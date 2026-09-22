@@ -653,6 +653,7 @@ button:disabled {
 
 .branch-row {
   position: relative;
+  isolation: isolate;
   display: flex;
   width: 100%;
   min-height: 58px;
@@ -667,6 +668,42 @@ button:disabled {
   transition:
     background 120ms ease,
     border-color 120ms ease;
+}
+
+.branch-select {
+  position: absolute;
+  z-index: 1;
+  inset: 0;
+  border: 0;
+  border-radius: inherit;
+  background: transparent;
+}
+
+.branch-summary {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+}
+
+.branch-pr-link {
+  position: relative;
+  z-index: 2;
+  display: inline-flex;
+  min-height: 24px;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 4px;
+  border-radius: 3px;
+  color: var(--accent-strong);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.branch-pr-link:hover {
+  color: var(--ink);
 }
 
 .branch-row:hover {

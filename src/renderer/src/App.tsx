@@ -759,15 +759,18 @@ function App() {
           const pullRequest = branch.pr
           const selected = branch.ref === selectedBranchRef
           return (
-            <button
-              aria-current={selected ? 'true' : undefined}
-              aria-label={`${branch.name}${branch.remote ? ', remote branch' : ''}${branch.current ? ', current branch' : ''}`}
+            <div
               className={cn('branch-row', selected && 'branch-row-selected')}
               key={branch.ref}
-              onClick={() => setSelectedBranchRef(branch.ref)}
               style={{ '--branch-depth': tree.depth } as React.CSSProperties}
-              type="button"
             >
+              <button
+                aria-current={selected ? 'true' : undefined}
+                aria-label={`${branch.name}${branch.remote ? ', remote branch' : ''}${branch.current ? ', current branch' : ''}`}
+                className="branch-select"
+                onClick={() => setSelectedBranchRef(branch.ref)}
+                type="button"
+              />
               <span className="branch-tree-guide" aria-hidden="true" />
               <span className="branch-tree-elbow" aria-hidden="true" />
               <span className={cn('branch-icon', branch.current && 'branch-icon-current')}>
@@ -785,7 +788,26 @@ function App() {
                   {tree.cycle ? <Badge variant="warning">cycle</Badge> : null}
                   {tree.missingParent ? <Badge variant="warning">parent missing</Badge> : null}
                 </span>
-                <span className="branch-subject">{branch.subject || 'No commit subject'}</span>
+                <span className="branch-summary">
+                  {pullRequest ? (
+                    <a
+                      className="branch-pr-link"
+                      href={pullRequest.url}
+                      aria-label={`Open pull request #${pullRequest.number} on GitHub`}
+                      title={pullRequest.title}
+                      onClick={(event) => {
+                        event.preventDefault()
+                        desktop
+                          ?.openExternal(pullRequest.url)
+                          .catch((value) => setError(readableError(value)))
+                      }}
+                    >
+                      #{pullRequest.number}
+                      <ExternalLink className="size-3" aria-hidden="true" />
+                    </a>
+                  ) : null}
+                  <span className="branch-subject">{branch.subject || 'No commit subject'}</span>
+                </span>
               </span>
               <span className="branch-metrics">
                 {pullRequest ? (
@@ -810,7 +832,7 @@ function App() {
                 <span className="branch-updated">{formatBranchDate(branch.updatedAt)}</span>
               </span>
               <ChevronRight className="branch-chevron size-4" />
-            </button>
+            </div>
           )
         })}
       </div>
