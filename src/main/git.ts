@@ -158,6 +158,15 @@ function validateAction(value: unknown): GitAction {
         name: requireRefInput(value.name, 'branch name'),
         parent: requireRefInput(value.parent, 'parent branch'),
       }
+    case 'deleteBranch':
+      if (typeof value.force !== 'boolean') {
+        throw new Error('force must be a boolean')
+      }
+      return {
+        type: 'deleteBranch',
+        ref: requireRefInput(value.ref, 'branch ref'),
+        force: value.force,
+      }
     case 'stage':
     case 'unstage': {
       if (!Array.isArray(value.paths) || value.paths.length === 0 || value.paths.length > 1000) {
@@ -1332,6 +1341,32 @@ export async function getSnapshot(repoPath: string): Promise<RepositorySnapshot>
   }
 }
 
+async function runDeleteBranch(
+  repoPath: string,
+  ref: string,
+  force: boolean,
+): Promise<ActionResult> {
+  if (!ref.startsWith('refs/heads/')) {
+    throw new Error('Only local branches can be deleted')
+  }
+  const name = ref.slice('refs/heads/'.length)
+  await validateBranchName(repoPath, name)
+  await ensureNoBusyOperation(repoPath, 'delete a branch')
+  const [refs, currentBranch] = await Promise.all([getRefs(repoPath), getCurrentBranch(repoPath)])
+  if (name === currentBranch) {
+    throw new Error('Switch to another branch before deleting the current branch')
+  }
+  if (name === (await getDefaultBranch(repoPath, refs, currentBranch))) {
+    throw new Error('The default branch cannot be deleted')
+  }
+  if (!refs.some((entry) => entry.refname === ref && !entry.symref)) {
+    throw new Error(`Local branch "${name}" no longer exists`)
+  }
+  await ensureNotCheckedOutElsewhere(repoPath, name)
+  await runGit(repoPath, ['branch', force ? '-D' : '-d', '--', name])
+  return { message: `Deleted local branch ${name}. Remote branches were not changed.` }
+}
+
 export async function runAction(repoPath: string, value: GitAction): Promise<ActionResult> {
   const root = await resolveRepository(repoPath)
   const action = validateAction(value)
@@ -1355,6 +1390,8 @@ export async function runAction(repoPath: string, value: GitAction): Promise<Act
       return runSwitch(root, action.ref)
     case 'createBranch':
       return runCreateBranch(root, action.name, action.parent)
+    case 'deleteBranch':
+      return runDeleteBranch(root, action.ref, action.force)
     case 'rebase':
       return runRebase(root, action.parent)
     case 'rebaseContinue':

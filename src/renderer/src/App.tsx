@@ -30,6 +30,7 @@ import {
   Search,
   ShieldCheck,
   Terminal,
+  Trash2,
   TriangleAlert,
   Upload,
   X,
@@ -262,6 +263,13 @@ function App() {
   const [newBranchName, setNewBranchName] = React.useState('')
   const [newBranchParent, setNewBranchParent] = React.useState('')
   const [newBranchError, setNewBranchError] = React.useState<string | null>(null)
+  const [deleteTarget, setDeleteTarget] = React.useState<{
+    branch: Branch
+    repoPath: string
+  } | null>(null)
+  const [deleteForce, setDeleteForce] = React.useState(false)
+  const [deleteConfirmation, setDeleteConfirmation] = React.useState('')
+  const [deleteBranchError, setDeleteBranchError] = React.useState<string | null>(null)
   const [prOpen, setPrOpen] = React.useState(false)
   const [prTitle, setPrTitle] = React.useState('')
   const [prBody, setPrBody] = React.useState('')
@@ -275,6 +283,8 @@ function App() {
   const busyRef = React.useRef<string | null>(null)
   const openingRef = React.useRef(false)
   const searchRef = React.useRef<HTMLInputElement>(null)
+  const deleteCancelRef = React.useRef<HTMLButtonElement>(null)
+  const deleteTriggerRef = React.useRef<HTMLButtonElement>(null)
 
   const setSnapshotAndSelection = React.useCallback((next: RepositorySnapshot) => {
     setSnapshot(next)
@@ -353,6 +363,7 @@ function App() {
         const next = await desktop.openRepository(path)
         if (next) {
           setSnapshotAndSelection(next)
+          setDeleteTarget(null)
           setWorkspaceView('branches')
           const repositories = await desktop.recentRepositories().catch(() => null)
           if (repositories) setRecentRepositories(repositories)
@@ -384,6 +395,7 @@ function App() {
       } catch (value) {
         if (action.type === 'createBranch') setNewBranchError(readableError(value))
         if (action.type === 'createPr') setPrError(readableError(value))
+        if (action.type === 'deleteBranch') setDeleteBranchError(readableError(value))
         setActionError(`${label} failed: ${readableError(value)}`)
         await refreshSnapshot()
         return false
@@ -478,6 +490,14 @@ function App() {
   const branchCount = combinedBranches.length
   const pullRequestCount = snapshot?.pullRequests.length ?? 0
   const stashCount = snapshot?.stashes.length ?? 0
+  const deleteChildren = deleteTarget
+    ? allBranches.filter(
+        (branch) =>
+          !branch.remote &&
+          branch.parent &&
+          branchByName.get(branch.parent)?.ref === deleteTarget.branch.ref,
+      )
+    : []
 
   const openBranchDialog = React.useCallback(() => {
     if (!snapshot) return
@@ -498,6 +518,43 @@ function App() {
     setPrError(null)
     setPrOpen(true)
   }, [selectedBranch, snapshot])
+
+  const openDeleteDialog = () => {
+    if (
+      !snapshot ||
+      !selectedBranch ||
+      selectedBranch.remote ||
+      selectedBranch.current ||
+      selectedBranch.name === snapshot.defaultBranch ||
+      isBusy ||
+      snapshot.rebaseInProgress
+    )
+      return
+    setDeleteTarget({ branch: selectedBranch, repoPath: snapshot.path })
+    setDeleteForce(false)
+    setDeleteConfirmation('')
+    setDeleteBranchError(null)
+    setActionError(null)
+  }
+
+  const submitDeleteBranch = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    if (!deleteTarget || isBusy) return
+    if (snapshot?.path !== deleteTarget.repoPath) {
+      setDeleteBranchError('The repository changed. Close this dialog and select the branch again.')
+      return
+    }
+    if (deleteForce && deleteConfirmation !== deleteTarget.branch.name) {
+      setDeleteBranchError('Type the exact branch name to confirm deletion of unmerged work.')
+      return
+    }
+    setDeleteBranchError(null)
+    const success = await runAction(
+      { type: 'deleteBranch', ref: deleteTarget.branch.ref, force: deleteForce },
+      'Delete branch',
+    )
+    if (success) setDeleteTarget(null)
+  }
 
   const submitBranch = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault()
@@ -1460,6 +1517,31 @@ function App() {
             ) : !selectedBranch.parent ? (
               <span className="action-hint">This branch has no recorded parent.</span>
             ) : null}
+            {!selectedBranch.remote ? (
+              <>
+                <Button
+                  ref={deleteTriggerRef}
+                  disabled={
+                    selectedBranch.current ||
+                    selectedBranch.name === snapshot.defaultBranch ||
+                    isBusy ||
+                    snapshot.rebaseInProgress
+                  }
+                  onClick={openDeleteDialog}
+                  variant="danger"
+                >
+                  <Trash2 className="size-3.5" />
+                  Delete local branch
+                </Button>
+                {selectedBranch.name === snapshot.defaultBranch ? (
+                  <span className="action-hint">The default branch cannot be deleted.</span>
+                ) : selectedBranch.current ? (
+                  <span className="action-hint">
+                    Switch to another branch before deleting this one.
+                  </span>
+                ) : null}
+              </>
+            ) : null}
           </section>
         </div>
       </aside>
@@ -1573,6 +1655,104 @@ function App() {
         {snapshot ? <main className="main-pane">{renderMainContent()}</main> : renderOnboarding()}
         {showDetails ? renderDetails() : null}
       </div>
+      <Dialog
+        open={deleteTarget !== null}
+        onOpenChange={(open) => {
+          if (!open && !isBusy) setDeleteTarget(null)
+        }}
+      >
+        <DialogContent
+          className="delete-branch-dialog"
+          onOpenAutoFocus={(event) => {
+            event.preventDefault()
+            deleteCancelRef.current?.focus()
+          }}
+          onCloseAutoFocus={(event) => {
+            event.preventDefault()
+            const trigger = deleteTriggerRef.current
+            if (trigger && !trigger.disabled) trigger.focus()
+            else searchRef.current?.focus()
+          }}
+        >
+          <DialogHeader>
+            <DialogTitle>Delete local branch?</DialogTitle>
+            <DialogDescription>
+              Delete <strong>{deleteTarget?.branch.name}</strong> from this repository. Remote
+              branches and pull requests will not be deleted.
+            </DialogDescription>
+          </DialogHeader>
+          <form className="dialog-form" onSubmit={submitDeleteBranch}>
+            {deleteChildren.length > 0 ? (
+              <p className="delete-branch-note">
+                {deleteChildren.length} child{' '}
+                {deleteChildren.length === 1 ? 'branch uses' : 'branches use'} this parent. Deleting
+                it does not retarget those branches.
+              </p>
+            ) : null}
+            <label className="checkbox-label" htmlFor="delete-branch-force">
+              <input
+                id="delete-branch-force"
+                type="checkbox"
+                checked={deleteForce}
+                disabled={isBusy}
+                onChange={(event) => {
+                  setDeleteForce(event.target.checked)
+                  setDeleteConfirmation('')
+                  setDeleteBranchError(null)
+                }}
+              />
+              <span>Delete even if not merged</span>
+            </label>
+            <p className="delete-branch-note">
+              {deleteForce
+                ? 'Commits that exist only on this branch can become unreachable.'
+                : 'Git will refuse deletion if the branch is not fully merged.'}
+            </p>
+            {deleteForce ? (
+              <>
+                <label htmlFor="delete-branch-confirmation">Type the branch name to confirm</label>
+                <Input
+                  id="delete-branch-confirmation"
+                  autoComplete="off"
+                  spellCheck={false}
+                  value={deleteConfirmation}
+                  disabled={isBusy}
+                  onChange={(event) => setDeleteConfirmation(event.target.value)}
+                />
+              </>
+            ) : null}
+            {deleteBranchError ? (
+              <p className="form-error" role="alert">
+                {deleteBranchError}
+              </p>
+            ) : null}
+            <DialogFooter>
+              <Button
+                ref={deleteCancelRef}
+                disabled={isBusy}
+                onClick={() => setDeleteTarget(null)}
+                variant="secondary"
+              >
+                Cancel
+              </Button>
+              <Button
+                disabled={
+                  isBusy || (deleteForce && deleteConfirmation !== deleteTarget?.branch.name)
+                }
+                type="submit"
+                variant="danger"
+              >
+                {busyAction === 'Delete branch' ? (
+                  <LoaderCircle className="size-3.5 animate-spin" />
+                ) : (
+                  <Trash2 className="size-3.5" />
+                )}
+                Delete branch
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
       <Dialog onOpenChange={setNewBranchOpen} open={newBranchOpen}>
         <DialogContent>
           <DialogHeader>

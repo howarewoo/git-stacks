@@ -572,3 +572,108 @@ test('parent comparisons use fetched remote parents and remain unknown for missi
     await rm(root, { recursive: true, force: true })
   }
 })
+
+test('local deletion preserves remote refs, child branches, and uncommitted work', async () => {
+  const { root, repo, git } = await fixture()
+  try {
+    git('branch', 'merged')
+    git('branch', 'child', 'merged')
+    git('config', 'branch.child.parent', 'merged')
+    const tip = git('rev-parse', 'merged')
+    git('update-ref', 'refs/remotes/origin/merged', tip)
+    await writeFile(join(repo, 'shared.txt'), 'staged work\n')
+    git('add', 'shared.txt')
+    const staged = git('diff', '--cached')
+    await writeFile(join(repo, 'shared.txt'), 'unsaved work\n')
+
+    await runAction(repo, { type: 'deleteBranch', ref: 'refs/heads/merged', force: false })
+    const snapshot = await getSnapshot(repo)
+    assert.equal(
+      snapshot.branches.some((branch) => branch.ref === 'refs/heads/merged'),
+      false,
+    )
+    assert.equal(git('rev-parse', 'refs/remotes/origin/merged'), tip)
+    assert.equal(git('rev-parse', 'refs/heads/child'), tip)
+    assert.equal(git('config', '--get', 'branch.child.parent'), 'merged')
+    assert.equal(git('branch', '--show-current'), 'main')
+    assert.equal(git('diff', '--cached'), staged)
+    assert.equal(await readFile(join(repo, 'shared.txt'), 'utf8'), 'unsaved work\n')
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('unmerged deletion requires an explicit boolean force opt-in', async () => {
+  const { root, repo, git } = await fixture()
+  try {
+    git('switch', '-c', 'unmerged')
+    await writeFile(join(repo, 'unique.txt'), 'unmerged work\n')
+    git('add', '.')
+    git('commit', '-m', 'Unmerged work')
+    const tip = git('rev-parse', 'HEAD')
+    git('switch', 'main')
+    await assert.rejects(
+      runAction(repo, {
+        type: 'deleteBranch',
+        ref: 'refs/heads/unmerged',
+        force: false,
+      }),
+    )
+    await assert.rejects(
+      runAction(repo, {
+        type: 'deleteBranch',
+        ref: 'refs/heads/unmerged',
+        force: 'false',
+      } as unknown as GitAction),
+    )
+    assert.equal(git('rev-parse', 'unmerged'), tip)
+
+    await runAction(repo, { type: 'deleteBranch', ref: 'refs/heads/unmerged', force: true })
+    assert.equal(
+      (await getSnapshot(repo)).branches.some((branch) => branch.name === 'unmerged'),
+      false,
+    )
+    assert.equal(git('branch', '--show-current'), 'main')
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('force deletion cannot bypass root, current, worktree, remote, or operation protection', async () => {
+  const { root, repo, git } = await fixture()
+  try {
+    git('config', 'init.defaultBranch', 'main')
+    git('worktree', 'add', '-b', 'occupied', join(root, 'linked'), 'main')
+    git('switch', '-c', 'current')
+    const tip = git('rev-parse', 'HEAD')
+    git('update-ref', 'refs/remotes/origin/remote-only', tip)
+    for (const ref of [
+      'refs/heads/main',
+      'refs/heads/current',
+      'refs/heads/occupied',
+      'refs/remotes/origin/remote-only',
+    ]) {
+      await assert.rejects(runAction(repo, { type: 'deleteBranch', ref, force: true }))
+      assert.equal(git('rev-parse', ref), tip)
+    }
+    await assert.rejects(
+      runAction(repo, {
+        type: 'deleteBranch',
+        ref: 'refs/heads/-D',
+        force: true,
+      }),
+    )
+    git('branch', 'during-operation')
+    await writeFile(join(repo, '.git', 'CHERRY_PICK_HEAD'), `${tip}\n`)
+    await assert.rejects(
+      runAction(repo, {
+        type: 'deleteBranch',
+        ref: 'refs/heads/during-operation',
+        force: true,
+      }),
+    )
+    assert.equal(git('rev-parse', 'during-operation'), tip)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})

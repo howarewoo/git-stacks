@@ -1568,6 +1568,19 @@ button:disabled {
   font-size: 11px;
 }
 
+.delete-branch-dialog {
+  max-height: calc(100vh - 32px);
+  overflow-y: auto;
+  overflow-wrap: anywhere;
+}
+
+.delete-branch-note {
+  margin: 2px 0 8px;
+  color: var(--ink-soft);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
 .animate-spin {
   animation: spin 0.9s linear infinite;
 }

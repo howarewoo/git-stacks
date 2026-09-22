@@ -52,6 +52,7 @@ export interface RecentRepository {
 export type GitAction =
   | { type: 'switch'; ref: string }
   | { type: 'createBranch'; name: string; parent: string }
+  | { type: 'deleteBranch'; ref: string; force: boolean }
   | { type: 'stage' | 'unstage'; paths: string[] }
   | { type: 'commit'; message: string }
   | { type: 'fetch' | 'pull' | 'push' | 'stash' | 'rebaseContinue' | 'rebaseAbort' }
