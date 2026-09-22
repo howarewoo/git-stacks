@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { test } from 'node:test'
 import { getSnapshot, resolveRepository, runAction } from '../src/main/git'
 import type { GitAction } from '../src/shared/types'
-import { getCombinedBranches } from '../src/renderer/src/lib/branches'
+import { getCombinedBranches, sortBranchesByUpdatedAt } from '../src/renderer/src/lib/branches'
 
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), 'git-stacks-test-'))
@@ -350,6 +350,224 @@ test('untracked local branches represent same-name origin refs without conflatin
       'refs/remotes/origin/main',
       'refs/remotes/origin/remote-only',
     ])
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('branch recency sorting uses absolute timestamps, with stable ties and undated branches last', async () => {
+  const { root, repo } = await fixture()
+  try {
+    const base = (await getSnapshot(repo)).branches[0]
+    const branches = Object.freeze([
+      { ...base, ref: 'refs/heads/parent', updatedAt: '2026-05-01T15:00:00+02:00' },
+      { ...base, ref: 'refs/heads/unknown', updatedAt: 'invalid' },
+      { ...base, ref: 'refs/heads/alpha', updatedAt: '2026-05-01T13:00:00Z' },
+      {
+        ...base,
+        ref: 'refs/remotes/origin/recent',
+        remote: true,
+        updatedAt: '2026-05-01T13:30:00Z',
+      },
+      { ...base, ref: 'refs/heads/unborn', updatedAt: '' },
+      {
+        ...base,
+        ref: 'refs/heads/child',
+        parent: 'parent',
+        updatedAt: '2026-05-01T14:00:00Z',
+      },
+    ])
+
+    assert.deepEqual(
+      sortBranchesByUpdatedAt(branches).map((branch) => branch.ref),
+      [
+        'refs/heads/child',
+        'refs/remotes/origin/recent',
+        'refs/heads/alpha',
+        'refs/heads/parent',
+        'refs/heads/unborn',
+        'refs/heads/unknown',
+      ],
+    )
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('stack ordering keeps descendants contiguous above parents and ranks sibling stacks by recency', async () => {
+  const { root, repo } = await fixture()
+  try {
+    const base = (await getSnapshot(repo)).branches[0]
+    const branches = [
+      ['parent', null, '10'],
+      ['child', 'parent', '04'],
+      ['grandchild', 'child', '01'],
+      ['sibling', 'parent', '02'],
+      ['unrelated', null, '09'],
+      ['missing-parent', 'absent', '03'],
+    ].map(([name, parent, day]) => ({
+      ...base,
+      name: name!,
+      ref: `refs/heads/${name}`,
+      parent,
+      updatedAt: `2026-05-${day}T00:00:00Z`,
+    }))
+    assert.deepEqual(
+      sortBranchesByUpdatedAt(branches).map((branch) => branch.name),
+      ['grandchild', 'child', 'sibling', 'parent', 'unrelated', 'missing-parent'],
+    )
+
+    const cyclic = [
+      { ...base, ref: 'refs/heads/a', name: 'a', parent: 'b' },
+      { ...base, ref: 'refs/heads/b', name: 'b', parent: 'a' },
+      { ...base, ref: 'refs/heads/free', name: 'free', parent: null },
+    ]
+    assert.deepEqual(
+      sortBranchesByUpdatedAt(cyclic).map((branch) => branch.name),
+      ['free', 'a', 'b'],
+    )
+
+    const remoteParent = [
+      { ...base, ref: 'refs/remotes/origin/main', name: 'origin/main', remote: true, parent: null },
+      { ...base, ref: 'refs/heads/feature', name: 'feature', parent: 'main' },
+    ]
+    assert.deepEqual(
+      sortBranchesByUpdatedAt(remoteParent).map((branch) => branch.ref),
+      ['refs/heads/feature', 'refs/remotes/origin/main'],
+    )
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('default fallback links ordinary descendants without overriding explicit parents or orphan roots', async () => {
+  const { root, repo, git } = await fixture()
+  try {
+    git('config', 'init.defaultBranch', 'main')
+    git('branch', 'old')
+    git('branch', 'feature')
+    git('branch', 'configured')
+    git('config', 'branch.configured.parent', 'feature')
+    execFileSync('git', ['-C', repo, 'commit', '--allow-empty', '-m', 'Advance default'], {
+      env: {
+        ...process.env,
+        GIT_AUTHOR_DATE: '2030-01-02T00:00:00Z',
+        GIT_COMMITTER_DATE: '2030-01-02T00:00:00Z',
+      },
+      stdio: 'pipe',
+    })
+
+    git('switch', '--orphan', 'orphan')
+    await writeFile(join(repo, 'orphan.txt'), 'orphan history\n')
+    git('add', '.')
+    git('commit', '-m', 'Orphan history')
+
+    const snapshot = await getSnapshot(repo)
+    const branch = (name: string) => snapshot.branches.find((entry) => entry.name === name)
+    assert.equal(snapshot.defaultBranch, 'main')
+    assert.equal(branch('old')?.parent, 'main')
+    assert.equal(branch('old')?.parentBehind, 1)
+    assert.equal(branch('configured')?.parent, 'feature')
+    assert.equal(branch('main')?.parent, null)
+    assert.equal(branch('orphan')?.parent, null)
+    assert.deepEqual(
+      sortBranchesByUpdatedAt(snapshot.branches)
+        .filter((entry) => entry.name === 'old' || entry.name === 'main')
+        .map((entry) => entry.name),
+      ['old', 'main'],
+    )
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('default fallback links origin descendants without linking default or other remotes', async () => {
+  const { root, repo, git } = await fixture()
+  try {
+    git('config', 'init.defaultBranch', 'main')
+    const initialTip = git('rev-parse', 'main')
+    execFileSync('git', ['-C', repo, 'commit', '--allow-empty', '-m', 'Advance default'], {
+      env: {
+        ...process.env,
+        GIT_AUTHOR_DATE: '2030-01-02T00:00:00Z',
+        GIT_COMMITTER_DATE: '2030-01-02T00:00:00Z',
+      },
+      stdio: 'pipe',
+    })
+    const defaultTip = git('rev-parse', 'main')
+    git('remote', 'add', 'origin', join(root, 'origin.git'))
+    git('update-ref', 'refs/remotes/origin/staging', initialTip)
+    git('update-ref', 'refs/remotes/origin/main', defaultTip)
+    git('symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/main')
+    git('update-ref', 'refs/remotes/other/staging', initialTip)
+
+    const snapshot = await getSnapshot(repo)
+    const branch = (ref: string) => snapshot.branches.find((entry) => entry.ref === ref)
+    assert.equal(snapshot.defaultBranch, 'main')
+    assert.equal(branch('refs/remotes/origin/staging')?.parent, 'main')
+    assert.equal(branch('refs/remotes/origin/staging')?.parentBehind, 1)
+    assert.equal(branch('refs/remotes/origin/main')?.parent, null)
+    assert.equal(branch('refs/remotes/other/staging')?.parent, null)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('parent commit warnings propagate through a stack and clear after each child is rebased', async () => {
+  const { root, repo, git } = await fixture()
+  try {
+    await runAction(repo, { type: 'createBranch', name: 'parent', parent: 'main' })
+    await writeFile(join(repo, 'parent.txt'), 'parent work\n')
+    git('add', '.')
+    git('commit', '-m', 'Parent work')
+    await runAction(repo, { type: 'createBranch', name: 'child', parent: 'parent' })
+    await writeFile(join(repo, 'child.txt'), 'child work\n')
+    git('add', '.')
+    git('commit', '-m', 'Child work')
+    let snapshot = await getSnapshot(repo)
+    assert.equal(snapshot.branches.find((branch) => branch.name === 'parent')?.parentBehind, 0)
+    assert.equal(snapshot.branches.find((branch) => branch.name === 'child')?.parentBehind, 0)
+
+    git('switch', 'main')
+    await writeFile(join(repo, 'root.txt'), 'updated base\n')
+    git('add', '.')
+    execFileSync('git', ['-C', repo, 'commit', '-m', 'Base advances with an older timestamp'], {
+      env: { ...process.env, GIT_COMMITTER_DATE: '2001-01-01T00:00:00Z' },
+      stdio: 'pipe',
+    })
+    snapshot = await getSnapshot(repo)
+    assert.equal(snapshot.branches.find((branch) => branch.name === 'parent')?.parentBehind, 1)
+    assert.equal(snapshot.branches.find((branch) => branch.name === 'child')?.parentBehind, 0)
+
+    git('switch', 'parent')
+    await runAction(repo, { type: 'rebase', parent: 'main' })
+    snapshot = await getSnapshot(repo)
+    assert.equal(snapshot.branches.find((branch) => branch.name === 'parent')?.parentBehind, 0)
+    assert.equal(snapshot.branches.find((branch) => branch.name === 'child')?.parentBehind, 2)
+
+    git('switch', 'child')
+    await runAction(repo, { type: 'rebase', parent: 'parent' })
+    snapshot = await getSnapshot(repo)
+    assert.equal(snapshot.branches.find((branch) => branch.name === 'child')?.parentBehind, 0)
+    assert.equal(await readFile(join(repo, 'child.txt'), 'utf8'), 'child work\n')
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('parent comparisons use fetched remote parents and remain unknown for missing parents', async () => {
+  const { root, repo, git } = await fixture()
+  try {
+    await runAction(repo, { type: 'createBranch', name: 'child', parent: 'main' })
+    git('switch', 'main')
+    git('commit', '--allow-empty', '-m', 'Parent advances')
+    git('update-ref', 'refs/remotes/origin/fetched-parent', 'HEAD')
+    git('config', 'branch.child.parent', 'fetched-parent')
+    let snapshot = await getSnapshot(repo)
+    assert.equal(snapshot.branches.find((branch) => branch.name === 'child')?.parentBehind, 1)
+    git('update-ref', '-d', 'refs/remotes/origin/fetched-parent')
+    snapshot = await getSnapshot(repo)
+    assert.equal(snapshot.branches.find((branch) => branch.name === 'child')?.parentBehind, null)
   } finally {
     await rm(root, { recursive: true, force: true })
   }

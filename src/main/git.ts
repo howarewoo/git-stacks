@@ -1195,6 +1195,7 @@ function branchFromRef(ref: RefRecord, currentBranch: string | null, remote: boo
     subject: ref.subject,
     updatedAt: ref.updatedAt,
     parent: null,
+    parentBehind: null,
     pr: null,
   }
 }
@@ -1233,10 +1234,12 @@ export async function getSnapshot(repoPath: string): Promise<RepositorySnapshot>
       subject: '',
       updatedAt: '',
       parent: null,
+      parentBehind: null,
       pr: null,
     })
   }
 
+  const defaultBranch = await getDefaultBranch(root, refs, currentBranch)
   const github = await getGitHubData(root, originUrl)
   const parentConfigs = await Promise.all(
     branches
@@ -1254,15 +1257,66 @@ export async function getSnapshot(repoPath: string): Promise<RepositorySnapshot>
     }
   })
   for (const branch of branches) {
-    if (branch.remote) {
-      continue
-    }
-    const pullRequest = localPullRequests.get(branch.name) ?? null
+    if (branch.remote && !branch.ref.startsWith('refs/remotes/origin/')) continue
+    const name = branch.remote ? branch.name.slice('origin/'.length) : branch.name
+    const pullRequest = localPullRequests.get(name) ?? null
     branch.pr = pullRequest
-    branch.parent = pullRequest?.base ?? configParents.get(branch.name) ?? null
+    branch.parent = pullRequest?.base ?? configParents.get(name) ?? null
   }
 
-  const defaultBranch = await getDefaultBranch(root, refs, currentBranch)
+  const refsByName = new Map(refs.filter((ref) => !ref.symref).map((ref) => [ref.refname, ref]))
+  const defaultRef =
+    refsByName.get(`refs/heads/${defaultBranch}`) ??
+    refsByName.get(`refs/remotes/origin/${defaultBranch}`)
+  if (defaultRef) {
+    await Promise.all(
+      branches.map(async (branch) => {
+        if (branch.parent) {
+          return
+        }
+        const child = refsByName.get(branch.ref)
+        if (!child) {
+          return
+        }
+        const local = !branch.remote
+        const originRemote = branch.remote && branch.ref.startsWith('refs/remotes/origin/')
+        if (
+          (!local && !originRemote) ||
+          branch.ref === `refs/heads/${defaultBranch}` ||
+          branch.ref === `refs/remotes/origin/${defaultBranch}` ||
+          branch.ref === defaultRef.refname
+        ) {
+          return
+        }
+        if (
+          (await tryGit(root, ['merge-base', child.objectName, defaultRef.objectName])) !== null
+        ) {
+          branch.parent = defaultBranch
+        }
+      }),
+    )
+  }
+
+  await Promise.all(
+    branches.map(async (branch) => {
+      if (!branch.parent) return
+      const child = refsByName.get(branch.ref)
+      const parent =
+        refsByName.get(`refs/heads/${branch.parent}`) ??
+        refsByName.get(`refs/remotes/${branch.parent}`) ??
+        refsByName.get(`refs/remotes/origin/${branch.parent}`)
+      if (!child || !parent || child.refname === parent.refname) return
+      branch.parentBehind = Number(
+        await runGit(root, [
+          'rev-list',
+          '--count',
+          `${child.objectName}..${parent.objectName}`,
+          '--',
+        ]),
+      )
+    }),
+  )
+
   return {
     path: root,
     name: path.basename(root) || root,

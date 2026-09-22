@@ -21,6 +21,8 @@ export interface Branch {
   subject: string
   updatedAt: string
   parent: string | null
+  /** Parent commits absent from this branch; null when no parent comparison is available. */
+  parentBehind: number | null
   pr: PullRequest | null
 }
 export interface ChangedFile {

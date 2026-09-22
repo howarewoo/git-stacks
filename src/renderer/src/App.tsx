@@ -55,7 +55,12 @@ import {
 } from './components/ui/dialog'
 import { Input } from './components/ui/input'
 import { cn } from './lib/utils'
-import { getCombinedBranches, getRepresentedRemoteRef } from './lib/branches'
+import {
+  getCombinedBranches,
+  getRepresentedRemoteRef,
+  indexBranchesByParentName,
+  sortBranchesByUpdatedAt,
+} from './lib/branches'
 
 type WorkspaceView = 'branches' | 'changes' | 'pullRequests' | 'stashes'
 type BranchFilter = 'all' | 'local' | 'remote' | 'prs'
@@ -94,7 +99,76 @@ function branchTreeInfo(branch: Branch, byName: Map<string, Branch>): BranchTree
     parent = parentBranch.parent
   }
 
-  return { depth: Math.min(depth, 7), cycle, missingParent }
+  return { depth, cycle, missingParent }
+}
+
+type BranchTreeRow = BranchTreeInfo & {
+  trunks: { lane: number; kind: 'start' | 'full' | 'end-parent' | 'end-child' }[]
+  elbows: { lane: number }[]
+}
+
+function getBranchTreeGeometry(visibleBranches: readonly Branch[], byName: Map<string, Branch>) {
+  const rows: BranchTreeRow[] = visibleBranches.map((branch) => ({
+    ...branchTreeInfo(branch, byName),
+    trunks: [],
+    elbows: [],
+  }))
+  const visibleByName = indexBranchesByParentName(visibleBranches)
+  const visibleIndex = new Map(visibleBranches.map((branch, index) => [branch.ref, index]))
+  for (let index = 0; index < visibleBranches.length; index += 1) {
+    const counterpart = getRepresentedRemoteRef(visibleBranches[index])
+    if (counterpart && !visibleIndex.has(counterpart)) visibleIndex.set(counterpart, index)
+  }
+  const groups = new Map<
+    string,
+    { parent: number | undefined; depth: number; children: number[]; start: number; end: number }
+  >()
+
+  for (let index = 0; index < visibleBranches.length; index += 1) {
+    const branch = visibleBranches[index]
+    if (!branch.parent || rows[index].cycle || rows[index].missingParent) continue
+    const parent = visibleByName.get(branch.parent) ?? byName.get(branch.parent)
+    if (!parent) continue
+    const parentIndex = visibleIndex.get(parent.ref)
+    if (parentIndex !== undefined && parentIndex <= index) continue
+    const key = parentIndex === undefined ? parent.ref : visibleBranches[parentIndex].ref
+    const group = groups.get(key)
+    if (group) {
+      group.children.push(index)
+      if (group.parent === undefined) group.end = index
+    } else {
+      groups.set(key, {
+        parent: parentIndex,
+        depth:
+          parentIndex === undefined
+            ? branchTreeInfo(parent, byName).depth
+            : rows[parentIndex].depth,
+        children: [index],
+        start: index,
+        end: parentIndex ?? index,
+      })
+    }
+  }
+
+  for (const group of groups.values()) {
+    const lane = group.depth
+    for (let index = group.start; index <= group.end && group.start !== group.end; index += 1) {
+      rows[index].trunks.push({
+        lane,
+        kind:
+          index === group.start
+            ? 'start'
+            : index === group.end
+              ? group.parent === undefined
+                ? 'end-child'
+                : 'end-parent'
+              : 'full',
+      })
+    }
+    for (const child of group.children) rows[child].elbows.push({ lane })
+  }
+
+  return { rows }
 }
 
 function formatBranchDate(value: string): string {
@@ -341,42 +415,22 @@ function App() {
   }, [selectedBranch, snapshot])
 
   const branchByName = React.useMemo(
-    () =>
-      new Map(
-        (snapshot?.branches ?? [])
-          .filter((branch) => !branch.remote)
-          .map((branch) => [branch.name, branch]),
-      ),
+    () => indexBranchesByParentName(snapshot?.branches ?? []),
     [snapshot],
   )
   const combinedBranches = React.useMemo(
     () => getCombinedBranches(snapshot?.branches ?? []),
     [snapshot],
   )
-  const orderedBranches = React.useMemo(() => {
-    const branches = branchFilter === 'remote' ? (snapshot?.branches ?? []) : combinedBranches
-    const children = new Map<string, Branch[]>()
-    for (const branch of branches) {
-      if (branch.parent) {
-        const siblings = children.get(branch.parent) ?? []
-        siblings.push(branch)
-        children.set(branch.parent, siblings)
-      }
-    }
-    const ordered: Branch[] = []
-    const visited = new Set<Branch>()
-    const visit = (branch: Branch) => {
-      if (visited.has(branch)) return
-      visited.add(branch)
-      ordered.push(branch)
-      if (!branch.remote) for (const child of children.get(branch.name) ?? []) visit(child)
-    }
-    for (const branch of branches) {
-      if (!branch.parent || !branchByName.has(branch.parent)) visit(branch)
-    }
-    for (const branch of branches) visit(branch)
-    return ordered
-  }, [snapshot, branchByName, branchFilter, combinedBranches])
+  const orderedBranches = React.useMemo(
+    () =>
+      sortBranchesByUpdatedAt(
+        branchFilter === 'remote'
+          ? (snapshot?.branches.filter((branch) => branch.remote) ?? [])
+          : combinedBranches,
+      ),
+    [snapshot, branchFilter, combinedBranches],
+  )
 
   const visibleBranches = React.useMemo(() => {
     if (!snapshot) return []
@@ -391,6 +445,10 @@ function App() {
         .includes(needle)
     })
   }, [branchFilter, search, snapshot, orderedBranches])
+  const branchTree = React.useMemo(
+    () => getBranchTreeGeometry(visibleBranches, branchByName),
+    [branchByName, visibleBranches],
+  )
 
   const stagedFiles = React.useMemo(
     () => snapshot?.files.filter((file) => fileIsStaged(file)) ?? [],
@@ -768,8 +826,8 @@ function App() {
 
     return (
       <div className="branch-list" role="group" aria-label="Repository branches">
-        {visibleBranches.map((branch) => {
-          const tree = branchTreeInfo(branch, branchByName)
+        {visibleBranches.map((branch, branchIndex) => {
+          const tree = branchTree.rows[branchIndex]
           const pullRequest = branch.pr
           const selected = branch.ref === selectedBranch?.ref
           return (
@@ -785,8 +843,22 @@ function App() {
                 onClick={() => setSelectedBranchRef(branch.ref)}
                 type="button"
               />
-              <span className="branch-tree-guide" aria-hidden="true" />
-              <span className="branch-tree-elbow" aria-hidden="true" />
+              {tree.trunks.map((trunk, segmentIndex) => (
+                <span
+                  aria-hidden="true"
+                  className={cn('branch-tree-trunk', `branch-tree-trunk-${trunk.kind}`)}
+                  key={`trunk-${segmentIndex}`}
+                  style={{ '--branch-lane': trunk.lane } as React.CSSProperties}
+                />
+              ))}
+              {tree.elbows.map((elbow, segmentIndex) => (
+                <span
+                  aria-hidden="true"
+                  className="branch-tree-elbow"
+                  key={`elbow-${segmentIndex}`}
+                  style={{ '--branch-lane': elbow.lane } as React.CSSProperties}
+                />
+              ))}
               <span className={cn('branch-icon', branch.current && 'branch-icon-current')}>
                 {branch.remote ? (
                   <Cloud className="size-3.5" />
@@ -801,6 +873,9 @@ function App() {
                   {branch.remote ? <Badge variant="outline">remote</Badge> : null}
                   {tree.cycle ? <Badge variant="warning">cycle</Badge> : null}
                   {tree.missingParent ? <Badge variant="warning">parent missing</Badge> : null}
+                  {(branch.parentBehind ?? 0) > 0 ? (
+                    <Badge variant="warning">Requires restack</Badge>
+                  ) : null}
                 </span>
                 <span className="branch-summary">
                   {pullRequest ? (
@@ -1227,12 +1302,11 @@ function App() {
         </aside>
       )
     }
-    const parent = selectedBranch.parent
-      ? snapshot.branches.find((branch) => branch.name === selectedBranch.parent)
-      : null
+    const parent = selectedBranch.parent ? branchByName.get(selectedBranch.parent) : null
     const canRebase = Boolean(
       selectedBranch.current &&
       selectedBranch.parent &&
+      parent &&
       !selectedBranch.remote &&
       !snapshot.rebaseInProgress,
     )
@@ -1275,6 +1349,16 @@ function App() {
               <span>Last update</span>
               <strong>{formatBranchDate(selectedBranch.updatedAt)}</strong>
             </div>
+            {(selectedBranch.parentBehind ?? 0) > 0 ? (
+              <div className="restack-notice">
+                <strong>Requires restack</strong>
+                <p>
+                  {selectedBranch.parent} has {selectedBranch.parentBehind} commit
+                  {selectedBranch.parentBehind === 1 ? '' : 's'} not in this branch. Rebase onto the
+                  parent, then restack any affected descendants.
+                </p>
+              </div>
+            ) : null}
           </section>
           <section className="detail-section">
             <h3>Sync status</h3>
