@@ -14,6 +14,8 @@ export interface Branch {
   current: boolean
   remote: boolean
   upstream: string | null
+  /** Fully qualified upstream identity; display names can be ambiguous. */
+  upstreamRef: string | null
   ahead: number
   behind: number
   subject: string

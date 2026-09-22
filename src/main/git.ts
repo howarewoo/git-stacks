@@ -285,7 +285,7 @@ function parseRefRecords(output: string): RefRecord[] {
 async function getRefs(repoPath: string): Promise<RefRecord[]> {
   const output = await runGit(repoPath, [
     'for-each-ref',
-    '--format=%(refname)%00%(objectname)%00%(upstream:short)%00%(upstream:track)%00%(subject)%00%(committerdate:iso-strict)%00%(symref)%00',
+    '--format=%(refname)%00%(objectname)%00%(upstream)%00%(upstream:track)%00%(subject)%00%(committerdate:iso-strict)%00%(symref)%00',
     'refs/heads',
     'refs/remotes',
   ])
@@ -1188,7 +1188,8 @@ function branchFromRef(ref: RefRecord, currentBranch: string | null, remote: boo
     name,
     current: !remote && name === currentBranch,
     remote,
-    upstream: ref.upstream || null,
+    upstream: ref.upstream.replace(/^refs\/(?:remotes|heads)\//u, '') || null,
+    upstreamRef: ref.upstream || null,
     ahead: track.ahead,
     behind: track.behind,
     subject: ref.subject,
@@ -1226,6 +1227,7 @@ export async function getSnapshot(repoPath: string): Promise<RepositorySnapshot>
       current: true,
       remote: false,
       upstream,
+      upstreamRef: null,
       ahead: 0,
       behind: 0,
       subject: '',

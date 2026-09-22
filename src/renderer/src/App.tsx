@@ -55,6 +55,7 @@ import {
 } from './components/ui/dialog'
 import { Input } from './components/ui/input'
 import { cn } from './lib/utils'
+import { getCombinedBranches, getRepresentedRemoteRef } from './lib/branches'
 
 type WorkspaceView = 'branches' | 'changes' | 'pullRequests' | 'stashes'
 type BranchFilter = 'all' | 'local' | 'remote' | 'prs'
@@ -320,10 +321,19 @@ function App() {
     [desktop, refreshSnapshot, snapshot],
   )
 
-  const selectedBranch = React.useMemo(
-    () => snapshot?.branches.find((branch) => branch.ref === selectedBranchRef) ?? null,
-    [selectedBranchRef, snapshot],
-  )
+  const selectedBranch = React.useMemo(() => {
+    const branch = snapshot?.branches.find((candidate) => candidate.ref === selectedBranchRef)
+    if (branch?.remote && branchFilter !== 'remote') {
+      return (
+        snapshot?.branches.find(
+          (candidate) => !candidate.remote && candidate.upstreamRef === branch.ref,
+        ) ??
+        snapshot?.branches.find((candidate) => getRepresentedRemoteRef(candidate) === branch.ref) ??
+        branch
+      )
+    }
+    return branch ?? null
+  }, [branchFilter, selectedBranchRef, snapshot])
 
   const selectedPullRequest = React.useMemo(() => {
     if (!snapshot || !selectedBranch) return null
@@ -339,8 +349,12 @@ function App() {
       ),
     [snapshot],
   )
+  const combinedBranches = React.useMemo(
+    () => getCombinedBranches(snapshot?.branches ?? []),
+    [snapshot],
+  )
   const orderedBranches = React.useMemo(() => {
-    const branches = snapshot?.branches ?? []
+    const branches = branchFilter === 'remote' ? (snapshot?.branches ?? []) : combinedBranches
     const children = new Map<string, Branch[]>()
     for (const branch of branches) {
       if (branch.parent) {
@@ -362,7 +376,7 @@ function App() {
     }
     for (const branch of branches) visit(branch)
     return ordered
-  }, [snapshot, branchByName])
+  }, [snapshot, branchByName, branchFilter, combinedBranches])
 
   const visibleBranches = React.useMemo(() => {
     if (!snapshot) return []
@@ -403,7 +417,7 @@ function App() {
   const isBusy = Boolean(busyAction || opening || refreshing)
   const currentBranch = snapshot?.currentBranch ?? null
   const allBranches = snapshot?.branches ?? []
-  const branchCount = allBranches.length
+  const branchCount = combinedBranches.length
   const pullRequestCount = snapshot?.pullRequests.length ?? 0
   const stashCount = snapshot?.stashes.length ?? 0
 
@@ -757,7 +771,7 @@ function App() {
         {visibleBranches.map((branch) => {
           const tree = branchTreeInfo(branch, branchByName)
           const pullRequest = branch.pr
-          const selected = branch.ref === selectedBranchRef
+          const selected = branch.ref === selectedBranch?.ref
           return (
             <div
               className={cn('branch-row', selected && 'branch-row-selected')}

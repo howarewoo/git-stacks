@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import { test } from 'node:test'
 import { getSnapshot, resolveRepository, runAction } from '../src/main/git'
 import type { GitAction } from '../src/shared/types'
+import { getCombinedBranches } from '../src/renderer/src/lib/branches'
 
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), 'git-stacks-test-'))
@@ -277,6 +278,78 @@ test('local and remote branches with identical display names remain distinct', a
     await runAction(repo, { type: 'switch', ref: 'refs/heads/origin/feature' })
     await runAction(repo, { type: 'switch', ref: 'refs/remotes/origin/feature' })
     assert.equal(git('branch', '--show-current'), 'feature')
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('combined branches collapse tracked refs without hiding unrelated remotes or local name collisions', async () => {
+  const { root, repo, git } = await fixture()
+  try {
+    git('remote', 'add', 'origin', join(root, 'origin.git'))
+    git('remote', 'add', 'other', join(root, 'other.git'))
+    for (const ref of ['origin/main', 'origin/feature', 'origin/remote-only', 'other/feature']) {
+      git('update-ref', `refs/remotes/${ref}`, 'HEAD')
+    }
+    git('branch', '--set-upstream-to=origin/main', 'main')
+    git('branch', 'work', '--track', 'origin/feature')
+    git('branch', 'origin/feature')
+
+    const snapshot = await getSnapshot(repo)
+    const combined = getCombinedBranches(snapshot.branches)
+    assert.deepEqual(combined.map((branch) => branch.ref).sort(), [
+      'refs/heads/main',
+      'refs/heads/origin/feature',
+      'refs/heads/work',
+      'refs/remotes/origin/remote-only',
+      'refs/remotes/other/feature',
+    ])
+    assert.deepEqual(
+      snapshot.branches
+        .filter((branch) => branch.remote)
+        .map((branch) => branch.ref)
+        .sort(),
+      [
+        'refs/remotes/origin/feature',
+        'refs/remotes/origin/main',
+        'refs/remotes/origin/remote-only',
+        'refs/remotes/other/feature',
+      ],
+    )
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('untracked local branches represent same-name origin refs without conflating other remotes', async () => {
+  const { root, repo, git } = await fixture()
+  try {
+    git('remote', 'add', 'origin', join(root, 'origin.git'))
+    git('remote', 'add', 'other', join(root, 'other.git'))
+    git('branch', 'stack/topic')
+    for (const ref of ['origin/main', 'origin/stack/topic', 'origin/remote-only', 'other/main']) {
+      git('update-ref', `refs/remotes/${ref}`, 'HEAD')
+    }
+    git('commit', '--allow-empty', '-m', 'Local work not yet pushed')
+    const originalConfig = git('config', '--local', '--list')
+
+    const combined = getCombinedBranches((await getSnapshot(repo)).branches)
+    assert.deepEqual(combined.map((branch) => branch.ref).sort(), [
+      'refs/heads/main',
+      'refs/heads/stack/topic',
+      'refs/remotes/origin/remote-only',
+      'refs/remotes/other/main',
+    ])
+    assert.equal(git('config', '--local', '--list'), originalConfig)
+
+    git('branch', '--set-upstream-to=other/main', 'main')
+    const explicitlyTracked = getCombinedBranches((await getSnapshot(repo)).branches)
+    assert.deepEqual(explicitlyTracked.map((branch) => branch.ref).sort(), [
+      'refs/heads/main',
+      'refs/heads/stack/topic',
+      'refs/remotes/origin/main',
+      'refs/remotes/origin/remote-only',
+    ])
   } finally {
     await rm(root, { recursive: true, force: true })
   }
