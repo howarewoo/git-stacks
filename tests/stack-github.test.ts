@@ -1189,3 +1189,101 @@ test(
     })
   },
 )
+test(
+  'restack reconstructs merge-time head from journal and rejects unproven metadata pointing at child tip',
+  { concurrency: false },
+  async () => {
+    await withHarness(async (harness) => {
+      await createStack(harness)
+      await publishStack(harness)
+      let state = await harness.readState()
+      updatePr(state, 'parent', {
+        checks: 'passing',
+        reviewDecision: 'APPROVED',
+        mergeState: 'CLEAN',
+      })
+      await harness.writeState(state)
+
+      const mergePreview = await previewStack(
+        harness.repo,
+        await getSnapshot(harness.repo),
+        'merge',
+        'parent',
+      )
+      await runAction(harness.repo, {
+        type: 'executeStack',
+        token: mergePreview.token,
+        allowForce: false,
+        draft: false,
+        titles: {},
+        mergeMethod: 'squash',
+      })
+      state = await harness.readState()
+      const mergedHead = prFor(state, 'parent').headOid
+      assert.ok(mergedHead)
+
+      const journalPath = join(harness.repo, '.git', 'git-stacks-merged-heads.json')
+      const journalContent = JSON.parse(await readFile(journalPath, 'utf8'))
+      assert.equal(journalContent.parent.headOid, mergedHead)
+      assert.equal(journalContent[String(prFor(state, 'parent').number)].headOid, mergedHead)
+
+      git(harness, ['config', '--local', '--unset', 'branch.parent.gitStacksMergedHeadOid'])
+      git(harness, ['config', '--local', '--unset', 'branch.parent.gitStacksMergedCommitOid'])
+
+      git(harness, ['switch', 'child'])
+      const previewAfterConfigCleared = await previewStack(
+        harness.repo,
+        await getSnapshot(harness.repo),
+        'restack',
+        'child',
+      )
+      assert.deepEqual(previewAfterConfigCleared.blockers, [])
+
+      const childOid = git(harness, ['rev-parse', 'refs/heads/child'])
+      git(harness, ['config', '--local', 'branch.parent.gitStacksMergedHeadOid', childOid])
+      const previewUnprovenChildTip = await previewStack(
+        harness.repo,
+        await getSnapshot(harness.repo),
+        'restack',
+        'child',
+      )
+      assert.ok(
+        previewUnprovenChildTip.blockers.some((b) =>
+          b.includes(
+            'has no validated merge-time head for child that can be used as a safe replay boundary',
+          ),
+        ),
+      )
+    })
+  },
+)
+
+test(
+  'branch publication recovers orphaned branch ref locks left by dead processes',
+  { concurrency: false },
+  async () => {
+    await withHarness(async (harness) => {
+      await createStack(harness)
+      const lockPath = join(harness.repo, '.git', 'refs', 'heads', 'child.lock')
+      const deadPid = 99999999
+      const lockData = {
+        pid: deadPid,
+        branch: 'child',
+        lockPath,
+        createdAt: Date.now() - 10000,
+        transactionId: 'dead-lock-uuid',
+      }
+      await writeFile(lockPath, JSON.stringify(lockData), 'utf8')
+
+      const locksDir = join(harness.repo, '.git', 'git-stacks-branch-locks')
+      await mkdir(locksDir, { recursive: true })
+      await writeFile(join(locksDir, 'dead-lock-uuid.json'), JSON.stringify(lockData), 'utf8')
+
+      await publishStack(harness)
+      const state = await harness.readState()
+      assert.ok(prFor(state, 'child'))
+
+      await assert.rejects(readFile(lockPath), { code: 'ENOENT' })
+    })
+  },
+)

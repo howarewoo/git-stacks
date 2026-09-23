@@ -403,6 +403,225 @@ async function mergeCommitCount(repoPath: string, boundary: string, tip: string)
     throw new Error('Git returned an invalid merge commit count')
   return count
 }
+async function commitParents(repoPath: string, oid: string): Promise<string[]> {
+  const output = await runGit(repoPath, [
+    'rev-list',
+    '--parents',
+    '-n',
+    '1',
+    '--end-of-options',
+    oid,
+  ])
+  const tokens = stripTrailingNewline(output).trim().split(/\s+/u)
+  return tokens.slice(1).filter(Boolean)
+}
+
+interface MergedPrRecord {
+  branch: string
+  pr: number
+  headOid: string
+  mergeOid: string | null
+  mergedAt: number
+}
+
+async function mergedPrJournalPath(repoPath: string): Promise<string> {
+  const commonDir = stripTrailingNewline(await runGit(repoPath, ['rev-parse', '--git-common-dir']))
+  return path.resolve(repoPath, commonDir, 'git-stacks-merged-heads.json')
+}
+
+async function readMergedPrJournal(repoPath: string): Promise<Map<string, MergedPrRecord>> {
+  const journalPath = await mergedPrJournalPath(repoPath)
+  const map = new Map<string, MergedPrRecord>()
+  try {
+    const raw = await fs.readFile(journalPath, 'utf8')
+    const parsed = JSON.parse(raw)
+    if (isRecord(parsed)) {
+      for (const [key, value] of Object.entries(parsed)) {
+        if (
+          isRecord(value) &&
+          typeof value.branch === 'string' &&
+          typeof value.pr === 'number' &&
+          typeof value.headOid === 'string'
+        ) {
+          map.set(key, {
+            branch: value.branch,
+            pr: value.pr,
+            headOid: value.headOid,
+            mergeOid: typeof value.mergeOid === 'string' ? value.mergeOid : null,
+            mergedAt: typeof value.mergedAt === 'number' ? value.mergedAt : Date.now(),
+          })
+        }
+      }
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      // Ignore unreadable or missing journal
+    }
+  }
+  return map
+}
+
+async function writeMergedPrRecord(repoPath: string, record: MergedPrRecord): Promise<void> {
+  const journalPath = await mergedPrJournalPath(repoPath)
+  await fs.mkdir(path.dirname(journalPath), { recursive: true })
+  const map = await readMergedPrJournal(repoPath)
+  map.set(String(record.pr), record)
+  map.set(record.branch, record)
+  const obj: Record<string, MergedPrRecord> = {}
+  for (const [k, v] of map.entries()) {
+    obj[k] = v
+  }
+  const temporaryPath = `${journalPath}.${randomUUID()}.tmp`
+  const handle = await fs.open(temporaryPath, 'wx', 0o600)
+  try {
+    await handle.writeFile(JSON.stringify(obj, null, 2), 'utf8')
+    await handle.sync()
+  } finally {
+    await handle.close()
+  }
+  await fs.rename(temporaryPath, journalPath)
+}
+
+async function isProvenMergeHead(
+  repoPath: string,
+  prNumber: number,
+  candidateHeadOid: string,
+  mergeOid: string,
+  journal: Map<string, MergedPrRecord>,
+): Promise<boolean> {
+  const journalRecord = journal.get(String(prNumber))
+  if (
+    journalRecord &&
+    journalRecord.pr === prNumber &&
+    journalRecord.headOid === candidateHeadOid
+  ) {
+    if (!journalRecord.mergeOid || journalRecord.mergeOid === mergeOid) {
+      return true
+    }
+  }
+  if (mergeOid) {
+    try {
+      const parents = await commitParents(repoPath, mergeOid)
+      if (parents.length >= 2) {
+        const prParent = parents[1]
+        if (
+          candidateHeadOid === prParent ||
+          (await isAncestor(repoPath, candidateHeadOid, prParent))
+        ) {
+          return true
+        }
+      }
+    } catch {
+      // Ignore
+    }
+  }
+  return false
+}
+
+function isPidRunning(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) return false
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code
+    return code === 'EPERM'
+  }
+}
+
+interface BranchLockInfo {
+  pid: number
+  branch: string
+  lockPath: string
+  createdAt: number
+  transactionId: string
+}
+
+async function tryRecoverStaleBranchLock(repoPath: string, lockPath: string): Promise<boolean> {
+  let content = ''
+  try {
+    content = await fs.readFile(lockPath, 'utf8')
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return true
+    return false
+  }
+  try {
+    const parsed = JSON.parse(content)
+    if (typeof parsed.pid === 'number') {
+      if (!isPidRunning(parsed.pid)) {
+        await fs.unlink(lockPath)
+        return true
+      }
+      return false
+    }
+  } catch {
+    // If not JSON, check branch-locks directory
+  }
+  let commonDir = ''
+  try {
+    commonDir = stripTrailingNewline(await runGit(repoPath, ['rev-parse', '--git-common-dir']))
+  } catch {
+    return false
+  }
+  const locksDir = path.resolve(repoPath, commonDir, 'git-stacks-branch-locks')
+  try {
+    const entries = await fs.readdir(locksDir)
+    for (const entry of entries) {
+      if (!entry.endsWith('.json')) continue
+      const journalPath = path.join(locksDir, entry)
+      try {
+        const raw = await fs.readFile(journalPath, 'utf8')
+        const journal = JSON.parse(raw)
+        if (journal.lockPath === lockPath && typeof journal.pid === 'number') {
+          if (!isPidRunning(journal.pid)) {
+            await fs.unlink(lockPath).catch(() => {})
+            await fs.unlink(journalPath).catch(() => {})
+            return true
+          }
+          return false
+        }
+      } catch {
+        // Ignore unreadable journal
+      }
+    }
+  } catch {
+    // Ignore ENOENT
+  }
+  return false
+}
+
+export async function recoverStaleBranchLocks(repoPath: string): Promise<void> {
+  let commonDir: string
+  try {
+    commonDir = stripTrailingNewline(await runGit(repoPath, ['rev-parse', '--git-common-dir']))
+  } catch {
+    return
+  }
+  const locksDir = path.resolve(repoPath, commonDir, 'git-stacks-branch-locks')
+  try {
+    const entries = await fs.readdir(locksDir)
+    for (const entry of entries) {
+      if (!entry.endsWith('.json')) continue
+      const journalPath = path.join(locksDir, entry)
+      try {
+        const raw = await fs.readFile(journalPath, 'utf8')
+        const journal = JSON.parse(raw)
+        if (typeof journal.pid === 'number' && !isPidRunning(journal.pid)) {
+          if (typeof journal.lockPath === 'string') {
+            await fs.unlink(journal.lockPath).catch(() => {})
+          }
+          await fs.unlink(journalPath).catch(() => {})
+        }
+      } catch {
+        // Ignore unreadable entry
+      }
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      // Ignore
+    }
+  }
+}
 
 interface ParentTarget {
   ref: string
@@ -496,6 +715,7 @@ async function branchRecords(
   const refs = await getRefs(repoPath)
   const local = refs.filter((ref) => ref.refname.startsWith('refs/heads/') && !ref.symref)
   const records = new Map<string, BranchRecord>()
+  const mergedJournal = await readMergedPrJournal(repoPath)
   for (const ref of local) {
     const name = ref.refname.slice('refs/heads/'.length)
     const oid = ref.objectName
@@ -531,6 +751,22 @@ async function branchRecords(
       `branch.${name}.gitStacksMergedCommitOid`,
     )
     const pr = canonicalPrs.get(name) ?? localPrForBranch(snapshot, name, originFullName)
+    const journalEntry =
+      mergedJournal.get(name) ?? (pr ? mergedJournal.get(String(pr.number)) : null)
+    const mergedHeadPr = configuredMergedHeadPr ?? (journalEntry ? String(journalEntry.pr) : null)
+    let mergedHeadOid = configuredMergedHeadOid ?? journalEntry?.headOid ?? null
+    let mergedCommitOid =
+      configuredMergedCommitOid ?? journalEntry?.mergeOid ?? pr?.mergeOid ?? null
+    if (!mergedHeadOid && mergedCommitOid) {
+      try {
+        const parents = await commitParents(repoPath, mergedCommitOid)
+        if (parents.length >= 2 && isOid(parents[1])) {
+          mergedHeadOid = parents[1]
+        }
+      } catch {
+        // Ignore
+      }
+    }
     records.set(name, {
       name,
       oid,
@@ -539,9 +775,9 @@ async function branchRecords(
       invalidParentTip,
       parentSource: source,
       pr,
-      mergedHeadPr: configuredMergedHeadPr,
-      mergedHeadOid: configuredMergedHeadOid,
-      mergedCommitOid: configuredMergedCommitOid,
+      mergedHeadPr,
+      mergedHeadOid,
+      mergedCommitOid,
     })
   }
   return records
@@ -642,6 +878,7 @@ async function capturePlan(
     }
   }
   const records = await branchRecords(root, snapshot, defaultBranch, originFullName, canonicalPrs)
+  const mergedJournal = await readMergedPrJournal(root)
   const connected = connectedBranchNames(records, selectedBranch, defaultBranch)
   const blockers = [...connected.blockers]
   let mergeMethods: ('merge' | 'squash' | 'rebase')[] = []
@@ -792,26 +1029,65 @@ async function capturePlan(
           `Merged parent ${retargetedFrom} has no validated merge commit reachable from ${parent}; fetch origin and inspect the rewritten base before retrying`,
         )
       }
-      const recordedMergeHead =
+      let recordedMergeHead =
         oldParentRecord.mergedHeadPr === String(mergedPr.number) &&
         oldParentRecord.mergedCommitOid === mergedPr.mergeOid &&
         oldParentRecord.mergedHeadOid &&
         isOid(oldParentRecord.mergedHeadOid)
           ? await resolveCommit(root, oldParentRecord.mergedHeadOid)
           : null
+      if (!recordedMergeHead) {
+        const journalRecord =
+          mergedJournal.get(String(mergedPr.number)) ?? mergedJournal.get(retargetedFrom)
+        if (
+          journalRecord &&
+          journalRecord.pr === mergedPr.number &&
+          journalRecord.headOid &&
+          isOid(journalRecord.headOid) &&
+          (!journalRecord.mergeOid || journalRecord.mergeOid === mergedPr.mergeOid)
+        ) {
+          recordedMergeHead = await resolveCommit(root, journalRecord.headOid)
+        }
+      }
+      if (!recordedMergeHead && mergedPr.mergeOid) {
+        try {
+          const parents = await commitParents(root, mergedPr.mergeOid)
+          if (parents.length >= 2 && isOid(parents[1])) {
+            recordedMergeHead = await resolveCommit(root, parents[1])
+          }
+        } catch {
+          // Ignore
+        }
+      }
       const boundaryIncludedInParent = await isAncestor(root, boundary, effectiveParentOid)
       const unsafeBoundaryMessage = `Merged parent ${retargetedFrom} has no validated merge-time head for ${name} that can be used as a safe replay boundary; restacking is blocked to preserve commits`
       if (!recordedMergeHead) {
         blockers.push(unsafeBoundaryMessage)
-      } else if (await isAncestor(root, recordedMergeHead, record.oid)) {
-        const mergeHeadIncludedInBoundary = await isAncestor(root, recordedMergeHead, boundary)
-        if (!mergeHeadIncludedInBoundary || !boundaryIncludedInParent) {
-          // Replay from the immutable head captured when the PR was merged.
-          // The live source ref may have advanced since GitHub closed the PR.
-          boundary = recordedMergeHead
+      } else {
+        const isChildTip = recordedMergeHead === record.oid
+        const commitsToChild = await commitCount(root, recordedMergeHead, record.oid)
+        const isProven =
+          !isChildTip &&
+          commitsToChild > 0 &&
+          (await isProvenMergeHead(
+            root,
+            mergedPr.number,
+            recordedMergeHead,
+            mergeOid ?? '',
+            mergedJournal,
+          ))
+        if (!isProven) {
+          blockers.push(unsafeBoundaryMessage)
+        } else if (await isAncestor(root, recordedMergeHead, record.oid)) {
+          const mergeHeadIncludedInBoundary = await isAncestor(root, recordedMergeHead, boundary)
+          if (!mergeHeadIncludedInBoundary || !boundaryIncludedInParent) {
+            // Replay from the immutable head captured when the PR was merged.
+            // The live source ref may have advanced since GitHub closed the PR.
+            boundary = recordedMergeHead
+          }
+        } else if (!boundaryIncludedInParent) {
+          blockers.push(unsafeBoundaryMessage)
         }
-      } else if (!boundaryIncludedInParent) {
-        blockers.push(unsafeBoundaryMessage)
       }
     }
     const commits = await commitCount(root, boundary, record.oid)
@@ -1771,16 +2047,50 @@ async function withLocalBranchRefLock<T>(
   if (!refPathValue) throw new Error(`Cannot locate the local ref for ${branch}`)
   const lockPath = `${gitPathOnDisk(repoPath, refPathValue, refRoot)}.lock`
   await fs.mkdir(path.dirname(lockPath), { recursive: true })
+  const commonDir = stripTrailingNewline(await runGit(repoPath, ['rev-parse', '--git-common-dir']))
+  const locksDir = path.resolve(repoPath, commonDir, 'git-stacks-branch-locks')
+  await fs.mkdir(locksDir, { recursive: true })
+
+  const transactionId = randomUUID()
+  const lockJournalPath = path.join(locksDir, `${transactionId}.json`)
+  const lockInfo: BranchLockInfo = {
+    pid: process.pid,
+    branch,
+    lockPath,
+    createdAt: Date.now(),
+    transactionId,
+  }
+  const tempJournal = `${lockJournalPath}.${randomUUID()}.tmp`
+  const journalHandle = await fs.open(tempJournal, 'wx', 0o600)
+  try {
+    await journalHandle.writeFile(JSON.stringify(lockInfo), 'utf8')
+    await journalHandle.sync()
+  } finally {
+    await journalHandle.close()
+  }
+  await fs.rename(tempJournal, lockJournalPath)
+
   let lock: FileHandle
   try {
     lock = await fs.open(lockPath, 'wx', 0o666)
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
-      throw new Error(`Cannot publish ${branch}: its local branch ref is being updated`)
+      const recovered = await tryRecoverStaleBranchLock(repoPath, lockPath)
+      if (recovered) {
+        lock = await fs.open(lockPath, 'wx', 0o666)
+      } else {
+        await fs.unlink(lockJournalPath).catch(() => {})
+        throw new Error(`Cannot publish ${branch}: its local branch ref is being updated`)
+      }
+    } else {
+      await fs.unlink(lockJournalPath).catch(() => {})
+      throw error
     }
-    throw error
   }
+
   try {
+    await lock.writeFile(JSON.stringify(lockInfo), 'utf8')
+    await lock.sync()
     const lockIdentity = await lock.stat()
     try {
       return await action()
@@ -1795,7 +2105,8 @@ async function withLocalBranchRefLock<T>(
       }
     }
   } finally {
-    await lock.close()
+    await fs.unlink(lockJournalPath).catch(() => {})
+    await lock.close().catch(() => {})
   }
 }
 
@@ -2212,10 +2523,20 @@ async function mergeStack(
       `GitHub did not confirm the reviewed head of PR #${entry.pr.number} as merged${mergeError ? `: ${commandDetail(mergeError)}` : ''}`,
     )
   }
-  await setConfig(repoPath, `branch.${entry.branch}.gitStacksMergedHeadPr`, String(entry.pr.number))
-  await setConfig(repoPath, `branch.${entry.branch}.gitStacksMergedHeadOid`, entry.pr.headOid)
-  if (readBack.mergeOid) {
-    await setConfig(repoPath, `branch.${entry.branch}.gitStacksMergedCommitOid`, readBack.mergeOid)
+  let mergeOid = readBack.mergeOid ?? null
+  if (!mergeOid) {
+    for (let attempt = 0; attempt < 5; attempt++) {
+      await new Promise((resolve) => setTimeout(resolve, 300 * (attempt + 1)))
+      try {
+        const refreshed = await getPullRequest(repoPath, entry.pr.number)
+        if (refreshed.mergeOid) {
+          mergeOid = refreshed.mergeOid
+          break
+        }
+      } catch {
+        // Continue retry
+      }
+    }
   }
   let fetchMessage = ''
   try {
@@ -2228,6 +2549,43 @@ async function mergeStack(
     ])
   } catch (error) {
     fetchMessage = ` The pull request merged, but refreshing origin/${plan.defaultBranch} failed: ${commandDetail(error)}`
+  }
+  if (!mergeOid) {
+    try {
+      const logOutput = await runGit(repoPath, [
+        'log',
+        '-n',
+        '20',
+        '--merges',
+        '--format=%H %P',
+        `refs/remotes/origin/${plan.defaultBranch}`,
+      ])
+      for (const line of logOutput.split('\n')) {
+        const tokens = line.trim().split(/\s+/u)
+        if (
+          tokens.length >= 3 &&
+          (tokens[2] === entry.pr.headOid ||
+            (await isAncestor(repoPath, entry.pr.headOid, tokens[2])))
+        ) {
+          mergeOid = tokens[0]
+          break
+        }
+      }
+    } catch {
+      // Best effort recovery
+    }
+  }
+  await writeMergedPrRecord(repoPath, {
+    branch: entry.branch,
+    pr: entry.pr.number,
+    headOid: entry.pr.headOid,
+    mergeOid,
+    mergedAt: Date.now(),
+  })
+  await setConfig(repoPath, `branch.${entry.branch}.gitStacksMergedHeadPr`, String(entry.pr.number))
+  await setConfig(repoPath, `branch.${entry.branch}.gitStacksMergedHeadOid`, entry.pr.headOid)
+  if (mergeOid) {
+    await setConfig(repoPath, `branch.${entry.branch}.gitStacksMergedCommitOid`, mergeOid)
   }
   return { message: `Merged pull request #${entry.pr.number}.${fetchMessage}` }
 }

@@ -60,6 +60,7 @@ import {
   getStackProgress,
   isStackAction,
   parentTarget,
+  recoverStaleBranchLocks,
   runStackAction,
   validateStackAction,
 } from './stacks'
@@ -3480,6 +3481,7 @@ export async function getSnapshot(repoPath: string): Promise<RepositorySnapshot>
   const root = await resolveRepository(repoPath)
   await recoverStashDropForRepository(root)
   await recoverFileActionJournals(root)
+  await recoverStaleBranchLocks(root)
   const [refs, currentBranch, files, stashes, originUrl, operationState, stackOperation, headOid] =
     await Promise.all([
       getRefs(root),
