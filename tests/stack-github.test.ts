@@ -1272,20 +1272,26 @@ test(
         branch: 'child',
         lockPath,
         createdAt: Date.now() - 10000,
-        transactionId: 'dead-lock-uuid',
+        transactionId: 'deadbeefdeadbeefdeadbeefdeadbeef',
       }
       await writeFile(lockPath, JSON.stringify(lockData), 'utf8')
 
       const locksDir = join(harness.repo, '.git', 'git-stacks-branch-locks')
       await mkdir(locksDir, { recursive: true })
-      await writeFile(join(locksDir, 'dead-lock-uuid.json'), JSON.stringify(lockData), 'utf8')
+      await writeFile(
+        join(locksDir, 'deadbeefdeadbeefdeadbeefdeadbeef.json'),
+        JSON.stringify(lockData),
+        'utf8',
+      )
 
       await publishStack(harness)
       const state = await harness.readState()
       assert.ok(prFor(state, 'child'))
 
       await assert.rejects(readFile(lockPath), { code: 'ENOENT' })
-      await assert.rejects(readFile(join(locksDir, 'dead-lock-uuid.json')), { code: 'ENOENT' })
+      await assert.rejects(readFile(join(locksDir, 'deadbeefdeadbeefdeadbeefdeadbeef.json')), {
+        code: 'ENOENT',
+      })
     })
   },
 )
@@ -1359,37 +1365,72 @@ exec "$GIT_STACKS_TEST_DELEGATE_GIT" "$@"
 )
 
 test(
+  'branch lock recovery accepts the literal files ref-storage setting',
+  { concurrency: false },
+  async () => {
+    await withHarness(async (harness) => {
+      await createStack(harness)
+      git(harness, ['config', 'core.repositoryFormatVersion', '1'])
+      git(harness, ['config', 'extensions.refStorage', 'files'])
+
+      const lockPath = join(harness.repo, '.git', 'refs', 'heads', 'child.lock')
+      const locksDir = join(harness.repo, '.git', 'git-stacks-branch-locks')
+      const transactionId = 'deadbeefdeadbeefdeadbeefdeadbeef'
+      const lockData = {
+        pid: 99999999,
+        branch: 'child',
+        lockPath,
+        createdAt: Date.now() - 30000,
+        transactionId,
+      }
+      await mkdir(locksDir, { recursive: true })
+      await writeFile(lockPath, JSON.stringify(lockData), 'utf8')
+      const journalPath = join(locksDir, `${transactionId}.json`)
+      await writeFile(journalPath, JSON.stringify(lockData), 'utf8')
+
+      await recoverStaleBranchLocks(harness.repo)
+      await assert.rejects(readFile(lockPath), { code: 'ENOENT' })
+      await assert.rejects(readFile(journalPath), { code: 'ENOENT' })
+
+      await publishStack(harness)
+      assert.ok(prFor(await harness.readState(), 'child'))
+    })
+  },
+)
+
+test(
   'stale branch lock cleanup preserves live locks and removes dead journals',
   { concurrency: false },
   async () => {
     await withHarness(async (harness) => {
       await createStack(harness)
       const lockPath = join(harness.repo, '.git', 'refs', 'heads', 'child.lock')
+      const transactionId = 'deadbeefdeadbeefdeadbeefdeadbeef'
       const liveLockData = {
         pid: process.pid,
         branch: 'child',
         lockPath,
         createdAt: Date.now(),
-        transactionId: 'live-lock-uuid',
+        transactionId,
       }
       await writeFile(lockPath, JSON.stringify(liveLockData), 'utf8')
 
       const locksDir = join(harness.repo, '.git', 'git-stacks-branch-locks')
       await mkdir(locksDir, { recursive: true })
-      const deadJournalPath = join(locksDir, 'dead-lock-uuid.json')
+      const deadJournalPath = join(locksDir, `${transactionId}.json`)
       const deadLockData = {
         pid: 99999999,
         branch: 'child',
         lockPath,
         createdAt: Date.now() - 20000,
-        transactionId: 'dead-lock-uuid',
+        transactionId,
       }
       await writeFile(deadJournalPath, JSON.stringify(deadLockData), 'utf8')
 
       await recoverStaleBranchLocks(harness.repo)
 
       const liveContent = JSON.parse(await readFile(lockPath, 'utf8'))
-      assert.equal(liveContent.transactionId, 'live-lock-uuid')
+      assert.equal(liveContent.transactionId, transactionId)
       await assert.rejects(readFile(deadJournalPath), { code: 'ENOENT' })
     })
   },
@@ -1492,7 +1533,7 @@ test(
       await recoverStaleBranchLocks(harness.repo)
 
       assert.equal(await readFile(victimLock, 'utf8'), 'unrelated lock\n')
-      await assert.rejects(readFile(journalPath), { code: 'ENOENT' })
+      assert.equal(JSON.parse(await readFile(journalPath, 'utf8')).lockPath, victimLock)
     })
   },
 )
@@ -1522,7 +1563,7 @@ test(
           branch: 'child',
           lockPath: victimLock,
           createdAt: Date.now() - 30000,
-          transactionId: 'valid-tx-uuid-1',
+          transactionId: 'deadbeefdeadbeefdeadbeefdeadbeef',
         }),
         'utf8',
       )
@@ -1546,6 +1587,11 @@ test(
       // Victim files must still exist untouched
       assert.equal(await readFile(victimFile, 'utf8'), 'do not delete me\n')
       assert.equal(await readFile(victimLock, 'utf8'), 'victim lock\n')
+      assert.equal(JSON.parse(await readFile(maliciousJournal1, 'utf8')).lockPath, victimLock)
+      assert.equal(
+        JSON.parse(await readFile(maliciousJournal2, 'utf8')).transactionId,
+        '../../victim.txt',
+      )
     })
   },
 )
@@ -1577,6 +1623,42 @@ test(
       assert.equal(await readFile(lockPath, 'utf8'), '')
       assert.deepEqual(JSON.parse(await readFile(deadJournalPath, 'utf8')), deadJournalData)
       await assert.rejects(publishStack(harness), /being updated/u)
+    })
+  },
+)
+
+test(
+  'branch lock recovery preserves parseable locks with mismatched transaction metadata',
+  { concurrency: false },
+  async () => {
+    await withHarness(async (harness) => {
+      await createStack(harness)
+      const lockPath = join(harness.repo, '.git', 'refs', 'heads', 'child.lock')
+      const locksDir = join(harness.repo, '.git', 'git-stacks-branch-locks')
+      const journalTransactionId = 'deadbeefdeadbeefdeadbeefdeadbeef'
+      const lockTransactionId = 'ffffffffffffffffffffffffffffffff'
+      const journalData = {
+        pid: 99999999,
+        branch: 'child',
+        lockPath,
+        createdAt: Date.now() - 30000,
+        transactionId: journalTransactionId,
+      }
+      const lockData = {
+        ...journalData,
+        transactionId: lockTransactionId,
+      }
+      await mkdir(locksDir, { recursive: true })
+      const journalPath = join(locksDir, `${journalTransactionId}.json`)
+      await writeFile(journalPath, JSON.stringify(journalData), 'utf8')
+      await writeFile(lockPath, JSON.stringify(lockData), 'utf8')
+
+      await recoverStaleBranchLocks(harness.repo)
+      assert.deepEqual(JSON.parse(await readFile(lockPath, 'utf8')), lockData)
+      assert.deepEqual(JSON.parse(await readFile(journalPath, 'utf8')), journalData)
+      await assert.rejects(publishStack(harness), /being updated/u)
+      assert.deepEqual(JSON.parse(await readFile(lockPath, 'utf8')), lockData)
+      assert.deepEqual(JSON.parse(await readFile(journalPath, 'utf8')), journalData)
     })
   },
 )

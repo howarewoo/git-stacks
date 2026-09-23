@@ -567,6 +567,15 @@ function safeJournalPath(locksDir: string, transactionId: unknown): string | nul
   return resolved
 }
 
+async function sameExistingPath(left: string, right: string): Promise<boolean> {
+  try {
+    const [leftRealPath, rightRealPath] = await Promise.all([fs.realpath(left), fs.realpath(right)])
+    return leftRealPath === rightRealPath
+  } catch {
+    return false
+  }
+}
+
 async function isSafeBranchLockPath(
   repoPath: string,
   candidatePath: unknown,
@@ -585,7 +594,7 @@ async function isSafeBranchLockPath(
 
     let refRoot: string | null = null
     const refStorage = await getConfigValue(repoPath, 'extensions.refstorage')
-    if (refStorage) {
+    if (refStorage && refStorage.toLowerCase() !== 'files') {
       try {
         refRoot = localFilesRefStoragePath(refStorage)
       } catch {
@@ -718,46 +727,46 @@ async function tryRecoverStaleBranchLock(
   } catch {
     parsed = null
   }
-  if (parsed && typeof parsed.pid === 'number') {
-    if (!isPidRunning(parsed.pid)) {
-      const unlinkResult = await unlinkIfSameIdentity(lockPath, lockStat!)
-      if (unlinkResult !== 'unlinked') {
-        return false
-      }
-      if (isValidTransactionId(parsed.transactionId)) {
-        const directJournalPath = safeJournalPath(locksDir, parsed.transactionId)
-        if (directJournalPath) {
-          await fs.unlink(directJournalPath).catch(() => {})
-        }
-      }
-      try {
-        const entries = await fs.readdir(locksDir)
-        for (const entry of entries) {
-          if (!entry.endsWith('.json')) continue
-          const journalPath = path.join(locksDir, entry)
-          try {
-            const raw = await fs.readFile(journalPath, 'utf8')
-            const journal = JSON.parse(raw)
-            if (
-              journal.lockPath === lockPath &&
-              ((isValidTransactionId(parsed.transactionId) &&
-                journal.transactionId === parsed.transactionId) ||
-                journal.pid === parsed.pid)
-            ) {
-              await fs.unlink(journalPath).catch(() => {})
-            }
-          } catch {
-            // Ignore unreadable journal
-          }
-        }
-      } catch {
-        // Ignore
-      }
-      return true
-    }
-    return false
-  }
+  if (
+    parsed &&
+    typeof parsed.pid === 'number' &&
+    isValidTransactionId(parsed.transactionId) &&
+    parsed.branch === branch &&
+    typeof parsed.lockPath === 'string' &&
+    !isPidRunning(parsed.pid)
+  ) {
+    if (!(await sameExistingPath(parsed.lockPath, lockPath))) return false
 
+    const journalPath = safeJournalPath(locksDir, parsed.transactionId)
+    if (!journalPath) return false
+
+    let journal: Record<string, unknown>
+    try {
+      const rawJournal = JSON.parse(await fs.readFile(journalPath, 'utf8'))
+      if (!isRecord(rawJournal)) return false
+      journal = rawJournal
+    } catch {
+      return false
+    }
+    if (
+      journal.transactionId !== parsed.transactionId ||
+      typeof journal.lockPath !== 'string' ||
+      !(await sameExistingPath(journal.lockPath, lockPath)) ||
+      journal.branch !== branch ||
+      journal.pid !== parsed.pid ||
+      typeof journal.pid !== 'number' ||
+      isPidRunning(journal.pid)
+    ) {
+      return false
+    }
+
+    const unlinkResult = await unlinkIfSameIdentity(lockPath, lockStat!)
+    if (unlinkResult !== 'unlinked') {
+      return false
+    }
+    await fs.unlink(journalPath).catch(() => {})
+    return true
+  }
   // A partial or malformed lock has no reliable transaction ownership. Keep it
   // for manual recovery instead of deleting a lock that may belong to a new
   // publisher which is still writing its metadata.
@@ -796,10 +805,11 @@ export async function recoverStaleBranchLocks(repoPath: string): Promise<void> {
         continue
       }
 
+      if (!isValidTransactionId(journalJson.transactionId)) continue
+
       const safe = await isSafeBranchLockPath(repoPath, journalJson.lockPath, journalJson.branch)
       if (!safe) {
-        // Untrusted/unsafe lockPath in journal for dead process: unlink bogus journal and never touch lockPath
-        await fs.unlink(journalPath).catch(() => {})
+        // Keep rejected journals as evidence; their lock paths are not proven safe to touch.
         continue
       }
 
@@ -836,9 +846,12 @@ export async function recoverStaleBranchLocks(repoPath: string): Promise<void> {
 
       if (lockParsed) {
         const isSameDeadLock =
-          (isValidTransactionId(journalJson.transactionId) &&
-            lockParsed.transactionId === journalJson.transactionId) ||
-          (lockParsed.pid === pid && !isPidRunning(pid))
+          isValidTransactionId(journalJson.transactionId) &&
+          lockParsed.transactionId === journalJson.transactionId &&
+          lockParsed.pid === journalJson.pid &&
+          lockParsed.branch === journalJson.branch &&
+          typeof lockParsed.lockPath === 'string' &&
+          (await sameExistingPath(lockParsed.lockPath, lockPath))
 
         if (isSameDeadLock) {
           const result = await unlinkIfSameIdentity(lockPath, lockStat!)
