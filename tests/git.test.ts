@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict'
-import { execFileSync } from 'node:child_process'
-import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { execFileSync, spawnSync } from 'node:child_process'
+import { chmod, mkdtemp, mkdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { delimiter, join } from 'node:path'
+import { delimiter, join, resolve, sep } from 'node:path'
 import { test } from 'node:test'
 import { getSnapshot, resolveRepository, runAction } from '../src/main/git'
 import type { GitAction } from '../src/shared/types'
@@ -199,6 +199,190 @@ test('stash removes untracked literal paths and restores their contents and stag
     assert.equal(await readFile(join(repo, 'notes [draft].txt'), 'utf8'), 'untracked notes\n')
     assert.equal(restored.files.find((file) => file.path === 'shared.txt')?.index, 'M')
     assert.deepEqual(restored.stashes, [])
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('dropping the final packed stash removes refs/stash from packed-refs', async () => {
+  const { root, repo, git } = await fixture()
+  try {
+    await writeFile(join(repo, 'shared.txt'), 'packed stash\n')
+    await runAction(repo, { type: 'stash', message: 'packed stash', includeUntracked: false })
+    const stash = (await getSnapshot(repo)).stashes[0]!
+    git('tag', 'keep-packed-ref')
+    git('pack-refs', '--all', '--prune')
+
+    const refPath = resolve(repo, git('rev-parse', '--git-path', 'refs/stash'))
+    const packedRefsPath = resolve(repo, git('rev-parse', '--git-path', 'packed-refs'))
+    await assert.rejects(readFile(refPath))
+    assert.equal(git('for-each-ref', '--format=%(refname)', 'refs/stash'), 'refs/stash')
+    assert.match(
+      await readFile(packedRefsPath, 'utf8'),
+      new RegExp(`^${stash.oid} refs/stash$`, 'm'),
+    )
+
+    await runAction(repo, { type: 'stashDrop', ref: stash.ref, oid: stash.oid })
+
+    assert.equal(git('for-each-ref', '--format=%(refname)', 'refs/stash'), '')
+    assert.equal(git('rev-parse', 'refs/tags/keep-packed-ref'), git('rev-parse', 'HEAD'))
+    assert.equal((await readFile(packedRefsPath, 'utf8')).includes('refs/stash'), false)
+    assert.deepEqual((await getSnapshot(repo)).stashes, [])
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('stash drop resolves relative ref paths from a custom files URI', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'git-stacks-test-'))
+  const repo = join(root, 'workspace')
+  const refsStore = join(root, 'custom refs')
+  const shimDir = join(root, 'git-shim')
+  await mkdir(repo)
+  const git = (...args: string[]) =>
+    execFileSync('git', ['-C', repo, ...args], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    }).trim()
+  const originalPath = process.env.PATH
+  const originalRealGit = process.env.GIT_STACKS_REAL_GIT
+  const originalRefStorage = process.env.GIT_STACKS_TEST_REF_STORAGE
+  try {
+    git('init', '-b', 'main')
+    git('config', 'user.name', 'Git Stacks test')
+    git('config', 'user.email', 'test@example.invalid')
+    await writeFile(join(repo, 'shared.txt'), 'base\n')
+    git('add', '.')
+    git('commit', '-m', 'Initial commit')
+    await symlink(resolve(repo, git('rev-parse', '--git-common-dir')), refsStore)
+
+    await writeFile(join(repo, 'shared.txt'), 'custom ref store stash\n')
+    await runAction(repo, { type: 'stash', message: 'custom refs', includeUntracked: false })
+    const stash = (await getSnapshot(repo)).stashes[0]!
+    const refPath = join(refsStore, 'refs', 'stash')
+    assert.equal((await readFile(refPath, 'utf8')).trim(), stash.oid)
+
+    const refStorage = `files://${encodeURI(refsStore)}`
+    const realGit = execFileSync('which', ['git'], { encoding: 'utf8' }).trim()
+    await mkdir(shimDir)
+    await writeFile(
+      join(shimDir, 'git'),
+      `#!/bin/sh
+repo=''
+if [ "$1" = "-C" ]; then
+  repo=$2
+  shift 2
+fi
+if [ "$1" = "config" ] && [ "$2" = "--get" ] && [ "$3" = "extensions.refstorage" ]; then
+  printf '%s\\n' "$GIT_STACKS_TEST_REF_STORAGE"
+  exit 0
+fi
+if [ "$1" = "rev-parse" ] && [ "$2" = "--git-path" ]; then
+  case "$3" in
+    refs/stash|refs/stash.lock|logs/refs/stash|logs/refs/stash.lock|packed-refs|packed-refs.lock)
+      printf '%s\\n' "$3"
+      exit 0
+      ;;
+  esac
+fi
+if [ -n "$repo" ]; then
+  exec "$GIT_STACKS_REAL_GIT" -C "$repo" "$@"
+fi
+exec "$GIT_STACKS_REAL_GIT" "$@"
+`,
+      { mode: 0o755 },
+    )
+    process.env.GIT_STACKS_REAL_GIT = realGit
+    process.env.GIT_STACKS_TEST_REF_STORAGE = refStorage
+    process.env.PATH = `${shimDir}${delimiter}${originalPath || ''}`
+
+    await runAction(repo, { type: 'stashDrop', ref: stash.ref, oid: stash.oid })
+
+    await assert.rejects(readFile(refPath))
+    assert.deepEqual((await getSnapshot(repo)).stashes, [])
+  } finally {
+    if (originalPath === undefined) delete process.env.PATH
+    else process.env.PATH = originalPath
+    if (originalRealGit === undefined) delete process.env.GIT_STACKS_REAL_GIT
+    else process.env.GIT_STACKS_REAL_GIT = originalRealGit
+    if (originalRefStorage === undefined) delete process.env.GIT_STACKS_TEST_REF_STORAGE
+    else process.env.GIT_STACKS_TEST_REF_STORAGE = originalRefStorage
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('stash drop safely rejects a non-files reference backend', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'git-stacks-test-'))
+  const repo = join(root, 'workspace')
+  await mkdir(repo)
+  const git = (...args: string[]) =>
+    execFileSync('git', ['-C', repo, ...args], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    }).trim()
+  try {
+    const init = spawnSync('git', ['init', '--ref-format=reftable', '-b', 'main', repo], {
+      encoding: 'utf8',
+    })
+    if (init.status !== 0) {
+      const version = execFileSync('git', ['--version'], { encoding: 'utf8' }).trim()
+      t.skip(`${version} does not support the reftable backend: ${init.stderr.trim()}`)
+      return
+    }
+    git('config', 'user.name', 'Git Stacks test')
+    git('config', 'user.email', 'test@example.invalid')
+    await writeFile(join(repo, 'shared.txt'), 'base\n')
+    git('add', '.')
+    git('commit', '-m', 'Initial commit')
+    await writeFile(join(repo, 'shared.txt'), 'reftable stash\n')
+    await runAction(repo, { type: 'stash', message: 'reftable stash', includeUntracked: false })
+    const stash = (await getSnapshot(repo)).stashes[0]!
+
+    await assert.rejects(
+      runAction(repo, { type: 'stashDrop', ref: stash.ref, oid: stash.oid }),
+      /reftable reference storage/u,
+    )
+    assert.equal(git('rev-parse', 'refs/stash'), stash.oid)
+    assert.deepEqual(
+      (await getSnapshot(repo)).stashes.map(({ oid }) => oid),
+      [stash.oid],
+    )
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('stash drop preserves shared reference and reflog permissions', async () => {
+  const { root, repo, git } = await fixture()
+  try {
+    git('config', 'core.sharedRepository', 'group')
+    for (const value of ['first stash\n', 'second stash\n', 'third stash\n']) {
+      await writeFile(join(repo, 'shared.txt'), value)
+      await runAction(repo, { type: 'stash', message: value.trim(), includeUntracked: false })
+    }
+    const refPath = resolve(repo, git('rev-parse', '--git-path', 'refs/stash'))
+    const logPath = resolve(repo, git('rev-parse', '--git-path', 'logs/refs/stash'))
+    const packedRefsPath = resolve(repo, git('rev-parse', '--git-path', 'packed-refs'))
+    git('pack-refs', '--all', '--prune')
+    await assert.rejects(readFile(refPath))
+
+    const stashes = (await getSnapshot(repo)).stashes
+    await runAction(repo, { type: 'stashDrop', ref: stashes[0]!.ref, oid: stashes[0]!.oid })
+
+    const materializedRefMode = (await stat(refPath)).mode & 0o777
+    const reflogMode = (await stat(logPath)).mode & 0o777
+    assert.notEqual(materializedRefMode & 0o020, 0)
+    assert.notEqual(reflogMode & 0o020, 0)
+    assert.equal((await readFile(packedRefsPath, 'utf8')).includes('refs/stash'), false)
+
+    await chmod(refPath, 0o660)
+    await chmod(logPath, 0o660)
+    const remaining = (await getSnapshot(repo)).stashes[0]!
+    await runAction(repo, { type: 'stashDrop', ref: remaining.ref, oid: remaining.oid })
+
+    assert.equal((await stat(refPath)).mode & 0o777, 0o660)
+    assert.equal((await stat(logPath)).mode & 0o777, 0o660)
+    assert.equal(git('rev-parse', 'refs/stash'), (await getSnapshot(repo)).stashes[0]!.oid)
   } finally {
     await rm(root, { recursive: true, force: true })
   }

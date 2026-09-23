@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process'
 
 import * as path from 'node:path'
-import { promises as fs } from 'node:fs'
+import { constants as fsConstants, promises as fs } from 'node:fs'
 import type { Stats } from 'node:fs'
 import type { FileHandle } from 'node:fs/promises'
 import { createHash, randomUUID } from 'node:crypto'
@@ -85,13 +85,15 @@ function requireHeadRef(value: unknown, label: string): string {
   return ref
 }
 
+function repositoryPathParts(value: string): string[] {
+  return value.split(path.sep === '\\' ? /[\\/]/u : /\//u)
+}
+
 function requirePathInput(value: unknown, label: string): string {
   const filePath = requireString(value, label, MAX_PATH_LENGTH)
   if (
     path.isAbsolute(filePath) ||
-    filePath
-      .split(path.sep === '\\' ? /[\\/]/u : /\//u)
-      .some((part) => part === '..' || part === '.')
+    repositoryPathParts(filePath).some((part) => part === '..' || part === '.')
   ) {
     throw new Error(`${label} is not a safe repository-relative path`)
   }
@@ -439,8 +441,21 @@ async function installReferenceTransactionGuard(
       if (code !== 'ENOENT' && code !== 'ENOTDIR') throw error
     }
     for (const name of names) {
-      if (name !== 'reference-transaction') {
-        await fs.symlink(path.join(previousHooksPath, name), path.join(hooksPath, name))
+      if (name === 'reference-transaction') continue
+      const previousPath = path.join(previousHooksPath, name)
+      try {
+        const info = await fs.stat(previousPath)
+        if (!info.isFile() && !info.isDirectory()) continue
+        const copiedPath = path.join(hooksPath, name)
+        if (info.isDirectory()) {
+          await fs.cp(previousPath, copiedPath, { recursive: true, dereference: true })
+        } else {
+          await fs.copyFile(previousPath, copiedPath)
+        }
+        await fs.chmod(copiedPath, info.mode & 0o777)
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code
+        if (code !== 'ENOENT' && code !== 'ENOTDIR') throw error
       }
     }
 
@@ -480,6 +495,9 @@ if [ "$1" = "prepared" ]; then
     echo "$GIT_STACKS_EXPECTED_HEAD_ERROR" >&2
     rm -f "$input"
     exit 1
+  fi
+  if [ "$matched" = true ]; then
+    : > "$GIT_STACKS_EXPECTED_HEAD_VERIFIED" || exit 1
   fi
 fi
 if [ -x "$GIT_STACKS_PREVIOUS_REFERENCE_TRANSACTION" ]; then
@@ -522,14 +540,25 @@ async function runGitWithExpectedHead(
   env?: NodeJS.ProcessEnv,
 ): Promise<string> {
   const hooks = await installReferenceTransactionGuard(repoPath)
+  const verifiedPath = path.join(hooks.hooksPath, 'expected-head-verified')
   try {
-    return await runGit(repoPath, ['-c', `core.hooksPath=${hooks.hooksPath}`, ...args], {
+    const output = await runGit(repoPath, ['-c', `core.hooksPath=${hooks.hooksPath}`, ...args], {
       ...env,
       GIT_STACKS_EXPECTED_HEAD_REF: expected.ref,
       GIT_STACKS_EXPECTED_HEAD_OLD: await expectedHeadOldValue(repoPath, expected.oid),
       GIT_STACKS_EXPECTED_HEAD_ERROR: `Cannot ${operation}: HEAD changed since this action started`,
+      GIT_STACKS_EXPECTED_HEAD_VERIFIED: verifiedPath,
       GIT_STACKS_PREVIOUS_REFERENCE_TRANSACTION: hooks.previousHook ?? '',
     })
+    let headRefUpdated = false
+    try {
+      await fs.stat(verifiedPath)
+      headRefUpdated = true
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+    }
+    if (!headRefUpdated) await assertExpectedHead(repoPath, expected.oid, operation, expected.ref)
+    return output
   } finally {
     await fs.rm(hooks.hooksPath, { recursive: true, force: true })
   }
@@ -842,7 +871,7 @@ async function runStash(
   }
 }
 
-interface StashDropJournal {
+interface StashDropJournalV1 {
   version: 1
   changesRef: boolean
   oldRef: string
@@ -854,6 +883,47 @@ interface StashDropJournal {
   refLockIdentity: { dev: string; ino: string }
   logLockIdentity: { dev: string; ino: string }
 }
+
+interface StashDropJournalV2 {
+  version: 2
+  changesRef: boolean
+  changesLooseRef: boolean
+  changesPackedRefs: boolean
+  oldRefExists: boolean
+  oldRef: string
+  oldPacked: string | null
+  oldLog: string
+  nextRef: string | null
+  nextPacked: string | null
+  nextLog: string
+  refLock: string
+  packedLock: string
+  logLock: string
+  refLockIdentity: { dev: string; ino: string }
+  packedLockIdentity: { dev: string; ino: string }
+  logLockIdentity: { dev: string; ino: string }
+}
+
+interface StashDropJournalV3Acquiring {
+  version: 3
+  phase: 'acquiring'
+  transactionId: string
+  ownerPid: number
+  refLockIdentity: { dev: string; ino: string } | null
+  packedLockIdentity: { dev: string; ino: string } | null
+  logLockIdentity: { dev: string; ino: string } | null
+}
+
+type StashDropJournalV3Prepared = Omit<StashDropJournalV2, 'version'> & {
+  version: 3
+  phase: 'prepared'
+  transactionId: string
+  ownerPid: number
+}
+
+type StashDropJournalV3 = StashDropJournalV3Acquiring | StashDropJournalV3Prepared
+
+type StashDropJournal = StashDropJournalV1 | StashDropJournalV2 | StashDropJournalV3
 
 function encodeStashJournalBytes(value: Buffer): string {
   return value.toString('base64')
@@ -880,17 +950,151 @@ function validStashLockIdentity(value: unknown): value is { dev: string; ino: st
   )
 }
 
-async function optionalStashFile(filePath: string): Promise<Buffer | null> {
+function validOptionalStashLockIdentity(
+  value: unknown,
+): value is { dev: string; ino: string } | null {
+  return value === null || validStashLockIdentity(value)
+}
+
+function isProcessRunning(pid: number): boolean {
+  if (pid <= 0) return false
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== 'ESRCH'
+  }
+}
+
+function parseStashDropJournalV2(value: Record<string, unknown>): StashDropJournalV2 | null {
+  if (
+    value.version !== 2 ||
+    typeof value.changesRef !== 'boolean' ||
+    typeof value.changesLooseRef !== 'boolean' ||
+    typeof value.changesPackedRefs !== 'boolean' ||
+    value.changesRef !== (value.changesLooseRef || value.changesPackedRefs) ||
+    typeof value.oldRefExists !== 'boolean' ||
+    typeof value.oldRef !== 'string' ||
+    (value.oldPacked !== null && typeof value.oldPacked !== 'string') ||
+    typeof value.oldLog !== 'string' ||
+    (value.nextRef !== null && typeof value.nextRef !== 'string') ||
+    (value.nextPacked !== null && typeof value.nextPacked !== 'string') ||
+    typeof value.nextLog !== 'string' ||
+    typeof value.refLock !== 'string' ||
+    typeof value.packedLock !== 'string' ||
+    typeof value.logLock !== 'string' ||
+    !validStashLockIdentity(value.refLockIdentity) ||
+    !validStashLockIdentity(value.packedLockIdentity) ||
+    !validStashLockIdentity(value.logLockIdentity)
+  ) {
+    return null
+  }
+  return {
+    version: 2,
+    changesRef: value.changesRef,
+    changesLooseRef: value.changesLooseRef,
+    changesPackedRefs: value.changesPackedRefs,
+    oldRefExists: value.oldRefExists,
+    oldRef: value.oldRef,
+    oldPacked: value.oldPacked,
+    oldLog: value.oldLog,
+    nextRef: value.nextRef,
+    nextPacked: value.nextPacked,
+    nextLog: value.nextLog,
+    refLock: value.refLock,
+    packedLock: value.packedLock,
+    logLock: value.logLock,
+    refLockIdentity: value.refLockIdentity,
+    packedLockIdentity: value.packedLockIdentity,
+    logLockIdentity: value.logLockIdentity,
+  }
+}
+
+interface StashFileSnapshot {
+  contents: Buffer
+  mode: number
+}
+
+async function optionalStashFileState(filePath: string): Promise<StashFileSnapshot | null> {
   try {
     const info = await fs.lstat(filePath)
     if (!info.isFile()) {
       throw new Error(`Cannot safely recover stash file ${path.basename(filePath)}`)
     }
-    return await fs.readFile(filePath)
+    return {
+      contents: await fs.readFile(filePath),
+      mode: info.mode & 0o7777,
+    }
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null
     throw error
   }
+}
+
+async function optionalStashFileMode(filePath: string): Promise<number | null> {
+  try {
+    const info = await fs.lstat(filePath)
+    if (!info.isFile()) {
+      throw new Error(`Cannot safely recover stash file ${path.basename(filePath)}`)
+    }
+    return info.mode & 0o7777
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null
+    throw error
+  }
+}
+
+async function optionalStashFile(filePath: string): Promise<Buffer | null> {
+  return (await optionalStashFileState(filePath))?.contents ?? null
+}
+
+async function prepareStashLock(
+  lockPath: string,
+  transactionId: string,
+  existingMode: number | null,
+  sharedMode: number | null,
+): Promise<{ temporaryPath: string; identity: { dev: string; ino: string } }> {
+  const temporaryPath = `${lockPath}.${transactionId}.tmp`
+  const mode = existingMode ?? sharedMode ?? 0o666
+  const handle = await fs.open(temporaryPath, 'wx', mode)
+  try {
+    const preserveMode = existingMode ?? sharedMode
+    if (preserveMode !== null) await handle.chmod(preserveMode)
+    await handle.sync()
+    const info = await handle.stat()
+    await handle.close()
+    return {
+      temporaryPath,
+      identity: { dev: String(info.dev), ino: String(info.ino) },
+    }
+  } catch (error) {
+    await handle.close().catch(() => {})
+    await fs.rm(temporaryPath, { force: true })
+    throw error
+  }
+}
+
+async function publishStashLock(
+  lockPath: string,
+  temporaryPath: string,
+  identity: { dev: string; ino: string },
+): Promise<FileHandle> {
+  await fs.link(temporaryPath, lockPath)
+  const info = await fs.lstat(lockPath)
+  if (!info.isFile() || String(info.dev) !== identity.dev || String(info.ino) !== identity.ino) {
+    throw new Error(`Cannot safely acquire stash lock ${path.basename(lockPath)}`)
+  }
+  await fs.unlink(temporaryPath)
+  return fs.open(lockPath, 'r+')
+}
+
+async function setStashLockMode(
+  handle: FileHandle,
+  existingMode: number | null,
+  sharedMode: number | null,
+): Promise<void> {
+  const mode = existingMode ?? sharedMode
+  if (mode !== null) await handle.chmod(mode)
 }
 
 function sameStashFile(left: Buffer | null, right: Buffer | null): boolean {
@@ -936,33 +1140,77 @@ async function readStashDropJournal(journalPath: string): Promise<StashDropJourn
   } catch {
     throw new Error('The interrupted stash journal is unreadable; refusing recovery')
   }
-  if (
-    !isRecord(value) ||
-    value.version !== 1 ||
-    typeof value.changesRef !== 'boolean' ||
-    typeof value.oldRef !== 'string' ||
-    typeof value.oldLog !== 'string' ||
-    (value.nextRef !== null && typeof value.nextRef !== 'string') ||
-    typeof value.nextLog !== 'string' ||
-    typeof value.refLock !== 'string' ||
-    typeof value.logLock !== 'string' ||
-    !validStashLockIdentity(value.refLockIdentity) ||
-    !validStashLockIdentity(value.logLockIdentity)
-  ) {
+  if (!isRecord(value)) {
     throw new Error('The interrupted stash journal is invalid; refusing recovery')
   }
-  return {
-    version: 1,
-    changesRef: value.changesRef,
-    oldRef: value.oldRef,
-    oldLog: value.oldLog,
-    nextRef: value.nextRef,
-    nextLog: value.nextLog,
-    refLock: value.refLock,
-    logLock: value.logLock,
-    refLockIdentity: value.refLockIdentity,
-    logLockIdentity: value.logLockIdentity,
+  if (
+    value.version === 1 &&
+    typeof value.changesRef === 'boolean' &&
+    typeof value.oldRef === 'string' &&
+    typeof value.oldLog === 'string' &&
+    (value.nextRef === null || typeof value.nextRef === 'string') &&
+    typeof value.nextLog === 'string' &&
+    typeof value.refLock === 'string' &&
+    typeof value.logLock === 'string' &&
+    validStashLockIdentity(value.refLockIdentity) &&
+    validStashLockIdentity(value.logLockIdentity)
+  ) {
+    return {
+      version: 1,
+      changesRef: value.changesRef,
+      oldRef: value.oldRef,
+      oldLog: value.oldLog,
+      nextRef: value.nextRef,
+      nextLog: value.nextLog,
+      refLock: value.refLock,
+      logLock: value.logLock,
+      refLockIdentity: value.refLockIdentity,
+      logLockIdentity: value.logLockIdentity,
+    }
   }
+  const validV3Metadata =
+    typeof value.transactionId === 'string' &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(
+      value.transactionId,
+    ) &&
+    typeof value.ownerPid === 'number' &&
+    Number.isSafeInteger(value.ownerPid) &&
+    value.ownerPid >= 0
+  if (
+    value.version === 3 &&
+    value.phase === 'acquiring' &&
+    validV3Metadata &&
+    validOptionalStashLockIdentity(value.refLockIdentity) &&
+    validOptionalStashLockIdentity(value.packedLockIdentity) &&
+    validOptionalStashLockIdentity(value.logLockIdentity)
+  ) {
+    return {
+      version: 3,
+      phase: 'acquiring',
+      transactionId: value.transactionId as string,
+      ownerPid: value.ownerPid as number,
+      refLockIdentity: value.refLockIdentity,
+      packedLockIdentity: value.packedLockIdentity,
+      logLockIdentity: value.logLockIdentity,
+    }
+  }
+  if (value.version === 2) {
+    const parsed = parseStashDropJournalV2(value)
+    if (parsed) return parsed
+  }
+  if (value.version === 3 && value.phase === 'prepared' && validV3Metadata) {
+    const transaction = parseStashDropJournalV2({ ...value, version: 2 })
+    if (transaction) {
+      return {
+        ...transaction,
+        version: 3,
+        phase: 'prepared',
+        transactionId: value.transactionId as string,
+        ownerPid: value.ownerPid as number,
+      }
+    }
+  }
+  throw new Error('The interrupted stash journal is invalid; refusing recovery')
 }
 
 async function writeStashDropJournal(
@@ -985,47 +1233,290 @@ async function writeStashDropJournal(
   }
 }
 
-async function recoverStashDrop(commonPath: string): Promise<void> {
+async function createStashDropIntent(
+  journalPath: string,
+  journal: StashDropJournalV3Acquiring,
+): Promise<void> {
+  const temporaryPath = `${journalPath}.${journal.transactionId}.tmp`
+  const handle = await fs.open(temporaryPath, 'wx', 0o600)
+  try {
+    await handle.writeFile(JSON.stringify(journal), 'utf8')
+    await handle.sync()
+  } catch (error) {
+    await handle.close().catch(() => {})
+    await fs.rm(temporaryPath, { force: true })
+    throw error
+  }
+  await handle.close()
+  try {
+    await fs.link(temporaryPath, journalPath)
+  } catch (error) {
+    await fs.rm(temporaryPath, { force: true })
+    throw error
+  }
+  await fs.rm(temporaryPath, { force: true }).catch(() => {})
+}
+
+async function removeStashAcquisitionFile(
+  filePath: string,
+  identity: { dev: string; ino: string } | null,
+  removeUnidentified: boolean,
+): Promise<void> {
+  let info: Stats
+  try {
+    info = await fs.lstat(filePath)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return
+    throw error
+  }
+  if (!info.isFile()) return
+  if (identity && (String(info.dev) !== identity.dev || String(info.ino) !== identity.ino)) {
+    return
+  }
+  if (!identity && !removeUnidentified) return
+  await fs.unlink(filePath)
+}
+
+async function removeStashDropAcquisition(
+  paths: StashDropPaths,
+  journal: StashDropJournalV3Acquiring,
+): Promise<void> {
+  for (const [lockPath, identity] of [
+    [paths.refLockPath, journal.refLockIdentity],
+    [paths.packedRefsLockPath, journal.packedLockIdentity],
+    [paths.logLockPath, journal.logLockIdentity],
+  ] as const) {
+    await removeStashAcquisitionFile(lockPath, identity, false)
+    await removeStashAcquisitionFile(`${lockPath}.${journal.transactionId}.tmp`, identity, true)
+  }
+  await fs.rm(`${paths.journalPath}.${journal.transactionId}.tmp`, { force: true })
+}
+
+interface StashDropPaths {
+  refPath: string
+  refLockPath: string
+  logPath: string
+  logLockPath: string
+  packedRefsPath: string
+  packedRefsLockPath: string
+  journalPath: string
+}
+
+function localFilesUriPath(value: string): string {
+  let uri: URL
+  try {
+    uri = new URL(value)
+  } catch {
+    throw new Error('Invalid local files reference-storage URI')
+  }
+  if (
+    uri.protocol !== 'files:' ||
+    uri.host ||
+    uri.username ||
+    uri.password ||
+    uri.search ||
+    uri.hash ||
+    !uri.pathname.startsWith('/')
+  ) {
+    throw new Error('Invalid local files reference-storage URI')
+  }
+  let decodedPath: string
+  try {
+    decodedPath = decodeURIComponent(uri.pathname)
+  } catch {
+    throw new Error('Invalid local files reference-storage URI')
+  }
+  if (decodedPath.includes('\0')) {
+    throw new Error('Invalid local files reference-storage URI')
+  }
+  return path.resolve('/', decodedPath)
+}
+
+function assertFilesRefStorage(refStorage: string | null, ref: string): string | null {
+  if (!refStorage || refStorage.toLowerCase() === 'files') return null
+  try {
+    return localFilesUriPath(refStorage)
+  } catch {
+    throw new Error(`Cannot safely remove stash ${ref} with ${refStorage} reference storage`)
+  }
+}
+
+function sharedStashFileMode(value: string | null): number | null {
+  const normalized = value?.toLowerCase()
+  if (!normalized || ['false', 'no', 'off', 'umask'].includes(normalized)) return null
+  if (['true', 'yes', 'on', 'group'].includes(normalized)) return 0o664
+  if (['all', 'world'].includes(normalized)) return 0o666
+  const digits = normalized.startsWith('0o') ? normalized.slice(2) : normalized
+  if (/^0?[0-7]{3,4}$/u.test(digits)) return Number.parseInt(digits, 8) & 0o7777
+  return null
+}
+
+async function repositoryGitPath(
+  repoPath: string,
+  gitPath: string,
+  refRoot: string | null,
+): Promise<string> {
+  const resolvedPath = stripTrailingNewline(
+    await runGit(repoPath, ['rev-parse', '--git-path', gitPath]),
+  )
+  if (!resolvedPath) throw new Error(`Git did not resolve the path for ${gitPath}`)
+  if (resolvedPath.startsWith('files:')) return localFilesUriPath(resolvedPath)
+  return path.resolve(
+    path.isAbsolute(resolvedPath) ? path.sep : (refRoot ?? repoPath),
+    resolvedPath,
+  )
+}
+
+async function stashDropPaths(
+  repoPath: string,
+  commonPath: string,
+  refRoot: string | null,
+): Promise<StashDropPaths> {
+  const [refPath, refLockPath, logPath, logLockPath, packedRefsPath, packedRefsLockPath] =
+    await Promise.all([
+      repositoryGitPath(repoPath, 'refs/stash', refRoot),
+      repositoryGitPath(repoPath, 'refs/stash.lock', refRoot),
+      repositoryGitPath(repoPath, 'logs/refs/stash', refRoot),
+      repositoryGitPath(repoPath, 'logs/refs/stash.lock', refRoot),
+      repositoryGitPath(repoPath, 'packed-refs', refRoot),
+      repositoryGitPath(repoPath, 'packed-refs.lock', refRoot),
+    ])
+  return {
+    refPath,
+    refLockPath,
+    logPath,
+    logLockPath,
+    packedRefsPath,
+    packedRefsLockPath,
+    journalPath: path.join(commonPath, 'git-stacks-stash-drop.json'),
+  }
+}
+
+async function recoverStashDrop(repoPath: string, commonPath: string): Promise<void> {
   const journalPath = path.join(commonPath, 'git-stacks-stash-drop.json')
-  const journal = await readStashDropJournal(journalPath)
+  let journal = await readStashDropJournal(journalPath)
   if (!journal) return
 
-  const refPath = path.join(commonPath, 'refs', 'stash')
-  const logPath = path.join(commonPath, 'logs', 'refs', 'stash')
-  const refLockPath = `${refPath}.lock`
-  const logLockPath = `${logPath}.lock`
-  const oldRef = decodeStashJournalBytes(journal.oldRef)
+  const refStorage = await getConfigValue(repoPath, 'extensions.refstorage')
+  const refRoot = assertFilesRefStorage(refStorage, 'refs/stash')
+  const paths = await stashDropPaths(repoPath, commonPath, refRoot)
+  if (journal.version === 3) {
+    if (isProcessRunning(journal.ownerPid)) {
+      throw new Error('Another stash update is in progress; retry after it completes')
+    }
+    if (journal.phase === 'acquiring') {
+      await removeStashDropAcquisition(paths, journal)
+      await fs.rm(journalPath, { force: true })
+      return
+    }
+    journal = { ...journal, version: 2 }
+  }
+  const { refPath, refLockPath, logPath, logLockPath, packedRefsPath, packedRefsLockPath } = paths
   const oldLog = decodeStashJournalBytes(journal.oldLog)
-  const nextRef = journal.nextRef === null ? null : decodeStashJournalBytes(journal.nextRef)
   const nextLog = decodeStashJournalBytes(journal.nextLog)
-  const refLock = decodeStashJournalBytes(journal.refLock)
   const logLock = decodeStashJournalBytes(journal.logLock)
-  const targetRef = journal.changesRef ? nextRef : oldRef
-  const [currentRef, currentLog] = await Promise.all([
+
+  if (journal.version === 1) {
+    const oldRef = decodeStashJournalBytes(journal.oldRef)
+    const nextRef = journal.nextRef === null ? null : decodeStashJournalBytes(journal.nextRef)
+    const refLock = decodeStashJournalBytes(journal.refLock)
+    const targetRef = journal.changesRef ? nextRef : oldRef
+    const [currentRef, currentLog] = await Promise.all([
+      optionalStashFile(refPath),
+      optionalStashFile(logPath),
+    ])
+    const refIsOld = sameStashFile(currentRef, oldRef)
+    const refIsNew = sameStashFile(currentRef, targetRef)
+    const logIsOld = sameStashFile(currentLog, oldLog)
+    const logIsNew = sameStashFile(currentLog, nextLog)
+    if (!refIsOld && !refIsNew) {
+      throw new Error('Stash references changed during recovery; refusing to overwrite them')
+    }
+    if (!logIsOld && !logIsNew) {
+      throw new Error('The stash reflog changed during recovery; refusing to overwrite it')
+    }
+    if (journal.changesRef && refIsNew && !refIsOld && logIsOld) {
+      throw new Error('Stash files are in an unexpected transaction state; refusing recovery')
+    }
+
+    const hasRefLock = await verifyStashRecoveryLock(refLockPath, refLock, journal.refLockIdentity)
+    const hasLogLock = await verifyStashRecoveryLock(logLockPath, logLock, journal.logLockIdentity)
+    if (logIsOld && !hasLogLock) {
+      throw new Error('The stash reflog lock is missing; refusing to finish recovery')
+    }
+    if (journal.changesRef && refIsOld && !hasRefLock) {
+      throw new Error('The stash reference lock is missing; refusing to finish recovery')
+    }
+
+    if (logIsOld) {
+      await fs.rename(logLockPath, logPath)
+    } else if (hasLogLock) {
+      await fs.unlink(logLockPath)
+    }
+    if (journal.changesRef && refIsOld) {
+      if (nextRef === null) {
+        await fs.unlink(refPath)
+        if (hasRefLock) await fs.unlink(refLockPath)
+      } else {
+        await fs.rename(refLockPath, refPath)
+      }
+    } else if (hasRefLock) {
+      await fs.unlink(refLockPath)
+    }
+    await fs.rm(journalPath)
+    return
+  }
+
+  const oldRef = journal.oldRefExists ? decodeStashJournalBytes(journal.oldRef) : null
+  const oldPacked = journal.oldPacked === null ? null : decodeStashJournalBytes(journal.oldPacked)
+  const nextRef = journal.nextRef === null ? null : decodeStashJournalBytes(journal.nextRef)
+  const nextPacked =
+    journal.nextPacked === null ? null : decodeStashJournalBytes(journal.nextPacked)
+  const refLock = decodeStashJournalBytes(journal.refLock)
+  const packedLock = decodeStashJournalBytes(journal.packedLock)
+  const looseTarget = journal.changesLooseRef ? nextRef : oldRef
+  const packedTarget = journal.changesPackedRefs ? nextPacked : oldPacked
+  const [currentRef, currentPacked, currentLog] = await Promise.all([
     optionalStashFile(refPath),
+    optionalStashFile(packedRefsPath),
     optionalStashFile(logPath),
   ])
   const refIsOld = sameStashFile(currentRef, oldRef)
-  const refIsNew = sameStashFile(currentRef, targetRef)
+  const refIsNew = sameStashFile(currentRef, looseTarget)
+  const packedIsOld = sameStashFile(currentPacked, oldPacked)
+  const packedIsNew = sameStashFile(currentPacked, packedTarget)
   const logIsOld = sameStashFile(currentLog, oldLog)
   const logIsNew = sameStashFile(currentLog, nextLog)
   if (!refIsOld && !refIsNew) {
     throw new Error('Stash references changed during recovery; refusing to overwrite them')
   }
+  if (!packedIsOld && !packedIsNew) {
+    throw new Error('Packed references changed during stash recovery; refusing to overwrite them')
+  }
   if (!logIsOld && !logIsNew) {
     throw new Error('The stash reflog changed during recovery; refusing to overwrite it')
   }
-  if (journal.changesRef && refIsNew && !refIsOld && logIsOld) {
+  if (
+    journal.changesRef &&
+    ((refIsNew && !refIsOld) || (packedIsNew && !packedIsOld)) &&
+    logIsOld
+  ) {
     throw new Error('Stash files are in an unexpected transaction state; refusing recovery')
   }
 
-  const hasRefLock = await verifyStashRecoveryLock(refLockPath, refLock, journal.refLockIdentity)
-  const hasLogLock = await verifyStashRecoveryLock(logLockPath, logLock, journal.logLockIdentity)
+  const [hasRefLock, hasPackedLock, hasLogLock] = await Promise.all([
+    verifyStashRecoveryLock(refLockPath, refLock, journal.refLockIdentity),
+    verifyStashRecoveryLock(packedRefsLockPath, packedLock, journal.packedLockIdentity),
+    verifyStashRecoveryLock(logLockPath, logLock, journal.logLockIdentity),
+  ])
   if (logIsOld && !hasLogLock) {
     throw new Error('The stash reflog lock is missing; refusing to finish recovery')
   }
-  if (journal.changesRef && refIsOld && !hasRefLock) {
+  if (journal.changesLooseRef && refIsOld && !hasRefLock) {
     throw new Error('The stash reference lock is missing; refusing to finish recovery')
+  }
+  if (journal.changesPackedRefs && packedIsOld && !hasPackedLock) {
+    throw new Error('The packed references lock is missing; refusing to finish recovery')
   }
 
   if (logIsOld) {
@@ -1033,9 +1524,19 @@ async function recoverStashDrop(commonPath: string): Promise<void> {
   } else if (hasLogLock) {
     await fs.unlink(logLockPath)
   }
-  if (journal.changesRef && refIsOld) {
+  if (journal.changesPackedRefs && packedIsOld) {
+    if (nextPacked === null) {
+      if (oldPacked !== null) await fs.unlink(packedRefsPath)
+      if (hasPackedLock) await fs.unlink(packedRefsLockPath)
+    } else {
+      await fs.rename(packedRefsLockPath, packedRefsPath)
+    }
+  } else if (hasPackedLock) {
+    await fs.unlink(packedRefsLockPath)
+  }
+  if (journal.changesLooseRef && refIsOld) {
     if (nextRef === null) {
-      await fs.unlink(refPath)
+      if (oldRef !== null) await fs.unlink(refPath)
       if (hasRefLock) await fs.unlink(refLockPath)
     } else {
       await fs.rename(refLockPath, refPath)
@@ -1048,7 +1549,7 @@ async function recoverStashDrop(commonPath: string): Promise<void> {
 
 async function recoverStashDropForRepository(repoPath: string): Promise<void> {
   const commonDir = stripTrailingNewline(await runGit(repoPath, ['rev-parse', '--git-common-dir']))
-  await recoverStashDrop(path.resolve(repoPath, commonDir))
+  await recoverStashDrop(repoPath, path.resolve(repoPath, commonDir))
 }
 
 async function getStashesWithRecovery(repoPath: string) {
@@ -1064,6 +1565,29 @@ async function assertStashIdentity(repoPath: string, ref: string, oid: string): 
   }
 }
 
+function packedStashState(contents: Buffer | null): {
+  oid: string | null
+  withoutStash: Buffer | null
+} {
+  if (contents === null) return { oid: null, withoutStash: null }
+  const text = contents.toString('utf8')
+  const rows = text.split('\n')
+  const entries = rows
+    .map((row, index) => ({ row, index, match: row.match(/^([0-9a-f]{40,128}) refs\/stash$/iu) }))
+    .filter(({ row }) => row.endsWith(' refs/stash'))
+  if (entries.length > 1 || entries.some(({ match }) => !match)) {
+    throw new Error('Cannot safely identify packed refs/stash')
+  }
+  const entry = entries[0]
+  if (!entry?.match) return { oid: null, withoutStash: contents }
+  const removePeeled = /^\^[0-9a-f]{40,128}$/iu.test(rows[entry.index + 1] ?? '')
+  rows.splice(entry.index, removePeeled ? 2 : 1)
+  return {
+    oid: entry.match[1],
+    withoutStash: Buffer.from(rows.join('\n'), 'utf8'),
+  }
+}
+
 async function dropStashByOid(
   repoPath: string,
   ref: string,
@@ -1071,40 +1595,101 @@ async function dropStashByOid(
   apply?: () => Promise<void>,
 ): Promise<void> {
   const refStorage = await getConfigValue(repoPath, 'extensions.refstorage')
-  if (refStorage && refStorage.toLowerCase() !== 'files') {
-    throw new Error(`Cannot safely remove stash ${ref} with ${refStorage} reference storage`)
-  }
+  const refRoot = assertFilesRefStorage(refStorage, ref)
 
   const commonDir = stripTrailingNewline(await runGit(repoPath, ['rev-parse', '--git-common-dir']))
   const commonPath = path.resolve(repoPath, commonDir)
-  await recoverStashDrop(commonPath)
-  const refPath = path.join(commonPath, 'refs', 'stash')
-  const logPath = path.join(commonPath, 'logs', 'refs', 'stash')
-  const refLockPath = `${refPath}.lock`
-  const logLockPath = `${logPath}.lock`
-  const journalPath = path.join(commonPath, 'git-stacks-stash-drop.json')
+  await recoverStashDrop(repoPath, commonPath)
+  const paths = await stashDropPaths(repoPath, commonPath, refRoot)
+  const sharedMode = sharedStashFileMode(await getConfigValue(repoPath, 'core.sharedrepository'))
+  const transactionId = randomUUID()
+  let acquiringJournal: StashDropJournalV3Acquiring = {
+    version: 3,
+    phase: 'acquiring',
+    transactionId,
+    ownerPid: process.pid,
+    refLockIdentity: null,
+    packedLockIdentity: null,
+    logLockIdentity: null,
+  }
+  let intentCreated = false
   let refLock: FileHandle | undefined
+  let packedLock: FileHandle | undefined
   let logLock: FileHandle | undefined
-  let refLockExists = false
-  let logLockExists = false
+  let preparedJournal: StashDropJournalV3Prepared | null = null
   let journalPending = false
 
   try {
-    refLock = await fs.open(refLockPath, 'wx')
-    refLockExists = true
-    logLock = await fs.open(logLockPath, 'wx')
-    logLockExists = true
+    const [refMode, packedRefsMode, logMode] = await Promise.all([
+      optionalStashFileMode(paths.refPath),
+      optionalStashFileMode(paths.packedRefsPath),
+      optionalStashFileMode(paths.logPath),
+    ])
+    await createStashDropIntent(paths.journalPath, acquiringJournal)
+    intentCreated = true
+    const refPrepared = await prepareStashLock(
+      paths.refLockPath,
+      transactionId,
+      refMode,
+      sharedMode,
+    )
+    const packedPrepared = await prepareStashLock(
+      paths.packedRefsLockPath,
+      transactionId,
+      packedRefsMode,
+      sharedMode,
+    )
+    const logPrepared = await prepareStashLock(
+      paths.logLockPath,
+      transactionId,
+      logMode,
+      sharedMode,
+    )
+    acquiringJournal = {
+      ...acquiringJournal,
+      refLockIdentity: refPrepared.identity,
+      packedLockIdentity: packedPrepared.identity,
+      logLockIdentity: logPrepared.identity,
+    }
+    await writeStashDropJournal(paths.journalPath, acquiringJournal)
+    refLock = await publishStashLock(
+      paths.refLockPath,
+      refPrepared.temporaryPath,
+      refPrepared.identity,
+    )
+    packedLock = await publishStashLock(
+      paths.packedRefsLockPath,
+      packedPrepared.temporaryPath,
+      packedPrepared.identity,
+    )
+    logLock = await publishStashLock(
+      paths.logLockPath,
+      logPrepared.temporaryPath,
+      logPrepared.identity,
+    )
 
-    const [refInfo, logInfo, currentRef, logBuffer, stashes] = await Promise.all([
-      fs.lstat(refPath),
-      fs.lstat(logPath),
-      fs.readFile(refPath),
-      fs.readFile(logPath),
+    const [refState, packedRefsState, logState, stashes] = await Promise.all([
+      optionalStashFileState(paths.refPath),
+      optionalStashFileState(paths.packedRefsPath),
+      optionalStashFileState(paths.logPath),
       getStashes(repoPath),
     ])
-    if (!refInfo.isFile() || !logInfo.isFile()) {
-      throw new Error(`Cannot safely remove stash ${ref} from this repository`)
+    if (!logState) throw new Error(`Cannot safely remove stash ${ref} from this repository`)
+    await Promise.all([
+      setStashLockMode(refLock, refState?.mode ?? sharedMode, sharedMode),
+      setStashLockMode(packedLock, packedRefsState?.mode ?? sharedMode, sharedMode),
+      setStashLockMode(logLock, logState.mode, sharedMode),
+    ])
+
+    const currentRef = refState?.contents ?? null
+    const packedRefs = packedRefsState?.contents ?? null
+    const packedStash = packedStashState(packedRefs)
+    const looseRefText = currentRef?.toString('utf8').trim() ?? null
+    if (looseRefText !== null && !/^[0-9a-f]{40,128}$/iu.test(looseRefText)) {
+      throw new Error(`Cannot safely identify stash ${ref}; refresh before retrying`)
     }
+    const currentRefOid = looseRefText ?? packedStash.oid
+    const logBuffer = logState.contents
     const log = logBuffer.toString('utf8')
     const matches = stashes
       .map((stash, index) => ({ stash, index }))
@@ -1115,7 +1700,7 @@ async function dropStashByOid(
     const selectedIndex = matches[0].index
     if (
       !stashes[0] ||
-      currentRef.toString('utf8').trim().toLowerCase() !== stashes[0].oid.toLowerCase() ||
+      currentRefOid?.toLowerCase() !== stashes[0].oid.toLowerCase() ||
       (log && !log.endsWith('\n'))
     ) {
       throw new Error(`Stash ${ref} changed; refresh before retrying`)
@@ -1148,64 +1733,93 @@ async function dropStashByOid(
     rows.splice(logIndex, 1)
 
     const newTip = selectedIndex === 0 ? (records[logIndex - 1]?.newOid ?? null) : null
-    if (selectedIndex === 0 && newTip === null) {
-      const packedRefsPath = path.join(commonPath, 'packed-refs')
-      const packedRefs = await fs.readFile(packedRefsPath, 'utf8').catch((error: unknown) => {
-        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return ''
-        throw error
-      })
-      if (/^[0-9a-f]{40,128} refs\/stash$/imu.test(packedRefs)) {
-        throw new Error(`Cannot safely remove the last stash ${ref} from packed references`)
-      }
-    }
     if (apply) await apply()
 
     const nextLog = Buffer.from(rows.length > 0 ? `${rows.join('\n')}\n` : '', 'utf8')
-    const changesRef = selectedIndex === 0
-    const nextRef = changesRef ? (newTip ? Buffer.from(`${newTip}\n`, 'utf8') : null) : currentRef
-    const refLockContents =
-      changesRef && newTip ? Buffer.from(`${newTip}\n`, 'utf8') : Buffer.alloc(0)
+    const changesLooseRef = selectedIndex === 0 && (currentRef !== null || newTip !== null)
+    const changesPackedRefs = selectedIndex === 0 && packedStash.oid !== null
+    const changesRef = changesLooseRef || changesPackedRefs
+    const nextRef = changesLooseRef
+      ? newTip
+        ? Buffer.from(`${newTip}\n`, 'utf8')
+        : null
+      : currentRef
+    const nextPackedRefs = changesPackedRefs ? packedStash.withoutStash : packedRefs
+    const refLockContents = changesLooseRef && nextRef !== null ? nextRef : Buffer.alloc(0)
+    const packedLockContents =
+      changesPackedRefs && nextPackedRefs !== null ? nextPackedRefs : Buffer.alloc(0)
     await logLock.writeFile(nextLog)
     await logLock.sync()
     await refLock.writeFile(refLockContents)
     await refLock.sync()
-    const [refLockInfo, logLockInfo] = await Promise.all([
-      fs.lstat(refLockPath),
-      fs.lstat(logLockPath),
+    await packedLock.writeFile(packedLockContents)
+    await packedLock.sync()
+    const [refLockInfo, packedLockInfo, logLockInfo] = await Promise.all([
+      fs.lstat(paths.refLockPath),
+      fs.lstat(paths.packedRefsLockPath),
+      fs.lstat(paths.logLockPath),
     ])
-    const journal: StashDropJournal = {
-      version: 1,
+    const journal: StashDropJournalV3Prepared = {
+      version: 3,
+      phase: 'prepared',
+      transactionId,
+      ownerPid: process.pid,
       changesRef,
-      oldRef: encodeStashJournalBytes(currentRef),
+      changesLooseRef,
+      changesPackedRefs,
+      oldRefExists: currentRef !== null,
+      oldRef: encodeStashJournalBytes(currentRef ?? Buffer.alloc(0)),
+      oldPacked: packedRefs === null ? null : encodeStashJournalBytes(packedRefs),
       oldLog: encodeStashJournalBytes(logBuffer),
       nextRef: nextRef === null ? null : encodeStashJournalBytes(nextRef),
+      nextPacked: nextPackedRefs === null ? null : encodeStashJournalBytes(nextPackedRefs),
       nextLog: encodeStashJournalBytes(nextLog),
       refLock: encodeStashJournalBytes(refLockContents),
+      packedLock: encodeStashJournalBytes(packedLockContents),
       logLock: encodeStashJournalBytes(nextLog),
       refLockIdentity: { dev: String(refLockInfo.dev), ino: String(refLockInfo.ino) },
+      packedLockIdentity: { dev: String(packedLockInfo.dev), ino: String(packedLockInfo.ino) },
       logLockIdentity: { dev: String(logLockInfo.dev), ino: String(logLockInfo.ino) },
     }
-    await writeStashDropJournal(journalPath, journal)
+    preparedJournal = journal
+    await writeStashDropJournal(paths.journalPath, journal)
     journalPending = true
 
-    await fs.rename(logLockPath, logPath)
-    logLockExists = false
+    await fs.rename(paths.logLockPath, paths.logPath)
     await logLock.close()
     logLock = undefined
-    if (changesRef && nextRef !== null) {
-      await fs.rename(refLockPath, refPath)
-      refLockExists = false
+    if (changesPackedRefs && nextPackedRefs !== null) {
+      await fs.rename(paths.packedRefsLockPath, paths.packedRefsPath)
     } else {
-      if (changesRef) await fs.unlink(refPath)
-      await fs.unlink(refLockPath)
-      refLockExists = false
+      await fs.unlink(paths.packedRefsLockPath)
     }
+    if (changesLooseRef && nextRef !== null) {
+      await fs.rename(paths.refLockPath, paths.refPath)
+    } else {
+      if (changesLooseRef && currentRef !== null) await fs.unlink(paths.refPath)
+      await fs.unlink(paths.refLockPath)
+    }
+    await packedLock.close()
+    packedLock = undefined
     await refLock.close()
     refLock = undefined
-    await fs.rm(journalPath)
+    await fs.rm(paths.journalPath)
     journalPending = false
+    intentCreated = false
   } catch (error) {
     if (journalPending) {
+      await logLock?.close().catch(() => {})
+      logLock = undefined
+      await packedLock?.close().catch(() => {})
+      packedLock = undefined
+      await refLock?.close().catch(() => {})
+      refLock = undefined
+      if (preparedJournal) {
+        await writeStashDropJournal(paths.journalPath, {
+          ...preparedJournal,
+          ownerPid: 0,
+        }).catch(() => {})
+      }
       throw new Error(
         `Stash removal was interrupted and will be recovered on the next repository refresh: ${commandDetail(error)}`,
       )
@@ -1215,15 +1829,17 @@ async function dropStashByOid(
     }
     throw error
   } finally {
+    await logLock?.close().catch(() => {})
+    await packedLock?.close().catch(() => {})
+    await refLock?.close().catch(() => {})
     if (!journalPending) {
-      try {
-        if (logLockExists) await fs.rm(logLockPath, { force: true })
-      } finally {
-        if (refLockExists) await fs.rm(refLockPath, { force: true })
+      if (intentCreated) {
+        await removeStashDropAcquisition(paths, acquiringJournal)
+        await fs.rm(paths.journalPath, { force: true })
+      } else {
+        await fs.rm(`${paths.journalPath}.${transactionId}.tmp`, { force: true })
       }
     }
-    await logLock?.close().catch(() => {})
-    await refLock?.close().catch(() => {})
   }
 }
 
@@ -1559,7 +2175,7 @@ async function safeRepositoryPath(repoPath: string, relativePath: string): Promi
   if (candidate === repoPath || !candidate.startsWith(`${repoPath}${path.sep}`)) {
     throw new Error('Path must remain inside the repository')
   }
-  const parts = relativePath.split(path.sep === '\\' ? /[\\/]/u : /\//u)
+  const parts = repositoryPathParts(relativePath)
   if (parts.includes('.git')) throw new Error('Git metadata paths are not accessible')
   let cursor = repoPath
   for (const part of parts) {
@@ -1576,6 +2192,77 @@ async function safeRepositoryPath(repoPath: string, relativePath: string): Promi
     }
   }
   return candidate
+}
+
+interface RepositoryDirectoryIdentity {
+  relativePath: string
+  dev: string
+  ino: string
+}
+
+async function assertRepositoryParentDirectories(
+  repoPath: string,
+  relativePath: string,
+  directories: RepositoryDirectoryIdentity[],
+): Promise<string> {
+  const targetPath = await safeRepositoryPath(repoPath, relativePath)
+  for (const directory of directories) {
+    const directoryPath = directory.relativePath
+      ? path.resolve(repoPath, directory.relativePath)
+      : repoPath
+    const info = await fs.lstat(directoryPath)
+    if (
+      info.isSymbolicLink() ||
+      !info.isDirectory() ||
+      String(info.dev) !== directory.dev ||
+      String(info.ino) !== directory.ino
+    ) {
+      throw new Error('A parent directory changed during the file action; refresh and retry')
+    }
+  }
+  return targetPath
+}
+
+async function ensureRepositoryParentDirectories(
+  repoPath: string,
+  relativePath: string,
+  createMissing = true,
+): Promise<{ targetPath: string; directories: RepositoryDirectoryIdentity[] }> {
+  const targetPath = await safeRepositoryPath(repoPath, relativePath)
+  const relativeParent = path.relative(repoPath, path.dirname(targetPath))
+  const parentParts = relativeParent ? relativeParent.split(path.sep) : []
+  const directories: RepositoryDirectoryIdentity[] = []
+  let current = repoPath
+
+  const rootInfo = await fs.lstat(repoPath)
+  if (rootInfo.isSymbolicLink() || !rootInfo.isDirectory()) {
+    throw new Error('The repository root is not a safe directory')
+  }
+  directories.push({ relativePath: '', dev: String(rootInfo.dev), ino: String(rootInfo.ino) })
+
+  for (const part of parentParts) {
+    await assertRepositoryParentDirectories(repoPath, relativePath, directories)
+    current = path.join(current, part)
+    if (createMissing) {
+      try {
+        await fs.mkdir(current)
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+      }
+    }
+    const info = await fs.lstat(current)
+    if (info.isSymbolicLink() || !info.isDirectory()) {
+      throw new Error('A parent directory is not a safe repository directory')
+    }
+    await assertRepositoryParentDirectories(repoPath, relativePath, directories)
+    directories.push({
+      relativePath: path.relative(repoPath, current),
+      dev: String(info.dev),
+      ino: String(info.ino),
+    })
+  }
+  await assertRepositoryParentDirectories(repoPath, relativePath, directories)
+  return { targetPath, directories }
 }
 
 function changedEntry(files: ChangedFile[], requestedPath: string): ChangedFile {
@@ -1812,11 +2499,479 @@ async function materializeGitWorktreePath(
   }
 }
 
-async function restoreQuarantinedFile(backupPath: string, targetPath: string): Promise<void> {
+async function restoreQuarantinedFile(
+  backupPath: string,
+  targetPath: string,
+  assertLocations: () => Promise<unknown>,
+): Promise<void> {
+  await assertLocations()
   const info = await fs.lstat(backupPath)
-  if (!info.isFile()) throw new Error('The changed path cannot be restored safely')
+  if (info.isSymbolicLink() || !info.isFile()) {
+    throw new Error('The changed path cannot be restored safely')
+  }
+  await assertLocations()
   await fs.link(backupPath, targetPath)
+  await assertLocations()
   await fs.unlink(backupPath)
+}
+interface FileActionIdentity {
+  dev: string
+  ino: string
+}
+
+type FileActionPhase = 'prepared' | 'quarantined' | 'committed'
+
+interface FileActionJournal {
+  version: 1
+  transactionId: string
+  ownerPid: number
+  phase: FileActionPhase
+  repoPath: string
+  relativePath: string
+  stagingName: string
+  stagingIdentity: FileActionIdentity
+  parentDirectories: RepositoryDirectoryIdentity[]
+  originalIdentity: FileActionIdentity | null
+  replacementIdentity: FileActionIdentity | null
+}
+
+const FILE_ACTION_ID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu
+
+function fileActionIdentity(info: Stats): FileActionIdentity {
+  return { dev: String(info.dev), ino: String(info.ino) }
+}
+
+function isFileActionIdentity(value: unknown): value is FileActionIdentity {
+  return (
+    isRecord(value) &&
+    typeof value.dev === 'string' &&
+    /^\d+$/u.test(value.dev) &&
+    typeof value.ino === 'string' &&
+    /^\d+$/u.test(value.ino)
+  )
+}
+
+function sameFileActionIdentity(
+  left: FileActionIdentity | null,
+  right: FileActionIdentity | null,
+): boolean {
+  return left?.dev === right?.dev && left?.ino === right?.ino
+}
+
+async function optionalFileActionIdentity(filePath: string): Promise<FileActionIdentity | null> {
+  let info: Stats
+  try {
+    info = await fs.lstat(filePath)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null
+    throw error
+  }
+  if (info.isSymbolicLink() || !info.isFile()) {
+    throw new Error('The changed path is not a regular file; refusing file recovery')
+  }
+  return fileActionIdentity(info)
+}
+
+function parseFileActionJournal(value: unknown): FileActionJournal {
+  if (!isRecord(value)) throw new Error('The interrupted file action journal is invalid')
+  const validParentDirectories =
+    Array.isArray(value.parentDirectories) &&
+    value.parentDirectories.length > 0 &&
+    value.parentDirectories.length <= 256 &&
+    value.parentDirectories.every(
+      (entry) =>
+        isRecord(entry) &&
+        typeof entry.relativePath === 'string' &&
+        !path.isAbsolute(entry.relativePath) &&
+        (entry.relativePath === '' ||
+          !repositoryPathParts(entry.relativePath).some(
+            (part) => !part || part === '.' || part === '..',
+          )) &&
+        typeof entry.dev === 'string' &&
+        /^\d+$/u.test(entry.dev) &&
+        typeof entry.ino === 'string' &&
+        /^\d+$/u.test(entry.ino),
+    )
+  const validRelativePath =
+    typeof value.relativePath === 'string' &&
+    value.relativePath.length > 0 &&
+    !path.isAbsolute(value.relativePath) &&
+    !repositoryPathParts(value.relativePath).some((part) => !part || part === '.' || part === '..')
+  if (
+    value.version !== 1 ||
+    typeof value.transactionId !== 'string' ||
+    !FILE_ACTION_ID_PATTERN.test(value.transactionId) ||
+    typeof value.ownerPid !== 'number' ||
+    !Number.isSafeInteger(value.ownerPid) ||
+    value.ownerPid < 0 ||
+    !['prepared', 'quarantined', 'committed'].includes(value.phase as string) ||
+    typeof value.repoPath !== 'string' ||
+    !path.isAbsolute(value.repoPath) ||
+    !validRelativePath ||
+    value.stagingName !== `.git-stacks-${value.transactionId}` ||
+    !isFileActionIdentity(value.stagingIdentity) ||
+    !validParentDirectories ||
+    !(value.originalIdentity === null || isFileActionIdentity(value.originalIdentity)) ||
+    !(value.replacementIdentity === null || isFileActionIdentity(value.replacementIdentity))
+  ) {
+    throw new Error('The interrupted file action journal is invalid')
+  }
+  return {
+    version: 1,
+    transactionId: value.transactionId,
+    ownerPid: value.ownerPid,
+    phase: value.phase as FileActionPhase,
+    repoPath: value.repoPath,
+    relativePath: value.relativePath as string,
+    stagingName: value.stagingName,
+    stagingIdentity: value.stagingIdentity,
+    parentDirectories: value.parentDirectories as RepositoryDirectoryIdentity[],
+    originalIdentity: value.originalIdentity,
+    replacementIdentity: value.replacementIdentity,
+  }
+}
+
+async function fileActionJournalDirectory(
+  repoPath: string,
+  create: boolean,
+): Promise<string | null> {
+  const gitDirectory = stripTrailingNewline(await runGit(repoPath, ['rev-parse', '--git-dir']))
+  if (!gitDirectory) throw new Error('Git did not resolve its metadata directory')
+  const canonicalGitDirectory = await fs.realpath(path.resolve(repoPath, gitDirectory))
+  const gitDirectoryInfo = await fs.stat(canonicalGitDirectory)
+  if (!gitDirectoryInfo.isDirectory()) throw new Error('Git metadata path is not a directory')
+  const directory = path.join(canonicalGitDirectory, 'git-stacks-file-actions')
+  if (create) {
+    try {
+      await fs.mkdir(directory, { mode: 0o700 })
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+    }
+  }
+  try {
+    const info = await fs.lstat(directory)
+    if (info.isSymbolicLink() || !info.isDirectory()) {
+      throw new Error('The file action journal directory is not safe')
+    }
+    return directory
+  } catch (error) {
+    if (!create && (error as NodeJS.ErrnoException).code === 'ENOENT') return null
+    throw error
+  }
+}
+
+async function writeFileActionJournal(
+  directory: string,
+  journal: FileActionJournal,
+  exclusive = false,
+): Promise<string> {
+  const journalPath = path.join(directory, `${journal.transactionId}.json`)
+  const temporaryPath = path.join(directory, `${journal.transactionId}.${randomUUID()}.tmp`)
+  const handle = await fs.open(temporaryPath, 'wx', 0o600)
+  try {
+    await handle.writeFile(JSON.stringify(journal), 'utf8')
+    await handle.sync()
+  } catch (error) {
+    await handle.close().catch(() => {})
+    await fs.rm(temporaryPath, { force: true })
+    throw error
+  }
+  await handle.close()
+  try {
+    if (exclusive) await fs.link(temporaryPath, journalPath)
+    else await fs.rename(temporaryPath, journalPath)
+  } finally {
+    await fs.rm(temporaryPath, { force: true })
+  }
+  return journalPath
+}
+
+async function readFileActionJournal(journalPath: string): Promise<FileActionJournal> {
+  let info: Stats
+  try {
+    info = await fs.lstat(journalPath)
+  } catch (error) {
+    throw error
+  }
+  if (info.isSymbolicLink() || !info.isFile() || info.size > 1024 * 1024) {
+    throw new Error('The interrupted file action journal is invalid')
+  }
+  let value: unknown
+  try {
+    value = JSON.parse(await fs.readFile(journalPath, 'utf8'))
+  } catch {
+    throw new Error('The interrupted file action journal is unreadable')
+  }
+  return parseFileActionJournal(value)
+}
+
+async function assertFileActionParents(
+  repoPath: string,
+  journal: FileActionJournal,
+): Promise<string> {
+  if (journal.repoPath !== repoPath) {
+    throw new Error('The interrupted file action belongs to a different working tree')
+  }
+  const current = await ensureRepositoryParentDirectories(repoPath, journal.relativePath, false)
+  if (
+    current.directories.length !== journal.parentDirectories.length ||
+    current.directories.some((directory, index) => {
+      const recorded = journal.parentDirectories[index]
+      return (
+        directory.relativePath !== recorded.relativePath ||
+        directory.dev !== recorded.dev ||
+        directory.ino !== recorded.ino
+      )
+    })
+  ) {
+    throw new Error('A parent directory changed before file recovery; refusing to follow it')
+  }
+  return current.targetPath
+}
+
+async function assertFileActionLocations(
+  repoPath: string,
+  journal: FileActionJournal,
+  stagingDirectory: string,
+): Promise<{ targetPath: string; backupPath: string; replacementPath: string }> {
+  const targetPath = await assertFileActionParents(repoPath, journal)
+  const stagingInfo = await fs.lstat(stagingDirectory)
+  if (
+    stagingInfo.isSymbolicLink() ||
+    !stagingInfo.isDirectory() ||
+    !sameFileActionIdentity(fileActionIdentity(stagingInfo), journal.stagingIdentity)
+  ) {
+    throw new Error('The file action staging directory changed; refusing recovery')
+  }
+  return {
+    targetPath,
+    backupPath: path.join(stagingDirectory, 'original'),
+    replacementPath: path.join(stagingDirectory, 'replacement'),
+  }
+}
+
+async function removeFileActionStaging(
+  repoPath: string,
+  journal: FileActionJournal,
+  stagingDirectory: string,
+): Promise<void> {
+  const checkLocations = async () => assertFileActionLocations(repoPath, journal, stagingDirectory)
+  await assertFileActionParents(repoPath, journal)
+  let stagingInfo: Stats
+  try {
+    stagingInfo = await fs.lstat(stagingDirectory)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return
+    throw error
+  }
+  if (
+    stagingInfo.isSymbolicLink() ||
+    !stagingInfo.isDirectory() ||
+    !sameFileActionIdentity(fileActionIdentity(stagingInfo), journal.stagingIdentity)
+  ) {
+    throw new Error('The file action staging directory changed; refusing recovery')
+  }
+  for (const [name, expected] of [
+    ['original', journal.originalIdentity],
+    ['replacement', journal.replacementIdentity],
+  ] as const) {
+    const filePath = path.join(stagingDirectory, name)
+    await checkLocations()
+    const actual = await optionalFileActionIdentity(filePath)
+    if (actual === null) continue
+    if (!expected || !sameFileActionIdentity(actual, expected)) {
+      throw new Error(
+        `Unexpected file in ${path.relative(repoPath, stagingDirectory)}; preserving it`,
+      )
+    }
+    await checkLocations()
+    const beforeUnlink = await optionalFileActionIdentity(filePath)
+    if (!sameFileActionIdentity(beforeUnlink, expected)) {
+      throw new Error('A staged file changed during cleanup; preserving it')
+    }
+    await fs.unlink(filePath)
+  }
+  await checkLocations()
+  if ((await fs.readdir(stagingDirectory)).length > 0) {
+    throw new Error(`Unexpected files remain in ${path.relative(repoPath, stagingDirectory)}`)
+  }
+  await checkLocations()
+  await fs.rmdir(stagingDirectory)
+}
+
+async function removeFileActionJournal(
+  directory: string,
+  journalPath: string,
+  transactionId: string,
+): Promise<void> {
+  let current: FileActionJournal
+  try {
+    current = await readFileActionJournal(journalPath)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return
+    throw error
+  }
+  if (current.transactionId !== transactionId) {
+    throw new Error('The file action journal changed during recovery')
+  }
+  const info = await fs.lstat(directory)
+  if (info.isSymbolicLink() || !info.isDirectory()) {
+    throw new Error('The file action journal directory changed during recovery')
+  }
+  await fs.unlink(journalPath)
+}
+
+async function recoverFileActionJournal(
+  repoPath: string,
+  directory: string,
+  journalPath: string,
+  journal: FileActionJournal,
+): Promise<void> {
+  if (journal.repoPath !== repoPath) {
+    throw new Error('The interrupted file action belongs to a different working tree')
+  }
+  if (isProcessRunning(journal.ownerPid)) {
+    throw new Error('Another file update is in progress; retry after it completes')
+  }
+  const targetPath = await assertFileActionParents(repoPath, journal)
+  const stagingDirectory = path.join(path.dirname(targetPath), journal.stagingName)
+  const backupPath = path.join(stagingDirectory, 'original')
+  const replacementPath = path.join(stagingDirectory, 'replacement')
+  const journalIdentity = journal.transactionId
+  const journalLocations = async () =>
+    assertFileActionLocations(repoPath, journal, stagingDirectory)
+  let stagingExists = true
+  try {
+    const info = await fs.lstat(stagingDirectory)
+    if (
+      info.isSymbolicLink() ||
+      !info.isDirectory() ||
+      !sameFileActionIdentity(fileActionIdentity(info), journal.stagingIdentity)
+    ) {
+      throw new Error('The file action staging directory changed; refusing recovery')
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+    stagingExists = false
+  }
+  const targetIdentity = await optionalFileActionIdentity(targetPath)
+  if (!stagingExists) {
+    const committedDeletion =
+      journal.phase === 'committed' &&
+      journal.replacementIdentity === null &&
+      targetIdentity === null
+    const targetIsOriginal =
+      journal.originalIdentity !== null &&
+      sameFileActionIdentity(targetIdentity, journal.originalIdentity)
+    const targetIsReplacement =
+      journal.replacementIdentity !== null &&
+      sameFileActionIdentity(targetIdentity, journal.replacementIdentity)
+    if (
+      journal.originalIdentity &&
+      !targetIsOriginal &&
+      !targetIsReplacement &&
+      !committedDeletion
+    ) {
+      throw new Error('The quarantined original is missing; refusing file recovery')
+    }
+    await removeFileActionJournal(directory, journalPath, journalIdentity)
+    return
+  }
+
+  await journalLocations()
+  const [backupIdentity, replacementIdentity] = await Promise.all([
+    optionalFileActionIdentity(backupPath),
+    optionalFileActionIdentity(replacementPath),
+  ])
+  if (
+    journal.replacementIdentity &&
+    sameFileActionIdentity(targetIdentity, journal.replacementIdentity)
+  ) {
+    if (
+      replacementIdentity &&
+      !sameFileActionIdentity(replacementIdentity, journal.replacementIdentity)
+    ) {
+      throw new Error('The staged replacement changed; refusing file recovery')
+    }
+    if (backupIdentity && !sameFileActionIdentity(backupIdentity, journal.originalIdentity)) {
+      throw new Error('The quarantined original changed; preserving it for manual recovery')
+    }
+    if (backupIdentity) {
+      await journalLocations()
+      await fs.unlink(backupPath)
+    }
+    await removeFileActionStaging(repoPath, journal, stagingDirectory)
+    await removeFileActionJournal(directory, journalPath, journalIdentity)
+    return
+  }
+  if (
+    journal.originalIdentity &&
+    sameFileActionIdentity(targetIdentity, journal.originalIdentity)
+  ) {
+    if (backupIdentity && !sameFileActionIdentity(backupIdentity, journal.originalIdentity)) {
+      throw new Error('The quarantined original changed; preserving it for manual recovery')
+    }
+    if (backupIdentity) {
+      await journalLocations()
+      await fs.unlink(backupPath)
+    }
+    await removeFileActionStaging(repoPath, journal, stagingDirectory)
+    await removeFileActionJournal(directory, journalPath, journalIdentity)
+    return
+  }
+  if (targetIdentity === null) {
+    if (journal.phase === 'committed' && journal.replacementIdentity === null) {
+      if (backupIdentity && !sameFileActionIdentity(backupIdentity, journal.originalIdentity)) {
+        throw new Error('The quarantined original changed; preserving it for manual recovery')
+      }
+      if (backupIdentity) {
+        await journalLocations()
+        await fs.unlink(backupPath)
+      }
+      await removeFileActionStaging(repoPath, journal, stagingDirectory)
+      await removeFileActionJournal(directory, journalPath, journalIdentity)
+      return
+    }
+    if (
+      journal.originalIdentity &&
+      sameFileActionIdentity(backupIdentity, journal.originalIdentity)
+    ) {
+      await restoreQuarantinedFile(backupPath, targetPath, journalLocations)
+      await removeFileActionStaging(repoPath, journal, stagingDirectory)
+      await removeFileActionJournal(directory, journalPath, journalIdentity)
+      return
+    }
+    if (journal.originalIdentity === null && backupIdentity === null) {
+      await removeFileActionStaging(repoPath, journal, stagingDirectory)
+      await removeFileActionJournal(directory, journalPath, journalIdentity)
+      return
+    }
+    throw new Error('The quarantined original is missing; refusing file recovery')
+  }
+  if (journal.originalIdentity === null && backupIdentity === null) {
+    await removeFileActionStaging(repoPath, journal, stagingDirectory)
+    await removeFileActionJournal(directory, journalPath, journalIdentity)
+    return
+  }
+  throw new Error(
+    `A concurrent file prevents recovery; prior contents remain at ${path.relative(repoPath, backupPath)}`,
+  )
+}
+
+async function recoverFileActionJournals(repoPath: string): Promise<void> {
+  const directory = await fileActionJournalDirectory(repoPath, false)
+  if (!directory) return
+  const names = await fs.readdir(directory)
+  for (const name of names) {
+    if (!name.endsWith('.json')) continue
+    const journalPath = path.join(directory, name)
+    const journal = await readFileActionJournal(journalPath)
+    if (name !== `${journal.transactionId}.json`) {
+      throw new Error('The interrupted file action journal name is invalid')
+    }
+    await recoverFileActionJournal(repoPath, directory, journalPath, journal)
+  }
 }
 
 async function replaceCheckedFile(
@@ -1826,37 +2981,117 @@ async function replaceCheckedFile(
   sourcePath: string | null,
   content?: string,
 ): Promise<void> {
-  const targetPath = await safeRepositoryPath(repoPath, relativePath)
-  await fs.mkdir(path.dirname(targetPath), { recursive: true })
-  await safeRepositoryPath(repoPath, relativePath)
-  const stagingDirectory = await fs.mkdtemp(path.join(path.dirname(targetPath), '.git-stacks-'))
+  const { targetPath, directories } = await ensureRepositoryParentDirectories(
+    repoPath,
+    relativePath,
+  )
+  const transactionId = randomUUID()
+  const stagingName = `.git-stacks-${transactionId}`
+  const stagingDirectory = path.join(path.dirname(targetPath), stagingName)
   const backupPath = path.join(stagingDirectory, 'original')
   const replacementPath =
     sourcePath !== null || content !== undefined ? path.join(stagingDirectory, 'replacement') : null
+  let stagingIdentity: FileActionIdentity | null = null
+  let journalDirectory: string | null = null
+  let journalPath: string | null = null
+  let journal: FileActionJournal | null = null
+  let journalCreated = false
   let movedOriginal = false
   let preserveStagingDirectory = false
+  let commitRecorded = false
+
+  const assertParents = () => assertRepositoryParentDirectories(repoPath, relativePath, directories)
+  const assertLocations = async () => {
+    await assertParents()
+    const info = await fs.lstat(stagingDirectory)
+    if (
+      info.isSymbolicLink() ||
+      !info.isDirectory() ||
+      !stagingIdentity ||
+      !sameFileActionIdentity(fileActionIdentity(info), stagingIdentity)
+    ) {
+      throw new Error('The file action staging directory changed; refusing to continue')
+    }
+  }
+
   try {
+    await assertParents()
+    await fs.mkdir(stagingDirectory, { mode: 0o700 })
+    const stagingInfo = await fs.lstat(stagingDirectory)
+    if (stagingInfo.isSymbolicLink() || !stagingInfo.isDirectory()) {
+      throw new Error('Could not create a safe file action staging directory')
+    }
+    stagingIdentity = fileActionIdentity(stagingInfo)
+    await assertLocations()
+
     if (sourcePath !== null) {
       const sourceInfo = await fs.stat(sourcePath)
       if (!sourceInfo.isFile()) throw new Error('The replacement path is not a regular file')
-      await fs.copyFile(sourcePath, replacementPath!)
+      await assertLocations()
+      await fs.copyFile(sourcePath, replacementPath!, fsConstants.COPYFILE_EXCL)
+      await assertLocations()
       await fs.chmod(replacementPath!, sourceInfo.mode & 0o777)
     } else if (content !== undefined) {
+      await assertLocations()
       await fs.writeFile(replacementPath!, content, {
         encoding: 'utf8',
         mode: expected.stat ? expected.stat.mode & 0o777 : 0o666,
+        flag: 'wx',
       })
       if (expected.stat) {
+        await assertLocations()
         await fs.chmod(replacementPath!, expected.stat.mode & 0o777)
       }
     }
 
-    try {
-      await fs.rename(targetPath, backupPath)
-      movedOriginal = true
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+    const originalIdentity = await optionalFileActionIdentity(targetPath)
+    const replacementIdentity = replacementPath
+      ? await optionalFileActionIdentity(replacementPath)
+      : null
+    if (replacementPath && !replacementIdentity) {
+      throw new Error('The replacement file was not created')
     }
+    const resolvedJournalDirectory = await fileActionJournalDirectory(repoPath, true)
+    if (!resolvedJournalDirectory)
+      throw new Error('Could not create the file action journal directory')
+    journalDirectory = resolvedJournalDirectory
+    journal = {
+      version: 1,
+      transactionId,
+      ownerPid: process.pid,
+      phase: 'prepared',
+      repoPath,
+      relativePath,
+      stagingName,
+      stagingIdentity,
+      parentDirectories: directories,
+      originalIdentity,
+      replacementIdentity,
+    }
+    journalPath = path.join(resolvedJournalDirectory, `${transactionId}.json`)
+    await writeFileActionJournal(resolvedJournalDirectory, journal, true)
+    journalCreated = true
+
+    await assertLocations()
+    const beforeRename = await optionalFileActionIdentity(targetPath)
+    if (!sameFileActionIdentity(beforeRename, originalIdentity)) {
+      throw new Error('The file changed during the action; refresh before retrying')
+    }
+    if (originalIdentity) {
+      await assertLocations()
+      try {
+        await fs.rename(targetPath, backupPath)
+        movedOriginal = true
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+      }
+    }
+    if (movedOriginal) {
+      journal = { ...journal, phase: 'quarantined' }
+      await writeFileActionJournal(resolvedJournalDirectory, journal)
+    }
+
+    await assertLocations()
     const current = await fileFingerprintAt(
       repoPath,
       relativePath,
@@ -1867,53 +3102,163 @@ async function replaceCheckedFile(
     }
 
     if (replacementPath) {
+      await assertLocations()
+      const stagedReplacement = await optionalFileActionIdentity(replacementPath)
+      if (!sameFileActionIdentity(stagedReplacement, replacementIdentity)) {
+        throw new Error('The staged replacement changed during the action')
+      }
+      if ((await optionalFileActionIdentity(targetPath)) !== null) {
+        preserveStagingDirectory = movedOriginal
+        throw new Error('A concurrent file appeared during the action')
+      }
       try {
         await fs.link(replacementPath, targetPath)
       } catch (error) {
         if (movedOriginal && (error as NodeJS.ErrnoException).code === 'EEXIST') {
           preserveStagingDirectory = true
-          throw new Error(
-            `A concurrent file appeared during the action; prior contents are preserved at ${path.relative(repoPath, backupPath)}`,
-          )
+          throw new Error('A concurrent file appeared during the action')
         }
         throw error
       }
-      await fs.unlink(replacementPath)
-    } else if (movedOriginal) {
-      try {
-        await fs.lstat(targetPath)
-        preserveStagingDirectory = true
-        throw new Error(
-          `A concurrent file appeared during the action; prior contents are preserved at ${path.relative(repoPath, backupPath)}`,
-        )
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
-      }
+    } else if (movedOriginal && (await optionalFileActionIdentity(targetPath)) !== null) {
+      preserveStagingDirectory = true
+      throw new Error('A concurrent file appeared during the action')
     }
 
+    journal = { ...journal, phase: 'committed' }
+    await writeFileActionJournal(resolvedJournalDirectory, journal)
+    commitRecorded = true
     if (movedOriginal) {
+      await assertLocations()
+      const currentBackup = await optionalFileActionIdentity(backupPath)
+      if (!sameFileActionIdentity(currentBackup, originalIdentity)) {
+        throw new Error('The quarantined original changed during the action')
+      }
+      await assertLocations()
       await fs.unlink(backupPath)
       movedOriginal = false
     }
+    await removeFileActionStaging(repoPath, journal, stagingDirectory)
+    journal = { ...journal, ownerPid: 0 }
+    await writeFileActionJournal(resolvedJournalDirectory, journal)
+    await removeFileActionJournal(resolvedJournalDirectory, journalPath, transactionId)
+    journalCreated = false
   } catch (error) {
-    if (movedOriginal && !preserveStagingDirectory) {
+    if (!journalCreated && journalPath) {
       try {
-        await restoreQuarantinedFile(backupPath, targetPath)
-        movedOriginal = false
+        const persisted = await readFileActionJournal(journalPath)
+        if (persisted.transactionId === transactionId) {
+          journal = persisted
+          journalCreated = true
+        }
+      } catch {}
+    }
+    if (journalCreated && journal && journalDirectory && journalPath) {
+      if (!commitRecorded) {
+        try {
+          commitRecorded = (await readFileActionJournal(journalPath)).phase === 'committed'
+        } catch {}
+      }
+      if (commitRecorded) {
+        const recoverable = { ...journal, phase: 'committed' as const, ownerPid: 0 }
+        await writeFileActionJournal(journalDirectory, recoverable).catch(() => {})
+        try {
+          await recoverFileActionJournal(repoPath, journalDirectory, journalPath, recoverable)
+          return
+        } catch (recoveryError) {
+          throw new Error(
+            `${commandDetail(error)}; committed file cleanup needs recovery: ${commandDetail(recoveryError)}`,
+          )
+        }
+      }
+
+      let targetIdentity: FileActionIdentity | null = null
+      let backupIdentity: FileActionIdentity | null = null
+      try {
+        await assertLocations()
+        targetIdentity = await optionalFileActionIdentity(targetPath)
+        backupIdentity = await optionalFileActionIdentity(backupPath)
       } catch {
         preserveStagingDirectory = true
       }
-    }
-    if (preserveStagingDirectory) {
-      throw new Error(
-        `${commandDetail(error)}; prior contents are preserved at ${path.relative(repoPath, backupPath)}`,
-      )
+      if (
+        !preserveStagingDirectory &&
+        journal.replacementIdentity &&
+        sameFileActionIdentity(targetIdentity, journal.replacementIdentity)
+      ) {
+        try {
+          await assertLocations()
+          await fs.unlink(targetPath)
+          targetIdentity = null
+        } catch {
+          preserveStagingDirectory = true
+        }
+      }
+      if (!preserveStagingDirectory && journal.originalIdentity) {
+        if (backupIdentity && sameFileActionIdentity(backupIdentity, journal.originalIdentity)) {
+          if (targetIdentity === null) {
+            try {
+              await restoreQuarantinedFile(backupPath, targetPath, assertLocations)
+              movedOriginal = false
+            } catch {
+              preserveStagingDirectory = true
+            }
+          } else if (sameFileActionIdentity(targetIdentity, journal.originalIdentity)) {
+            try {
+              await assertLocations()
+              await fs.unlink(backupPath)
+              movedOriginal = false
+            } catch {
+              preserveStagingDirectory = true
+            }
+          } else {
+            preserveStagingDirectory = true
+          }
+        } else if (
+          movedOriginal &&
+          !sameFileActionIdentity(targetIdentity, journal.originalIdentity)
+        ) {
+          preserveStagingDirectory = true
+        }
+      } else if (
+        !preserveStagingDirectory &&
+        !journal.originalIdentity &&
+        backupIdentity !== null
+      ) {
+        preserveStagingDirectory = true
+      }
+      if (!preserveStagingDirectory) {
+        try {
+          await removeFileActionStaging(repoPath, journal, stagingDirectory)
+          await removeFileActionJournal(journalDirectory, journalPath, transactionId)
+          journalCreated = false
+        } catch {
+          preserveStagingDirectory = true
+        }
+      }
+      if (preserveStagingDirectory) {
+        await writeFileActionJournal(journalDirectory, {
+          ...journal,
+          ownerPid: 0,
+        }).catch(() => {})
+        throw new Error(
+          `${commandDetail(error)}; prior contents are preserved at ${path.relative(repoPath, backupPath)}`,
+        )
+      }
+    } else if (stagingIdentity) {
+      try {
+        await assertParents()
+        const info = await fs.lstat(stagingDirectory)
+        if (
+          !info.isSymbolicLink() &&
+          info.isDirectory() &&
+          sameFileActionIdentity(fileActionIdentity(info), stagingIdentity)
+        ) {
+          await fs.rm(stagingDirectory, { recursive: true, force: true })
+        }
+      } catch {}
     }
     throw error
-  } finally {
-    if (!preserveStagingDirectory) {
-      await fs.rm(stagingDirectory, { recursive: true, force: true })
-    }
   }
 }
 
@@ -1923,6 +3268,7 @@ export async function runDiscardFile(
   fingerprint: string,
 ): Promise<ActionResult> {
   const root = await resolveRepository(repoPath)
+  await recoverFileActionJournals(root)
   const { entry, identity } = await checkFileFingerprint(root, filePath, fingerprint)
   if (entry.conflicted) throw new Error('Resolve conflicted files instead of discarding them')
   if (entry.index === '?' || entry.worktree === '?') {
@@ -1968,6 +3314,7 @@ export async function runResolveFile(
   content: string,
 ): Promise<ActionResult> {
   const root = await resolveRepository(repoPath)
+  await recoverFileActionJournals(root)
   const { entry, identity } = await checkFileFingerprint(root, filePath, fingerprint)
   if (!entry.conflicted) throw new Error('The selected file has no unresolved conflict')
   const actualPath = entry.path
@@ -1997,6 +3344,7 @@ export async function runResolveFile(
       await fs.rm(materializedRoot, { recursive: true, force: true })
     }
   }
+  await safeRepositoryPath(root, actualPath)
   await runGit(root, ['--literal-pathspecs', 'add', '--', actualPath])
   return { message: `Resolved ${actualPath} using ${strategy}` }
 }
@@ -2131,6 +3479,7 @@ function branchFromRef(ref: RefRecord, currentBranch: string | null, remote: boo
 export async function getSnapshot(repoPath: string): Promise<RepositorySnapshot> {
   const root = await resolveRepository(repoPath)
   await recoverStashDropForRepository(root)
+  await recoverFileActionJournals(root)
   const [refs, currentBranch, files, stashes, originUrl, operationState, stackOperation, headOid] =
     await Promise.all([
       getRefs(root),
@@ -2448,7 +3797,10 @@ async function runOperation(
   const branch = state.operation === 'rebase' ? await rebaseBranch(repoPath) : null
   if (!command) throw new Error(`Cannot ${kind} the current Git operation`)
   const captured =
-    state.operation === 'merge' || state.operation === 'cherryPick' || state.operation === 'revert'
+    kind !== 'abort' &&
+    (state.operation === 'merge' ||
+      state.operation === 'cherryPick' ||
+      state.operation === 'revert')
       ? await readOperationHead(repoPath)
       : null
   if (kind !== 'abort' && captured && captured.operation !== state.operation) {

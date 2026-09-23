@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
+import type { FileHandle } from 'node:fs/promises'
 import type {
   ActionResult,
   Branch,
@@ -56,6 +58,9 @@ interface BranchRecord {
   invalidParentTip: boolean
   parentSource: 'recorded' | 'pullRequest' | 'inferred' | null
   pr: PullRequest | null
+  mergedHeadPr: string | null
+  mergedHeadOid: string | null
+  mergedCommitOid: string | null
 }
 
 interface PlanEntry {
@@ -95,6 +100,10 @@ interface StackPlan {
   capturedTips: Record<string, string>
   capturedRemoteOids: Record<string, string | null>
   capturedPrs: Record<string, PullRequest | null>
+  capturedMergedHeads: Record<
+    string,
+    { pr: string | null; oid: string | null; commit: string | null }
+  >
   warnings: string[]
   blockers: string[]
   mergeMethods: ('merge' | 'squash' | 'rebase')[]
@@ -509,6 +518,18 @@ async function branchRecords(
       : snapshotBranch?.parentSource === 'recorded'
         ? 'inferred'
         : (snapshotBranch?.parentSource ?? null)
+    const configuredMergedHeadPr = await getConfigValue(
+      repoPath,
+      `branch.${name}.gitStacksMergedHeadPr`,
+    )
+    const configuredMergedHeadOid = await getConfigValue(
+      repoPath,
+      `branch.${name}.gitStacksMergedHeadOid`,
+    )
+    const configuredMergedCommitOid = await getConfigValue(
+      repoPath,
+      `branch.${name}.gitStacksMergedCommitOid`,
+    )
     const pr = canonicalPrs.get(name) ?? localPrForBranch(snapshot, name, originFullName)
     records.set(name, {
       name,
@@ -518,6 +539,9 @@ async function branchRecords(
       invalidParentTip,
       parentSource: source,
       pr,
+      mergedHeadPr: configuredMergedHeadPr,
+      mergedHeadOid: configuredMergedHeadOid,
+      mergedCommitOid: configuredMergedCommitOid,
     })
   }
   return records
@@ -665,6 +689,17 @@ async function capturePlan(
   const tips: Record<string, string> = {}
   const remoteOids: Record<string, string | null> = {}
   const prs: Record<string, PullRequest | null> = {}
+  const capturedMergedHeads: Record<
+    string,
+    { pr: string | null; oid: string | null; commit: string | null }
+  > = {}
+  for (const [name, record] of records) {
+    capturedMergedHeads[name] = {
+      pr: record.mergedHeadPr,
+      oid: record.mergedHeadOid,
+      commit: record.mergedCommitOid,
+    }
+  }
   const entries: PlanEntry[] = []
   const skippedMerged = new Set<string>()
   for (const name of names) {
@@ -757,17 +792,23 @@ async function capturePlan(
           `Merged parent ${retargetedFrom} has no validated merge commit reachable from ${parent}; fetch origin and inspect the rewritten base before retrying`,
         )
       }
-      const reviewedHead = mergedPr.headOid ? await resolveCommit(root, mergedPr.headOid) : null
+      const recordedMergeHead =
+        oldParentRecord.mergedHeadPr === String(mergedPr.number) &&
+        oldParentRecord.mergedCommitOid === mergedPr.mergeOid &&
+        oldParentRecord.mergedHeadOid &&
+        isOid(oldParentRecord.mergedHeadOid)
+          ? await resolveCommit(root, oldParentRecord.mergedHeadOid)
+          : null
       const boundaryIncludedInParent = await isAncestor(root, boundary, effectiveParentOid)
-      const unsafeBoundaryMessage = `Merged parent ${retargetedFrom} has a boundary for ${name} that is not included in ${parent} and its reviewed head cannot be used as a safe replay boundary; restacking is blocked to preserve commits`
-      if (!reviewedHead) {
+      const unsafeBoundaryMessage = `Merged parent ${retargetedFrom} has no validated merge-time head for ${name} that can be used as a safe replay boundary; restacking is blocked to preserve commits`
+      if (!recordedMergeHead) {
         blockers.push(unsafeBoundaryMessage)
-      } else if (await isAncestor(root, reviewedHead, record.oid)) {
-        const reviewedHeadIncludedInBoundary = await isAncestor(root, reviewedHead, boundary)
-        if (!reviewedHeadIncludedInBoundary || !boundaryIncludedInParent) {
-          // Replaying from the merged PR head excludes its reviewed commits
-          // while retaining every child commit added after that head.
-          boundary = reviewedHead
+      } else if (await isAncestor(root, recordedMergeHead, record.oid)) {
+        const mergeHeadIncludedInBoundary = await isAncestor(root, recordedMergeHead, boundary)
+        if (!mergeHeadIncludedInBoundary || !boundaryIncludedInParent) {
+          // Replay from the immutable head captured when the PR was merged.
+          // The live source ref may have advanced since GitHub closed the PR.
+          boundary = recordedMergeHead
         }
       } else if (!boundaryIncludedInParent) {
         blockers.push(unsafeBoundaryMessage)
@@ -917,6 +958,7 @@ async function capturePlan(
     capturedParentOids: parentOidMap,
     capturedTips: tips,
     capturedRemoteOids: remoteOids,
+    capturedMergedHeads,
     capturedPrs: prs,
     warnings,
     blockers,
@@ -983,6 +1025,16 @@ async function revalidatePlan(repoPath: string, plan: StackPlan): Promise<void> 
     const currentTip = await resolveCommit(repoPath, `refs/heads/${branch}`)
     if (currentTip !== expectedTip)
       throw new Error(`Stack preview is stale: branch ${branch} changed`)
+  }
+  for (const [branch, expected] of Object.entries(plan.capturedMergedHeads)) {
+    const [pr, oid, commit] = await Promise.all([
+      getConfigValue(repoPath, `branch.${branch}.gitStacksMergedHeadPr`),
+      getConfigValue(repoPath, `branch.${branch}.gitStacksMergedHeadOid`),
+      getConfigValue(repoPath, `branch.${branch}.gitStacksMergedCommitOid`),
+    ])
+    if (pr !== expected.pr || oid !== expected.oid || commit !== expected.commit) {
+      throw new Error(`Stack preview is stale: merged pull request boundary for ${branch} changed`)
+    }
   }
   for (const entry of plan.entries) {
     const parent = await getBranchParent(repoPath, entry.branch)
@@ -1616,6 +1668,9 @@ async function setPullRequestNumber(
   number: number,
 ): Promise<void> {
   await setConfig(repoPath, `branch.${branch}.gitStacksPr`, String(number))
+  await unsetConfig(repoPath, `branch.${branch}.gitStacksMergedHeadPr`)
+  await unsetConfig(repoPath, `branch.${branch}.gitStacksMergedHeadOid`)
+  await unsetConfig(repoPath, `branch.${branch}.gitStacksMergedCommitOid`)
 }
 
 async function canonicalPullRequests(
@@ -1670,57 +1725,133 @@ function matchesCapturedPullRequest(entry: PlanEntry, currentPr: PullRequest | n
   )
 }
 
+function localFilesRefStoragePath(value: string): string {
+  const uri = new URL(value)
+  if (
+    uri.protocol !== 'files:' ||
+    uri.host ||
+    uri.username ||
+    uri.password ||
+    uri.search ||
+    uri.hash ||
+    !uri.pathname.startsWith('/')
+  ) {
+    throw new Error('The configured files ref-storage URI cannot be locked safely')
+  }
+  const decodedPath = decodeURIComponent(uri.pathname)
+  if (decodedPath.includes('\0')) {
+    throw new Error('The configured files ref-storage URI cannot be locked safely')
+  }
+  return path.resolve('/', decodedPath)
+}
+
+function gitPathOnDisk(repoPath: string, value: string, refRoot: string | null): string {
+  if (value.startsWith('files:')) return localFilesRefStoragePath(value)
+  if (value.startsWith('file:')) return fileURLToPath(new URL(value))
+  return path.resolve(refRoot ?? repoPath, value)
+}
+
+async function withLocalBranchRefLock<T>(
+  repoPath: string,
+  branch: string,
+  action: () => Promise<T>,
+): Promise<T> {
+  const refStorage = await getConfigValue(repoPath, 'extensions.refstorage')
+  let refRoot: string | null = null
+  if (refStorage && refStorage.toLowerCase() !== 'files') {
+    try {
+      refRoot = localFilesRefStoragePath(refStorage)
+    } catch {
+      throw new Error(`Cannot safely publish ${branch} with ref storage ${refStorage}`)
+    }
+  }
+  const refPathValue = stripTrailingNewline(
+    await runGit(repoPath, ['rev-parse', '--git-path', `refs/heads/${branch}`]),
+  )
+  if (!refPathValue) throw new Error(`Cannot locate the local ref for ${branch}`)
+  const lockPath = `${gitPathOnDisk(repoPath, refPathValue, refRoot)}.lock`
+  await fs.mkdir(path.dirname(lockPath), { recursive: true })
+  let lock: FileHandle
+  try {
+    lock = await fs.open(lockPath, 'wx', 0o666)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
+      throw new Error(`Cannot publish ${branch}: its local branch ref is being updated`)
+    }
+    throw error
+  }
+  try {
+    const lockIdentity = await lock.stat()
+    try {
+      return await action()
+    } finally {
+      try {
+        const current = await fs.lstat(lockPath)
+        if (current.dev === lockIdentity.dev && current.ino === lockIdentity.ino) {
+          await fs.unlink(lockPath)
+        }
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+      }
+    }
+  } finally {
+    await lock.close()
+  }
+}
+
 async function pushBranch(
   repoPath: string,
   entry: PlanEntry,
   allowForce: boolean,
   pushUrl: string,
 ): Promise<string> {
-  const upstream = await branchUpstream(repoPath, entry.branch)
-  if (upstream && upstream !== `origin/${entry.branch}`) {
-    throw new Error(`Branch ${entry.branch} has a non-origin or renamed upstream (${upstream})`)
-  }
-  const local = await resolveCommit(repoPath, `refs/heads/${entry.branch}`)
-  if (!local) throw new Error(`Branch ${entry.branch} no longer exists`)
-  if (local !== entry.oldTip)
-    throw new Error(`Stack preview is stale: local ${entry.branch} changed`)
-  const remote = await remoteOid(repoPath, pushUrl, entry.branch)
-  if (remote !== entry.remoteOid)
-    throw new Error(`Stack preview is stale: remote ${entry.branch} changed`)
-  if (remote === local) {
+  return withLocalBranchRefLock(repoPath, entry.branch, async () => {
+    const upstream = await branchUpstream(repoPath, entry.branch)
+    if (upstream && upstream !== `origin/${entry.branch}`) {
+      throw new Error(`Branch ${entry.branch} has a non-origin or renamed upstream (${upstream})`)
+    }
+    const local = await resolveCommit(repoPath, `refs/heads/${entry.branch}`)
+    if (!local) throw new Error(`Branch ${entry.branch} no longer exists`)
+    if (local !== entry.oldTip)
+      throw new Error(`Stack preview is stale: local ${entry.branch} changed`)
+    const remote = await remoteOid(repoPath, pushUrl, entry.branch)
+    if (remote !== entry.remoteOid)
+      throw new Error(`Stack preview is stale: remote ${entry.branch} changed`)
+    if (remote === local) {
+      await setConfig(repoPath, `branch.${entry.branch}.remote`, 'origin')
+      await setConfig(repoPath, `branch.${entry.branch}.merge`, `refs/heads/${entry.branch}`)
+      return local
+    }
+    const nonFastForward = remote !== null && !(await isAncestor(repoPath, remote, local))
+    if (nonFastForward && !allowForce) {
+      throw new Error(`Publishing ${entry.branch} requires explicit force-with-lease permission`)
+    }
+    if (nonFastForward) {
+      if (!entry.remoteOid) throw new Error(`Remote ${entry.branch} changed; force lease refused`)
+      await runGit(repoPath, [
+        '-c',
+        'push.followTags=false',
+        'push',
+        '--no-mirror',
+        `--force-with-lease=refs/heads/${entry.branch}:${entry.remoteOid}`,
+        'origin',
+        `${entry.oldTip}:refs/heads/${entry.branch}`,
+      ])
+    } else {
+      await runGit(repoPath, [
+        '-c',
+        'push.followTags=false',
+        'push',
+        '--no-force',
+        '--no-mirror',
+        'origin',
+        `${entry.oldTip}:refs/heads/${entry.branch}`,
+      ])
+    }
     await setConfig(repoPath, `branch.${entry.branch}.remote`, 'origin')
     await setConfig(repoPath, `branch.${entry.branch}.merge`, `refs/heads/${entry.branch}`)
     return local
-  }
-  const nonFastForward = remote !== null && !(await isAncestor(repoPath, remote, local))
-  if (nonFastForward && !allowForce) {
-    throw new Error(`Publishing ${entry.branch} requires explicit force-with-lease permission`)
-  }
-  if (nonFastForward) {
-    if (!entry.remoteOid) throw new Error(`Remote ${entry.branch} changed; force lease refused`)
-    await runGit(repoPath, [
-      '-c',
-      'push.followTags=false',
-      'push',
-      '--no-mirror',
-      `--force-with-lease=refs/heads/${entry.branch}:${entry.remoteOid}`,
-      'origin',
-      `${entry.oldTip}:refs/heads/${entry.branch}`,
-    ])
-  } else {
-    await runGit(repoPath, [
-      '-c',
-      'push.followTags=false',
-      'push',
-      '--no-force',
-      '--no-mirror',
-      'origin',
-      `${entry.oldTip}:refs/heads/${entry.branch}`,
-    ])
-  }
-  await setConfig(repoPath, `branch.${entry.branch}.remote`, 'origin')
-  await setConfig(repoPath, `branch.${entry.branch}.merge`, `refs/heads/${entry.branch}`)
-  return local
+  })
 }
 
 async function createPullRequest(
@@ -1943,8 +2074,12 @@ async function publishStack(
     let pr = await exactPrForBranch(entry.branch, currentData)
     const base = entry.parent
     if (
-      entry.pr &&
-      (!pr || pr.number !== entry.pr.number || pr.base !== entry.pr.base || pr.state !== 'OPEN')
+      (entry.pr &&
+        (!pr ||
+          pr.number !== entry.pr.number ||
+          pr.base !== entry.pr.base ||
+          pr.state !== 'OPEN')) ||
+      (!entry.pr && pr !== null)
     ) {
       throw new Error(
         `Pull request for ${entry.branch} changed during publication; inspect the published branches before retrying`,
@@ -2076,6 +2211,11 @@ async function mergeStack(
     throw new Error(
       `GitHub did not confirm the reviewed head of PR #${entry.pr.number} as merged${mergeError ? `: ${commandDetail(mergeError)}` : ''}`,
     )
+  }
+  await setConfig(repoPath, `branch.${entry.branch}.gitStacksMergedHeadPr`, String(entry.pr.number))
+  await setConfig(repoPath, `branch.${entry.branch}.gitStacksMergedHeadOid`, entry.pr.headOid)
+  if (readBack.mergeOid) {
+    await setConfig(repoPath, `branch.${entry.branch}.gitStacksMergedCommitOid`, readBack.mergeOid)
   }
   let fetchMessage = ''
   try {

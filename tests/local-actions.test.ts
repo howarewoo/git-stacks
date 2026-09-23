@@ -1,10 +1,27 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { lstat, mkdtemp, mkdir, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises'
+import { promises as fs } from 'node:fs'
+import {
+  link,
+  lstat,
+  mkdtemp,
+  mkdir,
+  readFile,
+  rename,
+  rm,
+  symlink,
+  writeFile,
+} from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { delimiter, join } from 'node:path'
+import { basename, delimiter, dirname, join, resolve } from 'node:path'
 import { test } from 'node:test'
-import { getFileView, getPushPreview, getSnapshot, runAction } from '../src/main/git'
+import {
+  getFileView,
+  getPushPreview,
+  getSnapshot,
+  resolveRepository,
+  runAction,
+} from '../src/main/git'
 import type { GitAction } from '../src/shared/types'
 
 async function fixture() {
@@ -421,8 +438,51 @@ test('merge operation recovery continues through explicit abort and cannot skip 
     )
     assert.equal((await getSnapshot(repo)).operation, 'merge')
     await assert.rejects(runAction(repo, { type: 'operationSkip' }))
+    const operationHead = resolve(
+      repo,
+      git('rev-parse', '--git-path', 'git-stacks-expected-operation-head.json'),
+    )
+    await writeFile(operationHead, 'not JSON')
     await runAction(repo, { type: 'operationAbort' })
+    await assert.rejects(readFile(operationHead), /ENOENT/u)
+
     assert.equal((await getSnapshot(repo)).operation, null)
+  } finally {
+    await cleanup(root)
+  }
+})
+
+test('a no-op merge rejects a branch advanced after preflight', async () => {
+  const { root, repo, git } = await fixture()
+  try {
+    const expectedHead = git('rev-parse', 'HEAD')
+    const tree = git('rev-parse', `${expectedHead}^{tree}`)
+    const advancedHead = execFileSync(
+      'git',
+      ['-C', repo, 'commit-tree', tree, '-p', expectedHead, '-m', 'Advanced during merge'],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] },
+    ).trim()
+    const triggered = await withHeadAdvanceBeforeCommand(
+      root,
+      repo,
+      'merge',
+      'refs/heads/main',
+      expectedHead,
+      advancedHead,
+      async () => {
+        await assert.rejects(
+          runAction(repo, {
+            type: 'merge',
+            ref: expectedHead,
+            expectedHead,
+            expectedHeadRef: 'refs/heads/main',
+          }),
+          /HEAD changed/u,
+        )
+      },
+    )
+    assert.equal(await readFile(triggered, 'utf8'), '')
+    assert.equal(git('rev-parse', 'refs/heads/main'), advancedHead)
   } finally {
     await cleanup(root)
   }
@@ -557,6 +617,169 @@ test('snapshot completes a stash removal interrupted after reflog replacement', 
     )
     assert.equal(git('rev-parse', 'refs/stash'), first.oid)
     assert.equal((await getSnapshot(repo)).stashes.length, 1)
+  } finally {
+    await cleanup(root)
+  }
+})
+
+test('snapshot completes a packed stash removal interrupted after reflog replacement', async () => {
+  const { root, repo, git } = await fixture()
+  try {
+    await writeFile(join(repo, 'shared.txt'), 'packed stash\n')
+    await runAction(repo, { type: 'stash', message: 'packed', includeUntracked: false })
+    const stash = (await getSnapshot(repo)).stashes[0]
+    assert.ok(stash)
+    git('pack-refs', '--all', '--prune')
+
+    const commonPath = resolve(repo, git('rev-parse', '--git-common-dir'))
+    const refPath = resolve(repo, git('rev-parse', '--git-path', 'refs/stash'))
+    const refLockPath = resolve(repo, git('rev-parse', '--git-path', 'refs/stash.lock'))
+    const packedRefsPath = resolve(repo, git('rev-parse', '--git-path', 'packed-refs'))
+    const packedRefsLockPath = resolve(repo, git('rev-parse', '--git-path', 'packed-refs.lock'))
+    const logPath = resolve(repo, git('rev-parse', '--git-path', 'logs/refs/stash'))
+    const logLockPath = resolve(repo, git('rev-parse', '--git-path', 'logs/refs/stash.lock'))
+    await assert.rejects(readFile(refPath))
+
+    const oldPacked = await readFile(packedRefsPath)
+    const packedRows = oldPacked.toString('utf8').split('\n')
+    const stashRow = packedRows.findIndex((row) => row.endsWith(' refs/stash'))
+    assert.notEqual(stashRow, -1)
+    assert.equal(packedRows[stashRow], `${stash.oid} refs/stash`)
+    const hasPeeledRow = /^\^[0-9a-f]{40,128}$/iu.test(packedRows[stashRow + 1] ?? '')
+    packedRows.splice(stashRow, hasPeeledRow ? 2 : 1)
+    const nextPacked = Buffer.from(packedRows.join('\n'), 'utf8')
+    const oldLog = await readFile(logPath)
+    const nextLog = Buffer.alloc(0)
+    const emptyRefLock = Buffer.alloc(0)
+    await writeFile(refLockPath, emptyRefLock, { flag: 'wx' })
+    await writeFile(packedRefsLockPath, nextPacked, { flag: 'wx' })
+    await writeFile(logLockPath, nextLog, { flag: 'wx' })
+    const [refLockInfo, packedLockInfo, logLockInfo] = await Promise.all([
+      lstat(refLockPath),
+      lstat(packedRefsLockPath),
+      lstat(logLockPath),
+    ])
+    const journalPath = join(commonPath, 'git-stacks-stash-drop.json')
+    await writeFile(
+      journalPath,
+      JSON.stringify({
+        version: 2,
+        changesRef: true,
+        changesLooseRef: false,
+        changesPackedRefs: true,
+        oldRefExists: false,
+        oldRef: '',
+        oldPacked: oldPacked.toString('base64'),
+        oldLog: oldLog.toString('base64'),
+        nextRef: null,
+        nextPacked: nextPacked.toString('base64'),
+        nextLog: nextLog.toString('base64'),
+        refLock: emptyRefLock.toString('base64'),
+        packedLock: nextPacked.toString('base64'),
+        logLock: nextLog.toString('base64'),
+        refLockIdentity: { dev: String(refLockInfo.dev), ino: String(refLockInfo.ino) },
+        packedLockIdentity: { dev: String(packedLockInfo.dev), ino: String(packedLockInfo.ino) },
+        logLockIdentity: { dev: String(logLockInfo.dev), ino: String(logLockInfo.ino) },
+      }),
+    )
+    await rename(logLockPath, logPath)
+
+    const recovered = await getSnapshot(repo)
+    assert.deepEqual(recovered.stashes, [])
+    assert.equal(git('for-each-ref', '--format=%(refname)', 'refs/stash'), '')
+    assert.equal((await readFile(packedRefsPath, 'utf8')).includes('refs/stash'), false)
+    await assert.rejects(readFile(journalPath))
+  } finally {
+    await cleanup(root)
+  }
+})
+
+test('snapshot completes a prepared stash drop after an interrupted ref commit', async () => {
+  const { root, repo, git } = await fixture()
+  const originalRename = fs.rename
+  let interrupted = false
+  try {
+    await writeFile(join(repo, 'shared.txt'), 'recover prepared stash\n')
+    await runAction(repo, { type: 'stash', message: 'prepared', includeUntracked: false })
+    const stash = (await getSnapshot(repo)).stashes[0]
+    assert.ok(stash)
+    const canonicalRepo = await resolveRepository(repo)
+    const logPath = resolve(canonicalRepo, git('rev-parse', '--git-path', 'logs/refs/stash'))
+    const logLockPath = resolve(
+      canonicalRepo,
+      git('rev-parse', '--git-path', 'logs/refs/stash.lock'),
+    )
+    const journalPath = join(
+      resolve(canonicalRepo, git('rev-parse', '--git-common-dir')),
+      'git-stacks-stash-drop.json',
+    )
+
+    fs.rename = async (source, destination) => {
+      if (!interrupted && String(source) === logLockPath && String(destination) === logPath) {
+        interrupted = true
+        throw Object.assign(new Error('simulated ref commit interruption'), { code: 'EIO' })
+      }
+      return originalRename(source, destination)
+    }
+    try {
+      await assert.rejects(
+        runAction(repo, { type: 'stashDrop', ref: stash.ref, oid: stash.oid }),
+        /will be recovered on the next repository refresh/u,
+      )
+    } finally {
+      fs.rename = originalRename
+    }
+
+    assert.equal(interrupted, true)
+    assert.deepEqual((await getSnapshot(repo)).stashes, [])
+    await assert.rejects(readFile(journalPath))
+  } finally {
+    fs.rename = originalRename
+    await cleanup(root)
+  }
+})
+
+test('snapshot recovers locks orphaned during stash lock acquisition', async () => {
+  const { root, repo, git } = await fixture()
+  try {
+    await writeFile(join(repo, 'shared.txt'), 'recover stash lock\n')
+    await runAction(repo, { type: 'stash', message: 'recover lock', includeUntracked: false })
+    const stash = (await getSnapshot(repo)).stashes[0]!
+    const commonPath = resolve(repo, git('rev-parse', '--git-common-dir'))
+    const refLockPath = resolve(repo, git('rev-parse', '--git-path', 'refs/stash.lock'))
+    const journalPath = join(commonPath, 'git-stacks-stash-drop.json')
+    const transactionId = '11111111-1111-4111-8111-111111111111'
+    const temporaryLockPath = `${refLockPath}.${transactionId}.tmp`
+    await writeFile(refLockPath, Buffer.alloc(0), { flag: 'wx' })
+    const lockInfo = await lstat(refLockPath)
+    await link(refLockPath, temporaryLockPath)
+    const journal = (ownerPid: number) =>
+      JSON.stringify({
+        version: 3,
+        phase: 'acquiring',
+        transactionId,
+        ownerPid,
+        refLockIdentity: { dev: String(lockInfo.dev), ino: String(lockInfo.ino) },
+        packedLockIdentity: null,
+        logLockIdentity: null,
+      })
+    await writeFile(journalPath, journal(process.pid))
+
+    await assert.rejects(getSnapshot(repo), /Another stash update is in progress/u)
+    assert.equal(String((await lstat(refLockPath)).ino), String(lockInfo.ino))
+
+    await writeFile(journalPath, journal(999999999))
+    const recovered = await getSnapshot(repo)
+    assert.deepEqual(
+      recovered.stashes.map((entry) => entry.oid),
+      [stash.oid],
+    )
+    await assert.rejects(readFile(refLockPath))
+    await assert.rejects(readFile(temporaryLockPath))
+    await assert.rejects(readFile(journalPath))
+
+    await runAction(repo, { type: 'stashDrop', ref: stash.ref, oid: stash.oid })
+    assert.deepEqual((await getSnapshot(repo)).stashes, [])
   } finally {
     await cleanup(root)
   }
@@ -748,6 +971,153 @@ test('conflict resolution preserves a file edited after preflight', async () => 
   }
 })
 
+test('file actions reject a parent replaced by a symlink before mutation', async () => {
+  const { root, repo, git } = await fixture()
+  const canonicalRepo = await resolveRepository(repo)
+  const parent = join(canonicalRepo, 'nested')
+  const movedParent = join(root, 'nested-moved')
+  const filePath = join(parent, 'shared.txt')
+  const outside = join(root, 'outside')
+  const outsideFile = join(outside, 'shared.txt')
+  const originalCopyFile = fs.copyFile
+  let swapped = false
+  try {
+    await mkdir(parent)
+    await writeFile(filePath, 'base\n')
+    git('add', '.')
+    git('commit', '-m', 'Add nested file')
+    await writeFile(filePath, 'modified\n')
+    await mkdir(outside)
+    await link(filePath, outsideFile)
+    const view = await getFileView(repo, 'nested/shared.txt')
+
+    fs.copyFile = async (source, destination, mode) => {
+      const result = await originalCopyFile(source, destination, mode)
+      const destinationPath = String(destination)
+      const stagingDirectory = dirname(destinationPath)
+      const stagingName = basename(stagingDirectory)
+      if (
+        !swapped &&
+        dirname(stagingDirectory) === parent &&
+        stagingName.startsWith('.git-stacks-')
+      ) {
+        swapped = true
+        await rename(parent, movedParent)
+        await symlink(outside, parent)
+        const outsideStaging = join(outside, stagingName)
+        await mkdir(outsideStaging)
+        await originalCopyFile(
+          join(movedParent, stagingName, 'replacement'),
+          join(outsideStaging, 'replacement'),
+        )
+      }
+      return result
+    }
+    await assert.rejects(
+      runAction(repo, {
+        type: 'discardFile',
+        path: 'nested/shared.txt',
+        fingerprint: view.fingerprint,
+      }),
+      /parent directory changed|Symlink paths are not supported/u,
+    )
+    assert.equal(swapped, true)
+
+    assert.equal(await readFile(outsideFile, 'utf8'), 'modified\n')
+  } finally {
+    fs.copyFile = originalCopyFile
+    await cleanup(root)
+  }
+})
+
+test('file actions accept POSIX filenames with backslash dot segments', async (t) => {
+  if (process.platform === 'win32') {
+    t.skip('Backslash is a path separator on Windows')
+    return
+  }
+  const { root, repo } = await fixture()
+  const relativePath = 'literal\\..\\filename.txt'
+  const absolutePath = join(repo, relativePath)
+  try {
+    await writeFile(absolutePath, 'untracked\n')
+    const view = await getFileView(repo, relativePath)
+    await runAction(repo, {
+      type: 'discardFile',
+      path: relativePath,
+      fingerprint: view.fingerprint,
+    })
+
+    await assert.rejects(readFile(absolutePath))
+    assert.equal(
+      (await getSnapshot(repo)).files.some((file) => file.path === relativePath),
+      false,
+    )
+  } finally {
+    await cleanup(root)
+  }
+})
+
+test('snapshot restores a file quarantined before replacement completed', async () => {
+  const { root, repo, git } = await fixture()
+  try {
+    const transactionId = '22222222-2222-4222-8222-222222222222'
+    const stagingName = `.git-stacks-${transactionId}`
+    const stagingDirectory = join(repo, stagingName)
+    const targetPath = join(repo, 'shared.txt')
+    await writeFile(targetPath, 'user data before crash\n')
+    await mkdir(stagingDirectory, { mode: 0o700 })
+    const replacementPath = join(stagingDirectory, 'replacement')
+    await writeFile(replacementPath, 'replacement\n')
+    const [rootInfo, stagingInfo, originalInfo, replacementInfo] = await Promise.all([
+      lstat(repo),
+      lstat(stagingDirectory),
+      lstat(targetPath),
+      lstat(replacementPath),
+    ])
+    await rename(targetPath, join(stagingDirectory, 'original'))
+
+    const journalDirectory = join(
+      resolve(repo, git('rev-parse', '--git-dir')),
+      'git-stacks-file-actions',
+    )
+    await mkdir(journalDirectory, { mode: 0o700 })
+    const journalPath = join(journalDirectory, `${transactionId}.json`)
+    await writeFile(
+      journalPath,
+      JSON.stringify({
+        version: 1,
+        transactionId,
+        ownerPid: 999999999,
+        phase: 'prepared',
+        repoPath: await resolveRepository(repo),
+        relativePath: 'shared.txt',
+        stagingName,
+        stagingIdentity: { dev: String(stagingInfo.dev), ino: String(stagingInfo.ino) },
+        parentDirectories: [
+          { relativePath: '', dev: String(rootInfo.dev), ino: String(rootInfo.ino) },
+        ],
+        originalIdentity: { dev: String(originalInfo.dev), ino: String(originalInfo.ino) },
+        replacementIdentity: {
+          dev: String(replacementInfo.dev),
+          ino: String(replacementInfo.ino),
+        },
+      }),
+    )
+
+    const snapshot = await getSnapshot(repo)
+    assert.equal(await readFile(targetPath, 'utf8'), 'user data before crash\n')
+    assert.equal(
+      snapshot.files.some((file) => file.path === 'shared.txt'),
+      true,
+    )
+    await assert.rejects(readFile(join(stagingDirectory, 'original')))
+    await assert.rejects(readFile(replacementPath))
+    await assert.rejects(readFile(journalPath))
+  } finally {
+    await cleanup(root)
+  }
+})
+
 test('commit, merge, cherry-pick, and revert reject a ref advanced after preflight', async () => {
   for (const command of ['commit', 'merge', 'cherry-pick', 'revert'] as const) {
     const { root, repo, git } = await fixture()
@@ -835,12 +1205,20 @@ test('the HEAD guard preserves configured user hooks', async () => {
   try {
     const hooks = join(root, 'custom-hooks')
     const marker = join(root, 'pre-commit-ran')
+    const helpers = join(hooks, 'helpers')
     await mkdir(hooks)
+    await mkdir(helpers)
     await writeFile(
       join(hooks, 'pre-commit'),
-      '#!/bin/sh\nprintf called > "$GIT_STACKS_TEST_HOOK_MARKER"\n',
+      '#!/bin/sh\nset -e\n. "$(dirname "$0")/helpers/common.sh"\n',
       { mode: 0o755 },
     )
+    await writeFile(
+      join(helpers, 'common.sh'),
+      'printf called > "$GIT_STACKS_TEST_HOOK_MARKER"\n',
+      { mode: 0o644 },
+    )
+    await writeFile(join(hooks, 'pre-commit.sample'), '#!/bin/sh\nexit 1\n', { mode: 0o644 })
     git('config', 'core.hooksPath', hooks)
     await writeFile(join(repo, 'staged.txt'), 'staged\n')
     git('add', '.')
