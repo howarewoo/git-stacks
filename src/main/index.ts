@@ -15,6 +15,7 @@ import {
 import { previewStack } from './stacks'
 import { getPullRequest } from './github'
 import type { GitAction, RecentRepository, StackKind } from '../shared/types'
+import { RepositoryOperations } from './repository-operations'
 
 const bundleDir = dirname(fileURLToPath(import.meta.url))
 protocol.registerSchemesAsPrivileged([
@@ -40,7 +41,7 @@ if (!app.isPackaged && process.env.GIT_STACKS_USER_DATA) {
 let window: BrowserWindow | null = null
 let activeRepository: string | null = null
 let recents: RecentRepository[] = []
-let busy = false
+const operations = new RepositoryOperations()
 const productionOrigin = 'app://git-stacks'
 const devUrl = !app.isPackaged ? process.env.ELECTRON_RENDERER_URL : undefined
 if (devUrl) {
@@ -68,19 +69,19 @@ function validateSender(event: IpcMainInvokeEvent) {
   if (origin !== trustedOrigin) throw new Error('Untrusted application origin.')
 }
 
-async function exclusively<T>(operation: () => Promise<T>): Promise<T> {
-  if (busy) throw new Error('Another repository operation is still running. Wait for it to finish.')
-  busy = true
-  try {
-    return await operation()
-  } finally {
-    busy = false
-  }
-}
-
 function repository() {
   if (!activeRepository) throw new Error('Open a local Git repository first.')
   return activeRepository
+}
+
+function readRepository<T>(operation: (root: string) => Promise<T>): Promise<T> {
+  const root = repository()
+  return operations.read(() => {
+    if (root !== activeRepository) {
+      throw new Error('The active repository changed. Reopen this view to load its current state.')
+    }
+    return operation(root)
+  })
 }
 
 async function remember(path: string) {
@@ -101,7 +102,7 @@ function installHandlers() {
   })
   ipcMain.handle('repositories:open', async (event, requestedPath: unknown) => {
     validateSender(event)
-    return exclusively(async () => {
+    return operations.write(async () => {
       let selected: string
       if (requestedPath !== undefined) {
         if (
@@ -129,38 +130,37 @@ function installHandlers() {
   })
   ipcMain.handle('repository:refresh', async (event) => {
     validateSender(event)
-    return exclusively(() => getSnapshot(repository()))
+    return readRepository(getSnapshot)
   })
   ipcMain.handle('repository:action', async (event, action: GitAction) => {
     validateSender(event)
-    return exclusively(() => runAction(repository(), action))
+    return operations.write(() => runAction(repository(), action))
   })
   ipcMain.handle('repository:file', (event, filePath: string) => {
     validateSender(event)
-    return exclusively(() => getFileView(repository(), filePath))
+    return readRepository((root) => getFileView(root, filePath))
   })
   ipcMain.handle('repository:history', (event, ref: string, skip: number) => {
     validateSender(event)
-    return exclusively(() => getHistory(repository(), ref, skip))
+    return readRepository((root) => getHistory(root, ref, skip))
   })
   ipcMain.handle('repository:commit-diff', (event, oid: string) => {
     validateSender(event)
-    return exclusively(() => getCommitDiff(repository(), oid))
+    return readRepository((root) => getCommitDiff(root, oid))
   })
   ipcMain.handle('repository:push-preview', (event) => {
     validateSender(event)
-    return exclusively(() => getPushPreview(repository()))
+    return readRepository(getPushPreview)
   })
   ipcMain.handle('repository:stack-preview', (event, kind: StackKind, branch: string) => {
     validateSender(event)
-    return exclusively(async () => {
-      const root = repository()
+    return readRepository(async (root) => {
       return previewStack(root, await getSnapshot(root), kind, branch)
     })
   })
   ipcMain.handle('repository:pull-request', (event, number: number) => {
     validateSender(event)
-    return exclusively(() => getPullRequest(repository(), number))
+    return readRepository((root) => getPullRequest(root, number))
   })
   ipcMain.handle('external:open', async (event, value: unknown) => {
     validateSender(event)

@@ -44,6 +44,12 @@ export function workflowError(error: unknown): string {
 
 const stackLabels = { restack: 'Restack', publish: 'Publish', merge: 'Merge pull request' }
 
+type WorkflowData =
+  | { kind: 'stack'; value: StackPreview }
+  | { kind: 'forcePush'; value: PushPreview }
+  | { kind: 'pr'; value: PullRequest & { body: string } }
+  | { kind: 'local' }
+
 export function WorkflowDialog({
   request,
   snapshot,
@@ -111,35 +117,57 @@ export function WorkflowDialog({
   )
     parentNames.push(snapshot.defaultBranch)
 
+  const initialLoad = React.useRef<{
+    request: WorkflowRequest
+    promise: Promise<WorkflowData>
+  } | null>(null)
+
   React.useEffect(() => {
     let active = true
-    const load = async () => {
-      setError(null)
-      try {
+    setError(null)
+    setLoading(['stack', 'forcePush', 'pr'].includes(request.kind))
+    setLoaded(false)
+    if (initialLoad.current?.request !== request) {
+      const load = async (): Promise<WorkflowData> => {
         if (request.kind === 'stack') {
-          const next = await window.desktop.stackPreview(request.operation, request.branch)
-          if (!active) return
-          setPreview(next)
-          setTitles(Object.fromEntries(next.steps.map((step) => [step.branch, step.title])))
-        } else if (request.kind === 'forcePush') {
-          const next = await window.desktop.pushPreview()
-          if (active) setPush(next)
-        } else if (request.kind === 'pr') {
-          const next = await window.desktop.pullRequest(request.number)
-          if (!active) return
-          setPr(next)
-          setPrTitle(next.title)
-          setBody(next.body)
-          setDraft(next.draft)
+          return {
+            kind: 'stack',
+            value: await window.desktop.stackPreview(request.operation, request.branch),
+          }
         }
-        if (active) setLoaded(true)
-      } catch (value) {
-        if (active) setError(workflowError(value))
-      } finally {
-        if (active) setLoading(false)
+        if (request.kind === 'forcePush') {
+          return { kind: 'forcePush', value: await window.desktop.pushPreview() }
+        }
+        if (request.kind === 'pr') {
+          return { kind: 'pr', value: await window.desktop.pullRequest(request.number) }
+        }
+        return { kind: 'local' }
       }
+      initialLoad.current = { request, promise: load() }
     }
-    void load()
+    void initialLoad.current.promise.then(
+      (data) => {
+        if (!active) return
+        if (data.kind === 'stack') {
+          setPreview(data.value)
+          setTitles(Object.fromEntries(data.value.steps.map((step) => [step.branch, step.title])))
+        } else if (data.kind === 'forcePush') {
+          setPush(data.value)
+        } else if (data.kind === 'pr') {
+          setPr(data.value)
+          setPrTitle(data.value.title)
+          setBody(data.value.body)
+          setDraft(data.value.draft)
+        }
+        setLoaded(true)
+        setLoading(false)
+      },
+      (value) => {
+        if (!active) return
+        setError(workflowError(value))
+        setLoading(false)
+      },
+    )
     return () => {
       active = false
     }
@@ -704,6 +732,7 @@ export function WorkflowDialog({
                 ) ? (
                   <Button
                     variant="secondary"
+                    tooltip="Check the PR’s current head, reviews, checks, and allowed merge methods before merging."
                     onClick={() =>
                       onRequest({ kind: 'stack', operation: 'merge', branch: pr.head })
                     }
@@ -738,6 +767,11 @@ export function WorkflowDialog({
                           <Button
                             variant="danger"
                             size="sm"
+                            tooltip={
+                              pr.state === 'OPEN'
+                                ? 'Close this PR without merging or deleting its branch. Unsaved edits are not applied.'
+                                : 'Reopen this PR on GitHub. Unsaved edits are not applied.'
+                            }
                             onClick={() =>
                               run(
                                 {
@@ -753,7 +787,16 @@ export function WorkflowDialog({
                         </div>
                       </>
                     ) : (
-                      <Button size="sm" variant="ghost" onClick={() => setConfirmPrState(true)}>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => setConfirmPrState(true)}
+                        tooltip={
+                          pr.state === 'OPEN'
+                            ? 'Review closing this PR without merging. Its branch and commits will remain.'
+                            : 'Review reopening this closed PR on GitHub.'
+                        }
+                      >
                         {pr.state === 'OPEN' ? 'Close without merging…' : 'Reopen pull request…'}
                       </Button>
                     )}
@@ -770,7 +813,12 @@ export function WorkflowDialog({
           {!loading &&
           (error || actionError) &&
           ['stack', 'forcePush', 'pr'].includes(request.kind) ? (
-            <Button variant="secondary" disabled={busy} onClick={() => onRequest(request)}>
+            <Button
+              variant="secondary"
+              disabled={busy}
+              onClick={() => onRequest(request)}
+              tooltip="Read the latest repository and GitHub state to replace this preview. No Git changes are made."
+            >
               Reload preview
             </Button>
           ) : null}
@@ -794,6 +842,7 @@ export function WorkflowDialog({
               request.operation === 'merge' ? (
                 <Button
                   variant="accent"
+                  tooltip="Preview rebasing the remaining branches onto the merged base. No changes are made yet."
                   onClick={() =>
                     onRequest({ kind: 'stack', branch: request.branch, operation: 'restack' })
                   }
@@ -805,6 +854,7 @@ export function WorkflowDialog({
                   <Button
                     key={root.branch}
                     variant="accent"
+                    tooltip="Review remote updates and PR base changes before publishing this remaining stack."
                     onClick={() =>
                       onRequest({ kind: 'stack', branch: root.branch, operation: 'publish' })
                     }
@@ -816,7 +866,12 @@ export function WorkflowDialog({
                 ))
               )
             ) : (
-              <Button type="submit" variant={destructive ? 'danger' : 'accent'} disabled={disabled}>
+              <Button
+                type="submit"
+                variant={destructive ? 'danger' : 'accent'}
+                disabled={disabled}
+                tooltip={description}
+              >
                 {busy ? <LoaderCircle className="size-3.5 animate-spin" /> : null}
                 {actionLabel}
               </Button>

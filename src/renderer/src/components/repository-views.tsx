@@ -70,6 +70,11 @@ export function OperationBanner({
               disabled={busy || conflicts > 0}
               size="sm"
               variant="accent"
+              tooltip={
+                stack
+                  ? 'Resume the stack restack locally using staged resolutions. Blocked until every conflicted file is staged.'
+                  : `Resume the ${label.toLowerCase()} locally using staged resolutions. Blocked until every conflicted file is staged.`
+              }
               onClick={() =>
                 runAction(
                   { type: stack ? 'stackContinue' : 'operationContinue' },
@@ -84,6 +89,7 @@ export function OperationBanner({
                 disabled={busy}
                 size="sm"
                 variant="secondary"
+                tooltip="Skip the current commit without applying it locally. Its conflict resolutions are discarded."
                 onClick={() =>
                   onRequest({
                     kind: 'confirm',
@@ -103,6 +109,11 @@ export function OperationBanner({
               disabled={busy}
               size="sm"
               variant="secondary"
+              tooltip={
+                stack
+                  ? 'Abort the restack and restore completed branches to their saved tips. In-progress resolutions are discarded; changed external refs stop the rollback.'
+                  : 'Abort this operation and restore the pre-operation state locally. In-progress resolutions are discarded.'
+              }
               onClick={() =>
                 onRequest({
                   kind: 'confirm',
@@ -317,6 +328,11 @@ export function FileInspector({
                   size="sm"
                   variant="secondary"
                   disabled={busy}
+                  tooltip={
+                    rebase
+                      ? 'Keep the new-base (ours) version for this file. Confirming stages it and replaces manual edits.'
+                      : 'Keep the current-branch (ours) version for this file. Confirming stages it and replaces manual edits.'
+                  }
                   onClick={() => setPending('ours')}
                 >
                   {rebase ? 'Use new base (ours)…' : 'Use ours…'}
@@ -325,6 +341,11 @@ export function FileInspector({
                   size="sm"
                   variant="secondary"
                   disabled={busy}
+                  tooltip={
+                    rebase
+                      ? 'Keep the replayed-commit (theirs) version for this file. Confirming stages it and replaces manual edits.'
+                      : 'Keep the incoming (theirs) version for this file. Confirming stages it and replaces manual edits.'
+                  }
                   onClick={() => setPending('theirs')}
                 >
                   {rebase ? 'Use replayed commit (theirs)…' : 'Use theirs…'}
@@ -335,7 +356,6 @@ export function FileInspector({
                   <label htmlFor="conflict-content">Edit the resolved file</label>
                   <textarea
                     id="conflict-content"
-                    className="conflict-content"
                     rows={12}
                     spellCheck={false}
                     value={content}
@@ -345,7 +365,12 @@ export function FileInspector({
                   <p className="workflow-note">
                     Remove conflict markers, keep the intended content, then save and stage.
                   </p>
-                  <Button variant="accent" disabled={busy} onClick={() => resolve('manual')}>
+                  <Button
+                    variant="accent"
+                    disabled={busy}
+                    onClick={() => resolve('manual')}
+                    tooltip="Save the edited content and stage it to mark this file resolved. Local working-tree change only; continue the operation afterwards."
+                  >
                     <Check className="size-3.5" />
                     Save and stage resolution
                   </Button>
@@ -384,6 +409,7 @@ export function FileInspector({
                 size="sm"
                 variant="danger"
                 disabled={busy}
+                tooltip="Discard unstaged working-tree changes only; staged content is kept. Untracked files are deleted and cannot be recovered through Git."
                 onClick={() => setPending('discard')}
               >
                 Discard unstaged changes…
@@ -411,6 +437,11 @@ export function FileInspector({
                   variant="danger"
                   size="sm"
                   disabled={busy}
+                  tooltip={
+                    pending === 'discard'
+                      ? 'Confirm discarding the displayed unstaged changes. Untracked files are deleted and cannot be recovered through Git.'
+                      : `Confirm replacing this file with the ${pending} version and staging it. Manual edits are replaced.`
+                  }
                   onClick={() => (pending === 'discard' ? discard() : resolve(pending))}
                 >
                   Confirm {pending === 'discard' ? 'discard' : 'resolution'}
@@ -618,6 +649,7 @@ export function HistoryView({
                 size="sm"
                 variant="secondary"
                 disabled={!actionable || diffLoading}
+                tooltip={`Copy this commit onto ${snapshot.currentBranch ?? 'the current branch'} locally as a new commit. Remote branches stay unchanged until pushed.`}
                 onClick={() =>
                   onRequest({ kind: 'commitAction', commit: selected, mode: 'cherryPick' })
                 }
@@ -628,6 +660,7 @@ export function HistoryView({
                 size="sm"
                 variant="secondary"
                 disabled={!actionable || diffLoading}
+                tooltip={`Create a new local commit on ${snapshot.currentBranch ?? 'the current branch'} that undoes this commit. Original history is kept; remote stays unchanged until pushed.`}
                 onClick={() =>
                   onRequest({ kind: 'commitAction', commit: selected, mode: 'revert' })
                 }
@@ -834,6 +867,7 @@ export function StackView({
                       size="sm"
                       variant="ghost"
                       disabled={blocked}
+                      tooltip="Record the intended parent locally without rewriting commits. Preview Restack next to move this branch and its descendants."
                       onClick={() => onRequest({ kind: 'parent', branch })}
                     >
                       Set parent…
@@ -876,6 +910,7 @@ export function StackView({
                           size="sm"
                           variant="secondary"
                           disabled={blocked}
+                          tooltip="Preview merging this pull request into the default branch. Nothing is merged until confirmed; remaining branches still need restack and publish."
                           onClick={() =>
                             onRequest({ kind: 'stack', branch: branch.name, operation: 'merge' })
                           }

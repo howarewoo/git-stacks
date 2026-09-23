@@ -887,6 +887,7 @@ function App() {
         <span className="toolbar-divider" />
         <Button
           disabled={!snapshot || isBusy || operationActive}
+          tooltip="Create a local branch from an existing branch and switch to it. Records its stack parent; nothing is pushed."
           onClick={openBranchDialog}
           size="sm"
           variant="accent"
@@ -898,6 +899,7 @@ function App() {
           <DropdownMenu.Trigger asChild>
             <Button
               aria-label="More Git actions"
+              tooltip="More actions: preview merge, force push with lease, stash, or browse history."
               size="icon-sm"
               variant="secondary"
               disabled={!snapshot || isBusy}
@@ -1008,7 +1010,12 @@ function App() {
               : 'Create a branch to start a stack.'}
           </p>
           {!search ? (
-            <Button onClick={openBranchDialog} size="sm" variant="accent">
+            <Button
+              onClick={openBranchDialog}
+              size="sm"
+              variant="accent"
+              tooltip="Create a local branch to start a stack. Switches to it; nothing is pushed."
+            >
               <Plus className="size-3.5" />
               New branch
             </Button>
@@ -1151,6 +1158,7 @@ function App() {
           </div>
           <Button
             disabled={snapshot.files.length === 0 || isBusy}
+            tooltip="Shelve tracked working changes into a local stash and restore a clean tree. Choose whether untracked files are included."
             onClick={() => openWorkflow({ kind: 'stash' })}
             size="sm"
             variant="secondary"
@@ -1179,6 +1187,11 @@ function App() {
                 size="sm"
                 variant="ghost"
                 disabled={isBusy || !visibleStagedFiles.length}
+                tooltip={
+                  fileSearch
+                    ? 'Remove the shown files from the index; working-tree edits remain. Hidden staged files stay staged.'
+                    : 'Remove all staged changes from the index; working-tree edits remain. Nothing is discarded.'
+                }
                 onClick={() =>
                   runAction(
                     {
@@ -1223,6 +1236,13 @@ function App() {
                 size="sm"
                 variant="ghost"
                 disabled={isBusy || !visibleUnstagedFiles.length || conflictedFiles.length > 0}
+                tooltip={
+                  conflictedFiles.length > 0
+                    ? 'Resolve conflicts before staging — conflicted files cannot be staged in bulk.'
+                    : fileSearch
+                      ? 'Stage the shown working-tree changes for the next commit. Hidden unstaged files stay unstaged.'
+                      : 'Stage all working-tree changes for the next commit. Local index only; nothing is committed yet.'
+                }
                 onClick={() =>
                   runAction(
                     { type: 'stage', paths: visibleUnstagedFiles.map((file) => file.path) },
@@ -1303,6 +1323,11 @@ function App() {
               }
               type="submit"
               variant="accent"
+              tooltip={
+                commitAmend
+                  ? 'Preview rewriting the last commit with the new message plus staged changes. Rewrites local history; pushed commits will need force push.'
+                  : 'Create a local commit from staged changes only. Unstaged edits stay in the working tree; nothing is pushed.'
+              }
             >
               {busyAction === 'Commit staged changes' ? (
                 <LoaderCircle className="size-3.5 animate-spin" />
@@ -1344,6 +1369,11 @@ function App() {
       </button>
       <Button
         disabled={isBusy}
+        tooltip={
+          action === 'stage'
+            ? "Stage this file's working-tree changes for the next commit. Local index only."
+            : 'Remove this file from the index; its working-tree edits remain. Nothing is discarded.'
+        }
         onClick={() =>
           runAction(
             {
@@ -1377,6 +1407,14 @@ function App() {
           </div>
           <Button
             disabled={!selectedBranch?.current || !snapshot.github.available || isBusy}
+            tooltip={
+              !snapshot.github.available
+                ? snapshot.github.message ||
+                  'Connect an authenticated GitHub repository to create pull requests.'
+                : !selectedBranch?.current
+                  ? 'Switch to a local branch to open its pull request on GitHub.'
+                  : 'Review creating a PR from this branch’s published upstream. Unpushed commits are not included.'
+            }
             onClick={openPrDialog}
             size="sm"
             variant="accent"
@@ -1452,6 +1490,7 @@ function App() {
           </div>
           <Button
             disabled={snapshot.files.length === 0 || isBusy}
+            tooltip="Shelve current working changes into a local stash and restore a clean tree. Choose whether untracked files are included."
             onClick={() => openWorkflow({ kind: 'stash' })}
             size="sm"
             variant="accent"
@@ -1471,6 +1510,7 @@ function App() {
                 </span>
                 <Button
                   disabled={isBusy || operationActive}
+                  tooltip="Restore this stash’s working changes and saved staging state, and keep the stash. May conflict with current edits."
                   onClick={() =>
                     runAction({ type: 'stashApply', ref: stash.ref, oid: stash.oid }, 'Apply stash')
                   }
@@ -1481,6 +1521,7 @@ function App() {
                 </Button>
                 <Button
                   disabled={isBusy}
+                  tooltip="Reapply this stash to the working tree, then delete it from the list. Stops on conflicts so saved changes are not lost silently."
                   onClick={() =>
                     runAction({ type: 'stashPop', ref: stash.ref, oid: stash.oid }, 'Pop stash')
                   }
@@ -1492,6 +1533,7 @@ function App() {
                 </Button>
                 <Button
                   disabled={isBusy || operationActive}
+                  tooltip="Preview permanently removing this saved stash without applying it. This app cannot restore a dropped stash."
                   onClick={() =>
                     openWorkflow({
                       kind: 'confirm',
@@ -1634,6 +1676,7 @@ function App() {
               <Button
                 variant="accent"
                 disabled={isBusy || operationActive}
+                tooltip="Preview rebasing this stack onto updated parents locally, branch by branch. Remotes stay unchanged until published."
                 onClick={() =>
                   openWorkflow({ kind: 'stack', operation: 'restack', branch: selectedBranch.name })
                 }
@@ -1644,6 +1687,12 @@ function App() {
               <Button
                 variant="secondary"
                 disabled={isBusy || operationActive || !snapshot.github.available}
+                tooltip={
+                  !snapshot.github.available
+                    ? snapshot.github.message ||
+                      'Connect an authenticated GitHub repository to publish stacks.'
+                    : 'Push reviewed stack tips and update their pull requests without rebasing. Requires a clean, restacked stack.'
+                }
                 onClick={() =>
                   openWorkflow({ kind: 'stack', operation: 'publish', branch: selectedBranch.name })
                 }
@@ -1654,6 +1703,7 @@ function App() {
               <Button
                 variant="ghost"
                 disabled={isBusy || operationActive}
+                tooltip="Record a different local parent without rewriting commits. Preview Restack next to move this branch and descendants."
                 onClick={() => openWorkflow({ kind: 'parent', branch: selectedBranch })}
               >
                 Set stack parent…
@@ -1662,6 +1712,7 @@ function App() {
                 <Button
                   variant="secondary"
                   disabled={isBusy || operationActive}
+                  tooltip="Preview merging this open pull request into the default branch. Nothing merges until confirmed; remaining branches still need restack."
                   onClick={() =>
                     openWorkflow({ kind: 'stack', operation: 'merge', branch: selectedBranch.name })
                   }
@@ -1714,12 +1765,14 @@ function App() {
                   }
                   size="sm"
                   variant="secondary"
+                  tooltip="Open this pull request in the browser. Read-only; no local or remote changes."
                 >
                   <ExternalLink className="size-3.5" />
                   Open on GitHub
                 </Button>
                 <Button
                   disabled={isBusy}
+                  tooltip="Preview checks, reviews, and merge or close options for this pull request. Nothing changes until confirmed."
                   size="sm"
                   variant="accent"
                   onClick={() => openWorkflow({ kind: 'pr', number: selectedPullRequest.number })}
@@ -1734,6 +1787,14 @@ function App() {
               <p>No pull request for this branch.</p>
               <Button
                 disabled={!selectedBranch.current || !snapshot.github.available || isBusy}
+                tooltip={
+                  !snapshot.github.available
+                    ? snapshot.github.message ||
+                      'Connect an authenticated GitHub repository to create pull requests.'
+                    : !selectedBranch.current
+                      ? 'Switch to this branch to open its pull request on GitHub.'
+                      : 'Review creating a PR from this branch’s published upstream. Unpushed commits are not included.'
+                }
                 onClick={openPrDialog}
                 size="sm"
                 variant="secondary"
@@ -1752,6 +1813,11 @@ function App() {
             <h3>Branch actions</h3>
             <Button
               disabled={selectedBranch.current || isBusy || operationActive}
+              tooltip={
+                selectedBranch.current
+                  ? 'This is already the checked-out branch.'
+                  : 'Switch the working tree to this branch. Requires a clean tree; remotes create a local tracking copy.'
+              }
               onClick={() =>
                 runAction({ type: 'switch', ref: selectedBranch.ref }, 'Switch branch')
               }
@@ -1762,6 +1828,7 @@ function App() {
             </Button>
             <Button
               disabled={!canRebase || isBusy}
+              tooltip="Rebase only the current branch onto its recorded parent locally. Rewrites its history; use Restack to move descendants together."
               onClick={() =>
                 openWorkflow({
                   kind: 'confirm',
@@ -1791,6 +1858,11 @@ function App() {
                   disabled={
                     isBusy || operationActive || selectedBranch.name === snapshot.defaultBranch
                   }
+                  tooltip={
+                    selectedBranch.name === snapshot.defaultBranch
+                      ? 'The default branch cannot be renamed here.'
+                      : 'Rename this local branch. Remote tracking and open pull requests may need updating.'
+                  }
                   onClick={() => openWorkflow({ kind: 'rename', branch: selectedBranch })}
                 >
                   Rename local branch…
@@ -1798,6 +1870,7 @@ function App() {
                 <Button
                   variant="secondary"
                   disabled={isBusy || operationActive}
+                  tooltip="Choose which remote branch this branch pushes to and pulls from. Local config only; no commits move."
                   onClick={() => openWorkflow({ kind: 'upstream', branch: selectedBranch })}
                 >
                   Set upstream…
@@ -1811,6 +1884,13 @@ function App() {
                     operationActive
                   }
                   onClick={openDeleteDialog}
+                  tooltip={
+                    selectedBranch.name === snapshot.defaultBranch
+                      ? 'The default branch cannot be deleted.'
+                      : selectedBranch.current
+                        ? 'Cannot delete the checked-out branch — switch away first. Remotes and pull requests are kept.'
+                        : 'Delete this local branch. Remotes and pull requests are kept; unmerged work needs force and can orphan commits.'
+                  }
                   variant="danger"
                 >
                   <Trash2 className="size-3.5" />
@@ -1835,6 +1915,7 @@ function App() {
                   selectedBranch.name.endsWith(`/${snapshot.defaultBranch}`)
                 }
                 onClick={() => openWorkflow({ kind: 'deleteRemote', branch: selectedBranch })}
+                tooltip="Preview removing this branch from its remote. Local copies remain; open PRs may close and collaborators must prune."
               >
                 <Trash2 className="size-3.5" />
                 Delete remote branch…
@@ -2060,6 +2141,11 @@ function App() {
                 }
                 type="submit"
                 variant="danger"
+                tooltip={
+                  deleteForce && deleteConfirmation !== deleteTarget?.branch.name
+                    ? 'Type the branch name to enable force deletion. Unmerged commits can become unreachable.'
+                    : 'Delete this local branch now. Remotes and pull requests are kept.'
+                }
               >
                 {busyAction === 'Delete branch' ? (
                   <LoaderCircle className="size-3.5 animate-spin" />
@@ -2113,7 +2199,12 @@ function App() {
               <Button onClick={() => setNewBranchOpen(false)} variant="secondary">
                 Cancel
               </Button>
-              <Button disabled={isBusy} type="submit" variant="accent">
+              <Button
+                disabled={isBusy}
+                type="submit"
+                variant="accent"
+                tooltip="Create the local branch, record its stack parent, and switch to it. Nothing is pushed."
+              >
                 {busyAction === 'Create branch' ? (
                   <LoaderCircle className="size-3.5 animate-spin" />
                 ) : (
@@ -2186,6 +2277,14 @@ function App() {
               </Button>
               <Button
                 disabled={!snapshot?.github.available || !selectedBranch?.current || isBusy}
+                tooltip={
+                  !snapshot?.github.available
+                    ? snapshot?.github.message ||
+                      'Connect an authenticated GitHub repository to create pull requests.'
+                    : !selectedBranch?.current
+                      ? 'Switch to a local branch to create its pull request.'
+                      : 'Create the PR using this branch’s published upstream. This does not push newer local commits.'
+                }
                 type="submit"
                 variant="accent"
               >
