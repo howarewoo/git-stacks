@@ -569,28 +569,12 @@ function safeJournalPath(locksDir: string, transactionId: unknown): string | nul
 
 async function isSafeBranchLockPath(
   repoPath: string,
-  commonDir: string,
-  gitDir: string,
   candidatePath: unknown,
   branch: unknown,
 ): Promise<boolean> {
-  if (typeof candidatePath !== 'string' || !candidatePath) return false
+  if (typeof candidatePath !== 'string' || !path.isAbsolute(candidatePath)) return false
   if (!candidatePath.endsWith('.lock')) return false
   if (typeof branch !== 'string' || !branch.trim()) return false
-
-  const resolved = path.resolve(candidatePath)
-  if (!resolved.endsWith('.lock')) return false
-
-  const commonHeads = path.resolve(commonDir, 'refs', 'heads')
-  const gitHeads = path.resolve(gitDir, 'refs', 'heads')
-
-  const relCommon = path.relative(commonHeads, resolved)
-  const inCommon = !relCommon.startsWith('..') && !path.isAbsolute(relCommon) && relCommon !== ''
-
-  const relGit = path.relative(gitHeads, resolved)
-  const inGit = !relGit.startsWith('..') && !path.isAbsolute(relGit) && relGit !== ''
-
-  if (!inCommon && !inGit) return false
 
   try {
     await runGit(repoPath, ['check-ref-format', '--branch', branch])
@@ -600,21 +584,16 @@ async function isSafeBranchLockPath(
     if (!refPathValue) return false
 
     let refRoot: string | null = null
-    try {
-      const refStorage = stripTrailingNewline(
-        await runGit(repoPath, ['config', '--get', 'extensions.refStorage']),
-      )
-      if (refStorage && refStorage.toLowerCase() === 'files') {
+    const refStorage = await getConfigValue(repoPath, 'extensions.refstorage')
+    if (refStorage) {
+      try {
         refRoot = localFilesRefStoragePath(refStorage)
+      } catch {
+        return false
       }
-    } catch {
-      // Ignore
     }
     const expectedLockPath = `${gitPathOnDisk(repoPath, refPathValue, refRoot)}.lock`
-    if (resolved !== path.resolve(expectedLockPath)) {
-      return false
-    }
-    return true
+    return path.resolve(candidatePath) === path.resolve(expectedLockPath)
   } catch {
     return false
   }
@@ -704,18 +683,13 @@ async function tryRecoverStaleBranchLock(
   branch: string,
 ): Promise<boolean> {
   let commonDir = ''
-  let gitDir = ''
   try {
     commonDir = stripTrailingNewline(await runGit(repoPath, ['rev-parse', '--git-common-dir']))
-    gitDir = stripTrailingNewline(await runGit(repoPath, ['rev-parse', '--git-dir']))
   } catch {
     return false
   }
   const resolvedCommonDir = path.resolve(repoPath, commonDir)
-  const resolvedGitDir = path.resolve(repoPath, gitDir)
-  if (
-    !(await isSafeBranchLockPath(repoPath, resolvedCommonDir, resolvedGitDir, lockPath, branch))
-  ) {
+  if (!(await isSafeBranchLockPath(repoPath, lockPath, branch))) {
     return false
   }
 
@@ -784,47 +758,20 @@ async function tryRecoverStaleBranchLock(
     return false
   }
 
-  // Lock content is not valid JSON (e.g. empty or malformed from dead process)
-  try {
-    const entries = await fs.readdir(locksDir)
-    for (const entry of entries) {
-      if (!entry.endsWith('.json')) continue
-      const journalPath = path.join(locksDir, entry)
-      try {
-        const raw = await fs.readFile(journalPath, 'utf8')
-        const journal = JSON.parse(raw)
-        if (isRecord(journal) && journal.lockPath === lockPath && typeof journal.pid === 'number') {
-          if (!isPidRunning(journal.pid)) {
-            const unlinkResult = await unlinkIfSameIdentity(lockPath, lockStat!)
-            if (unlinkResult !== 'unlinked') {
-              return false
-            }
-            await fs.unlink(journalPath).catch(() => {})
-            return true
-          }
-          return false
-        }
-      } catch {
-        // Ignore unreadable journal
-      }
-    }
-  } catch {
-    // Ignore ENOENT
-  }
+  // A partial or malformed lock has no reliable transaction ownership. Keep it
+  // for manual recovery instead of deleting a lock that may belong to a new
+  // publisher which is still writing its metadata.
   return false
 }
 
 export async function recoverStaleBranchLocks(repoPath: string): Promise<void> {
   let commonDirRaw: string
-  let gitDirRaw: string
   try {
     commonDirRaw = stripTrailingNewline(await runGit(repoPath, ['rev-parse', '--git-common-dir']))
-    gitDirRaw = stripTrailingNewline(await runGit(repoPath, ['rev-parse', '--git-dir']))
   } catch {
     return
   }
   const commonDir = path.resolve(repoPath, commonDirRaw)
-  const gitDir = path.resolve(repoPath, gitDirRaw)
   const locksDir = path.resolve(commonDir, 'git-stacks-branch-locks')
 
   let entries: string[]
@@ -849,13 +796,7 @@ export async function recoverStaleBranchLocks(repoPath: string): Promise<void> {
         continue
       }
 
-      const safe = await isSafeBranchLockPath(
-        repoPath,
-        commonDir,
-        gitDir,
-        journalJson.lockPath,
-        journalJson.branch,
-      )
+      const safe = await isSafeBranchLockPath(repoPath, journalJson.lockPath, journalJson.branch)
       if (!safe) {
         // Untrusted/unsafe lockPath in journal for dead process: unlink bogus journal and never touch lockPath
         await fs.unlink(journalPath).catch(() => {})
@@ -901,43 +842,13 @@ export async function recoverStaleBranchLocks(repoPath: string): Promise<void> {
 
         if (isSameDeadLock) {
           const result = await unlinkIfSameIdentity(lockPath, lockStat!)
-          if (result === 'unlinked' || result === 'replaced') {
+          if (result === 'unlinked') {
             await fs.unlink(journalPath).catch(() => {})
           }
           // If 'failed', keep journal evidence
         } else if (typeof lockParsed.pid === 'number' && isPidRunning(lockParsed.pid)) {
           // A live publisher owns the lock: remove our dead journal
           await fs.unlink(journalPath).catch(() => {})
-        }
-      } else {
-        // Lock file is malformed, partial, or empty (e.g. process died before JSON write completed)
-        // Check if any other journal in locksDir belongs to a live process for this same lockPath
-        let hasLiveJournalForLock = false
-        for (const otherEntry of entries) {
-          if (otherEntry === entry || !otherEntry.endsWith('.json')) continue
-          try {
-            const otherRaw = await fs.readFile(path.join(locksDir, otherEntry), 'utf8')
-            const otherJournal = JSON.parse(otherRaw)
-            if (
-              isRecord(otherJournal) &&
-              otherJournal.lockPath === lockPath &&
-              typeof otherJournal.pid === 'number' &&
-              isPidRunning(otherJournal.pid)
-            ) {
-              hasLiveJournalForLock = true
-              break
-            }
-          } catch {
-            // Ignore
-          }
-        }
-
-        if (!hasLiveJournalForLock) {
-          // No live owner: recover partial lock using journal identity
-          const result = await unlinkIfSameIdentity(lockPath, lockStat!)
-          if (result === 'unlinked' || result === 'replaced') {
-            await fs.unlink(journalPath).catch(() => {})
-          }
         }
       }
     } catch {

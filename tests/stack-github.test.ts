@@ -1291,6 +1291,74 @@ test(
 )
 
 test(
+  'branch lock recovery accepts an exact custom files ref-storage lock path',
+  { concurrency: false },
+  async () => {
+    await withHarness(async (harness) => {
+      await createStack(harness)
+      const customRoot = join(harness.root, 'custom refs')
+      const customHeadsDir = join(customRoot, 'refs', 'heads')
+      const customLockPath = join(customHeadsDir, 'child.lock')
+      const refStorage = `files://${encodeURI(customRoot)}`
+      const shimDir = join(harness.root, 'ref-storage-shim')
+      const transactionId = 'deadbeef-dead-beef-dead-beefdeadbeef'
+      const lockData = {
+        pid: 99999999,
+        branch: 'child',
+        lockPath: customLockPath,
+        createdAt: Date.now() - 30000,
+        transactionId,
+      }
+      await mkdir(customHeadsDir, { recursive: true })
+      await mkdir(shimDir)
+      await writeFile(
+        join(shimDir, 'git'),
+        `#!/bin/sh
+repo=''
+if [ "$1" = "-C" ]; then
+  repo=$2
+  shift 2
+fi
+if [ "$1" = "config" ] && [ "$2" = "--get" ] && [ "$3" = "extensions.refstorage" ]; then
+  printf '%s\\n' "$GIT_STACKS_TEST_REF_STORAGE"
+  exit 0
+fi
+if [ "$1" = "rev-parse" ] && [ "$2" = "--git-path" ]; then
+  case "$3" in
+    refs/heads/*)
+      printf '%s\\n' "$3"
+      exit 0
+      ;;
+  esac
+fi
+if [ -n "$repo" ]; then
+  exec "$GIT_STACKS_TEST_DELEGATE_GIT" -C "$repo" "$@"
+fi
+exec "$GIT_STACKS_TEST_DELEGATE_GIT" "$@"
+`,
+        { mode: 0o755 },
+      )
+      await writeFile(customLockPath, JSON.stringify(lockData), 'utf8')
+      const locksDir = join(harness.repo, '.git', 'git-stacks-branch-locks')
+      await mkdir(locksDir, { recursive: true })
+      const journalPath = join(locksDir, `${transactionId}.json`)
+      await writeFile(journalPath, JSON.stringify(lockData), 'utf8')
+
+      process.env.PATH = `${shimDir}:${process.env.PATH || ''}`
+      process.env.GIT_STACKS_TEST_REF_STORAGE = refStorage
+      process.env.GIT_STACKS_TEST_DELEGATE_GIT = join(harness.bin, 'git')
+
+      await recoverStaleBranchLocks(harness.repo)
+      await assert.rejects(readFile(customLockPath), { code: 'ENOENT' })
+      await assert.rejects(readFile(journalPath), { code: 'ENOENT' })
+
+      await publishStack(harness)
+      assert.ok(prFor(await harness.readState(), 'child'))
+    })
+  },
+)
+
+test(
   'stale branch lock cleanup preserves live locks and removes dead journals',
   { concurrency: false },
   async () => {
@@ -1388,6 +1456,10 @@ test(
       assert.equal(remainingLock.transactionId, 'live-replacement-uuid')
       assert.equal(remainingLock.pid, process.pid)
       assert.equal(replacementCreated, true)
+      const preservedJournal = JSON.parse(
+        await readFile(join(locksDir, `${transactionId}.json`), 'utf8'),
+      )
+      assert.equal(preservedJournal.transactionId, transactionId)
     })
   },
 )
@@ -1479,7 +1551,7 @@ test(
 )
 
 test(
-  'branch lock recovery safely cleans up malformed partial lock files and allows publication',
+  'branch lock recovery preserves malformed partial locks and blocks publication',
   { concurrency: false },
   async () => {
     await withHarness(async (harness) => {
@@ -1488,7 +1560,6 @@ test(
       const locksDir = join(harness.repo, '.git', 'git-stacks-branch-locks')
       await mkdir(locksDir, { recursive: true })
 
-      // Create a dead journal
       const deadTxId = 'dead-partial-lock-uuid'
       const deadJournalPath = join(locksDir, `${deadTxId}.json`)
       const deadJournalData = {
@@ -1499,20 +1570,13 @@ test(
         transactionId: deadTxId,
       }
       await writeFile(deadJournalPath, JSON.stringify(deadJournalData), 'utf8')
-
-      // Lock file is empty or malformed (process died before writing valid JSON)
       await writeFile(lockPath, '', 'utf8')
 
-      // recoverStaleBranchLocks should clean up the partial lock and the journal
       await recoverStaleBranchLocks(harness.repo)
 
-      await assert.rejects(readFile(lockPath), { code: 'ENOENT' })
-      await assert.rejects(readFile(deadJournalPath), { code: 'ENOENT' })
-
-      // Now publication succeeds normally
-      await publishStack(harness)
-      const state = await harness.readState()
-      assert.ok(prFor(state, 'child'))
+      assert.equal(await readFile(lockPath, 'utf8'), '')
+      assert.deepEqual(JSON.parse(await readFile(deadJournalPath, 'utf8')), deadJournalData)
+      await assert.rejects(publishStack(harness), /being updated/u)
     })
   },
 )
