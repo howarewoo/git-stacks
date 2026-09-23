@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, unlink, writeFile } from 'node:fs/promises'
 import { delimiter, join } from 'node:path'
 import { test } from 'node:test'
 import { getSnapshot, runAction } from '../src/main/git'
@@ -1322,6 +1322,141 @@ test(
       const liveContent = JSON.parse(await readFile(lockPath, 'utf8'))
       assert.equal(liveContent.transactionId, 'live-lock-uuid')
       await assert.rejects(readFile(deadJournalPath), { code: 'ENOENT' })
+    })
+  },
+)
+
+test(
+  'stale branch lock cleanup preserves replacement lock when race occurs during takeover',
+  { concurrency: false },
+  async () => {
+    await withHarness(async (harness) => {
+      await createStack(harness)
+      const lockPath = join(harness.repo, '.git', 'refs', 'heads', 'child.lock')
+      const locksDir = join(harness.repo, '.git', 'git-stacks-branch-locks')
+      await mkdir(locksDir, { recursive: true })
+
+      // Create a dead lock file and its dead journal
+      const deadLockData = {
+        pid: 99999999,
+        branch: 'child',
+        lockPath,
+        createdAt: Date.now() - 30000,
+        transactionId: 'dead-lock-uuid-race',
+      }
+      await writeFile(lockPath, JSON.stringify(deadLockData), 'utf8')
+      const deadJournalPath = join(locksDir, 'dead-lock-uuid-race.json')
+      await writeFile(deadJournalPath, JSON.stringify(deadLockData), 'utf8')
+
+      // Simulate a replacement publisher replacing the lock file with a new file (different inode, live PID)
+      await unlink(lockPath)
+      const liveLockData = {
+        pid: process.pid,
+        branch: 'child',
+        lockPath,
+        createdAt: Date.now(),
+        transactionId: 'live-replacement-uuid',
+      }
+      await writeFile(lockPath, JSON.stringify(liveLockData), 'utf8')
+
+      // Running recoverStaleBranchLocks must not unlink the live replacement lock
+      await recoverStaleBranchLocks(harness.repo)
+
+      const remainingLock = JSON.parse(await readFile(lockPath, 'utf8'))
+      assert.equal(remainingLock.transactionId, 'live-replacement-uuid')
+      assert.equal(remainingLock.pid, process.pid)
+    })
+  },
+)
+
+test(
+  'branch lock recovery rejects path traversal in journal lockPath and transactionId',
+  { concurrency: false },
+  async () => {
+    await withHarness(async (harness) => {
+      await createStack(harness)
+      const locksDir = join(harness.repo, '.git', 'git-stacks-branch-locks')
+      await mkdir(locksDir, { recursive: true })
+
+      // Create victim files that must NOT be touched
+      const victimFile = join(harness.repo, 'victim.txt')
+      await writeFile(victimFile, 'do not delete me\n', 'utf8')
+
+      const victimLock = join(harness.repo, 'victim.lock')
+      await writeFile(victimLock, 'victim lock\n', 'utf8')
+
+      // Create a malicious journal with traversal in lockPath
+      const maliciousJournal1 = join(locksDir, 'malicious-lockpath.json')
+      await writeFile(
+        maliciousJournal1,
+        JSON.stringify({
+          pid: 99999999,
+          branch: 'child',
+          lockPath: victimLock,
+          createdAt: Date.now() - 30000,
+          transactionId: 'valid-tx-uuid-1',
+        }),
+        'utf8',
+      )
+
+      // Create a malicious journal with traversal in transactionId
+      const maliciousJournal2 = join(locksDir, 'malicious-txid.json')
+      await writeFile(
+        maliciousJournal2,
+        JSON.stringify({
+          pid: 99999999,
+          branch: 'child',
+          lockPath: join(harness.repo, '.git', 'refs', 'heads', 'child.lock'),
+          createdAt: Date.now() - 30000,
+          transactionId: '../../victim.txt',
+        }),
+        'utf8',
+      )
+
+      await recoverStaleBranchLocks(harness.repo)
+
+      // Victim files must still exist untouched
+      assert.equal(await readFile(victimFile, 'utf8'), 'do not delete me\n')
+      assert.equal(await readFile(victimLock, 'utf8'), 'victim lock\n')
+    })
+  },
+)
+
+test(
+  'branch lock recovery safely cleans up malformed partial lock files and allows publication',
+  { concurrency: false },
+  async () => {
+    await withHarness(async (harness) => {
+      await createStack(harness)
+      const lockPath = join(harness.repo, '.git', 'refs', 'heads', 'child.lock')
+      const locksDir = join(harness.repo, '.git', 'git-stacks-branch-locks')
+      await mkdir(locksDir, { recursive: true })
+
+      // Create a dead journal
+      const deadTxId = 'dead-partial-lock-uuid'
+      const deadJournalPath = join(locksDir, `${deadTxId}.json`)
+      const deadJournalData = {
+        pid: 99999999,
+        branch: 'child',
+        lockPath,
+        createdAt: Date.now() - 30000,
+        transactionId: deadTxId,
+      }
+      await writeFile(deadJournalPath, JSON.stringify(deadJournalData), 'utf8')
+
+      // Lock file is empty or malformed (process died before writing valid JSON)
+      await writeFile(lockPath, '', 'utf8')
+
+      // recoverStaleBranchLocks should clean up the partial lock and the journal
+      await recoverStaleBranchLocks(harness.repo)
+
+      await assert.rejects(readFile(lockPath), { code: 'ENOENT' })
+      await assert.rejects(readFile(deadJournalPath), { code: 'ENOENT' })
+
+      // Now publication succeeds normally
+      await publishStack(harness)
+      const state = await harness.readState()
+      assert.ok(prFor(state, 'child'))
     })
   },
 )
