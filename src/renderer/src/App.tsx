@@ -1,4 +1,5 @@
 import * as React from 'react'
+import { DropdownMenu } from 'radix-ui'
 import {
   AlertCircle,
   Archive,
@@ -21,6 +22,8 @@ import {
   GitMerge,
   GitPullRequest,
   Info,
+  History,
+  Layers,
   LoaderCircle,
   MoreHorizontal,
   PanelRightClose,
@@ -62,8 +65,15 @@ import {
   indexBranchesByParentName,
   sortBranchesByUpdatedAt,
 } from './lib/branches'
+import { WorkflowDialog, type WorkflowRequest } from './components/workflow-dialog'
+import {
+  FileInspector,
+  HistoryView,
+  OperationBanner,
+  StackView,
+} from './components/repository-views'
 
-type WorkspaceView = 'branches' | 'changes' | 'pullRequests' | 'stashes'
+type WorkspaceView = 'branches' | 'stacks' | 'history' | 'changes' | 'pullRequests' | 'stashes'
 type BranchFilter = 'all' | 'local' | 'remote' | 'prs'
 
 type BranchTreeInfo = {
@@ -277,6 +287,14 @@ function App() {
   const [prDraft, setPrDraft] = React.useState(false)
   const [prError, setPrError] = React.useState<string | null>(null)
   const [commitMessage, setCommitMessage] = React.useState('')
+  const [commitAmend, setCommitAmend] = React.useState(false)
+  const [inspectedPath, setInspectedPath] = React.useState<string | null>(null)
+  const [workflow, setWorkflow] = React.useState<{
+    id: number
+    repoPath: string
+    request: WorkflowRequest
+  } | null>(null)
+  const workflowSequence = React.useRef(0)
 
   const [showDetails, setShowDetails] = React.useState(true)
   const refreshSequence = React.useRef(0)
@@ -364,6 +382,10 @@ function App() {
         if (next) {
           setSnapshotAndSelection(next)
           setDeleteTarget(null)
+          setWorkflow(null)
+          setInspectedPath(null)
+          setCommitAmend(false)
+          setCommitMessage('')
           setWorkspaceView('branches')
           const repositories = await desktop.recentRepositories().catch(() => null)
           if (repositories) setRecentRepositories(repositories)
@@ -391,13 +413,31 @@ function App() {
         const next = await refreshSnapshot()
         if (action.type === 'switch' && next?.currentBranch)
           setSelectedBranchRef(`refs/heads/${next.currentBranch}`)
+        if (action.type === 'renameBranch') setSelectedBranchRef(`refs/heads/${action.name}`)
+        if (
+          action.type === 'commit' ||
+          action.type === 'switch' ||
+          action.type === 'createBranch'
+        ) {
+          setCommitAmend(false)
+          setCommitMessage('')
+        }
         return true
       } catch (value) {
         if (action.type === 'createBranch') setNewBranchError(readableError(value))
         if (action.type === 'createPr') setPrError(readableError(value))
         if (action.type === 'deleteBranch') setDeleteBranchError(readableError(value))
         setActionError(`${label} failed: ${readableError(value)}`)
-        await refreshSnapshot()
+        const next = await refreshSnapshot()
+        if (
+          next?.operation ||
+          next?.stackOperation ||
+          next?.files.some((file) => file.conflicted)
+        ) {
+          setWorkspaceView('changes')
+          setInspectedPath(next.files.find((file) => file.conflicted)?.path ?? null)
+          setWorkflow(null)
+        }
         return false
       } finally {
         busyRef.current = null
@@ -490,6 +530,13 @@ function App() {
   const branchCount = combinedBranches.length
   const pullRequestCount = snapshot?.pullRequests.length ?? 0
   const stashCount = snapshot?.stashes.length ?? 0
+  const detailsVisible = showDetails && (workspaceView === 'branches' || workspaceView === 'stacks')
+  const operationActive = Boolean(snapshot?.operation || snapshot?.stackOperation)
+  const openWorkflow = (request: WorkflowRequest) => {
+    if (!snapshot || isBusy) return
+    setActionError(null)
+    setWorkflow({ id: ++workflowSequence.current, repoPath: snapshot.path, request })
+  }
   const deleteChildren = deleteTarget
     ? allBranches.filter(
         (branch) =>
@@ -527,7 +574,7 @@ function App() {
       selectedBranch.current ||
       selectedBranch.name === snapshot.defaultBranch ||
       isBusy ||
-      snapshot.rebaseInProgress
+      operationActive
     )
       return
     setDeleteTarget({ branch: selectedBranch, repoPath: snapshot.path })
@@ -601,9 +648,25 @@ function App() {
   const submitCommit = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     const message = commitMessage.trim()
-    if (!message || stagedFiles.length === 0) return
-    const success = await runAction({ type: 'commit', message }, 'Commit staged changes')
-    if (success) setCommitMessage('')
+    if (!snapshot || !message || (!commitAmend && stagedFiles.length === 0)) return
+    const action: GitAction = {
+      type: 'commit',
+      message,
+      amend: commitAmend,
+      expectedHead: snapshot.headOid,
+    }
+    if (commitAmend) {
+      openWorkflow({
+        kind: 'confirm',
+        action,
+        title: 'Amend the last commit?',
+        description: `Replace the last commit on ${currentBranch} with the entered message and staged changes. Its commit ID will change. Restack dependent branches and use force-with-lease if already published.`,
+        label: 'Amend commit',
+        destructive: true,
+      })
+    } else {
+      await runAction(action, 'Commit staged changes')
+    }
   }
 
   const renderSidebar = () => (
@@ -638,6 +701,22 @@ function App() {
             <GitBranch className="size-4" />
             <span>Branches</span>
             <span className="nav-count">{branchCount}</span>
+          </button>
+          <button
+            className={cn('nav-item', workspaceView === 'stacks' && 'nav-item-active')}
+            onClick={() => setWorkspaceView('stacks')}
+            type="button"
+          >
+            <Layers className="size-4" />
+            <span>Stacks</span>
+          </button>
+          <button
+            className={cn('nav-item', workspaceView === 'history' && 'nav-item-active')}
+            onClick={() => setWorkspaceView('history')}
+            type="button"
+          >
+            <History className="size-4" />
+            <span>History</span>
           </button>
           <button
             className={cn('nav-item', workspaceView === 'changes' && 'nav-item-active')}
@@ -750,7 +829,7 @@ function App() {
     <div className="toolbar">
       <div className="toolbar-actions" aria-label="Repository actions">
         <Button
-          disabled={!snapshot || isBusy}
+          disabled={!snapshot || isBusy || operationActive}
           onClick={() => runAction({ type: 'fetch' }, 'Fetch')}
           size="sm"
           variant="secondary"
@@ -763,8 +842,8 @@ function App() {
           Fetch
         </Button>
         <Button
-          disabled={!snapshot || isBusy}
-          onClick={() => runAction({ type: 'pull' }, 'Pull')}
+          disabled={!snapshot || isBusy || operationActive}
+          onClick={() => openWorkflow({ kind: 'pull' })}
           size="sm"
           variant="secondary"
         >
@@ -776,7 +855,7 @@ function App() {
           Pull
         </Button>
         <Button
-          disabled={!snapshot || isBusy}
+          disabled={!snapshot || isBusy || operationActive}
           onClick={() => runAction({ type: 'push' }, 'Push')}
           size="sm"
           variant="secondary"
@@ -790,7 +869,7 @@ function App() {
         </Button>
         <span className="toolbar-divider" />
         <Button
-          disabled={!snapshot || isBusy}
+          disabled={!snapshot || isBusy || operationActive}
           onClick={openBranchDialog}
           size="sm"
           variant="accent"
@@ -798,6 +877,46 @@ function App() {
           <Plus className="size-3.5" />
           New branch
         </Button>
+        <DropdownMenu.Root>
+          <DropdownMenu.Trigger asChild>
+            <Button
+              aria-label="More Git actions"
+              size="icon-sm"
+              variant="secondary"
+              disabled={!snapshot || isBusy}
+            >
+              <MoreHorizontal className="size-4" />
+            </Button>
+          </DropdownMenu.Trigger>
+          <DropdownMenu.Portal>
+            <DropdownMenu.Content className="workflow-menu" align="start" sideOffset={6}>
+              <DropdownMenu.Item
+                disabled={operationActive || !currentBranch}
+                onSelect={() => openWorkflow({ kind: 'merge' })}
+              >
+                Merge into current branch…
+              </DropdownMenu.Item>
+              <DropdownMenu.Item
+                disabled={
+                  operationActive || !currentBranch || currentBranch === snapshot?.defaultBranch
+                }
+                onSelect={() => openWorkflow({ kind: 'forcePush' })}
+              >
+                Force push with lease…
+              </DropdownMenu.Item>
+              <DropdownMenu.Item
+                disabled={operationActive || !snapshot?.files.length}
+                onSelect={() => openWorkflow({ kind: 'stash' })}
+              >
+                Stash changes…
+              </DropdownMenu.Item>
+              <DropdownMenu.Separator className="workflow-menu-separator" />
+              <DropdownMenu.Item onSelect={() => setWorkspaceView('history')}>
+                Browse commit history
+              </DropdownMenu.Item>
+            </DropdownMenu.Content>
+          </DropdownMenu.Portal>
+        </DropdownMenu.Root>
       </div>
       <div className="toolbar-spacer" />
       <div className="toolbar-search">
@@ -819,7 +938,7 @@ function App() {
       >
         <RefreshCw className={cn('size-4', refreshing && 'animate-spin')} />
       </IconButton>
-      {snapshot ? (
+      {snapshot && (workspaceView === 'branches' || workspaceView === 'stacks') ? (
         <IconButton
           label={showDetails ? 'Hide details pane' : 'Show details pane'}
           onClick={() => setShowDetails((value) => !value)}
@@ -930,7 +1049,7 @@ function App() {
                   {branch.remote ? <Badge variant="outline">remote</Badge> : null}
                   {tree.cycle ? <Badge variant="warning">cycle</Badge> : null}
                   {tree.missingParent ? <Badge variant="warning">parent missing</Badge> : null}
-                  {(branch.parentBehind ?? 0) > 0 ? (
+                  {branch.needsRestack || (branch.parentBehind ?? 0) > 0 ? (
                     <Badge variant="warning">Requires restack</Badge>
                   ) : null}
                 </span>
@@ -998,7 +1117,7 @@ function App() {
           </div>
           <Button
             disabled={snapshot.files.length === 0 || isBusy}
-            onClick={() => runAction({ type: 'stash' }, 'Stash changes')}
+            onClick={() => openWorkflow({ kind: 'stash' })}
             size="sm"
             variant="secondary"
           >
@@ -1010,69 +1129,6 @@ function App() {
             Stash changes
           </Button>
         </div>
-        {conflictedFiles.length > 0 ? (
-          <div className="conflict-banner" role="alert">
-            <TriangleAlert className="size-4" />
-            <div>
-              <strong>
-                {conflictedFiles.length} conflict{conflictedFiles.length === 1 ? '' : 's'} need
-                attention
-              </strong>
-              <span>
-                Resolve conflicts in your working tree, then continue or abort the rebase.
-              </span>
-            </div>
-            <div className="conflict-actions">
-              {snapshot.rebaseInProgress ? (
-                <Button
-                  disabled={isBusy}
-                  onClick={() => runAction({ type: 'rebaseContinue' }, 'Continue rebase')}
-                  size="sm"
-                  variant="danger"
-                >
-                  Continue rebase
-                </Button>
-              ) : null}
-              {snapshot.rebaseInProgress ? (
-                <Button
-                  disabled={isBusy}
-                  onClick={() => runAction({ type: 'rebaseAbort' }, 'Abort rebase')}
-                  size="sm"
-                  variant="secondary"
-                >
-                  Abort
-                </Button>
-              ) : null}
-            </div>
-          </div>
-        ) : null}
-        {snapshot.rebaseInProgress && conflictedFiles.length === 0 ? (
-          <div className="conflict-banner" role="status">
-            <RotateCcw className="size-4" />
-            <div>
-              <strong>Rebase in progress</strong>
-              <span>Complete the conflict resolution, then continue or abort.</span>
-            </div>
-            <div className="conflict-actions">
-              <Button
-                disabled={isBusy}
-                onClick={() => runAction({ type: 'rebaseContinue' }, 'Continue rebase')}
-                size="sm"
-                variant="danger"
-              >
-                Continue
-              </Button>
-              <Button
-                disabled={isBusy}
-                onClick={() => runAction({ type: 'rebaseAbort' }, 'Abort rebase')}
-                size="sm"
-                variant="secondary"
-              >
-                Abort
-              </Button>
-            </div>
-          </div>
-        ) : null}
         <div className="changes-columns">
           <section className="change-section" aria-labelledby="staged-heading">
             <div className="change-section-header">
@@ -1085,6 +1141,28 @@ function App() {
               <Badge variant={stagedFiles.length > 0 ? 'accent' : 'secondary'}>
                 {stagedFiles.length}
               </Badge>
+              <Button
+                size="sm"
+                variant="ghost"
+                disabled={isBusy || !visibleStagedFiles.length}
+                onClick={() =>
+                  runAction(
+                    {
+                      type: 'unstage',
+                      paths: [
+                        ...new Set(
+                          visibleStagedFiles.flatMap((file) =>
+                            file.originalPath ? [file.path, file.originalPath] : [file.path],
+                          ),
+                        ),
+                      ],
+                    },
+                    'Unstage files',
+                  )
+                }
+              >
+                {fileSearch ? 'Unstage shown' : 'Unstage all'}
+              </Button>
             </div>
             {visibleStagedFiles.length > 0 ? (
               <div className="file-list">
@@ -1107,6 +1185,19 @@ function App() {
               <Badge variant={unstagedFiles.length > 0 ? 'warning' : 'secondary'}>
                 {unstagedFiles.length}
               </Badge>
+              <Button
+                size="sm"
+                variant="ghost"
+                disabled={isBusy || !visibleUnstagedFiles.length || conflictedFiles.length > 0}
+                onClick={() =>
+                  runAction(
+                    { type: 'stage', paths: visibleUnstagedFiles.map((file) => file.path) },
+                    'Stage files',
+                  )
+                }
+              >
+                {fileSearch ? 'Stage shown' : 'Stage all'}
+              </Button>
             </div>
             {visibleUnstagedFiles.length > 0 ? (
               <div className="file-list">
@@ -1121,24 +1212,61 @@ function App() {
             )}
           </section>
         </div>
+        {inspectedPath && snapshot.files.some((file) => file.path === inspectedPath) ? (
+          <FileInspector
+            key={inspectedPath}
+            path={inspectedPath}
+            snapshot={snapshot}
+            busy={isBusy}
+            runAction={runAction}
+            onClose={() => setInspectedPath(null)}
+            actionError={actionError}
+          />
+        ) : null}
         <form className="commit-panel" onSubmit={submitCommit}>
           <div className="commit-panel-heading">
             <GitCommitHorizontal className="size-4" />
             <div>
-              <h2>Commit staged changes</h2>
-              <span>Only staged files will be included.</span>
+              <h2>{commitAmend ? 'Amend the last commit' : 'Commit staged changes'}</h2>
+              <span>
+                {commitAmend
+                  ? 'Enter the full replacement message. Staged changes are included.'
+                  : 'Only staged files will be included.'}
+              </span>
             </div>
           </div>
+          <label className="checkbox-label commit-amend">
+            <input
+              type="checkbox"
+              checked={commitAmend}
+              disabled={
+                isBusy ||
+                operationActive ||
+                !snapshot.headOid ||
+                currentBranch === snapshot.defaultBranch
+              }
+              onChange={(event) => setCommitAmend(event.target.checked)}
+            />
+            Amend last commit
+            {currentBranch === snapshot.defaultBranch ? ' (protected on default branch)' : ''}
+          </label>
           <div className="commit-form-row">
-            <Input
+            <textarea
+              className="commit-message"
               aria-label="Commit message"
-              disabled={stagedFiles.length === 0 || isBusy}
+              disabled={(!commitAmend && stagedFiles.length === 0) || isBusy || operationActive}
               onChange={(event) => setCommitMessage(event.target.value)}
-              placeholder="Describe the change"
+              placeholder="Summary and optional commit body"
+              rows={2}
               value={commitMessage}
             />
             <Button
-              disabled={!commitMessage.trim() || stagedFiles.length === 0 || isBusy}
+              disabled={
+                !commitMessage.trim() ||
+                (!commitAmend && stagedFiles.length === 0) ||
+                isBusy ||
+                operationActive
+              }
               type="submit"
               variant="accent"
             >
@@ -1147,7 +1275,7 @@ function App() {
               ) : (
                 <GitCommitHorizontal className="size-3.5" />
               )}
-              Commit
+              {commitAmend ? 'Review amend…' : 'Commit'}
             </Button>
           </div>
         </form>
@@ -1168,12 +1296,18 @@ function App() {
       >
         {file.conflicted ? '!' : `${statusLetter(file.index)}${statusLetter(file.worktree)}`}
       </span>
-      <span
+      <button
         className="file-path"
         title={file.originalPath ? `${file.originalPath} → ${file.path}` : file.path}
+        type="button"
+        onClick={() => {
+          setActionError(null)
+          setInspectedPath(file.path)
+        }}
+        aria-label={`${file.conflicted ? 'Resolve' : 'Inspect'} ${file.path}`}
       >
         {file.originalPath ? `${file.originalPath} → ${file.path}` : file.path}
-      </span>
+      </button>
       <Button
         disabled={isBusy}
         onClick={() =>
@@ -1235,10 +1369,9 @@ function App() {
               <button
                 className="pr-row"
                 key={pr.number}
-                onClick={() =>
-                  desktop?.openExternal(pr.url).catch((value) => setError(readableError(value)))
-                }
-                title="Open pull request on GitHub"
+                onClick={() => openWorkflow({ kind: 'pr', number: pr.number })}
+                disabled={isBusy}
+                title="Inspect and manage pull request"
                 type="button"
               >
                 <span className="pr-number">#{pr.number}</span>
@@ -1255,7 +1388,7 @@ function App() {
                 <Badge variant={pr.state === 'OPEN' ? 'success' : 'secondary'}>
                   {pr.draft ? 'draft' : pr.state.toLowerCase()}
                 </Badge>
-                <ExternalLink className="size-4" />
+                <ChevronRight className="size-4" />
               </button>
             ))}
           </div>
@@ -1285,7 +1418,7 @@ function App() {
           </div>
           <Button
             disabled={snapshot.files.length === 0 || isBusy}
-            onClick={() => runAction({ type: 'stash' }, 'Stash changes')}
+            onClick={() => openWorkflow({ kind: 'stash' })}
             size="sm"
             variant="accent"
           >
@@ -1296,20 +1429,49 @@ function App() {
         {snapshot.stashes.length > 0 ? (
           <div className="stash-list" role="list">
             {snapshot.stashes.map((stash) => (
-              <div className="stash-row" key={stash.ref}>
+              <div className="stash-row" key={stash.oid}>
                 <Archive className="size-4" />
                 <span className="stash-copy">
                   <strong>{stash.message || 'WIP'}</strong>
                   <small>{stash.ref}</small>
                 </span>
                 <Button
+                  disabled={isBusy || operationActive}
+                  onClick={() =>
+                    runAction({ type: 'stashApply', ref: stash.ref, oid: stash.oid }, 'Apply stash')
+                  }
+                  size="sm"
+                  variant="ghost"
+                >
+                  Apply
+                </Button>
+                <Button
                   disabled={isBusy}
-                  onClick={() => runAction({ type: 'stashPop', ref: stash.ref }, 'Restore stash')}
+                  onClick={() =>
+                    runAction({ type: 'stashPop', ref: stash.ref, oid: stash.oid }, 'Pop stash')
+                  }
                   size="sm"
                   variant="secondary"
                 >
                   <RotateCcw className="size-3.5" />
-                  Restore
+                  Pop
+                </Button>
+                <Button
+                  disabled={isBusy || operationActive}
+                  onClick={() =>
+                    openWorkflow({
+                      kind: 'confirm',
+                      title: 'Drop this stash?',
+                      description: `Permanently remove ${stash.ref}: ${stash.message}. Its saved changes will not be applied.`,
+                      label: 'Drop stash',
+                      action: { type: 'stashDrop', ref: stash.ref, oid: stash.oid },
+                      destructive: true,
+                    })
+                  }
+                  size="sm"
+                  variant="danger"
+                >
+                  Drop…
                 </Button>
               </div>
             ))}
@@ -1330,6 +1492,21 @@ function App() {
     if (workspaceView === 'changes') return renderChanges()
     if (workspaceView === 'pullRequests') return renderPullRequests()
     if (workspaceView === 'stashes') return renderStashes()
+    if (workspaceView === 'history')
+      return (
+        <HistoryView snapshot={snapshot} busy={isBusy} onRequest={openWorkflow} search={search} />
+      )
+    if (workspaceView === 'stacks')
+      return (
+        <StackView
+          snapshot={snapshot}
+          busy={isBusy}
+          onRequest={openWorkflow}
+          onSelect={(branch) => setSelectedBranchRef(branch.ref)}
+          search={search}
+          onCreate={openBranchDialog}
+        />
+      )
     return (
       <div className="branches-view">
         {renderBranchFilters()}
@@ -1365,7 +1542,7 @@ function App() {
       selectedBranch.parent &&
       parent &&
       !selectedBranch.remote &&
-      !snapshot.rebaseInProgress,
+      !operationActive,
     )
     return (
       <aside className="details-pane" aria-label="Selected branch details">
@@ -1406,17 +1583,61 @@ function App() {
               <span>Last update</span>
               <strong>{formatBranchDate(selectedBranch.updatedAt)}</strong>
             </div>
-            {(selectedBranch.parentBehind ?? 0) > 0 ? (
+            {selectedBranch.needsRestack || (selectedBranch.parentBehind ?? 0) > 0 ? (
               <div className="restack-notice">
                 <strong>Requires restack</strong>
                 <p>
-                  {selectedBranch.parent} has {selectedBranch.parentBehind} commit
-                  {selectedBranch.parentBehind === 1 ? '' : 's'} not in this branch. Rebase onto the
-                  parent, then restack any affected descendants.
+                  {selectedBranch.parentTip
+                    ? 'The parent or recorded boundary changed. Preview a stack restack to update this branch and its descendants together.'
+                    : `${selectedBranch.parent} has ${selectedBranch.parentBehind ?? 0} commits not in this branch. Preview a restack before publishing.`}
                 </p>
               </div>
             ) : null}
           </section>
+          {!selectedBranch.remote && selectedBranch.name !== snapshot.defaultBranch ? (
+            <section className="detail-section detail-actions">
+              <h3>Stack workflow</h3>
+              <Button
+                variant="accent"
+                disabled={isBusy || operationActive}
+                onClick={() =>
+                  openWorkflow({ kind: 'stack', operation: 'restack', branch: selectedBranch.name })
+                }
+              >
+                <Layers className="size-3.5" />
+                Restack stack…
+              </Button>
+              <Button
+                variant="secondary"
+                disabled={isBusy || operationActive || !snapshot.github.available}
+                onClick={() =>
+                  openWorkflow({ kind: 'stack', operation: 'publish', branch: selectedBranch.name })
+                }
+              >
+                <Upload className="size-3.5" />
+                Publish stack…
+              </Button>
+              <Button
+                variant="ghost"
+                disabled={isBusy || operationActive}
+                onClick={() => openWorkflow({ kind: 'parent', branch: selectedBranch })}
+              >
+                Set stack parent…
+              </Button>
+              {selectedPullRequest?.state === 'OPEN' ? (
+                <Button
+                  variant="secondary"
+                  disabled={isBusy || operationActive}
+                  onClick={() =>
+                    openWorkflow({ kind: 'stack', operation: 'merge', branch: selectedBranch.name })
+                  }
+                >
+                  <GitMerge className="size-3.5" />
+                  Preview PR merge
+                </Button>
+              ) : null}
+            </section>
+          ) : null}
           <section className="detail-section">
             <h3>Sync status</h3>
             <div className="sync-stat-grid">
@@ -1463,6 +1684,14 @@ function App() {
                   <ExternalLink className="size-3.5" />
                   Open on GitHub
                 </Button>
+                <Button
+                  disabled={isBusy}
+                  size="sm"
+                  variant="accent"
+                  onClick={() => openWorkflow({ kind: 'pr', number: selectedPullRequest.number })}
+                >
+                  Manage pull request
+                </Button>
               </div>
             </section>
           ) : (
@@ -1488,7 +1717,7 @@ function App() {
           <section className="detail-section detail-actions">
             <h3>Branch actions</h3>
             <Button
-              disabled={selectedBranch.current || isBusy || snapshot.rebaseInProgress}
+              disabled={selectedBranch.current || isBusy || operationActive}
               onClick={() =>
                 runAction({ type: 'switch', ref: selectedBranch.ref }, 'Switch branch')
               }
@@ -1500,10 +1729,14 @@ function App() {
             <Button
               disabled={!canRebase || isBusy}
               onClick={() =>
-                runAction(
-                  { type: 'rebase', parent: selectedBranch.parent as string },
-                  'Rebase onto parent',
-                )
+                openWorkflow({
+                  kind: 'confirm',
+                  action: { type: 'rebase', parent: selectedBranch.parent as string },
+                  title: 'Rebase current branch?',
+                  label: 'Rebase onto parent',
+                  description:
+                    'This rewrites only the current branch. Use Restack stack to update dependent branches together.',
+                })
               }
               variant="secondary"
             >
@@ -1520,12 +1753,28 @@ function App() {
             {!selectedBranch.remote ? (
               <>
                 <Button
+                  variant="secondary"
+                  disabled={
+                    isBusy || operationActive || selectedBranch.name === snapshot.defaultBranch
+                  }
+                  onClick={() => openWorkflow({ kind: 'rename', branch: selectedBranch })}
+                >
+                  Rename local branch…
+                </Button>
+                <Button
+                  variant="secondary"
+                  disabled={isBusy || operationActive}
+                  onClick={() => openWorkflow({ kind: 'upstream', branch: selectedBranch })}
+                >
+                  Set upstream…
+                </Button>
+                <Button
                   ref={deleteTriggerRef}
                   disabled={
                     selectedBranch.current ||
                     selectedBranch.name === snapshot.defaultBranch ||
                     isBusy ||
-                    snapshot.rebaseInProgress
+                    operationActive
                   }
                   onClick={openDeleteDialog}
                   variant="danger"
@@ -1541,6 +1790,21 @@ function App() {
                   </span>
                 ) : null}
               </>
+            ) : null}
+            {selectedBranch.remote ? (
+              <Button
+                variant="danger"
+                disabled={
+                  isBusy ||
+                  operationActive ||
+                  !selectedBranch.oid ||
+                  selectedBranch.name.endsWith(`/${snapshot.defaultBranch}`)
+                }
+                onClick={() => openWorkflow({ kind: 'deleteRemote', branch: selectedBranch })}
+              >
+                <Trash2 className="size-3.5" />
+                Delete remote branch…
+              </Button>
             ) : null}
           </section>
         </div>
@@ -1614,10 +1878,10 @@ function App() {
         </div>
         <div className="titlebar-context">{snapshot ? snapshot.name : 'Repository workbench'}</div>
         <div className="titlebar-spacer" />
-        {snapshot?.rebaseInProgress ? (
+        {operationActive ? (
           <Badge variant="warning">
             <RotateCcw className="size-3" />
-            Rebase in progress
+            {snapshot?.stackOperation ? 'Stack operation in progress' : 'Git operation in progress'}
           </Badge>
         ) : null}
         <span className="titlebar-build">Native Git workspace</span>
@@ -1650,11 +1914,32 @@ function App() {
         </div>
       ) : null}
       {snapshot ? renderToolbar() : null}
-      <div className={cn('workspace', !showDetails && 'workspace-details-hidden')}>
+      {snapshot ? (
+        <OperationBanner
+          snapshot={snapshot}
+          busy={isBusy}
+          runAction={runAction}
+          onRequest={openWorkflow}
+          onShowChanges={() => setWorkspaceView('changes')}
+        />
+      ) : null}
+      <div className={cn('workspace', !detailsVisible && 'workspace-details-hidden')}>
         {renderSidebar()}
         {snapshot ? <main className="main-pane">{renderMainContent()}</main> : renderOnboarding()}
-        {showDetails ? renderDetails() : null}
+        {detailsVisible ? renderDetails() : null}
       </div>
+      {workflow && snapshot && workflow.repoPath === snapshot.path ? (
+        <WorkflowDialog
+          key={workflow.id}
+          request={workflow.request}
+          snapshot={snapshot}
+          busy={isBusy}
+          actionError={actionError}
+          runAction={runAction}
+          onClose={() => setWorkflow(null)}
+          onRequest={openWorkflow}
+        />
+      ) : null}
       <Dialog
         open={deleteTarget !== null}
         onOpenChange={(open) => {

@@ -1,150 +1,118 @@
-import { execFile as execFileCallback } from 'node:child_process'
+import * as path from 'node:path'
 import { promises as fs } from 'node:fs'
-import path from 'node:path'
-import { promisify } from 'node:util'
+import type { Stats } from 'node:fs'
+import { createHash } from 'node:crypto'
 
 import type {
   ActionResult,
   Branch,
   ChangedFile,
+  Commit,
+  FileView,
   GitAction,
+  HistoryPage,
   PullRequest,
+  PushPreview,
   RepositorySnapshot,
 } from '../shared/types'
+import {
+  MAX_BRANCH_LENGTH,
+  MAX_MESSAGE_LENGTH,
+  MAX_PATH_LENGTH,
+  branchUpstream,
+  commandDetail,
+  ensureClean,
+  ensureNoBusyOperation,
+  ensureNotCheckedOutElsewhere,
+  execute,
+  getBranchParent,
+  getConfigValue,
+  getCurrentBranch,
+  getDefaultBranch,
+  getOperationState,
+  getOriginUrl,
+  getRemotePushUrl,
+  getRefs,
+  getRemotes,
+  getStashes,
+  getStatus,
+  isExitCode,
+  isRecord,
+  parseRemote,
+  parseTrack,
+  refExists,
+  requireRefInput,
+  requireString,
+  resolveParentRef,
+  runGit,
+  statusPathCandidates,
+  stripTrailingNewline,
+  tryGit,
+  validateBranchName,
+} from './git-core'
+import type { RefRecord } from './git-core'
+import { getGitHubData } from './github'
+import {
+  getStackProgress,
+  isStackAction,
+  parentTarget,
+  runStackAction,
+  validateStackAction,
+} from './stacks'
 
-const execFile = promisify(execFileCallback)
-const MAX_BUFFER = 32 * 1024 * 1024
-const MAX_BRANCH_LENGTH = 1024
-const MAX_PATH_LENGTH = 32 * 1024
-const MAX_MESSAGE_LENGTH = 256 * 1024
-
-interface CommandError extends Error {
-  code?: string | number
-  stdout?: string
-  stderr?: string
-}
-
-interface RefRecord {
-  refname: string
-  objectName: string
-  upstream: string
-  track: string
-  subject: string
-  updatedAt: string
-  symref: string
-}
-
-interface OperationState {
-  rebase: boolean
-  busy: boolean
-}
-
-interface GitHubResult {
-  pullRequests: PullRequest[]
-  available: boolean
-  message: string
-  sameRepository: (value: unknown) => boolean
-}
-
-interface ParsedRemote {
-  host: string
-  owner: string
-  name: string
-  fullName: string
-}
-
-function commandDetail(error: unknown): string {
-  const commandError = error as CommandError
-  const stderr = typeof commandError.stderr === 'string' ? commandError.stderr.trim() : ''
-  const message = error instanceof Error ? error.message.trim() : String(error)
-  return stderr || message
-}
-
-function commandCode(error: unknown): string | number | undefined {
-  const value = (error as CommandError | undefined)?.code
-  return typeof value === 'string' || typeof value === 'number' ? value : undefined
-}
-
-function isExitCode(error: unknown, code: number): boolean {
-  return commandCode(error) === code
-}
-
-function stripTrailingNewline(value: string): string {
-  return value.replace(/(?:\r\n|\n|\r)+$/, '')
-}
-
-async function execute(
-  command: string,
-  args: string[],
-  cwd: string,
-  env?: NodeJS.ProcessEnv,
-): Promise<string> {
-  try {
-    const result = await execFile(command, args, {
-      cwd,
-      env: {
-        ...process.env,
-        GIT_TERMINAL_PROMPT: '0',
-        GH_PROMPT_DISABLED: '1',
-        GCM_INTERACTIVE: 'Never',
-        ...env,
-      },
-      timeout: command === 'gh' ? 20_000 : 120_000,
-      shell: false,
-      windowsHide: true,
-      maxBuffer: MAX_BUFFER,
-      encoding: 'utf8',
-    })
-    return typeof result.stdout === 'string' ? result.stdout : String(result.stdout)
-  } catch (error) {
-    const commandError = error as CommandError
-    if (typeof commandError.stderr !== 'string') {
-      commandError.stderr = ''
-    }
-    throw commandError
+function requireOid(value: unknown, label: string, allowNull = false): string | null {
+  if (allowNull && value === null) {
+    return null
   }
-}
-
-async function runGit(repoPath: string, args: string[], env?: NodeJS.ProcessEnv): Promise<string> {
-  return execute('git', args, repoPath, env)
-}
-
-async function tryGit(repoPath: string, args: string[]): Promise<string | null> {
-  try {
-    return await runGit(repoPath, args)
-  } catch (error) {
-    if (isExitCode(error, 1) || isExitCode(error, 2) || isExitCode(error, 128)) {
-      return null
-    }
-    throw error
+  const oid = requireString(value, label, 128)
+  if (!/^[0-9a-f]{4,128}$/iu.test(oid)) {
+    throw new Error(`${label} must be a hexadecimal Git object id`)
   }
+  return oid
 }
 
-function requireString(value: unknown, label: string, maxLength = MAX_MESSAGE_LENGTH): string {
+function requirePathInput(value: unknown, label: string): string {
+  const filePath = requireString(value, label, MAX_PATH_LENGTH)
   if (
-    typeof value !== 'string' ||
-    value.length === 0 ||
-    value.length > maxLength ||
-    value.includes('\0')
+    path.isAbsolute(filePath) ||
+    filePath
+      .split(path.sep === '\\' ? /[\\/]/u : /\//u)
+      .some((part) => part === '..' || part === '.')
   ) {
-    throw new Error(`${label} must be a non-empty string without NUL bytes`)
+    throw new Error(`${label} is not a safe repository-relative path`)
   }
-  return value
+  return filePath
 }
-
-function requireRefInput(value: unknown, label: string): string {
-  const ref = requireString(value, label, MAX_BRANCH_LENGTH)
-  if (ref.startsWith('-') || ref.includes('@{') || /[\u0000-\u001f\u007f]/u.test(ref)) {
-    throw new Error(`${label} is not a safe Git ref`)
+function requireStashRef(value: unknown): string {
+  const ref = requireString(value, 'stash ref', 256)
+  if (!/^stash@\{\d+\}$/u.test(ref)) {
+    throw new Error('Invalid stash reference')
   }
   return ref
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
+function validatePushPreview(value: unknown): PushPreview {
+  if (!isRecord(value)) throw new Error('forcePush requires a push preview')
+  const branch = requireRefInput(value.branch, 'preview.branch')
+  const remote = requireRefInput(value.remote, 'preview.remote')
+  const destination = requireString(value.destination, 'preview.destination', MAX_BRANCH_LENGTH)
+  if (!destination.startsWith('refs/heads/') || destination === 'refs/heads/') {
+    throw new Error('preview.destination must be a remote branch ref')
+  }
+  return {
+    branch,
+    remote,
+    remoteUrl: requireString(value.remoteUrl, 'preview.remoteUrl', 4096),
+    destination,
+    localOid: requireOid(value.localOid, 'preview.localOid')!,
+    remoteOid: requireOid(value.remoteOid, 'preview.remoteOid', true),
+  }
 }
 
 function validateAction(value: unknown): GitAction {
+  if (isStackAction(value)) {
+    return validateStackAction(value)
+  }
   if (!isRecord(value) || typeof value.type !== 'string') {
     throw new Error('Invalid Git action payload')
   }
@@ -159,9 +127,7 @@ function validateAction(value: unknown): GitAction {
         parent: requireRefInput(value.parent, 'parent branch'),
       }
     case 'deleteBranch':
-      if (typeof value.force !== 'boolean') {
-        throw new Error('force must be a boolean')
-      }
+      if (typeof value.force !== 'boolean') throw new Error('force must be a boolean')
       return {
         type: 'deleteBranch',
         ref: requireRefInput(value.ref, 'branch ref'),
@@ -172,49 +138,145 @@ function validateAction(value: unknown): GitAction {
       if (!Array.isArray(value.paths) || value.paths.length === 0 || value.paths.length > 1000) {
         throw new Error(`${value.type} requires one or more paths`)
       }
-      const paths = value.paths.map((entry, index) => {
-        const filePath = requireString(entry, `paths[${index}]`, MAX_PATH_LENGTH)
-        if (
-          filePath.startsWith('/') ||
-          filePath.split('/').some((part) => part === '..' || part === '.')
-        ) {
-          throw new Error(`paths[${index}] is not a safe repository-relative path`)
-        }
-        return filePath
-      })
-      if (new Set(paths).size !== paths.length) {
-        throw new Error('paths must not contain duplicates')
-      }
+      const paths = value.paths.map((entry, index) => requirePathInput(entry, `paths[${index}]`))
+      if (new Set(paths).size !== paths.length) throw new Error('paths must not contain duplicates')
       return { type: value.type, paths }
     }
-    case 'commit':
-      return { type: 'commit', message: requireString(value.message, 'commit message') }
+    case 'commit': {
+      if (typeof value.amend !== 'boolean') throw new Error('amend must be a boolean')
+      const expectedHead = requireOid(value.expectedHead, 'expectedHead', true)
+      return {
+        type: 'commit',
+        message: requireString(value.message, 'commit message'),
+        amend: value.amend,
+        expectedHead,
+      }
+    }
     case 'fetch':
-    case 'pull':
     case 'push':
-    case 'stash':
     case 'rebaseContinue':
     case 'rebaseAbort':
+    case 'operationContinue':
+    case 'operationSkip':
+    case 'operationAbort':
       return { type: value.type }
+    case 'pull': {
+      if (
+        value.strategy !== 'ff-only' &&
+        value.strategy !== 'merge' &&
+        value.strategy !== 'rebase'
+      ) {
+        throw new Error('pull strategy must be ff-only, merge, or rebase')
+      }
+      return { type: 'pull', strategy: value.strategy }
+    }
+    case 'forcePush':
+      return {
+        type: 'forcePush',
+        preview: validatePushPreview(value.preview),
+      }
+    case 'stash':
+      if (typeof value.includeUntracked !== 'boolean') {
+        throw new Error('includeUntracked must be a boolean')
+      }
+      return {
+        type: 'stash',
+        message: requireString(value.message, 'stash message'),
+        includeUntracked: value.includeUntracked,
+      }
     case 'stashPop':
-      return { type: 'stashPop', ref: requireString(value.ref, 'stash ref', 256) }
+    case 'stashApply':
+    case 'stashDrop':
+      return {
+        type: value.type,
+        ref: requireStashRef(value.ref),
+        oid: requireOid(value.oid, 'stash oid')!,
+      }
     case 'rebase':
       return { type: 'rebase', parent: requireRefInput(value.parent, 'parent branch') }
     case 'createPr':
-      if (typeof value.draft !== 'boolean') {
-        throw new Error('draft must be a boolean')
+      if (typeof value.draft !== 'boolean') throw new Error('draft must be a boolean')
+      if (
+        typeof value.body !== 'string' ||
+        value.body.length > MAX_MESSAGE_LENGTH ||
+        value.body.includes('\0')
+      ) {
+        throw new Error('pull request body must be a string without NUL bytes')
       }
       return {
         type: 'createPr',
         title: requireString(value.title, 'pull request title'),
-        body:
-          typeof value.body === 'string'
-            ? value.body
-            : (() => {
-                throw new Error('pull request body must be a string')
-              })(),
+        body: value.body,
         base: requireRefInput(value.base, 'pull request base'),
         draft: value.draft,
+      }
+    case 'renameBranch':
+      return {
+        type: 'renameBranch',
+        ref: requireRefInput(value.ref, 'branch ref'),
+        name: requireRefInput(value.name, 'branch name'),
+      }
+    case 'setUpstream':
+      if (value.upstream !== null && typeof value.upstream !== 'string') {
+        throw new Error('upstream must be a string or null')
+      }
+      return {
+        type: 'setUpstream',
+        ref: requireRefInput(value.ref, 'branch ref'),
+        upstream: value.upstream === null ? null : requireRefInput(value.upstream, 'upstream ref'),
+      }
+    case 'merge':
+      return {
+        type: 'merge',
+        ref: requireRefInput(value.ref, 'merge ref'),
+        expectedHead: requireOid(value.expectedHead, 'expectedHead')!,
+      }
+    case 'cherryPick':
+    case 'revert': {
+      if (
+        value.mainline !== null &&
+        (typeof value.mainline !== 'number' ||
+          !Number.isInteger(value.mainline) ||
+          value.mainline < 1)
+      ) {
+        throw new Error('mainline must be a positive integer or null')
+      }
+      return {
+        type: value.type,
+        oid: requireOid(value.oid, 'commit oid')!,
+        expectedHead: requireOid(value.expectedHead, 'expectedHead')!,
+        mainline: value.mainline,
+      }
+    }
+    case 'deleteRemoteBranch':
+      return {
+        type: 'deleteRemoteBranch',
+        ref: requireRefInput(value.ref, 'remote branch ref'),
+        expectedOid: requireOid(value.expectedOid, 'expectedOid')!,
+      }
+    case 'discardFile':
+      return {
+        type: 'discardFile',
+        path: requirePathInput(value.path, 'path'),
+        fingerprint: requireString(value.fingerprint, 'fingerprint', 1024),
+      }
+    case 'resolveFile':
+      if (value.strategy !== 'ours' && value.strategy !== 'theirs' && value.strategy !== 'manual') {
+        throw new Error('resolve strategy must be ours, theirs, or manual')
+      }
+      if (
+        typeof value.content !== 'string' ||
+        value.content.length > MAX_MESSAGE_LENGTH ||
+        value.content.includes('\0')
+      ) {
+        throw new Error('content must be a UTF-8 string without NUL bytes')
+      }
+      return {
+        type: 'resolveFile',
+        path: requirePathInput(value.path, 'path'),
+        fingerprint: requireString(value.fingerprint, 'fingerprint', 1024),
+        strategy: value.strategy,
+        content: value.content,
       }
     default:
       throw new Error(`Unsupported Git action: ${value.type}`)
@@ -262,561 +324,6 @@ export async function resolveRepository(inputPath: string): Promise<string> {
   }
 }
 
-async function getCurrentBranch(repoPath: string): Promise<string | null> {
-  try {
-    const value = stripTrailingNewline(
-      await runGit(repoPath, ['symbolic-ref', '--quiet', '--short', 'HEAD']),
-    )
-    return value || null
-  } catch (error) {
-    if (isExitCode(error, 1) || isExitCode(error, 128)) {
-      return null
-    }
-    throw error
-  }
-}
-
-function parseRefRecords(output: string): RefRecord[] {
-  const values = output.split('\0')
-  const records: RefRecord[] = []
-  for (let index = 0; index + 6 < values.length; index += 7) {
-    const fields = values.slice(index, index + 7)
-    const refname = fields[0].replace(/^[\r\n]+/u, '')
-    const [, objectName, upstream, track, subject, updatedAt, symref] = fields
-    if (!refname) {
-      continue
-    }
-    records.push({ refname, objectName, upstream, track, subject, updatedAt, symref })
-  }
-  return records
-}
-
-async function getRefs(repoPath: string): Promise<RefRecord[]> {
-  const output = await runGit(repoPath, [
-    'for-each-ref',
-    '--format=%(refname)%00%(objectname)%00%(upstream)%00%(upstream:track)%00%(subject)%00%(committerdate:iso-strict)%00%(symref)%00',
-    'refs/heads',
-    'refs/remotes',
-  ])
-  return parseRefRecords(output)
-}
-
-function parseTrack(value: string): { ahead: number; behind: number } {
-  const track = value.replace(/^\[/u, '').replace(/\]$/u, '')
-  const aheadMatch = /(?:^|,\s*)ahead\s+(\d+)/u.exec(track)
-  const behindMatch = /(?:^|,\s*)behind\s+(\d+)/u.exec(track)
-  return {
-    ahead: aheadMatch ? Number(aheadMatch[1]) : 0,
-    behind: behindMatch ? Number(behindMatch[1]) : 0,
-  }
-}
-
-function isConflicted(indexStatus: string, worktreeStatus: string): boolean {
-  return (
-    indexStatus === 'U' ||
-    worktreeStatus === 'U' ||
-    ['AA', 'DD', 'AU', 'UA', 'DU', 'UD', 'UU'].includes(`${indexStatus}${worktreeStatus}`)
-  )
-}
-
-function parseStatus(output: string): ChangedFile[] {
-  if (!output) {
-    return []
-  }
-  const tokens = output.split('\0')
-  const files: ChangedFile[] = []
-  for (let index = 0; index < tokens.length; index += 1) {
-    const token = tokens[index]
-    if (!token) {
-      continue
-    }
-    if (token.length < 3) {
-      throw new Error('Git returned malformed porcelain status output')
-    }
-    const indexStatus = token[0]
-    const worktreeStatus = token[1]
-    const filePath = token.slice(3)
-    if (!filePath) {
-      throw new Error('Git returned a status entry without a path')
-    }
-    const renamed =
-      indexStatus === 'R' || indexStatus === 'C' || worktreeStatus === 'R' || worktreeStatus === 'C'
-    let originalPath: string | undefined
-    if (renamed) {
-      originalPath = tokens[index + 1]
-      index += 1
-      if (!originalPath) {
-        throw new Error('Git returned a rename status without its original path')
-      }
-    }
-    files.push({
-      path: filePath,
-      ...(originalPath ? { originalPath } : {}),
-      index: indexStatus,
-      worktree: worktreeStatus,
-      conflicted: isConflicted(indexStatus, worktreeStatus),
-    })
-  }
-  return files
-}
-
-async function getStatus(repoPath: string): Promise<ChangedFile[]> {
-  const output = await runGit(repoPath, ['status', '--porcelain=v1', '-z', '--untracked-files=all'])
-  return parseStatus(output)
-}
-
-async function getStashes(repoPath: string): Promise<{ ref: string; message: string }[]> {
-  const output = await runGit(repoPath, ['stash', 'list', '--format=%gd%x00%gs%x00'])
-  const values = output.split('\0')
-  const stashes: { ref: string; message: string }[] = []
-  for (let index = 0; index + 1 < values.length; index += 2) {
-    const ref = values[index]
-    const message = values[index + 1]
-    if (ref) {
-      stashes.push({ ref, message })
-    }
-  }
-  return stashes
-}
-
-async function getOriginUrl(repoPath: string): Promise<string | null> {
-  try {
-    const value = stripTrailingNewline(await runGit(repoPath, ['remote', 'get-url', 'origin']))
-    return value || null
-  } catch (error) {
-    if (isExitCode(error, 2) || isExitCode(error, 128)) {
-      return null
-    }
-    throw error
-  }
-}
-
-async function getRemotes(repoPath: string): Promise<string[]> {
-  const output = await runGit(repoPath, ['remote'])
-  return output
-    .split(/\r?\n/u)
-    .map((remote) => remote.trim())
-    .filter(Boolean)
-}
-
-function parseRemote(urlValue: string | null): ParsedRemote | null {
-  if (!urlValue) {
-    return null
-  }
-  let value = urlValue.trim()
-  let host = ''
-  let remotePath = ''
-  try {
-    if (/^[^/@\s]+@[^:/\s]+:.+$/u.test(value)) {
-      const separator = value.indexOf(':')
-      host = value.slice(value.indexOf('@') + 1, separator)
-      remotePath = value.slice(separator + 1)
-    } else {
-      const parsed = new URL(value)
-      host = parsed.hostname
-      remotePath = parsed.pathname
-    }
-  } catch {
-    return null
-  }
-  remotePath = remotePath.replace(/^\/+|\/+$/gu, '').replace(/\.git$/u, '')
-  const segments = remotePath.split('/').filter(Boolean)
-  if (segments.length < 2 || !host) {
-    return null
-  }
-  const owner = segments[segments.length - 2]
-  const name = segments[segments.length - 1]
-  return { host: host.toLowerCase(), owner, name, fullName: `${owner}/${name}` }
-}
-
-function pullRequestChecks(value: unknown): PullRequest['checks'] {
-  if (!Array.isArray(value) || value.length === 0) {
-    return 'none'
-  }
-  let pending = false
-  let failing = false
-  for (const entry of value) {
-    if (!isRecord(entry)) {
-      pending = true
-      continue
-    }
-    const raw = entry.conclusion ?? entry.state ?? entry.status
-    const state = typeof raw === 'string' ? raw.toUpperCase() : ''
-    if (
-      !state ||
-      ['PENDING', 'QUEUED', 'IN_PROGRESS', 'WAITING', 'REQUESTED', 'EXPECTED'].includes(state)
-    ) {
-      pending = true
-    } else if (
-      [
-        'FAILURE',
-        'ERROR',
-        'CANCELLED',
-        'TIMED_OUT',
-        'ACTION_REQUIRED',
-        'STARTUP_FAILURE',
-        'STALE',
-      ].includes(state)
-    ) {
-      failing = true
-    }
-  }
-  if (failing) {
-    return 'failing'
-  }
-  if (pending) {
-    return 'pending'
-  }
-  return 'passing'
-}
-
-function pullRequestHeadRepository(value: unknown): string | null {
-  if (typeof value === 'string') {
-    return value
-  }
-  if (!isRecord(value)) {
-    return null
-  }
-  const nameWithOwner = value.nameWithOwner
-  if (typeof nameWithOwner === 'string') {
-    return nameWithOwner
-  }
-  const name = value.name
-  const owner = value.owner
-  if (typeof name === 'string' && isRecord(owner) && typeof owner.login === 'string') {
-    return `${owner.login}/${name}`
-  }
-  return null
-}
-
-function parsePullRequests(output: string): {
-  pullRequests: PullRequest[]
-  headRepositories: (string | null)[]
-} {
-  let parsed: unknown
-  try {
-    parsed = JSON.parse(output)
-  } catch {
-    throw new Error('GitHub CLI returned invalid pull request JSON')
-  }
-  if (!Array.isArray(parsed)) {
-    throw new Error('GitHub CLI returned an unexpected pull request response')
-  }
-  const pullRequests: PullRequest[] = []
-  const headRepositories: (string | null)[] = []
-  for (const item of parsed) {
-    if (!isRecord(item)) {
-      continue
-    }
-    const number = item.number
-    const title = item.title
-    const url = item.url
-    const head = item.headRefName
-    const base = item.baseRefName
-    if (
-      typeof number !== 'number' ||
-      typeof title !== 'string' ||
-      typeof url !== 'string' ||
-      typeof head !== 'string' ||
-      typeof base !== 'string'
-    ) {
-      continue
-    }
-    const rawState = typeof item.state === 'string' ? item.state.toUpperCase() : 'OPEN'
-    const state: PullRequest['state'] =
-      rawState === 'MERGED' || rawState === 'CLOSED' ? rawState : 'OPEN'
-    pullRequests.push({
-      number,
-      title,
-      url,
-      head,
-      base,
-      state,
-      draft: item.isDraft === true,
-      checks: pullRequestChecks(item.statusCheckRollup),
-    })
-    headRepositories.push(pullRequestHeadRepository(item.headRepository))
-  }
-  return { pullRequests, headRepositories }
-}
-
-function githubErrorMessage(error: unknown): string {
-  const detail = commandDetail(error)
-  if (commandCode(error) === 'ENOENT') {
-    return 'GitHub metadata unavailable: the gh CLI is not installed'
-  }
-  if (/auth|login|token|credential/iu.test(detail)) {
-    return `GitHub metadata unavailable: authentication is required (${detail})`
-  }
-  if (/network|connect|timeout|resolve|fetch|socket|dns|api\.github/iu.test(detail)) {
-    return `GitHub metadata unavailable: network request failed (${detail})`
-  }
-  return `GitHub metadata unavailable: ${detail}`
-}
-
-async function getGitHubData(repoPath: string, originUrl: string | null): Promise<GitHubResult> {
-  const remote = parseRemote(originUrl)
-  const unavailable = (message: string): GitHubResult => ({
-    pullRequests: [],
-    available: false,
-    message,
-    sameRepository: () => false,
-  })
-  if (!originUrl) {
-    return unavailable('GitHub metadata unavailable: no origin remote is configured')
-  }
-  if (!remote || remote.host !== 'github.com') {
-    return unavailable(
-      'PR integration requires a github.com origin remote. Local Git actions remain available.',
-    )
-  }
-
-  try {
-    const query = `query($owner: String!, $name: String!, $endCursor: String) {
-      repository(owner: $owner, name: $name) {
-        pullRequests(first: 100, after: $endCursor, states: OPEN, orderBy: {field: UPDATED_AT, direction: DESC}) {
-          nodes {
-            number title url headRefName baseRefName isDraft state
-            headRepository { nameWithOwner }
-            commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
-          }
-          pageInfo { hasNextPage endCursor }
-        }
-      }
-    }`
-    const output = await execute(
-      'gh',
-      [
-        'api',
-        'graphql',
-        '--hostname',
-        'github.com',
-        '--paginate',
-        '--slurp',
-        '-f',
-        `owner=${remote.owner}`,
-        '-f',
-        `name=${remote.name}`,
-        '-f',
-        `query=${query}`,
-      ],
-      repoPath,
-    )
-    const pages: unknown = JSON.parse(output)
-    if (!Array.isArray(pages)) throw new Error('Unexpected GitHub pagination response')
-    const items: Record<string, unknown>[] = []
-    for (const page of pages) {
-      const nodes = page?.data?.repository?.pullRequests?.nodes
-      if (!Array.isArray(nodes) || page.errors?.length)
-        throw new Error('GitHub could not load pull requests')
-      for (const item of nodes) {
-        if (!isRecord(item)) continue
-        const commits =
-          isRecord(item.commits) && Array.isArray(item.commits.nodes) ? item.commits.nodes : []
-        items.push({
-          ...item,
-          statusCheckRollup: commits.flatMap((node) =>
-            node?.commit?.statusCheckRollup ? [node.commit.statusCheckRollup] : [],
-          ),
-        })
-      }
-    }
-    const parsed = parsePullRequests(JSON.stringify(items))
-    const originFullName = remote?.fullName.toLowerCase() ?? null
-    const normalizedHeads = parsed.headRepositories.map((value) => value?.toLowerCase() ?? null)
-    const sameRepository = (value: unknown): boolean => {
-      if (!originFullName || typeof value !== 'number') {
-        return false
-      }
-      return normalizedHeads[value]?.toLowerCase() === originFullName
-    }
-    return {
-      pullRequests: parsed.pullRequests,
-      available: true,
-      message:
-        parsed.pullRequests.length === 0
-          ? 'GitHub metadata available; no open pull requests'
-          : `GitHub metadata available; ${parsed.pullRequests.length} open pull request${parsed.pullRequests.length === 1 ? '' : 's'}`,
-      sameRepository,
-    }
-  } catch (error) {
-    return unavailable(githubErrorMessage(error))
-  }
-}
-
-async function getConfigValue(repoPath: string, key: string): Promise<string | null> {
-  try {
-    const value = stripTrailingNewline(await runGit(repoPath, ['config', '--get', key]))
-    return value || null
-  } catch (error) {
-    if (isExitCode(error, 1) || isExitCode(error, 2) || isExitCode(error, 128)) {
-      return null
-    }
-    throw error
-  }
-}
-
-async function getBranchParent(repoPath: string, branch: string): Promise<string | null> {
-  return getConfigValue(repoPath, `branch.${branch}.parent`)
-}
-
-async function getDefaultBranch(
-  repoPath: string,
-  refs: RefRecord[],
-  currentBranch: string | null,
-): Promise<string> {
-  const remoteHead = refs.find(
-    (ref) =>
-      ref.refname.startsWith('refs/remotes/origin/') &&
-      ref.symref.startsWith('refs/remotes/origin/'),
-  )
-  if (remoteHead?.symref) {
-    return remoteHead.symref.slice('refs/remotes/origin/'.length)
-  }
-  const configured = await getConfigValue(repoPath, 'init.defaultBranch')
-  if (configured) {
-    return configured
-  }
-  const localNames = refs
-    .filter((ref) => ref.refname.startsWith('refs/heads/') && !ref.symref)
-    .map((ref) => ref.refname.slice('refs/heads/'.length))
-  if (localNames.includes('main')) {
-    return 'main'
-  }
-  if (localNames.includes('master')) {
-    return 'master'
-  }
-  if (currentBranch) {
-    return currentBranch
-  }
-  return localNames[0] ?? 'main'
-}
-
-async function gitPathExists(repoPath: string, name: string): Promise<boolean> {
-  const output = stripTrailingNewline(await runGit(repoPath, ['rev-parse', '--git-path', name]))
-  const candidate = path.isAbsolute(output) ? output : path.resolve(repoPath, output)
-  try {
-    await fs.stat(candidate)
-    return true
-  } catch {
-    return false
-  }
-}
-
-async function getOperationState(repoPath: string): Promise<OperationState> {
-  const names = [
-    'rebase-merge',
-    'rebase-apply',
-    'MERGE_HEAD',
-    'CHERRY_PICK_HEAD',
-    'REVERT_HEAD',
-    'sequencer',
-    'BISECT_LOG',
-  ]
-  const existing = await Promise.all(names.map((name) => gitPathExists(repoPath, name)))
-  const rebase = existing[0] || existing[1]
-  return { rebase, busy: existing.some(Boolean) }
-}
-
-function statusPathCandidates(
-  files: ChangedFile[],
-  requested: string[],
-  action: 'stage' | 'unstage',
-): string[] {
-  const byPath = new Map<string, ChangedFile>()
-  for (const file of files) {
-    byPath.set(file.path, file)
-    if (file.originalPath) byPath.set(file.originalPath, file)
-  }
-  const paths = new Set<string>()
-  for (const filePath of requested) {
-    const file = byPath.get(filePath)
-    if (!file) throw new Error(`Path is not currently changed: ${filePath}`)
-    paths.add(file.path)
-    if (action === 'unstage' && file.originalPath) paths.add(file.originalPath)
-  }
-  return [...paths]
-}
-
-async function ensureNoBusyOperation(repoPath: string, operation: string): Promise<void> {
-  const state = await getOperationState(repoPath)
-  if (state.busy) {
-    throw new Error(
-      `Cannot ${operation} while another Git operation is in progress; finish or abort it first`,
-    )
-  }
-}
-
-async function ensureClean(repoPath: string, operation: string): Promise<void> {
-  const files = await getStatus(repoPath)
-  if (files.length > 0) {
-    throw new Error(`Cannot ${operation} with uncommitted changes; commit or stash them first`)
-  }
-}
-
-async function refExists(repoPath: string, ref: string): Promise<boolean> {
-  try {
-    await runGit(repoPath, ['show-ref', '--verify', '--quiet', ref])
-    return true
-  } catch (error) {
-    if (isExitCode(error, 1) || isExitCode(error, 128)) {
-      return false
-    }
-    throw error
-  }
-}
-
-async function validateBranchName(repoPath: string, branch: string): Promise<void> {
-  requireRefInput(branch, 'branch')
-  try {
-    await runGit(repoPath, ['check-ref-format', '--branch', branch])
-  } catch (error) {
-    throw new Error(`Invalid branch name "${branch}": ${commandDetail(error)}`)
-  }
-}
-
-async function ensureNotCheckedOutElsewhere(repoPath: string, branch: string): Promise<void> {
-  const output = await runGit(repoPath, ['worktree', 'list', '--porcelain'])
-  const lines = output.split(/\r?\n/u)
-  let worktreePath: string | null = null
-  for (const line of lines) {
-    if (line.startsWith('worktree ')) {
-      worktreePath = line.slice('worktree '.length)
-      continue
-    }
-    if (!line.startsWith('branch refs/heads/')) {
-      continue
-    }
-    const checkedOutBranch = line.slice('branch refs/heads/'.length)
-    if (checkedOutBranch !== branch || !worktreePath) {
-      continue
-    }
-    let canonicalWorktree: string
-    try {
-      canonicalWorktree = await fs.realpath(worktreePath)
-    } catch {
-      canonicalWorktree = path.resolve(worktreePath)
-    }
-    if (canonicalWorktree !== repoPath) {
-      throw new Error(`Branch "${branch}" is checked out in another worktree: ${canonicalWorktree}`)
-    }
-  }
-}
-
-async function branchUpstream(repoPath: string, branch: string): Promise<string | null> {
-  try {
-    const value = stripTrailingNewline(
-      await runGit(repoPath, ['rev-parse', '--symbolic-full-name', `${branch}@{upstream}`]),
-    )
-    return value.replace(/^refs\/remotes\//, '').replace(/^refs\/heads\//, './') || null
-  } catch (error) {
-    if (isExitCode(error, 1) || isExitCode(error, 128)) {
-      return null
-    }
-    throw error
-  }
-}
-
 async function runStage(
   repoPath: string,
   action: 'stage' | 'unstage',
@@ -839,9 +346,51 @@ async function runStage(
   return { message: `Unstaged ${paths.length} path${paths.length === 1 ? '' : 's'}` }
 }
 
-async function runCommit(repoPath: string, message: string): Promise<ActionResult> {
+async function currentHeadOid(repoPath: string): Promise<string | null> {
+  const value = await tryGit(repoPath, [
+    'rev-parse',
+    '--verify',
+    '--end-of-options',
+    'HEAD^{commit}',
+  ])
+  return value ? stripTrailingNewline(value) : null
+}
+
+async function assertExpectedHead(
+  repoPath: string,
+  expectedHead: string | null,
+  operation: string,
+): Promise<void> {
+  const actual = await currentHeadOid(repoPath)
+  if (actual !== expectedHead) {
+    throw new Error(
+      `Cannot ${operation}: HEAD changed (expected ${expectedHead ?? 'unborn'}, found ${actual ?? 'unborn'})`,
+    )
+  }
+}
+
+async function runCommit(
+  repoPath: string,
+  message: string,
+  amend: boolean,
+  expectedHead: string | null,
+): Promise<ActionResult> {
   await ensureNoBusyOperation(repoPath, 'commit')
+  await assertExpectedHead(repoPath, expectedHead, 'commit')
   const files = await getStatus(repoPath)
+  if (files.some((file) => file.conflicted)) {
+    throw new Error('Cannot commit while conflicts are unresolved')
+  }
+  if (amend) {
+    const currentBranch = await getCurrentBranch(repoPath)
+    const refs = await getRefs(repoPath)
+    const defaultBranch = await getDefaultBranch(repoPath, refs, currentBranch)
+    if (currentBranch === defaultBranch) {
+      throw new Error('Amending the default branch is not allowed')
+    }
+    await runGit(repoPath, ['commit', '--amend', '--message', message])
+    return { message: 'Amended the current commit' }
+  }
   if (!files.some((file) => file.index !== ' ' && file.index !== '?')) {
     throw new Error('Nothing is staged to commit')
   }
@@ -859,90 +408,198 @@ async function runFetch(repoPath: string): Promise<ActionResult> {
   return { message: 'Fetched all remotes' }
 }
 
-async function runPull(repoPath: string): Promise<ActionResult> {
+async function runPull(
+  repoPath: string,
+  strategy: 'ff-only' | 'merge' | 'rebase',
+): Promise<ActionResult> {
   await ensureNoBusyOperation(repoPath, 'pull')
   await ensureClean(repoPath, 'pull')
   const currentBranch = await getCurrentBranch(repoPath)
-  if (!currentBranch) {
-    throw new Error('Cannot pull while HEAD is detached')
-  }
+  if (!currentBranch) throw new Error('Cannot pull while HEAD is detached')
   const upstream = await branchUpstream(repoPath, currentBranch)
-  if (!upstream) {
-    throw new Error(`Branch "${currentBranch}" has no upstream; configure one before pulling`)
+  if (!upstream || upstream.startsWith('./') || upstream === '.') {
+    throw new Error(
+      `Branch "${currentBranch}" has no remote upstream; configure one before pulling`,
+    )
   }
-  await runGit(repoPath, ['pull', '--ff-only'])
-  return { message: `Pulled ${upstream} with fast-forward-only protection` }
+  const pullArgs =
+    strategy === 'ff-only'
+      ? ['pull', '--ff-only']
+      : strategy === 'merge'
+        ? ['pull', '--no-rebase', '--no-edit']
+        : ['-c', 'rebase.updateRefs=false', '-c', 'rebase.autoStash=false', 'pull', '--rebase']
+  await runGit(repoPath, pullArgs, strategy === 'merge' ? { GIT_EDITOR: 'true' } : undefined)
+  return { message: `Pulled ${upstream} with ${strategy} strategy` }
+}
+
+interface PushTarget {
+  branch: string
+  remote: string
+  destination: string
+  explicit: boolean
+}
+
+async function getPushTarget(repoPath: string, requireExplicit: boolean): Promise<PushTarget> {
+  const branch = await getCurrentBranch(repoPath)
+  if (!branch) throw new Error('Cannot push while HEAD is detached')
+  const remotes = await getRemotes(repoPath)
+  if (remotes.length === 0) throw new Error('Cannot push: repository has no configured remotes')
+  const configuredRemote = await getConfigValue(repoPath, `branch.${branch}.remote`)
+  const configuredDestination = await getConfigValue(repoPath, `branch.${branch}.merge`)
+  if (configuredRemote || configuredDestination) {
+    if (
+      !configuredRemote ||
+      !remotes.includes(configuredRemote) ||
+      !configuredDestination?.startsWith('refs/heads/')
+    ) {
+      throw new Error('Push requires a configured remote branch, not another local branch.')
+    }
+    return {
+      branch,
+      remote: configuredRemote,
+      destination: configuredDestination,
+      explicit: true,
+    }
+  }
+  if (requireExplicit || !remotes.includes('origin')) {
+    throw new Error(
+      requireExplicit
+        ? `Branch "${branch}" has no explicit remote target for force push`
+        : `Branch "${branch}" has no upstream and this repository has no origin remote`,
+    )
+  }
+  return {
+    branch,
+    remote: 'origin',
+    destination: `refs/heads/${branch}`,
+    explicit: false,
+  }
 }
 
 async function runPush(repoPath: string): Promise<ActionResult> {
   await ensureNoBusyOperation(repoPath, 'push')
-  const currentBranch = await getCurrentBranch(repoPath)
-  if (!currentBranch) {
-    throw new Error('Cannot push while HEAD is detached')
+  const target = await getPushTarget(repoPath, false)
+  const args = [
+    '-c',
+    'push.followTags=false',
+    'push',
+    '--no-force',
+    '--no-mirror',
+    ...(target.explicit ? [] : ['--set-upstream']),
+    '--',
+    target.remote,
+    `refs/heads/${target.branch}:${target.destination}`,
+  ]
+  await runGit(repoPath, args)
+  return {
+    message: `Pushed ${target.branch} to ${target.remote}/${target.destination.slice('refs/heads/'.length)}`,
   }
-  const remotes = await getRemotes(repoPath)
-  if (remotes.length === 0) {
-    throw new Error('Cannot push: repository has no configured remotes')
-  }
-  const upstream = await branchUpstream(repoPath, currentBranch)
-  if (upstream) {
-    const remote = await getConfigValue(repoPath, `branch.${currentBranch}.remote`)
-    const destination = await getConfigValue(repoPath, `branch.${currentBranch}.merge`)
-    if (!remote || !remotes.includes(remote) || !destination?.startsWith('refs/heads/')) {
-      throw new Error('Push requires a remote branch upstream, not another local branch.')
-    }
-    await runGit(repoPath, [
-      '-c',
-      'push.followTags=false',
-      'push',
-      '--no-force',
-      '--no-mirror',
-      '--',
-      remote,
-      `refs/heads/${currentBranch}:${destination}`,
-    ])
-    return { message: `Pushed ${currentBranch} to ${upstream}` }
-  }
-  if (!remotes.includes('origin')) {
+}
+
+async function getRemoteOid(
+  repoPath: string,
+  pushUrl: string,
+  destination: string,
+): Promise<string | null> {
+  const output = await runGit(repoPath, ['ls-remote', '--heads', '--', pushUrl, destination])
+  const value = output.trim().split(/\s+/u)[0]
+  return value && /^[0-9a-f]{4,128}$/iu.test(value) ? value : null
+}
+
+async function remoteHeadDestination(repoPath: string, pushUrl: string): Promise<string | null> {
+  const output = await tryGit(repoPath, ['ls-remote', '--symref', '--', pushUrl, 'HEAD'])
+  if (!output) return null
+  const match = output.match(/^ref:\s+(refs\/heads\/\S+)\s+HEAD$/mu)
+  return match?.[1] ?? null
+}
+
+async function runForcePush(repoPath: string, preview: PushPreview): Promise<ActionResult> {
+  await ensureNoBusyOperation(repoPath, 'force push')
+  const target = await getPushTarget(repoPath, true)
+  if (
+    target.branch !== preview.branch ||
+    target.remote !== preview.remote ||
+    target.destination !== preview.destination
+  ) {
     throw new Error(
-      `Branch "${currentBranch}" has no upstream and this repository has no origin remote`,
+      'Cannot force push: the configured push target changed; refresh before retrying',
+    )
+  }
+  const pushUrl = await getRemotePushUrl(repoPath, target.remote)
+  if (pushUrl !== preview.remoteUrl) {
+    throw new Error('Cannot force push: the remote push URL changed; refresh before retrying')
+  }
+  const refs = await getRefs(repoPath)
+  const defaultBranch = await getDefaultBranch(repoPath, refs, target.branch)
+  const remoteHead = await remoteHeadDestination(repoPath, pushUrl)
+  if (preview.destination === `refs/heads/${defaultBranch}` || preview.destination === remoteHead) {
+    throw new Error('Force pushing the default or remote HEAD branch is not allowed')
+  }
+  await assertExpectedHead(repoPath, preview.localOid, 'force push')
+  const actualRemoteOid = await getRemoteOid(repoPath, pushUrl, target.destination)
+  if (actualRemoteOid !== preview.remoteOid) {
+    throw new Error(
+      `Cannot force push: remote changed (expected ${preview.remoteOid ?? 'absent'}, found ${actualRemoteOid ?? 'absent'})`,
     )
   }
   await runGit(repoPath, [
     '-c',
     'push.followTags=false',
     'push',
-    '--no-force',
+    `--force-with-lease=${target.destination}:${preview.remoteOid ?? ''}`,
     '--no-mirror',
-    '--set-upstream',
     '--',
-    'origin',
-    `refs/heads/${currentBranch}:refs/heads/${currentBranch}`,
+    pushUrl,
+    `refs/heads/${target.branch}:${target.destination}`,
   ])
-  return { message: `Pushed ${currentBranch} and set origin/${currentBranch} as its upstream` }
+  return {
+    message: `Force pushed ${target.branch} to ${target.remote}/${target.destination.slice('refs/heads/'.length)}`,
+  }
 }
 
-async function runStash(repoPath: string): Promise<ActionResult> {
+async function runStash(
+  repoPath: string,
+  message: string,
+  includeUntracked: boolean,
+): Promise<ActionResult> {
   await ensureNoBusyOperation(repoPath, 'stash')
   const files = await getStatus(repoPath)
-  if (files.length === 0) {
-    throw new Error('Nothing to stash')
+  if (files.length === 0) throw new Error('Nothing to stash')
+  const args = [
+    'stash',
+    'push',
+    ...(includeUntracked ? ['--include-untracked'] : []),
+    `--message=${message}`,
+  ]
+  await runGit(repoPath, args)
+  return {
+    message: includeUntracked
+      ? 'Stashed changes, including untracked files'
+      : 'Stashed tracked changes',
   }
-  await runGit(repoPath, ['stash', 'push', '--include-untracked'])
-  return { message: 'Stashed changes, including untracked files' }
 }
 
-async function runStashPop(repoPath: string, ref: string): Promise<ActionResult> {
-  await ensureNoBusyOperation(repoPath, 'pop a stash')
-  if (!/^stash@\{\d+\}$/u.test(ref)) {
-    throw new Error('Invalid stash reference')
+async function assertStashIdentity(repoPath: string, ref: string, oid: string): Promise<void> {
+  const stash = (await getStashes(repoPath)).find((entry) => entry.ref === ref)
+  if (!stash) throw new Error(`Stash ${ref} does not exist`)
+  if (stash.oid !== oid) {
+    throw new Error(`Stash ${ref} changed; refresh before applying or dropping it`)
   }
-  const stashes = await getStashes(repoPath)
-  if (!stashes.some((stash) => stash.ref === ref)) {
-    throw new Error(`Stash ${ref} does not exist`)
+}
+
+async function runStashAction(
+  repoPath: string,
+  action: 'stashPop' | 'stashApply' | 'stashDrop',
+  ref: string,
+  oid: string,
+): Promise<ActionResult> {
+  await ensureNoBusyOperation(repoPath, `${action} a stash`)
+  await assertStashIdentity(repoPath, ref, oid)
+  const command = action === 'stashPop' ? 'pop' : action === 'stashApply' ? 'apply' : 'drop'
+  await runGit(repoPath, ['stash', command, ...(command === 'drop' ? [] : ['--index']), ref])
+  return {
+    message: `${action === 'stashPop' ? 'Applied and removed' : action === 'stashApply' ? 'Applied' : 'Dropped'} ${ref}`,
   }
-  await runGit(repoPath, ['stash', 'pop', '--index', ref])
-  return { message: `Applied ${ref}` }
 }
 
 async function runSwitch(repoPath: string, ref: string): Promise<ActionResult> {
@@ -1000,6 +657,53 @@ async function runSwitch(repoPath: string, ref: string): Promise<ActionResult> {
   return { message: `Switched to ${localName} tracking ${remote}/${localName}` }
 }
 
+async function setBranchMetadata(
+  repoPath: string,
+  branch: string,
+  parent: string,
+  parentTip: string,
+): Promise<void> {
+  await runGit(repoPath, ['config', '--local', `branch.${branch}.parent`, parent])
+  await runGit(repoPath, ['config', '--local', `branch.${branch}.parentTip`, parentTip])
+}
+
+async function unsetConfig(repoPath: string, key: string): Promise<void> {
+  try {
+    await runGit(repoPath, ['config', '--local', '--unset', key])
+  } catch (error) {
+    if (!isExitCode(error, 1) && !isExitCode(error, 5)) throw error
+  }
+}
+
+async function persistPendingRebase(repoPath: string, branch: string): Promise<void> {
+  const parent = await getConfigValue(repoPath, `branch.${branch}.parentPending`)
+  const parentTip = await getConfigValue(repoPath, `branch.${branch}.parentTipPending`)
+  if (parent && parentTip) {
+    await setBranchMetadata(repoPath, branch, parent, parentTip)
+  }
+  await unsetConfig(repoPath, `branch.${branch}.parentPending`)
+  await unsetConfig(repoPath, `branch.${branch}.parentTipPending`)
+}
+async function rebaseBranch(repoPath: string): Promise<string | null> {
+  const current = await getCurrentBranch(repoPath)
+  if (current) return current
+  for (const statePath of ['rebase-merge/head-name', 'rebase-apply/head-name']) {
+    const output = await tryGit(repoPath, ['rev-parse', '--git-path', statePath])
+    if (!output) continue
+    const candidate = path.isAbsolute(stripTrailingNewline(output))
+      ? stripTrailingNewline(output)
+      : path.resolve(repoPath, stripTrailingNewline(output))
+    try {
+      const value = stripTrailingNewline(await fs.readFile(candidate, 'utf8'))
+      const branch = value.replace(/^refs\/heads\//u, '')
+      if (branch) return branch
+    } catch {
+      // The state directory may disappear as a continuation completes.
+    }
+  }
+  return null
+}
+
 async function runCreateBranch(
   repoPath: string,
   name: string,
@@ -1012,9 +716,13 @@ async function runCreateBranch(
   if (await refExists(repoPath, `refs/heads/${name}`)) {
     throw new Error(`Local branch "${name}" already exists`)
   }
-  if (!(await refExists(repoPath, `refs/heads/${parent}`))) {
+  const parentRef = `refs/heads/${parent}`
+  if (!(await refExists(repoPath, parentRef))) {
     throw new Error(`Parent branch "${parent}" does not exist locally`)
   }
+  const parentTip = stripTrailingNewline(
+    await runGit(repoPath, ['rev-parse', '--verify', '--end-of-options', `${parentRef}^{commit}`]),
+  )
   await ensureNotCheckedOutElsewhere(repoPath, name)
   await runGit(repoPath, [
     'switch',
@@ -1022,10 +730,10 @@ async function runCreateBranch(
     '--no-recurse-submodules',
     '--create',
     name,
-    `refs/heads/${parent}`,
+    parentRef,
   ])
   try {
-    await runGit(repoPath, ['config', '--local', `branch.${name}.parent`, parent])
+    await setBranchMetadata(repoPath, name, parent, parentTip)
   } catch (error) {
     throw new Error(
       `Created branch "${name}", but could not persist its parent configuration: ${commandDetail(error)}`,
@@ -1034,61 +742,64 @@ async function runCreateBranch(
   return { message: `Created and switched to ${name} from ${parent}` }
 }
 
-async function resolveParentRef(repoPath: string, parent: string): Promise<string> {
-  await validateBranchName(repoPath, parent)
-  if (await refExists(repoPath, `refs/heads/${parent}`)) {
-    return `refs/heads/${parent}`
-  }
-  if (await refExists(repoPath, `refs/remotes/${parent}`)) {
-    if (parent.endsWith('/HEAD')) {
-      throw new Error('Cannot use a remote symbolic HEAD as a rebase parent')
-    }
-    return `refs/remotes/${parent}`
-  }
-  if (await refExists(repoPath, `refs/remotes/origin/${parent}`)) {
-    return `refs/remotes/origin/${parent}`
-  }
-  throw new Error(`Parent branch "${parent}" does not exist locally or on a fetched remote`)
-}
-
 async function runRebase(repoPath: string, parent: string): Promise<ActionResult> {
   await ensureNoBusyOperation(repoPath, 'start a rebase')
   await ensureClean(repoPath, 'start a rebase')
   const currentBranch = await getCurrentBranch(repoPath)
-  if (!currentBranch) {
-    throw new Error('Cannot rebase while HEAD is detached')
-  }
+  if (!currentBranch) throw new Error('Cannot rebase while HEAD is detached')
   const parentRef = await resolveParentRef(repoPath, parent)
   if (parentRef === currentBranch || parentRef === `refs/heads/${currentBranch}`) {
     throw new Error('Cannot rebase a branch onto itself')
   }
   await ensureNotCheckedOutElsewhere(repoPath, currentBranch)
-  await runGit(repoPath, ['-c', 'rebase.updateRefs=false', 'rebase', parentRef])
+  const parentTip = stripTrailingNewline(
+    await runGit(repoPath, ['rev-parse', '--verify', '--end-of-options', `${parentRef}^{commit}`]),
+  )
+  await runGit(repoPath, ['config', '--local', `branch.${currentBranch}.parentPending`, parent])
+  await runGit(repoPath, [
+    'config',
+    '--local',
+    `branch.${currentBranch}.parentTipPending`,
+    parentTip,
+  ])
+  await runGit(repoPath, [
+    '-c',
+    'rebase.updateRefs=false',
+    '-c',
+    'rebase.autoStash=false',
+    'rebase',
+    parentRef,
+  ])
+  await persistPendingRebase(repoPath, currentBranch)
   return { message: `Rebased ${currentBranch} onto ${parent}` }
 }
 
 async function runRebaseContinue(repoPath: string): Promise<ActionResult> {
   const state = await getOperationState(repoPath)
-  if (!state.rebase) {
-    throw new Error('No rebase is in progress')
-  }
+  if (!state.rebase) throw new Error('No rebase is in progress')
+  const branch = await rebaseBranch(repoPath)
   await runGit(repoPath, ['rebase', '--continue'], {
     ...process.env,
     GIT_EDITOR: 'true',
     GIT_SEQUENCE_EDITOR: 'true',
   })
+  if (branch && !(await getOperationState(repoPath)).rebase) {
+    await persistPendingRebase(repoPath, branch)
+  }
   return { message: 'Continued the rebase' }
 }
 
 async function runRebaseAbort(repoPath: string): Promise<ActionResult> {
   const state = await getOperationState(repoPath)
-  if (!state.rebase) {
-    throw new Error('No rebase is in progress')
-  }
+  if (!state.rebase) throw new Error('No rebase is in progress')
+  const branch = await rebaseBranch(repoPath)
   await runGit(repoPath, ['rebase', '--abort'])
+  if (branch) {
+    await unsetConfig(repoPath, `branch.${branch}.parentPending`)
+    await unsetConfig(repoPath, `branch.${branch}.parentTipPending`)
+  }
   return { message: 'Aborted the rebase' }
 }
-
 async function baseForGh(
   repoPath: string,
   requestedBase: string,
@@ -1097,8 +808,9 @@ async function baseForGh(
   if (await refExists(repoPath, `refs/heads/${requestedBase}`)) {
     return requestedBase
   }
-  const remotes = await getRemotes(repoPath)
-  const remote = remotes.find((name) => resolvedBase.startsWith(`refs/remotes/${name}/`))
+  const remote = (await getRemotes(repoPath))
+    .sort((left, right) => right.length - left.length)
+    .find((name) => resolvedBase.startsWith(`refs/remotes/${name}/`))
   if (!remote) throw new Error('The PR base does not resolve to a branch.')
   return resolvedBase.slice(`refs/remotes/${remote}/`.length)
 }
@@ -1115,27 +827,24 @@ async function runCreatePr(
   if (!currentBranch) {
     throw new Error('Cannot create a pull request while HEAD is detached')
   }
-  const upstream = await branchUpstream(repoPath, currentBranch)
-  if (!upstream || upstream.startsWith('./') || upstream === '.') {
+  const configuredRemote = await getConfigValue(repoPath, `branch.${currentBranch}.remote`)
+  const configuredMerge = await getConfigValue(repoPath, `branch.${currentBranch}.merge`)
+  const remotes = await getRemotes(repoPath)
+  if (
+    !configuredRemote ||
+    !remotes.includes(configuredRemote) ||
+    !configuredMerge?.startsWith('refs/heads/') ||
+    configuredMerge === 'refs/heads/'
+  ) {
     throw new Error(
       `Branch "${currentBranch}" must be pushed to a remote before creating a pull request`,
     )
   }
-  const separator = upstream.indexOf('/')
-  if (separator <= 0 || separator === upstream.length - 1) {
-    throw new Error(
-      `Branch "${currentBranch}" has an invalid upstream; push it to a remote before creating a pull request`,
-    )
-  }
-  const remote = upstream.slice(0, separator)
-  const remoteBranch = upstream.slice(separator + 1)
+  const remote = configuredRemote
+  const remoteBranch = configuredMerge.slice('refs/heads/'.length)
+  const upstream = `${remote}/${remoteBranch}`
   try {
-    const remoteHead = await runGit(repoPath, [
-      'ls-remote',
-      '--heads',
-      remote,
-      `refs/heads/${remoteBranch}`,
-    ])
+    const remoteHead = await runGit(repoPath, ['ls-remote', '--heads', remote, configuredMerge])
     if (!remoteHead.trim()) {
       throw new Error('remote branch was not found')
     }
@@ -1188,6 +897,368 @@ async function runCreatePr(
   }
 }
 
+const MAX_FILE_BYTES = 2 * 1024 * 1024
+const MAX_DIFF_BYTES = 4 * 1024 * 1024
+const MAX_HISTORY_SKIP = 1_000_000
+
+function boundedText(value: string, maxBytes: number): { text: string; truncated: boolean } {
+  const bytes = Buffer.from(value, 'utf8')
+  if (bytes.length <= maxBytes) return { text: value, truncated: false }
+  return { text: bytes.subarray(0, maxBytes).toString('utf8'), truncated: true }
+}
+
+async function safeRepositoryPath(repoPath: string, relativePath: string): Promise<string> {
+  const candidate = path.resolve(repoPath, relativePath)
+  if (candidate === repoPath || !candidate.startsWith(`${repoPath}${path.sep}`)) {
+    throw new Error('Path must remain inside the repository')
+  }
+  const parts = relativePath.split(path.sep === '\\' ? /[\\/]/u : /\//u)
+  if (parts.includes('.git')) throw new Error('Git metadata paths are not accessible')
+  let cursor = repoPath
+  for (const part of parts) {
+    if (!part) continue
+    cursor = path.join(cursor, part)
+    try {
+      const info = await fs.lstat(cursor)
+      if (info.isSymbolicLink()) {
+        throw new Error('Symlink paths are not supported for file actions')
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue
+      throw error
+    }
+  }
+  return candidate
+}
+
+function changedEntry(files: ChangedFile[], requestedPath: string): ChangedFile {
+  const entry = files.find(
+    (file) => file.path === requestedPath || file.originalPath === requestedPath,
+  )
+  if (!entry) throw new Error(`Path is not currently changed: ${requestedPath}`)
+  return entry
+}
+
+interface FileIdentity {
+  fingerprint: string
+  preview: Buffer | null
+  stat: Stats | null
+  binary: boolean
+  truncated: boolean
+}
+async function fileFingerprint(repoPath: string, relativePath: string): Promise<FileIdentity> {
+  const absolute = await safeRepositoryPath(repoPath, relativePath)
+  const index = await runGit(repoPath, [
+    '--literal-pathspecs',
+    'ls-files',
+    '--stage',
+    '-z',
+    '--',
+    relativePath,
+  ])
+  let stat: Stats | null = null
+  let preview: Buffer | null = null
+  let binary = false
+  let truncated = false
+  try {
+    stat = await fs.lstat(absolute)
+    if (stat.isDirectory()) throw new Error('Changed path is a directory')
+    const hash = createHash('sha256')
+    hash.update(index)
+    hash.update(
+      JSON.stringify({
+        dev: stat.dev,
+        ino: stat.ino,
+        mode: stat.mode,
+        size: stat.size,
+        mtimeMs: stat.mtimeMs,
+        ctimeMs: stat.ctimeMs,
+      }),
+    )
+    const decoder = new TextDecoder('utf-8', { fatal: true })
+    const handle = await fs.open(absolute, 'r')
+    const chunks: Buffer[] = []
+    let retained = 0
+    let totalBytes = 0
+    const buffer = Buffer.allocUnsafe(64 * 1024)
+    try {
+      while (true) {
+        const result = await handle.read(buffer, 0, buffer.length, null)
+        if (result.bytesRead === 0) break
+        const chunk = buffer.subarray(0, result.bytesRead)
+        totalBytes += chunk.length
+        hash.update(chunk)
+        if (chunk.includes(0)) binary = true
+        try {
+          decoder.decode(chunk, { stream: true })
+        } catch {
+          binary = true
+        }
+        if (retained < MAX_FILE_BYTES) {
+          const take = Math.min(MAX_FILE_BYTES - retained, chunk.length)
+          chunks.push(Buffer.from(chunk.subarray(0, take)))
+          retained += take
+        }
+        if (totalBytes > MAX_FILE_BYTES) truncated = true
+      }
+      try {
+        decoder.decode()
+      } catch {
+        binary = true
+      }
+    } finally {
+      await handle.close()
+    }
+    preview = Buffer.concat(chunks)
+    return { fingerprint: hash.digest('hex'), preview, stat, binary, truncated }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+  }
+  const hash = createHash('sha256')
+  hash.update(index)
+  hash.update('missing')
+  return {
+    fingerprint: hash.digest('hex'),
+    preview: null,
+    stat: null,
+    binary: false,
+    truncated: false,
+  }
+}
+async function changedDiff(
+  repoPath: string,
+  mode: 'cached' | 'worktree',
+  relativePath: string,
+): Promise<{ text: string; truncated: boolean }> {
+  const args = [
+    '--literal-pathspecs',
+    'diff',
+    '--no-ext-diff',
+    '--no-textconv',
+    ...(mode === 'cached' ? ['--cached'] : []),
+    '--',
+    relativePath,
+  ]
+  return boundedText(await runGit(repoPath, args), MAX_DIFF_BYTES)
+}
+
+export async function getFileView(repoPath: string, requestedPath: string): Promise<FileView> {
+  const root = await resolveRepository(repoPath)
+  const filePath = requirePathInput(requestedPath, 'path')
+  const entry = changedEntry(await getStatus(root), filePath)
+  const actualPath = entry.path
+  const [stagedDiff, unstagedDiff, identity] = await Promise.all([
+    changedDiff(root, 'cached', actualPath),
+    changedDiff(root, 'worktree', actualPath),
+    fileFingerprint(root, actualPath),
+  ])
+  const contentResult = identity.preview
+    ? {
+        text: identity.binary ? '' : identity.preview.toString('utf8'),
+        truncated: identity.truncated,
+      }
+    : { text: '', truncated: false }
+  const untracked = entry.index === '?' || entry.worktree === '?'
+  return {
+    path: filePath,
+    stagedDiff: stagedDiff.text,
+    unstagedDiff: untracked && !identity.binary ? contentResult.text : unstagedDiff.text,
+    content: identity.binary || !identity.preview ? null : contentResult.text,
+    binary: identity.binary,
+    fingerprint: identity.fingerprint,
+    conflicted: entry.conflicted,
+    truncated: stagedDiff.truncated || unstagedDiff.truncated || contentResult.truncated,
+  }
+}
+
+async function checkFileFingerprint(
+  repoPath: string,
+  filePath: string,
+  expected: string,
+): Promise<ChangedFile> {
+  const entry = changedEntry(await getStatus(repoPath), filePath)
+  const identity = await fileFingerprint(repoPath, entry.path)
+  if (identity.fingerprint !== expected) {
+    throw new Error('The file changed since it was opened; refresh before applying this action')
+  }
+  return entry
+}
+
+async function removeSelectedFile(repoPath: string, relativePath: string): Promise<void> {
+  const absolute = await safeRepositoryPath(repoPath, relativePath)
+  let info: Stats
+  try {
+    info = await fs.lstat(absolute)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return
+    throw error
+  }
+  if (info.isDirectory()) throw new Error('Refusing to remove a directory')
+  await fs.unlink(absolute)
+}
+
+export async function runDiscardFile(
+  repoPath: string,
+  filePath: string,
+  fingerprint: string,
+): Promise<ActionResult> {
+  const root = await resolveRepository(repoPath)
+  const entry = await checkFileFingerprint(root, filePath, fingerprint)
+  if (entry.conflicted) throw new Error('Resolve conflicted files instead of discarding them')
+  await safeRepositoryPath(root, entry.path)
+  if (entry.index === '?' || entry.worktree === '?') {
+    await removeSelectedFile(root, entry.path)
+    return { message: `Removed untracked file ${entry.path}` }
+  }
+  await runGit(root, ['--literal-pathspecs', 'restore', '--worktree', '--', entry.path])
+  return { message: `Discarded unstaged changes in ${entry.path}` }
+}
+
+async function hasConflictStage(
+  repoPath: string,
+  relativePath: string,
+  stage: number,
+): Promise<boolean> {
+  const output = await runGit(repoPath, [
+    '--literal-pathspecs',
+    'ls-files',
+    '-u',
+    '-z',
+    '--',
+    relativePath,
+  ])
+  return output.split('\0').some((token) => token.split(/\s+/u)[2] === String(stage))
+}
+
+export async function runResolveFile(
+  repoPath: string,
+  filePath: string,
+  fingerprint: string,
+  strategy: 'ours' | 'theirs' | 'manual',
+  content: string,
+): Promise<ActionResult> {
+  const root = await resolveRepository(repoPath)
+  const entry = await checkFileFingerprint(root, filePath, fingerprint)
+  if (!entry.conflicted) throw new Error('The selected file has no unresolved conflict')
+  const actualPath = entry.path
+  await safeRepositoryPath(root, actualPath)
+  if (strategy === 'manual') {
+    await fs.writeFile(path.join(root, actualPath), content, 'utf8')
+  } else {
+    const stage = strategy === 'ours' ? 2 : 3
+    if (await hasConflictStage(root, actualPath, stage)) {
+      await runGit(root, ['--literal-pathspecs', 'checkout', `--${strategy}`, '--', actualPath])
+    } else {
+      await removeSelectedFile(root, actualPath)
+    }
+  }
+  await runGit(root, ['--literal-pathspecs', 'add', '--', actualPath])
+  return { message: `Resolved ${actualPath} using ${strategy}` }
+}
+
+function requireHistorySkip(value: unknown): number {
+  if (!Number.isInteger(value) || (value as number) < 0 || (value as number) > MAX_HISTORY_SKIP) {
+    throw new Error(`history skip must be an integer from 0 to ${MAX_HISTORY_SKIP}`)
+  }
+  return value as number
+}
+
+export async function getHistory(
+  repoPath: string,
+  ref: string,
+  skip: number,
+): Promise<HistoryPage> {
+  const root = await resolveRepository(repoPath)
+  const requestedRef = requireRefInput(ref, 'history ref')
+  const offset = requireHistorySkip(skip)
+  const resolved = await tryGit(root, [
+    'rev-parse',
+    '--verify',
+    '--end-of-options',
+    `${requestedRef}^{commit}`,
+  ])
+  if (!resolved) {
+    const current = await getCurrentBranch(root)
+    if (
+      requestedRef !== 'HEAD' &&
+      requestedRef !== current &&
+      requestedRef !== `refs/heads/${current ?? ''}`
+    ) {
+      throw new Error(`History ref "${requestedRef}" does not exist`)
+    }
+    return { commits: [], hasMore: false }
+  }
+  const output = await runGit(root, [
+    'log',
+    '--no-ext-diff',
+    '--skip',
+    String(offset),
+    '-n',
+    '51',
+    '--format=%H%x00%P%x00%s%x00%an%x00%cI%x00',
+    '--end-of-options',
+    requestedRef,
+  ])
+  const values = output.split('\0')
+  const commits: Commit[] = []
+  for (let index = 0; index + 4 < values.length; index += 5) {
+    const oid = stripTrailingNewline(values[index])
+    if (!oid) continue
+    const parents = stripTrailingNewline(values[index + 1])
+      .split(/\s+/u)
+      .filter(Boolean)
+    commits.push({
+      oid,
+      parents,
+      subject: stripTrailingNewline(values[index + 2]),
+      author: stripTrailingNewline(values[index + 3]),
+      date: stripTrailingNewline(values[index + 4]),
+    })
+  }
+  return { commits: commits.slice(0, 50), hasMore: commits.length > 50 }
+}
+
+export async function getCommitDiff(
+  repoPath: string,
+  oid: string,
+): Promise<{ text: string; truncated: boolean }> {
+  const root = await resolveRepository(repoPath)
+  const commitOid = requireOid(oid, 'commit oid')!
+  const resolved = await tryGit(root, [
+    'rev-parse',
+    '--verify',
+    '--end-of-options',
+    `${commitOid}^{commit}`,
+  ])
+  if (!resolved) throw new Error(`Commit "${commitOid}" does not exist`)
+  const output = await runGit(root, [
+    'show',
+    '--format=',
+    '--no-ext-diff',
+    '--no-textconv',
+    '--binary',
+    '--patch',
+    '--end-of-options',
+    commitOid,
+  ])
+  return boundedText(output, MAX_DIFF_BYTES)
+}
+
+export async function getPushPreview(repoPath: string): Promise<PushPreview> {
+  const root = await resolveRepository(repoPath)
+  const target = await getPushTarget(root, true)
+  const localOid = await currentHeadOid(root)
+  if (!localOid) throw new Error('Cannot preview a push from an unborn branch')
+  const remoteUrl = await getRemotePushUrl(root, target.remote)
+  return {
+    branch: target.branch,
+    remote: target.remote,
+    remoteUrl,
+    destination: target.destination,
+    localOid,
+    remoteOid: await getRemoteOid(root, remoteUrl, target.destination),
+  }
+}
 function branchFromRef(ref: RefRecord, currentBranch: string | null, remote: boolean): Branch {
   const prefix = remote ? 'refs/remotes/' : 'refs/heads/'
   const name = ref.refname.slice(prefix.length)
@@ -1206,19 +1277,25 @@ function branchFromRef(ref: RefRecord, currentBranch: string | null, remote: boo
     parent: null,
     parentBehind: null,
     pr: null,
+    oid: ref.objectName,
+    parentTip: null,
+    parentSource: null,
+    needsRestack: false,
   }
 }
-
 export async function getSnapshot(repoPath: string): Promise<RepositorySnapshot> {
   const root = await resolveRepository(repoPath)
-  const [refs, currentBranch, files, stashes, originUrl, operationState] = await Promise.all([
-    getRefs(root),
-    getCurrentBranch(root),
-    getStatus(root),
-    getStashes(root),
-    getOriginUrl(root),
-    getOperationState(root),
-  ])
+  const [refs, currentBranch, files, stashes, originUrl, operationState, stackOperation, headOid] =
+    await Promise.all([
+      getRefs(root),
+      getCurrentBranch(root),
+      getStatus(root),
+      getStashes(root),
+      getOriginUrl(root),
+      getOperationState(root),
+      getStackProgress(root),
+      currentHeadOid(root),
+    ])
 
   const localRefs = refs.filter((ref) => ref.refname.startsWith('refs/heads/') && !ref.symref)
   const remoteRefs = refs.filter((ref) => ref.refname.startsWith('refs/remotes/') && !ref.symref)
@@ -1245,6 +1322,10 @@ export async function getSnapshot(repoPath: string): Promise<RepositorySnapshot>
       parent: null,
       parentBehind: null,
       pr: null,
+      oid: headOid ?? undefined,
+      parentTip: null,
+      parentSource: null,
+      needsRestack: false,
     })
   }
 
@@ -1256,9 +1337,15 @@ export async function getSnapshot(repoPath: string): Promise<RepositorySnapshot>
       .map(async (branch) => ({
         name: branch.name,
         parent: await getBranchParent(root, branch.name),
+        parentTip: await getConfigValue(root, `branch.${branch.name}.parentTip`),
       })),
   )
-  const configParents = new Map(parentConfigs.map((entry) => [entry.name, entry.parent]))
+  const configParents = new Map(
+    parentConfigs.map((entry) => [
+      entry.name,
+      { parent: entry.parent, parentTip: entry.parentTip },
+    ]),
+  )
   const localPullRequests = new Map<string, PullRequest>()
   github.pullRequests.forEach((pullRequest, index) => {
     if (github.sameRepository(index) && !localPullRequests.has(pullRequest.head)) {
@@ -1269,8 +1356,11 @@ export async function getSnapshot(repoPath: string): Promise<RepositorySnapshot>
     if (branch.remote && !branch.ref.startsWith('refs/remotes/origin/')) continue
     const name = branch.remote ? branch.name.slice('origin/'.length) : branch.name
     const pullRequest = localPullRequests.get(name) ?? null
+    const config = configParents.get(name)
     branch.pr = pullRequest
-    branch.parent = pullRequest?.base ?? configParents.get(name) ?? null
+    branch.parent = config?.parent ?? pullRequest?.base ?? null
+    branch.parentTip = config?.parentTip ?? null
+    branch.parentSource = config?.parent ? 'recorded' : pullRequest ? 'pullRequest' : null
   }
 
   const refsByName = new Map(refs.filter((ref) => !ref.symref).map((ref) => [ref.refname, ref]))
@@ -1280,16 +1370,12 @@ export async function getSnapshot(repoPath: string): Promise<RepositorySnapshot>
   if (defaultRef) {
     await Promise.all(
       branches.map(async (branch) => {
-        if (branch.parent) {
-          return
-        }
+        if (branch.parent) return
         const child = refsByName.get(branch.ref)
-        if (!child) {
-          return
-        }
         const local = !branch.remote
         const originRemote = branch.remote && branch.ref.startsWith('refs/remotes/origin/')
         if (
+          !child ||
           (!local && !originRemote) ||
           branch.ref === `refs/heads/${defaultBranch}` ||
           branch.ref === `refs/remotes/origin/${defaultBranch}` ||
@@ -1301,20 +1387,28 @@ export async function getSnapshot(repoPath: string): Promise<RepositorySnapshot>
           (await tryGit(root, ['merge-base', child.objectName, defaultRef.objectName])) !== null
         ) {
           branch.parent = defaultBranch
+          branch.parentSource = 'inferred'
         }
       }),
     )
   }
 
+  const effectiveDefault = await parentTarget(root, defaultBranch, defaultBranch, false)
   await Promise.all(
     branches.map(async (branch) => {
       if (!branch.parent) return
       const child = refsByName.get(branch.ref)
       const parent =
+        (branch.parent === defaultBranch && effectiveDefault
+          ? refsByName.get(effectiveDefault.ref)
+          : null) ??
         refsByName.get(`refs/heads/${branch.parent}`) ??
         refsByName.get(`refs/remotes/${branch.parent}`) ??
         refsByName.get(`refs/remotes/origin/${branch.parent}`)
-      if (!child || !parent || child.refname === parent.refname) return
+      if (!child || !parent || child.refname === parent.refname) {
+        branch.needsRestack = Boolean(branch.parentTip && !parent)
+        return
+      }
       branch.parentBehind = Number(
         await runGit(root, [
           'rev-list',
@@ -1323,6 +1417,9 @@ export async function getSnapshot(repoPath: string): Promise<RepositorySnapshot>
           '--',
         ]),
       )
+      branch.needsRestack =
+        (branch.parentBehind ?? 0) > 0 ||
+        Boolean(branch.parentTip && branch.parentTip !== parent.objectName)
     }),
   )
 
@@ -1337,10 +1434,253 @@ export async function getSnapshot(repoPath: string): Promise<RepositorySnapshot>
     files,
     stashes,
     rebaseInProgress: operationState.rebase,
+    operation: operationState.operation,
+    stackOperation,
+    headOid,
     github: { available: github.available, message: github.message },
   }
 }
+async function runRenameBranch(
+  repoPath: string,
+  ref: string,
+  newName: string,
+): Promise<ActionResult> {
+  if (!ref.startsWith('refs/heads/')) throw new Error('Only local branches can be renamed')
+  const oldName = ref.slice('refs/heads/'.length)
+  await ensureNoBusyOperation(repoPath, 'rename a branch')
+  await validateBranchName(repoPath, oldName)
+  await validateBranchName(repoPath, newName)
+  const [refs, currentBranch] = await Promise.all([getRefs(repoPath), getCurrentBranch(repoPath)])
+  const defaultBranch = await getDefaultBranch(repoPath, refs, currentBranch)
+  if (oldName === defaultBranch || newName === defaultBranch) {
+    throw new Error('The default branch cannot be renamed')
+  }
+  if (!refs.some((entry) => entry.refname === ref && !entry.symref)) {
+    throw new Error(`Local branch "${oldName}" does not exist`)
+  }
+  if (await refExists(repoPath, `refs/heads/${newName}`)) {
+    throw new Error(`Local branch "${newName}" already exists`)
+  }
+  await ensureNotCheckedOutElsewhere(repoPath, oldName)
+  const children = refs
+    .filter((entry) => entry.refname.startsWith('refs/heads/') && entry.refname !== ref)
+    .map((entry) => entry.refname.slice('refs/heads/'.length))
+  await runGit(repoPath, ['branch', '-m', '--', oldName, newName])
+  for (const child of children) {
+    const parent = await getBranchParent(repoPath, child)
+    if (parent === oldName || parent === `refs/heads/${oldName}`) {
+      await runGit(repoPath, ['config', '--local', `branch.${child}.parent`, newName])
+    }
+  }
+  return { message: `Renamed local branch ${oldName} to ${newName}` }
+}
 
+async function runSetUpstream(
+  repoPath: string,
+  ref: string,
+  upstream: string | null,
+): Promise<ActionResult> {
+  if (!ref.startsWith('refs/heads/')) throw new Error('Only local branches may have an upstream')
+  const branch = ref.slice('refs/heads/'.length)
+  await ensureNoBusyOperation(repoPath, 'change branch upstream')
+  await validateBranchName(repoPath, branch)
+  if (!(await refExists(repoPath, ref))) throw new Error(`Local branch "${branch}" does not exist`)
+  if (upstream === null) {
+    await runGit(repoPath, ['branch', '--unset-upstream', '--', branch])
+    return { message: `Removed upstream from ${branch}` }
+  }
+  const remotes = await getRemotes(repoPath)
+  const short = upstream.startsWith('refs/remotes/')
+    ? upstream.slice('refs/remotes/'.length)
+    : upstream
+  const separator = short.indexOf('/')
+  if (separator <= 0 || separator === short.length - 1) {
+    throw new Error('Upstream must name an existing remote branch')
+  }
+  const remote = short.slice(0, separator)
+  const remoteBranch = short.slice(separator + 1)
+  if (!remotes.includes(remote) || !(await refExists(repoPath, `refs/remotes/${short}`))) {
+    throw new Error(`Upstream "${upstream}" does not exist as a fetched remote branch`)
+  }
+  await runGit(repoPath, ['branch', `--set-upstream-to=${short}`, '--', branch])
+  return { message: `Set ${branch} to track ${short}` }
+}
+
+async function resolveCommitRef(repoPath: string, value: string, label: string): Promise<string> {
+  const ref = requireRefInput(value, label)
+  const oid = await tryGit(repoPath, [
+    'rev-parse',
+    '--verify',
+    '--end-of-options',
+    `${ref}^{commit}`,
+  ])
+  if (!oid) throw new Error(`${label} does not resolve to a commit`)
+  return stripTrailingNewline(oid)
+}
+
+async function commitParentCount(repoPath: string, oid: string): Promise<number> {
+  const output = await runGit(repoPath, [
+    'rev-list',
+    '--parents',
+    '-n',
+    '1',
+    '--end-of-options',
+    oid,
+  ])
+  return stripTrailingNewline(output).split(/\s+/u).length - 1
+}
+
+async function runMerge(
+  repoPath: string,
+  ref: string,
+  expectedHead: string,
+): Promise<ActionResult> {
+  await ensureNoBusyOperation(repoPath, 'merge')
+  await ensureClean(repoPath, 'merge')
+  await assertExpectedHead(repoPath, expectedHead, 'merge')
+  const oid = await resolveCommitRef(repoPath, ref, 'merge ref')
+  await runGit(repoPath, ['merge', '--no-edit', '--', oid], { GIT_EDITOR: 'true' })
+  return { message: `Merged ${ref}` }
+}
+
+async function runCherryPickOrRevert(
+  repoPath: string,
+  kind: 'cherryPick' | 'revert',
+  value: string,
+  expectedHead: string,
+  mainline: number | null,
+): Promise<ActionResult> {
+  await ensureNoBusyOperation(repoPath, kind === 'cherryPick' ? 'cherry-pick' : 'revert')
+  await ensureClean(repoPath, kind === 'cherryPick' ? 'cherry-pick' : 'revert')
+  await assertExpectedHead(repoPath, expectedHead, kind)
+  const oid = await resolveCommitRef(repoPath, value, 'commit oid')
+  const parentCount = await commitParentCount(repoPath, oid)
+  if (parentCount > 1 && mainline === null) {
+    throw new Error(`${kind} of a merge commit requires an explicit mainline parent`)
+  }
+  if (mainline !== null && mainline > parentCount) {
+    throw new Error(`mainline ${mainline} is not a parent of the selected commit`)
+  }
+  const command = kind === 'cherryPick' ? 'cherry-pick' : 'revert'
+  await runGit(
+    repoPath,
+    [command, ...(mainline === null ? [] : ['-m', String(mainline)]), '--', oid],
+    { GIT_EDITOR: 'true' },
+  )
+  return { message: `${kind === 'cherryPick' ? 'Cherry-picked' : 'Reverted'} ${value}` }
+}
+
+async function runOperation(
+  repoPath: string,
+  kind: 'continue' | 'skip' | 'abort',
+): Promise<ActionResult> {
+  const state = await getOperationState(repoPath)
+  if (!state.operation) throw new Error('No Git operation is in progress')
+  if (kind === 'skip' && state.operation === 'merge') {
+    throw new Error('Merge operations cannot be skipped')
+  }
+  const command =
+    state.operation === 'rebase'
+      ? ['rebase', `--${kind}`]
+      : state.operation === 'merge'
+        ? ['merge', `--${kind}`]
+        : state.operation === 'cherryPick'
+          ? ['cherry-pick', `--${kind}`]
+          : state.operation === 'revert'
+            ? ['revert', `--${kind}`]
+            : null
+  const branch = state.operation === 'rebase' ? await rebaseBranch(repoPath) : null
+  if (!command) throw new Error(`Cannot ${kind} the current Git operation`)
+  await runGit(repoPath, command, {
+    GIT_EDITOR: 'true',
+    GIT_SEQUENCE_EDITOR: 'true',
+  })
+  if (state.operation === 'rebase' && branch && !(await getOperationState(repoPath)).rebase) {
+    if (kind === 'abort') {
+      await unsetConfig(repoPath, `branch.${branch}.parentPending`)
+      await unsetConfig(repoPath, `branch.${branch}.parentTipPending`)
+    } else {
+      await persistPendingRebase(repoPath, branch)
+    }
+  }
+  return {
+    message:
+      kind === 'continue'
+        ? `Continued ${state.operation} operation`
+        : kind === 'skip'
+          ? `Skipped ${state.operation} operation`
+          : `Aborted ${state.operation} operation`,
+  }
+}
+
+async function ensureStackWriteAllowed(repoPath: string, action: GitAction): Promise<void> {
+  const progress = await getStackProgress(repoPath)
+  if (!progress) return
+  if (
+    action.type === 'stage' ||
+    action.type === 'unstage' ||
+    action.type === 'resolveFile' ||
+    action.type === 'stackContinue' ||
+    action.type === 'stackAbort'
+  ) {
+    return
+  }
+  throw new Error('A stack operation is in progress; finish or abort it before other writes')
+}
+async function runDeleteRemoteBranch(
+  repoPath: string,
+  ref: string,
+  expectedOid: string,
+): Promise<ActionResult> {
+  const prefix = 'refs/remotes/'
+  if (!ref.startsWith(prefix)) {
+    throw new Error('Only fetched remote branch refs can be deleted')
+  }
+  await ensureNoBusyOperation(repoPath, 'delete a remote branch')
+  const remotes = (await getRemotes(repoPath)).sort((left, right) => right.length - left.length)
+  const remainder = ref.slice(prefix.length)
+  const remote = remotes.find((name) => remainder.startsWith(`${name}/`))
+  if (!remote) throw new Error('The selected remote branch has no configured remote')
+  const branch = remainder.slice(remote.length + 1)
+  if (!branch || branch === 'HEAD') {
+    throw new Error('The remote symbolic HEAD cannot be deleted')
+  }
+  await validateBranchName(repoPath, branch)
+  if (!(await refExists(repoPath, ref))) {
+    throw new Error(`Remote branch "${ref}" no longer exists locally`)
+  }
+  const localOid = stripTrailingNewline(
+    await runGit(repoPath, ['rev-parse', '--verify', '--end-of-options', `${ref}^{commit}`]),
+  )
+  if (localOid.toLowerCase() !== expectedOid.toLowerCase()) {
+    throw new Error('The remote branch changed locally; refresh before deleting it')
+  }
+  const refs = await getRefs(repoPath)
+  const defaultBranch = await getDefaultBranch(repoPath, refs, await getCurrentBranch(repoPath))
+  const pushUrl = await getRemotePushUrl(repoPath, remote)
+  const remoteHead = await remoteHeadDestination(repoPath, pushUrl)
+  if (branch === defaultBranch || remoteHead === `refs/heads/${branch}`) {
+    throw new Error('The default or remote HEAD branch cannot be deleted')
+  }
+  const symbolic = await tryGit(repoPath, ['symbolic-ref', '--quiet', ref])
+  if (symbolic) throw new Error('The remote symbolic HEAD cannot be deleted')
+  const remoteOid = await getRemoteOid(repoPath, pushUrl, `refs/heads/${branch}`)
+  if (!remoteOid || remoteOid.toLowerCase() !== expectedOid.toLowerCase()) {
+    throw new Error('The remote branch changed; fetch and refresh before deleting it')
+  }
+  await runGit(repoPath, [
+    '-c',
+    'push.followTags=false',
+    'push',
+    `--force-with-lease=refs/heads/${branch}:${expectedOid}`,
+    '--no-mirror',
+    '--no-follow-tags',
+    '--',
+    pushUrl,
+    `:refs/heads/${branch}`,
+  ])
+  return { message: `Deleted remote branch ${remote}/${branch}` }
+}
 async function runDeleteBranch(
   repoPath: string,
   ref: string,
@@ -1370,34 +1710,69 @@ async function runDeleteBranch(
 export async function runAction(repoPath: string, value: GitAction): Promise<ActionResult> {
   const root = await resolveRepository(repoPath)
   const action = validateAction(value)
+  if (isStackAction(action)) {
+    return runStackAction(root, action)
+  }
+  await ensureStackWriteAllowed(root, action)
   switch (action.type) {
     case 'stage':
     case 'unstage':
       return runStage(root, action.type, action.paths)
     case 'commit':
-      return runCommit(root, action.message)
+      return runCommit(root, action.message, action.amend, action.expectedHead)
+    case 'forcePush':
+      return runForcePush(root, action.preview)
     case 'fetch':
       return runFetch(root)
     case 'pull':
-      return runPull(root)
+      return runPull(root, action.strategy)
     case 'push':
       return runPush(root)
     case 'stash':
-      return runStash(root)
+      return runStash(root, action.message, action.includeUntracked)
     case 'stashPop':
-      return runStashPop(root, action.ref)
+    case 'stashApply':
+    case 'stashDrop':
+      return runStashAction(root, action.type, action.ref, action.oid)
     case 'switch':
       return runSwitch(root, action.ref)
     case 'createBranch':
       return runCreateBranch(root, action.name, action.parent)
     case 'deleteBranch':
       return runDeleteBranch(root, action.ref, action.force)
+    case 'deleteRemoteBranch':
+      return runDeleteRemoteBranch(root, action.ref, action.expectedOid)
+    case 'renameBranch':
+      return runRenameBranch(root, action.ref, action.name)
+    case 'setUpstream':
+      return runSetUpstream(root, action.ref, action.upstream)
     case 'rebase':
       return runRebase(root, action.parent)
     case 'rebaseContinue':
       return runRebaseContinue(root)
     case 'rebaseAbort':
       return runRebaseAbort(root)
+    case 'merge':
+      return runMerge(root, action.ref, action.expectedHead)
+    case 'cherryPick':
+    case 'revert':
+      return runCherryPickOrRevert(
+        root,
+        action.type,
+        action.oid,
+        action.expectedHead,
+        action.mainline,
+      )
+    case 'operationContinue':
+      return runOperation(root, 'continue')
+    case 'operationSkip':
+      return runOperation(root, 'skip')
+    case 'operationAbort':
+      return runOperation(root, 'abort')
+    case 'discardFile':
+      return runDiscardFile(root, action.path, action.fingerprint)
+    case 'resolveFile':
+      return runResolveFile(root, action.path, action.fingerprint, action.strategy, action.content)
     case 'createPr':
       return runCreatePr(root, action.title, action.body, action.base, action.draft)
   }

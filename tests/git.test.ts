@@ -54,7 +54,12 @@ test('renamed files and literal pathspec characters retain both paths through un
     await runAction(repo, { type: 'unstage', paths: [destination, 'shared.txt'] })
     assert.equal(git('diff', '--cached', '--name-only'), '')
     await runAction(repo, { type: 'stage', paths: [destination, 'shared.txt'] })
-    await runAction(repo, { type: 'commit', message: 'Rename a literal path' })
+    await runAction(repo, {
+      type: 'commit',
+      message: 'Rename a literal path',
+      amend: false,
+      expectedHead: git('rev-parse', 'HEAD'),
+    })
     assert.equal(git('show', `HEAD:${destination}`), 'base')
     snapshot = await getSnapshot(repo)
     assert.deepEqual(snapshot.files, [])
@@ -116,7 +121,12 @@ test('unborn repositories support their first staged commit without GitHub', asy
     await runAction(repo, { type: 'unstage', paths: ['first.txt'] })
     assert.equal((await getSnapshot(repo)).files[0]?.index, '?')
     await runAction(repo, { type: 'stage', paths: ['first.txt'] })
-    await runAction(repo, { type: 'commit', message: 'First commit' })
+    await runAction(repo, {
+      type: 'commit',
+      message: 'First commit',
+      amend: false,
+      expectedHead: null,
+    })
     assert.equal(
       execFileSync('git', ['-C', root, 'show', 'HEAD:first.txt'], { encoding: 'utf8' }),
       'first\n',
@@ -151,7 +161,7 @@ test('divergent pull and push cannot rewrite either side of a remote branch', as
     git('add', '.')
     git('commit', '-m', 'Local commit')
     const localTip = git('rev-parse', 'HEAD')
-    await assert.rejects(runAction(repo, { type: 'pull' }))
+    await assert.rejects(runAction(repo, { type: 'pull', strategy: 'ff-only' }))
     git('config', 'remote.origin.push', '+refs/heads/main:refs/heads/main')
     git('config', 'remote.origin.mirror', 'true')
     assert.equal(git('rev-parse', 'HEAD'), localTip)
@@ -174,11 +184,15 @@ test('stash removes untracked literal paths and restores their contents and stag
     await writeFile(join(repo, 'notes [draft].txt'), 'untracked notes\n')
     await writeFile(join(repo, 'shared.txt'), 'staged work\n')
     await runAction(repo, { type: 'stage', paths: ['shared.txt'] })
-    await runAction(repo, { type: 'stash' })
+    await runAction(repo, { type: 'stash', message: 'test stash', includeUntracked: true })
     const stashed = await getSnapshot(repo)
     assert.deepEqual(stashed.files, [])
     await assert.rejects(readFile(join(repo, 'notes [draft].txt')))
-    await runAction(repo, { type: 'stashPop', ref: stashed.stashes[0].ref })
+    await runAction(repo, {
+      type: 'stashPop',
+      ref: stashed.stashes[0].ref,
+      oid: stashed.stashes[0].oid,
+    })
     const restored = await getSnapshot(repo)
     assert.equal(await readFile(join(repo, 'notes [draft].txt'), 'utf8'), 'untracked notes\n')
     assert.equal(restored.files.find((file) => file.path === 'shared.txt')?.index, 'M')

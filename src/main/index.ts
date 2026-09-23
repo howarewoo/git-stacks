@@ -3,8 +3,18 @@ import type { IpcMainInvokeEvent } from 'electron'
 import { readFile, writeFile, mkdir, rename } from 'node:fs/promises'
 import { dirname, join, resolve, sep, basename } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { getSnapshot, resolveRepository, runAction } from './git'
-import type { GitAction, RecentRepository } from '../shared/types'
+import {
+  getSnapshot,
+  resolveRepository,
+  runAction,
+  getFileView,
+  getHistory,
+  getCommitDiff,
+  getPushPreview,
+} from './git'
+import { previewStack } from './stacks'
+import { getPullRequest } from './github'
+import type { GitAction, RecentRepository, StackKind } from '../shared/types'
 
 const bundleDir = dirname(fileURLToPath(import.meta.url))
 protocol.registerSchemesAsPrivileged([
@@ -124,6 +134,33 @@ function installHandlers() {
   ipcMain.handle('repository:action', async (event, action: GitAction) => {
     validateSender(event)
     return exclusively(() => runAction(repository(), action))
+  })
+  ipcMain.handle('repository:file', (event, filePath: string) => {
+    validateSender(event)
+    return exclusively(() => getFileView(repository(), filePath))
+  })
+  ipcMain.handle('repository:history', (event, ref: string, skip: number) => {
+    validateSender(event)
+    return exclusively(() => getHistory(repository(), ref, skip))
+  })
+  ipcMain.handle('repository:commit-diff', (event, oid: string) => {
+    validateSender(event)
+    return exclusively(() => getCommitDiff(repository(), oid))
+  })
+  ipcMain.handle('repository:push-preview', (event) => {
+    validateSender(event)
+    return exclusively(() => getPushPreview(repository()))
+  })
+  ipcMain.handle('repository:stack-preview', (event, kind: StackKind, branch: string) => {
+    validateSender(event)
+    return exclusively(async () => {
+      const root = repository()
+      return previewStack(root, await getSnapshot(root), kind, branch)
+    })
+  })
+  ipcMain.handle('repository:pull-request', (event, number: number) => {
+    validateSender(event)
+    return exclusively(() => getPullRequest(repository(), number))
   })
   ipcMain.handle('external:open', async (event, value: unknown) => {
     validateSender(event)
