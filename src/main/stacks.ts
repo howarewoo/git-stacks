@@ -1120,6 +1120,22 @@ function replayReflogAction(journal: StackJournal, entry: JournalEntry): string 
   return `git-stacks-rebase:${journal.id}:${entry.boundary}:${expectedRebaseOnto(journal, entry)}`
 }
 
+async function requiredHeadReflogCount(repoPath: string): Promise<number> {
+  const logAllRefUpdates = await tryGit(repoPath, [
+    'config',
+    '--bool',
+    '--get',
+    'core.logAllRefUpdates',
+  ])
+  if (stripTrailingNewline(logAllRefUpdates ?? '') === 'false') {
+    throw new Error('Restack recovery requires HEAD reflog recording to remain enabled')
+  }
+  const output = await tryGit(repoPath, ['reflog', 'show', 'HEAD', '--format=%H'])
+  const count = output?.split('\n').filter((line) => line.length > 0).length ?? 0
+  if (count === 0) throw new Error('Restack recovery requires an available HEAD reflog baseline')
+  return count
+}
+
 type ParsedReflogEntry = { oid: string; message: string }
 
 function recoveryProofError(entry: JournalEntry): Error {
@@ -1182,8 +1198,24 @@ async function assertActiveRebase(
       'The active rebase does not match the saved stack operation; refusing to change it',
     )
   }
-  await assertRecordedReplayStart(repoPath, journal, entry)
+  const { action, delta } = await assertRecordedReplayStart(repoPath, journal, entry)
+  assertActiveReplayHistory(entry, action, delta)
   entry.newParentTip = expectedOnto
+}
+
+function isRecordedReplayStep(action: string, message: string): boolean {
+  return message.startsWith(`${action} (pick): `) || message.startsWith(`${action} (continue): `)
+}
+
+function assertActiveReplayHistory(
+  entry: JournalEntry,
+  action: string,
+  delta: ParsedReflogEntry[],
+): void {
+  for (let index = 1; index < delta.length; index += 1) {
+    const line = delta[index]
+    if (!line || !isRecordedReplayStep(action, line.message)) throw recoveryProofError(entry)
+  }
 }
 
 function parseReflogEntry(line: string): ParsedReflogEntry | null {
@@ -1214,11 +1246,7 @@ async function assertRecordedReplay(
       finish = line
       break
     }
-    if (
-      !line.message.startsWith(`${action} (pick): `) &&
-      !line.message.startsWith(`${action} (continue): `)
-    )
-      throw recoveryProofError(entry)
+    if (!isRecordedReplayStep(action, line.message)) throw recoveryProofError(entry)
   }
   if (!finish || finish.oid !== tip || expectedRebaseOnto(journal, entry) !== expectedOnto)
     throw recoveryProofError(entry)
@@ -1339,10 +1367,16 @@ async function restackJournal(repoPath: string, journal: StackJournal): Promise<
     journal.message = `Restacking ${entry.branch} onto ${entry.newParent}`
     try {
       await runGit(repoPath, ['switch', '--', entry.branch])
-      const headReflog = await tryGit(repoPath, ['reflog', 'show', 'HEAD', '--format=%H'])
-      entry.headReflogCount =
-        headReflog === null ? null : headReflog.split('\n').filter((line) => line.length > 0).length
+      if ((await resolveCommit(repoPath, `refs/heads/${entry.branch}`)) !== entry.oldTip) {
+        throw new Error(`Branch ${entry.branch} changed after preview; no replay was attempted`)
+      }
+      entry.headReflogCount = await requiredHeadReflogCount(repoPath)
       await writeJournal(repoPath, journal)
+      if ((await resolveCommit(repoPath, `refs/heads/${entry.branch}`)) !== entry.oldTip) {
+        entry.status = 'pending'
+        entry.headReflogCount = null
+        throw new Error(`Branch ${entry.branch} changed after preview; no replay was attempted`)
+      }
       await runGit(
         repoPath,
         [
@@ -1362,10 +1396,21 @@ async function restackJournal(repoPath: string, journal: StackJournal): Promise<
         },
       )
     } catch (error) {
-      if (entry.headReflogCount === null) entry.status = 'pending'
       const operation = await getOperationState(repoPath)
+      let restoreDetail = ''
+      if (entry.headReflogCount === null) {
+        entry.status = 'pending'
+        if (!operation.rebase) {
+          try {
+            await restoreCheckout(repoPath, journal.originalBranch, journal.originalHead)
+            journal.currentBranch = journal.originalBranch
+          } catch (restoreError) {
+            restoreDetail = `; checkout restore failed: ${commandDetail(restoreError)}`
+          }
+        }
+      }
       journal.status = operation.rebase ? 'conflict' : 'uncertain'
-      journal.message = `${operation.rebase ? 'Restack paused' : 'Restack stopped'} on ${entry.branch}: ${commandDetail(error)}`
+      journal.message = `${operation.rebase ? 'Restack paused' : 'Restack stopped'} on ${entry.branch}: ${commandDetail(error)}${restoreDetail}`
       await writeJournal(repoPath, journal)
       throw new Error(journal.message)
     }
@@ -1432,9 +1477,15 @@ async function stackContinue(repoPath: string): Promise<ActionResult> {
     return restackJournal(repoPath, journal)
   }
   await assertActiveRebase(repoPath, journal, active)
+  if ((await resolveCommit(repoPath, `refs/heads/${active.branch}`)) !== active.oldTip) {
+    throw new Error(
+      `Branch ${active.branch} changed while the stack was paused; refusing to continue`,
+    )
+  }
   if ((await resolveCommit(repoPath, active.newParentRef)) !== active.newParentTip) {
     throw new Error(`Parent ${active.newParent} changed while the stack was paused`)
   }
+  await requiredHeadReflogCount(repoPath)
   try {
     await runGit(
       repoPath,

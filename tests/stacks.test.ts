@@ -246,6 +246,182 @@ test('restack refuses a captured default tip change before moving any branch', a
   assert.equal(await getStackProgress(repo), null)
 })
 
+test('restack rejects a branch tip changed immediately after checkout', async () => {
+  const { root, repo, git, base } = await fixture()
+  git('switch', '-c', 'feature', base)
+  const featureTip = await commitFile(repo, git, 'feature.txt', 'feature\n', 'Feature change')
+  recordParent(git, 'feature', 'main', base)
+  const featureTree = git('rev-parse', `${featureTip}^{tree}`)
+  const advancedTip = git('commit-tree', featureTree, '-p', featureTip, '-m', 'Concurrent update')
+  git('switch', 'main')
+  await commitFile(repo, git, 'main.txt', 'main\n', 'Advance main')
+  git('switch', '-c', 'parking', base)
+  const preview = await previewStack(repo, await getSnapshot(repo), 'restack', 'feature')
+  assert.deepEqual(preview.blockers, [])
+
+  const shimDir = join(root, 'git-shim')
+  await mkdir(shimDir)
+  const raceFlag = join(root, 'branch-advanced')
+  const shimPath = join(shimDir, 'git')
+  await writeFile(
+    shimPath,
+    `#!/bin/sh
+real="$GIT_STACKS_REAL_GIT"
+if [ "$1" = "switch" ] && [ "$2" = "--" ] && [ "$3" = "feature" ] && [ ! -e "$GIT_STACKS_SWITCH_RACE_FLAG" ]; then
+  out=$("$real" "$@"); rc=$?
+  if [ -n "$out" ]; then printf '%s\\n' "$out"; fi
+  if [ "$rc" = "0" ]; then
+    "$real" -C "$GIT_STACKS_RACE_REPO" update-ref refs/heads/feature "$GIT_STACKS_RACE_OID"
+    : > "$GIT_STACKS_SWITCH_RACE_FLAG"
+  fi
+  exit "$rc"
+fi
+exec "$real" "$@"
+`,
+    { mode: 0o755 },
+  )
+  const realGit = execFileSync('/bin/sh', ['-c', 'command -v git'], {
+    encoding: 'utf8',
+  }).trim()
+  await withEnv(
+    {
+      PATH: `${shimDir}${delimiter}${process.env.PATH ?? ''}`,
+      GIT_STACKS_REAL_GIT: realGit,
+      GIT_STACKS_RACE_REPO: repo,
+      GIT_STACKS_RACE_OID: advancedTip,
+      GIT_STACKS_SWITCH_RACE_FLAG: raceFlag,
+    },
+    async () => {
+      await assert.rejects(
+        executePreview(repo, preview.token),
+        /Branch feature changed after preview; no replay was attempted/u,
+      )
+    },
+  )
+
+  assert.equal(await readFile(raceFlag, 'utf8'), '')
+  assert.equal(tip(git, 'feature'), advancedTip)
+  assert.equal(git('branch', '--show-current'), 'parking')
+  assert.equal(git('status', '--porcelain'), '')
+  const progress = await getStackProgress(repo)
+  assert.deepEqual(progress?.completed, [])
+  assert.deepEqual(progress?.remaining, ['feature'])
+})
+
+test('restack refuses to launch when HEAD reflog recording is disabled', async () => {
+  const { repo, git, rootTip } = await prepareSimpleStack()
+  git('switch', 'main')
+  await commitFile(repo, git, 'main.txt', 'advanced\n', 'Advance main')
+  git('switch', 'parking')
+  git('config', '--local', 'core.logAllRefUpdates', 'false')
+  const preview = await previewStack(repo, await getSnapshot(repo), 'restack', 'root')
+  assert.deepEqual(preview.blockers, [])
+
+  await assert.rejects(executePreview(repo, preview.token), /HEAD reflog/u)
+
+  assert.equal(tip(git, 'root'), rootTip)
+  assert.equal(git('branch', '--show-current'), 'parking')
+  assert.equal(git('status', '--porcelain'), '')
+  const progress = await getStackProgress(repo)
+  assert.deepEqual(progress?.completed, [])
+  assert.deepEqual(progress?.remaining, ['root'])
+})
+
+test('restack refuses to launch when the HEAD reflog baseline is empty', async () => {
+  const { root, repo, git, rootTip } = await prepareSimpleStack()
+  git('switch', 'main')
+  await commitFile(repo, git, 'main.txt', 'advanced\n', 'Advance main')
+  git('switch', 'parking')
+  const preview = await previewStack(repo, await getSnapshot(repo), 'restack', 'root')
+  assert.deepEqual(preview.blockers, [])
+
+  const shimDir = join(root, 'git-shim')
+  await mkdir(shimDir)
+  const emptyLogFlag = join(root, 'empty-head-reflog')
+  const rebaseFlag = join(root, 'rebase-launched')
+  const shimPath = join(shimDir, 'git')
+  await writeFile(
+    shimPath,
+    `#!/bin/sh
+real="$GIT_STACKS_REAL_GIT"
+if [ "$1" = "reflog" ] && [ "$2" = "show" ] && [ "$3" = "HEAD" ] && [ "$4" = "--format=%H" ]; then
+  : > "$GIT_STACKS_EMPTY_LOG_FLAG"
+  exit 0
+fi
+is_rebase=0
+is_onto=0
+for arg in "$@"; do
+  [ "$arg" = "rebase" ] && is_rebase=1
+  [ "$arg" = "--onto" ] && is_onto=1
+done
+if [ "$is_rebase" = "1" ] && [ "$is_onto" = "1" ]; then
+  : > "$GIT_STACKS_REBASE_FLAG"
+fi
+exec "$real" "$@"
+`,
+    { mode: 0o755 },
+  )
+  const realGit = execFileSync('/bin/sh', ['-c', 'command -v git'], {
+    encoding: 'utf8',
+  }).trim()
+  await withEnv(
+    {
+      PATH: `${shimDir}${delimiter}${process.env.PATH ?? ''}`,
+      GIT_STACKS_REAL_GIT: realGit,
+      GIT_STACKS_EMPTY_LOG_FLAG: emptyLogFlag,
+      GIT_STACKS_REBASE_FLAG: rebaseFlag,
+    },
+    async () => {
+      await assert.rejects(executePreview(repo, preview.token), /HEAD reflog/u)
+    },
+  )
+
+  assert.equal(await readFile(emptyLogFlag, 'utf8'), '')
+  await assert.rejects(readFile(rebaseFlag), { code: 'ENOENT' })
+  assert.equal(tip(git, 'root'), rootTip)
+  assert.equal(git('branch', '--show-current'), 'parking')
+  assert.equal(git('status', '--porcelain'), '')
+})
+
+test('stack continue refuses to resume when HEAD reflog recording is disabled', async () => {
+  const { repo, git, childTip } = await prepareConflictStack()
+  const preview = await previewStack(repo, await getSnapshot(repo), 'restack', 'child')
+  await assert.rejects(executePreview(repo, preview.token))
+  git('config', '--local', 'core.logAllRefUpdates', 'false')
+
+  await assert.rejects(runAction(repo, { type: 'stackContinue' }), /HEAD reflog/u)
+
+  assert.equal(tip(git, 'child'), childTip)
+  const gitDir = git('rev-parse', '--absolute-git-dir')
+  assert.equal(
+    (await readFile(join(gitDir, 'rebase-merge', 'head-name'), 'utf8')).trim(),
+    'refs/heads/child',
+  )
+  assert.equal(git('status', '--porcelain').includes('UU shared.txt'), true)
+})
+
+test('stack continue refuses to overwrite a branch tip moved during conflict recovery', async () => {
+  const { repo, git, childTip } = await prepareConflictStack()
+  const preview = await previewStack(repo, await getSnapshot(repo), 'restack', 'child')
+  await assert.rejects(executePreview(repo, preview.token))
+  const childTree = git('rev-parse', `${childTip}^{tree}`)
+  const movedTip = git('commit-tree', childTree, '-p', childTip, '-m', 'External update')
+  git('update-ref', 'refs/heads/child', movedTip)
+
+  await assert.rejects(
+    runAction(repo, { type: 'stackContinue' }),
+    /Branch child changed while the stack was paused; refusing to continue/u,
+  )
+
+  assert.equal(tip(git, 'child'), movedTip)
+  const gitDir = git('rev-parse', '--absolute-git-dir')
+  assert.equal(
+    (await readFile(join(gitDir, 'rebase-merge', 'head-name'), 'utf8')).trim(),
+    'refs/heads/child',
+  )
+  assert.equal(git('status', '--porcelain').includes('UU shared.txt'), true)
+})
+
 test('restack refuses changed parent metadata before moving any branch', async () => {
   const { repo, git } = await prepareSimpleStack()
   git('branch', 'other')
@@ -439,6 +615,34 @@ test('continue and abort refuse an external replay recorded under a different bo
     backups.some((line) => line.endsWith(`/${Buffer.from('child', 'utf8').toString('hex')}`)),
     'the backup ref must be retained when the replay cannot be proven',
   )
+})
+
+test('active recovery rejects an aborted and replaced replay with the same boundary', async () => {
+  const { repo, git, rootTip, childTip } = await prepareConflictStack()
+  const boundary = git('config', '--get', 'branch.child.parentTip')
+  const preview = await previewStack(repo, await getSnapshot(repo), 'restack', 'child')
+  assert.deepEqual(preview.blockers, [])
+  await assert.rejects(executePreview(repo, preview.token))
+  const rewrittenRoot = tip(git, 'root')
+  assert.notEqual(rewrittenRoot, rootTip)
+
+  gitAt(repo, ['rebase', '--abort'])
+  assert.equal(tip(git, 'child'), childTip)
+  assert.throws(() => gitAt(repo, ['rebase', '--onto', rewrittenRoot, boundary, 'child']))
+  const gitDir = git('rev-parse', '--absolute-git-dir')
+  assert.equal(
+    (await readFile(join(gitDir, 'rebase-merge', 'head-name'), 'utf8')).trim(),
+    'refs/heads/child',
+  )
+
+  await assert.rejects(runAction(repo, { type: 'stackContinue' }), /recorded boundary/u)
+  await assert.rejects(runAction(repo, { type: 'stackAbort' }), /recorded boundary/u)
+
+  assert.equal(tip(git, 'child'), childTip)
+  assert.ok(git('show-ref').includes('refs/git-stacks/backups/'))
+  const progress = await getStackProgress(repo)
+  assert.deepEqual(progress?.completed, ['root'])
+  assert.deepEqual(progress?.remaining, ['child'])
 })
 
 test('recovery rejects a different-boundary replay after a pre-launch journal crash', async () => {

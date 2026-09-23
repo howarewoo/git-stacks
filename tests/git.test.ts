@@ -653,6 +653,65 @@ test('merged deletion resolves the upstream ref despite a same-named local branc
   }
 })
 
+test('merged deletion uses the upstream object captured before a concurrent fetch', async () => {
+  const { root, repo, git } = await fixture()
+  try {
+    git('remote', 'add', 'origin', 'https://example.invalid/repo.git')
+    git('switch', '-c', 'feature')
+    git('commit', '--allow-empty', '-m', 'Feature commit')
+    const featureTip = git('rev-parse', 'HEAD')
+    git('update-ref', 'refs/remotes/origin/feature', featureTip)
+    git('config', 'branch.feature.remote', 'origin')
+    git('config', 'branch.feature.merge', 'refs/heads/feature')
+    const baseTip = git('rev-parse', 'main')
+    git('switch', 'main')
+
+    const shimDir = join(root, 'git-shim')
+    await mkdir(shimDir)
+    const shimPath = join(shimDir, 'git')
+    const fetchFlag = join(root, 'upstream-advanced')
+    await writeFile(
+      shimPath,
+      `#!/bin/sh
+real="$GIT_STACKS_REAL_GIT"
+if [ "$1" = "merge-base" ] && [ "$2" = "--is-ancestor" ] && [ ! -e "$GIT_STACKS_FETCH_FLAG" ]; then
+  "$real" update-ref refs/remotes/origin/feature "$GIT_STACKS_FETCH_OID"
+  : > "$GIT_STACKS_FETCH_FLAG"
+fi
+exec "$real" "$@"
+`,
+      { mode: 0o755 },
+    )
+    const realGit = execFileSync('/bin/sh', ['-c', 'command -v git'], {
+      encoding: 'utf8',
+    }).trim()
+    const savedPath = process.env.PATH
+    process.env.PATH = `${shimDir}${delimiter}${savedPath ?? ''}`
+    process.env.GIT_STACKS_REAL_GIT = realGit
+    process.env.GIT_STACKS_FETCH_FLAG = fetchFlag
+    process.env.GIT_STACKS_FETCH_OID = baseTip
+    try {
+      await runAction(repo, {
+        type: 'deleteBranch',
+        ref: 'refs/heads/feature',
+        force: false,
+        expectedOid: featureTip,
+      })
+    } finally {
+      process.env.PATH = savedPath
+      delete process.env.GIT_STACKS_REAL_GIT
+      delete process.env.GIT_STACKS_FETCH_FLAG
+      delete process.env.GIT_STACKS_FETCH_OID
+    }
+
+    assert.equal(await readFile(fetchFlag, 'utf8'), '')
+    assert.equal(git('rev-parse', 'refs/remotes/origin/feature'), baseTip)
+    assert.throws(() => git('show-ref', '--verify', '--quiet', 'refs/heads/feature'))
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 test('unmerged deletion requires an explicit boolean force opt-in', async () => {
   const { root, repo, git } = await fixture()
   try {
@@ -782,6 +841,96 @@ test('branch deletion protects a branch being rebased in a detached linked workt
   }
 })
 
+test('branch deletion rechecks worktrees after locking the branch ref', async () => {
+  const { root, repo, git } = await fixture()
+  try {
+    git('switch', '-c', 'racing')
+    git('commit', '--allow-empty', '-m', 'Racing branch')
+    const racingTip = git('rev-parse', 'HEAD')
+    git('switch', 'main')
+
+    const linked = join(root, 'linked')
+    const created = join(root, 'linked-created')
+    const shimDir = join(root, 'git-shim')
+    await mkdir(shimDir)
+    const shimPath = join(shimDir, 'git')
+    await writeFile(
+      shimPath,
+      `#!/bin/sh
+real="$GIT_STACKS_TEST_REAL_GIT"
+if [ "$1" = "worktree" ] && [ "$2" = "list" ] && [ ! -e "$GIT_STACKS_LINKED_CREATED" ]; then
+  out=$("$real" "$@")
+  printf '%s\\n' "$out"
+  "$real" -C "$GIT_STACKS_RACE_REPO" worktree add "$GIT_STACKS_LINKED" racing >/dev/null
+  : > "$GIT_STACKS_LINKED_CREATED"
+  exit 0
+fi
+exec "$real" "$@"
+`,
+      { mode: 0o755 },
+    )
+    const realGit = execFileSync('/bin/sh', ['-c', 'command -v git'], {
+      encoding: 'utf8',
+    }).trim()
+    const savedPath = process.env.PATH
+    process.env.PATH = `${shimDir}${delimiter}${savedPath ?? ''}`
+    process.env.GIT_STACKS_TEST_REAL_GIT = realGit
+    process.env.GIT_STACKS_RACE_REPO = repo
+    process.env.GIT_STACKS_LINKED = linked
+    process.env.GIT_STACKS_LINKED_CREATED = created
+    try {
+      await assert.rejects(
+        runAction(repo, {
+          type: 'deleteBranch',
+          ref: 'refs/heads/racing',
+          force: true,
+          expectedOid: racingTip,
+        }),
+        /checked out in another worktree/u,
+      )
+    } finally {
+      process.env.PATH = savedPath
+      delete process.env.GIT_STACKS_TEST_REAL_GIT
+      delete process.env.GIT_STACKS_RACE_REPO
+      delete process.env.GIT_STACKS_LINKED
+      delete process.env.GIT_STACKS_LINKED_CREATED
+    }
+    assert.equal(await readFile(created, 'utf8'), '')
+    assert.equal(git('rev-parse', 'refs/heads/racing'), racingTip)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('branch deletion protects claims from missing prunable worktrees', async () => {
+  const { root, repo, git } = await fixture()
+  try {
+    git('switch', '-c', 'racing')
+    git('commit', '--allow-empty', '-m', 'Racing branch')
+    const racingTip = git('rev-parse', 'HEAD')
+    git('switch', 'main')
+    const linked = join(root, 'linked')
+    git('worktree', 'add', linked, 'racing')
+    await rm(linked, { recursive: true, force: true })
+    const worktrees = git('worktree', 'list', '--porcelain')
+    assert.match(worktrees, /branch refs\/heads\/racing/u)
+    assert.match(worktrees, /prunable/u)
+
+    await assert.rejects(
+      runAction(repo, {
+        type: 'deleteBranch',
+        ref: 'refs/heads/racing',
+        force: true,
+        expectedOid: racingTip,
+      }),
+      /checked out in another worktree/u,
+    )
+    assert.equal(git('rev-parse', 'refs/heads/racing'), racingTip)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 test('force deletion rejects a branch that advanced after its tip was captured', async () => {
   const { root, repo, git } = await fixture()
   try {
@@ -894,22 +1043,20 @@ exec "$real" "$@"
   }
 })
 
-test('branch deletion holds the ref lock through metadata cleanup', async () => {
+test('branch deletion commits its ref before metadata cleanup', async () => {
   const { root, repo, git } = await fixture()
   try {
     git('switch', '-c', 'racing')
     git('commit', '--allow-empty', '-m', 'Captured branch tip')
     const captured = git('rev-parse', 'HEAD')
     git('switch', 'main')
-    git('commit', '--allow-empty', '-m', 'Replacement branch tip')
-    const replacement = git('rev-parse', 'HEAD')
     git('config', 'branch.racing.parent', 'old-parent')
     git('config', 'branch.racing.remote', 'old-remote')
 
     const shimDir = join(root, 'git-shim')
     await mkdir(shimDir)
     const shimPath = join(shimDir, 'git')
-    const raceResult = join(root, 'ref-race-result')
+    const cleanupState = join(root, 'ref-state-during-cleanup')
     await writeFile(
       shimPath,
       `#!/bin/sh
@@ -921,10 +1068,10 @@ for arg in "$@"; do
   [ "$arg" = "branch.racing" ] && is_section=1
 done
 if [ "$is_remove" = "1" ] && [ "$is_section" = "1" ]; then
-  if "$real" -C "$GIT_STACKS_RACE_REPO" update-ref refs/heads/racing "$GIT_STACKS_RACE_OID" >/dev/null 2>&1; then
-    printf 'created\\n' > "$GIT_STACKS_RACE_RESULT"
+  if "$real" -C "$GIT_STACKS_RACE_REPO" show-ref --verify --quiet refs/heads/racing; then
+    printf 'present\\n' > "$GIT_STACKS_CLEANUP_STATE"
   else
-    printf 'blocked\\n' > "$GIT_STACKS_RACE_RESULT"
+    printf 'absent\\n' > "$GIT_STACKS_CLEANUP_STATE"
   fi
 fi
 exec "$real" "$@"
@@ -938,8 +1085,7 @@ exec "$real" "$@"
     process.env.PATH = `${shimDir}${delimiter}${savedPath ?? ''}`
     process.env.GIT_STACKS_REAL_GIT = realGit
     process.env.GIT_STACKS_RACE_REPO = repo
-    process.env.GIT_STACKS_RACE_OID = replacement
-    process.env.GIT_STACKS_RACE_RESULT = raceResult
+    process.env.GIT_STACKS_CLEANUP_STATE = cleanupState
     try {
       await runAction(repo, {
         type: 'deleteBranch',
@@ -951,13 +1097,13 @@ exec "$real" "$@"
       process.env.PATH = savedPath
       delete process.env.GIT_STACKS_REAL_GIT
       delete process.env.GIT_STACKS_RACE_REPO
-      delete process.env.GIT_STACKS_RACE_OID
-      delete process.env.GIT_STACKS_RACE_RESULT
+      delete process.env.GIT_STACKS_CLEANUP_STATE
     }
 
-    assert.equal(await readFile(raceResult, 'utf8'), 'blocked\n')
+    assert.equal(await readFile(cleanupState, 'utf8'), 'absent\n')
     assert.throws(() => git('show-ref', '--verify', '--quiet', 'refs/heads/racing'))
-    git('branch', 'racing', replacement)
+    assert.throws(() => git('config', '--get', 'branch.racing.parent'))
+    git('branch', 'racing', captured)
     git('config', 'branch.racing.parent', 'new-parent')
     git('config', 'branch.racing.remote', 'new-remote')
     assert.equal(git('config', '--get', 'branch.racing.parent'), 'new-parent')

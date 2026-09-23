@@ -1695,6 +1695,7 @@ async function runDeleteRemoteBranch(
 async function deleteLocalBranchRef(
   repoPath: string,
   ref: string,
+  branchName: string,
   expectedOid: string,
   cleanupConfig: () => Promise<void>,
 ): Promise<void> {
@@ -1766,9 +1767,8 @@ async function deleteLocalBranchRef(
     await completed
     throw new Error('The branch changed since it was selected; refresh before deleting it')
   }
-
   try {
-    await cleanupConfig()
+    await ensureNotCheckedOutElsewhere(repoPath, branchName)
   } catch (error) {
     try {
       child.stdin.end('abort\n')
@@ -1783,6 +1783,13 @@ async function deleteLocalBranchRef(
   const result = await completed
   if (result.code !== 0) {
     throw new Error(stderr.trim() || `Git could not complete deletion of ${ref}`)
+  }
+  try {
+    await cleanupConfig()
+  } catch (error) {
+    throw new Error(
+      `Deleted branch ${branchName}, but could not remove its configuration: ${commandDetail(error)}`,
+    )
   }
 }
 
@@ -1822,17 +1829,25 @@ async function runDeleteBranch(
       `${name}@{upstream}`,
     ])
     const upstreamRef = upstreamOutput ? stripTrailingNewline(upstreamOutput) : 'HEAD'
+    const upstreamOid = stripTrailingNewline(
+      await runGit(repoPath, [
+        'rev-parse',
+        '--verify',
+        '--end-of-options',
+        `${upstreamRef}^{commit}`,
+      ]),
+    )
     const mergedInto = await tryGit(repoPath, [
       'merge-base',
       '--is-ancestor',
       currentOid,
-      upstreamRef,
+      upstreamOid,
     ])
     if (mergedInto === null) {
       throw new Error(`Branch "${name}" is not fully merged`)
     }
   }
-  await deleteLocalBranchRef(repoPath, ref, currentOid, async () => {
+  await deleteLocalBranchRef(repoPath, ref, name, currentOid, async () => {
     await tryGit(repoPath, ['config', '--remove-section', `branch.${name}`])
   })
   return { message: `Deleted local branch ${name}. Remote branches were not changed.` }

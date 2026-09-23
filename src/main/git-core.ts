@@ -491,7 +491,14 @@ export async function ensureNotCheckedOutElsewhere(
     try {
       canonicalWorktree = await fs.realpath(worktree.path)
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        if (worktree.branch === branch) {
+          throw new Error(
+            `Branch "${branch}" is checked out in another worktree: ${path.resolve(worktree.path)}`,
+          )
+        }
+        continue
+      }
       canonicalWorktree = path.resolve(worktree.path)
     }
     if (canonicalWorktree === canonicalRepo) continue
