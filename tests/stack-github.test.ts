@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { writeFile } from 'node:fs/promises'
+import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { delimiter, join } from 'node:path'
 import { test } from 'node:test'
 import { getSnapshot, runAction } from '../src/main/git'
 import { getPullRequest } from '../src/main/github'
@@ -123,6 +124,267 @@ async function makeRemoteDivergence(harness: GitHubHarness, branch: string): Pro
   bareGit(harness, ['update-ref', `refs/heads/${branch}`, next, old])
   return next
 }
+
+async function installGitPublicationHook(
+  harness: GitHubHarness,
+  options: {
+    branch: string
+    advance?: { from: string; to: string }
+    closePrBranch?: string
+  },
+): Promise<void> {
+  const bin = join(harness.root, 'publication-hook-bin')
+  await mkdir(bin)
+  await writeFile(
+    join(bin, 'git'),
+    `#!/usr/bin/env node
+'use strict'
+const { spawnSync } = require('node:child_process')
+const fs = require('node:fs')
+const args = process.argv.slice(2)
+const branch = process.env.GIT_STACKS_TEST_HOOK_BRANCH
+const targetSuffix = \`:refs/heads/\${branch}\`
+const targetPush = args.includes('push') && args.some((arg) => arg.endsWith(targetSuffix))
+if (targetPush && process.env.GIT_STACKS_TEST_HOOK_ADVANCE_TO) {
+  const update = spawnSync(process.env.GIT_STACKS_REAL_GIT, [
+    '-C',
+    process.env.GIT_STACKS_TEST_HOOK_REPO,
+    'update-ref',
+    \`refs/heads/\${branch}\`,
+    process.env.GIT_STACKS_TEST_HOOK_ADVANCE_TO,
+    process.env.GIT_STACKS_TEST_HOOK_ADVANCE_FROM,
+  ], { encoding: 'utf8' })
+  if (update.status !== 0) {
+    process.stderr.write(String(update.stderr || 'could not advance the test branch ref'))
+    process.exit(1)
+  }
+}
+const result = spawnSync(process.env.GIT_STACKS_TEST_HOOK_FIXTURE_GIT, args, {
+  stdio: 'inherit',
+  env: process.env,
+})
+if (result.status === 0 && targetPush && process.env.GIT_STACKS_TEST_HOOK_CLOSE_PR) {
+  const statePath = process.env.GIT_STACKS_FIXTURE_STATE
+  const state = JSON.parse(fs.readFileSync(statePath, 'utf8'))
+  const pr = state.prs.find(
+    (candidate) => candidate.head === process.env.GIT_STACKS_TEST_HOOK_CLOSE_PR,
+  )
+  if (!pr) {
+    process.stderr.write('the test could not find the PR to close')
+    process.exit(1)
+  }
+  pr.state = 'CLOSED'
+  fs.writeFileSync(statePath, \`\${JSON.stringify(state, null, 2)}\\n\`, 'utf8')
+}
+process.exit(typeof result.status === 'number' ? result.status : 1)
+`,
+    { mode: 0o755 },
+  )
+  process.env.PATH = `${bin}${delimiter}${process.env.PATH || ''}`
+  process.env.GIT_STACKS_TEST_HOOK_BRANCH = options.branch
+  process.env.GIT_STACKS_TEST_HOOK_REPO = harness.repo
+  process.env.GIT_STACKS_TEST_HOOK_FIXTURE_GIT = join(harness.bin, 'git')
+  process.env.GIT_STACKS_TEST_HOOK_ADVANCE_FROM = options.advance?.from || ''
+  process.env.GIT_STACKS_TEST_HOOK_ADVANCE_TO = options.advance?.to || ''
+  process.env.GIT_STACKS_TEST_HOOK_CLOSE_PR = options.closePrBranch || ''
+}
+
+async function pushedGitTransports(harness: GitHubHarness): Promise<string[][]> {
+  const log = await readFile(join(harness.root, 'git-transport.jsonl'), 'utf8')
+  return log
+    .split('\n')
+    .filter(Boolean)
+    .map((line) => {
+      const value: unknown = JSON.parse(line)
+      if (
+        !value ||
+        typeof value !== 'object' ||
+        !('argv' in value) ||
+        !Array.isArray(value.argv) ||
+        !value.argv.every((arg) => typeof arg === 'string')
+      ) {
+        throw new Error('Malformed Git transport fixture record')
+      }
+      return value.argv
+    })
+    .filter((args) => args.includes('push'))
+}
+
+async function assertPublicationUsesCapturedPushTip(allowForce: boolean): Promise<void> {
+  await withHarness(async (harness) => {
+    await createStack(harness)
+    await publishStack(harness)
+    const originalChild = localOid(harness, 'child')
+    let capturedTip: string
+    if (allowForce) {
+      const parent = git(harness, ['rev-parse', `${originalChild}^`])
+      const tree = git(harness, ['rev-parse', `${originalChild}^{tree}`])
+      capturedTip = git(harness, ['commit-tree', tree, '-p', parent, '-m', 'Rewritten child tip'])
+      git(harness, ['update-ref', 'refs/heads/child', capturedTip, originalChild])
+    } else {
+      capturedTip = await commitFile(harness, 'child-next.txt', 'child next\n', 'Advance child')
+    }
+    assert.equal(
+      git(harness, ['merge-base', originalChild, capturedTip]),
+      allowForce ? git(harness, ['rev-parse', `${originalChild}^`]) : originalChild,
+    )
+    const capturedTree = git(harness, ['rev-parse', `${capturedTip}^{tree}`])
+    const racedTip = git(harness, [
+      'commit-tree',
+      capturedTree,
+      '-p',
+      capturedTip,
+      '-m',
+      'Concurrent local ref advance',
+    ])
+    await installGitPublicationHook(harness, {
+      branch: 'child',
+      advance: { from: capturedTip, to: racedTip },
+    })
+
+    await publishStack(harness, { allowForce })
+
+    assert.equal(remoteOid(harness, 'child'), capturedTip)
+    assert.equal(localOid(harness, 'child'), racedTip)
+  })
+}
+
+test(
+  'normal publication pushes the captured tip if the local branch advances at push time',
+  { concurrency: false },
+  async () => assertPublicationUsesCapturedPushTip(false),
+)
+
+test(
+  'force-with-lease publication pushes the captured tip if the local branch advances at push time',
+  { concurrency: false },
+  async () => assertPublicationUsesCapturedPushTip(true),
+)
+
+test(
+  'publish rejects a closed tracked PR before updating any stack branch',
+  { concurrency: false },
+  async () => {
+    await withHarness(async (harness) => {
+      await createStack(harness)
+      await publishStack(harness)
+      const pendingChild = await commitFile(
+        harness,
+        'child-next.txt',
+        'child next\n',
+        'Advance child',
+      )
+      let state = await harness.readState()
+      updatePr(state, 'child', { state: 'CLOSED' })
+      await harness.writeState(state)
+
+      const preview = await previewStack(
+        harness.repo,
+        await getSnapshot(harness.repo),
+        'publish',
+        'child',
+      )
+      assert.deepEqual(preview.blockers, [])
+      const parentRemoteBefore = remoteOid(harness, 'parent')
+      const childRemoteBefore = remoteOid(harness, 'child')
+      const pushesBefore = await pushedGitTransports(harness)
+      await assert.rejects(
+        runAction(harness.repo, {
+          type: 'executeStack',
+          token: preview.token,
+          allowForce: false,
+          draft: false,
+          titles: { parent: 'Parent title', child: 'Child title' },
+          mergeMethod: 'squash',
+        }),
+        /pull request for child changed/u,
+      )
+
+      assert.equal(remoteOid(harness, 'parent'), parentRemoteBefore)
+      assert.equal(remoteOid(harness, 'child'), childRemoteBefore)
+      assert.equal(localOid(harness, 'child'), pendingChild)
+      assert.equal((await pushedGitTransports(harness)).length, pushesBefore.length)
+      state = await harness.readState()
+      assert.equal(state.prs.length, 2)
+      assert.equal(
+        state.requests.filter((request) => request.argv[0] === 'pr' && request.argv[1] === 'create')
+          .length,
+        2,
+      )
+    })
+  },
+)
+
+test(
+  'publish rechecks each tracked PR before pushing later branches',
+  { concurrency: false },
+  async () => {
+    await withHarness(async (harness) => {
+      await createStack(harness)
+      await publishStack(harness)
+      git(harness, ['switch', 'parent'])
+      const parentTip = await commitFile(
+        harness,
+        'parent-next.txt',
+        'parent next\n',
+        'Advance parent',
+      )
+      git(harness, ['switch', 'child'])
+      const restack = await previewStack(
+        harness.repo,
+        await getSnapshot(harness.repo),
+        'restack',
+        'child',
+      )
+      assert.deepEqual(restack.blockers, [])
+      await runAction(harness.repo, {
+        type: 'executeStack',
+        token: restack.token,
+        allowForce: false,
+        draft: false,
+        titles: {},
+        mergeMethod: 'squash',
+      })
+      const childTip = localOid(harness, 'child')
+      assert.equal(git(harness, ['config', '--get', 'branch.child.parentTip']), parentTip)
+
+      const childRemoteBefore = remoteOid(harness, 'child')
+      assert.notEqual(git(harness, ['merge-base', childRemoteBefore, childTip]), childRemoteBefore)
+      const pushesBefore = await pushedGitTransports(harness)
+      await installGitPublicationHook(harness, {
+        branch: 'parent',
+        closePrBranch: 'child',
+      })
+      const preview = await previewStack(
+        harness.repo,
+        await getSnapshot(harness.repo),
+        'publish',
+        'child',
+      )
+      assert.deepEqual(preview.blockers, [])
+      await assert.rejects(
+        runAction(harness.repo, {
+          type: 'executeStack',
+          token: preview.token,
+          allowForce: true,
+          draft: false,
+          titles: { parent: 'Parent title', child: 'Child title' },
+          mergeMethod: 'squash',
+        }),
+        /Pull request for child changed during publication/u,
+      )
+
+      assert.equal(remoteOid(harness, 'parent'), parentTip)
+      assert.equal(remoteOid(harness, 'child'), childRemoteBefore)
+      assert.equal(localOid(harness, 'child'), childTip)
+      const pushesAfter = await pushedGitTransports(harness)
+      assert.equal(pushesAfter.length, pushesBefore.length + 1)
+      assert.ok(pushesAfter[pushesBefore.length].some((arg) => arg.endsWith(':refs/heads/parent')))
+      const state = await harness.readState()
+      assert.equal(prFor(state, 'child').state, 'CLOSED')
+    })
+  },
+)
 
 test(
   'GitHub publish creates a real base chain, preserves descriptions, and is idempotent',
@@ -610,6 +872,85 @@ test(
       assert.equal(prFor(state, 'child').body, 'Human child description before parent merge')
       assert.equal(prFor(state, 'child').headOid, remoteOid(harness, 'child'))
       assert.equal(prFor(state, 'parent').state, 'MERGED')
+    })
+  },
+)
+
+test(
+  'restack preserves unpublished commits after a merged parent',
+  { concurrency: false },
+  async () => {
+    await withHarness(async (harness) => {
+      await createStack(harness)
+      await publishStack(harness)
+      let state = await harness.readState()
+      updatePr(state, 'parent', {
+        checks: 'passing',
+        reviewDecision: 'APPROVED',
+        mergeState: 'CLEAN',
+      })
+      await harness.writeState(state)
+
+      const mergePreview = await previewStack(
+        harness.repo,
+        await getSnapshot(harness.repo),
+        'merge',
+        'parent',
+      )
+      assert.deepEqual(mergePreview.blockers, [])
+      await runAction(harness.repo, {
+        type: 'executeStack',
+        token: mergePreview.token,
+        allowForce: false,
+        draft: false,
+        titles: {},
+        mergeMethod: 'squash',
+      })
+      state = await harness.readState()
+      const mergedParent = prFor(state, 'parent')
+      const mergedParentHead = mergedParent.headOid
+      const mergedParentMergeOid = mergedParent.mergeOid
+      assert.equal(mergedParent.state, 'MERGED')
+      assert.ok(mergedParentHead)
+      assert.ok(mergedParentMergeOid)
+
+      git(harness, ['switch', 'parent'])
+      const laterParentTip = await commitFile(
+        harness,
+        'parent-after-merge.txt',
+        'parent two\n',
+        'Later parent work',
+      )
+      git(harness, ['switch', 'child'])
+      git(harness, ['rebase', '--onto', 'parent', mergedParentHead, 'child'])
+      git(harness, ['config', '--local', 'branch.child.parentTip', laterParentTip])
+      const childTip = localOid(harness, 'child')
+      assert.equal(git(harness, ['show', 'child:parent-after-merge.txt']), 'parent two')
+
+      const preview = await previewStack(
+        harness.repo,
+        await getSnapshot(harness.repo),
+        'restack',
+        'child',
+      )
+      assert.deepEqual(preview.blockers, [])
+      await runAction(harness.repo, {
+        type: 'executeStack',
+        token: preview.token,
+        allowForce: false,
+        draft: false,
+        titles: {},
+        mergeMethod: 'squash',
+      })
+      assert.notEqual(localOid(harness, 'child'), childTip)
+      assert.equal(git(harness, ['show', 'child:parent-after-merge.txt']), 'parent two')
+      assert.equal(git(harness, ['show', 'child:child.txt']), 'child')
+      assert.equal(localOid(harness, 'parent'), laterParentTip)
+      assert.equal(
+        git(harness, ['config', '--get', 'branch.child.parentTip']),
+        mergedParentMergeOid,
+      )
+      assert.equal(remoteOid(harness, 'main'), mergedParentMergeOid)
     })
   },
 )

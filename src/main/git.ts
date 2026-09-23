@@ -3,6 +3,7 @@ import { spawn } from 'node:child_process'
 import * as path from 'node:path'
 import { promises as fs } from 'node:fs'
 import type { Stats } from 'node:fs'
+import type { FileHandle } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 
 import type {
@@ -560,7 +561,7 @@ async function runForcePush(repoPath: string, preview: PushPreview): Promise<Act
     '--no-mirror',
     '--',
     pushUrl,
-    `refs/heads/${target.branch}:${target.destination}`,
+    `${preview.localOid}:${target.destination}`,
   ])
   return {
     message: `Force pushed ${target.branch} to ${target.remote}/${target.destination.slice('refs/heads/'.length)}`,
@@ -597,6 +598,160 @@ async function assertStashIdentity(repoPath: string, ref: string, oid: string): 
   }
 }
 
+async function dropStashByOid(
+  repoPath: string,
+  ref: string,
+  oid: string,
+  apply?: () => Promise<void>,
+): Promise<void> {
+  const refStorage = await getConfigValue(repoPath, 'extensions.refstorage')
+  if (refStorage && refStorage.toLowerCase() !== 'files') {
+    throw new Error(`Cannot safely remove stash ${ref} with ${refStorage} reference storage`)
+  }
+
+  const commonDir = stripTrailingNewline(await runGit(repoPath, ['rev-parse', '--git-common-dir']))
+  const commonPath = path.resolve(repoPath, commonDir)
+  const refPath = path.join(commonPath, 'refs', 'stash')
+  const logPath = path.join(commonPath, 'logs', 'refs', 'stash')
+  const refLockPath = `${refPath}.lock`
+  const logLockPath = `${logPath}.lock`
+  let refLock: FileHandle | undefined
+  let logLock: FileHandle | undefined
+  let refLockExists = false
+  let logLockExists = false
+  let originalLog = ''
+  let logCommitted = false
+  let completed = false
+
+  // Match the files backend's ref-then-reflog lock order and revalidate before rewriting.
+  try {
+    refLock = await fs.open(refLockPath, 'wx')
+    refLockExists = true
+    logLock = await fs.open(logLockPath, 'wx')
+    logLockExists = true
+
+    const [refInfo, logInfo, currentRef, log, stashes] = await Promise.all([
+      fs.lstat(refPath),
+      fs.lstat(logPath),
+      fs.readFile(refPath, 'utf8'),
+      fs.readFile(logPath, 'utf8'),
+      getStashes(repoPath),
+    ])
+    if (!refInfo.isFile() || !logInfo.isFile()) {
+      throw new Error(`Cannot safely remove stash ${ref} from this repository`)
+    }
+    originalLog = log
+    const matches = stashes
+      .map((stash, index) => ({ stash, index }))
+      .filter(({ stash }) => stash.oid.toLowerCase() === oid.toLowerCase())
+    if (matches.length !== 1) {
+      throw new Error(`Stash ${ref} changed or is ambiguous; refresh before retrying`)
+    }
+    const selectedIndex = matches[0].index
+    if (
+      !stashes[0] ||
+      currentRef.trim().toLowerCase() !== stashes[0].oid.toLowerCase() ||
+      (log && !log.endsWith('\n'))
+    ) {
+      throw new Error(`Stash ${ref} changed; refresh before retrying`)
+    }
+
+    const rows = log ? log.slice(0, -1).split('\n') : []
+    const records = rows.map((row) => {
+      const match = row.match(/^([0-9a-f]{40,128}) ([0-9a-f]{40,128}) (.*)$/iu)
+      if (!match) throw new Error(`Cannot safely identify stash ${ref}; refresh before retrying`)
+      return { oldOid: match[1], newOid: match[2], rest: match[3] }
+    })
+    if (
+      records.length !== stashes.length ||
+      records.some(
+        (record, index) =>
+          record.newOid.toLowerCase() !== stashes[stashes.length - index - 1].oid.toLowerCase(),
+      )
+    ) {
+      throw new Error(`Cannot safely identify stash ${ref}; refresh before retrying`)
+    }
+
+    // `stash list` is newest-first; reflog records on disk are oldest-first.
+    const logIndex = records.length - selectedIndex - 1
+    const selected = records[logIndex]!
+    if (logIndex < records.length - 1) {
+      const newer = records[logIndex + 1]!
+      const olderOid = logIndex > 0 ? records[logIndex - 1]!.newOid : selected.oldOid
+      rows[logIndex + 1] = `${olderOid} ${newer.newOid} ${newer.rest}`
+    }
+    rows.splice(logIndex, 1)
+
+    const newTip = selectedIndex === 0 ? (records[logIndex - 1]?.newOid ?? null) : null
+    if (selectedIndex === 0 && newTip === null) {
+      const packedRefsPath = path.join(commonPath, 'packed-refs')
+      const packedRefs = await fs.readFile(packedRefsPath, 'utf8').catch((error: unknown) => {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return ''
+        throw error
+      })
+      if (/^[0-9a-f]{40,128} refs\/stash$/imu.test(packedRefs)) {
+        throw new Error(`Cannot safely remove the last stash ${ref} from packed references`)
+      }
+    }
+    if (apply) await apply()
+
+    await logLock.writeFile(rows.length > 0 ? `${rows.join('\n')}\n` : '', 'utf8')
+    if (newTip) await refLock.writeFile(`${newTip}\n`, 'utf8')
+    await fs.rename(logLockPath, logPath)
+    logLockExists = false
+    logCommitted = true
+    await logLock.close()
+    logLock = undefined
+
+    if (selectedIndex === 0) {
+      if (newTip) {
+        await fs.rename(refLockPath, refPath)
+        refLockExists = false
+        completed = true
+        await refLock.close()
+        refLock = undefined
+      } else {
+        await fs.unlink(refPath)
+      }
+    }
+    completed = true
+  } catch (error) {
+    if (logCommitted && !completed) {
+      try {
+        if (logLock) {
+          await logLock.close()
+          logLock = undefined
+        }
+        const restoreLock = await fs.open(logLockPath, 'wx')
+        logLock = restoreLock
+        logLockExists = true
+        await restoreLock.writeFile(originalLog, 'utf8')
+        await fs.rename(logLockPath, logPath)
+        logLockExists = false
+        await restoreLock.close()
+        logLock = undefined
+      } catch {
+        // Preserve the original failure if rollback is blocked.
+      }
+    }
+    if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
+      throw new Error('Another Git operation is changing the stash; retry after it completes')
+    }
+    throw error
+  } finally {
+    try {
+      if (logLockExists) await fs.rm(logLockPath, { force: true })
+    } finally {
+      try {
+        if (refLockExists) await fs.rm(refLockPath, { force: true })
+      } finally {
+        await logLock?.close().catch(() => {})
+        await refLock?.close().catch(() => {})
+      }
+    }
+  }
+}
+
 async function runStashAction(
   repoPath: string,
   action: 'stashPop' | 'stashApply' | 'stashDrop',
@@ -605,8 +760,15 @@ async function runStashAction(
 ): Promise<ActionResult> {
   await ensureNoBusyOperation(repoPath, `${action} a stash`)
   await assertStashIdentity(repoPath, ref, oid)
-  const command = action === 'stashPop' ? 'pop' : action === 'stashApply' ? 'apply' : 'drop'
-  await runGit(repoPath, ['stash', command, ...(command === 'drop' ? [] : ['--index']), ref])
+  if (action === 'stashApply') {
+    await runGit(repoPath, ['stash', 'apply', '--index', oid])
+  } else if (action === 'stashPop') {
+    await dropStashByOid(repoPath, ref, oid, async () => {
+      await runGit(repoPath, ['stash', 'apply', '--index', oid])
+    })
+  } else {
+    await dropStashByOid(repoPath, ref, oid)
+  }
   return {
     message: `${action === 'stashPop' ? 'Applied and removed' : action === 'stashApply' ? 'Applied' : 'Dropped'} ${ref}`,
   }
@@ -1692,6 +1854,103 @@ async function runDeleteRemoteBranch(
   return { message: `Deleted remote branch ${remote}/${branch}` }
 }
 
+// Hold the absent branch ref locked while its per-branch config is removed.
+async function withAbsentRefLock(
+  repoPath: string,
+  ref: string,
+  operation: () => Promise<void>,
+): Promise<void> {
+  const child = spawn('git', ['update-ref', '--stdin'], {
+    cwd: repoPath,
+    env: {
+      ...process.env,
+      GIT_TERMINAL_PROMPT: '0',
+      GH_PROMPT_DISABLED: '1',
+      GCM_INTERACTIVE: 'Never',
+    },
+    stdio: ['pipe', 'pipe', 'pipe'],
+  })
+  let pendingOutput = ''
+  let stdout = ''
+  let stderr = ''
+  let prepared = false
+  let resolvePrepared!: () => void
+  let rejectPrepared!: (error: Error) => void
+  const prepareResult = new Promise<void>((resolve, reject) => {
+    resolvePrepared = resolve
+    rejectPrepared = reject
+  })
+  const completed = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(
+    (resolve) => {
+      child.on('close', (code, signal) => resolve({ code, signal }))
+    },
+  )
+  child.stdout.on('data', (chunk: Buffer) => {
+    stdout += chunk.toString()
+    pendingOutput += chunk.toString()
+    const lines = pendingOutput.split(/\r?\n/u)
+    pendingOutput = lines.pop() ?? ''
+    for (const line of lines) {
+      if (line === 'prepare: ok') {
+        prepared = true
+        resolvePrepared()
+      } else if (line.startsWith('prepare: ')) {
+        rejectPrepared(new Error(line))
+      }
+    }
+  })
+  child.stderr.on('data', (chunk: Buffer) => {
+    stderr += chunk.toString()
+  })
+  child.on('error', (error) => rejectPrepared(error))
+  child.on('close', (code, signal) => {
+    if (!prepared) {
+      rejectPrepared(
+        new Error(
+          stderr.trim() || stdout.trim() || `Git exited with ${signal ?? code ?? 'unknown'}`,
+        ),
+      )
+    }
+  })
+  child.stdin.on('error', (error) => {
+    if (!prepared) rejectPrepared(error)
+  })
+  child.stdin.write(`start\nverify ${ref}\nprepare\n`)
+
+  try {
+    await prepareResult
+  } catch (error) {
+    try {
+      child.stdin.end('abort\n')
+    } catch {
+      // The update-ref process may already have exited.
+    }
+    await completed
+    if (await refExists(repoPath, ref)) return
+    throw new Error(
+      stderr.trim() || commandDetail(error) || `Could not lock ${ref} for configuration cleanup`,
+    )
+  }
+
+  try {
+    await operation()
+  } catch (error) {
+    try {
+      child.stdin.end('abort\n')
+    } catch {
+      // The update-ref process may already have exited.
+    }
+    await completed
+    throw error
+  }
+  child.stdin.end('commit\n')
+  const result = await completed
+  if (result.code !== 0) {
+    throw new Error(stderr.trim() || `Git could not finish cleanup for ${ref}`)
+  }
+  return
+}
+
 async function deleteLocalBranchRef(
   repoPath: string,
   ref: string,
@@ -1785,7 +2044,7 @@ async function deleteLocalBranchRef(
     throw new Error(stderr.trim() || `Git could not complete deletion of ${ref}`)
   }
   try {
-    await cleanupConfig()
+    await withAbsentRefLock(repoPath, ref, cleanupConfig)
   } catch (error) {
     throw new Error(
       `Deleted branch ${branchName}, but could not remove its configuration: ${commandDetail(error)}`,

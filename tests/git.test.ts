@@ -622,6 +622,67 @@ test('local deletion preserves remote refs, child branches, and uncommitted work
   }
 })
 
+test('branch deletion preserves config for a same-name branch recreated before cleanup', async () => {
+  const { root, repo, git } = await fixture()
+  try {
+    git('switch', '-c', 'racing')
+    const deletedTip = git('rev-parse', 'HEAD')
+    git('switch', 'main')
+    git('commit', '--allow-empty', '-m', 'Advance replacement branch')
+    const replacementTip = git('rev-parse', 'HEAD')
+    git('config', 'branch.racing.parent', 'old-parent')
+
+    const shimDir = join(root, 'git-shim')
+    await mkdir(shimDir)
+    const shimPath = join(shimDir, 'git')
+    const recreated = join(root, 'branch-recreated')
+    await writeFile(
+      shimPath,
+      `#!/bin/sh
+real="$GIT_STACKS_TEST_REAL_GIT"
+if [ "$1" = "update-ref" ] && [ "$2" = "--stdin" ] && [ ! -e "$GIT_STACKS_BRANCH_RECREATED" ]; then
+  "$real" "$@" || exit $?
+  "$real" -C "$GIT_STACKS_RACE_REPO" update-ref refs/heads/racing "$GIT_STACKS_REPLACEMENT_OID"
+  "$real" -C "$GIT_STACKS_RACE_REPO" config branch.racing.parent replacement-parent
+  : > "$GIT_STACKS_BRANCH_RECREATED"
+  exit 0
+fi
+exec "$real" "$@"
+`,
+      { mode: 0o755 },
+    )
+    const realGit = execFileSync('/bin/sh', ['-c', 'command -v git'], {
+      encoding: 'utf8',
+    }).trim()
+    const savedPath = process.env.PATH
+    process.env.PATH = `${shimDir}${delimiter}${savedPath ?? ''}`
+    process.env.GIT_STACKS_TEST_REAL_GIT = realGit
+    process.env.GIT_STACKS_RACE_REPO = repo
+    process.env.GIT_STACKS_BRANCH_RECREATED = recreated
+    process.env.GIT_STACKS_REPLACEMENT_OID = replacementTip
+    try {
+      await runAction(repo, {
+        type: 'deleteBranch',
+        ref: 'refs/heads/racing',
+        force: false,
+        expectedOid: deletedTip,
+      })
+    } finally {
+      process.env.PATH = savedPath
+      delete process.env.GIT_STACKS_TEST_REAL_GIT
+      delete process.env.GIT_STACKS_RACE_REPO
+      delete process.env.GIT_STACKS_BRANCH_RECREATED
+      delete process.env.GIT_STACKS_REPLACEMENT_OID
+    }
+
+    assert.equal(await readFile(recreated, 'utf8'), '')
+    assert.equal(git('rev-parse', 'refs/heads/racing'), replacementTip)
+    assert.equal(git('config', '--get', 'branch.racing.parent'), 'replacement-parent')
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 test('merged deletion resolves the upstream ref despite a same-named local branch', async () => {
   const { root, repo, git } = await fixture()
   try {

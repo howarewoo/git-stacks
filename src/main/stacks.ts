@@ -746,7 +746,8 @@ async function capturePlan(
     parentOidMap[name] = target.oid
     const effectiveParentOid = target.oid
     if (retargetedFrom && oldParentRecord?.pr?.state === 'MERGED') {
-      const mergeOid = oldParentRecord.pr.mergeOid
+      const mergedPr = oldParentRecord.pr
+      const mergeOid = mergedPr.mergeOid
       if (
         !mergeOid ||
         !(await resolveCommit(root, mergeOid)) ||
@@ -755,6 +756,21 @@ async function capturePlan(
         blockers.push(
           `Merged parent ${retargetedFrom} has no validated merge commit reachable from ${parent}; fetch origin and inspect the rewritten base before retrying`,
         )
+      }
+      const reviewedHead = mergedPr.headOid ? await resolveCommit(root, mergedPr.headOid) : null
+      const boundaryIncludedInParent = await isAncestor(root, boundary, effectiveParentOid)
+      const unsafeBoundaryMessage = `Merged parent ${retargetedFrom} has a boundary for ${name} that is not included in ${parent} and its reviewed head cannot be used as a safe replay boundary; restacking is blocked to preserve commits`
+      if (!reviewedHead) {
+        blockers.push(unsafeBoundaryMessage)
+      } else if (await isAncestor(root, reviewedHead, record.oid)) {
+        const reviewedHeadIncludedInBoundary = await isAncestor(root, reviewedHead, boundary)
+        if (!reviewedHeadIncludedInBoundary || !boundaryIncludedInParent) {
+          // Replaying from the merged PR head excludes its reviewed commits
+          // while retaining every child commit added after that head.
+          boundary = reviewedHead
+        }
+      } else if (!boundaryIncludedInParent) {
+        blockers.push(unsafeBoundaryMessage)
       }
     }
     const commits = await commitCount(root, boundary, record.oid)
@@ -1643,6 +1659,17 @@ async function exactPrForBranch(branch: string, data: GitHubResult): Promise<Pul
   return matches[0] ?? null
 }
 
+function matchesCapturedPullRequest(entry: PlanEntry, currentPr: PullRequest | null): boolean {
+  if (!entry.pr) return currentPr === null
+  if (!currentPr || currentPr.state !== 'OPEN') return false
+  return (
+    currentPr.number === entry.pr.number &&
+    currentPr.head === entry.pr.head &&
+    currentPr.headOid === entry.pr.headOid &&
+    currentPr.base === entry.pr.base
+  )
+}
+
 async function pushBranch(
   repoPath: string,
   entry: PlanEntry,
@@ -1678,7 +1705,7 @@ async function pushBranch(
       '--no-mirror',
       `--force-with-lease=refs/heads/${entry.branch}:${entry.remoteOid}`,
       'origin',
-      `refs/heads/${entry.branch}:refs/heads/${entry.branch}`,
+      `${entry.oldTip}:refs/heads/${entry.branch}`,
     ])
   } else {
     await runGit(repoPath, [
@@ -1688,7 +1715,7 @@ async function pushBranch(
       '--no-force',
       '--no-mirror',
       'origin',
-      `refs/heads/${entry.branch}:refs/heads/${entry.branch}`,
+      `${entry.oldTip}:refs/heads/${entry.branch}`,
     ])
   }
   await setConfig(repoPath, `branch.${entry.branch}.remote`, 'origin')
@@ -1895,20 +1922,21 @@ async function publishStack(
   const preflight = await canonicalPullRequests(repoPath)
   for (const entry of plan.entries) {
     const currentPr = await exactPrForBranch(entry.branch, preflight.data)
-    if (!entry.pr && !currentPr) continue
-    if (
-      !entry.pr ||
-      !currentPr ||
-      currentPr.number !== entry.pr.number ||
-      currentPr.headOid !== entry.pr.headOid ||
-      currentPr.base !== entry.pr.base
-    ) {
+    if (!matchesCapturedPullRequest(entry, currentPr)) {
       throw new Error(`Stack preview is stale: pull request for ${entry.branch} changed`)
     }
   }
   const canonical = preflight
   const published: Array<{ branch: string; pr: PullRequest }> = []
   for (const entry of plan.entries) {
+    const beforePush = await getGitHubData(repoPath, origin.url)
+    if (!beforePush.available) throw new Error(beforePush.message)
+    const beforePushPr = await exactPrForBranch(entry.branch, beforePush)
+    if (!matchesCapturedPullRequest(entry, beforePushPr)) {
+      throw new Error(
+        `Pull request for ${entry.branch} changed during publication; inspect the published branches before retrying`,
+      )
+    }
     const currentOid = await pushBranch(repoPath, entry, action.allowForce, pushUrl)
     const currentData = await getGitHubData(repoPath, origin.url)
     if (!currentData.available) throw new Error(currentData.message)
