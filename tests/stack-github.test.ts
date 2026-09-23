@@ -1437,6 +1437,69 @@ test(
 )
 
 test(
+  'branch lock recovery preserves journals for invalid numeric PIDs',
+  { concurrency: false },
+  async () => {
+    await withHarness(async (harness) => {
+      await createStack(harness)
+      const lockPath = join(harness.repo, '.git', 'refs', 'heads', 'child.lock')
+      const locksDir = join(harness.repo, '.git', 'git-stacks-branch-locks')
+      const transactionId = 'deadbeefdeadbeefdeadbeefdeadbeef'
+      const journalPath = join(locksDir, `${transactionId}.json`)
+      const lockData = {
+        pid: 0,
+        branch: 'child',
+        lockPath,
+        createdAt: Date.now() - 30000,
+        transactionId,
+      }
+      await mkdir(locksDir, { recursive: true })
+      await writeFile(lockPath, JSON.stringify(lockData), 'utf8')
+      await writeFile(journalPath, JSON.stringify(lockData), 'utf8')
+
+      await assert.rejects(publishStack(harness), /being updated/u)
+      assert.deepEqual(JSON.parse(await readFile(lockPath, 'utf8')), lockData)
+      assert.deepEqual(JSON.parse(await readFile(journalPath, 'utf8')), lockData)
+    })
+  },
+)
+
+test(
+  'branch lock recovery preserves journals for mismatched live lock metadata',
+  { concurrency: false },
+  async () => {
+    await withHarness(async (harness) => {
+      await createStack(harness)
+      const lockPath = join(harness.repo, '.git', 'refs', 'heads', 'child.lock')
+      const locksDir = join(harness.repo, '.git', 'git-stacks-branch-locks')
+      const journalTransactionId = 'deadbeefdeadbeefdeadbeefdeadbeef'
+      const journalPath = join(locksDir, `${journalTransactionId}.json`)
+      const liveLockData = {
+        pid: process.pid,
+        branch: 'child',
+        lockPath,
+        createdAt: Date.now(),
+        transactionId: 'ffffffffffffffffffffffffffffffff',
+      }
+      const journalData = {
+        pid: 99999999,
+        branch: 'child',
+        lockPath,
+        createdAt: Date.now() - 30000,
+        transactionId: journalTransactionId,
+      }
+      await mkdir(locksDir, { recursive: true })
+      await writeFile(lockPath, JSON.stringify(liveLockData), 'utf8')
+      await writeFile(journalPath, JSON.stringify(journalData), 'utf8')
+
+      await assert.rejects(publishStack(harness), /being updated/u)
+      assert.deepEqual(JSON.parse(await readFile(lockPath, 'utf8')), liveLockData)
+      assert.deepEqual(JSON.parse(await readFile(journalPath, 'utf8')), journalData)
+    })
+  },
+)
+
+test(
   'stale branch lock cleanup preserves a replacement created during identity validation',
   { concurrency: false },
   async () => {

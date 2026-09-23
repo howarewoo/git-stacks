@@ -512,8 +512,12 @@ async function isProvenMergeHead(
   return false
 }
 
+function isValidPid(pid: unknown): pid is number {
+  return typeof pid === 'number' && Number.isInteger(pid) && pid > 0
+}
+
 function isPidRunning(pid: number): boolean {
-  if (!Number.isInteger(pid) || pid <= 0) return false
+  if (!isValidPid(pid)) return false
   try {
     process.kill(pid, 0)
     return true
@@ -729,7 +733,7 @@ async function tryRecoverStaleBranchLock(
   }
   if (
     parsed &&
-    typeof parsed.pid === 'number' &&
+    isValidPid(parsed.pid) &&
     isValidTransactionId(parsed.transactionId) &&
     parsed.branch === branch &&
     typeof parsed.lockPath === 'string' &&
@@ -754,7 +758,7 @@ async function tryRecoverStaleBranchLock(
       !(await sameExistingPath(journal.lockPath, lockPath)) ||
       journal.branch !== branch ||
       journal.pid !== parsed.pid ||
-      typeof journal.pid !== 'number' ||
+      !isValidPid(journal.pid) ||
       isPidRunning(journal.pid)
     ) {
       return false
@@ -801,7 +805,7 @@ export async function recoverStaleBranchLocks(repoPath: string): Promise<void> {
       const journalJson = JSON.parse(raw)
       if (!isRecord(journalJson)) continue
       const pid = journalJson.pid
-      if (typeof pid !== 'number' || isPidRunning(pid)) {
+      if (!isValidPid(pid) || isPidRunning(pid)) {
         continue
       }
 
@@ -859,8 +863,15 @@ export async function recoverStaleBranchLocks(repoPath: string): Promise<void> {
             await fs.unlink(journalPath).catch(() => {})
           }
           // If 'failed', keep journal evidence
-        } else if (typeof lockParsed.pid === 'number' && isPidRunning(lockParsed.pid)) {
-          // A live publisher owns the lock: remove our dead journal
+        } else if (
+          isValidPid(lockParsed.pid) &&
+          isPidRunning(lockParsed.pid) &&
+          lockParsed.transactionId === journalJson.transactionId &&
+          lockParsed.branch === journalJson.branch &&
+          typeof lockParsed.lockPath === 'string' &&
+          (await sameExistingPath(lockParsed.lockPath, lockPath))
+        ) {
+          // A live publisher owns the same transaction; remove only its stale journal.
           await fs.unlink(journalPath).catch(() => {})
         }
       }
