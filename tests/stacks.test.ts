@@ -5,7 +5,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { getFileView, getSnapshot, runAction } from '../src/main/git'
-import { getStackProgress, previewStack } from '../src/main/stacks'
+import { MAX_MESSAGE_LENGTH } from '../src/main/git-core'
+import { getStackProgress, isStackAction, previewStack } from '../src/main/stacks'
 
 type Git = (...args: string[]) => string
 
@@ -126,6 +127,17 @@ async function prepareConflictStack() {
   const mainTip = await commitFile(repo, git, 'shared.txt', 'main\n', 'Main change')
   git('switch', 'parking')
   return { ...state, rootTip, childTip, mainTip, parkingTip: tip(git, 'parking') }
+}
+
+// Simulates the crash window where `git rebase` succeeds but the process exits
+// before the journal records the new tip: the conflicted child rebase is
+// resolved and finished outside the app, leaving the journal at `rebasing`.
+async function finishRebaseExternally(repo: string, git: Git): Promise<string> {
+  await writeFile(join(repo, 'shared.txt'), 'resolved\n')
+  git('add', '--', 'shared.txt')
+  gitAt(repo, ['rebase', '--continue'], { ...process.env, GIT_EDITOR: 'true' })
+  assert.equal(git('status', '--porcelain'), '')
+  return tip(git, 'child')
 }
 
 test('restack moves every connected local ref onto an advanced parent and preserves siblings with updateRefs enabled', async () => {
@@ -304,6 +316,82 @@ test('abort refuses an externally drifted completed ref without rolling back its
   assert.deepEqual(progress?.remaining, ['child'])
 })
 
+test('continue adopts a rebase that finished after its journal checkpoint', async () => {
+  const { repo, git, rootTip, childTip } = await prepareConflictStack()
+  const preview = await previewStack(repo, await getSnapshot(repo), 'restack', 'child')
+  assert.deepEqual(preview.blockers, [])
+  await assert.rejects(executePreview(repo, preview.token))
+
+  const rewrittenRoot = tip(git, 'root')
+  const rewrittenChild = await finishRebaseExternally(repo, git)
+  assert.notEqual(rewrittenRoot, rootTip)
+  assert.notEqual(rewrittenChild, childTip)
+  const stuck = await getStackProgress(repo)
+  assert.deepEqual(stuck?.completed, ['root'])
+  assert.deepEqual(stuck?.remaining, ['child'])
+
+  await runAction(repo, { type: 'stackContinue' })
+
+  assert.equal(await getStackProgress(repo), null)
+  assert.equal(tip(git, 'root'), rewrittenRoot)
+  assert.equal(tip(git, 'child'), rewrittenChild)
+  assert.equal(git('config', '--get', 'branch.child.parent'), 'root')
+  assert.equal(git('config', '--get', 'branch.child.parentTip'), rewrittenRoot)
+  assert.equal(git('show', 'child:shared.txt'), 'resolved')
+  assert.equal(git('show', 'child:root.txt'), 'root')
+  assert.equal(git('branch', '--show-current'), 'parking')
+  assert.equal(git('status', '--porcelain'), '')
+  const refLines = git('show-ref').split('\n')
+  const backups = refLines.filter((line) => line.includes('refs/git-stacks/'))
+  assert.deepEqual(backups, [])
+})
+
+test('abort restores tips when the recorded rebase finished after its journal checkpoint', async () => {
+  const { repo, git, rootTip, childTip, parkingTip } = await prepareConflictStack()
+  const rootBoundary = git('config', '--get', 'branch.root.parentTip')
+  const childBoundary = git('config', '--get', 'branch.child.parentTip')
+  const preview = await previewStack(repo, await getSnapshot(repo), 'restack', 'child')
+  await assert.rejects(executePreview(repo, preview.token))
+  const rewrittenChild = await finishRebaseExternally(repo, git)
+  assert.notEqual(rewrittenChild, childTip)
+
+  await runAction(repo, { type: 'stackAbort' })
+
+  assert.equal(tip(git, 'root'), rootTip)
+  assert.equal(tip(git, 'child'), childTip)
+  assert.equal(git('config', '--get', 'branch.root.parent'), 'main')
+  assert.equal(git('config', '--get', 'branch.root.parentTip'), rootBoundary)
+  assert.equal(git('config', '--get', 'branch.child.parent'), 'root')
+  assert.equal(git('config', '--get', 'branch.child.parentTip'), childBoundary)
+  assert.equal(tip(git, 'parking'), parkingTip)
+  assert.equal(git('branch', '--show-current'), 'parking')
+  assert.equal(git('status', '--porcelain'), '')
+  assert.equal(await getStackProgress(repo), null)
+})
+
+test('recovery refuses a branch moved outside Git Stacks after its recorded rebase', async () => {
+  const { repo, git, rootTip, childTip } = await prepareConflictStack()
+  const childBoundary = git('config', '--get', 'branch.child.parentTip')
+  const preview = await previewStack(repo, await getSnapshot(repo), 'restack', 'child')
+  await assert.rejects(executePreview(repo, preview.token))
+  const rewrittenRoot = tip(git, 'root')
+  assert.notEqual(rewrittenRoot, rootTip)
+  await finishRebaseExternally(repo, git)
+  git('commit', '--allow-empty', '-m', 'External child work')
+  const movedTip = tip(git, 'child')
+  assert.notEqual(movedTip, childTip)
+
+  await assert.rejects(runAction(repo, { type: 'stackContinue' }), /changed outside Git Stacks/u)
+  await assert.rejects(runAction(repo, { type: 'stackAbort' }), /changed outside Git Stacks/u)
+
+  assert.equal(tip(git, 'child'), movedTip)
+  assert.equal(tip(git, 'root'), rewrittenRoot)
+  assert.equal(git('config', '--get', 'branch.child.parentTip'), childBoundary)
+  const progress = await getStackProgress(repo)
+  assert.deepEqual(progress?.completed, ['root'])
+  assert.deepEqual(progress?.remaining, ['child'])
+})
+
 test('setParent rejects cycles and preserves the original cutoff while reparenting', async () => {
   const { repo, git, base } = await fixture()
   git('switch', '-c', 'a', base)
@@ -390,4 +478,12 @@ test('offline local restack ignores an unavailable non-GitHub origin', async () 
   assert.equal(calls, '')
   assert.equal(git('branch', '--show-current'), 'parking')
   assert.equal(git('status', '--porcelain'), '')
+})
+
+test('PR editing rejects malformed descriptions and empty titles', () => {
+  const base = { type: 'updatePr', number: 7, title: 'A title', draft: false }
+  assert.equal(isStackAction({ ...base, body: 'human\0description' }), false)
+  assert.equal(isStackAction({ ...base, body: 'x'.repeat(MAX_MESSAGE_LENGTH + 1) }), false)
+  assert.equal(isStackAction({ ...base, body: 42 }), false)
+  assert.equal(isStackAction({ ...base, title: '', body: 'ok' }), false)
 })

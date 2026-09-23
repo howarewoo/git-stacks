@@ -139,7 +139,7 @@ export type StackAction =
 export type GitAction =
   | { type: 'switch'; ref: string }
   | { type: 'createBranch'; name: string; parent: string }
-  | { type: 'deleteBranch'; ref: string; force: boolean }
+  | { type: 'deleteBranch'; ref: string; force: boolean; expectedOid: string }
   | { type: 'stage' | 'unstage'; paths: string[] }
   | { type: 'commit'; message: string; amend: boolean; expectedHead: string | null }
   | { type: 'fetch' | 'push' | 'rebaseContinue' | 'rebaseAbort' }

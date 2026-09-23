@@ -600,7 +600,12 @@ test('local deletion preserves remote refs, child branches, and uncommitted work
     const staged = git('diff', '--cached')
     await writeFile(join(repo, 'shared.txt'), 'unsaved work\n')
 
-    await runAction(repo, { type: 'deleteBranch', ref: 'refs/heads/merged', force: false })
+    await runAction(repo, {
+      type: 'deleteBranch',
+      ref: 'refs/heads/merged',
+      force: false,
+      expectedOid: tip,
+    })
     const snapshot = await getSnapshot(repo)
     assert.equal(
       snapshot.branches.some((branch) => branch.ref === 'refs/heads/merged'),
@@ -631,6 +636,7 @@ test('unmerged deletion requires an explicit boolean force opt-in', async () => 
         type: 'deleteBranch',
         ref: 'refs/heads/unmerged',
         force: false,
+        expectedOid: tip,
       }),
     )
     await assert.rejects(
@@ -638,11 +644,17 @@ test('unmerged deletion requires an explicit boolean force opt-in', async () => 
         type: 'deleteBranch',
         ref: 'refs/heads/unmerged',
         force: 'false',
+        expectedOid: tip,
       } as unknown as GitAction),
     )
     assert.equal(git('rev-parse', 'unmerged'), tip)
 
-    await runAction(repo, { type: 'deleteBranch', ref: 'refs/heads/unmerged', force: true })
+    await runAction(repo, {
+      type: 'deleteBranch',
+      ref: 'refs/heads/unmerged',
+      force: true,
+      expectedOid: tip,
+    })
     assert.equal(
       (await getSnapshot(repo)).branches.some((branch) => branch.name === 'unmerged'),
       false,
@@ -667,7 +679,9 @@ test('force deletion cannot bypass root, current, worktree, remote, or operation
       'refs/heads/occupied',
       'refs/remotes/origin/remote-only',
     ]) {
-      await assert.rejects(runAction(repo, { type: 'deleteBranch', ref, force: true }))
+      await assert.rejects(
+        runAction(repo, { type: 'deleteBranch', ref, force: true, expectedOid: tip }),
+      )
       assert.equal(git('rev-parse', ref), tip)
     }
     await assert.rejects(
@@ -675,6 +689,7 @@ test('force deletion cannot bypass root, current, worktree, remote, or operation
         type: 'deleteBranch',
         ref: 'refs/heads/-D',
         force: true,
+        expectedOid: tip,
       }),
     )
     git('branch', 'during-operation')
@@ -684,9 +699,50 @@ test('force deletion cannot bypass root, current, worktree, remote, or operation
         type: 'deleteBranch',
         ref: 'refs/heads/during-operation',
         force: true,
+        expectedOid: tip,
       }),
     )
     assert.equal(git('rev-parse', 'during-operation'), tip)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('force deletion rejects a branch that advanced after its tip was captured', async () => {
+  const { root, repo, git } = await fixture()
+  try {
+    git('switch', '-c', 'racing')
+    await writeFile(join(repo, 'racing.txt'), 'racing work\n')
+    git('add', '.')
+    git('commit', '-m', 'Racing work')
+    const captured = git('rev-parse', 'HEAD')
+    git('switch', 'main')
+    git('commit', '--allow-empty', '-m', 'Advance main')
+    git('update-ref', 'refs/heads/racing', 'HEAD')
+    const advanced = git('rev-parse', 'refs/heads/racing')
+    assert.notEqual(advanced, captured)
+
+    await assert.rejects(
+      runAction(repo, {
+        type: 'deleteBranch',
+        ref: 'refs/heads/racing',
+        force: true,
+        expectedOid: captured,
+      }),
+      { message: /refresh before deleting/ },
+    )
+    assert.equal(git('rev-parse', 'refs/heads/racing'), advanced)
+
+    await runAction(repo, {
+      type: 'deleteBranch',
+      ref: 'refs/heads/racing',
+      force: true,
+      expectedOid: advanced,
+    })
+    assert.equal(
+      (await getSnapshot(repo)).branches.some((branch) => branch.ref === 'refs/heads/racing'),
+      false,
+    )
   } finally {
     await rm(root, { recursive: true, force: true })
   }

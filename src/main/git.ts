@@ -132,6 +132,7 @@ function validateAction(value: unknown): GitAction {
         type: 'deleteBranch',
         ref: requireRefInput(value.ref, 'branch ref'),
         force: value.force,
+        expectedOid: requireOid(value.expectedOid, 'expectedOid')!,
       }
     case 'stage':
     case 'unstage': {
@@ -179,9 +180,16 @@ function validateAction(value: unknown): GitAction {
       if (typeof value.includeUntracked !== 'boolean') {
         throw new Error('includeUntracked must be a boolean')
       }
+      if (
+        typeof value.message !== 'string' ||
+        value.message.length > MAX_MESSAGE_LENGTH ||
+        value.message.includes('\0')
+      ) {
+        throw new Error('stash message must be a string without NUL bytes')
+      }
       return {
         type: 'stash',
-        message: requireString(value.message, 'stash message'),
+        message: value.message,
         includeUntracked: value.includeUntracked,
       }
     case 'stashPop':
@@ -266,7 +274,7 @@ function validateAction(value: unknown): GitAction {
       }
       if (
         typeof value.content !== 'string' ||
-        value.content.length > MAX_MESSAGE_LENGTH ||
+        Buffer.byteLength(value.content, 'utf8') > MAX_FILE_BYTES ||
         value.content.includes('\0')
       ) {
         throw new Error('content must be a UTF-8 string without NUL bytes')
@@ -569,7 +577,7 @@ async function runStash(
     'stash',
     'push',
     ...(includeUntracked ? ['--include-untracked'] : []),
-    `--message=${message}`,
+    ...(message ? [`--message=${message}`] : []),
   ]
   await runGit(repoPath, args)
   return {
@@ -1685,6 +1693,7 @@ async function runDeleteBranch(
   repoPath: string,
   ref: string,
   force: boolean,
+  expectedOid: string,
 ): Promise<ActionResult> {
   if (!ref.startsWith('refs/heads/')) {
     throw new Error('Only local branches can be deleted')
@@ -1701,6 +1710,12 @@ async function runDeleteBranch(
   }
   if (!refs.some((entry) => entry.refname === ref && !entry.symref)) {
     throw new Error(`Local branch "${name}" no longer exists`)
+  }
+  const currentOid = stripTrailingNewline(
+    await runGit(repoPath, ['rev-parse', '--verify', '--end-of-options', `${ref}^{commit}`]),
+  )
+  if (currentOid.toLowerCase() !== expectedOid.toLowerCase()) {
+    throw new Error('The branch changed since it was selected; refresh before deleting it')
   }
   await ensureNotCheckedOutElsewhere(repoPath, name)
   await runGit(repoPath, ['branch', force ? '-D' : '-d', '--', name])
@@ -1739,7 +1754,7 @@ export async function runAction(repoPath: string, value: GitAction): Promise<Act
     case 'createBranch':
       return runCreateBranch(root, action.name, action.parent)
     case 'deleteBranch':
-      return runDeleteBranch(root, action.ref, action.force)
+      return runDeleteBranch(root, action.ref, action.force, action.expectedOid)
     case 'deleteRemoteBranch':
       return runDeleteRemoteBranch(root, action.ref, action.expectedOid)
     case 'renameBranch':

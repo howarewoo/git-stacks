@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { getFileView, getPushPreview, getSnapshot, runAction } from '../src/main/git'
+import type { GitAction } from '../src/shared/types'
 
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), 'git-stacks-local-actions-'))
@@ -135,6 +136,91 @@ test('stash actions require both the displayed ref and captured stash object', a
     await writeFile(join(repo, 'shared.txt'), 'second\n')
     await runAction(repo, { type: 'stash', message: 'second', includeUntracked: false })
     await assert.rejects(runAction(repo, { type: 'stashDrop', ref: first.ref, oid: first.oid }))
+  } finally {
+    await cleanup(root)
+  }
+})
+
+test('optional empty stash messages use Git defaults and preserve validation', async () => {
+  const { root, repo } = await fixture()
+  try {
+    await writeFile(join(repo, 'shared.txt'), 'stash me\n')
+    await assert.rejects(
+      runAction(repo, {
+        type: 'stash',
+        message: 'bad\0message',
+        includeUntracked: false,
+      } as unknown as GitAction),
+    )
+    await assert.rejects(
+      runAction(repo, {
+        type: 'stash',
+        message: 'x'.repeat(256 * 1024 + 1),
+        includeUntracked: false,
+      }),
+    )
+    await assert.rejects(
+      runAction(repo, {
+        type: 'stash',
+        message: 42,
+        includeUntracked: false,
+      } as unknown as GitAction),
+    )
+
+    await runAction(repo, { type: 'stash', message: '', includeUntracked: false })
+    const snapshot = await getSnapshot(repo)
+    assert.deepEqual(snapshot.files, [])
+    assert.equal(snapshot.stashes.length, 1)
+    await runAction(repo, {
+      type: 'stashApply',
+      ref: snapshot.stashes[0].ref,
+      oid: snapshot.stashes[0].oid,
+    })
+    assert.equal(await readFile(join(repo, 'shared.txt'), 'utf8'), 'stash me\n')
+  } finally {
+    await cleanup(root)
+  }
+})
+
+test('manual conflict resolution accepts UTF-8 content through the file byte limit', async () => {
+  const { root, repo, git } = await fixture()
+  try {
+    await runAction(repo, { type: 'createBranch', name: 'feature', parent: 'main' })
+    await writeFile(join(repo, 'shared.txt'), 'feature change\n')
+    git('add', '.')
+    git('commit', '-m', 'Feature change')
+    await runAction(repo, { type: 'switch', ref: 'refs/heads/main' })
+    await writeFile(join(repo, 'shared.txt'), 'main change\n')
+    git('add', '.')
+    git('commit', '-m', 'Main change')
+    await runAction(repo, { type: 'switch', ref: 'refs/heads/feature' })
+    await assert.rejects(runAction(repo, { type: 'rebase', parent: 'main' }))
+
+    const view = await getFileView(repo, 'shared.txt')
+    assert.equal(view.conflicted, true)
+    const tooLarge = 'é'.repeat(1_100_000)
+    await assert.rejects(
+      runAction(repo, {
+        type: 'resolveFile',
+        path: 'shared.txt',
+        fingerprint: view.fingerprint,
+        strategy: 'manual',
+        content: tooLarge,
+      }),
+    )
+    assert.equal((await getFileView(repo, 'shared.txt')).fingerprint, view.fingerprint)
+
+    const resolved = 'é'.repeat(400_000)
+    await runAction(repo, {
+      type: 'resolveFile',
+      path: 'shared.txt',
+      fingerprint: view.fingerprint,
+      strategy: 'manual',
+      content: resolved,
+    })
+    assert.equal(await readFile(join(repo, 'shared.txt'), 'utf8'), resolved)
+    await runAction(repo, { type: 'rebaseAbort' })
+    assert.equal((await getSnapshot(repo)).rebaseInProgress, false)
   } finally {
     await cleanup(root)
   }

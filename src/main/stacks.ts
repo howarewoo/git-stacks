@@ -13,6 +13,7 @@ import type {
   StackStep,
 } from '../shared/types'
 import {
+  MAX_MESSAGE_LENGTH,
   branchUpstream,
   commandCode,
   commandDetail,
@@ -198,11 +199,18 @@ export function validateStackAction(value: unknown): StackAction {
         stackActionError('Pull request number must be a positive integer')
       }
       if (typeof value.draft !== 'boolean') stackActionError('draft must be a boolean')
+      if (
+        typeof value.body !== 'string' ||
+        value.body.length > MAX_MESSAGE_LENGTH ||
+        value.body.includes('\0')
+      ) {
+        stackActionError('pull request body must be a string without NUL bytes')
+      }
       return {
         type: 'updatePr',
         number: value.number,
         title: requireString(value.title, 'pull request title'),
-        body: requireString(value.body, 'pull request body'),
+        body: value.body,
         draft: value.draft,
       }
     case 'closePr':
@@ -1070,15 +1078,13 @@ async function verifyCompletedEntries(repoPath: string, journal: StackJournal): 
   }
 }
 
-async function assertActiveRebase(
-  repoPath: string,
-  journal: StackJournal,
-  entry: JournalEntry,
-): Promise<void> {
-  const parent = journal.entries.find(
-    (candidate) => candidate.branch === entry.newParent && candidate.status === 'completed',
-  )
-  const expectedOnto = entry.newParentTip ?? parent?.newTip ?? entry.newParentOid
+interface ActiveRebaseState {
+  head: string
+  original: string
+  onto: string
+}
+
+async function activeRebaseState(repoPath: string): Promise<ActiveRebaseState | null> {
   const directory = await gitDirectory(repoPath)
   for (const backend of ['rebase-merge', 'rebase-apply']) {
     try {
@@ -1087,23 +1093,90 @@ async function assertActiveRebase(
           fs.readFile(path.join(directory, backend, name), 'utf8'),
         ),
       )
-      if (
-        head.trim() !== `refs/heads/${entry.branch}` ||
-        original.trim() !== entry.oldTip ||
-        onto.trim() !== expectedOnto
-      ) {
-        throw new Error(
-          'The active rebase does not match the saved stack operation; refusing to change it',
-        )
-      }
-      entry.newParentTip = expectedOnto
-      return
+      return { head: head.trim(), original: original.trim(), onto: onto.trim() }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue
       throw error
     }
   }
-  throw new Error('The saved stack rebase is not active; inspect its backup refs before recovery')
+  return null
+}
+
+function expectedRebaseOnto(journal: StackJournal, entry: JournalEntry): string {
+  const parent = journal.entries.find(
+    (candidate) => candidate.branch === entry.newParent && candidate.status === 'completed',
+  )
+  return entry.newParentTip ?? parent?.newTip ?? entry.newParentOid
+}
+
+function inactiveRebaseError(): Error {
+  return new Error('The saved stack rebase is not active; inspect its backup refs before recovery')
+}
+
+async function assertActiveRebase(
+  repoPath: string,
+  journal: StackJournal,
+  entry: JournalEntry,
+): Promise<void> {
+  const state = await activeRebaseState(repoPath)
+  if (!state) throw inactiveRebaseError()
+  const expectedOnto = expectedRebaseOnto(journal, entry)
+  if (
+    state.head !== `refs/heads/${entry.branch}` ||
+    state.original !== entry.oldTip ||
+    state.onto !== expectedOnto
+  ) {
+    throw new Error(
+      'The active rebase does not match the saved stack operation; refusing to change it',
+    )
+  }
+  entry.newParentTip = expectedOnto
+}
+
+function parseReflogEntry(line: string): { oid: string; message: string } | null {
+  const separator = line.indexOf(' ')
+  if (separator <= 0) return null
+  return { oid: line.slice(0, separator), message: line.slice(separator + 1) }
+}
+
+async function reconcileCompletedRebase(
+  repoPath: string,
+  journal: StackJournal,
+  entry: JournalEntry,
+  tip: string | null,
+): Promise<void> {
+  const operation = await getOperationState(repoPath)
+  if (operation.busy) throw new Error('Another Git operation is still in progress')
+  if (!tip || tip === entry.oldTip) throw inactiveRebaseError()
+  const backup = await resolveCommit(repoPath, entry.backupRef)
+  if (backup !== entry.oldTip)
+    throw new Error(`Backup ref for ${entry.branch} does not match its recorded tip`)
+  const expectedOnto = expectedRebaseOnto(journal, entry)
+  const output = await tryGit(repoPath, [
+    'reflog',
+    'show',
+    `refs/heads/${entry.branch}`,
+    '--format=%H %gs',
+    '--max-count=2',
+  ])
+  const lines = (output ?? '').split('\n').filter((line) => line.length > 0)
+  const newest = parseReflogEntry(lines[0] ?? '')
+  const previous = parseReflogEntry(lines[1] ?? '')
+  const prefix = `rebase (finish): refs/heads/${entry.branch} onto `
+  const proven =
+    newest !== null &&
+    previous !== null &&
+    newest.oid === tip &&
+    previous.oid === entry.oldTip &&
+    newest.message.startsWith(prefix) &&
+    isOid(newest.message.slice(prefix.length)) &&
+    newest.message.slice(prefix.length) === expectedOnto
+  if (!proven)
+    throw new Error(`Branch ${entry.branch} changed outside Git Stacks; refusing to adopt its tip`)
+  entry.newParentTip = expectedOnto
+  entry.newTip = tip
+  entry.status = 'metadata'
+  await writeJournal(repoPath, journal)
 }
 
 async function completeEntry(
@@ -1257,6 +1330,12 @@ async function stackContinue(repoPath: string): Promise<ActionResult> {
   if (!active) return restackJournal(repoPath, journal)
   await verifyCompletedEntries(repoPath, journal)
   await verifyEntryMetadata(repoPath, active)
+  if (!(await activeRebaseState(repoPath))) {
+    const tip = await resolveCommit(repoPath, `refs/heads/${active.branch}`)
+    await reconcileCompletedRebase(repoPath, journal, active, tip)
+    await completeEntry(repoPath, journal, active)
+    return restackJournal(repoPath, journal)
+  }
   await assertActiveRebase(repoPath, journal, active)
   if ((await resolveCommit(repoPath, active.newParentRef)) !== active.newParentTip) {
     throw new Error(`Parent ${active.newParent} changed while the stack was paused`)
@@ -1285,8 +1364,17 @@ async function stackAbort(repoPath: string): Promise<ActionResult> {
   if (state.rebase) {
     if (!active) throw new Error('An unrelated rebase is active; refusing to abort it')
     await assertActiveRebase(repoPath, journal, active)
-  } else if (state.busy) throw new Error('Another Git operation is still in progress')
-  else await ensureClean(repoPath, 'abort the stack')
+  } else if (state.busy) {
+    throw new Error('Another Git operation is still in progress')
+  } else {
+    await ensureClean(repoPath, 'abort the stack')
+    if (active) {
+      const tip = await resolveCommit(repoPath, `refs/heads/${active.branch}`)
+      if (tip && tip !== active.oldTip) {
+        await reconcileCompletedRebase(repoPath, journal, active, tip)
+      }
+    }
+  }
   for (const entry of journal.entries) {
     const tip = await resolveCommit(repoPath, `refs/heads/${entry.branch}`)
     if (tip !== entry.oldTip && (!entry.newTip || tip !== entry.newTip)) {

@@ -391,6 +391,18 @@ test(
       state = await harness.readState()
       assert.equal(prFor(state, 'topic').state, 'OPEN')
       assert.equal(prFor(state, 'topic').body, 'Updated human description')
+
+      await runAction(harness.repo, {
+        type: 'updatePr',
+        number: pr.number,
+        title: 'Updated title',
+        body: '',
+        draft: false,
+      })
+      state = await harness.readState()
+      assert.equal(prFor(state, 'topic').title, 'Updated title')
+      assert.equal(prFor(state, 'topic').body, '')
+      assert.equal((await getPullRequest(harness.repo, pr.number)).body, '')
     })
   },
 )

@@ -609,9 +609,19 @@ function App() {
       setDeleteBranchError('Type the exact branch name to confirm deletion of unmerged work.')
       return
     }
+    const expectedOid = deleteTarget.branch.oid
+    if (!expectedOid) {
+      setDeleteBranchError('The branch tip is unknown. Close this dialog and select it again.')
+      return
+    }
     setDeleteBranchError(null)
     const success = await runAction(
-      { type: 'deleteBranch', ref: deleteTarget.branch.ref, force: deleteForce },
+      {
+        type: 'deleteBranch',
+        ref: deleteTarget.branch.ref,
+        force: deleteForce,
+        expectedOid,
+      },
       'Delete branch',
     )
     if (success) setDeleteTarget(null)
