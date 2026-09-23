@@ -55,7 +55,7 @@ export function sortBranchesByUpdatedAt(branches: readonly Branch[]): Branch[] {
   }
 
   // Rank sibling stacks by their newest member, then emit each entire stack
-  // children-first. Contiguous subtrees keep fixed depth lanes unambiguous.
+  // children-first. Contiguous subtrees keep stack lanes unambiguous.
   const recentRanks = Int32Array.from(ranked, (_, rank) => rank)
   const remainingChildren = Int32Array.from(children, (entries) => entries.length)
   const ready = ranked.flatMap((_, rank) => (remainingChildren[rank] === 0 ? [rank] : []))

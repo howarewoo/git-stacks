@@ -58,6 +58,8 @@ import {
   DialogTitle,
 } from './components/ui/dialog'
 import { Input } from './components/ui/input'
+import { Tooltip, TooltipContent, TooltipTrigger } from './components/ui/tooltip'
+import { BranchHoverCard, PullRequestHoverCard } from './components/repository-hover-cards'
 import { cn } from './lib/utils'
 import {
   getCombinedBranches,
@@ -88,7 +90,11 @@ function readableError(value: unknown): string {
   return 'The operation failed. Check the repository and try again.'
 }
 
-function branchTreeInfo(branch: Branch, byName: Map<string, Branch>): BranchTreeInfo {
+function branchTreeInfo(
+  branch: Branch,
+  byName: Map<string, Branch>,
+  childCounts: Map<string, number>,
+): BranchTreeInfo {
   const visited = new Set<string>([branch.name])
   let parent = branch.parent
   let depth = 0
@@ -106,7 +112,7 @@ function branchTreeInfo(branch: Branch, byName: Map<string, Branch>): BranchTree
       missingParent = true
       break
     }
-    depth += 1
+    if (!parentBranch.parent || (childCounts.get(parentBranch.ref) ?? 0) > 1) depth += 1
     parent = parentBranch.parent
   }
 
@@ -114,13 +120,18 @@ function branchTreeInfo(branch: Branch, byName: Map<string, Branch>): BranchTree
 }
 
 type BranchTreeRow = BranchTreeInfo & {
-  trunks: { lane: number; kind: 'start' | 'full' | 'end-parent' | 'end-child' }[]
+  trunks: { lane: number; kind: 'start' | 'start-node' | 'full' | 'end-parent' | 'end-child' }[]
   elbows: { lane: number }[]
 }
 
 function getBranchTreeGeometry(visibleBranches: readonly Branch[], byName: Map<string, Branch>) {
+  const childCounts = new Map<string, number>()
+  for (const branch of getCombinedBranches([...new Set(byName.values())])) {
+    const parent = byName.get(branch.parent ?? '')
+    if (parent) childCounts.set(parent.ref, (childCounts.get(parent.ref) ?? 0) + 1)
+  }
   const rows: BranchTreeRow[] = visibleBranches.map((branch) => ({
-    ...branchTreeInfo(branch, byName),
+    ...branchTreeInfo(branch, byName, childCounts),
     trunks: [],
     elbows: [],
   }))
@@ -152,7 +163,7 @@ function getBranchTreeGeometry(visibleBranches: readonly Branch[], byName: Map<s
         parent: parentIndex,
         depth:
           parentIndex === undefined
-            ? branchTreeInfo(parent, byName).depth
+            ? branchTreeInfo(parent, byName, childCounts).depth
             : rows[parentIndex].depth,
         children: [index],
         start: index,
@@ -168,7 +179,9 @@ function getBranchTreeGeometry(visibleBranches: readonly Branch[], byName: Map<s
         lane,
         kind:
           index === group.start
-            ? 'start'
+            ? rows[group.start].depth === lane
+              ? 'start-node'
+              : 'start'
             : index === group.end
               ? group.parent === undefined
                 ? 'end-child'
@@ -176,7 +189,9 @@ function getBranchTreeGeometry(visibleBranches: readonly Branch[], byName: Map<s
               : 'full',
       })
     }
-    for (const child of group.children) rows[child].elbows.push({ lane })
+    for (const child of group.children) {
+      if (rows[child].depth !== lane) rows[child].elbows.push({ lane })
+    }
   }
 
   return { rows }
@@ -245,7 +260,6 @@ function IconButton({
       disabled={disabled}
       onClick={onClick}
       size="icon-sm"
-      title={label}
       variant={variant}
     >
       {children}
@@ -831,6 +845,7 @@ function App() {
         <Button
           disabled={!snapshot || isBusy || operationActive}
           onClick={() => runAction({ type: 'fetch' }, 'Fetch')}
+          tooltip="Fetch remote updates without changing your working tree."
           size="sm"
           variant="secondary"
         >
@@ -844,6 +859,7 @@ function App() {
         <Button
           disabled={!snapshot || isBusy || operationActive}
           onClick={() => openWorkflow({ kind: 'pull' })}
+          tooltip="Choose how to integrate updates from this branch’s upstream."
           size="sm"
           variant="secondary"
         >
@@ -857,6 +873,7 @@ function App() {
         <Button
           disabled={!snapshot || isBusy || operationActive}
           onClick={() => runAction({ type: 'push' }, 'Push')}
+          tooltip="Push the current branch without rewriting remote history."
           size="sm"
           variant="secondary"
         >
@@ -1012,13 +1029,15 @@ function App() {
               key={branch.ref}
               style={{ '--branch-depth': tree.depth } as React.CSSProperties}
             >
-              <button
-                aria-current={selected ? 'true' : undefined}
-                aria-label={`${branch.name}${branch.remote ? ', remote branch' : ''}${branch.current ? ', current branch' : ''}`}
-                className="branch-select"
-                onClick={() => setSelectedBranchRef(branch.ref)}
-                type="button"
-              />
+              <BranchHoverCard branch={branch}>
+                <button
+                  aria-current={selected ? 'true' : undefined}
+                  aria-label={`${branch.name}${branch.remote ? ', remote branch' : ''}${branch.current ? ', current branch' : ''}`}
+                  className="branch-select"
+                  onClick={() => setSelectedBranchRef(branch.ref)}
+                  type="button"
+                />
+              </BranchHoverCard>
               {tree.trunks.map((trunk, segmentIndex) => (
                 <span
                   aria-hidden="true"
@@ -1055,21 +1074,22 @@ function App() {
                 </span>
                 <span className="branch-summary">
                   {pullRequest ? (
-                    <a
-                      className="branch-pr-link"
-                      href={pullRequest.url}
-                      aria-label={`Open pull request #${pullRequest.number} on GitHub`}
-                      title={pullRequest.title}
-                      onClick={(event) => {
-                        event.preventDefault()
-                        desktop
-                          ?.openExternal(pullRequest.url)
-                          .catch((value) => setError(readableError(value)))
-                      }}
-                    >
-                      #{pullRequest.number}
-                      <ExternalLink className="size-3" aria-hidden="true" />
-                    </a>
+                    <PullRequestHoverCard pr={pullRequest}>
+                      <a
+                        className="branch-pr-link"
+                        href={pullRequest.url}
+                        aria-label={`Open pull request #${pullRequest.number} on GitHub`}
+                        onClick={(event) => {
+                          event.preventDefault()
+                          desktop
+                            ?.openExternal(pullRequest.url)
+                            .catch((value) => setError(readableError(value)))
+                        }}
+                      >
+                        #{pullRequest.number}
+                        <ExternalLink className="size-3" aria-hidden="true" />
+                      </a>
+                    </PullRequestHoverCard>
                   ) : null}
                   <span className="branch-subject">{branch.subject || 'No commit subject'}</span>
                 </span>
@@ -1081,19 +1101,33 @@ function App() {
                     {checkLabel(pullRequest.checks)}
                   </Badge>
                 ) : null}
-                <span
-                  className="ahead-behind"
-                  title={`${branch.ahead} ahead, ${branch.behind} behind upstream`}
-                >
-                  <span className={branch.ahead > 0 ? 'metric-positive' : 'metric-muted'}>
-                    <ArrowUp className="size-3" />
-                    {branch.ahead}
-                  </span>
-                  <span className={branch.behind > 0 ? 'metric-negative' : 'metric-muted'}>
-                    <ArrowDown className="size-3" />
-                    {branch.behind}
-                  </span>
-                </span>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <span
+                      className="ahead-behind relative z-[2] rounded-sm outline-none focus-visible:ring-2 focus-visible:ring-[var(--ring)]"
+                      tabIndex={0}
+                      aria-label={
+                        branch.upstream
+                          ? `${branch.ahead} ahead, ${branch.behind} behind ${branch.upstream}`
+                          : 'No upstream configured'
+                      }
+                    >
+                      <span className={branch.ahead > 0 ? 'metric-positive' : 'metric-muted'}>
+                        <ArrowUp className="size-3" />
+                        {branch.ahead}
+                      </span>
+                      <span className={branch.behind > 0 ? 'metric-negative' : 'metric-muted'}>
+                        <ArrowDown className="size-3" />
+                        {branch.behind}
+                      </span>
+                    </span>
+                  </TooltipTrigger>
+                  <TooltipContent>
+                    {branch.upstream
+                      ? `${branch.ahead} commits ahead and ${branch.behind} behind ${branch.upstream}`
+                      : 'Set an upstream to compare this branch with its remote.'}
+                  </TooltipContent>
+                </Tooltip>
                 <span className="branch-updated">{formatBranchDate(branch.updatedAt)}</span>
               </span>
               <ChevronRight className="branch-chevron size-4" />
@@ -1366,30 +1400,30 @@ function App() {
         {pullRequests.length > 0 ? (
           <div className="pr-list">
             {pullRequests.map((pr) => (
-              <button
-                className="pr-row"
-                key={pr.number}
-                onClick={() => openWorkflow({ kind: 'pr', number: pr.number })}
-                disabled={isBusy}
-                title="Inspect and manage pull request"
-                type="button"
-              >
-                <span className="pr-number">#{pr.number}</span>
-                <span className="pr-copy">
-                  <strong>{pr.title}</strong>
-                  <small>
-                    {pr.head} <span>→</span> {pr.base}
-                  </small>
-                </span>
-                <Badge variant={checksVariant(pr.checks)}>
-                  <ShieldCheck className="size-3" />
-                  {checkLabel(pr.checks)}
-                </Badge>
-                <Badge variant={pr.state === 'OPEN' ? 'success' : 'secondary'}>
-                  {pr.draft ? 'draft' : pr.state.toLowerCase()}
-                </Badge>
-                <ChevronRight className="size-4" />
-              </button>
+              <PullRequestHoverCard pr={pr} key={pr.number}>
+                <button
+                  className="pr-row"
+                  onClick={() => openWorkflow({ kind: 'pr', number: pr.number })}
+                  disabled={isBusy}
+                  type="button"
+                >
+                  <span className="pr-number">#{pr.number}</span>
+                  <span className="pr-copy">
+                    <strong>{pr.title}</strong>
+                    <small>
+                      {pr.head} <span>→</span> {pr.base}
+                    </small>
+                  </span>
+                  <Badge variant={checksVariant(pr.checks)}>
+                    <ShieldCheck className="size-3" />
+                    {checkLabel(pr.checks)}
+                  </Badge>
+                  <Badge variant={pr.state === 'OPEN' ? 'success' : 'secondary'}>
+                    {pr.draft ? 'draft' : pr.state.toLowerCase()}
+                  </Badge>
+                  <ChevronRight className="size-4" />
+                </button>
+              </PullRequestHoverCard>
             ))}
           </div>
         ) : (

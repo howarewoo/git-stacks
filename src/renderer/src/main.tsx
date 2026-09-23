@@ -1,6 +1,8 @@
 import React from 'react'
 import { createRoot } from 'react-dom/client'
 import App from './App'
+import { TooltipProvider } from './components/ui/tooltip'
+import { RepositoryHoverCardProvider } from './components/repository-hover-cards'
 import './styles.css'
 
 const root = document.getElementById('root')
@@ -11,6 +13,10 @@ if (!root) {
 
 createRoot(root).render(
   <React.StrictMode>
-    <App />
+    <TooltipProvider delayDuration={450} skipDelayDuration={150}>
+      <RepositoryHoverCardProvider>
+        <App />
+      </RepositoryHoverCardProvider>
+    </TooltipProvider>
   </React.StrictMode>,
 )

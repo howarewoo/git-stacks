@@ -2,6 +2,7 @@ import * as React from 'react'
 import { Dialog as DialogPrimitive } from 'radix-ui'
 import { X } from 'lucide-react'
 import { cn } from '../../lib/utils'
+import { Tooltip, TooltipContent, TooltipTrigger } from './tooltip'
 
 const Dialog = DialogPrimitive.Root
 const DialogTrigger = DialogPrimitive.Trigger
@@ -35,12 +36,17 @@ const DialogContent = React.forwardRef<
       {...props}
     >
       {children}
-      <DialogPrimitive.Close
-        aria-label="Close dialog"
-        className="absolute right-3 top-3 inline-flex size-8 items-center justify-center rounded-md text-[var(--ink-muted)] outline-none hover:bg-[var(--surface-muted)] hover:text-[var(--ink)] focus-visible:ring-2 focus-visible:ring-[var(--ring)]"
-      >
-        <X className="size-4" />
-      </DialogPrimitive.Close>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <DialogPrimitive.Close
+            aria-label="Close dialog"
+            className="absolute right-3 top-3 inline-flex size-8 items-center justify-center rounded-md text-[var(--ink-muted)] outline-none hover:bg-[var(--surface-muted)] hover:text-[var(--ink)] focus-visible:ring-2 focus-visible:ring-[var(--ring)]"
+          >
+            <X className="size-4" />
+          </DialogPrimitive.Close>
+        </TooltipTrigger>
+        <TooltipContent>Close dialog · Esc</TooltipContent>
+      </Tooltip>
     </DialogPrimitive.Content>
   </DialogPortal>
 ))

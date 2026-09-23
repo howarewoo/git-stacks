@@ -739,6 +739,10 @@ button:disabled {
   top: calc(50% + 5.5px);
 }
 
+.branch-tree-trunk-start-node {
+  top: calc(50% + 12px);
+}
+
 .branch-tree-trunk-end-parent {
   bottom: calc(50% + 12px);
 }

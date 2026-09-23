@@ -17,6 +17,7 @@ import { Badge } from './ui/badge'
 import { Button } from './ui/button'
 import { sortBranchesByUpdatedAt } from '../lib/branches'
 import { workflowError, type RunAction, type WorkflowRequest } from './workflow-dialog'
+import { BranchHoverCard, PullRequestHoverCard } from './repository-hover-cards'
 
 type CommonProps = {
   snapshot: RepositorySnapshot
@@ -769,6 +770,7 @@ export function StackView({
                 variant={stale ? 'accent' : 'secondary'}
                 disabled={blocked}
                 onClick={() => onRequest({ kind: 'stack', branch: root, operation: 'restack' })}
+                tooltip="Preview parent-first rebases of this stack. Publishing is a separate step."
               >
                 <RefreshCw className="size-3.5" />
                 Restack…
@@ -778,6 +780,12 @@ export function StackView({
                 variant={stale ? 'secondary' : 'accent'}
                 disabled={blocked || !snapshot.github.available}
                 onClick={() => onRequest({ kind: 'stack', branch: root, operation: 'publish' })}
+                tooltip={
+                  snapshot.github.available
+                    ? 'Push reviewed branches and update their pull requests without restacking.'
+                    : snapshot.github.message ||
+                      'Connect an authenticated GitHub repository to publish.'
+                }
               >
                 <Upload className="size-3.5" />
                 Publish stack…
@@ -799,11 +807,13 @@ export function StackView({
               .map((branch) => (
                 <article className="stack-member" key={branch.ref}>
                   <div className="stack-member-heading">
-                    <button onClick={() => onSelect(branch)} className="stack-member-name">
-                      <GitBranch className="size-4" />
-                      <strong>{branch.name}</strong>
-                      <ChevronRight className="size-3.5" />
-                    </button>
+                    <BranchHoverCard branch={branch}>
+                      <button onClick={() => onSelect(branch)} className="stack-member-name">
+                        <GitBranch className="size-4" />
+                        <strong>{branch.name}</strong>
+                        <ChevronRight className="size-3.5" />
+                      </button>
+                    </BranchHoverCard>
                     {branch.current ? <Badge variant="accent">current</Badge> : null}
                     {branch.needsRestack || (branch.parentBehind ?? 0) > 0 ? (
                       <Badge variant="warning">Requires restack</Badge>
@@ -831,14 +841,16 @@ export function StackView({
                   </div>
                   {branch.pr ? (
                     <div className="stack-pr-row">
-                      <Button
-                        size="sm"
-                        variant="link"
-                        disabled={busy}
-                        onClick={() => onRequest({ kind: 'pr', number: branch.pr!.number })}
-                      >
-                        #{branch.pr.number} {branch.pr.title}
-                      </Button>
+                      <PullRequestHoverCard pr={branch.pr}>
+                        <Button
+                          size="sm"
+                          variant="link"
+                          disabled={busy}
+                          onClick={() => onRequest({ kind: 'pr', number: branch.pr!.number })}
+                        >
+                          #{branch.pr.number} {branch.pr.title}
+                        </Button>
+                      </PullRequestHoverCard>
                       <div className="workflow-row">
                         <Badge variant={branch.pr.state === 'MERGED' ? 'accent' : 'secondary'}>
                           {branch.pr.draft ? 'draft' : branch.pr.state.toLowerCase()}

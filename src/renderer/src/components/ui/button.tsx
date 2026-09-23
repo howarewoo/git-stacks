@@ -1,6 +1,7 @@
 import * as React from 'react'
 import { cva, type VariantProps } from 'class-variance-authority'
 import { cn } from '../../lib/utils'
+import { Tooltip, TooltipContent, TooltipTrigger } from './tooltip'
 
 const buttonVariants = cva(
   'inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-colors outline-none focus-visible:ring-2 focus-visible:ring-[var(--ring)] focus-visible:ring-offset-1 focus-visible:ring-offset-[var(--surface)] disabled:pointer-events-none disabled:opacity-45',
@@ -34,17 +35,44 @@ const buttonVariants = cva(
 )
 
 export interface ButtonProps
-  extends React.ButtonHTMLAttributes<HTMLButtonElement>, VariantProps<typeof buttonVariants> {}
+  extends React.ButtonHTMLAttributes<HTMLButtonElement>, VariantProps<typeof buttonVariants> {
+  tooltip?: React.ReactNode
+}
 
 const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
-  ({ className, variant, size, type = 'button', ...props }, ref) => (
-    <button
-      ref={ref}
-      type={type}
-      className={cn(buttonVariants({ variant, size, className }))}
-      {...props}
-    />
-  ),
+  ({ className, variant, size, type = 'button', tooltip, ...props }, ref) => {
+    const hint = tooltip ?? (size === 'icon' || size === 'icon-sm' ? props['aria-label'] : null)
+    const button = (
+      <button
+        ref={ref}
+        type={type}
+        className={cn(buttonVariants({ variant, size, className }))}
+        {...props}
+      />
+    )
+    if (!hint) return button
+    return (
+      <Tooltip>
+        <TooltipTrigger asChild>
+          {props.disabled ? (
+            <span
+              className="inline-flex shrink-0 rounded-md outline-none focus-visible:ring-2 focus-visible:ring-[var(--ring)]"
+              tabIndex={0}
+              aria-label={typeof hint === 'string' ? hint : props['aria-label']}
+            >
+              {button}
+            </span>
+          ) : (
+            button
+          )}
+        </TooltipTrigger>
+        <TooltipContent>
+          {hint}
+          {props.disabled && !tooltip ? ' — unavailable' : null}
+        </TooltipContent>
+      </Tooltip>
+    )
+  },
 )
 Button.displayName = 'Button'
 
