@@ -572,10 +572,11 @@ async function isSafeBranchLockPath(
   commonDir: string,
   gitDir: string,
   candidatePath: unknown,
-  branch?: string,
+  branch: unknown,
 ): Promise<boolean> {
   if (typeof candidatePath !== 'string' || !candidatePath) return false
   if (!candidatePath.endsWith('.lock')) return false
+  if (typeof branch !== 'string' || !branch.trim()) return false
 
   const resolved = path.resolve(candidatePath)
   if (!resolved.endsWith('.lock')) return false
@@ -591,35 +592,32 @@ async function isSafeBranchLockPath(
 
   if (!inCommon && !inGit) return false
 
-  if (typeof branch === 'string' && branch) {
+  try {
+    await runGit(repoPath, ['check-ref-format', '--branch', branch])
+    const refPathValue = stripTrailingNewline(
+      await runGit(repoPath, ['rev-parse', '--git-path', `refs/heads/${branch}`]),
+    )
+    if (!refPathValue) return false
+
+    let refRoot: string | null = null
     try {
-      await runGit(repoPath, ['check-ref-format', '--branch', branch])
-      const refPathValue = stripTrailingNewline(
-        await runGit(repoPath, ['rev-parse', '--git-path', `refs/heads/${branch}`]),
+      const refStorage = stripTrailingNewline(
+        await runGit(repoPath, ['config', '--get', 'extensions.refStorage']),
       )
-      if (refPathValue) {
-        let refRoot: string | null = null
-        try {
-          const refStorage = stripTrailingNewline(
-            await runGit(repoPath, ['config', '--get', 'extensions.refStorage']),
-          )
-          if (refStorage && refStorage.toLowerCase() === 'files') {
-            refRoot = localFilesRefStoragePath(refStorage)
-          }
-        } catch {
-          // Ignore
-        }
-        const expectedLockPath = `${gitPathOnDisk(repoPath, refPathValue, refRoot)}.lock`
-        if (resolved !== path.resolve(expectedLockPath)) {
-          return false
-        }
+      if (refStorage && refStorage.toLowerCase() === 'files') {
+        refRoot = localFilesRefStoragePath(refStorage)
       }
     } catch {
+      // Ignore
+    }
+    const expectedLockPath = `${gitPathOnDisk(repoPath, refPathValue, refRoot)}.lock`
+    if (resolved !== path.resolve(expectedLockPath)) {
       return false
     }
+    return true
+  } catch {
+    return false
   }
-
-  return true
 }
 
 type UnlinkIdentityResult = 'unlinked' | 'replaced' | 'failed'
@@ -628,18 +626,67 @@ async function unlinkIfSameIdentity(
   lockPath: string,
   expectedStat: { dev: number; ino: number },
 ): Promise<UnlinkIdentityResult> {
+  let currentHandle: FileHandle | null = null
   try {
-    const current = await fs.lstat(lockPath)
-    if (current.dev !== expectedStat.dev || current.ino !== expectedStat.ino) {
-      return 'replaced'
+    try {
+      currentHandle = await fs.open(lockPath, 'r')
+      const [pathStat, openedStat] = await Promise.all([fs.lstat(lockPath), currentHandle.stat()])
+      if (
+        pathStat.dev !== expectedStat.dev ||
+        pathStat.ino !== expectedStat.ino ||
+        openedStat.dev !== expectedStat.dev ||
+        openedStat.ino !== expectedStat.ino
+      ) {
+        return 'replaced'
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        return 'unlinked'
+      }
+      return 'failed'
     }
-    await fs.unlink(lockPath)
-    return 'unlinked'
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+
+    const claimPath = `${lockPath}.${randomUUID()}.stale-claim`
+    try {
+      await fs.rename(lockPath, claimPath)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        return 'unlinked'
+      }
+      return 'failed'
+    }
+
+    try {
+      const [claimStat, heldStat] = await Promise.all([fs.lstat(claimPath), currentHandle.stat()])
+      if (
+        claimStat.dev !== heldStat.dev ||
+        claimStat.ino !== heldStat.ino ||
+        heldStat.dev !== expectedStat.dev ||
+        heldStat.ino !== expectedStat.ino
+      ) {
+        try {
+          await fs.rename(claimPath, lockPath)
+        } catch {
+          // Preserve the claimed file if another process recreated the canonical path.
+        }
+        return 'replaced'
+      }
+
+      await fs.unlink(claimPath)
       return 'unlinked'
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        return 'unlinked'
+      }
+      try {
+        await fs.rename(claimPath, lockPath)
+      } catch {
+        // Preserve the claimed file if it cannot be restored.
+      }
+      return 'failed'
     }
-    return 'failed'
+  } finally {
+    await currentHandle?.close().catch(() => {})
   }
 }
 
@@ -651,7 +698,11 @@ interface BranchLockInfo {
   transactionId: string
 }
 
-async function tryRecoverStaleBranchLock(repoPath: string, lockPath: string): Promise<boolean> {
+async function tryRecoverStaleBranchLock(
+  repoPath: string,
+  lockPath: string,
+  branch: string,
+): Promise<boolean> {
   let commonDir = ''
   let gitDir = ''
   try {
@@ -662,10 +713,13 @@ async function tryRecoverStaleBranchLock(repoPath: string, lockPath: string): Pr
   }
   const resolvedCommonDir = path.resolve(repoPath, commonDir)
   const resolvedGitDir = path.resolve(repoPath, gitDir)
-  if (!(await isSafeBranchLockPath(repoPath, resolvedCommonDir, resolvedGitDir, lockPath))) {
+  if (
+    !(await isSafeBranchLockPath(repoPath, resolvedCommonDir, resolvedGitDir, lockPath, branch))
+  ) {
     return false
   }
 
+  const locksDir = path.resolve(resolvedCommonDir, 'git-stacks-branch-locks')
   let lockHandle: FileHandle | null = null
   let lockStat: { dev: number; ino: number } | null = null
   let content = ''
@@ -681,7 +735,6 @@ async function tryRecoverStaleBranchLock(repoPath: string, lockPath: string): Pr
     await lockHandle?.close().catch(() => {})
   }
 
-  const locksDir = path.resolve(resolvedCommonDir, 'git-stacks-branch-locks')
   let parsed: Record<string, unknown> | null = null
   try {
     const rawParsed = JSON.parse(content)
@@ -796,13 +849,12 @@ export async function recoverStaleBranchLocks(repoPath: string): Promise<void> {
         continue
       }
 
-      const branchName = typeof journalJson.branch === 'string' ? journalJson.branch : undefined
       const safe = await isSafeBranchLockPath(
         repoPath,
         commonDir,
         gitDir,
         journalJson.lockPath,
-        branchName,
+        journalJson.branch,
       )
       if (!safe) {
         // Untrusted/unsafe lockPath in journal for dead process: unlink bogus journal and never touch lockPath
@@ -883,10 +935,9 @@ export async function recoverStaleBranchLocks(repoPath: string): Promise<void> {
         if (!hasLiveJournalForLock) {
           // No live owner: recover partial lock using journal identity
           const result = await unlinkIfSameIdentity(lockPath, lockStat!)
-          if (result === 'unlinked') {
+          if (result === 'unlinked' || result === 'replaced') {
             await fs.unlink(journalPath).catch(() => {})
           }
-          // If 'failed' or 'replaced', do not unlink journalPath: preserve journal evidence!
         }
       }
     } catch {
@@ -2321,7 +2372,7 @@ async function withLocalBranchRefLock<T>(
     lock = await fs.open(lockPath, 'wx', 0o666)
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
-      const recovered = await tryRecoverStaleBranchLock(repoPath, lockPath)
+      const recovered = await tryRecoverStaleBranchLock(repoPath, lockPath, branch)
       if (recovered) {
         try {
           lock = await fs.open(lockPath, 'wx', 0o666)

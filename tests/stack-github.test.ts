@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
+import * as fs from 'node:fs'
 import { mkdir, readFile, unlink, writeFile } from 'node:fs/promises'
 import { delimiter, join } from 'node:path'
 import { test } from 'node:test'
@@ -1327,7 +1328,7 @@ test(
 )
 
 test(
-  'stale branch lock cleanup preserves replacement lock when race occurs during takeover',
+  'stale branch lock cleanup preserves a replacement created during identity validation',
   { concurrency: false },
   async () => {
     await withHarness(async (harness) => {
@@ -1336,35 +1337,90 @@ test(
       const locksDir = join(harness.repo, '.git', 'git-stacks-branch-locks')
       await mkdir(locksDir, { recursive: true })
 
-      // Create a dead lock file and its dead journal
+      const transactionId = 'deadbeef-dead-beef-dead-beefdeadbeef'
       const deadLockData = {
         pid: 99999999,
         branch: 'child',
         lockPath,
         createdAt: Date.now() - 30000,
-        transactionId: 'dead-lock-uuid-race',
+        transactionId,
       }
       await writeFile(lockPath, JSON.stringify(deadLockData), 'utf8')
-      const deadJournalPath = join(locksDir, 'dead-lock-uuid-race.json')
-      await writeFile(deadJournalPath, JSON.stringify(deadLockData), 'utf8')
+      await writeFile(join(locksDir, `${transactionId}.json`), JSON.stringify(deadLockData), 'utf8')
 
-      // Simulate a replacement publisher replacing the lock file with a new file (different inode, live PID)
-      await unlink(lockPath)
-      const liveLockData = {
-        pid: process.pid,
-        branch: 'child',
-        lockPath,
-        createdAt: Date.now(),
-        transactionId: 'live-replacement-uuid',
+      const originalLstat = fs.promises.lstat
+      let replacementCreated = false
+      Object.defineProperty(fs.promises, 'lstat', {
+        configurable: true,
+        value: async (candidate: fs.PathLike) => {
+          const stat = await originalLstat(candidate)
+          if (!replacementCreated && candidate === lockPath) {
+            replacementCreated = true
+            await unlink(lockPath)
+            await writeFile(
+              lockPath,
+              JSON.stringify({
+                pid: process.pid,
+                branch: 'child',
+                lockPath,
+                createdAt: Date.now(),
+                transactionId: 'live-replacement-uuid',
+              }),
+              'utf8',
+            )
+          }
+          return stat
+        },
+        writable: true,
+      })
+
+      try {
+        await recoverStaleBranchLocks(harness.repo)
+      } finally {
+        Object.defineProperty(fs.promises, 'lstat', {
+          configurable: true,
+          value: originalLstat,
+          writable: true,
+        })
       }
-      await writeFile(lockPath, JSON.stringify(liveLockData), 'utf8')
-
-      // Running recoverStaleBranchLocks must not unlink the live replacement lock
-      await recoverStaleBranchLocks(harness.repo)
 
       const remainingLock = JSON.parse(await readFile(lockPath, 'utf8'))
       assert.equal(remainingLock.transactionId, 'live-replacement-uuid')
       assert.equal(remainingLock.pid, process.pid)
+      assert.equal(replacementCreated, true)
+    })
+  },
+)
+
+test(
+  'branch lock recovery rejects journals without a branch before touching the candidate lock',
+  { concurrency: false },
+  async () => {
+    await withHarness(async (harness) => {
+      await createStack(harness)
+      const locksDir = join(harness.repo, '.git', 'git-stacks-branch-locks')
+      const victimLock = join(harness.repo, '.git', 'refs', 'heads', 'victim.lock')
+      await mkdir(locksDir, { recursive: true })
+      await mkdir(join(harness.repo, '.git', 'refs', 'heads'), { recursive: true })
+      await writeFile(victimLock, 'unrelated lock\n', 'utf8')
+
+      const transactionId = 'deadbeef-dead-beef-dead-beefdeadbeef'
+      const journalPath = join(locksDir, `${transactionId}.json`)
+      await writeFile(
+        journalPath,
+        JSON.stringify({
+          pid: 99999999,
+          lockPath: victimLock,
+          createdAt: Date.now() - 30000,
+          transactionId,
+        }),
+        'utf8',
+      )
+
+      await recoverStaleBranchLocks(harness.repo)
+
+      assert.equal(await readFile(victimLock, 'utf8'), 'unrelated lock\n')
+      await assert.rejects(readFile(journalPath), { code: 'ENOENT' })
     })
   },
 )
