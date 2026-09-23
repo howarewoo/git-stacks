@@ -5,7 +5,7 @@ import { delimiter, join } from 'node:path'
 import { test } from 'node:test'
 import { getSnapshot, runAction } from '../src/main/git'
 import { getPullRequest } from '../src/main/github'
-import { previewStack } from '../src/main/stacks'
+import { previewStack, recoverStaleBranchLocks } from '../src/main/stacks'
 import {
   createGitHubHarness,
   type GitHubHarness,
@@ -1284,6 +1284,132 @@ test(
       assert.ok(prFor(state, 'child'))
 
       await assert.rejects(readFile(lockPath), { code: 'ENOENT' })
+      await assert.rejects(readFile(join(locksDir, 'dead-lock-uuid.json')), { code: 'ENOENT' })
+    })
+  },
+)
+
+test(
+  'stale branch lock cleanup preserves live locks and removes dead journals',
+  { concurrency: false },
+  async () => {
+    await withHarness(async (harness) => {
+      await createStack(harness)
+      const lockPath = join(harness.repo, '.git', 'refs', 'heads', 'child.lock')
+      const liveLockData = {
+        pid: process.pid,
+        branch: 'child',
+        lockPath,
+        createdAt: Date.now(),
+        transactionId: 'live-lock-uuid',
+      }
+      await writeFile(lockPath, JSON.stringify(liveLockData), 'utf8')
+
+      const locksDir = join(harness.repo, '.git', 'git-stacks-branch-locks')
+      await mkdir(locksDir, { recursive: true })
+      const deadJournalPath = join(locksDir, 'dead-lock-uuid.json')
+      const deadLockData = {
+        pid: 99999999,
+        branch: 'child',
+        lockPath,
+        createdAt: Date.now() - 20000,
+        transactionId: 'dead-lock-uuid',
+      }
+      await writeFile(deadJournalPath, JSON.stringify(deadLockData), 'utf8')
+
+      await recoverStaleBranchLocks(harness.repo)
+
+      const liveContent = JSON.parse(await readFile(lockPath, 'utf8'))
+      assert.equal(liveContent.transactionId, 'live-lock-uuid')
+      await assert.rejects(readFile(deadJournalPath), { code: 'ENOENT' })
+    })
+  },
+)
+
+test(
+  'restack rejects stale ancestor candidate when journal records the true merge head',
+  { concurrency: false },
+  async () => {
+    await withHarness(async (harness) => {
+      await runAction(harness.repo, { type: 'createBranch', name: 'parent', parent: 'main' })
+      const parentFirstCommit = await commitFile(harness, 'parent1.txt', '1\n', 'Parent one')
+      const parentTip = await commitFile(harness, 'parent2.txt', '2\n', 'Parent two')
+      await runAction(harness.repo, { type: 'createBranch', name: 'child', parent: 'parent' })
+      await commitFile(harness, 'child.txt', 'child\n', 'Child work')
+
+      await publishStack(harness)
+      let state = await harness.readState()
+      updatePr(state, 'parent', {
+        checks: 'passing',
+        reviewDecision: 'APPROVED',
+        mergeState: 'CLEAN',
+      })
+      await harness.writeState(state)
+
+      const mergePreview = await previewStack(
+        harness.repo,
+        await getSnapshot(harness.repo),
+        'merge',
+        'parent',
+      )
+      await runAction(harness.repo, {
+        type: 'executeStack',
+        token: mergePreview.token,
+        allowForce: false,
+        draft: false,
+        titles: {},
+        mergeMethod: 'squash',
+      })
+      state = await harness.readState()
+      const mergedHead = prFor(state, 'parent').headOid
+      assert.equal(mergedHead, parentTip)
+
+      // Stale config points at parentFirstCommit (an ancestor of mergedHead)
+      git(harness, ['switch', 'child'])
+      git(harness, ['config', '--local', 'branch.parent.gitStacksMergedHeadOid', parentFirstCommit])
+
+      // 1. Stale ancestor candidate in config is rejected by isProvenMergeHead against durable journal
+      const previewStaleConfig = await previewStack(
+        harness.repo,
+        await getSnapshot(harness.repo),
+        'restack',
+        'child',
+      )
+      assert.ok(
+        previewStaleConfig.blockers.some((b) =>
+          b.includes(
+            'has no validated merge-time head for child that can be used as a safe replay boundary',
+          ),
+        ),
+      )
+
+      // 2. Unsetting stale config allows restack to pick up journal's true merge head and succeed
+      git(harness, ['config', '--local', '--unset', 'branch.parent.gitStacksMergedHeadOid'])
+      const previewWithJournal = await previewStack(
+        harness.repo,
+        await getSnapshot(harness.repo),
+        'restack',
+        'child',
+      )
+      assert.deepEqual(previewWithJournal.blockers, [])
+
+      // 3. If journal is removed, stale ancestor candidate in config is also rejected by graph fallback
+      git(harness, ['config', '--local', 'branch.parent.gitStacksMergedHeadOid', parentFirstCommit])
+      const journalPath = join(harness.repo, '.git', 'git-stacks-merged-heads.json')
+      await writeFile(journalPath, '{}', 'utf8')
+      const previewWithoutJournal = await previewStack(
+        harness.repo,
+        await getSnapshot(harness.repo),
+        'restack',
+        'child',
+      )
+      assert.ok(
+        previewWithoutJournal.blockers.some((b) =>
+          b.includes(
+            'has no validated merge-time head for child that can be used as a safe replay boundary',
+          ),
+        ),
+      )
     })
   },
 )

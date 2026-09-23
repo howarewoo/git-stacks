@@ -490,24 +490,18 @@ async function isProvenMergeHead(
   journal: Map<string, MergedPrRecord>,
 ): Promise<boolean> {
   const journalRecord = journal.get(String(prNumber))
-  if (
-    journalRecord &&
-    journalRecord.pr === prNumber &&
-    journalRecord.headOid === candidateHeadOid
-  ) {
-    if (!journalRecord.mergeOid || journalRecord.mergeOid === mergeOid) {
-      return true
+  if (journalRecord && journalRecord.pr === prNumber) {
+    if (journalRecord.headOid !== candidateHeadOid) {
+      return false
     }
+    return !journalRecord.mergeOid || !mergeOid || journalRecord.mergeOid === mergeOid
   }
   if (mergeOid) {
     try {
       const parents = await commitParents(repoPath, mergeOid)
       if (parents.length >= 2) {
         const prParent = parents[1]
-        if (
-          candidateHeadOid === prParent ||
-          (await isAncestor(repoPath, candidateHeadOid, prParent))
-        ) {
+        if (candidateHeadOid === prParent) {
           return true
         }
       }
@@ -545,18 +539,6 @@ async function tryRecoverStaleBranchLock(repoPath: string, lockPath: string): Pr
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return true
     return false
   }
-  try {
-    const parsed = JSON.parse(content)
-    if (typeof parsed.pid === 'number') {
-      if (!isPidRunning(parsed.pid)) {
-        await fs.unlink(lockPath)
-        return true
-      }
-      return false
-    }
-  } catch {
-    // If not JSON, check branch-locks directory
-  }
   let commonDir = ''
   try {
     commonDir = stripTrailingNewline(await runGit(repoPath, ['rev-parse', '--git-common-dir']))
@@ -564,6 +546,42 @@ async function tryRecoverStaleBranchLock(repoPath: string, lockPath: string): Pr
     return false
   }
   const locksDir = path.resolve(repoPath, commonDir, 'git-stacks-branch-locks')
+  try {
+    const parsed = JSON.parse(content)
+    if (typeof parsed.pid === 'number') {
+      if (!isPidRunning(parsed.pid)) {
+        await fs.unlink(lockPath).catch(() => {})
+        if (typeof parsed.transactionId === 'string' && parsed.transactionId) {
+          await fs.unlink(path.join(locksDir, `${parsed.transactionId}.json`)).catch(() => {})
+        }
+        try {
+          const entries = await fs.readdir(locksDir)
+          for (const entry of entries) {
+            if (!entry.endsWith('.json')) continue
+            const journalPath = path.join(locksDir, entry)
+            try {
+              const raw = await fs.readFile(journalPath, 'utf8')
+              const journal = JSON.parse(raw)
+              if (
+                journal.lockPath === lockPath &&
+                (journal.transactionId === parsed.transactionId || journal.pid === parsed.pid)
+              ) {
+                await fs.unlink(journalPath).catch(() => {})
+              }
+            } catch {
+              // Ignore unreadable journal
+            }
+          }
+        } catch {
+          // Ignore
+        }
+        return true
+      }
+      return false
+    }
+  } catch {
+    // If not JSON, check branch-locks directory below
+  }
   try {
     const entries = await fs.readdir(locksDir)
     for (const entry of entries) {
@@ -608,7 +626,28 @@ export async function recoverStaleBranchLocks(repoPath: string): Promise<void> {
         const journal = JSON.parse(raw)
         if (typeof journal.pid === 'number' && !isPidRunning(journal.pid)) {
           if (typeof journal.lockPath === 'string') {
-            await fs.unlink(journal.lockPath).catch(() => {})
+            try {
+              const lockRaw = await fs.readFile(journal.lockPath, 'utf8')
+              let shouldUnlinkLock = false
+              try {
+                const lockParsed = JSON.parse(lockRaw)
+                if (
+                  (typeof journal.transactionId === 'string' &&
+                    journal.transactionId &&
+                    lockParsed.transactionId === journal.transactionId) ||
+                  (lockParsed.pid === journal.pid && !isPidRunning(lockParsed.pid))
+                ) {
+                  shouldUnlinkLock = true
+                }
+              } catch {
+                // Ignore unreadable or non-JSON lock
+              }
+              if (shouldUnlinkLock) {
+                await fs.unlink(journal.lockPath).catch(() => {})
+              }
+            } catch {
+              // If lock file does not exist, ignore
+            }
           }
           await fs.unlink(journalPath).catch(() => {})
         }
