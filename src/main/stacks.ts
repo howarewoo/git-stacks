@@ -112,6 +112,7 @@ interface JournalEntry {
   newParentTip: string | null
   boundary: string
   backupRef: string
+  headReflogCount: number | null
   status: 'pending' | 'rebasing' | 'metadata' | 'completed' | 'restored'
 }
 
@@ -313,10 +314,16 @@ async function readJournal(repoPath: string): Promise<StackJournal | null> {
         String(entry.newParentRef),
       ) ||
       entry.backupRef !== backupRefFor(parsed.id, entry.branch) ||
+      (entry.headReflogCount !== null &&
+        entry.headReflogCount !== undefined &&
+        (typeof entry.headReflogCount !== 'number' ||
+          !Number.isSafeInteger(entry.headReflogCount) ||
+          entry.headReflogCount < 0)) ||
       (['metadata', 'completed'].includes(String(entry.status)) &&
         (!isOid(entry.newTip) || !isOid(entry.newParentTip)))
     )
       throw invalid()
+    entry.headReflogCount = typeof entry.headReflogCount === 'number' ? entry.headReflogCount : null
     branches.add(entry.branch)
     names.add(entry.branch)
     names.add(entry.newParent)
@@ -1139,6 +1146,52 @@ function parseReflogEntry(line: string): { oid: string; message: string } | null
   return { oid: line.slice(0, separator), message: line.slice(separator + 1) }
 }
 
+// Prove that the ref entries appended since the journaled launch form exactly
+// one rebase of this journal's replay: a single start checked out at the
+// recorded onto, followed only by that rebase's pick/continue steps and its
+// finish back on this branch. Anything else (an external abort, a second
+// rebase, a substituted boundary) cannot be adopted, so the backup ref stays.
+async function assertRecordedReplay(
+  repoPath: string,
+  entry: JournalEntry,
+  expectedOnto: string,
+  tip: string,
+): Promise<void> {
+  const refuse = () =>
+    new Error(
+      `Cannot prove the completed rebase for ${entry.branch} matches the recorded replay; refusing to adopt its tip`,
+    )
+  if (entry.headReflogCount === null) throw refuse()
+  const headOutput = await tryGit(repoPath, ['reflog', 'show', 'HEAD', '--format=%H %gs'])
+  if (headOutput === null) throw refuse()
+  const headLines = headOutput.split('\n').filter((line) => line.length > 0)
+  const deltaLength = headLines.length - entry.headReflogCount
+  if (deltaLength < 2) throw refuse()
+  const delta = headLines.slice(0, deltaLength).map(parseReflogEntry).reverse()
+  const start = delta[0]
+  if (
+    !start ||
+    start.oid !== expectedOnto ||
+    start.message !== `rebase (start): checkout ${expectedOnto}`
+  )
+    throw refuse()
+  let finish: { oid: string; message: string } | null = null
+  for (let index = 1; index < delta.length; index += 1) {
+    const line = delta[index]
+    if (!line) throw refuse()
+    if (line.message === `rebase (finish): returning to refs/heads/${entry.branch}`) {
+      finish = line
+      break
+    }
+    if (
+      !line.message.startsWith('rebase (pick): ') &&
+      !line.message.startsWith('rebase (continue): ')
+    )
+      throw refuse()
+  }
+  if (!finish || finish.oid !== tip) throw refuse()
+}
+
 async function reconcileCompletedRebase(
   repoPath: string,
   journal: StackJournal,
@@ -1173,6 +1226,7 @@ async function reconcileCompletedRebase(
     newest.message.slice(prefix.length) === expectedOnto
   if (!proven)
     throw new Error(`Branch ${entry.branch} changed outside Git Stacks; refusing to adopt its tip`)
+  await assertRecordedReplay(repoPath, entry, expectedOnto, tip)
   entry.newParentTip = expectedOnto
   entry.newTip = tip
   entry.status = 'metadata'
@@ -1250,9 +1304,12 @@ async function restackJournal(repoPath: string, journal: StackJournal): Promise<
     journal.currentBranch = entry.branch
     journal.status = 'running'
     journal.message = `Restacking ${entry.branch} onto ${entry.newParent}`
-    await writeJournal(repoPath, journal)
     try {
       await runGit(repoPath, ['switch', '--', entry.branch])
+      const headReflog = await tryGit(repoPath, ['reflog', 'show', 'HEAD', '--format=%H'])
+      entry.headReflogCount =
+        headReflog === null ? null : headReflog.split('\n').filter((line) => line.length > 0).length
+      await writeJournal(repoPath, journal)
       await runGit(
         repoPath,
         [
@@ -1269,6 +1326,7 @@ async function restackJournal(repoPath: string, journal: StackJournal): Promise<
         { GIT_EDITOR: 'true' },
       )
     } catch (error) {
+      if (entry.headReflogCount === null) entry.status = 'pending'
       const operation = await getOperationState(repoPath)
       journal.status = operation.rebase ? 'conflict' : 'uncertain'
       journal.message = `${operation.rebase ? 'Restack paused' : 'Restack stopped'} on ${entry.branch}: ${commandDetail(error)}`
@@ -1313,6 +1371,7 @@ async function beginRestack(repoPath: string, plan: StackPlan): Promise<ActionRe
       newParentTip: null,
       boundary: entry.boundary,
       backupRef: backupRefFor(id, entry.branch),
+      headReflogCount: null,
       status: 'pending',
     })),
     status: 'running',

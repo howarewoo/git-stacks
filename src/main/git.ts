@@ -1718,7 +1718,24 @@ async function runDeleteBranch(
     throw new Error('The branch changed since it was selected; refresh before deleting it')
   }
   await ensureNotCheckedOutElsewhere(repoPath, name)
-  await runGit(repoPath, ['branch', force ? '-D' : '-d', '--', name])
+  if (!force) {
+    const upstream = await branchUpstream(repoPath, name)
+    const mergedInto = await tryGit(repoPath, [
+      'merge-base',
+      '--is-ancestor',
+      currentOid,
+      upstream ?? 'HEAD',
+    ])
+    if (mergedInto === null) {
+      throw new Error(`Branch "${name}" is not fully merged`)
+    }
+  }
+  try {
+    await runGit(repoPath, ['update-ref', '-d', ref, currentOid])
+  } catch {
+    throw new Error('The branch changed since it was selected; refresh before deleting it')
+  }
+  await tryGit(repoPath, ['config', '--remove-section', `branch.${name}`])
   return { message: `Deleted local branch ${name}. Remote branches were not changed.` }
 }
 

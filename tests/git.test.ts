@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { delimiter, join } from 'node:path'
 import { test } from 'node:test'
 import { getSnapshot, resolveRepository, runAction } from '../src/main/git'
 import type { GitAction } from '../src/shared/types'
@@ -742,6 +742,78 @@ test('force deletion rejects a branch that advanced after its tip was captured',
     assert.equal(
       (await getSnapshot(repo)).branches.some((branch) => branch.ref === 'refs/heads/racing'),
       false,
+    )
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('force deletion rejects a branch that advances between validation and removal', async () => {
+  const { root, repo, git } = await fixture()
+  try {
+    git('switch', '-c', 'racing')
+    await writeFile(join(repo, 'racing.txt'), 'racing work\n')
+    git('add', '.')
+    git('commit', '-m', 'Racing work')
+    const captured = git('rev-parse', 'HEAD')
+    git('switch', 'main')
+    git('commit', '--allow-empty', '-m', 'Advance main')
+    const advanced = git('rev-parse', 'HEAD')
+    assert.notEqual(advanced, captured)
+
+    // The shim validates nothing itself: it forwards the app's expected-OID
+    // read, then advances the ref in the window before the app deletes it.
+    const shimDir = join(root, 'git-shim')
+    await mkdir(shimDir)
+    const shimPath = join(shimDir, 'git')
+    await writeFile(
+      shimPath,
+      `#!/bin/sh
+real="$GIT_STACKS_TEST_REAL_GIT"
+race=0
+if [ -n "\${GIT_STACKS_RACE_REF:-}" ] && [ "$1" = "rev-parse" ]; then
+  for arg in "$@"; do
+    if [ "$arg" = "\${GIT_STACKS_RACE_REF}^{commit}" ]; then race=1; fi
+  done
+fi
+if [ "$race" = "1" ]; then
+  out=$("$real" "$@"); rc=$?
+  if [ -n "$out" ]; then printf '%s\\n' "$out"; fi
+  "$real" update-ref "$GIT_STACKS_RACE_REF" "$GIT_STACKS_RACE_OID"
+  exit $rc
+fi
+exec "$real" "$@"
+`,
+      { mode: 0o755 },
+    )
+    const realGit = execFileSync('/bin/sh', ['-c', 'command -v git'], {
+      encoding: 'utf8',
+    }).trim()
+    const savedPath = process.env.PATH
+    process.env.PATH = `${shimDir}${delimiter}${savedPath}`
+    process.env.GIT_STACKS_TEST_REAL_GIT = realGit
+    process.env.GIT_STACKS_RACE_REF = 'refs/heads/racing'
+    process.env.GIT_STACKS_RACE_OID = advanced
+    try {
+      await assert.rejects(
+        runAction(repo, {
+          type: 'deleteBranch',
+          ref: 'refs/heads/racing',
+          force: true,
+          expectedOid: captured,
+        }),
+        { message: /refresh before deleting/ },
+      )
+    } finally {
+      process.env.PATH = savedPath
+      delete process.env.GIT_STACKS_TEST_REAL_GIT
+      delete process.env.GIT_STACKS_RACE_REF
+      delete process.env.GIT_STACKS_RACE_OID
+    }
+    assert.equal(git('rev-parse', 'refs/heads/racing'), advanced)
+    assert.equal(
+      (await getSnapshot(repo)).branches.some((branch) => branch.ref === 'refs/heads/racing'),
+      true,
     )
   } finally {
     await rm(root, { recursive: true, force: true })

@@ -369,6 +369,51 @@ test('abort restores tips when the recorded rebase finished after its journal ch
   assert.equal(await getStackProgress(repo), null)
 })
 
+test('continue and abort refuse an external replay recorded under a different boundary', async () => {
+  const { repo, git, base, rootTip, childTip } = await prepareConflictStack()
+  const preview = await previewStack(repo, await getSnapshot(repo), 'restack', 'child')
+  assert.deepEqual(preview.blockers, [])
+  await assert.rejects(executePreview(repo, preview.token))
+  const rewrittenRoot = tip(git, 'root')
+  assert.notEqual(rewrittenRoot, rootTip)
+
+  // An external actor aborts the paused operation, then replays child from a
+  // different boundary onto the same destination and finishes it: same ref
+  // tips and the same finish subject as the recorded replay.
+  gitAt(repo, ['rebase', '--abort'])
+  assert.equal(tip(git, 'child'), childTip)
+  let conflict = false
+  try {
+    gitAt(repo, ['rebase', '--onto', rewrittenRoot, base, 'child'])
+  } catch {
+    conflict = true
+  }
+  if (conflict) {
+    await writeFile(join(repo, 'shared.txt'), 'external resolution\n')
+    git('add', '--', 'shared.txt')
+    gitAt(repo, ['rebase', '--continue'], { ...process.env, GIT_EDITOR: 'true' })
+  }
+  assert.equal(git('status', '--porcelain'), '')
+  const externalTip = tip(git, 'child')
+  assert.notEqual(externalTip, childTip)
+
+  await assert.rejects(runAction(repo, { type: 'stackContinue' }), /Cannot prove the completed/u)
+  await assert.rejects(runAction(repo, { type: 'stackAbort' }), /Cannot prove the completed/u)
+
+  assert.equal(tip(git, 'child'), externalTip)
+  assert.equal(tip(git, 'root'), rewrittenRoot)
+  const progress = await getStackProgress(repo)
+  assert.deepEqual(progress?.completed, ['root'])
+  assert.deepEqual(progress?.remaining, ['child'])
+  const backups = git('show-ref')
+    .split('\n')
+    .filter((line) => line.includes('refs/git-stacks/'))
+  assert.ok(
+    backups.some((line) => line.endsWith(`/${Buffer.from('child', 'utf8').toString('hex')}`)),
+    'the backup ref must be retained when the replay cannot be proven',
+  )
+})
+
 test('recovery refuses a branch moved outside Git Stacks after its recorded rebase', async () => {
   const { repo, git, rootTip, childTip } = await prepareConflictStack()
   const childBoundary = git('config', '--get', 'branch.child.parentTip')
