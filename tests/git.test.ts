@@ -59,6 +59,7 @@ test('renamed files and literal pathspec characters retain both paths through un
       message: 'Rename a literal path',
       amend: false,
       expectedHead: git('rev-parse', 'HEAD'),
+      expectedHeadRef: 'refs/heads/main',
     })
     assert.equal(git('show', `HEAD:${destination}`), 'base')
     snapshot = await getSnapshot(repo)
@@ -126,6 +127,7 @@ test('unborn repositories support their first staged commit without GitHub', asy
       message: 'First commit',
       amend: false,
       expectedHead: null,
+      expectedHeadRef: 'refs/heads/main',
     })
     assert.equal(
       execFileSync('git', ['-C', root, 'show', 'HEAD:first.txt'], { encoding: 'utf8' }),

@@ -4,7 +4,8 @@ import * as path from 'node:path'
 import { promises as fs } from 'node:fs'
 import type { Stats } from 'node:fs'
 import type { FileHandle } from 'node:fs/promises'
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
+import { tmpdir } from 'node:os'
 
 import type {
   ActionResult,
@@ -72,6 +73,16 @@ function requireOid(value: unknown, label: string, allowNull = false): string | 
     throw new Error(`${label} must be a hexadecimal Git object id`)
   }
   return oid
+}
+function requireHeadRef(value: unknown, label: string): string {
+  if (value === 'HEAD') return value
+  const ref = requireString(value, label, MAX_BRANCH_LENGTH + 'refs/heads/'.length)
+  const prefix = 'refs/heads/'
+  if (!ref.startsWith(prefix)) {
+    throw new Error(`${label} must be HEAD or a local branch ref`)
+  }
+  requireRefInput(ref.slice(prefix.length), label)
+  return ref
 }
 
 function requirePathInput(value: unknown, label: string): string {
@@ -154,6 +165,7 @@ function validateAction(value: unknown): GitAction {
         message: requireString(value.message, 'commit message'),
         amend: value.amend,
         expectedHead,
+        expectedHeadRef: requireHeadRef(value.expectedHeadRef, 'expectedHeadRef'),
       }
     }
     case 'fetch':
@@ -241,6 +253,7 @@ function validateAction(value: unknown): GitAction {
         type: 'merge',
         ref: requireRefInput(value.ref, 'merge ref'),
         expectedHead: requireOid(value.expectedHead, 'expectedHead')!,
+        expectedHeadRef: requireHeadRef(value.expectedHeadRef, 'expectedHeadRef'),
       }
     case 'cherryPick':
     case 'revert': {
@@ -256,6 +269,7 @@ function validateAction(value: unknown): GitAction {
         type: value.type,
         oid: requireOid(value.oid, 'commit oid')!,
         expectedHead: requireOid(value.expectedHead, 'expectedHead')!,
+        expectedHeadRef: requireHeadRef(value.expectedHeadRef, 'expectedHeadRef'),
         mainline: value.mainline,
       }
     }
@@ -367,16 +381,247 @@ async function currentHeadOid(repoPath: string): Promise<string | null> {
   return value ? stripTrailingNewline(value) : null
 }
 
+async function currentHeadRef(repoPath: string): Promise<string> {
+  const ref = await tryGit(repoPath, ['symbolic-ref', '--quiet', 'HEAD'])
+  return ref ? stripTrailingNewline(ref) : 'HEAD'
+}
+
+interface ExpectedHeadContext {
+  oid: string | null
+  ref: string
+}
+
+interface CapturedOperationHead extends ExpectedHeadContext {
+  oid: string
+  operation: 'merge' | 'cherryPick' | 'revert'
+}
+
 async function assertExpectedHead(
   repoPath: string,
   expectedHead: string | null,
   operation: string,
+  expectedHeadRef?: string,
 ): Promise<void> {
-  const actual = await currentHeadOid(repoPath)
-  if (actual !== expectedHead) {
+  const [actual, actualRef] = await Promise.all([
+    currentHeadOid(repoPath),
+    currentHeadRef(repoPath),
+  ])
+  if (actual !== expectedHead || (expectedHeadRef !== undefined && actualRef !== expectedHeadRef)) {
     throw new Error(
-      `Cannot ${operation}: HEAD changed (expected ${expectedHead ?? 'unborn'}, found ${actual ?? 'unborn'})`,
+      `Cannot ${operation}: HEAD changed (expected ${expectedHead ?? 'unborn'} at ${expectedHeadRef ?? 'any ref'}, found ${actual ?? 'unborn'} at ${actualRef})`,
     )
+  }
+}
+
+async function installReferenceTransactionGuard(
+  repoPath: string,
+): Promise<{ hooksPath: string; previousHook: string | null }> {
+  const configuredHooksPath = await tryGit(repoPath, [
+    'config',
+    '--path',
+    '--get',
+    'core.hooksPath',
+  ])
+  const previousHooksPath =
+    configuredHooksPath !== null
+      ? path.resolve(repoPath, stripTrailingNewline(configuredHooksPath))
+      : path.resolve(
+          repoPath,
+          stripTrailingNewline(await runGit(repoPath, ['rev-parse', '--git-path', 'hooks'])),
+        )
+  const hooksPath = await fs.mkdtemp(path.join(tmpdir(), 'git-stacks-head-guard-'))
+  try {
+    let names: string[] = []
+    try {
+      names = await fs.readdir(previousHooksPath)
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code
+      if (code !== 'ENOENT' && code !== 'ENOTDIR') throw error
+    }
+    for (const name of names) {
+      if (name !== 'reference-transaction') {
+        await fs.symlink(path.join(previousHooksPath, name), path.join(hooksPath, name))
+      }
+    }
+
+    const previousHookPath = path.join(previousHooksPath, 'reference-transaction')
+    let previousHook: string | null = null
+    try {
+      const info = await fs.stat(previousHookPath)
+      if (info.isFile() && (info.mode & 0o111) !== 0) previousHook = previousHookPath
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code
+      if (code !== 'ENOENT' && code !== 'ENOTDIR') throw error
+    }
+
+    const hookPath = path.join(hooksPath, 'reference-transaction')
+    await fs.writeFile(
+      hookPath,
+      `#!/bin/sh
+input=
+if [ "$1" = "prepared" ]; then
+  input=$(mktemp "\${TMPDIR:-/tmp}/git-stacks-reference-transaction.XXXXXX") || exit 1
+  if ! cat > "$input"; then
+    rm -f "$input"
+    exit 1
+  fi
+  matched=false
+  mismatch=false
+  unexpected=false
+  while IFS=' ' read -r old new ref; do
+    if [ "$ref" = "$GIT_STACKS_EXPECTED_HEAD_REF" ]; then
+      matched=true
+      if [ "$old" != "$GIT_STACKS_EXPECTED_HEAD_OLD" ]; then mismatch=true; fi
+    elif [ "\${ref#refs/heads/}" != "$ref" ] || { [ "$ref" = "HEAD" ] && [ "$GIT_STACKS_EXPECTED_HEAD_REF" != "HEAD" ]; }; then
+      unexpected=true
+    fi
+  done < "$input"
+  if [ "$mismatch" = true ] || [ "$unexpected" = true ]; then
+    echo "$GIT_STACKS_EXPECTED_HEAD_ERROR" >&2
+    rm -f "$input"
+    exit 1
+  fi
+fi
+if [ -x "$GIT_STACKS_PREVIOUS_REFERENCE_TRANSACTION" ]; then
+  if [ -n "$input" ]; then
+    "$GIT_STACKS_PREVIOUS_REFERENCE_TRANSACTION" "$@" < "$input"
+  else
+    "$GIT_STACKS_PREVIOUS_REFERENCE_TRANSACTION" "$@"
+  fi
+  result=$?
+else
+  result=0
+fi
+if [ -n "$input" ]; then rm -f "$input"; fi
+exit "$result"
+`,
+      { encoding: 'utf8', mode: 0o700 },
+    )
+    await fs.chmod(hookPath, 0o700)
+    return { hooksPath, previousHook }
+  } catch (error) {
+    await fs.rm(hooksPath, { recursive: true, force: true })
+    throw error
+  }
+}
+
+async function expectedHeadOldValue(repoPath: string, head: string | null): Promise<string> {
+  if (head) return head.toLowerCase()
+  const format = stripTrailingNewline(await runGit(repoPath, ['rev-parse', '--show-object-format']))
+  if (format !== 'sha1' && format !== 'sha256') {
+    throw new Error(`Unsupported Git object format: ${format}`)
+  }
+  return '0'.repeat(format === 'sha1' ? 40 : 64)
+}
+
+async function runGitWithExpectedHead(
+  repoPath: string,
+  args: string[],
+  expected: ExpectedHeadContext,
+  operation: string,
+  env?: NodeJS.ProcessEnv,
+): Promise<string> {
+  const hooks = await installReferenceTransactionGuard(repoPath)
+  try {
+    return await runGit(repoPath, ['-c', `core.hooksPath=${hooks.hooksPath}`, ...args], {
+      ...env,
+      GIT_STACKS_EXPECTED_HEAD_REF: expected.ref,
+      GIT_STACKS_EXPECTED_HEAD_OLD: await expectedHeadOldValue(repoPath, expected.oid),
+      GIT_STACKS_EXPECTED_HEAD_ERROR: `Cannot ${operation}: HEAD changed since this action started`,
+      GIT_STACKS_PREVIOUS_REFERENCE_TRANSACTION: hooks.previousHook ?? '',
+    })
+  } finally {
+    await fs.rm(hooks.hooksPath, { recursive: true, force: true })
+  }
+}
+
+async function expectedOperationHeadPath(repoPath: string): Promise<string> {
+  const value = stripTrailingNewline(
+    await runGit(repoPath, ['rev-parse', '--git-path', 'git-stacks-expected-operation-head.json']),
+  )
+  return path.resolve(repoPath, value)
+}
+
+async function persistOperationHead(
+  repoPath: string,
+  expected: CapturedOperationHead,
+): Promise<void> {
+  const filePath = await expectedOperationHeadPath(repoPath)
+  await fs.mkdir(path.dirname(filePath), { recursive: true })
+  const temporaryPath = `${filePath}.${randomUUID()}.tmp`
+  try {
+    await fs.writeFile(temporaryPath, JSON.stringify(expected), {
+      encoding: 'utf8',
+      flag: 'wx',
+      mode: 0o600,
+    })
+    await fs.rename(temporaryPath, filePath)
+  } catch (error) {
+    await fs.rm(temporaryPath, { force: true })
+    throw error
+  }
+}
+
+async function readOperationHead(repoPath: string): Promise<CapturedOperationHead | null> {
+  const filePath = await expectedOperationHeadPath(repoPath)
+  let raw: string
+  try {
+    const info = await fs.lstat(filePath)
+    if (!info.isFile() || info.size > 4096) {
+      throw new Error('The saved operation HEAD state is invalid; abort the Git operation')
+    }
+    raw = await fs.readFile(filePath, 'utf8')
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null
+    throw error
+  }
+  let value: unknown
+  try {
+    value = JSON.parse(raw)
+  } catch {
+    throw new Error('The saved operation HEAD state is unreadable; abort the Git operation')
+  }
+  if (
+    !isRecord(value) ||
+    (value.operation !== 'merge' &&
+      value.operation !== 'cherryPick' &&
+      value.operation !== 'revert') ||
+    typeof value.oid !== 'string' ||
+    !/^[0-9a-f]{40,64}$/iu.test(value.oid) ||
+    typeof value.ref !== 'string' ||
+    (value.ref !== 'HEAD' && !value.ref.startsWith('refs/heads/'))
+  ) {
+    throw new Error('The saved operation HEAD state is invalid; abort the Git operation')
+  }
+  return {
+    operation: value.operation,
+    oid: value.oid,
+    ref: value.ref,
+  }
+}
+
+async function clearOperationHead(repoPath: string): Promise<void> {
+  await fs.rm(await expectedOperationHeadPath(repoPath), { force: true })
+}
+
+async function runCapturedOperation(
+  repoPath: string,
+  operation: CapturedOperationHead['operation'],
+  args: string[],
+  expected: CapturedOperationHead,
+  env: NodeJS.ProcessEnv,
+): Promise<void> {
+  await persistOperationHead(repoPath, expected)
+  try {
+    await runGitWithExpectedHead(repoPath, args, expected, operation, env)
+  } catch (error) {
+    if ((await getOperationState(repoPath)).operation !== operation) {
+      await clearOperationHead(repoPath)
+    }
+    throw error
+  }
+  if ((await getOperationState(repoPath)).operation !== operation) {
+    await clearOperationHead(repoPath)
   }
 }
 
@@ -385,9 +630,11 @@ async function runCommit(
   message: string,
   amend: boolean,
   expectedHead: string | null,
+  expectedHeadRef: string,
 ): Promise<ActionResult> {
   await ensureNoBusyOperation(repoPath, 'commit')
-  await assertExpectedHead(repoPath, expectedHead, 'commit')
+  await assertExpectedHead(repoPath, expectedHead, 'commit', expectedHeadRef)
+  const expected = { oid: expectedHead, ref: expectedHeadRef }
   const files = await getStatus(repoPath)
   if (files.some((file) => file.conflicted)) {
     throw new Error('Cannot commit while conflicts are unresolved')
@@ -399,13 +646,18 @@ async function runCommit(
     if (currentBranch === defaultBranch) {
       throw new Error('Amending the default branch is not allowed')
     }
-    await runGit(repoPath, ['commit', '--amend', '--message', message])
+    await runGitWithExpectedHead(
+      repoPath,
+      ['commit', '--amend', '--message', message],
+      expected,
+      'commit',
+    )
     return { message: 'Amended the current commit' }
   }
   if (!files.some((file) => file.index !== ' ' && file.index !== '?')) {
     throw new Error('Nothing is staged to commit')
   }
-  await runGit(repoPath, ['commit', '--message', message])
+  await runGitWithExpectedHead(repoPath, ['commit', '--message', message], expected, 'commit')
   return { message: 'Committed staged changes' }
 }
 
@@ -590,8 +842,222 @@ async function runStash(
   }
 }
 
+interface StashDropJournal {
+  version: 1
+  changesRef: boolean
+  oldRef: string
+  oldLog: string
+  nextRef: string | null
+  nextLog: string
+  refLock: string
+  logLock: string
+  refLockIdentity: { dev: string; ino: string }
+  logLockIdentity: { dev: string; ino: string }
+}
+
+function encodeStashJournalBytes(value: Buffer): string {
+  return value.toString('base64')
+}
+
+function decodeStashJournalBytes(value: unknown): Buffer {
+  if (typeof value !== 'string') {
+    throw new Error('The interrupted stash journal is invalid; refusing recovery')
+  }
+  const bytes = Buffer.from(value, 'base64')
+  if (bytes.toString('base64') !== value) {
+    throw new Error('The interrupted stash journal is invalid; refusing recovery')
+  }
+  return bytes
+}
+
+function validStashLockIdentity(value: unknown): value is { dev: string; ino: string } {
+  return (
+    isRecord(value) &&
+    typeof value.dev === 'string' &&
+    typeof value.ino === 'string' &&
+    /^\d+$/u.test(value.dev) &&
+    /^\d+$/u.test(value.ino)
+  )
+}
+
+async function optionalStashFile(filePath: string): Promise<Buffer | null> {
+  try {
+    const info = await fs.lstat(filePath)
+    if (!info.isFile()) {
+      throw new Error(`Cannot safely recover stash file ${path.basename(filePath)}`)
+    }
+    return await fs.readFile(filePath)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null
+    throw error
+  }
+}
+
+function sameStashFile(left: Buffer | null, right: Buffer | null): boolean {
+  if (left === null || right === null) return left === right
+  return left.equals(right)
+}
+
+async function verifyStashRecoveryLock(
+  filePath: string,
+  expected: Buffer,
+  identity: { dev: string; ino: string },
+): Promise<boolean> {
+  const contents = await optionalStashFile(filePath)
+  if (contents === null) return false
+  const info = await fs.lstat(filePath)
+  if (
+    !contents.equals(expected) ||
+    String(info.dev) !== identity.dev ||
+    String(info.ino) !== identity.ino
+  ) {
+    throw new Error(
+      `Cannot safely recover an interrupted stash update while ${path.basename(filePath)} is owned by another Git operation`,
+    )
+  }
+  return true
+}
+
+async function readStashDropJournal(journalPath: string): Promise<StashDropJournal | null> {
+  let raw: string
+  try {
+    const info = await fs.lstat(journalPath)
+    if (!info.isFile() || info.size > 256 * 1024 * 1024) {
+      throw new Error('The interrupted stash journal is invalid; refusing recovery')
+    }
+    raw = await fs.readFile(journalPath, 'utf8')
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null
+    throw error
+  }
+  let value: unknown
+  try {
+    value = JSON.parse(raw)
+  } catch {
+    throw new Error('The interrupted stash journal is unreadable; refusing recovery')
+  }
+  if (
+    !isRecord(value) ||
+    value.version !== 1 ||
+    typeof value.changesRef !== 'boolean' ||
+    typeof value.oldRef !== 'string' ||
+    typeof value.oldLog !== 'string' ||
+    (value.nextRef !== null && typeof value.nextRef !== 'string') ||
+    typeof value.nextLog !== 'string' ||
+    typeof value.refLock !== 'string' ||
+    typeof value.logLock !== 'string' ||
+    !validStashLockIdentity(value.refLockIdentity) ||
+    !validStashLockIdentity(value.logLockIdentity)
+  ) {
+    throw new Error('The interrupted stash journal is invalid; refusing recovery')
+  }
+  return {
+    version: 1,
+    changesRef: value.changesRef,
+    oldRef: value.oldRef,
+    oldLog: value.oldLog,
+    nextRef: value.nextRef,
+    nextLog: value.nextLog,
+    refLock: value.refLock,
+    logLock: value.logLock,
+    refLockIdentity: value.refLockIdentity,
+    logLockIdentity: value.logLockIdentity,
+  }
+}
+
+async function writeStashDropJournal(
+  journalPath: string,
+  journal: StashDropJournal,
+): Promise<void> {
+  const temporaryPath = `${journalPath}.${randomUUID()}.tmp`
+  try {
+    const handle = await fs.open(temporaryPath, 'wx', 0o600)
+    try {
+      await handle.writeFile(JSON.stringify(journal), 'utf8')
+      await handle.sync()
+    } finally {
+      await handle.close()
+    }
+    await fs.rename(temporaryPath, journalPath)
+  } catch (error) {
+    await fs.rm(temporaryPath, { force: true })
+    throw error
+  }
+}
+
+async function recoverStashDrop(commonPath: string): Promise<void> {
+  const journalPath = path.join(commonPath, 'git-stacks-stash-drop.json')
+  const journal = await readStashDropJournal(journalPath)
+  if (!journal) return
+
+  const refPath = path.join(commonPath, 'refs', 'stash')
+  const logPath = path.join(commonPath, 'logs', 'refs', 'stash')
+  const refLockPath = `${refPath}.lock`
+  const logLockPath = `${logPath}.lock`
+  const oldRef = decodeStashJournalBytes(journal.oldRef)
+  const oldLog = decodeStashJournalBytes(journal.oldLog)
+  const nextRef = journal.nextRef === null ? null : decodeStashJournalBytes(journal.nextRef)
+  const nextLog = decodeStashJournalBytes(journal.nextLog)
+  const refLock = decodeStashJournalBytes(journal.refLock)
+  const logLock = decodeStashJournalBytes(journal.logLock)
+  const targetRef = journal.changesRef ? nextRef : oldRef
+  const [currentRef, currentLog] = await Promise.all([
+    optionalStashFile(refPath),
+    optionalStashFile(logPath),
+  ])
+  const refIsOld = sameStashFile(currentRef, oldRef)
+  const refIsNew = sameStashFile(currentRef, targetRef)
+  const logIsOld = sameStashFile(currentLog, oldLog)
+  const logIsNew = sameStashFile(currentLog, nextLog)
+  if (!refIsOld && !refIsNew) {
+    throw new Error('Stash references changed during recovery; refusing to overwrite them')
+  }
+  if (!logIsOld && !logIsNew) {
+    throw new Error('The stash reflog changed during recovery; refusing to overwrite it')
+  }
+  if (journal.changesRef && refIsNew && !refIsOld && logIsOld) {
+    throw new Error('Stash files are in an unexpected transaction state; refusing recovery')
+  }
+
+  const hasRefLock = await verifyStashRecoveryLock(refLockPath, refLock, journal.refLockIdentity)
+  const hasLogLock = await verifyStashRecoveryLock(logLockPath, logLock, journal.logLockIdentity)
+  if (logIsOld && !hasLogLock) {
+    throw new Error('The stash reflog lock is missing; refusing to finish recovery')
+  }
+  if (journal.changesRef && refIsOld && !hasRefLock) {
+    throw new Error('The stash reference lock is missing; refusing to finish recovery')
+  }
+
+  if (logIsOld) {
+    await fs.rename(logLockPath, logPath)
+  } else if (hasLogLock) {
+    await fs.unlink(logLockPath)
+  }
+  if (journal.changesRef && refIsOld) {
+    if (nextRef === null) {
+      await fs.unlink(refPath)
+      if (hasRefLock) await fs.unlink(refLockPath)
+    } else {
+      await fs.rename(refLockPath, refPath)
+    }
+  } else if (hasRefLock) {
+    await fs.unlink(refLockPath)
+  }
+  await fs.rm(journalPath)
+}
+
+async function recoverStashDropForRepository(repoPath: string): Promise<void> {
+  const commonDir = stripTrailingNewline(await runGit(repoPath, ['rev-parse', '--git-common-dir']))
+  await recoverStashDrop(path.resolve(repoPath, commonDir))
+}
+
+async function getStashesWithRecovery(repoPath: string) {
+  await recoverStashDropForRepository(repoPath)
+  return getStashes(repoPath)
+}
+
 async function assertStashIdentity(repoPath: string, ref: string, oid: string): Promise<void> {
-  const stash = (await getStashes(repoPath)).find((entry) => entry.ref === ref)
+  const stash = (await getStashesWithRecovery(repoPath)).find((entry) => entry.ref === ref)
   if (!stash) throw new Error(`Stash ${ref} does not exist`)
   if (stash.oid !== oid) {
     throw new Error(`Stash ${ref} changed; refresh before applying or dropping it`)
@@ -611,36 +1077,35 @@ async function dropStashByOid(
 
   const commonDir = stripTrailingNewline(await runGit(repoPath, ['rev-parse', '--git-common-dir']))
   const commonPath = path.resolve(repoPath, commonDir)
+  await recoverStashDrop(commonPath)
   const refPath = path.join(commonPath, 'refs', 'stash')
   const logPath = path.join(commonPath, 'logs', 'refs', 'stash')
   const refLockPath = `${refPath}.lock`
   const logLockPath = `${logPath}.lock`
+  const journalPath = path.join(commonPath, 'git-stacks-stash-drop.json')
   let refLock: FileHandle | undefined
   let logLock: FileHandle | undefined
   let refLockExists = false
   let logLockExists = false
-  let originalLog = ''
-  let logCommitted = false
-  let completed = false
+  let journalPending = false
 
-  // Match the files backend's ref-then-reflog lock order and revalidate before rewriting.
   try {
     refLock = await fs.open(refLockPath, 'wx')
     refLockExists = true
     logLock = await fs.open(logLockPath, 'wx')
     logLockExists = true
 
-    const [refInfo, logInfo, currentRef, log, stashes] = await Promise.all([
+    const [refInfo, logInfo, currentRef, logBuffer, stashes] = await Promise.all([
       fs.lstat(refPath),
       fs.lstat(logPath),
-      fs.readFile(refPath, 'utf8'),
-      fs.readFile(logPath, 'utf8'),
+      fs.readFile(refPath),
+      fs.readFile(logPath),
       getStashes(repoPath),
     ])
     if (!refInfo.isFile() || !logInfo.isFile()) {
       throw new Error(`Cannot safely remove stash ${ref} from this repository`)
     }
-    originalLog = log
+    const log = logBuffer.toString('utf8')
     const matches = stashes
       .map((stash, index) => ({ stash, index }))
       .filter(({ stash }) => stash.oid.toLowerCase() === oid.toLowerCase())
@@ -650,7 +1115,7 @@ async function dropStashByOid(
     const selectedIndex = matches[0].index
     if (
       !stashes[0] ||
-      currentRef.trim().toLowerCase() !== stashes[0].oid.toLowerCase() ||
+      currentRef.toString('utf8').trim().toLowerCase() !== stashes[0].oid.toLowerCase() ||
       (log && !log.endsWith('\n'))
     ) {
       throw new Error(`Stash ${ref} changed; refresh before retrying`)
@@ -695,60 +1160,70 @@ async function dropStashByOid(
     }
     if (apply) await apply()
 
-    await logLock.writeFile(rows.length > 0 ? `${rows.join('\n')}\n` : '', 'utf8')
-    if (newTip) await refLock.writeFile(`${newTip}\n`, 'utf8')
+    const nextLog = Buffer.from(rows.length > 0 ? `${rows.join('\n')}\n` : '', 'utf8')
+    const changesRef = selectedIndex === 0
+    const nextRef = changesRef ? (newTip ? Buffer.from(`${newTip}\n`, 'utf8') : null) : currentRef
+    const refLockContents =
+      changesRef && newTip ? Buffer.from(`${newTip}\n`, 'utf8') : Buffer.alloc(0)
+    await logLock.writeFile(nextLog)
+    await logLock.sync()
+    await refLock.writeFile(refLockContents)
+    await refLock.sync()
+    const [refLockInfo, logLockInfo] = await Promise.all([
+      fs.lstat(refLockPath),
+      fs.lstat(logLockPath),
+    ])
+    const journal: StashDropJournal = {
+      version: 1,
+      changesRef,
+      oldRef: encodeStashJournalBytes(currentRef),
+      oldLog: encodeStashJournalBytes(logBuffer),
+      nextRef: nextRef === null ? null : encodeStashJournalBytes(nextRef),
+      nextLog: encodeStashJournalBytes(nextLog),
+      refLock: encodeStashJournalBytes(refLockContents),
+      logLock: encodeStashJournalBytes(nextLog),
+      refLockIdentity: { dev: String(refLockInfo.dev), ino: String(refLockInfo.ino) },
+      logLockIdentity: { dev: String(logLockInfo.dev), ino: String(logLockInfo.ino) },
+    }
+    await writeStashDropJournal(journalPath, journal)
+    journalPending = true
+
     await fs.rename(logLockPath, logPath)
     logLockExists = false
-    logCommitted = true
     await logLock.close()
     logLock = undefined
-
-    if (selectedIndex === 0) {
-      if (newTip) {
-        await fs.rename(refLockPath, refPath)
-        refLockExists = false
-        completed = true
-        await refLock.close()
-        refLock = undefined
-      } else {
-        await fs.unlink(refPath)
-      }
+    if (changesRef && nextRef !== null) {
+      await fs.rename(refLockPath, refPath)
+      refLockExists = false
+    } else {
+      if (changesRef) await fs.unlink(refPath)
+      await fs.unlink(refLockPath)
+      refLockExists = false
     }
-    completed = true
+    await refLock.close()
+    refLock = undefined
+    await fs.rm(journalPath)
+    journalPending = false
   } catch (error) {
-    if (logCommitted && !completed) {
-      try {
-        if (logLock) {
-          await logLock.close()
-          logLock = undefined
-        }
-        const restoreLock = await fs.open(logLockPath, 'wx')
-        logLock = restoreLock
-        logLockExists = true
-        await restoreLock.writeFile(originalLog, 'utf8')
-        await fs.rename(logLockPath, logPath)
-        logLockExists = false
-        await restoreLock.close()
-        logLock = undefined
-      } catch {
-        // Preserve the original failure if rollback is blocked.
-      }
+    if (journalPending) {
+      throw new Error(
+        `Stash removal was interrupted and will be recovered on the next repository refresh: ${commandDetail(error)}`,
+      )
     }
     if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
       throw new Error('Another Git operation is changing the stash; retry after it completes')
     }
     throw error
   } finally {
-    try {
-      if (logLockExists) await fs.rm(logLockPath, { force: true })
-    } finally {
+    if (!journalPending) {
       try {
-        if (refLockExists) await fs.rm(refLockPath, { force: true })
+        if (logLockExists) await fs.rm(logLockPath, { force: true })
       } finally {
-        await logLock?.close().catch(() => {})
-        await refLock?.close().catch(() => {})
+        if (refLockExists) await fs.rm(refLockPath, { force: true })
       }
     }
+    await logLock?.close().catch(() => {})
+    await refLock?.close().catch(() => {})
   }
 }
 
@@ -902,7 +1377,7 @@ async function runCreateBranch(
     '--no-recurse-submodules',
     '--create',
     name,
-    parentRef,
+    parentTip,
   ])
   try {
     await setBranchMetadata(repoPath, name, parent, parentTip)
@@ -940,7 +1415,7 @@ async function runRebase(repoPath: string, parent: string): Promise<ActionResult
     '-c',
     'rebase.autoStash=false',
     'rebase',
-    parentRef,
+    parentTip,
   ])
   await persistPendingRebase(repoPath, currentBranch)
   return { message: `Rebased ${currentBranch} onto ${parent}` }
@@ -1113,13 +1588,19 @@ function changedEntry(files: ChangedFile[], requestedPath: string): ChangedFile 
 
 interface FileIdentity {
   fingerprint: string
+  indexFingerprint: string
+  contentFingerprint: string
   preview: Buffer | null
   stat: Stats | null
   binary: boolean
   truncated: boolean
 }
-async function fileFingerprint(repoPath: string, relativePath: string): Promise<FileIdentity> {
-  const absolute = await safeRepositoryPath(repoPath, relativePath)
+
+async function fileFingerprintAt(
+  repoPath: string,
+  relativePath: string,
+  absolutePath: string,
+): Promise<FileIdentity> {
   const index = await runGit(repoPath, [
     '--literal-pathspecs',
     'ls-files',
@@ -1128,14 +1609,16 @@ async function fileFingerprint(repoPath: string, relativePath: string): Promise<
     '--',
     relativePath,
   ])
+  const indexFingerprint = createHash('sha256').update(index).digest('hex')
   let stat: Stats | null = null
   let preview: Buffer | null = null
   let binary = false
   let truncated = false
   try {
-    stat = await fs.lstat(absolute)
-    if (stat.isDirectory()) throw new Error('Changed path is a directory')
+    stat = await fs.lstat(absolutePath)
+    if (!stat.isFile()) throw new Error('Changed path is not a regular file')
     const hash = createHash('sha256')
+    const contentHash = createHash('sha256')
     hash.update(index)
     hash.update(
       JSON.stringify({
@@ -1148,7 +1631,7 @@ async function fileFingerprint(repoPath: string, relativePath: string): Promise<
       }),
     )
     const decoder = new TextDecoder('utf-8', { fatal: true })
-    const handle = await fs.open(absolute, 'r')
+    const handle = await fs.open(absolutePath, 'r')
     const chunks: Buffer[] = []
     let retained = 0
     let totalBytes = 0
@@ -1160,6 +1643,7 @@ async function fileFingerprint(repoPath: string, relativePath: string): Promise<
         const chunk = buffer.subarray(0, result.bytesRead)
         totalBytes += chunk.length
         hash.update(chunk)
+        contentHash.update(chunk)
         if (chunk.includes(0)) binary = true
         try {
           decoder.decode(chunk, { stream: true })
@@ -1178,24 +1662,71 @@ async function fileFingerprint(repoPath: string, relativePath: string): Promise<
       } catch {
         binary = true
       }
+      const openedStat = await handle.stat()
+      if (
+        openedStat.dev !== stat.dev ||
+        openedStat.ino !== stat.ino ||
+        openedStat.size !== stat.size ||
+        openedStat.mtimeMs !== stat.mtimeMs ||
+        openedStat.ctimeMs !== stat.ctimeMs
+      ) {
+        throw new Error('The file changed while it was being read; refresh and retry')
+      }
     } finally {
       await handle.close()
     }
+    const currentStat = await fs.lstat(absolutePath)
+    if (currentStat.dev !== stat.dev || currentStat.ino !== stat.ino) {
+      throw new Error('The file changed while it was being read; refresh and retry')
+    }
     preview = Buffer.concat(chunks)
-    return { fingerprint: hash.digest('hex'), preview, stat, binary, truncated }
+    return {
+      fingerprint: hash.digest('hex'),
+      indexFingerprint,
+      contentFingerprint: contentHash.digest('hex'),
+      preview,
+      stat,
+      binary,
+      truncated,
+    }
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
   }
+  const contentFingerprint = createHash('sha256').update('missing').digest('hex')
   const hash = createHash('sha256')
   hash.update(index)
   hash.update('missing')
   return {
     fingerprint: hash.digest('hex'),
+    indexFingerprint,
+    contentFingerprint,
     preview: null,
     stat: null,
     binary: false,
     truncated: false,
   }
+}
+
+async function fileFingerprint(repoPath: string, relativePath: string): Promise<FileIdentity> {
+  const absolute = await safeRepositoryPath(repoPath, relativePath)
+  return fileFingerprintAt(repoPath, relativePath, absolute)
+}
+
+function sameFileMutationIdentity(expected: FileIdentity, actual: FileIdentity): boolean {
+  if (
+    expected.indexFingerprint !== actual.indexFingerprint ||
+    expected.contentFingerprint !== actual.contentFingerprint
+  ) {
+    return false
+  }
+  if (!expected.stat || !actual.stat) return expected.stat === actual.stat
+  return (
+    expected.stat.dev === actual.stat.dev &&
+    expected.stat.ino === actual.stat.ino &&
+    expected.stat.mode === actual.stat.mode &&
+    expected.stat.size === actual.stat.size &&
+    expected.stat.mtimeMs === actual.stat.mtimeMs
+  )
 }
 async function changedDiff(
   repoPath: string,
@@ -1247,26 +1778,143 @@ async function checkFileFingerprint(
   repoPath: string,
   filePath: string,
   expected: string,
-): Promise<ChangedFile> {
+): Promise<{ entry: ChangedFile; identity: FileIdentity }> {
   const entry = changedEntry(await getStatus(repoPath), filePath)
   const identity = await fileFingerprint(repoPath, entry.path)
   if (identity.fingerprint !== expected) {
     throw new Error('The file changed since it was opened; refresh before applying this action')
   }
-  return entry
+  return { entry, identity }
 }
 
-async function removeSelectedFile(repoPath: string, relativePath: string): Promise<void> {
-  const absolute = await safeRepositoryPath(repoPath, relativePath)
-  let info: Stats
+async function materializeGitWorktreePath(
+  repoPath: string,
+  relativePath: string,
+  args: string[],
+): Promise<{ root: string; path: string | null }> {
+  const root = await fs.mkdtemp(path.join(tmpdir(), 'git-stacks-worktree-'))
+  const worktree = path.join(root, 'worktree')
+  const destination = path.join(worktree, relativePath)
+  await fs.mkdir(path.dirname(destination), { recursive: true })
   try {
-    info = await fs.lstat(absolute)
+    await runGit(repoPath, args, { GIT_WORK_TREE: worktree })
+    try {
+      const info = await fs.lstat(destination)
+      if (!info.isFile()) throw new Error('Git produced a non-file path during file resolution')
+      return { root, path: destination }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+      return { root, path: null }
+    }
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return
+    await fs.rm(root, { recursive: true, force: true })
     throw error
   }
-  if (info.isDirectory()) throw new Error('Refusing to remove a directory')
-  await fs.unlink(absolute)
+}
+
+async function restoreQuarantinedFile(backupPath: string, targetPath: string): Promise<void> {
+  const info = await fs.lstat(backupPath)
+  if (!info.isFile()) throw new Error('The changed path cannot be restored safely')
+  await fs.link(backupPath, targetPath)
+  await fs.unlink(backupPath)
+}
+
+async function replaceCheckedFile(
+  repoPath: string,
+  relativePath: string,
+  expected: FileIdentity,
+  sourcePath: string | null,
+  content?: string,
+): Promise<void> {
+  const targetPath = await safeRepositoryPath(repoPath, relativePath)
+  await fs.mkdir(path.dirname(targetPath), { recursive: true })
+  await safeRepositoryPath(repoPath, relativePath)
+  const stagingDirectory = await fs.mkdtemp(path.join(path.dirname(targetPath), '.git-stacks-'))
+  const backupPath = path.join(stagingDirectory, 'original')
+  const replacementPath =
+    sourcePath !== null || content !== undefined ? path.join(stagingDirectory, 'replacement') : null
+  let movedOriginal = false
+  let preserveStagingDirectory = false
+  try {
+    if (sourcePath !== null) {
+      const sourceInfo = await fs.stat(sourcePath)
+      if (!sourceInfo.isFile()) throw new Error('The replacement path is not a regular file')
+      await fs.copyFile(sourcePath, replacementPath!)
+      await fs.chmod(replacementPath!, sourceInfo.mode & 0o777)
+    } else if (content !== undefined) {
+      await fs.writeFile(replacementPath!, content, {
+        encoding: 'utf8',
+        mode: expected.stat ? expected.stat.mode & 0o777 : 0o666,
+      })
+      if (expected.stat) {
+        await fs.chmod(replacementPath!, expected.stat.mode & 0o777)
+      }
+    }
+
+    try {
+      await fs.rename(targetPath, backupPath)
+      movedOriginal = true
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+    }
+    const current = await fileFingerprintAt(
+      repoPath,
+      relativePath,
+      movedOriginal ? backupPath : targetPath,
+    )
+    if (!sameFileMutationIdentity(expected, current)) {
+      throw new Error('The file changed during the action; refresh before retrying')
+    }
+
+    if (replacementPath) {
+      try {
+        await fs.link(replacementPath, targetPath)
+      } catch (error) {
+        if (movedOriginal && (error as NodeJS.ErrnoException).code === 'EEXIST') {
+          preserveStagingDirectory = true
+          throw new Error(
+            `A concurrent file appeared during the action; prior contents are preserved at ${path.relative(repoPath, backupPath)}`,
+          )
+        }
+        throw error
+      }
+      await fs.unlink(replacementPath)
+    } else if (movedOriginal) {
+      try {
+        await fs.lstat(targetPath)
+        preserveStagingDirectory = true
+        throw new Error(
+          `A concurrent file appeared during the action; prior contents are preserved at ${path.relative(repoPath, backupPath)}`,
+        )
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+      }
+    }
+
+    if (movedOriginal) {
+      await fs.unlink(backupPath)
+      movedOriginal = false
+    }
+  } catch (error) {
+    if (movedOriginal && !preserveStagingDirectory) {
+      try {
+        await restoreQuarantinedFile(backupPath, targetPath)
+        movedOriginal = false
+      } catch {
+        preserveStagingDirectory = true
+      }
+    }
+    if (preserveStagingDirectory) {
+      throw new Error(
+        `${commandDetail(error)}; prior contents are preserved at ${path.relative(repoPath, backupPath)}`,
+      )
+    }
+    throw error
+  } finally {
+    if (!preserveStagingDirectory) {
+      await fs.rm(stagingDirectory, { recursive: true, force: true })
+    }
+  }
 }
 
 export async function runDiscardFile(
@@ -1275,14 +1923,24 @@ export async function runDiscardFile(
   fingerprint: string,
 ): Promise<ActionResult> {
   const root = await resolveRepository(repoPath)
-  const entry = await checkFileFingerprint(root, filePath, fingerprint)
+  const { entry, identity } = await checkFileFingerprint(root, filePath, fingerprint)
   if (entry.conflicted) throw new Error('Resolve conflicted files instead of discarding them')
-  await safeRepositoryPath(root, entry.path)
   if (entry.index === '?' || entry.worktree === '?') {
-    await removeSelectedFile(root, entry.path)
+    await replaceCheckedFile(root, entry.path, identity, null)
     return { message: `Removed untracked file ${entry.path}` }
   }
-  await runGit(root, ['--literal-pathspecs', 'restore', '--worktree', '--', entry.path])
+  const materialized = await materializeGitWorktreePath(root, entry.path, [
+    '--literal-pathspecs',
+    'restore',
+    '--worktree',
+    '--',
+    entry.path,
+  ])
+  try {
+    await replaceCheckedFile(root, entry.path, identity, materialized.path)
+  } finally {
+    await fs.rm(materialized.root, { recursive: true, force: true })
+  }
   return { message: `Discarded unstaged changes in ${entry.path}` }
 }
 
@@ -1310,18 +1968,33 @@ export async function runResolveFile(
   content: string,
 ): Promise<ActionResult> {
   const root = await resolveRepository(repoPath)
-  const entry = await checkFileFingerprint(root, filePath, fingerprint)
+  const { entry, identity } = await checkFileFingerprint(root, filePath, fingerprint)
   if (!entry.conflicted) throw new Error('The selected file has no unresolved conflict')
   const actualPath = entry.path
   await safeRepositoryPath(root, actualPath)
-  if (strategy === 'manual') {
-    await fs.writeFile(path.join(root, actualPath), content, 'utf8')
-  } else {
-    const stage = strategy === 'ours' ? 2 : 3
-    if (await hasConflictStage(root, actualPath, stage)) {
-      await runGit(root, ['--literal-pathspecs', 'checkout', `--${strategy}`, '--', actualPath])
+  let materializedRoot: string | null = null
+  let sourcePath: string | null = null
+  try {
+    if (strategy === 'manual') {
+      await replaceCheckedFile(root, actualPath, identity, null, content)
     } else {
-      await removeSelectedFile(root, actualPath)
+      const stage = strategy === 'ours' ? 2 : 3
+      if (await hasConflictStage(root, actualPath, stage)) {
+        const materialized = await materializeGitWorktreePath(root, actualPath, [
+          '--literal-pathspecs',
+          'checkout',
+          `--${strategy}`,
+          '--',
+          actualPath,
+        ])
+        materializedRoot = materialized.root
+        sourcePath = materialized.path
+      }
+      await replaceCheckedFile(root, actualPath, identity, sourcePath)
+    }
+  } finally {
+    if (materializedRoot) {
+      await fs.rm(materializedRoot, { recursive: true, force: true })
     }
   }
   await runGit(root, ['--literal-pathspecs', 'add', '--', actualPath])
@@ -1457,6 +2130,7 @@ function branchFromRef(ref: RefRecord, currentBranch: string | null, remote: boo
 }
 export async function getSnapshot(repoPath: string): Promise<RepositorySnapshot> {
   const root = await resolveRepository(repoPath)
+  await recoverStashDropForRepository(root)
   const [refs, currentBranch, files, stashes, originUrl, operationState, stackOperation, headOid] =
     await Promise.all([
       getRefs(root),
@@ -1706,12 +2380,19 @@ async function runMerge(
   repoPath: string,
   ref: string,
   expectedHead: string,
+  expectedHeadRef: string,
 ): Promise<ActionResult> {
   await ensureNoBusyOperation(repoPath, 'merge')
   await ensureClean(repoPath, 'merge')
-  await assertExpectedHead(repoPath, expectedHead, 'merge')
+  await assertExpectedHead(repoPath, expectedHead, 'merge', expectedHeadRef)
   const oid = await resolveCommitRef(repoPath, ref, 'merge ref')
-  await runGit(repoPath, ['merge', '--no-edit', '--', oid], { GIT_EDITOR: 'true' })
+  await runCapturedOperation(
+    repoPath,
+    'merge',
+    ['merge', '--no-edit', '--', oid],
+    { operation: 'merge', oid: expectedHead, ref: expectedHeadRef },
+    { GIT_EDITOR: 'true' },
+  )
   return { message: `Merged ${ref}` }
 }
 
@@ -1720,11 +2401,12 @@ async function runCherryPickOrRevert(
   kind: 'cherryPick' | 'revert',
   value: string,
   expectedHead: string,
+  expectedHeadRef: string,
   mainline: number | null,
 ): Promise<ActionResult> {
   await ensureNoBusyOperation(repoPath, kind === 'cherryPick' ? 'cherry-pick' : 'revert')
   await ensureClean(repoPath, kind === 'cherryPick' ? 'cherry-pick' : 'revert')
-  await assertExpectedHead(repoPath, expectedHead, kind)
+  await assertExpectedHead(repoPath, expectedHead, kind, expectedHeadRef)
   const oid = await resolveCommitRef(repoPath, value, 'commit oid')
   const parentCount = await commitParentCount(repoPath, oid)
   if (parentCount > 1 && mainline === null) {
@@ -1734,9 +2416,11 @@ async function runCherryPickOrRevert(
     throw new Error(`mainline ${mainline} is not a parent of the selected commit`)
   }
   const command = kind === 'cherryPick' ? 'cherry-pick' : 'revert'
-  await runGit(
+  await runCapturedOperation(
     repoPath,
+    kind,
     [command, ...(mainline === null ? [] : ['-m', String(mainline)]), '--', oid],
+    { operation: kind, oid: expectedHead, ref: expectedHeadRef },
     { GIT_EDITOR: 'true' },
   )
   return { message: `${kind === 'cherryPick' ? 'Cherry-picked' : 'Reverted'} ${value}` }
@@ -1763,10 +2447,25 @@ async function runOperation(
             : null
   const branch = state.operation === 'rebase' ? await rebaseBranch(repoPath) : null
   if (!command) throw new Error(`Cannot ${kind} the current Git operation`)
-  await runGit(repoPath, command, {
+  const captured =
+    state.operation === 'merge' || state.operation === 'cherryPick' || state.operation === 'revert'
+      ? await readOperationHead(repoPath)
+      : null
+  if (kind !== 'abort' && captured && captured.operation !== state.operation) {
+    throw new Error(
+      'The saved expected HEAD belongs to a different Git operation; abort this operation',
+    )
+  }
+  const env = {
     GIT_EDITOR: 'true',
     GIT_SEQUENCE_EDITOR: 'true',
-  })
+  }
+  if (kind !== 'abort' && captured) {
+    await assertExpectedHead(repoPath, captured.oid, `${kind} ${state.operation}`, captured.ref)
+    await runGitWithExpectedHead(repoPath, command, captured, `${kind} ${state.operation}`, env)
+  } else {
+    await runGit(repoPath, command, env)
+  }
   if (state.operation === 'rebase' && branch && !(await getOperationState(repoPath)).rebase) {
     if (kind === 'abort') {
       await unsetConfig(repoPath, `branch.${branch}.parentPending`)
@@ -1774,6 +2473,12 @@ async function runOperation(
     } else {
       await persistPendingRebase(repoPath, branch)
     }
+  }
+  if (
+    state.operation !== 'rebase' &&
+    (kind === 'abort' || (await getOperationState(repoPath)).operation !== state.operation)
+  ) {
+    await clearOperationHead(repoPath)
   }
   return {
     message:
@@ -2124,7 +2829,13 @@ export async function runAction(repoPath: string, value: GitAction): Promise<Act
     case 'unstage':
       return runStage(root, action.type, action.paths)
     case 'commit':
-      return runCommit(root, action.message, action.amend, action.expectedHead)
+      return runCommit(
+        root,
+        action.message,
+        action.amend,
+        action.expectedHead,
+        action.expectedHeadRef,
+      )
     case 'forcePush':
       return runForcePush(root, action.preview)
     case 'fetch':
@@ -2158,7 +2869,7 @@ export async function runAction(repoPath: string, value: GitAction): Promise<Act
     case 'rebaseAbort':
       return runRebaseAbort(root)
     case 'merge':
-      return runMerge(root, action.ref, action.expectedHead)
+      return runMerge(root, action.ref, action.expectedHead, action.expectedHeadRef)
     case 'cherryPick':
     case 'revert':
       return runCherryPickOrRevert(
@@ -2166,6 +2877,7 @@ export async function runAction(repoPath: string, value: GitAction): Promise<Act
         action.type,
         action.oid,
         action.expectedHead,
+        action.expectedHeadRef,
         action.mainline,
       )
     case 'operationContinue':

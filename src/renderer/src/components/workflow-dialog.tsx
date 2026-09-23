@@ -265,7 +265,14 @@ export function WorkflowDialog({
       case 'merge':
         if (captured.current.head)
           return run(
-            { type: 'merge', ref: name, expectedHead: captured.current.head },
+            {
+              type: 'merge',
+              ref: name,
+              expectedHead: captured.current.head,
+              expectedHeadRef: captured.current.branch
+                ? `refs/heads/${captured.current.branch}`
+                : 'HEAD',
+            },
             'Merge branch',
           )
         return
@@ -282,6 +289,9 @@ export function WorkflowDialog({
               type: request.mode,
               oid: request.commit.oid,
               expectedHead: captured.current.head,
+              expectedHeadRef: captured.current.branch
+                ? `refs/heads/${captured.current.branch}`
+                : 'HEAD',
               mainline: mainline ? Number(mainline) : null,
             },
             request.mode === 'cherryPick' ? 'Cherry-pick commit' : 'Revert commit',

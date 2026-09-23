@@ -141,7 +141,13 @@ export type GitAction =
   | { type: 'createBranch'; name: string; parent: string }
   | { type: 'deleteBranch'; ref: string; force: boolean; expectedOid: string }
   | { type: 'stage' | 'unstage'; paths: string[] }
-  | { type: 'commit'; message: string; amend: boolean; expectedHead: string | null }
+  | {
+      type: 'commit'
+      message: string
+      amend: boolean
+      expectedHead: string | null
+      expectedHeadRef: string
+    }
   | { type: 'fetch' | 'push' | 'rebaseContinue' | 'rebaseAbort' }
   | { type: 'pull'; strategy: 'ff-only' | 'merge' | 'rebase' }
   | { type: 'forcePush'; preview: PushPreview }
@@ -152,8 +158,14 @@ export type GitAction =
   | { type: 'renameBranch'; ref: string; name: string }
   | { type: 'deleteRemoteBranch'; ref: string; expectedOid: string }
   | { type: 'setUpstream'; ref: string; upstream: string | null }
-  | { type: 'merge'; ref: string; expectedHead: string }
-  | { type: 'cherryPick' | 'revert'; oid: string; expectedHead: string; mainline: number | null }
+  | { type: 'merge'; ref: string; expectedHead: string; expectedHeadRef: string }
+  | {
+      type: 'cherryPick' | 'revert'
+      oid: string
+      expectedHead: string
+      expectedHeadRef: string
+      mainline: number | null
+    }
   | { type: 'operationContinue' | 'operationSkip' | 'operationAbort' }
   | { type: 'discardFile'; path: string; fingerprint: string }
   | {

@@ -678,6 +678,7 @@ function App() {
       message,
       amend: commitAmend,
       expectedHead: snapshot.headOid,
+      expectedHeadRef: snapshot.currentBranch ? `refs/heads/${snapshot.currentBranch}` : 'HEAD',
     }
     if (commitAmend) {
       openWorkflow({

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises'
+import { lstat, mkdtemp, mkdir, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { delimiter, join } from 'node:path'
 import { test } from 'node:test'
@@ -77,6 +77,241 @@ exec "$real" "$@"
   return { inserted, newerOid }
 }
 
+async function withParentBranchRace(
+  root: string,
+  repo: string,
+  command: 'create' | 'rebase',
+  expectedOid: string,
+  advancedOid: string,
+  action: () => Promise<void>,
+): Promise<string> {
+  const shimDir = join(root, 'parent-race-shim')
+  await mkdir(shimDir)
+  const triggered = join(root, 'parent-race-triggered')
+  await writeFile(
+    join(shimDir, 'git'),
+    `#!/bin/sh
+real="$GIT_STACKS_TEST_REAL_GIT"
+trigger=false
+if [ ! -e "$GIT_STACKS_RACE_TRIGGERED" ]; then
+  case "$GIT_STACKS_RACE_COMMAND" in
+    create)
+      if [ "$1" = "switch" ] && [ "$4" = "--create" ]; then trigger=true; fi
+      ;;
+    rebase)
+      if [ "$1" = "-c" ] && [ "$5" = "rebase" ]; then trigger=true; fi
+      ;;
+  esac
+fi
+if [ "$trigger" = true ]; then
+  "$real" -C "$GIT_STACKS_RACE_REPO" update-ref refs/heads/main "$GIT_STACKS_RACE_ADVANCED" "$GIT_STACKS_RACE_EXPECTED" || exit $?
+  : > "$GIT_STACKS_RACE_TRIGGERED"
+fi
+exec "$real" "$@"
+`,
+    { mode: 0o755 },
+  )
+  const realGit = execFileSync('/bin/sh', ['-c', 'command -v git'], {
+    encoding: 'utf8',
+  }).trim()
+  const savedPath = process.env.PATH
+  process.env.PATH = `${shimDir}${delimiter}${savedPath ?? ''}`
+  process.env.GIT_STACKS_TEST_REAL_GIT = realGit
+  process.env.GIT_STACKS_RACE_REPO = repo
+  process.env.GIT_STACKS_RACE_COMMAND = command
+  process.env.GIT_STACKS_RACE_EXPECTED = expectedOid
+  process.env.GIT_STACKS_RACE_ADVANCED = advancedOid
+  process.env.GIT_STACKS_RACE_TRIGGERED = triggered
+  try {
+    await action()
+  } finally {
+    process.env.PATH = savedPath
+    delete process.env.GIT_STACKS_TEST_REAL_GIT
+    delete process.env.GIT_STACKS_RACE_REPO
+    delete process.env.GIT_STACKS_RACE_COMMAND
+    delete process.env.GIT_STACKS_RACE_EXPECTED
+    delete process.env.GIT_STACKS_RACE_ADVANCED
+    delete process.env.GIT_STACKS_RACE_TRIGGERED
+  }
+  return triggered
+}
+async function withConcurrentFileEdit(
+  root: string,
+  repo: string,
+  action: 'discard' | 'resolve',
+  content: string,
+  run: () => Promise<void>,
+): Promise<string> {
+  const shimDir = join(root, 'file-race-shim')
+  await mkdir(shimDir)
+  const triggered = join(root, 'file-race-triggered')
+  await writeFile(
+    join(shimDir, 'git'),
+    `#!/bin/sh
+real="$GIT_STACKS_TEST_REAL_GIT"
+trigger=false
+if [ ! -e "$GIT_STACKS_FILE_RACE_TRIGGERED" ]; then
+  case "$GIT_STACKS_FILE_RACE_ACTION" in
+    discard)
+      if [ "$1" = "--literal-pathspecs" ] && [ "$2" = "restore" ]; then trigger=true; fi
+      ;;
+    resolve)
+      if [ "$1" = "--literal-pathspecs" ] && [ "$2" = "checkout" ] && [ "$3" = "--ours" ]; then trigger=true; fi
+      ;;
+  esac
+fi
+if [ "$trigger" = true ]; then
+  printf '%s' "$GIT_STACKS_FILE_RACE_CONTENT" > "$GIT_STACKS_FILE_RACE_FILE" || exit $?
+  : > "$GIT_STACKS_FILE_RACE_TRIGGERED"
+fi
+exec "$real" "$@"
+`,
+    { mode: 0o755 },
+  )
+  const realGit = execFileSync('/bin/sh', ['-c', 'command -v git'], {
+    encoding: 'utf8',
+  }).trim()
+  const savedPath = process.env.PATH
+  process.env.PATH = `${shimDir}${delimiter}${savedPath ?? ''}`
+  process.env.GIT_STACKS_TEST_REAL_GIT = realGit
+  process.env.GIT_STACKS_FILE_RACE_ACTION = action
+  process.env.GIT_STACKS_FILE_RACE_CONTENT = content
+  process.env.GIT_STACKS_FILE_RACE_FILE = join(repo, 'shared.txt')
+  process.env.GIT_STACKS_FILE_RACE_TRIGGERED = triggered
+  try {
+    await run()
+  } finally {
+    process.env.PATH = savedPath
+    delete process.env.GIT_STACKS_TEST_REAL_GIT
+    delete process.env.GIT_STACKS_FILE_RACE_ACTION
+    delete process.env.GIT_STACKS_FILE_RACE_CONTENT
+    delete process.env.GIT_STACKS_FILE_RACE_FILE
+    delete process.env.GIT_STACKS_FILE_RACE_TRIGGERED
+  }
+  return triggered
+}
+async function withHeadAdvanceBeforeCommand(
+  root: string,
+  repo: string,
+  command: 'commit' | 'merge' | 'cherry-pick' | 'revert',
+  ref: string,
+  expectedOid: string,
+  advancedOid: string,
+  run: () => Promise<void>,
+): Promise<string> {
+  const shimDir = join(root, 'head-race-shim')
+  await mkdir(shimDir)
+  const triggered = join(root, 'head-race-triggered')
+  await writeFile(
+    join(shimDir, 'git'),
+    `#!/bin/sh
+real="$GIT_STACKS_TEST_REAL_GIT"
+if [ ! -e "$GIT_STACKS_HEAD_RACE_TRIGGERED" ] && [ "$1" = "-c" ] && [ "$3" = "$GIT_STACKS_HEAD_RACE_COMMAND" ]; then
+  "$real" -C "$GIT_STACKS_HEAD_RACE_REPO" update-ref "$GIT_STACKS_HEAD_RACE_REF" "$GIT_STACKS_HEAD_RACE_ADVANCED" "$GIT_STACKS_HEAD_RACE_EXPECTED" || exit $?
+  : > "$GIT_STACKS_HEAD_RACE_TRIGGERED"
+fi
+exec "$real" "$@"
+`,
+    { mode: 0o755 },
+  )
+  const realGit = execFileSync('/bin/sh', ['-c', 'command -v git'], {
+    encoding: 'utf8',
+  }).trim()
+  const savedPath = process.env.PATH
+  process.env.PATH = `${shimDir}${delimiter}${savedPath ?? ''}`
+  process.env.GIT_STACKS_TEST_REAL_GIT = realGit
+  process.env.GIT_STACKS_HEAD_RACE_COMMAND = command
+  process.env.GIT_STACKS_HEAD_RACE_REPO = repo
+  process.env.GIT_STACKS_HEAD_RACE_REF = ref
+  process.env.GIT_STACKS_HEAD_RACE_EXPECTED = expectedOid
+  process.env.GIT_STACKS_HEAD_RACE_ADVANCED = advancedOid
+  process.env.GIT_STACKS_HEAD_RACE_TRIGGERED = triggered
+  try {
+    await run()
+  } finally {
+    process.env.PATH = savedPath
+    delete process.env.GIT_STACKS_TEST_REAL_GIT
+    delete process.env.GIT_STACKS_HEAD_RACE_COMMAND
+    delete process.env.GIT_STACKS_HEAD_RACE_REPO
+    delete process.env.GIT_STACKS_HEAD_RACE_REF
+    delete process.env.GIT_STACKS_HEAD_RACE_EXPECTED
+    delete process.env.GIT_STACKS_HEAD_RACE_ADVANCED
+    delete process.env.GIT_STACKS_HEAD_RACE_TRIGGERED
+  }
+  return triggered
+}
+
+test('branch creation uses the captured parent when its ref advances before switch', async () => {
+  const { root, repo, git } = await fixture()
+  try {
+    const parentTip = git('rev-parse', 'refs/heads/main')
+    const tree = git('rev-parse', `${parentTip}^{tree}`)
+    const advancedTip = execFileSync(
+      'git',
+      ['-C', repo, 'commit-tree', tree, '-p', parentTip, '-m', 'Advanced parent'],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] },
+    ).trim()
+
+    const triggered = await withParentBranchRace(
+      root,
+      repo,
+      'create',
+      parentTip,
+      advancedTip,
+      async () => {
+        await runAction(repo, { type: 'createBranch', name: 'feature', parent: 'main' })
+      },
+    )
+
+    assert.equal(await readFile(triggered, 'utf8'), '')
+    assert.equal(git('rev-parse', 'refs/heads/main'), advancedTip)
+    assert.equal(git('rev-parse', 'refs/heads/feature'), parentTip)
+    assert.equal(git('config', '--get', 'branch.feature.parentTip'), parentTip)
+  } finally {
+    await cleanup(root)
+  }
+})
+
+test('rebase uses the captured parent when its ref advances before rebase', async () => {
+  const { root, repo, git } = await fixture()
+  try {
+    git('switch', '-c', 'feature')
+    await writeFile(join(repo, 'feature.txt'), 'feature\n')
+    git('add', '.')
+    git('commit', '-m', 'Feature change')
+    git('switch', 'main')
+    await writeFile(join(repo, 'main.txt'), 'main\n')
+    git('add', '.')
+    git('commit', '-m', 'Main change')
+    const parentTip = git('rev-parse', 'refs/heads/main')
+    const tree = git('rev-parse', `${parentTip}^{tree}`)
+    const advancedTip = execFileSync(
+      'git',
+      ['-C', repo, 'commit-tree', tree, '-p', parentTip, '-m', 'Advanced parent'],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] },
+    ).trim()
+    git('switch', 'feature')
+
+    const triggered = await withParentBranchRace(
+      root,
+      repo,
+      'rebase',
+      parentTip,
+      advancedTip,
+      async () => {
+        await runAction(repo, { type: 'rebase', parent: 'main' })
+      },
+    )
+
+    assert.equal(await readFile(triggered, 'utf8'), '')
+    assert.equal(git('rev-parse', 'refs/heads/main'), advancedTip)
+    assert.equal(git('rev-parse', 'refs/heads/feature^'), parentTip)
+    assert.equal(git('config', '--get', 'branch.feature.parentTip'), parentTip)
+  } finally {
+    await cleanup(root)
+  }
+})
+
 test('discard preserves staged content and rejects stale fingerprints', async () => {
   const { root, repo, git } = await fixture()
   try {
@@ -127,13 +362,25 @@ test('amend requires the captured head and never amends the default branch', asy
         message: 'stale amend',
         amend: true,
         expectedHead: initial.slice(0, -1) + (initial.endsWith('0') ? '1' : '0'),
+        expectedHeadRef: 'refs/heads/feature',
       }),
+    )
+    await assert.rejects(
+      runAction(repo, {
+        type: 'commit',
+        message: 'same commit on different branch',
+        amend: true,
+        expectedHead: initial,
+        expectedHeadRef: 'refs/heads/main',
+      }),
+      /HEAD changed/u,
     )
     await runAction(repo, {
       type: 'commit',
       message: 'amended feature',
       amend: true,
       expectedHead: initial,
+      expectedHeadRef: 'refs/heads/feature',
     })
     assert.equal(git('log', '-1', '--format=%s'), 'amended feature')
     git('switch', 'main')
@@ -144,6 +391,7 @@ test('amend requires the captured head and never amends the default branch', asy
         message: 'forbidden',
         amend: true,
         expectedHead: mainHead,
+        expectedHeadRef: 'refs/heads/main',
       }),
     )
   } finally {
@@ -164,12 +412,53 @@ test('merge operation recovery continues through explicit abort and cannot skip 
     git('commit', '-m', 'main change')
     const mainHead = git('rev-parse', 'HEAD')
     await assert.rejects(
-      runAction(repo, { type: 'merge', ref: 'refs/heads/side', expectedHead: mainHead }),
+      runAction(repo, {
+        type: 'merge',
+        ref: 'refs/heads/side',
+        expectedHead: mainHead,
+        expectedHeadRef: 'refs/heads/main',
+      }),
     )
     assert.equal((await getSnapshot(repo)).operation, 'merge')
     await assert.rejects(runAction(repo, { type: 'operationSkip' }))
     await runAction(repo, { type: 'operationAbort' })
     assert.equal((await getSnapshot(repo)).operation, null)
+  } finally {
+    await cleanup(root)
+  }
+})
+
+test('merge continuation rejects a branch advanced during conflict resolution', async () => {
+  const { root, repo, git } = await fixture()
+  try {
+    git('switch', '-c', 'side')
+    await writeFile(join(repo, 'shared.txt'), 'side\n')
+    git('add', '.')
+    git('commit', '-m', 'side change')
+    git('switch', 'main')
+    await writeFile(join(repo, 'shared.txt'), 'main\n')
+    git('add', '.')
+    git('commit', '-m', 'main change')
+    const expectedHead = git('rev-parse', 'HEAD')
+    await assert.rejects(
+      runAction(repo, {
+        type: 'merge',
+        ref: 'refs/heads/side',
+        expectedHead,
+        expectedHeadRef: 'refs/heads/main',
+      }),
+    )
+    const tree = git('rev-parse', `${expectedHead}^{tree}`)
+    const advancedHead = execFileSync(
+      'git',
+      ['-C', repo, 'commit-tree', tree, '-p', expectedHead, '-m', 'External conflict-time advance'],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] },
+    ).trim()
+    git('update-ref', 'refs/heads/main', advancedHead, expectedHead)
+
+    await assert.rejects(runAction(repo, { type: 'operationContinue' }), /HEAD changed/u)
+    assert.equal(git('rev-parse', 'refs/heads/main'), advancedHead)
+    assert.equal((await getSnapshot(repo)).operation, 'merge')
   } finally {
     await cleanup(root)
   }
@@ -213,6 +502,61 @@ test('stash pop applies and removes the selected object when a newer stash arriv
       snapshot.stashes.some((stash) => stash.oid === selected.oid),
       false,
     )
+  } finally {
+    await cleanup(root)
+  }
+})
+
+test('snapshot completes a stash removal interrupted after reflog replacement', async () => {
+  const { root, repo, git } = await fixture()
+  try {
+    await writeFile(join(repo, 'shared.txt'), 'first stash\n')
+    await runAction(repo, { type: 'stash', message: 'first', includeUntracked: false })
+    const first = (await getSnapshot(repo)).stashes[0]
+    assert.ok(first)
+    await writeFile(join(repo, 'shared.txt'), 'second stash\n')
+    await runAction(repo, { type: 'stash', message: 'second', includeUntracked: false })
+    const stashes = (await getSnapshot(repo)).stashes
+    assert.equal(stashes.length, 2)
+
+    const commonPath = join(repo, git('rev-parse', '--git-common-dir'))
+    const refPath = join(commonPath, 'refs', 'stash')
+    const logPath = join(commonPath, 'logs', 'refs', 'stash')
+    const refLockPath = `${refPath}.lock`
+    const logLockPath = `${logPath}.lock`
+    const oldRef = await readFile(refPath)
+    const oldLog = await readFile(logPath)
+    const oldRows = oldLog.toString('utf8').trimEnd().split('\n')
+    const nextRef = Buffer.from(`${first.oid}\n`)
+    const nextLog = Buffer.from(`${oldRows.slice(0, -1).join('\n')}\n`)
+    await writeFile(refLockPath, nextRef, { flag: 'wx' })
+    await writeFile(logLockPath, nextLog, { flag: 'wx' })
+    const refLockInfo = await lstat(refLockPath)
+    const logLockInfo = await lstat(logLockPath)
+    await writeFile(
+      join(commonPath, 'git-stacks-stash-drop.json'),
+      JSON.stringify({
+        version: 1,
+        changesRef: true,
+        oldRef: oldRef.toString('base64'),
+        oldLog: oldLog.toString('base64'),
+        nextRef: nextRef.toString('base64'),
+        nextLog: nextLog.toString('base64'),
+        refLock: nextRef.toString('base64'),
+        logLock: nextLog.toString('base64'),
+        refLockIdentity: { dev: String(refLockInfo.dev), ino: String(refLockInfo.ino) },
+        logLockIdentity: { dev: String(logLockInfo.dev), ino: String(logLockInfo.ino) },
+      }),
+    )
+    await rename(logLockPath, logPath)
+
+    const recovered = await getSnapshot(repo)
+    assert.deepEqual(
+      recovered.stashes.map((stash) => stash.oid),
+      [first.oid],
+    )
+    assert.equal(git('rev-parse', 'refs/stash'), first.oid)
+    assert.equal((await getSnapshot(repo)).stashes.length, 1)
   } finally {
     await cleanup(root)
   }
@@ -327,6 +671,194 @@ test('manual conflict resolution accepts UTF-8 content through the file byte lim
     assert.equal(await readFile(join(repo, 'shared.txt'), 'utf8'), resolved)
     await runAction(repo, { type: 'rebaseAbort' })
     assert.equal((await getSnapshot(repo)).rebaseInProgress, false)
+  } finally {
+    await cleanup(root)
+  }
+})
+
+test('discard preserves a file edited after preflight', async () => {
+  const { root, repo } = await fixture()
+  try {
+    await writeFile(join(repo, 'shared.txt'), 'indexed\n')
+    await runAction(repo, { type: 'stage', paths: ['shared.txt'] })
+    await writeFile(join(repo, 'shared.txt'), 'preflight content\n')
+    const view = await getFileView(repo, 'shared.txt')
+    const triggered = await withConcurrentFileEdit(
+      root,
+      repo,
+      'discard',
+      'newer editor save\n',
+      async () => {
+        await assert.rejects(
+          runAction(repo, {
+            type: 'discardFile',
+            path: 'shared.txt',
+            fingerprint: view.fingerprint,
+          }),
+          /file changed during the action/u,
+        )
+      },
+    )
+
+    assert.equal(await readFile(triggered, 'utf8'), '')
+    assert.equal(await readFile(join(repo, 'shared.txt'), 'utf8'), 'newer editor save\n')
+  } finally {
+    await cleanup(root)
+  }
+})
+
+test('conflict resolution preserves a file edited after preflight', async () => {
+  const { root, repo, git } = await fixture()
+  try {
+    await runAction(repo, { type: 'createBranch', name: 'feature', parent: 'main' })
+    await writeFile(join(repo, 'shared.txt'), 'feature change\n')
+    git('add', '.')
+    git('commit', '-m', 'Feature change')
+    await runAction(repo, { type: 'switch', ref: 'refs/heads/main' })
+    await writeFile(join(repo, 'shared.txt'), 'main change\n')
+    git('add', '.')
+    git('commit', '-m', 'Main change')
+    await runAction(repo, { type: 'switch', ref: 'refs/heads/feature' })
+    await assert.rejects(runAction(repo, { type: 'rebase', parent: 'main' }))
+    const view = await getFileView(repo, 'shared.txt')
+
+    const triggered = await withConcurrentFileEdit(
+      root,
+      repo,
+      'resolve',
+      'newer editor save\n',
+      async () => {
+        await assert.rejects(
+          runAction(repo, {
+            type: 'resolveFile',
+            path: 'shared.txt',
+            fingerprint: view.fingerprint,
+            strategy: 'ours',
+            content: '',
+          }),
+          /file changed during the action/u,
+        )
+      },
+    )
+
+    assert.equal(await readFile(triggered, 'utf8'), '')
+    assert.equal(await readFile(join(repo, 'shared.txt'), 'utf8'), 'newer editor save\n')
+  } finally {
+    await cleanup(root)
+  }
+})
+
+test('commit, merge, cherry-pick, and revert reject a ref advanced after preflight', async () => {
+  for (const command of ['commit', 'merge', 'cherry-pick', 'revert'] as const) {
+    const { root, repo, git } = await fixture()
+    try {
+      let targetOid = ''
+      if (command === 'commit') {
+        await writeFile(join(repo, 'staged.txt'), 'staged\n')
+        git('add', '.')
+      } else if (command === 'revert') {
+        await writeFile(join(repo, 'revert.txt'), 'revert this\n')
+        git('add', '.')
+        git('commit', '-m', 'Commit to revert')
+        targetOid = git('rev-parse', 'HEAD')
+      } else {
+        git('switch', '-c', 'side')
+        await writeFile(join(repo, 'side.txt'), 'side\n')
+        git('add', '.')
+        git('commit', '-m', 'Side change')
+        targetOid = git('rev-parse', 'HEAD')
+        git('switch', 'main')
+      }
+
+      const expectedHead = git('rev-parse', 'HEAD')
+      const tree = git('rev-parse', `${expectedHead}^{tree}`)
+      const advancedHead = execFileSync(
+        'git',
+        ['-C', repo, 'commit-tree', tree, '-p', expectedHead, '-m', `External ${command} race`],
+        { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] },
+      ).trim()
+      const run = async () => {
+        if (command === 'commit') {
+          await assert.rejects(
+            runAction(repo, {
+              type: 'commit',
+              message: 'Must not commit on the new head',
+              amend: false,
+              expectedHead,
+              expectedHeadRef: 'refs/heads/main',
+            }),
+            /HEAD changed/u,
+          )
+        } else if (command === 'merge') {
+          await assert.rejects(
+            runAction(repo, {
+              type: 'merge',
+              ref: 'refs/heads/side',
+              expectedHead,
+              expectedHeadRef: 'refs/heads/main',
+            }),
+            /HEAD changed/u,
+          )
+        } else {
+          await assert.rejects(
+            runAction(repo, {
+              type: command === 'cherry-pick' ? 'cherryPick' : 'revert',
+              oid: command === 'cherry-pick' ? targetOid : targetOid,
+              expectedHead,
+              expectedHeadRef: 'refs/heads/main',
+              mainline: null,
+            }),
+            /HEAD changed/u,
+          )
+        }
+      }
+      const triggered = await withHeadAdvanceBeforeCommand(
+        root,
+        repo,
+        command,
+        'refs/heads/main',
+        expectedHead,
+        advancedHead,
+        run,
+      )
+
+      assert.equal(await readFile(triggered, 'utf8'), '')
+      assert.equal(git('rev-parse', 'refs/heads/main'), advancedHead)
+    } finally {
+      await cleanup(root)
+    }
+  }
+})
+
+test('the HEAD guard preserves configured user hooks', async () => {
+  const { root, repo, git } = await fixture()
+  try {
+    const hooks = join(root, 'custom-hooks')
+    const marker = join(root, 'pre-commit-ran')
+    await mkdir(hooks)
+    await writeFile(
+      join(hooks, 'pre-commit'),
+      '#!/bin/sh\nprintf called > "$GIT_STACKS_TEST_HOOK_MARKER"\n',
+      { mode: 0o755 },
+    )
+    git('config', 'core.hooksPath', hooks)
+    await writeFile(join(repo, 'staged.txt'), 'staged\n')
+    git('add', '.')
+    const savedMarker = process.env.GIT_STACKS_TEST_HOOK_MARKER
+    process.env.GIT_STACKS_TEST_HOOK_MARKER = marker
+    try {
+      await runAction(repo, {
+        type: 'commit',
+        message: 'Run existing hooks',
+        amend: false,
+        expectedHead: git('rev-parse', 'HEAD'),
+        expectedHeadRef: 'refs/heads/main',
+      })
+    } finally {
+      if (savedMarker === undefined) delete process.env.GIT_STACKS_TEST_HOOK_MARKER
+      else process.env.GIT_STACKS_TEST_HOOK_MARKER = savedMarker
+    }
+    assert.equal(await readFile(marker, 'utf8'), 'called')
   } finally {
     await cleanup(root)
   }
