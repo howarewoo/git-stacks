@@ -1116,6 +1116,51 @@ function expectedRebaseOnto(journal: StackJournal, entry: JournalEntry): string 
   return entry.newParentTip ?? parent?.newTip ?? entry.newParentOid
 }
 
+function replayReflogAction(journal: StackJournal, entry: JournalEntry): string {
+  return `git-stacks-rebase:${journal.id}:${entry.boundary}:${expectedRebaseOnto(journal, entry)}`
+}
+
+type ParsedReflogEntry = { oid: string; message: string }
+
+function recoveryProofError(entry: JournalEntry): Error {
+  return new Error(
+    `Cannot prove the saved rebase for ${entry.branch} matches its recorded boundary and destination; refusing recovery`,
+  )
+}
+
+async function recordedHeadReflogDelta(
+  repoPath: string,
+  entry: JournalEntry,
+): Promise<ParsedReflogEntry[]> {
+  if (entry.headReflogCount === null) throw recoveryProofError(entry)
+  const headOutput = await tryGit(repoPath, ['reflog', 'show', 'HEAD', '--format=%H %gs'])
+  if (headOutput === null) throw recoveryProofError(entry)
+  const headLines = headOutput.split('\n').filter((line) => line.length > 0)
+  const deltaLength = headLines.length - entry.headReflogCount
+  if (deltaLength < 1) throw recoveryProofError(entry)
+  const delta = headLines.slice(0, deltaLength).map(parseReflogEntry).reverse()
+  if (delta.some((line) => line === null)) throw recoveryProofError(entry)
+  return delta as ParsedReflogEntry[]
+}
+
+async function assertRecordedReplayStart(
+  repoPath: string,
+  journal: StackJournal,
+  entry: JournalEntry,
+): Promise<{ action: string; delta: ParsedReflogEntry[] }> {
+  const action = replayReflogAction(journal, entry)
+  const expectedOnto = expectedRebaseOnto(journal, entry)
+  const delta = await recordedHeadReflogDelta(repoPath, entry)
+  const start = delta[0]
+  if (
+    !start ||
+    start.oid !== expectedOnto ||
+    start.message !== `${action} (start): checkout ${expectedOnto}`
+  )
+    throw recoveryProofError(entry)
+  return { action, delta }
+}
+
 function inactiveRebaseError(): Error {
   return new Error('The saved stack rebase is not active; inspect its backup refs before recovery')
 }
@@ -1137,10 +1182,11 @@ async function assertActiveRebase(
       'The active rebase does not match the saved stack operation; refusing to change it',
     )
   }
+  await assertRecordedReplayStart(repoPath, journal, entry)
   entry.newParentTip = expectedOnto
 }
 
-function parseReflogEntry(line: string): { oid: string; message: string } | null {
+function parseReflogEntry(line: string): ParsedReflogEntry | null {
   const separator = line.indexOf(' ')
   if (separator <= 0) return null
   return { oid: line.slice(0, separator), message: line.slice(separator + 1) }
@@ -1153,43 +1199,29 @@ function parseReflogEntry(line: string): { oid: string; message: string } | null
 // rebase, a substituted boundary) cannot be adopted, so the backup ref stays.
 async function assertRecordedReplay(
   repoPath: string,
+  journal: StackJournal,
   entry: JournalEntry,
   expectedOnto: string,
   tip: string,
 ): Promise<void> {
-  const refuse = () =>
-    new Error(
-      `Cannot prove the completed rebase for ${entry.branch} matches the recorded replay; refusing to adopt its tip`,
-    )
-  if (entry.headReflogCount === null) throw refuse()
-  const headOutput = await tryGit(repoPath, ['reflog', 'show', 'HEAD', '--format=%H %gs'])
-  if (headOutput === null) throw refuse()
-  const headLines = headOutput.split('\n').filter((line) => line.length > 0)
-  const deltaLength = headLines.length - entry.headReflogCount
-  if (deltaLength < 2) throw refuse()
-  const delta = headLines.slice(0, deltaLength).map(parseReflogEntry).reverse()
-  const start = delta[0]
-  if (
-    !start ||
-    start.oid !== expectedOnto ||
-    start.message !== `rebase (start): checkout ${expectedOnto}`
-  )
-    throw refuse()
-  let finish: { oid: string; message: string } | null = null
+  const { action, delta } = await assertRecordedReplayStart(repoPath, journal, entry)
+  if (delta.length < 2) throw recoveryProofError(entry)
+  let finish: ParsedReflogEntry | null = null
   for (let index = 1; index < delta.length; index += 1) {
     const line = delta[index]
-    if (!line) throw refuse()
-    if (line.message === `rebase (finish): returning to refs/heads/${entry.branch}`) {
+    if (!line) throw recoveryProofError(entry)
+    if (line.message === `${action} (finish): returning to refs/heads/${entry.branch}`) {
       finish = line
       break
     }
     if (
-      !line.message.startsWith('rebase (pick): ') &&
-      !line.message.startsWith('rebase (continue): ')
+      !line.message.startsWith(`${action} (pick): `) &&
+      !line.message.startsWith(`${action} (continue): `)
     )
-      throw refuse()
+      throw recoveryProofError(entry)
   }
-  if (!finish || finish.oid !== tip) throw refuse()
+  if (!finish || finish.oid !== tip || expectedRebaseOnto(journal, entry) !== expectedOnto)
+    throw recoveryProofError(entry)
 }
 
 async function reconcileCompletedRebase(
@@ -1215,7 +1247,8 @@ async function reconcileCompletedRebase(
   const lines = (output ?? '').split('\n').filter((line) => line.length > 0)
   const newest = parseReflogEntry(lines[0] ?? '')
   const previous = parseReflogEntry(lines[1] ?? '')
-  const prefix = `rebase (finish): refs/heads/${entry.branch} onto `
+  const prefix = `${replayReflogAction(journal, entry)} (finish): refs/heads/${entry.branch} onto `
+
   const proven =
     newest !== null &&
     previous !== null &&
@@ -1226,7 +1259,7 @@ async function reconcileCompletedRebase(
     newest.message.slice(prefix.length) === expectedOnto
   if (!proven)
     throw new Error(`Branch ${entry.branch} changed outside Git Stacks; refusing to adopt its tip`)
-  await assertRecordedReplay(repoPath, entry, expectedOnto, tip)
+  await assertRecordedReplay(repoPath, journal, entry, expectedOnto, tip)
   entry.newParentTip = expectedOnto
   entry.newTip = tip
   entry.status = 'metadata'
@@ -1323,7 +1356,10 @@ async function restackJournal(repoPath: string, journal: StackJournal): Promise<
           entry.boundary,
           entry.branch,
         ],
-        { GIT_EDITOR: 'true' },
+        {
+          GIT_EDITOR: 'true',
+          GIT_REFLOG_ACTION: replayReflogAction(journal, entry),
+        },
       )
     } catch (error) {
       if (entry.headReflogCount === null) entry.status = 'pending'
@@ -1403,7 +1439,10 @@ async function stackContinue(repoPath: string): Promise<ActionResult> {
     await runGit(
       repoPath,
       ['-c', 'rebase.updateRefs=false', '-c', 'rebase.autoStash=false', 'rebase', '--continue'],
-      { GIT_EDITOR: 'true' },
+      {
+        GIT_EDITOR: 'true',
+        GIT_REFLOG_ACTION: replayReflogAction(journal, active),
+      },
     )
   } catch (error) {
     journal.status = (await getOperationState(repoPath)).rebase ? 'conflict' : 'uncertain'

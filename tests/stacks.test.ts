@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import { chmod, mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { delimiter, join } from 'node:path'
 import { test } from 'node:test'
 import { getFileView, getSnapshot, runAction } from '../src/main/git'
 import { MAX_MESSAGE_LENGTH } from '../src/main/git-core'
@@ -129,13 +129,34 @@ async function prepareConflictStack() {
   return { ...state, rootTip, childTip, mainTip, parkingTip: tip(git, 'parking') }
 }
 
+// Mirrors the action marker bound to the journaled replay's boundary and destination.
+async function recordedReflogAction(repo: string): Promise<string> {
+  const gitDir = gitAt(repo, ['rev-parse', '--absolute-git-dir'])
+  const journal = JSON.parse(await readFile(join(gitDir, 'git-stacks-stack.json'), 'utf8')) as {
+    id: string
+    entries: {
+      status: string
+      boundary: string
+      newParentTip: string | null
+    }[]
+  }
+  const entry = journal.entries.find((candidate) => candidate.status === 'rebasing')
+  if (!entry?.newParentTip) throw new Error('No active journaled rebase entry')
+  return `git-stacks-rebase:${journal.id}:${entry.boundary}:${entry.newParentTip}`
+}
+
 // Simulates the crash window where `git rebase` succeeds but the process exits
 // before the journal records the new tip: the conflicted child rebase is
 // resolved and finished outside the app, leaving the journal at `rebasing`.
 async function finishRebaseExternally(repo: string, git: Git): Promise<string> {
   await writeFile(join(repo, 'shared.txt'), 'resolved\n')
   git('add', '--', 'shared.txt')
-  gitAt(repo, ['rebase', '--continue'], { ...process.env, GIT_EDITOR: 'true' })
+  const reflogAction = await recordedReflogAction(repo)
+  gitAt(repo, ['rebase', '--continue'], {
+    ...process.env,
+    GIT_EDITOR: 'true',
+    GIT_REFLOG_ACTION: reflogAction,
+  })
   assert.equal(git('status', '--porcelain'), '')
   return tip(git, 'child')
 }
@@ -397,8 +418,14 @@ test('continue and abort refuse an external replay recorded under a different bo
   const externalTip = tip(git, 'child')
   assert.notEqual(externalTip, childTip)
 
-  await assert.rejects(runAction(repo, { type: 'stackContinue' }), /Cannot prove the completed/u)
-  await assert.rejects(runAction(repo, { type: 'stackAbort' }), /Cannot prove the completed/u)
+  await assert.rejects(
+    runAction(repo, { type: 'stackContinue' }),
+    /recorded boundary|changed outside Git Stacks/u,
+  )
+  await assert.rejects(
+    runAction(repo, { type: 'stackAbort' }),
+    /recorded boundary|changed outside Git Stacks/u,
+  )
 
   assert.equal(tip(git, 'child'), externalTip)
   assert.equal(tip(git, 'root'), rewrittenRoot)
@@ -412,6 +439,84 @@ test('continue and abort refuse an external replay recorded under a different bo
     backups.some((line) => line.endsWith(`/${Buffer.from('child', 'utf8').toString('hex')}`)),
     'the backup ref must be retained when the replay cannot be proven',
   )
+})
+
+test('recovery rejects a different-boundary replay after a pre-launch journal crash', async () => {
+  const { root, repo, git, base, rootTip, childTip } = await prepareConflictStack()
+  const preview = await previewStack(repo, await getSnapshot(repo), 'restack', 'child')
+  assert.deepEqual(preview.blockers, [])
+
+  const shimDir = join(root, 'git-shim')
+  await mkdir(shimDir)
+  const flagPath = join(root, 'pre-launch-rebase')
+  const shimPath = join(shimDir, 'git')
+  await writeFile(
+    shimPath,
+    `#!/bin/sh
+real="$GIT_STACKS_REAL_GIT"
+is_rebase=0
+is_onto=0
+is_child=0
+for arg in "$@"; do
+  [ "$arg" = "rebase" ] && is_rebase=1
+  [ "$arg" = "--onto" ] && is_onto=1
+  [ "$arg" = "child" ] && is_child=1
+done
+if [ "$is_rebase" = "1" ] && [ "$is_onto" = "1" ] && [ "$is_child" = "1" ]; then
+  printf 'intercepted\\n' > "$GIT_STACKS_PRELAUNCH_FLAG"
+  exit 1
+fi
+exec "$real" "$@"
+`,
+    { mode: 0o755 },
+  )
+  const realGit = execFileSync('/bin/sh', ['-c', 'command -v git'], {
+    encoding: 'utf8',
+  }).trim()
+  await withEnv(
+    {
+      PATH: `${shimDir}${delimiter}${process.env.PATH ?? ''}`,
+      GIT_STACKS_REAL_GIT: realGit,
+      GIT_STACKS_PRELAUNCH_FLAG: flagPath,
+    },
+    async () => {
+      await assert.rejects(executePreview(repo, preview.token))
+    },
+  )
+  assert.equal(await readFile(flagPath, 'utf8'), 'intercepted\n')
+  const rewrittenRoot = tip(git, 'root')
+  assert.notEqual(rewrittenRoot, rootTip)
+  assert.equal(tip(git, 'child'), childTip)
+
+  let conflict = false
+  try {
+    gitAt(repo, ['rebase', '--onto', rewrittenRoot, base, 'child'])
+  } catch {
+    conflict = true
+  }
+  assert.equal(conflict, true)
+  await assert.rejects(runAction(repo, { type: 'stackContinue' }), /recorded boundary/u)
+  await assert.rejects(runAction(repo, { type: 'stackAbort' }), /recorded boundary/u)
+  assert.equal(tip(git, 'child'), childTip)
+
+  await writeFile(join(repo, 'shared.txt'), 'external resolution\n')
+  git('add', '--', 'shared.txt')
+  gitAt(repo, ['rebase', '--continue'], { ...process.env, GIT_EDITOR: 'true' })
+  const externalTip = tip(git, 'child')
+  assert.notEqual(externalTip, childTip)
+  await assert.rejects(
+    runAction(repo, { type: 'stackContinue' }),
+    /recorded boundary|changed outside Git Stacks/u,
+  )
+  await assert.rejects(
+    runAction(repo, { type: 'stackAbort' }),
+    /recorded boundary|changed outside Git Stacks/u,
+  )
+  assert.equal(tip(git, 'child'), externalTip)
+  const progress = await getStackProgress(repo)
+  assert.deepEqual(progress?.completed, ['root'])
+  assert.deepEqual(progress?.remaining, ['child'])
+  assert.ok(git('show-ref').includes('refs/git-stacks/backups/'))
 })
 
 test('recovery refuses a branch moved outside Git Stacks after its recorded rebase', async () => {

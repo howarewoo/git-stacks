@@ -1,3 +1,5 @@
+import { spawn } from 'node:child_process'
+
 import * as path from 'node:path'
 import { promises as fs } from 'node:fs'
 import type { Stats } from 'node:fs'
@@ -1689,6 +1691,101 @@ async function runDeleteRemoteBranch(
   ])
   return { message: `Deleted remote branch ${remote}/${branch}` }
 }
+
+async function deleteLocalBranchRef(
+  repoPath: string,
+  ref: string,
+  expectedOid: string,
+  cleanupConfig: () => Promise<void>,
+): Promise<void> {
+  const child = spawn('git', ['update-ref', '--stdin'], {
+    cwd: repoPath,
+    env: {
+      ...process.env,
+      GIT_TERMINAL_PROMPT: '0',
+      GH_PROMPT_DISABLED: '1',
+      GCM_INTERACTIVE: 'Never',
+    },
+    stdio: ['pipe', 'pipe', 'pipe'],
+  })
+  let pendingOutput = ''
+  let stdout = ''
+  let stderr = ''
+  let prepared = false
+  let resolvePrepared!: () => void
+  let rejectPrepared!: (error: Error) => void
+  const prepareResult = new Promise<void>((resolve, reject) => {
+    resolvePrepared = resolve
+    rejectPrepared = reject
+  })
+  const completed = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(
+    (resolve) => {
+      child.on('close', (code, signal) => resolve({ code, signal }))
+    },
+  )
+  child.stdout.on('data', (chunk: Buffer) => {
+    stdout += chunk.toString()
+    pendingOutput += chunk.toString()
+    const lines = pendingOutput.split(/\r?\n/u)
+    pendingOutput = lines.pop() ?? ''
+    for (const line of lines) {
+      if (line === 'prepare: ok') {
+        prepared = true
+        resolvePrepared()
+      } else if (line.startsWith('prepare: ')) {
+        rejectPrepared(new Error(line))
+      }
+    }
+  })
+  child.stderr.on('data', (chunk: Buffer) => {
+    stderr += chunk.toString()
+  })
+  child.on('error', (error) => rejectPrepared(error))
+  child.on('close', (code, signal) => {
+    if (!prepared) {
+      rejectPrepared(
+        new Error(
+          stderr.trim() || stdout.trim() || `Git exited with ${signal ?? code ?? 'unknown'}`,
+        ),
+      )
+    }
+  })
+  child.stdin.on('error', (error) => {
+    if (!prepared) rejectPrepared(error)
+  })
+  child.stdin.write(`start\ndelete ${ref} ${expectedOid}\nprepare\n`)
+
+  try {
+    await prepareResult
+  } catch {
+    try {
+      child.stdin.end('abort\n')
+    } catch {
+      // The update-ref process may already have exited.
+    }
+    await completed
+    throw new Error('The branch changed since it was selected; refresh before deleting it')
+  }
+
+  try {
+    await cleanupConfig()
+  } catch (error) {
+    try {
+      child.stdin.end('abort\n')
+    } catch {
+      // The update-ref process may already have exited.
+    }
+    await completed
+    throw error
+  }
+
+  child.stdin.end('commit\n')
+  const result = await completed
+  if (result.code !== 0) {
+    throw new Error(stderr.trim() || `Git could not complete deletion of ${ref}`)
+  }
+}
+
 async function runDeleteBranch(
   repoPath: string,
   ref: string,
@@ -1719,23 +1816,25 @@ async function runDeleteBranch(
   }
   await ensureNotCheckedOutElsewhere(repoPath, name)
   if (!force) {
-    const upstream = await branchUpstream(repoPath, name)
+    const upstreamOutput = await tryGit(repoPath, [
+      'rev-parse',
+      '--symbolic-full-name',
+      `${name}@{upstream}`,
+    ])
+    const upstreamRef = upstreamOutput ? stripTrailingNewline(upstreamOutput) : 'HEAD'
     const mergedInto = await tryGit(repoPath, [
       'merge-base',
       '--is-ancestor',
       currentOid,
-      upstream ?? 'HEAD',
+      upstreamRef,
     ])
     if (mergedInto === null) {
       throw new Error(`Branch "${name}" is not fully merged`)
     }
   }
-  try {
-    await runGit(repoPath, ['update-ref', '-d', ref, currentOid])
-  } catch {
-    throw new Error('The branch changed since it was selected; refresh before deleting it')
-  }
-  await tryGit(repoPath, ['config', '--remove-section', `branch.${name}`])
+  await deleteLocalBranchRef(repoPath, ref, currentOid, async () => {
+    await tryGit(repoPath, ['config', '--remove-section', `branch.${name}`])
+  })
   return { message: `Deleted local branch ${name}. Remote branches were not changed.` }
 }
 

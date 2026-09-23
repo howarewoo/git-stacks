@@ -622,6 +622,37 @@ test('local deletion preserves remote refs, child branches, and uncommitted work
   }
 })
 
+test('merged deletion resolves the upstream ref despite a same-named local branch', async () => {
+  const { root, repo, git } = await fixture()
+  try {
+    git('remote', 'add', 'origin', 'https://example.invalid/repo.git')
+    git('switch', '-c', 'feature')
+    git('commit', '--allow-empty', '-m', 'Feature commit')
+    const featureTip = git('rev-parse', 'HEAD')
+    git('update-ref', 'refs/remotes/origin/feature', featureTip)
+    git('switch', 'main')
+    git('branch', 'origin/feature', 'main')
+    git('config', 'branch.feature.remote', 'origin')
+    git('config', 'branch.feature.merge', 'refs/heads/feature')
+
+    assert.equal(
+      git('rev-parse', '--symbolic-full-name', 'feature@{upstream}'),
+      'refs/remotes/origin/feature',
+    )
+    await runAction(repo, {
+      type: 'deleteBranch',
+      ref: 'refs/heads/feature',
+      force: false,
+      expectedOid: featureTip,
+    })
+
+    assert.throws(() => git('show-ref', '--verify', '--quiet', 'refs/heads/feature'))
+    assert.equal(git('rev-parse', 'refs/heads/origin/feature'), git('rev-parse', 'main'))
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 test('unmerged deletion requires an explicit boolean force opt-in', async () => {
   const { root, repo, git } = await fixture()
   try {
@@ -703,6 +734,49 @@ test('force deletion cannot bypass root, current, worktree, remote, or operation
       }),
     )
     assert.equal(git('rev-parse', 'during-operation'), tip)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('branch deletion protects a branch being rebased in a detached linked worktree', async () => {
+  const { root, repo, git } = await fixture()
+  try {
+    git('switch', '-c', 'feature')
+    await writeFile(join(repo, 'shared.txt'), 'feature change\n')
+    git('add', '.')
+    git('commit', '-m', 'Feature change')
+    const featureTip = git('rev-parse', 'HEAD')
+    git('switch', 'main')
+    await writeFile(join(repo, 'shared.txt'), 'main change\n')
+    git('add', '.')
+    git('commit', '-m', 'Main change')
+
+    const linked = join(root, 'linked')
+    git('worktree', 'add', linked, 'feature')
+    const linkedGit = (...args: string[]) =>
+      execFileSync('git', ['-C', linked, ...args], {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+      }).trim()
+    assert.throws(() => linkedGit('rebase', 'main'))
+    assert.match(git('worktree', 'list', '--porcelain'), /detached/u)
+    const gitDir = linkedGit('rev-parse', '--absolute-git-dir')
+    assert.equal(
+      (await readFile(join(gitDir, 'rebase-merge', 'head-name'), 'utf8')).trim(),
+      'refs/heads/feature',
+    )
+
+    await assert.rejects(
+      runAction(repo, {
+        type: 'deleteBranch',
+        ref: 'refs/heads/feature',
+        force: true,
+        expectedOid: featureTip,
+      }),
+      /checked out in another worktree/u,
+    )
+    assert.equal(git('rev-parse', 'refs/heads/feature'), featureTip)
   } finally {
     await rm(root, { recursive: true, force: true })
   }
@@ -815,6 +889,79 @@ exec "$real" "$@"
       (await getSnapshot(repo)).branches.some((branch) => branch.ref === 'refs/heads/racing'),
       true,
     )
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('branch deletion holds the ref lock through metadata cleanup', async () => {
+  const { root, repo, git } = await fixture()
+  try {
+    git('switch', '-c', 'racing')
+    git('commit', '--allow-empty', '-m', 'Captured branch tip')
+    const captured = git('rev-parse', 'HEAD')
+    git('switch', 'main')
+    git('commit', '--allow-empty', '-m', 'Replacement branch tip')
+    const replacement = git('rev-parse', 'HEAD')
+    git('config', 'branch.racing.parent', 'old-parent')
+    git('config', 'branch.racing.remote', 'old-remote')
+
+    const shimDir = join(root, 'git-shim')
+    await mkdir(shimDir)
+    const shimPath = join(shimDir, 'git')
+    const raceResult = join(root, 'ref-race-result')
+    await writeFile(
+      shimPath,
+      `#!/bin/sh
+real="$GIT_STACKS_REAL_GIT"
+is_remove=0
+is_section=0
+for arg in "$@"; do
+  [ "$arg" = "--remove-section" ] && is_remove=1
+  [ "$arg" = "branch.racing" ] && is_section=1
+done
+if [ "$is_remove" = "1" ] && [ "$is_section" = "1" ]; then
+  if "$real" -C "$GIT_STACKS_RACE_REPO" update-ref refs/heads/racing "$GIT_STACKS_RACE_OID" >/dev/null 2>&1; then
+    printf 'created\\n' > "$GIT_STACKS_RACE_RESULT"
+  else
+    printf 'blocked\\n' > "$GIT_STACKS_RACE_RESULT"
+  fi
+fi
+exec "$real" "$@"
+`,
+      { mode: 0o755 },
+    )
+    const realGit = execFileSync('/bin/sh', ['-c', 'command -v git'], {
+      encoding: 'utf8',
+    }).trim()
+    const savedPath = process.env.PATH
+    process.env.PATH = `${shimDir}${delimiter}${savedPath ?? ''}`
+    process.env.GIT_STACKS_REAL_GIT = realGit
+    process.env.GIT_STACKS_RACE_REPO = repo
+    process.env.GIT_STACKS_RACE_OID = replacement
+    process.env.GIT_STACKS_RACE_RESULT = raceResult
+    try {
+      await runAction(repo, {
+        type: 'deleteBranch',
+        ref: 'refs/heads/racing',
+        force: true,
+        expectedOid: captured,
+      })
+    } finally {
+      process.env.PATH = savedPath
+      delete process.env.GIT_STACKS_REAL_GIT
+      delete process.env.GIT_STACKS_RACE_REPO
+      delete process.env.GIT_STACKS_RACE_OID
+      delete process.env.GIT_STACKS_RACE_RESULT
+    }
+
+    assert.equal(await readFile(raceResult, 'utf8'), 'blocked\n')
+    assert.throws(() => git('show-ref', '--verify', '--quiet', 'refs/heads/racing'))
+    git('branch', 'racing', replacement)
+    git('config', 'branch.racing.parent', 'new-parent')
+    git('config', 'branch.racing.remote', 'new-remote')
+    assert.equal(git('config', '--get', 'branch.racing.parent'), 'new-parent')
+    assert.equal(git('config', '--get', 'branch.racing.remote'), 'new-remote')
   } finally {
     await rm(root, { recursive: true, force: true })
   }

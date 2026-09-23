@@ -469,28 +469,62 @@ export async function ensureNotCheckedOutElsewhere(
   branch: string,
 ): Promise<void> {
   const output = await runGit(repoPath, ['worktree', 'list', '--porcelain'])
-  const lines = output.split(/\r?\n/u)
-  let worktreePath: string | null = null
-  for (const line of lines) {
+  const worktrees: { path: string; branch: string | null }[] = []
+  let currentWorktree: { path: string; branch: string | null } | null = null
+  for (const line of output.split(/\r?\n/u)) {
     if (line.startsWith('worktree ')) {
-      worktreePath = line.slice('worktree '.length)
-      continue
+      currentWorktree = { path: line.slice('worktree '.length), branch: null }
+      worktrees.push(currentWorktree)
+    } else if (currentWorktree && line.startsWith('branch refs/heads/')) {
+      currentWorktree.branch = line.slice('branch refs/heads/'.length)
     }
-    if (!line.startsWith('branch refs/heads/')) {
-      continue
-    }
-    const checkedOutBranch = line.slice('branch refs/heads/'.length)
-    if (checkedOutBranch !== branch || !worktreePath) {
-      continue
-    }
+  }
+
+  let canonicalRepo: string
+  try {
+    canonicalRepo = await fs.realpath(repoPath)
+  } catch {
+    canonicalRepo = path.resolve(repoPath)
+  }
+  for (const worktree of worktrees) {
     let canonicalWorktree: string
     try {
-      canonicalWorktree = await fs.realpath(worktreePath)
-    } catch {
-      canonicalWorktree = path.resolve(worktreePath)
+      canonicalWorktree = await fs.realpath(worktree.path)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue
+      canonicalWorktree = path.resolve(worktree.path)
     }
-    if (canonicalWorktree !== repoPath) {
+    if (canonicalWorktree === canonicalRepo) continue
+    if (worktree.branch === branch) {
       throw new Error(`Branch "${branch}" is checked out in another worktree: ${canonicalWorktree}`)
+    }
+
+    const exists = await fs
+      .stat(worktree.path)
+      .then(() => true)
+      .catch((error: NodeJS.ErrnoException) => {
+        if (error.code === 'ENOENT') return false
+        throw error
+      })
+    if (!exists) continue
+    const gitDir = stripTrailingNewline(
+      await runGit(worktree.path, ['rev-parse', '--absolute-git-dir']),
+    )
+    for (const backend of ['rebase-merge', 'rebase-apply']) {
+      let headName: string
+      try {
+        headName = stripTrailingNewline(
+          await fs.readFile(path.join(gitDir, backend, 'head-name'), 'utf8'),
+        )
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue
+        throw error
+      }
+      if (headName === `refs/heads/${branch}`) {
+        throw new Error(
+          `Branch "${branch}" is checked out in another worktree: ${canonicalWorktree}`,
+        )
+      }
     }
   }
 }
