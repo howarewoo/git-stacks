@@ -4,20 +4,22 @@ import { cn } from '../../lib/utils'
 import { Tooltip, TooltipContent, TooltipTrigger } from './tooltip'
 
 const buttonVariants = cva(
-  'inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-colors outline-none focus-visible:ring-2 focus-visible:ring-[var(--ring)] focus-visible:ring-offset-1 focus-visible:ring-offset-[var(--surface)] disabled:pointer-events-none disabled:opacity-45',
+  'inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-colors outline-none focus-visible:ring-2 focus-visible:ring-[var(--gs-component-button-focus-ring)] focus-visible:ring-offset-1 focus-visible:ring-offset-[var(--gs-semantic-surface-content)] disabled:pointer-events-none disabled:opacity-45',
   {
     variants: {
       variant: {
-        default: 'bg-[var(--ink)] text-white hover:bg-[var(--ink-soft)]',
+        default:
+          'bg-[var(--gs-component-button-primary-background)] text-[var(--gs-component-button-primary-foreground)] hover:bg-[var(--gs-component-button-primary-hover)] active:bg-[var(--gs-component-button-primary-pressed)]',
         secondary:
-          'border border-[var(--line)] bg-[var(--surface)] text-[var(--ink)] hover:bg-[var(--surface-muted)]',
-        ghost: 'text-[var(--ink-soft)] hover:bg-[var(--surface-muted)] hover:text-[var(--ink)]',
+          'border border-[var(--gs-component-button-secondary-border)] bg-[var(--gs-component-button-secondary-background)] text-[var(--gs-component-button-secondary-foreground)] hover:bg-[var(--gs-component-button-secondary-hover)]',
+        ghost:
+          'text-[var(--gs-semantic-text-secondary)] hover:bg-[var(--gs-semantic-surface-inset)] hover:text-[var(--gs-semantic-text-primary)]',
         subtle:
-          'bg-[var(--surface-muted)] text-[var(--ink-soft)] hover:bg-[var(--surface-hover)] hover:text-[var(--ink)]',
-        accent: 'bg-[var(--accent)] text-white hover:bg-[var(--accent-strong)]',
+          'bg-[var(--gs-semantic-surface-inset)] text-[var(--gs-semantic-text-secondary)] hover:bg-[var(--gs-semantic-surface-hover)] hover:text-[var(--gs-semantic-text-primary)]',
+        accent: 'bg-[var(--gs-semantic-selection-text)] text-white hover:bg-[var(--gs-semantic-selection-border)]',
         danger:
-          'border border-[var(--danger-line)] bg-[var(--danger-wash)] text-[var(--danger)] hover:bg-[var(--danger-wash-strong)]',
-        link: 'text-[var(--accent-strong)] underline decoration-[var(--accent-line)] underline-offset-4 hover:decoration-[var(--accent-strong)]',
+          'border border-[var(--gs-semantic-feedback-error-text)] bg-[var(--gs-semantic-feedback-error-surface)] text-[var(--gs-semantic-feedback-error-text)] hover:bg-[var(--gs-semantic-feedback-error-surface)]',
+        link: 'text-[var(--gs-component-button-link)] underline decoration-[var(--gs-semantic-selection-border)] underline-offset-4 hover:decoration-[var(--gs-component-button-link)]',
       },
       size: {
         default: 'h-9 px-3',
