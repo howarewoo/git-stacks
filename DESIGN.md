@@ -65,7 +65,6 @@ components:
   button-primary:
     backgroundColor: '{colors.ink}'
     textColor: '{colors.surface}'
-    rounded: '{rounded.control}'
     padding: '0 12px'
     height: '36px'
   button-primary-hover:
@@ -77,34 +76,28 @@ components:
   button-secondary:
     backgroundColor: '{colors.surface}'
     textColor: '{colors.ink}'
-    rounded: '{rounded.control}'
     padding: '0 12px'
     height: '36px'
   button-ghost:
     textColor: '{colors.text-secondary}'
-    rounded: '{rounded.control}'
     padding: '0 12px'
   button-subtle:
     backgroundColor: '{colors.surface-inset}'
     textColor: '{colors.text-secondary}'
-    rounded: '{rounded.control}'
     padding: '0 12px'
   button-accent:
     backgroundColor: '{colors.selection-strong}'
     textColor: '{colors.surface}'
-    rounded: '{rounded.control}'
     padding: '0 12px'
   button-danger:
     backgroundColor: '{colors.error-surface}'
     textColor: '{colors.error-text}'
-    rounded: '{rounded.control}'
     padding: '0 12px'
   button-link:
     textColor: '{colors.selection-strong}'
   field:
     backgroundColor: '{colors.surface}'
     textColor: '{colors.ink}'
-    rounded: '{rounded.control}'
     padding: '8px 12px'
     height: '36px'
   badge-neutral:
@@ -209,7 +202,7 @@ The palette is a cool-gray workbench with quiet semantic feedback. Workbench Ink
 
 Git Stacks is a desktop workbench, not a mobile or web client. The existing shell uses a three-pane composition: repository navigation, primary work area, and details. Dense branch, pull-request, stash, history, and diff rows use the compact rhythm; forms and primary work surfaces use standard density. Controls are 36px compact or 44px standard, and rows are 44px compact or 56px standard, with content allowed to grow when necessary.
 
-The spacing system follows a 4px rhythm with 4, 8, 12, 16, 20, 24, 32, and 40px steps. Work surfaces, controls, and nested items use the 12/16/24px radius scale, while pill-shaped primary actions and navigation use 999px. The existing renderer breakpoints at 1040px and 1199px adapt the shell to narrower desktop renderer widths; the native product remains centered on the 1000×700 minimum and 1440×940 default window sizes.
+The spacing system follows a 4px rhythm with 4, 8, 12, 16, 20, 24, 32, and 40px steps. The foundation radius scale reserves 12px for controls, 16px for nested items, and 24px for work surfaces and dialogs, while pills use 999px. These are target roles, not a claim that every existing component already consumes them. The existing renderer breakpoints at 1040px and 1199px adapt the shell to narrower desktop renderer widths; the native product remains centered on the 1000×700 minimum and 1440×940 default window sizes.
 Motion uses 120ms fast, 180ms standard, and 240ms deliberate transitions with `cubic-bezier(0.2, 0, 0, 1)` easing. The generated reduced-motion rule maps each duration to `0.01ms`; status text and operation locks remain when animation is removed.
 
 Overlay content is layered above the shell through the named z-index scale: base `0`, content `1`, floating `10`, overlay `60`, and popover `70`. Overlay surfaces do not compete with arbitrary per-view z-index values.
@@ -230,7 +223,7 @@ Depth is primarily tonal: the cool-gray canvas, white work surfaces, and inset s
 
 ## Shapes
 
-Controls use the 12px control radius, nested items use 16px, work surfaces and dialogs use 24px, and pills use 999px. The generated component primitives currently use the existing Shadcn/Tailwind radius utilities where noted below; this document does not claim that every existing component consumes every radius token. Borders are quiet and structural: essential controls use the stronger border, while decorative dividers remain low contrast. Clipping and overflow behavior follow the work surface rather than arbitrary view-specific decoration.
+The foundation radius scale targets 12px for controls, 16px for nested items, and 24px for work surfaces and dialogs, with 999px pills. The current shared `Button` and `Input` still use Tailwind's `rounded-md` utility, which resolves to 6px in this project; the 12px control token is therefore a preserved migration target, not the current component radius. Other existing overlays retain their utility-specific radii. Borders are quiet and structural: essential controls use the stronger border, while decorative dividers remain low contrast. Clipping and overflow behavior follow the work surface rather than arbitrary view-specific decoration.
 
 ## Components
 
@@ -238,7 +231,7 @@ The renderer builds on the repository's existing [shadcn/ui](https://ui.shadcn.c
 
 ### Buttons
 
-- **Shape:** Existing shared controls use Tailwind's `rounded-md`; the token scale reserves 12px for controls, 16px for items, and 24px for work surfaces.
+- **Shape:** The current shared `Button` and `Input` use Tailwind's `rounded-md` utility (6px). The foundation control token remains 12px as the migration target, but no current-component example in this document binds to it until those components are migrated.
 - **Primary (`default`):** Workbench Ink background with white text; hover uses ink-hover and active uses ink-pressed.
 - **Secondary:** White background, essential border, Workbench Ink text, and inset hover background.
 - **Ghost:** Secondary text with inset hover and primary text on hover.
