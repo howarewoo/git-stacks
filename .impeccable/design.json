@@ -7,7 +7,6 @@
       "canvas": {
         "role": "neutral",
         "displayName": "Cool Gray Canvas",
-        "canonical": "#e8ecf3",
         "tonalRamp": [
           "oklch(15% 0.0104 261.8)",
           "oklch(27% 0.0104 261.8)",
@@ -22,7 +21,6 @@
       "surface": {
         "role": "neutral",
         "displayName": "Work Surface",
-        "canonical": "#ffffff",
         "tonalRamp": [
           "oklch(15% 0.0000 89.9)",
           "oklch(27% 0.0000 89.9)",
@@ -37,7 +35,6 @@
       "surface-inset": {
         "role": "neutral",
         "displayName": "Inset Surface",
-        "canonical": "#f2f4f8",
         "tonalRamp": [
           "oklch(15% 0.0058 264.5)",
           "oklch(27% 0.0058 264.5)",
@@ -52,7 +49,6 @@
       "surface-hover": {
         "role": "neutral",
         "displayName": "Row Hover",
-        "canonical": "#e1e6ef",
         "tonalRamp": [
           "oklch(15% 0.0133 262.4)",
           "oklch(27% 0.0133 262.4)",
@@ -67,7 +63,6 @@
       "ink": {
         "role": "primary",
         "displayName": "Workbench Ink",
-        "canonical": "#171c24",
         "tonalRamp": [
           "oklch(15% 0.0174 259.7)",
           "oklch(27% 0.0174 259.7)",
@@ -82,7 +77,6 @@
       "ink-hover": {
         "role": "primary",
         "displayName": "Workbench Ink Hover",
-        "canonical": "#2a3340",
         "tonalRamp": [
           "oklch(15% 0.0264 257.5)",
           "oklch(27% 0.0264 257.5)",
@@ -97,7 +91,6 @@
       "ink-pressed": {
         "role": "primary",
         "displayName": "Workbench Ink Pressed",
-        "canonical": "#11151b",
         "tonalRamp": [
           "oklch(15% 0.0137 258.4)",
           "oklch(27% 0.0137 258.4)",
@@ -112,7 +105,6 @@
       "text-secondary": {
         "role": "neutral",
         "displayName": "Muted Slate",
-        "canonical": "#536176",
         "tonalRamp": [
           "oklch(15% 0.0380 258.4)",
           "oklch(27% 0.0380 258.4)",
@@ -127,7 +119,6 @@
       "border": {
         "role": "neutral",
         "displayName": "Decorative Divider",
-        "canonical": "#d7dde7",
         "tonalRamp": [
           "oklch(15% 0.0151 260.7)",
           "oklch(27% 0.0151 260.7)",
@@ -142,7 +133,6 @@
       "border-essential": {
         "role": "neutral",
         "displayName": "Essential Border",
-        "canonical": "#7c879a",
         "tonalRamp": [
           "oklch(15% 0.0315 261.4)",
           "oklch(27% 0.0315 261.4)",
@@ -157,7 +147,6 @@
       "selection": {
         "role": "primary",
         "displayName": "Repository Blue Wash",
-        "canonical": "#edf2fc",
         "tonalRamp": [
           "oklch(15% 0.0144 264.5)",
           "oklch(27% 0.0144 264.5)",
@@ -172,7 +161,6 @@
       "selection-strong": {
         "role": "primary",
         "displayName": "Repository Blue",
-        "canonical": "#3155a6",
         "tonalRamp": [
           "oklch(15% 0.0847 263.9)",
           "oklch(27% 0.1370 263.9)",
@@ -187,7 +175,6 @@
       "focus": {
         "role": "primary",
         "displayName": "Focus Blue",
-        "canonical": "#355bc5",
         "tonalRamp": [
           "oklch(15% 0.1023 265.7)",
           "oklch(27% 0.1712 265.7)",
@@ -202,7 +189,6 @@
       "info-surface": {
         "role": "secondary",
         "displayName": "Info Blue Wash",
-        "canonical": "#dfe8fc",
         "tonalRamp": [
           "oklch(15% 0.0288 266.4)",
           "oklch(27% 0.0288 266.4)",
@@ -217,7 +203,6 @@
       "info-text": {
         "role": "secondary",
         "displayName": "Info Blue",
-        "canonical": "#3155a6",
         "tonalRamp": [
           "oklch(15% 0.0847 263.9)",
           "oklch(27% 0.1370 263.9)",
@@ -232,7 +217,6 @@
       "success-surface": {
         "role": "secondary",
         "displayName": "Success Green Wash",
-        "canonical": "#dceee3",
         "tonalRamp": [
           "oklch(15% 0.0240 159.1)",
           "oklch(27% 0.0240 159.1)",
@@ -247,7 +231,6 @@
       "success-text": {
         "role": "secondary",
         "displayName": "Success Green",
-        "canonical": "#276449",
         "tonalRamp": [
           "oklch(15% 0.0330 161.7)",
           "oklch(27% 0.0594 161.7)",
@@ -262,7 +245,6 @@
       "warning-surface": {
         "role": "secondary",
         "displayName": "Warning Amber Wash",
-        "canonical": "#f4e3b9",
         "tonalRamp": [
           "oklch(15% 0.0307 88.6)",
           "oklch(27% 0.0552 88.6)",
@@ -277,7 +259,6 @@
       "warning-text": {
         "role": "secondary",
         "displayName": "Warning Amber",
-        "canonical": "#865b13",
         "tonalRamp": [
           "oklch(15% 0.0317 74.3)",
           "oklch(27% 0.0571 74.3)",
@@ -292,7 +273,6 @@
       "error-surface": {
         "role": "secondary",
         "displayName": "Error Garnet Wash",
-        "canonical": "#f9dfdf",
         "tonalRamp": [
           "oklch(15% 0.0287 17.7)",
           "oklch(27% 0.0287 17.7)",
@@ -307,7 +287,6 @@
       "error-text": {
         "role": "secondary",
         "displayName": "Error Garnet",
-        "canonical": "#9d3d43",
         "tonalRamp": [
           "oklch(15% 0.0602 19.4)",
           "oklch(27% 0.1083 19.4)",
@@ -322,7 +301,6 @@
       "merged-surface": {
         "role": "secondary",
         "displayName": "Merged Violet Wash",
-        "canonical": "#e4dff5",
         "tonalRamp": [
           "oklch(15% 0.0301 296.2)",
           "oklch(27% 0.0301 296.2)",
@@ -337,7 +315,6 @@
       "merged-text": {
         "role": "secondary",
         "displayName": "Merged Violet",
-        "canonical": "#635097",
         "tonalRamp": [
           "oklch(15% 0.0828 294.1)",
           "oklch(27% 0.1119 294.1)",
@@ -352,7 +329,6 @@
       "diff-add": {
         "role": "tertiary",
         "displayName": "Diff Addition",
-        "canonical": "#276449",
         "tonalRamp": [
           "oklch(15% 0.0330 161.7)",
           "oklch(27% 0.0594 161.7)",
@@ -367,7 +343,6 @@
       "diff-add-surface": {
         "role": "tertiary",
         "displayName": "Diff Addition Wash",
-        "canonical": "#dceee3",
         "tonalRamp": [
           "oklch(15% 0.0240 159.1)",
           "oklch(27% 0.0240 159.1)",
@@ -382,7 +357,6 @@
       "diff-remove": {
         "role": "tertiary",
         "displayName": "Diff Deletion",
-        "canonical": "#9d3d43",
         "tonalRamp": [
           "oklch(15% 0.0602 19.4)",
           "oklch(27% 0.1083 19.4)",
@@ -397,7 +371,6 @@
       "diff-remove-surface": {
         "role": "tertiary",
         "displayName": "Diff Deletion Wash",
-        "canonical": "#f9dfdf",
         "tonalRamp": [
           "oklch(15% 0.0287 17.7)",
           "oklch(27% 0.0287 17.7)",
@@ -412,7 +385,6 @@
       "diff-hunk": {
         "role": "tertiary",
         "displayName": "Diff Hunk",
-        "canonical": "#3155a6",
         "tonalRamp": [
           "oklch(15% 0.0847 263.9)",
           "oklch(27% 0.1370 263.9)",
@@ -582,7 +554,7 @@
       },
       {
         "name": "The Essential Boundary Rule",
-        "body": "#d7dde7 is for decorative dividers only. Inputs, controls, and meaningful graphics that need a non-text boundary use #7c879a or the focus role.",
+        "body": "semantic.border.decorative is for decorative dividers only. Inputs, controls, and meaningful graphics that need a non-text boundary use semantic.border.essential or semantic.focus.ring.",
         "section": "colors"
       },
       {
@@ -600,14 +572,14 @@
       "Do use Workbench Ink for primary actions and navigation, with Repository Blue reserved for links, selection, focus, and meaningful identity accents.",
       "Do keep selection, checked-out state, pull-request lifecycle, checks, review, restacks, and diff additions/deletions/hunks independent and explicitly labelled.",
       "Do use the 4px spacing rhythm, 36/44px controls, 44/56px rows, and the defined 12/16/24/999px radius scale where the current component architecture consumes them.",
-      "Do use #7c879a for essential boundaries, #355bc5 for keyboard focus, and text/icon descriptions alongside every Git status.",
+      "Do use semantic.border.essential for essential boundaries, semantic.focus.ring for keyboard focus, and text/icon descriptions alongside every Git status.",
       "Do use npm run tokens:generate followed by npm run tokens:check after editing src/renderer/src/design-system/tokens.json; never hand-edit generated tokens.css.",
       "Do keep the renderer local-first, preserve the sandbox/preload/IPC/CSP boundary, and retain busy-state text when reduced motion removes animation."
     ],
     "donts": [
       "Don't globally replace --accent with ink; selection, links, checked-out state, and stack graphics remain Repository Blue, while merged pull requests remain violet.",
       "Don't use color alone for status, lifecycle, review, checks, unknown/unavailable data, or diff meaning.",
-      "Don't use decorative #d7dde7 dividers as a substitute for essential control boundaries or meaningful graphics.",
+      "Don't use decorative semantic.border.decorative dividers as a substitute for essential control boundaries or meaningful graphics.",
       "Don't add external font loading, font files from chat artifacts, a second manually maintained palette, CRM runtime behavior, or new Git/IPC/navigation semantics.",
       "Don't claim that every existing component consumes all density or radius tokens; migrate each consumer as its owning issue changes it.",
       "Don't use shadows to imply Git state; reserve depth for floating, transient, or elevated surfaces."
