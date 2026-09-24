@@ -153,40 +153,40 @@ The palette is a cool-gray workbench with quiet semantic feedback. Workbench Ink
 
 ### Primary
 
-- **Workbench Ink** (`#171c24`): primary text, primary actions, navigation, and high-emphasis surfaces. Hover uses `#2a3340` and pressed uses `#11151b`.
-- **Repository Blue** (`#3155a6`): links, selection text and borders, focus-adjacent identity, checked-out state, and meaningful blue graphics. It is not a replacement for Workbench Ink primary actions.
+- **Workbench Ink** (`semantic.action.primary`): primary text, primary actions, navigation, and high-emphasis surfaces. Hover uses `semantic.action.primary-hover`; pressed uses `semantic.action.primary-pressed`.
+- **Repository Blue** (`semantic.selection.text`): links, selection text and borders, focus-adjacent identity, checked-out state, and meaningful blue graphics. It is not a replacement for Workbench Ink primary actions.
 
 ### Secondary
 
-- **Muted Slate** (`#536176`): secondary readable text and metadata. It remains readable on the canvas and work surfaces rather than being treated as disabled text.
-- **Repository Blue** (`#3155a6`): the semantic link and selection accent, distinct from primary action ink.
+- **Muted Slate** (`semantic.text.secondary`): secondary readable text and metadata. It remains readable on the canvas and work surfaces rather than being treated as disabled text.
+- **Repository Blue** (`semantic.action.link`): the semantic link and selection accent, distinct from primary action ink.
 
 ### Tertiary
 
-- **Restack Amber** (`#865b13` on `#f4e3b9`): requires-restack and warning text/surface pairs.
-- **Error Garnet** (`#9d3d43` on `#f9dfdf`): error and closed-state text/surface pairs.
+- **Restack Amber** (`semantic.feedback.warning-text` on `semantic.feedback.warning-surface`): requires-restack and warning text/surface pairs.
+- **Error Garnet** (`semantic.feedback.error-text` on `semantic.feedback.error-surface`): error and closed-state text/surface pairs.
 
 ### Neutral
 
-- **Cool Gray Canvas** (`#e8ecf3`): workspace backdrop.
-- **Work Surface** (`#ffffff`): content, controls, and dialog surfaces.
-- **Inset Surface** (`#f2f4f8`): grouped content and secondary controls.
-- **Row Hover** (`#e1e6ef`): quiet hover state.
-- **Decorative Divider** (`#d7dde7`): separators that do not carry essential control meaning.
-- **Essential Border** (`#7c879a`): field and control boundaries that must remain visible.
+- **Cool Gray Canvas** (`semantic.surface.canvas`): workspace backdrop.
+- **Work Surface** (`semantic.surface.content`): content, controls, and dialog surfaces.
+- **Inset Surface** (`semantic.surface.inset`): grouped content and secondary controls.
+- **Row Hover** (`semantic.surface.hover`): quiet hover state.
+- **Decorative Divider** (`semantic.border.decorative`): separators that do not carry essential control meaning.
+- **Essential Border** (`semantic.border.essential`): field and control boundaries that must remain visible.
 
 ### Feedback and Git states
 
-- **Info Blue**: `#dfe8fc` surface with `#3155a6` text.
-- **Success Green**: `#dceee3` surface with `#276449` text.
-- **Warning Amber**: `#f4e3b9` surface with `#865b13` text.
-- **Error Garnet**: `#f9dfdf` surface with `#9d3d43` text.
-- **Merged Violet**: `#e4dff5` surface with `#635097` text, a Git Stacks adaptation of the Journey violet role.
-- **Diff roles**: addition `#276449` on `#dceee3`, deletion `#9d3d43` on `#f9dfdf`, and hunk `#3155a6`.
+- **Info Blue**: `semantic.feedback.info-surface` with `semantic.feedback.info-text`.
+- **Success Green**: `semantic.feedback.success-surface` with `semantic.feedback.success-text`.
+- **Warning Amber**: `semantic.feedback.warning-surface` with `semantic.feedback.warning-text`.
+- **Error Garnet**: `semantic.feedback.error-surface` with `semantic.feedback.error-text`.
+- **Merged Violet**: `semantic.feedback.merged-surface` with `semantic.feedback.merged-text`, a Git Stacks adaptation of the Journey violet role.
+- **Diff roles**: addition `semantic.diff.add-text` on `semantic.diff.add-surface`, deletion `semantic.diff.remove-text` on `semantic.diff.remove-surface`, and hunk `semantic.diff.hunk-text`.
 
 **The Meaning Before Color Rule.** Every selection, checked-out branch, pull-request lifecycle, checks state, review decision, restack requirement, and diff role has an explicit text or icon meaning. Unknown or unavailable GitHub data uses the neutral unknown role and an explicit unavailable label; it is never represented as none, zero, or passing.
 
-**The Essential Boundary Rule.** `#d7dde7` is for decorative dividers only. Inputs, controls, and meaningful graphics that need a non-text boundary use `#7c879a` or the focus role.
+**The Essential Boundary Rule.** `semantic.border.decorative` is for decorative dividers only. Inputs, controls, and meaningful graphics that need a non-text boundary use `semantic.border.essential` or `semantic.focus.ring`.
 
 ## Typography
 
@@ -222,9 +222,9 @@ Depth is primarily tonal: the cool-gray canvas, white work surfaces, and inset s
 
 ### Shadow Vocabulary
 
-- **Small** (`0 1px 2px rgba(23, 28, 36, 0.08)`): low-elevation detail.
-- **Medium** (`0 8px 24px rgba(23, 28, 36, 0.12)`): floating cards, hover cards, and tooltips.
-- **Large** (`0 22px 64px rgba(23, 28, 36, 0.2)`): dialog surfaces and other high-elevation overlays.
+- **Small** (`semantic.elevation.small`): low-elevation detail.
+- **Medium** (`semantic.elevation.medium`): floating cards, hover cards, and tooltips.
+- **Large** (`semantic.elevation.large`): dialog surfaces and other high-elevation overlays.
 
 **The Flat-By-Default Rule.** Surfaces are flat at rest. Use a shadow only when a component is floating, transient, or deliberately elevated; do not use decorative shadows to imply Git state.
 
@@ -277,7 +277,7 @@ The renderer builds on the repository's existing [shadcn/ui](https://ui.shadcn.c
 
 ### Dialogs
 
-- **Overlay:** Fixed inset overlay at z-index 60 with `rgba(20, 24, 32, 0.34)`.
+- **Overlay:** Fixed inset overlay at the `component.overlay` z-index with the dedicated overlay scrim role.
 - **Content:** White surface, essential border, existing 12px utility radius, 20px padding, and large elevation shadow at z-index 60.
 - **Close:** Keyboard-focusable close control with an explicit accessible label and tooltip.
 - **State:** Radix open/close behavior and the existing dialog-in motion remain unchanged.
@@ -304,7 +304,7 @@ Concrete guardrails for the existing system and the user-confirmed Quiet Workben
 - **Do** use Workbench Ink for primary actions and navigation, with Repository Blue reserved for links, selection, focus, and meaningful identity accents.
 - **Do** keep selection, checked-out state, pull-request lifecycle, checks, review, restacks, and diff additions/deletions/hunks independent and explicitly labelled.
 - **Do** use the 4px spacing rhythm, 36/44px controls, 44/56px rows, and the defined 12/16/24/999px radius scale where the current component architecture consumes them.
-- **Do** use `#7c879a` for essential boundaries, `#355bc5` for keyboard focus, and text/icon descriptions alongside every Git status.
+- **Do** use `semantic.border.essential` for essential boundaries, `semantic.focus.ring` for keyboard focus, and text/icon descriptions alongside every Git status.
 - **Do** use `npm run tokens:generate` followed by `npm run tokens:check` after editing `src/renderer/src/design-system/tokens.json`; never hand-edit generated `tokens.css`.
 - **Do** keep the renderer local-first, preserve the sandbox/preload/IPC/CSP boundary, and retain busy-state text when reduced motion removes animation.
 
@@ -312,7 +312,7 @@ Concrete guardrails for the existing system and the user-confirmed Quiet Workben
 
 - **Don't** globally replace `--accent` with ink; selection, links, checked-out state, and stack graphics remain Repository Blue, while merged pull requests remain violet.
 - **Don't** use color alone for status, lifecycle, review, checks, unknown/unavailable data, or diff meaning.
-- **Don't** use decorative `#d7dde7` dividers as a substitute for essential control boundaries or meaningful graphics.
+- **Don't** use decorative `semantic.border.decorative` dividers as a substitute for essential control boundaries or meaningful graphics.
 - **Don't** add external font loading, font files from chat artifacts, a second manually maintained palette, CRM runtime behavior, or new Git/IPC/navigation semantics.
 - **Don't** claim that every existing component consumes all density or radius tokens; migrate each consumer as its owning issue changes it.
 - **Don't** use shadows to imply Git state; reserve depth for floating, transient, or elevated surfaces.
