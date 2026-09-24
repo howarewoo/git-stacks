@@ -9,3 +9,6 @@ release/
 .github/actions-runner/
 .woostack/tmp/
 .github/actions-runner-linux/
+!.impeccable/
+.impeccable/*
+!.impeccable/design.json

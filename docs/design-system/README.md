@@ -137,7 +137,7 @@ shared `cn()` helper (`clsx` + `tailwind-merge`) with Tailwind v4, Radix primiti
 Lucide icons. Semantic/component token consumption follows the generated `@theme` aliases
 and `var(--gs-*)` variables above. shadcn/ui is copied source and configuration, not a
 required runtime dependency, so this slice adds no shadcn CLI application dependency.
-See `DESIGN.md` for the implementation architecture.
+See [the root design system document](../../DESIGN.md) for the implementation architecture.
 
 ## Tailwind and renderer specimen
 
