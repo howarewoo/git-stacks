@@ -418,17 +418,17 @@
     "shadows": [
       {
         "name": "small",
-        "value": "0 1px 2px rgba(23, 28, 36, 0.08)",
+        "value": "var(--gs-semantic-elevation-small)",
         "purpose": "Low-elevation detail."
       },
       {
         "name": "medium",
-        "value": "0 8px 24px rgba(23, 28, 36, 0.12)",
+        "value": "var(--gs-semantic-elevation-medium)",
         "purpose": "Floating cards, hover cards, and tooltips."
       },
       {
         "name": "large",
-        "value": "0 22px 64px rgba(23, 28, 36, 0.2)",
+        "value": "var(--gs-semantic-elevation-large)",
         "purpose": "Dialog surfaces and other high-elevation overlays."
       }
     ],
@@ -477,7 +477,7 @@
       "refersTo": "button-primary",
       "description": "Primary action for a decisive local workbench operation.",
       "html": "<button class=\"ds-btn-primary\" type=\"button\">Create branch</button>",
-      "css": ".ds-btn-primary { display: inline-flex; align-items: center; justify-content: center; gap: 8px; height: 36px; padding: 0 12px; border: 0; border-radius: 6px; background: #171c24; color: #ffffff; font: 500 14px/1.5 Inter, -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif; transition: background-color 180ms cubic-bezier(0.2, 0, 0, 1); } .ds-btn-primary:hover { background: #2a3340; } .ds-btn-primary:active { background: #11151b; } .ds-btn-primary:focus-visible { outline: 2px solid #355bc5; outline-offset: 1px; }"
+      "css": ".ds-btn-primary { display: inline-flex; align-items: center; justify-content: center; gap: 8px; height: 36px; padding: 0 12px; border: 0; border-radius: 6px; background: var(--gs-component-button-primary-background); color: var(--gs-component-button-primary-foreground); font: 500 14px/1.5 Inter, -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif; transition: background-color 180ms cubic-bezier(0.2, 0, 0, 1); } .ds-btn-primary:hover { background: var(--gs-component-button-primary-hover); } .ds-btn-primary:active { background: var(--gs-component-button-primary-pressed); } .ds-btn-primary:focus-visible { outline: 2px solid var(--gs-component-button-focus-ring); outline-offset: 1px; }"
     },
     {
       "name": "Secondary Button",
@@ -485,7 +485,7 @@
       "refersTo": "button-secondary",
       "description": "Secondary action with an essential boundary and quiet hover.",
       "html": "<button class=\"ds-btn-secondary\" type=\"button\">Cancel</button>",
-      "css": ".ds-btn-secondary { display: inline-flex; align-items: center; justify-content: center; height: 36px; padding: 0 12px; border: 1px solid #7c879a; border-radius: 6px; background: #ffffff; color: #171c24; font: 500 14px/1.5 Inter, -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif; transition: background-color 180ms cubic-bezier(0.2, 0, 0, 1); } .ds-btn-secondary:hover { background: #f2f4f8; } .ds-btn-secondary:focus-visible { outline: 2px solid #355bc5; outline-offset: 1px; }"
+      "css": ".ds-btn-secondary { display: inline-flex; align-items: center; justify-content: center; height: 36px; padding: 0 12px; border: 1px solid var(--gs-component-button-secondary-border); border-radius: 6px; background: var(--gs-component-button-secondary-background); color: var(--gs-component-button-secondary-foreground); font: 500 14px/1.5 Inter, -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif; transition: background-color 180ms cubic-bezier(0.2, 0, 0, 1); } .ds-btn-secondary:hover { background: var(--gs-component-button-secondary-hover); } .ds-btn-secondary:focus-visible { outline: 2px solid var(--gs-component-button-focus-ring); outline-offset: 1px; }"
     },
     {
       "name": "Ghost Button",
@@ -493,7 +493,7 @@
       "refersTo": "button-ghost",
       "description": "Low-emphasis action that reveals an inset hover surface.",
       "html": "<button class=\"ds-btn-ghost\" type=\"button\">View details</button>",
-      "css": ".ds-btn-ghost { display: inline-flex; align-items: center; justify-content: center; height: 36px; padding: 0 12px; border: 0; border-radius: 6px; background: transparent; color: #536176; font: 500 14px/1.5 Inter, -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif; transition: background-color 180ms cubic-bezier(0.2, 0, 0, 1), color 180ms cubic-bezier(0.2, 0, 0, 1); } .ds-btn-ghost:hover { background: #f2f4f8; color: #171c24; } .ds-btn-ghost:focus-visible { outline: 2px solid #355bc5; outline-offset: 1px; }"
+      "css": ".ds-btn-ghost { display: inline-flex; align-items: center; justify-content: center; height: 36px; padding: 0 12px; border: 0; border-radius: 6px; background: transparent; color: var(--gs-semantic-text-secondary); font: 500 14px/1.5 Inter, -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif; transition: background-color 180ms cubic-bezier(0.2, 0, 0, 1), color 180ms cubic-bezier(0.2, 0, 0, 1); } .ds-btn-ghost:hover { background: var(--gs-semantic-surface-inset); color: var(--gs-semantic-text-primary); } .ds-btn-ghost:focus-visible { outline: 2px solid var(--gs-component-button-focus-ring); outline-offset: 1px; }"
     },
     {
       "name": "Accent Button",
@@ -501,7 +501,7 @@
       "refersTo": "button-accent",
       "description": "Repository Blue action for a selected or navigational context.",
       "html": "<button class=\"ds-btn-accent\" type=\"button\">Open selection</button>",
-      "css": ".ds-btn-accent { display: inline-flex; align-items: center; justify-content: center; height: 36px; padding: 0 12px; border: 0; border-radius: 6px; background: #3155a6; color: #ffffff; font: 500 14px/1.5 Inter, -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif; transition: background-color 180ms cubic-bezier(0.2, 0, 0, 1); } .ds-btn-accent:hover { background: #3155a6; } .ds-btn-accent:focus-visible { outline: 2px solid #355bc5; outline-offset: 1px; }"
+      "css": ".ds-btn-accent { display: inline-flex; align-items: center; justify-content: center; height: 36px; padding: 0 12px; border: 0; border-radius: 6px; background: var(--gs-semantic-selection-text); color: var(--gs-semantic-text-inverse); font: 500 14px/1.5 Inter, -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif; transition: background-color 180ms cubic-bezier(0.2, 0, 0, 1); } .ds-btn-accent:hover { background: var(--gs-semantic-selection-border); } .ds-btn-accent:focus-visible { outline: 2px solid var(--gs-component-button-focus-ring); outline-offset: 1px; }"
     },
     {
       "name": "Danger Button",
@@ -509,7 +509,7 @@
       "refersTo": "button-danger",
       "description": "Destructive action with a labelled error surface and text.",
       "html": "<button class=\"ds-btn-danger\" type=\"button\">Delete branch</button>",
-      "css": ".ds-btn-danger { display: inline-flex; align-items: center; justify-content: center; height: 36px; padding: 0 12px; border: 1px solid #9d3d43; border-radius: 6px; background: #f9dfdf; color: #9d3d43; font: 500 14px/1.5 Inter, -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif; transition: background-color 180ms cubic-bezier(0.2, 0, 0, 1); } .ds-btn-danger:hover { background: #f9dfdf; } .ds-btn-danger:focus-visible { outline: 2px solid #355bc5; outline-offset: 1px; }"
+      "css": ".ds-btn-danger { display: inline-flex; align-items: center; justify-content: center; height: 36px; padding: 0 12px; border: 1px solid var(--gs-semantic-feedback-error-text); border-radius: 6px; background: var(--gs-semantic-feedback-error-surface); color: var(--gs-semantic-feedback-error-text); font: 500 14px/1.5 Inter, -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif; transition: background-color 180ms cubic-bezier(0.2, 0, 0, 1); } .ds-btn-danger:hover { background: var(--gs-semantic-feedback-error-surface); } .ds-btn-danger:focus-visible { outline: 2px solid var(--gs-component-button-focus-ring); outline-offset: 1px; }"
     },
     {
       "name": "Field",
@@ -517,7 +517,7 @@
       "refersTo": "field",
       "description": "Text field for branch names, paths, and other repository values.",
       "html": "<input class=\"ds-field\" type=\"text\" placeholder=\"feature/tokens\" aria-label=\"Branch name\">",
-      "css": ".ds-field { box-sizing: border-box; width: 100%; height: 36px; padding: 8px 12px; border: 1px solid #7c879a; border-radius: 6px; background: #ffffff; color: #171c24; font: 400 14px/1.5 Inter, -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif; } .ds-field::placeholder { color: #536176; } .ds-field:hover { border-color: #7c879a; } .ds-field:focus { border-color: #355bc5; outline: 0; box-shadow: 0 0 0 2px #355bc5; } .ds-field:disabled { cursor: not-allowed; background: #f2f4f8; opacity: 0.65; }"
+      "css": ".ds-field { box-sizing: border-box; width: 100%; height: 36px; padding: 8px 12px; border: 1px solid var(--gs-component-field-border); border-radius: 6px; background: var(--gs-component-field-background); color: var(--gs-component-field-text); font: 400 14px/1.5 Inter, -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif; } .ds-field::placeholder { color: var(--gs-component-field-placeholder); } .ds-field:hover { border-color: var(--gs-component-field-border); } .ds-field:focus { border-color: var(--gs-component-field-focus-border); outline: 0; box-shadow: 0 0 0 2px var(--gs-component-field-focus-ring); } .ds-field:disabled { cursor: not-allowed; background: var(--gs-component-field-disabled-background); opacity: 0.65; }"
     },
     {
       "name": "Success Badge",
@@ -525,7 +525,7 @@
       "refersTo": "badge-success",
       "description": "Text-labelled success status for checks and completed states.",
       "html": "<span class=\"ds-badge-success\">Ready</span>",
-      "css": ".ds-badge-success { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border: 1px solid #276449; border-radius: 999px; background: #dceee3; color: #276449; font: 500 11px/16px Inter, -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif; } .ds-badge-success:focus-visible { outline: 2px solid #355bc5; outline-offset: 1px; }"
+      "css": ".ds-badge-success { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border: 1px solid var(--gs-semantic-feedback-success-text); border-radius: 999px; background: var(--gs-component-badge-success-background); color: var(--gs-component-badge-success-text); font: 500 11px/16px Inter, -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif; } .ds-badge-success:focus-visible { outline: 2px solid var(--gs-component-button-focus-ring); outline-offset: 1px; }"
     },
     {
       "name": "Dialog",
@@ -533,7 +533,7 @@
       "refersTo": "dialog-overlay",
       "description": "Elevated confirmation surface above the local-first workbench shell.",
       "html": "<div class=\"ds-dialog-layer\"><section class=\"ds-dialog\" role=\"dialog\" aria-label=\"Confirm operation\"><h2>Confirm operation</h2><p>Review the captured preview before continuing.</p><button class=\"ds-dialog-close\" type=\"button\" aria-label=\"Close dialog\">\u00d7</button></section></div>",
-      "css": ".ds-dialog-layer { position: relative; min-height: 220px; } .ds-dialog-layer::before { content: \"\"; position: absolute; inset: 0; background: rgba(20, 24, 32, 0.34); } .ds-dialog { position: relative; width: min(100% - 32px, 512px); margin: 32px auto; padding: 20px; border: 1px solid #7c879a; border-radius: 12px; background: #ffffff; color: #171c24; box-shadow: 0 22px 64px rgba(23, 28, 36, 0.2); } .ds-dialog h2 { margin: 0 32px 8px 0; font: 500 20px/1.25 Inter, -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif; } .ds-dialog p { margin: 0; color: #536176; font: 400 14px/1.5 Inter, -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif; } .ds-dialog-close { position: absolute; top: 12px; right: 12px; width: 32px; height: 32px; border: 0; border-radius: 6px; background: transparent; color: #536176; font-size: 20px; } .ds-dialog-close:hover { background: #f2f4f8; color: #171c24; } .ds-dialog-close:focus-visible { outline: 2px solid #355bc5; outline-offset: 1px; }"
+      "css": ".ds-dialog-layer { position: relative; min-height: 220px; } .ds-dialog-layer::before { content: \"\"; position: absolute; inset: 0; background: rgba(20, 24, 32, 0.34); } .ds-dialog { position: relative; width: min(100% - 32px, 512px); margin: 32px auto; padding: 20px; border: 1px solid var(--gs-semantic-border-essential); border-radius: 12px; background: var(--gs-semantic-surface-content); color: var(--gs-semantic-text-primary); box-shadow: var(--gs-semantic-elevation-large); } .ds-dialog h2 { margin: 0 32px 8px 0; font: 500 20px/1.25 Inter, -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif; } .ds-dialog p { margin: 0; color: var(--gs-semantic-text-secondary); font: 400 14px/1.5 Inter, -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif; } .ds-dialog-close { position: absolute; top: 12px; right: 12px; width: 32px; height: 32px; border: 0; border-radius: 6px; background: transparent; color: var(--gs-semantic-text-secondary); font-size: 20px; } .ds-dialog-close:hover { background: var(--gs-semantic-surface-inset); color: var(--gs-semantic-text-primary); } .ds-dialog-close:focus-visible { outline: 2px solid var(--gs-component-button-focus-ring); outline-offset: 1px; }"
     }
   ],
   "narrative": {
