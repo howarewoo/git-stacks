@@ -8,3 +8,6 @@ release/
 .impeccable/
 .github/actions-runner/
 .woostack/tmp/
+!.impeccable/
+.impeccable/*
+!.impeccable/design.json

@@ -1,0 +1,616 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-09-24T00:00:00Z",
+  "title": "Design System: Git Stacks",
+  "extensions": {
+    "colorMeta": {
+      "canvas": {
+        "role": "neutral",
+        "displayName": "Cool Gray Canvas",
+        "canonical": "#e8ecf3",
+        "tonalRamp": [
+          "oklch(15% 0.0104 261.8)",
+          "oklch(27% 0.0104 261.8)",
+          "oklch(39% 0.0104 261.8)",
+          "oklch(51% 0.0104 261.8)",
+          "oklch(63% 0.0104 261.8)",
+          "oklch(75% 0.0104 261.8)",
+          "oklch(87% 0.0104 261.8)",
+          "oklch(95% 0.0104 261.8)"
+        ]
+      },
+      "surface": {
+        "role": "neutral",
+        "displayName": "Work Surface",
+        "canonical": "#ffffff",
+        "tonalRamp": [
+          "oklch(15% 0.0000 89.9)",
+          "oklch(27% 0.0000 89.9)",
+          "oklch(39% 0.0000 89.9)",
+          "oklch(51% 0.0000 89.9)",
+          "oklch(63% 0.0000 89.9)",
+          "oklch(75% 0.0000 89.9)",
+          "oklch(87% 0.0000 89.9)",
+          "oklch(95% 0.0000 89.9)"
+        ]
+      },
+      "surface-inset": {
+        "role": "neutral",
+        "displayName": "Inset Surface",
+        "canonical": "#f2f4f8",
+        "tonalRamp": [
+          "oklch(15% 0.0058 264.5)",
+          "oklch(27% 0.0058 264.5)",
+          "oklch(39% 0.0058 264.5)",
+          "oklch(51% 0.0058 264.5)",
+          "oklch(63% 0.0058 264.5)",
+          "oklch(75% 0.0058 264.5)",
+          "oklch(87% 0.0058 264.5)",
+          "oklch(95% 0.0058 264.5)"
+        ]
+      },
+      "surface-hover": {
+        "role": "neutral",
+        "displayName": "Row Hover",
+        "canonical": "#e1e6ef",
+        "tonalRamp": [
+          "oklch(15% 0.0133 262.4)",
+          "oklch(27% 0.0133 262.4)",
+          "oklch(39% 0.0133 262.4)",
+          "oklch(51% 0.0133 262.4)",
+          "oklch(63% 0.0133 262.4)",
+          "oklch(75% 0.0133 262.4)",
+          "oklch(87% 0.0133 262.4)",
+          "oklch(95% 0.0133 262.4)"
+        ]
+      },
+      "ink": {
+        "role": "primary",
+        "displayName": "Workbench Ink",
+        "canonical": "#171c24",
+        "tonalRamp": [
+          "oklch(15% 0.0174 259.7)",
+          "oklch(27% 0.0174 259.7)",
+          "oklch(39% 0.0174 259.7)",
+          "oklch(51% 0.0174 259.7)",
+          "oklch(63% 0.0174 259.7)",
+          "oklch(75% 0.0174 259.7)",
+          "oklch(87% 0.0174 259.7)",
+          "oklch(95% 0.0174 259.7)"
+        ]
+      },
+      "ink-hover": {
+        "role": "primary",
+        "displayName": "Workbench Ink Hover",
+        "canonical": "#2a3340",
+        "tonalRamp": [
+          "oklch(15% 0.0264 257.5)",
+          "oklch(27% 0.0264 257.5)",
+          "oklch(39% 0.0264 257.5)",
+          "oklch(51% 0.0264 257.5)",
+          "oklch(63% 0.0264 257.5)",
+          "oklch(75% 0.0264 257.5)",
+          "oklch(87% 0.0264 257.5)",
+          "oklch(95% 0.0240 257.5)"
+        ]
+      },
+      "ink-pressed": {
+        "role": "primary",
+        "displayName": "Workbench Ink Pressed",
+        "canonical": "#11151b",
+        "tonalRamp": [
+          "oklch(15% 0.0137 258.4)",
+          "oklch(27% 0.0137 258.4)",
+          "oklch(39% 0.0137 258.4)",
+          "oklch(51% 0.0137 258.4)",
+          "oklch(63% 0.0137 258.4)",
+          "oklch(75% 0.0137 258.4)",
+          "oklch(87% 0.0137 258.4)",
+          "oklch(95% 0.0137 258.4)"
+        ]
+      },
+      "text-secondary": {
+        "role": "neutral",
+        "displayName": "Muted Slate",
+        "canonical": "#536176",
+        "tonalRamp": [
+          "oklch(15% 0.0380 258.4)",
+          "oklch(27% 0.0380 258.4)",
+          "oklch(39% 0.0380 258.4)",
+          "oklch(51% 0.0380 258.4)",
+          "oklch(63% 0.0380 258.4)",
+          "oklch(75% 0.0380 258.4)",
+          "oklch(87% 0.0380 258.4)",
+          "oklch(95% 0.0239 258.4)"
+        ]
+      },
+      "border": {
+        "role": "neutral",
+        "displayName": "Decorative Divider",
+        "canonical": "#d7dde7",
+        "tonalRamp": [
+          "oklch(15% 0.0151 260.7)",
+          "oklch(27% 0.0151 260.7)",
+          "oklch(39% 0.0151 260.7)",
+          "oklch(51% 0.0151 260.7)",
+          "oklch(63% 0.0151 260.7)",
+          "oklch(75% 0.0151 260.7)",
+          "oklch(87% 0.0151 260.7)",
+          "oklch(95% 0.0151 260.7)"
+        ]
+      },
+      "border-essential": {
+        "role": "neutral",
+        "displayName": "Essential Border",
+        "canonical": "#7c879a",
+        "tonalRamp": [
+          "oklch(15% 0.0315 261.4)",
+          "oklch(27% 0.0315 261.4)",
+          "oklch(39% 0.0315 261.4)",
+          "oklch(51% 0.0315 261.4)",
+          "oklch(63% 0.0315 261.4)",
+          "oklch(75% 0.0315 261.4)",
+          "oklch(87% 0.0315 261.4)",
+          "oklch(95% 0.0237 261.4)"
+        ]
+      },
+      "selection": {
+        "role": "primary",
+        "displayName": "Repository Blue Wash",
+        "canonical": "#edf2fc",
+        "tonalRamp": [
+          "oklch(15% 0.0144 264.5)",
+          "oklch(27% 0.0144 264.5)",
+          "oklch(39% 0.0144 264.5)",
+          "oklch(51% 0.0144 264.5)",
+          "oklch(63% 0.0144 264.5)",
+          "oklch(75% 0.0144 264.5)",
+          "oklch(87% 0.0144 264.5)",
+          "oklch(95% 0.0144 264.5)"
+        ]
+      },
+      "selection-strong": {
+        "role": "primary",
+        "displayName": "Repository Blue",
+        "canonical": "#3155a6",
+        "tonalRamp": [
+          "oklch(15% 0.0847 263.9)",
+          "oklch(27% 0.1370 263.9)",
+          "oklch(39% 0.1370 263.9)",
+          "oklch(51% 0.1370 263.9)",
+          "oklch(63% 0.1370 263.9)",
+          "oklch(75% 0.1278 263.9)",
+          "oklch(87% 0.0634 263.9)",
+          "oklch(95% 0.0236 263.9)"
+        ]
+      },
+      "focus": {
+        "role": "primary",
+        "displayName": "Focus Blue",
+        "canonical": "#355bc5",
+        "tonalRamp": [
+          "oklch(15% 0.1023 265.7)",
+          "oklch(27% 0.1712 265.7)",
+          "oklch(39% 0.1712 265.7)",
+          "oklch(51% 0.1712 265.7)",
+          "oklch(63% 0.1712 265.7)",
+          "oklch(75% 0.1277 265.7)",
+          "oklch(87% 0.0633 265.7)",
+          "oklch(95% 0.0236 265.7)"
+        ]
+      },
+      "info-surface": {
+        "role": "secondary",
+        "displayName": "Info Blue Wash",
+        "canonical": "#dfe8fc",
+        "tonalRamp": [
+          "oklch(15% 0.0288 266.4)",
+          "oklch(27% 0.0288 266.4)",
+          "oklch(39% 0.0288 266.4)",
+          "oklch(51% 0.0288 266.4)",
+          "oklch(63% 0.0288 266.4)",
+          "oklch(75% 0.0288 266.4)",
+          "oklch(87% 0.0288 266.4)",
+          "oklch(95% 0.0236 266.4)"
+        ]
+      },
+      "info-text": {
+        "role": "secondary",
+        "displayName": "Info Blue",
+        "canonical": "#3155a6",
+        "tonalRamp": [
+          "oklch(15% 0.0847 263.9)",
+          "oklch(27% 0.1370 263.9)",
+          "oklch(39% 0.1370 263.9)",
+          "oklch(51% 0.1370 263.9)",
+          "oklch(63% 0.1370 263.9)",
+          "oklch(75% 0.1278 263.9)",
+          "oklch(87% 0.0634 263.9)",
+          "oklch(95% 0.0236 263.9)"
+        ]
+      },
+      "success-surface": {
+        "role": "secondary",
+        "displayName": "Success Green Wash",
+        "canonical": "#dceee3",
+        "tonalRamp": [
+          "oklch(15% 0.0240 159.1)",
+          "oklch(27% 0.0240 159.1)",
+          "oklch(39% 0.0240 159.1)",
+          "oklch(51% 0.0240 159.1)",
+          "oklch(63% 0.0240 159.1)",
+          "oklch(75% 0.0240 159.1)",
+          "oklch(87% 0.0240 159.1)",
+          "oklch(95% 0.0240 159.1)"
+        ]
+      },
+      "success-text": {
+        "role": "secondary",
+        "displayName": "Success Green",
+        "canonical": "#276449",
+        "tonalRamp": [
+          "oklch(15% 0.0330 161.7)",
+          "oklch(27% 0.0594 161.7)",
+          "oklch(39% 0.0777 161.7)",
+          "oklch(51% 0.0777 161.7)",
+          "oklch(63% 0.0777 161.7)",
+          "oklch(75% 0.0777 161.7)",
+          "oklch(87% 0.0777 161.7)",
+          "oklch(95% 0.0753 161.7)"
+        ]
+      },
+      "warning-surface": {
+        "role": "secondary",
+        "displayName": "Warning Amber Wash",
+        "canonical": "#f4e3b9",
+        "tonalRamp": [
+          "oklch(15% 0.0307 88.6)",
+          "oklch(27% 0.0552 88.6)",
+          "oklch(39% 0.0578 88.6)",
+          "oklch(51% 0.0578 88.6)",
+          "oklch(63% 0.0578 88.6)",
+          "oklch(75% 0.0578 88.6)",
+          "oklch(87% 0.0578 88.6)",
+          "oklch(95% 0.0578 88.6)"
+        ]
+      },
+      "warning-text": {
+        "role": "secondary",
+        "displayName": "Warning Amber",
+        "canonical": "#865b13",
+        "tonalRamp": [
+          "oklch(15% 0.0317 74.3)",
+          "oklch(27% 0.0571 74.3)",
+          "oklch(39% 0.0825 74.3)",
+          "oklch(51% 0.0995 74.3)",
+          "oklch(63% 0.0995 74.3)",
+          "oklch(75% 0.0995 74.3)",
+          "oklch(87% 0.0995 74.3)",
+          "oklch(95% 0.0399 74.3)"
+        ]
+      },
+      "error-surface": {
+        "role": "secondary",
+        "displayName": "Error Garnet Wash",
+        "canonical": "#f9dfdf",
+        "tonalRamp": [
+          "oklch(15% 0.0287 17.7)",
+          "oklch(27% 0.0287 17.7)",
+          "oklch(39% 0.0287 17.7)",
+          "oklch(51% 0.0287 17.7)",
+          "oklch(63% 0.0287 17.7)",
+          "oklch(75% 0.0287 17.7)",
+          "oklch(87% 0.0287 17.7)",
+          "oklch(95% 0.0249 17.7)"
+        ]
+      },
+      "error-text": {
+        "role": "secondary",
+        "displayName": "Error Garnet",
+        "canonical": "#9d3d43",
+        "tonalRamp": [
+          "oklch(15% 0.0602 19.4)",
+          "oklch(27% 0.1083 19.4)",
+          "oklch(39% 0.1281 19.4)",
+          "oklch(51% 0.1281 19.4)",
+          "oklch(63% 0.1281 19.4)",
+          "oklch(75% 0.1281 19.4)",
+          "oklch(87% 0.0695 19.4)",
+          "oklch(95% 0.0249 19.4)"
+        ]
+      },
+      "merged-surface": {
+        "role": "secondary",
+        "displayName": "Merged Violet Wash",
+        "canonical": "#e4dff5",
+        "tonalRamp": [
+          "oklch(15% 0.0301 296.2)",
+          "oklch(27% 0.0301 296.2)",
+          "oklch(39% 0.0301 296.2)",
+          "oklch(51% 0.0301 296.2)",
+          "oklch(63% 0.0301 296.2)",
+          "oklch(75% 0.0301 296.2)",
+          "oklch(87% 0.0301 296.2)",
+          "oklch(95% 0.0268 296.2)"
+        ]
+      },
+      "merged-text": {
+        "role": "secondary",
+        "displayName": "Merged Violet",
+        "canonical": "#635097",
+        "tonalRamp": [
+          "oklch(15% 0.0828 294.1)",
+          "oklch(27% 0.1119 294.1)",
+          "oklch(39% 0.1119 294.1)",
+          "oklch(51% 0.1119 294.1)",
+          "oklch(63% 0.1119 294.1)",
+          "oklch(75% 0.1119 294.1)",
+          "oklch(87% 0.0707 294.1)",
+          "oklch(95% 0.0263 294.1)"
+        ]
+      },
+      "diff-add": {
+        "role": "tertiary",
+        "displayName": "Diff Addition",
+        "canonical": "#276449",
+        "tonalRamp": [
+          "oklch(15% 0.0330 161.7)",
+          "oklch(27% 0.0594 161.7)",
+          "oklch(39% 0.0777 161.7)",
+          "oklch(51% 0.0777 161.7)",
+          "oklch(63% 0.0777 161.7)",
+          "oklch(75% 0.0777 161.7)",
+          "oklch(87% 0.0777 161.7)",
+          "oklch(95% 0.0753 161.7)"
+        ]
+      },
+      "diff-add-surface": {
+        "role": "tertiary",
+        "displayName": "Diff Addition Wash",
+        "canonical": "#dceee3",
+        "tonalRamp": [
+          "oklch(15% 0.0240 159.1)",
+          "oklch(27% 0.0240 159.1)",
+          "oklch(39% 0.0240 159.1)",
+          "oklch(51% 0.0240 159.1)",
+          "oklch(63% 0.0240 159.1)",
+          "oklch(75% 0.0240 159.1)",
+          "oklch(87% 0.0240 159.1)",
+          "oklch(95% 0.0240 159.1)"
+        ]
+      },
+      "diff-remove": {
+        "role": "tertiary",
+        "displayName": "Diff Deletion",
+        "canonical": "#9d3d43",
+        "tonalRamp": [
+          "oklch(15% 0.0602 19.4)",
+          "oklch(27% 0.1083 19.4)",
+          "oklch(39% 0.1281 19.4)",
+          "oklch(51% 0.1281 19.4)",
+          "oklch(63% 0.1281 19.4)",
+          "oklch(75% 0.1281 19.4)",
+          "oklch(87% 0.0695 19.4)",
+          "oklch(95% 0.0249 19.4)"
+        ]
+      },
+      "diff-remove-surface": {
+        "role": "tertiary",
+        "displayName": "Diff Deletion Wash",
+        "canonical": "#f9dfdf",
+        "tonalRamp": [
+          "oklch(15% 0.0287 17.7)",
+          "oklch(27% 0.0287 17.7)",
+          "oklch(39% 0.0287 17.7)",
+          "oklch(51% 0.0287 17.7)",
+          "oklch(63% 0.0287 17.7)",
+          "oklch(75% 0.0287 17.7)",
+          "oklch(87% 0.0287 17.7)",
+          "oklch(95% 0.0249 17.7)"
+        ]
+      },
+      "diff-hunk": {
+        "role": "tertiary",
+        "displayName": "Diff Hunk",
+        "canonical": "#3155a6",
+        "tonalRamp": [
+          "oklch(15% 0.0847 263.9)",
+          "oklch(27% 0.1370 263.9)",
+          "oklch(39% 0.1370 263.9)",
+          "oklch(51% 0.1370 263.9)",
+          "oklch(63% 0.1370 263.9)",
+          "oklch(75% 0.1278 263.9)",
+          "oklch(87% 0.0634 263.9)",
+          "oklch(95% 0.0236 263.9)"
+        ]
+      }
+    },
+    "typographyMeta": {
+      "heading": {
+        "displayName": "Heading",
+        "purpose": "Section and work-surface titles."
+      },
+      "body": {
+        "displayName": "Body",
+        "purpose": "Standard interface copy and form content."
+      },
+      "label": {
+        "displayName": "Label",
+        "purpose": "Control labels and concise row labels."
+      },
+      "metadata": {
+        "displayName": "Metadata",
+        "purpose": "Timestamps, counts, paths, refs, and supporting status details."
+      }
+    },
+    "shadows": [
+      {
+        "name": "small",
+        "value": "0 1px 2px rgba(23, 28, 36, 0.08)",
+        "purpose": "Low-elevation detail."
+      },
+      {
+        "name": "medium",
+        "value": "0 8px 24px rgba(23, 28, 36, 0.12)",
+        "purpose": "Floating cards, hover cards, and tooltips."
+      },
+      {
+        "name": "large",
+        "value": "0 22px 64px rgba(23, 28, 36, 0.2)",
+        "purpose": "Dialog surfaces and other high-elevation overlays."
+      }
+    ],
+    "motion": [
+      {
+        "name": "fast",
+        "value": "120ms",
+        "purpose": "Small state transitions."
+      },
+      {
+        "name": "standard",
+        "value": "180ms",
+        "purpose": "Standard component state transitions."
+      },
+      {
+        "name": "deliberate",
+        "value": "240ms",
+        "purpose": "Deliberate transitions."
+      },
+      {
+        "name": "ease",
+        "value": "cubic-bezier(0.2, 0, 0, 1)",
+        "purpose": "Default easing for state transitions."
+      },
+      {
+        "name": "reduced",
+        "value": "0.01ms",
+        "purpose": "Reduced-motion duration; essential status text remains present."
+      }
+    ],
+    "breakpoints": [
+      {
+        "name": "shell-1040",
+        "value": "1040px"
+      },
+      {
+        "name": "shell-1199",
+        "value": "1199px"
+      }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "Primary action for a decisive local workbench operation.",
+      "html": "<button class=\"ds-btn-primary\" type=\"button\">Create branch</button>",
+      "css": ".ds-btn-primary { display: inline-flex; align-items: center; justify-content: center; gap: 8px; height: 36px; padding: 0 12px; border: 0; border-radius: 6px; background: #171c24; color: #ffffff; font: 500 14px/1.5 Inter, -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif; transition: background-color 180ms cubic-bezier(0.2, 0, 0, 1); } .ds-btn-primary:hover { background: #2a3340; } .ds-btn-primary:active { background: #11151b; } .ds-btn-primary:focus-visible { outline: 2px solid #355bc5; outline-offset: 1px; }"
+    },
+    {
+      "name": "Secondary Button",
+      "kind": "button",
+      "refersTo": "button-secondary",
+      "description": "Secondary action with an essential boundary and quiet hover.",
+      "html": "<button class=\"ds-btn-secondary\" type=\"button\">Cancel</button>",
+      "css": ".ds-btn-secondary { display: inline-flex; align-items: center; justify-content: center; height: 36px; padding: 0 12px; border: 1px solid #7c879a; border-radius: 6px; background: #ffffff; color: #171c24; font: 500 14px/1.5 Inter, -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif; transition: background-color 180ms cubic-bezier(0.2, 0, 0, 1); } .ds-btn-secondary:hover { background: #f2f4f8; } .ds-btn-secondary:focus-visible { outline: 2px solid #355bc5; outline-offset: 1px; }"
+    },
+    {
+      "name": "Ghost Button",
+      "kind": "button",
+      "refersTo": "button-ghost",
+      "description": "Low-emphasis action that reveals an inset hover surface.",
+      "html": "<button class=\"ds-btn-ghost\" type=\"button\">View details</button>",
+      "css": ".ds-btn-ghost { display: inline-flex; align-items: center; justify-content: center; height: 36px; padding: 0 12px; border: 0; border-radius: 6px; background: transparent; color: #536176; font: 500 14px/1.5 Inter, -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif; transition: background-color 180ms cubic-bezier(0.2, 0, 0, 1), color 180ms cubic-bezier(0.2, 0, 0, 1); } .ds-btn-ghost:hover { background: #f2f4f8; color: #171c24; } .ds-btn-ghost:focus-visible { outline: 2px solid #355bc5; outline-offset: 1px; }"
+    },
+    {
+      "name": "Accent Button",
+      "kind": "button",
+      "refersTo": "button-accent",
+      "description": "Repository Blue action for a selected or navigational context.",
+      "html": "<button class=\"ds-btn-accent\" type=\"button\">Open selection</button>",
+      "css": ".ds-btn-accent { display: inline-flex; align-items: center; justify-content: center; height: 36px; padding: 0 12px; border: 0; border-radius: 6px; background: #3155a6; color: #ffffff; font: 500 14px/1.5 Inter, -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif; transition: background-color 180ms cubic-bezier(0.2, 0, 0, 1); } .ds-btn-accent:hover { background: #3155a6; } .ds-btn-accent:focus-visible { outline: 2px solid #355bc5; outline-offset: 1px; }"
+    },
+    {
+      "name": "Danger Button",
+      "kind": "button",
+      "refersTo": "button-danger",
+      "description": "Destructive action with a labelled error surface and text.",
+      "html": "<button class=\"ds-btn-danger\" type=\"button\">Delete branch</button>",
+      "css": ".ds-btn-danger { display: inline-flex; align-items: center; justify-content: center; height: 36px; padding: 0 12px; border: 1px solid #9d3d43; border-radius: 6px; background: #f9dfdf; color: #9d3d43; font: 500 14px/1.5 Inter, -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif; transition: background-color 180ms cubic-bezier(0.2, 0, 0, 1); } .ds-btn-danger:hover { background: #f9dfdf; } .ds-btn-danger:focus-visible { outline: 2px solid #355bc5; outline-offset: 1px; }"
+    },
+    {
+      "name": "Field",
+      "kind": "input",
+      "refersTo": "field",
+      "description": "Text field for branch names, paths, and other repository values.",
+      "html": "<input class=\"ds-field\" type=\"text\" placeholder=\"feature/tokens\" aria-label=\"Branch name\">",
+      "css": ".ds-field { box-sizing: border-box; width: 100%; height: 36px; padding: 8px 12px; border: 1px solid #7c879a; border-radius: 6px; background: #ffffff; color: #171c24; font: 400 14px/1.5 Inter, -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif; } .ds-field::placeholder { color: #536176; } .ds-field:hover { border-color: #7c879a; } .ds-field:focus { border-color: #355bc5; outline: 0; box-shadow: 0 0 0 2px #355bc5; } .ds-field:disabled { cursor: not-allowed; background: #f2f4f8; opacity: 0.65; }"
+    },
+    {
+      "name": "Success Badge",
+      "kind": "chip",
+      "refersTo": "badge-success",
+      "description": "Text-labelled success status for checks and completed states.",
+      "html": "<span class=\"ds-badge-success\">Ready</span>",
+      "css": ".ds-badge-success { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border: 1px solid #276449; border-radius: 999px; background: #dceee3; color: #276449; font: 500 11px/16px Inter, -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif; } .ds-badge-success:focus-visible { outline: 2px solid #355bc5; outline-offset: 1px; }"
+    },
+    {
+      "name": "Dialog",
+      "kind": "card",
+      "refersTo": "dialog-overlay",
+      "description": "Elevated confirmation surface above the local-first workbench shell.",
+      "html": "<div class=\"ds-dialog-layer\"><section class=\"ds-dialog\" role=\"dialog\" aria-label=\"Confirm operation\"><h2>Confirm operation</h2><p>Review the captured preview before continuing.</p><button class=\"ds-dialog-close\" type=\"button\" aria-label=\"Close dialog\">\u00d7</button></section></div>",
+      "css": ".ds-dialog-layer { position: relative; min-height: 220px; } .ds-dialog-layer::before { content: \"\"; position: absolute; inset: 0; background: rgba(20, 24, 32, 0.34); } .ds-dialog { position: relative; width: min(100% - 32px, 512px); margin: 32px auto; padding: 20px; border: 1px solid #7c879a; border-radius: 12px; background: #ffffff; color: #171c24; box-shadow: 0 22px 64px rgba(23, 28, 36, 0.2); } .ds-dialog h2 { margin: 0 32px 8px 0; font: 500 20px/1.25 Inter, -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif; } .ds-dialog p { margin: 0; color: #536176; font: 400 14px/1.5 Inter, -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif; } .ds-dialog-close { position: absolute; top: 12px; right: 12px; width: 32px; height: 32px; border: 0; border-radius: 6px; background: transparent; color: #536176; font-size: 20px; } .ds-dialog-close:hover { background: #f2f4f8; color: #171c24; } .ds-dialog-close:focus-visible { outline: 2px solid #355bc5; outline-offset: 1px; }"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Quiet Workbench",
+    "overview": "Git Stacks is a quiet, precise desktop workbench for navigating branches, stacks, pull requests, changes, history, and stashes. The system adapts the cool-gray canvas, rounded white work surfaces, ink-colored primary actions, and restrained blue selection of the Journey CRM Dashboard reference into a local-first Git and GitHub product. Journey is a visual and material reference only: Git Stacks does not introduce CRM stages, analytics cards, or a web client.\n\nThe visual language is intentionally restrained. Workbench Ink makes primary actions and navigation feel decisive; Repository Blue keeps links, selection, focus, checked-out state, and stack edges legible without turning the whole interface into a status field. Rounded surfaces and quiet tonal layers organize dense repository information while preserving the desktop workbench hierarchy.",
+    "keyCharacteristics": [
+      "Cool-gray workspace canvas with white content surfaces and inset grouping surfaces.",
+      "Workbench Ink primary actions and navigation with Repository Blue selection and links.",
+      "Independent, text-labelled Git states for selection, checked-out state, pull-request lifecycle, checks, review, restacks, and diffs.",
+      "Compact information density for branch, pull-request, stash, history, and diff rows.",
+      "Local-first, keyboard-accessible, operation-safe behavior with no external font or network dependency."
+    ],
+    "rules": [
+      {
+        "name": "The Meaning Before Color Rule",
+        "body": "Every selection, checked-out branch, pull-request lifecycle, checks state, review decision, restack requirement, and diff role has an explicit text or icon meaning. Unknown or unavailable GitHub data uses the neutral unknown role and an explicit unavailable label; it is never represented as none, zero, or passing.",
+        "section": "colors"
+      },
+      {
+        "name": "The Essential Boundary Rule",
+        "body": "#d7dde7 is for decorative dividers only. Inputs, controls, and meaningful graphics that need a non-text boundary use #7c879a or the focus role.",
+        "section": "colors"
+      },
+      {
+        "name": "The Code Is Monospace Rule",
+        "body": "Use the system monospace stack for code, paths, refs, and OIDs; use the system sans stack for interface copy. No external font is loaded and no font files are copied from chat artifacts.",
+        "section": "typography"
+      },
+      {
+        "name": "The Flat-By-Default Rule",
+        "body": "Surfaces are flat at rest. Use a shadow only when a component is floating, transient, or deliberately elevated; do not use decorative shadows to imply Git state.",
+        "section": "elevation"
+      }
+    ],
+    "dos": [
+      "Do use Workbench Ink for primary actions and navigation, with Repository Blue reserved for links, selection, focus, and meaningful identity accents.",
+      "Do keep selection, checked-out state, pull-request lifecycle, checks, review, restacks, and diff additions/deletions/hunks independent and explicitly labelled.",
+      "Do use the 4px spacing rhythm, 36/44px controls, 44/56px rows, and the defined 12/16/24/999px radius scale where the current component architecture consumes them.",
+      "Do use #7c879a for essential boundaries, #355bc5 for keyboard focus, and text/icon descriptions alongside every Git status.",
+      "Do use npm run tokens:generate followed by npm run tokens:check after editing src/renderer/src/design-system/tokens.json; never hand-edit generated tokens.css.",
+      "Do keep the renderer local-first, preserve the sandbox/preload/IPC/CSP boundary, and retain busy-state text when reduced motion removes animation."
+    ],
+    "donts": [
+      "Don't globally replace --accent with ink; selection, links, checked-out state, and stack graphics remain Repository Blue, while merged pull requests remain violet.",
+      "Don't use color alone for status, lifecycle, review, checks, unknown/unavailable data, or diff meaning.",
+      "Don't use decorative #d7dde7 dividers as a substitute for essential control boundaries or meaningful graphics.",
+      "Don't add external font loading, font files from chat artifacts, a second manually maintained palette, CRM runtime behavior, or new Git/IPC/navigation semantics.",
+      "Don't claim that every existing component consumes all density or radius tokens; migrate each consumer as its owning issue changes it.",
+      "Don't use shadows to imply Git state; reserve depth for floating, transient, or elevated surfaces."
+    ]
+  }
+}
