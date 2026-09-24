@@ -128,6 +128,17 @@ Consumers should move from legacy aliases to the component role as their surface
 mapping rule is deliberately not a global `--accent` to ink replacement: links and selection remain
 blue, current branch and PR lifecycle remain independent, and merged PRs remain violet.
 
+## shadcn/ui implementation baseline
+
+The renderer builds on the repository's existing [shadcn/ui](https://ui.shadcn.com/)
+setup: `components.json` uses the New York style with CSS variables and the configured
+path aliases; primitives compose CVA variants (`class-variance-authority`) through the
+shared `cn()` helper (`clsx` + `tailwind-merge`) with Tailwind v4, Radix primitives, and
+Lucide icons. Semantic/component token consumption follows the generated `@theme` aliases
+and `var(--gs-*)` variables above. shadcn/ui is copied source and configuration, not a
+required runtime dependency, so this slice adds no shadcn CLI application dependency.
+See `DESIGN.md` for the implementation architecture.
+
 ## Tailwind and renderer specimen
 
 The generated `@theme inline` block exposes semantic color, font, type, radius, spacing, and shadow
