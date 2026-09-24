@@ -1,9 +1,12 @@
 import React from 'react'
 import { createRoot } from 'react-dom/client'
 import App from './App'
+import { FoundationsSpecimen } from './design-system/FoundationsSpecimen'
 import { TooltipProvider } from './components/ui/tooltip'
 import { RepositoryHoverCardProvider } from './components/repository-hover-cards'
 import './styles.css'
+
+const specimen = window.location.hash === '#/design-system-specimen'
 
 const root = document.getElementById('root')
 
@@ -15,7 +18,7 @@ createRoot(root).render(
   <React.StrictMode>
     <TooltipProvider delayDuration={450} skipDelayDuration={150}>
       <RepositoryHoverCardProvider>
-        <App />
+        {specimen ? <FoundationsSpecimen /> : <App />}
       </RepositoryHoverCardProvider>
     </TooltipProvider>
   </React.StrictMode>,
