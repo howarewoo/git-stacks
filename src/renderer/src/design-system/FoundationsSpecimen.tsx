@@ -25,10 +25,7 @@ export function FoundationsSpecimen() {
           </div>
           <Badge variant="success">Ready</Badge>
         </div>
-        <form
-          className="foundations-specimen-form"
-          onSubmit={(event) => event.preventDefault()}
-        >
+        <form className="foundations-specimen-form" onSubmit={(event) => event.preventDefault()}>
           <label htmlFor="specimen-branch">Branch name</label>
           <Input
             id="specimen-branch"
@@ -89,9 +86,12 @@ export function FoundationsSpecimen() {
           <Badge variant="warning">1 review</Badge>
         </div>
         <pre className="foundations-specimen-diff" tabIndex={0} aria-label="Sample unified diff">
-          <span className="foundations-diff-hunk">@@ -1,2 +1,2 @@</span>{'\n'}
-          <span className="foundations-diff-remove">- const accent = &apos;purple&apos;</span>{'\n'}
-          <span className="foundations-diff-add">+ const selection = &apos;blue&apos;</span>{'\n'}
+          <span className="foundations-diff-hunk">@@ -1,2 +1,2 @@</span>
+          {'\n'}
+          <span className="foundations-diff-remove">- const accent = &apos;purple&apos;</span>
+          {'\n'}
+          <span className="foundations-diff-add">+ const selection = &apos;blue&apos;</span>
+          {'\n'}
         </pre>
       </section>
     </main>

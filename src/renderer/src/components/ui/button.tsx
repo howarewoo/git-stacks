@@ -16,7 +16,8 @@ const buttonVariants = cva(
           'text-[var(--gs-semantic-text-secondary)] hover:bg-[var(--gs-semantic-surface-inset)] hover:text-[var(--gs-semantic-text-primary)]',
         subtle:
           'bg-[var(--gs-semantic-surface-inset)] text-[var(--gs-semantic-text-secondary)] hover:bg-[var(--gs-semantic-surface-hover)] hover:text-[var(--gs-semantic-text-primary)]',
-        accent: 'bg-[var(--gs-semantic-selection-text)] text-white hover:bg-[var(--gs-semantic-selection-border)]',
+        accent:
+          'bg-[var(--gs-semantic-selection-text)] text-white hover:bg-[var(--gs-semantic-selection-border)]',
         danger:
           'border border-[var(--gs-semantic-feedback-error-text)] bg-[var(--gs-semantic-feedback-error-surface)] text-[var(--gs-semantic-feedback-error-text)] hover:bg-[var(--gs-semantic-feedback-error-surface)]',
         link: 'text-[var(--gs-component-button-link)] underline decoration-[var(--gs-semantic-selection-border)] underline-offset-4 hover:decoration-[var(--gs-component-button-link)]',

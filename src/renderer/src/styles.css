@@ -10,7 +10,8 @@
 }
 
 .foundations-specimen {
-  min-height: 100vh;
+  min-height: 0;
+  max-height: 100%;
   overflow: auto;
   background: var(--gs-semantic-surface-canvas);
   color: var(--gs-semantic-text-primary);
@@ -214,7 +215,7 @@ button:disabled {
   background: var(--gs-semantic-selection-background);
 }
 
-::focus-visible {
+:focus-visible {
   outline: 2px solid var(--gs-semantic-focus-ring);
   outline-offset: 2px;
 }
