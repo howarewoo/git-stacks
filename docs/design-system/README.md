@@ -28,21 +28,21 @@ The source has four layers:
 
 ## Baseline tokens
 
-| Role | Value | Notes |
-| --- | --- | --- |
-| Workspace canvas | `#E8ECF3` | Cool-gray application backdrop |
-| Content / inset surface | `#FFFFFF` / `#F2F4F8` | Rounded work surfaces and quiet grouping |
-| Primary text / action | `#171C24` | Primary action, navigation, and emphasis |
-| Primary action hover / pressed | `#2A3340` / `#11151B` | Separate interaction states |
-| Secondary readable text | `#536176` | Muted metadata remains readable |
-| Decorative / essential border | `#D7DDE7` / `#7C879A` | Essential boundaries use the stronger value |
-| Selection background / border | `#EDF2FC` / `#3155A6` | Selection is independent from checked-out state |
-| Focus ring | `#355BC5` | Keyboard focus is always visible |
-| Info | `#DFE8FC` / `#3155A6` | Background / text |
-| Success | `#DCEEE3` / `#276449` | Background / text |
-| Warning | `#F4E3B9` / `#865B13` | Background / text |
-| Error | `#F9DFDF` / `#9D3D43` | Background / text |
-| Merged PR | `#E4DFF5` / `#635097` | Git Stacks adaptation of Journey violet |
+| Role                           | Value                 | Notes                                           |
+| ------------------------------ | --------------------- | ----------------------------------------------- |
+| Workspace canvas               | `#e8ecf3`             | Cool-gray application backdrop                  |
+| Content / inset surface        | `#ffffff` / `#f2f4f8` | Rounded work surfaces and quiet grouping        |
+| Primary text / action          | `#171c24`             | Primary action, navigation, and emphasis        |
+| Primary action hover / pressed | `#2a3340` / `#11151b` | Separate interaction states                     |
+| Secondary readable text        | `#536176`             | Muted metadata remains readable                 |
+| Decorative / essential border  | `#d7dde7` / `#7c879a` | Essential boundaries use the stronger value     |
+| Selection background / border  | `#edf2fc` / `#3155a6` | Selection is independent from checked-out state |
+| Focus ring                     | `#355bc5`             | Keyboard focus is always visible                |
+| Info                           | `#dfe8fc` / `#3155a6` | Background / text                               |
+| Success                        | `#dceee3` / `#276449` | Background / text                               |
+| Warning                        | `#f4e3b9` / `#865b13` | Background / text                               |
+| Error                          | `#f9dfdf` / `#9d3d43` | Background / text                               |
+| Merged PR                      | `#e4dff5` / `#635097` | Git Stacks adaptation of Journey violet         |
 
 The editable source also defines the 14px body, 13px label, 12px metadata scale; 4px spacing
 rhythm; 12px controls, 16px nested items, 24px work surfaces, and pill radii; 36/44px compact and
@@ -59,15 +59,15 @@ not a global ink replacement.
 
 Git states are intentionally independent and always require a text label or icon description:
 
-| State | Role contract | Required presentation |
-| --- | --- | --- |
-| Checked out | `component.git.checked-out-*` | Branch identity plus “Current” label/icon |
-| Selected row | `component.row.selected-*` | Selection background/border plus selected label |
-| PR open / merged / closed | `component.git.pr-*-text` | Lifecycle text, icon, and optional metadata |
-| Checks passing / failing / unknown | `component.git.checks-*-text` | Text label and status icon; unknown is not passing |
-| Review approved / changes / unknown | `component.git.review-*-text` | Decision text and icon; unavailable stays unknown |
-| Requires restack | `component.git.requires-restack-*` | Warning surface and explicit “Restack required” text |
-| Diff addition / deletion / hunk | `component.diff.*` | Prefix, text, and surface; never color alone |
+| State                               | Role contract                      | Required presentation                                |
+| ----------------------------------- | ---------------------------------- | ---------------------------------------------------- |
+| Checked out                         | `component.git.checked-out-*`      | Branch identity plus “Current” label/icon            |
+| Selected row                        | `component.row.selected-*`         | Selection background/border plus selected label      |
+| PR open / merged / closed           | `component.git.pr-*-text`          | Lifecycle text, icon, and optional metadata          |
+| Checks passing / failing / unknown  | `component.git.checks-*-text`      | Text label and status icon; unknown is not passing   |
+| Review approved / changes / unknown | `component.git.review-*-text`      | Decision text and icon; unavailable stays unknown    |
+| Requires restack                    | `component.git.requires-restack-*` | Warning surface and explicit “Restack required” text |
+| Diff addition / deletion / hunk     | `component.diff.*`                 | Prefix, text, and surface; never color alone         |
 
 Unknown or unavailable GitHub data uses the neutral unknown roles and an explicit unavailable label.
 It must not be represented as zero, none, or successful.
@@ -79,25 +79,28 @@ luminance formula. Normal text uses a 4.5:1 target; essential control boundaries
 graphics use 3:1. Decorative dividers are documented separately and are not a substitute for an
 essential boundary.
 
-| Pair | Ratio / target | Result |
-| --- | --- | --- |
-| Primary `#171C24` on content `#FFFFFF` | 17.10:1 / 4.5 | Pass |
-| Primary `#171C24` on inset `#F2F4F8` | 15.53:1 / 4.5 | Pass |
-| Secondary `#536176` on content `#FFFFFF` | 6.29:1 / 4.5 | Pass |
-| Secondary `#536176` on canvas `#E8ECF3` | 5.31:1 / 4.5 | Pass |
-| Link / selection `#3155A6` on content | 7.05:1 / 4.5 | Pass |
-| Link / selection `#3155A6` on selection `#EDF2FC` | 6.28:1 / 4.5 | Pass |
-| Info `#3155A6` on info `#DFE8FC` | 5.73:1 / 4.5 | Pass |
-| Success `#276449` on success `#DCEEE3` | 5.78:1 / 4.5 | Pass |
-| Warning `#865B13` on warning `#F4E3B9` | 4.70:1 / 4.5 | Pass |
-| Error `#9D3D43` on error `#F9DFDF` | 5.23:1 / 4.5 | Pass |
-| Merged PR `#635097` on merged `#E4DFF5` | 5.18:1 / 4.5 | Pass |
-| Essential border `#7C879A` on content | 3.63:1 / 3 | Pass |
-| Essential border `#7C879A` on canvas | 3.06:1 / 3 | Pass |
-| Focus `#355BC5` on content / selection | 6.08:1 / 5.42:1 / 3 | Pass |
-| Primary hover `#2A3340` with white text | 12.76:1 / 4.5 | Pass |
-| Primary pressed `#11151B` with white text | 18.31:1 / 4.5 | Pass |
-| Decorative divider `#D7DDE7` on content | 1.36:1 / decorative | Allowed only for non-essential dividers |
+| Pair                                              | Ratio / target      | Result                                  |
+| ------------------------------------------------- | ------------------- | --------------------------------------- |
+| Primary `#171c24` on content `#ffffff`            | 17.10:1 / 4.5       | Pass                                    |
+| Primary `#171c24` on inset `#f2f4f8`              | 15.53:1 / 4.5       | Pass                                    |
+| Secondary `#536176` on content `#ffffff`          | 6.29:1 / 4.5        | Pass                                    |
+| Secondary `#536176` on canvas `#e8ecf3`           | 5.31:1 / 4.5        | Pass                                    |
+| Link / selection `#3155a6` on content             | 7.05:1 / 4.5        | Pass                                    |
+| Link / selection `#3155a6` on selection `#edf2fc` | 6.28:1 / 4.5        | Pass                                    |
+| Info `#3155a6` on info `#dfe8fc`                  | 5.73:1 / 4.5        | Pass                                    |
+| Success `#276449` on success `#dceee3`            | 5.78:1 / 4.5        | Pass                                    |
+| Warning `#865b13` on warning `#f4e3b9`            | 4.70:1 / 4.5        | Pass                                    |
+| Error `#9d3d43` on error `#f9dfdf`                | 5.23:1 / 4.5        | Pass                                    |
+| Merged PR `#635097` on merged `#e4dff5`           | 5.18:1 / 4.5        | Pass                                    |
+| Essential border `#7c879a` on content             | 3.63:1 / 3          | Pass                                    |
+| Essential border `#7c879a` on canvas              | 3.06:1 / 3          | Pass                                    |
+| Focus `#355bc5` on content / selection            | 6.08:1 / 5.42:1 / 3 | Pass                                    |
+| Primary hover `#2a3340` with white text           | 12.76:1 / 4.5       | Pass                                    |
+| Primary pressed `#11151b` with white text         | 18.31:1 / 4.5       | Pass                                    |
+| Diff hunk `#3155a6` on inset `#f2f4f8`            | 6.40:1 / 4.5        | Pass                                    |
+| Primary `#171c24` on row hover `#e1e6ef`          | 13.65:1 / 4.5       | Pass                                    |
+| Secondary `#536176` on row hover `#e1e6ef`        | 5.02:1 / 4.5        | Pass                                    |
+| Decorative divider `#d7dde7` on content           | 1.36:1 / decorative | Allowed only for non-essential dividers |
 
 ## Motion and density
 
@@ -112,14 +115,14 @@ default for forms and primary work surfaces.
 The generated legacy aliases are temporary and are intentionally limited to the existing variable
 names. The removal owner is the migration issue that updates each consumer:
 
-| Legacy alias | Temporary semantic target | Removal owner |
-| --- | --- | --- |
-| `--canvas`, `--surface`, `--surface-muted`, `--surface-hover` | `semantic.surface.*` | Issue #5 shell/navigation migration |
-| `--ink`, `--ink-soft`, `--ink-muted` | `semantic.text.*` | Issue #4 shared controls and #5 shell migration |
-| `--line`, `--line-strong` | `semantic.border.*` | Issue #4 shared controls |
-| `--accent`, `--accent-strong`, `--accent-line`, `--accent-wash` | selection/link roles, then Git role | Issue #6 branch/stack migration |
-| `--ring`, `--ring-soft` | `semantic.focus.*` | Issue #4 shared controls |
-| status aliases | `semantic.feedback.*` and component Git roles | Issues #6–#8 by consumer |
+| Legacy alias                                                    | Temporary semantic target                     | Removal owner                                   |
+| --------------------------------------------------------------- | --------------------------------------------- | ----------------------------------------------- |
+| `--canvas`, `--surface`, `--surface-muted`, `--surface-hover`   | `semantic.surface.*`                          | Issue #5 shell/navigation migration             |
+| `--ink`, `--ink-soft`, `--ink-muted`                            | `semantic.text.*`                             | Issue #4 shared controls and #5 shell migration |
+| `--line`, `--line-strong`                                       | `semantic.border.*`                           | Issue #4 shared controls                        |
+| `--accent`, `--accent-strong`, `--accent-line`, `--accent-wash` | selection/link roles, then Git role           | Issue #6 branch/stack migration                 |
+| `--ring`, `--ring-soft`                                         | `semantic.focus.*`                            | Issue #4 shared controls                        |
+| status aliases                                                  | `semantic.feedback.*` and component Git roles | Issues #6–#8 by consumer                        |
 
 Consumers should move from legacy aliases to the component role as their surface is migrated. The
 mapping rule is deliberately not a global `--accent` to ink replacement: links and selection remain

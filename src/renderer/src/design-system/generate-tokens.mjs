@@ -39,10 +39,7 @@ const themeEntries = primitiveAndSemantic
     /^(semantic\.(surface|text|border|action|selection|focus|feedback|diff))\./.test(name),
   )
   .map(([name]) => {
-    const key = name
-      .slice('semantic.'.length)
-      .split('.')
-      .join('-')
+    const key = name.slice('semantic.'.length).split('.').join('-')
     return `  --color-${key}: var(--gs-${name.replaceAll('.', '-')});`
   })
   .concat([
