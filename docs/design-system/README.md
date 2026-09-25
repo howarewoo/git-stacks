@@ -160,3 +160,5 @@ button are at least 36px at ordinary density and 44px for coarse pointers. Rende
 inheritance lives in Tailwind's base layer so component typography utilities can override it.
 The issue #4 gallery, error, dialog, menu, and reduced-motion captures under `evidence/` were
 regenerated from the corrected renderer.
+The repeatable production interaction smoke is available with `npm run test:controls`; it verifies
+keyboard dismissal and focus return, the mixed checkbox state, and reduced motion.
