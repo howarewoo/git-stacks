@@ -1,99 +1,243 @@
 import * as React from 'react'
+import { Check, ChevronDown, LoaderCircle, MoreHorizontal, RefreshCw } from 'lucide-react'
 import { Badge } from '../components/ui/badge'
-import { Button } from '../components/ui/button'
+import { Button, IconButton } from '../components/ui/button'
+import { Checkbox } from '../components/ui/checkbox'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from '../components/ui/dialog'
+import { DropdownMenu } from '../components/ui/dropdown-menu'
+import { Field } from '../components/ui/field'
 import { Input } from '../components/ui/input'
+import { SegmentedControl } from '../components/ui/segmented-control'
+import { Select } from '../components/ui/select'
+import { Textarea } from '../components/ui/textarea'
+import { Tooltip, TooltipContent, TooltipTrigger } from '../components/ui/tooltip'
+import {
+  EmptyState,
+  InlineAlert,
+  LoadingState,
+  Surface,
+  SurfaceDescription,
+  SurfaceHeader,
+  SurfaceTitle,
+} from '../components/ui/surface'
 
 export function FoundationsSpecimen() {
   const [query, setQuery] = React.useState('feature/tokens')
+  const [saving, setSaving] = React.useState(false)
+  const [includeUntracked, setIncludeUntracked] = React.useState(true)
+  const [filter, setFilter] = React.useState<'all' | 'local' | 'remote'>('all')
+  const [dialogOpen, setDialogOpen] = React.useState(false)
+  const [dialogName, setDialogName] = React.useState('feature/controls')
 
   return (
     <main className="foundations-specimen" aria-labelledby="specimen-title">
       <div className="foundations-specimen-header">
         <div>
-          <p className="foundations-specimen-eyebrow">Git Stacks foundations</p>
-          <h1 id="specimen-title">Renderer specimen</h1>
-          <p>Semantic roles in a quiet developer workbench.</p>
+          <p className="foundations-specimen-eyebrow">Git Stacks shared controls</p>
+          <h1 id="specimen-title">Production component gallery</h1>
+          <p>
+            Production primitives demonstrate independent interaction, validation, and status
+            states.
+          </p>
         </div>
-        <Badge variant="accent">Design system</Badge>
+        <Badge variant="accent">Issue #4</Badge>
       </div>
 
-      <section className="foundations-specimen-card" aria-labelledby="specimen-controls-title">
-        <div className="foundations-specimen-section-heading">
+      <Surface aria-labelledby="specimen-actions-title">
+        <SurfaceHeader>
           <div>
-            <h2 id="specimen-controls-title">Controls</h2>
-            <p>Actions, fields, and status are independently labelled.</p>
+            <SurfaceTitle id="specimen-actions-title">Actions and icons</SurfaceTitle>
+            <SurfaceDescription>
+              Busy actions retain their label, target, and keyboard focus behavior.
+            </SurfaceDescription>
           </div>
-          <Badge variant="success">Ready</Badge>
-        </div>
-        <form className="foundations-specimen-form" onSubmit={(event) => event.preventDefault()}>
-          <label htmlFor="specimen-branch">Branch name</label>
-          <Input
-            id="specimen-branch"
-            value={query}
-            onChange={(event) => setQuery(event.target.value)}
-            placeholder="feature/my-change"
-          />
-          <Button type="submit">Create branch</Button>
-          <Button type="button" variant="secondary">
-            Cancel
+          <Badge variant="success">Available</Badge>
+        </SurfaceHeader>
+        <div className="controls-specimen-row">
+          <Button loading={saving} onClick={() => setSaving(true)}>
+            {saving ? (
+              <LoaderCircle aria-hidden="true" className="size-4 animate-spin" />
+            ) : (
+              <Check aria-hidden="true" className="size-4" />
+            )}
+            Save branch
           </Button>
-        </form>
-      </section>
-
-      <section className="foundations-specimen-card" aria-labelledby="specimen-row-title">
-        <div className="foundations-specimen-section-heading">
-          <div>
-            <h2 id="specimen-row-title">Branch stack</h2>
-            <p>Selection and checked-out state remain independent.</p>
-          </div>
-          <Badge variant="outline">2 branches</Badge>
+          <Button onClick={() => setSaving(false)} variant="secondary">
+            Clear busy state
+          </Button>
+          <Button variant="accent">Create branch</Button>
+          <Button variant="ghost">Ghost action</Button>
+          <Button variant="danger">Delete branch</Button>
+          <Button disabled tooltip="Connect a repository before this action is available.">
+            Unavailable action
+          </Button>
+          <IconButton label="Refresh preview" variant="secondary">
+            <RefreshCw aria-hidden="true" className="size-4" />
+          </IconButton>
         </div>
-        <div className="foundations-specimen-rows" role="list" aria-label="Branch stack">
-          <div className="foundations-specimen-row" role="listitem">
-            <span className="foundations-specimen-branch-mark" aria-hidden="true">
-              ●
-            </span>
-            <span className="foundations-specimen-branch-copy">
-              <strong>main</strong>
-              <small>origin/main · up to date</small>
-            </span>
-            <Badge variant="secondary">Default</Badge>
+        <InlineAlert tone="info" title="Loading is a state, not a layout change">
+          The action stays in the same footprint and exposes its busy state to assistive technology.
+        </InlineAlert>
+      </Surface>
+
+      <Surface aria-labelledby="specimen-fields-title">
+        <SurfaceHeader>
+          <div>
+            <SurfaceTitle id="specimen-fields-title">Fields and selection</SurfaceTitle>
+            <SurfaceDescription>
+              Visible labels, helper text, and errors stay associated with their controls.
+            </SurfaceDescription>
           </div>
-          <div
-            className="foundations-specimen-row foundations-specimen-row-selected"
-            role="listitem"
-            aria-current="true"
+          <Badge variant="warning">Validation</Badge>
+        </SurfaceHeader>
+        <div className="controls-specimen-grid">
+          <Field
+            id="specimen-branch"
+            label="Branch name"
+            description="Use a short, lowercase feature name."
+            error={query ? undefined : 'A branch name is required.'}
+            required
           >
-            <span className="foundations-specimen-branch-mark" aria-hidden="true">
-              ↳
-            </span>
-            <span className="foundations-specimen-branch-copy">
-              <strong>{query || 'feature/my-change'}</strong>
-              <small>Selected · local branch</small>
-            </span>
-            <Badge variant="accent">Selected</Badge>
-            <Badge variant="info">Current</Badge>
-          </div>
+            <Input
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              placeholder="feature/my-change"
+            />
+          </Field>
+          <Field
+            id="specimen-parent"
+            label="Parent branch"
+            description="Selection is independent from checked-out state."
+          >
+            <Select defaultValue="main">
+              <option value="main">main</option>
+              <option value="develop">develop</option>
+            </Select>
+          </Field>
+          <Field
+            id="specimen-description"
+            label="Description"
+            description="Optional context is preserved after an error."
+          >
+            <Textarea defaultValue="Keep this text while reviewing the operation." rows={3} />
+          </Field>
+          <Checkbox
+            id="specimen-include-untracked"
+            label="Include untracked files"
+            description="Untracked files are included in the stash preview."
+            checked={includeUntracked}
+            onChange={(event) => setIncludeUntracked(event.target.checked)}
+          />
+          <Checkbox
+            id="specimen-mixed"
+            label="Mixed selection"
+            indeterminate
+            description="Indeterminate remains distinct from checked."
+          />
         </div>
-      </section>
+        <div className="controls-specimen-row">
+          <SegmentedControl
+            label="Repository filter"
+            value={filter}
+            onValueChange={setFilter}
+            options={[
+              { value: 'all', label: 'All' },
+              { value: 'local', label: 'Local' },
+              { value: 'remote', label: 'Remote' },
+            ]}
+          />
+          <span className="controls-specimen-note" aria-live="polite">
+            Selected: {filter}
+          </span>
+        </div>
+      </Surface>
 
-      <section className="foundations-specimen-card" aria-labelledby="specimen-diff-title">
-        <div className="foundations-specimen-section-heading">
+      <Surface aria-labelledby="specimen-overlay-title">
+        <SurfaceHeader>
           <div>
-            <h2 id="specimen-diff-title">Diff excerpt</h2>
-            <p>Addition, deletion, and hunk roles include readable text.</p>
+            <SurfaceTitle id="specimen-overlay-title">Overlays and menus</SurfaceTitle>
+            <SurfaceDescription>
+              Keyboard entry, dismissal, visible focus, and focus return use one overlay vocabulary.
+            </SurfaceDescription>
           </div>
-          <Badge variant="warning">1 review</Badge>
+        </SurfaceHeader>
+        <div className="controls-specimen-row">
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button variant="secondary">Focusable tooltip</Button>
+            </TooltipTrigger>
+            <TooltipContent>
+              Tooltip content is announced and dismissible with Escape.
+            </TooltipContent>
+          </Tooltip>
+          <DropdownMenu.Root>
+            <DropdownMenu.Trigger asChild>
+              <Button variant="secondary">
+                Open actions
+                <ChevronDown aria-hidden="true" className="size-4" />
+              </Button>
+            </DropdownMenu.Trigger>
+            <DropdownMenu.Content>
+              <DropdownMenu.Item onSelect={() => undefined}>Preview merge</DropdownMenu.Item>
+              <DropdownMenu.Item disabled>Force push with lease</DropdownMenu.Item>
+              <DropdownMenu.Separator />
+              <DropdownMenu.Item onSelect={() => undefined}>Browse history</DropdownMenu.Item>
+            </DropdownMenu.Content>
+          </DropdownMenu.Root>
+          <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
+            <DialogTrigger asChild>
+              <Button variant="accent">Open dialog</Button>
+            </DialogTrigger>
+            <DialogContent>
+              <DialogHeader>
+                <DialogTitle>Keyboard-safe dialog</DialogTitle>
+                <DialogDescription>
+                  Escape closes the dialog and focus returns to the trigger.
+                </DialogDescription>
+              </DialogHeader>
+              <Field id="specimen-dialog-name" label="New branch" required>
+                <Input
+                  autoFocus
+                  value={dialogName}
+                  onChange={(event) => setDialogName(event.target.value)}
+                />
+              </Field>
+              <DialogFooter>
+                <Button variant="secondary" onClick={() => setDialogOpen(false)}>
+                  Cancel
+                </Button>
+                <Button onClick={() => setDialogOpen(false)}>Continue</Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
         </div>
-        <pre className="foundations-specimen-diff" tabIndex={0} aria-label="Sample unified diff">
-          <span className="foundations-diff-hunk">@@ -1,2 +1,2 @@</span>
-          {'\n'}
-          <span className="foundations-diff-remove">- const accent = &apos;purple&apos;</span>
-          {'\n'}
-          <span className="foundations-diff-add">+ const selection = &apos;blue&apos;</span>
-          {'\n'}
-        </pre>
-      </section>
+      </Surface>
+
+      <div className="controls-specimen-grid">
+        <LoadingState>Reading repository state…</LoadingState>
+        <InlineAlert tone="success" title="Success keeps the form">
+          The entered branch name remains available after completion.
+        </InlineAlert>
+        <InlineAlert tone="error" title="Action unavailable">
+          The operation did not run. Review the error and try again.
+        </InlineAlert>
+      </div>
+      <EmptyState>
+        <MoreHorizontal
+          aria-hidden="true"
+          className="size-6 text-[var(--gs-semantic-text-secondary)]"
+        />
+        <strong>No matching branches</strong>
+        <span>Try a different search or clear the filter.</span>
+      </EmptyState>
     </main>
   )
 }
