@@ -160,3 +160,35 @@ button are at least 36px at ordinary density and 44px for coarse pointers. Rende
 inheritance lives in Tailwind's base layer so component typography utilities can override it.
 The issue #4 gallery, error, dialog, menu, and reduced-motion captures under `evidence/` were
 regenerated from the corrected renderer.
+
+## Shell and navigation specimen
+
+Issue #5 adds a real-renderer shell fixture at
+`#/design-system-shell-specimen`. It exercises the same titlebar, toolbar grouping, six
+workspace destinations, repository identity, recent-repository affordance, adaptive inspector,
+and long path treatment as the production shell without requiring IPC or a network connection.
+The fixture keeps search, selected branch, and an in-progress commit message mounted while the
+inspector is hidden and reopened, which makes pane-state regressions directly observable.
+
+The shell reserves the native traffic-light region, keeps focusable titlebar content outside the
+`-webkit-app-region: drag` hit zone, and uses the foundation canvas/surface/ink/selection roles. The
+production route still owns the existing repository opening, recents, refresh, synchronization,
+branch, and details callbacks; the fixture is opt-in and does not introduce a second command or
+state system.
+
+### Responsive evidence
+
+Smoke was run against the live Electron renderer on macOS Darwin 25.5.0 arm64 (Electron 44.4.3).
+The 200% case used a 500 × 350 CSS viewport at device-pixel-ratio 2, equivalent to a 1000 × 700
+physical capture for the contract size. At every case the document width stayed within the viewport
+and no visible shell descendant overflowed horizontally; the inspector, navigation, and toolbar
+remained reachable. The native traffic-light region was also exercised in the desktop window.
+
+| Case                         | Before                                                       | After                                                       |
+| ---------------------------- | ------------------------------------------------------------ | ----------------------------------------------------------- |
+| 1000 × 700                   | `evidence/shell-before-1000x700.png`                         | `evidence/shell-after-1000x700.png`                         |
+| 1440 × 940                   | `evidence/shell-before-1440x940.png`                        | `evidence/shell-after-1440x940.png`                         |
+| 1920 × 1080                  | `evidence/shell-before-1920x1080.png`                        | `evidence/shell-after-1920x1080.png`                        |
+| 200% zoom, 1000 × 700 window | `evidence/shell-before-zoom-200-percent-1000x700-window.png` | `evidence/shell-after-zoom-200-percent-1000x700-window.png` |
+
+The delivery note records the exact validation command results and the live-renderer smoke steps.
