@@ -40,8 +40,8 @@ export const Checkbox = React.forwardRef<HTMLInputElement, CheckboxProps>(
               id={inputId}
               type="checkbox"
               aria-describedby={describedBy}
-              aria-invalid={error ? true : undefined}
-              className="peer absolute inset-0 size-5 cursor-pointer appearance-none rounded-[4px] border border-[var(--gs-component-field-border)] bg-[var(--gs-component-field-background)] outline-none transition-colors checked:border-[var(--gs-semantic-selection-border)] checked:bg-[var(--gs-semantic-selection-border)] indeterminate:border-[var(--gs-semantic-selection-border)] indeterminate:bg-[var(--gs-semantic-selection-border)] focus-visible:ring-2 focus-visible:ring-[var(--gs-component-field-focus-ring)] disabled:cursor-not-allowed disabled:opacity-60"
+              aria-invalid={error ? true : props['aria-invalid']}
+              className="peer absolute inset-0 size-5 cursor-pointer appearance-none rounded-[4px] border border-[var(--gs-component-field-border)] bg-[var(--gs-component-field-background)] outline-none transition-colors checked:border-[var(--gs-semantic-selection-border)] checked:bg-[var(--gs-semantic-selection-border)] indeterminate:border-[var(--gs-semantic-selection-border)] indeterminate:bg-[var(--gs-semantic-selection-border)] focus-visible:ring-2 focus-visible:ring-[var(--gs-component-field-focus-ring)] disabled:cursor-not-allowed disabled:opacity-60 aria-[invalid=true]:border-[var(--gs-semantic-feedback-error-text)]"
             />
             <span className="pointer-events-none relative z-10 hidden text-[var(--gs-semantic-text-inverse)] peer-checked:block peer-indeterminate:hidden">
               <Check aria-hidden="true" className="size-3.5" />
