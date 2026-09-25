@@ -2,7 +2,6 @@ import * as React from 'react'
 import { DropdownMenu } from './components/ui/dropdown-menu'
 import {
   AlertCircle,
-  Archive,
   ArrowDown,
   ArrowLeftRight,
   ArrowUp,
@@ -13,16 +12,13 @@ import {
   Cloud,
   Download,
   ExternalLink,
-  Files,
   FolderGit2,
   FolderOpen,
   GitBranch,
-  GitCommitHorizontal,
   GitFork,
   GitMerge,
   GitPullRequest,
   Info,
-  History,
   Layers,
   LoaderCircle,
   MoreHorizontal,
@@ -41,7 +37,6 @@ import {
 } from 'lucide-react'
 import type {
   Branch,
-  ChangedFile,
   DesktopAPI,
   GitAction,
   PullRequest,
@@ -74,12 +69,15 @@ import {
 } from './lib/branches'
 import { WorkflowDialog, type WorkflowRequest } from './components/workflow-dialog'
 import { WorkspaceNavigation } from './components/workspace-navigation'
+import { HistoryView, OperationBanner, StackView } from './components/repository-views'
 import {
-  FileInspector,
-  HistoryView,
-  OperationBanner,
-  StackView,
-} from './components/repository-views'
+  ChangesView,
+  PullRequestListView,
+  StashesView,
+  changeGroups,
+  matchesPullRequest,
+} from './components/data-views'
+import { checkLabel, checksVariant } from './lib/pull-request-state'
 
 type WorkspaceView = 'branches' | 'stacks' | 'history' | 'changes' | 'pullRequests' | 'stashes'
 type BranchFilter = 'all' | 'local' | 'remote' | 'prs'
@@ -212,36 +210,6 @@ function formatBranchDate(value: string): string {
   if (elapsed < 86_400_000) return `${Math.max(1, Math.floor(elapsed / 3_600_000))}h ago`
   if (elapsed < 604_800_000) return `${Math.max(1, Math.floor(elapsed / 86_400_000))}d ago`
   return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
-}
-
-function fileIsStaged(file: ChangedFile): boolean {
-  return file.index !== '' && file.index !== ' ' && file.index !== '?'
-}
-
-function fileIsUnstaged(file: ChangedFile): boolean {
-  return file.worktree !== '' && file.worktree !== ' '
-}
-
-function statusLetter(value: string): string {
-  if (!value || value === ' ') return '·'
-  if (value === '?') return 'U'
-  return value
-}
-
-function checksVariant(
-  checks: PullRequest['checks'],
-): 'success' | 'danger' | 'warning' | 'secondary' {
-  if (checks === 'passing') return 'success'
-  if (checks === 'failing') return 'danger'
-  if (checks === 'pending') return 'warning'
-  return 'secondary'
-}
-
-function checkLabel(checks: PullRequest['checks']): string {
-  if (checks === 'passing') return 'checks passing'
-  if (checks === 'failing') return 'checks failing'
-  if (checks === 'pending') return 'checks pending'
-  return 'no checks'
 }
 
 function App() {
@@ -493,28 +461,12 @@ function App() {
     [branchByName, visibleBranches],
   )
 
-  const stagedFiles = React.useMemo(
-    () => snapshot?.files.filter((file) => fileIsStaged(file)) ?? [],
-    [snapshot],
+  const changeState = React.useMemo(
+    () => changeGroups(snapshot?.files ?? [], search),
+    [snapshot, search],
   )
-  const unstagedFiles = React.useMemo(
-    () =>
-      snapshot?.files.filter(
-        (file) => fileIsUnstaged(file) || (!fileIsStaged(file) && file.index === '?'),
-      ) ?? [],
-    [snapshot],
-  )
-  const fileSearch = search.trim().toLowerCase()
-  const visibleStagedFiles = stagedFiles.filter((file) =>
-    `${file.path} ${file.originalPath ?? ''}`.toLowerCase().includes(fileSearch),
-  )
-  const visibleUnstagedFiles = unstagedFiles.filter((file) =>
-    `${file.path} ${file.originalPath ?? ''}`.toLowerCase().includes(fileSearch),
-  )
-  const conflictedFiles = React.useMemo(
-    () => snapshot?.files.filter((file) => file.conflicted) ?? [],
-    [snapshot],
-  )
+  const stagedFiles = changeState.staged
+  const conflictedFiles = changeState.conflicted
   const isBusy = Boolean(busyAction || opening || refreshing)
   const currentBranch = snapshot?.currentBranch ?? null
   const allBranches = snapshot?.branches ?? []
@@ -1100,421 +1052,63 @@ function App() {
   const renderChanges = () => {
     if (!snapshot) return null
     return (
-      <div className="changes-view">
-        <div className="list-toolbar">
-          <div className="list-title-group">
-            <h1>Working changes</h1>
-            <span className="list-subtitle">
-              {snapshot.files.length} file{snapshot.files.length === 1 ? '' : 's'}
-            </span>
-          </div>
-          <Button
-            disabled={snapshot.files.length === 0 || isBusy}
-            tooltip="Shelve tracked working changes into a local stash and restore a clean tree. Choose whether untracked files are included."
-            onClick={() => openWorkflow({ kind: 'stash' })}
-            size="sm"
-            variant="secondary"
-          >
-            {busyAction === 'Stash changes' ? (
-              <LoaderCircle className="size-3.5 animate-spin" />
-            ) : (
-              <Archive className="size-3.5" />
-            )}
-            Stash changes
-          </Button>
-        </div>
-        <div className="changes-columns">
-          <section className="change-section" aria-labelledby="staged-heading">
-            <div className="change-section-header">
-              <div>
-                <h2 id="staged-heading">Staged</h2>
-                <span>
-                  {stagedFiles.length} file{stagedFiles.length === 1 ? '' : 's'} ready to commit
-                </span>
-              </div>
-              <Badge variant={stagedFiles.length > 0 ? 'accent' : 'secondary'}>
-                {stagedFiles.length}
-              </Badge>
-              <Button
-                size="sm"
-                variant="ghost"
-                disabled={isBusy || !visibleStagedFiles.length}
-                tooltip={
-                  fileSearch
-                    ? 'Remove the shown files from the index; working-tree edits remain. Hidden staged files stay staged.'
-                    : 'Remove all staged changes from the index; working-tree edits remain. Nothing is discarded.'
-                }
-                onClick={() =>
-                  runAction(
-                    {
-                      type: 'unstage',
-                      paths: [
-                        ...new Set(
-                          visibleStagedFiles.flatMap((file) =>
-                            file.originalPath ? [file.path, file.originalPath] : [file.path],
-                          ),
-                        ),
-                      ],
-                    },
-                    'Unstage files',
-                  )
-                }
-              >
-                {fileSearch ? 'Unstage shown' : 'Unstage all'}
-              </Button>
-            </div>
-            {visibleStagedFiles.length > 0 ? (
-              <div className="file-list">
-                {visibleStagedFiles.map((file) => renderFileRow(file, 'unstage'))}
-              </div>
-            ) : (
-              <div className="section-empty">
-                {fileSearch
-                  ? 'No staged files match your search.'
-                  : 'Stage files from the working tree to prepare a commit.'}
-              </div>
-            )}
-          </section>
-          <section className="change-section" aria-labelledby="unstaged-heading">
-            <div className="change-section-header">
-              <div>
-                <h2 id="unstaged-heading">Unstaged</h2>
-                <span>Changes in the working tree</span>
-              </div>
-              <Badge variant={unstagedFiles.length > 0 ? 'warning' : 'secondary'}>
-                {unstagedFiles.length}
-              </Badge>
-              <Button
-                size="sm"
-                variant="ghost"
-                disabled={isBusy || !visibleUnstagedFiles.length || conflictedFiles.length > 0}
-                tooltip={
-                  conflictedFiles.length > 0
-                    ? 'Resolve conflicts before staging — conflicted files cannot be staged in bulk.'
-                    : fileSearch
-                      ? 'Stage the shown working-tree changes for the next commit. Hidden unstaged files stay unstaged.'
-                      : 'Stage all working-tree changes for the next commit. Local index only; nothing is committed yet.'
-                }
-                onClick={() =>
-                  runAction(
-                    { type: 'stage', paths: visibleUnstagedFiles.map((file) => file.path) },
-                    'Stage files',
-                  )
-                }
-              >
-                {fileSearch ? 'Stage shown' : 'Stage all'}
-              </Button>
-            </div>
-            {visibleUnstagedFiles.length > 0 ? (
-              <div className="file-list">
-                {visibleUnstagedFiles.map((file) => renderFileRow(file, 'stage'))}
-              </div>
-            ) : (
-              <div className="section-empty">
-                {fileSearch
-                  ? 'No unstaged files match your search.'
-                  : 'Your working tree is clean.'}
-              </div>
-            )}
-          </section>
-        </div>
-        {inspectedPath && snapshot.files.some((file) => file.path === inspectedPath) ? (
-          <FileInspector
-            key={inspectedPath}
-            path={inspectedPath}
-            snapshot={snapshot}
-            busy={isBusy}
-            runAction={runAction}
-            onClose={() => setInspectedPath(null)}
-            actionError={actionError}
-          />
-        ) : null}
-        <form className="commit-panel" onSubmit={submitCommit}>
-          <div className="commit-panel-heading">
-            <GitCommitHorizontal className="size-4" />
-            <div>
-              <h2>{commitAmend ? 'Amend the last commit' : 'Commit staged changes'}</h2>
-              <span>
-                {commitAmend
-                  ? 'Enter the full replacement message. Staged changes are included.'
-                  : 'Only staged files will be included.'}
-              </span>
-            </div>
-          </div>
-          <Checkbox
-            id="commit-amend"
-            className="commit-amend"
-            label={
-              <>
-                Amend last commit
-                {currentBranch === snapshot.defaultBranch ? ' (protected on default branch)' : ''}
-              </>
-            }
-            checked={commitAmend}
-            disabled={
-              isBusy ||
-              operationActive ||
-              !snapshot.headOid ||
-              currentBranch === snapshot.defaultBranch
-            }
-            onChange={(event) => setCommitAmend(event.target.checked)}
-          />
-          <div className="commit-form-row">
-            <Textarea
-              className="commit-message"
-              aria-label="Commit message"
-              disabled={(!commitAmend && stagedFiles.length === 0) || isBusy || operationActive}
-              onChange={(event) => setCommitMessage(event.target.value)}
-              placeholder="Summary and optional commit body"
-              rows={2}
-              value={commitMessage}
-            />
-            <Button
-              disabled={
-                !commitMessage.trim() ||
-                (!commitAmend && stagedFiles.length === 0) ||
-                isBusy ||
-                operationActive
-              }
-              type="submit"
-              variant="accent"
-              tooltip={
-                commitAmend
-                  ? 'Preview rewriting the last commit with the new message plus staged changes. Rewrites local history; pushed commits will need force push.'
-                  : 'Create a local commit from staged changes only. Unstaged edits stay in the working tree; nothing is pushed.'
-              }
-            >
-              {busyAction === 'Commit staged changes' ? (
-                <LoaderCircle className="size-3.5 animate-spin" />
-              ) : (
-                <GitCommitHorizontal className="size-3.5" />
-              )}
-              {commitAmend ? 'Review amend…' : 'Commit'}
-            </Button>
-          </div>
-        </form>
-      </div>
+      <ChangesView
+        actionError={actionError}
+        busy={isBusy}
+        busyAction={busyAction}
+        commitAmend={commitAmend}
+        commitMessage={commitMessage}
+        groups={changeState}
+        inspectedPath={inspectedPath}
+        onCommitAmendChange={setCommitAmend}
+        onCommitMessageChange={setCommitMessage}
+        onInspect={(path) => {
+          setActionError(null)
+          setInspectedPath(path)
+        }}
+        onStash={() => openWorkflow({ kind: 'stash' })}
+        onSubmitCommit={submitCommit}
+        operationActive={operationActive}
+        runAction={runAction}
+        snapshot={snapshot}
+      />
     )
   }
 
-  const renderFileRow = (file: ChangedFile, action: 'stage' | 'unstage') => (
-    <div
-      className={cn('file-row', file.conflicted && 'file-row-conflicted')}
-      key={`${action}:${file.path}`}
-    >
-      <span
-        className={cn('file-status', file.conflicted && 'file-status-conflicted')}
-        title={
-          file.conflicted ? 'Conflict' : `${statusLetter(file.index)}${statusLetter(file.worktree)}`
-        }
-      >
-        {file.conflicted ? '!' : `${statusLetter(file.index)}${statusLetter(file.worktree)}`}
-      </span>
-      <button
-        className="file-path"
-        title={file.originalPath ? `${file.originalPath} → ${file.path}` : file.path}
-        type="button"
-        onClick={() => {
-          setActionError(null)
-          setInspectedPath(file.path)
-        }}
-        aria-label={`${file.conflicted ? 'Resolve' : 'Inspect'} ${file.path}`}
-      >
-        {file.originalPath ? `${file.originalPath} → ${file.path}` : file.path}
-      </button>
-      <Button
-        disabled={isBusy}
-        tooltip={
-          action === 'stage'
-            ? "Stage this file's working-tree changes for the next commit. Local index only."
-            : 'Remove this file from the index; its working-tree edits remain. Nothing is discarded.'
-        }
-        onClick={() =>
-          runAction(
-            {
-              type: action,
-              paths: file.originalPath ? [file.path, file.originalPath] : [file.path],
-            },
-            action === 'stage' ? 'Stage file' : 'Unstage file',
-          )
-        }
-        size="sm"
-        variant="ghost"
-      >
-        {action === 'stage' ? 'Stage' : 'Unstage'}
-      </Button>
-    </div>
-  )
-
   const renderPullRequests = () => {
     if (!snapshot) return null
-    const pullRequests = snapshot.pullRequests.filter((pr) => {
-      const needle = search.trim().toLowerCase()
-      if (!needle) return true
-      return `${pr.title} ${pr.head} ${pr.base} #${pr.number}`.toLowerCase().includes(needle)
-    })
     return (
-      <div className="pull-requests-view">
-        <div className="list-toolbar">
-          <div className="list-title-group">
-            <h1>Pull requests</h1>
-            <span className="list-subtitle">{pullRequests.length} shown</span>
-          </div>
-          <Button
-            disabled={!selectedBranch?.current || !snapshot.github.available || isBusy}
-            tooltip={
-              !snapshot.github.available
-                ? snapshot.github.message ||
-                  'Connect an authenticated GitHub repository to create pull requests.'
-                : !selectedBranch?.current
-                  ? 'Switch to a local branch to open its pull request on GitHub.'
-                  : 'Review creating a PR from this branch’s published upstream. Unpushed commits are not included.'
-            }
-            onClick={openPrDialog}
-            size="sm"
-            variant="accent"
-          >
-            <Plus className="size-3.5" />
-            Create PR
-          </Button>
-        </div>
-        {!snapshot.github.available ? (
-          <div className="gh-banner" role="status">
-            <Terminal className="size-4" />
-            <div>
-              <strong>GitHub CLI is unavailable</strong>
-              <span>
-                {snapshot.github.message ||
-                  'Install and authenticate gh to list or create pull requests.'}
-              </span>
-            </div>
-          </div>
-        ) : null}
-        {pullRequests.length > 0 ? (
-          <div className="pr-list">
-            {pullRequests.map((pr) => (
-              <PullRequestHoverCard pr={pr} key={pr.number}>
-                <button
-                  className="pr-row"
-                  onClick={() => openWorkflow({ kind: 'pr', number: pr.number })}
-                  disabled={isBusy}
-                  type="button"
-                >
-                  <span className="pr-number">#{pr.number}</span>
-                  <span className="pr-copy">
-                    <strong>{pr.title}</strong>
-                    <small>
-                      {pr.head} <span>→</span> {pr.base}
-                    </small>
-                  </span>
-                  <Badge variant={checksVariant(pr.checks)}>
-                    <ShieldCheck className="size-3" />
-                    {checkLabel(pr.checks)}
-                  </Badge>
-                  <Badge variant={pr.state === 'OPEN' ? 'success' : 'secondary'}>
-                    {pr.draft ? 'draft' : pr.state.toLowerCase()}
-                  </Badge>
-                  <ChevronRight className="size-4" />
-                </button>
-              </PullRequestHoverCard>
-            ))}
-          </div>
-        ) : (
-          <div className="empty-state compact-empty">
-            <GitPullRequest className="empty-icon" />
-            <h2>{search ? 'No matching pull requests' : 'No pull requests'}</h2>
-            <p>
-              {snapshot.github.available
-                ? 'Create a pull request from the current branch when it is ready.'
-                : 'Connect the GitHub CLI to see pull requests.'}
-            </p>
-          </div>
-        )}
-      </div>
+      <PullRequestListView
+        busy={isBusy}
+        canCreate={Boolean(selectedBranch?.current) && snapshot.github.available && !isBusy}
+        createTooltip={
+          !snapshot.github.available
+            ? snapshot.github.message ||
+              'Connect an authenticated GitHub repository to create pull requests.'
+            : !selectedBranch?.current
+              ? 'Switch to a local branch to open its pull request on GitHub.'
+              : 'Review creating a PR from this branch’s published upstream. Unpushed commits are not included.'
+        }
+        onCreate={openPrDialog}
+        onRequest={openWorkflow}
+        pullRequests={snapshot.pullRequests.filter((pr) => matchesPullRequest(pr, search))}
+        snapshot={snapshot}
+      />
     )
   }
 
   const renderStashes = () => {
     if (!snapshot) return null
     return (
-      <div className="stashes-view">
-        <div className="list-toolbar">
-          <div className="list-title-group">
-            <h1>Stashes</h1>
-            <span className="list-subtitle">{snapshot.stashes.length} saved</span>
-          </div>
-          <Button
-            disabled={snapshot.files.length === 0 || isBusy}
-            tooltip="Shelve current working changes into a local stash and restore a clean tree. Choose whether untracked files are included."
-            onClick={() => openWorkflow({ kind: 'stash' })}
-            size="sm"
-            variant="accent"
-          >
-            <Archive className="size-3.5" />
-            Stash current changes
-          </Button>
-        </div>
-        {snapshot.stashes.length > 0 ? (
-          <div className="stash-list" role="list">
-            {snapshot.stashes.map((stash) => (
-              <div className="stash-row" key={stash.oid}>
-                <Archive className="size-4" />
-                <span className="stash-copy">
-                  <strong>{stash.message || 'WIP'}</strong>
-                  <small>{stash.ref}</small>
-                </span>
-                <Button
-                  disabled={isBusy || operationActive}
-                  tooltip="Restore this stash’s working changes and saved staging state, and keep the stash. May conflict with current edits."
-                  onClick={() =>
-                    runAction({ type: 'stashApply', ref: stash.ref, oid: stash.oid }, 'Apply stash')
-                  }
-                  size="sm"
-                  variant="ghost"
-                >
-                  Apply
-                </Button>
-                <Button
-                  disabled={isBusy}
-                  tooltip="Reapply this stash to the working tree, then delete it from the list. Stops on conflicts so saved changes are not lost silently."
-                  onClick={() =>
-                    runAction({ type: 'stashPop', ref: stash.ref, oid: stash.oid }, 'Pop stash')
-                  }
-                  size="sm"
-                  variant="secondary"
-                >
-                  <RotateCcw className="size-3.5" />
-                  Pop
-                </Button>
-                <Button
-                  disabled={isBusy || operationActive}
-                  tooltip="Preview permanently removing this saved stash without applying it. This app cannot restore a dropped stash."
-                  onClick={() =>
-                    openWorkflow({
-                      kind: 'confirm',
-                      title: 'Drop this stash?',
-                      description: `Permanently remove ${stash.ref}: ${stash.message}. Its saved changes will not be applied.`,
-                      label: 'Drop stash',
-                      action: { type: 'stashDrop', ref: stash.ref, oid: stash.oid },
-                      destructive: true,
-                    })
-                  }
-                  size="sm"
-                  variant="danger"
-                >
-                  Drop…
-                </Button>
-              </div>
-            ))}
-          </div>
-        ) : (
-          <div className="empty-state compact-empty">
-            <Archive className="empty-icon" />
-            <h2>No stashes</h2>
-            <p>Stash changes before switching context when you need a clean tree.</p>
-          </div>
-        )}
-      </div>
+      <StashesView
+        busy={isBusy}
+        busyAction={busyAction}
+        onRequest={openWorkflow}
+        onStash={() => openWorkflow({ kind: 'stash' })}
+        operationActive={operationActive}
+        runAction={runAction}
+        snapshot={snapshot}
+      />
     )
   }
 
