@@ -413,6 +413,11 @@ button:disabled {
   border-radius: var(--gs-semantic-radius-control);
 }
 
+.toolbar-control-slot {
+  display: inline-flex;
+  align-items: center;
+}
+
 .toolbar-divider {
   width: 1px;
   height: 22px;
@@ -2465,7 +2470,8 @@ button.file-path:focus-visible {
     flex: 1 1 100%;
   }
 
-  .toolbar > .toolbar-control {
+  .toolbar > .toolbar-control,
+  .toolbar > .toolbar-control-slot {
     order: 2;
   }
 

@@ -897,15 +897,17 @@ function App() {
         />
         <kbd>{shortcutModifier} K</kbd>
       </div>
-      <IconButton
-        className="toolbar-control"
-        label="Refresh repository"
-        onClick={() => refreshSnapshot()}
-        disabled={!snapshot || isBusy}
-        variant="secondary"
-      >
-        <RefreshCw aria-hidden="true" className={cn('size-4', refreshing && 'animate-spin')} />
-      </IconButton>
+      <div className="toolbar-control-slot">
+        <IconButton
+          className="toolbar-control"
+          label="Refresh repository"
+          onClick={() => refreshSnapshot()}
+          disabled={!snapshot || isBusy}
+          variant="secondary"
+        >
+          <RefreshCw aria-hidden="true" className={cn('size-4', refreshing && 'animate-spin')} />
+        </IconButton>
+      </div>
       {snapshot && (workspaceView === 'branches' || workspaceView === 'stacks') ? (
         <Button
           aria-controls="branch-inspector"
