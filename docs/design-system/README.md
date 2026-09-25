@@ -196,4 +196,53 @@ busy. The refresh button's disabled tooltip wrapper and the details control both
 second toolbar row after Search, with no document-level horizontal overflow. Evidence:
 `evidence/shell-after-disabled-refresh-500x350.png`.
 
+## Data surfaces specimen
+
+Issue #7 migrates the non-stack data views — Working changes, the file and commit diff, History,
+the pull request list, and Stashes — onto the same tokens and primitives. The view markup moves out
+of `App.tsx` into `components/data-views.tsx`; `App.tsx` keeps the existing Git calls, commit
+state, and workflow requests unchanged.
+
+The opt-in fixture at `#/design-system-data-specimen` renders those same components with a fixture
+repository, a fixture desktop bridge, and a dispatch log, so the real surfaces can be observed
+without IPC or a network connection. Its scenario switch covers the clean, staged-only,
+unstaged-only, filtered, and conflicted working trees; populated, genuinely empty, filtered, and
+unavailable pull request states; and present and empty stash lists.
+
+The fixture proves the behavioural rules rather than only the styling:
+
+- Filtered bulk actions relabel to "Stage shown"/"Unstage shown" and act only on the visible list,
+  so a hidden file is never included by a filter refactor.
+- A rename row shows the struck-through original and the new path, and stages both.
+- A file with edits in both the index and the working tree reports both states, and an untracked
+  file is labelled rather than hidden.
+- A conflicted file disables bulk staging and says why.
+- Commit text survives a rejection, and the amend path still requires review and stays locked on the
+  default branch.
+- An unavailable GitHub source renders "Pull requests unavailable" and explicitly says the count is
+  unknown rather than zero, while a genuinely empty repository shows "0 shown".
+- A 2400-line diff opens bounded at 1000 lines with a "Show more diff lines" reveal instead of
+  rendering the whole file.
+- Stash Apply, Pop, and Drop carry the captured OID, and Drop routes through a destructive
+  confirmation.
+
+### Data surface evidence
+
+Smoke was run against the live Vite renderer on macOS Darwin 25.5.0 arm64 (Electron 44.4.3) at
+1440 × 940, and against a 500 × 350 CSS viewport for the minimum-window case. At 500 × 350 the
+document width stayed equal to the viewport width, so no visible data-surface descendant
+overflowed horizontally; the commit panel stays pinned and the file lists scroll.
+
+| Case                                              | Evidence                                               |
+| ------------------------------------------------- | ------------------------------------------------------ |
+| Working changes, mixed staged/unstaged/conflicted | `evidence/data-changes-mixed-1440x940.png`             |
+| Working changes, filtered bulk-action scope       | `evidence/data-changes-filtered-scope-1440x940.png`    |
+| Working changes, minimum window                   | `evidence/data-changes-filtered-500x350.png`           |
+| History with a selected commit                    | `evidence/data-history-1440x940.png`                   |
+| Pull requests, populated                          | `evidence/data-pull-requests-populated-1440x940.png`   |
+| Pull requests, genuinely empty                    | `evidence/data-pull-requests-empty-1440x940.png`       |
+| Pull requests, GitHub unavailable                 | `evidence/data-pull-requests-unavailable-1440x940.png` |
+| Stashes with ref and OID                          | `evidence/data-stashes-1440x940.png`                   |
+| Stash Drop confirmation                           | `evidence/data-stash-drop-confirmation-1440x940.png`   |
+
 The delivery note records the exact validation command results and the live-renderer smoke steps.
