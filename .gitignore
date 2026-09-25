@@ -8,3 +8,4 @@ release/
 .impeccable/
 .github/actions-runner/
 .woostack/tmp/
+.github/actions-runner-linux/
