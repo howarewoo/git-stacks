@@ -1,4 +1,5 @@
-FROM ubuntu:24.04
+# Debian provides native ARM64 Chromium; Ubuntu's chromium-browser requires Snap.
+FROM debian:bookworm-slim
 
 ARG RUNNER_UID=1000
 ARG RUNNER_GID=1000
@@ -9,11 +10,12 @@ RUN apt-get update \
     && apt-get install --yes --no-install-recommends \
         build-essential \
         ca-certificates \
+        chromium \
         curl \
         file \
         git \
         iproute2 \
-        libicu74 \
+        libicu72 \
         gh \
         jq \
         openssh-client \
@@ -38,6 +40,10 @@ RUN group_name="$(getent group "${RUNNER_GID}" | cut -d: -f1 || true)"; \
     printf 'runner ALL=(ALL) NOPASSWD: ALL\n' > /etc/sudoers.d/pullfrog-runner; \
     chmod 0440 /etc/sudoers.d/pullfrog-runner
 
+
+# a named volume mounted at /runner inherits this directory's ownership, so the
+# runner user — not root — must own it or every job starts unable to write.
+RUN mkdir -p /runner && chown "${RUNNER_UID}:${RUNNER_GID}" /runner
 WORKDIR /runner
 USER runner
 ENV HOME=/home/runner
