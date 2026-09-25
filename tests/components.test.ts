@@ -7,6 +7,7 @@ import { Checkbox } from '../src/renderer/src/components/ui/checkbox'
 import { Field } from '../src/renderer/src/components/ui/field'
 import { Input } from '../src/renderer/src/components/ui/input'
 import { SegmentedControl } from '../src/renderer/src/components/ui/segmented-control'
+import { Textarea } from '../src/renderer/src/components/ui/textarea'
 import { TooltipProvider } from '../src/renderer/src/components/ui/tooltip'
 test('loading buttons retain their label, busy state, and disabled lock', () => {
   const markup = renderToStaticMarkup(
@@ -54,6 +55,36 @@ test('fields associate labels, required state, helper text, and errors', () => {
   assert.match(markup, /aria-invalid="true"/)
   assert.match(markup, /branch-name-description/)
   assert.match(markup, /branch-name-error/)
+})
+
+test('field errors remain visible on textarea and checkbox controls', () => {
+  const textarea = renderToStaticMarkup(
+    React.createElement(Field, {
+      id: 'description',
+      label: 'Description',
+      error: 'A description is required.',
+      children: React.createElement(Textarea),
+    }),
+  )
+  const checkbox = renderToStaticMarkup(
+    React.createElement(Field, {
+      id: 'include-files',
+      label: 'Include files',
+      error: 'Choose whether to include files.',
+      children: React.createElement(Checkbox),
+    }),
+  )
+
+  assert.match(textarea, /aria-invalid="true"/)
+  assert.match(
+    textarea,
+    /aria-\[invalid=true\]:border-\[var\(--gs-semantic-feedback-error-text\)\]/,
+  )
+  assert.match(checkbox, /aria-invalid="true"/)
+  assert.match(
+    checkbox,
+    /aria-\[invalid=true\]:border-\[var\(--gs-semantic-feedback-error-text\)\]/,
+  )
 })
 
 test('checkbox and segmented controls expose independent state semantics', () => {

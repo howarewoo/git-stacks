@@ -2246,6 +2246,9 @@ button.file-path:focus-visible {
 .stack-workspace-header .workflow-select {
   width: 100%;
 }
+.stack-workspace-header > span {
+  width: 100%;
+}
 .stack-workspace-header p {
   margin: 0;
   color: var(--ink-soft);
