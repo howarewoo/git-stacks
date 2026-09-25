@@ -152,3 +152,11 @@ specimens include loading, disabled, error, selected, checked/mixed, long-label,
 states. The gallery uses semantic/component CSS variables, exercises keyboard dismissal and focus
 return, and renders without desktop IPC or network access. It does not alter normal six-view
 navigation.
+
+Shared controls use typed `text-[length:var(--gs-semantic-type-*-size)]` utilities so
+`tailwind-merge` preserves both font size and foreground color. The native checkbox input,
+checked/mixed glyph, and visible text share a clickable label: its target and each segmented
+button are at least 36px at ordinary density and 44px for coarse pointers. Renderer font
+inheritance lives in Tailwind's base layer so component typography utilities can override it.
+The issue #4 gallery, error, dialog, menu, and reduced-motion captures under `evidence/` were
+regenerated from the corrected renderer.

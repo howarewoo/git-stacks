@@ -24,7 +24,7 @@ export function SegmentedControl<T extends string>({
   return (
     <div
       className={cn(
-        'inline-flex items-center gap-1 rounded-[var(--gs-semantic-radius-pill)] bg-[var(--gs-semantic-surface-inset)] p-1',
+        'gs-segmented-control inline-flex items-center gap-1 rounded-[var(--gs-semantic-radius-pill)] bg-[var(--gs-semantic-surface-inset)] p-1',
         className,
       )}
       role="group"
@@ -36,7 +36,7 @@ export function SegmentedControl<T extends string>({
           type="button"
           aria-pressed={value === option.value}
           className={cn(
-            'min-h-8 rounded-[var(--gs-semantic-radius-pill)] px-3 text-[var(--gs-semantic-type-label-size)] font-medium text-[var(--gs-semantic-text-secondary)] outline-none transition-colors hover:text-[var(--gs-semantic-text-primary)] focus-visible:ring-2 focus-visible:ring-[var(--gs-semantic-focus-ring)]',
+            'min-h-[var(--gs-semantic-density-control-compact)] rounded-[var(--gs-semantic-radius-pill)] px-3 text-[length:var(--gs-semantic-type-label-size)] font-medium text-[var(--gs-semantic-text-secondary)] outline-none transition-colors hover:text-[var(--gs-semantic-text-primary)] focus-visible:ring-2 focus-visible:ring-[var(--gs-semantic-focus-ring)]',
             value === option.value
               ? 'bg-[var(--gs-semantic-surface-content)] text-[var(--gs-semantic-text-primary)] shadow-[var(--gs-semantic-elevation-small)]'
               : 'bg-transparent',

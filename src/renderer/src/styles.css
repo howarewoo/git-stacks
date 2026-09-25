@@ -226,11 +226,13 @@ body {
   line-height: var(--gs-semantic-type-body-line);
 }
 
-button,
-input,
-select,
-textarea {
-  font: inherit;
+@layer base {
+  button,
+  input,
+  select,
+  textarea {
+    font: inherit;
+  }
 }
 
 button {
@@ -2299,7 +2301,8 @@ button.file-path:focus-visible {
 
 @media (pointer: coarse) {
   .gs-button,
-  .gs-checkbox,
+  .gs-segmented-control button,
+  .gs-checkbox > label,
   input:not([type='checkbox']),
   select,
   textarea {

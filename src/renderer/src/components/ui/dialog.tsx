@@ -76,7 +76,7 @@ const DialogTitle = React.forwardRef<
   <DialogPrimitive.Title
     ref={ref}
     className={cn(
-      'text-[var(--gs-semantic-type-heading-size)] font-semibold leading-[var(--gs-semantic-type-heading-line)]',
+      'text-[length:var(--gs-semantic-type-heading-size)] font-semibold leading-[var(--gs-semantic-type-heading-line)]',
       className,
     )}
     {...props}
@@ -91,7 +91,7 @@ const DialogDescription = React.forwardRef<
   <DialogPrimitive.Description
     ref={ref}
     className={cn(
-      'text-[var(--gs-semantic-type-label-size)] leading-5 text-[var(--gs-semantic-text-secondary)]',
+      'text-[length:var(--gs-semantic-type-label-size)] leading-5 text-[var(--gs-semantic-text-secondary)]',
       className,
     )}
     {...props}
