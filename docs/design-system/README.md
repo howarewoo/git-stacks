@@ -187,7 +187,7 @@ remained reachable. The native traffic-light region was also exercised in the de
 | Case                         | Before                                                       | After                                                       |
 | ---------------------------- | ------------------------------------------------------------ | ----------------------------------------------------------- |
 | 1000 × 700                   | `evidence/shell-before-1000x700.png`                         | `evidence/shell-after-1000x700.png`                         |
-| 1440 × 940                   | `evidence/shell-before-1440x940.png`                        | `evidence/shell-after-1440x940.png`                         |
+| 1440 × 940                   | `evidence/shell-before-1440x940.png`                         | `evidence/shell-after-1440x940.png`                         |
 | 1920 × 1080                  | `evidence/shell-before-1920x1080.png`                        | `evidence/shell-after-1920x1080.png`                        |
 | 200% zoom, 1000 × 700 window | `evidence/shell-before-zoom-200-percent-1000x700-window.png` | `evidence/shell-after-zoom-200-percent-1000x700-window.png` |
 
