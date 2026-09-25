@@ -23,10 +23,10 @@ const buttonVariants = cva(
         link: 'h-auto rounded-none p-0 text-[var(--gs-component-button-link)] underline decoration-[var(--gs-semantic-selection-border)] underline-offset-4 hover:decoration-[var(--gs-component-button-link)]',
       },
       size: {
-        sm: 'min-h-[var(--gs-semantic-density-control-compact)] px-3 text-[var(--gs-semantic-type-label-size)]',
+        sm: 'min-h-[var(--gs-semantic-density-control-compact)] px-3 text-[length:var(--gs-semantic-type-label-size)]',
         default:
-          'min-h-[var(--gs-semantic-density-control-standard)] px-4 text-[var(--gs-semantic-type-label-size)]',
-        lg: 'min-h-[var(--gs-semantic-density-control-standard)] px-5 text-[var(--gs-semantic-type-body-size)]',
+          'min-h-[var(--gs-semantic-density-control-standard)] px-4 text-[length:var(--gs-semantic-type-label-size)]',
+        lg: 'min-h-[var(--gs-semantic-density-control-standard)] px-5 text-[length:var(--gs-semantic-type-body-size)]',
         icon: 'size-11',
         'icon-sm': 'size-9',
       },

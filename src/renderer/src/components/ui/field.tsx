@@ -27,7 +27,7 @@ export function Field({
   return (
     <div className={cn('grid gap-1.5', className)}>
       <label
-        className="text-[var(--gs-semantic-type-label-size)] font-medium text-[var(--gs-semantic-text-primary)]"
+        className="text-[length:var(--gs-semantic-type-label-size)] font-medium text-[var(--gs-semantic-text-primary)]"
         htmlFor={id}
       >
         {label}
@@ -45,7 +45,7 @@ export function Field({
       })}
       {description ? (
         <p
-          className="text-[var(--gs-semantic-type-metadata-size)] text-[var(--gs-semantic-text-secondary)]"
+          className="text-[length:var(--gs-semantic-type-metadata-size)] text-[var(--gs-semantic-text-secondary)]"
           id={descriptionId}
         >
           {description}
@@ -53,7 +53,7 @@ export function Field({
       ) : null}
       {error ? (
         <p
-          className="text-[var(--gs-semantic-type-metadata-size)] text-[var(--gs-semantic-feedback-error-text)]"
+          className="text-[length:var(--gs-semantic-type-metadata-size)] text-[var(--gs-semantic-feedback-error-text)]"
           id={errorId}
           role="alert"
         >

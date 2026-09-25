@@ -22,7 +22,7 @@ export function SurfaceTitle({ className, ...props }: React.HTMLAttributes<HTMLH
   return (
     <h2
       className={cn(
-        'm-0 text-[var(--gs-semantic-type-heading-size)] font-semibold leading-[var(--gs-semantic-type-heading-line)]',
+        'm-0 text-[length:var(--gs-semantic-type-heading-size)] font-semibold leading-[var(--gs-semantic-type-heading-line)]',
         className,
       )}
       {...props}
@@ -37,7 +37,7 @@ export function SurfaceDescription({
   return (
     <p
       className={cn(
-        'm-0 text-[var(--gs-semantic-type-body-size)] text-[var(--gs-semantic-text-secondary)]',
+        'm-0 text-[length:var(--gs-semantic-type-body-size)] text-[var(--gs-semantic-text-secondary)]',
         className,
       )}
       {...props}
@@ -64,7 +64,7 @@ export function InlineAlert({
     <div
       role={tone === 'error' ? 'alert' : 'status'}
       className={cn(
-        'flex items-start gap-2 rounded-[var(--gs-semantic-radius-control)] px-3 py-2 text-[var(--gs-semantic-type-metadata-size)]',
+        'flex items-start gap-2 rounded-[var(--gs-semantic-radius-control)] px-3 py-2 text-[length:var(--gs-semantic-type-metadata-size)]',
         tone === 'info' &&
           'bg-[var(--gs-semantic-feedback-info-surface)] text-[var(--gs-semantic-feedback-info-text)]',
         tone === 'success' &&
@@ -114,7 +114,7 @@ export function LoadingState({
       role="status"
       aria-busy="true"
       className={cn(
-        'flex items-center gap-2 text-[var(--gs-semantic-type-label-size)] text-[var(--gs-semantic-text-secondary)]',
+        'flex items-center gap-2 text-[length:var(--gs-semantic-type-label-size)] text-[var(--gs-semantic-text-secondary)]',
         className,
       )}
       {...props}
