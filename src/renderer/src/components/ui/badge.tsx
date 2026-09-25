@@ -7,13 +7,23 @@ const badgeVariants = cva(
   {
     variants: {
       variant: {
-        default: 'border-transparent bg-[var(--ink)] text-white',
-        secondary: 'border-[var(--line)] bg-[var(--surface-muted)] text-[var(--ink-soft)]',
-        outline: 'border-[var(--line)] bg-transparent text-[var(--ink-soft)]',
-        accent: 'border-[var(--accent-line)] bg-[var(--accent-wash)] text-[var(--accent-strong)]',
-        success: 'border-[var(--success-line)] bg-[var(--success-wash)] text-[var(--success)]',
-        warning: 'border-[var(--warning-line)] bg-[var(--warning-wash)] text-[var(--warning)]',
-        danger: 'border-[var(--danger-line)] bg-[var(--danger-wash)] text-[var(--danger)]',
+        default:
+          'border-transparent bg-[var(--gs-component-button-primary-background)] text-[var(--gs-component-button-primary-foreground)]',
+        secondary:
+          'border-[var(--gs-component-badge-neutral-border)] bg-[var(--gs-component-badge-neutral-background)] text-[var(--gs-component-badge-neutral-text)]',
+        outline:
+          'border-[var(--gs-component-badge-neutral-border)] bg-transparent text-[var(--gs-component-badge-neutral-text)]',
+        accent:
+          'border-[var(--gs-semantic-selection-border)] bg-[var(--gs-semantic-selection-background)] text-[var(--gs-semantic-selection-text)]',
+        info: 'border-[var(--gs-component-badge-info-text)] bg-[var(--gs-component-badge-info-background)] text-[var(--gs-component-badge-info-text)]',
+        success:
+          'border-[var(--gs-component-badge-success-text)] bg-[var(--gs-component-badge-success-background)] text-[var(--gs-component-badge-success-text)]',
+        warning:
+          'border-[var(--gs-component-badge-warning-text)] bg-[var(--gs-component-badge-warning-background)] text-[var(--gs-component-badge-warning-text)]',
+        danger:
+          'border-[var(--gs-component-badge-error-text)] bg-[var(--gs-component-badge-error-background)] text-[var(--gs-component-badge-error-text)]',
+        merged:
+          'border-[var(--gs-component-badge-merged-text)] bg-[var(--gs-component-badge-merged-background)] text-[var(--gs-component-badge-merged-text)]',
       },
     },
     defaultVariants: { variant: 'secondary' },

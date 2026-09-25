@@ -1,36 +1,177 @@
 @import 'tailwindcss';
+@import './design-system/tokens.css';
 
 :root {
-  --canvas: #f4f5f7;
-  --surface: #ffffff;
-  --surface-muted: #f0f1f4;
-  --surface-hover: #e9ebf0;
-  --ink: #242833;
-  --ink-soft: #515866;
-  --ink-muted: #646d79;
-  --line: #dfe2e8;
-  --line-strong: #cdd2db;
-  --accent: #7560bf;
-  --accent-strong: #5f4aa8;
-  --accent-line: #b8a9e0;
-  --accent-wash: #efebfa;
-  --ring: #8c78d0;
-  --ring-soft: rgba(117, 96, 191, 0.2);
-  --success: #2d7a58;
-  --success-line: #a7d3bd;
-  --success-wash: #eaf6ef;
-  --warning: #956117;
-  --warning-line: #e4c88f;
-  --warning-wash: #fff7e6;
-  --danger: #b13d4c;
-  --danger-line: #e8b3ba;
-  --danger-wash: #fff0f2;
-  --danger-wash-strong: #ffe2e6;
-  color: var(--ink);
-  background: var(--canvas);
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  color: var(--gs-semantic-text-primary);
+  background: var(--gs-semantic-surface-canvas);
+  font-family: var(--gs-semantic-font-sans);
   font-synthesis: none;
   text-rendering: optimizeLegibility;
+}
+
+.foundations-specimen {
+  min-height: 0;
+  max-height: 100%;
+  overflow: auto;
+  background: var(--gs-semantic-surface-canvas);
+  color: var(--gs-semantic-text-primary);
+  padding: 40px;
+}
+
+.foundations-specimen-header,
+.foundations-specimen-section-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+}
+
+.foundations-specimen-header {
+  max-width: 880px;
+  margin: 0 auto 24px;
+}
+
+.foundations-specimen-header h1 {
+  margin: 0;
+  font-size: var(--gs-semantic-type-heading-size);
+  line-height: var(--gs-semantic-type-heading-line);
+  letter-spacing: -0.02em;
+}
+
+.foundations-specimen-header p,
+.foundations-specimen-section-heading p {
+  margin: 6px 0 0;
+  color: var(--gs-semantic-text-secondary);
+  font-size: var(--gs-semantic-type-body-size);
+  line-height: var(--gs-semantic-type-body-line);
+}
+
+.foundations-specimen-eyebrow {
+  color: var(--gs-semantic-text-link) !important;
+  font-size: var(--gs-semantic-type-metadata-size) !important;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.foundations-specimen-card {
+  max-width: 880px;
+  margin: 0 auto 16px;
+  border: 1px solid var(--gs-semantic-border-essential);
+  border-radius: var(--gs-semantic-radius-workbench);
+  background: var(--gs-semantic-surface-content);
+  box-shadow: var(--gs-semantic-elevation-small);
+  padding: 24px;
+}
+
+.foundations-specimen-section-heading {
+  align-items: center;
+  margin-bottom: 20px;
+}
+
+.foundations-specimen-section-heading h2 {
+  margin: 0;
+  font-size: var(--gs-semantic-type-heading-size);
+  line-height: var(--gs-semantic-type-heading-line);
+}
+
+.foundations-specimen-form {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.foundations-specimen-form label {
+  color: var(--gs-semantic-text-secondary);
+  font-size: var(--gs-semantic-type-label-size);
+}
+
+.foundations-specimen-form input {
+  flex: 1 1 280px;
+  min-height: var(--gs-semantic-density-control-standard);
+  border-color: var(--gs-component-field-border);
+  border-radius: var(--gs-semantic-radius-control);
+}
+
+.foundations-specimen-form button {
+  min-height: var(--gs-semantic-density-control-standard);
+  border-radius: var(--gs-semantic-radius-control);
+}
+
+.foundations-specimen-rows {
+  overflow: hidden;
+  border: 1px solid var(--gs-semantic-border-essential);
+  border-radius: var(--gs-semantic-radius-item);
+}
+
+.foundations-specimen-row {
+  display: flex;
+  min-height: var(--gs-semantic-density-row-standard);
+  align-items: center;
+  gap: 12px;
+  border-bottom: 1px solid var(--gs-semantic-border-decorative);
+  padding: 12px 16px;
+}
+
+.foundations-specimen-row:last-child {
+  border-bottom: 0;
+}
+
+.foundations-specimen-row:hover {
+  background: var(--gs-component-row-hover-background);
+}
+
+.foundations-specimen-row-selected {
+  border-left: 3px solid var(--gs-component-row-selected-border);
+  background: var(--gs-component-row-selected-background);
+}
+
+.foundations-specimen-branch-mark {
+  width: 24px;
+  color: var(--gs-component-git-selection-text);
+  font-size: 16px;
+  text-align: center;
+}
+
+.foundations-specimen-branch-copy {
+  display: grid;
+  min-width: 0;
+  flex: 1;
+  gap: 2px;
+}
+
+.foundations-specimen-branch-copy small {
+  color: var(--gs-component-row-metadata);
+  font-size: var(--gs-semantic-type-metadata-size);
+}
+
+.foundations-specimen-diff {
+  margin: 0;
+  overflow: auto;
+  border: 1px solid var(--gs-semantic-border-essential);
+  border-radius: var(--gs-semantic-radius-control);
+  background: var(--gs-semantic-surface-inset);
+  padding: 16px;
+  color: var(--gs-semantic-text-primary);
+  font: var(--gs-semantic-type-metadata-size) / 1.6 var(--gs-semantic-font-mono);
+}
+
+.foundations-specimen-diff:focus-visible {
+  outline: 2px solid var(--gs-semantic-focus-ring);
+  outline-offset: 2px;
+}
+
+.foundations-diff-add {
+  background: var(--gs-component-diff-add-surface);
+  color: var(--gs-component-diff-add-text);
+}
+
+.foundations-diff-remove {
+  background: var(--gs-component-diff-remove-surface);
+  color: var(--gs-component-diff-remove-text);
+}
+
+.foundations-diff-hunk {
+  color: var(--gs-component-diff-hunk-text);
 }
 
 * {
@@ -48,9 +189,10 @@ body,
 body {
   min-width: 1000px;
   overflow: hidden;
-  background: var(--canvas);
-  color: var(--ink);
-  font-size: 13px;
+  background: var(--gs-semantic-surface-canvas);
+  color: var(--gs-semantic-text-primary);
+  font-size: var(--gs-semantic-type-body-size);
+  line-height: var(--gs-semantic-type-body-line);
 }
 
 button,
@@ -69,12 +211,12 @@ button:disabled {
 }
 
 ::selection {
-  color: var(--ink);
-  background: #dcd5f3;
+  color: var(--gs-semantic-text-primary);
+  background: var(--gs-semantic-selection-background);
 }
 
 :focus-visible {
-  outline: 2px solid var(--ring);
+  outline: 2px solid var(--gs-semantic-focus-ring);
   outline-offset: 2px;
 }
 
