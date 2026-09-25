@@ -6,7 +6,9 @@ import { TooltipProvider } from './components/ui/tooltip'
 import { RepositoryHoverCardProvider } from './components/repository-hover-cards'
 import './styles.css'
 
-const specimen = window.location.hash === '#/design-system-specimen'
+const specimen = ['#/design-system-specimen', '#/design-system-controls'].includes(
+  window.location.hash,
+)
 
 const root = document.getElementById('root')
 

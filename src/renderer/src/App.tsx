@@ -1,5 +1,5 @@
 import * as React from 'react'
-import { DropdownMenu } from 'radix-ui'
+import { DropdownMenu } from './components/ui/dropdown-menu'
 import {
   AlertCircle,
   Archive,
@@ -48,7 +48,8 @@ import type {
   RepositorySnapshot,
 } from '../../shared/types'
 import { Badge } from './components/ui/badge'
-import { Button } from './components/ui/button'
+import { Button, IconButton } from './components/ui/button'
+import { Checkbox } from './components/ui/checkbox'
 import {
   Dialog,
   DialogContent,
@@ -58,6 +59,9 @@ import {
   DialogTitle,
 } from './components/ui/dialog'
 import { Input } from './components/ui/input'
+import { SegmentedControl } from './components/ui/segmented-control'
+import { Select } from './components/ui/select'
+import { Textarea } from './components/ui/textarea'
 import { Tooltip, TooltipContent, TooltipTrigger } from './components/ui/tooltip'
 import { BranchHoverCard, PullRequestHoverCard } from './components/repository-hover-cards'
 import { cn } from './lib/utils'
@@ -236,35 +240,6 @@ function checkLabel(checks: PullRequest['checks']): string {
   if (checks === 'failing') return 'checks failing'
   if (checks === 'pending') return 'checks pending'
   return 'no checks'
-}
-
-function IconButton({
-  label,
-  children,
-  onClick,
-  disabled,
-  variant = 'ghost',
-  className,
-}: {
-  label: string
-  children: React.ReactNode
-  onClick?: () => void
-  disabled?: boolean
-  variant?: React.ComponentProps<typeof Button>['variant']
-  className?: string
-}) {
-  return (
-    <Button
-      aria-label={label}
-      className={cn('shrink-0', className)}
-      disabled={disabled}
-      onClick={onClick}
-      size="icon-sm"
-      variant={variant}
-    >
-      {children}
-    </Button>
-  )
 }
 
 function App() {
@@ -918,34 +893,32 @@ function App() {
               <MoreHorizontal className="size-4" />
             </Button>
           </DropdownMenu.Trigger>
-          <DropdownMenu.Portal>
-            <DropdownMenu.Content className="workflow-menu" align="start" sideOffset={6}>
-              <DropdownMenu.Item
-                disabled={operationActive || !currentBranch}
-                onSelect={() => openWorkflow({ kind: 'merge' })}
-              >
-                Merge into current branch…
-              </DropdownMenu.Item>
-              <DropdownMenu.Item
-                disabled={
-                  operationActive || !currentBranch || currentBranch === snapshot?.defaultBranch
-                }
-                onSelect={() => openWorkflow({ kind: 'forcePush' })}
-              >
-                Force push with lease…
-              </DropdownMenu.Item>
-              <DropdownMenu.Item
-                disabled={operationActive || !snapshot?.files.length}
-                onSelect={() => openWorkflow({ kind: 'stash' })}
-              >
-                Stash changes…
-              </DropdownMenu.Item>
-              <DropdownMenu.Separator className="workflow-menu-separator" />
-              <DropdownMenu.Item onSelect={() => setWorkspaceView('history')}>
-                Browse commit history
-              </DropdownMenu.Item>
-            </DropdownMenu.Content>
-          </DropdownMenu.Portal>
+          <DropdownMenu.Content align="start" sideOffset={6}>
+            <DropdownMenu.Item
+              disabled={operationActive || !currentBranch}
+              onSelect={() => openWorkflow({ kind: 'merge' })}
+            >
+              Merge into current branch…
+            </DropdownMenu.Item>
+            <DropdownMenu.Item
+              disabled={
+                operationActive || !currentBranch || currentBranch === snapshot?.defaultBranch
+              }
+              onSelect={() => openWorkflow({ kind: 'forcePush' })}
+            >
+              Force push with lease…
+            </DropdownMenu.Item>
+            <DropdownMenu.Item
+              disabled={operationActive || !snapshot?.files.length}
+              onSelect={() => openWorkflow({ kind: 'stash' })}
+            >
+              Stash changes…
+            </DropdownMenu.Item>
+            <DropdownMenu.Separator />
+            <DropdownMenu.Item onSelect={() => setWorkspaceView('history')}>
+              Browse commit history
+            </DropdownMenu.Item>
+          </DropdownMenu.Content>
         </DropdownMenu.Root>
       </div>
       <div className="toolbar-spacer" />
@@ -986,25 +959,17 @@ function App() {
         <h1>Branches</h1>
         <span className="list-subtitle">{visibleBranches.length} shown</span>
       </div>
-      <div className="filter-group" aria-label="Branch filters">
-        {(
-          [
-            ['all', 'All'],
-            ['local', 'Local'],
-            ['remote', 'Remote'],
-            ['prs', 'With PRs'],
-          ] as [BranchFilter, string][]
-        ).map(([value, label]) => (
-          <button
-            className={cn('filter-button', branchFilter === value && 'filter-button-active')}
-            key={value}
-            onClick={() => setBranchFilter(value)}
-            type="button"
-          >
-            {label}
-          </button>
-        ))}
-      </div>
+      <SegmentedControl<BranchFilter>
+        label="Branch filters"
+        value={branchFilter}
+        onValueChange={setBranchFilter}
+        options={[
+          { value: 'all', label: 'All' },
+          { value: 'local', label: 'Local' },
+          { value: 'remote', label: 'Remote' },
+          { value: 'prs', label: 'With PRs' },
+        ]}
+      />
     </div>
   )
 
@@ -1300,23 +1265,26 @@ function App() {
               </span>
             </div>
           </div>
-          <label className="checkbox-label commit-amend">
-            <input
-              type="checkbox"
-              checked={commitAmend}
-              disabled={
-                isBusy ||
-                operationActive ||
-                !snapshot.headOid ||
-                currentBranch === snapshot.defaultBranch
-              }
-              onChange={(event) => setCommitAmend(event.target.checked)}
-            />
-            Amend last commit
-            {currentBranch === snapshot.defaultBranch ? ' (protected on default branch)' : ''}
-          </label>
+          <Checkbox
+            id="commit-amend"
+            className="commit-amend"
+            label={
+              <>
+                Amend last commit
+                {currentBranch === snapshot.defaultBranch ? ' (protected on default branch)' : ''}
+              </>
+            }
+            checked={commitAmend}
+            disabled={
+              isBusy ||
+              operationActive ||
+              !snapshot.headOid ||
+              currentBranch === snapshot.defaultBranch
+            }
+            onChange={(event) => setCommitAmend(event.target.checked)}
+          />
           <div className="commit-form-row">
-            <textarea
+            <Textarea
               className="commit-message"
               aria-label="Commit message"
               disabled={(!commitAmend && stagedFiles.length === 0) || isBusy || operationActive}
@@ -2100,20 +2068,17 @@ function App() {
                 it does not retarget those branches.
               </p>
             ) : null}
-            <label className="checkbox-label" htmlFor="delete-branch-force">
-              <input
-                id="delete-branch-force"
-                type="checkbox"
-                checked={deleteForce}
-                disabled={isBusy}
-                onChange={(event) => {
-                  setDeleteForce(event.target.checked)
-                  setDeleteConfirmation('')
-                  setDeleteBranchError(null)
-                }}
-              />
-              <span>Delete even if not merged</span>
-            </label>
+            <Checkbox
+              id="delete-branch-force"
+              label="Delete even if not merged"
+              checked={deleteForce}
+              disabled={isBusy}
+              onChange={(event) => {
+                setDeleteForce(event.target.checked)
+                setDeleteConfirmation('')
+                setDeleteBranchError(null)
+              }}
+            />
             <p className="delete-branch-note">
               {deleteForce
                 ? 'Commits that exist only on this branch can become unreachable.'
@@ -2187,7 +2152,7 @@ function App() {
               value={newBranchName}
             />
             <label htmlFor="new-branch-parent">Parent branch</label>
-            <select
+            <Select
               id="new-branch-parent"
               onChange={(event) => setNewBranchParent(event.target.value)}
               value={newBranchParent}
@@ -2200,7 +2165,7 @@ function App() {
                     {branch.current ? ' (current)' : ''}
                   </option>
                 ))}
-            </select>
+            </Select>
             {newBranchError ? (
               <p className="form-error" role="alert">
                 {newBranchError}
@@ -2261,22 +2226,19 @@ function App() {
             <label htmlFor="pr-body">
               Description <span className="optional-label">optional</span>
             </label>
-            <textarea
+            <Textarea
               id="pr-body"
               onChange={(event) => setPrBody(event.target.value)}
               placeholder="Add context for reviewers"
               rows={5}
               value={prBody}
             />
-            <label className="checkbox-label" htmlFor="pr-draft">
-              <input
-                checked={prDraft}
-                id="pr-draft"
-                onChange={(event) => setPrDraft(event.target.checked)}
-                type="checkbox"
-              />
-              <span>Mark as draft</span>
-            </label>
+            <Checkbox
+              id="pr-draft"
+              label="Mark as draft"
+              checked={prDraft}
+              onChange={(event) => setPrDraft(event.target.checked)}
+            />
             {prError ? (
               <p className="form-error" role="alert">
                 {prError}

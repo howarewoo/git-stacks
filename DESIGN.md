@@ -223,7 +223,7 @@ Depth is primarily tonal: the cool-gray canvas, white work surfaces, and inset s
 
 ## Shapes
 
-The foundation radius scale targets 12px for controls, 16px for nested items, and 24px for work surfaces and dialogs, with 999px pills. The current shared `Button` and `Input` still use Tailwind's `rounded-md` utility, which resolves to 6px in this project; the 12px control token is therefore a preserved migration target, not the current component radius. Other existing overlays retain their utility-specific radii. Borders are quiet and structural: essential controls use the stronger border, while decorative dividers remain low contrast. Clipping and overflow behavior follow the work surface rather than arbitrary view-specific decoration.
+The foundation radius scale targets 12px for controls, 16px for nested items, and 24px for work surfaces and dialogs, with 999px pills. Shared controls now bind directly to those semantic radius tokens; borders are quiet and structural: essential controls use the stronger border, while decorative dividers remain low contrast. Clipping and overflow behavior follow the work surface rather than arbitrary view-specific decoration.
 
 ## Components
 
@@ -231,7 +231,7 @@ The renderer builds on the repository's existing [shadcn/ui](https://ui.shadcn.c
 
 ### Buttons
 
-- **Shape:** The current shared `Button` and `Input` use Tailwind's `rounded-md` utility (6px). The foundation control token remains 12px as the migration target, but no current-component example in this document binds to it until those components are migrated.
+- **Shape:** Shared `Button`, `Input`, `Select`, and `Textarea` use the 12px semantic control radius. `IconButton` uses 16px or 20px Lucide icons and the compact/standard target sizes.
 - **Primary (`default`):** Workbench Ink background with white text; hover uses ink-hover and active uses ink-pressed.
 - **Secondary:** White background, essential border, Workbench Ink text, and inset hover background.
 - **Ghost:** Secondary text with inset hover and primary text on hover.
@@ -239,8 +239,8 @@ The renderer builds on the repository's existing [shadcn/ui](https://ui.shadcn.c
 - **Accent:** Repository Blue background with white text and selection-border hover.
 - **Danger:** Error surface, error text, and an essential error-colored border.
 - **Link:** Repository Blue underlined text with a selection-colored underline.
-- **Sizes:** `default` is 36px high, `sm` is 32px, `lg` is 40px, and `icon` / `icon-sm` are 36px / 32px square controls.
-- **States:** `focus-visible` uses a 2px Repository Blue focus ring with a surface-colored offset; disabled controls remain non-interactive and use reduced opacity.
+- **Sizes:** `sm` is 36px high, `default` and `lg` are 44px high, and `icon` / `icon-sm` are 44px / 36px square controls. Coarse pointers receive a 44px minimum target through the renderer's pointer media query.
+- **States:** `focus-visible` uses a 2px Repository Blue focus ring with a surface-colored offset; `loading` sets `aria-busy` and prevents another dispatch; disabled controls remain non-interactive while their wrapper stays keyboard-discoverable.
 
 ### Badges
 
@@ -248,11 +248,12 @@ The renderer builds on the repository's existing [shadcn/ui](https://ui.shadcn.c
 - **Outline:** Transparent background with essential border and secondary text.
 - **Accent:** Selection background, selection border, and selection text.
 - **Info / Success / Warning / Danger / Merged:** Their named feedback background/text pairs. Every badge includes a text label; color is not the state itself.
-- **Default:** Workbench Ink background and white text.
+- **Default:** Neutral inset background and secondary text; the legacy `default` name is retained as a neutral badge alias rather than inheriting primary-action ink.
 
 ### Inputs / Fields
 
-- **Style:** White background, essential border, Workbench Ink text, secondary placeholder text, and the existing 36px compact control height.
+- **Style:** White background, essential border, Workbench Ink text, secondary placeholder text, and semantic 36px compact or 44px standard control heights.
+- **Composition:** `Field` associates visible labels, required state, helper text, and error text with native `Input`, `Select`, and `Textarea` controls. `Checkbox` exposes checked and indeterminate states without nesting interactive labels.
 - **Focus:** Repository Blue border plus a 2px Repository Blue ring.
 - **Disabled:** Inset background with reduced opacity and a not-allowed cursor.
 

@@ -145,6 +145,10 @@ The generated `@theme inline` block exposes semantic color, font, type, radius, 
 utilities to the installed Tailwind v4 build. Existing components can therefore consume
 `var(--gs-component-*)` or the equivalent semantic utility without importing a second palette.
 `src/renderer/src/design-system/FoundationsSpecimen.tsx` is an opt-in real-renderer route
-(`#/design-system-specimen`) showing a primary action, field, badges, selected row, and diff excerpt.
-It uses semantic/component CSS variables, has a keyboard-focusable action and field, and renders
-without desktop IPC or network access. The route does not alter the normal six-view navigation.
+(`#/design-system-specimen` or `#/design-system-controls`) showing the production Button,
+IconButton, Badge, Field/Input, Checkbox, Select, Textarea, SegmentedControl, DropdownMenu,
+Tooltip, Dialog, Surface, InlineAlert, EmptyState, and LoadingState primitives. Required
+specimens include loading, disabled, error, selected, checked/mixed, long-label, and icon-only
+states. The gallery uses semantic/component CSS variables, exercises keyboard dismissal and focus
+return, and renders without desktop IPC or network access. It does not alter normal six-view
+navigation.
