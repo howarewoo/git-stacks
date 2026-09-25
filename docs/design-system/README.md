@@ -191,4 +191,9 @@ remained reachable. The native traffic-light region was also exercised in the de
 | 1920 × 1080                  | `evidence/shell-before-1920x1080.png`                        | `evidence/shell-after-1920x1080.png`                        |
 | 200% zoom, 1000 × 700 window | `evidence/shell-before-zoom-200-percent-1000x700-window.png` | `evidence/shell-after-zoom-200-percent-1000x700-window.png` |
 
+The disabled-refresh regression smoke used a 500 × 350 CSS viewport while the live Fetch action was
+busy. The refresh button's disabled tooltip wrapper and the details control both remained in the
+second toolbar row after Search, with no document-level horizontal overflow. Evidence:
+`evidence/shell-after-disabled-refresh-500x350.png`.
+
 The delivery note records the exact validation command results and the live-renderer smoke steps.
