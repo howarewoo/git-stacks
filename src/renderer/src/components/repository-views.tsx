@@ -15,6 +15,8 @@ import {
 import type { Branch, Commit, FileView, RepositorySnapshot } from '../../../shared/types'
 import { Badge } from './ui/badge'
 import { Button } from './ui/button'
+import { Select } from './ui/select'
+import { Textarea } from './ui/textarea'
 import { sortBranchesByUpdatedAt } from '../lib/branches'
 import { workflowError, type RunAction, type WorkflowRequest } from './workflow-dialog'
 import { BranchHoverCard, PullRequestHoverCard } from './repository-hover-cards'
@@ -354,7 +356,7 @@ export function FileInspector({
               {file.content !== null && !file.binary && !file.truncated ? (
                 <>
                   <label htmlFor="conflict-content">Edit the resolved file</label>
-                  <textarea
+                  <Textarea
                     id="conflict-content"
                     rows={12}
                     spellCheck={false}
@@ -562,9 +564,10 @@ export function HistoryView({
           <label className="sr-only" htmlFor="history-ref">
             History branch
           </label>
-          <select
+          <Select
             className="workflow-select"
             id="history-ref"
+            controlSize="compact"
             disabled={busy || loading || diffLoading}
             value={ref}
             onChange={(event) => setRef(event.target.value)}
@@ -577,7 +580,7 @@ export function HistoryView({
                 {branch.name}
               </option>
             ))}
-          </select>
+          </Select>
           <Button
             aria-label="Reload history"
             variant="ghost"
@@ -776,7 +779,7 @@ export function StackView({
         <>
           <div className="stack-workspace-header">
             <label htmlFor="stack-selection">Stack root</label>
-            <select
+            <Select
               id="stack-selection"
               className="workflow-select"
               value={root}
@@ -791,7 +794,7 @@ export function StackView({
                   {name} · {branches.length} branch{branches.length === 1 ? '' : 'es'}
                 </option>
               ))}
-            </select>
+            </Select>
             <p>
               {stale
                 ? `${stale} branch${stale === 1 ? ' requires' : 'es require'} restacking.`

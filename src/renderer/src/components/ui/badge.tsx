@@ -3,12 +3,12 @@ import { cva, type VariantProps } from 'class-variance-authority'
 import { cn } from '../../lib/utils'
 
 const badgeVariants = cva(
-  'inline-flex shrink-0 items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] font-medium leading-4',
+  'inline-flex shrink-0 items-center gap-1 rounded-[var(--gs-semantic-radius-pill)] border px-2 py-0.5 text-[length:var(--gs-semantic-type-metadata-size)] font-medium leading-4',
   {
     variants: {
       variant: {
         default:
-          'border-transparent bg-[var(--gs-component-button-primary-background)] text-[var(--gs-component-button-primary-foreground)]',
+          'border-[var(--gs-component-badge-neutral-border)] bg-[var(--gs-component-badge-neutral-background)] text-[var(--gs-component-badge-neutral-text)]',
         secondary:
           'border-[var(--gs-component-badge-neutral-border)] bg-[var(--gs-component-badge-neutral-background)] text-[var(--gs-component-badge-neutral-text)]',
         outline:
@@ -21,7 +21,7 @@ const badgeVariants = cva(
         warning:
           'border-[var(--gs-component-badge-warning-text)] bg-[var(--gs-component-badge-warning-background)] text-[var(--gs-component-badge-warning-text)]',
         danger:
-          'border-[var(--gs-component-badge-error-text)] bg-[var(--gs-component-badge-error-background)] text-[var(--gs-component-badge-error-text)]',
+          'border-[var(--gs-semantic-feedback-error-text)] bg-[var(--gs-component-badge-error-background)] text-[var(--gs-component-badge-error-text)]',
         merged:
           'border-[var(--gs-component-badge-merged-text)] bg-[var(--gs-component-badge-merged-background)] text-[var(--gs-component-badge-merged-text)]',
       },
@@ -33,8 +33,8 @@ const badgeVariants = cva(
 export interface BadgeProps
   extends React.HTMLAttributes<HTMLSpanElement>, VariantProps<typeof badgeVariants> {}
 
-function Badge({ className, variant, ...props }: BadgeProps) {
+export function Badge({ className, variant, ...props }: BadgeProps) {
   return <span className={cn(badgeVariants({ variant, className }))} {...props} />
 }
 
-export { Badge, badgeVariants }
+export { badgeVariants }

@@ -13,6 +13,9 @@ import type {
 import { Button } from './ui/button'
 import { Input } from './ui/input'
 import { Badge } from './ui/badge'
+import { Checkbox } from './ui/checkbox'
+import { Select } from './ui/select'
+import { Textarea } from './ui/textarea'
 import {
   Dialog,
   DialogContent,
@@ -429,7 +432,7 @@ export function WorkflowDialog({
                 <label htmlFor="workflow-branch">
                   {request.kind === 'parent' ? 'Parent branch' : 'Branch to merge'}
                 </label>
-                <select
+                <Select
                   id="workflow-branch"
                   value={name}
                   onChange={(event) => setName(event.target.value)}
@@ -450,7 +453,7 @@ export function WorkflowDialog({
                             {branch.name}
                           </option>
                         ))}
-                </select>
+                </Select>
                 {request.kind === 'parent' ? (
                   <p className="workflow-note">
                     The original boundary is retained so restacking does not replay the previous
@@ -462,7 +465,7 @@ export function WorkflowDialog({
             {request.kind === 'upstream' ? (
               <>
                 <label htmlFor="workflow-upstream">Remote tracking branch</label>
-                <select
+                <Select
                   id="workflow-upstream"
                   value={name}
                   onChange={(event) => setName(event.target.value)}
@@ -475,13 +478,13 @@ export function WorkflowDialog({
                         {branch.name}
                       </option>
                     ))}
-                </select>
+                </Select>
               </>
             ) : null}
             {request.kind === 'pull' ? (
               <>
                 <label htmlFor="workflow-pull">Integration strategy</label>
-                <select
+                <Select
                   id="workflow-pull"
                   value={strategy}
                   onChange={(event) => setStrategy(event.target.value as typeof strategy)}
@@ -489,7 +492,7 @@ export function WorkflowDialog({
                   <option value="ff-only">Fast-forward only</option>
                   <option value="merge">Merge upstream changes</option>
                   <option value="rebase">Rebase local commits onto upstream</option>
-                </select>
+                </Select>
                 {strategy === 'rebase' ? (
                   <p className="workflow-warning">
                     Rebase rewrites local commits. Restack dependent branches afterward.
@@ -508,14 +511,12 @@ export function WorkflowDialog({
                   onChange={(event) => setMessage(event.target.value)}
                   placeholder="Work to return to"
                 />
-                <label className="checkbox-label">
-                  <input
-                    type="checkbox"
-                    checked={includeUntracked}
-                    onChange={(event) => setIncludeUntracked(event.target.checked)}
-                  />
-                  Include untracked files
-                </label>
+                <Checkbox
+                  id="workflow-include-untracked"
+                  label="Include untracked files"
+                  checked={includeUntracked}
+                  onChange={(event) => setIncludeUntracked(event.target.checked)}
+                />
               </>
             ) : null}
             {request.kind === 'forcePush' && push ? (
@@ -550,7 +551,7 @@ export function WorkflowDialog({
             {request.kind === 'commitAction' && request.commit.parents.length > 1 ? (
               <>
                 <label htmlFor="workflow-mainline">Mainline parent for this merge commit</label>
-                <select
+                <Select
                   id="workflow-mainline"
                   value={mainline}
                   onChange={(event) => setMainline(event.target.value)}
@@ -561,7 +562,7 @@ export function WorkflowDialog({
                       Parent {index + 1}: {oid.slice(0, 12)}
                     </option>
                   ))}
-                </select>
+                </Select>
               </>
             ) : null}
             {request.kind === 'stack' && preview ? (
@@ -626,25 +627,21 @@ export function WorkflowDialog({
                 ) : null}
                 {request.operation === 'publish' ? (
                   <>
-                    <label className="checkbox-label">
-                      <input
-                        type="checkbox"
-                        checked={draft}
-                        onChange={(event) => setDraft(event.target.checked)}
-                      />
-                      Create new PRs as drafts
-                    </label>
-                    <label className="checkbox-label">
-                      <input
-                        type="checkbox"
-                        checked={allowForce}
-                        onChange={(event) => {
-                          setAllowForce(event.target.checked)
-                          setConfirmation('')
-                        }}
-                      />
-                      Allow rewritten branches to be pushed with exact leases
-                    </label>
+                    <Checkbox
+                      id="workflow-create-drafts"
+                      label="Create new PRs as drafts"
+                      checked={draft}
+                      onChange={(event) => setDraft(event.target.checked)}
+                    />
+                    <Checkbox
+                      id="workflow-allow-force"
+                      label="Allow rewritten branches to be pushed with exact leases"
+                      checked={allowForce}
+                      onChange={(event) => {
+                        setAllowForce(event.target.checked)
+                        setConfirmation('')
+                      }}
+                    />
                     {allowForce ? (
                       <>
                         <p className="workflow-warning">
@@ -665,7 +662,7 @@ export function WorkflowDialog({
                 {request.operation === 'merge' ? (
                   <>
                     <label htmlFor="workflow-merge-method">Merge method</label>
-                    <select
+                    <Select
                       id="workflow-merge-method"
                       value={mergeMethod}
                       onChange={(event) => setMergeMethod(event.target.value as typeof mergeMethod)}
@@ -680,7 +677,7 @@ export function WorkflowDialog({
                               : 'Create a merge commit'}
                         </option>
                       ))}
-                    </select>
+                    </Select>
                   </>
                 ) : null}
               </>
@@ -720,22 +717,20 @@ export function WorkflowDialog({
                   onChange={(event) => setPrTitle(event.target.value)}
                 />
                 <label htmlFor="workflow-pr-body">Description</label>
-                <textarea
+                <Textarea
                   id="workflow-pr-body"
                   rows={6}
                   disabled={pr.state === 'MERGED'}
                   value={body}
                   onChange={(event) => setBody(event.target.value)}
                 />
-                <label className="checkbox-label">
-                  <input
-                    type="checkbox"
-                    checked={draft}
-                    disabled={pr.state !== 'OPEN'}
-                    onChange={(event) => setDraft(event.target.checked)}
-                  />
-                  Draft pull request
-                </label>
+                <Checkbox
+                  id="workflow-pr-draft"
+                  label="Draft pull request"
+                  checked={draft}
+                  disabled={pr.state !== 'OPEN'}
+                  onChange={(event) => setDraft(event.target.checked)}
+                />
                 {pr.state === 'OPEN' &&
                 localBranches.some(
                   (branch) => branch.name === pr.head && branch.pr?.number === pr.number,

@@ -41,7 +41,7 @@ function RepositoryHoverCard({
 function ContextRow({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <div className="grid grid-cols-[5rem_minmax(0,1fr)] gap-3">
-      <dt className="text-[var(--ink-muted)]">{label}</dt>
+      <dt className="text-[var(--gs-semantic-text-secondary)]">{label}</dt>
       <dd className="m-0">{children}</dd>
     </div>
   )
@@ -53,7 +53,7 @@ export function BranchHoverCard({ branch, children }: { branch: Branch; children
       <HoverCardTrigger asChild>{children}</HoverCardTrigger>
       <HoverCardContent>
         <strong className="block">{branch.name}</strong>
-        <p className="mt-1 text-xs text-[var(--ink-muted)]">
+        <p className="mt-1 text-[length:var(--gs-semantic-type-metadata-size)] text-[var(--gs-semantic-text-secondary)]">
           {branch.current ? 'Current branch' : branch.remote ? 'Remote branch' : 'Local branch'}
         </p>
         <p className="my-3 leading-relaxed">{branch.subject || 'No commit subject'}</p>
@@ -74,7 +74,7 @@ export function BranchHoverCard({ branch, children }: { branch: Branch; children
           ) : null}
         </dl>
         {branch.needsRestack ? (
-          <p className="mt-3 text-xs text-[var(--warning)]">
+          <p className="mt-3 text-[length:var(--gs-semantic-type-metadata-size)] text-[var(--gs-semantic-feedback-warning-text)]">
             The parent or recorded boundary changed. Review a restack before publishing.
           </p>
         ) : null}
@@ -94,12 +94,12 @@ export function PullRequestHoverCard({
     <RepositoryHoverCard openDelay={500}>
       <HoverCardTrigger asChild>{children}</HoverCardTrigger>
       <HoverCardContent>
-        <p className="mb-1 text-xs text-[var(--ink-muted)]">
+        <p className="mb-1 text-[length:var(--gs-semantic-type-metadata-size)] text-[var(--gs-semantic-text-secondary)]">
           Pull request #{pr.number} ·{' '}
           {pr.state === 'OPEN' && pr.draft ? 'draft' : pr.state.toLowerCase()}
         </p>
         <strong className="block leading-snug">{pr.title}</strong>
-        <p className="my-3 text-xs">
+        <p className="my-3 text-[length:var(--gs-semantic-type-metadata-size)]">
           <span>{pr.head}</span> → <span>{pr.base}</span>
         </p>
         <dl className="space-y-2 text-xs">
@@ -113,7 +113,7 @@ export function PullRequestHoverCard({
             {pr.mergeState?.replaceAll('_', ' ').toLowerCase() || 'Not reported by GitHub'}
           </ContextRow>
         </dl>
-        <p className="mt-3 text-xs text-[var(--ink-muted)]">
+        <p className="mt-3 text-[length:var(--gs-semantic-type-metadata-size)] text-[var(--gs-semantic-text-secondary)]">
           GitHub rules and the reviewed head are checked again before merging.
         </p>
       </HoverCardContent>

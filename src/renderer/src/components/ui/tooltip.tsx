@@ -16,7 +16,7 @@ const TooltipContent = React.forwardRef<
       sideOffset={sideOffset}
       collisionPadding={collisionPadding}
       className={cn(
-        'z-[var(--gs-component-overlay-popover-z-index)] max-w-[min(20rem,calc(100vw-24px))] rounded-md bg-[var(--gs-component-button-primary-background)] px-3 py-2 text-xs leading-relaxed text-[var(--gs-component-button-primary-foreground)] shadow-[var(--gs-semantic-elevation-medium)] [overflow-wrap:anywhere]',
+        'z-[var(--gs-component-overlay-popover-z-index)] max-w-[min(20rem,calc(100vw-24px))] rounded-[var(--gs-semantic-radius-control)] bg-[var(--gs-semantic-text-primary)] px-3 py-2 text-[length:var(--gs-semantic-type-metadata-size)] leading-relaxed text-[var(--gs-semantic-text-inverse)] shadow-[var(--gs-semantic-elevation-medium)] [overflow-wrap:anywhere]',
         className,
       )}
       {...props}
