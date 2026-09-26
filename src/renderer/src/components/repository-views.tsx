@@ -20,6 +20,8 @@ import { Select } from './ui/select'
 import { Textarea } from './ui/textarea'
 import { sortBranchesByUpdatedAt } from '../lib/branches'
 import { workflowError, type RunAction, type WorkflowRequest } from './workflow-dialog'
+import { PhaseStatus, WorkflowActions } from './workflow-composition'
+import { partialProgress, workflowPhase } from './workflow-policy'
 import { BranchHoverCard, PullRequestHoverCard } from './repository-hover-cards'
 
 type CommonProps = {
@@ -29,6 +31,12 @@ type CommonProps = {
   onRequest: (request: WorkflowRequest) => void
 }
 
+/**
+ * The persistent operation banner. It stays on screen across every workspace
+ * view while a Git operation or stack restack is in flight, and it renders the
+ * same state model the dialogs use: real progress from the snapshot, real
+ * blocker counts from the working tree, and never a synthesized percentage.
+ */
 export function OperationBanner({
   snapshot,
   busy,
@@ -47,36 +55,53 @@ export function OperationBanner({
       : operation
         ? operation.charAt(0).toUpperCase() + operation.slice(1)
         : 'Conflicts'
+  const resumable = Boolean(stack || (operation && operation !== 'other'))
+  const progress = stack
+    ? partialProgress({
+        completed: stack.completed,
+        remaining: stack.remaining,
+        message: stack.message,
+      })
+    : null
+  const phase = workflowPhase({
+    loading: false,
+    busy: false,
+    failed: false,
+    stale: false,
+    finished: progress !== null && progress.remaining === 0,
+    partial: progress !== null && progress.completed > 0 && progress.remaining > 0,
+    blocked: resumable && conflicts > 0,
+  })
+  const message =
+    conflicts > 0
+      ? `${conflicts} conflicted file${conflicts === 1 ? '' : 's'}. Resolve and stage each file before continuing.`
+      : progress
+        ? `${progress.summary}. ${progress.message}`
+        : 'Review the working tree, then continue or abort.'
   return (
-    <div className="operation-banner" role="status">
-      <TriangleAlert className="size-4" />
-      <div className="operation-copy">
-        <strong>
-          {label}
-          {operation || stack ? ' in progress' : ' need attention'}
-        </strong>
-        <span>
-          {stack
-            ? `${stack.completed.length} completed · ${stack.remaining.length} remaining. ${stack.message}`
-            : conflicts
-              ? `${conflicts} conflicted file${conflicts === 1 ? '' : 's'}. Resolve and stage each file before continuing.`
-              : 'Review the working tree, then continue or abort.'}
-        </span>
-      </div>
+    <section className="operation-banner" aria-label="Git operation status">
+      <PhaseStatus
+        phase={phase}
+        title={`${label} ${operation || stack ? 'in progress' : 'need attention'}`}
+        message={message}
+        className="operation-status"
+      />
       <div className="workflow-row">
         <Button size="sm" variant="secondary" onClick={onShowChanges}>
           View changes
         </Button>
-        {stack || (operation && operation !== 'other') ? (
+        {resumable ? (
           <>
             <Button
               disabled={busy || conflicts > 0}
               size="sm"
               variant="accent"
               tooltip={
-                stack
-                  ? 'Resume the stack restack locally using staged resolutions. Blocked until every conflicted file is staged.'
-                  : `Resume the ${label.toLowerCase()} locally using staged resolutions. Blocked until every conflicted file is staged.`
+                conflicts > 0
+                  ? 'Blocked until every conflicted file is resolved and staged.'
+                  : stack
+                    ? 'Resume the stack restack locally using staged resolutions.'
+                    : `Resume the ${label.toLowerCase()} locally using staged resolutions.`
               }
               onClick={() =>
                 runAction(
@@ -138,7 +163,7 @@ export function OperationBanner({
           <span className="workflow-note">Finish the active Git operation in your terminal.</span>
         ) : null}
       </div>
-    </div>
+    </section>
   )
 }
 
@@ -465,13 +490,16 @@ export function FileInspector({
             </div>
           ) : null}
           {pending ? (
-            <div className="inline-confirm" role="alert">
-              <p>
-                {pending === 'discard'
-                  ? 'Discard the displayed unstaged changes? An untracked file will be deleted. This cannot be undone through Git.'
-                  : `Replace this conflicted file with the ${pending} version and stage it? Manual edits to the file will be replaced.`}
-              </p>
-              <div className="workflow-row">
+            <div className="inline-confirm" data-composition="destructive">
+              <PhaseStatus
+                phase="blocked"
+                message={
+                  pending === 'discard'
+                    ? 'Discard the displayed unstaged changes? An untracked file will be deleted. This cannot be undone through Git.'
+                    : `Replace this conflicted file with the ${pending} version and stage it? Manual edits to the file will be replaced.`
+                }
+              />
+              <WorkflowActions>
                 <Button
                   variant="secondary"
                   size="sm"
@@ -493,7 +521,7 @@ export function FileInspector({
                 >
                   Confirm {pending === 'discard' ? 'discard' : 'resolution'}
                 </Button>
-              </div>
+              </WorkflowActions>
             </div>
           ) : null}
           {actionError ? (

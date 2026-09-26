@@ -272,9 +272,12 @@ The renderer builds on the repository's existing [shadcn/ui](https://ui.shadcn.c
 ### Dialogs
 
 - **Overlay:** Fixed inset overlay at the `component.overlay` z-index with the dedicated overlay scrim role.
-- **Content:** White surface, essential border, existing 12px utility radius, 20px padding, and large elevation shadow at z-index 60.
-- **Close:** Keyboard-focusable close control with an explicit accessible label and tooltip.
-- **State:** Radix open/close behavior and the existing dialog-in motion remain unchanged.
+- **Content:** White surface, essential border, 24px workbench radius, 20px padding, and large elevation shadow at the overlay token's z-index. Height is viewport-constrained and scrollable so footer actions remain reachable when zoomed.
+- **Compositions:** `WorkflowFrame`, `OperationContext`, and `WorkflowActions` give ordinary forms, reviewed operations, and destructive confirmations shared spacing and action roles. `Field` and `TypedConfirmation` retain domain-specific validation.
+- **Close and focus:** The Radix focus trap returns focus to the initiating control. Reviewed and destructive workflow dialogs start on Cancel. Escape/backdrop cannot discard entered work or interrupt an active mutation; explicit Cancel is distinct from aborting Git.
+- **State:** `PhaseStatus` presents loading, ready, blocked, submitting, rejected, partial, success, and failure from existing operation data. Important errors remain inline; successful notices are polite and dismissible. Rejected previews require a successful reload before another dispatch.
+- **Recovery:** The persistent operation banner remains outside workspace-specific views. Continue respects conflict blockers; Skip and Abort retain their explicit loss warnings and existing Git actions. Progress uses actual completed and remaining branches.
+- **Specimen:** `#/design-system-dialog-specimen` renders the shared compositions, recovery states, and guarded action fixtures without changing normal navigation.
 
 ### Hover Cards and Tooltips
 
