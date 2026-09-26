@@ -9,6 +9,7 @@ import type { GitAction } from '../src/shared/types'
 import type { RepositoryCapabilities } from '../src/shared/capabilities'
 import { getFileView, getSnapshot, resolveRepository, runAction } from '../src/main/git'
 import { getRepositoryCapabilities } from '../src/main/capabilities'
+import { previewStack } from '../src/main/stacks'
 
 type Git = (...args: string[]) => string
 
@@ -206,7 +207,7 @@ test('a submodule shows its recorded commit and refuses content actions', async 
   }
 })
 
-test('a Git LFS pointer is read as a pointer and a push says so', async () => {
+test('a real Git LFS push transfers its object and a pointer preview stays distinct', async () => {
   const root = await scratch()
   try {
     const remotePath = join(root, 'remote.git')
@@ -214,35 +215,35 @@ test('a Git LFS pointer is read as a pointer and a push says so', async () => {
     const remote = gitIn(remotePath)
     const git = await initRepo(root)
     const repo = join(root, 'workspace')
-    // `git lfs install` writes filter.lfs.*; a pass-through driver stands in for the client.
-    git('config', 'filter.lfs.process', '')
-    git('config', 'filter.lfs.clean', 'cat')
-    git('config', 'filter.lfs.smudge', 'cat')
-    git('config', 'filter.lfs.required', 'false')
-    const oid = 'a'.repeat(64)
-    await writeFile(join(repo, '.gitattributes'), '*.bin filter=lfs diff=lfs merge=lfs -text\n')
-    await writeFile(
-      join(repo, 'asset.bin'),
-      `version https://git-lfs.github.com/spec/v1\noid sha256:${oid}\nsize 2048\n`,
-    )
+    git('lfs', 'install', '--local')
+    git('lfs', 'track', '*.bin')
+    const object = Buffer.from('actual binary content\n'.repeat(128))
+    await writeFile(join(repo, 'asset.bin'), object)
     git('add', '.')
-    git('commit', '-m', 'Add pointer')
+    git('commit', '-m', 'Add LFS object')
     git('remote', 'add', 'origin', remotePath)
 
+    const pointer = git('show', 'HEAD:asset.bin')
+    const match = pointer.match(/^oid sha256:([0-9a-f]{64})$/mu)
+    assert.ok(match, `expected Git LFS to store a pointer, got ${pointer}`)
+    const oid = match[1]
     const capabilities = (await getSnapshot(repo)).capabilities
     assert.equal(capabilities.gitLfs, true)
     assert.equal(reportEntry(capabilities, 'git-lfs').state, 'limited')
 
-    await writeFile(
-      join(repo, 'asset.bin'),
-      `version https://git-lfs.github.com/spec/v1\noid sha256:${'b'.repeat(64)}\nsize 4096\n`,
-    )
-    const view = await getFileView(repo, 'asset.bin')
-    assert.deepEqual(view.lfs, { oid: 'b'.repeat(64), size: 4096 })
+    // A checked-out pointer (e.g. a skipped smudge) is metadata, not object content.
+    await writeFile(join(repo, 'preview.bin'), `${pointer}\n`)
+    const view = await getFileView(repo, 'preview.bin')
+    assert.deepEqual(view.lfs, { oid, size: object.length })
+    assert.notEqual(view.content, object.toString('utf8'))
 
     const result = await runAction(repo, { type: 'push' })
     assert.match(result.message, /Git LFS objects travel with the Git LFS client/u)
     assert.equal(remote('rev-parse', 'refs/heads/main'), git('rev-parse', 'main'))
+    assert.deepEqual(
+      await readFile(join(remotePath, 'lfs', 'objects', oid.slice(0, 2), oid.slice(2, 4), oid)),
+      object,
+    )
   } finally {
     await rm(root, { recursive: true, force: true })
   }
@@ -347,6 +348,50 @@ test('a detached HEAD limits branch-owned operations and reports the reason', as
 
     await runAction(repo, { type: 'switch', ref: 'refs/heads/main' })
     assert.equal((await getSnapshot(repo)).capabilities.detachedHead, false)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('a detached HEAD can execute a stack restack without attaching the checkout', async () => {
+  const root = await scratch()
+  try {
+    const git = await initRepo(root)
+    const repo = join(root, 'workspace')
+    await writeFile(join(repo, 'shared.txt'), 'base\n')
+    git('add', '.')
+    git('commit', '-m', 'Initial commit')
+    const base = git('rev-parse', 'HEAD')
+    git('switch', '-c', 'feature')
+    await writeFile(join(repo, 'feature.txt'), 'feature\n')
+    git('add', '.')
+    git('commit', '-m', 'Feature commit')
+    const originalFeature = git('rev-parse', 'feature')
+    git('config', 'branch.feature.parent', 'main')
+    git('config', 'branch.feature.parentTip', base)
+    git('switch', 'main')
+    await writeFile(join(repo, 'main.txt'), 'updated\n')
+    git('add', '.')
+    git('commit', '-m', 'Advance main')
+    git('checkout', '--detach', base)
+
+    const detachedOid = git('rev-parse', 'HEAD')
+    const snapshot = await getSnapshot(repo)
+    assert.equal(snapshot.capabilities.detachedHead, true)
+    const preview = await previewStack(repo, snapshot, 'restack', 'feature')
+    assert.deepEqual(preview.blockers, [])
+    await runAction(repo, {
+      type: 'executeStack',
+      token: preview.token,
+      allowForce: false,
+      draft: false,
+      titles: {},
+      mergeMethod: 'squash',
+    })
+    assert.notEqual(git('rev-parse', 'feature'), originalFeature)
+    assert.equal(git('merge-base', 'main', 'feature'), git('rev-parse', 'main'))
+    assert.equal(git('branch', '--show-current'), '')
+    assert.equal(git('rev-parse', 'HEAD'), detachedOid)
   } finally {
     await rm(root, { recursive: true, force: true })
   }

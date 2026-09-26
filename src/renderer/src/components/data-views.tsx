@@ -352,9 +352,11 @@ export function ChangesView({
             busy ||
             operationActive ||
             !snapshot.headOid ||
-            snapshot.currentBranch === snapshot.defaultBranch
+            snapshot.currentBranch === snapshot.defaultBranch ||
+            Boolean(actionBlockReason(snapshot.capabilities, 'commit'))
           }
           onChange={(event) => onCommitAmendChange(event.target.checked)}
+          description={actionBlockReason(snapshot.capabilities, 'commit') ?? undefined}
         />
         <div className="commit-form-row">
           <Field
@@ -381,14 +383,16 @@ export function ChangesView({
               !commitMessage.trim() ||
               (!commitAmend && groups.staged.length === 0) ||
               busy ||
-              operationActive
+              operationActive ||
+              Boolean(actionBlockReason(snapshot.capabilities, 'commit'))
             }
             type="submit"
             variant="accent"
             tooltip={
-              commitAmend
+              actionBlockReason(snapshot.capabilities, 'commit') ??
+              (commitAmend
                 ? 'Review rewriting the last commit with the new message plus staged changes. Rewrites local history; pushed commits will need force push.'
-                : 'Create a local commit from staged changes only. Unstaged edits stay in the working tree; nothing is pushed.'
+                : 'Create a local commit from staged changes only. Unstaged edits stay in the working tree; nothing is pushed.')
             }
           >
             {busyAction === 'Commit staged changes' ? (

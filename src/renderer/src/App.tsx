@@ -1309,9 +1309,9 @@ function App() {
               <h3>Stack workflow</h3>
               <Button
                 variant="accent"
-                disabled={isBusy || operationActive || Boolean(shapeReason('rebase'))}
+                disabled={isBusy || operationActive || Boolean(shapeReason('executeStack'))}
                 tooltip={
-                  shapeReason('rebase') ??
+                  shapeReason('executeStack') ??
                   'Preview rebasing this stack onto updated parents locally, branch by branch. Remotes stay unchanged until published.'
                 }
                 onClick={() =>
@@ -1357,9 +1357,9 @@ function App() {
               {selectedPullRequest?.state === 'OPEN' ? (
                 <Button
                   variant="secondary"
-                  disabled={isBusy || operationActive || Boolean(shapeReason('merge'))}
+                  disabled={isBusy || operationActive || Boolean(shapeReason('executeStack'))}
                   tooltip={
-                    shapeReason('merge') ??
+                    shapeReason('executeStack') ??
                     'Preview merging this open pull request into the default branch. Nothing merges until confirmed; remaining branches still need restack.'
                   }
                   onClick={() =>

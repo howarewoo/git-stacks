@@ -17,6 +17,7 @@ import { actionBlockReason, submodulePathReason } from '../../../shared/capabili
 import { Badge } from './ui/badge'
 import { Button } from './ui/button'
 import { SegmentedControl } from './ui/segmented-control'
+import { InlineAlert } from './ui/surface'
 import { Select } from './ui/select'
 import { Textarea } from './ui/textarea'
 import { sortBranchesByUpdatedAt } from '../lib/branches'
@@ -372,6 +373,12 @@ export function FileInspector({
         </p>
       ) : file ? (
         <>
+          {file.lfs ? (
+            <InlineAlert className="mx-4 mt-3" title="Git LFS pointer, not object content">
+              Object sha256:{file.lfs.oid} · {file.lfs.size.toLocaleString()} bytes. Git Stacks does
+              not check whether the object is available locally; use Git LFS to retrieve it.
+            </InlineAlert>
+          ) : null}
           <div className="inspector-tabs">
             <SegmentedControl
               className="inspector-tab-control"
@@ -1055,8 +1062,14 @@ export function StackView({
                         <Button
                           size="sm"
                           variant="secondary"
-                          disabled={blocked}
-                          tooltip="Preview merging this pull request into the default branch. Nothing is merged until confirmed; remaining branches still need restack and publish."
+                          disabled={
+                            blocked ||
+                            Boolean(actionBlockReason(snapshot.capabilities, 'executeStack'))
+                          }
+                          tooltip={
+                            actionBlockReason(snapshot.capabilities, 'executeStack') ??
+                            'Preview merging this pull request into the default branch. Nothing is merged until confirmed; remaining branches still need restack and publish.'
+                          }
                           onClick={() =>
                             onRequest({ kind: 'stack', branch: branch.name, operation: 'merge' })
                           }
