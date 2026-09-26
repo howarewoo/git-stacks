@@ -18,6 +18,7 @@ import {
   readGitRuntimePreference,
   requireGitCapability,
   resolveGitRuntime,
+  withGitRuntime,
   writeGitRuntimePreference,
 } from '../src/main/git-runtime'
 import type { GitAction } from '../src/shared/types'
@@ -300,6 +301,83 @@ test(
     }
   },
 )
+test(
+  'cached validation rejects an altered or removed helper in a disposable copied distribution before execution even when bin/git is intact',
+  { skip: process.platform === 'win32' },
+  async () => {
+    const tmp = await temporaryRoot('git-stacks-helper-tamper-')
+    execFileSync('cp', ['-R', '-P', join(releaseResources, 'git'), tmp])
+    configureGitRuntime({
+      appVersion: APP_VERSION,
+      packaged: true,
+      resourcesRoot: tmp,
+      useSystemGit: false,
+    })
+    try {
+      const initial = await resolveGitRuntime()
+      assert.equal(initial.source, 'bundled')
+
+      const helperRelative = join('libexec', 'git-core', 'git-remote-https')
+      const helperPath = join(tmp, 'git', platform, helperRelative)
+      const marker = join(tmp, 'helper-marker')
+
+      // Replace helper with executable script while bin/git remains untouched
+      await writeFile(helperPath, `#!/bin/sh\nprintf executed > "${marker}"\nexit 1\n`, {
+        mode: 0o755,
+      })
+
+      await assert.rejects(
+        resolveGitRuntime(),
+        /The bundled Git runtime files do not match the signed release inventory/u,
+      )
+      await assert.rejects(readFile(marker), { code: 'ENOENT' })
+
+      // Remove helper while bin/git remains untouched
+      await rm(helperPath)
+      await assert.rejects(
+        resolveGitRuntime(),
+        /The bundled Git runtime files do not match the signed release inventory/u,
+      )
+    } finally {
+      configureGitRuntime({ resourcesRoot: null, packaged: false, useSystemGit: false })
+    }
+  },
+)
+
+test('an in-flight operation retains its checked runtime and capabilities across multi-command execution despite global configuration changes', async () => {
+  configureGitRuntime({
+    appVersion: APP_VERSION,
+    packaged: true,
+    resourcesRoot: releaseResources,
+    useSystemGit: false,
+  })
+  try {
+    const initial = await resolveGitRuntime()
+    assert.equal(initial.source, 'bundled')
+
+    let duringOperationSource: string | null = null
+    let secondCheckSource: string | null = null
+
+    await withGitRuntime(initial, async () => {
+      const first = await resolveGitRuntime()
+      duringOperationSource = first.source
+
+      // Global preference changes mid-operation
+      configureGitRuntime({ useSystemGit: true })
+
+      const second = await resolveGitRuntime()
+      secondCheckSource = second.source
+    })
+
+    const outside = await resolveGitRuntime()
+
+    assert.equal(duringOperationSource, 'bundled')
+    assert.equal(secondCheckSource, 'bundled')
+    assert.equal(outside.source, 'system')
+  } finally {
+    configureGitRuntime({ resourcesRoot: null, packaged: false, useSystemGit: false })
+  }
+})
 
 test('core workflows complete against the bundled runtime and the system Git', async () => {
   const bundled = { resourcesRoot: releaseResources, executable: releaseExecutable }

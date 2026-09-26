@@ -1,7 +1,8 @@
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { execFile as execFileCallback } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { createReadStream, promises as fs } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { dirname, join, relative } from 'node:path'
 import { promisify } from 'node:util'
 import type {
   BundledRuntimeInfo,
@@ -64,9 +65,32 @@ export interface GitRuntimeConfiguration {
   arch: string
 }
 
-let configuration: GitRuntimeConfiguration | null = null
-let cached: { key: string; record: GitRuntimeRecord } | null = null
+interface FileFingerprint {
+  mtimeMs: number
+  size: number
+  ino: number
+  mode: number
+}
 
+interface BundledVerification {
+  info: BundledRuntimeInfo
+  fingerprints: Record<string, FileFingerprint>
+  dirMtimes: Record<string, number>
+}
+
+const runtimeScope = new AsyncLocalStorage<GitRuntimeRecord>()
+
+export function withGitRuntime<T>(runtime: GitRuntimeRecord, fn: () => Promise<T>): Promise<T> {
+  return runtimeScope.run(runtime, fn)
+}
+
+let configuration: GitRuntimeConfiguration | null = null
+let cached: {
+  key: string
+  record: GitRuntimeRecord
+  fingerprints?: Record<string, FileFingerprint>
+  dirMtimes?: Record<string, number>
+} | null = null
 /** Point the resolver at this build's resources directory and record the system-Git override. */
 export function configureGitRuntime(
   next: Partial<GitRuntimeConfiguration>,
@@ -155,24 +179,59 @@ async function sha256(filePath: string): Promise<string> {
   for await (const chunk of createReadStream(filePath)) hash.update(chunk)
   return hash.digest('hex')
 }
-async function runtimeFiles(directory: string, prefix = ''): Promise<Record<string, string>> {
-  const entries: Record<string, string> = {}
-  for (const item of await fs.readdir(directory, { withFileTypes: true })) {
-    const name = prefix ? `${prefix}/${item.name}` : item.name
-    const path = join(directory, item.name)
-    if (item.isDirectory()) Object.assign(entries, await runtimeFiles(path, name))
-    else if (item.isSymbolicLink()) entries[name] = `link:${await fs.readlink(path)}`
-    else if (item.isFile()) entries[name] = await sha256(path)
-    else throw new Error(`Unexpected bundled Git runtime entry: ${name}`)
+async function runtimeFiles(
+  directory: string,
+  prefix = '',
+): Promise<{
+  files: Record<string, string>
+  fingerprints: Record<string, FileFingerprint>
+  dirMtimes: Record<string, number>
+}> {
+  const files: Record<string, string> = {}
+  const fingerprints: Record<string, FileFingerprint> = {}
+  const dirMtimes: Record<string, number> = {}
+
+  async function walk(dir: string, currentPrefix: string) {
+    const dirStat = await fs.stat(dir)
+    dirMtimes[currentPrefix || '.'] = dirStat.mtimeMs
+    for (const item of await fs.readdir(dir, { withFileTypes: true })) {
+      const name = currentPrefix ? `${currentPrefix}/${item.name}` : item.name
+      const path = join(dir, item.name)
+      if (item.isDirectory()) {
+        await walk(path, name)
+      } else if (item.isSymbolicLink()) {
+        const lstat = await fs.lstat(path)
+        files[name] = `link:${await fs.readlink(path)}`
+        fingerprints[name] = {
+          mtimeMs: lstat.mtimeMs,
+          size: lstat.size,
+          ino: lstat.ino,
+          mode: lstat.mode,
+        }
+      } else if (item.isFile()) {
+        const lstat = await fs.lstat(path)
+        files[name] = await sha256(path)
+        fingerprints[name] = {
+          mtimeMs: lstat.mtimeMs,
+          size: lstat.size,
+          ino: lstat.ino,
+          mode: lstat.mode,
+        }
+      } else {
+        throw new Error(`Unexpected bundled Git runtime entry: ${name}`)
+      }
+    }
   }
-  return entries
+
+  await walk(directory, prefix)
+  return { files, fingerprints, dirMtimes }
 }
 
 async function assertBundledRuntime(
   manifest: BundledRuntimeManifest | null,
   platform: string,
   executable: string,
-): Promise<BundledRuntimeInfo> {
+): Promise<BundledVerification> {
   if (configuration?.packaged && manifest?.appVersion !== configuration.appVersion) {
     throw new Error(
       `The bundled Git runtime manifest records app version ${manifest?.appVersion ?? 'none'} and does not match this build. Git Stacks only runs the Git runtime that ships with its own release.`,
@@ -185,7 +244,11 @@ async function assertBundledRuntime(
         `This build records no Git runtime for ${platform}. Git Stacks only runs a Git runtime that ships inside a signed release.`,
       )
     }
-    return { gitVersion: '', sha256: '', source: 'unverified development runtime' }
+    return {
+      info: { gitVersion: '', sha256: '', source: 'unverified development runtime' },
+      fingerprints: {},
+      dirMtimes: {},
+    }
   }
   if (
     !/^[a-f0-9]{64}$/iu.test(entry.sha256) ||
@@ -195,21 +258,24 @@ async function assertBundledRuntime(
       `The bundled Git runtime at ${executable} does not match its release digest. Reinstall Git Stacks from a signed release.`,
     )
   }
+  let fingerprints: Record<string, FileFingerprint> = {}
+  let dirMtimes: Record<string, number> = {}
   if (configuration?.packaged) {
     if (!entry.files || Object.values(entry.files).some((hash) => typeof hash !== 'string')) {
       throw new Error('The bundled Git runtime has no complete release inventory.')
     }
     const actual = await runtimeFiles(dirname(dirname(executable)))
     if (
-      Object.keys(actual).length !== Object.keys(entry.files).length ||
-      Object.entries(actual).some(([name, hash]) => entry.files?.[name] !== hash)
+      Object.keys(actual.files).length !== Object.keys(entry.files).length ||
+      Object.entries(actual.files).some(([name, hash]) => entry.files?.[name] !== hash)
     ) {
       throw new Error('The bundled Git runtime files do not match the signed release inventory.')
     }
+    fingerprints = actual.fingerprints
+    dirMtimes = actual.dirMtimes
   }
-  return entry
+  return { info: entry, fingerprints, dirMtimes }
 }
-
 /** Relocate managed Git's helpers without replacing user credentials, hooks, or Git config. */
 export function gitCommandEnvironment(
   runtime: Pick<GitRuntimeInfo, 'source' | 'executable' | 'platform'>,
@@ -246,6 +312,9 @@ export function gitCommandEnvironment(
 
 /** Resolve the one Git executable every Git Stacks operation runs through, and record its facts. */
 export async function resolveGitRuntime(): Promise<GitRuntimeRecord> {
+  const scoped = runtimeScope.getStore()
+  if (scoped) return scoped
+
   configuration ??= configureGitRuntime({})
   const settings = configuration
   const key = JSON.stringify([
@@ -259,16 +328,114 @@ export async function resolveGitRuntime(): Promise<GitRuntimeRecord> {
     settings.arch,
   ])
   if (cached?.key === key) {
-    const { record } = cached
-    if (
-      record.packaged &&
-      record.bundled &&
-      record.bundled.sha256 !== (await sha256(record.executable))
-    ) {
-      cached = null
-      throw new Error(
-        `The bundled Git runtime at ${record.executable} does not match its release digest. Reinstall Git Stacks from a signed release.`,
-      )
+    const { record, fingerprints, dirMtimes } = cached
+    if (record.packaged && record.bundled) {
+      const root = dirname(dirname(record.executable))
+      const execStat = await fs.lstat(record.executable).catch(() => null)
+      if (!execStat) {
+        cached = null
+        throw new Error(
+          `The bundled Git runtime at ${record.executable} does not match its release digest. Reinstall Git Stacks from a signed release.`,
+        )
+      }
+      const execRel = relative(root, record.executable).replace(/\\/gu, '/')
+      const execFp = fingerprints?.[execRel]
+      if (
+        !execFp ||
+        execFp.mtimeMs !== execStat.mtimeMs ||
+        execFp.size !== execStat.size ||
+        execFp.ino !== execStat.ino ||
+        execFp.mode !== execStat.mode
+      ) {
+        const hash = await sha256(record.executable)
+        if (hash !== record.bundled.sha256) {
+          cached = null
+          throw new Error(
+            `The bundled Git runtime at ${record.executable} does not match its release digest. Reinstall Git Stacks from a signed release.`,
+          )
+        }
+        if (fingerprints) {
+          fingerprints[execRel] = {
+            mtimeMs: execStat.mtimeMs,
+            size: execStat.size,
+            ino: execStat.ino,
+            mode: execStat.mode,
+          }
+        }
+      }
+
+      if (record.bundled.files) {
+        if (dirMtimes) {
+          for (const [dirRel, expectedMtime] of Object.entries(dirMtimes)) {
+            const dirStat = await fs.stat(join(root, dirRel)).catch(() => null)
+            if (!dirStat || dirStat.mtimeMs !== expectedMtime) {
+              const actual = await runtimeFiles(root).catch(() => null)
+              if (
+                !actual ||
+                Object.keys(actual.files).length !== Object.keys(record.bundled.files).length ||
+                Object.entries(actual.files).some(
+                  ([name, hash]) => record.bundled?.files?.[name] !== hash,
+                )
+              ) {
+                cached = null
+                throw new Error(
+                  'The bundled Git runtime files do not match the signed release inventory.',
+                )
+              }
+              for (const [d, m] of Object.entries(actual.dirMtimes)) dirMtimes[d] = m
+              for (const [f, fp] of Object.entries(actual.fingerprints)) {
+                if (fingerprints) fingerprints[f] = fp
+              }
+            }
+          }
+        }
+
+        for (const [relPath, expected] of Object.entries(record.bundled.files)) {
+          if (relPath === execRel) continue
+          const absPath = join(root, relPath)
+          const stat = await fs.lstat(absPath).catch(() => null)
+          if (!stat) {
+            cached = null
+            throw new Error(
+              'The bundled Git runtime files do not match the signed release inventory.',
+            )
+          }
+          const fp = fingerprints?.[relPath]
+          if (
+            !fp ||
+            fp.mtimeMs !== stat.mtimeMs ||
+            fp.size !== stat.size ||
+            fp.ino !== stat.ino ||
+            fp.mode !== stat.mode
+          ) {
+            if (expected.startsWith('link:')) {
+              const target = await fs.readlink(absPath).catch(() => null)
+              if (`link:${target}` !== expected) {
+                cached = null
+                throw new Error(
+                  'The bundled Git runtime files do not match the signed release inventory.',
+                )
+              }
+            } else {
+              const fileHash = await sha256(absPath)
+              if (fileHash !== expected) {
+                cached = null
+                throw new Error(
+                  'The bundled Git runtime files do not match the signed release inventory.',
+                )
+              }
+            }
+            if (fingerprints) {
+              fingerprints[relPath] = {
+                mtimeMs: stat.mtimeMs,
+                size: stat.size,
+                ino: stat.ino,
+                mode: stat.mode,
+              }
+            }
+          }
+        }
+      }
     }
     return record
   }
@@ -304,10 +471,11 @@ export async function resolveGitRuntime(): Promise<GitRuntimeRecord> {
       `The bundled Git runtime for ${platform} is missing from this build. Turn on Use system Git in Git runtime diagnostics to run a Git installed on this computer.`,
     )
   }
-  const bundled =
+  const verification =
     source === 'bundled'
       ? await assertBundledRuntime(await readManifest(settings.resourcesRoot), platform, executable)
       : null
+  const bundled = verification?.info ?? null
 
   let versionOutput = ''
   try {
@@ -352,7 +520,12 @@ export async function resolveGitRuntime(): Promise<GitRuntimeRecord> {
     preservedEnvironment: PRESERVED_ENVIRONMENT,
     preservedConfiguration: PRESERVED_CONFIGURATION,
   }
-  cached = { key, record }
+  cached = {
+    key,
+    record,
+    fingerprints: verification?.fingerprints,
+    dirMtimes: verification?.dirMtimes,
+  }
   return record
 }
 

@@ -378,18 +378,21 @@ function App() {
     [desktop, setSnapshotAndSelection],
   )
 
+  const isBusy = Boolean(busyAction || opening || refreshing)
+  const operationActive = Boolean(snapshot?.operation || snapshot?.stackOperation)
+
   const openGitRuntime = React.useCallback(() => {
-    if (!desktop) return
+    if (!desktop || isBusy || operationActive) return
     setGitRuntimeOpen(true)
     desktop
       .gitRuntimeStatus()
       .then(setGitRuntimeStatus)
       .catch((value) => setError(readableError(value)))
-  }, [desktop])
+  }, [desktop, isBusy, operationActive])
 
   const selectGitRuntime = React.useCallback(
     async (useSystemGit: boolean) => {
-      if (!desktop) return
+      if (!desktop || isBusy || operationActive) return
       setGitRuntimeBusy(true)
       try {
         setGitRuntimeStatus(await desktop.setSystemGit(useSystemGit))
@@ -399,7 +402,7 @@ function App() {
         setGitRuntimeBusy(false)
       }
     },
-    [desktop],
+    [desktop, isBusy, operationActive],
   )
 
   const runAction = React.useCallback(
@@ -510,14 +513,12 @@ function App() {
   )
   const stagedFiles = changeState.staged
   const conflictedFiles = changeState.conflicted
-  const isBusy = Boolean(busyAction || opening || refreshing)
   const currentBranch = snapshot?.currentBranch ?? null
   const allBranches = snapshot?.branches ?? []
   const branchCount = combinedBranches.length
   const pullRequestCount = snapshot?.pullRequests.length ?? 0
   const stashCount = snapshot?.stashes.length ?? 0
   const detailsVisible = showDetails && (workspaceView === 'branches' || workspaceView === 'stacks')
-  const operationActive = Boolean(snapshot?.operation || snapshot?.stackOperation)
   const openWorkflow = (request: WorkflowRequest) => {
     if (!snapshot || isBusy) return
     setActionError(null)
@@ -779,7 +780,7 @@ function App() {
         <div className="sidebar-footer-actions">
           <button
             className="version-label version-label-action"
-            disabled={!desktop}
+            disabled={!desktop || isBusy || operationActive}
             onClick={openGitRuntime}
             title="Git runtime diagnostics"
             type="button"
@@ -1687,7 +1688,7 @@ function App() {
         />
       ) : null}
       <GitRuntimeDialog
-        busy={gitRuntimeBusy}
+        busy={gitRuntimeBusy || isBusy || operationActive}
         onOpenChange={setGitRuntimeOpen}
         onSelectSystemGit={selectGitRuntime}
         open={gitRuntimeOpen}

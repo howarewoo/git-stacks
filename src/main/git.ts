@@ -56,7 +56,12 @@ import {
   validateBranchName,
 } from './git-core'
 import type { RefRecord } from './git-core'
-import { gitCommandEnvironment, requireGitCapability, resolveGitRuntime } from './git-runtime'
+import {
+  gitCommandEnvironment,
+  requireGitCapability,
+  resolveGitRuntime,
+  withGitRuntime,
+} from './git-runtime'
 import { getGitHubData } from './github'
 import {
   getStackProgress,
@@ -4167,79 +4172,88 @@ async function runDeleteBranch(
 }
 
 export async function runAction(repoPath: string, value: GitAction): Promise<ActionResult> {
-  const root = await resolveRepository(repoPath)
-  const action = validateAction(value)
-  if (isStackAction(action)) {
-    return runStackAction(root, action)
-  }
-  await ensureStackWriteAllowed(root, action)
-  switch (action.type) {
-    case 'stage':
-    case 'unstage':
-      return runStage(root, action.type, action.paths)
-    case 'commit':
-      return runCommit(
-        root,
-        action.message,
-        action.amend,
-        action.expectedHead,
-        action.expectedHeadRef,
-      )
-    case 'forcePush':
-      return runForcePush(root, action.preview)
-    case 'fetch':
-      return runFetch(root)
-    case 'pull':
-      return runPull(root, action.strategy)
-    case 'push':
-      return runPush(root)
-    case 'stash':
-      return runStash(root, action.message, action.includeUntracked)
-    case 'stashPop':
-    case 'stashApply':
-    case 'stashDrop':
-      return runStashAction(root, action.type, action.ref, action.oid)
-    case 'switch':
-      return runSwitch(root, action.ref)
-    case 'createBranch':
-      return runCreateBranch(root, action.name, action.parent)
-    case 'deleteBranch':
-      return runDeleteBranch(root, action.ref, action.force, action.expectedOid)
-    case 'deleteRemoteBranch':
-      return runDeleteRemoteBranch(root, action.ref, action.expectedOid)
-    case 'renameBranch':
-      return runRenameBranch(root, action.ref, action.name)
-    case 'setUpstream':
-      return runSetUpstream(root, action.ref, action.upstream)
-    case 'rebase':
-      return runRebase(root, action.parent)
-    case 'rebaseContinue':
-      return runRebaseContinue(root)
-    case 'rebaseAbort':
-      return runRebaseAbort(root)
-    case 'merge':
-      return runMerge(root, action.ref, action.expectedHead, action.expectedHeadRef)
-    case 'cherryPick':
-    case 'revert':
-      return runCherryPickOrRevert(
-        root,
-        action.type,
-        action.oid,
-        action.expectedHead,
-        action.expectedHeadRef,
-        action.mainline,
-      )
-    case 'operationContinue':
-      return runOperation(root, 'continue')
-    case 'operationSkip':
-      return runOperation(root, 'skip')
-    case 'operationAbort':
-      return runOperation(root, 'abort')
-    case 'discardFile':
-      return runDiscardFile(root, action.path, action.fingerprint)
-    case 'resolveFile':
-      return runResolveFile(root, action.path, action.fingerprint, action.strategy, action.content)
-    case 'createPr':
-      return runCreatePr(root, action.title, action.body, action.base, action.draft)
-  }
+  const runtime = await resolveGitRuntime()
+  return withGitRuntime(runtime, async () => {
+    const root = await resolveRepository(repoPath)
+    const action = validateAction(value)
+    if (isStackAction(action)) {
+      return runStackAction(root, action)
+    }
+    await ensureStackWriteAllowed(root, action)
+    switch (action.type) {
+      case 'stage':
+      case 'unstage':
+        return runStage(root, action.type, action.paths)
+      case 'commit':
+        return runCommit(
+          root,
+          action.message,
+          action.amend,
+          action.expectedHead,
+          action.expectedHeadRef,
+        )
+      case 'forcePush':
+        return runForcePush(root, action.preview)
+      case 'fetch':
+        return runFetch(root)
+      case 'pull':
+        return runPull(root, action.strategy)
+      case 'push':
+        return runPush(root)
+      case 'stash':
+        return runStash(root, action.message, action.includeUntracked)
+      case 'stashPop':
+      case 'stashApply':
+      case 'stashDrop':
+        return runStashAction(root, action.type, action.ref, action.oid)
+      case 'switch':
+        return runSwitch(root, action.ref)
+      case 'createBranch':
+        return runCreateBranch(root, action.name, action.parent)
+      case 'deleteBranch':
+        return runDeleteBranch(root, action.ref, action.force, action.expectedOid)
+      case 'deleteRemoteBranch':
+        return runDeleteRemoteBranch(root, action.ref, action.expectedOid)
+      case 'renameBranch':
+        return runRenameBranch(root, action.ref, action.name)
+      case 'setUpstream':
+        return runSetUpstream(root, action.ref, action.upstream)
+      case 'rebase':
+        return runRebase(root, action.parent)
+      case 'rebaseContinue':
+        return runRebaseContinue(root)
+      case 'rebaseAbort':
+        return runRebaseAbort(root)
+      case 'merge':
+        return runMerge(root, action.ref, action.expectedHead, action.expectedHeadRef)
+      case 'cherryPick':
+      case 'revert':
+        return runCherryPickOrRevert(
+          root,
+          action.type,
+          action.oid,
+          action.expectedHead,
+          action.expectedHeadRef,
+          action.mainline,
+        )
+      case 'operationContinue':
+        return runOperation(root, 'continue')
+      case 'operationSkip':
+        return runOperation(root, 'skip')
+      case 'operationAbort':
+        return runOperation(root, 'abort')
+      case 'discardFile':
+        return runDiscardFile(root, action.path, action.fingerprint)
+      case 'resolveFile':
+        return runResolveFile(
+          root,
+          action.path,
+          action.fingerprint,
+          action.strategy,
+          action.content,
+        )
+      case 'createPr':
+        return runCreatePr(root, action.title, action.body, action.base, action.draft)
+    }
+  })
 }

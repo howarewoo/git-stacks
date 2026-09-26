@@ -20,6 +20,8 @@ import {
   configureGitRuntime,
   gitRuntimeStatus,
   readGitRuntimePreference,
+  resolveGitRuntime,
+  withGitRuntime,
   writeGitRuntimePreference,
 } from './git-runtime'
 
@@ -83,11 +85,12 @@ function repository() {
 
 function readRepository<T>(operation: (root: string) => Promise<T>): Promise<T> {
   const root = repository()
-  return operations.read(() => {
+  return operations.read(async () => {
     if (root !== activeRepository) {
       throw new Error('The active repository changed. Reopen this view to load its current state.')
     }
-    return operation(root)
+    const runtime = await resolveGitRuntime()
+    return withGitRuntime(runtime, () => operation(root))
   })
 }
 
@@ -110,29 +113,32 @@ function installHandlers() {
   ipcMain.handle('repositories:open', async (event, requestedPath: unknown) => {
     validateSender(event)
     return operations.write(async () => {
-      let selected: string
-      if (requestedPath !== undefined) {
-        if (
-          typeof requestedPath !== 'string' ||
-          !recents.some((item) => item.path === requestedPath)
-        ) {
-          throw new Error('Use Open repository to choose a new folder.')
+      const runtime = await resolveGitRuntime()
+      return withGitRuntime(runtime, async () => {
+        let selected: string
+        if (requestedPath !== undefined) {
+          if (
+            typeof requestedPath !== 'string' ||
+            !recents.some((item) => item.path === requestedPath)
+          ) {
+            throw new Error('Use Open repository to choose a new folder.')
+          }
+          selected = requestedPath
+        } else {
+          const result = await dialog.showOpenDialog(window!, {
+            title: 'Open Git repository',
+            properties: ['openDirectory'],
+            buttonLabel: 'Open repository',
+          })
+          if (result.canceled || !result.filePaths[0]) return null
+          selected = result.filePaths[0]
         }
-        selected = requestedPath
-      } else {
-        const result = await dialog.showOpenDialog(window!, {
-          title: 'Open Git repository',
-          properties: ['openDirectory'],
-          buttonLabel: 'Open repository',
-        })
-        if (result.canceled || !result.filePaths[0]) return null
-        selected = result.filePaths[0]
-      }
-      const path = await resolveRepository(selected)
-      const snapshot = await getSnapshot(path)
-      await remember(path)
-      activeRepository = path
-      return snapshot
+        const path = await resolveRepository(selected)
+        const snapshot = await getSnapshot(path)
+        await remember(path)
+        activeRepository = path
+        return snapshot
+      })
     })
   })
   ipcMain.handle('repository:refresh', async (event) => {
@@ -141,7 +147,10 @@ function installHandlers() {
   })
   ipcMain.handle('repository:action', async (event, action: GitAction) => {
     validateSender(event)
-    return operations.write(() => runAction(repository(), action))
+    return operations.write(async () => {
+      const runtime = await resolveGitRuntime()
+      return withGitRuntime(runtime, () => runAction(repository(), action))
+    })
   })
   ipcMain.handle('repository:file', (event, filePath: string) => {
     validateSender(event)
@@ -186,14 +195,16 @@ function installHandlers() {
   })
   ipcMain.handle('git-runtime', async (event) => {
     validateSender(event)
-    return gitRuntimeStatus(settingsFile())
+    return operations.read(() => gitRuntimeStatus(settingsFile()))
   })
   ipcMain.handle('git-runtime:system-git', async (event, requested: unknown) => {
     validateSender(event)
     if (typeof requested !== 'boolean') throw new Error('Use system Git must be true or false.')
-    await writeGitRuntimePreference(settingsFile(), { useSystemGit: requested })
-    configureGitRuntime({ useSystemGit: requested })
-    return gitRuntimeStatus(settingsFile())
+    return operations.write(async () => {
+      await writeGitRuntimePreference(settingsFile(), { useSystemGit: requested })
+      configureGitRuntime({ useSystemGit: requested })
+      return gitRuntimeStatus(settingsFile())
+    })
   })
 }
 
