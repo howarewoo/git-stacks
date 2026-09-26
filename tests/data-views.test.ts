@@ -13,6 +13,7 @@ import {
 import { DiffView, diffLineKind } from '../src/renderer/src/components/repository-views'
 import { RepositoryHoverCardProvider } from '../src/renderer/src/components/repository-hover-cards'
 import { TooltipProvider } from '../src/renderer/src/components/ui/tooltip'
+import type { WorkflowRequest } from '../src/renderer/src/components/workflow-dialog'
 import {
   changesSnapshots,
   largeDiffText,
@@ -33,6 +34,25 @@ function render(element: React.ReactElement): string {
       React.createElement(RepositoryHoverCardProvider, null, element),
     ),
   )
+}
+
+function findLabeledElement(node: React.ReactNode, label: string): React.ReactElement | undefined {
+  for (const child of React.Children.toArray(node)) {
+    if (!React.isValidElement(child)) continue
+    const props = child.props as { 'aria-label'?: string; children?: React.ReactNode }
+    if (props['aria-label'] === label) return child
+    const match = findLabeledElement(props.children, label)
+    if (match) return match
+  }
+  return undefined
+}
+
+async function clickLabeledElement(node: React.ReactNode, label: string): Promise<void> {
+  const element = findLabeledElement(node, label)
+  assert.ok(element, `expected to find the ${label} control`)
+  const onClick = (element.props as { onClick?: () => unknown }).onClick
+  assert.equal(typeof onClick, 'function', `expected the ${label} control to have a click handler`)
+  await onClick?.()
 }
 
 function changes(
@@ -226,6 +246,13 @@ test('the diff keeps the literal text and adds colour as a supplement', () => {
   assert.ok(markup.includes('x'.repeat(400)), 'a very long line is not wrapped or truncated')
 })
 
+test('a newline-terminated diff does not count a trailing empty line', () => {
+  const markup = render(React.createElement(DiffView, { text: '+added\n' }))
+
+  assert.match(markup, /1 added · 0 removed · 1 of 1 lines/)
+  assert.match(markup, /aria-label="Unified diff, 1 of 1 lines shown"/)
+})
+
 test('a large diff is bounded and revealed incrementally', () => {
   const markup = render(React.createElement(DiffView, { text: largeDiffText }))
 
@@ -340,23 +367,23 @@ test('pull request search keeps its own filter and reports no matches', () => {
   assert.equal(matchesPullRequest(snapshot.pullRequests[0], 'does-not-exist'), false)
 })
 
-test('stash rows show the ref and OID and keep each action tied to the captured OID', () => {
+test('stash rows show the ref and OID and keep each action tied to the captured OID', async () => {
   const snapshot = stashSnapshots.present
   const sent: GitAction[] = []
-  const markup = render(
-    React.createElement(StashesView, {
-      busy: false,
-      busyAction: null,
-      onRequest: noopRequest,
-      onStash: () => undefined,
-      operationActive: false,
-      runAction: async (action: GitAction) => {
-        sent.push(action)
-        return true
-      },
-      snapshot,
-    }),
-  )
+  const requests: WorkflowRequest[] = []
+  const view = StashesView({
+    busy: false,
+    busyAction: null,
+    onRequest: (request) => requests.push(request),
+    onStash: () => undefined,
+    operationActive: false,
+    runAction: async (action: GitAction) => {
+      sent.push(action)
+      return true
+    },
+    snapshot,
+  })
+  const markup = render(view)
 
   assert.match(markup, /stash@\{0\}/)
   assert.match(markup, /a1b2c3d4/)
@@ -365,14 +392,22 @@ test('stash rows show the ref and OID and keep each action tied to the captured 
   assert.match(markup, /aria-label="Drop stash@\{0\}"/)
 
   const stash = snapshot.stashes[0]
-  const apply = { type: 'stashApply', ref: stash.ref, oid: stash.oid } as GitAction
-  assert.deepEqual(apply, {
-    type: 'stashApply',
-    ref: 'stash@{0}',
-    oid: 'a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4',
-  })
+  assert.deepEqual(sent, [], 'rendering a stash row dispatches nothing on its own')
+  await clickLabeledElement(view, `Apply ${stash.ref}`)
+  await clickLabeledElement(view, `Pop ${stash.ref}`)
+  await clickLabeledElement(view, `Drop ${stash.ref}`)
+
+  assert.deepEqual(sent, [
+    { type: 'stashApply', ref: stash.ref, oid: stash.oid },
+    { type: 'stashPop', ref: stash.ref, oid: stash.oid },
+  ])
+  assert.equal(requests.length, 1)
+  const [dropRequest] = requests
+  assert.equal(dropRequest?.kind, 'confirm')
+  if (dropRequest?.kind === 'confirm') {
+    assert.deepEqual(dropRequest.action, { type: 'stashDrop', ref: stash.ref, oid: stash.oid })
+  }
   assert.notEqual(snapshot.stashes[1].oid, snapshot.stashes[0].oid, 'stashes are identified by OID')
-  assert.equal(sent.length, 0, 'rendering a stash row dispatches nothing on its own')
 })
 
 test('an empty stash list states the recovery instead of a count of zero actions', () => {
