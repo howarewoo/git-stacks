@@ -89,8 +89,21 @@ function graphPullRequest(pr: GitHubFixtureState['prs'][number], withBody: boole
   return value
 }
 
-function restPullRequest(pr: GitHubFixtureState['prs'][number]) {
+function restPullRequest(state: GitHubFixtureState, pr: GitHubFixtureState['prs'][number]) {
   const merged = pr.state === 'MERGED'
+  const stack = (state.stacks ?? []).find((s) => s.pull_requests.some((p) => p.number === pr.number))
+  let stackObj: Record<string, unknown> | null = null
+  if (stack) {
+    const position = stack.pull_requests.findIndex((p) => p.number === pr.number) + 1
+    stackObj = {
+      id: stack.id,
+      number: stack.number,
+      url: stack.url,
+      size: stack.pull_requests.length,
+      position,
+      base: position === 1 ? stack.base.ref : stack.pull_requests[position - 2].head.ref,
+    }
+  }
   return {
     number: pr.number,
     title: pr.title,
@@ -101,6 +114,32 @@ function restPullRequest(pr: GitHubFixtureState['prs'][number]) {
     head: { ref: pr.head, sha: currentHead(pr), repo: { full_name: pr.headRepository } },
     base: { ref: pr.base },
     merge_commit_sha: pr.mergeOid || null,
+    ...(stackObj ? { stack: stackObj } : {}),
+  }
+}
+
+function formatStack(state: GitHubFixtureState, stack: NonNullable<GitHubFixtureState['stacks']>[number]) {
+  return {
+    id: stack.id,
+    number: stack.number,
+    node_id: stack.node_id,
+    url: stack.url,
+    base: { ref: stack.base.ref },
+    open: stack.open,
+    created_at: stack.created_at,
+    pull_requests: stack.pull_requests.map((p) => {
+      const pr = state.prs.find((entry) => entry.number === p.number)
+      return {
+        number: p.number,
+        state: p.state,
+        draft: p.draft,
+        merged_at: p.merged_at,
+        head: {
+          ref: p.head.ref,
+          sha: pr ? currentHead(pr) : p.head.sha,
+        },
+      }
+    }),
   }
 }
 
@@ -227,6 +266,161 @@ function handleRest(
   const repository = `${state.repository.owner}/${state.repository.name}`
   const prefix = `repos/${repository}`
   if (path === 'user') return { status: 200, body: actor(state.currentUser) }
+  const [rawPath, rawQuery] = path.split('?')
+  const queryParams = new URLSearchParams(rawQuery ?? '')
+  if (rawPath.startsWith(`${prefix}/stacks`)) {
+    if (state.stacksPreviewDisabled) {
+      throw new HttpError(404, 'Not Found', 'Not Found: stacks preview unavailable')
+    }
+    if (rawPath === `${prefix}/stacks`) {
+      if (method === 'GET') {
+        let stacks = state.stacks ?? []
+        if (queryParams.has('pull_request')) {
+          const prNum = Number(queryParams.get('pull_request'))
+          stacks = stacks.filter((s) => s.pull_requests.some((p) => p.number === prNum))
+        }
+        const perPage = Number(queryParams.get('per_page')) || 30
+        const page = Number(queryParams.get('page')) || 1
+        const start = (page - 1) * perPage
+        const paginated = stacks.slice(start, start + perPage)
+        return { status: 200, body: paginated.map((s) => formatStack(state, s)) }
+      }
+      if (method === 'POST') {
+        const pullRequestsInput = body.pull_requests
+        if (!Array.isArray(pullRequestsInput) || pullRequestsInput.length === 0) {
+          throw new HttpError(422, 'Unprocessable Entity', 'pull_requests must be a non-empty array')
+        }
+        const prs = pullRequestsInput.map((num: unknown) => {
+          if (typeof num !== 'number') throw new HttpError(422, 'Unprocessable Entity', 'invalid pull request number')
+          return findPr(state, num)
+        })
+        const seen = new Set<number>()
+        for (const pr of prs) {
+          if (seen.has(pr.number)) throw new HttpError(422, 'Unprocessable Entity', 'duplicate pull request in stack')
+          seen.add(pr.number)
+        }
+        for (const s of state.stacks ?? []) {
+          for (const pr of prs) {
+            if (s.pull_requests.some((p) => p.number === pr.number)) {
+              throw new HttpError(422, 'Unprocessable Entity', `pull request #${pr.number} is already in a stack`)
+            }
+          }
+        }
+        for (const pr of prs) {
+          if (pr.headRepository.toLowerCase() !== repository.toLowerCase()) {
+            throw new HttpError(422, 'Unprocessable Entity', `pull request #${pr.number} is from a fork`)
+          }
+        }
+        for (let i = 1; i < prs.length; i++) {
+          if (prs[i].base !== prs[i - 1].head) {
+            throw new HttpError(
+              422,
+              'Unprocessable Entity',
+              `chain invalid: PR #${prs[i].number} base ${prs[i].base} does not match PR #${prs[i - 1].number} head ${prs[i - 1].head}`,
+            )
+          }
+        }
+        const stackNumber = Number.isInteger(state.nextStackNumber) ? state.nextStackNumber!++ : 1
+        const newStack = {
+          id: stackNumber * 1000,
+          number: stackNumber,
+          node_id: `STACK_${stackNumber}`,
+          url: `https://api.github.com/${prefix}/stacks/${stackNumber}`,
+          base: { ref: prs[0].base },
+          open: true,
+          created_at: new Date().toISOString(),
+          pull_requests: prs.map((pr) => ({
+            number: pr.number,
+            state: pr.state === 'MERGED' || pr.state === 'CLOSED' ? ('closed' as const) : ('open' as const),
+            draft: pr.draft === true,
+            merged_at: pr.mergedAt,
+            head: { ref: pr.head, sha: currentHead(pr) },
+          })),
+        }
+        state.stacks = state.stacks ?? []
+        state.stacks.push(newStack)
+        return { status: 201, body: formatStack(state, newStack) }
+      }
+      throw new HttpError(405, 'Method Not Allowed', `unsupported stacks method ${method}`)
+    }
+    const stackMatch = new RegExp(`^${prefix}/stacks/(\\d+)$`, 'u').exec(rawPath)
+    if (stackMatch) {
+      const stackNum = Number(stackMatch[1])
+      const stack = (state.stacks ?? []).find((s) => s.number === stackNum)
+      if (!stack) throw new HttpError(404, 'Not Found', `Stack #${stackNum} not found`)
+      if (method === 'GET') {
+        return { status: 200, body: formatStack(state, stack) }
+      }
+      throw new HttpError(405, 'Method Not Allowed', `unsupported stack method ${method}`)
+    }
+    const addMatch = new RegExp(`^${prefix}/stacks/(\\d+)/(?:add|pull_requests)$`, 'u').exec(rawPath)
+    if (addMatch) {
+      const stackNum = Number(addMatch[1])
+      const stack = (state.stacks ?? []).find((s) => s.number === stackNum)
+      if (!stack) throw new HttpError(404, 'Not Found', `Stack #${stackNum} not found`)
+      if (method !== 'POST') throw new HttpError(405, 'Method Not Allowed', 'add pull requests requires POST')
+      const pullRequestsInput = body.pull_requests
+      if (!Array.isArray(pullRequestsInput) || pullRequestsInput.length === 0) {
+        throw new HttpError(422, 'Unprocessable Entity', 'pull_requests must be a non-empty array')
+      }
+      const prs = pullRequestsInput.map((num: unknown) => {
+        if (typeof num !== 'number') throw new HttpError(422, 'Unprocessable Entity', 'invalid pull request number')
+        return findPr(state, num)
+      })
+      for (const pr of prs) {
+        if (stack.pull_requests.some((p) => p.number === pr.number)) {
+          throw new HttpError(422, 'Unprocessable Entity', `pull request #${pr.number} is already in stack #${stackNum}`)
+        }
+        if (pr.headRepository.toLowerCase() !== repository.toLowerCase()) {
+          throw new HttpError(422, 'Unprocessable Entity', `pull request #${pr.number} is from a fork`)
+        }
+      }
+      const topPr = stack.pull_requests[stack.pull_requests.length - 1]
+      if (topPr && prs[0].base !== topPr.head.ref) {
+        throw new HttpError(
+          422,
+          'Unprocessable Entity',
+          `PR #${prs[0].number} base ${prs[0].base} does not match top of stack head ${topPr.head.ref}`,
+        )
+      }
+      for (let i = 1; i < prs.length; i++) {
+        if (prs[i].base !== prs[i - 1].head) {
+          throw new HttpError(
+            422,
+            'Unprocessable Entity',
+            `chain invalid: PR #${prs[i].number} base ${prs[i].base} does not match PR #${prs[i - 1].number} head ${prs[i - 1].head}`,
+          )
+        }
+      }
+      for (const pr of prs) {
+        stack.pull_requests.push({
+          number: pr.number,
+          state: pr.state === 'MERGED' || pr.state === 'CLOSED' ? 'closed' : 'open',
+          draft: pr.draft === true,
+          merged_at: pr.mergedAt,
+          head: { ref: pr.head, sha: currentHead(pr) },
+        })
+      }
+      return { status: 200, body: formatStack(state, stack) }
+    }
+    const unstackMatch = new RegExp(`^${prefix}/stacks/(\\d+)/unstack$`, 'u').exec(rawPath)
+    if (unstackMatch) {
+      const stackNum = Number(unstackMatch[1])
+      const stackIdx = (state.stacks ?? []).findIndex((s) => s.number === stackNum)
+      if (stackIdx === -1) throw new HttpError(404, 'Not Found', `Stack #${stackNum} not found`)
+      if (method !== 'POST') throw new HttpError(405, 'Method Not Allowed', 'unstack requires POST')
+      const stack = state.stacks![stackIdx]
+      const remaining = stack.pull_requests.filter((p) => p.merged_at != null || p.state === 'closed')
+      if (remaining.length === 0) {
+        state.stacks!.splice(stackIdx, 1)
+        return { status: 204, body: null }
+      } else {
+        stack.pull_requests = remaining
+        return { status: 200, body: formatStack(state, stack) }
+      }
+    }
+    throw new HttpError(404, 'Not Found', `Not Found: ${path}`)
+  }
   if (path !== prefix && !path.startsWith(`${prefix}/`))
     throw new HttpError(404, 'Not Found', `Not Found: ${path}`)
   if (path === prefix && method === 'GET') {
@@ -244,7 +438,7 @@ function handleRest(
   const pull = new RegExp(`^${prefix}/pulls/(\\d+)$`, 'u').exec(path)
   if (pull) {
     const pr = findPr(state, Number(pull[1]))
-    if (method === 'GET') return { status: 200, body: restPullRequest(pr) }
+    if (method === 'GET') return { status: 200, body: restPullRequest(state, pr) }
     if (method === 'PATCH') {
       if (body.draft !== undefined)
         throw new HttpError(422, 'Unprocessable Entity', 'draft cannot be updated through REST')
@@ -257,13 +451,13 @@ function handleRest(
         if (body.state === 'open' && pr.state !== 'MERGED') pr.state = 'OPEN'
         else if (body.state === 'closed' && pr.state !== 'MERGED') pr.state = 'CLOSED'
       }
-      return { status: 200, body: restPullRequest(pr) }
+      return { status: 200, body: restPullRequest(state, pr) }
     }
     throw new HttpError(405, 'Method Not Allowed', `unsupported pull request method ${method}`)
   }
   if (method === 'POST' && path === `${prefix}/pulls`) {
     const pr = createPullRequest(state, body)
-    return { status: 201, body: { ...restPullRequest(pr), number: pr.number, html_url: pr.url } }
+    return { status: 201, body: { ...restPullRequest(state, pr), number: pr.number, html_url: pr.url } }
   }
   const merge = new RegExp(`^${prefix}/pulls/(\\d+)/merge$`, 'u').exec(path)
   if (merge) {
@@ -354,10 +548,11 @@ function handleGraphql(
 }
 
 function json(status: number, body: unknown, headers: Record<string, string> = {}): Response {
-  return new Response(JSON.stringify(body), {
+  const isNoBody = status === 204 || status === 205 || status === 304
+  return new Response(isNoBody ? null : JSON.stringify(body), {
     status,
     headers: {
-      'content-type': 'application/json; charset=utf-8',
+      ...(isNoBody ? {} : { 'content-type': 'application/json; charset=utf-8' }),
       'x-ratelimit-limit': '5000',
       'x-ratelimit-remaining': '4998',
       'x-ratelimit-reset': String(Math.floor(Date.now() / 1000) + 3600),
@@ -388,7 +583,7 @@ export function createGitHubApiDouble(): typeof globalThis.fetch {
       return json(401, { message: 'Bad credentials' })
     const state = loadState()
     if (!Array.isArray(state.requests)) state.requests = []
-    const path = url.pathname.replace(/^\//u, '')
+    const path = (url.pathname + url.search).replace(/^\//u, '')
     state.requests.push({
       argv: [path, method],
       cwd: process.cwd(),

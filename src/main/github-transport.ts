@@ -4,6 +4,7 @@ import { commandCode, commandDetail, isRecord, MAX_BUFFER } from './git-core'
 
 const execFile = promisify(execFileCallback)
 export const GITHUB_API_VERSION = '2022-11-28'
+export const GITHUB_STACKS_API_VERSION = '2026-03-10'
 export const GITHUB_API_VERSION_ENV = 'GIT_STACKS_GITHUB_API_VERSION'
 export const GITHUB_API_URL_ENV = 'GIT_STACKS_GITHUB_API_URL'
 export const GITHUB_TRANSPORT_ENV = 'GIT_STACKS_GITHUB_TRANSPORT'
@@ -70,6 +71,7 @@ export interface GitHubRestRequest {
   /** API path without a leading slash, for example `repos/owner/name/pulls/1`. */
   path: string
   body?: Record<string, unknown>
+  headers?: Record<string, string>
   signal?: AbortSignal
   timeoutMs?: number
 }
@@ -251,7 +253,7 @@ export class DirectGitHubTransport implements GitHubTransport {
     return this.options.timeoutMs ?? GITHUB_TIMEOUT_MS
   }
 
-  private headers(hasBody: boolean): Headers {
+  private headers(hasBody: boolean, customHeaders?: Record<string, string>): Headers {
     const token = this.options.token ?? resolveGitHubToken(this.env)
     if (!token) {
       throw new GitHubTransportError({
@@ -259,20 +261,26 @@ export class DirectGitHubTransport implements GitHubTransport {
         detail: `set ${GITHUB_TRANSPORT_ENV} with a token or provide GH_TOKEN`,
       })
     }
-    return new Headers({
+    const headers = new Headers({
       accept: 'application/vnd.github+json',
       authorization: `Bearer ${token}`,
       'x-github-api-version': this.options.apiVersion ?? githubApiVersion(this.env),
       'user-agent': this.options.userAgent ?? 'git-stacks',
       ...(hasBody ? { 'content-type': 'application/json' } : {}),
     })
+    if (customHeaders) {
+      for (const [key, value] of Object.entries(customHeaders)) {
+        headers.set(key, value)
+      }
+    }
+    return headers
   }
 
   private async send(
     url: string,
     method: GitHubRestMethod,
     payload: unknown,
-    request: Pick<GitHubRestRequest, 'signal' | 'timeoutMs'>,
+    request: Pick<GitHubRestRequest, 'signal' | 'timeoutMs' | 'headers'>,
   ): Promise<{ status: number; body: unknown; headers: Headers; rateLimit: GitHubRateLimit }> {
     const timeoutMs = request.timeoutMs ?? this.timeoutMs
     const controller = new AbortController()
@@ -290,7 +298,7 @@ export class DirectGitHubTransport implements GitHubTransport {
     try {
       const response = await request$(url, {
         method,
-        headers: this.headers(payload !== undefined),
+        headers: this.headers(payload !== undefined, request.headers),
         body: payload === undefined ? undefined : JSON.stringify(payload),
         signal: controller.signal,
       })
@@ -330,7 +338,7 @@ export class DirectGitHubTransport implements GitHubTransport {
     url: string,
     method: GitHubRestMethod,
     payload: unknown,
-    request: Pick<GitHubRestRequest, 'signal' | 'timeoutMs'>,
+    request: Pick<GitHubRestRequest, 'signal' | 'timeoutMs' | 'headers'>,
   ): Promise<GitHubRestResponse<T>> {
     const { status, body, rateLimit } = await this.send(url, method, payload, request)
     return { status, data: body as T, rateLimit }
@@ -557,12 +565,21 @@ export class GhGitHubTransport implements GitHubTransport {
     request: GitHubRestRequest,
   ): Promise<{ status: number; data: T; headers: Headers; rateLimit: GitHubRateLimit }> {
     const method = request.method ?? 'GET'
-    const args = [
-      'api',
-      '--include',
-      '--header',
-      `X-GitHub-Api-Version: ${githubApiVersion(this.options.env)}`,
-    ]
+    let version = githubApiVersion(this.options.env)
+    const extraHeaderEntries: [string, string][] = []
+    if (request.headers) {
+      for (const [key, value] of Object.entries(request.headers)) {
+        if (key.toLowerCase() === 'x-github-api-version') {
+          version = value
+        } else {
+          extraHeaderEntries.push([key, value])
+        }
+      }
+    }
+    const args = ['api', '--include', '--header', `X-GitHub-Api-Version: ${version}`]
+    for (const [key, value] of extraHeaderEntries) {
+      args.push('--header', `${key}: ${value}`)
+    }
     const customApi = this.apiUrl !== GITHUB_API_URL
     const isAbsolute = /^https?:\/\//u.test(request.path)
     if (!customApi && !isAbsolute) {

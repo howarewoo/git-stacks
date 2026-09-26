@@ -3544,9 +3544,15 @@ export async function getSnapshot(repoPath: string): Promise<RepositorySnapshot>
     const pullRequest = localPullRequests.get(name) ?? null
     const config = configParents.get(name)
     branch.pr = pullRequest
-    branch.parent = config?.parent ?? pullRequest?.base ?? null
-    branch.parentTip = config?.parentTip ?? null
-    branch.parentSource = config?.parent ? 'recorded' : pullRequest ? 'pullRequest' : null
+    if (pullRequest?.stack) {
+      branch.parent = pullRequest.stack.base
+      branch.parentTip = config?.parentTip ?? null
+      branch.parentSource = 'stack'
+    } else {
+      branch.parent = config?.parent ?? pullRequest?.base ?? null
+      branch.parentTip = config?.parentTip ?? null
+      branch.parentSource = config?.parent ? 'recorded' : pullRequest ? 'pullRequest' : null
+    }
   }
 
   const refsByName = new Map(refs.filter((ref) => !ref.symref).map((ref) => [ref.refname, ref]))
@@ -3624,6 +3630,9 @@ export async function getSnapshot(repoPath: string): Promise<RepositorySnapshot>
     stackOperation,
     headOid,
     github: { available: github.available, message: github.message },
+    nativeStacks: github.nativeStacks ?? [],
+    nativeStackPreviewAvailable: github.nativeStackPreviewAvailable ?? false,
+    nativeStackMessage: github.nativeStackMessage,
   }
 }
 async function runRenameBranch(
