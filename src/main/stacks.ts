@@ -42,6 +42,15 @@ import {
   tryGit,
   validateBranchName,
 } from './git-core'
+import {
+  addPullRequestsToNativeStackAction,
+  addPullRequestsToStack,
+  createNativeStackAction,
+  createPullRequestStack,
+  detectNativeStacksCapability,
+  listPullRequestStacks,
+  unstackNativeStackAction,
+} from './native-stacks'
 import { canonicalRemoteName, getGitHubData, getPullRequest, pullRequestRepository } from './github'
 import { githubTransport } from './github-transport'
 import type { GitHubResult } from './github'
@@ -234,6 +243,46 @@ export function validateStackAction(value: unknown): StackAction {
         stackActionError('Pull request number must be a positive integer')
       }
       return { type: value.type, number: value.number }
+    case 'createNativeStack':
+      if (!hasOnlyKeys(value, ['type', 'pullRequests']) || !Array.isArray(value.pullRequests)) {
+        stackActionError('Invalid createNativeStack action')
+      }
+      for (const pr of value.pullRequests) {
+        if (typeof pr !== 'number' || !Number.isInteger(pr) || pr <= 0) {
+          stackActionError('Pull request numbers must be positive integers')
+        }
+      }
+      return { type: 'createNativeStack', pullRequests: value.pullRequests as number[] }
+    case 'addPullRequestsToNativeStack':
+      if (
+        !hasOnlyKeys(value, ['type', 'stackNumber', 'pullRequests']) ||
+        typeof value.stackNumber !== 'number' ||
+        !Number.isInteger(value.stackNumber) ||
+        value.stackNumber <= 0 ||
+        !Array.isArray(value.pullRequests)
+      ) {
+        stackActionError('Invalid addPullRequestsToNativeStack action')
+      }
+      for (const pr of value.pullRequests) {
+        if (typeof pr !== 'number' || !Number.isInteger(pr) || pr <= 0) {
+          stackActionError('Pull request numbers must be positive integers')
+        }
+      }
+      return {
+        type: 'addPullRequestsToNativeStack',
+        stackNumber: value.stackNumber,
+        pullRequests: value.pullRequests as number[],
+      }
+    case 'unstackNativeStack':
+      if (
+        !hasOnlyKeys(value, ['type', 'stackNumber']) ||
+        typeof value.stackNumber !== 'number' ||
+        !Number.isInteger(value.stackNumber) ||
+        value.stackNumber <= 0
+      ) {
+        stackActionError('Invalid unstackNativeStack action')
+      }
+      return { type: 'unstackNativeStack', stackNumber: value.stackNumber }
     default:
       stackActionError(`Unsupported stack action: ${String(value.type)}`)
   }
@@ -2643,6 +2692,34 @@ async function publishStack(
     published.push({ branch: entry.branch, pr: readBack })
   }
   await linkStackComments(canonical.fullName, published)
+  try {
+    const [owner, name] = canonical.fullName.split('/')
+    const capability = await detectNativeStacksCapability(owner, name)
+    if (capability.available) {
+      const existingStacks = await listPullRequestStacks(owner, name)
+      const publishedNumbers = published.map((entry) => entry.pr.number)
+      const matched = existingStacks.find((stack) =>
+        stack.pullRequests.some((member) => publishedNumbers.includes(member.number)),
+      )
+      if (matched) {
+        const existingNumbers = new Set(matched.pullRequests.map((member) => member.number))
+        const toAdd = publishedNumbers.filter((num) => !existingNumbers.has(num))
+        if (toAdd.length > 0) {
+          await addPullRequestsToStack(owner, name, matched.number, toAdd, {
+            existingStack: matched,
+            knownPullRequests: published.map((entry) => entry.pr),
+          })
+        }
+      } else if (published.length >= 1) {
+        await createPullRequestStack(owner, name, publishedNumbers, {
+          knownPullRequests: published.map((entry) => entry.pr),
+          defaultBranch: plan.defaultBranch,
+        })
+      }
+    }
+  } catch {
+    // Degrade gracefully to chained PRs when native stack registration fails
+  }
   return {
     message: `Published ${published.length} stack pull request${published.length === 1 ? '' : 's'}`,
   }
@@ -2963,6 +3040,27 @@ export async function runStackAction(
       if (plan.kind === 'restack') return beginRestack(root, plan)
       if (plan.kind === 'publish') return publishStack(root, plan, action)
       return mergeStack(root, plan, action)
+    }
+    case 'createNativeStack': {
+      const origin = await currentOrigin(root)
+      const data = await getGitHubData(root, origin.url)
+      const defaultBranch = await getDefaultBranch(root, await getRefs(root), await getCurrentBranch(root))
+      return createNativeStackAction(root, origin.fullName, action.pullRequests, data.pullRequests, defaultBranch)
+    }
+    case 'addPullRequestsToNativeStack': {
+      const origin = await currentOrigin(root)
+      const data = await getGitHubData(root, origin.url)
+      return addPullRequestsToNativeStackAction(
+        root,
+        origin.fullName,
+        action.stackNumber,
+        action.pullRequests,
+        data.pullRequests,
+      )
+    }
+    case 'unstackNativeStack': {
+      const origin = await currentOrigin(root)
+      return unstackNativeStackAction(root, origin.fullName, action.stackNumber)
     }
   }
 }

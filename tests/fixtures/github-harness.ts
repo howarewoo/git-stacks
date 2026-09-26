@@ -35,6 +35,22 @@ export interface GitHubFixturePullRequest {
   mergedAt: string | null
 }
 
+export interface GitHubFixtureStack {
+  id: number
+  number: number
+  node_id: string
+  url: string
+  base: { ref: string }
+  open: boolean
+  created_at: string
+  pull_requests: Array<{
+    number: number
+    state: 'open' | 'closed'
+    draft: boolean
+    merged_at: string | null
+    head: { ref: string; sha: string }
+  }>
+}
 export interface GitHubFixtureState {
   version: 1
   repository: {
@@ -48,8 +64,11 @@ export interface GitHubFixtureState {
   currentUser: string
   nextNumber: number
   nextCommentId: number
+  nextStackNumber?: number
+  stacksPreviewDisabled?: boolean
   prs: GitHubFixturePullRequest[]
   comments: Record<string, GitHubFixtureComment[]>
+  stacks?: GitHubFixtureStack[]
   requests: Array<{ argv: string[]; cwd: string; at: string; body?: Record<string, unknown> }>
 }
 
@@ -107,8 +126,10 @@ const initialState = (): GitHubFixtureState => ({
   currentUser: 'fixture-user',
   nextNumber: 1,
   nextCommentId: 1,
+  nextStackNumber: 1,
   prs: [],
   comments: {},
+  stacks: [],
   requests: [],
 })
 

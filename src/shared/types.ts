@@ -1,3 +1,44 @@
+export type NativeStackValidationStatus =
+  | 'valid'
+  | 'invalid-chain'
+  | 'cross-fork-head'
+  | 'duplicate-pr'
+  | 'closed'
+  | 'completed'
+  | 'preview-unavailable'
+
+export interface PullRequestStackMember {
+  number: number
+  position: number
+  total: number
+  head: string
+  headSha?: string
+  base: string
+  state: 'OPEN' | 'CLOSED' | 'MERGED'
+  draft: boolean
+}
+
+export interface NativeStack {
+  id: number
+  number: number
+  url: string
+  base: string
+  open: boolean
+  createdAt: string
+  size: number
+  pullRequests: PullRequestStackMember[]
+  status: NativeStackValidationStatus
+}
+
+export interface PullRequestStackMembership {
+  stackNumber: number
+  position: number
+  size: number
+  base: string
+  open: boolean
+  url: string
+}
+
 export interface PullRequest {
   number: number
   title: string
@@ -12,6 +53,7 @@ export interface PullRequest {
   headRepository?: string
   reviewDecision?: string
   mergeState?: string
+  stack?: PullRequestStackMembership | null
 }
 export interface Branch {
   ref: string
@@ -31,7 +73,7 @@ export interface Branch {
   pr: PullRequest | null
   oid?: string
   parentTip?: string | null
-  parentSource?: 'recorded' | 'pullRequest' | 'inferred' | null
+  parentSource?: 'recorded' | 'pullRequest' | 'stack' | 'inferred' | null
   needsRestack?: boolean
 }
 export interface ChangedFile {
@@ -56,6 +98,9 @@ export interface RepositorySnapshot {
   stackOperation: StackProgress | null
   headOid: string | null
   github: { available: boolean; message: string }
+  nativeStacks?: NativeStack[]
+  nativeStackPreviewAvailable?: boolean
+  nativeStackMessage?: string
 }
 export interface RecentRepository {
   path: string
@@ -136,6 +181,9 @@ export type StackAction =
   | { type: 'stackContinue' | 'stackAbort' }
   | { type: 'updatePr'; number: number; title: string; body: string; draft: boolean }
   | { type: 'closePr' | 'reopenPr'; number: number }
+  | { type: 'createNativeStack'; pullRequests: number[] }
+  | { type: 'addPullRequestsToNativeStack'; stackNumber: number; pullRequests: number[] }
+  | { type: 'unstackNativeStack'; stackNumber: number }
 export type GitAction =
   | { type: 'switch'; ref: string }
   | { type: 'createBranch'; name: string; parent: string }
@@ -191,6 +239,10 @@ export interface DesktopAPI {
   pushPreview(): Promise<PushPreview>
   stackPreview(kind: StackKind, branch: string): Promise<StackPreview>
   pullRequest(number: number): Promise<PullRequest & { body: string }>
+  listNativeStacks?: () => Promise<NativeStack[]>
+  createNativeStack?: (pullRequests: number[]) => Promise<NativeStack>
+  addPullRequestsToNativeStack?: (stackNumber: number, pullRequests: number[]) => Promise<NativeStack>
+  unstackNativeStack?: (stackNumber: number) => Promise<{ dissolved: boolean; stack: NativeStack | null }>
   openExternal(url: string): Promise<void>
 }
 declare global {
