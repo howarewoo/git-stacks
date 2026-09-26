@@ -15,6 +15,7 @@ import {
 import type { Branch, Commit, FileView, RepositorySnapshot } from '../../../shared/types'
 import { Badge } from './ui/badge'
 import { Button } from './ui/button'
+import { SegmentedControl } from './ui/segmented-control'
 import { Select } from './ui/select'
 import { Textarea } from './ui/textarea'
 import { sortBranchesByUpdatedAt } from '../lib/branches'
@@ -141,43 +142,72 @@ export function OperationBanner({
   )
 }
 
+export type DiffLineKind = 'add' | 'remove' | 'hunk'
+
+/** Unified-diff markers drive the surface; the literal text is always preserved. */
+export function diffLineKind(line: string): DiffLineKind | null {
+  if (line.startsWith('+') && !line.startsWith('+++')) return 'add'
+  if (line.startsWith('-') && !line.startsWith('---')) return 'remove'
+  if (line.startsWith('@@')) return 'hunk'
+  return null
+}
+
 export function DiffView({ text, truncated = false }: { text: string; truncated?: boolean }) {
-  const preview = React.useMemo(
-    () => ({ lines: text.slice(0, 512 * 1024).split('\n'), clipped: text.length > 512 * 1024 }),
-    [text],
-  )
+  const preview = React.useMemo(() => {
+    const previewText = text.slice(0, 512 * 1024)
+    const lines = previewText ? previewText.split('\n') : []
+    if (previewText.endsWith('\n')) lines.pop()
+    return { lines, clipped: text.length > 512 * 1024 }
+  }, [text])
   const [visibleLines, setVisibleLines] = React.useState(1000)
   React.useEffect(() => setVisibleLines(1000), [text])
+  const shown = preview.lines.slice(0, visibleLines)
+  const counts = shown.reduce(
+    (total, line) => {
+      const kind = diffLineKind(line)
+      if (kind === 'add') total.added += 1
+      if (kind === 'remove') total.removed += 1
+      return total
+    },
+    { added: 0, removed: 0 },
+  )
   return (
-    <>
+    <div className="code-region">
+      <div className="code-region-header">
+        <strong>Unified diff</strong>
+        <span className="code-region-meta">
+          {text
+            ? `${counts.added} added · ${counts.removed} removed · ${shown.length} of ${preview.lines.length} lines`
+            : 'No textual diff'}
+        </span>
+        {truncated || preview.clipped ? <Badge variant="warning">truncated preview</Badge> : null}
+      </div>
       {truncated || preview.clipped ? (
-        <p className="workflow-warning">
+        <p className="code-region-note">
           This preview is truncated. Inspect the full change in your editor before applying it.
         </p>
       ) : null}
-      <pre className="code-diff" tabIndex={0} aria-label="Unified diff">
+      <pre
+        className="code-diff"
+        role="region"
+        tabIndex={0}
+        aria-label={`Unified diff, ${shown.length} of ${preview.lines.length} lines shown`}
+      >
         {text
-          ? preview.lines.slice(0, visibleLines).map((line, index) => (
-              <span
-                key={index}
-                className={
-                  line.startsWith('+') && !line.startsWith('+++')
-                    ? 'diff-add'
-                    : line.startsWith('-') && !line.startsWith('---')
-                      ? 'diff-remove'
-                      : line.startsWith('@@')
-                        ? 'diff-hunk'
-                        : undefined
-                }
-              >
-                {line}
-                {'\n'}
-              </span>
-            ))
+          ? shown.map((line, index) => {
+              const kind = diffLineKind(line)
+              return (
+                <span key={index} className={kind ? `diff-${kind}` : undefined}>
+                  {line}
+                  {'\n'}
+                </span>
+              )
+            })
           : 'No textual diff in this view.'}
       </pre>
       {preview.lines.length > visibleLines ? (
         <Button
+          className="code-region-more"
           variant="secondary"
           size="sm"
           onClick={() => setVisibleLines((value) => value + 1000)}
@@ -185,7 +215,7 @@ export function DiffView({ text, truncated = false }: { text: string; truncated?
           Show more diff lines ({preview.lines.length - visibleLines} remaining)
         </Button>
       ) : null}
-    </>
+    </div>
   )
 }
 
@@ -264,10 +294,26 @@ export function FileInspector({
   const state = snapshot.files.find((item) => item.path === path)
   const canDiscard = state && !state.conflicted && (state.worktree !== ' ' || state.index === '?')
   const rebase = snapshot.operation === 'rebase'
+  const tabOptions = (
+    [
+      { value: 'working', label: 'Working tree' },
+      { value: 'staged', label: 'Staged' },
+      ...(file?.conflicted ? [{ value: 'resolve' as const, label: 'Resolve conflict' }] : []),
+    ] as { value: 'working' | 'staged' | 'resolve'; label: string }[]
+  ).filter((option) => option.value !== 'resolve' || file?.conflicted)
   return (
     <section className="file-inspector" aria-label={`Inspect ${path}`}>
       <header className="inspector-heading">
-        <strong title={path}>{path}</strong>
+        <div className="inspector-title">
+          <strong title={path}>{path}</strong>
+          <small>
+            {file?.conflicted
+              ? 'Conflicted — resolve before staging'
+              : (state?.index ?? ' ') === '?'
+                ? 'Untracked file'
+                : 'Working tree and index'}
+          </small>
+        </div>
         <div className="workflow-row">
           <Button
             aria-label="Reload file"
@@ -299,24 +345,14 @@ export function FileInspector({
         </p>
       ) : file ? (
         <>
-          <div className="inspector-tabs" aria-label="File views">
-            {(['working', 'staged', ...(file.conflicted ? ['resolve'] : [])] as const).map(
-              (value) => (
-                <Button
-                  key={value}
-                  size="sm"
-                  variant={tab === value ? 'subtle' : 'ghost'}
-                  aria-pressed={tab === value}
-                  onClick={() => setTab(value as typeof tab)}
-                >
-                  {value === 'working'
-                    ? 'Working tree'
-                    : value === 'staged'
-                      ? 'Staged'
-                      : 'Resolve conflict'}
-                </Button>
-              ),
-            )}
+          <div className="inspector-tabs">
+            <SegmentedControl
+              className="inspector-tab-control"
+              label="File views"
+              onValueChange={(value) => setTab(value)}
+              options={tabOptions}
+              value={tab}
+            />
           </div>
           {tab === 'resolve' ? (
             <div className="conflict-editor dialog-form">
@@ -385,20 +421,29 @@ export function FileInspector({
               )}
             </div>
           ) : tab === 'working' && state?.index === '?' ? (
-            <>
-              <p className="workflow-note">Untracked file contents — not yet staged.</p>
+            <div className="code-region">
+              <div className="code-region-header">
+                <strong>Untracked file content</strong>
+                <span className="code-region-meta">Not staged</span>
+                {file.truncated ? <Badge variant="warning">truncated preview</Badge> : null}
+              </div>
               {file.truncated ? (
-                <p className="workflow-warning">
+                <p className="code-region-note">
                   This preview is truncated. Inspect the full file in your editor before discarding
                   it.
                 </p>
               ) : null}
-              <pre className="code-diff" tabIndex={0} aria-label="Untracked file content">
+              <pre
+                className="code-diff"
+                role="region"
+                tabIndex={0}
+                aria-label="Untracked file content"
+              >
                 {file.binary
                   ? 'Binary or non-UTF-8 file. A text preview is not available.'
                   : (file.content ?? 'No file content available.')}
               </pre>
-            </>
+            </div>
           ) : (
             <DiffView
               text={tab === 'staged' ? file.stagedDiff : file.unstagedDiff}
@@ -553,12 +598,15 @@ export function HistoryView({
     !!snapshot.currentBranch &&
     !!snapshot.headOid &&
     snapshot.files.length === 0
+  const refName = ref.startsWith('refs/heads/') ? ref.slice('refs/heads/'.length) : ref
   return (
     <div className="history-view">
       <div className="list-toolbar">
         <div className="list-title-group">
           <h1>History</h1>
-          <span className="list-subtitle">{commits.length} loaded</span>
+          <span className="list-subtitle">
+            {refName} · {commits.length} loaded{hasMore ? ' (more available)' : ''}
+          </span>
         </div>
         <div className="workflow-row">
           <label className="sr-only" htmlFor="history-ref">
@@ -607,13 +655,13 @@ export function HistoryView({
             aria-pressed={selected?.oid === commit.oid}
           >
             <GitCommitHorizontal className="size-4" />
-            <span>
+            <span className="history-copy">
               <strong>{commit.subject}</strong>
               <small>
                 {commit.author} · {new Date(commit.date).toLocaleDateString()}
               </small>
             </span>
-            <code>{commit.oid.slice(0, 8)}</code>
+            <code className="history-oid">{commit.oid.slice(0, 8)}</code>
           </button>
         ))}
         {loading ? (
@@ -643,8 +691,11 @@ export function HistoryView({
       {selected ? (
         <section className="commit-inspector" aria-label="Selected commit">
           <header className="inspector-heading">
-            <div>
+            <div className="inspector-title">
               <strong>{selected.subject}</strong>
+              <small>
+                {selected.author} · {new Date(selected.date).toLocaleDateString()}
+              </small>
               <code>{selected.oid}</code>
             </div>
             <div className="workflow-row">
@@ -672,16 +723,15 @@ export function HistoryView({
               </Button>
             </div>
           </header>
-          {!actionable ? (
-            <p className="workflow-note history-message">
-              Commit actions require a clean working tree, an attached branch, and no active
-              operation.
-            </p>
-          ) : (
-            <p className="workflow-note history-message">
-              Apply to current branch: <strong>{snapshot.currentBranch}</strong>
-            </p>
-          )}
+          <p className="workflow-note history-message history-target">
+            {actionable
+              ? 'Cherry-pick and revert apply to the current branch'
+              : 'Commit actions are blocked'}{' '}
+            <strong>{snapshot.currentBranch ?? 'no branch attached'}</strong>
+            {!actionable
+              ? '. They require a clean working tree, an attached branch, and no active operation.'
+              : '. The remote stays unchanged until you push.'}
+          </p>
           {diffLoading ? (
             <p className="workflow-loading" role="status">
               <LoaderCircle className="size-4 animate-spin" />

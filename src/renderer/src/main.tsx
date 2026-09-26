@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client'
 import App from './App'
 import { FoundationsSpecimen } from './design-system/FoundationsSpecimen'
 import { ShellSpecimen } from './design-system/ShellSpecimen'
+import { DataSurfacesSpecimen } from './design-system/DataSurfacesSpecimen'
 import { TooltipProvider } from './components/ui/tooltip'
 import { RepositoryHoverCardProvider } from './components/repository-hover-cards'
 import './styles.css'
@@ -10,6 +11,7 @@ import './styles.css'
 const route = window.location.hash
 const specimen = ['#/design-system-specimen', '#/design-system-controls'].includes(route)
 const shellSpecimen = route === '#/design-system-shell-specimen'
+const dataSpecimen = route === '#/design-system-data-specimen'
 
 const root = document.getElementById('root')
 
@@ -21,7 +23,15 @@ createRoot(root).render(
   <React.StrictMode>
     <TooltipProvider delayDuration={450} skipDelayDuration={150}>
       <RepositoryHoverCardProvider>
-        {specimen ? <FoundationsSpecimen /> : shellSpecimen ? <ShellSpecimen /> : <App />}
+        {specimen ? (
+          <FoundationsSpecimen />
+        ) : shellSpecimen ? (
+          <ShellSpecimen />
+        ) : dataSpecimen ? (
+          <DataSurfacesSpecimen />
+        ) : (
+          <App />
+        )}
       </RepositoryHoverCardProvider>
     </TooltipProvider>
   </React.StrictMode>,
