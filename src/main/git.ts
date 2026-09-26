@@ -3463,7 +3463,7 @@ export async function runStageHunk(
     )
   }
   const selected = validateHunkSelection(hunk, lineIndexes)
-  const patch = buildHunkPatch(block, hunk, selected)
+  const patch = buildHunkPatch(block, hunk, side, selected)
   await safeRepositoryPath(root, entry.path)
   // Building the patch takes time; do not apply it against a file or index that
   // changed since the diff and hunk identity were resolved.
@@ -3474,17 +3474,30 @@ export async function runStageHunk(
   const lockPath = `${realIndexPath}.lock`
   const tempIndexPath = `${realIndexPath}.stage-${randomUUID()}`
 
-  const indexExists = await fs
-    .access(realIndexPath, fsConstants.F_OK)
-    .then(() => true)
-    .catch(() => false)
-  if (indexExists) {
-    await fs.copyFile(realIndexPath, tempIndexPath)
-  }
-
   let lockHandle: FileHandle | null = null
   let lockAcquired = false
   try {
+    try {
+      lockHandle = await fs.open(lockPath, 'wx', 0o666)
+      lockAcquired = true
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
+        throw new Error('Another Git process is modifying the index; retry after it completes')
+      }
+      throw error
+    }
+
+    // A Git writer can change ANY entry while this action resolves the diff.
+    // Take the complete snapshot only after owning Git's index lock, otherwise
+    // publishing the temporary index could discard a different file's staging.
+    const indexExists = await fs
+      .access(realIndexPath, fsConstants.F_OK)
+      .then(() => true)
+      .catch(() => false)
+    if (indexExists) {
+      await fs.copyFile(realIndexPath, tempIndexPath)
+    }
+
     try {
       await runGitWithInput(
         root,
@@ -3514,16 +3527,6 @@ export async function runStageHunk(
     const tempIndexFingerprint = createHash('sha256').update(tempStage).digest('hex')
     if (tempIndexFingerprint === identity.indexFingerprint) {
       throw new Error('The patch did not change the index; refresh and try again')
-    }
-
-    try {
-      lockHandle = await fs.open(lockPath, 'wx', 0o666)
-      lockAcquired = true
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
-        throw new Error('Another Git process is modifying the index; retry after it completes')
-      }
-      throw error
     }
 
     const currentHead = (await tryGit(root, ['rev-parse', 'HEAD']))?.trim() ?? ''

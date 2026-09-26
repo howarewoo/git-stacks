@@ -2299,8 +2299,6 @@ button:disabled {
 .hunk-line-selectable {
   width: 100%;
   border: 0;
-  background-color: transparent;
-  color: inherit;
   padding: 0;
   cursor: pointer;
 }

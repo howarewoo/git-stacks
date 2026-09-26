@@ -102,8 +102,10 @@ export function unquoteGitPath(raw: string): string {
         i++
       }
     } else {
-      const buf = Buffer.from(ch, 'utf8')
+      const codePoint = inner.codePointAt(i)!
+      const buf = Buffer.from(String.fromCodePoint(codePoint), 'utf8')
       for (const b of buf) bytes.push(b)
+      if (codePoint > 0xffff) i++
     }
   }
   return Buffer.from(bytes).toString('utf8')
@@ -390,74 +392,16 @@ export function hunkSideUnavailable(
 }
 
 /**
- * Line numbers for a split hunk. The preimage is anchored on the first line the
- * window keeps on the old side, and the postimage on the first line it keeps on
- * the new side, so Git verifies the window against the index even when the window
- * opens with an addition.
+ * Builds one hunk patch. Without a line selection Git's hunk passes through
+ * unchanged; with one, unselected preimage lines become context and
+ * unselected postimage lines disappear.
  */
-function windowHeader(
+export function buildHunkPatch(
+  block: HunkBlock,
   hunk: DiffHunk,
-  selected: Set<number>,
-  from: number,
-  to: number,
-  delta: number,
+  side: HunkSideName,
+  lineIndexes?: number[],
 ): string {
-  const lines = hunk.lines
-  let preimageAnchor = hunk.oldStart - 1
-  let postimageAnchor = hunk.newStart - 1
-
-  for (let i = 0; i < from; i++) {
-    const line = lines[i]
-    if (line.kind === 'context') {
-      preimageAnchor += 1
-      postimageAnchor += 1
-    } else if (line.kind === 'remove') {
-      if (selected.has(i)) {
-        preimageAnchor += 1
-      }
-    } else if (line.kind === 'add') {
-      if (selected.has(i)) {
-        postimageAnchor += 1
-      }
-    }
-  }
-
-  let oldCount = 0
-  let newCount = 0
-
-  for (let i = from; i <= to; i++) {
-    const line = lines[i]
-    if (line.kind === 'context' || line.kind === 'remove') {
-      oldCount += 1
-    }
-    if (line.kind === 'context' || line.kind === 'add') {
-      newCount += 1
-    }
-  }
-
-  let oldStart: number
-  let newStart: number
-
-  if (oldCount === 0) {
-    oldStart = preimageAnchor
-    newStart = postimageAnchor + 1 + delta
-  } else if (newCount === 0) {
-    oldStart = preimageAnchor + 1
-    newStart = postimageAnchor + delta
-  } else {
-    oldStart = preimageAnchor + 1
-    newStart = postimageAnchor + 1 + delta
-  }
-
-  return `@@ -${oldStart},${oldCount} +${newStart},${newCount} @@`
-}
-
-/**
- * Builds the patch for one hunk. Without a line selection Git's own hunk text is
- * passed through unchanged; with one, the selection becomes sub-hunks that carry
- * recomputed line numbers plus the context and no-newline markers they need.
- */
-export function buildHunkPatch(block: HunkBlock, hunk: DiffHunk, lineIndexes?: number[]): string {
   const lines = hunk.lines
   // A text hunk and chmod can share a diff block. Applying Git's mode headers
   // would stage the chmod too, so keep only the content-bearing file header.
@@ -465,49 +409,45 @@ export function buildHunkPatch(block: HunkBlock, hunk: DiffHunk, lineIndexes?: n
     (line) => !line.startsWith('old mode ') && !line.startsWith('new mode '),
   )
   const verbatim = () => `${[...header, hunk.header, ...lines.map((l) => l.text)].join('\n')}\n`
-  if (!lineIndexes || lineIndexes.length === 0) return verbatim()
+  if (lineIndexes === undefined) return verbatim()
+  if (lineIndexes.length === 0) {
+    throw new Error('Select at least one changed line before applying a hunk')
+  }
 
   const selected = new Set(lineIndexes)
-  const changeIndexes = lines
+  const changes = lines
     .map((line, index) => ({ line, index }))
-    .filter((entry) => entry.line.kind === 'add' || entry.line.kind === 'remove')
-    .map((entry) => entry.index)
-  if (changeIndexes.length > 0 && changeIndexes.every((index) => selected.has(index))) {
-    return verbatim()
-  }
+    .filter(({ line }) => line.kind === 'add' || line.kind === 'remove')
+  if (changes.every(({ index }) => selected.has(index))) return verbatim()
 
-  // A run spans the selected changes that no unselected change separates; context
-  // between them is shared, and a gap in the selected changes starts a new hunk.
-  const runs: { from: number; to: number }[] = []
-  for (const index of changeIndexes) {
-    if (!selected.has(index)) continue
-    const last = runs[runs.length - 1]
-    const separated = last
-      ? lines
-          .slice(last.to + 1, index)
-          .some((line) => line.kind === 'add' || line.kind === 'remove')
-      : true
-    if (last && !separated) last.to = index
-    else runs.push({ from: index, to: index })
-  }
-  if (runs.length === 0) throw new Error('Select at least one changed line before applying a hunk')
-
+  // The index is the old side when staging and the new side when reversing a
+  // staged diff. An unselected line already present there becomes context;
+  // an unselected line absent there disappears from the patch altogether.
+  // Keeping one complete hunk makes repeated content and zero-count anchors
+  // independent of Git's fuzzy matching or split-window coordinate offsets.
+  const preimageKind = side === 'staged' ? 'add' : 'remove'
   const body: string[] = []
-  let delta = 0
-  for (const run of runs) {
-    // Anchor each run with the adjacent context lines, then keep the
-    // no-newline marker of every line the run includes.
-    const from = run.from > 0 && lines[run.from - 1].kind === 'context' ? run.from - 1 : run.from
-    let to = run.to
-    while (to + 1 < lines.length && lines[to + 1].kind === 'context') to += 1
-    while (to + 1 < lines.length && lines[to + 1].kind === MARKER) to += 1
-    const headerLine = windowHeader(hunk, selected, from, to, delta)
-    const match = HUNK_HEADER.exec(headerLine)
-    const oldCount = match ? Number(match[2] ?? 1) : 0
-    const newCount = match ? Number(match[4] ?? 1) : 0
-    body.push(headerLine)
-    for (let index = from; index <= to; index += 1) body.push(lines[index].text)
-    delta += newCount - oldCount
+  let oldCount = 0
+  let newCount = 0
+  let previousIncluded = false
+  for (let index = 0; index < lines.length; index++) {
+    const line = lines[index]
+    if (line.kind === MARKER) {
+      if (previousIncluded) body.push(line.text)
+      continue
+    }
+    const included = line.kind === 'context' || selected.has(index) || line.kind === preimageKind
+    previousIncluded = included
+    if (!included) continue
+    const text =
+      line.kind !== 'context' && !selected.has(index) ? ` ${line.text.slice(1)}` : line.text
+    body.push(text)
+    if (text[0] !== '+') oldCount++
+    if (text[0] !== '-') newCount++
   }
-  return `${[...header, ...body].join('\n')}\n`
+
+  const preimageStart = side === 'staged' ? hunk.newStart : hunk.oldStart
+  const oldStart = side === 'staged' ? preimageStart + (newCount === 0 ? 1 : 0) : preimageStart
+  const newStart = side === 'staged' ? preimageStart : preimageStart + (oldCount === 0 ? 1 : 0)
+  return `${[...header, `@@ -${oldStart},${oldCount} +${newStart},${newCount} @@`, ...body].join('\n')}\n`
 }

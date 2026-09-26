@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
+import { promises as fs } from 'node:fs'
 import { chmod, mkdtemp, open, readFile, rm, unlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -237,10 +238,102 @@ test('interior added or removed lines anchor at their exact position when staged
   }
 })
 
+test('repeated text selects the exact coordinate in both index directions', async () => {
+  const { root, repo, git, text } = await fixture()
+  try {
+    const base = 'alpha\nx\ny\nx\nz\nomega\n'
+    await writeFile(join(repo, 'remove.txt'), base)
+    await writeFile(join(repo, 'insert.txt'), 'alpha\nomega\n')
+    git('add', '.')
+    git('commit', '-qm', 'Add repeated-line bases')
+    await writeFile(join(repo, 'remove.txt'), 'alpha\nomega\n')
+    await writeFile(join(repo, 'insert.txt'), base)
+    git('add', 'insert.txt')
+    for (const [file, side, line] of [
+      ['remove.txt', 'unstaged', '-x'],
+      ['insert.txt', 'staged', '+x'],
+    ] as const) {
+      const view = await getFileView(repo, file)
+      const changes = view.hunks[side].hunks[0].lines
+      const second = changes.findLastIndex((entry) => entry.text === line)
+      assert.ok(second >= 0)
+      await applyHunk(repo, file, side, 0, [second])
+      assert.equal(text('show', `:${file}`), 'alpha\nx\ny\nz\nomega\n')
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('zero-context selections retain insertion and deletion anchors in both directions', async () => {
+  const { root, repo, git, text } = await fixture()
+  try {
+    git('config', 'diff.context', '0')
+    for (const file of ['stage-add', 'unstage-add', 'stage-remove', 'unstage-remove']) {
+      const removal = file.endsWith('remove')
+      await writeFile(
+        join(repo, `${file}.txt`),
+        removal ? 'alpha\nfirst\nmiddle\nlast\nomega\n' : 'alpha\nomega\n',
+      )
+    }
+    await writeFile(join(repo, 'start.txt'), 'alpha\nomega\n')
+    await writeFile(join(repo, 'crlf-eof.txt'), 'alpha\r\nomega')
+    git('add', '.')
+    git('commit', '-qm', 'Add zero-context bases')
+    for (const file of ['stage-add', 'unstage-add', 'stage-remove', 'unstage-remove']) {
+      const removal = file.endsWith('remove')
+      await writeFile(
+        join(repo, `${file}.txt`),
+        removal ? 'alpha\nomega\n' : 'alpha\nfirst\nmiddle\nlast\nomega\n',
+      )
+      if (file.startsWith('unstage')) git('add', `${file}.txt`)
+      const side = file.startsWith('unstage') ? 'staged' : 'unstaged'
+      const view = await getFileView(repo, `${file}.txt`)
+      const hunk = view.hunks[side].hunks[0]
+      assert.ok(hunk)
+      assert.match(hunk.header, /,0 /u, 'a zero-count side is present')
+      const middle = hunk.lines.findIndex((line) => line.text === `${removal ? '-' : '+'}middle`)
+      assert.ok(middle >= 0)
+      await applyHunk(repo, `${file}.txt`, side, 0, [middle])
+      assert.equal(
+        text('show', `:${file}.txt`),
+        removal
+          ? file.startsWith('unstage')
+            ? 'alpha\nmiddle\nomega\n'
+            : 'alpha\nfirst\nlast\nomega\n'
+          : file.startsWith('unstage')
+            ? 'alpha\nfirst\nlast\nomega\n'
+            : 'alpha\nmiddle\nomega\n',
+      )
+    }
+
+    await writeFile(join(repo, 'start.txt'), 'first\nmiddle\nlast\nalpha\nomega\n')
+    const start = await getFileView(repo, 'start.txt')
+    const startHunk = start.hunks.unstaged.hunks[0]
+    assert.match(startHunk.header, /-0,0/u)
+    await applyHunk(repo, 'start.txt', 'unstaged', 0, [
+      startHunk.lines.findIndex((line) => line.text === '+middle'),
+    ])
+    assert.equal(text('show', ':start.txt'), 'middle\nalpha\nomega\n')
+
+    await writeFile(join(repo, 'crlf-eof.txt'), 'alpha\r\nfirst\r\nmiddle\r\nlast\r\nomega')
+    const crlf = await getFileView(repo, 'crlf-eof.txt')
+    await applyHunk(repo, 'crlf-eof.txt', 'unstaged', 0, [
+      crlf.hunks.unstaged.hunks[0].lines.findIndex((line) => line.text === '+middle\r'),
+    ])
+    assert.deepEqual(
+      execFileSync('git', ['-C', repo, 'show', ':crlf-eof.txt']),
+      Buffer.from('alpha\r\nmiddle\r\nomega'),
+    )
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 test('quoted file paths preserve hunks and stage and unstage cleanly', async () => {
   const { root, repo, git, text } = await fixture()
   try {
-    const quotedPath = 'say"hello.txt'
+    const quotedPath = '😀"notes.txt'
     await writeFile(join(repo, quotedPath), 'before\n')
     git('add', '.')
     git('commit', '-qm', 'Add quoted file')
@@ -304,6 +397,59 @@ test('atomic index transaction fails closed on concurrent lock or state change w
       'the real index remained completely unmutated',
     )
   } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('in-flight other-entry staging is preserved before the lock and refused while it is owned', async () => {
+  const { root, repo, git, text } = await fixture()
+  const originalOpen = fs.open
+  const originalCopy = fs.copyFile
+  try {
+    await writeFile(join(repo, 'other.txt'), 'before\n')
+    await writeFile(join(repo, 'blocked.txt'), 'before\n')
+    git('add', 'other.txt', 'blocked.txt')
+    git('commit', '-qm', 'Add other tracked files')
+    await writeFile(join(repo, 'other.txt'), 'independently staged\n')
+    await writeFile(join(repo, 'blocked.txt'), 'still unstaged\n')
+    await writeFile(join(repo, 'lines.txt'), numbered(20, { 2: 'selected hunk' }))
+    const view = await getFileView(repo, 'lines.txt')
+    let raced = false
+    fs.open = (async (...args: Parameters<typeof fs.open>) => {
+      if (String(args[0]).endsWith('/index.lock') && args[1] === 'wx') {
+        assert.equal(raced, false)
+        // Run a real Git writer after hunk resolution but just before lock
+        // acquisition. A snapshot made before this boundary loses other.txt.
+        git('add', 'other.txt')
+        raced = true
+      }
+      return originalOpen(...args)
+    }) as typeof fs.open
+    let lockRefused = false
+    fs.copyFile = (async (...args: Parameters<typeof fs.copyFile>) => {
+      if (String(args[1]).includes('.stage-')) {
+        assert.throws(() => git('add', 'blocked.txt'), /index\.lock/u)
+        lockRefused = true
+      }
+      return originalCopy(...args)
+    }) as typeof fs.copyFile
+    await runAction(repo, {
+      type: 'stageHunk',
+      path: 'lines.txt',
+      hunkId: view.hunks.unstaged.hunks[0].id,
+      fingerprint: view.fingerprint,
+    })
+    assert.equal(raced, true)
+    assert.equal(lockRefused, true)
+    assert.equal(text('show', ':other.txt'), 'independently staged\n')
+    assert.equal(text('show', ':lines.txt'), numbered(20, { 2: 'selected hunk' }))
+    assert.match(text('diff', '--cached', '--name-only'), /other\.txt/u)
+    assert.match(text('diff', '--cached', '--name-only'), /lines\.txt/u)
+    assert.equal(text('show', ':blocked.txt'), 'before\n')
+    assert.equal(await readFile(join(repo, 'blocked.txt'), 'utf8'), 'still unstaged\n')
+  } finally {
+    fs.open = originalOpen
+    fs.copyFile = originalCopy
     await rm(root, { recursive: true, force: true })
   }
 })
