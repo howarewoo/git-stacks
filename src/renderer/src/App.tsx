@@ -1,9 +1,10 @@
 import * as React from 'react'
 import { DropdownMenu } from './components/ui/dropdown-menu'
 import {
-  AlertCircle,
   Archive,
   ArrowDown,
+  ArrowLeftRight,
+  ArrowUp,
   Check,
   ChevronRight,
   Circle,
@@ -48,7 +49,6 @@ import {
   Dialog,
   DialogContent,
   DialogDescription,
-  DialogFooter,
   DialogHeader,
   DialogTitle,
 } from './components/ui/dialog'
@@ -56,8 +56,11 @@ import { Input } from './components/ui/input'
 import { SegmentedControl } from './components/ui/segmented-control'
 import { Select } from './components/ui/select'
 import { Textarea } from './components/ui/textarea'
-import { PullRequestHoverCard } from './components/repository-hover-cards'
+import { Tooltip, TooltipContent, TooltipTrigger } from './components/ui/tooltip'
+import { BranchHoverCard, PullRequestHoverCard } from './components/repository-hover-cards'
+import { Field } from './components/ui/field'
 import { cn } from './lib/utils'
+import { EmptyState, InlineAlert } from './components/ui/surface'
 import { checkLabel, checksVariant } from './lib/pull-request-state'
 import {
   branchFilterOptions,
@@ -75,6 +78,14 @@ import {
   OperationBanner,
   StackView,
 } from './components/repository-views'
+import {
+  OperationContext,
+  PhaseStatus,
+  WorkflowActions,
+  TypedConfirmation,
+  WorkflowFrame,
+} from './components/workflow-composition'
+import { CLOSE_INTENT_MESSAGES, closeIntent } from './components/workflow-policy'
 
 type WorkspaceView = 'branches' | 'stacks' | 'history' | 'changes' | 'pullRequests' | 'stashes'
 
@@ -117,6 +128,7 @@ function App() {
   const [newBranchOpen, setNewBranchOpen] = React.useState(false)
   const [newBranchName, setNewBranchName] = React.useState('')
   const [newBranchParent, setNewBranchParent] = React.useState('')
+  const [newBranchEdited, setNewBranchEdited] = React.useState(false)
   const [newBranchError, setNewBranchError] = React.useState<string | null>(null)
   const [deleteTarget, setDeleteTarget] = React.useState<{
     branch: Branch
@@ -127,9 +139,13 @@ function App() {
   const [deleteBranchError, setDeleteBranchError] = React.useState<string | null>(null)
   const [prOpen, setPrOpen] = React.useState(false)
   const [prTitle, setPrTitle] = React.useState('')
+  const [deleteCloseNotice, setDeleteCloseNotice] = React.useState<string | null>(null)
+  const [newBranchNotice, setNewBranchNotice] = React.useState<string | null>(null)
+  const [prNotice, setPrNotice] = React.useState<string | null>(null)
   const [prBody, setPrBody] = React.useState('')
   const [prBase, setPrBase] = React.useState('')
   const [prDraft, setPrDraft] = React.useState(false)
+  const [prEdited, setPrEdited] = React.useState(false)
   const [prError, setPrError] = React.useState<string | null>(null)
   const [commitMessage, setCommitMessage] = React.useState('')
   const [commitAmend, setCommitAmend] = React.useState(false)
@@ -357,6 +373,7 @@ function App() {
     setNewBranchParent(
       snapshot.currentBranch ?? snapshot.defaultBranch ?? snapshot.branches[0]?.name ?? '',
     )
+    setNewBranchEdited(false)
     setNewBranchError(null)
     setNewBranchOpen(true)
   }, [snapshot])
@@ -367,6 +384,7 @@ function App() {
     setPrBody('')
     setPrBase(selectedBranch.parent ?? snapshot.defaultBranch)
     setPrDraft(false)
+    setPrEdited(false)
     setPrError(null)
     setPrOpen(true)
   }, [selectedBranch, snapshot])
@@ -1253,20 +1271,30 @@ function App() {
     if (!snapshot) {
       return (
         <aside className="details-pane details-pane-empty" id="branch-inspector">
-          <div className="details-placeholder">
-            <PanelRightClose className="size-5" />
-            <span>Branch details will appear here.</span>
-          </div>
+          <EmptyState>
+            <PanelRightClose aria-hidden="true" className="size-5" />
+            <strong>No repository open</strong>
+            <span>Open a local repository to inspect branches, changes, and pull requests.</span>
+            <Button
+              disabled={opening}
+              onClick={() => openRepository()}
+              size="sm"
+              variant="secondary"
+            >
+              Open repository
+            </Button>
+          </EmptyState>
         </aside>
       )
     }
     if (!selectedBranch) {
       return (
         <aside className="details-pane details-pane-empty" id="branch-inspector">
-          <div className="details-placeholder">
-            <GitBranch className="size-5" />
-            <span>Select a branch to inspect its stack.</span>
-          </div>
+          <EmptyState>
+            <GitBranch aria-hidden="true" className="size-5" />
+            <strong>No branch selected</strong>
+            <span>Select a branch to inspect its stack position, upstream, and pull request.</span>
+          </EmptyState>
         </aside>
       )
     }
@@ -1404,31 +1432,34 @@ function App() {
         <span className="titlebar-build">Native Git workspace</span>
       </header>
       {error ? (
-        <div className="global-banner global-banner-error" role="alert">
-          <AlertCircle className="size-4" />
-          <span>{error}</span>
-          <IconButton label="Dismiss error" onClick={() => setError(null)}>
-            <X className="size-3.5" />
-          </IconButton>
-        </div>
+        <InlineAlert tone="error" className="global-banner" role="alert">
+          <span className="global-banner-row">
+            <span>{error}</span>
+            <IconButton label="Dismiss error" onClick={() => setError(null)}>
+              <X aria-hidden="true" className="size-3.5" />
+            </IconButton>
+          </span>
+        </InlineAlert>
       ) : null}
       {actionError ? (
-        <div className="global-banner global-banner-error" role="alert">
-          <TriangleAlert className="size-4" />
-          <span>{actionError}</span>
-          <IconButton label="Dismiss action error" onClick={() => setActionError(null)}>
-            <X className="size-3.5" />
-          </IconButton>
-        </div>
+        <InlineAlert tone="error" className="global-banner" role="alert">
+          <span className="global-banner-row">
+            <span>{actionError}</span>
+            <IconButton label="Dismiss action error" onClick={() => setActionError(null)}>
+              <X aria-hidden="true" className="size-3.5" />
+            </IconButton>
+          </span>
+        </InlineAlert>
       ) : null}
       {notice ? (
-        <div className="global-banner global-banner-success" role="status">
-          <Check className="size-4" />
-          <span>{notice}</span>
-          <IconButton label="Dismiss notice" onClick={() => setNotice(null)}>
-            <X className="size-3.5" />
-          </IconButton>
-        </div>
+        <InlineAlert tone="success" className="global-banner" aria-live="polite">
+          <span className="global-banner-row">
+            <span>{notice}</span>
+            <IconButton label="Dismiss notice" onClick={() => setNotice(null)}>
+              <X aria-hidden="true" className="size-3.5" />
+            </IconButton>
+          </span>
+        </InlineAlert>
       ) : null}
       {snapshot ? renderToolbar() : null}
       {snapshot ? (
@@ -1452,6 +1483,7 @@ function App() {
           snapshot={snapshot}
           busy={isBusy}
           actionError={actionError}
+          onClearActionError={() => setActionError(null)}
           runAction={runAction}
           onClose={() => setWorkflow(null)}
           onRequest={openWorkflow}
@@ -1460,11 +1492,20 @@ function App() {
       <Dialog
         open={deleteTarget !== null}
         onOpenChange={(open) => {
-          if (!open && !isBusy) setDeleteTarget(null)
+          if (open) return
+          const intent = closeIntent({
+            busy: isBusy,
+            dirty: deleteForce || Boolean(deleteConfirmation),
+          })
+          if (intent === 'allow') {
+            setDeleteTarget(null)
+            return
+          }
+          setDeleteCloseNotice(CLOSE_INTENT_MESSAGES[intent])
         }}
       >
         <DialogContent
-          className="delete-branch-dialog"
+          className="workflow-dialog"
           onOpenAutoFocus={(event) => {
             event.preventDefault()
             deleteCancelRef.current?.focus()
@@ -1484,81 +1525,112 @@ function App() {
             </DialogDescription>
           </DialogHeader>
           <form className="dialog-form" onSubmit={submitDeleteBranch}>
-            {deleteChildren.length > 0 ? (
-              <p className="delete-branch-note">
-                {deleteChildren.length} child{' '}
-                {deleteChildren.length === 1 ? 'branch uses' : 'branches use'} this parent. Deleting
-                it does not retarget those branches.
-              </p>
-            ) : null}
-            <Checkbox
-              id="delete-branch-force"
-              label="Delete even if not merged"
-              checked={deleteForce}
-              disabled={isBusy}
-              onChange={(event) => {
-                setDeleteForce(event.target.checked)
-                setDeleteConfirmation('')
-                setDeleteBranchError(null)
-              }}
-            />
-            <p className="delete-branch-note">
-              {deleteForce
-                ? 'Commits that exist only on this branch can become unreachable.'
-                : 'Git will refuse deletion if the branch is not fully merged.'}
-            </p>
-            {deleteForce ? (
-              <>
-                <label htmlFor="delete-branch-confirmation">Type the branch name to confirm</label>
-                <Input
-                  id="delete-branch-confirmation"
-                  autoComplete="off"
-                  spellCheck={false}
-                  value={deleteConfirmation}
-                  disabled={isBusy}
-                  onChange={(event) => setDeleteConfirmation(event.target.value)}
-                />
-              </>
-            ) : null}
-            {deleteBranchError ? (
-              <p className="form-error" role="alert">
-                {deleteBranchError}
-              </p>
-            ) : null}
-            <DialogFooter>
-              <Button
-                ref={deleteCancelRef}
+            <WorkflowFrame composition="destructive">
+              {deleteCloseNotice ? (
+                <PhaseStatus phase="blocked" message={deleteCloseNotice} />
+              ) : null}
+              <OperationContext
+                title={deleteTarget?.branch.name}
+                description={`Delete this local branch. ${
+                  deleteChildren.length > 0
+                    ? `${deleteChildren.length} child ${deleteChildren.length === 1 ? 'branch uses' : 'branches use'} this parent; deleting it does not retarget those branches.`
+                    : 'No local branches record this branch as their parent.'
+                }`}
+                facts={
+                  deleteTarget
+                    ? [
+                        { label: 'Local ref', value: deleteTarget.branch.ref, code: true },
+                        {
+                          label: 'Current tip',
+                          value: deleteTarget.branch.oid ?? 'Unavailable',
+                          code: true,
+                        },
+                      ]
+                    : []
+                }
+              />
+              <Checkbox
+                id="delete-branch-force"
+                label="Delete even if not merged"
+                checked={deleteForce}
                 disabled={isBusy}
-                onClick={() => setDeleteTarget(null)}
-                variant="secondary"
-              >
-                Cancel
-              </Button>
-              <Button
-                disabled={
-                  isBusy || (deleteForce && deleteConfirmation !== deleteTarget?.branch.name)
-                }
-                type="submit"
-                variant="danger"
-                tooltip={
-                  deleteForce && deleteConfirmation !== deleteTarget?.branch.name
-                    ? 'Type the branch name to enable force deletion. Unmerged commits can become unreachable.'
-                    : 'Delete this local branch now. Remotes and pull requests are kept.'
-                }
-              >
-                {busyAction === 'Delete branch' ? (
-                  <LoaderCircle className="size-3.5 animate-spin" />
-                ) : (
-                  <Trash2 className="size-3.5" />
-                )}
-                Delete branch
-              </Button>
-            </DialogFooter>
+                onChange={(event) => {
+                  setDeleteForce(event.target.checked)
+                  setDeleteConfirmation('')
+                  setDeleteBranchError(null)
+                  setDeleteCloseNotice(null)
+                }}
+              />
+              <p className="delete-branch-note">
+                {deleteForce
+                  ? 'Commits that exist only on this branch can become unreachable.'
+                  : 'Git will refuse deletion if the branch is not fully merged.'}
+              </p>
+              {deleteForce && deleteTarget ? (
+                <TypedConfirmation
+                  id="delete-branch-confirmation"
+                  label="Type the branch name to confirm"
+                  value={deleteConfirmation}
+                  target={deleteTarget.branch.name}
+                  disabled={isBusy}
+                  onChange={(value) => {
+                    setDeleteConfirmation(value)
+                    setDeleteCloseNotice(null)
+                  }}
+                />
+              ) : null}
+              {deleteBranchError ? (
+                <PhaseStatus phase="failed" message={deleteBranchError} />
+              ) : null}
+              <WorkflowActions>
+                <Button
+                  ref={deleteCancelRef}
+                  disabled={isBusy}
+                  onClick={() => setDeleteTarget(null)}
+                  variant="secondary"
+                >
+                  Cancel
+                </Button>
+                <Button
+                  disabled={
+                    isBusy || (deleteForce && deleteConfirmation !== deleteTarget?.branch.name)
+                  }
+                  type="submit"
+                  variant="danger"
+                  loading={busyAction === 'Delete branch'}
+                  tooltip={
+                    deleteForce && deleteConfirmation !== deleteTarget?.branch.name
+                      ? 'Type the branch name to enable force deletion. Unmerged commits can become unreachable.'
+                      : 'Delete this local branch now. Remotes and pull requests are kept.'
+                  }
+                >
+                  <Trash2 aria-hidden="true" className="size-3.5" />
+                  Delete branch
+                </Button>
+              </WorkflowActions>
+            </WorkflowFrame>
           </form>
         </DialogContent>
       </Dialog>
-      <Dialog onOpenChange={setNewBranchOpen} open={newBranchOpen}>
-        <DialogContent>
+      <Dialog
+        onOpenChange={(open) => {
+          if (open) {
+            setNewBranchOpen(true)
+            return
+          }
+          const intent = closeIntent({
+            busy: isBusy,
+            dirty: newBranchEdited,
+          })
+          if (intent === 'allow') {
+            setNewBranchOpen(false)
+            return
+          }
+          setNewBranchNotice(CLOSE_INTENT_MESSAGES[intent])
+        }}
+        open={newBranchOpen}
+      >
+        <DialogContent className="workflow-dialog">
           <DialogHeader>
             <DialogTitle>Create a branch</DialogTitle>
             <DialogDescription>
@@ -1566,57 +1638,87 @@ function App() {
             </DialogDescription>
           </DialogHeader>
           <form className="dialog-form" onSubmit={submitBranch}>
-            <label htmlFor="new-branch-name">Branch name</label>
-            <Input
-              autoFocus
-              id="new-branch-name"
-              onChange={(event) => setNewBranchName(event.target.value)}
-              placeholder="feature/short-description"
-              value={newBranchName}
-            />
-            <label htmlFor="new-branch-parent">Parent branch</label>
-            <Select
-              id="new-branch-parent"
-              onChange={(event) => setNewBranchParent(event.target.value)}
-              value={newBranchParent}
-            >
-              {(snapshot?.branches ?? [])
-                .filter((branch) => !branch.remote)
-                .map((branch) => (
-                  <option key={branch.name} value={branch.name}>
-                    {branch.name}
-                    {branch.current ? ' (current)' : ''}
-                  </option>
-                ))}
-            </Select>
-            {newBranchError ? (
-              <p className="form-error" role="alert">
-                {newBranchError}
-              </p>
-            ) : null}
-            <DialogFooter>
-              <Button onClick={() => setNewBranchOpen(false)} variant="secondary">
-                Cancel
-              </Button>
-              <Button
-                disabled={isBusy}
-                type="submit"
-                variant="accent"
-                tooltip="Create the local branch, record its stack parent, and switch to it. Nothing is pushed."
+            <WorkflowFrame composition="form">
+              {newBranchNotice ? <PhaseStatus phase="blocked" message={newBranchNotice} /> : null}
+              <Field
+                id="new-branch-name"
+                label="Branch name"
+                required
+                description="Local only. Nothing is pushed and no commit is created."
               >
-                {busyAction === 'Create branch' ? (
-                  <LoaderCircle className="size-3.5 animate-spin" />
-                ) : (
-                  <Plus className="size-3.5" />
-                )}
-                Create branch
-              </Button>
-            </DialogFooter>
+                <Input
+                  autoFocus
+                  onChange={(event) => {
+                    setNewBranchName(event.target.value)
+                    setNewBranchEdited(true)
+                    setNewBranchNotice(null)
+                  }}
+                  placeholder="feature/short-description"
+                  value={newBranchName}
+                />
+              </Field>
+              <Field id="new-branch-parent" label="Parent branch" required>
+                <Select
+                  onChange={(event) => {
+                    setNewBranchParent(event.target.value)
+                    setNewBranchEdited(true)
+                    setNewBranchNotice(null)
+                  }}
+                  value={newBranchParent}
+                >
+                  {(snapshot?.branches ?? [])
+                    .filter((branch) => !branch.remote)
+                    .map((branch) => (
+                      <option key={branch.name} value={branch.name}>
+                        {branch.name}
+                        {branch.current ? ' (current)' : ''}
+                      </option>
+                    ))}
+                </Select>
+              </Field>
+              {newBranchError ? <PhaseStatus phase="failed" message={newBranchError} /> : null}
+              <WorkflowActions>
+                <Button onClick={() => setNewBranchOpen(false)} variant="secondary">
+                  Cancel
+                </Button>
+                <Button
+                  disabled={isBusy || !newBranchName.trim() || !newBranchParent}
+                  type="submit"
+                  variant="accent"
+                  loading={busyAction === 'Create branch'}
+                  tooltip={
+                    !newBranchName.trim() || !newBranchParent
+                      ? 'Enter a branch name and choose a parent branch first.'
+                      : 'Create the local branch, record its stack parent, and switch to it. Nothing is pushed.'
+                  }
+                >
+                  <Plus aria-hidden="true" className="size-3.5" />
+                  Create branch
+                </Button>
+              </WorkflowActions>
+            </WorkflowFrame>
           </form>
         </DialogContent>
       </Dialog>
-      <Dialog onOpenChange={setPrOpen} open={prOpen}>
-        <DialogContent className="pr-dialog-content">
+      <Dialog
+        onOpenChange={(open) => {
+          if (open) {
+            setPrOpen(true)
+            return
+          }
+          const intent = closeIntent({
+            busy: isBusy,
+            dirty: prEdited,
+          })
+          if (intent === 'allow') {
+            setPrOpen(false)
+            return
+          }
+          setPrNotice(CLOSE_INTENT_MESSAGES[intent])
+        }}
+        open={prOpen}
+      >
+        <DialogContent className="workflow-dialog pr-dialog-content">
           <DialogHeader>
             <DialogTitle>Create pull request</DialogTitle>
             <DialogDescription>
@@ -1624,74 +1726,120 @@ function App() {
             </DialogDescription>
           </DialogHeader>
           <form className="dialog-form" onSubmit={submitPr}>
-            <label htmlFor="pr-title">Title</label>
-            <Input
-              autoFocus
-              id="pr-title"
-              onChange={(event) => setPrTitle(event.target.value)}
-              placeholder="What does this stack change?"
-              value={prTitle}
-            />
-            <label htmlFor="pr-base">Base branch</label>
-            <Input
-              id="pr-base"
-              list="pr-base-options"
-              onChange={(event) => setPrBase(event.target.value)}
-              value={prBase}
-            />
-            <datalist id="pr-base-options">
-              {(snapshot?.branches ?? [])
-                .filter((branch) => !branch.remote && branch.name !== currentBranch)
-                .map((branch) => (
-                  <option key={branch.name} value={branch.name} />
-                ))}
-            </datalist>
-            <label htmlFor="pr-body">
-              Description <span className="optional-label">optional</span>
-            </label>
-            <Textarea
-              id="pr-body"
-              onChange={(event) => setPrBody(event.target.value)}
-              placeholder="Add context for reviewers"
-              rows={5}
-              value={prBody}
-            />
-            <Checkbox
-              id="pr-draft"
-              label="Mark as draft"
-              checked={prDraft}
-              onChange={(event) => setPrDraft(event.target.checked)}
-            />
-            {prError ? (
-              <p className="form-error" role="alert">
-                {prError}
-              </p>
-            ) : null}
-            <DialogFooter>
-              <Button onClick={() => setPrOpen(false)} variant="secondary">
-                Cancel
-              </Button>
-              <Button
-                disabled={!snapshot?.github.available || !selectedBranch?.current || isBusy}
-                tooltip={
-                  !snapshot?.github.available
-                    ? snapshot?.github.message ||
-                      'Connect an authenticated GitHub repository to create pull requests.'
-                    : !selectedBranch?.current
-                      ? 'Switch to a local branch to create its pull request.'
-                      : 'Create the PR using this branch’s published upstream. This does not push newer local commits.'
+            <WorkflowFrame composition="form">
+              {prNotice ? <PhaseStatus phase="blocked" message={prNotice} /> : null}
+              {snapshot && !snapshot.github.available ? (
+                <PhaseStatus
+                  phase="blocked"
+                  message={
+                    snapshot.github.message ||
+                    'GitHub is unavailable for this repository, so pull requests cannot be created or listed here.'
+                  }
+                />
+              ) : null}
+              <OperationContext
+                title={`${selectedBranch?.name ?? 'This branch'} → ${prBase || 'base branch'}`}
+                description="The pull request is created against this branch’s published upstream. Newer local commits are not pushed."
+                facts={
+                  selectedBranch
+                    ? [
+                        { label: 'Head branch', value: selectedBranch.name },
+                        {
+                          label: 'Upstream',
+                          value: selectedBranch.upstream ?? 'No upstream configured',
+                          code: true,
+                        },
+                      ]
+                    : []
                 }
-                type="submit"
-                variant="accent"
+              />
+              <Field id="pr-title" label="Title" required>
+                <Input
+                  autoFocus
+                  onChange={(event) => {
+                    setPrTitle(event.target.value)
+                    setPrEdited(true)
+                    setPrNotice(null)
+                  }}
+                  placeholder="What does this stack change?"
+                  value={prTitle}
+                />
+              </Field>
+              <Field
+                id="pr-base"
+                label="Base branch"
+                required
+                description="Pick a local branch other than the head branch."
               >
-                {busyAction === 'Create pull request' ? (
-                  <LoaderCircle className="size-3.5 animate-spin" />
-                ) : (
-                  <GitPullRequest className="size-3.5" />
-                )}
-                Create pull request
-              </Button>
-            </DialogFooter>
+                <Input
+                  list="pr-base-options"
+                  onChange={(event) => {
+                    setPrBase(event.target.value)
+                    setPrEdited(true)
+                    setPrNotice(null)
+                  }}
+                  value={prBase}
+                />
+              </Field>
+              <datalist id="pr-base-options">
+                {(snapshot?.branches ?? [])
+                  .filter((branch) => !branch.remote && branch.name !== currentBranch)
+                  .map((branch) => (
+                    <option key={branch.name} value={branch.name} />
+                  ))}
+              </datalist>
+              <Field id="pr-body" label="Description (optional)">
+                <Textarea
+                  onChange={(event) => {
+                    setPrBody(event.target.value)
+                    setPrEdited(true)
+                    setPrNotice(null)
+                  }}
+                  placeholder="Add context for reviewers"
+                  rows={5}
+                  value={prBody}
+                />
+              </Field>
+              <Checkbox
+                id="pr-draft"
+                label="Mark as draft"
+                checked={prDraft}
+                onChange={(event) => {
+                  setPrDraft(event.target.checked)
+                  setPrEdited(true)
+                }}
+              />
+              {prError ? <PhaseStatus phase="failed" message={prError} /> : null}
+              <WorkflowActions>
+                <Button onClick={() => setPrOpen(false)} variant="secondary">
+                  Cancel
+                </Button>
+                <Button
+                  disabled={
+                    !snapshot?.github.available ||
+                    !selectedBranch?.current ||
+                    isBusy ||
+                    !prBase.trim()
+                  }
+                  loading={busyAction === 'Create pull request'}
+                  tooltip={
+                    !snapshot?.github.available
+                      ? snapshot?.github.message ||
+                        'Connect an authenticated GitHub repository to create pull requests.'
+                      : !selectedBranch?.current
+                        ? 'Switch to a local branch to create its pull request.'
+                        : !prBase.trim()
+                          ? 'Choose the base branch this pull request targets.'
+                          : 'Create the PR using this branch’s published upstream. This does not push newer local commits.'
+                  }
+                  type="submit"
+                  variant="accent"
+                >
+                  <GitPullRequest aria-hidden="true" className="size-3.5" />
+                  Create pull request
+                </Button>
+              </WorkflowActions>
+            </WorkflowFrame>
           </form>
         </DialogContent>
       </Dialog>
