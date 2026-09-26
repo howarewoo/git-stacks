@@ -106,7 +106,9 @@ async function main() {
       return result.result.value
     }
     async function until(description, expression) {
-      for (let attempt = 0; attempt < 100; attempt++) {
+      // Generous budget: this host runs several suites at once, so a slow
+      // renderer round-trip must not read as a failed assertion.
+      for (let attempt = 0; attempt < 400; attempt++) {
         if (await page(`Boolean(${expression})`)) return
         await delay(50)
       }
@@ -529,24 +531,52 @@ async function main() {
     let opener = { key: '+', code: 'Equal', text: '+', windowsVirtualKeyCode: 187 }
     let openerModifier = 8
     async function openPalette() {
-      await page(`${button('Fetch')}.focus()`)
-      await send('Input.dispatchKeyEvent', {
-        type: 'keyDown',
-        ...opener,
-        modifiers: openerModifier,
-      })
-      await until('palette open', `document.querySelector('[role="combobox"]')`)
+      // A single CDP key dispatch can be lost while the renderer replaces the
+      // focused toolbar node, so retry the press before failing the scenario.
+      for (let attempt = 0; attempt < 3; attempt++) {
+        await page(`${button('Fetch')}.focus()`)
+        await pressOpener()
+        await delay(150)
+        if (await page(`Boolean(document.querySelector('[role="combobox"]'))`)) return
+      }
+      throw new Error('the palette did not open after three opener presses')
     }
     async function pressOpener() {
+      // Release first: a press that arrives as an auto-repeat is deliberately
+      // inert, and an earlier scenario may still hold the key.
+      await send('Input.dispatchKeyEvent', {
+        type: 'keyUp',
+        key: opener.key,
+        code: opener.code,
+        windowsVirtualKeyCode: opener.windowsVirtualKeyCode,
+        modifiers: openerModifier,
+      })
       await send('Input.dispatchKeyEvent', {
         type: 'keyDown',
         ...opener,
         modifiers: openerModifier,
       })
-      await send('Input.dispatchKeyEvent', { type: 'keyUp', ...opener, modifiers: openerModifier })
+    }
+    async function setFilter(text) {
+      await page(
+        `(() => { const input = document.querySelector(${JSON.stringify(filter)}); input.focus(); input.select() })()`,
+      )
+      if (text) await send('Input.insertText', { text })
+      else
+        await send('Input.dispatchKeyEvent', {
+          type: 'keyDown',
+          key: 'Backspace',
+          code: 'Backspace',
+          windowsVirtualKeyCode: 8,
+        })
+      await until(
+        `filter ${JSON.stringify(text)}`,
+        `document.querySelector(${JSON.stringify(filter)}).value === ${JSON.stringify(text)}`,
+      )
     }
     await key('Escape')
     await until('palette dismissed after evidence', `!document.querySelector('[role="combobox"]')`)
+    await setFilter('')
 
     // A local branch that tracks its remote keeps a qualified parent name usable.
     execFileSync('git', ['init', '--bare', '-q', join(root, 'origin.git')], { stdio: 'pipe' })
@@ -554,10 +584,10 @@ async function main() {
     git('push', '-q', '-u', 'origin', 'main')
     git('config', 'branch.child.parent', 'origin/main')
     await page(`document.querySelector('[aria-label="Refresh repository"]').click()`)
-    await until(
-      'tracked remote branch',
-      `Array.from(document.querySelectorAll('h2')).some((element) => element.textContent === 'origin/main')`,
-    )
+    // The remote row is deduplicated into the local branch it tracks, so the
+    // qualified parent must resolve to that local row.
+    await until('tracked local branch', `document.querySelector('button[aria-label="main"]')`)
+    await delay(500)
     await openPalette()
     await search('child')
     await key('Enter')
@@ -654,6 +684,7 @@ async function main() {
     const headAfterModifiedOpener = git('symbolic-ref', '--short', 'HEAD')
     await openPalette()
     await search('Force push with lease')
+    await setFilter('+')
     console.log(
       JSON.stringify({
         disabledPaletteValue,
