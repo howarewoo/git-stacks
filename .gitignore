@@ -12,3 +12,5 @@ release/
 !.impeccable/
 .impeccable/*
 !.impeccable/design.json
+test-results/
+playwright-report/
