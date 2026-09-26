@@ -4,7 +4,9 @@ import * as React from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import {
   SHORTCUT_DEFINITIONS,
+  DEFAULT_SHORTCUTS,
   assignShortcut,
+  chordFromEvent,
   canonicalChord,
   detectShortcutConflicts,
   formatChord,
@@ -183,6 +185,32 @@ test('parseChord and formatChord format shortcuts consistently across platforms'
   assert.equal(formatChord('/', true), '/')
   assert.equal(formatChord('Alt+ArrowUp', true), '⌥↑')
   assert.equal(formatChord('Alt+ArrowUp', false), 'Alt+Up')
+})
+
+test('shifted letter shortcuts record and dispatch distinctly from unshifted bindings', () => {
+  for (const isMac of [true, false]) {
+    const event = {
+      key: 'R',
+      metaKey: isMac,
+      ctrlKey: !isMac,
+      shiftKey: true,
+    }
+    const recorded = chordFromEvent(event, isMac)
+    assert.equal(recorded, 'Mod+Shift+r')
+    assert.equal(matchesChord(event, recorded!, isMac), true)
+    assert.equal(matchesChord(event, 'Mod+r', isMac), false)
+    assert.equal(matchesChord({ ...event, key: 'r', shiftKey: false }, 'Mod+Shift+r', isMac), false)
+
+    const assigned = assignShortcut(DEFAULT_SHORTCUTS, 'palette.open', 'Mod+r')
+    assert.equal(assigned.conflict, null)
+    assert.equal(detectShortcutConflicts(assigned.bindings).length, 0)
+    assert.equal(matchesChord(event, assigned.bindings['palette.open'], isMac), false)
+    assert.equal(matchesChord(event, assigned.bindings['stack.restack'], isMac), true)
+    assert.equal(
+      assignShortcut(assigned.bindings, 'palette.open', recorded!).conflict?.conflictingId,
+      'stack.restack',
+    )
+  }
 })
 
 // =============================================================================

@@ -279,7 +279,7 @@ export function chordFromEvent(event: KeyboardEventLike, isMac = isMacPlatform()
   const parts: string[] = []
   if (modPressed) parts.push('Mod')
   if (altPressed) parts.push('Alt')
-  if (shiftPressed && rawKey.length > 1) parts.push('Shift')
+  if (shiftPressed) parts.push('Shift')
   parts.push(normalizeKeyName(rawKey))
 
   return canonicalChord(parts.join('+'))
@@ -299,9 +299,7 @@ export function matchesChord(
 
   const normalizedEventKey = normalizeKeyName(event.key)
 
-  // Single character with shift (like '?'): event.key already carries shift
-  if (parsed.shift && !Boolean(event.shiftKey)) return false
-  if (!parsed.shift && Boolean(event.shiftKey) && parsed.key.length > 1) return false
+  if (parsed.shift !== Boolean(event.shiftKey)) return false
 
   return normalizedEventKey.toLowerCase() === parsed.key.toLowerCase()
 }

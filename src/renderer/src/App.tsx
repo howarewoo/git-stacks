@@ -1689,9 +1689,7 @@ function App() {
                   ? 'This is already the checked-out branch.'
                   : 'Switch the working tree to this branch. Requires a clean tree; remotes create a local tracking copy.'
               }
-              onClick={() =>
-                runAction({ type: 'switch', ref: selectedBranch.ref }, 'Switch branch')
-              }
+              onClick={() => requestCheckoutBranch(selectedBranch.ref, selectedBranch.name)}
               variant="accent"
             >
               <ArrowLeftRight className="size-3.5" />

@@ -411,7 +411,7 @@ export function CommandPalette({
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
-        className="palette-dialog fixed left-1/2 top-[12%] z-[var(--gs-component-overlay-z-index)] grid w-[calc(100%-2rem)] max-w-2xl -translate-x-1/2 gap-0 overflow-hidden rounded-[var(--gs-semantic-radius-workbench)] border border-[var(--gs-semantic-border-essential)] bg-[var(--gs-component-overlay-background)] p-0 shadow-[var(--gs-semantic-elevation-large)] outline-none"
+        className="palette-dialog fixed left-1/2 top-[12%] z-[var(--gs-component-overlay-z-index)] grid max-h-[calc(88vh-1rem)] w-[calc(100%-2rem)] max-w-2xl -translate-x-1/2 translate-y-0 gap-0 overflow-y-auto rounded-[var(--gs-semantic-radius-workbench)] border border-[var(--gs-semantic-border-essential)] bg-[var(--gs-component-overlay-background)] p-0 shadow-[var(--gs-semantic-elevation-large)] outline-none"
         onCloseAutoFocus={(event) => {
           event.preventDefault()
           const target = resolveFocusRestoreTarget(openerRef.current, searchFallbackRef?.current)
