@@ -511,6 +511,7 @@ function App() {
     )
     setNewBranchEdited(false)
     setNewBranchError(null)
+    setNewBranchNotice(null)
     setNewBranchOpen(true)
   }, [snapshot])
 
@@ -522,6 +523,7 @@ function App() {
     setPrDraft(false)
     setPrEdited(false)
     setPrError(null)
+    setPrNotice(null)
     setPrOpen(true)
   }, [selectedBranch, snapshot])
 
@@ -540,6 +542,7 @@ function App() {
     setDeleteForce(false)
     setDeleteConfirmation('')
     setDeleteBranchError(null)
+    setDeleteCloseNotice(null)
     setActionError(null)
   }
 
