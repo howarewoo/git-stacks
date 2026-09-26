@@ -77,6 +77,10 @@ interface BundledVerification {
   fingerprints: Record<string, FileFingerprint>
   dirMtimes: Record<string, number>
 }
+interface ManifestRead {
+  manifest: BundledRuntimeManifest | null
+  digest: string | null
+}
 
 const runtimeScope = new AsyncLocalStorage<GitRuntimeRecord>()
 
@@ -89,7 +93,14 @@ let cached: {
   key: string
   record: GitRuntimeRecord
   fingerprints?: Record<string, FileFingerprint>
+  manifestDigest?: string
   dirMtimes?: Record<string, number>
+} | null = null
+let trustedManifest: {
+  resourcesRoot: string | null
+  appVersion: string
+  platform: string
+  digest: string
 } | null = null
 /** Point the resolver at this build's resources directory and record the system-Git override. */
 export function configureGitRuntime(
@@ -159,15 +170,17 @@ function parseManifest(value: unknown): BundledRuntimeManifest | null {
   return { appVersion: record.appVersion, platforms }
 }
 
-async function readManifest(resourcesRoot: string | null): Promise<BundledRuntimeManifest | null> {
-  if (!resourcesRoot) return null
+async function readManifest(resourcesRoot: string | null): Promise<ManifestRead> {
+  if (!resourcesRoot) return { manifest: null, digest: null }
   try {
-    const stored: unknown = JSON.parse(
-      await fs.readFile(join(resourcesRoot, 'git', 'runtime-manifest.json'), 'utf8'),
-    )
-    return parseManifest(stored)
+    const contents = await fs.readFile(join(resourcesRoot, 'git', 'runtime-manifest.json'))
+    const stored: unknown = JSON.parse(contents.toString('utf8'))
+    return {
+      manifest: parseManifest(stored),
+      digest: createHash('sha256').update(contents).digest('hex'),
+    }
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { manifest: null, digest: null }
     throw new Error(
       `The bundled Git runtime manifest could not be read: ${(error as Error).message}`,
     )
@@ -330,6 +343,27 @@ export async function resolveGitRuntime(): Promise<GitRuntimeRecord> {
   if (cached?.key === key) {
     const { record, fingerprints, dirMtimes } = cached
     if (record.packaged && record.bundled) {
+      try {
+        const current = await readManifest(settings.resourcesRoot)
+        if (current.manifest?.appVersion !== settings.appVersion) {
+          throw new Error(
+            `The bundled Git runtime manifest records app version ${current.manifest?.appVersion ?? 'none'} and does not match this build. Git Stacks only runs the Git runtime that ships with its own release.`,
+          )
+        }
+        if (
+          !current.manifest.platforms[record.platform] ||
+          current.digest !== cached.manifestDigest
+        ) {
+          throw new Error(
+            'The bundled Git runtime manifest does not match the signed release inventory.',
+          )
+        }
+      } catch (error) {
+        cached = null
+        throw error
+      }
+    }
+    if (record.packaged && record.bundled) {
       const root = dirname(dirname(record.executable))
       const execStat = await fs.lstat(record.executable).catch(() => null)
       if (!execStat) {
@@ -471,9 +505,20 @@ export async function resolveGitRuntime(): Promise<GitRuntimeRecord> {
       `The bundled Git runtime for ${platform} is missing from this build. Turn on Use system Git in Git runtime diagnostics to run a Git installed on this computer.`,
     )
   }
+  const manifestRead = source === 'bundled' ? await readManifest(settings.resourcesRoot) : null
+  if (
+    source === 'bundled' &&
+    settings.packaged &&
+    trustedManifest?.resourcesRoot === settings.resourcesRoot &&
+    trustedManifest.appVersion === settings.appVersion &&
+    trustedManifest.platform === platform &&
+    manifestRead?.digest !== trustedManifest.digest
+  ) {
+    throw new Error('The bundled Git runtime manifest does not match the signed release inventory.')
+  }
   const verification =
     source === 'bundled'
-      ? await assertBundledRuntime(await readManifest(settings.resourcesRoot), platform, executable)
+      ? await assertBundledRuntime(manifestRead?.manifest ?? null, platform, executable)
       : null
   const bundled = verification?.info ?? null
 
@@ -520,11 +565,20 @@ export async function resolveGitRuntime(): Promise<GitRuntimeRecord> {
     preservedEnvironment: PRESERVED_ENVIRONMENT,
     preservedConfiguration: PRESERVED_CONFIGURATION,
   }
+  if (settings.packaged && manifestRead?.digest) {
+    trustedManifest = {
+      resourcesRoot: settings.resourcesRoot,
+      appVersion: settings.appVersion,
+      platform,
+      digest: manifestRead.digest,
+    }
+  }
   cached = {
     key,
     record,
     fingerprints: verification?.fingerprints,
     dirMtimes: verification?.dirMtimes,
+    manifestDigest: manifestRead?.digest ?? undefined,
   }
   return record
 }

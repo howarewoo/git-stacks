@@ -3,6 +3,7 @@ import { execFileSync, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { readFileSync } from 'node:fs'
+import { createRequire } from 'node:module'
 import { createServer, type Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { tmpdir } from 'node:os'
@@ -22,6 +23,13 @@ import {
   writeGitRuntimePreference,
 } from '../src/main/git-runtime'
 import type { GitAction } from '../src/shared/types'
+const require = createRequire(import.meta.url)
+const refreshWindowsInventory = require('../scripts/refresh-win-git-runtime.cjs') as (context: {
+  appOutDir: string
+  arch: number
+  electronPlatformName: string
+}) => Promise<void>
+const { Arch } = require('builder-util') as { Arch: Record<string, number> }
 
 const packageData: unknown = JSON.parse(
   readFileSync(new URL('../package.json', import.meta.url), 'utf8'),
@@ -343,6 +351,134 @@ test(
     }
   },
 )
+test(
+  'a cached packaged runtime refuses a removed, malformed, or replaced release manifest before a Git operation',
+  { skip: process.platform === 'win32' },
+  async () => {
+    const resources = await temporaryRoot('git-stacks-manifest-tamper-')
+    execFileSync('cp', ['-R', '-P', join(releaseResources, 'git'), resources])
+    const manifestPath = join(resources, 'git', 'runtime-manifest.json')
+    const original = await readFile(manifestPath, 'utf8')
+    const { repo } = await repository()
+    const initialHead = headOid(repo)
+    const replacements = [
+      null,
+      '{invalid json',
+      JSON.stringify({ ...JSON.parse(original), appVersion: '9.9.9' }),
+      JSON.stringify({
+        ...JSON.parse(original),
+        platforms: {
+          [platform]: { ...JSON.parse(original).platforms[platform], source: 'replaced source' },
+        },
+      }),
+    ]
+    try {
+      for (const replacement of replacements) {
+        await writeFile(manifestPath, original)
+        configureGitRuntime({
+          appVersion: APP_VERSION,
+          packaged: true,
+          resourcesRoot: resources,
+          useSystemGit: false,
+          env: process.env,
+        })
+        assert.equal((await resolveGitRuntime()).source, 'bundled')
+        if (replacement === null) await rm(manifestPath)
+        else await writeFile(manifestPath, replacement)
+        await assert.rejects(runGit(repo, ['status', '--porcelain']), /runtime manifest/u)
+        await assert.rejects(runGit(repo, ['status', '--porcelain']), /runtime manifest/u)
+        assert.equal(headOid(repo), initialHead)
+      }
+      configureGitRuntime({ useSystemGit: true })
+      assert.equal((await resolveGitRuntime()).source, 'system')
+      configureGitRuntime({ useSystemGit: false })
+      await assert.rejects(runGit(repo, ['status', '--porcelain']), /runtime manifest/u)
+      await writeFile(manifestPath, original)
+      assert.equal((await resolveGitRuntime()).source, 'bundled')
+
+      const semanticResources = await temporaryRoot('git-stacks-manifest-bytes-')
+      execFileSync('cp', ['-R', '-P', join(releaseResources, 'git'), semanticResources])
+      const semanticManifest = join(semanticResources, 'git', 'runtime-manifest.json')
+      const equivalent = JSON.parse(original) as { platforms: Record<string, { source: string }> }
+      equivalent.platforms[platform].source = 'upstream \uFFFD'
+      const valid = Buffer.from(JSON.stringify(equivalent))
+      const offset = valid.indexOf(Buffer.from('\uFFFD'))
+      assert.notEqual(offset, -1)
+      await writeFile(semanticManifest, valid)
+      configureGitRuntime({
+        appVersion: APP_VERSION,
+        packaged: true,
+        resourcesRoot: semanticResources,
+        useSystemGit: false,
+        env: process.env,
+      })
+      assert.equal((await resolveGitRuntime()).source, 'bundled')
+      const invalid = Buffer.concat([
+        valid.subarray(0, offset),
+        Buffer.from([0xff]),
+        valid.subarray(offset + Buffer.byteLength('\uFFFD')),
+      ])
+      assert.equal(invalid.toString('utf8'), valid.toString('utf8'))
+      await writeFile(semanticManifest, invalid)
+      await assert.rejects(runGit(repo, ['status', '--porcelain']), /runtime manifest/u)
+      await assert.rejects(runGit(repo, ['status', '--porcelain']), /runtime manifest/u)
+      assert.equal(headOid(repo), initialHead)
+    } finally {
+      configureGitRuntime({ resourcesRoot: null, packaged: false, useSystemGit: false })
+    }
+  },
+)
+
+test('Windows afterPack records signed EXE bytes without changing archive provenance or other payload files', async () => {
+  const appOutDir = await temporaryRoot('git-stacks-signed-win-')
+  const gitRoot = join(appOutDir, 'resources', 'git')
+  const root = join(gitRoot, 'win32-x64')
+  const executable = join(root, 'cmd', 'git.exe')
+  const helper = join(root, 'mingw64', 'libexec', 'git-core', 'git-remote-https.exe')
+  const data = join(root, 'etc', 'gitconfig')
+  await mkdir(join(root, 'cmd'), { recursive: true })
+  await mkdir(join(root, 'mingw64', 'libexec', 'git-core'), { recursive: true })
+  await mkdir(join(root, 'etc'), { recursive: true })
+  await writeFile(executable, 'original git executable')
+  await writeFile(helper, 'original helper executable')
+  await writeFile(data, 'user config template')
+  const digest = (value: string) => createHash('sha256').update(value).digest('hex')
+  const source = 'pinned archive and upstream SHA-256'
+  const manifestPath = join(gitRoot, 'runtime-manifest.json')
+  const manifest = {
+    appVersion: APP_VERSION,
+    platforms: {
+      'win32-x64': {
+        gitVersion: '2.53.0',
+        sha256: digest('original git executable'),
+        source,
+        files: {
+          'cmd/git.exe': digest('original git executable'),
+          'mingw64/libexec/git-core/git-remote-https.exe': digest('original helper executable'),
+          'etc/gitconfig': digest('user config template'),
+        },
+      },
+    },
+  }
+  await writeFile(manifestPath, JSON.stringify(manifest))
+  await writeFile(executable, 'signed git executable')
+  await writeFile(helper, 'signed helper executable')
+  await refreshWindowsInventory({ appOutDir, arch: Arch.x64, electronPlatformName: 'win32' })
+  const actual = JSON.parse(await readFile(manifestPath, 'utf8')) as typeof manifest
+  assert.equal(actual.appVersion, APP_VERSION)
+  assert.equal(actual.platforms['win32-x64'].source, source)
+  assert.equal(actual.platforms['win32-x64'].sha256, digest('signed git executable'))
+  assert.deepEqual(actual.platforms['win32-x64'].files, {
+    'cmd/git.exe': digest('signed git executable'),
+    'mingw64/libexec/git-core/git-remote-https.exe': digest('signed helper executable'),
+    'etc/gitconfig': digest('user config template'),
+  })
+  await writeFile(data, 'unexpected config change')
+  await assert.rejects(
+    refreshWindowsInventory({ appOutDir, arch: Arch.x64, electronPlatformName: 'win32' }),
+    /Unexpected Git runtime change/u,
+  )
+})
 
 test('an in-flight operation retains its checked runtime and capabilities across multi-command execution despite global configuration changes', async () => {
   configureGitRuntime({
