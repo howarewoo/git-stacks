@@ -3,10 +3,7 @@ import { execFileSync } from 'node:child_process'
 import { test } from 'node:test'
 import { getSnapshot } from '../src/main/git'
 import { getGitHubData, getPullRequest } from '../src/main/github'
-import {
-  DirectGitHubTransport,
-  setGitHubTransport,
-} from '../src/main/github-transport'
+import { DirectGitHubTransport, setGitHubTransport } from '../src/main/github-transport'
 import {
   addPullRequestsToStack,
   createPullRequestStack,
@@ -18,10 +15,7 @@ import {
 } from '../src/main/native-stacks'
 import { runStackAction } from '../src/main/stacks'
 import { createGitHubApiDouble } from './fixtures/github-api-double'
-import {
-  createGitHubHarness,
-  type GitHubHarness,
-} from './fixtures/github-harness'
+import { createGitHubHarness, type GitHubHarness } from './fixtures/github-harness'
 
 function git(harness: GitHubHarness, args: string[]): string {
   return execFileSync(harness.env.GIT_STACKS_REAL_GIT || 'git', ['-C', harness.repo, ...args], {
@@ -42,9 +36,7 @@ function bareGit(harness: GitHubHarness, args: string[]): string {
     },
   ).trim()
 }
-async function withHarness(
-  run: (harness: GitHubHarness) => Promise<void>,
-): Promise<void> {
+async function withHarness(run: (harness: GitHubHarness) => Promise<void>): Promise<void> {
   const harness = await createGitHubHarness()
   const original = { ...process.env }
   setGitHubTransport(

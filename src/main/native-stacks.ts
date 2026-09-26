@@ -17,7 +17,11 @@ export class NativeStackError extends Error {
   readonly status: NativeStackValidationStatus
   readonly httpStatus: number | null
 
-  constructor(status: NativeStackValidationStatus, message: string, httpStatus: number | null = null) {
+  constructor(
+    status: NativeStackValidationStatus,
+    message: string,
+    httpStatus: number | null = null,
+  ) {
     super(message)
     this.name = 'NativeStackError'
     this.status = status
@@ -62,7 +66,7 @@ export function parseRestStack(raw: unknown): NativeStack {
     const headObj = isRecord(item.head) ? item.head : {}
     const head = typeof headObj.ref === 'string' ? headObj.ref : ''
     const headSha = typeof headObj.sha === 'string' ? headObj.sha : undefined
-    const memberBase = i === 0 ? base : pullRequests[i - 1]?.head ?? base
+    const memberBase = i === 0 ? base : (pullRequests[i - 1]?.head ?? base)
     const state = normalizePrState(item.state, item.merged_at)
     const draft = item.draft === true
 
@@ -81,7 +85,10 @@ export function parseRestStack(raw: unknown): NativeStack {
   let status: NativeStackValidationStatus = 'valid'
   if (!open) {
     status = 'closed'
-  } else if (size > 0 && pullRequests.every((pr) => pr.state === 'MERGED' || pr.state === 'CLOSED')) {
+  } else if (
+    size > 0 &&
+    pullRequests.every((pr) => pr.state === 'MERGED' || pr.state === 'CLOSED')
+  ) {
     status = 'completed'
   } else {
     // Check duplicates
@@ -100,7 +107,11 @@ export function parseRestStack(raw: unknown): NativeStack {
       // Check chain continuity
       let validChain = true
       for (let i = 1; i < pullRequests.length; i++) {
-        if (!pullRequests[i].head || !pullRequests[i - 1].head || pullRequests[i].base !== pullRequests[i - 1].head) {
+        if (
+          !pullRequests[i].head ||
+          !pullRequests[i - 1].head ||
+          pullRequests[i].base !== pullRequests[i - 1].head
+        ) {
           validChain = false
           break
         }
@@ -152,10 +163,7 @@ export function validateNativeStackChain(
   pullRequests: readonly PullRequest[],
   optionsInput: { targetRepository?: string; defaultBranch?: string } | string = {},
 ): NativeStackValidationResult {
-  const options =
-    typeof optionsInput === 'string'
-      ? { defaultBranch: optionsInput }
-      : optionsInput
+  const options = typeof optionsInput === 'string' ? { defaultBranch: optionsInput } : optionsInput
 
   if (pullRequests.length === 0) {
     return {
@@ -179,7 +187,8 @@ export function validateNativeStackChain(
     seenHeads.add(pr.head)
   }
 
-  const targetRepo = options.targetRepository?.toLowerCase() ?? pullRequests[0]?.headRepository?.toLowerCase()
+  const targetRepo =
+    options.targetRepository?.toLowerCase() ?? pullRequests[0]?.headRepository?.toLowerCase()
   if (targetRepo) {
     for (const pr of pullRequests) {
       if (pr.headRepository && pr.headRepository.toLowerCase() !== targetRepo) {
@@ -283,7 +292,11 @@ export async function detectNativeStacksCapability(
       headers: STACK_HEADERS,
     })
     if (response.status >= 200 && response.status < 300) {
-      return { available: true, state: 'valid', message: 'Native stacked pull requests API preview is available' }
+      return {
+        available: true,
+        state: 'valid',
+        message: 'Native stacked pull requests API preview is available',
+      }
     }
     return {
       available: false,
@@ -296,7 +309,8 @@ export async function detectNativeStacksCapability(
         return {
           available: false,
           state: 'preview-unavailable',
-          message: 'GitHub native stacked pull requests preview API is not available on this repository',
+          message:
+            'GitHub native stacked pull requests preview API is not available on this repository',
         }
       }
     }
@@ -351,10 +365,18 @@ export async function listPullRequestStacks(
   } catch (error) {
     if (error instanceof GitHubTransportError) {
       if (error.status === 404 || error.kind === 'not-found') {
-        throw new NativeStackError('preview-unavailable', 'Native stacks endpoint not found (404)', 404)
+        throw new NativeStackError(
+          'preview-unavailable',
+          'Native stacks endpoint not found (404)',
+          404,
+        )
       }
       if (error.status === 422 || error.kind === 'unprocessable') {
-        throw new NativeStackError('invalid-chain', `Validation failed for stacks query: ${error.detail}`, 422)
+        throw new NativeStackError(
+          'invalid-chain',
+          `Validation failed for stacks query: ${error.detail}`,
+          422,
+        )
       }
     }
     throw error
@@ -383,7 +405,11 @@ export async function getPullRequestStack(
   } catch (error) {
     if (error instanceof GitHubTransportError) {
       if (error.status === 404 || error.kind === 'not-found') {
-        throw new NativeStackError('preview-unavailable', `Stack #${stackNumber} was not found (404)`, 404)
+        throw new NativeStackError(
+          'preview-unavailable',
+          `Stack #${stackNumber} was not found (404)`,
+          404,
+        )
       }
     }
     throw error
@@ -402,7 +428,10 @@ export async function createPullRequestStack(
   } = {},
 ): Promise<NativeStack> {
   if (!Array.isArray(pullRequests) || pullRequests.length === 0) {
-    throw new NativeStackError('invalid-chain', 'createPullRequestStack requires an ordered list of pull request numbers')
+    throw new NativeStackError(
+      'invalid-chain',
+      'createPullRequestStack requires an ordered list of pull request numbers',
+    )
   }
 
   // Pre-validate if domain pull request models are available
@@ -437,10 +466,18 @@ export async function createPullRequestStack(
   } catch (error) {
     if (error instanceof GitHubTransportError) {
       if (error.status === 404 || error.kind === 'not-found') {
-        throw new NativeStackError('preview-unavailable', 'Native stacks API preview not found (404)', 404)
+        throw new NativeStackError(
+          'preview-unavailable',
+          'Native stacks API preview not found (404)',
+          404,
+        )
       }
       if (error.status === 422 || error.kind === 'unprocessable') {
-        throw new NativeStackError('invalid-chain', `Validation failed for stack creation: ${error.detail}`, 422)
+        throw new NativeStackError(
+          'invalid-chain',
+          `Validation failed for stack creation: ${error.detail}`,
+          422,
+        )
       }
     }
     throw error
@@ -463,7 +500,10 @@ export async function addPullRequestsToStack(
     throw new Error('Stack number must be a positive integer')
   }
   if (!Array.isArray(pullRequests) || pullRequests.length === 0) {
-    throw new NativeStackError('invalid-chain', 'addPullRequestsToStack requires pull request numbers')
+    throw new NativeStackError(
+      'invalid-chain',
+      'addPullRequestsToStack requires pull request numbers',
+    )
   }
 
   if (options.existingStack && options.knownPullRequests) {
@@ -474,7 +514,9 @@ export async function addPullRequestsToStack(
       if (pr) chain.push(pr)
     }
     if (chain.length === pullRequests.length) {
-      const validation = validateTopAppend(options.existingStack, chain, { targetRepository: `${owner}/${repo}` })
+      const validation = validateTopAppend(options.existingStack, chain, {
+        targetRepository: `${owner}/${repo}`,
+      })
       if (!validation.valid) {
         throw new NativeStackError(validation.status, validation.message ?? 'Invalid chain')
       }
@@ -494,13 +536,21 @@ export async function addPullRequestsToStack(
   } catch (error) {
     if (error instanceof GitHubTransportError) {
       if (error.status === 404 || error.kind === 'not-found') {
-        throw new NativeStackError('preview-unavailable', `Stack #${stackNumber} not found (404)`, 404)
+        throw new NativeStackError(
+          'preview-unavailable',
+          `Stack #${stackNumber} not found (404)`,
+          404,
+        )
       }
       if (error.status === 409 || error.kind === 'conflict') {
         throw new Error(`Stack #${stackNumber} is being modified by another request (409)`)
       }
       if (error.status === 422 || error.kind === 'unprocessable') {
-        throw new NativeStackError('invalid-chain', `Validation failed appending to stack #${stackNumber}: ${error.detail}`, 422)
+        throw new NativeStackError(
+          'invalid-chain',
+          `Validation failed appending to stack #${stackNumber}: ${error.detail}`,
+          422,
+        )
       }
     }
     throw error
@@ -526,20 +576,33 @@ export async function unstackPullRequestStack(
       body: {},
       signal: options.signal,
     })
-    if (response.status === 204 || response.data === null || response.data === undefined || Object.keys(response.data as object).length === 0) {
+    if (
+      response.status === 204 ||
+      response.data === null ||
+      response.data === undefined ||
+      Object.keys(response.data as object).length === 0
+    ) {
       return { dissolved: true, stack: null }
     }
     return { dissolved: false, stack: parseRestStack(response.data) }
   } catch (error) {
     if (error instanceof GitHubTransportError) {
       if (error.status === 404 || error.kind === 'not-found') {
-        throw new NativeStackError('preview-unavailable', `Stack #${stackNumber} not found (404)`, 404)
+        throw new NativeStackError(
+          'preview-unavailable',
+          `Stack #${stackNumber} not found (404)`,
+          404,
+        )
       }
       if (error.status === 409 || error.kind === 'conflict') {
         throw new Error(`Stack #${stackNumber} is currently locked or in conflict (409)`)
       }
       if (error.status === 422 || error.kind === 'unprocessable') {
-        throw new NativeStackError('invalid-chain', `Cannot unstack #${stackNumber}: ${error.detail}`, 422)
+        throw new NativeStackError(
+          'invalid-chain',
+          `Cannot unstack #${stackNumber}: ${error.detail}`,
+          422,
+        )
       }
     }
     throw error
