@@ -4,7 +4,7 @@ const { join } = require('node:path')
 const { pathToFileURL } = require('node:url')
 const { app, BrowserWindow } = require('electron')
 
-const rendererPath = join(__dirname, '..', 'out', 'renderer', 'index.html')
+const rendererPath = join(__dirname, '..', 'out', 'renderer-fixtures', 'index.html')
 const pageHelpers = `
   function buttonNamed(label) {
     return Array.from(document.querySelectorAll('button')).find(
@@ -50,7 +50,7 @@ async function waitFor(description, expression, timeout = 3000) {
 
 async function main() {
   if (!existsSync(rendererPath)) {
-    throw new Error(`Missing production renderer at ${rendererPath}; run the build first.`)
+    throw new Error(`Missing fixture renderer at ${rendererPath}; run npm run build:gallery first.`)
   }
 
   await app.whenReady()

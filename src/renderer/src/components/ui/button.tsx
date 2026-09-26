@@ -69,6 +69,7 @@ const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
         <TooltipTrigger asChild>
           {isDisabled ? (
             <span
+              role="group"
               className="inline-flex shrink-0 rounded-[var(--gs-semantic-radius-control)] outline-none focus-visible:ring-2 focus-visible:ring-[var(--gs-semantic-focus-ring)]"
               tabIndex={0}
               aria-label={typeof hint === 'string' ? hint : props['aria-label']}

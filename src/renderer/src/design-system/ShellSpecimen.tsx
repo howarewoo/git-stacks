@@ -45,7 +45,7 @@ export function ShellSpecimen() {
 
       <div className="toolbar" role="toolbar" aria-label="Repository actions">
         <div className="toolbar-actions">
-          <div className="toolbar-action-group" aria-label="Synchronization actions">
+          <div className="toolbar-action-group" role="group" aria-label="Synchronization actions">
             <Button size="sm" variant="secondary">
               <Download aria-hidden="true" className="size-3.5" /> Fetch
             </Button>
@@ -57,7 +57,7 @@ export function ShellSpecimen() {
             </Button>
           </div>
           <span className="toolbar-divider" aria-hidden="true" />
-          <div className="toolbar-action-group" aria-label="Branch and Git actions">
+          <div className="toolbar-action-group" role="group" aria-label="Branch and Git actions">
             <Button size="sm">
               <Plus aria-hidden="true" className="size-3.5" /> New branch
             </Button>
@@ -114,6 +114,7 @@ export function ShellSpecimen() {
             <div
               aria-label={`Repository repository-with-a-very-long-name-for-responsive-accessibility, ${fixturePath}`}
               className="repo-heading"
+              role="group"
               tabIndex={0}
               title={fixturePath}
             >

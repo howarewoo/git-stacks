@@ -65,19 +65,22 @@ function snapshot(
   }
 }
 
-const file = (
+/** Working-tree row builder shared by the specimens and the renderer fixture gallery. */
+export const changedFile = (
   path: string,
   index: string,
   worktree: string,
   extra: Partial<ChangedFile> = {},
 ): ChangedFile => ({ path, index, worktree, conflicted: false, ...extra })
 
+const file = changedFile
+
 /** Staged, unstaged, untracked, renamed, and conflicted files in one working tree. */
 export const mixedChanges: ChangedFile[] = [
   file('src/renderer/src/components/data-views.tsx', 'M', 'M'),
   file('src/renderer/src/components/repository-views.tsx', 'M', ' '),
   file('src/renderer/src/styles.css', ' ', 'M'),
-  file('docs/design-system/README.md', ' ', 'M'),
+  file('DESIGN.md', ' ', 'M'),
   file('src/renderer/src/lib/pull-request-state.ts', '?', ' '),
   file('src/renderer/src/components/legacy-views.tsx', 'R', ' ', {
     originalPath: 'src/renderer/src/components/old-views.tsx',
@@ -92,7 +95,7 @@ export const stagedOnlyChanges: ChangedFile[] = [
 
 export const unstagedOnlyChanges: ChangedFile[] = [
   file('src/renderer/src/styles.css', ' ', 'M'),
-  file('docs/design-system/README.md', ' ', 'M'),
+  file('DESIGN.md', ' ', 'M'),
 ]
 
 export const conflictedChanges: ChangedFile[] = [

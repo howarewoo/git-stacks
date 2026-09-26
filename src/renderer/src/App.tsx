@@ -1034,6 +1034,7 @@ function App() {
                 <Tooltip>
                   <TooltipTrigger asChild>
                     <span
+                      role="img"
                       className="ahead-behind relative z-[2] rounded-sm outline-none focus-visible:ring-2 focus-visible:ring-[var(--ring)]"
                       tabIndex={0}
                       aria-label={
@@ -1506,7 +1507,7 @@ function App() {
   }
 
   const renderOnboarding = () => (
-    <div className="onboarding-pane">
+    <main className="onboarding-pane">
       <div className="onboarding-content">
         <div className="onboarding-icon">
           <GitBranch className="size-7" />
@@ -1558,7 +1559,7 @@ function App() {
           </div>
         ) : null}
       </div>
-    </div>
+    </main>
   )
 
   return (
@@ -1570,6 +1571,7 @@ function App() {
           <strong>Git Stacks</strong>
         </div>
         <div
+          role="group"
           aria-label={
             snapshot ? `Repository ${snapshot.name}, ${snapshot.path}` : 'Repository workbench'
           }
@@ -1618,7 +1620,7 @@ function App() {
           </span>
         </InlineAlert>
       ) : null}
-      {snapshot ? renderToolbar() : null}
+      {snapshot ? <section aria-label="Repository controls">{renderToolbar()}</section> : null}
       {snapshot ? (
         <OperationBanner
           snapshot={snapshot}
@@ -1804,7 +1806,6 @@ function App() {
                 description="Local only. Nothing is pushed and no commit is created."
               >
                 <Input
-                  autoFocus
                   onChange={(event) => {
                     setNewBranchName(event.target.value)
                     setNewBranchEdited(true)
@@ -1912,7 +1913,6 @@ function App() {
               />
               <Field id="pr-title" label="Title" required>
                 <Input
-                  autoFocus
                   onChange={(event) => {
                     setPrTitle(event.target.value)
                     setPrEdited(true)
