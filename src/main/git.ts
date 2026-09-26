@@ -20,6 +20,15 @@ import type {
   RepositorySnapshot,
 } from '../shared/types'
 import {
+  GIT_CONCURRENCY,
+  MAX_DIFF_BYTES,
+  MAX_FILE_BYTES,
+  MAX_HISTORY_BYTES,
+  SNAPSHOT_BRANCH_BUDGET,
+  type SnapshotLimits,
+} from '../shared/performance'
+import {
+  CommandCancelled,
   MAX_BRANCH_LENGTH,
   MAX_MESSAGE_LENGTH,
   MAX_PATH_LENGTH,
@@ -29,6 +38,8 @@ import {
   ensureNoBusyOperation,
   ensureNotCheckedOutElsewhere,
   execute,
+  executeCapped,
+  getBranchConfigs,
   getBranchParent,
   getConfigValue,
   getCurrentBranch,
@@ -40,8 +51,11 @@ import {
   getRemotes,
   getStashes,
   getStatus,
+  isCancelled,
   isExitCode,
   isRecord,
+  listStatus,
+  mapWithConcurrency,
   parseRemote,
   parseTrack,
   refExists,
@@ -2161,15 +2175,7 @@ async function runCreatePr(
   }
 }
 
-const MAX_FILE_BYTES = 2 * 1024 * 1024
-const MAX_DIFF_BYTES = 4 * 1024 * 1024
 const MAX_HISTORY_SKIP = 1_000_000
-
-function boundedText(value: string, maxBytes: number): { text: string; truncated: boolean } {
-  const bytes = Buffer.from(value, 'utf8')
-  if (bytes.length <= maxBytes) return { text: value, truncated: false }
-  return { text: bytes.subarray(0, maxBytes).toString('utf8'), truncated: true }
-}
 
 async function safeRepositoryPath(repoPath: string, relativePath: string): Promise<string> {
   const candidate = path.resolve(repoPath, relativePath)
@@ -2420,6 +2426,7 @@ async function changedDiff(
   repoPath: string,
   mode: 'cached' | 'worktree',
   relativePath: string,
+  signal?: AbortSignal,
 ): Promise<{ text: string; truncated: boolean }> {
   const args = [
     '--literal-pathspecs',
@@ -2430,17 +2437,21 @@ async function changedDiff(
     '--',
     relativePath,
   ]
-  return boundedText(await runGit(repoPath, args), MAX_DIFF_BYTES)
+  return executeCapped('git', args, repoPath, { maxBytes: MAX_DIFF_BYTES, signal })
 }
 
-export async function getFileView(repoPath: string, requestedPath: string): Promise<FileView> {
+export async function getFileView(
+  repoPath: string,
+  requestedPath: string,
+  signal?: AbortSignal,
+): Promise<FileView> {
   const root = await resolveRepository(repoPath)
   const filePath = requirePathInput(requestedPath, 'path')
   const entry = changedEntry(await getStatus(root), filePath)
   const actualPath = entry.path
   const [stagedDiff, unstagedDiff, identity] = await Promise.all([
-    changedDiff(root, 'cached', actualPath),
-    changedDiff(root, 'worktree', actualPath),
+    changedDiff(root, 'cached', actualPath, signal),
+    changedDiff(root, 'worktree', actualPath, signal),
     fileFingerprint(root, actualPath),
   ])
   const contentResult = identity.preview
@@ -3361,6 +3372,7 @@ export async function getHistory(
   repoPath: string,
   ref: string,
   skip: number,
+  signal?: AbortSignal,
 ): Promise<HistoryPage> {
   const root = await resolveRepository(repoPath)
   const requestedRef = requireRefInput(ref, 'history ref')
@@ -3382,17 +3394,22 @@ export async function getHistory(
     }
     return { commits: [], hasMore: false }
   }
-  const output = await runGit(root, [
-    'log',
-    '--no-ext-diff',
-    '--skip',
-    String(offset),
-    '-n',
-    '51',
-    '--format=%H%x00%P%x00%s%x00%an%x00%cI%x00',
-    '--end-of-options',
-    requestedRef,
-  ])
+  const { text: output, truncated } = await executeCapped(
+    'git',
+    [
+      'log',
+      '--no-ext-diff',
+      '--skip',
+      String(offset),
+      '-n',
+      '51',
+      '--format=%H%x00%P%x00%s%x00%an%x00%cI%x00',
+      '--end-of-options',
+      requestedRef,
+    ],
+    root,
+    { maxBytes: MAX_HISTORY_BYTES, boundary: '\0', signal },
+  )
   const values = output.split('\0')
   const commits: Commit[] = []
   for (let index = 0; index + 4 < values.length; index += 5) {
@@ -3409,12 +3426,16 @@ export async function getHistory(
       date: stripTrailingNewline(values[index + 4]),
     })
   }
-  return { commits: commits.slice(0, 50), hasMore: commits.length > 50 }
+  if (truncated && commits.length === 0) {
+    throw new Error('History entry exceeds the 1 MiB preview limit.')
+  }
+  return { commits: commits.slice(0, 50), hasMore: truncated || commits.length > 50 }
 }
 
 export async function getCommitDiff(
   repoPath: string,
   oid: string,
+  signal?: AbortSignal,
 ): Promise<{ text: string; truncated: boolean }> {
   const root = await resolveRepository(repoPath)
   const commitOid = requireOid(oid, 'commit oid')!
@@ -3425,17 +3446,21 @@ export async function getCommitDiff(
     `${commitOid}^{commit}`,
   ])
   if (!resolved) throw new Error(`Commit "${commitOid}" does not exist`)
-  const output = await runGit(root, [
-    'show',
-    '--format=',
-    '--no-ext-diff',
-    '--no-textconv',
-    '--binary',
-    '--patch',
-    '--end-of-options',
-    commitOid,
-  ])
-  return boundedText(output, MAX_DIFF_BYTES)
+  return executeCapped(
+    'git',
+    [
+      'show',
+      '--format=',
+      '--no-ext-diff',
+      '--no-textconv',
+      '--binary',
+      '--patch',
+      '--end-of-options',
+      commitOid,
+    ],
+    root,
+    { maxBytes: MAX_DIFF_BYTES, signal },
+  )
 }
 
 export async function getPushPreview(repoPath: string): Promise<PushPreview> {
@@ -3477,22 +3502,58 @@ function branchFromRef(ref: RefRecord, currentBranch: string | null, remote: boo
     needsRestack: false,
   }
 }
-export async function getSnapshot(repoPath: string): Promise<RepositorySnapshot> {
+export async function getSnapshot(
+  repoPath: string,
+  signal?: AbortSignal,
+  // Overridable so a test can exercise the budget with a handful of branches
+  // instead of materialising SNAPSHOT_BRANCH_BUDGET of them.
+  branchBudget = SNAPSHOT_BRANCH_BUDGET,
+): Promise<RepositorySnapshot> {
   const root = await resolveRepository(repoPath)
   await recoverStashDropForRepository(root)
   await recoverFileActionJournals(root)
   await recoverStaleBranchLocks(root)
-  const [refs, currentBranch, files, stashes, originUrl, operationState, stackOperation, headOid] =
-    await Promise.all([
-      getRefs(root),
-      getCurrentBranch(root),
-      getStatus(root),
-      getStashes(root),
-      getOriginUrl(root),
-      getOperationState(root),
-      getStackProgress(root),
-      currentHeadOid(root),
-    ])
+  const [
+    refs,
+    currentBranch,
+    workingTree,
+    stashes,
+    originUrl,
+    operationState,
+    stackOperation,
+    headOid,
+    configParents,
+  ] = await Promise.all([
+    getRefs(root),
+    getCurrentBranch(root),
+    listStatus(root, signal),
+    getStashes(root),
+    getOriginUrl(root),
+    getOperationState(root),
+    getStackProgress(root),
+    currentHeadOid(root),
+    getBranchConfigs(root),
+  ])
+  const files = workingTree.files
+  const limits: SnapshotLimits = {
+    branchesAnalyzed: 0,
+    branchesSkipped: 0,
+    filesListed: files.length,
+    filesTruncated: workingTree.truncated,
+  }
+  // Budget per-branch Git work while reporting each branch only once, even
+  // when it needs both parent inference and a behind-count.
+  let remaining = branchBudget
+  const analyzed = new Set<Branch>()
+  const skipped = new Set<Branch>()
+  const takeBudget = (candidates: Branch[]): Branch[] => {
+    const allowed = candidates.slice(0, remaining)
+    remaining -= allowed.length
+    for (const branch of allowed) analyzed.add(branch)
+    for (let index = allowed.length; index < candidates.length; index += 1)
+      skipped.add(candidates[index])
+    return allowed
+  }
 
   const localRefs = refs.filter((ref) => ref.refname.startsWith('refs/heads/') && !ref.symref)
   const remoteRefs = refs.filter((ref) => ref.refname.startsWith('refs/remotes/') && !ref.symref)
@@ -3528,21 +3589,6 @@ export async function getSnapshot(repoPath: string): Promise<RepositorySnapshot>
 
   const defaultBranch = await getDefaultBranch(root, refs, currentBranch)
   const github = await getGitHubData(root, originUrl)
-  const parentConfigs = await Promise.all(
-    branches
-      .filter((branch) => !branch.remote)
-      .map(async (branch) => ({
-        name: branch.name,
-        parent: await getBranchParent(root, branch.name),
-        parentTip: await getConfigValue(root, `branch.${branch.name}.parentTip`),
-      })),
-  )
-  const configParents = new Map(
-    parentConfigs.map((entry) => [
-      entry.name,
-      { parent: entry.parent, parentTip: entry.parentTip },
-    ]),
-  )
   const localPullRequests = new Map<string, PullRequest>()
   github.pullRequests.forEach((pullRequest, index) => {
     if (github.sameRepository(index) && !localPullRequests.has(pullRequest.head)) {
@@ -3565,60 +3611,104 @@ export async function getSnapshot(repoPath: string): Promise<RepositorySnapshot>
     refsByName.get(`refs/heads/${defaultBranch}`) ??
     refsByName.get(`refs/remotes/origin/${defaultBranch}`)
   if (defaultRef) {
-    await Promise.all(
-      branches.map(async (branch) => {
-        if (branch.parent) return
-        const child = refsByName.get(branch.ref)
-        const local = !branch.remote
-        const originRemote = branch.remote && branch.ref.startsWith('refs/remotes/origin/')
-        if (
-          !child ||
-          (!local && !originRemote) ||
-          branch.ref === `refs/heads/${defaultBranch}` ||
-          branch.ref === `refs/remotes/origin/${defaultBranch}` ||
-          branch.ref === defaultRef.refname
-        ) {
-          return
-        }
-        if (
-          (await tryGit(root, ['merge-base', child.objectName, defaultRef.objectName])) !== null
-        ) {
-          branch.parent = defaultBranch
-          branch.parentSource = 'inferred'
-        }
-      }),
+    const defaultRefs = new Set([
+      `refs/heads/${defaultBranch}`,
+      `refs/remotes/origin/${defaultBranch}`,
+      defaultRef.refname,
+    ])
+    const analyzable = takeBudget(
+      branches
+        .filter((branch) => {
+          if (branch.parent) return false
+          if (!refsByName.get(branch.ref)) return false
+          const originRemote = branch.ref.startsWith('refs/remotes/origin/')
+          if (branch.remote && !originRemote) return false
+          return !defaultRefs.has(branch.ref)
+        })
+        .sort((left, right) => Number(right.current) - Number(left.current)),
     )
+    await mapWithConcurrency(analyzable, GIT_CONCURRENCY, async (branch) => {
+      const child = refsByName.get(branch.ref) as RefRecord
+      if (child.objectName === defaultRef.objectName) {
+        branch.parent = defaultBranch
+        branch.parentSource = 'inferred'
+        return
+      }
+      try {
+        await executeCapped('git', ['merge-base', child.objectName, defaultRef.objectName], root, {
+          maxBytes: 4096,
+          signal,
+        })
+        branch.parent = defaultBranch
+        branch.parentSource = 'inferred'
+      } catch (error) {
+        if (
+          !isCancelled(error) &&
+          !isExitCode(error, 1) &&
+          !isExitCode(error, 2) &&
+          !isExitCode(error, 128)
+        ) {
+          throw error
+        }
+        if (isCancelled(error)) throw error
+      }
+    })
   }
+  if (signal?.aborted) throw new CommandCancelled()
 
   const effectiveDefault = await parentTarget(root, defaultBranch, defaultBranch, false)
-  await Promise.all(
-    branches.map(async (branch) => {
-      if (!branch.parent) return
-      const child = refsByName.get(branch.ref)
-      const parent =
-        (branch.parent === defaultBranch && effectiveDefault
+  const parentOf = (branch: Branch): RefRecord | undefined =>
+    branch.parent
+      ? ((branch.parent === defaultBranch && effectiveDefault
           ? refsByName.get(effectiveDefault.ref)
           : null) ??
         refsByName.get(`refs/heads/${branch.parent}`) ??
         refsByName.get(`refs/remotes/${branch.parent}`) ??
-        refsByName.get(`refs/remotes/origin/${branch.parent}`)
-      if (!child || !parent || child.refname === parent.refname) {
-        branch.needsRestack = Boolean(branch.parentTip && !parent)
-        return
-      }
-      branch.parentBehind = Number(
-        await runGit(root, [
-          'rev-list',
-          '--count',
-          `${child.objectName}..${parent.objectName}`,
-          '--',
-        ]),
-      )
-      branch.needsRestack =
-        (branch.parentBehind ?? 0) > 0 ||
-        Boolean(branch.parentTip && branch.parentTip !== parent.objectName)
-    }),
-  )
+        refsByName.get(`refs/remotes/origin/${branch.parent}`))
+      : undefined
+  const comparable = branches.filter((branch) => {
+    const child = refsByName.get(branch.ref)
+    const parent = parentOf(branch)
+    if (!child || !parent) return false
+    if (child.refname === parent.refname) {
+      branch.needsRestack = Boolean(branch.parentTip)
+      return false
+    }
+    return true
+  })
+  for (const branch of branches) {
+    if (branch.parent && !parentOf(branch)) branch.needsRestack = Boolean(branch.parentTip)
+  }
+  const behind = takeBudget(comparable)
+  await mapWithConcurrency(behind, GIT_CONCURRENCY, async (branch) => {
+    const child = refsByName.get(branch.ref) as RefRecord
+    const parent = parentOf(branch) as RefRecord
+    if (child.objectName === parent.objectName) {
+      branch.parentBehind = 0
+      branch.needsRestack = Boolean(branch.parentTip && branch.parentTip !== parent.objectName)
+      return
+    }
+    const { text } = await executeCapped(
+      'git',
+      ['rev-list', '--count', `${child.objectName}..${parent.objectName}`, '--'],
+      root,
+      { maxBytes: 1024, signal },
+    )
+    branch.parentBehind = Number(text)
+    branch.needsRestack =
+      (branch.parentBehind ?? 0) > 0 ||
+      Boolean(branch.parentTip && branch.parentTip !== parent.objectName)
+  })
+  const measured = new Set(behind)
+  for (const branch of comparable) {
+    if (measured.has(branch)) continue
+    // Past the budget the recorded parent still stands; only a recorded tip
+    // that no longer resolves is reported as needing restack.
+    branch.needsRestack = Boolean(branch.parentTip)
+  }
+
+  limits.branchesAnalyzed = analyzed.size
+  limits.branchesSkipped = skipped.size
 
   return {
     path: root,
@@ -3635,6 +3725,7 @@ export async function getSnapshot(repoPath: string): Promise<RepositorySnapshot>
     stackOperation,
     headOid,
     github: { available: github.available, message: github.message },
+    limits,
   }
 }
 async function runRenameBranch(

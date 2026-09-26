@@ -8,6 +8,7 @@ import type {
   StackPreview,
   StackProgress,
 } from '../../src/shared/types'
+import { EMPTY_SNAPSHOT_LIMITS } from '../../src/shared/performance'
 
 /**
  * Deterministic Git Stacks fixtures for the workflow dialog state and recovery
@@ -101,6 +102,7 @@ export const baseSnapshot: RepositorySnapshot = {
   stackOperation: null,
   headOid: featureBranch.oid ?? null,
   github: { available: true, message: '' },
+  limits: EMPTY_SNAPSHOT_LIMITS,
 }
 
 function withSnapshot(overrides: Partial<RepositorySnapshot>): RepositorySnapshot {

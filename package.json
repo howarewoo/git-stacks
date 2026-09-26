@@ -11,6 +11,7 @@
     "build": "npm run typecheck && electron-vite build",
     "typecheck": "tsc --noEmit",
     "test": "tsx --test tests/*.test.ts",
+    "bench:performance": "tsx scripts/perf/run-benchmarks.ts",
     "test:controls": "npm run build && electron --headless --no-sandbox --disable-gpu scripts/design-system-controls-smoke.cjs",
     "tokens:generate": "node src/renderer/src/design-system/generate-tokens.mjs",
     "tokens:check": "node src/renderer/src/design-system/generate-tokens.mjs --check",

@@ -1,11 +1,13 @@
-import { execFile as execFileCallback } from 'node:child_process'
+import { execFile as execFileCallback, spawn } from 'node:child_process'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
+import { StringDecoder } from 'node:string_decoder'
 import { promisify } from 'node:util'
+import { MAX_COMMAND_BYTES, MAX_STATUS_BYTES } from '../shared/performance'
 import type { ChangedFile, GitOperation, Stash } from '../shared/types'
 
 export const execFile = promisify(execFileCallback)
-export const MAX_BUFFER = 32 * 1024 * 1024
+export const MAX_BUFFER = MAX_COMMAND_BYTES
 export const MAX_BRANCH_LENGTH = 1024
 export const MAX_PATH_LENGTH = 32 * 1024
 export const MAX_MESSAGE_LENGTH = 256 * 1024
@@ -89,6 +91,161 @@ export async function execute(
     }
     throw commandError
   }
+}
+
+/** A read the caller abandoned; never a repository or command failure. */
+export class CommandCancelled extends Error {
+  readonly cancelled = true
+
+  constructor() {
+    super('The request was cancelled.')
+    this.name = 'CommandCancelled'
+  }
+}
+
+export function isCancelled(error: unknown): boolean {
+  return error instanceof CommandCancelled
+}
+
+export interface CappedOptions {
+  env?: NodeJS.ProcessEnv
+  /** Stop retaining output past this many bytes and end the process. */
+  maxBytes: number
+  /** Cut the retained output at the last whole occurrence of this separator. */
+  boundary?: string
+  signal?: AbortSignal
+}
+
+export interface CappedResult {
+  text: string
+  truncated: boolean
+}
+
+/**
+ * Runs a read-only command and retains at most `maxBytes` of stdout. Nothing
+ * larger than the cap is ever accumulated, so a 100k-file status or a 5k-file
+ * diff costs bounded memory instead of a full-repository buffer plus a copy.
+ */
+export async function executeCapped(
+  command: string,
+  args: string[],
+  cwd: string,
+  options: CappedOptions,
+): Promise<CappedResult> {
+  return new Promise<CappedResult>((resolve, reject) => {
+    if (options.signal?.aborted) {
+      reject(new CommandCancelled())
+      return
+    }
+    const child = spawn(command, args, {
+      cwd,
+      env: {
+        ...process.env,
+        GIT_TERMINAL_PROMPT: '0',
+        GH_PROMPT_DISABLED: '1',
+        GCM_INTERACTIVE: 'Never',
+        ...options.env,
+      },
+      shell: false,
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    const decoder = new StringDecoder('utf8')
+    const parts: string[] = []
+    const stderr: string[] = []
+    let retained = 0
+    let truncated = false
+    let settled = false
+
+    const settle = (finish: () => void) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      options.signal?.removeEventListener('abort', onAbort)
+      finish()
+    }
+    const onAbort = () => {
+      child.kill('SIGTERM')
+      settle(() => reject(new CommandCancelled()))
+    }
+    const timer = setTimeout(
+      () => {
+        child.kill('SIGTERM')
+        settle(() =>
+          reject(
+            Object.assign(new Error(`${command} timed out`), {
+              code: 'ETIMEDOUT',
+              stderr: stderr.join(''),
+            }),
+          ),
+        )
+      },
+      command === 'gh' ? 20_000 : 120_000,
+    )
+    options.signal?.addEventListener('abort', onAbort, { once: true })
+
+    child.stdout.on('data', (chunk: Buffer) => {
+      const room = options.maxBytes - retained
+      if (room > 0) {
+        const take = Math.min(room, chunk.length)
+        retained += take
+        parts.push(decoder.write(chunk.subarray(0, take)))
+        if (take < chunk.length) truncated = true
+      } else {
+        truncated = true
+      }
+      if (truncated) child.kill('SIGTERM')
+    })
+    child.stderr.on('data', (chunk: Buffer) => {
+      if (stderr.length < 64) stderr.push(chunk.toString('utf8'))
+    })
+    child.on('error', (error) => settle(() => reject(error)))
+    child.on('close', (code) => {
+      const tail = decoder.end()
+      if (tail) parts.push(tail)
+      let text = parts.join('')
+      if (truncated) {
+        if (options.boundary) {
+          const cut = text.lastIndexOf(options.boundary)
+          if (cut >= 0) text = text.slice(0, cut + options.boundary.length)
+        } else if (text.endsWith('\uFFFD')) {
+          // A byte cap can land inside a multi-byte character; drop the lone
+          // replacement character rather than rendering a corrupt final glyph.
+          text = text.slice(0, -1)
+        }
+      } else if (code !== 0) {
+        settle(() =>
+          reject(
+            Object.assign(new Error(`${command} failed with exit code ${code}`), {
+              code,
+              stderr: stderr.join(''),
+            }),
+          ),
+        )
+        return
+      }
+      settle(() => resolve({ text, truncated }))
+    })
+  })
+}
+
+/**
+ * Runs at most `limit` workers at a time. Per-branch Git work is bounded by
+ * this rather than by the branch count, so a repository with thousands of
+ * refs no longer forks thousands of processes at once.
+ */
+export async function mapWithConcurrency<T>(
+  items: readonly T[],
+  limit: number,
+  worker: (item: T) => Promise<void>,
+): Promise<void> {
+  let cursor = 0
+  const runners = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (cursor < items.length) {
+      await worker(items[cursor++])
+    }
+  })
+  await Promise.all(runners)
 }
 
 export async function runGit(
@@ -195,7 +352,7 @@ export function isConflicted(indexStatus: string, worktreeStatus: string): boole
   )
 }
 
-export function parseStatus(output: string): ChangedFile[] {
+export function parseStatus(output: string, truncated = false): ChangedFile[] {
   if (!output) {
     return []
   }
@@ -222,6 +379,9 @@ export function parseStatus(output: string): ChangedFile[] {
       originalPath = tokens[index + 1]
       index += 1
       if (!originalPath) {
+        // `-z` renames have two NUL-terminated paths. The byte cap can end
+        // after the new path, before the old one has arrived.
+        if (truncated && index === tokens.length - 1) break
         throw new Error('Git returned a rename status without its original path')
       }
     }
@@ -239,6 +399,25 @@ export function parseStatus(output: string): ChangedFile[] {
 export async function getStatus(repoPath: string): Promise<ChangedFile[]> {
   const output = await runGit(repoPath, ['status', '--porcelain=v1', '-z', '--untracked-files=all'])
   return parseStatus(output)
+}
+
+/**
+ * The working-tree listing used by snapshots. A repository with 100k changed
+ * files is cut on a whole-record boundary at `MAX_STATUS_BYTES` and reports
+ * `truncated` so the renderer states the limit instead of silently dropping
+ * files. Actions that must see every path keep using `getStatus`.
+ */
+export async function listStatus(
+  repoPath: string,
+  signal?: AbortSignal,
+): Promise<{ files: ChangedFile[]; truncated: boolean }> {
+  const { text, truncated } = await executeCapped(
+    'git',
+    ['status', '--porcelain=v1', '-z', '--untracked-files=all'],
+    repoPath,
+    { maxBytes: MAX_STATUS_BYTES, boundary: '\0', signal },
+  )
+  return { files: parseStatus(text, truncated), truncated }
 }
 
 export async function getStashes(repoPath: string): Promise<Stash[]> {
@@ -332,6 +511,41 @@ export async function getConfigValue(repoPath: string, key: string): Promise<str
     }
     throw error
   }
+}
+
+export interface BranchConfig {
+  parent: string | null
+  parentTip: string | null
+}
+
+export function parseBranchConfig(output: string): Map<string, BranchConfig> {
+  const configs = new Map<string, BranchConfig>()
+  for (const token of output.split('\0')) {
+    const match = /^branch\.(.+)\.(parent|parenttip)\n([\s\S]*)$/iu.exec(token)
+    if (!match) continue
+    const [, name, field, value] = match
+    const entry = configs.get(name) ?? { parent: null, parentTip: null }
+    if (field.toLowerCase() === 'parent') entry.parent = value || null
+    else entry.parentTip = value || null
+    configs.set(name, entry)
+  }
+  return configs
+}
+
+/**
+ * One read for every branch's recorded parent and parent tip. The previous
+ * per-branch `git config --get` cost two child processes per branch, which is
+ * what made a repository with thousands of refs unusable.
+ */
+export async function getBranchConfigs(repoPath: string): Promise<Map<string, BranchConfig>> {
+  const output = await tryGit(repoPath, [
+    'config',
+    '--null',
+    '--get-regexp',
+    // Git reports config keys lower-cased, so the match must be lower-case too.
+    '^branch\\..*\\.(parent|parenttip)$',
+  ])
+  return parseBranchConfig(output ?? '')
 }
 
 export async function getBranchParent(repoPath: string, branch: string): Promise<string | null> {
