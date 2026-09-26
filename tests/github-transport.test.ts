@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { execFileSync } from 'node:child_process'
 import { createServer } from 'node:http'
 import { chmod, mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -144,6 +145,9 @@ test('HTTP failures are typed with their rate-limit metadata', async () => {
     { status: 422, kind: 'unprocessable' },
     { status: 403, kind: 'rate-limited', headers: { 'x-ratelimit-remaining': '0' } },
     { status: 403, kind: 'secondary-rate-limit', headers: { 'retry-after': '60' } },
+    { status: 429, kind: 'rate-limited', headers: { 'x-ratelimit-remaining': '0' } },
+    { status: 429, kind: 'secondary-rate-limit', headers: { 'retry-after': '60' } },
+    { status: 429, kind: 'secondary-rate-limit' },
   ]
   for (const expected of cases) {
     const { fetch: fetchDouble } = recordingFetch([
@@ -428,6 +432,194 @@ test('GraphQL HTTP 200 rate limit errors retain their response metadata', async 
         assert.equal(error.rateLimit.remaining, expected.kind === 'rate-limited' ? 0 : 4321)
         return true
       },
+    )
+  }
+})
+
+test('both transports distinguish primary and secondary rate limits on 429 and 403', async () => {
+  const directCases: Array<{
+    status: number
+    remaining?: string
+    retryAfter?: string
+    message?: string
+    kind: GitHubErrorKind
+  }> = [
+    { status: 429, remaining: '0', message: 'API rate limit exceeded', kind: 'rate-limited' },
+    { status: 429, remaining: '0', kind: 'rate-limited' },
+    { status: 429, retryAfter: '60', kind: 'secondary-rate-limit' },
+    {
+      status: 429,
+      message: 'You have exceeded a secondary rate limit',
+      kind: 'secondary-rate-limit',
+    },
+    { status: 429, kind: 'secondary-rate-limit' },
+    { status: 403, remaining: '0', message: 'API rate limit exceeded', kind: 'rate-limited' },
+    { status: 403, retryAfter: '60', kind: 'secondary-rate-limit' },
+    {
+      status: 403,
+      message: 'You have exceeded a secondary rate limit',
+      kind: 'secondary-rate-limit',
+    },
+    { status: 403, message: 'Forbidden', kind: 'forbidden' },
+  ]
+  for (const c of directCases) {
+    const headers: Record<string, string> = {}
+    if (c.remaining !== undefined) headers['x-ratelimit-remaining'] = c.remaining
+    if (c.retryAfter !== undefined) headers['retry-after'] = c.retryAfter
+    const { fetch: f } = recordingFetch([
+      { status: c.status, body: { message: c.message ?? 'error' }, headers },
+    ])
+    const direct = new DirectGitHubTransport({ token: 't', fetch: f })
+    await assert.rejects(direct.rest({ path: 'user' }), (err: unknown) => {
+      assert.ok(err instanceof GitHubTransportError)
+      assert.equal(err.kind, c.kind)
+      assert.equal(err.status, c.status)
+      return true
+    })
+    const gh = new GhGitHubTransport({
+      run: async () => {
+        const headerLines = Object.entries(headers)
+          .map(([k, v]) => `${k}: ${v}`)
+          .join('\r\n')
+        const error = new Error('gh failed') as Error & { stdout: string }
+        error.stdout = `HTTP/2.0 ${c.status} Error\r\n${headerLines ? headerLines + '\r\n' : ''}\r\n${JSON.stringify({ message: c.message ?? 'error' })}\n`
+        throw error
+      },
+    })
+    await assert.rejects(gh.rest({ path: 'user' }), (err: unknown) => {
+      assert.ok(err instanceof GitHubTransportError)
+      assert.equal(err.kind, c.kind)
+      assert.equal(err.status, c.status)
+      return true
+    })
+  }
+})
+
+test('pagination rejects malformed collection pages and preserves empty pages', async () => {
+  const malformedDirect = new DirectGitHubTransport({
+    token: 'token',
+    fetch: recordingFetch([{ body: { message: 'not an array' } }]).fetch,
+  })
+  await assert.rejects(
+    malformedDirect.paginate({ path: 'repos/acme/widgets/pulls' }),
+    (error: unknown) => error instanceof GitHubTransportError && error.kind === 'invalid-response',
+  )
+  const malformedGh = new GhGitHubTransport({
+    run: async () => 'HTTP/2.0 200 OK\r\n\r\n{}\n',
+  })
+  await assert.rejects(
+    malformedGh.paginate({ path: 'repos/acme/widgets/pulls' }),
+    (error: unknown) => error instanceof GitHubTransportError && error.kind === 'invalid-response',
+  )
+
+  const emptyDirect = new DirectGitHubTransport({
+    token: 'token',
+    fetch: recordingFetch([{ body: [] }]).fetch,
+  })
+  assert.deepEqual(await emptyDirect.paginate({ path: 'repos/acme/widgets/pulls' }), [])
+
+  const emptyGh = new GhGitHubTransport({
+    run: async () => 'HTTP/2.0 200 OK\r\n\r\n[]\n',
+  })
+  assert.deepEqual(await emptyGh.paginate({ path: 'repos/acme/widgets/pulls' }), [])
+})
+
+test('pagination handles prefixed API base without next link and with next link', async () => {
+  const serverRequests: string[] = []
+  let port = 0
+  const server = createServer((request, response) => {
+    serverRequests.push(request.url ?? '')
+    response.setHeader('content-type', 'application/json')
+    if (request.url === '/api/v3/single') {
+      response.end('[{"id":1}]')
+    } else if (request.url === '/api/v3/multi') {
+      response.setHeader('link', `<http://127.0.0.1:${port}/api/v3/multi?page=2>; rel="next"`)
+      response.end('[{"id":1}]')
+    } else if (request.url === '/api/v3/multi?page=2') {
+      response.end('[{"id":2}]')
+    } else {
+      response.statusCode = 404
+      response.end('{"message":"not found"}')
+    }
+  })
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  try {
+    const address = server.address()
+    assert.ok(address && typeof address !== 'string')
+    port = address.port
+    const apiUrl = `http://127.0.0.1:${port}/api/v3`
+
+    serverRequests.length = 0
+    const direct = new DirectGitHubTransport({ token: 't', apiUrl })
+    const singleItems = await direct.paginate<{ id: number }>({ path: 'single' })
+    assert.deepEqual(singleItems, [{ id: 1 }])
+    assert.deepEqual(serverRequests, ['/api/v3/single'])
+
+    serverRequests.length = 0
+    const multiItems = await direct.paginate<{ id: number }>({ path: 'multi' })
+    assert.deepEqual(multiItems, [{ id: 1 }, { id: 2 }])
+    assert.deepEqual(serverRequests, ['/api/v3/multi', '/api/v3/multi?page=2'])
+
+    serverRequests.length = 0
+    const gh = new GhGitHubTransport({ apiUrl })
+    const ghSingle = await gh.paginate<{ id: number }>({ path: 'single' })
+    assert.deepEqual(ghSingle, [{ id: 1 }])
+    assert.deepEqual(serverRequests, ['/api/v3/single'])
+
+    serverRequests.length = 0
+    const ghMulti = await gh.paginate<{ id: number }>({ path: 'multi' })
+    assert.deepEqual(ghMulti, [{ id: 1 }, { id: 2 }])
+    assert.deepEqual(serverRequests, ['/api/v3/multi', '/api/v3/multi?page=2'])
+  } finally {
+    server.closeAllConnections()
+    await new Promise<void>((resolve, reject) =>
+      server.close((error) => (error ? reject(error) : resolve())),
+    )
+  }
+})
+
+test('native gh cancellation and deadline cleanup apply to subprocesses on a local endpoint', async () => {
+  let hasGh = false
+  try {
+    execFileSync('gh', ['--version'], { stdio: 'ignore' })
+    hasGh = true
+  } catch {
+    hasGh = false
+  }
+  if (!hasGh) return
+
+  let onHangRequest: (() => void) | null = null
+  const server = createServer((_req, _res) => {
+    onHangRequest?.()
+  })
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  try {
+    const address = server.address()
+    assert.ok(address && typeof address !== 'string')
+    const gh = new GhGitHubTransport({ apiUrl: `http://127.0.0.1:${address.port}` })
+
+    const pre = new AbortController()
+    pre.abort()
+    await assert.rejects(
+      gh.rest({ path: 'hang', signal: pre.signal }),
+      (err: unknown) => err instanceof GitHubTransportError && err.kind === 'cancelled',
+    )
+
+    await assert.rejects(
+      gh.rest({ path: 'hang', timeoutMs: 50 }),
+      (err: unknown) => err instanceof GitHubTransportError && err.kind === 'timeout',
+    )
+
+    const ctrl = new AbortController()
+    onHangRequest = () => ctrl.abort()
+    await assert.rejects(
+      gh.rest({ path: 'hang', signal: ctrl.signal }),
+      (err: unknown) => err instanceof GitHubTransportError && err.kind === 'cancelled',
+    )
+  } finally {
+    server.closeAllConnections()
+    await new Promise<void>((resolve, reject) =>
+      server.close((error) => (error ? reject(error) : resolve())),
     )
   }
 })

@@ -157,12 +157,13 @@ export function statusKind(
   message: string | null,
 ): GitHubErrorKind {
   if (status === 401) return 'unauthorized'
-  if (status === 429) return 'secondary-rate-limit'
-  if (status === 403) {
+  if (status === 429 || status === 403) {
     if (message && /secondary rate limit|abuse detection|temporarily blocked/iu.test(message))
       return 'secondary-rate-limit'
-    if (rateLimit.remaining === 0) return 'rate-limited'
+    if (rateLimit.remaining === 0 || (message && /rate limit exceeded/iu.test(message)))
+      return 'rate-limited'
     if (rateLimit.retryAfterSeconds !== null) return 'secondary-rate-limit'
+    if (status === 429) return 'secondary-rate-limit'
     return 'forbidden'
   }
   if (status === 404) return 'not-found'
@@ -214,6 +215,8 @@ function toTransportError(error: unknown, signal?: AbortSignal): GitHubTransport
     return new GitHubTransportError({ kind: 'unsupported', detail: 'the gh CLI is not installed' })
   if (code === 'ETIMEDOUT')
     return new GitHubTransportError({ kind: 'timeout', detail: 'the gh request timed out' })
+  if (code === 'ABORT_ERR' || (error instanceof Error && error.name === 'AbortError'))
+    return new GitHubTransportError({ kind: 'cancelled', detail: 'the request was cancelled' })
   return new GitHubTransportError({ kind: 'network', detail: commandDetail(error) })
 }
 
@@ -335,30 +338,41 @@ export class DirectGitHubTransport implements GitHubTransport {
 
   async rest<T = unknown>(request: GitHubRestRequest): Promise<GitHubRestResponse<T>> {
     const method = request.method ?? 'GET'
-    return this.result<T>(`${this.apiUrl}/${request.path}`, method, request.body, request)
+    const path = request.path.replace(/^\/+/u, '')
+    return this.result<T>(`${this.apiUrl}/${path}`, method, request.body, request)
   }
 
   async paginate<T = unknown>(request: GitHubRestRequest): Promise<T[]> {
     const items: T[] = []
     const origin = new URL(this.apiUrl).origin
-    let path: string | null = request.path
-    for (let page = 0; path !== null && page < MAX_PAGES; page += 1) {
+    const initialPath = request.path.replace(/^\/+/u, '')
+    let currentUrl: string | null = `${this.apiUrl}/${initialPath}`
+    for (let page = 0; currentUrl !== null && page < MAX_PAGES; page += 1) {
       const method = request.method ?? 'GET'
-      const { body, headers } = await this.send(
-        `${this.apiUrl}/${path}`,
+      const { body, headers, status, rateLimit } = await this.send(
+        currentUrl,
         method,
         request.body,
         request,
       )
-      if (Array.isArray(body)) items.push(...(body as T[]))
-      // Only follow GitHub's own next link; a foreign host never receives the token.
-      const next = new URL(parseLink(headers.get('link')) ?? '', `${this.apiUrl}/`)
-      path =
-        next.origin === origin && next.pathname !== '/'
-          ? `${next.pathname.slice(1)}${next.search}`
-          : null
+      if (!Array.isArray(body)) {
+        throw new GitHubTransportError({
+          kind: 'invalid-response',
+          status,
+          detail: 'GitHub returned an unexpected pagination response',
+          rateLimit,
+        })
+      }
+      items.push(...(body as T[]))
+      const nextLink = parseLink(headers.get('link'))
+      if (!nextLink) {
+        currentUrl = null
+        break
+      }
+      const resolved = new URL(nextLink, currentUrl)
+      currentUrl = resolved.origin === origin ? resolved.toString() : null
     }
-    if (path !== null) {
+    if (currentUrl !== null) {
       throw new GitHubTransportError({
         kind: 'invalid-response',
         detail: `GitHub returned more than ${MAX_PAGES} pages`,
@@ -385,8 +399,8 @@ export class DirectGitHubTransport implements GitHubTransport {
 function parseLink(header: string | null): string | null {
   if (!header) return null
   for (const part of header.split(',')) {
-    const match = /^\s*<([^>]+)>;\s*rel="next"/u.exec(part)
-    if (match) return match[1]
+    const match = /<\s*([^>]+)\s*>;.*?\brel="?next"?/iu.exec(part)
+    if (match) return match[1].trim()
   }
   return null
 }
@@ -402,28 +416,41 @@ function includedResponse(output: string): { status: number; headers: Headers; b
       detail: 'gh did not return HTTP response headers',
     })
   const start = last.index + last[0].length
-  const boundary = /\r?\n\r?\n/gu
-  boundary.lastIndex = start
-  const end = boundary.exec(output)
-  if (!end)
-    throw new GitHubTransportError({
-      kind: 'invalid-response',
-      detail: 'gh did not return a complete HTTP response',
-    })
+  let headerText: string
+  let bodyText: string
+  if (output.startsWith('\r\n', start)) {
+    headerText = ''
+    bodyText = output.slice(start + 2)
+  } else if (output.startsWith('\n', start)) {
+    headerText = ''
+    bodyText = output.slice(start + 1)
+  } else {
+    const boundary = /\r?\n\r?\n/gu
+    boundary.lastIndex = start
+    const end = boundary.exec(output)
+    if (!end)
+      throw new GitHubTransportError({
+        kind: 'invalid-response',
+        detail: 'gh did not return a complete HTTP response',
+      })
+    headerText = output.slice(start, end.index)
+    bodyText = output.slice(end.index + end[0].length)
+  }
   const headers = new Headers()
-  for (const line of output.slice(start, end.index).split(/\r?\n/u)) {
+  for (const line of headerText.split(/\r?\n/u)) {
     const separator = line.indexOf(':')
     if (separator > 0) headers.append(line.slice(0, separator), line.slice(separator + 1).trim())
   }
   return {
     status: Number(last[1]),
     headers,
-    body: parseJsonBody(output.slice(end.index + end[0].length)),
+    body: parseJsonBody(bodyText),
   }
 }
 
 export interface GhGitHubTransportOptions {
   env?: NodeJS.ProcessEnv
+  apiUrl?: string
   run?: (args: string[], options?: GitHubGraphqlOptions) => Promise<string>
 }
 
@@ -434,6 +461,14 @@ export class GhGitHubTransport implements GitHubTransport {
 
   constructor(options: GhGitHubTransportOptions = {}) {
     this.options = options
+  }
+
+  private get env(): NodeJS.ProcessEnv {
+    return this.options.env ?? process.env
+  }
+
+  private get apiUrl(): string {
+    return this.options.apiUrl?.replace(/\/+$/u, '') ?? githubApiUrl(this.env)
   }
 
   private async api(
@@ -488,7 +523,7 @@ export class GhGitHubTransport implements GitHubTransport {
         const stdout =
           error !== null && typeof error === 'object' && 'stdout' in error ? error.stdout : null
         if (typeof stdout !== 'string' || !/^HTTP\//u.test(stdout.trimStart()))
-          throw toTransportError(error)
+          throw toTransportError(error, request.signal)
         output = stdout
       }
       if (timedOut)
@@ -521,14 +556,22 @@ export class GhGitHubTransport implements GitHubTransport {
     const method = request.method ?? 'GET'
     const args = [
       'api',
-      '--hostname',
-      GITHUB_HOST,
       '--include',
       '--header',
       `X-GitHub-Api-Version: ${githubApiVersion(this.options.env)}`,
     ]
+    const customApi = this.apiUrl !== GITHUB_API_URL
+    const isAbsolute = /^https?:\/\//u.test(request.path)
+    if (!customApi && !isAbsolute) {
+      args.splice(1, 0, '--hostname', GITHUB_HOST)
+    }
     if (method !== 'GET') args.push('--method', method)
-    args.push(request.path)
+    const endpoint = isAbsolute
+      ? request.path
+      : customApi
+        ? `${this.apiUrl}/${request.path.replace(/^\/+/u, '')}`
+        : request.path
+    args.push(endpoint)
     for (const [key, value] of Object.entries(request.body ?? {})) {
       args.push(typeof value === 'string' ? '-f' : '-F', `${key}=${String(value)}`)
     }
@@ -544,24 +587,32 @@ export class GhGitHubTransport implements GitHubTransport {
   async paginate<T = unknown>(request: GitHubRestRequest): Promise<T[]> {
     const items: T[] = []
     let path: string | null = request.path
-    const origin = new URL(GITHUB_API_URL).origin
+    const origin = new URL(this.apiUrl).origin
     for (let page = 0; path !== null && page < MAX_PAGES; page += 1) {
       const response = await this.request<unknown>({ ...request, path })
-      if (!Array.isArray(response.data))
+      if (!Array.isArray(response.data)) {
         throw new GitHubTransportError({
           kind: 'invalid-response',
+          status: response.status,
+          rateLimit: response.rateLimit,
           detail: 'GitHub returned an unexpected pagination response',
         })
+      }
       items.push(...(response.data as T[]))
       const next = parseLink(response.headers.get('link'))
-      const url = next ? new URL(next, GITHUB_API_URL) : null
-      path = url && url.origin === origin ? `${url.pathname.slice(1)}${url.search}` : null
+      if (!next) {
+        path = null
+        break
+      }
+      const url = new URL(next, /^https?:\/\//u.test(path) ? path : `${this.apiUrl}/`)
+      path = url.origin === origin ? url.toString() : null
     }
-    if (path !== null)
+    if (path !== null) {
       throw new GitHubTransportError({
         kind: 'invalid-response',
         detail: `GitHub returned more than ${MAX_PAGES} pages`,
       })
+    }
     return items
   }
 
