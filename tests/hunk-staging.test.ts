@@ -152,6 +152,55 @@ test('selected lines inside one merged hunk stage only what was selected', async
   }
 })
 
+test('adjacent replacement subset preserves the excluded neighbor in both directions', async () => {
+  const { root, repo, git } = await fixture()
+  try {
+    const staged = numbered(20, { 2: 'line 2 staged' })
+    await writeFile(join(repo, 'lines.txt'), staged)
+    git('add', 'lines.txt')
+    const working = numbered(20, {
+      2: 'line 2 staged',
+      18: 'line 18 selected',
+      19: 'line 19 excluded',
+    })
+    await writeFile(join(repo, 'lines.txt'), working)
+
+    const view = await getFileView(repo, 'lines.txt')
+    const hunk = view.hunks.unstaged.hunks[0]
+    const selected = hunk.lines
+      .map((line, index) => ({ line, index }))
+      .filter(({ line }) => line.text === '-line 18' || line.text === '+line 18 selected')
+      .map(({ index }) => index)
+    assert.equal(selected.length, 2)
+    await applyHunk(repo, 'lines.txt', 'unstaged', 0, selected)
+    assert.deepEqual(
+      execFileSync('git', ['-C', repo, 'show', ':lines.txt']),
+      Buffer.from(numbered(20, { 2: 'line 2 staged', 18: 'line 18 selected' })),
+    )
+    assert.deepEqual(await readFile(join(repo, 'lines.txt')), Buffer.from(working))
+
+    git('add', 'lines.txt')
+    const stagedView = await getFileView(repo, 'lines.txt')
+    const stagedHunkIndex = stagedView.hunks.staged.hunks.findIndex((entry) =>
+      entry.lines.some((line) => line.text === '+line 18 selected'),
+    )
+    assert.notEqual(stagedHunkIndex, -1)
+    const stagedHunk = stagedView.hunks.staged.hunks[stagedHunkIndex]
+    const unselected = stagedHunk.lines
+      .map((line, index) => ({ line, index }))
+      .filter(({ line }) => line.text === '-line 18' || line.text === '+line 18 selected')
+      .map(({ index }) => index)
+    await applyHunk(repo, 'lines.txt', 'staged', stagedHunkIndex, unselected)
+    assert.deepEqual(
+      execFileSync('git', ['-C', repo, 'show', ':lines.txt']),
+      Buffer.from(numbered(20, { 2: 'line 2 staged', 19: 'line 19 excluded' })),
+    )
+    assert.deepEqual(await readFile(join(repo, 'lines.txt')), Buffer.from(working))
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 test('selected lines unstage without removing a neighboring staged edit', async () => {
   const { root, repo, git, text } = await fixture()
   try {

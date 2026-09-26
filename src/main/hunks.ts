@@ -415,36 +415,56 @@ export function buildHunkPatch(
   }
 
   const selected = new Set(lineIndexes)
-  const changes = lines
-    .map((line, index) => ({ line, index }))
-    .filter(({ line }) => line.kind === 'add' || line.kind === 'remove')
-  if (changes.every(({ index }) => selected.has(index))) return verbatim()
+  let allSelected = true
+  for (let index = 0; index < lines.length; index++) {
+    if ((lines[index].kind === 'add' || lines[index].kind === 'remove') && !selected.has(index)) {
+      allSelected = false
+      break
+    }
+  }
+  if (allSelected) return verbatim()
 
   // The index is the old side when staging and the new side when reversing a
   // staged diff. An unselected line already present there becomes context;
   // an unselected line absent there disappears from the patch altogether.
-  // Keeping one complete hunk makes repeated content and zero-count anchors
-  // independent of Git's fuzzy matching or split-window coordinate offsets.
+  // One complete hunk keeps repeated content and zero-count anchors at exact coordinates.
+  // Git groups removals before additions. Pair their positions within each
+  // edit run so an excluded neighboring preimage line stays after a selected
+  // replacement, rather than being moved ahead of it.
   const preimageKind = side === 'staged' ? 'add' : 'remove'
   const body: string[] = []
+  const removals: number[] = []
+  const additions: number[] = []
   let oldCount = 0
   let newCount = 0
-  let previousIncluded = false
-  for (let index = 0; index < lines.length; index++) {
+  const append = (index: number) => {
     const line = lines[index]
-    if (line.kind === MARKER) {
-      if (previousIncluded) body.push(line.text)
-      continue
-    }
-    const included = line.kind === 'context' || selected.has(index) || line.kind === preimageKind
-    previousIncluded = included
-    if (!included) continue
+    if (line.kind !== 'context' && !selected.has(index) && line.kind !== preimageKind) return
     const text =
       line.kind !== 'context' && !selected.has(index) ? ` ${line.text.slice(1)}` : line.text
     body.push(text)
+    if (lines[index + 1]?.kind === MARKER) body.push(lines[index + 1].text)
     if (text[0] !== '+') oldCount++
     if (text[0] !== '-') newCount++
   }
+  const flush = () => {
+    const count = Math.max(removals.length, additions.length)
+    for (let index = 0; index < count; index++) {
+      if (index < removals.length) append(removals[index])
+      if (index < additions.length) append(additions[index])
+    }
+    removals.length = 0
+    additions.length = 0
+  }
+  for (let index = 0; index < lines.length; index++) {
+    if (lines[index].kind === 'remove') removals.push(index)
+    else if (lines[index].kind === 'add') additions.push(index)
+    else if (lines[index].kind === 'context') {
+      flush()
+      append(index)
+    }
+  }
+  flush()
 
   const preimageStart = side === 'staged' ? hunk.newStart : hunk.oldStart
   const oldStart = side === 'staged' ? preimageStart + (newCount === 0 ? 1 : 0) : preimageStart
