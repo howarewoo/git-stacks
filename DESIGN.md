@@ -279,6 +279,13 @@ The renderer builds on the repository's existing [shadcn/ui](https://ui.shadcn.c
 - **Recovery:** The persistent operation banner remains outside workspace-specific views. Continue respects conflict blockers; Skip and Abort retain their explicit loss warnings and existing Git actions. Progress uses actual completed and remaining branches.
 - **Specimen:** `#/design-system-dialog-specimen` renders the shared compositions, recovery states, and guarded action fixtures without changing normal navigation.
 
+### Command Palette and Shortcuts
+
+- **Command Palette:** Fixed workbench overlay at `component.overlay` elevation, combobox with listbox semantics, full keyboard navigation (arrows, home/end, Enter, Escape), and screen-reader status announcements.
+- **Search Separation:** In-view search/filter fields retain distinct focused shortcuts (`/` default) and are not conflated with the global command palette (`Mod+K` default).
+- **Remappable Shortcuts:** Configurable keybindings for palette opening, view navigation, and stack commands with collision detection before assignment.
+- **Safe Execution:** Selection does not mutate the working tree. Destructive actions require explicit confirmation and cannot execute from ranking alone. Dirty-tree checkouts route through existing carry/stash/commit/cancel safeguards.
+
 ### Hover Cards and Tooltips
 
 - **Hover card:** White overlay, 12px utility radius, medium elevation, 16px padding, and popover z-index 70.

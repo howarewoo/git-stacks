@@ -2986,3 +2986,21 @@ button:disabled {
   color: var(--gs-semantic-text-secondary);
   font-size: 11px;
 }
+
+.palette-dialog {
+  animation: dialog-in 140ms cubic-bezier(0.2, 0, 0, 1) both;
+  box-shadow: var(--gs-semantic-elevation-large);
+}
+
+.palette-results::-webkit-scrollbar {
+  width: 6px;
+}
+.palette-results::-webkit-scrollbar-thumb {
+  background: var(--gs-semantic-border-essential);
+  border-radius: var(--gs-semantic-radius-pill);
+}
+
+.shortcut-settings-dialog {
+  width: min(calc(100% - 2rem), 620px);
+  animation: dialog-in 140ms cubic-bezier(0.2, 0, 0, 1) both;
+}
