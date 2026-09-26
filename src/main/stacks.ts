@@ -57,7 +57,6 @@ import type { GitHubResult } from './github'
 
 const PLAN_TTL_MS = 5 * 60_000
 const JOURNAL_VERSION = 1
-const STACK_MARKER = '<!-- git-stacks:stack-links:v1 -->'
 
 interface BranchRecord {
   name: string
@@ -2469,7 +2468,7 @@ async function createPullRequest(
         title,
         head: branch,
         base,
-        body: `${title}\n\n${STACK_MARKER}\nGit Stacks branch: ${branch}\nBase: ${base}`,
+        body: `${title}\n\nGit Stacks branch: ${branch}\nBase: ${base}`,
         draft,
       },
     })
@@ -2514,83 +2513,6 @@ async function changePullRequestDraft(
   const updated = isRecord(payload) ? payload.pullRequest : null
   if (!isRecord(updated) || updated.id !== pullRequest.id || updated.isDraft !== draft)
     throw new Error(`Pull request #${number} did not change readiness`)
-}
-
-async function linkStackComments(
-  fullName: string,
-  pullRequests: Array<{ branch: string; pr: PullRequest }>,
-): Promise<void> {
-  const transport = githubTransport()
-  const { data: viewer } = await transport.rest<Record<string, unknown>>({ path: 'user' })
-  if (!isRecord(viewer) || typeof viewer.id !== 'number')
-    throw new Error('Could not verify the authenticated GitHub comment author')
-  const endMarker = '<!-- /git-stacks:stack-links:v1 -->'
-  const links = pullRequests
-    .map((entry) => `- ${entry.branch}: #${entry.pr.number} (${entry.pr.url})`)
-    .join('\n')
-  const managed = `${STACK_MARKER}\nStack navigation:\n${links}\n${endMarker}`
-  const owned = (comment: unknown): comment is Record<string, unknown> =>
-    isRecord(comment) &&
-    isRecord(comment.user) &&
-    comment.user.id === viewer.id &&
-    typeof comment.id === 'number' &&
-    typeof comment.body === 'string' &&
-    comment.body.startsWith(`${STACK_MARKER}\n`)
-  for (const entry of pullRequests) {
-    const endpoint = `repos/${fullName}/issues/${entry.pr.number}/comments`
-    const comments = await transport.paginate<unknown>({ path: endpoint })
-    const candidates = comments.filter(owned)
-    if (candidates.length > 1)
-      throw new Error(
-        `Multiple owned stack comments exist on PR #${entry.pr.number}; reconcile them on GitHub before publishing`,
-      )
-    let id: number
-    let body = managed
-    const existing = candidates[0]
-    if (existing) {
-      const { data } = await transport.rest<Record<string, unknown>>({
-        path: `repos/${fullName}/issues/comments/${existing.id}`,
-      })
-      if (!owned(data)) throw new Error(`Stack comment ownership changed on PR #${entry.pr.number}`)
-      const previous = data.body as string
-      const end = previous.indexOf(endMarker)
-      if (
-        end < 0 ||
-        previous.indexOf(STACK_MARKER, STACK_MARKER.length) >= 0 ||
-        previous.indexOf(endMarker, end + endMarker.length) >= 0
-      ) {
-        throw new Error(
-          `The owned stack comment on PR #${entry.pr.number} has ambiguous boundaries; preserve and reconcile it on GitHub`,
-        )
-      }
-      id = data.id as number
-      body += previous.slice(end + endMarker.length)
-      if (body !== previous)
-        await transport.rest({
-          method: 'PATCH',
-          path: `repos/${fullName}/issues/comments/${id}`,
-          body: { body },
-        })
-    } else {
-      const { data: created } = await transport.rest<Record<string, unknown>>({
-        method: 'POST',
-        path: endpoint,
-        body: { body },
-      })
-      if (!owned(created))
-        throw new Error(
-          `Stack comment creation for PR #${entry.pr.number} is unconfirmed; inspect GitHub before retrying`,
-        )
-      id = created.id as number
-    }
-    const { data: readBack } = await transport.rest<Record<string, unknown>>({
-      path: `repos/${fullName}/issues/comments/${id}`,
-    })
-    if (!owned(readBack) || readBack.body !== body)
-      throw new Error(
-        `Stack navigation for PR #${entry.pr.number} did not match its confirmed content`,
-      )
-  }
 }
 
 async function publishStack(
@@ -2691,34 +2613,29 @@ async function publishStack(
     }
     published.push({ branch: entry.branch, pr: readBack })
   }
-  await linkStackComments(canonical.fullName, published)
-  try {
-    const [owner, name] = canonical.fullName.split('/')
-    const capability = await detectNativeStacksCapability(owner, name)
-    if (capability.available) {
-      const existingStacks = await listPullRequestStacks(owner, name)
-      const publishedNumbers = published.map((entry) => entry.pr.number)
-      const matched = existingStacks.find((stack) =>
-        stack.pullRequests.some((member) => publishedNumbers.includes(member.number)),
-      )
-      if (matched) {
-        const existingNumbers = new Set(matched.pullRequests.map((member) => member.number))
-        const toAdd = publishedNumbers.filter((num) => !existingNumbers.has(num))
-        if (toAdd.length > 0) {
-          await addPullRequestsToStack(owner, name, matched.number, toAdd, {
-            existingStack: matched,
-            knownPullRequests: published.map((entry) => entry.pr),
-          })
-        }
-      } else if (published.length >= 1) {
-        await createPullRequestStack(owner, name, publishedNumbers, {
+  const [owner, name] = canonical.fullName.split('/')
+  const capability = await detectNativeStacksCapability(owner, name)
+  if (capability.available) {
+    const existingStacks = await listPullRequestStacks(owner, name)
+    const publishedNumbers = published.map((entry) => entry.pr.number)
+    const matched = existingStacks.find((stack) =>
+      stack.pullRequests.some((member) => publishedNumbers.includes(member.number)),
+    )
+    if (matched) {
+      const existingNumbers = new Set(matched.pullRequests.map((member) => member.number))
+      const toAdd = publishedNumbers.filter((num) => !existingNumbers.has(num))
+      if (toAdd.length > 0) {
+        await addPullRequestsToStack(owner, name, matched.number, toAdd, {
+          existingStack: matched,
           knownPullRequests: published.map((entry) => entry.pr),
-          defaultBranch: plan.defaultBranch,
         })
       }
+    } else if (published.length >= 1) {
+      await createPullRequestStack(owner, name, publishedNumbers, {
+        knownPullRequests: published.map((entry) => entry.pr),
+        defaultBranch: plan.defaultBranch,
+      })
     }
-  } catch {
-    // Degrade gracefully to chained PRs when native stack registration fails
   }
   return {
     message: `Published ${published.length} stack pull request${published.length === 1 ? '' : 's'}`,

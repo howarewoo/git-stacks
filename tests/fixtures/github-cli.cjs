@@ -33,12 +33,15 @@ function valueFor(args, flag) {
   return index >= 0 ? args[index + 1] : undefined
 }
 
+let cachedInput = null
 function jsonValues(args) {
   const input = valueFor(args, '--input')
   if (input === undefined) return {}
   if (input !== '-') fail('the fixture expects JSON on stdin')
+  if (cachedInput !== null) return cachedInput
   try {
-    return JSON.parse(fs.readFileSync(0, 'utf8'))
+    cachedInput = JSON.parse(fs.readFileSync(0, 'utf8'))
+    return cachedInput
   } catch {
     fail('invalid JSON input')
   }
