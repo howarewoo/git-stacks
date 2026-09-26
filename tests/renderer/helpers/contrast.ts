@@ -120,12 +120,12 @@ const EVALUATE_CONTRAST_SCRIPT = `
 `
 
 /**
- * Measures text contrast against the real adjacent rendered background for a given selector.
+ * Measures text contrast against the real adjacent rendered background for every visible match.
  */
 export async function measureElementContrast(
   page: Page,
   selector: string,
-): Promise<ContrastMeasurement | null> {
+): Promise<ContrastMeasurement[]> {
   await page.evaluate(EVALUATE_CONTRAST_SCRIPT)
 
   return page.evaluate((sel) => {
@@ -133,33 +133,36 @@ export async function measureElementContrast(
     const contrast = win.__gitStacksContrast
     if (!contrast) throw new Error('Contrast evaluator was not installed')
 
-    const el = document.querySelector(sel)
-    if (!el || !el.getClientRects().length)
-      throw new Error(`Missing visible contrast target: ${sel}`)
+    const elements = Array.from(document.querySelectorAll(sel)).filter(
+      (el) => el.getClientRects().length,
+    )
+    if (!elements.length) throw new Error(`Missing visible contrast target: ${sel}`)
 
-    const style = window.getComputedStyle(el)
-    const fgParsed = contrast.parseRgba(style.color)
-    const effectiveBg = contrast.getEffectiveBackground(el)
-    const effectiveFg = contrast.composite(fgParsed, effectiveBg)
+    return elements.map((el) => {
+      const style = window.getComputedStyle(el)
+      const fgParsed = contrast.parseRgba(style.color)
+      const effectiveBg = contrast.getEffectiveBackground(el)
+      const effectiveFg = contrast.composite(fgParsed, effectiveBg)
 
-    const ratio = contrast.contrastRatio(effectiveFg, effectiveBg)
-    const fontSizePx = parseFloat(style.fontSize) || 14
-    const fontWeight = parseInt(style.fontWeight, 10) || 400
-    const isLargeText = fontSizePx >= 24 || (fontSizePx >= 18.66 && fontWeight >= 700)
-    const requiredRatio = isLargeText ? 3.0 : 4.5
+      const ratio = contrast.contrastRatio(effectiveFg, effectiveBg)
+      const fontSizePx = parseFloat(style.fontSize) || 14
+      const fontWeight = parseInt(style.fontWeight, 10) || 400
+      const isLargeText = fontSizePx >= 24 || (fontSizePx >= 18.66 && fontWeight >= 700)
+      const requiredRatio = isLargeText ? 3.0 : 4.5
 
-    return {
-      selector: sel,
-      textSample: (el.textContent || '').trim().slice(0, 40),
-      foregroundColor: `rgb(${effectiveFg.r}, ${effectiveFg.g}, ${effectiveFg.b})`,
-      backgroundColor: `rgb(${effectiveBg.r}, ${effectiveBg.g}, ${effectiveBg.b})`,
-      fontSizePx,
-      fontWeight,
-      isLargeText,
-      ratio: Math.round(ratio * 100) / 100,
-      requiredRatio,
-      passes: ratio >= requiredRatio,
-    }
+      return {
+        selector: sel,
+        textSample: (el.textContent || '').trim().slice(0, 40),
+        foregroundColor: `rgb(${effectiveFg.r}, ${effectiveFg.g}, ${effectiveFg.b})`,
+        backgroundColor: `rgb(${effectiveBg.r}, ${effectiveBg.g}, ${effectiveBg.b})`,
+        fontSizePx,
+        fontWeight,
+        isLargeText,
+        ratio: Math.round(ratio * 100) / 100,
+        requiredRatio,
+        passes: ratio >= requiredRatio,
+      }
+    })
   }, selector)
 }
 
@@ -174,10 +177,7 @@ export async function scanElementsContrast(
 
   const results: ContrastMeasurement[] = []
   for (const selector of selectors) {
-    const measurement = await measureElementContrast(page, selector)
-    if (measurement) {
-      results.push(measurement)
-    }
+    results.push(...(await measureElementContrast(page, selector)))
   }
   return results
 }

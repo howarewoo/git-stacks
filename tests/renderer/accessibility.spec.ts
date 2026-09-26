@@ -112,7 +112,8 @@ test.describe('Automated accessibility audits and contrast', () => {
       const selectorsToMeasure = [
         '.titlebar-brand strong',
         '.repo-name',
-        '.nav-item-label',
+        '.nav-item-active .nav-item-label',
+        '.nav-item:not(.nav-item-active) .nav-item-label',
         '.list-title-group h1',
         '.list-subtitle',
         '.branch-copy strong',

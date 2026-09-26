@@ -110,7 +110,6 @@ function resolveTarget(explicit) {
     : (
         {
           darwin: ['release/mac-arm64/Git Stacks.app', 'release/mac/Git Stacks.app'],
-          win32: ['release/win-unpacked/Git Stacks.exe', 'release/win-x64-unpacked/Git Stacks.exe'],
         }[process.platform] ?? ['release/linux-unpacked/git-stacks']
       ).map((candidate) => join(ROOT, candidate))
   const found = candidates.find((candidate) => existsSync(candidate))
@@ -734,6 +733,11 @@ async function waitForViewport(page, expectedWidth, timeout = 15_000) {
 }
 
 async function run(options) {
+  if (process.platform === 'win32') {
+    throw new Error(
+      'Packaged desktop smoke supports macOS and Linux only; Windows process-tree cleanup is not implemented.',
+    )
+  }
   const target = resolveTarget(options.app)
   const shipped = payload(target)
   const workspace = await createWorkspace()
