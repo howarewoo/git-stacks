@@ -153,10 +153,12 @@ export function diffLineKind(line: string): DiffLineKind | null {
 }
 
 export function DiffView({ text, truncated = false }: { text: string; truncated?: boolean }) {
-  const preview = React.useMemo(
-    () => ({ lines: text.slice(0, 512 * 1024).split('\n'), clipped: text.length > 512 * 1024 }),
-    [text],
-  )
+  const preview = React.useMemo(() => {
+    const previewText = text.slice(0, 512 * 1024)
+    const lines = previewText ? previewText.split('\n') : []
+    if (previewText.endsWith('\n')) lines.pop()
+    return { lines, clipped: text.length > 512 * 1024 }
+  }, [text])
   const [visibleLines, setVisibleLines] = React.useState(1000)
   React.useEffect(() => setVisibleLines(1000), [text])
   const shown = preview.lines.slice(0, visibleLines)
