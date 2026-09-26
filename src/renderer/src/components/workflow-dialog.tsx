@@ -10,6 +10,7 @@ import type {
   StackKind,
   StackPreview,
 } from '../../../shared/types'
+import { actionBlockReason, stashRemovalBlockReason } from '../../../shared/capabilities'
 import { Button } from './ui/button'
 import { Input } from './ui/input'
 import { Badge } from './ui/badge'
@@ -78,6 +79,31 @@ function workflowComposition(request: WorkflowRequest): WorkflowComposition {
   if (request.kind === 'pull' || request.kind === 'merge' || request.kind === 'commitAction')
     return 'reviewed'
   return 'form'
+}
+
+function requestActionType(request: WorkflowRequest): GitAction['type'] {
+  switch (request.kind) {
+    case 'confirm':
+      return request.action.type
+    case 'rename':
+      return 'renameBranch'
+    case 'parent':
+      return 'setParent'
+    case 'upstream':
+      return 'setUpstream'
+    case 'deleteRemote':
+      return 'deleteRemoteBranch'
+    case 'commitAction':
+      return request.mode
+    case 'stack':
+      return 'executeStack'
+    case 'pr':
+      return 'updatePr'
+    case 'forcePush':
+      return 'forcePush'
+    default:
+      return request.kind
+  }
 }
 
 /**
@@ -162,6 +188,12 @@ export function WorkflowDialog({
   const dispatch = React.useRef(createDispatchLock()).current
   const locked = busy || loading
   const composition = workflowComposition(request)
+  const shapeReason =
+    actionBlockReason(snapshot.capabilities, requestActionType(request)) ??
+    (request.kind === 'confirm' &&
+    (request.action.type === 'stashPop' || request.action.type === 'stashDrop')
+      ? stashRemovalBlockReason(snapshot.capabilities)
+      : null)
   const localBranches = snapshot.branches.filter((branch) => !branch.remote)
   const parentNames = localBranches.map((branch) => branch.name)
   if (
@@ -297,7 +329,13 @@ export function WorkflowDialog({
                               : 'Merge one bottom PR into the default branch. Then explicitly restack and publish the remaining branches. No automatic merges or queue enrollment.'
 
   const run = async (action: GitAction, label: string) => {
-    if (locked || captured.current.path !== snapshot.path) return
+    if (
+      locked ||
+      captured.current.path !== snapshot.path ||
+      shapeReason ||
+      actionBlockReason(snapshot.capabilities, action.type)
+    )
+      return
     const attemptRun = dispatch(async () => {
       const success = await runAction(action, label)
       if (!success && identity)
@@ -366,7 +404,7 @@ export function WorkflowDialog({
 
   const submit = async (event: React.FormEvent) => {
     event.preventDefault()
-    if (blocker || !actionInput) return
+    if (blocker || shapeReason || !actionInput) return
     const action = workflowAction(actionInput, {
       headOid: captured.current.head,
       currentBranch: captured.current.branch,
@@ -423,7 +461,7 @@ export function WorkflowDialog({
     stale,
     finished,
     partial: false,
-    blocked: Boolean(blocker) && !finished,
+    blocked: Boolean(blocker || shapeReason) && !finished,
   })
   const actionLabel =
     request.kind === 'confirm'
@@ -447,7 +485,7 @@ export function WorkflowDialog({
                 ? 'Restack the remaining branches onto the updated base, then publish to update their pull requests.'
                 : 'Publish next to update remote branches and PR bases. Rewritten branches require your explicit force-with-lease approval.'
               : phase === 'blocked'
-                ? blocker?.message
+                ? (shapeReason ?? blocker?.message)
                 : undefined
   const destructive = composition === 'destructive'
 
@@ -880,8 +918,11 @@ export function WorkflowDialog({
                     (branch) => branch.name === pr.head && branch.pr?.number === pr.number,
                   ) ? (
                     <Button
-                      variant="secondary"
-                      tooltip="Check the PR’s current head, reviews, checks, and allowed merge methods before merging."
+                      tooltip={
+                        actionBlockReason(snapshot.capabilities, 'executeStack') ??
+                        'Check the PR’s current head, reviews, checks, and allowed merge methods before merging.'
+                      }
+                      disabled={Boolean(actionBlockReason(snapshot.capabilities, 'executeStack'))}
                       onClick={() =>
                         onRequest({ kind: 'stack', operation: 'merge', branch: pr.head })
                       }
@@ -916,10 +957,20 @@ export function WorkflowDialog({
                             <Button
                               variant="danger"
                               size="sm"
+                              disabled={Boolean(
+                                actionBlockReason(
+                                  snapshot.capabilities,
+                                  pr.state === 'OPEN' ? 'closePr' : 'reopenPr',
+                                ),
+                              )}
                               tooltip={
-                                pr.state === 'OPEN'
+                                actionBlockReason(
+                                  snapshot.capabilities,
+                                  pr.state === 'OPEN' ? 'closePr' : 'reopenPr',
+                                ) ??
+                                (pr.state === 'OPEN'
                                   ? 'Close this PR without merging or deleting its branch. Unsaved edits are not applied.'
-                                  : 'Reopen this PR on GitHub. Unsaved edits are not applied.'
+                                  : 'Reopen this PR on GitHub. Unsaved edits are not applied.')
                               }
                               onClick={() =>
                                 run(
@@ -941,11 +992,21 @@ export function WorkflowDialog({
                         <Button
                           size="sm"
                           variant="ghost"
+                          disabled={Boolean(
+                            actionBlockReason(
+                              snapshot.capabilities,
+                              pr.state === 'OPEN' ? 'closePr' : 'reopenPr',
+                            ),
+                          )}
                           onClick={() => setConfirmPrState(true)}
                           tooltip={
-                            pr.state === 'OPEN'
+                            actionBlockReason(
+                              snapshot.capabilities,
+                              pr.state === 'OPEN' ? 'closePr' : 'reopenPr',
+                            ) ??
+                            (pr.state === 'OPEN'
                               ? 'Review closing this PR without merging. Its branch and commits will remain.'
-                              : 'Review reopening this closed PR on GitHub.'
+                              : 'Review reopening this closed PR on GitHub.')
                           }
                         >
                           {pr.state === 'OPEN' ? 'Close without merging…' : 'Reopen pull request…'}
@@ -1005,9 +1066,9 @@ export function WorkflowDialog({
                 <Button
                   type="submit"
                   variant={destructive ? 'danger' : 'accent'}
-                  disabled={Boolean(blocker)}
+                  disabled={Boolean(blocker || shapeReason)}
                   loading={busy}
-                  tooltip={blocker ? blocker.message : description}
+                  tooltip={shapeReason ?? (blocker ? blocker.message : description)}
                 >
                   {busy ? (
                     <LoaderCircle aria-hidden="true" className="size-3.5 animate-spin" />

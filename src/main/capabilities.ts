@@ -74,17 +74,17 @@ function classifyRefStorage(value: string | null): RefStorageFormat {
 }
 
 /**
- * `--show-ref-format` is authoritative. Older Git rejects the option, so the
- * `extensions.refstorage` key that the same command would have written is the
- * fallback; a relocated `files://` root still counts as the files backend.
+ * Older Git may echo an unknown --show-ref-format option with exit status zero.
+ * Only an actual format response overrides the configured backend.
  */
 async function detectRefStorage(
   repoPath: string,
 ): Promise<{ format: RefStorageFormat; detail: string | null }> {
   const reported = (await tryGit(repoPath, ['rev-parse', '--show-ref-format']))?.trim()
   const configured = (await getConfigValue(repoPath, 'extensions.refstorage'))?.trim() ?? null
-  const format = classifyRefStorage(reported || configured)
-  return { format, detail: format === 'files' ? null : configured || reported || null }
+  const value = reported === '--show-ref-format' ? configured : reported || configured
+  const format = classifyRefStorage(value)
+  return { format, detail: format === 'files' ? null : value || null }
 }
 
 async function worktreeInventory(repoPath: string): Promise<{ linked: boolean; count: number }> {

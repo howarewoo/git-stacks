@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { execFileSync, spawnSync } from 'node:child_process'
-import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
@@ -68,6 +68,38 @@ test('a standard repository reports a fully supported matrix', async () => {
     )
     assert.equal(capabilityAttentionCount(capabilityReport(capabilities)), 0)
   } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('an older Git echo of --show-ref-format falls back to files instead of inventing a backend', async () => {
+  const root = await scratch()
+  const originalPath = process.env.PATH
+  try {
+    await initRepo(root)
+    const bin = join(root, 'bin')
+    await mkdir(bin)
+    const realGit = execFileSync('which', ['git'], { encoding: 'utf8' }).trim()
+    const shim = join(bin, 'git')
+    await writeFile(
+      shim,
+      `#!/bin/sh
+if [ "$1" = "rev-parse" ] && [ "$2" = "--show-ref-format" ]; then
+  printf '%s\\n' '--show-ref-format'
+else
+  exec '${realGit}' "$@"
+fi
+`,
+    )
+    await chmod(shim, 0o755)
+    process.env.PATH = `${bin}:${originalPath ?? ''}`
+    const capabilities = await getRepositoryCapabilities(join(root, 'workspace'))
+    assert.equal(capabilities.refStorage, 'files')
+    assert.equal(capabilities.refStorageDetail, null)
+    assert.equal(reportEntry(capabilities, 'ref-storage').state, 'supported')
+  } finally {
+    if (originalPath === undefined) delete process.env.PATH
+    else process.env.PATH = originalPath
     await rm(root, { recursive: true, force: true })
   }
 })
@@ -429,12 +461,13 @@ test('the reftable backend is reported and never manipulated as ref files', asyn
     const capabilities = (await getSnapshot(repo)).capabilities
     assert.equal(capabilities.refStorage, 'reftable')
     assert.equal(reportEntry(capabilities, 'ref-storage').state, 'limited')
-
-    await assert.rejects(
-      runAction(repo, { type: 'stashDrop', ref: stash.ref, oid: stash.oid }),
-      /reftable reference storage/u,
-    )
-    assert.equal(git('rev-parse', 'refs/stash'), stash.oid)
+    for (const type of ['stashPop', 'stashDrop'] as const) {
+      await assert.rejects(
+        runAction(repo, { type, ref: stash.ref, oid: stash.oid }),
+        /reftable reference storage/u,
+      )
+      assert.equal(git('rev-parse', 'refs/stash'), stash.oid)
+    }
   } finally {
     await rm(root, { recursive: true, force: true })
   }

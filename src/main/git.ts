@@ -4250,7 +4250,7 @@ async function runDeleteBranch(
 export async function runAction(repoPath: string, value: GitAction): Promise<ActionResult> {
   const root = await resolveRepository(repoPath)
   const action = validateAction(value)
-  const blocked = actionBlockReason(await getRepositoryShapeFacts(root), action)
+  const blocked = actionBlockReason(await getRepositoryShapeFacts(root), action.type)
   if (blocked) throw new Error(blocked)
   if (isStackAction(action)) {
     return runStackAction(root, action)

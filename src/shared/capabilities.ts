@@ -158,10 +158,19 @@ function restrictions(
 }
 
 /** The single reason an action must not run, or null when the shape allows it. */
-export function actionBlockReason(shape: RepositoryShapeFacts, action: GitAction): string | null {
-  if (shape.bare && BARE_RESTRICTED_ACTIONS.includes(action.type)) return BARE_REASON
-  if (shape.detachedHead && BRANCH_ACTIONS.includes(action.type)) return DETACHED_REASON
+export function actionBlockReason(
+  shape: RepositoryShapeFacts,
+  type: GitAction['type'],
+): string | null {
+  if (shape.bare && BARE_RESTRICTED_ACTIONS.includes(type)) return BARE_REASON
+  if (shape.detachedHead && BRANCH_ACTIONS.includes(type)) return DETACHED_REASON
   return null
+}
+
+/** Removing a stash requires direct files-backed ref/reflog locks. Applying it does not. */
+export function stashRemovalBlockReason(capabilities: RepositoryCapabilities): string | null {
+  if (capabilities.refStorage === 'files') return null
+  return `Cannot safely remove a stash with ${capabilities.refStorageDetail ?? capabilities.refStorage} reference storage. Apply the stash without removing it instead.`
 }
 
 export function sparsePathReason(path: string): string {
@@ -178,6 +187,7 @@ export function submodulePathReason(path: string): string {
  * before it is attempted rather than after it fails.
  */
 export function capabilityReport(capabilities: RepositoryCapabilities): CapabilityReportEntry[] {
+  const removalReason = stashRemovalBlockReason(capabilities)
   const entries: CapabilityReportEntry[] = [
     {
       id: 'worktree',
@@ -212,7 +222,7 @@ export function capabilityReport(capabilities: RepositoryCapabilities): Capabili
       label: 'Submodules',
       state: capabilities.submodules ? 'limited' : 'supported',
       detail: capabilities.submodules
-        ? 'Tracked submodules are listed as their recorded commit. Staging a submodule path stages that commit only; Git Stacks never recurses into submodule contents.'
+        ? 'Tracked submodules are listed by recorded commit. Staging a gitlink records that commit only; Discard and in-app conflict resolution are disabled because Git Stacks never rewrites submodule contents.'
         : 'No tracked submodule configuration is present.',
       restrictions: [],
     },
@@ -247,9 +257,9 @@ export function capabilityReport(capabilities: RepositoryCapabilities): Capabili
         capabilities.refStorage === 'files'
           ? 'Refs are loose files and packed-refs, so ref paths can be resolved directly.'
           : capabilities.refStorage === 'reftable'
-            ? 'This repository stores refs in the reftable format. Operations that would rewrite ref files, such as removing a stash, are refused.'
-            : `This repository declares ${capabilities.refStorageDetail ?? 'an unknown'} reference storage, which Git Stacks does not manipulate.`,
-      restrictions: [],
+            ? 'This repository stores refs in the reftable format. Applying stashes is supported, but Pop and Drop cannot safely remove a stash.'
+            : `This repository declares ${capabilities.refStorageDetail ?? 'an unknown'} reference storage. Applying stashes is supported, but Pop and Drop cannot safely remove a stash.`,
+      restrictions: removalReason ? restrictions(['stashPop', 'stashDrop'], removalReason) : [],
     },
   ]
   return entries
