@@ -546,3 +546,17 @@ test('resolveStackNavigation navigates correctly up and down stack hierarchy', (
   // From feature-2: child is null
   assert.equal(resolveStackNavigation(feature2, branches, 'child'), null)
 })
+
+test('remote-only parent aliases preserve child and top navigation without checkout', () => {
+  const remoteParent = makeMockBranch('origin/fetched-parent', {
+    ref: 'refs/remotes/origin/fetched-parent',
+    remote: true,
+  })
+  const topic = makeMockBranch('topic', { parent: 'fetched-parent' })
+  const child = makeMockBranch('child', { parent: 'topic' })
+  const branches = [remoteParent, topic, child]
+
+  assert.equal(resolveStackNavigation(topic, branches, 'parent')?.ref, remoteParent.ref)
+  assert.equal(resolveStackNavigation(remoteParent, branches, 'child')?.ref, topic.ref)
+  assert.equal(resolveStackNavigation(remoteParent, branches, 'top')?.ref, child.ref)
+})

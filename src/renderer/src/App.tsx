@@ -299,6 +299,7 @@ function App() {
   const searchRef = React.useRef<HTMLInputElement>(null)
   const deleteCancelRef = React.useRef<HTMLButtonElement>(null)
   const paletteHandoffFocusRef = React.useRef<HTMLElement | null>(null)
+  const paletteDeleteHandoffRef = React.useRef(false)
   const deleteTriggerRef = React.useRef<HTMLButtonElement>(null)
 
   const setSnapshotAndSelection = React.useCallback((next: RepositorySnapshot) => {
@@ -711,6 +712,7 @@ function App() {
         (intent.kind === 'checkoutBranch' && Boolean(snapshot?.files.length))
       ) {
         paletteHandoffFocusRef.current = opener
+        paletteDeleteHandoffRef.current = intent.kind === 'deleteBranch'
       }
       switch (intent.kind) {
         case 'view':
@@ -782,6 +784,7 @@ function App() {
   React.useEffect(() => {
     if (
       !paletteHandoffFocusRef.current ||
+      paletteDeleteHandoffRef.current ||
       paletteOpen ||
       shortcutSettingsOpen ||
       checkoutGuardTarget ||
@@ -810,6 +813,8 @@ function App() {
 
   React.useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
+      if (event.isComposing || event.keyCode === 229) return
+
       // If any modal dialog is currently open, don't execute global hotkeys underneath
       const anyModalOpen =
         paletteOpen ||
@@ -820,11 +825,19 @@ function App() {
         prOpen ||
         workflow !== null
 
-      // Cmd/Ctrl+K opens a palette instead of only focusing the current filter field
+      // A bare printable remap must not steal text from either search field.
+      // Modified openers such as Cmd/Ctrl+K still work while editing.
       if (matchesChord(event, shortcutBindings['palette.open'], isMac)) {
         if (anyModalOpen && !paletteOpen) return
+        if (
+          isEditableTarget(event.target) &&
+          event.key.length === 1 &&
+          !event.metaKey &&
+          !event.ctrlKey
+        )
+          return
         event.preventDefault()
-        setPaletteOpen((prev) => !prev)
+        if (!event.repeat) setPaletteOpen((prev) => !prev)
         return
       }
 
@@ -2010,6 +2023,14 @@ function App() {
           }}
           onCloseAutoFocus={(event) => {
             event.preventDefault()
+            if (paletteDeleteHandoffRef.current) {
+              paletteDeleteHandoffRef.current = false
+              const target = paletteHandoffFocusRef.current
+              paletteHandoffFocusRef.current = null
+              if (target?.isConnected && !('disabled' in target && target.disabled)) target.focus()
+              else searchRef.current?.focus()
+              return
+            }
             const trigger = deleteTriggerRef.current
             if (trigger && !trigger.disabled) trigger.focus()
             else searchRef.current?.focus()

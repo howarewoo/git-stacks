@@ -163,6 +163,7 @@ export function CommandPaletteContent({
   )
 
   const handleKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
+    if (event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) return
     if (event.key === 'ArrowDown') {
       event.preventDefault()
       setConfirmingId(null)
@@ -183,7 +184,7 @@ export function CommandPaletteContent({
       setSelectedIndex(Math.max(0, displayedItems.length - 1))
     } else if (event.key === 'Enter') {
       event.preventDefault()
-      if (selectedItem) {
+      if (!event.repeat && selectedItem) {
         handleExecute(selectedItem)
       }
     } else if (event.key === 'Escape') {

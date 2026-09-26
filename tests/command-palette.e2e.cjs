@@ -20,6 +20,10 @@ git('add', 'shared.txt')
 git('commit', '-m', 'baseline')
 git('branch', 'feature')
 git('checkout', '-b', 'topic')
+git('branch', 'child')
+git('config', 'branch.child.parent', 'topic')
+git('update-ref', 'refs/remotes/origin/fetched-parent', 'HEAD')
+git('config', 'branch.topic.parent', 'fetched-parent')
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 async function availablePort() {
@@ -116,10 +120,17 @@ async function main() {
       await send('Input.dispatchKeyEvent', { ...options, type: 'keyUp' })
     }
     async function search(text) {
-      await page(`(() => { const input = document.querySelector('[role="combobox"]');
-        const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
-        setter.call(input, ${JSON.stringify(text)}); input.dispatchEvent(new Event('input', { bubbles: true }));
-      })()`)
+      await page(
+        `(() => { const input = document.querySelector('[role="combobox"]'); input.focus(); input.select() })()`,
+      )
+      if (text) await send('Input.insertText', { text })
+      else
+        await send('Input.dispatchKeyEvent', {
+          type: 'keyDown',
+          key: 'Backspace',
+          code: 'Backspace',
+          windowsVirtualKeyCode: 8,
+        })
       await until(
         `search ${text}`,
         `document.querySelector('[role="combobox"]')?.value === ${JSON.stringify(text)}`,
@@ -135,8 +146,130 @@ async function main() {
       `document.querySelector('[aria-label="Filter current view branches, files, and pull requests"]')`,
     )
     await page(`${button('Fetch')}.focus()`)
-    await key('k', process.platform === 'darwin' ? 4 : 2)
+    await send('Input.dispatchKeyEvent', {
+      type: 'keyDown',
+      key: 'k',
+      code: 'KeyK',
+      windowsVirtualKeyCode: 75,
+      modifiers: process.platform === 'darwin' ? 4 : 2,
+    })
     await until('palette combobox', `document.querySelector('[role="combobox"]')`)
+    await send('Input.dispatchKeyEvent', {
+      type: 'keyDown',
+      key: 'k',
+      code: 'KeyK',
+      windowsVirtualKeyCode: 75,
+      modifiers: process.platform === 'darwin' ? 4 : 2,
+      autoRepeat: true,
+    })
+    assert.ok(await page(`Boolean(document.querySelector('[role="combobox"]'))`))
+    await send('Input.dispatchKeyEvent', {
+      type: 'keyUp',
+      key: 'k',
+      code: 'KeyK',
+      windowsVirtualKeyCode: 75,
+      modifiers: process.platform === 'darwin' ? 4 : 2,
+    })
+    await search('Fetch')
+    await until(
+      'fetch result',
+      `document.querySelector('[role="option"]')?.textContent?.includes('Fetch')`,
+    )
+    const activeBeforeComposition = await page(
+      `document.querySelector('[role="combobox"]').getAttribute('aria-activedescendant')`,
+    )
+    for (const eventOptions of [
+      { key: 'ArrowDown', isComposing: true },
+      { key: 'ArrowUp', keyCode: 229 },
+      { key: 'Enter', isComposing: true },
+      { key: 'Enter', keyCode: 229 },
+    ]) {
+      await page(`(() => {
+        const options = ${JSON.stringify(eventOptions)};
+        const event = new KeyboardEvent('keydown', { key: options.key, isComposing: Boolean(options.isComposing), bubbles: true, cancelable: true });
+        if (options.keyCode) Object.defineProperty(event, 'keyCode', { value: options.keyCode });
+        document.querySelector('[role="combobox"]').dispatchEvent(event);
+      })()`)
+      assert.ok(await page(`Boolean(document.querySelector('[role="combobox"]'))`))
+      assert.equal(
+        await page(
+          `document.querySelector('[role="combobox"]').getAttribute('aria-activedescendant')`,
+        ),
+        activeBeforeComposition,
+      )
+    }
+    await search('')
+    const activeBeforeRepeat = await page(
+      `document.querySelector('[role="combobox"]').getAttribute('aria-activedescendant')`,
+    )
+    await send('Input.dispatchKeyEvent', {
+      type: 'keyDown',
+      key: 'ArrowDown',
+      code: 'ArrowDown',
+      windowsVirtualKeyCode: 40,
+      autoRepeat: true,
+    })
+    assert.notEqual(
+      await page(
+        `document.querySelector('[role="combobox"]').getAttribute('aria-activedescendant')`,
+      ),
+      activeBeforeRepeat,
+    )
+    await send('Input.dispatchKeyEvent', {
+      type: 'keyUp',
+      key: 'ArrowDown',
+      code: 'ArrowDown',
+      windowsVirtualKeyCode: 40,
+    })
+    await search('origin/fetched-parent')
+    await until(
+      'remote parent result',
+      `document.querySelector('[role="option"]')?.textContent?.includes('origin/fetched-parent')`,
+    )
+    await key('Enter')
+    await until(
+      'selected remote parent',
+      `Array.from(document.querySelectorAll('h2')).some((element) => element.textContent === 'origin/fetched-parent')`,
+    )
+    assert.equal(git('symbolic-ref', '--short', 'HEAD'), 'topic')
+    await key('k', process.platform === 'darwin' ? 4 : 2)
+    await search('Select child branch')
+    await until(
+      'child command enabled',
+      `document.querySelector('[role="option"]')?.getAttribute('aria-disabled') === 'false'`,
+    )
+    await key('Enter')
+    await until(
+      'selected remote child',
+      `Array.from(document.querySelectorAll('h2')).some((element) => element.textContent === 'topic')`,
+    )
+    await key('k', process.platform === 'darwin' ? 4 : 2)
+    await search('Select parent branch')
+    await key('Enter')
+    await until(
+      'reselected remote parent',
+      `Array.from(document.querySelectorAll('h2')).some((element) => element.textContent === 'origin/fetched-parent')`,
+    )
+    await key('k', process.platform === 'darwin' ? 4 : 2)
+    await search('Select stack top')
+    await until(
+      'top command enabled',
+      `document.querySelector('[role="option"]')?.getAttribute('aria-disabled') === 'false'`,
+    )
+    await key('Enter')
+    await until(
+      'selected remote stack top',
+      `Array.from(document.querySelectorAll('h2')).some((element) => element.textContent === 'child')`,
+    )
+    assert.equal(git('symbolic-ref', '--short', 'HEAD'), 'topic')
+    await key('k', process.platform === 'darwin' ? 4 : 2)
+    await search('topic')
+    await key('Enter')
+    await until(
+      'reselected topic',
+      `Array.from(document.querySelectorAll('h2')).some((element) => element.textContent === 'topic')`,
+    )
+    await key('k', process.platform === 'darwin' ? 4 : 2)
     await search('Publish topic stack')
     await until(
       'disabled publish action',
@@ -153,15 +286,42 @@ async function main() {
       `Array.from(document.querySelectorAll('h2')).some((element) => element.textContent === 'feature')`,
     )
     assert.equal(git('symbolic-ref', '--short', 'HEAD'), 'topic')
+    await page(`${button('Fetch')}.focus()`)
     await key('k', process.platform === 'darwin' ? 4 : 2)
     await search('Delete feature')
-    await key('Enter')
+    await send('Input.dispatchKeyEvent', {
+      type: 'keyDown',
+      key: 'Enter',
+      code: 'Enter',
+      windowsVirtualKeyCode: 13,
+    })
     await until(
       'armed confirmation',
       `document.body.textContent.includes('Press Enter again to confirm')`,
     )
     const branchAfterFirstEnter = git('branch', '--list', 'feature')
+    await send('Input.dispatchKeyEvent', {
+      type: 'keyDown',
+      key: 'Enter',
+      code: 'Enter',
+      windowsVirtualKeyCode: 13,
+      autoRepeat: true,
+    })
+    assert.ok(await page(`document.body.textContent.includes('Press Enter again to confirm')`))
+    assert.equal(
+      await page(
+        `Boolean(document.querySelector('[role="dialog"]')?.textContent.includes('Delete local branch?'))`,
+      ),
+      false,
+    )
+    assert.match(git('branch', '--list', 'feature'), /feature/)
     assert.match(branchAfterFirstEnter, /feature/)
+    await send('Input.dispatchKeyEvent', {
+      type: 'keyUp',
+      key: 'Enter',
+      code: 'Enter',
+      windowsVirtualKeyCode: 13,
+    })
     await key('Escape')
     await until('disarmed', `!document.body.textContent.includes('Press Enter again to confirm')`)
     await key('Enter')
@@ -174,10 +334,16 @@ async function main() {
     await until('dialog closed', `!document.querySelector('[role="dialog"]')`)
     const branchAfterCancel = git('branch', '--list', 'feature')
     assert.match(branchAfterCancel, /feature/)
-    await until(
-      'opener focused after dialog',
-      `document.activeElement?.textContent?.trim() === 'Fetch'`,
-    )
+    try {
+      await until(
+        'opener focused after dialog',
+        `document.activeElement?.textContent?.trim() === 'Fetch'`,
+      )
+    } catch (error) {
+      throw new Error(
+        `${error.message}; active=${JSON.stringify(await page('({text:document.activeElement?.textContent, html:document.activeElement?.outerHTML.slice(-400), connected:document.activeElement?.isConnected})'))}`,
+      )
+    }
     const restoredFocus = await page('document.activeElement?.textContent?.trim()')
     await key('k', process.platform === 'darwin' ? 4 : 2)
     await search('Delete feature')
@@ -194,6 +360,143 @@ async function main() {
     )
     assert.equal(git('branch', '--list', 'feature'), '')
     assert.equal(git('symbolic-ref', '--short', 'HEAD'), 'topic')
+    writeFileSync(join(repository, 'shared.txt'), 'baseline\nuncommitted\n')
+    assert.match(git('status', '--short', 'shared.txt'), /M shared\.txt/)
+    await page(`document.querySelector('[aria-label="Refresh repository"]').click()`)
+    await until(
+      'dirty snapshot',
+      `Array.from(document.querySelectorAll('.workspace-nav button')).find((element) => element.textContent.includes('Working changes'))?.querySelector('.nav-count')?.textContent === '1'`,
+    )
+    await key('k', process.platform === 'darwin' ? 4 : 2)
+    await search('child')
+    await key('Enter')
+    await until(
+      'selected dirty checkout target',
+      `Array.from(document.querySelectorAll('h2')).some((element) => element.textContent === 'child')`,
+    )
+    async function guardedCheckout() {
+      await key('k', process.platform === 'darwin' ? 4 : 2)
+      await search('Check out child')
+      await until(
+        'checkout command',
+        `document.querySelector('[role="option"][aria-disabled="false"]')`,
+      )
+      await key('Enter')
+      await until(
+        'dirty checkout alternatives',
+        `document.querySelector('[role="dialog"]')?.textContent?.includes('Uncommitted changes in working tree')`,
+      )
+      for (const label of [
+        'Cancel',
+        'Review changes',
+        'Carry changes and check out',
+        'Stash changes…',
+      ]) {
+        assert.ok(
+          await page(`Boolean(${button(label)})`),
+          `missing dirty checkout alternative: ${label}`,
+        )
+      }
+    }
+    await guardedCheckout()
+    await page(`${button('Cancel')}.click()`)
+    await until('dirty guard cancelled', `!document.querySelector('[role="dialog"]')`)
+    assert.equal(git('symbolic-ref', '--short', 'HEAD'), 'topic')
+    assert.match(git('status', '--short', 'shared.txt'), /M shared\.txt/)
+    await guardedCheckout()
+    await page(`${button('Stash changes…')}.click()`)
+    await until(
+      'stash workflow',
+      `document.querySelector('[role="dialog"]')?.textContent?.includes('Stash')`,
+    )
+    await page(`${button('Cancel')}.click()`)
+    await until('stash cancelled', `!document.querySelector('[role="dialog"]')`)
+    assert.equal(git('symbolic-ref', '--short', 'HEAD'), 'topic')
+    assert.equal(git('stash', 'list'), '')
+    await guardedCheckout()
+    await page(`${button('Review changes')}.click()`)
+    await until(
+      'review changes view',
+      `document.querySelector('main h1')?.textContent === 'Working changes'`,
+    )
+    assert.equal(git('symbolic-ref', '--short', 'HEAD'), 'topic')
+    await guardedCheckout()
+    await page(`${button('Carry changes and check out')}.click()`)
+    for (
+      let attempt = 0;
+      attempt < 100 && git('symbolic-ref', '--short', 'HEAD') !== 'child';
+      attempt++
+    ) {
+      await delay(50)
+    }
+    assert.equal(git('symbolic-ref', '--short', 'HEAD'), 'child')
+    assert.match(git('status', '--short', 'shared.txt'), /M shared\.txt/)
+    await key('k', process.platform === 'darwin' ? 4 : 2)
+    await search('Go to Branches')
+    await key('Enter')
+    await until(
+      'child current in branch view',
+      `document.querySelector('[aria-label="child, current branch"]')`,
+    )
+    await key('k', process.platform === 'darwin' ? 4 : 2)
+    await search('Keyboard shortcuts')
+    await until(
+      'shortcuts result',
+      `document.querySelector('[role="option"]')?.textContent?.includes('Keyboard shortcuts')`,
+    )
+    await key('Enter')
+    await until(
+      'shortcut settings',
+      `document.querySelector('[aria-label="Change shortcut for Open command palette"]')`,
+    )
+    await page(
+      `document.querySelector('[aria-label="Change shortcut for Open command palette"]').click()`,
+    )
+    await send('Input.dispatchKeyEvent', {
+      type: 'keyDown',
+      key: '+',
+      code: 'Equal',
+      windowsVirtualKeyCode: 187,
+      modifiers: 8,
+    })
+    await until(
+      'printable remap saved',
+      `document.body.textContent.includes('Updated shortcut for "Open command palette"')`,
+    )
+    await page(`${button('Done')}.click()`)
+    await until('shortcut settings closed', `!document.querySelector('[role="dialog"]')`)
+    const filter = '[aria-label="Filter current view branches, files, and pull requests"]'
+    await page(`document.querySelector(${JSON.stringify(filter)}).focus()`)
+    await send('Input.dispatchKeyEvent', {
+      type: 'keyDown',
+      key: '+',
+      code: 'Equal',
+      text: '+',
+      windowsVirtualKeyCode: 187,
+      modifiers: 8,
+    })
+    assert.equal(await page(`document.querySelector(${JSON.stringify(filter)}).value`), '+')
+    assert.equal(await page(`Boolean(document.querySelector('[role="combobox"]'))`), false)
+    await page(`${button('Fetch')}.focus()`)
+    await send('Input.dispatchKeyEvent', {
+      type: 'keyDown',
+      key: '+',
+      code: 'Equal',
+      text: '+',
+      windowsVirtualKeyCode: 187,
+      modifiers: 8,
+    })
+    await until('remapped opener', `document.querySelector('[role="combobox"]')`)
+    await send('Input.dispatchKeyEvent', {
+      type: 'keyDown',
+      key: '+',
+      code: 'Equal',
+      text: '+',
+      windowsVirtualKeyCode: 187,
+      modifiers: 8,
+    })
+    assert.equal(await page(`document.querySelector('[role="combobox"]')?.value`), '+')
+    assert.ok(await page(`Boolean(document.querySelector('[role="combobox"]'))`))
     if (process.env.PALETTE_EVIDENCE_DIR) {
       const screenshot = await send('Page.captureScreenshot', { format: 'png' })
       writeFileSync(
@@ -209,6 +512,10 @@ async function main() {
         branchAfterCancel,
         restoredFocus,
         confirmedDeletion: git('branch', '--list', 'feature'),
+        dirtyCarryStatus: git('status', '--short', 'shared.txt'),
+        stashList: git('stash', 'list'),
+        editableFilter: await page(`document.querySelector(${JSON.stringify(filter)}).value`),
+        editablePaletteSearch: await page(`document.querySelector('[role="combobox"]')?.value`),
       }),
     )
   } finally {

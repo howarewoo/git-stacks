@@ -17,8 +17,14 @@ export function resolveStackNavigation(
   const byName = indexBranchesByParentName(combined)
   const ordered = sortBranchesByUpdatedAt(combined)
 
-  const childrenOf = (parentName: string): Branch[] => {
-    return ordered.filter((b) => !b.remote && b.parent === parentName && b.ref !== current.ref)
+  const childrenOf = (parent: Branch): Branch[] => {
+    return ordered.filter(
+      (branch) =>
+        !branch.remote &&
+        branch.ref !== parent.ref &&
+        branch.parent !== null &&
+        byName.get(branch.parent)?.ref === parent.ref,
+    )
   }
 
   switch (relation) {
@@ -28,7 +34,7 @@ export function resolveStackNavigation(
     }
 
     case 'child': {
-      const children = childrenOf(current.name)
+      const children = childrenOf(current)
       return children[0] ?? null
     }
 
@@ -48,9 +54,7 @@ export function resolveStackNavigation(
       let candidate: Branch = current
       const visited = new Set<string>([candidate.name])
       while (true) {
-        const children = ordered.filter(
-          (b) => !b.remote && b.parent === candidate.name && !visited.has(b.name),
-        )
+        const children = childrenOf(candidate).filter((branch) => !visited.has(branch.name))
         if (children.length === 0) break
         candidate = children[0]
         visited.add(candidate.name)
