@@ -232,6 +232,10 @@ function handleApi(state, args) {
       allow_rebase_merge: state.repository.allowRebaseMerge === true,
     }
   }
+  if (endpoint === `${prefix}/pulls` && method === 'POST') {
+    const pr = createPullRequest(state, forms)
+    return { ...restPullRequest(pr), html_url: pr.url }
+  }
   const prNumber = parseNumberFromEndpoint(endpoint, `${prefix}/pulls`)
   if (prNumber !== null && endpoint.endsWith(`/pulls/${prNumber}`)) {
     const pr = findPr(state, prNumber)
@@ -240,6 +244,7 @@ function handleApi(state, args) {
     if (forms.has('title')) pr.title = forms.get('title')
     if (forms.has('body')) pr.body = forms.get('body')
     if (forms.has('base')) pr.base = forms.get('base')
+    if (forms.has('draft')) pr.draft = String(forms.get('draft')) === 'true'
     if (forms.has('state')) {
       const requested = String(forms.get('state')).toLowerCase()
       if (requested === 'open' && pr.state !== 'MERGED') pr.state = 'OPEN'
@@ -295,77 +300,61 @@ function handleGraphql(state, args) {
   const forms = formValues(args)
   requireRepository(state, args)
   const query = forms.get('query') || ''
-  const numberValue = forms.get('number')
   if (query.includes('pullRequest(number:')) {
-    const number = Number(numberValue)
-    const pr = findPr(state, number)
+    const pr = findPr(state, Number(forms.get('number')))
     return { data: { repository: { pullRequest: graphPullRequest(pr, true) } } }
   }
-  const nodes = state.prs
-    .filter((pr) => pr.state === 'OPEN')
-    .map((pr) => graphPullRequest(pr, false))
-  return [
-    {
-      data: {
-        repository: {
-          pullRequests: {
-            nodes,
-            pageInfo: { hasNextPage: false, endCursor: null },
+  const open = state.prs.filter((pr) => pr.state === 'OPEN')
+  // One PR per page, so a second request carrying a cursor proves pagination advanced.
+  const after = forms.get('endCursor')
+  const start = after && after !== 'null' ? Number(String(after).replace('cursor:', '')) : 0
+  const next = start + 1
+  return {
+    data: {
+      repository: {
+        pullRequests: {
+          nodes: open.slice(start, start + 1).map((pr) => graphPullRequest(pr, false)),
+          pageInfo: {
+            hasNextPage: next < open.length,
+            endCursor: next < open.length ? `cursor:${next}` : null,
           },
         },
       },
     },
-  ]
+  }
 }
 
-function handlePr(state, args) {
-  const subcommand = args[1]
-  requireRepository(state, args)
-  if (subcommand === 'create') {
-    const headValue = valueFor(args, '--head')
-    const base = valueFor(args, '--base')
-    const title = valueFor(args, '--title')
-    const body = valueFor(args, '--body')
-    if (!headValue || !base || typeof title !== 'string' || typeof body !== 'string') {
-      fail('pr create requires head, base, title, and body')
-    }
-    const separator = headValue.indexOf(':')
-    const owner = separator >= 0 ? headValue.slice(0, separator) : state.repository.owner
-    const head = separator >= 0 ? headValue.slice(separator + 1) : headValue
-    const headRepository = `${owner}/${state.repository.name}`
-    const headOid = bareRef(`refs/heads/${head}`)
-    if (!headOid) fail(`cannot create PR for missing branch ${head}`)
-    const number = nextNumber(state)
-    const pr = {
-      number,
-      title,
-      body,
-      base,
-      head,
-      headRepository,
-      draft: args.includes('--draft'),
-      state: 'OPEN',
-      checks: 'none',
-      reviewDecision: null,
-      mergeState: 'CLEAN',
-      url: `https://github.com/${state.repository.owner}/${state.repository.name}/pull/${number}`,
-      headOid,
-      mergeOid: null,
-      mergedAt: null,
-    }
-    state.prs.push(pr)
-    if (!state.comments) state.comments = {}
-    state.comments[String(number)] = []
-    return `${pr.url}\n`
+function createPullRequest(state, forms) {
+  const head = forms.get('head') || ''
+  const separator = head.indexOf(':')
+  const owner = separator >= 0 ? head.slice(0, separator) : state.repository.owner
+  const branch = separator >= 0 ? head.slice(separator + 1) : head
+  const headOid = bareRef(`refs/heads/${branch}`)
+  if (!headOid) fail(`cannot create PR for missing branch ${branch}`)
+  if (state.prs.some((pr) => pr.head === branch && pr.state === 'OPEN'))
+    fail(`a pull request for ${branch} already exists`)
+  const number = nextNumber(state)
+  const pr = {
+    number,
+    title: forms.get('title') || '',
+    body: forms.get('body') || '',
+    base: forms.get('base') || '',
+    head: branch,
+    headRepository: `${owner}/${state.repository.name}`,
+    draft: forms.get('draft') === 'true',
+    state: 'OPEN',
+    checks: 'none',
+    reviewDecision: null,
+    mergeState: 'CLEAN',
+    url: `https://github.com/${state.repository.owner}/${state.repository.name}/pull/${number}`,
+    headOid,
+    mergeOid: null,
+    mergedAt: null,
   }
-  if (subcommand === 'ready') {
-    const number = Number(args[2])
-    const pr = findPr(state, number)
-    if (pr.state === 'MERGED') fail(`pull request #${number} is already merged`)
-    pr.draft = args.includes('--undo')
-    return ''
-  }
-  fail(`unknown gh pr request: ${args.join(' ')}`)
+  state.prs.push(pr)
+  if (!state.comments) state.comments = {}
+  state.comments[String(number)] = []
+  return pr
 }
 
 const args = process.argv.slice(2)
@@ -379,9 +368,6 @@ try {
   }
   if (args[0] === 'api' && args.includes('graphql')) result = handleGraphql(state, args)
   else if (args[0] === 'api') result = handleApi(state, args)
-  else if (args[0] === 'pr') result = handlePr(state, args)
-  else if (args[0] === 'auth' && args[1] === 'status')
-    result = 'github.com\n  Logged in to github.com as fixture-user\n'
   else fail(`unknown gh request: ${args.join(' ')}`)
   saveState(state)
   if (typeof result === 'string') process.stdout.write(result)

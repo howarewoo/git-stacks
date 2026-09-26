@@ -22,7 +22,6 @@ import {
   ensureClean,
   ensureNoBusyOperation,
   ensureNotCheckedOutElsewhere,
-  execute,
   getBranchParent,
   getConfigValue,
   getCurrentBranch,
@@ -44,6 +43,7 @@ import {
   validateBranchName,
 } from './git-core'
 import { canonicalRemoteName, getGitHubData, getPullRequest, pullRequestRepository } from './github'
+import { githubTransport } from './github-transport'
 import type { GitHubResult } from './github'
 
 const PLAN_TTL_MS = 5 * 60_000
@@ -1158,7 +1158,7 @@ async function capturePlan(
     }
   }
   if (kind === 'merge' && originFullName) {
-    const allowed = await repositoryMergeMethods(root, originFullName)
+    const allowed = await repositoryMergeMethods(originFullName)
     if (!allowed) blockers.push('Repository merge-method policy is unavailable; merge is blocked')
     else mergeMethods = allowed
   }
@@ -2179,17 +2179,17 @@ async function currentOrigin(
   return { url, fullName: remote.fullName, pushUrl }
 }
 async function repositoryMergeMethods(
-  repoPath: string,
   fullName: string,
 ): Promise<('merge' | 'squash' | 'rebase')[] | null> {
   try {
-    const output = await runGh(repoPath, ['api', '--hostname', 'github.com', `repos/${fullName}`])
-    const value: unknown = JSON.parse(output)
-    if (!isRecord(value)) return null
+    const { data } = await githubTransport().rest<Record<string, unknown>>({
+      path: `repos/${fullName}`,
+    })
+    if (!isRecord(data)) return null
     const methods: ('merge' | 'squash' | 'rebase')[] = []
-    if (value.allow_merge_commit === true) methods.push('merge')
-    if (value.allow_squash_merge === true) methods.push('squash')
-    if (value.allow_rebase_merge === true) methods.push('rebase')
+    if (data.allow_merge_commit === true) methods.push('merge')
+    if (data.allow_squash_merge === true) methods.push('squash')
+    if (data.allow_rebase_merge === true) methods.push('rebase')
     return methods
   } catch {
     return null
@@ -2406,77 +2406,47 @@ async function pushBranch(
 }
 
 async function createPullRequest(
-  repoPath: string,
   fullName: string,
   branch: string,
   base: string,
   title: string,
   draft: boolean,
 ): Promise<void> {
-  const body = `${title}\n\n${STACK_MARKER}\nGit Stacks branch: ${branch}\nBase: ${base}`
-  const args = [
-    'pr',
-    'create',
-    '--repo',
-    `github.com/${fullName}`,
-    '--head',
-    branch,
-    '--base',
-    base,
-    '--title',
-    title,
-    '--body',
-    body,
-  ]
-  if (draft) args.push('--draft')
   try {
-    await runGh(repoPath, args)
+    await githubTransport().rest({
+      method: 'POST',
+      path: `repos/${fullName}/pulls`,
+      body: {
+        title,
+        head: branch,
+        base,
+        body: `${title}\n\n${STACK_MARKER}\nGit Stacks branch: ${branch}\nBase: ${base}`,
+        draft,
+      },
+    })
   } catch (error) {
     throw new Error(`Could not create pull request for ${branch}: ${commandDetail(error)}`)
   }
 }
 
-async function runGh(repoPath: string, args: string[]): Promise<string> {
-  return execute('gh', args, repoPath)
-}
-
-async function patchPullRequestBase(
-  repoPath: string,
+async function patchPullRequest(
   fullName: string,
   number: number,
-  base: string,
+  body: Record<string, unknown>,
 ): Promise<void> {
-  await runGh(repoPath, [
-    'api',
-    '--hostname',
-    'github.com',
-    '--method',
-    'PATCH',
-    `repos/${fullName}/pulls/${number}`,
-    '-f',
-    `base=${base}`,
-  ])
-}
-
-async function setPullRequestDraft(
-  repoPath: string,
-  fullName: string,
-  number: number,
-  draft: boolean,
-): Promise<void> {
-  const args = ['pr', 'ready', String(number), '--repo', `github.com/${fullName}`]
-  if (draft) args.push('--undo')
-  await runGh(repoPath, args)
+  await githubTransport().rest({
+    method: 'PATCH',
+    path: `repos/${fullName}/pulls/${number}`,
+    body,
+  })
 }
 
 async function linkStackComments(
-  repoPath: string,
   fullName: string,
   pullRequests: Array<{ branch: string; pr: PullRequest }>,
 ): Promise<void> {
-  const viewer: unknown = JSON.parse(
-    await runGh(repoPath, ['api', '--hostname', 'github.com', 'user']),
-  )
+  const transport = githubTransport()
+  const { data: viewer } = await transport.rest<Record<string, unknown>>({ path: 'user' })
   if (!isRecord(viewer) || typeof viewer.id !== 'number')
     throw new Error('Could not verify the authenticated GitHub comment author')
   const endMarker = '<!-- /git-stacks:stack-links:v1 -->'
@@ -2493,12 +2463,8 @@ async function linkStackComments(
     comment.body.startsWith(`${STACK_MARKER}\n`)
   for (const entry of pullRequests) {
     const endpoint = `repos/${fullName}/issues/${entry.pr.number}/comments`
-    const pages: unknown = JSON.parse(
-      await runGh(repoPath, ['api', '--hostname', 'github.com', '--paginate', '--slurp', endpoint]),
-    )
-    if (!Array.isArray(pages) || !pages.every(Array.isArray))
-      throw new Error(`Could not read all comments for PR #${entry.pr.number}`)
-    const candidates = pages.flat().filter(owned)
+    const comments = await transport.paginate<unknown>({ path: endpoint })
+    const candidates = comments.filter(owned)
     if (candidates.length > 1)
       throw new Error(
         `Multiple owned stack comments exist on PR #${entry.pr.number}; reconcile them on GitHub before publishing`,
@@ -2507,17 +2473,11 @@ async function linkStackComments(
     let body = managed
     const existing = candidates[0]
     if (existing) {
-      const current: unknown = JSON.parse(
-        await runGh(repoPath, [
-          'api',
-          '--hostname',
-          'github.com',
-          `repos/${fullName}/issues/comments/${existing.id}`,
-        ]),
-      )
-      if (!owned(current))
-        throw new Error(`Stack comment ownership changed on PR #${entry.pr.number}`)
-      const previous = current.body as string
+      const { data } = await transport.rest<Record<string, unknown>>({
+        path: `repos/${fullName}/issues/comments/${existing.id}`,
+      })
+      if (!owned(data)) throw new Error(`Stack comment ownership changed on PR #${entry.pr.number}`)
+      const previous = data.body as string
       const end = previous.indexOf(endMarker)
       if (
         end < 0 ||
@@ -2528,46 +2488,29 @@ async function linkStackComments(
           `The owned stack comment on PR #${entry.pr.number} has ambiguous boundaries; preserve and reconcile it on GitHub`,
         )
       }
-      id = current.id as number
+      id = data.id as number
       body += previous.slice(end + endMarker.length)
       if (body !== previous)
-        await runGh(repoPath, [
-          'api',
-          '--hostname',
-          'github.com',
-          '--method',
-          'PATCH',
-          `repos/${fullName}/issues/comments/${id}`,
-          '-f',
-          `body=${body}`,
-        ])
+        await transport.rest({
+          method: 'PATCH',
+          path: `repos/${fullName}/issues/comments/${id}`,
+          body: { body },
+        })
     } else {
-      const created: unknown = JSON.parse(
-        await runGh(repoPath, [
-          'api',
-          '--hostname',
-          'github.com',
-          '--method',
-          'POST',
-          endpoint,
-          '-f',
-          `body=${body}`,
-        ]),
-      )
+      const { data: created } = await transport.rest<Record<string, unknown>>({
+        method: 'POST',
+        path: endpoint,
+        body: { body },
+      })
       if (!owned(created))
         throw new Error(
           `Stack comment creation for PR #${entry.pr.number} is unconfirmed; inspect GitHub before retrying`,
         )
       id = created.id as number
     }
-    const readBack: unknown = JSON.parse(
-      await runGh(repoPath, [
-        'api',
-        '--hostname',
-        'github.com',
-        `repos/${fullName}/issues/comments/${id}`,
-      ]),
-    )
+    const { data: readBack } = await transport.rest<Record<string, unknown>>({
+      path: `repos/${fullName}/issues/comments/${id}`,
+    })
     if (!owned(readBack) || readBack.body !== body)
       throw new Error(
         `Stack navigation for PR #${entry.pr.number} did not match its confirmed content`,
@@ -2638,7 +2581,6 @@ async function publishStack(
     }
     if (!pr) {
       await createPullRequest(
-        repoPath,
         canonical.fullName,
         entry.branch,
         base,
@@ -2653,7 +2595,7 @@ async function publishStack(
           `Pull request creation for ${entry.branch} returned no canonical head; retry only after a fresh preview`,
         )
     } else if (pr.base !== base) {
-      await patchPullRequestBase(repoPath, canonical.fullName, pr.number, base)
+      await patchPullRequest(canonical.fullName, pr.number, { base })
       const afterPatch = await getPullRequest(repoPath, pr.number)
       if (afterPatch.base !== base)
         throw new Error(`Pull request #${pr.number} did not accept base ${base}`)
@@ -2674,7 +2616,7 @@ async function publishStack(
     }
     published.push({ branch: entry.branch, pr: readBack })
   }
-  await linkStackComments(repoPath, canonical.fullName, published)
+  await linkStackComments(canonical.fullName, published)
   return {
     message: `Published ${published.length} stack pull request${published.length === 1 ? '' : 's'}`,
   }
@@ -2724,7 +2666,7 @@ async function mergeStack(
   const blockers = mergeBlockers(currentPr, plan.defaultBranch, entry.oldTip)
   blockers.push(...mergeBlockers(canonical, plan.defaultBranch, entry.oldTip))
   if (blockers.length > 0) throw new Error([...new Set(blockers)].join('; '))
-  const allowedMethods = await repositoryMergeMethods(repoPath, plan.originFullName)
+  const allowedMethods = await repositoryMergeMethods(plan.originFullName)
   if (
     !plan.mergeMethods.includes(action.mergeMethod) ||
     !allowedMethods ||
@@ -2735,18 +2677,11 @@ async function mergeStack(
   await setPullRequestNumber(repoPath, entry.branch, entry.pr.number)
   let mergeError: unknown
   try {
-    await runGh(repoPath, [
-      'api',
-      '--hostname',
-      'github.com',
-      '--method',
-      'PUT',
-      `repos/${plan.originFullName}/pulls/${entry.pr.number}/merge`,
-      '-f',
-      `sha=${entry.pr.headOid}`,
-      '-f',
-      `merge_method=${action.mergeMethod}`,
-    ])
+    await githubTransport().rest({
+      method: 'PUT',
+      path: `repos/${plan.originFullName}/pulls/${entry.pr.number}/merge`,
+      body: { sha: entry.pr.headOid, merge_method: action.mergeMethod },
+    })
   } catch (error) {
     mergeError = error
   }
@@ -2840,19 +2775,8 @@ async function updatePullRequest(
   const origin = await currentOrigin(repoPath)
   const current = await getPullRequest(repoPath, number)
   if (current.state === 'MERGED') throw new Error(`Pull request #${number} is already merged`)
-  await runGh(repoPath, [
-    'api',
-    '--hostname',
-    'github.com',
-    '--method',
-    'PATCH',
-    `repos/${origin.fullName}/pulls/${number}`,
-    '-f',
-    `title=${title}`,
-    '-f',
-    `body=${body}`,
-  ])
-  if (current.draft !== draft) await setPullRequestDraft(repoPath, origin.fullName, number, draft)
+  await patchPullRequest(origin.fullName, number, { title, body })
+  if (current.draft !== draft) await patchPullRequest(origin.fullName, number, { draft })
   const readBack = await getPullRequest(repoPath, number)
   if (readBack.title !== title || readBack.body !== body || readBack.draft !== draft) {
     throw new Error(`Pull request #${number} did not match the requested update`)
@@ -2869,16 +2793,7 @@ async function changePullRequestState(
   const current = await getPullRequest(repoPath, number)
   if (state === 'open' && current.state === 'MERGED')
     throw new Error(`Pull request #${number} cannot be reopened after merge`)
-  await runGh(repoPath, [
-    'api',
-    '--hostname',
-    'github.com',
-    '--method',
-    'PATCH',
-    `repos/${origin.fullName}/pulls/${number}`,
-    '-f',
-    `state=${state}`,
-  ])
+  await patchPullRequest(origin.fullName, number, { state })
   const readBack = await getPullRequest(repoPath, number)
   const expected = state === 'open' ? 'OPEN' : 'CLOSED'
   if (readBack.state !== expected)

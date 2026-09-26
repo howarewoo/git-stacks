@@ -35,10 +35,11 @@ const open = [
   { number: 4, title: 'Fork feature', url: 'https://github.com/acme/widgets/pull/4', headRefName: 'feature', headRefOid: 'b'.repeat(40), baseRefName: 'main', isDraft: false, state: 'OPEN', headRepository: { nameWithOwner: 'evil/widgets' }, commits: { nodes: [{ commit: { statusCheckRollup: { state: 'SUCCESS' } } }] } }
 ]
 const tracked = { number: 7, title: 'Merged parent', url: 'https://github.com/acme/widgets/pull/7', body: 'body', state: 'MERGED', isDraft: false, headRefName: 'parent', headRefOid: 'c'.repeat(40), headRepository: { nameWithOwner: 'acme/widgets' }, baseRefName: 'main', mergeStateStatus: 'CLEAN', reviewDecision: 'APPROVED', mergeCommit: { oid: 'd'.repeat(40) }, commits: { nodes: [{ commit: { statusCheckRollup: { state: 'SUCCESS' } } }] } }
-if (args.includes('graphql') && args.includes('number=7')) {
+const single = args.some((arg) => arg.includes('pullRequest(number:'))
+if (args.includes('graphql') && single) {
   process.stdout.write(JSON.stringify({ data: { repository: { pullRequest: tracked } } }))
-} else if (args.includes('graphql') && args.includes('--paginate')) {
-  process.stdout.write(JSON.stringify([{ data: { repository: { pullRequests: { nodes: open, pageInfo: { hasNextPage: false, endCursor: null } } } } }]))
+} else if (args.includes('graphql')) {
+  process.stdout.write(JSON.stringify({ data: { repository: { pullRequests: { nodes: open, pageInfo: { hasNextPage: false, endCursor: null } } } } }))
 } else {
   process.stderr.write('unexpected gh fixture request')
   process.exit(2)
