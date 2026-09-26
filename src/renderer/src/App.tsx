@@ -27,6 +27,7 @@ import {
   LoaderCircle,
   MoreHorizontal,
   PanelRightClose,
+  PanelRightOpen,
   Plus,
   RefreshCw,
   RotateCcw,
@@ -72,6 +73,7 @@ import {
   sortBranchesByUpdatedAt,
 } from './lib/branches'
 import { WorkflowDialog, type WorkflowRequest } from './components/workflow-dialog'
+import { WorkspaceNavigation } from './components/workspace-navigation'
 import {
   FileInspector,
   HistoryView,
@@ -693,60 +695,14 @@ function App() {
       <div className="sidebar-scroll">
         <div className="nav-section">
           <span className="nav-label">Workspace</span>
-          <button
-            className={cn('nav-item', workspaceView === 'branches' && 'nav-item-active')}
-            onClick={() => setWorkspaceView('branches')}
-            type="button"
-          >
-            <GitBranch className="size-4" />
-            <span>Branches</span>
-            <span className="nav-count">{branchCount}</span>
-          </button>
-          <button
-            className={cn('nav-item', workspaceView === 'stacks' && 'nav-item-active')}
-            onClick={() => setWorkspaceView('stacks')}
-            type="button"
-          >
-            <Layers className="size-4" />
-            <span>Stacks</span>
-          </button>
-          <button
-            className={cn('nav-item', workspaceView === 'history' && 'nav-item-active')}
-            onClick={() => setWorkspaceView('history')}
-            type="button"
-          >
-            <History className="size-4" />
-            <span>History</span>
-          </button>
-          <button
-            className={cn('nav-item', workspaceView === 'changes' && 'nav-item-active')}
-            onClick={() => setWorkspaceView('changes')}
-            type="button"
-          >
-            <Files className="size-4" />
-            <span>Working changes</span>
-            {snapshot && snapshot.files.length > 0 ? (
-              <span className="nav-count nav-count-accent">{snapshot.files.length}</span>
-            ) : null}
-          </button>
-          <button
-            className={cn('nav-item', workspaceView === 'pullRequests' && 'nav-item-active')}
-            onClick={() => setWorkspaceView('pullRequests')}
-            type="button"
-          >
-            <GitPullRequest className="size-4" />
-            <span>Pull requests</span>
-            <span className="nav-count">{pullRequestCount}</span>
-          </button>
-          <button
-            className={cn('nav-item', workspaceView === 'stashes' && 'nav-item-active')}
-            onClick={() => setWorkspaceView('stashes')}
-            type="button"
-          >
-            <Archive className="size-4" />
-            <span>Stashes</span>
-            <span className="nav-count">{stashCount}</span>
-          </button>
+          <WorkspaceNavigation
+            activeView={workspaceView}
+            branchCount={branchCount}
+            changeCount={snapshot?.files.length ?? 0}
+            onSelect={setWorkspaceView}
+            pullRequestCount={pullRequestCount}
+            stashCount={stashCount}
+          />
         </div>
 
         {snapshot ? (
@@ -825,130 +781,150 @@ function App() {
     </aside>
   )
 
+  const shortcutModifier = /Mac|iPhone|iPad/.test(navigator.userAgent) ? '⌘' : 'Ctrl+'
+
   const renderToolbar = () => (
-    <div className="toolbar">
-      <div className="toolbar-actions" aria-label="Repository actions">
-        <Button
-          disabled={!snapshot || isBusy || operationActive}
-          onClick={() => runAction({ type: 'fetch' }, 'Fetch')}
-          tooltip="Fetch remote updates without changing your working tree."
-          size="sm"
-          variant="secondary"
-        >
-          {busyAction === 'Fetch' ? (
-            <LoaderCircle className="size-3.5 animate-spin" />
-          ) : (
-            <Download className="size-3.5" />
-          )}
-          Fetch
-        </Button>
-        <Button
-          disabled={!snapshot || isBusy || operationActive}
-          onClick={() => openWorkflow({ kind: 'pull' })}
-          tooltip="Choose how to integrate updates from this branch’s upstream."
-          size="sm"
-          variant="secondary"
-        >
-          {busyAction === 'Pull' ? (
-            <LoaderCircle className="size-3.5 animate-spin" />
-          ) : (
-            <ArrowDown className="size-3.5" />
-          )}
-          Pull
-        </Button>
-        <Button
-          disabled={!snapshot || isBusy || operationActive}
-          onClick={() => runAction({ type: 'push' }, 'Push')}
-          tooltip="Push the current branch without rewriting remote history."
-          size="sm"
-          variant="secondary"
-        >
-          {busyAction === 'Push' ? (
-            <LoaderCircle className="size-3.5 animate-spin" />
-          ) : (
-            <Upload className="size-3.5" />
-          )}
-          Push
-        </Button>
-        <span className="toolbar-divider" />
-        <Button
-          disabled={!snapshot || isBusy || operationActive}
-          tooltip="Create a local branch from an existing branch and switch to it. Records its stack parent; nothing is pushed."
-          onClick={openBranchDialog}
-          size="sm"
-          variant="accent"
-        >
-          <Plus className="size-3.5" />
-          New branch
-        </Button>
-        <DropdownMenu.Root>
-          <DropdownMenu.Trigger asChild>
-            <Button
-              aria-label="More Git actions"
-              tooltip="More actions: preview merge, force push with lease, stash, or browse history."
-              size="icon-sm"
-              variant="secondary"
-              disabled={!snapshot || isBusy}
-            >
-              <MoreHorizontal className="size-4" />
-            </Button>
-          </DropdownMenu.Trigger>
-          <DropdownMenu.Content align="start" sideOffset={6}>
-            <DropdownMenu.Item
-              disabled={operationActive || !currentBranch}
-              onSelect={() => openWorkflow({ kind: 'merge' })}
-            >
-              Merge into current branch…
-            </DropdownMenu.Item>
-            <DropdownMenu.Item
-              disabled={
-                operationActive || !currentBranch || currentBranch === snapshot?.defaultBranch
-              }
-              onSelect={() => openWorkflow({ kind: 'forcePush' })}
-            >
-              Force push with lease…
-            </DropdownMenu.Item>
-            <DropdownMenu.Item
-              disabled={operationActive || !snapshot?.files.length}
-              onSelect={() => openWorkflow({ kind: 'stash' })}
-            >
-              Stash changes…
-            </DropdownMenu.Item>
-            <DropdownMenu.Separator />
-            <DropdownMenu.Item onSelect={() => setWorkspaceView('history')}>
-              Browse commit history
-            </DropdownMenu.Item>
-          </DropdownMenu.Content>
-        </DropdownMenu.Root>
+    <div className="toolbar" role="toolbar" aria-label="Repository actions">
+      <div className="toolbar-actions">
+        <div className="toolbar-action-group" role="group" aria-label="Synchronization actions">
+          <Button
+            disabled={!snapshot || isBusy || operationActive}
+            onClick={() => runAction({ type: 'fetch' }, 'Fetch')}
+            tooltip="Fetch remote updates without changing your working tree."
+            size="sm"
+            variant="secondary"
+          >
+            {busyAction === 'Fetch' ? (
+              <LoaderCircle className="size-3.5 animate-spin" />
+            ) : (
+              <Download className="size-3.5" />
+            )}
+            Fetch
+          </Button>
+          <Button
+            disabled={!snapshot || isBusy || operationActive}
+            onClick={() => openWorkflow({ kind: 'pull' })}
+            tooltip="Choose how to integrate updates from this branch’s upstream."
+            size="sm"
+            variant="secondary"
+          >
+            {busyAction === 'Pull' ? (
+              <LoaderCircle className="size-3.5 animate-spin" />
+            ) : (
+              <ArrowDown className="size-3.5" />
+            )}
+            Pull
+          </Button>
+          <Button
+            disabled={!snapshot || isBusy || operationActive}
+            onClick={() => runAction({ type: 'push' }, 'Push')}
+            tooltip="Push the current branch without rewriting remote history."
+            size="sm"
+            variant="secondary"
+          >
+            {busyAction === 'Push' ? (
+              <LoaderCircle className="size-3.5 animate-spin" />
+            ) : (
+              <Upload className="size-3.5" />
+            )}
+            Push
+          </Button>
+        </div>
+        <span className="toolbar-divider" aria-hidden="true" />
+        <div className="toolbar-action-group" role="group" aria-label="Branch and Git actions">
+          <Button
+            disabled={!snapshot || isBusy || operationActive}
+            tooltip="Create a local branch from an existing branch and switch to it. Records its stack parent; nothing is pushed."
+            onClick={openBranchDialog}
+            size="sm"
+          >
+            <Plus className="size-3.5" />
+            New branch
+          </Button>
+          <DropdownMenu.Root>
+            <DropdownMenu.Trigger asChild>
+              <Button
+                aria-label="More Git actions"
+                tooltip="More actions: preview merge, force push with lease, stash, or browse history."
+                size="icon-sm"
+                variant="secondary"
+                disabled={!snapshot || isBusy}
+              >
+                <MoreHorizontal className="size-4" />
+              </Button>
+            </DropdownMenu.Trigger>
+            <DropdownMenu.Portal>
+              <DropdownMenu.Content className="workflow-menu" align="start" sideOffset={6}>
+                <DropdownMenu.Item
+                  disabled={operationActive || !currentBranch}
+                  onSelect={() => openWorkflow({ kind: 'merge' })}
+                >
+                  Merge into current branch…
+                </DropdownMenu.Item>
+                <DropdownMenu.Item
+                  disabled={
+                    operationActive || !currentBranch || currentBranch === snapshot?.defaultBranch
+                  }
+                  onSelect={() => openWorkflow({ kind: 'forcePush' })}
+                >
+                  Force push with lease…
+                </DropdownMenu.Item>
+                <DropdownMenu.Item
+                  disabled={operationActive || !snapshot?.files.length}
+                  onSelect={() => openWorkflow({ kind: 'stash' })}
+                >
+                  Stash changes…
+                </DropdownMenu.Item>
+                <DropdownMenu.Separator className="workflow-menu-separator" />
+                <DropdownMenu.Item onSelect={() => setWorkspaceView('history')}>
+                  Browse commit history
+                </DropdownMenu.Item>
+              </DropdownMenu.Content>
+            </DropdownMenu.Portal>
+          </DropdownMenu.Root>
+        </div>
       </div>
       <div className="toolbar-spacer" />
       <div className="toolbar-search">
         <Search className="size-3.5" />
         <Input
+          aria-keyshortcuts="Meta+K Control+K"
           aria-label="Search branches, files, and pull requests"
           onChange={(event) => setSearch(event.target.value)}
           placeholder="Search"
           ref={searchRef}
           value={search}
         />
-        <kbd>⌘ K</kbd>
+        <kbd>{shortcutModifier} K</kbd>
       </div>
-      <IconButton
-        label="Refresh repository"
-        onClick={() => refreshSnapshot()}
-        disabled={!snapshot || isBusy}
-        variant="secondary"
-      >
-        <RefreshCw className={cn('size-4', refreshing && 'animate-spin')} />
-      </IconButton>
-      {snapshot && (workspaceView === 'branches' || workspaceView === 'stacks') ? (
+      <div className="toolbar-control-slot">
         <IconButton
-          label={showDetails ? 'Hide details pane' : 'Show details pane'}
-          onClick={() => setShowDetails((value) => !value)}
+          className="toolbar-control"
+          label="Refresh repository"
+          onClick={() => refreshSnapshot()}
+          disabled={!snapshot || isBusy}
           variant="secondary"
         >
-          <PanelRightClose className="size-4" />
+          <RefreshCw aria-hidden="true" className={cn('size-4', refreshing && 'animate-spin')} />
         </IconButton>
+      </div>
+      {snapshot && (workspaceView === 'branches' || workspaceView === 'stacks') ? (
+        <Button
+          aria-controls={detailsVisible ? 'branch-inspector' : undefined}
+          aria-expanded={detailsVisible}
+          aria-label={detailsVisible ? 'Hide details pane' : 'Show details pane'}
+          className="toolbar-control toolbar-details-toggle"
+          onClick={() => setShowDetails((value) => !value)}
+          size="sm"
+          variant="secondary"
+        >
+          {detailsVisible ? (
+            <PanelRightClose aria-hidden="true" className="size-4" />
+          ) : (
+            <PanelRightOpen aria-hidden="true" className="size-4" />
+          )}
+          Details
+        </Button>
       ) : null}
     </div>
   )
@@ -1573,7 +1549,7 @@ function App() {
   const renderDetails = () => {
     if (!snapshot) {
       return (
-        <aside className="details-pane details-pane-empty">
+        <aside className="details-pane details-pane-empty" id="branch-inspector">
           <div className="details-placeholder">
             <PanelRightClose className="size-5" />
             <span>Branch details will appear here.</span>
@@ -1583,7 +1559,7 @@ function App() {
     }
     if (!selectedBranch) {
       return (
-        <aside className="details-pane details-pane-empty">
+        <aside className="details-pane details-pane-empty" id="branch-inspector">
           <div className="details-placeholder">
             <GitBranch className="size-5" />
             <span>Select a branch to inspect its stack.</span>
@@ -1600,7 +1576,7 @@ function App() {
       !operationActive,
     )
     return (
-      <aside className="details-pane" aria-label="Selected branch details">
+      <aside className="details-pane" id="branch-inspector" aria-label="Selected branch details">
         <div className="details-header">
           <div>
             <h2 title={selectedBranch.name}>{selectedBranch.name}</h2>
@@ -1970,7 +1946,16 @@ function App() {
           <GitBranch className="size-4" />
           <strong>Git Stacks</strong>
         </div>
-        <div className="titlebar-context">{snapshot ? snapshot.name : 'Repository workbench'}</div>
+        <div
+          aria-label={
+            snapshot ? `Repository ${snapshot.name}, ${snapshot.path}` : 'Repository workbench'
+          }
+          className="titlebar-context"
+          tabIndex={snapshot ? 0 : undefined}
+          title={snapshot?.path}
+        >
+          {snapshot ? snapshot.name : 'Repository workbench'}
+        </div>
         <div className="titlebar-spacer" />
         {operationActive ? (
           <Badge variant="warning">

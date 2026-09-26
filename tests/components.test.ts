@@ -9,6 +9,7 @@ import { Input } from '../src/renderer/src/components/ui/input'
 import { SegmentedControl } from '../src/renderer/src/components/ui/segmented-control'
 import { Textarea } from '../src/renderer/src/components/ui/textarea'
 import { TooltipProvider } from '../src/renderer/src/components/ui/tooltip'
+import { ShellSpecimen } from '../src/renderer/src/design-system/ShellSpecimen'
 test('loading buttons retain their label, busy state, and disabled lock', () => {
   const markup = renderToStaticMarkup(
     React.createElement(
@@ -113,4 +114,15 @@ test('checkbox and segmented controls expose independent state semantics', () =>
   assert.match(segmented, /role="group"/)
   assert.match(segmented, /aria-label="Repository filter"/)
   assert.match(segmented, /aria-pressed="true"[^>]*>Local/)
+})
+
+test('shell specimen captions are not rendered as labels without controls', () => {
+  const markup = renderToStaticMarkup(
+    React.createElement(TooltipProvider, null, React.createElement(ShellSpecimen)),
+  )
+
+  assert.match(markup, /<p class="shell-fixture-caption">Branch matching/)
+  assert.match(markup, /<label for="shell-fixture-draft">In-progress commit message<\/label>/)
+  assert.match(markup, /id="shell-fixture-draft"/)
+  assert.doesNotMatch(markup, /for="shell-fixture-search-result"/)
 })
