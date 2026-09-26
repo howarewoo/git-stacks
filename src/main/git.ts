@@ -2297,21 +2297,22 @@ async function fileFingerprintAt(
   repoPath: string,
   relativePath: string,
   absolutePath: string,
+  signal?: AbortSignal,
 ): Promise<FileIdentity> {
-  const index = await runGit(repoPath, [
-    '--literal-pathspecs',
-    'ls-files',
-    '--stage',
-    '-z',
-    '--',
-    relativePath,
-  ])
+  if (signal?.aborted) throw new CommandCancelled()
+  const index = await runGit(
+    repoPath,
+    ['--literal-pathspecs', 'ls-files', '--stage', '-z', '--', relativePath],
+    undefined,
+    signal,
+  )
   const indexFingerprint = createHash('sha256').update(index).digest('hex')
   let stat: Stats | null = null
   let preview: Buffer | null = null
   let binary = false
   let truncated = false
   try {
+    if (signal?.aborted) throw new CommandCancelled()
     stat = await fs.lstat(absolutePath)
     if (!stat.isFile()) throw new Error('Changed path is not a regular file')
     const hash = createHash('sha256')
@@ -2335,6 +2336,7 @@ async function fileFingerprintAt(
     const buffer = Buffer.allocUnsafe(64 * 1024)
     try {
       while (true) {
+        if (signal?.aborted) throw new CommandCancelled()
         const result = await handle.read(buffer, 0, buffer.length, null)
         if (result.bytesRead === 0) break
         const chunk = buffer.subarray(0, result.bytesRead)
@@ -2354,6 +2356,7 @@ async function fileFingerprintAt(
         }
         if (totalBytes > MAX_FILE_BYTES) truncated = true
       }
+      if (signal?.aborted) throw new CommandCancelled()
       try {
         decoder.decode()
       } catch {
@@ -2372,7 +2375,9 @@ async function fileFingerprintAt(
     } finally {
       await handle.close()
     }
+    if (signal?.aborted) throw new CommandCancelled()
     const currentStat = await fs.lstat(absolutePath)
+    if (signal?.aborted) throw new CommandCancelled()
     if (currentStat.dev !== stat.dev || currentStat.ino !== stat.ino) {
       throw new Error('The file changed while it was being read; refresh and retry')
     }
@@ -2389,6 +2394,7 @@ async function fileFingerprintAt(
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
   }
+  if (signal?.aborted) throw new CommandCancelled()
   const contentFingerprint = createHash('sha256').update('missing').digest('hex')
   const hash = createHash('sha256')
   hash.update(index)
@@ -2404,9 +2410,15 @@ async function fileFingerprintAt(
   }
 }
 
-async function fileFingerprint(repoPath: string, relativePath: string): Promise<FileIdentity> {
+async function fileFingerprint(
+  repoPath: string,
+  relativePath: string,
+  signal?: AbortSignal,
+): Promise<FileIdentity> {
+  if (signal?.aborted) throw new CommandCancelled()
   const absolute = await safeRepositoryPath(repoPath, relativePath)
-  return fileFingerprintAt(repoPath, relativePath, absolute)
+  if (signal?.aborted) throw new CommandCancelled()
+  return fileFingerprintAt(repoPath, relativePath, absolute, signal)
 }
 
 function sameFileMutationIdentity(expected: FileIdentity, actual: FileIdentity): boolean {
@@ -2452,11 +2464,17 @@ export async function getFileView(
   const filePath = requirePathInput(requestedPath, 'path')
   const entry = changedEntry(await getStatus(root, signal), filePath)
   const actualPath = entry.path
-  const [stagedDiff, unstagedDiff, identity] = await Promise.all([
+  const reads = [
     changedDiff(root, 'cached', actualPath, signal),
     changedDiff(root, 'worktree', actualPath, signal),
-    fileFingerprint(root, actualPath),
-  ])
+    fileFingerprint(root, actualPath, signal),
+  ] as const
+  const [stagedDiff, unstagedDiff, identity] = await Promise.all(reads).catch(
+    async (error: unknown) => {
+      await Promise.allSettled(reads)
+      throw error
+    },
+  )
   const contentResult = identity.preview
     ? {
         text: identity.binary ? '' : identity.preview.toString('utf8'),

@@ -981,7 +981,7 @@ function App() {
         {renderBranchBudgetNote()}
         <div className="branch-list" role="group" aria-label="Repository branches">
           {branchWindow.visible.map((branch, branchIndex) => {
-            const tree = branchTree.rows[branchIndex]
+            const tree = branchTree.rows[branchWindow.start + branchIndex]
             const pullRequest = branch.pr
             const selected = branch.ref === selectedBranch?.ref
             return (

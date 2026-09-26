@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
+import { promises as fs } from 'node:fs'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import { test } from 'node:test'
-import { getCommitDiff, getHistory, getSnapshot } from '../src/main/git'
+import { getCommitDiff, getFileView, getHistory, getSnapshot } from '../src/main/git'
 import {
   getBranchConfigs,
   isCancelled,
@@ -122,6 +123,61 @@ test('a repository switch waits for a cancelled read instead of rejecting the sw
   await assert.rejects(queued, (error: unknown) => isCancelled(error))
   await switched
   assert.deepEqual(order, ['old read', 'new repository'])
+})
+
+test('a cancelled file view keeps the next repository operation behind all its file reads', async () => {
+  const { root, repo } = await repository()
+  const filePath = join(repo, 'base.txt')
+  const originalOpen = fs.open
+  const reading = deferred()
+  const release = deferred()
+  let stopped = false
+  let switched = false
+  const controller = new AbortController()
+  try {
+    await writeFile(filePath, `${'changed\n'.repeat(1_000_000)}`)
+    fs.open = async (...args: Parameters<typeof fs.open>) => {
+      const handle = await originalOpen(...args)
+      if (typeof args[0] === 'string' && args[0].endsWith('/base.txt')) {
+        const originalRead = handle.read.bind(handle)
+        handle.read = (async (...readArgs: Parameters<typeof handle.read>) => {
+          reading.resolve()
+          await release.promise
+          stopped = true
+          return originalRead(...readArgs)
+        }) as typeof handle.read
+      }
+      return handle
+    }
+    const operations = new RepositoryOperations()
+    const pending = operations.read(
+      () => getFileView(repo, 'base.txt', controller.signal),
+      controller.signal,
+    )
+    const started = await Promise.race([
+      reading.promise.then(() => 'reading'),
+      pending.then(
+        () => 'completed without reading',
+        (error: unknown) => `failed without reading: ${String(error)}`,
+      ),
+    ])
+    assert.equal(started, 'reading')
+    controller.abort()
+    const next = operations.switchRepository(async () => {
+      switched = true
+    })
+    await delay(150)
+    assert.equal(switched, false, 'the next repository must wait for the fingerprint read')
+    release.resolve()
+    await assert.rejects(pending, (error: unknown) => isCancelled(error))
+    await next
+    assert.equal(stopped, true, 'the file read settled before the next operation')
+    assert.equal(switched, true)
+  } finally {
+    release.resolve()
+    fs.open = originalOpen
+    await rm(root, { recursive: true, force: true })
+  }
 })
 
 test('branch parents and tips are read in one batched config pass', async () => {

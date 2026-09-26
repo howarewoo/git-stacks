@@ -105,6 +105,8 @@ then slide a bounded two-page window on deeper navigation. Previous controls
 return to earlier rows rather than accumulating the entire traversed prefix.
 History holds one fetched page of at most 50 commits and navigates older/newer
 pages. Diff regions expand from 1,000 to at most 2,000 mounted lines, then slide.
+Branch-tree connectors and cycle/missing-parent warnings use each branch's
+position in the complete list even after the two-page window slides.
 
 ### Stale results and cancellation
 
@@ -121,6 +123,9 @@ never applied to the one it now shows:
   the previous one. Cancelled reads reject with `CommandCancelled`; the renderer
   drops them instead of showing an error.
 - A read cancelled while still queued in `RepositoryOperations` never starts.
+- Cancelling a file view also stops its fingerprint scan and waits for both
+  diff commands and the fingerprint task to settle before the next repository
+  operation starts; mutation preflight reads remain non-cancelable.
 
 ### Documented limits
 
