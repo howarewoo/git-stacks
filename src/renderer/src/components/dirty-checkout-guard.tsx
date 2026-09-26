@@ -10,6 +10,7 @@ export interface DirtyCheckoutGuardProps {
   snapshot: RepositorySnapshot | null
   onClose: () => void
   onStash: () => void
+  onCarry: () => void
   onReviewChanges: () => void
 }
 
@@ -19,6 +20,7 @@ export function DirtyCheckoutContent({
   onClose,
   onStash,
   onReviewChanges,
+  onCarry,
 }: DirtyCheckoutGuardProps) {
   const stagedCount =
     snapshot?.files.filter((f) => f.index !== '' && f.index !== ' ' && f.index !== '?').length ?? 0
@@ -28,7 +30,7 @@ export function DirtyCheckoutContent({
     <WorkflowFrame composition="reviewed">
       <OperationContext
         title={`Check out ${target?.name ?? 'branch'}`}
-        description="Git refuses to switch branches with uncommitted edits. Route through an existing safeguard below before checking out."
+        description="Choose whether to carry compatible edits to the target branch or prepare a clean tree first. Git will refuse a carry that would overwrite work."
         facts={[
           { label: 'Target branch', value: target?.name ?? '—' },
           {
@@ -50,8 +52,8 @@ export function DirtyCheckoutContent({
             aria-hidden="true"
           />
           <span>
-            You can stash your changes to restore a clean tree, review and commit them in Working
-            changes, or cancel this checkout request.
+            Carry compatible changes, stash them, review and commit them in Working changes, or
+            cancel. Git refuses a carry when the destination would overwrite your edits.
           </span>
         </div>
       </div>
@@ -70,6 +72,13 @@ export function DirtyCheckoutContent({
         >
           <Files className="size-3.5 mr-1" aria-hidden="true" />
           Review changes
+        </Button>
+        <Button
+          variant="secondary"
+          onClick={onCarry}
+          tooltip="Try switching with the current edits; Git refuses conflicts or overwrites"
+        >
+          Carry changes and check out
         </Button>
         <Button
           variant="accent"
@@ -94,8 +103,8 @@ export function DirtyCheckoutGuard(props: DirtyCheckoutGuardProps) {
         <DialogHeader>
           <DialogTitle>Uncommitted changes in working tree</DialogTitle>
           <DialogDescription>
-            Switching to <strong>{props.target?.name}</strong> requires a clean working tree. Choose
-            how to handle your current changes.
+            Carry compatible edits to <strong>{props.target?.name}</strong>, or prepare a clean tree
+            before switching.
           </DialogDescription>
         </DialogHeader>
         <DirtyCheckoutContent {...props} />

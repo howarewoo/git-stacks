@@ -668,6 +668,15 @@ function App() {
     },
     [isBusy, operationActive, runAction, snapshot],
   )
+  const carryCheckoutBranch = React.useCallback(() => {
+    if (!checkoutGuardTarget || !snapshot || isBusy || operationActive) return
+    const target = checkoutGuardTarget
+    setCheckoutGuardTarget(null)
+    void runAction(
+      { type: 'switch', ref: target.ref, carry: true },
+      'Carry changes and switch branch',
+    )
+  }, [checkoutGuardTarget, snapshot, isBusy, operationActive, runAction])
 
   const paletteItems = React.useMemo(() => {
     return buildPaletteItems({
@@ -773,6 +782,7 @@ function App() {
 
       // Cmd/Ctrl+K opens a palette instead of only focusing the current filter field
       if (matchesChord(event, shortcutBindings['palette.open'], isMac)) {
+        if (anyModalOpen && !paletteOpen) return
         event.preventDefault()
         setPaletteOpen((prev) => !prev)
         return
@@ -1141,7 +1151,7 @@ function App() {
         onClick={() => setPaletteOpen(true)}
         aria-keyshortcuts={formatChord(shortcutBindings['palette.open'], isMac)}
         aria-label="Open command palette"
-        tooltip="Search actions, repositories, branches, PRs, and settings"
+        tooltip="Search actions, repositories, branches, PRs, issues, and settings"
       >
         <Search className="size-3.5" />
         Palette
@@ -2307,6 +2317,7 @@ function App() {
       <DirtyCheckoutGuard
         target={checkoutGuardTarget}
         snapshot={snapshot}
+        onCarry={carryCheckoutBranch}
         onClose={() => setCheckoutGuardTarget(null)}
         onStash={() => openWorkflow({ kind: 'stash' })}
         onReviewChanges={() => setWorkspaceView('changes')}

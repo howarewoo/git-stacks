@@ -1,4 +1,4 @@
-import type { PullRequest } from '../shared/types'
+import type { PullRequest, RepositoryIssue } from '../shared/types'
 import {
   commandCode,
   commandDetail,
@@ -166,6 +166,71 @@ function githubErrorMessage(error: unknown): string {
 
 function unavailable(message: string): GitHubResult {
   return { pullRequests: [], available: false, message, sameRepository: () => false }
+}
+
+/** Read open issues separately from PR workflows; paging one connection never truncates the other. */
+export async function getGitHubIssues(
+  repoPath: string,
+  originUrl: string | null,
+): Promise<{ issues: RepositoryIssue[]; message: string }> {
+  const remote = parseRemote(originUrl)
+  if (!remote || remote.host !== 'github.com') {
+    return { issues: [], message: 'Issues unavailable: a github.com origin is required' }
+  }
+  const query = `query($owner: String!, $name: String!, $endCursor: String) {
+    repository(owner: $owner, name: $name) {
+      issues(first: 100, after: $endCursor, states: OPEN, orderBy: {field: UPDATED_AT, direction: DESC}) {
+        nodes { number title url }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  }`
+  try {
+    const output = await execute(
+      'gh',
+      [
+        'api',
+        'graphql',
+        '--hostname',
+        'github.com',
+        '--paginate',
+        '--slurp',
+        '-f',
+        `owner=${remote.owner}`,
+        '-f',
+        `name=${remote.name}`,
+        '-f',
+        `query=${query}`,
+      ],
+      repoPath,
+    )
+    const pages: unknown = JSON.parse(output)
+    if (!Array.isArray(pages)) throw new Error('Unexpected issue pagination response')
+    const issues: RepositoryIssue[] = []
+    for (const page of pages) {
+      if (!isRecord(page) || (Array.isArray(page.errors) && page.errors.length)) {
+        throw new Error('GitHub could not load issues')
+      }
+      const repository = isRecord(page.data) ? page.data.repository : null
+      const connection = isRecord(repository) ? repository.issues : null
+      if (!isRecord(connection) || !Array.isArray(connection.nodes))
+        throw new Error('GitHub could not load issues')
+      for (const node of connection.nodes) {
+        if (
+          !isRecord(node) ||
+          typeof node.number !== 'number' ||
+          !Number.isInteger(node.number) ||
+          typeof node.title !== 'string' ||
+          typeof node.url !== 'string'
+        )
+          throw new Error('GitHub returned an invalid issue')
+        issues.push({ number: node.number, title: node.title, url: node.url })
+      }
+    }
+    return { issues, message: '' }
+  } catch (error) {
+    return { issues: [], message: githubErrorMessage(error) }
+  }
 }
 
 async function trackedPullRequestNumbers(repoPath: string): Promise<number[]> {

@@ -30,7 +30,7 @@ export const SHORTCUT_DEFINITIONS: readonly ShortcutMetadata[] = [
     label: 'Open command palette',
     group: 'General',
     defaultChord: 'Mod+K',
-    description: 'Open the palette to search actions, branches, PRs, and repositories.',
+    description: 'Open the palette to search actions, branches, PRs, issues, and repositories.',
   },
   {
     id: 'search.focus',
@@ -177,12 +177,17 @@ export function parseChord(chord: string): NormalizedChord | null {
   }
 
   if (!key) return null
+  const normalizedKey = normalizeKeyName(key)
   return {
-    key: normalizeKeyName(key),
+    key: normalizedKey,
     mod,
-    shift,
+    shift: shift && !isPrintableSymbol(normalizedKey),
     alt,
   }
+}
+
+function isPrintableSymbol(key: string): boolean {
+  return key.length === 1 && !/[\p{L}\p{N}]/u.test(key)
 }
 
 function normalizeKeyName(rawKey: string): string {
@@ -274,7 +279,7 @@ export function chordFromEvent(event: KeyboardEventLike, isMac = isMacPlatform()
 
   const modPressed = isMac ? Boolean(event.metaKey) : Boolean(event.ctrlKey)
   const altPressed = Boolean(event.altKey)
-  const shiftPressed = Boolean(event.shiftKey)
+  const shiftPressed = Boolean(event.shiftKey) && !isPrintableSymbol(normalizeKeyName(rawKey))
 
   const parts: string[] = []
   if (modPressed) parts.push('Mod')
@@ -299,7 +304,8 @@ export function matchesChord(
 
   const normalizedEventKey = normalizeKeyName(event.key)
 
-  if (parsed.shift !== Boolean(event.shiftKey)) return false
+  if (parsed.shift !== (Boolean(event.shiftKey) && !isPrintableSymbol(normalizedEventKey)))
+    return false
 
   return normalizedEventKey.toLowerCase() === parsed.key.toLowerCase()
 }

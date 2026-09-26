@@ -301,6 +301,20 @@ function handleGraphql(state, args) {
     const pr = findPr(state, number)
     return { data: { repository: { pullRequest: graphPullRequest(pr, true) } } }
   }
+  if (query.includes('issues(first:')) {
+    return [
+      {
+        data: {
+          repository: {
+            issues: {
+              nodes: state.issues || [],
+              pageInfo: { hasNextPage: false, endCursor: null },
+            },
+          },
+        },
+      },
+    ]
+  }
   const nodes = state.prs
     .filter((pr) => pr.state === 'OPEN')
     .map((pr) => graphPullRequest(pr, false))

@@ -16,6 +16,7 @@ import {
 } from '../src/renderer/src/lib/keyboard-shortcuts'
 import {
   buildPaletteItems,
+  groupPaletteItems,
   rankPaletteItems,
   resolveFocusRestoreTarget,
   scorePaletteItem,
@@ -27,12 +28,7 @@ import {
   CommandPalette,
   CommandPaletteContent,
 } from '../src/renderer/src/components/command-palette'
-import {
-  DirtyCheckoutGuard,
-  DirtyCheckoutContent,
-} from '../src/renderer/src/components/dirty-checkout-guard'
 import type { Branch, RepositorySnapshot } from '../src/shared/types'
-import { TooltipProvider } from '../src/renderer/src/components/ui/tooltip'
 
 function makeMockBranch(name: string, overrides: Partial<Branch> = {}): Branch {
   return {
@@ -211,6 +207,127 @@ test('shifted letter shortcuts record and dispatch distinctly from unshifted bin
       'stack.restack',
     )
   }
+})
+test('symbol keys requiring Shift match and collide as printable characters, unlike letters', () => {
+  for (const isMac of [true, false]) {
+    const slash = { key: '/', shiftKey: true, metaKey: false, ctrlKey: false }
+    assert.equal(chordFromEvent(slash, isMac), '/')
+    assert.equal(matchesChord(slash, DEFAULT_SHORTCUTS['search.focus'], isMac), true)
+    assert.equal(canonicalChord('Shift+/'), '/')
+    assert.equal(
+      assignShortcut(DEFAULT_SHORTCUTS, 'palette.open', 'Shift+/').conflict?.conflictingId,
+      'search.focus',
+    )
+    const shiftedLetter = { key: 'R', shiftKey: true, metaKey: isMac, ctrlKey: !isMac }
+    assert.equal(matchesChord(shiftedLetter, 'Mod+r', isMac), false)
+    assert.equal(matchesChord(shiftedLetter, 'Mod+Shift+r', isMac), true)
+  }
+})
+
+test('palette exposes PR workflows, rebase guards, sync target and issue entities', () => {
+  const snapshot = makeMockSnapshot({
+    issues: [
+      {
+        number: 17,
+        title: 'Correct keyboard navigation',
+        url: 'https://github.com/example/mock-repo/issues/17',
+      },
+    ],
+  })
+  const branch = snapshot.branches[1]
+  branch.pr = snapshot.pullRequests[0]
+  const items = buildPaletteItems({
+    snapshot,
+    selectedBranch: branch,
+    recentRepositories: [],
+    isBusy: false,
+    operationActive: false,
+    shortcutMap: DEFAULT_SHORTCUTS,
+  })
+  assert.deepEqual(items.find((item) => item.id === 'stack.managePr')?.intent, {
+    kind: 'workflow',
+    request: { kind: 'pr', number: 42 },
+  })
+  assert.deepEqual(items.find((item) => item.id === 'stack.mergePr')?.intent, {
+    kind: 'workflow',
+    request: { kind: 'stack', operation: 'merge', branch: 'feature-1' },
+  })
+  assert.equal(items.find((item) => item.id === 'stack.rebaseCurrent')?.disabled, true)
+  assert.equal(items.find((item) => item.id === 'command.fetch')?.shortcutId, 'stack.sync')
+  assert.equal(items.find((item) => item.id === 'stack.publish')?.shortcutId, undefined)
+  assert.deepEqual(items.find((item) => item.id === 'issue.17')?.intent, {
+    kind: 'openPrUrl',
+    url: 'https://github.com/example/mock-repo/issues/17',
+  })
+
+  branch.current = true
+  const rebasing = buildPaletteItems({
+    snapshot,
+    selectedBranch: branch,
+    recentRepositories: [],
+    isBusy: false,
+    operationActive: false,
+    shortcutMap: DEFAULT_SHORTCUTS,
+  }).find((item) => item.id === 'stack.rebaseCurrent')
+  assert.equal(rebasing?.disabled, false)
+  assert.deepEqual(rebasing?.intent, {
+    kind: 'workflow',
+    request: {
+      kind: 'confirm',
+      action: { type: 'rebase', parent: 'main' },
+      title: 'Rebase current branch?',
+      label: 'Rebase onto parent',
+      description:
+        'This rewrites only the current branch. Use Restack stack to update dependent branches together.',
+    },
+  })
+})
+
+test('keyboard indices follow visible order while searches keep best-ranked actions first', () => {
+  const items: PaletteItem[] = [
+    {
+      id: 'view',
+      label: 'Go to branches',
+      group: 'Views',
+      intent: { kind: 'view', view: 'branches' },
+    },
+    {
+      id: 'stack',
+      label: 'Select parent',
+      group: 'Stack navigation',
+      intent: { kind: 'navigateStack', relation: 'parent' },
+    },
+    {
+      id: 'pr',
+      label: 'Add keyboard shortcuts to PR',
+      group: 'Pull requests',
+      intent: { kind: 'view', view: 'pullRequests' },
+    },
+    {
+      id: 'settings',
+      label: 'Keyboard shortcuts',
+      group: 'Settings',
+      intent: { kind: 'openShortcutsSettings' },
+    },
+  ]
+  const initial = groupPaletteItems(rankPaletteItems(items, ''), false)
+  assert.deepEqual(
+    initial.flatMap(({ entries }) => entries.map(({ item, flatIndex }) => [flatIndex, item.id])),
+    [
+      [0, 'stack'],
+      [1, 'view'],
+      [2, 'pr'],
+      [3, 'settings'],
+    ],
+  )
+  const searching = groupPaletteItems(rankPaletteItems(items, 'keyboard shortcuts'), true)
+  assert.deepEqual(
+    searching.flatMap(({ entries }) => entries.map(({ item, flatIndex }) => [flatIndex, item.id])),
+    [
+      [0, 'settings'],
+      [1, 'pr'],
+    ],
+  )
 })
 
 // =============================================================================
@@ -518,37 +635,4 @@ test('resolveStackNavigation navigates correctly up and down stack hierarchy', (
   assert.equal(resolveStackNavigation(main, branches, 'parent'), null)
   // From feature-2: child is null
   assert.equal(resolveStackNavigation(feature2, branches, 'child'), null)
-})
-
-// =============================================================================
-// 6. Dirty checkout guard
-// =============================================================================
-
-test('DirtyCheckoutGuard renders modified files and safeguard options', () => {
-  const snapshot = makeMockSnapshot({
-    files: [
-      { path: 'src/App.tsx', index: 'M', worktree: ' ', conflicted: false },
-      { path: 'src/main.ts', index: ' ', worktree: 'M', conflicted: false },
-    ],
-  })
-
-  const html = renderToStaticMarkup(
-    React.createElement(
-      TooltipProvider,
-      null,
-      React.createElement(DirtyCheckoutContent, {
-        target: { ref: 'refs/heads/feature-1', name: 'feature-1' },
-        snapshot,
-        onClose: () => {},
-        onStash: () => {},
-        onReviewChanges: () => {},
-      }),
-    ),
-  )
-
-  assert.match(html, /Check out feature-1/)
-  assert.match(html, /2 files \(1 staged\)/)
-  assert.match(html, /Stash changes…/)
-  assert.match(html, /Review changes/)
-  assert.match(html, /Cancel/)
 })

@@ -281,10 +281,10 @@ The renderer builds on the repository's existing [shadcn/ui](https://ui.shadcn.c
 
 ### Command Palette and Shortcuts
 
-- **Command Palette:** Fixed workbench overlay at `component.overlay` elevation, combobox with listbox semantics, full keyboard navigation (arrows, home/end, Enter, Escape), and screen-reader status announcements.
-- **Search Separation:** In-view search/filter fields retain distinct focused shortcuts (`/` default) and are not conflated with the global command palette (`Mod+K` default).
-- **Remappable Shortcuts:** Configurable keybindings for palette opening, view navigation, and stack commands with collision detection before assignment.
-- **Safe Execution:** Selection does not mutate the working tree. Destructive actions require explicit confirmation and cannot execute from ranking alone. Dirty-tree checkouts route through existing carry/stash/commit/cancel safeguards.
+- **Command Palette:** Fixed workbench overlay at `component.overlay` elevation, combobox with listbox semantics, full keyboard navigation in the same order as visually grouped results (arrows, home/end, Enter, Escape), and screen-reader status announcements. Empty search groups commands by workspace area; active search preserves relevance order. Local branches, pull requests, open GitHub issues, and recent repositories are searchable alongside actions.
+- **Search Separation:** In-view search/filter fields retain distinct focused shortcuts (`/` default) and are not conflated with the global command palette (`Mod+K` default). Printable symbols match their character on keyboard layouts that require Shift; shifted letters remain distinct.
+- **Remappable Shortcuts:** Configurable keybindings for palette opening, view navigation, and stack commands with collision detection before assignment; each displayed shortcut names the action it dispatches.
+- **Safe Execution:** Selection does not mutate the working tree. Destructive actions require explicit confirmation and cannot execute from ranking alone. Other dialogs keep exclusive focus so the palette cannot replace edited workflows. Dirty-tree checkouts offer an explicit Git-protected carry attempt, stash, review and commit, or cancel.
 
 ### Hover Cards and Tooltips
 

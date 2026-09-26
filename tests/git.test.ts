@@ -42,6 +42,32 @@ test('dirty switches and option-like branch names cannot change or discard work'
     await rm(root, { recursive: true, force: true })
   }
 })
+test('explicit carry keeps tracked and untracked edits and refuses overwrites', async () => {
+  const { root, repo, git } = await fixture()
+  try {
+    git('branch', 'feature')
+    await writeFile(join(repo, 'shared.txt'), 'unsaved work\n')
+    await writeFile(join(repo, 'private.txt'), 'untracked work\n')
+    await runAction(repo, { type: 'switch', ref: 'refs/heads/feature', carry: true })
+    assert.equal(git('branch', '--show-current'), 'feature')
+    assert.equal(await readFile(join(repo, 'shared.txt'), 'utf8'), 'unsaved work\n')
+    assert.equal(await readFile(join(repo, 'private.txt'), 'utf8'), 'untracked work\n')
+    await rm(join(repo, 'private.txt'))
+    git('add', 'shared.txt')
+    git('commit', '-m', 'Feature edits')
+    await runAction(repo, { type: 'switch', ref: 'refs/heads/main' })
+    await writeFile(join(repo, 'shared.txt'), 'different main version\n')
+    git('add', 'shared.txt')
+    git('commit', '-m', 'Main edits')
+    await runAction(repo, { type: 'switch', ref: 'refs/heads/feature' })
+    await writeFile(join(repo, 'shared.txt'), 'new unsaved feature work\n')
+    await assert.rejects(runAction(repo, { type: 'switch', ref: 'refs/heads/main', carry: true }))
+    assert.equal(git('branch', '--show-current'), 'feature')
+    assert.equal(await readFile(join(repo, 'shared.txt'), 'utf8'), 'new unsaved feature work\n')
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
 
 test('renamed files and literal pathspec characters retain both paths through unstage and stage', async () => {
   const { root, repo, git } = await fixture()

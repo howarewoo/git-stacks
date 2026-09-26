@@ -15,6 +15,7 @@ export type CommandGroup =
   | 'Views'
   | 'Branches'
   | 'Pull requests'
+  | 'Issues'
   | 'Recent repositories'
   | 'Settings'
 
@@ -59,6 +60,47 @@ export interface BuildPaletteContext {
   operationActive: boolean
   shortcutMap: Record<ShortcutId, string>
   isMac?: boolean
+}
+const GROUP_ORDER: readonly CommandGroup[] = [
+  'Stack navigation',
+  'Commands',
+  'Views',
+  'Branches',
+  'Pull requests',
+  'Issues',
+  'Recent repositories',
+  'Settings',
+]
+
+export function groupPaletteItems(
+  ranked: readonly PaletteItem[],
+  searching: boolean,
+): Array<{ group: CommandGroup; entries: Array<{ item: PaletteItem; flatIndex: number }> }> {
+  if (searching) {
+    const runs: Array<{
+      group: CommandGroup
+      entries: Array<{ item: PaletteItem; flatIndex: number }>
+    }> = []
+    ranked.forEach((item, flatIndex) => {
+      const current = runs.at(-1)
+      if (current?.group === item.group) current.entries.push({ item, flatIndex })
+      else runs.push({ group: item.group, entries: [{ item, flatIndex }] })
+    })
+    return runs
+  }
+  const map = new Map<CommandGroup, PaletteItem[]>()
+  for (const item of ranked) {
+    const entries = map.get(item.group)
+    if (entries) entries.push(item)
+    else map.set(item.group, [item])
+  }
+  let index = 0
+  return [...GROUP_ORDER, ...[...map.keys()].filter((group) => !GROUP_ORDER.includes(group))]
+    .filter((group) => map.has(group))
+    .map((group) => ({
+      group,
+      entries: map.get(group)!.map((item) => ({ item, flatIndex: index++ })),
+    }))
 }
 
 export function buildPaletteItems(context: BuildPaletteContext): PaletteItem[] {
@@ -232,8 +274,6 @@ export function buildPaletteItems(context: BuildPaletteContext): PaletteItem[] {
     detail: 'Push reviewed stack tips and update pull requests on GitHub',
     group: 'Stack navigation',
     keywords: 'publish submit sync push stack remote github pull request',
-    shortcutId: 'stack.sync',
-    shortcutText: shortcutFor('stack.sync'),
     disabled: !canPublish,
     disabledReason: !snapshot
       ? 'Open a repository first'
@@ -282,11 +322,89 @@ export function buildPaletteItems(context: BuildPaletteContext): PaletteItem[] {
     intent: selectedPr ? { kind: 'openPrUrl', url: selectedPr.url } : { kind: 'createPr' },
   })
 
+  if (selectedPr) {
+    items.push({
+      id: 'stack.managePr',
+      label: `Manage pull request #${selectedPr.number}…`,
+      detail: 'Review checks, reviews, merge and close options',
+      group: 'Stack navigation',
+      keywords: 'manage pull request pr review checks merge close',
+      disabled: isBusy,
+      disabledReason: isBusy ? 'App is busy' : undefined,
+      intent: { kind: 'workflow', request: { kind: 'pr', number: selectedPr.number } },
+    })
+    if (
+      selectedBranch &&
+      !selectedBranch.remote &&
+      selectedBranch.name !== snapshot?.defaultBranch &&
+      selectedPr.state === 'OPEN'
+    ) {
+      items.push({
+        id: 'stack.mergePr',
+        label: `Preview PR #${selectedPr.number} merge…`,
+        detail: 'Review merging the open pull request before confirmation',
+        group: 'Stack navigation',
+        keywords: 'preview merge pull request pr stack',
+        disabled: isBusy || operationActive,
+        disabledReason: isBusy
+          ? 'App is busy'
+          : operationActive
+            ? 'Operation in progress'
+            : undefined,
+        intent: {
+          kind: 'workflow',
+          request: { kind: 'stack', operation: 'merge', branch: selectedBranch.name },
+        },
+      })
+    }
+  }
+
+  if (selectedBranch) {
+    const parent = snapshot?.branches.find(
+      (branch) => !branch.remote && branch.name === selectedBranch.parent,
+    )
+    items.push({
+      id: 'stack.rebaseCurrent',
+      label: 'Rebase current onto parent…',
+      detail: 'Rewrite only the checked-out branch after review; descendants are not moved',
+      group: 'Stack navigation',
+      keywords: 'rebase current branch parent rewrite',
+      disabled:
+        !selectedBranch.current || !parent || selectedBranch.remote || isBusy || operationActive,
+      disabledReason: !selectedBranch.current
+        ? 'Switch to this branch before rebasing'
+        : selectedBranch.remote
+          ? 'Remote branches cannot be rebased directly'
+          : !parent
+            ? 'No local recorded parent'
+            : isBusy
+              ? 'App is busy'
+              : operationActive
+                ? 'Operation in progress'
+                : undefined,
+      intent: parent
+        ? {
+            kind: 'workflow',
+            request: {
+              kind: 'confirm',
+              action: { type: 'rebase', parent: parent.name },
+              title: 'Rebase current branch?',
+              label: 'Rebase onto parent',
+              description:
+                'This rewrites only the current branch. Use Restack stack to update dependent branches together.',
+            },
+          }
+        : { kind: 'view', view: 'branches' },
+    })
+  }
+
   // --- Primary menu / toolbar commands ---
   items.push({
     id: 'command.fetch',
     label: 'Fetch remote updates',
     detail: 'Fetch latest branches and commits without updating working tree',
+    shortcutId: 'stack.sync',
+    shortcutText: shortcutFor('stack.sync'),
     group: 'Commands',
     keywords: 'fetch sync pull remote download',
     disabled: !snapshot || isBusy || operationActive,
@@ -521,12 +639,20 @@ export function buildPaletteItems(context: BuildPaletteContext): PaletteItem[] {
         group: 'Commands',
         keywords: 'delete remove remote branch prune',
         destructive: true,
-        disabled: isBusy || operationActive,
+        disabled:
+          isBusy ||
+          operationActive ||
+          !selectedBranch.oid ||
+          selectedBranch.name.endsWith(`/${snapshot?.defaultBranch}`),
         disabledReason: isBusy
           ? 'App is busy'
           : operationActive
             ? 'Operation in progress'
-            : undefined,
+            : !selectedBranch.oid
+              ? 'Remote branch identity is unavailable'
+              : selectedBranch.name.endsWith(`/${snapshot?.defaultBranch}`)
+                ? 'Cannot delete the default branch on its remote'
+                : undefined,
         intent: { kind: 'workflow', request: { kind: 'deleteRemote', branch: selectedBranch } },
       })
     }
@@ -572,6 +698,40 @@ export function buildPaletteItems(context: BuildPaletteContext): PaletteItem[] {
         group: 'Pull requests',
         keywords: `#${pr.number} ${pr.title} ${pr.head} ${pr.base} ${pr.state}`,
         intent: { kind: 'openPrUrl', url: pr.url },
+      })
+      items.push({
+        id: `pr.manage.${pr.number}`,
+        label: `Manage PR #${pr.number}…`,
+        detail: `${pr.title} (${pr.state.toLowerCase()})`,
+        group: 'Pull requests',
+        keywords: `manage pull request #${pr.number} ${pr.title} review checks merge close`,
+        disabled: isBusy,
+        disabledReason: isBusy ? 'App is busy' : undefined,
+        intent: { kind: 'workflow', request: { kind: 'pr', number: pr.number } },
+      })
+    }
+  }
+  // --- Entities: Issues ---
+  if (snapshot) {
+    for (const issue of snapshot.issues ?? []) {
+      items.push({
+        id: `issue.${issue.number}`,
+        label: `Issue #${issue.number} ${issue.title}`,
+        detail: 'Open issue on GitHub',
+        group: 'Issues',
+        keywords: `#${issue.number} ${issue.title} issue github`,
+        intent: { kind: 'openPrUrl', url: issue.url },
+      })
+    }
+    if (snapshot.issuesMessage) {
+      items.push({
+        id: 'issues.unavailable',
+        label: 'GitHub issues unavailable',
+        detail: snapshot.issuesMessage,
+        group: 'Issues',
+        disabled: true,
+        disabledReason: snapshot.issuesMessage,
+        intent: { kind: 'view', view: 'pullRequests' },
       })
     }
   }

@@ -2,6 +2,7 @@ import * as React from 'react'
 import {
   AlertTriangle,
   Archive,
+  CircleDot,
   CornerDownLeft,
   ExternalLink,
   Files,
@@ -28,6 +29,7 @@ import { cn } from '../lib/utils'
 import {
   type CommandGroup,
   type PaletteItem,
+  groupPaletteItems,
   rankPaletteItems,
   resolveFocusRestoreTarget,
 } from '../lib/command-palette'
@@ -39,16 +41,6 @@ export interface CommandPaletteProps {
   onExecute: (item: PaletteItem) => void
   searchFallbackRef?: React.RefObject<HTMLInputElement | null>
 }
-
-const GROUP_ORDER: readonly CommandGroup[] = [
-  'Stack navigation',
-  'Commands',
-  'Views',
-  'Branches',
-  'Pull requests',
-  'Recent repositories',
-  'Settings',
-]
 
 function groupIcon(group: CommandGroup) {
   switch (group) {
@@ -74,6 +66,10 @@ function groupIcon(group: CommandGroup) {
           className="size-3.5 text-[var(--gs-semantic-feedback-success-text)]"
           aria-hidden="true"
         />
+      )
+    case 'Issues':
+      return (
+        <CircleDot className="size-3.5 text-[var(--gs-semantic-action-link)]" aria-hidden="true" />
       )
     case 'Recent repositories':
       return (
@@ -129,38 +125,16 @@ export function CommandPaletteContent({
     onConfirmingChange?.(confirmingId)
   }, [confirmingId, onConfirmingChange])
 
-  // Group items in standard group order
-  const groupedItems = React.useMemo(() => {
-    const map = new Map<CommandGroup, Array<{ item: PaletteItem; flatIndex: number }>>()
-    filteredItems.forEach((item, flatIndex) => {
-      const existing = map.get(item.group)
-      if (existing) {
-        existing.push({ item, flatIndex })
-      } else {
-        map.set(item.group, [{ item, flatIndex }])
-      }
-    })
+  const groupedItems = React.useMemo(
+    () => groupPaletteItems(filteredItems, Boolean(query.trim())),
+    [filteredItems, query],
+  )
+  const displayedItems = React.useMemo(
+    () => groupedItems.flatMap(({ entries }) => entries.map(({ item }) => item)),
+    [groupedItems],
+  )
 
-    const result: Array<{
-      group: CommandGroup
-      entries: Array<{ item: PaletteItem; flatIndex: number }>
-    }> = []
-    for (const group of GROUP_ORDER) {
-      const entries = map.get(group)
-      if (entries && entries.length > 0) {
-        result.push({ group, entries })
-      }
-    }
-    // Any other groups
-    for (const [group, entries] of map.entries()) {
-      if (!GROUP_ORDER.includes(group)) {
-        result.push({ group, entries })
-      }
-    }
-    return result
-  }, [filteredItems])
-
-  const selectedItem = filteredItems[selectedIndex] ?? null
+  const selectedItem = displayedItems[selectedIndex] ?? null
 
   // Ensure selected item is scrolled into view
   React.useEffect(() => {
@@ -192,13 +166,13 @@ export function CommandPaletteContent({
     if (event.key === 'ArrowDown') {
       event.preventDefault()
       setConfirmingId(null)
-      if (filteredItems.length === 0) return
-      setSelectedIndex((prev) => (prev + 1) % filteredItems.length)
+      if (displayedItems.length === 0) return
+      setSelectedIndex((prev) => (prev + 1) % displayedItems.length)
     } else if (event.key === 'ArrowUp') {
       event.preventDefault()
       setConfirmingId(null)
-      if (filteredItems.length === 0) return
-      setSelectedIndex((prev) => (prev - 1 + filteredItems.length) % filteredItems.length)
+      if (displayedItems.length === 0) return
+      setSelectedIndex((prev) => (prev - 1 + displayedItems.length) % displayedItems.length)
     } else if (event.key === 'Home') {
       event.preventDefault()
       setConfirmingId(null)
@@ -206,7 +180,7 @@ export function CommandPaletteContent({
     } else if (event.key === 'End') {
       event.preventDefault()
       setConfirmingId(null)
-      setSelectedIndex(Math.max(0, filteredItems.length - 1))
+      setSelectedIndex(Math.max(0, displayedItems.length - 1))
     } else if (event.key === 'Enter') {
       event.preventDefault()
       if (selectedItem) {
@@ -238,7 +212,7 @@ export function CommandPaletteContent({
     <div className="flex flex-col">
       <div className="sr-only">
         <h2>Command palette</h2>
-        <p>Search commands, stack navigation, branches, pull requests, and settings.</p>
+        <p>Search commands, stack navigation, branches, pull requests, issues, and settings.</p>
       </div>
 
       <div className="palette-search-row flex items-center border-b border-[var(--gs-semantic-border-essential)] px-4 py-3">
@@ -254,7 +228,7 @@ export function CommandPaletteContent({
           aria-autocomplete="list"
           aria-controls="palette-listbox"
           aria-activedescendant={selectedItem ? `palette-opt-${selectedItem.id}` : undefined}
-          aria-label="Search actions, repositories, branches, PRs, and settings"
+          aria-label="Search actions, repositories, branches, PRs, issues, and settings"
           placeholder="Type a command or search entities…"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
@@ -280,7 +254,7 @@ export function CommandPaletteContent({
         id="palette-listbox"
         role="listbox"
         aria-label="Command suggestions"
-        className="palette-results max-h-[360px] overflow-y-auto p-2"
+        className="palette-results min-w-0 max-h-[360px] overflow-y-auto p-2"
       >
         {filteredItems.length === 0 ? (
           <div className="p-6 text-center text-[13px] text-[var(--gs-semantic-text-secondary)]">
@@ -289,7 +263,7 @@ export function CommandPaletteContent({
         ) : (
           groupedItems.map(({ group, entries }) => (
             <div
-              key={group}
+              key={`${group}-${entries[0].flatIndex}`}
               role="group"
               aria-label={group}
               className="palette-group mb-2 last:mb-0"
@@ -411,12 +385,11 @@ export function CommandPalette({
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
-        className="palette-dialog fixed left-1/2 top-[12%] z-[var(--gs-component-overlay-z-index)] grid max-h-[calc(88vh-1rem)] w-[calc(100%-2rem)] max-w-2xl -translate-x-1/2 translate-y-0 gap-0 overflow-y-auto rounded-[var(--gs-semantic-radius-workbench)] border border-[var(--gs-semantic-border-essential)] bg-[var(--gs-component-overlay-background)] p-0 shadow-[var(--gs-semantic-elevation-large)] outline-none"
+        className="palette-dialog fixed left-1/2 top-[12%] z-[var(--gs-component-overlay-z-index)] grid grid-cols-[minmax(0,1fr)] max-h-[calc(88vh-1rem)] w-[calc(100%-2rem)] max-w-2xl -translate-x-1/2 translate-y-0 gap-0 overflow-y-auto rounded-[var(--gs-semantic-radius-workbench)] border border-[var(--gs-semantic-border-essential)] bg-[var(--gs-component-overlay-background)] p-0 shadow-[var(--gs-semantic-elevation-large)] outline-none"
         onCloseAutoFocus={(event) => {
           event.preventDefault()
           const target = resolveFocusRestoreTarget(openerRef.current, searchFallbackRef?.current)
           target?.focus()
-          openerRef.current = null
         }}
         onEscapeKeyDown={(event) => {
           if (confirmingRef.current) event.preventDefault()
@@ -425,7 +398,7 @@ export function CommandPalette({
         <DialogHeader className="sr-only">
           <DialogTitle>Command palette</DialogTitle>
           <DialogDescription>
-            Search commands, stack navigation, branches, pull requests, and settings.
+            Search commands, stack navigation, branches, pull requests, issues, and settings.
           </DialogDescription>
         </DialogHeader>
         <CommandPaletteContent

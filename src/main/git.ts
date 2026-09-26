@@ -55,7 +55,7 @@ import {
   validateBranchName,
 } from './git-core'
 import type { RefRecord } from './git-core'
-import { getGitHubData } from './github'
+import { getGitHubData, getGitHubIssues } from './github'
 import {
   getStackProgress,
   isStackAction,
@@ -136,7 +136,13 @@ function validateAction(value: unknown): GitAction {
 
   switch (value.type) {
     case 'switch':
-      return { type: 'switch', ref: requireRefInput(value.ref, 'branch ref') }
+      if (value.carry !== undefined && typeof value.carry !== 'boolean')
+        throw new Error('carry must be a boolean')
+      return {
+        type: 'switch',
+        ref: requireRefInput(value.ref, 'branch ref'),
+        carry: value.carry === true,
+      }
     case 'createBranch':
       return {
         type: 'createBranch',
@@ -1866,9 +1872,9 @@ async function runStashAction(
   }
 }
 
-async function runSwitch(repoPath: string, ref: string): Promise<ActionResult> {
+async function runSwitch(repoPath: string, ref: string, carry = false): Promise<ActionResult> {
   await ensureNoBusyOperation(repoPath, 'switch branches')
-  await ensureClean(repoPath, 'switch branches')
+  if (!carry) await ensureClean(repoPath, 'switch branches')
   if (
     (!ref.startsWith('refs/heads/') && !ref.startsWith('refs/remotes/')) ||
     !(await refExists(repoPath, ref))
@@ -3527,7 +3533,10 @@ export async function getSnapshot(repoPath: string): Promise<RepositorySnapshot>
   }
 
   const defaultBranch = await getDefaultBranch(root, refs, currentBranch)
-  const github = await getGitHubData(root, originUrl)
+  const [github, issueData] = await Promise.all([
+    getGitHubData(root, originUrl),
+    getGitHubIssues(root, originUrl),
+  ])
   const parentConfigs = await Promise.all(
     branches
       .filter((branch) => !branch.remote)
@@ -3628,6 +3637,8 @@ export async function getSnapshot(repoPath: string): Promise<RepositorySnapshot>
     remoteUrl: originUrl,
     branches,
     pullRequests: github.pullRequests,
+    issues: issueData.issues,
+    issuesMessage: issueData.message,
     files,
     stashes,
     rebaseInProgress: operationState.rebase,
@@ -4205,7 +4216,7 @@ export async function runAction(repoPath: string, value: GitAction): Promise<Act
     case 'stashDrop':
       return runStashAction(root, action.type, action.ref, action.oid)
     case 'switch':
-      return runSwitch(root, action.ref)
+      return runSwitch(root, action.ref, action.carry)
     case 'createBranch':
       return runCreateBranch(root, action.name, action.parent)
     case 'deleteBranch':

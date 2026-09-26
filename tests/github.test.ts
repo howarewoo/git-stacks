@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
-import { getGitHubData, getPullRequest } from '../src/main/github'
+import { getGitHubData, getGitHubIssues, getPullRequest } from '../src/main/github'
 
 async function githubFixture() {
   const root = await mkdtemp(join(tmpdir(), 'git-stacks-gh-fixture-'))
@@ -37,6 +37,10 @@ const open = [
 const tracked = { number: 7, title: 'Merged parent', url: 'https://github.com/acme/widgets/pull/7', body: 'body', state: 'MERGED', isDraft: false, headRefName: 'parent', headRefOid: 'c'.repeat(40), headRepository: { nameWithOwner: 'acme/widgets' }, baseRefName: 'main', mergeStateStatus: 'CLEAN', reviewDecision: 'APPROVED', mergeCommit: { oid: 'd'.repeat(40) }, commits: { nodes: [{ commit: { statusCheckRollup: { state: 'SUCCESS' } } }] } }
 if (args.includes('graphql') && args.includes('number=7')) {
   process.stdout.write(JSON.stringify({ data: { repository: { pullRequest: tracked } } }))
+} else if (args.includes('graphql') && args.some((arg) => arg.includes('issues(first:'))) {
+  process.stdout.write(JSON.stringify([{ data: { repository: { issues: { nodes: [
+    { number: 17, title: 'Improve navigation', url: 'https://github.com/acme/widgets/issues/17' }
+  ], pageInfo: { hasNextPage: false, endCursor: null } } } } }]))
 } else if (args.includes('graphql') && args.includes('--paginate')) {
   process.stdout.write(JSON.stringify([{ data: { repository: { pullRequests: { nodes: open, pageInfo: { hasNextPage: false, endCursor: null } } } } }]))
 } else {
@@ -68,6 +72,25 @@ test('GitHub fixture keeps fork heads separate and includes tracked closed paren
     assert.equal(result.pullRequests[local]?.headOid, 'a'.repeat(40))
     assert.equal(result.pullRequests[local]?.reviewDecision, 'APPROVED')
     assert.equal(result.pullRequests[local]?.mergeState, 'CLEAN')
+  } finally {
+    process.env.PATH = originalPath
+    await rm(root, { recursive: true, force: true })
+  }
+})
+test('GitHub issue discovery returns open issue identities from the repository', async () => {
+  const { root, repo, bin } = await githubFixture()
+  const originalPath = process.env.PATH
+  process.env.PATH = `${bin}:${originalPath ?? ''}`
+  try {
+    const result = await getGitHubIssues(repo, 'https://github.com/acme/widgets.git')
+    assert.equal(result.message, '')
+    assert.deepEqual(result.issues, [
+      {
+        number: 17,
+        title: 'Improve navigation',
+        url: 'https://github.com/acme/widgets/issues/17',
+      },
+    ])
   } finally {
     process.env.PATH = originalPath
     await rm(root, { recursive: true, force: true })
