@@ -148,6 +148,7 @@ export function WorkflowDialog({
   const [identity, setIdentity] = React.useState<string | null>(null)
   const [edited, setEdited] = React.useState(false)
   const [closeNotice, setCloseNotice] = React.useState<string | null>(null)
+  const hasEditedRef = React.useRef(false)
   const captured = React.useRef({
     path: snapshot.path,
     head: snapshot.headOid,
@@ -173,6 +174,7 @@ export function WorkflowDialog({
 
   const stale = identity !== null && rejectedIdentities.includes(identity)
   const markEdited = () => {
+    hasEditedRef.current = true
     setEdited(true)
     setCloseNotice(null)
   }
@@ -210,6 +212,7 @@ export function WorkflowDialog({
     void initialLoad.current.promise.then(
       (data) => {
         if (!active) return
+        setRejectedIdentities([])
         if (data.kind === 'stack') {
           setPreview(data.value)
           // Entered titles survive a preview reload; only untouched branches are seeded.
@@ -222,9 +225,11 @@ export function WorkflowDialog({
           setPush(data.value)
         } else if (data.kind === 'pr') {
           setPr(data.value)
-          setPrTitle((current) => current || data.value.title)
-          setBody((current) => current || data.value.body)
-          setDraft(data.value.draft)
+          if (!hasEditedRef.current) {
+            setPrTitle(data.value.title)
+            setBody(data.value.body)
+            setDraft(data.value.draft)
+          }
         }
         setLoaded(true)
         setLoading(false)
@@ -956,7 +961,6 @@ export function WorkflowDialog({
                 variant="secondary"
                 disabled={busy}
                 onClick={() => {
-                  setRejectedIdentities([])
                   setError(null)
                   onClearActionError()
                   setAttempt((value) => value + 1)

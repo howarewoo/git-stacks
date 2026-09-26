@@ -221,6 +221,8 @@ export function workflowBlocker(input: WorkflowGuardInput): WorkflowBlocker | nu
   if (nameKinds.includes(input.kind) && !input.name.trim()) return block('name-required')
 
   if (input.kind === 'pr') {
+    if (input.previewToken && input.rejectedTokens.includes(input.previewToken))
+      return block('preview-stale')
     if (input.pullRequestMissing || input.pullRequestMerged)
       return block('pull-request-unavailable')
     if (!input.pullRequestTitle.trim()) return block('pull-request-title-required')

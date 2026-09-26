@@ -265,6 +265,26 @@ test('a rejected preview identity stays rejected until a fresh preview is read',
   )
 })
 
+test('a rejected pull request preview cannot be updated until it is reloaded', () => {
+  const pr = guard({
+    kind: 'pr',
+    requiresName: false,
+    previewToken: 'pr:41:head-1',
+    pullRequestTitle: 'Cover checkout',
+  })
+  assert.equal(workflowBlocker(pr), null)
+  assert.equal(workflowBlocker({ ...pr, rejectedTokens: ['pr:41:head-1'] })?.code, 'preview-stale')
+  assert.equal(
+    workflowBlocker({
+      ...pr,
+      previewToken: 'pr:41:head-2',
+      rejectedTokens: ['pr:41:head-1'],
+    }),
+    null,
+    'a reloaded PR preview issues a new identity and can be reviewed',
+  )
+})
+
 test('a blocked preview and a missing preview each name a recoverable next step', () => {
   const stack = guard({ kind: 'stack', requiresName: false })
   assert.equal(workflowBlocker(stack)?.code, 'preview-missing')

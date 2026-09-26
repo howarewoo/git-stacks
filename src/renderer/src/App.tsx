@@ -128,6 +128,7 @@ function App() {
   const [newBranchOpen, setNewBranchOpen] = React.useState(false)
   const [newBranchName, setNewBranchName] = React.useState('')
   const [newBranchParent, setNewBranchParent] = React.useState('')
+  const [newBranchEdited, setNewBranchEdited] = React.useState(false)
   const [newBranchError, setNewBranchError] = React.useState<string | null>(null)
   const [deleteTarget, setDeleteTarget] = React.useState<{
     branch: Branch
@@ -144,6 +145,7 @@ function App() {
   const [prBody, setPrBody] = React.useState('')
   const [prBase, setPrBase] = React.useState('')
   const [prDraft, setPrDraft] = React.useState(false)
+  const [prEdited, setPrEdited] = React.useState(false)
   const [prError, setPrError] = React.useState<string | null>(null)
   const [commitMessage, setCommitMessage] = React.useState('')
   const [commitAmend, setCommitAmend] = React.useState(false)
@@ -371,6 +373,7 @@ function App() {
     setNewBranchParent(
       snapshot.currentBranch ?? snapshot.defaultBranch ?? snapshot.branches[0]?.name ?? '',
     )
+    setNewBranchEdited(false)
     setNewBranchError(null)
     setNewBranchOpen(true)
   }, [snapshot])
@@ -381,6 +384,7 @@ function App() {
     setPrBody('')
     setPrBase(selectedBranch.parent ?? snapshot.defaultBranch)
     setPrDraft(false)
+    setPrEdited(false)
     setPrError(null)
     setPrOpen(true)
   }, [selectedBranch, snapshot])
@@ -1616,7 +1620,7 @@ function App() {
           }
           const intent = closeIntent({
             busy: isBusy,
-            dirty: Boolean(newBranchName) || Boolean(newBranchParent),
+            dirty: newBranchEdited,
           })
           if (intent === 'allow') {
             setNewBranchOpen(false)
@@ -1646,6 +1650,7 @@ function App() {
                   autoFocus
                   onChange={(event) => {
                     setNewBranchName(event.target.value)
+                    setNewBranchEdited(true)
                     setNewBranchNotice(null)
                   }}
                   placeholder="feature/short-description"
@@ -1656,6 +1661,7 @@ function App() {
                 <Select
                   onChange={(event) => {
                     setNewBranchParent(event.target.value)
+                    setNewBranchEdited(true)
                     setNewBranchNotice(null)
                   }}
                   value={newBranchParent}
@@ -1702,7 +1708,7 @@ function App() {
           }
           const intent = closeIntent({
             busy: isBusy,
-            dirty: Boolean(prTitle) || Boolean(prBase) || Boolean(prBody) || prDraft,
+            dirty: prEdited,
           })
           if (intent === 'allow') {
             setPrOpen(false)
@@ -1752,6 +1758,7 @@ function App() {
                   autoFocus
                   onChange={(event) => {
                     setPrTitle(event.target.value)
+                    setPrEdited(true)
                     setPrNotice(null)
                   }}
                   placeholder="What does this stack change?"
@@ -1768,6 +1775,7 @@ function App() {
                   list="pr-base-options"
                   onChange={(event) => {
                     setPrBase(event.target.value)
+                    setPrEdited(true)
                     setPrNotice(null)
                   }}
                   value={prBase}
@@ -1784,6 +1792,7 @@ function App() {
                 <Textarea
                   onChange={(event) => {
                     setPrBody(event.target.value)
+                    setPrEdited(true)
                     setPrNotice(null)
                   }}
                   placeholder="Add context for reviewers"
@@ -1795,7 +1804,10 @@ function App() {
                 id="pr-draft"
                 label="Mark as draft"
                 checked={prDraft}
-                onChange={(event) => setPrDraft(event.target.checked)}
+                onChange={(event) => {
+                  setPrDraft(event.target.checked)
+                  setPrEdited(true)
+                }}
               />
               {prError ? <PhaseStatus phase="failed" message={prError} /> : null}
               <WorkflowActions>
