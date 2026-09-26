@@ -451,7 +451,7 @@ function includedResponse(output: string): { status: number; headers: Headers; b
 export interface GhGitHubTransportOptions {
   env?: NodeJS.ProcessEnv
   apiUrl?: string
-  run?: (args: string[], options?: GitHubGraphqlOptions) => Promise<string>
+  run?: (args: string[], options: GitHubGraphqlOptions & { input?: string }) => Promise<string>
 }
 
 /** Optional fallback/diagnostic path: `gh api --include` supplies JSON and HTTP metadata. */
@@ -474,6 +474,7 @@ export class GhGitHubTransport implements GitHubTransport {
   private async api(
     args: string[],
     request: GitHubGraphqlOptions,
+    input?: string,
   ): Promise<{ status: number; headers: Headers; body: unknown }> {
     if (request.signal?.aborted)
       throw new GitHubTransportError({ kind: 'cancelled', detail: 'the request was cancelled' })
@@ -489,8 +490,8 @@ export class GhGitHubTransport implements GitHubTransport {
     if (request.signal?.aborted) controller.abort()
     const run =
       this.options.run ??
-      (async (argv: string[], options: GitHubGraphqlOptions = {}) => {
-        const result = await execFile('gh', argv, {
+      (async (argv: string[], options: GitHubGraphqlOptions & { input?: string }) => {
+        const child = execFile('gh', argv, {
           cwd: process.cwd(),
           env: {
             ...process.env,
@@ -505,12 +506,14 @@ export class GhGitHubTransport implements GitHubTransport {
           maxBuffer: MAX_BUFFER,
           encoding: 'utf8',
         })
+        if (options.input !== undefined) child.child.stdin?.end(options.input)
+        const result = await child
         return result.stdout
       })
     let output: string
     try {
       try {
-        output = await run(args, { signal: controller.signal, timeoutMs })
+        output = await run(args, { signal: controller.signal, timeoutMs, input })
       } catch (error) {
         if (timedOut)
           throw new GitHubTransportError({
@@ -572,10 +575,9 @@ export class GhGitHubTransport implements GitHubTransport {
         ? `${this.apiUrl}/${request.path.replace(/^\/+/u, '')}`
         : request.path
     args.push(endpoint)
-    for (const [key, value] of Object.entries(request.body ?? {})) {
-      args.push(typeof value === 'string' ? '-f' : '-F', `${key}=${String(value)}`)
-    }
-    const { status, headers, body } = await this.api(args, request)
+    const input = request.body === undefined ? undefined : JSON.stringify(request.body)
+    if (input !== undefined) args.push('--input', '-')
+    const { status, headers, body } = await this.api(args, request, input)
     return { status, data: body as T, headers, rateLimit: parseRateLimit(headers) }
   }
 
@@ -624,7 +626,7 @@ export class GhGitHubTransport implements GitHubTransport {
     const response = await this.request<unknown>({
       method: 'POST',
       path: 'graphql',
-      body: { query, ...variables },
+      body: { query, variables },
       ...options,
     })
     return graphqlData<T>(response.data, response.status, response.rateLimit)

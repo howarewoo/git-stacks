@@ -289,11 +289,11 @@ test('gh stays optional and the selected transport follows the environment', () 
   )
 })
 test('gh consumes HTTP response metadata and version without parsing stderr', async () => {
-  const commands: string[][] = []
+  const commands: Array<{ args: string[]; input?: string }> = []
   const adapter = new GhGitHubTransport({
     env: { GIT_STACKS_GITHUB_API_VERSION: '2026-01-01' },
-    run: async (args) => {
-      commands.push(args)
+    run: async (args, options) => {
+      commands.push({ args, input: options.input })
       if (args.includes('repos/acme/widgets/pulls/9')) {
         const error = new Error('gh failed') as Error & { stdout: string }
         error.stdout =
@@ -311,8 +311,8 @@ test('gh consumes HTTP response metadata and version without parsing stderr', as
   })
   assert.equal(patched.status, 200)
   assert.equal(patched.rateLimit.remaining, 4321)
-  assert.ok(commands[0].includes('X-GitHub-Api-Version: 2026-01-01'))
-  assert.ok(commands[0].includes('--include'))
+  assert.ok(commands[0].args.includes('X-GitHub-Api-Version: 2026-01-01'))
+  assert.ok(commands[0].args.includes('--include'))
   assert.deepEqual(await adapter.paginate({ path: 'repos/acme/widgets/issues/3/comments' }), [
     { id: 1 },
     { id: 2 },
@@ -330,6 +330,33 @@ test('gh consumes HTTP response metadata and version without parsing stderr', as
     assert.equal(error.rateLimit.retryAfterSeconds, 60)
     return true
   })
+})
+
+test('gh sends structured REST bodies and GraphQL variables as JSON over stdin', async () => {
+  const sent: Array<{ args: string[]; input?: string }> = []
+  const adapter = new GhGitHubTransport({
+    run: async (args, options) => {
+      sent.push({ args, input: options.input })
+      return 'HTTP/2.0 200 OK\r\n\r\n{"data":{"ok":true}}\n'
+    },
+  })
+  const body = {
+    title: '["literal"]',
+    count: 7,
+    enabled: false,
+    empty: null,
+    nested: { labels: ['one', 'two'], options: { priority: 1 } },
+  }
+  await adapter.rest({ method: 'PATCH', path: 'repos/acme/widgets/pulls/3', body })
+  assert.deepEqual(JSON.parse(sent[0].input!), body)
+  assert.deepEqual(sent[0].args.slice(-2), ['--input', '-'])
+  assert.ok(!sent[0].args.includes('-F') && !sent[0].args.includes('-f'))
+
+  const variables = { input: { pullRequestId: 'PR_x', labels: ['one'] }, dryRun: false }
+  const query = 'mutation($input: ExampleInput!) { test(input: $input) { ok } }'
+  assert.deepEqual(await adapter.graphql(query, variables), { ok: true })
+  assert.deepEqual(JSON.parse(sent[1].input!), { query, variables })
+  assert.deepEqual(sent[1].args.slice(-2), ['--input', '-'])
 })
 
 test('gh rejects pre-cancelled requests and forwards deadlines to the subprocess', async () => {

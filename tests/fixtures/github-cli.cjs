@@ -33,18 +33,15 @@ function valueFor(args, flag) {
   return index >= 0 ? args[index + 1] : undefined
 }
 
-function formValues(args) {
-  const result = new Map()
-  for (let index = 0; index < args.length; index += 1) {
-    if (args[index] !== '-f' && args[index] !== '-F') continue
-    const value = args[index + 1]
-    if (typeof value !== 'string') continue
-    const separator = value.indexOf('=')
-    if (separator <= 0) continue
-    result.set(value.slice(0, separator), value.slice(separator + 1))
-    index += 1
+function jsonValues(args) {
+  const input = valueFor(args, '--input')
+  if (input === undefined) return {}
+  if (input !== '-') fail('the fixture expects JSON on stdin')
+  try {
+    return JSON.parse(fs.readFileSync(0, 'utf8'))
+  } catch {
+    fail('invalid JSON input')
   }
-  return result
 }
 
 function bareGit(args, options = {}) {
@@ -128,8 +125,7 @@ function repositoryName(args) {
   return null
 }
 
-function requireRepository(state, args) {
-  const forms = formValues(args)
+function requireRepository(state, args, forms) {
   const owner = forms.get('owner')
   const name = forms.get('name')
   const explicit = repositoryName(args)
@@ -216,10 +212,10 @@ function commentResponse(state, comment) {
 }
 
 function handleApi(state, args) {
-  requireRepository(state, args)
+  const forms = new Map(Object.entries(jsonValues(args)))
+  requireRepository(state, args, forms)
   const endpoint = args.find((arg) => /^repos\//u.test(arg) || arg === 'user')
   const method = valueFor(args, '--method') || 'GET'
-  const forms = formValues(args)
   if (endpoint === 'user') return actor(state.currentUser)
   if (!endpoint) fail(`unknown gh api endpoint: ${args.join(' ')}`)
   const repository = `${state.repository.owner}/${state.repository.name}`
@@ -298,9 +294,10 @@ function handleApi(state, args) {
 }
 
 function handleGraphql(state, args) {
-  const forms = formValues(args)
-  requireRepository(state, args)
-  const query = forms.get('query') || ''
+  const body = jsonValues(args)
+  const forms = new Map(Object.entries(body.variables || {}))
+  requireRepository(state, args, forms)
+  const query = body.query || ''
   const field = query.includes('convertPullRequestToDraft')
     ? 'convertPullRequestToDraft'
     : query.includes('markPullRequestReadyForReview')
