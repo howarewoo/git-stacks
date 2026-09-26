@@ -20,8 +20,6 @@ import {
   type GitHubFixtureState,
 } from './fixtures/github-harness'
 
-const marker = '<!-- git-stacks:stack-links:v1 -->'
-
 function git(harness: GitHubHarness, args: string[]): string {
   return execFileSync(harness.env.GIT_STACKS_REAL_GIT || 'git', ['-C', harness.repo, ...args], {
     encoding: 'utf8',
@@ -495,15 +493,6 @@ test(
         'https://github.com/acme/widgets.git',
       )
 
-      for (const branch of ['parent', 'child']) {
-        const pr = prFor(first, branch)
-        const comments = first.comments[String(pr.number)] || []
-        assert.equal(comments.filter((comment) => comment.body.includes(marker)).length, 1)
-        assert.match(
-          comments.find((comment) => comment.body.includes(marker))?.body || '',
-          new RegExp(`#${pr.number}`),
-        )
-      }
       assert.equal(localOid(harness, 'parent'), before.parent)
       assert.equal(localOid(harness, 'child'), before.child)
 
@@ -1145,81 +1134,6 @@ test(
 )
 
 test(
-  'foreign and ambiguous managed-link comments are never overwritten',
-  { concurrency: false },
-  async () => {
-    await withHarness(async (harness) => {
-      await createStack(harness)
-      await publishStack(harness)
-      let state = await harness.readState()
-      const parent = prFor(state, 'parent')
-      const managed = (state.comments[String(parent.number)] || []).find((comment) =>
-        comment.body.includes(marker),
-      )
-      assert.ok(managed)
-      const foreign = {
-        id: 9901,
-        body: `${marker}\nHuman-authored navigation that must remain untouched`,
-        user: { login: 'human-reviewer' },
-      }
-      state.comments[String(parent.number)] = [
-        foreign,
-        ...(state.comments[String(parent.number)] || []),
-      ]
-      await harness.writeState(state)
-
-      await publishStack(harness)
-      state = await harness.readState()
-      assert.equal(
-        state.comments[String(parent.number)]?.find((comment) => comment.id === foreign.id)?.body,
-        foreign.body,
-      )
-      assert.equal(
-        (state.comments[String(parent.number)] || []).filter((comment) =>
-          comment.body.includes(marker),
-        ).length,
-        2,
-      )
-
-      const managedComments =
-        state.comments[String(parent.number)]?.filter((comment) => comment.body.includes(marker)) ||
-        []
-      assert.equal(managedComments.length, 2)
-      const duplicate = { ...managedComments[1], id: 9902 }
-      state.comments[String(parent.number)] = [
-        ...(state.comments[String(parent.number)] || []),
-        duplicate,
-      ]
-      const beforeBodies = state.comments[String(parent.number)]?.map((comment) => [
-        comment.id,
-        comment.body,
-      ])
-      await harness.writeState(state)
-      const preview = await previewStack(
-        harness.repo,
-        await getSnapshot(harness.repo),
-        'publish',
-        'child',
-      )
-      await assert.rejects(
-        runAction(harness.repo, {
-          type: 'executeStack',
-          token: preview.token,
-          allowForce: false,
-          draft: false,
-          titles: {},
-          mergeMethod: 'squash',
-        }),
-      )
-      const after = await harness.readState()
-      assert.deepEqual(
-        after.comments[String(parent.number)]?.map((comment) => [comment.id, comment.body]),
-        beforeBodies,
-      )
-    })
-  },
-)
-test(
   'restack reconstructs merge-time head from journal and rejects unproven metadata pointing at child tip',
   { concurrency: false },
   async () => {
@@ -1855,9 +1769,6 @@ test(
         assert.deepEqual(state.prs.map((pr) => pr.head).sort(), ['child', 'parent'])
         const parent = prFor(state, 'parent')
         assert.equal(parent.headOid, remoteOid(harness, 'parent'))
-        const comments = state.comments[String(parent.number)] || []
-        assert.equal(comments.length, 1)
-        assert.match(comments[0].body, /Stack navigation:/u)
         const data = await getGitHubData(harness.repo, 'https://github.com/acme/widgets.git')
         assert.equal(data.available, true)
         assert.deepEqual(

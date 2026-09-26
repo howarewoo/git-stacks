@@ -3544,14 +3544,19 @@ export async function getSnapshot(repoPath: string): Promise<RepositorySnapshot>
     const pullRequest = localPullRequests.get(name) ?? null
     const config = configParents.get(name)
     branch.pr = pullRequest
-    if (pullRequest?.stack) {
+    if (config?.parent) {
+      branch.parent = config.parent
+      branch.parentTip = config.parentTip ?? null
+      branch.parentSource =
+        pullRequest?.stack && pullRequest.stack.base === config.parent ? 'stack' : 'recorded'
+    } else if (pullRequest?.stack) {
       branch.parent = pullRequest.stack.base
       branch.parentTip = config?.parentTip ?? null
       branch.parentSource = 'stack'
     } else {
-      branch.parent = config?.parent ?? pullRequest?.base ?? null
+      branch.parent = pullRequest?.base ?? null
       branch.parentTip = config?.parentTip ?? null
-      branch.parentSource = config?.parent ? 'recorded' : pullRequest ? 'pullRequest' : null
+      branch.parentSource = pullRequest ? 'pullRequest' : null
     }
   }
 

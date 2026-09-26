@@ -186,6 +186,22 @@ export function validateNativeStackChain(
     seenNumbers.add(pr.number)
     seenHeads.add(pr.head)
   }
+  for (const pr of pullRequests) {
+    if (pr.state !== 'OPEN') {
+      return {
+        status: pr.state === 'MERGED' ? 'completed' : 'closed',
+        valid: false,
+        message: `Pull request #${pr.number} is ${pr.state.toLowerCase()} and cannot join a native stack`,
+      }
+    }
+    if (pr.stack) {
+      return {
+        status: 'duplicate-pr',
+        valid: false,
+        message: `Pull request #${pr.number} already belongs to native stack #${pr.stack.stackNumber}`,
+      }
+    }
+  }
 
   const targetRepo =
     options.targetRepository?.toLowerCase() ?? pullRequests[0]?.headRepository?.toLowerCase()
@@ -416,6 +432,82 @@ export async function getPullRequestStack(
   }
 }
 
+/** Fill incomplete snapshot metadata from canonical REST resources before a stack mutation. */
+async function pullRequestsForValidation(
+  owner: string,
+  repo: string,
+  numbers: readonly number[],
+  knownPullRequests: readonly PullRequest[] | undefined,
+  signal: AbortSignal | undefined,
+): Promise<PullRequest[]> {
+  const known = new Map(knownPullRequests?.map((pr) => [pr.number, pr]) ?? [])
+  const transport = githubTransport()
+  return Promise.all(
+    numbers.map(async (number) => {
+      if (!Number.isInteger(number) || number <= 0) {
+        throw new NativeStackError('invalid-chain', `Invalid pull request number: ${number}`)
+      }
+      const cached = known.get(number)
+      if (cached?.headRepository && cached.head && cached.base) return cached
+      let raw: unknown
+      try {
+        raw = (
+          await transport.rest<unknown>({
+            method: 'GET',
+            path: `repos/${owner}/${repo}/pulls/${number}`,
+            headers: STACK_HEADERS,
+            signal,
+          })
+        ).data
+      } catch (error) {
+        if (error instanceof GitHubTransportError && error.status === 404) {
+          throw new NativeStackError('invalid-chain', `Pull request #${number} was not found`, 404)
+        }
+        throw error
+      }
+      if (
+        !isRecord(raw) ||
+        raw.number !== number ||
+        !isRecord(raw.head) ||
+        typeof raw.head.ref !== 'string' ||
+        !raw.head.ref ||
+        !isRecord(raw.head.repo) ||
+        typeof raw.head.repo.full_name !== 'string' ||
+        !raw.head.repo.full_name ||
+        !isRecord(raw.base) ||
+        typeof raw.base.ref !== 'string' ||
+        !raw.base.ref ||
+        typeof raw.title !== 'string' ||
+        typeof raw.html_url !== 'string' ||
+        (raw.state !== 'open' && raw.state !== 'closed')
+      ) {
+        throw new NativeStackError(
+          'invalid-chain',
+          `GitHub returned incomplete pull request #${number}`,
+        )
+      }
+      if (isRecord(raw.stack)) {
+        throw new NativeStackError(
+          'duplicate-pr',
+          `Pull request #${number} is already in stack #${raw.stack.number}`,
+        )
+      }
+      return {
+        number,
+        title: raw.title,
+        url: raw.html_url,
+        head: raw.head.ref,
+        base: raw.base.ref,
+        headRepository: raw.head.repo.full_name,
+        state:
+          typeof raw.merged_at === 'string' ? 'MERGED' : raw.state === 'open' ? 'OPEN' : 'CLOSED',
+        draft: raw.draft === true,
+        checks: 'none',
+      } satisfies PullRequest
+    }),
+  )
+}
+
 /** Create a native stack from an ordered bottom-to-top list of pull requests. */
 export async function createPullRequestStack(
   owner: string,
@@ -434,23 +526,19 @@ export async function createPullRequestStack(
     )
   }
 
-  // Pre-validate if domain pull request models are available
-  if (options.knownPullRequests && options.knownPullRequests.length > 0) {
-    const byNumber = new Map(options.knownPullRequests.map((pr) => [pr.number, pr]))
-    const chain: PullRequest[] = []
-    for (const num of pullRequests) {
-      const pr = byNumber.get(num)
-      if (pr) chain.push(pr)
-    }
-    if (chain.length === pullRequests.length) {
-      const validation = validateNativeStackChain(chain, {
-        targetRepository: `${owner}/${repo}`,
-        defaultBranch: options.defaultBranch,
-      })
-      if (!validation.valid) {
-        throw new NativeStackError(validation.status, validation.message ?? 'Invalid chain')
-      }
-    }
+  const chain = await pullRequestsForValidation(
+    owner,
+    repo,
+    pullRequests,
+    options.knownPullRequests,
+    options.signal,
+  )
+  const validation = validateNativeStackChain(chain, {
+    targetRepository: `${owner}/${repo}`,
+    defaultBranch: options.defaultBranch,
+  })
+  if (!validation.valid) {
+    throw new NativeStackError(validation.status, validation.message ?? 'Invalid chain')
   }
 
   const transport = githubTransport()
@@ -506,21 +594,20 @@ export async function addPullRequestsToStack(
     )
   }
 
-  if (options.existingStack && options.knownPullRequests) {
-    const byNumber = new Map(options.knownPullRequests.map((pr) => [pr.number, pr]))
-    const chain: PullRequest[] = []
-    for (const num of pullRequests) {
-      const pr = byNumber.get(num)
-      if (pr) chain.push(pr)
-    }
-    if (chain.length === pullRequests.length) {
-      const validation = validateTopAppend(options.existingStack, chain, {
-        targetRepository: `${owner}/${repo}`,
-      })
-      if (!validation.valid) {
-        throw new NativeStackError(validation.status, validation.message ?? 'Invalid chain')
-      }
-    }
+  const existing =
+    options.existingStack ?? (await getPullRequestStack(owner, repo, stackNumber, options))
+  const chain = await pullRequestsForValidation(
+    owner,
+    repo,
+    pullRequests,
+    options.knownPullRequests,
+    options.signal,
+  )
+  const validation = validateTopAppend(existing, chain, {
+    targetRepository: `${owner}/${repo}`,
+  })
+  if (!validation.valid) {
+    throw new NativeStackError(validation.status, validation.message ?? 'Invalid chain')
   }
 
   const transport = githubTransport()

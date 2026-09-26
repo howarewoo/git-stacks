@@ -7,13 +7,14 @@ import { DirectGitHubTransport, setGitHubTransport } from '../src/main/github-tr
 import {
   addPullRequestsToStack,
   createPullRequestStack,
+  NativeStackError,
   detectNativeStacksCapability,
   getPullRequestStack,
   listPullRequestStacks,
   unstackPullRequests,
   validateNativeStackChain,
 } from '../src/main/native-stacks'
-import { runStackAction } from '../src/main/stacks'
+import { previewStack, runStackAction } from '../src/main/stacks'
 import type { PullRequest } from '../src/shared/types'
 import { createGitHubApiDouble } from './fixtures/github-api-double'
 import { createGitHubHarness, type GitHubHarness } from './fixtures/github-harness'
@@ -245,6 +246,70 @@ test('validates bottom-to-top contiguous chain, rejecting gaps and mismatches', 
   })
 })
 
+test('missing snapshot models are preflighted against canonical PRs before stack writes', async () => {
+  await withHarness(async (harness) => {
+    await setupThreeBranches(harness)
+    const known = await getPullRequest(harness.repo, 101)
+    const state = await harness.readState()
+    state.prs[1].base = 'unrelated'
+    await harness.writeState(state)
+
+    await assert.rejects(
+      createPullRequestStack('acme', 'widgets', [101, 102], { knownPullRequests: [known] }),
+      (error) =>
+        error instanceof NativeStackError &&
+        error.status === 'invalid-chain' &&
+        error.httpStatus === null,
+    )
+    assert.deepEqual((await harness.readState()).stacks, [])
+
+    state.prs[1].base = 'feature/step-1'
+    state.prs[1].headRepository = 'other/fork'
+    await harness.writeState(state)
+    await assert.rejects(
+      createPullRequestStack('acme', 'widgets', [101, 102]),
+      (error) => error instanceof NativeStackError && error.status === 'cross-fork-head',
+    )
+    assert.deepEqual((await harness.readState()).stacks, [])
+
+    state.prs[1].headRepository = 'acme/widgets'
+    state.prs[1].state = 'CLOSED'
+    await harness.writeState(state)
+    await assert.rejects(
+      createPullRequestStack('acme', 'widgets', [101, 102]),
+      (error) => error instanceof NativeStackError && error.status === 'closed',
+    )
+    assert.deepEqual((await harness.readState()).stacks, [])
+
+    await createPullRequestStack('acme', 'widgets', [101])
+    await assert.rejects(
+      addPullRequestsToStack('acme', 'widgets', 1, [102], { knownPullRequests: [known] }),
+      (error) => error instanceof NativeStackError && error.status === 'closed',
+    )
+    assert.deepEqual(
+      (await harness.readState()).stacks?.[0]?.pull_requests.map((pr) => pr.number),
+      [101],
+    )
+
+    const stacked = await harness.readState()
+    stacked.stacks![0].open = false
+    await harness.writeState(stacked)
+    await assert.rejects(
+      addPullRequestsToStack('acme', 'widgets', 1, [103]),
+      (error) => error instanceof NativeStackError && error.status === 'closed',
+    )
+
+    stacked.stacks![0].open = true
+    stacked.stacks![0].pull_requests[0].state = 'closed'
+    stacked.stacks![0].pull_requests[0].merged_at = new Date().toISOString()
+    await harness.writeState(stacked)
+    await assert.rejects(
+      addPullRequestsToStack('acme', 'widgets', 1, [103]),
+      (error) => error instanceof NativeStackError && error.status === 'completed',
+    )
+  })
+})
+
 test('handles 404 not found and 422 validation failure gracefully', async () => {
   await withHarness(async (harness) => {
     await setupThreeBranches(harness)
@@ -367,5 +432,82 @@ test('degrades gracefully to chained PRs when native stack preview is unavailabl
     assert.ok(step2)
     assert.equal(step2.parent, 'feature/step-1')
     assert.equal(step2.parentSource, 'pullRequest')
+  })
+})
+
+test('publishStack automatically registers native stack on origin and reflects it in snapshot', async () => {
+  await withHarness(async (harness) => {
+    await setupThreeBranches(harness)
+
+    let snapshot = await getSnapshot(harness.repo)
+    const preview = await previewStack(harness.repo, snapshot, 'publish', 'feature/step-2')
+    assert.deepEqual(preview.blockers, [])
+    const publishRes = await runStackAction(harness.repo, {
+      type: 'executeStack',
+      token: preview.token,
+      allowForce: false,
+      draft: false,
+      titles: { 'feature/step-1': 'Step 1 PR', 'feature/step-2': 'Step 2 PR' },
+      mergeMethod: 'squash',
+    })
+    assert.match(publishRes.message, /Published 3 stack pull requests/u)
+
+    const stacks = await listPullRequestStacks('acme', 'widgets')
+    assert.equal(stacks.length, 1)
+    assert.equal(stacks[0].pullRequests.length, 3)
+    assert.equal(stacks[0].pullRequests[0].number, 101)
+    assert.equal(stacks[0].pullRequests[1].number, 102)
+    assert.equal(stacks[0].pullRequests[2].number, 103)
+
+    snapshot = await getSnapshot(harness.repo)
+    assert.equal(snapshot.nativeStacks?.length, 1)
+    const b2 = snapshot.branches.find((b) => b.name === 'feature/step-2')
+    assert.equal(b2?.parentSource, 'stack')
+    assert.equal(b2?.pr?.stack?.position, 2)
+  })
+})
+
+test('publishStack propagates native registration failure when preview capability is enabled', async () => {
+  await withHarness(async (harness) => {
+    await setupThreeBranches(harness)
+
+    const state = await harness.readState()
+    state.stacks = [
+      {
+        id: 99,
+        number: 99,
+        node_id: 'STACK_99',
+        url: 'https://api.github.com/repos/acme/widgets/stacks/99',
+        base: { ref: 'main' },
+        open: false,
+        created_at: new Date().toISOString(),
+        pull_requests: [
+          {
+            number: 101,
+            state: 'open',
+            draft: false,
+            merged_at: null,
+            head: { ref: 'feature/step-1', sha: git(harness, ['rev-parse', 'feature/step-1']) },
+          },
+        ],
+      },
+    ]
+    await harness.writeState(state)
+
+    const snapshot = await getSnapshot(harness.repo)
+    const preview = await previewStack(harness.repo, snapshot, 'publish', 'feature/step-2')
+    assert.deepEqual(preview.blockers, [])
+
+    await assert.rejects(
+      runStackAction(harness.repo, {
+        type: 'executeStack',
+        token: preview.token,
+        allowForce: false,
+        draft: false,
+        titles: { 'feature/step-1': 'Step 1 PR', 'feature/step-2': 'Step 2 PR' },
+        mergeMethod: 'squash',
+      }),
+      /closed stack|cannot add pull requests/iu,
+    )
   })
 })
