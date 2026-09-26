@@ -1657,7 +1657,7 @@ function App() {
       ) : null}
       {conflictPath &&
       snapshot &&
-      conflictPath === snapshot.files.find((file) => file.conflicted)?.path ? (
+      snapshot.files.some((file) => file.conflicted && file.path === conflictPath) ? (
         <ConflictResolver
           key={conflictPath}
           busy={isBusy}

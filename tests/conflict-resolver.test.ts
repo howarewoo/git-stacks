@@ -73,6 +73,18 @@ test('a conflict marker left unterminated is preserved as text instead of losing
   assert.equal(composeConflict(segments, {}), body)
 })
 
+test('widened rename conflict markers remain visible and cannot be staged unresolved', () => {
+  const body =
+    'before\n<<<<<<<< HEAD:current.txt\nours\n========\ntheirs\n>>>>>>>> topic:incoming.txt\n'
+  const segments = parseConflictSegments(body)
+  assert.deepEqual(conflictRegions(segments), [
+    { index: 0, startLine: 2, current: 'ours\n', incoming: 'theirs\n' },
+  ])
+  assert.equal(hasConflictMarkers(body), true)
+  assert.equal(composeConflict(segments, { 0: 'current' }), 'before\nours\n')
+  assert.equal(hasConflictMarkers(composeConflict(segments, { 0: 'incoming' })), false)
+})
+
 test('a diff3 conflict is reported as one region with the base stage kept out of the choice', () => {
   const body = [
     'header',
@@ -129,9 +141,18 @@ test('composing a file applies every region choice and leaves the rest byte for 
     ['top', 'between', 'ours', 'bottom'].join('\n'),
   )
   assert.equal(
-    composeConflict(segments, { 0: 'a hand written region\n', 1: 'current' }),
+    composeConflict(segments, {
+      0: { kind: 'manual', text: 'a hand written region\n' },
+      1: 'current',
+    }),
     ['top', 'a hand written region', 'between', 'ours', 'bottom'].join('\n'),
   )
+  for (const literal of ['current', 'incoming', 'both', 'delete']) {
+    assert.equal(
+      composeConflict(segments, { 0: { kind: 'manual', text: literal }, 1: 'delete' }),
+      `top\n${literal}between\nbottom`,
+    )
+  }
   assert.equal(
     hasConflictMarkers(composeConflict(segments, { 0: 'current', 1: 'incoming' })),
     false,
@@ -279,14 +300,18 @@ test('a rebase conflict resolves region by region, then continues on the same re
   }
 })
 
-test('a merge add/add conflict is offered as an addition, and keeping both copies is refused', async () => {
+test('an add/add conflict stays an addition despite an unrelated deletion and stages both copies', async () => {
   const { root, repo, git, gitExpectedFailure } = await fixture()
   try {
-    await writeFile(join(repo, 'readme.md'), 'base\n')
+    await writeFile(
+      join(repo, 'readme.md'),
+      'An unrelated document with no text in common with the feature.\n',
+    )
     git('add', '.')
     git('commit', '-m', 'Initial commit')
     git('checkout', '-b', 'topic')
     await writeFile(join(repo, 'feature.txt'), 'topic\n')
+    git('rm', '-q', 'readme.md')
     git('add', '.')
     git('commit', '-m', 'Topic adds a feature file')
     git('checkout', 'main')
@@ -294,6 +319,7 @@ test('a merge add/add conflict is offered as an addition, and keeping both copie
     git('add', '.')
     git('commit', '-m', 'Main adds the same feature file')
     gitExpectedFailure('merge', 'topic')
+    assert.match(git('diff', '--name-status', '-M', 'main^', 'topic'), /D\treadme\.md/u)
 
     const conflicted = await getConflictView(repo, 'feature.txt')
     assert.equal(conflicted.kind, 'addAdd')
@@ -339,7 +365,18 @@ test('a delete/modify conflict offers the deletion and the surviving file as dis
     assert.equal(conflicted.binary, false)
     assert.equal(conflicted.regions.length, 0)
 
-    await runResolveConflict(repo, 'docs.txt', conflicted.fingerprint, {
+    await writeFile(join(repo, 'docs.txt'), 'externally edited\n')
+    await assert.rejects(
+      runResolveConflict(repo, 'docs.txt', conflicted.fingerprint, {
+        kind: 'choice',
+        choice: 'delete',
+      }),
+      /changed since/u,
+    )
+    assert.equal(await readFile(join(repo, 'docs.txt'), 'utf8'), 'externally edited\n')
+    assert.notEqual(git('ls-files', '--unmerged', '--', 'docs.txt'), '')
+    const refreshed = await getConflictView(repo, 'docs.txt')
+    await runResolveConflict(repo, 'docs.txt', refreshed.fingerprint, {
       kind: 'choice',
       choice: 'delete',
     })
@@ -412,17 +449,18 @@ test('a modify/delete conflict keeps the file the incoming side deleted from vie
 test('a merge where both sides renamed the same file into the same name carries the move evidence', async () => {
   const { root, repo, git, gitExpectedFailure } = await fixture()
   try {
-    await writeFile(join(repo, 'old.txt'), 'base\n')
+    const original = Array.from({ length: 20 }, (_, index) => `line ${index}`).join('\n') + '\n'
+    await writeFile(join(repo, 'old.txt'), original)
     git('add', '.')
     git('commit', '-m', 'Initial commit')
     git('checkout', '-b', 'topic')
     git('mv', 'old.txt', 'new.txt')
-    await writeFile(join(repo, 'new.txt'), 'topic\n')
+    await writeFile(join(repo, 'new.txt'), original.replace('line 19', 'topic'))
     git('add', '-A')
     git('commit', '-m', 'Topic renames the file')
     git('checkout', 'main')
     git('mv', 'old.txt', 'new.txt')
-    await writeFile(join(repo, 'new.txt'), 'main\n')
+    await writeFile(join(repo, 'new.txt'), original.replace('line 19', 'main'))
     git('add', '-A')
     git('commit', '-m', 'Main renames the file too')
     gitExpectedFailure('merge', 'topic')
@@ -433,10 +471,87 @@ test('a merge where both sides renamed the same file into the same name carries 
       { from: 'old.txt', to: 'new.txt', side: 'current' },
       { from: 'old.txt', to: 'new.txt', side: 'incoming' },
     ])
-    assert.deepEqual(conflicted.stages, [2, 3])
+    assert.deepEqual(conflicted.stages, [1, 2, 3])
     assert.deepEqual(conflicted.regions, [
-      { index: 0, startLine: 1, current: 'main\n', incoming: 'topic\n' },
+      { index: 0, startLine: 20, current: 'main\n', incoming: 'topic\n' },
     ])
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('divergent real renames retain Git-recorded destinations and resolve selected paths', async () => {
+  const { root, repo, git, gitExpectedFailure } = await fixture()
+  try {
+    const original = Array.from({ length: 30 }, (_, index) => `line ${index}`).join('\n') + '\n'
+    await writeFile(join(repo, 'old.txt'), original)
+    git('add', '.')
+    git('commit', '-m', 'Original file')
+    git('checkout', '-b', 'topic')
+    git('mv', 'old.txt', 'incoming.txt')
+    await writeFile(join(repo, 'incoming.txt'), original.replace('line 29', 'incoming'))
+    git('add', '-A')
+    git('commit', '-m', 'Incoming rename')
+    git('checkout', 'main')
+    git('mv', 'old.txt', 'current.txt')
+    await writeFile(join(repo, 'current.txt'), original.replace('line 29', 'current'))
+    git('add', '-A')
+    git('commit', '-m', 'Current rename')
+    assert.match(
+      git('diff', '--name-status', '-M', 'main^', 'main'),
+      /R\d+\told\.txt\tcurrent\.txt/u,
+    )
+    assert.match(
+      git('diff', '--name-status', '-M', 'topic^', 'topic'),
+      /R\d+\told\.txt\tincoming\.txt/u,
+    )
+    gitExpectedFailure('merge', 'topic')
+    const current = await getConflictView(repo, 'current.txt')
+    const incoming = await getConflictView(repo, 'incoming.txt')
+    assert.deepEqual(current.moves, [{ from: 'old.txt', to: 'current.txt', side: 'current' }])
+    assert.deepEqual(incoming.moves, [{ from: 'old.txt', to: 'incoming.txt', side: 'incoming' }])
+    assert.equal(current.kind, 'rename')
+    assert.equal(incoming.kind, 'rename')
+    assert.deepEqual(current.regions, [
+      { index: 0, startLine: 30, current: 'current\n', incoming: 'incoming\n' },
+    ])
+    await assert.rejects(
+      runResolveConflict(repo, 'current.txt', current.fingerprint, {
+        kind: 'content',
+        content: current.worktree!,
+      }),
+      /Conflict markers are still present/u,
+    )
+    assert.notEqual(git('ls-files', '--unmerged', '--', 'current.txt'), '')
+    await runResolveConflict(repo, 'current.txt', current.fingerprint, {
+      kind: 'choice',
+      choice: 'current',
+    })
+    assert.notEqual(git('ls-files', '--unmerged', '--', 'incoming.txt'), '')
+    await runResolveConflict(repo, 'incoming.txt', incoming.fingerprint, {
+      kind: 'choice',
+      choice: 'incoming',
+    })
+    const source = await getConflictView(repo, 'old.txt')
+    assert.equal(source.kind, 'rename')
+    assert.deepEqual(source.stages, [1])
+    assert.deepEqual(source.moves, [
+      { from: 'old.txt', to: 'current.txt', side: 'current' },
+      { from: 'old.txt', to: 'incoming.txt', side: 'incoming' },
+    ])
+    await runResolveConflict(repo, 'old.txt', source.fingerprint, {
+      kind: 'choice',
+      choice: 'delete',
+    })
+    assert.equal(git('ls-files', '--unmerged'), '')
+    assert.equal(
+      await readFile(join(repo, 'current.txt'), 'utf8'),
+      original.replace('line 29', 'current'),
+    )
+    assert.equal(
+      await readFile(join(repo, 'incoming.txt'), 'utf8'),
+      original.replace('line 29', 'incoming'),
+    )
   } finally {
     await rm(root, { recursive: true, force: true })
   }
@@ -630,9 +745,10 @@ test('the external merge tool runs without staging, and its result can still be 
   try {
     const marker = join(root, 'merge-tool-ran')
     const tool = join(root, 'fake-merge-tool.sh')
-    await writeFile(tool, `#!/bin/sh\nprintf 'local\\n' > "$BASE"\n: > "${marker}"\n`)
+    await writeFile(tool, `#!/bin/sh\nprintf 'resolved by tool\\n' > "$1"\n: > "${marker}"\n`)
     await chmod(tool, 0o755)
-    git('config', 'mergetool.git-stacks-test.cmd', `sh "${tool}"`)
+    git('config', 'mergetool.git-stacks-test.trustExitCode', 'true')
+    git('config', 'mergetool.git-stacks-test.cmd', `sh "${tool}" "$MERGED"`)
     git('config', 'merge.tool', 'git-stacks-test')
     await writeFile(join(repo, 'shared.txt'), 'base\n')
     git('add', '.')
@@ -651,27 +767,30 @@ test('the external merge tool runs without staging, and its result can still be 
     assert.equal(conflicted.mergeTool.available, true)
     assert.equal(conflicted.mergeTool.tool, 'git-stacks-test')
 
-    // Git refuses to save a tool result it could not confirm, and reports that
-    // with its own words instead of staging anything behind the resolver.
-    await assert.rejects(
-      runConflictMergeTool(repo, 'shared.txt', conflicted.fingerprint),
-      /merge of shared\.txt failed|unchanged/u,
-    )
+    await runConflictMergeTool(repo, 'shared.txt', conflicted.fingerprint)
     assert.equal(await readFile(marker, 'utf8'), '', 'the configured merge tool ran')
-    assert.equal(
-      git('ls-files', '--unmerged', '--', 'shared.txt') !== '',
-      true,
-      'a merge tool run stages nothing on its own',
+    assert.equal(await readFile(join(repo, 'shared.txt'), 'utf8'), 'resolved by tool\n')
+    assert.notEqual(
+      git('ls-files', '--unmerged', '--', 'shared.txt'),
+      '',
+      'live index remains conflicted',
     )
-
     const afterTool = await getConflictView(repo, 'shared.txt')
+    assert.equal(afterTool.regions.length, 0, 'a clean tool result is still reviewable')
     assert.notEqual(afterTool.fingerprint, conflicted.fingerprint)
+    await assert.rejects(
+      runResolveConflict(repo, 'shared.txt', conflicted.fingerprint, {
+        kind: 'content',
+        content: 'stale\n',
+      }),
+      /changed since/u,
+    )
     await runResolveConflict(repo, 'shared.txt', afterTool.fingerprint, {
       kind: 'content',
-      content: 'merged by hand\n',
+      content: afterTool.worktree!,
     })
     assert.equal(git('ls-files', '--unmerged', '--', 'shared.txt'), '')
-    assert.equal(await readFile(join(repo, 'shared.txt'), 'utf8'), 'merged by hand\n')
+    assert.equal(await readFile(join(repo, 'shared.txt'), 'utf8'), 'resolved by tool\n')
     assert.equal(git('ls-files', '--unmerged', '--', 'shared.txt'), '')
     git('commit', '-m', 'Merge the tool result')
     assert.equal(git('rev-list', '--count', 'HEAD'), '4')

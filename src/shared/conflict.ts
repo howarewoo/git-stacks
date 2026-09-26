@@ -8,14 +8,14 @@ import type {
 } from './types'
 
 /**
- * The conflict-marker grammar Git writes into a conflicted worktree file. The
- * resolver parses exactly this, so a region in the UI is the same region Git
- * asked the person to decide.
+ * Git can widen its conflict markers (for example, to eight characters for a
+ * rename/rename conflict), so recognize runs of seven or more delimiters.
+ * The resolver parses the worktree markers Git actually wrote.
  */
-const START = /^<{7}(?: .*)?$/u
-const BASE = /^\|{7}(?: .*)?$/u
-const MIDDLE = /^={7}$/u
-const END = /^>{7}(?: .*)?$/u
+const START = /^<{7,}(?: .*)?$/u
+const BASE = /^\|{7,}(?: .*)?$/u
+const MIDDLE = /^={7,}$/u
+const END = /^>{7,}(?: .*)?$/u
 
 export interface ConflictTextSegment {
   kind: 'text'
@@ -110,14 +110,13 @@ export function conflictRegions(segments: ConflictSegment[]): ConflictRegion[] {
   return regions
 }
 
-/**
- * Build the resolved file from the parsed regions and the resolution chosen for
- * each region. A string choice is the person's own edit of that region;
- * `delete` drops the region without deleting the file.
- */
+/** Manual text is separate from action tokens, even when it spells "current". */
+export type ConflictRegionChoice = ConflictChoice | { kind: 'manual'; text: string }
+
+/** Build the resolved file from each region's action or literal manual text. */
 export function composeConflict(
   segments: ConflictSegment[],
-  choices: Record<number, ConflictChoice | string>,
+  choices: Record<number, ConflictRegionChoice>,
 ): string {
   let region = -1
   let result = ''
@@ -128,13 +127,11 @@ export function composeConflict(
     }
     region += 1
     const choice = choices[region] ?? 'current'
-    if (choice === 'incoming') result += segment.incoming
+    if (typeof choice === 'object') result += choice.text
+    else if (choice === 'incoming') result += segment.incoming
     else if (choice === 'both') result += segment.current + segment.incoming
     else if (choice === 'delete') continue
-    else if (choice === 'current') result += segment.current
-    // Any other string is the person's own text for that region, so it is
-    // written through instead of being read as a choice name.
-    else result += choice
+    else result += segment.current
   }
   return result
 }

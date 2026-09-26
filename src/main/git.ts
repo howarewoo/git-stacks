@@ -3500,11 +3500,7 @@ async function conflictContext(
   }
 }
 
-/**
- * A path one side of the operation moved, taken from Git's own name-status diff
- * rather than guessed. A pair Git reports as one added and one deleted path is
- * a move of that path.
- */
+/** Report only renames that Git's similarity detection actually identified. */
 async function conflictMoves(
   root: string,
   relativePath: string,
@@ -3522,28 +3518,12 @@ async function conflictMoves(
       side.target,
     ])
     if (!listing) continue
-    const added: string[] = []
-    let deleted: string | null = null
     for (const line of listing.split('\n')) {
       if (!line) continue
-      const [status, ...paths] = line.split('\t')
-      if (status?.startsWith('R') && (paths[0] === relativePath || paths[1] === relativePath)) {
-        moves.push({ from: paths[0], to: paths[1], side: side.side })
-      } else if (status === 'A') {
-        added.push(paths[0])
-      } else if (status === 'D') {
-        deleted = paths[0]
+      const [status, from, to] = line.split('\t')
+      if (status?.startsWith('R') && (from === relativePath || to === relativePath)) {
+        moves.push({ from, to, side: side.side })
       }
-    }
-    // Git records a move as one added and one deleted path. Either endpoint can
-    // be the conflicted path: a side that renamed a file here conflicts on the
-    // new name, a side that renamed it away conflicts on the old one.
-    const pair =
-      !moves.some((move) => move.side === side.side) && deleted && added.length === 1
-        ? { from: deleted, to: added[0] }
-        : null
-    if (pair && (pair.from === relativePath || pair.to === relativePath)) {
-      moves.push({ ...pair, side: side.side })
     }
   }
   return moves
@@ -3610,9 +3590,12 @@ export async function getConflictView(
 }
 
 /**
- * Put the chosen side, both sides, or nothing in the worktree. Side selection
- * goes through Git's own checkout so file modes and binary content survive;
- * nothing is staged here.
+ * Put the chosen side, both sides, or nothing in the worktree. Ordinary side
+ * selection goes through Git's index so file modes and binary content survive.
+ * For divergent renames Git may instead put a synthesized, marker-bearing
+ * merge result in both index stages; recover the actual selected side from
+ * its recorded rename destination in the corresponding commit.
+ * Nothing is staged here.
  */
 async function writeConflictChoice(
   root: string,
@@ -3622,7 +3605,7 @@ async function writeConflictChoice(
   identity: FileIdentity,
 ): Promise<void> {
   if (choice === 'delete') {
-    await runGit(root, ['--literal-pathspecs', 'rm', '-f', '--', relativePath])
+    await replaceCheckedFile(root, relativePath, identity, null)
     return
   }
   if (choice === 'both') {
@@ -3631,20 +3614,54 @@ async function writeConflictChoice(
     if (current === null || current === undefined || incoming === null || incoming === undefined) {
       throw new Error('Keeping both copies needs a version of the file on each side')
     }
+    if (hasConflictMarkers(current) || hasConflictMarkers(incoming)) {
+      throw new Error('A chosen side still contains conflict markers; resolve its regions first')
+    }
     await replaceCheckedFile(root, relativePath, identity, null, current + incoming)
     return
   }
-  if (!sides[choice === 'current' ? 2 : 3]) {
+  const selected = sides[choice === 'current' ? 2 : 3]
+  if (!selected) {
     throw new Error('That side of the conflict has no content; accept the deletion instead')
   }
-  const materialized = await materializeGitWorktreePath(root, relativePath, [
+  let sourcePath = relativePath
+  let renamedSource = false
+  let args = [
     '--literal-pathspecs',
     'checkout',
     choice === 'current' ? '--ours' : '--theirs',
     '--',
     relativePath,
-  ])
+  ]
+  if (selected.text !== null && hasConflictMarkers(selected.text)) {
+    const context = await conflictContext(
+      root,
+      relativePath,
+      await conflictStages(root, relativePath),
+    )
+    const destination = (await conflictMoves(root, relativePath, context)).find(
+      (move) => move.to === relativePath,
+    )
+    const move =
+      destination &&
+      (await conflictMoves(root, destination.from, context)).find((item) => item.side === choice)
+    const revision = context.sides.find((side) => side.side === choice)?.target
+    if (!move || !revision) {
+      throw new Error('A chosen side still contains conflict markers; resolve its regions first')
+    }
+    sourcePath = requirePathInput(move.to, 'path')
+    args = ['--literal-pathspecs', 'restore', '--source', revision, '--worktree', '--', sourcePath]
+    renamedSource = true
+  }
+  const materialized = await materializeGitWorktreePath(root, sourcePath, args)
   try {
+    if (!materialized.path) throw new Error('The selected side could not be restored')
+    if (renamedSource) {
+      const original = decodeConflictBlob(await fs.readFile(materialized.path))
+      if (original.text !== null && hasConflictMarkers(original.text)) {
+        throw new Error('A chosen side still contains conflict markers; resolve its regions first')
+      }
+    }
     await replaceCheckedFile(root, relativePath, identity, materialized.path)
   } finally {
     await fs.rm(materialized.root, { recursive: true, force: true })
@@ -3693,10 +3710,8 @@ export async function runResolveConflict(
     }
     await writeConflictChoice(root, relativePath, resolution.choice, sides, identity)
   }
-  if (resolution.kind !== 'choice' || resolution.choice !== 'delete') {
-    await safeRepositoryPath(root, relativePath)
-    await runGit(root, ['--literal-pathspecs', 'add', '--', relativePath])
-  }
+  await safeRepositoryPath(root, relativePath)
+  await runGit(root, ['--literal-pathspecs', 'add', '-A', '--', relativePath])
   if ((await conflictStages(root, relativePath)).length) {
     throw new Error('Git still reports this path as unmerged; nothing was marked resolved')
   }
@@ -3708,11 +3723,11 @@ export async function runResolveConflict(
  * Git is configured to run; Git decides how to call it and what a failed run
  * means, and a non-zero exit is reported with Git's own words.
  */
-function runMergeTool(root: string, relativePath: string): Promise<string> {
+function runMergeTool(root: string, relativePath: string, indexPath: string): Promise<string> {
   return new Promise((resolve, reject) => {
     const child = spawn('git', ['mergetool', '--no-prompt', '--no-gui', '--', relativePath], {
       cwd: root,
-      env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+      env: { ...process.env, GIT_INDEX_FILE: indexPath, GIT_TERMINAL_PROMPT: '0' },
       stdio: ['ignore', 'pipe', 'pipe'],
       shell: false,
     })
@@ -3743,9 +3758,9 @@ function runMergeTool(root: string, relativePath: string): Promise<string> {
 }
 
 /**
- * Hand the conflicted file to the configured merge tool. Git's own
- * `--no-save` keeps the staging decision here, so the result is reviewed and
- * marked resolved through the resolver rather than staged behind it.
+ * Run Git's configured tool with a private copy of the index. Git mergetool
+ * stages successful results itself, but only in that copy; the live unmerged
+ * stages remain until the resolver reviews and explicitly stages the result.
  */
 export async function runConflictMergeTool(
   repoPath: string,
@@ -3762,11 +3777,14 @@ export async function runConflictMergeTool(
   if (!tool) {
     throw new Error('No merge tool is configured. Set merge.tool or GIT_MERGE_TOOL in Git.')
   }
-  // `mergetool` takes no `--literal-pathspecs` and no `--no-save`: it leaves the
-  // tool's result in the worktree for review, which is what the resolver stages
-  // afterwards. It runs with no stdin, so the question Git asks before saving a
-  // result fails fast instead of waiting on a prompt no one can answer.
-  await runMergeTool(root, relativePath)
+  const temporary = await fs.mkdtemp(path.join(tmpdir(), 'git-stacks-mergetool-'))
+  try {
+    const indexPath = path.join(temporary, 'index')
+    await fs.copyFile(await repositoryGitPath(root, 'index', null), indexPath)
+    await runMergeTool(root, relativePath, indexPath)
+  } finally {
+    await fs.rm(temporary, { recursive: true, force: true })
+  }
   const after = await fileFingerprint(root, relativePath)
   const markers =
     after.preview && !after.binary ? hasConflictMarkers(after.preview.toString('utf8')) : true

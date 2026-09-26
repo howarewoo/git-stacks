@@ -11,6 +11,7 @@ import {
   hasConflictMarkers,
   parseConflictSegments,
 } from '../../../shared/conflict'
+import type { ConflictRegionChoice } from '../../../shared/conflict'
 import { Badge } from './ui/badge'
 import { Button } from './ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from './ui/dialog'
@@ -40,7 +41,7 @@ function stagePane(text: string | null, present: boolean, binary: boolean, label
   return text
 }
 
-function regionResult(region: ConflictRegion, choice: ConflictChoice | string | undefined) {
+function regionResult(region: ConflictRegion, choice: ConflictRegionChoice | undefined) {
   return composeConflict(
     [
       {
@@ -73,7 +74,7 @@ function RegionCard({
     <li className="conflict-region">
       <div className="conflict-region-head">
         <strong>Conflict {region.index + 1}</strong>
-        <span className="code-region-meta">from line {region.startLine + 1}</span>
+        <span className="code-region-meta">from line {region.startLine}</span>
       </div>
       <div className="conflict-region-sides">
         <div className="conflict-pane">
@@ -172,7 +173,7 @@ export function ConflictResolver({
   const [loading, setLoading] = React.useState(true)
   const [error, setError] = React.useState<string | null>(null)
   const [stale, setStale] = React.useState(false)
-  const [choices, setChoices] = React.useState<Record<number, ConflictChoice | string>>({})
+  const [choices, setChoices] = React.useState<Record<number, ConflictRegionChoice>>({})
   const [edited, setEdited] = React.useState<string | null>(null)
   const [attempt, setAttempt] = React.useState(0)
 
@@ -212,11 +213,11 @@ export function ConflictResolver({
     () => (file ? composeConflict(segments, choices) : ''),
     [choices, file, segments],
   )
-  const result = edited ?? composed
-  const editable = Boolean(file && !file.binary && !file.truncated && file.regions.length > 0)
+  const result = edited ?? (file?.regions.length ? composed : (file?.worktree ?? ''))
+  const editable = Boolean(file && !file.binary && !file.truncated && file.worktree !== null)
   const markersRemain = hasConflictMarkers(result)
 
-  const choose = (index: number, choice: ConflictChoice | string) => {
+  const choose = (index: number, choice: ConflictRegionChoice) => {
     setEdited(null)
     setChoices((current) => ({ ...current, [index]: choice }))
   }
@@ -262,6 +263,14 @@ export function ConflictResolver({
       'Open external merge tool',
     )
     if (succeeded) setAttempt((value) => value + 1)
+    else {
+      try {
+        const fresh = await window.desktop.conflictView(path)
+        setStale(fresh.fingerprint !== file.fingerprint)
+      } catch {
+        setStale(true)
+      }
+    }
   }
 
   const facts = file
@@ -336,7 +345,7 @@ export function ConflictResolver({
                   <PhaseStatus
                     phase="blocked"
                     title="The operation moved this path"
-                    message={`The incoming side moved the path, so keeping either side stages this path under the name Git recorded${file.moves[0] ? ` (${file.moves[0].from} → ${file.moves[0].to})` : ''}.`}
+                    message="Git recorded a rename for this path. Review the recorded source and destination below before choosing a resolution; only this selected path is staged."
                   />
                 ) : null}
                 <div className="conflict-panes">
@@ -375,7 +384,7 @@ export function ConflictResolver({
                     the result.
                   </p>
                 ) : null}
-                {editable ? (
+                {editable && file.regions.length > 0 ? (
                   <ul className="conflict-regions">
                     {file.regions.map((region) => (
                       <RegionCard
@@ -385,45 +394,47 @@ export function ConflictResolver({
                         region={region}
                         result={regionResult(region, choices[region.index])}
                         onChoose={(choice) => choose(region.index, choice)}
-                        onEdit={(text) => choose(region.index, text)}
+                        onEdit={(text) => choose(region.index, { kind: 'manual', text })}
                       />
                     ))}
                   </ul>
                 ) : null}
                 {editable ? (
                   <>
-                    <div className="workflow-row">
-                      <Button
-                        aria-label={`Accept ${file.labels.current} for every conflict`}
-                        disabled={busy}
-                        size="sm"
-                        tooltip={`Keep the ${file.labels.current} lines in every region.`}
-                        variant="secondary"
-                        onClick={() => chooseEverywhere('current')}
-                      >
-                        Accept all {file.labels.current}
-                      </Button>
-                      <Button
-                        aria-label={`Accept ${file.labels.incoming} for every conflict`}
-                        disabled={busy}
-                        size="sm"
-                        tooltip={`Keep the ${file.labels.incoming} lines in every region.`}
-                        variant="secondary"
-                        onClick={() => chooseEverywhere('incoming')}
-                      >
-                        Accept all {file.labels.incoming}
-                      </Button>
-                      <Button
-                        aria-label="Accept both sides in every conflict"
-                        disabled={busy}
-                        size="sm"
-                        tooltip="Keep the current lines and then the incoming lines in every region."
-                        variant="secondary"
-                        onClick={() => chooseEverywhere('both')}
-                      >
-                        Accept both everywhere
-                      </Button>
-                    </div>
+                    {file.regions.length > 0 ? (
+                      <div className="workflow-row">
+                        <Button
+                          aria-label={`Accept ${file.labels.current} for every conflict`}
+                          disabled={busy}
+                          size="sm"
+                          tooltip={`Keep the ${file.labels.current} lines in every region.`}
+                          variant="secondary"
+                          onClick={() => chooseEverywhere('current')}
+                        >
+                          Accept all {file.labels.current}
+                        </Button>
+                        <Button
+                          aria-label={`Accept ${file.labels.incoming} for every conflict`}
+                          disabled={busy}
+                          size="sm"
+                          tooltip={`Keep the ${file.labels.incoming} lines in every region.`}
+                          variant="secondary"
+                          onClick={() => chooseEverywhere('incoming')}
+                        >
+                          Accept all {file.labels.incoming}
+                        </Button>
+                        <Button
+                          aria-label="Accept both sides in every conflict"
+                          disabled={busy}
+                          size="sm"
+                          tooltip="Keep the current lines and then the incoming lines in every region."
+                          variant="secondary"
+                          onClick={() => chooseEverywhere('both')}
+                        >
+                          Accept both everywhere
+                        </Button>
+                      </div>
+                    ) : null}
                     <label htmlFor="conflict-result">Resolved file</label>
                     <Textarea
                       className="conflict-content"
@@ -440,7 +451,7 @@ export function ConflictResolver({
                     </p>
                   </>
                 ) : null}
-                {!editable ? (
+                {!editable || file.regions.length === 0 ? (
                   <div className="workflow-row">
                     <Button
                       aria-label={`Accept ${file.labels.current} and stage`}
