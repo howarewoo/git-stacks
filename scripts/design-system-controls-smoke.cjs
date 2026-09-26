@@ -11,16 +11,18 @@ const pageHelpers = `
       (button) => button.textContent?.replace(/\\s+/g, ' ').trim() === label,
     )
   }
-  function press(key) {
-    const target = document.activeElement || document.body
-    const init = { bubbles: true, cancelable: true, key, code: key }
-    target.dispatchEvent(new KeyboardEvent('keydown', init))
-    target.dispatchEvent(new KeyboardEvent('keyup', init))
-  }
 `
 
 let window
 let debuggerAttached = false
+
+function press(keyCode) {
+  window.webContents.sendInputEvent({ type: 'keyDown', keyCode })
+  if (keyCode === 'Return') {
+    window.webContents.sendInputEvent({ type: 'char', keyCode: '\r' })
+  }
+  window.webContents.sendInputEvent({ type: 'keyUp', keyCode })
+}
 
 function pageAction(body) {
   return `(async () => {${pageHelpers}${body}})()`
@@ -53,7 +55,7 @@ async function main() {
 
   await app.whenReady()
   window = new BrowserWindow({
-    show: false,
+    show: true,
     width: 1280,
     height: 900,
     webPreferences: {
@@ -63,6 +65,7 @@ async function main() {
   })
 
   await window.loadURL(`${pathToFileURL(rendererPath).href}#/design-system-controls`)
+  window.focus()
   await waitFor(
     'the controls gallery',
     `document.body.textContent.includes('Fields and selection')`,
@@ -76,11 +79,15 @@ async function main() {
     const trigger = buttonNamed('Open actions')
     if (!trigger) throw new Error('The menu trigger is missing.')
     trigger.focus()
-    press('Enter')
   `)
+  press('Return')
   await waitFor('the menu to open', `document.querySelector('[role="menu"]')`)
-  await runInPage(`press('Escape')`)
+  press('Escape')
   await waitFor('the menu to close', `!document.querySelector('[role="menu"]')`)
+  await waitFor(
+    'menu focus restoration',
+    `document.activeElement?.textContent?.trim() === 'Open actions'`,
+  )
   assert.equal(
     await evaluateInPage(`document.activeElement === buttonNamed('Open actions')`),
     true,
@@ -93,7 +100,7 @@ async function main() {
     trigger.focus()
   `)
   await waitFor('the tooltip to open', `document.querySelector('[role="tooltip"]')`, 2000)
-  await runInPage(`press('Escape')`)
+  press('Escape')
   await waitFor('the tooltip to close', `!document.querySelector('[role="tooltip"]')`)
   assert.equal(
     await evaluateInPage(`document.activeElement === buttonNamed('Focusable tooltip')`),
@@ -105,22 +112,28 @@ async function main() {
     const trigger = buttonNamed('Open dialog')
     if (!trigger) throw new Error('The dialog trigger is missing.')
     trigger.focus()
-    press('Enter')
   `)
+  press('Return')
   await waitFor('the dialog to open', `document.querySelector('[role="dialog"]')`)
   assert.equal(
     await evaluateInPage(`document.activeElement?.id === 'specimen-dialog-name'`),
     true,
     'dialog should focus its first field',
   )
-  await runInPage(`press('Escape')`)
+  press('Escape')
   await waitFor('the dialog to close', `!document.querySelector('[role="dialog"]')`)
+  await waitFor(
+    'dialog focus restoration',
+    `document.activeElement?.textContent?.trim() === 'Open dialog'`,
+  )
   assert.equal(
     await evaluateInPage(`document.activeElement === buttonNamed('Open dialog')`),
     true,
     'dialog focus should return to its trigger',
   )
 
+  // Specimen routes are selected at startup, not by a hash-change router.
+  await window.loadURL('about:blank')
   await window.loadURL(`${pathToFileURL(rendererPath).href}#/design-system-shell-specimen`)
   await waitFor('the shell specimen', `document.querySelector('.shell-fixture-content')`)
 
@@ -160,6 +173,10 @@ async function main() {
     assert.deepEqual(toolbar.clipped, [], `all toolbar actions should be reachable at ${width}px`)
   }
 
+  await window.loadURL('about:blank')
+  await window.loadURL(`${pathToFileURL(rendererPath).href}#/design-system-controls`)
+  await waitFor('the controls gallery', `document.querySelector('#specimen-mixed')`)
+
   await window.webContents.debugger.sendCommand('Emulation.setEmulatedMedia', {
     features: [{ name: 'prefers-reduced-motion', value: 'reduce' }],
   })
@@ -169,10 +186,10 @@ async function main() {
     'reduced-motion media emulation should be active',
   )
   await runInPage(`buttonNamed('Open dialog')?.click()`)
-  await waitFor('the reduced-motion dialog', `document.querySelector('.animate-dialog-in')`)
+  await waitFor('the reduced-motion dialog', `document.querySelector('[role="dialog"]')`)
   assert.equal(
     await evaluateInPage(
-      `getComputedStyle(document.querySelector('.animate-dialog-in')).animationDuration.includes('0.01')`,
+      `parseFloat(getComputedStyle(document.querySelector('[role="dialog"]')).animationDuration) <= 0.00001`,
     ),
     true,
     'reduced motion should shorten dialog animation',

@@ -357,31 +357,21 @@ button:disabled {
   letter-spacing: 0.01em;
 }
 
+/* Important failures stay inline and dismissible; the optional success notice
+   is polite and never auto-expires. */
 .global-banner {
-  display: flex;
-  min-height: 34px;
-  align-items: center;
-  gap: 9px;
-  border-bottom: 1px solid;
-  padding: 6px 14px;
-  font-size: 12px;
+  flex: 0 0 auto;
+  border-radius: 0;
+  border-bottom: 1px solid currentColor;
 }
 
-.global-banner > span {
+.global-banner-row {
+  display: flex;
   min-width: 0;
   flex: 1;
-}
-
-.global-banner-error {
-  border-color: var(--gs-semantic-feedback-error-text);
-  background: var(--gs-semantic-feedback-error-surface);
-  color: var(--gs-semantic-feedback-error-text);
-}
-
-.global-banner-success {
-  border-color: var(--gs-semantic-feedback-success-text);
-  background: var(--gs-semantic-feedback-success-surface);
-  color: var(--gs-semantic-feedback-success-text);
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
 }
 
 .toolbar {
@@ -1885,16 +1875,18 @@ button:disabled {
   }
 }
 
+/* The dialog shrinks to the width its composition asks for; the frame inside
+   carries the composition width so form, reviewed, and destructive dialogs
+   stay on one rhythm. */
 .workflow-dialog {
-  max-width: 620px;
+  width: fit-content;
+  min-width: min(100%, 26rem);
+  max-width: min(calc(100% - 2rem), 760px);
   max-height: calc(100vh - 40px);
   overflow-y: auto;
   overflow-wrap: anywhere;
 }
 
-.workflow-dialog.stack-dialog {
-  max-width: 760px;
-}
 .workflow-fields {
   display: flex;
   min-width: 0;
@@ -2042,33 +2034,24 @@ button:disabled {
   margin-top: 7px;
 }
 
+/* The operation banner is persistent, never a toast: it keeps its state tone
+   on a neutral workbench surface so it stays readable beside the workspace. */
 .operation-banner {
   display: flex;
   flex: 0 0 auto;
   align-items: center;
   flex-wrap: wrap;
   gap: 12px;
-  border-bottom: 1px solid var(--warning-line);
-  background: var(--warning-wash);
-  color: var(--warning);
+  border-bottom: 1px solid var(--gs-semantic-border-essential);
+  background: var(--gs-semantic-surface-inset);
   padding: 10px 16px;
 }
-.operation-banner > svg {
-  flex: 0 0 auto;
+.operation-status {
+  flex: 1 1 320px;
+  min-width: 260px;
 }
-.operation-copy {
-  display: flex;
-  flex: 1;
-  min-width: 220px;
-  flex-direction: column;
-  gap: 3px;
-}
-.operation-copy strong {
-  font-size: 12px;
-}
-.operation-copy span {
-  font-size: 11px;
-  line-height: 1.5;
+.operation-status strong {
+  font-size: var(--gs-semantic-type-label-size);
 }
 .operation-banner .workflow-row {
   justify-content: flex-end;
@@ -2252,18 +2235,16 @@ button:disabled {
 .conflict-editor > button {
   align-self: flex-start;
 }
+/* The inline destructive confirmation reuses the dialog compositions: the
+   state line above, the same footer rhythm, Cancel before the danger action. */
 .inline-confirm {
+  display: grid;
   margin: 10px 17px;
-  border: 1px solid var(--danger-line);
-  border-radius: 7px;
+  gap: 10px;
+  border: 1px solid var(--gs-semantic-border-essential);
+  border-radius: var(--gs-semantic-radius-item);
+  background: var(--gs-semantic-surface-inset);
   padding: 12px;
-  color: var(--danger);
-  background: var(--danger-wash);
-}
-.inline-confirm p {
-  margin: 0 0 10px;
-  font-size: 12px;
-  line-height: 1.5;
 }
 .file-inspector > .form-error {
   margin: 12px 17px;
@@ -2918,4 +2899,90 @@ button:disabled {
     transition-duration: 0.01ms !important;
     scroll-behavior: auto !important;
   }
+}
+
+/* Dialog specimen gallery: the three compositions and the recovery states,
+   rendered side by side so their shared rhythm and state tones can be compared. */
+.specimen-page {
+  display: grid;
+  gap: 20px;
+  min-height: 100vh;
+  align-content: start;
+  background: var(--gs-semantic-surface-canvas);
+  padding: 20px;
+}
+.specimen-header {
+  display: grid;
+  gap: 4px;
+  border-radius: var(--gs-semantic-radius-workbench);
+  border: 1px solid var(--gs-semantic-border-essential);
+  background: var(--gs-semantic-surface-content);
+  padding: 14px 16px;
+}
+.specimen-header strong {
+  font-size: 14px;
+}
+.specimen-header span {
+  max-width: 78ch;
+  color: var(--gs-semantic-text-secondary);
+  font-size: 12px;
+  line-height: 1.55;
+}
+.specimen-heading {
+  margin: 4px 0 0;
+  font-size: 13px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--gs-semantic-text-secondary);
+}
+.specimen-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+  gap: 16px;
+  align-items: start;
+}
+.specimen-dialog {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+  border-radius: var(--gs-semantic-radius-workbench);
+  border: 1px solid var(--gs-semantic-border-essential);
+  background: var(--gs-semantic-surface-content);
+  box-shadow: var(--gs-semantic-elevation-small);
+  padding: 16px;
+}
+.specimen-dialog > header {
+  display: grid;
+  gap: 3px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--gs-semantic-border-essential);
+}
+.specimen-dialog > header strong {
+  font-size: 13px;
+}
+.specimen-dialog > header span {
+  color: var(--gs-semantic-text-secondary);
+  font-size: 11px;
+  line-height: 1.5;
+}
+.specimen-recovery {
+  display: grid;
+  gap: 10px;
+}
+.specimen-banner {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  border-radius: var(--gs-semantic-radius-item);
+  border: 1px solid var(--gs-semantic-border-essential);
+  background: var(--gs-semantic-surface-inset);
+  padding: 10px 12px;
+}
+.specimen-banner-note {
+  grid-column: 1 / -1;
+  margin: 0;
+  color: var(--gs-semantic-text-secondary);
+  font-size: 11px;
 }
