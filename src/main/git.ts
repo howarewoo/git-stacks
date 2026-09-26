@@ -3339,8 +3339,11 @@ interface ConflictSides {
   [stage: number]: { text: string | null; binary: boolean }
 }
 
-/** The unmerged index stages Git left for one path, read without a pathspec quote. */
-async function conflictStages(root: string, relativePath: string): Promise<ConflictStageEntry[]> {
+/** Keep the exact staged index bytes with the entries used to render a conflict. */
+async function conflictIndex(
+  root: string,
+  relativePath: string,
+): Promise<{ stages: ConflictStageEntry[]; fingerprint: string }> {
   const output = await runGit(root, [
     '--literal-pathspecs',
     'ls-files',
@@ -3360,7 +3363,11 @@ async function conflictStages(root: string, relativePath: string): Promise<Confl
     }
     stages.push({ stage: Number(stage), oid })
   }
-  return stages
+  return { stages, fingerprint: createHash('sha256').update(output).digest('hex') }
+}
+
+async function conflictStages(root: string, relativePath: string): Promise<ConflictStageEntry[]> {
+  return (await conflictIndex(root, relativePath)).stages
 }
 
 async function readConflictBlob(root: string, oid: string): Promise<Buffer> {
@@ -3511,6 +3518,7 @@ async function conflictMoves(
     const listing = await tryGit(root, [
       'diff',
       '--name-status',
+      '-z',
       '-M',
       '--no-ext-diff',
       '--end-of-options',
@@ -3518,11 +3526,15 @@ async function conflictMoves(
       side.target,
     ])
     if (!listing) continue
-    for (const line of listing.split('\n')) {
-      if (!line) continue
-      const [status, from, to] = line.split('\t')
-      if (status?.startsWith('R') && (from === relativePath || to === relativePath)) {
-        moves.push({ from, to, side: side.side })
+    const fields = listing.split('\0')
+    for (let index = 0; index < fields.length - 1;) {
+      const status = fields[index++]
+      const from = fields[index++]
+      if (status.startsWith('R')) {
+        const to = fields[index++]
+        if (from === relativePath || to === relativePath) {
+          moves.push({ from, to, side: side.side })
+        }
       }
     }
   }
@@ -3539,7 +3551,8 @@ export async function getConflictView(
   if (!entry.conflicted) throw new Error('The selected file has no unresolved conflict')
   const relativePath = entry.path
   await safeRepositoryPath(root, relativePath)
-  const stages = await conflictStages(root, relativePath)
+  const captured = await conflictIndex(root, relativePath)
+  const stages = captured.stages
   if (!stages.length) throw new Error('The selected file has no unresolved conflict')
   const context = await conflictContext(root, relativePath, stages)
   const [identity, currentBranch, moves] = await Promise.all([
@@ -3553,6 +3566,9 @@ export async function getConflictView(
       sides[stage.stage] = decodeConflictBlob(await readConflictBlob(root, stage.oid))
     }),
   )
+  if (captured.fingerprint !== identity.indexFingerprint) {
+    throw new Error('The index changed while the conflict was being read; refresh and retry')
+  }
   const worktree = identity.binary || !identity.preview ? null : identity.preview.toString('utf8')
   const segments = worktree && !identity.truncated ? parseConflictSegments(worktree) : []
   const stageNumbers = stages.map((stage) => stage.stage)
@@ -3697,8 +3713,13 @@ export async function runResolveConflict(
     }
     await replaceCheckedFile(root, relativePath, identity, null, resolution.content)
   } else {
-    const stages = await conflictStages(root, relativePath)
-    if (!stages.length) throw new Error('The selected file has no unresolved conflict')
+    const captured = await conflictIndex(root, relativePath)
+    if (captured.fingerprint !== identity.indexFingerprint) {
+      throw new Error(
+        'The index changed since the conflict was opened; refresh before applying this action',
+      )
+    }
+    const stages = captured.stages
     const sides: ConflictSides = {}
     await Promise.all(
       stages.map(async (stage) => {

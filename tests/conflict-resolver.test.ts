@@ -72,6 +72,19 @@ test('a conflict marker left unterminated is preserved as text instead of losing
   assert.deepEqual(segments, [{ kind: 'text', text: body }])
   assert.equal(composeConflict(segments, {}), body)
 })
+test('a complete region followed by an unterminated marker keeps only the later raw block', () => {
+  const body =
+    'head\n<<<<<<< HEAD\ncurrent\n=======\nincoming\n>>>>>>> topic\nmiddle\n<<<<<<< HEAD\nunfinished\n=======\npending\n'
+  const segments = parseConflictSegments(body)
+  assert.deepEqual(conflictRegions(segments), [
+    { index: 0, startLine: 2, current: 'current\n', incoming: 'incoming\n' },
+  ])
+  assert.equal(
+    composeConflict(segments, { 0: 'incoming' }),
+    'head\nincoming\nmiddle\n<<<<<<< HEAD\nunfinished\n=======\npending\n',
+  )
+  assert.equal(hasConflictMarkers(composeConflict(segments, { 0: 'incoming' })), true)
+})
 
 test('widened rename conflict markers remain visible and cannot be staged unresolved', () => {
   const body =
@@ -557,6 +570,53 @@ test('divergent real renames retain Git-recorded destinations and resolve select
   }
 })
 
+test('Unicode and quoted divergent rename paths keep their recorded moves and selected bytes', async () => {
+  const { root, repo, git, gitExpectedFailure } = await fixture()
+  try {
+    const original = Array.from({ length: 30 }, (_, index) => `line ${index}`).join('\n') + '\n'
+    const currentPath = 'résumé\t"current".txt'
+    const incomingPath = 'renamed\\incoming.txt'
+    await writeFile(join(repo, 'old.txt'), original)
+    git('add', '.')
+    git('commit', '-m', 'Original file')
+    git('checkout', '-b', 'topic')
+    git('mv', 'old.txt', incomingPath)
+    await writeFile(join(repo, incomingPath), original.replace('line 29', 'incoming'))
+    git('add', '-A')
+    git('commit', '-m', 'Incoming rename')
+    git('checkout', 'main')
+    git('mv', 'old.txt', currentPath)
+    await writeFile(join(repo, currentPath), original.replace('line 29', 'current'))
+    git('add', '-A')
+    git('commit', '-m', 'Current rename')
+    gitExpectedFailure('merge', 'topic')
+    const current = await getConflictView(repo, currentPath)
+    const incoming = await getConflictView(repo, incomingPath)
+    assert.deepEqual(current.moves, [{ from: 'old.txt', to: currentPath, side: 'current' }])
+    assert.deepEqual(incoming.moves, [{ from: 'old.txt', to: incomingPath, side: 'incoming' }])
+    assert.equal(current.kind, 'rename')
+    assert.equal(incoming.kind, 'rename')
+    await runResolveConflict(repo, currentPath, current.fingerprint, {
+      kind: 'choice',
+      choice: 'current',
+    })
+    await runResolveConflict(repo, incomingPath, incoming.fingerprint, {
+      kind: 'choice',
+      choice: 'incoming',
+    })
+    assert.equal(
+      await readFile(join(repo, currentPath), 'utf8'),
+      original.replace('line 29', 'current'),
+    )
+    assert.equal(
+      await readFile(join(repo, incomingPath), 'utf8'),
+      original.replace('line 29', 'incoming'),
+    )
+    assert.notEqual(git('ls-files', '--unmerged', '--', 'old.txt'), '')
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
 test('a path nobody moved is not reported as renamed', async () => {
   const { root, repo, git, gitExpectedFailure } = await fixture()
   try {
@@ -675,6 +735,45 @@ test('a file edited after it was opened is refused, and the edit survives untouc
   }
 })
 
+test('a changed unmerged stage rejects an old view without replacing the worktree', async () => {
+  const { root, repo, git, gitExpectedFailure } = await fixture()
+  try {
+    await writeFile(join(repo, 'shared.txt'), 'base\n')
+    git('add', '.')
+    git('commit', '-m', 'Initial commit')
+    git('checkout', '-b', 'topic')
+    await writeFile(join(repo, 'shared.txt'), 'topic\n')
+    git('add', '.')
+    git('commit', '-m', 'Topic edit')
+    git('checkout', 'main')
+    await writeFile(join(repo, 'shared.txt'), 'main\n')
+    git('add', '.')
+    git('commit', '-m', 'Main edit')
+    gitExpectedFailure('merge', 'topic')
+    const old = await getConflictView(repo, 'shared.txt')
+    const original = await readFile(join(repo, 'shared.txt'), 'utf8')
+    const changedOid = git('rev-parse', 'main:shared.txt')
+    execFileSync('git', ['-C', repo, 'update-index', '--index-info'], {
+      input: `100644 ${changedOid} 3\tshared.txt\n`,
+    })
+    assert.equal(await readFile(join(repo, 'shared.txt'), 'utf8'), original)
+    assert.notEqual(git('ls-files', '--unmerged', '--', 'shared.txt'), '')
+    await assert.rejects(
+      runResolveConflict(repo, 'shared.txt', old.fingerprint, {
+        kind: 'choice',
+        choice: 'incoming',
+      }),
+      /changed since/u,
+    )
+    assert.equal(await readFile(join(repo, 'shared.txt'), 'utf8'), original)
+    assert.notEqual(git('ls-files', '--unmerged', '--', 'shared.txt'), '')
+    const refreshed = await getConflictView(repo, 'shared.txt')
+    assert.equal(refreshed.incoming, 'main\n')
+    assert.notEqual(refreshed.fingerprint, old.fingerprint)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
 test('a resolution that still contains conflict markers is refused instead of staged', async () => {
   const { root, repo, git, gitExpectedFailure } = await fixture()
   try {
@@ -822,6 +921,71 @@ test('a repository with no configured merge tool says so instead of guessing one
       runConflictMergeTool(repo, 'shared.txt', conflicted.fingerprint),
       /No merge tool is configured/u,
     )
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('a conflicted cherry-pick resolves and continues through Git', async () => {
+  const { root, repo, git, gitExpectedFailure } = await fixture()
+  try {
+    await writeFile(join(repo, 'shared.txt'), 'base\n')
+    git('add', '.')
+    git('commit', '-m', 'Base')
+    git('checkout', '-b', 'topic')
+    await writeFile(join(repo, 'shared.txt'), 'topic\n')
+    git('add', '.')
+    git('commit', '-m', 'Topic edit')
+    git('checkout', 'main')
+    await writeFile(join(repo, 'shared.txt'), 'main\n')
+    git('add', '.')
+    git('commit', '-m', 'Main edit')
+    gitExpectedFailure('cherry-pick', 'topic')
+    const view = await getConflictView(repo, 'shared.txt')
+    assert.equal(view.labels.operation, 'cherryPick')
+    assert.equal(view.base, 'base\n')
+    assert.equal(view.current, 'main\n')
+    assert.equal(view.incoming, 'topic\n')
+    await runResolveConflict(repo, 'shared.txt', view.fingerprint, {
+      kind: 'content',
+      content: 'accepted cherry-pick\n',
+    })
+    await runAction(repo, { type: 'operationContinue' })
+    assert.equal(git('log', '-1', '--format=%s'), 'Topic edit')
+    assert.equal(git('ls-files', '--unmerged'), '')
+    assert.equal(await readFile(join(repo, 'shared.txt'), 'utf8'), 'accepted cherry-pick\n')
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('a conflicted revert resolves but Git abort restores the original commit and bytes', async () => {
+  const { root, repo, git, gitExpectedFailure } = await fixture()
+  try {
+    await writeFile(join(repo, 'shared.txt'), 'base\n')
+    git('add', '.')
+    git('commit', '-m', 'Base')
+    await writeFile(join(repo, 'shared.txt'), 'earlier edit\n')
+    git('add', '.')
+    git('commit', '-m', 'Earlier edit')
+    const earlier = git('rev-parse', 'HEAD')
+    await writeFile(join(repo, 'shared.txt'), 'latest edit\n')
+    git('add', '.')
+    git('commit', '-m', 'Latest edit')
+    const latest = git('rev-parse', 'HEAD')
+    gitExpectedFailure('revert', earlier)
+    const view = await getConflictView(repo, 'shared.txt')
+    assert.equal(view.labels.operation, 'revert')
+    assert.equal(view.current, 'latest edit\n')
+    assert.equal(view.incoming, 'base\n')
+    await runResolveConflict(repo, 'shared.txt', view.fingerprint, {
+      kind: 'content',
+      content: 'resolved revert\n',
+    })
+    await runAction(repo, { type: 'operationAbort' })
+    assert.equal(git('rev-parse', 'HEAD'), latest)
+    assert.equal(git('ls-files', '--unmerged'), '')
+    assert.equal(await readFile(join(repo, 'shared.txt'), 'utf8'), 'latest edit\n')
   } finally {
     await rm(root, { recursive: true, force: true })
   }

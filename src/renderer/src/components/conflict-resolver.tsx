@@ -23,6 +23,7 @@ import {
   WorkflowFrame,
 } from './workflow-composition'
 import { workflowError, type RunAction } from './workflow-dialog'
+import { closeIntent, CLOSE_INTENT_MESSAGES } from './workflow-policy'
 
 const KIND_LABELS: Record<ConflictFile['kind'], string> = {
   content: 'Content conflict',
@@ -176,6 +177,8 @@ export function ConflictResolver({
   const [choices, setChoices] = React.useState<Record<number, ConflictRegionChoice>>({})
   const [edited, setEdited] = React.useState<string | null>(null)
   const [attempt, setAttempt] = React.useState(0)
+  const [closeNotice, setCloseNotice] = React.useState<string | null>(null)
+  const [modeNotice, setModeNotice] = React.useState(false)
 
   React.useEffect(() => {
     let active = true
@@ -183,6 +186,8 @@ export function ConflictResolver({
     setError(null)
     setStale(false)
     setEdited(null)
+    setCloseNotice(null)
+    setModeNotice(false)
     window.desktop
       .conflictView(path)
       .then((next) => {
@@ -217,11 +222,21 @@ export function ConflictResolver({
   const editable = Boolean(file && !file.binary && !file.truncated && file.worktree !== null)
   const markersRemain = hasConflictMarkers(result)
 
+  const regionEditBlocked = edited !== null && edited !== composed
+  const dirty = regionEditBlocked || Object.values(choices).some((choice) => choice !== 'current')
   const choose = (index: number, choice: ConflictRegionChoice) => {
+    if (regionEditBlocked) {
+      setModeNotice(true)
+      return
+    }
     setEdited(null)
     setChoices((current) => ({ ...current, [index]: choice }))
   }
   const chooseEverywhere = (choice: ConflictChoice) => {
+    if (regionEditBlocked) {
+      setModeNotice(true)
+      return
+    }
     setEdited(null)
     setChoices((current) => {
       const next = { ...current }
@@ -293,7 +308,10 @@ export function ConflictResolver({
   return (
     <Dialog
       onOpenChange={(open) => {
-        if (!open && !busy && !loading) onClose()
+        if (open) return
+        const intent = closeIntent({ busy: busy || loading, dirty })
+        if (intent === 'allow') onClose()
+        else setCloseNotice(CLOSE_INTENT_MESSAGES[intent])
       }}
       open
     >
@@ -306,6 +324,9 @@ export function ConflictResolver({
         </DialogHeader>
         <div className="dialog-form">
           <WorkflowFrame composition="reviewed" wide>
+            {closeNotice ? (
+              <PhaseStatus phase="blocked" title="Draft kept open" message={closeNotice} />
+            ) : null}
             {loading ? (
               <p className="workflow-loading" role="status">
                 <LoaderCircle className="size-4 animate-spin" />
@@ -384,6 +405,25 @@ export function ConflictResolver({
                     the result.
                   </p>
                 ) : null}
+                {modeNotice && regionEditBlocked ? (
+                  <div className="workflow-row">
+                    <p className="workflow-note" role="status">
+                      Your Resolved file edits are still intact. To edit regions again, explicitly
+                      discard the whole-file draft; changes outside the regions will be lost.
+                    </p>
+                    <Button
+                      disabled={busy}
+                      size="sm"
+                      variant="secondary"
+                      onClick={() => {
+                        setEdited(null)
+                        setModeNotice(false)
+                      }}
+                    >
+                      Discard full-file draft and use regions
+                    </Button>
+                  </div>
+                ) : null}
                 {editable && file.regions.length > 0 ? (
                   <ul className="conflict-regions">
                     {file.regions.map((region) => (
@@ -440,7 +480,10 @@ export function ConflictResolver({
                       className="conflict-content"
                       disabled={busy}
                       id="conflict-result"
-                      onChange={(event) => setEdited(event.target.value)}
+                      onChange={(event) => {
+                        setEdited(event.target.value)
+                        setModeNotice(false)
+                      }}
                       rows={10}
                       spellCheck={false}
                       value={result}

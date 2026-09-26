@@ -78,6 +78,7 @@ export function parseConflictSegments(text: string): ConflictSegment[] {
       })
       current.length = 0
       incoming.length = 0
+      block.length = 0
       open = false
       section = 'current'
     } else if (section === 'current') {
