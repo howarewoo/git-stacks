@@ -103,7 +103,9 @@ function graphPullRequest(pr, withBody) {
 
 function restPullRequest(state, pr) {
   const merged = pr.state === 'MERGED'
-  const stack = (state.stacks || []).find((s) => s.pull_requests.some((p) => p.number === pr.number))
+  const stack = (state.stacks || []).find((s) =>
+    s.pull_requests.some((p) => p.number === pr.number),
+  )
   let stackObj = null
   if (stack) {
     const position = stack.pull_requests.findIndex((p) => p.number === pr.number) + 1
@@ -334,7 +336,9 @@ function handleApi(state, args) {
       const stackIdx = (state.stacks || []).findIndex((s) => s.number === stackNumber)
       if (stackIdx === -1) fail(`404: stack #${stackNumber} not found`)
       const stack = state.stacks[stackIdx]
-      const remaining = stack.pull_requests.filter((p) => p.merged_at != null || p.state === 'closed')
+      const remaining = stack.pull_requests.filter(
+        (p) => p.merged_at != null || p.state === 'closed',
+      )
       if (remaining.length === 0) {
         state.stacks.splice(stackIdx, 1)
         return {}

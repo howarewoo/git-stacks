@@ -14,6 +14,7 @@ import {
   validateNativeStackChain,
 } from '../src/main/native-stacks'
 import { runStackAction } from '../src/main/stacks'
+import type { PullRequest } from '../src/shared/types'
 import { createGitHubApiDouble } from './fixtures/github-api-double'
 import { createGitHubHarness, type GitHubHarness } from './fixtures/github-harness'
 
@@ -204,7 +205,7 @@ test('validates bottom-to-top contiguous chain, rejecting gaps and mismatches', 
   await withHarness(async (harness) => {
     await setupThreeBranches(harness)
     const state = await harness.readState()
-    const prs = state.prs.map((p) => ({
+    const prs: PullRequest[] = state.prs.map((p) => ({
       number: p.number,
       title: p.title,
       url: p.url,
@@ -213,10 +214,10 @@ test('validates bottom-to-top contiguous chain, rejecting gaps and mismatches', 
       state: p.state,
       draft: p.draft,
       checks: p.checks,
-      headOid: p.headOid,
-      mergeOid: p.mergeOid,
-      reviewDecision: p.reviewDecision,
-      mergeState: p.mergeState,
+      headOid: p.headOid ?? undefined,
+      mergeOid: p.mergeOid ?? undefined,
+      reviewDecision: p.reviewDecision ?? undefined,
+      mergeState: p.mergeState ?? undefined,
       headRepository: p.headRepository,
     }))
 
@@ -227,7 +228,7 @@ test('validates bottom-to-top contiguous chain, rejecting gaps and mismatches', 
     // Discontinuous chain: main -> step-2 (base is step-1, doesn't match main)
     const invalidResult = validateNativeStackChain([prs[1]], 'main')
     assert.equal(invalidResult.status, 'invalid-chain')
-    assert.match(invalidResult.message, /does not match/i)
+    assert.match(invalidResult.message || '', /does not match/i)
 
     // Inverted chain: step-2 then step-1
     const invertedResult = validateNativeStackChain([prs[1], prs[0]], 'main')
@@ -282,8 +283,8 @@ test('reloads native stack from GitHub after restart without app metadata', asyn
 
     // Read snapshot
     const snapshot = await getSnapshot(harness.repo)
-    assert.equal(snapshot.nativeStacks.length, 1)
-    assert.equal(snapshot.nativeStacks[0].number, 1)
+    assert.equal(snapshot.nativeStacks?.length, 1)
+    assert.equal(snapshot.nativeStacks?.[0]?.number, 1)
     assert.equal(snapshot.nativeStackPreviewAvailable, true)
 
     // Branches should derive parent directly from native stack
@@ -323,8 +324,8 @@ test('runStackAction supports createNativeStack, addPullRequestsToNativeStack, a
 
     // Verify snapshot reflects it
     let snapshot = await getSnapshot(harness.repo)
-    assert.equal(snapshot.nativeStacks.length, 1)
-    assert.equal(snapshot.nativeStacks[0].pullRequests.length, 2)
+    assert.equal(snapshot.nativeStacks?.length, 1)
+    assert.equal(snapshot.nativeStacks?.[0]?.pullRequests.length, 2)
 
     // Execute addPullRequestsToNativeStack
     const addRes = await runStackAction(harness.repo, {
@@ -335,7 +336,7 @@ test('runStackAction supports createNativeStack, addPullRequestsToNativeStack, a
     assert.match(addRes.message, /Added 1 pull request to native stack #1/u)
 
     snapshot = await getSnapshot(harness.repo)
-    assert.equal(snapshot.nativeStacks[0].pullRequests.length, 3)
+    assert.equal(snapshot.nativeStacks?.[0]?.pullRequests.length, 3)
 
     // Execute unstackNativeStack
     const unstackRes = await runStackAction(harness.repo, {
@@ -345,7 +346,7 @@ test('runStackAction supports createNativeStack, addPullRequestsToNativeStack, a
     assert.match(unstackRes.message, /Dissolved native stack #1/u)
 
     snapshot = await getSnapshot(harness.repo)
-    assert.equal(snapshot.nativeStacks.length, 0)
+    assert.equal(snapshot.nativeStacks?.length, 0)
   })
 })
 
@@ -359,7 +360,7 @@ test('degrades gracefully to chained PRs when native stack preview is unavailabl
 
     const snapshot = await getSnapshot(harness.repo)
     assert.equal(snapshot.nativeStackPreviewAvailable, false)
-    assert.equal(snapshot.nativeStacks.length, 0)
+    assert.equal(snapshot.nativeStacks?.length, 0)
 
     // Branches fall back to PR base / recorded parent
     const step2 = snapshot.branches.find((b) => b.name === 'feature/step-2')
