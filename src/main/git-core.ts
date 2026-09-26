@@ -3,6 +3,7 @@ import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import { promisify } from 'node:util'
 import type { ChangedFile, GitOperation, Stash } from '../shared/types'
+import { gitExecutable } from './git-runtime'
 
 export const execFile = promisify(execFileCallback)
 export const MAX_BUFFER = 32 * 1024 * 1024
@@ -68,13 +69,7 @@ export async function execute(
   try {
     const result = await execFile(command, args, {
       cwd,
-      env: {
-        ...process.env,
-        GIT_TERMINAL_PROMPT: '0',
-        GH_PROMPT_DISABLED: '1',
-        GCM_INTERACTIVE: 'Never',
-        ...env,
-      },
+      env: commandEnvironment(env),
       timeout: command === 'gh' ? 20_000 : 120_000,
       shell: false,
       windowsHide: true,
@@ -91,12 +86,24 @@ export async function execute(
   }
 }
 
+// Prompt suppression is the only environment Git Stacks adds; user SSH, LFS, proxy,
+// askpass, hooks, signing, and credential-helper configuration is passed through untouched.
+export function commandEnvironment(env?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  return {
+    ...process.env,
+    GIT_TERMINAL_PROMPT: '0',
+    GH_PROMPT_DISABLED: '1',
+    GCM_INTERACTIVE: 'Never',
+    ...env,
+  }
+}
+
 export async function runGit(
   repoPath: string,
   args: string[],
   env?: NodeJS.ProcessEnv,
 ): Promise<string> {
-  return execute('git', args, repoPath, env)
+  return execute(await gitExecutable(), args, repoPath, env)
 }
 
 export async function tryGit(repoPath: string, args: string[]): Promise<string | null> {

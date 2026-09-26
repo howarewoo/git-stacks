@@ -14,8 +14,15 @@ import {
 } from './git'
 import { previewStack } from './stacks'
 import { getPullRequest } from './github'
-import type { GitAction, RecentRepository, StackKind } from '../shared/types'
+import type { GitAction, GitRuntimeStatus, RecentRepository, StackKind } from '../shared/types'
 import { RepositoryOperations } from './repository-operations'
+import {
+  MINIMUM_GIT_VERSION,
+  configureGitRuntime,
+  readGitRuntimePreference,
+  resolveGitRuntime,
+  writeGitRuntimePreference,
+} from './git-runtime'
 
 const bundleDir = dirname(fileURLToPath(import.meta.url))
 protocol.registerSchemesAsPrivileged([
@@ -55,6 +62,23 @@ if (devUrl) {
 }
 const trustedOrigin = devUrl ? new URL(devUrl).origin : productionOrigin
 const settingsPath = () => join(app.getPath('userData'), 'repositories.json')
+const settingsFile = () => join(app.getPath('userData'), 'settings.json')
+
+async function gitRuntimeStatus(): Promise<GitRuntimeStatus> {
+  try {
+    return {
+      runtime: await resolveGitRuntime(),
+      error: null,
+      minimumVersion: MINIMUM_GIT_VERSION,
+    }
+  } catch (error) {
+    return {
+      runtime: null,
+      error: error instanceof Error ? error.message : String(error),
+      minimumVersion: MINIMUM_GIT_VERSION,
+    }
+  }
+}
 
 function validateSender(event: IpcMainInvokeEvent) {
   if (
@@ -177,6 +201,17 @@ function installHandlers() {
     }
     await shell.openExternal(url.href)
   })
+  ipcMain.handle('git-runtime', async (event) => {
+    validateSender(event)
+    return gitRuntimeStatus()
+  })
+  ipcMain.handle('git-runtime:system-git', async (event, requested: unknown) => {
+    validateSender(event)
+    if (typeof requested !== 'boolean') throw new Error('Use system Git must be true or false.')
+    await writeGitRuntimePreference(settingsFile(), { useSystemGit: requested })
+    configureGitRuntime({ useSystemGit: requested })
+    return gitRuntimeStatus()
+  })
 }
 
 async function createWindow() {
@@ -251,6 +286,13 @@ app
       const path = await resolveRepository(process.env.GIT_STACKS_REPO)
       recents = [{ path, name: basename(path) }, ...recents.filter((item) => item.path !== path)]
     }
+    const preference = await readGitRuntimePreference(settingsFile()).catch(() => null)
+    configureGitRuntime({
+      appVersion: app.getVersion(),
+      packaged: app.isPackaged,
+      resourcesRoot: app.isPackaged ? process.resourcesPath : resolve(bundleDir, '../../resources'),
+      useSystemGit: preference?.useSystemGit ?? false,
+    })
     installHandlers()
     Menu.setApplicationMenu(
       Menu.buildFromTemplate([

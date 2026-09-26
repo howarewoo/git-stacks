@@ -16,8 +16,9 @@
     "tokens:check": "node src/renderer/src/design-system/generate-tokens.mjs --check",
     "format": "prettier --write .",
     "format:check": "prettier --check . '!./.github/workflows/pullfrog.yml'",
-    "package": "npm run build && electron-builder --dir --publish never",
-    "dist": "npm run build && electron-builder --publish never"
+    "package": "npm run build && npm run verify:git-runtime && electron-builder --dir --publish never",
+    "dist": "npm run build && npm run verify:git-runtime && electron-builder --publish never",
+    "verify:git-runtime": "node scripts/verify-git-runtime.mjs"
   },
   "build": {
     "appId": "dev.gitstacks.desktop",
@@ -28,6 +29,15 @@
     "files": [
       "out/**/*",
       "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "resources/git",
+        "to": "git",
+        "filter": [
+          "**/*"
+        ]
+      }
     ],
     "mac": {
       "icon": "resources/icon.icns",

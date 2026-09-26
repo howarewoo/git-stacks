@@ -39,6 +39,7 @@ import type {
   Branch,
   DesktopAPI,
   GitAction,
+  GitRuntimeStatus,
   PullRequest,
   RecentRepository,
   RepositorySnapshot,
@@ -71,6 +72,7 @@ import {
 import { WorkflowDialog, type WorkflowRequest } from './components/workflow-dialog'
 import { WorkspaceNavigation } from './components/workspace-navigation'
 import { HistoryView, OperationBanner, StackView } from './components/repository-views'
+import { GitRuntimeDialog } from './components/git-runtime-dialog'
 import {
   ChangesView,
   PullRequestListView,
@@ -267,6 +269,9 @@ function App() {
     repoPath: string
     request: WorkflowRequest
   } | null>(null)
+  const [gitRuntimeOpen, setGitRuntimeOpen] = React.useState(false)
+  const [gitRuntimeStatus, setGitRuntimeStatus] = React.useState<GitRuntimeStatus | null>(null)
+  const [gitRuntimeBusy, setGitRuntimeBusy] = React.useState(false)
   const workflowSequence = React.useRef(0)
 
   const [showDetails, setShowDetails] = React.useState(true)
@@ -371,6 +376,30 @@ function App() {
       }
     },
     [desktop, setSnapshotAndSelection],
+  )
+
+  const openGitRuntime = React.useCallback(() => {
+    if (!desktop) return
+    setGitRuntimeOpen(true)
+    desktop
+      .gitRuntimeStatus()
+      .then(setGitRuntimeStatus)
+      .catch((value) => setError(readableError(value)))
+  }, [desktop])
+
+  const selectGitRuntime = React.useCallback(
+    async (useSystemGit: boolean) => {
+      if (!desktop) return
+      setGitRuntimeBusy(true)
+      try {
+        setGitRuntimeStatus(await desktop.setSystemGit(useSystemGit))
+      } catch (value) {
+        setError(readableError(value))
+      } finally {
+        setGitRuntimeBusy(false)
+      }
+    },
+    [desktop],
   )
 
   const runAction = React.useCallback(
@@ -747,7 +776,18 @@ function App() {
           />
           <span>{desktop ? 'Desktop connected' : 'Desktop integration unavailable'}</span>
         </div>
-        <span className="version-label">Git Stacks</span>
+        <div className="sidebar-footer-actions">
+          <button
+            className="version-label version-label-action"
+            disabled={!desktop}
+            onClick={openGitRuntime}
+            title="Git runtime diagnostics"
+            type="button"
+          >
+            Git runtime
+          </button>
+          <span className="version-label">Git Stacks</span>
+        </div>
       </div>
     </aside>
   )
@@ -1646,6 +1686,13 @@ function App() {
           onRequest={openWorkflow}
         />
       ) : null}
+      <GitRuntimeDialog
+        busy={gitRuntimeBusy}
+        onOpenChange={setGitRuntimeOpen}
+        onSelectSystemGit={selectGitRuntime}
+        open={gitRuntimeOpen}
+        status={gitRuntimeStatus}
+      />
       <Dialog
         open={deleteTarget !== null}
         onOpenChange={(open) => {

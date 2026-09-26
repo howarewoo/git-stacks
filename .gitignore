@@ -1,6 +1,7 @@
 node_modules/
 out/
 release/
+resources/git/
 .DS_Store
 *.log
 .env*

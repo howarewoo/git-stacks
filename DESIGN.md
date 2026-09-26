@@ -292,6 +292,18 @@ Checked-out, selected, pull-request lifecycle, checks, review, requires-restack,
 
 `src/renderer/src/main.tsx` imports the global stylesheet and exposes the opt-in specimen without changing normal navigation. The local-first Electron boundary remains sandboxed (`sandbox: true`, `contextIsolation: true`, `nodeIntegration: false`), with the typed `contextBridge` preload API, explicit `ipcMain.handle` surface, and production Content-Security-Policy headers intact. This foundations slice does not change Git semantics, preview/confirmation/busy locks, typed confirmations, IPC, or navigation behavior.
 
+### Git runtime
+
+`src/main/git-runtime.ts` is the single resolver for the Git executable. `runGit` in `git-core.ts` and the two ref-transaction `update-ref --stdin` children in `git.ts` all run the executable it returns, so no operation can reach a different Git. The record it resolves holds the source (`bundled` or `system`), executable path, reported version, `MINIMUM_GIT_VERSION` (`2.29.0`, the first release with `rev-parse --show-object-format`, which the expected-head guard needs), and per-capability support.
+
+Resolution order is: an explicit `GIT_STACKS_BUNDLED_GIT` provisioning override, then the release runtime at `<resources>/git/<platform>-<arch>/bin/git`, then PATH. A packaged build never falls through to PATH: a missing runtime fails with a message that points at the override, and the runtime's SHA-256 must match the release manifest, otherwise the build is refused.
+
+**Use system Git** is a stored preference (`settings.json` in userData), surfaced as an explicit two-way choice in Git runtime diagnostics and reversible at any time. Diagnostics show the resolved source, version, path, minimum-version verdict, and capability badges.
+
+Git Stacks adds only prompt suppression (`GIT_TERMINAL_PROMPT`, `GH_PROMPT_DISABLED`, `GCM_INTERACTIVE`) to the child environment. `GIT_SSH_COMMAND`, `GIT_ASKPASS`, `SSH_AUTH_SOCK`, `GIT_PROXY_COMMAND`, the Git LFS variables, `core.hooksPath`, `core.sshCommand`, `credential.helper`, `commit.gpgsign`, `tag.gpgsign`, `user.signingkey`, and `filter.lfs.*` are never overridden, and `--no-verify` is never passed. `tests/git-runtime.test.ts` proves each of those against a real repository: a `pre-commit` hook runs and sees the preserved environment, a configured `credential.helper` answers an HTTP 401 challenge, a `commit.gpgsign` failure surfaces instead of being bypassed, and a Git LFS-style clean filter runs on stage. The same suite runs the core stage/commit/branch/rebase workflow against the bundled runtime and against the system Git.
+
+Runtime updates ship only inside a signed app release. The release pipeline provisions `resources/git/<platform>-<arch>/bin/git` plus `resources/git/runtime-manifest.json` (`appVersion` and, per platform, `gitVersion`, `sha256`, and `source`); `npm run verify:git-runtime` runs before `electron-builder` and refuses to package a missing, unrecorded, mismatched, or unrecorded-app-version runtime. The app has no code path that downloads a Git executable.
+
 ## Do's and Don'ts
 
 Concrete guardrails for the existing system and the user-confirmed Quiet Workbench direction:

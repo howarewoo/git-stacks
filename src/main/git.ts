@@ -25,6 +25,7 @@ import {
   MAX_PATH_LENGTH,
   branchUpstream,
   commandDetail,
+  commandEnvironment,
   ensureClean,
   ensureNoBusyOperation,
   ensureNotCheckedOutElsewhere,
@@ -55,6 +56,7 @@ import {
   validateBranchName,
 } from './git-core'
 import type { RefRecord } from './git-core'
+import { gitExecutable, requireGitCapability } from './git-runtime'
 import { getGitHubData } from './github'
 import {
   getStackProgress,
@@ -540,6 +542,7 @@ async function runGitWithExpectedHead(
   operation: string,
   env?: NodeJS.ProcessEnv,
 ): Promise<string> {
+  await requireGitCapability('referenceTransactions', operation)
   const hooks = await installReferenceTransactionGuard(repoPath)
   const verifiedPath = path.join(hooks.hooksPath, 'expected-head-verified')
   try {
@@ -3919,14 +3922,9 @@ async function withAbsentRefLock(
   ref: string,
   operation: () => Promise<void>,
 ): Promise<void> {
-  const child = spawn('git', ['update-ref', '--stdin'], {
+  const child = spawn(await gitExecutable(), ['update-ref', '--stdin'], {
     cwd: repoPath,
-    env: {
-      ...process.env,
-      GIT_TERMINAL_PROMPT: '0',
-      GH_PROMPT_DISABLED: '1',
-      GCM_INTERACTIVE: 'Never',
-    },
+    env: commandEnvironment(),
     stdio: ['pipe', 'pipe', 'pipe'],
   })
   let pendingOutput = ''
@@ -4017,14 +4015,10 @@ async function deleteLocalBranchRef(
   expectedOid: string,
   cleanupConfig: () => Promise<void>,
 ): Promise<void> {
-  const child = spawn('git', ['update-ref', '--stdin'], {
+  await requireGitCapability('referenceTransactions', `delete ${branchName}`)
+  const child = spawn(await gitExecutable(), ['update-ref', '--stdin'], {
     cwd: repoPath,
-    env: {
-      ...process.env,
-      GIT_TERMINAL_PROMPT: '0',
-      GH_PROMPT_DISABLED: '1',
-      GCM_INTERACTIVE: 'Never',
-    },
+    env: commandEnvironment(),
     stdio: ['pipe', 'pipe', 'pipe'],
   })
   let pendingOutput = ''
