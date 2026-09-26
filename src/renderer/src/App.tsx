@@ -298,6 +298,7 @@ function App() {
   const openingRef = React.useRef(false)
   const searchRef = React.useRef<HTMLInputElement>(null)
   const deleteCancelRef = React.useRef<HTMLButtonElement>(null)
+  const paletteHandoffFocusRef = React.useRef<HTMLElement | null>(null)
   const deleteTriggerRef = React.useRef<HTMLButtonElement>(null)
 
   const setSnapshotAndSelection = React.useCallback((next: RepositorySnapshot) => {
@@ -699,8 +700,18 @@ function App() {
   ])
 
   const handlePaletteExecute = React.useCallback(
-    (item: PaletteItem) => {
+    (item: PaletteItem, opener: HTMLElement | null) => {
       const intent = item.intent
+      if (
+        intent.kind === 'newBranch' ||
+        intent.kind === 'createPr' ||
+        intent.kind === 'workflow' ||
+        intent.kind === 'deleteBranch' ||
+        intent.kind === 'openShortcutsSettings' ||
+        (intent.kind === 'checkoutBranch' && Boolean(snapshot?.files.length))
+      ) {
+        paletteHandoffFocusRef.current = opener
+      }
       switch (intent.kind) {
         case 'view':
           setWorkspaceView(intent.view)
@@ -767,6 +778,35 @@ function App() {
       snapshot,
     ],
   )
+
+  React.useEffect(() => {
+    if (
+      !paletteHandoffFocusRef.current ||
+      paletteOpen ||
+      shortcutSettingsOpen ||
+      checkoutGuardTarget ||
+      deleteTarget ||
+      newBranchOpen ||
+      prOpen ||
+      workflow
+    )
+      return
+    const target = paletteHandoffFocusRef.current
+    paletteHandoffFocusRef.current = null
+    const frame = requestAnimationFrame(() => {
+      if (target.isConnected && !('disabled' in target && target.disabled)) target.focus()
+      else searchRef.current?.focus()
+    })
+    return () => cancelAnimationFrame(frame)
+  }, [
+    paletteOpen,
+    shortcutSettingsOpen,
+    checkoutGuardTarget,
+    deleteTarget,
+    newBranchOpen,
+    prOpen,
+    workflow,
+  ])
 
   React.useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {

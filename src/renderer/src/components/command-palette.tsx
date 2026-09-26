@@ -38,7 +38,7 @@ export interface CommandPaletteProps {
   open: boolean
   onOpenChange: (open: boolean) => void
   items: readonly PaletteItem[]
-  onExecute: (item: PaletteItem) => void
+  onExecute: (item: PaletteItem, opener: HTMLElement | null) => void
   searchFallbackRef?: React.RefObject<HTMLInputElement | null>
 }
 
@@ -403,7 +403,7 @@ export function CommandPalette({
         </DialogHeader>
         <CommandPaletteContent
           items={items}
-          onExecute={onExecute}
+          onExecute={(item) => onExecute(item, openerRef.current)}
           onClose={() => onOpenChange(false)}
           onConfirmingChange={(itemId) => {
             confirmingRef.current = itemId

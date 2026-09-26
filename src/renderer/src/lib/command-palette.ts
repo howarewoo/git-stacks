@@ -7,6 +7,7 @@ import type {
 } from '../../../shared/types'
 import type { WorkflowRequest } from '../components/workflow-dialog'
 import { formatChord, isMacPlatform, type ShortcutId } from './keyboard-shortcuts'
+import { indexBranchesByParentName } from './branches'
 import { resolveStackNavigation, type StackRelation } from './stack-navigation'
 
 export type CommandGroup =
@@ -360,8 +361,8 @@ export function buildPaletteItems(context: BuildPaletteContext): PaletteItem[] {
   }
 
   if (selectedBranch) {
-    const parent = snapshot?.branches.find(
-      (branch) => !branch.remote && branch.name === selectedBranch.parent,
+    const parent = indexBranchesByParentName(snapshot?.branches ?? []).get(
+      selectedBranch.parent ?? '',
     )
     items.push({
       id: 'stack.rebaseCurrent',
@@ -376,7 +377,7 @@ export function buildPaletteItems(context: BuildPaletteContext): PaletteItem[] {
         : selectedBranch.remote
           ? 'Remote branches cannot be rebased directly'
           : !parent
-            ? 'No local recorded parent'
+            ? 'No recorded parent available locally or on a fetched remote'
             : isBusy
               ? 'App is busy'
               : operationActive
@@ -387,7 +388,7 @@ export function buildPaletteItems(context: BuildPaletteContext): PaletteItem[] {
             kind: 'workflow',
             request: {
               kind: 'confirm',
-              action: { type: 'rebase', parent: parent.name },
+              action: { type: 'rebase', parent: selectedBranch.parent! },
               title: 'Rebase current branch?',
               label: 'Rebase onto parent',
               description:

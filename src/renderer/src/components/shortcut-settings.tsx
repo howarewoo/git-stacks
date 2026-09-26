@@ -52,6 +52,13 @@ export function ShortcutSettings({
         setConflictMessage(null)
         return
       }
+      if (isMac ? event.ctrlKey : event.metaKey) {
+        setConflictMessage(
+          `This shortcut cannot use ${isMac ? 'Control' : 'Command/Meta'}; use ${isMac ? 'Command' : 'Control'} as the primary modifier instead.`,
+        )
+        setSuccessMessage(null)
+        return
+      }
 
       const chord = chordFromEvent(event, isMac)
       if (!chord) return

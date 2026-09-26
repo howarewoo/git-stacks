@@ -12,6 +12,7 @@
     "typecheck": "tsc --noEmit",
     "test": "tsx --test tests/*.test.ts",
     "test:controls": "npm run build && electron --headless --no-sandbox --disable-gpu scripts/design-system-controls-smoke.cjs",
+    "test:palette:electron": "node tests/command-palette.e2e.cjs",
     "tokens:generate": "node src/renderer/src/design-system/generate-tokens.mjs",
     "tokens:check": "node src/renderer/src/design-system/generate-tokens.mjs --check",
     "format": "prettier --write .",

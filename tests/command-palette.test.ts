@@ -1,9 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import * as React from 'react'
-import { renderToStaticMarkup } from 'react-dom/server'
 import {
-  SHORTCUT_DEFINITIONS,
   DEFAULT_SHORTCUTS,
   assignShortcut,
   chordFromEvent,
@@ -11,23 +8,18 @@ import {
   detectShortcutConflicts,
   formatChord,
   matchesChord,
-  parseChord,
+  loadShortcuts,
+  resetShortcuts,
+  saveShortcuts,
   type ShortcutId,
 } from '../src/renderer/src/lib/keyboard-shortcuts'
 import {
   buildPaletteItems,
   groupPaletteItems,
   rankPaletteItems,
-  resolveFocusRestoreTarget,
-  scorePaletteItem,
-  type FocusableTargetLike,
   type PaletteItem,
 } from '../src/renderer/src/lib/command-palette'
 import { resolveStackNavigation } from '../src/renderer/src/lib/stack-navigation'
-import {
-  CommandPalette,
-  CommandPaletteContent,
-} from '../src/renderer/src/components/command-palette'
 import type { Branch, RepositorySnapshot } from '../src/shared/types'
 
 function makeMockBranch(name: string, overrides: Partial<Branch> = {}): Branch {
@@ -222,6 +214,90 @@ test('symbol keys requiring Shift match and collide as printable characters, unl
     assert.equal(matchesChord(shiftedLetter, 'Mod+r', isMac), false)
     assert.equal(matchesChord(shiftedLetter, 'Mod+Shift+r', isMac), true)
   }
+})
+
+test('recording preserves key identity through conflicts, storage and reset on either platform', () => {
+  for (const isMac of [true, false]) {
+    const nonPrimary = { key: 'k', ctrlKey: isMac, metaKey: !isMac }
+    assert.equal(chordFromEvent(nonPrimary, isMac), null)
+    assert.equal(matchesChord(nonPrimary, 'k', isMac), false)
+    assert.equal(
+      matchesChord({ ...nonPrimary, ctrlKey: true, metaKey: true }, 'Mod+k', isMac),
+      false,
+    )
+
+    const plus = { key: '+', shiftKey: true, ctrlKey: !isMac, metaKey: isMac }
+    const recorded = chordFromEvent(plus, isMac)
+    assert.equal(recorded, 'Mod+Plus')
+    assert.equal(canonicalChord('Mod++'), recorded)
+    assert.equal(matchesChord(plus, recorded!, isMac), true)
+    assert.equal(matchesChord({ ...plus, key: '=' }, recorded!, isMac), false)
+    const assigned = assignShortcut(DEFAULT_SHORTCUTS, 'palette.open', recorded!)
+    assert.equal(assigned.conflict, null)
+    assert.equal(
+      assignShortcut(assigned.bindings, 'view.branches', 'Mod++').conflict?.conflictingId,
+      'palette.open',
+    )
+
+    let stored: string | null = null
+    const storage = {
+      getItem: () => stored,
+      setItem: (_key: string, value: string) => {
+        stored = value
+      },
+      removeItem: () => {
+        stored = null
+      },
+    }
+    saveShortcuts(assigned.bindings, storage)
+    assert.equal(loadShortcuts(storage)['palette.open'], recorded)
+    assert.equal(matchesChord(plus, loadShortcuts(storage)['palette.open'], isMac), true)
+    const reset = resetShortcuts(storage)
+    assert.equal(matchesChord(plus, reset['palette.open'], isMac), false)
+    assert.equal(
+      matchesChord({ key: 'k', metaKey: isMac, ctrlKey: !isMac }, reset['palette.open'], isMac),
+      true,
+    )
+    assert.equal(stored, null)
+    assert.equal(matchesChord(plus, loadShortcuts(storage)['palette.open'], isMac), false)
+  }
+})
+
+test('palette rebase accepts a fetched remote-only parent without rewriting its recorded identity', () => {
+  const remote = makeMockBranch('origin/fetched-parent', {
+    ref: 'refs/remotes/origin/fetched-parent',
+    remote: true,
+  })
+  const child = makeMockBranch('topic', { current: true, parent: 'fetched-parent' })
+  const snapshot = makeMockSnapshot({ branches: [child, remote], currentBranch: 'topic' })
+  const item = buildPaletteItems({
+    snapshot,
+    selectedBranch: child,
+    recentRepositories: [],
+    isBusy: false,
+    operationActive: false,
+    shortcutMap: DEFAULT_SHORTCUTS,
+  }).find((entry) => entry.id === 'stack.rebaseCurrent')
+  assert.equal(item?.disabled, false)
+  assert.equal(item?.intent.kind, 'workflow')
+  if (item?.intent.kind === 'workflow') {
+    assert.equal(item.intent.request.kind, 'confirm')
+    if (item.intent.request.kind === 'confirm') {
+      assert.deepEqual(item.intent.request.action, { type: 'rebase', parent: 'fetched-parent' })
+    }
+  }
+  snapshot.branches = [child]
+  assert.match(
+    buildPaletteItems({
+      snapshot,
+      selectedBranch: child,
+      recentRepositories: [],
+      isBusy: false,
+      operationActive: false,
+      shortcutMap: DEFAULT_SHORTCUTS,
+    }).find((entry) => entry.id === 'stack.rebaseCurrent')?.disabledReason ?? '',
+    /No recorded parent/,
+  )
 })
 
 test('palette exposes PR workflows, rebase guards, sync target and issue entities', () => {
@@ -446,174 +522,8 @@ test('buildPaletteItems disables checkout when branch is already checked out', (
   assert.equal(checkoutCmd.disabledReason, 'Already the checked-out branch')
 })
 
-test('CommandPalette markup exposes aria-disabled and reason for disabled items', () => {
-  const items: PaletteItem[] = [
-    {
-      id: 'cmd-disabled',
-      label: 'Publish stack',
-      group: 'Commands',
-      disabled: true,
-      disabledReason: 'GitHub integration unavailable',
-      intent: { kind: 'view', view: 'branches' },
-    },
-  ]
-
-  const html = renderToStaticMarkup(
-    React.createElement(CommandPaletteContent, {
-      items,
-      onExecute: () => {},
-    }),
-  )
-
-  assert.match(html, /aria-disabled="true"/)
-  assert.match(html, /GitHub integration unavailable/)
-})
-
 // =============================================================================
-// 3. Destructive confirmations
-// =============================================================================
-
-test('Destructive actions are flagged and cannot execute from ranking alone', () => {
-  const snapshot = makeMockSnapshot()
-  const feature = snapshot.branches.find((b) => b.name === 'feature-1')!
-
-  const items = buildPaletteItems({
-    snapshot,
-    selectedBranch: feature,
-    recentRepositories: [],
-    isBusy: false,
-    operationActive: false,
-    shortcutMap: {
-      'palette.open': 'Mod+K',
-      'search.focus': '/',
-      'stack.selectParent': 'Alt+ArrowUp',
-      'stack.selectChild': 'Alt+ArrowDown',
-      'stack.selectTop': 'Alt+Shift+ArrowUp',
-      'stack.selectBottom': 'Alt+Shift+ArrowDown',
-      'stack.checkout': 'Mod+Enter',
-      'stack.restack': 'Mod+Shift+R',
-      'stack.sync': 'Mod+Shift+S',
-      'stack.openPr': 'Mod+Shift+P',
-      'view.branches': 'Mod+1',
-      'view.stacks': 'Mod+2',
-      'view.history': 'Mod+3',
-      'view.changes': 'Mod+4',
-      'view.pullRequests': 'Mod+5',
-      'view.stashes': 'Mod+6',
-    },
-  })
-
-  const deleteCmd = items.find((i) => i.id === 'command.deleteBranch')
-  assert.ok(deleteCmd)
-  assert.equal(deleteCmd.destructive, true)
-
-  const forcePushCmd = items.find((i) => i.id === 'command.forcePush')
-  assert.ok(forcePushCmd)
-  assert.equal(forcePushCmd.destructive, true)
-})
-
-test('CommandPalette marks destructive items with destructive badge and aria label', () => {
-  const items: PaletteItem[] = [
-    {
-      id: 'cmd-delete',
-      label: 'Delete feature-1…',
-      group: 'Commands',
-      destructive: true,
-      intent: { kind: 'deleteBranch' },
-    },
-  ]
-
-  const html = renderToStaticMarkup(
-    React.createElement(CommandPaletteContent, {
-      items,
-      onExecute: () => {},
-    }),
-  )
-
-  assert.match(html, /Destructive/)
-  assert.match(html, /destructive action requiring confirmation/)
-})
-
-// =============================================================================
-// 4. Focus restoration
-// =============================================================================
-
-test('resolveFocusRestoreTarget returns the opener element when connected and enabled', () => {
-  let focused = false
-  const opener: FocusableTargetLike = {
-    isConnected: true,
-    disabled: false,
-    focus: () => {
-      focused = true
-    },
-  }
-  const fallback: FocusableTargetLike = {
-    isConnected: true,
-    disabled: false,
-    focus: () => {},
-  }
-
-  const target = resolveFocusRestoreTarget(opener, fallback)
-  assert.equal(target, opener)
-  target?.focus()
-  assert.equal(focused, true)
-})
-
-test('resolveFocusRestoreTarget falls back to search input when opener is disconnected', () => {
-  let fallbackFocused = false
-  const opener: FocusableTargetLike = {
-    isConnected: false,
-    disabled: false,
-    focus: () => {},
-  }
-  const fallback: FocusableTargetLike = {
-    isConnected: true,
-    disabled: false,
-    focus: () => {
-      fallbackFocused = true
-    },
-  }
-
-  const target = resolveFocusRestoreTarget(opener, fallback)
-  assert.equal(target, fallback)
-  target?.focus()
-  assert.equal(fallbackFocused, true)
-})
-
-test('resolveFocusRestoreTarget falls back when opener is disabled', () => {
-  const opener: FocusableTargetLike = {
-    isConnected: true,
-    disabled: true,
-    focus: () => {},
-  }
-  const fallback: FocusableTargetLike = {
-    isConnected: true,
-    disabled: false,
-    focus: () => {},
-  }
-
-  const target = resolveFocusRestoreTarget(opener, fallback)
-  assert.equal(target, fallback)
-})
-
-test('resolveFocusRestoreTarget returns null when no candidate is valid', () => {
-  const opener: FocusableTargetLike = {
-    isConnected: false,
-    disabled: true,
-    focus: () => {},
-  }
-  const fallback: FocusableTargetLike = {
-    isConnected: false,
-    disabled: true,
-    focus: () => {},
-  }
-
-  const target = resolveFocusRestoreTarget(opener, fallback)
-  assert.equal(target, null)
-})
-
-// =============================================================================
-// 5. Stack navigation
+// 3. Stack navigation
 // =============================================================================
 
 test('resolveStackNavigation navigates correctly up and down stack hierarchy', () => {

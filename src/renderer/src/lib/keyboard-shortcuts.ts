@@ -151,11 +151,10 @@ export interface NormalizedChord {
 }
 
 export function parseChord(chord: string): NormalizedChord | null {
-  const parts = chord
-    .split('+')
-    .map((p) => p.trim())
-    .filter(Boolean)
-  if (parts.length === 0) return null
+  // "Plus" is the canonical key name; accept a trailing literal + when reading a chord.
+  const encoded = chord.endsWith('+') ? `${chord.slice(0, -1)}Plus` : chord
+  const parts = encoded.split('+').map((p) => p.trim())
+  if (parts.length === 0 || parts.some((part) => !part)) return null
 
   let mod = false
   let shift = false
@@ -192,6 +191,7 @@ function isPrintableSymbol(key: string): boolean {
 
 function normalizeKeyName(rawKey: string): string {
   const lower = rawKey.toLowerCase()
+  if (lower === 'plus') return '+'
   if (lower === 'enter' || lower === 'return') return 'Enter'
   if (lower === 'arrowup' || lower === 'up') return 'ArrowUp'
   if (lower === 'arrowdown' || lower === 'down') return 'ArrowDown'
@@ -211,7 +211,7 @@ export function canonicalChord(chord: string): string | null {
   if (parsed.mod) parts.push('Mod')
   if (parsed.alt) parts.push('Alt')
   if (parsed.shift) parts.push('Shift')
-  parts.push(parsed.key)
+  parts.push(parsed.key === '+' ? 'Plus' : parsed.key)
   return parts.join('+')
 }
 
@@ -277,6 +277,9 @@ export function chordFromEvent(event: KeyboardEventLike, isMac = isMacPlatform()
     return null
   }
 
+  // Only Mod denotes the platform primary modifier. Never turn the other modifier
+  // into an unmodified shortcut (or silently drop it when both are pressed).
+  if (isMac ? event.ctrlKey : event.metaKey) return null
   const modPressed = isMac ? Boolean(event.metaKey) : Boolean(event.ctrlKey)
   const altPressed = Boolean(event.altKey)
   const shiftPressed = Boolean(event.shiftKey) && !isPrintableSymbol(normalizeKeyName(rawKey))
@@ -285,7 +288,7 @@ export function chordFromEvent(event: KeyboardEventLike, isMac = isMacPlatform()
   if (modPressed) parts.push('Mod')
   if (altPressed) parts.push('Alt')
   if (shiftPressed) parts.push('Shift')
-  parts.push(normalizeKeyName(rawKey))
+  parts.push(rawKey === '+' ? 'Plus' : normalizeKeyName(rawKey))
 
   return canonicalChord(parts.join('+'))
 }
@@ -297,6 +300,7 @@ export function matchesChord(
 ): boolean {
   const parsed = parseChord(chord)
   if (!parsed) return false
+  if (isMac ? event.ctrlKey : event.metaKey) return false
 
   const modPressed = isMac ? Boolean(event.metaKey) : Boolean(event.ctrlKey)
   if (parsed.mod !== modPressed) return false
