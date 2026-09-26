@@ -724,7 +724,7 @@ function App() {
       </div>
       {snapshot && (workspaceView === 'branches' || workspaceView === 'stacks') ? (
         <Button
-          aria-controls="branch-inspector"
+          aria-controls={detailsVisible ? 'branch-inspector' : undefined}
           aria-expanded={detailsVisible}
           aria-label={detailsVisible ? 'Hide details pane' : 'Show details pane'}
           className="toolbar-control toolbar-details-toggle"
@@ -1252,7 +1252,7 @@ function App() {
   const renderDetails = () => {
     if (!snapshot) {
       return (
-        <aside className="details-pane details-pane-empty">
+        <aside className="details-pane details-pane-empty" id="branch-inspector">
           <div className="details-placeholder">
             <PanelRightClose className="size-5" />
             <span>Branch details will appear here.</span>
@@ -1262,7 +1262,7 @@ function App() {
     }
     if (!selectedBranch) {
       return (
-        <aside className="details-pane details-pane-empty">
+        <aside className="details-pane details-pane-empty" id="branch-inspector">
           <div className="details-placeholder">
             <GitBranch className="size-5" />
             <span>Select a branch to inspect its stack.</span>
