@@ -163,7 +163,7 @@ export function ShellSpecimen() {
             </div>
           </div>
           <div className="shell-fixture-content">
-            <label htmlFor="shell-fixture-search-result">Branch matching “{query || 'all'}”</label>
+            <p className="shell-fixture-caption">Branch matching “{query || 'all'}”</p>
             <button className="shell-fixture-branch" type="button">
               <GitBranch aria-hidden="true" className="size-4" />
               <span>

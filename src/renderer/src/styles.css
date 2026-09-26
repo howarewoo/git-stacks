@@ -2343,10 +2343,15 @@ button.file-path:focus-visible {
   padding: 16px;
 }
 
-.shell-fixture-content label {
+.shell-fixture-content label,
+.shell-fixture-caption {
   color: var(--gs-semantic-text-secondary);
   font-size: var(--gs-semantic-type-metadata-size);
   font-weight: 650;
+}
+
+.shell-fixture-caption {
+  margin: 0;
 }
 
 .shell-fixture-branch {
@@ -2381,6 +2386,34 @@ button.file-path:focus-visible {
   font-size: var(--gs-semantic-type-metadata-size);
 }
 
+@media (max-width: 1399px) {
+  .toolbar {
+    flex-wrap: wrap;
+    align-items: stretch;
+  }
+
+  .toolbar-actions {
+    flex: 1 1 100%;
+    flex-wrap: wrap;
+  }
+
+  .toolbar-spacer {
+    display: none;
+  }
+
+  .toolbar-search {
+    order: 1;
+    width: auto;
+    min-width: 0;
+    flex: 1 1 180px;
+  }
+
+  .toolbar > .toolbar-control,
+  .toolbar > .toolbar-control-slot {
+    order: 2;
+  }
+}
+
 @media (max-width: 1199px) {
   .workspace {
     --gs-shell-sidebar-width: 198px;
@@ -2401,10 +2434,6 @@ button.file-path:focus-visible {
   .workspace {
     --gs-shell-sidebar-width: 190px;
     --gs-shell-inspector-width: 288px;
-  }
-
-  .toolbar-search {
-    width: 180px;
   }
 
   .branch-updated {
@@ -2449,30 +2478,11 @@ button.file-path:focus-visible {
     align-items: flex-start;
   }
 
-  .toolbar {
-    flex-wrap: wrap;
-    align-items: stretch;
-  }
-
-  .toolbar-actions {
-    flex: 1 1 100%;
-    flex-wrap: wrap;
-  }
-
-  .toolbar-spacer {
-    display: none;
-  }
-
   .toolbar-search {
     order: 1;
     width: 100%;
     min-width: 100%;
     flex: 1 1 100%;
-  }
-
-  .toolbar > .toolbar-control,
-  .toolbar > .toolbar-control-slot {
-    order: 2;
   }
 
   .toolbar-details-toggle {
