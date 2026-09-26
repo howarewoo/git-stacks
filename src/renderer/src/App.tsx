@@ -1661,6 +1661,7 @@ function App() {
         <ConflictResolver
           key={conflictPath}
           busy={isBusy}
+          actionError={actionError}
           path={conflictPath}
           runAction={runAction}
           onClose={() => setConflictPath(null)}

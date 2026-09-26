@@ -162,11 +162,13 @@ function RegionCard({
 export function ConflictResolver({
   path,
   busy,
+  actionError,
   runAction,
   onClose,
 }: {
   path: string
   busy: boolean
+  actionError: string | null
   runAction: RunAction
   onClose: () => void
 }) {
@@ -179,6 +181,7 @@ export function ConflictResolver({
   const [attempt, setAttempt] = React.useState(0)
   const [closeNotice, setCloseNotice] = React.useState<string | null>(null)
   const [modeNotice, setModeNotice] = React.useState(false)
+  const [handoffNotice, setHandoffNotice] = React.useState(false)
 
   React.useEffect(() => {
     let active = true
@@ -188,6 +191,7 @@ export function ConflictResolver({
     setEdited(null)
     setCloseNotice(null)
     setModeNotice(false)
+    setHandoffNotice(false)
     window.desktop
       .conflictView(path)
       .then((next) => {
@@ -225,6 +229,7 @@ export function ConflictResolver({
   const regionEditBlocked = edited !== null && edited !== composed
   const dirty = regionEditBlocked || Object.values(choices).some((choice) => choice !== 'current')
   const choose = (index: number, choice: ConflictRegionChoice) => {
+    setHandoffNotice(false)
     if (regionEditBlocked) {
       setModeNotice(true)
       return
@@ -233,6 +238,7 @@ export function ConflictResolver({
     setChoices((current) => ({ ...current, [index]: choice }))
   }
   const chooseEverywhere = (choice: ConflictChoice) => {
+    setHandoffNotice(false)
     if (regionEditBlocked) {
       setModeNotice(true)
       return
@@ -271,14 +277,20 @@ export function ConflictResolver({
     }
   }
 
-  const openMergeTool = async () => {
+  const openMergeTool = async (discardDraft = false) => {
     if (!file || busy || loading) return
+    if (dirty && !discardDraft) {
+      setHandoffNotice(true)
+      return
+    }
     const succeeded = await runAction(
       { type: 'conflictMergeTool', path: file.path, fingerprint: file.fingerprint },
       'Open external merge tool',
     )
-    if (succeeded) setAttempt((value) => value + 1)
-    else {
+    if (succeeded) {
+      setHandoffNotice(false)
+      setAttempt((value) => value + 1)
+    } else {
       try {
         const fresh = await window.desktop.conflictView(path)
         setStale(fresh.fingerprint !== file.fingerprint)
@@ -327,6 +339,9 @@ export function ConflictResolver({
             {closeNotice ? (
               <PhaseStatus phase="blocked" title="Draft kept open" message={closeNotice} />
             ) : null}
+            {actionError ? (
+              <PhaseStatus phase="failed" title="Conflict action failed" message={actionError} />
+            ) : null}
             {loading ? (
               <p className="workflow-loading" role="status">
                 <LoaderCircle className="size-4 animate-spin" />
@@ -342,6 +357,25 @@ export function ConflictResolver({
                     title="This file changed while the resolver was open"
                     message="Nothing was written or staged. Reload to read the current conflict and decide again."
                   />
+                ) : null}
+                {handoffNotice ? (
+                  <div className="workflow-row">
+                    <p className="workflow-note" role="status">
+                      Your unstaged draft is still intact. The external tool starts from the working
+                      tree, not these edits. Explicitly discard this draft to hand off the file.
+                    </p>
+                    <Button
+                      disabled={busy}
+                      size="sm"
+                      variant="danger"
+                      onClick={() => openMergeTool(true)}
+                    >
+                      Discard draft and open external merge tool
+                    </Button>
+                    <Button size="sm" variant="secondary" onClick={() => setHandoffNotice(false)}>
+                      Keep editing
+                    </Button>
+                  </div>
                 ) : null}
                 <OperationContext
                   description={file.labels.explanation}
@@ -482,6 +516,7 @@ export function ConflictResolver({
                       id="conflict-result"
                       onChange={(event) => {
                         setEdited(event.target.value)
+                        setHandoffNotice(false)
                         setModeNotice(false)
                       }}
                       rows={10}
@@ -540,7 +575,7 @@ export function ConflictResolver({
                         : file.mergeTool.reason
                     }
                     variant="secondary"
-                    onClick={openMergeTool}
+                    onClick={() => openMergeTool()}
                   >
                     <ExternalLink className="size-3.5" />
                     Open in external merge tool
@@ -588,6 +623,17 @@ export function ConflictResolver({
                 >
                   <Check className="size-3.5" />
                   Mark resolved and stage
+                </Button>
+              ) : file && (file.binary || file.truncated) && file.worktreePresent ? (
+                <Button
+                  disabled={busy || loading}
+                  loading={busy}
+                  tooltip="Stage the entire existing worktree file without converting or replacing its bytes. Review the external result first."
+                  variant="accent"
+                  onClick={() => apply({ kind: 'worktree' })}
+                >
+                  <Check className="size-3.5" />
+                  Mark complete worktree file resolved and stage
                 </Button>
               ) : null}
             </WorkflowActions>

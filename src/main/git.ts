@@ -322,8 +322,16 @@ function validateAction(value: unknown): GitAction {
           resolution: { kind: 'choice', choice: value.resolution.choice },
         }
       }
+      if (value.resolution.kind === 'worktree') {
+        return {
+          type: 'resolveConflict',
+          path: requirePathInput(value.path, 'path'),
+          fingerprint: requireString(value.fingerprint, 'fingerprint', 1024),
+          resolution: { kind: 'worktree' },
+        }
+      }
       if (value.resolution.kind !== 'content') {
-        throw new Error('resolution kind must be content or choice')
+        throw new Error('resolution kind must be content, choice, or worktree')
       }
       if (
         typeof value.resolution.content !== 'string' ||
@@ -3591,6 +3599,7 @@ export async function getConflictView(
     current: sides[2]?.text ?? null,
     incoming: sides[3]?.text ?? null,
     worktree,
+    worktreePresent: identity.stat !== null,
     regions: conflictRegions(segments),
     moves,
     truncated: identity.truncated,
@@ -3684,6 +3693,56 @@ async function writeConflictChoice(
   }
 }
 
+/** Stage only the checked path through a private index. The live index is
+ * replaced under its lock only if no entry or selected worktree byte changed.
+ */
+async function stageCheckedConflict(
+  root: string,
+  relativePath: string,
+  expected: FileIdentity,
+): Promise<void> {
+  const indexPath = await repositoryGitPath(root, 'index', null)
+  const original = await fs.readFile(indexPath)
+  const temporary = await fs.mkdtemp(path.join(tmpdir(), 'git-stacks-stage-'))
+  const privateIndex = path.join(temporary, 'index')
+  const lockPath = `${indexPath}.lock`
+  let lock: FileHandle | null = null
+  let ownsLock = false
+  try {
+    await fs.writeFile(privateIndex, original)
+    if ((await fileFingerprint(root, relativePath)).fingerprint !== expected.fingerprint) {
+      throw new Error('The file changed before staging; refresh and retry')
+    }
+    await runGit(root, ['--literal-pathspecs', 'add', '-A', '--', relativePath], {
+      GIT_INDEX_FILE: privateIndex,
+    })
+    const unresolved = await runGit(
+      root,
+      ['--literal-pathspecs', 'ls-files', '-u', '--', relativePath],
+      { GIT_INDEX_FILE: privateIndex },
+    )
+    if (unresolved) throw new Error('Git still reports this path as unmerged')
+    lock = await fs.open(lockPath, 'wx')
+    ownsLock = true
+    if (
+      !(await fs.readFile(indexPath)).equals(original) ||
+      (await fileFingerprint(root, relativePath)).fingerprint !== expected.fingerprint
+    ) {
+      throw new Error('The file or index changed before staging; refresh and retry')
+    }
+    await lock.writeFile(await fs.readFile(privateIndex))
+    await lock.sync()
+    await lock.close()
+    lock = null
+    await fs.rename(lockPath, indexPath)
+    ownsLock = false
+  } finally {
+    if (lock) await lock.close()
+    if (ownsLock) await fs.rm(lockPath, { force: true })
+    await fs.rm(temporary, { recursive: true, force: true })
+  }
+}
+
 /**
  * Mark one conflicted path resolved. The worktree and index identity the
  * decision was made under is revalidated first, so an edit made elsewhere while
@@ -3701,7 +3760,17 @@ export async function runResolveConflict(
   if (!entry.conflicted) throw new Error('The selected file has no unresolved conflict')
   const relativePath = entry.path
   await safeRepositoryPath(root, relativePath)
-  if (resolution.kind === 'content') {
+  if (resolution.kind === 'worktree') {
+    if (!identity.stat) throw new Error('No worktree file exists to mark resolved')
+    if (
+      !identity.binary &&
+      !identity.truncated &&
+      identity.preview &&
+      hasConflictMarkers(identity.preview.toString('utf8'))
+    ) {
+      throw new Error('Conflict markers are still present; resolve every region before staging')
+    }
+  } else if (resolution.kind === 'content') {
     if (identity.binary) {
       throw new Error(
         'This conflict is a binary file, so it cannot be resolved by editing text. ' +
@@ -3732,10 +3801,12 @@ export async function runResolveConflict(
     await writeConflictChoice(root, relativePath, resolution.choice, sides, identity)
   }
   await safeRepositoryPath(root, relativePath)
-  await runGit(root, ['--literal-pathspecs', 'add', '-A', '--', relativePath])
-  if ((await conflictStages(root, relativePath)).length) {
-    throw new Error('Git still reports this path as unmerged; nothing was marked resolved')
+  const stagedIdentity =
+    resolution.kind === 'worktree' ? identity : await fileFingerprint(root, relativePath)
+  if (stagedIdentity.indexFingerprint !== identity.indexFingerprint) {
+    throw new Error('The index changed during resolution; refresh and retry')
   }
+  await stageCheckedConflict(root, relativePath, stagedIdentity)
   return { message: `Resolved and staged ${relativePath}` }
 }
 
@@ -3744,11 +3815,22 @@ export async function runResolveConflict(
  * Git is configured to run; Git decides how to call it and what a failed run
  * means, and a non-zero exit is reported with Git's own words.
  */
-function runMergeTool(root: string, relativePath: string, indexPath: string): Promise<string> {
+function runMergeTool(
+  gitDirectory: string,
+  relativePath: string,
+  indexPath: string,
+  worktree: string,
+): Promise<string> {
   return new Promise((resolve, reject) => {
     const child = spawn('git', ['mergetool', '--no-prompt', '--no-gui', '--', relativePath], {
-      cwd: root,
-      env: { ...process.env, GIT_INDEX_FILE: indexPath, GIT_TERMINAL_PROMPT: '0' },
+      cwd: worktree,
+      env: {
+        ...process.env,
+        GIT_DIR: gitDirectory,
+        GIT_INDEX_FILE: indexPath,
+        GIT_WORK_TREE: worktree,
+        GIT_TERMINAL_PROMPT: '0',
+      },
       stdio: ['ignore', 'pipe', 'pipe'],
       shell: false,
     })
@@ -3779,9 +3861,9 @@ function runMergeTool(root: string, relativePath: string, indexPath: string): Pr
 }
 
 /**
- * Run Git's configured tool with a private copy of the index. Git mergetool
- * stages successful results itself, but only in that copy; the live unmerged
- * stages remain until the resolver reviews and explicitly stages the result.
+ * Git runs the external tool in a private worktree and index. Only a result
+ * bound to the originally captured live identity is installed in the live
+ * worktree; the live index stays unmerged until an explicit checked stage.
  */
 export async function runConflictMergeTool(
   repoPath: string,
@@ -3790,7 +3872,7 @@ export async function runConflictMergeTool(
 ): Promise<ActionResult> {
   const root = await resolveRepository(repoPath)
   await recoverFileActionJournals(root)
-  const { entry } = await checkFileFingerprint(root, filePath, fingerprint)
+  const { entry, identity } = await checkFileFingerprint(root, filePath, fingerprint)
   if (!entry.conflicted) throw new Error('The selected file has no unresolved conflict')
   const relativePath = entry.path
   await safeRepositoryPath(root, relativePath)
@@ -3801,14 +3883,45 @@ export async function runConflictMergeTool(
   const temporary = await fs.mkdtemp(path.join(tmpdir(), 'git-stacks-mergetool-'))
   try {
     const indexPath = path.join(temporary, 'index')
+    const worktree = path.join(temporary, 'worktree')
+    const isolatedPath = path.join(worktree, relativePath)
+    await fs.mkdir(path.dirname(isolatedPath), { recursive: true })
     await fs.copyFile(await repositoryGitPath(root, 'index', null), indexPath)
-    await runMergeTool(root, relativePath, indexPath)
+    if (identity.stat) {
+      await fs.copyFile(await safeRepositoryPath(root, relativePath), isolatedPath)
+      await fs.chmod(isolatedPath, identity.stat.mode & 0o777)
+    }
+    if ((await fileFingerprint(root, relativePath)).fingerprint !== identity.fingerprint) {
+      throw new Error('The file changed while preparing the merge tool; refresh and retry')
+    }
+    await runMergeTool(
+      stripTrailingNewline(await runGit(root, ['rev-parse', '--absolute-git-dir'])),
+      relativePath,
+      indexPath,
+      worktree,
+    )
+    let result: string | null = isolatedPath
+    try {
+      const info = await fs.lstat(isolatedPath)
+      if (!info.isFile()) throw new Error('The merge tool produced a non-file result')
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+      result = null
+    }
+    if (!result) {
+      throw new Error(
+        'The merge tool removed this file; use Accept the deletion to stage its removal',
+      )
+    }
+    await replaceCheckedFile(root, relativePath, identity, result)
   } finally {
     await fs.rm(temporary, { recursive: true, force: true })
   }
   const after = await fileFingerprint(root, relativePath)
   const markers =
-    after.preview && !after.binary ? hasConflictMarkers(after.preview.toString('utf8')) : true
+    after.preview && !after.binary && !after.truncated
+      ? hasConflictMarkers(after.preview.toString('utf8'))
+      : false
   return {
     message: markers
       ? `${tool} left unresolved markers in ${relativePath}. Nothing was staged.`

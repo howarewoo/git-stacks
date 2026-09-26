@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict'
 import { execFileSync, spawnSync } from 'node:child_process'
-import { chmod, mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { access, chmod, mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
+import { setTimeout as delay } from 'node:timers/promises'
 import { join } from 'node:path'
 import { test } from 'node:test'
 
@@ -57,6 +58,18 @@ const stageOid = (git: (...args: string[]) => string, stage: string, path: strin
     .split('\n')
     .map((line) => line.split(/\s+/u))
     .find((parts) => parts[2] === stage)?.[1] ?? ''
+
+async function waitForFile(file: string) {
+  for (let attempt = 0; attempt < 200; attempt++) {
+    try {
+      await access(file)
+      return
+    } catch {
+      await delay(25)
+    }
+  }
+  throw new Error(`Timed out waiting for external merge tool: ${file}`)
+}
 
 test('a file without conflict markers reports no regions and no marker form', () => {
   const segments = parseConflictSegments('const a = 1\nconst b = 2\n')
@@ -925,6 +938,116 @@ test('a repository with no configured merge tool says so instead of guessing one
     await rm(root, { recursive: true, force: true })
   }
 })
+test('an in-flight merge tool never touches live bytes and refuses a concurrent edit', async () => {
+  const { root, repo, git, gitExpectedFailure } = await fixture()
+  try {
+    const ready = join(root, 'ready')
+    const release = join(root, 'release')
+    const tool = join(root, 'wait-for-review.sh')
+    await writeFile(
+      tool,
+      `#!/bin/sh\nprintf 'tool result\\n' > "$1"\n: > "${ready}"\nwhile [ ! -f "${release}" ]; do sleep 0.05; done\n`,
+    )
+    await chmod(tool, 0o755)
+    git('config', 'mergetool.git-stacks-wait.trustExitCode', 'true')
+    git('config', 'mergetool.git-stacks-wait.cmd', `sh "${tool}" "$MERGED"`)
+    git('config', 'merge.tool', 'git-stacks-wait')
+    await writeFile(join(repo, 'shared.txt'), 'base\n')
+    await writeFile(join(repo, 'other.txt'), 'base\n')
+    git('add', '.')
+    git('commit', '-m', 'Base')
+    git('checkout', '-b', 'topic')
+    await writeFile(join(repo, 'shared.txt'), 'topic\n')
+    await writeFile(join(repo, 'other.txt'), 'topic\n')
+    git('commit', '-am', 'Topic')
+    git('checkout', 'main')
+    await writeFile(join(repo, 'shared.txt'), 'main\n')
+    await writeFile(join(repo, 'other.txt'), 'main\n')
+    git('commit', '-am', 'Main')
+    gitExpectedFailure('merge', 'topic')
+    const view = await getConflictView(repo, 'shared.txt')
+    const otherStages = git('ls-files', '-u', '--', 'other.txt')
+    const initial = await readFile(join(repo, 'shared.txt'))
+    const running = runConflictMergeTool(repo, view.path, view.fingerprint)
+    try {
+      await waitForFile(ready)
+      assert.deepEqual(await readFile(join(repo, 'shared.txt')), initial)
+      await writeFile(join(repo, 'shared.txt'), 'external edit during tool\n')
+    } finally {
+      await writeFile(release, '')
+    }
+    await assert.rejects(running, /changed during the action|changed while/u)
+    assert.equal(await readFile(join(repo, 'shared.txt'), 'utf8'), 'external edit during tool\n')
+    assert.notEqual(git('ls-files', '-u', '--', 'shared.txt'), '')
+    assert.equal(git('ls-files', '-u', '--', 'other.txt'), otherStages)
+    assert.equal(git('ls-files', '--stage', '--', 'shared.txt').includes('\tshared.txt'), true)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+for (const variant of ['binary', 'oversize'] as const) {
+  test(`an external ${variant} result is staged whole, preserving bytes and unrelated entries`, async () => {
+    const { root, repo, git, gitExpectedFailure } = await fixture()
+    try {
+      const filename = variant === 'binary' ? 'image.bin' : 'large.txt'
+      const base = variant === 'binary' ? Buffer.from([0, 1, 2]) : Buffer.alloc(2_097_160, 65)
+      const incoming = variant === 'binary' ? Buffer.from([0, 3, 4]) : Buffer.alloc(2_097_160, 66)
+      const current = variant === 'binary' ? Buffer.from([0, 5, 6]) : Buffer.alloc(2_097_160, 67)
+      const resolved =
+        variant === 'binary' ? Buffer.from([0, 127, 255, 42]) : Buffer.alloc(2_097_169, 68)
+      const resultPath = join(root, 'resolved-file')
+      await writeFile(resultPath, resolved)
+      git('config', 'mergetool.git-stacks-copy.trustExitCode', 'true')
+      git('config', 'mergetool.git-stacks-copy.cmd', `cp "${resultPath}" "$MERGED"`)
+      git('config', 'merge.tool', 'git-stacks-copy')
+      await writeFile(join(repo, filename), base)
+      await writeFile(join(repo, 'other.txt'), 'base\n')
+      git('add', '.')
+      git('commit', '-m', 'Base')
+      git('checkout', '-b', 'topic')
+      await writeFile(join(repo, filename), incoming)
+      await writeFile(join(repo, 'other.txt'), 'topic\n')
+      git('commit', '-am', 'Topic')
+      git('checkout', 'main')
+      await writeFile(join(repo, filename), current)
+      await writeFile(join(repo, 'other.txt'), 'main\n')
+      git('commit', '-am', 'Main')
+      gitExpectedFailure('merge', 'topic')
+      const view = await getConflictView(repo, filename)
+      assert.equal(view.worktreePresent, true)
+      assert.equal(variant === 'binary' ? view.binary : view.truncated, true)
+      const otherStages = git('ls-files', '-u', '--', 'other.txt')
+      await runConflictMergeTool(repo, filename, view.fingerprint)
+      assert.deepEqual(await readFile(join(repo, filename)), resolved)
+      assert.notEqual(git('ls-files', '-u', '--', filename), '')
+      const updated = await getConflictView(repo, filename)
+      await assert.rejects(
+        runResolveConflict(repo, filename, view.fingerprint, { kind: 'worktree' }),
+        /changed since/u,
+      )
+      const lockPath = join(repo, '.git', 'index.lock')
+      await writeFile(lockPath, 'another index writer')
+      try {
+        await assert.rejects(
+          runResolveConflict(repo, filename, updated.fingerprint, { kind: 'worktree' }),
+          /EEXIST/u,
+        )
+        assert.deepEqual(await readFile(join(repo, filename)), resolved)
+        assert.notEqual(git('ls-files', '-u', '--', filename), '')
+      } finally {
+        await rm(lockPath)
+      }
+      await runResolveConflict(repo, filename, updated.fingerprint, { kind: 'worktree' })
+      assert.equal(git('ls-files', '-u', '--', filename), '')
+      assert.equal(git('ls-files', '-u', '--', 'other.txt'), otherStages)
+      assert.deepEqual(await readFile(join(repo, filename)), resolved)
+      assert.equal(git('rev-parse', `:${filename}`), git('hash-object', resultPath))
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+}
 
 test('a conflicted cherry-pick resolves and continues through Git', async () => {
   const { root, repo, git, gitExpectedFailure } = await fixture()

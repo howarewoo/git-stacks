@@ -124,6 +124,7 @@ export interface ConflictFile {
   current: string | null
   incoming: string | null
   worktree: string | null
+  worktreePresent: boolean
   regions: ConflictRegion[]
   moves: ConflictMove[]
   truncated: boolean
@@ -132,7 +133,9 @@ export interface ConflictFile {
   mergeTool: { available: boolean; tool: string | null; reason: string }
 }
 export type ConflictResolution =
-  { kind: 'content'; content: string } | { kind: 'choice'; choice: ConflictChoice }
+  | { kind: 'content'; content: string }
+  | { kind: 'choice'; choice: ConflictChoice }
+  | { kind: 'worktree' }
 export interface PushPreview {
   branch: string
   remote: string
