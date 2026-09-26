@@ -3044,8 +3044,18 @@ export async function runStackAction(
     case 'createNativeStack': {
       const origin = await currentOrigin(root)
       const data = await getGitHubData(root, origin.url)
-      const defaultBranch = await getDefaultBranch(root, await getRefs(root), await getCurrentBranch(root))
-      return createNativeStackAction(root, origin.fullName, action.pullRequests, data.pullRequests, defaultBranch)
+      const defaultBranch = await getDefaultBranch(
+        root,
+        await getRefs(root),
+        await getCurrentBranch(root),
+      )
+      return createNativeStackAction(
+        root,
+        origin.fullName,
+        action.pullRequests,
+        data.pullRequests,
+        defaultBranch,
+      )
     }
     case 'addPullRequestsToNativeStack': {
       const origin = await currentOrigin(root)

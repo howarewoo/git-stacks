@@ -241,8 +241,13 @@ export interface DesktopAPI {
   pullRequest(number: number): Promise<PullRequest & { body: string }>
   listNativeStacks?: () => Promise<NativeStack[]>
   createNativeStack?: (pullRequests: number[]) => Promise<NativeStack>
-  addPullRequestsToNativeStack?: (stackNumber: number, pullRequests: number[]) => Promise<NativeStack>
-  unstackNativeStack?: (stackNumber: number) => Promise<{ dissolved: boolean; stack: NativeStack | null }>
+  addPullRequestsToNativeStack?: (
+    stackNumber: number,
+    pullRequests: number[],
+  ) => Promise<NativeStack>
+  unstackNativeStack?: (
+    stackNumber: number,
+  ) => Promise<{ dissolved: boolean; stack: NativeStack | null }>
   openExternal(url: string): Promise<void>
 }
 declare global {
