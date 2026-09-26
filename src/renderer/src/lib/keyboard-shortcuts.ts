@@ -271,6 +271,15 @@ export function isEditableTarget(target: unknown): boolean {
   return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT'
 }
 
+/**
+ * True while an IME composition is in flight. Such a keydown belongs to
+ * committing or cancelling a candidate rather than to a real keystroke, so it
+ * must neither fire a global shortcut nor dismiss a dialog.
+ */
+export function isComposingKeyEvent(event: { isComposing?: boolean; keyCode?: number }): boolean {
+  return Boolean(event.isComposing) || event.keyCode === 229
+}
+
 export function chordFromEvent(event: KeyboardEventLike, isMac = isMacPlatform()): string | null {
   const rawKey = event.key
   if (rawKey === 'Control' || rawKey === 'Meta' || rawKey === 'Alt' || rawKey === 'Shift') {
@@ -344,9 +353,38 @@ export function detectShortcutConflicts(
   return collisions
 }
 
+/**
+ * Keys the open command palette handles itself, mapped to the role each one
+ * plays there. The opener is the only global shortcut that stays live while the
+ * palette is open, so an unmodified binding on one of these keys would make the
+ * palette toggle, navigate, or dismiss itself mid-interaction.
+ */
+const PALETTE_LOCAL_KEY_ROLES: Record<string, string> = {
+  Enter: 'selecting or confirming the highlighted item',
+  ArrowUp: 'moving to the previous result',
+  ArrowDown: 'moving to the next result',
+  Home: 'jumping to the first result',
+  End: 'jumping to the last result',
+  Escape: 'dismissing the palette',
+}
+
+/**
+ * Returns the palette role an unmodified chord would take over, or null when
+ * the chord is free to bind. Modified chords are not reserved: an event the
+ * palette already handled never reaches a global shortcut, so ownership
+ * settles their behavior instead.
+ */
+function reservedPaletteKeyRole(chord: string): string | null {
+  const parsed = parseChord(chord)
+  if (!parsed || parsed.mod || parsed.alt || parsed.shift) return null
+  return PALETTE_LOCAL_KEY_ROLES[parsed.key] ?? null
+}
+
 export interface AssignShortcutResult {
   bindings: Record<ShortcutId, string>
   conflict: { conflictingId: ShortcutId; chord: string } | null
+  /** Set when the opener was given a key the open palette handles itself. */
+  reserved: { chord: string; role: string } | null
 }
 
 export function assignShortcut(
@@ -359,6 +397,11 @@ export function assignShortcut(
     throw new Error(`Invalid shortcut chord "${newChord}".`)
   }
 
+  if (id === 'palette.open') {
+    const role = reservedPaletteKeyRole(canon)
+    if (role) return { bindings: current, conflict: null, reserved: { chord: canon, role } }
+  }
+
   const existingOwner = (Object.entries(current) as [ShortcutId, string][]).find(
     ([otherId, chord]) => otherId !== id && canonicalChord(chord) === canon,
   )
@@ -367,6 +410,7 @@ export function assignShortcut(
     return {
       bindings: current,
       conflict: { conflictingId: existingOwner[0], chord: canon },
+      reserved: null,
     }
   }
 
@@ -376,6 +420,7 @@ export function assignShortcut(
       [id]: canon,
     },
     conflict: null,
+    reserved: null,
   }
 }
 
@@ -410,6 +455,11 @@ export function loadShortcuts(
       for (const c of conflicts) {
         withDefaults[c.idB] = DEFAULT_SHORTCUTS[c.idB]
       }
+    }
+    // A stored opener on a palette-local key cannot be honored, because the
+    // open palette consumes that keystroke itself. Fall back to the default.
+    if (reservedPaletteKeyRole(withDefaults['palette.open'])) {
+      withDefaults['palette.open'] = DEFAULT_SHORTCUTS['palette.open']
     }
     return withDefaults
   } catch {

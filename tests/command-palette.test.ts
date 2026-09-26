@@ -17,6 +17,7 @@ import {
   buildPaletteItems,
   groupPaletteItems,
   rankPaletteItems,
+  shouldDismissPaletteOnEscape,
   type PaletteItem,
 } from '../src/renderer/src/lib/command-palette'
 import { resolveStackNavigation } from '../src/renderer/src/lib/stack-navigation'
@@ -261,6 +262,48 @@ test('recording preserves key identity through conflicts, storage and reset on e
     assert.equal(stored, null)
     assert.equal(matchesChord(plus, loadShortcuts(storage)['palette.open'], isMac), false)
   }
+})
+
+test('the palette opener refuses the keys the open palette handles, and storage drops them', () => {
+  for (const key of ['Enter', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'Escape']) {
+    const result = assignShortcut(DEFAULT_SHORTCUTS, 'palette.open', key)
+    assert.equal(result.reserved?.chord, key)
+    assert.equal(result.conflict, null)
+    assert.deepEqual(result.bindings, DEFAULT_SHORTCUTS)
+  }
+
+  // A modified chord is not reserved: the open palette yields the event it
+  // already handled, so the opener still sees an untouched one.
+  const modified = assignShortcut(DEFAULT_SHORTCUTS, 'palette.open', 'Alt+Enter')
+  assert.equal(modified.reserved, null)
+  assert.equal(modified.bindings['palette.open'], 'Alt+Enter')
+  // Local keys stay bindable for shortcuts that are inert while the palette is open.
+  assert.equal(assignShortcut(DEFAULT_SHORTCUTS, 'view.stacks', 'Enter').reserved, null)
+
+  let stored: string | null = JSON.stringify({
+    'palette.open': 'ArrowDown',
+    'view.stacks': 'Enter',
+  })
+  const storage = {
+    getItem: () => stored,
+    setItem: (_key: string, value: string) => {
+      stored = value
+    },
+    removeItem: () => {
+      stored = null
+    },
+  }
+  const loaded = loadShortcuts(storage)
+  assert.equal(loaded['palette.open'], DEFAULT_SHORTCUTS['palette.open'])
+  assert.equal(loaded['view.stacks'], 'Enter')
+})
+
+test('Escape dismisses the palette only outside a confirmation and outside an IME composition', () => {
+  assert.equal(shouldDismissPaletteOnEscape({ isComposing: false, keyCode: 0 }, false), true)
+  assert.equal(shouldDismissPaletteOnEscape({ isComposing: false, keyCode: 0 }, true), false)
+  assert.equal(shouldDismissPaletteOnEscape({ isComposing: true, keyCode: 0 }, false), false)
+  assert.equal(shouldDismissPaletteOnEscape({ isComposing: false, keyCode: 229 }, false), false)
+  assert.equal(shouldDismissPaletteOnEscape({ isComposing: true, keyCode: 229 }, true), false)
 })
 
 test('palette rebase accepts a fetched remote-only parent without rewriting its recorded identity', () => {
@@ -559,4 +602,40 @@ test('remote-only parent aliases preserve child and top navigation without check
   assert.equal(resolveStackNavigation(topic, branches, 'parent')?.ref, remoteParent.ref)
   assert.equal(resolveStackNavigation(remoteParent, branches, 'child')?.ref, topic.ref)
   assert.equal(resolveStackNavigation(remoteParent, branches, 'top')?.ref, child.ref)
+})
+
+test('stack navigation resolves a qualified remote parent to the local branch tracking it', () => {
+  const main = makeMockBranch('main', {
+    upstream: 'origin/main',
+    upstreamRef: 'refs/remotes/origin/main',
+  })
+  const remoteMain = makeMockBranch('origin/main', {
+    ref: 'refs/remotes/origin/main',
+    remote: true,
+  })
+  const topic = makeMockBranch('topic', { current: true, parent: 'origin/main' })
+  const child = makeMockBranch('child', { parent: 'topic' })
+  const branches = [main, remoteMain, topic, child]
+
+  assert.equal(resolveStackNavigation(topic, branches, 'parent')?.ref, main.ref)
+  assert.equal(resolveStackNavigation(topic, branches, 'bottom')?.ref, main.ref)
+  assert.equal(resolveStackNavigation(main, branches, 'child')?.ref, topic.ref)
+  assert.equal(resolveStackNavigation(main, branches, 'top')?.ref, child.ref)
+  assert.equal(resolveStackNavigation(remoteMain, branches, 'child')?.ref, topic.ref)
+  assert.equal(resolveStackNavigation(child, branches, 'top'), null)
+
+  const navigationItems = buildPaletteItems({
+    snapshot: makeMockSnapshot({ branches, currentBranch: 'topic' }),
+    selectedBranch: topic,
+    recentRepositories: [],
+    isBusy: false,
+    operationActive: false,
+    shortcutMap: DEFAULT_SHORTCUTS,
+  })
+  assert.equal(navigationItems.find((item) => item.id === 'stack.parent')?.disabled, false)
+  assert.equal(navigationItems.find((item) => item.id === 'stack.bottom')?.disabled, false)
+  assert.match(
+    navigationItems.find((item) => item.id === 'stack.parent')?.detail ?? '',
+    /Target: main/,
+  )
 })

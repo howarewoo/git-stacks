@@ -94,6 +94,7 @@ import { DirtyCheckoutGuard } from './components/dirty-checkout-guard'
 import { buildPaletteItems, type PaletteItem } from './lib/command-palette'
 import {
   formatChord,
+  isComposingKeyEvent,
   isEditableTarget,
   isMacPlatform,
   loadShortcuts,
@@ -813,7 +814,11 @@ function App() {
 
   React.useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.isComposing || event.keyCode === 229) return
+      // A focused control that already handled the key owns it: the palette's
+      // search input consumes navigation and confirmation keys before this
+      // window listener sees the same bubbling event.
+      if (event.defaultPrevented) return
+      if (isComposingKeyEvent(event)) return
 
       // If any modal dialog is currently open, don't execute global hotkeys underneath
       const anyModalOpen =

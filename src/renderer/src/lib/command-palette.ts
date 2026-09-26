@@ -6,9 +6,27 @@ import type {
   RepositorySnapshot,
 } from '../../../shared/types'
 import type { WorkflowRequest } from '../components/workflow-dialog'
-import { formatChord, isMacPlatform, type ShortcutId } from './keyboard-shortcuts'
+import {
+  formatChord,
+  isComposingKeyEvent,
+  isMacPlatform,
+  type ShortcutId,
+} from './keyboard-shortcuts'
 import { indexBranchesByParentName } from './branches'
 import { resolveStackNavigation, type StackRelation } from './stack-navigation'
+
+/**
+ * Whether Escape should close the palette. A pending destructive confirmation
+ * keeps it open for the confirming press, and so does an in-flight IME
+ * composition: Escape then belongs to the candidate being committed or
+ * cancelled, not to the dialog.
+ */
+export function shouldDismissPaletteOnEscape(
+  event: { isComposing?: boolean; keyCode?: number },
+  confirming: boolean,
+): boolean {
+  return !confirming && !isComposingKeyEvent(event)
+}
 
 export type CommandGroup =
   | 'Commands'

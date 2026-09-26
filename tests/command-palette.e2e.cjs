@@ -198,6 +198,28 @@ async function main() {
         activeBeforeComposition,
       )
     }
+    // A composing Escape belongs to the IME candidate, not to the dialog.
+    for (const eventOptions of [{ isComposing: true }, { keyCode: 229 }]) {
+      await page(`(() => {
+        const options = ${JSON.stringify(eventOptions)};
+        const event = new KeyboardEvent('keydown', { key: 'Escape', isComposing: Boolean(options.isComposing), bubbles: true, cancelable: true });
+        if (options.keyCode) Object.defineProperty(event, 'keyCode', { value: options.keyCode });
+        document.querySelector('[role="combobox"]').dispatchEvent(event);
+      })()`)
+      assert.ok(
+        await page(`Boolean(document.querySelector('[role="combobox"]'))`),
+        'a composing Escape dismissed the palette',
+      )
+      assert.equal(
+        await page(`document.querySelector('[role="combobox"]').value`),
+        'Fetch',
+        'a composing Escape lost the palette query',
+      )
+    }
+    await key('Escape')
+    await until('a real Escape still dismisses', `!document.querySelector('[role="combobox"]')`)
+    await key('k', process.platform === 'darwin' ? 4 : 2)
+    await until('palette reopened after dismissal', `document.querySelector('[role="combobox"]')`)
     await search('')
     const activeBeforeRepeat = await page(
       `document.querySelector('[role="combobox"]').getAttribute('aria-activedescendant')`,
@@ -504,6 +526,134 @@ async function main() {
         Buffer.from(screenshot.data, 'base64'),
       )
     }
+    let opener = { key: '+', code: 'Equal', text: '+', windowsVirtualKeyCode: 187 }
+    let openerModifier = 8
+    async function openPalette() {
+      await page(`${button('Fetch')}.focus()`)
+      await send('Input.dispatchKeyEvent', {
+        type: 'keyDown',
+        ...opener,
+        modifiers: openerModifier,
+      })
+      await until('palette open', `document.querySelector('[role="combobox"]')`)
+    }
+    async function pressOpener() {
+      await send('Input.dispatchKeyEvent', {
+        type: 'keyDown',
+        ...opener,
+        modifiers: openerModifier,
+      })
+      await send('Input.dispatchKeyEvent', { type: 'keyUp', ...opener, modifiers: openerModifier })
+    }
+    await key('Escape')
+    await until('palette dismissed after evidence', `!document.querySelector('[role="combobox"]')`)
+
+    // A local branch that tracks its remote keeps a qualified parent name usable.
+    execFileSync('git', ['init', '--bare', '-q', join(root, 'origin.git')], { stdio: 'pipe' })
+    git('remote', 'add', 'origin', join(root, 'origin.git'))
+    git('push', '-q', '-u', 'origin', 'main')
+    git('config', 'branch.child.parent', 'origin/main')
+    await page(`document.querySelector('[aria-label="Refresh repository"]').click()`)
+    await until(
+      'tracked remote branch',
+      `Array.from(document.querySelectorAll('h2')).some((element) => element.textContent === 'origin/main')`,
+    )
+    await openPalette()
+    await search('child')
+    await key('Enter')
+    await until(
+      'child selected before parent navigation',
+      `document.querySelector('button[aria-current="true"][aria-label="child, current branch"]')`,
+    )
+    await openPalette()
+    await search('Select parent branch')
+    await until(
+      'qualified parent resolves to the tracked local branch',
+      `document.querySelector('[role="option"]')?.getAttribute('aria-disabled') === 'false' && document.querySelector('[role="option"]')?.textContent?.includes('Target: main')`,
+    )
+    await key('Enter')
+    await until(
+      'local main selected through a qualified parent',
+      `document.querySelector('button[aria-current="true"][aria-label="main"]')`,
+    )
+    await openPalette()
+    await search('Select child branch')
+    await key('Enter')
+    await until(
+      'child selected from the tracked local branch',
+      `document.querySelector('button[aria-current="true"][aria-label="child, current branch"]')`,
+    )
+    await openPalette()
+    await search('Select stack bottom')
+    await key('Enter')
+    await until(
+      'stack bottom follows the qualified parent',
+      `document.querySelector('button[aria-current="true"][aria-label="main"]')`,
+    )
+    const qualifiedParentSelection = await page(
+      `document.querySelector('button[aria-current="true"]')?.getAttribute('aria-label')`,
+    )
+    assert.equal(git('symbolic-ref', '--short', 'HEAD'), 'child')
+
+    // The opener cannot own a key the open palette handles; a modified chord on
+    // one still works because the palette yields the event it already handled.
+    await openPalette()
+    await search('Keyboard shortcuts')
+    await key('Enter')
+    await until(
+      'shortcut settings reopened',
+      `document.querySelector('[aria-label="Change shortcut for Open command palette"]')`,
+    )
+    const recordOpener = `document.querySelector('[aria-label="Change shortcut for Open command palette"]').click()`
+    await page(recordOpener)
+    await key('Enter')
+    await until(
+      'reserved opener rejected',
+      `document.body.textContent.includes('is reserved by the command palette for selecting or confirming the highlighted item')`,
+    )
+    await key('Escape')
+    await until(
+      'reserved message cleared',
+      `!document.body.textContent.includes('is reserved by the command palette')`,
+    )
+    await page(recordOpener)
+    await send('Input.dispatchKeyEvent', {
+      type: 'keyDown',
+      key: 'Enter',
+      code: 'Enter',
+      windowsVirtualKeyCode: 13,
+      modifiers: 1,
+    })
+    await until(
+      'modified opener recorded',
+      `document.body.textContent.includes('Updated shortcut for "Open command palette"')`,
+    )
+    await page(`${button('Done')}.click()`)
+    await until('shortcut settings closed again', `!document.querySelector('[role="dialog"]')`)
+    opener = { key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 }
+    openerModifier = 1
+    await openPalette()
+    await search('Force push with lease')
+    await until(
+      'force push available',
+      `document.querySelector('[role="option"]')?.getAttribute('aria-disabled') === 'false'`,
+    )
+    await pressOpener()
+    assert.ok(
+      await page(`document.body.textContent.includes('Press Enter again to confirm')`),
+      'the modified opener did not arm the destructive confirmation',
+    )
+    assert.ok(
+      await page(`Boolean(document.querySelector('[role="combobox"]'))`),
+      'the modified opener closed the palette instead of arming the confirmation',
+    )
+    await pressOpener()
+    await until('force push workflow', `document.querySelector('[role="dialog"]')`)
+    await page(`${button('Cancel')}.click()`)
+    await until('force push cancelled', `!document.querySelector('[role="dialog"]')`)
+    const headAfterModifiedOpener = git('symbolic-ref', '--short', 'HEAD')
+    await openPalette()
+    await search('Force push with lease')
     console.log(
       JSON.stringify({
         disabledPaletteValue,
@@ -514,6 +664,8 @@ async function main() {
         confirmedDeletion: git('branch', '--list', 'feature'),
         dirtyCarryStatus: git('status', '--short', 'shared.txt'),
         stashList: git('stash', 'list'),
+        qualifiedParentSelection,
+        headAfterModifiedOpener,
         editableFilter: await page(`document.querySelector(${JSON.stringify(filter)}).value`),
         editablePaletteSearch: await page(`document.querySelector('[role="combobox"]')?.value`),
       }),

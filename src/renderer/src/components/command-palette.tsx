@@ -32,7 +32,9 @@ import {
   groupPaletteItems,
   rankPaletteItems,
   resolveFocusRestoreTarget,
+  shouldDismissPaletteOnEscape,
 } from '../lib/command-palette'
+import { isComposingKeyEvent } from '../lib/keyboard-shortcuts'
 
 export interface CommandPaletteProps {
   open: boolean
@@ -163,7 +165,7 @@ export function CommandPaletteContent({
   )
 
   const handleKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
-    if (event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) return
+    if (isComposingKeyEvent(event.nativeEvent)) return
     if (event.key === 'ArrowDown') {
       event.preventDefault()
       setConfirmingId(null)
@@ -393,7 +395,11 @@ export function CommandPalette({
           target?.focus()
         }}
         onEscapeKeyDown={(event) => {
-          if (confirmingRef.current) event.preventDefault()
+          // Radix dismisses from a document capture listener that runs before the
+          // input's own handler, so both conditions are checked here.
+          if (!shouldDismissPaletteOnEscape(event, confirmingRef.current !== null)) {
+            event.preventDefault()
+          }
         }}
       >
         <DialogHeader className="sr-only">

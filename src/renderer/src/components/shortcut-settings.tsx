@@ -64,7 +64,12 @@ export function ShortcutSettings({
       if (!chord) return
 
       const result = assignShortcut(bindings, recordingId, chord)
-      if (result.conflict) {
+      if (result.reserved) {
+        setConflictMessage(
+          `Conflict: ${formatChord(result.reserved.chord, isMac)} is reserved by the command palette for ${result.reserved.role}. Choose a different shortcut.`,
+        )
+        setSuccessMessage(null)
+      } else if (result.conflict) {
         const conflictingDef = SHORTCUT_DEFINITIONS.find(
           (d) => d.id === result.conflict?.conflictingId,
         )

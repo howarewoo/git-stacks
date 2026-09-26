@@ -1,7 +1,21 @@
 import type { Branch } from '../../../shared/types'
-import { getCombinedBranches, indexBranchesByParentName, sortBranchesByUpdatedAt } from './branches'
+import {
+  getCombinedBranches,
+  getRepresentedRemoteRef,
+  indexBranchesByParentName,
+  sortBranchesByUpdatedAt,
+} from './branches'
 
 export type StackRelation = 'parent' | 'child' | 'top' | 'bottom'
+
+/**
+ * Identity used to decide whether a recorded parent is the branch in hand.
+ * A local branch and the remote row it represents share it, so navigation
+ * matches whichever of the pair the user selected.
+ */
+function branchIdentity(branch: Branch): string {
+  return getRepresentedRemoteRef(branch) ?? branch.ref
+}
 
 /**
  * Returns the target branch for a stack navigation step, or null when the step
@@ -13,18 +27,19 @@ export function resolveStackNavigation(
   relation: StackRelation,
 ): Branch | null {
   if (!current) return null
-  const combined = getCombinedBranches(branches)
-  const byName = indexBranchesByParentName(combined)
-  const ordered = sortBranchesByUpdatedAt(combined)
+  // Parent names are resolved against the full snapshot: deduplicating remote
+  // rows would drop the qualified aliases (`origin/main`) that a recorded
+  // parent can name.
+  const byName = indexBranchesByParentName(branches)
+  const ordered = sortBranchesByUpdatedAt(getCombinedBranches(branches))
 
   const childrenOf = (parent: Branch): Branch[] => {
-    return ordered.filter(
-      (branch) =>
-        !branch.remote &&
-        branch.ref !== parent.ref &&
-        branch.parent !== null &&
-        byName.get(branch.parent)?.ref === parent.ref,
-    )
+    const parentIdentity = branchIdentity(parent)
+    return ordered.filter((branch) => {
+      if (branch.remote || branch.ref === parent.ref || branch.parent === null) return false
+      const recordedParent = byName.get(branch.parent)
+      return recordedParent !== undefined && branchIdentity(recordedParent) === parentIdentity
+    })
   }
 
   switch (relation) {
