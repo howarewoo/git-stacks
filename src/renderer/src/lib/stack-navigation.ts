@@ -1,20 +1,15 @@
 import type { Branch } from '../../../shared/types'
-import {
-  getCombinedBranches,
-  getRepresentedRemoteRef,
-  indexBranchesByParentName,
-  sortBranchesByUpdatedAt,
-} from './branches'
+import { getCombinedBranches, indexBranchesByParentName, sortBranchesByUpdatedAt } from './branches'
 
 export type StackRelation = 'parent' | 'child' | 'top' | 'bottom'
-
 /**
- * Identity used to decide whether a recorded parent is the branch in hand.
- * A local branch and the remote row it represents share it, so navigation
- * matches whichever of the pair the user selected.
+ * Resolves the local row a selection stands for. Only a remote row is
+ * canonicalized: a local branch already is itself, and two local branches may
+ * track the same upstream ref without being the same branch.
  */
-function branchIdentity(branch: Branch): string {
-  return getRepresentedRemoteRef(branch) ?? branch.ref
+function localRepresentative(branch: Branch, byName: Map<string, Branch>): Branch {
+  if (!branch.remote) return branch
+  return byName.get(branch.name) ?? branch
 }
 
 /**
@@ -34,11 +29,14 @@ export function resolveStackNavigation(
   const ordered = sortBranchesByUpdatedAt(getCombinedBranches(branches))
 
   const childrenOf = (parent: Branch): Branch[] => {
-    const parentIdentity = branchIdentity(parent)
+    // Parents are matched by their resolved local ref, because that is what a
+    // recorded parent name identifies. Equating branches that share an upstream
+    // ref would hand every one of them the same children.
+    const parentRef = localRepresentative(parent, byName).ref
     return ordered.filter((branch) => {
-      if (branch.remote || branch.ref === parent.ref || branch.parent === null) return false
+      if (branch.remote || branch.ref === parentRef || branch.parent === null) return false
       const recordedParent = byName.get(branch.parent)
-      return recordedParent !== undefined && branchIdentity(recordedParent) === parentIdentity
+      return recordedParent !== undefined && recordedParent.ref === parentRef
     })
   }
 

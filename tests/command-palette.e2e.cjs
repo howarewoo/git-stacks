@@ -105,14 +105,25 @@ async function main() {
       if (result.exceptionDetails) throw new Error(result.exceptionDetails.text)
       return result.result.value
     }
-    async function until(description, expression) {
+    async function until(description, expression, attempts = 900) {
       // Generous budget: this host runs several suites at once, so a slow
       // renderer round-trip must not read as a failed assertion.
-      for (let attempt = 0; attempt < 400; attempt++) {
+      for (let attempt = 0; attempt < attempts; attempt++) {
         if (await page(`Boolean(${expression})`)) return
         await delay(50)
       }
       throw new Error(`Timed out waiting for ${description}`)
+    }
+    // The highlighted option is set a tick after the results render, so a
+    // baseline captured too early compares against "nothing is active".
+    async function highlightedOption() {
+      await until(
+        'a highlighted palette option',
+        `document.querySelector('[role="combobox"]')?.getAttribute('aria-activedescendant')`,
+      )
+      return page(
+        `document.querySelector('[role="combobox"]').getAttribute('aria-activedescendant')`,
+      )
     }
     async function key(key, modifiers = 0) {
       const code = key === 'Enter' ? 'Enter' : key === 'Escape' ? 'Escape' : 'KeyK'
@@ -121,7 +132,69 @@ async function main() {
       await send('Input.dispatchKeyEvent', { ...options, type: 'keyDown' })
       await send('Input.dispatchKeyEvent', { ...options, type: 'keyUp' })
     }
+    // The palette highlights whichever result row the pointer enters, and a
+    // real cursor on this host rests over the list, so the pointer is parked
+    // in the corner before results render and the keyboard owns the highlight.
+    async function parkPointer() {
+      await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 1, y: 1 })
+    }
+    // A refresh pressed while the renderer is still settling after an earlier
+    // snapshot can be dropped, so the refresh is repeated until the app
+    // reports the state the scenario just created.
+    async function refresh(description, expression) {
+      for (let attempt = 0; attempt < 10; attempt += 1) {
+        await page(`document.querySelector('[aria-label="Refresh repository"]').click()`)
+        if (await page(`Boolean(${expression})`)) return
+        await delay(500)
+      }
+      throw new Error(`Timed out waiting for ${description}`)
+    }
+    // A failed activation reports what the palette held, so a press that ran
+    // the wrong option is distinguishable from one that never reached it.
+    async function paletteState() {
+      return page(
+        `JSON.stringify({ open: Boolean(document.querySelector('[role="combobox"]')), active: document.querySelector('[role="combobox"]')?.getAttribute('aria-activedescendant') ?? null, selection: document.querySelector('button[aria-current="true"]')?.getAttribute('aria-label') ?? null, options: Array.from(document.querySelectorAll('[role="option"]')).slice(0, 4).map((option) => option.textContent) })`,
+      )
+    }
+    // A single CDP key dispatch can be lost while the renderer replaces the
+    // focused node, so a palette activation is pressed again while the palette
+    // still holds it. A closed palette means the press already ran the
+    // command, and only its effect is still pending.
+    async function activate(description, expression) {
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        await key('Enter')
+        try {
+          await until(description, expression, 60)
+          return
+        } catch (error) {
+          if (attempt === 2) throw error
+          if (!(await page(`Boolean(document.querySelector('[role="combobox"]'))`))) break
+        }
+      }
+      try {
+        await until(description, expression)
+      } catch (error) {
+        throw new Error(`${error.message}; palette=${await paletteState()}`)
+      }
+    }
+
+    // The confirming press is repeated only while no dialog has appeared, so a
+    // lost dispatch cannot execute the confirmed action a second time.
+    async function confirmDestructive(description, expression) {
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        await key('Enter')
+        try {
+          await until(description, expression, 60)
+          return
+        } catch (error) {
+          if (attempt === 2) throw error
+          if (await page(`Boolean(document.querySelector('[role="dialog"]'))`)) break
+        }
+      }
+      await until(description, expression)
+    }
     async function search(text) {
+      await parkPointer()
       await page(
         `(() => { const input = document.querySelector('[role="combobox"]'); input.focus(); input.select() })()`,
       )
@@ -177,9 +250,7 @@ async function main() {
       'fetch result',
       `document.querySelector('[role="option"]')?.textContent?.includes('Fetch')`,
     )
-    const activeBeforeComposition = await page(
-      `document.querySelector('[role="combobox"]').getAttribute('aria-activedescendant')`,
-    )
+    const activeBeforeComposition = await highlightedOption()
     for (const eventOptions of [
       { key: 'ArrowDown', isComposing: true },
       { key: 'ArrowUp', keyCode: 229 },
@@ -223,9 +294,7 @@ async function main() {
     await key('k', process.platform === 'darwin' ? 4 : 2)
     await until('palette reopened after dismissal', `document.querySelector('[role="combobox"]')`)
     await search('')
-    const activeBeforeRepeat = await page(
-      `document.querySelector('[role="combobox"]').getAttribute('aria-activedescendant')`,
-    )
+    const activeBeforeRepeat = await highlightedOption()
     await send('Input.dispatchKeyEvent', {
       type: 'keyDown',
       key: 'ArrowDown',
@@ -250,8 +319,7 @@ async function main() {
       'remote parent result',
       `document.querySelector('[role="option"]')?.textContent?.includes('origin/fetched-parent')`,
     )
-    await key('Enter')
-    await until(
+    await activate(
       'selected remote parent',
       `Array.from(document.querySelectorAll('h2')).some((element) => element.textContent === 'origin/fetched-parent')`,
     )
@@ -262,15 +330,13 @@ async function main() {
       'child command enabled',
       `document.querySelector('[role="option"]')?.getAttribute('aria-disabled') === 'false'`,
     )
-    await key('Enter')
-    await until(
+    await activate(
       'selected remote child',
       `Array.from(document.querySelectorAll('h2')).some((element) => element.textContent === 'topic')`,
     )
     await key('k', process.platform === 'darwin' ? 4 : 2)
     await search('Select parent branch')
-    await key('Enter')
-    await until(
+    await activate(
       'reselected remote parent',
       `Array.from(document.querySelectorAll('h2')).some((element) => element.textContent === 'origin/fetched-parent')`,
     )
@@ -280,16 +346,14 @@ async function main() {
       'top command enabled',
       `document.querySelector('[role="option"]')?.getAttribute('aria-disabled') === 'false'`,
     )
-    await key('Enter')
-    await until(
+    await activate(
       'selected remote stack top',
       `Array.from(document.querySelectorAll('h2')).some((element) => element.textContent === 'child')`,
     )
     assert.equal(git('symbolic-ref', '--short', 'HEAD'), 'topic')
     await key('k', process.platform === 'darwin' ? 4 : 2)
     await search('topic')
-    await key('Enter')
-    await until(
+    await activate(
       'reselected topic',
       `Array.from(document.querySelectorAll('h2')).some((element) => element.textContent === 'topic')`,
     )
@@ -304,8 +368,7 @@ async function main() {
     assert.equal(disabledPaletteValue, 'Publish topic stack')
     assert.equal(git('symbolic-ref', '--short', 'HEAD'), 'topic')
     await search('feature')
-    await key('Enter')
-    await until(
+    await activate(
       'selected feature',
       `Array.from(document.querySelectorAll('h2')).some((element) => element.textContent === 'feature')`,
     )
@@ -313,13 +376,7 @@ async function main() {
     await page(`${button('Fetch')}.focus()`)
     await key('k', process.platform === 'darwin' ? 4 : 2)
     await search('Delete feature')
-    await send('Input.dispatchKeyEvent', {
-      type: 'keyDown',
-      key: 'Enter',
-      code: 'Enter',
-      windowsVirtualKeyCode: 13,
-    })
-    await until(
+    await activate(
       'armed confirmation',
       `document.body.textContent.includes('Press Enter again to confirm')`,
     )
@@ -371,9 +428,11 @@ async function main() {
     const restoredFocus = await page('document.activeElement?.textContent?.trim()')
     await key('k', process.platform === 'darwin' ? 4 : 2)
     await search('Delete feature')
-    await key('Enter')
-    await key('Enter')
-    await until(
+    await activate(
+      'armed confirmation for the delete workflow',
+      `document.body.textContent.includes('Press Enter again to confirm')`,
+    )
+    await confirmDestructive(
       'delete confirmation',
       `document.querySelector('[role="dialog"]')?.textContent.includes('Delete local branch?')`,
     )
@@ -386,15 +445,13 @@ async function main() {
     assert.equal(git('symbolic-ref', '--short', 'HEAD'), 'topic')
     writeFileSync(join(repository, 'shared.txt'), 'baseline\nuncommitted\n')
     assert.match(git('status', '--short', 'shared.txt'), /M shared\.txt/)
-    await page(`document.querySelector('[aria-label="Refresh repository"]').click()`)
-    await until(
+    await refresh(
       'dirty snapshot',
       `Array.from(document.querySelectorAll('.workspace-nav button')).find((element) => element.textContent.includes('Working changes'))?.querySelector('.nav-count')?.textContent === '1'`,
     )
     await key('k', process.platform === 'darwin' ? 4 : 2)
     await search('child')
-    await key('Enter')
-    await until(
+    await activate(
       'selected dirty checkout target',
       `Array.from(document.querySelectorAll('h2')).some((element) => element.textContent === 'child')`,
     )
@@ -405,8 +462,7 @@ async function main() {
         'checkout command',
         `document.querySelector('[role="option"][aria-disabled="false"]')`,
       )
-      await key('Enter')
-      await until(
+      await activate(
         'dirty checkout alternatives',
         `document.querySelector('[role="dialog"]')?.textContent?.includes('Uncommitted changes in working tree')`,
       )
@@ -457,8 +513,7 @@ async function main() {
     assert.match(git('status', '--short', 'shared.txt'), /M shared\.txt/)
     await key('k', process.platform === 'darwin' ? 4 : 2)
     await search('Go to Branches')
-    await key('Enter')
-    await until(
+    await activate(
       'child current in branch view',
       `document.querySelector('[aria-label="child, current branch"]')`,
     )
@@ -468,8 +523,7 @@ async function main() {
       'shortcuts result',
       `document.querySelector('[role="option"]')?.textContent?.includes('Keyboard shortcuts')`,
     )
-    await key('Enter')
-    await until(
+    await activate(
       'shortcut settings',
       `document.querySelector('[aria-label="Change shortcut for Open command palette"]')`,
     )
@@ -499,7 +553,10 @@ async function main() {
       windowsVirtualKeyCode: 187,
       modifiers: 8,
     })
-    assert.equal(await page(`document.querySelector(${JSON.stringify(filter)}).value`), '+')
+    await until(
+      'printable key typed into the filter',
+      `document.querySelector(${JSON.stringify(filter)}).value === '+'`,
+    )
     assert.equal(await page(`Boolean(document.querySelector('[role="combobox"]'))`), false)
     await page(`${button('Fetch')}.focus()`)
     await send('Input.dispatchKeyEvent', {
@@ -511,15 +568,30 @@ async function main() {
       modifiers: 8,
     })
     await until('remapped opener', `document.querySelector('[role="combobox"]')`)
-    await send('Input.dispatchKeyEvent', {
-      type: 'keyDown',
-      key: '+',
-      code: 'Equal',
-      text: '+',
-      windowsVirtualKeyCode: 187,
-      modifiers: 8,
-    })
-    assert.equal(await page(`document.querySelector('[role="combobox"]')?.value`), '+')
+    // The opener press is still logically held, so it is released and the chord
+    // is typed again the way a second keystroke arrives: the open palette takes
+    // the printable key rather than toggling itself shut. A dropped dispatch
+    // repeats, which is only safe while the palette still holds the chord.
+    const chordHeld = { key: '+', code: 'Equal', windowsVirtualKeyCode: 187, modifiers: 8 }
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      await send('Input.dispatchKeyEvent', { type: 'keyUp', ...chordHeld })
+      await delay(250)
+      await send('Input.dispatchKeyEvent', {
+        type: 'keyDown',
+        ...chordHeld,
+        text: '+',
+      })
+      if (await page(`document.querySelector('[role="combobox"]')?.value === '+'`)) break
+      if (!(await page(`Boolean(document.querySelector('[role="combobox"]'))`))) {
+        await page(`${button('Fetch')}.focus()`)
+        await send('Input.dispatchKeyEvent', { type: 'keyDown', ...chordHeld, text: '+' })
+        await until('remapped opener', `document.querySelector('[role="combobox"]')`)
+      }
+    }
+    await until(
+      'the open palette took the chord',
+      `document.querySelector('[role="combobox"]')?.value === '+'`,
+    )
     assert.ok(await page(`Boolean(document.querySelector('[role="combobox"]'))`))
     if (process.env.PALETTE_EVIDENCE_DIR) {
       const screenshot = await send('Page.captureScreenshot', { format: 'png' })
@@ -531,6 +603,7 @@ async function main() {
     let opener = { key: '+', code: 'Equal', text: '+', windowsVirtualKeyCode: 187 }
     let openerModifier = 8
     async function openPalette() {
+      await parkPointer()
       // A single CDP key dispatch can be lost while the renderer replaces the
       // focused toolbar node, so retry the press before failing the scenario.
       for (let attempt = 0; attempt < 3; attempt++) {
@@ -573,6 +646,9 @@ async function main() {
         `filter ${JSON.stringify(text)}`,
         `document.querySelector(${JSON.stringify(filter)}).value === ${JSON.stringify(text)}`,
       )
+      // The opener chord is a printable key, so a filter that still holds focus
+      // would swallow the next palette open as typed text.
+      await page(`document.querySelector(${JSON.stringify(filter)}).blur()`)
     }
     await key('Escape')
     await until('palette dismissed after evidence', `!document.querySelector('[role="combobox"]')`)
@@ -583,15 +659,11 @@ async function main() {
     git('remote', 'add', 'origin', join(root, 'origin.git'))
     git('push', '-q', '-u', 'origin', 'main')
     git('config', 'branch.child.parent', 'origin/main')
-    await page(`document.querySelector('[aria-label="Refresh repository"]').click()`)
-    // The remote row is deduplicated into the local branch it tracks, so the
-    // qualified parent must resolve to that local row.
-    await until('tracked local branch', `document.querySelector('button[aria-label="main"]')`)
+    await refresh('tracked local branch', `document.querySelector('button[aria-label="main"]')`)
     await delay(500)
     await openPalette()
     await search('child')
-    await key('Enter')
-    await until(
+    await activate(
       'child selected before parent navigation',
       `document.querySelector('button[aria-current="true"][aria-label="child, current branch"]')`,
     )
@@ -601,22 +673,19 @@ async function main() {
       'qualified parent resolves to the tracked local branch',
       `document.querySelector('[role="option"]')?.getAttribute('aria-disabled') === 'false' && document.querySelector('[role="option"]')?.textContent?.includes('Target: main')`,
     )
-    await key('Enter')
-    await until(
+    await activate(
       'local main selected through a qualified parent',
       `document.querySelector('button[aria-current="true"][aria-label="main"]')`,
     )
     await openPalette()
     await search('Select child branch')
-    await key('Enter')
-    await until(
+    await activate(
       'child selected from the tracked local branch',
       `document.querySelector('button[aria-current="true"][aria-label="child, current branch"]')`,
     )
     await openPalette()
     await search('Select stack bottom')
-    await key('Enter')
-    await until(
+    await activate(
       'stack bottom follows the qualified parent',
       `document.querySelector('button[aria-current="true"][aria-label="main"]')`,
     )
@@ -625,12 +694,98 @@ async function main() {
     )
     assert.equal(git('symbolic-ref', '--short', 'HEAD'), 'child')
 
+    // Readiness is read from the branch count rather than from a row: the view
+    // filter can legitimately hide every row while the snapshot holds them all.
+    const branchCount = `Array.from(document.querySelectorAll('.workspace-nav button')).find((element) => element.textContent.includes('Branches'))?.querySelector('.nav-count')?.textContent ?? ''`
+    const branchesBefore = await page(branchCount)
+    // Two local branches can track the same upstream ref; only the recorded
+    // parent decides which of them owns a child.
+    for (const tracker of ['track-a', 'track-b']) {
+      git('branch', '--force', tracker, 'main')
+      execFileSync('git', ['-C', repository, 'branch', '--set-upstream-to=origin/main', tracker])
+      git('config', `branch.${tracker}.parent`, 'fetched-parent')
+    }
+    git('branch', '--force', 'leaf', 'main')
+    git('config', 'branch.leaf.parent', 'track-b')
+    await refresh(
+      'shared upstream trackers',
+      `(${branchCount}) !== ${JSON.stringify(branchesBefore)}`,
+    )
+    const topOption = () => page(`document.querySelector('[role="option"]')?.textContent ?? ''`)
+    // The selected branch is named by the view heading, which the app keeps
+    // independent of the branch list's own filter and of which branch is
+    // checked out.
+    const selectionIs = (name) =>
+      `Array.from(document.querySelectorAll('h2')).some((element) => element.textContent === ${JSON.stringify(name)})`
+
+    // main tracks the same upstream ref and must not inherit track-b's child.
+    await openPalette()
+    await search('Select child branch')
+    const mainChildTarget = await topOption()
+    assert.match(mainChildTarget, /Target: child/)
+    assert.doesNotMatch(mainChildTarget, /Target: leaf/)
+    await activate('recorded child selected', selectionIs('child'))
+    await openPalette()
+    await search('Select parent branch')
+    const childParentTarget = await topOption()
+    assert.match(childParentTarget, /Target: main/)
+    await activate('local parent reselected', selectionIs('main'))
+    await openPalette()
+    await search('Select stack top')
+    const mainTopTarget = await topOption()
+    assert.match(mainTopTarget, /Target: child/)
+    assert.doesNotMatch(mainTopTarget, /Target: leaf/)
+    await key('Escape')
+    await until('top navigation left the palette', `!document.querySelector('[role="combobox"]')`)
+
+    await openPalette()
+    await search('track-b')
+    await activate('tracker selected', selectionIs('track-b'))
+    await openPalette()
+    await search('Select child branch')
+    const trackerChildTarget = await topOption()
+    assert.match(trackerChildTarget, /Target: leaf/)
+    await activate('tracker child selected', selectionIs('leaf'))
+    await openPalette()
+    await search('Select parent branch')
+    const leafParentTarget = await topOption()
+    assert.match(leafParentTarget, /Target: track-b/)
+    await activate('tracker reselected from its child', selectionIs('track-b'))
+
+    // The other tracker shares that upstream ref and owns nothing above it.
+    await openPalette()
+    await search('track-a')
+    await activate('second tracker selected', selectionIs('track-a'))
+    await openPalette()
+    await search('Select child branch')
+    const emptyTrackerTarget = await topOption()
+    const emptyTrackerDisabled = await page(
+      `document.querySelector('[role="option"]')?.getAttribute('aria-disabled')`,
+    )
+    assert.match(emptyTrackerTarget, /No child branch found for track-a/)
+    assert.equal(emptyTrackerDisabled, 'true')
+    await key('Escape')
+    await openPalette()
+    await search('Select stack top')
+    const emptyTrackerTop = await topOption()
+    assert.match(emptyTrackerTop, /No top branch found for track-a/)
+    assert.equal(
+      await page(`document.querySelector('[role="option"]')?.getAttribute('aria-disabled')`),
+      'true',
+    )
+    await key('Enter')
+    await key('Escape')
+    await until(
+      'disabled navigation left the palette',
+      `!document.querySelector('[role="combobox"]')`,
+    )
+    assert.ok(await page(selectionIs('track-a')), 'a disabled navigation moved the selection')
+
     // The opener cannot own a key the open palette handles; a modified chord on
     // one still works because the palette yields the event it already handled.
     await openPalette()
     await search('Keyboard shortcuts')
-    await key('Enter')
-    await until(
+    await activate(
       'shortcut settings reopened',
       `document.querySelector('[aria-label="Change shortcut for Open command palette"]')`,
     )
@@ -685,6 +840,103 @@ async function main() {
     await openPalette()
     await search('Force push with lease')
     await setFilter('+')
+    // Read here, where the scenario left them: the reload below resets the view.
+    const editableFilter = await page(`document.querySelector(${JSON.stringify(filter)}).value`)
+    const editablePaletteSearch = await page(`document.querySelector('[role="combobox"]')?.value`)
+    // A persisted opener on a key the open palette handles cannot be honored.
+    // The chord it falls back to must not stay shared with the stored filter
+    // shortcut, or the filter would silently open the palette instead.
+    await key('Escape')
+    await until(
+      'palette dismissed before rehydration',
+      `!document.querySelector('[role="combobox"]')`,
+    )
+    const storedChords = JSON.stringify({ 'palette.open': 'ArrowDown', 'search.focus': 'Mod+K' })
+    assert.equal(
+      await page(
+        `(() => { localStorage.setItem('git-stacks.shortcuts.v1', ${JSON.stringify(storedChords)}); return localStorage.getItem('git-stacks.shortcuts.v1') })()`,
+      ),
+      storedChords,
+    )
+    await send('Page.reload')
+    for (let attempt = 0; attempt < 200; attempt++) {
+      try {
+        if (await page(`document.readyState === 'complete'`)) break
+      } catch {
+        /* the reload replaced the execution context */
+      }
+      await delay(50)
+    }
+    await until(
+      'reloaded shell',
+      `Boolean(${fixtureButton} || document.querySelector(${JSON.stringify(filter)}))`,
+    )
+    if (!(await page(`Boolean(document.querySelector(${JSON.stringify(filter)}))`))) {
+      await page(`${fixtureButton}.click()`)
+    }
+    await until('snapshot after rehydration', `document.querySelector(${JSON.stringify(filter)})`)
+    const chordExpression = (label) =>
+      `(() => { const control = document.querySelector('[aria-label="Change shortcut for ${label}"]'); return control?.parentElement?.querySelector('kbd')?.textContent ?? null })()`
+    opener = { key: 'k', code: 'KeyK', windowsVirtualKeyCode: 75 }
+    openerModifier = process.platform === 'darwin' ? 4 : 2
+    await openPalette()
+    await search('Keyboard shortcuts')
+    await activate(
+      'shortcut settings after rehydration',
+      `document.querySelector('[aria-label="Change shortcut for Focus search filter"]')`,
+    )
+    const rehydratedFilterChord = await page(chordExpression('Focus search filter'))
+    const rehydratedOpenerChord = await page(chordExpression('Open command palette'))
+    assert.equal(rehydratedFilterChord, '/')
+    assert.equal(
+      rehydratedOpenerChord,
+      process.platform === 'darwin' ? '⌘K' : 'Ctrl+K',
+      'the reserved opener was not restored to its default chord',
+    )
+    await page(`${button('Done')}.click()`)
+    await until(
+      'shortcut settings closed after rehydration',
+      `!document.querySelector('[role="dialog"]')`,
+    )
+    // The shortcut can only land on a view that shows the field, and a single
+    // CDP dispatch can be dropped, so the press repeats until the filter takes
+    // focus.
+    const filterFocused = `document.activeElement?.getAttribute('aria-label') === 'Filter current view branches, files, and pull requests'`
+    await until('filter field on screen', `document.querySelector(${JSON.stringify(filter)})`)
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      await page(`${button('Fetch')}.focus()`)
+      await send('Input.dispatchKeyEvent', {
+        type: 'keyDown',
+        key: '/',
+        code: 'Slash',
+        text: '/',
+        windowsVirtualKeyCode: 191,
+      })
+      await send('Input.dispatchKeyEvent', {
+        type: 'keyUp',
+        key: '/',
+        code: 'Slash',
+        windowsVirtualKeyCode: 191,
+      })
+      if (await page(filterFocused)) break
+      await delay(200)
+    }
+    const filterFocusedBySlash = await page(filterFocused)
+    assert.ok(filterFocusedBySlash, 'the restored filter shortcut did not focus the filter')
+    assert.equal(
+      await page(`Boolean(document.querySelector('[role="combobox"]'))`),
+      false,
+      'the restored filter shortcut opened the palette',
+    )
+    await openPalette()
+    const restoredOpenerOpenedPalette = await page(
+      `Boolean(document.querySelector('[role="combobox"]'))`,
+    )
+    assert.equal(restoredOpenerOpenedPalette, true, 'the restored opener did not open the palette')
+    await until(
+      'restored opener still opens the palette',
+      `document.querySelector('[role="combobox"]')`,
+    )
     console.log(
       JSON.stringify({
         disabledPaletteValue,
@@ -697,8 +949,18 @@ async function main() {
         stashList: git('stash', 'list'),
         qualifiedParentSelection,
         headAfterModifiedOpener,
-        editableFilter: await page(`document.querySelector(${JSON.stringify(filter)}).value`),
-        editablePaletteSearch: await page(`document.querySelector('[role="combobox"]')?.value`),
+        editableFilter,
+        editablePaletteSearch,
+        mainChildTarget,
+        childParentTarget,
+        mainTopTarget,
+        trackerChildTarget,
+        leafParentTarget,
+        emptyTrackerTarget,
+        rehydratedFilterChord,
+        rehydratedOpenerChord,
+        filterFocusedBySlash,
+        restoredOpenerOpenedPalette,
       }),
     )
   } finally {

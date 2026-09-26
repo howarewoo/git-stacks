@@ -432,6 +432,29 @@ export interface StorageLike {
   removeItem(key: string): void
 }
 
+/**
+ * Resets conflicting bindings to their defaults until no chord has two owners.
+ * The action listed first keeps the contested chord; when the default the later
+ * action would be reset to is itself taken, the earlier owner is reset instead,
+ * so a restored default can never leave a duplicate behind. Defaults are
+ * collision-free, so each pass settles at least one binding and the loop ends
+ * on a set without duplicates.
+ */
+function resolveShortcutCollisions(bindings: Record<ShortcutId, string>): void {
+  for (let pass = 0; pass < SHORTCUT_DEFINITIONS.length; pass += 1) {
+    const conflicts = detectShortcutConflicts(bindings)
+    if (conflicts.length === 0) return
+    let changed = false
+    for (const { idA, idB } of conflicts) {
+      const loser = bindings[idB] === DEFAULT_SHORTCUTS[idB] ? idA : idB
+      if (bindings[loser] === DEFAULT_SHORTCUTS[loser]) continue
+      bindings[loser] = DEFAULT_SHORTCUTS[loser]
+      changed = true
+    }
+    if (!changed) return
+  }
+}
+
 export function loadShortcuts(
   storage: StorageLike | null = getStorage(),
 ): Record<ShortcutId, string> {
@@ -450,17 +473,14 @@ export function loadShortcuts(
       }
     }
     const withDefaults: Record<ShortcutId, string> = { ...DEFAULT_SHORTCUTS, ...sanitized }
-    const conflicts = detectShortcutConflicts(withDefaults)
-    if (conflicts.length > 0) {
-      for (const c of conflicts) {
-        withDefaults[c.idB] = DEFAULT_SHORTCUTS[c.idB]
-      }
-    }
     // A stored opener on a palette-local key cannot be honored, because the
-    // open palette consumes that keystroke itself. Fall back to the default.
+    // open palette consumes that keystroke itself. Fall back to the default
+    // before conflicts are resolved, so a chord that fallback hands out is
+    // detected like any other instead of quietly doubling up.
     if (reservedPaletteKeyRole(withDefaults['palette.open'])) {
       withDefaults['palette.open'] = DEFAULT_SHORTCUTS['palette.open']
     }
+    resolveShortcutCollisions(withDefaults)
     return withDefaults
   } catch {
     return { ...DEFAULT_SHORTCUTS }

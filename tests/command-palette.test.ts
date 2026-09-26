@@ -298,6 +298,53 @@ test('the palette opener refuses the keys the open palette handles, and storage 
   assert.equal(loaded['view.stacks'], 'Enter')
 })
 
+test('rehydrating a reserved opener leaves collision-free bindings that dispatch apart', () => {
+  // Both settings were accepted when they were stored: the opener on a key the
+  // open palette handles itself, and the filter on the chord that opener falls
+  // back to.
+  let stored: string | null = JSON.stringify({
+    'palette.open': 'ArrowDown',
+    'search.focus': 'Mod+k',
+  })
+  const storage = {
+    getItem: () => stored,
+    setItem: (_key: string, value: string) => {
+      stored = value
+    },
+    removeItem: () => {
+      stored = null
+    },
+  }
+
+  const loaded = loadShortcuts(storage)
+  assert.deepEqual(detectShortcutConflicts(loaded), [])
+  assert.equal(loaded['palette.open'], DEFAULT_SHORTCUTS['palette.open'])
+  assert.equal(loaded['search.focus'], DEFAULT_SHORTCUTS['search.focus'])
+  // The settings screen advertises the chord, so it must not show a filter
+  // shortcut the palette now answers first.
+  assert.equal(formatChord(loaded['search.focus'], true), '/')
+  assert.notEqual(loaded['search.focus'], loaded['palette.open'])
+
+  for (const isMac of [true, false]) {
+    const primary = isMac
+      ? { key: 'k', metaKey: true, ctrlKey: false }
+      : { key: 'k', ctrlKey: true, metaKey: false }
+    assert.equal(matchesChord(primary, loaded['palette.open'], isMac), true)
+    assert.equal(matchesChord(primary, loaded['search.focus'], isMac), false)
+    const slash = { key: '/', metaKey: false, ctrlKey: false }
+    assert.equal(matchesChord(slash, loaded['search.focus'], isMac), true)
+    assert.equal(matchesChord(slash, loaded['palette.open'], isMac), false)
+  }
+
+  // A chord two actions were stored on is settled even when the later action's
+  // own default is the contested chord.
+  stored = JSON.stringify({ 'view.branches': 'Mod+2', 'view.stacks': 'Mod+2' })
+  const shared = loadShortcuts(storage)
+  assert.deepEqual(detectShortcutConflicts(shared), [])
+  assert.equal(shared['view.stacks'], 'Mod+2')
+  assert.equal(shared['view.branches'], DEFAULT_SHORTCUTS['view.branches'])
+})
+
 test('Escape dismisses the palette only outside a confirmation and outside an IME composition', () => {
   assert.equal(shouldDismissPaletteOnEscape({ isComposing: false, keyCode: 0 }, false), true)
   assert.equal(shouldDismissPaletteOnEscape({ isComposing: false, keyCode: 0 }, true), false)
@@ -638,4 +685,68 @@ test('stack navigation resolves a qualified remote parent to the local branch tr
     navigationItems.find((item) => item.id === 'stack.parent')?.detail ?? '',
     /Target: main/,
   )
+})
+
+test('stack children follow the recorded local parent, not a shared upstream ref', () => {
+  const minute = 60_000
+  const main = makeMockBranch('main', {
+    upstream: 'origin/main',
+    upstreamRef: 'refs/remotes/origin/main',
+    updatedAt: new Date(Date.now() - 6 * minute).toISOString(),
+  })
+  const remoteMain = makeMockBranch('origin/main', {
+    ref: 'refs/remotes/origin/main',
+    remote: true,
+    updatedAt: new Date(Date.now() - 6 * minute).toISOString(),
+  })
+  // A second local branch tracks the same upstream ref and has diverged from
+  // main, so nothing but its recorded children belongs to it.
+  const topic = makeMockBranch('topic', {
+    upstream: 'origin/main',
+    upstreamRef: 'refs/remotes/origin/main',
+    oid: '1111111111111111',
+    updatedAt: new Date(Date.now() - 2 * minute).toISOString(),
+  })
+  const child = makeMockBranch('child', {
+    parent: 'topic',
+    oid: '2222222222222222',
+    updatedAt: new Date(Date.now() - 1 * minute).toISOString(),
+  })
+  // A qualified parent still names the local branch that tracks the ref.
+  const stacked = makeMockBranch('stacked', {
+    parent: 'origin/main',
+    oid: '3333333333333333',
+    updatedAt: new Date(Date.now() - 4 * minute).toISOString(),
+  })
+  const branches = [main, remoteMain, topic, child, stacked]
+
+  assert.equal(resolveStackNavigation(topic, branches, 'child')?.ref, child.ref)
+  assert.equal(resolveStackNavigation(topic, branches, 'top')?.ref, child.ref)
+  assert.equal(resolveStackNavigation(topic, branches, 'parent'), null)
+  assert.equal(resolveStackNavigation(topic, branches, 'bottom'), null)
+  // main shares the upstream ref but owns neither topic nor its children.
+  assert.equal(resolveStackNavigation(main, branches, 'child')?.ref, stacked.ref)
+  assert.equal(resolveStackNavigation(main, branches, 'top')?.ref, stacked.ref)
+  assert.equal(resolveStackNavigation(remoteMain, branches, 'child')?.ref, stacked.ref)
+  assert.equal(resolveStackNavigation(child, branches, 'parent')?.name, 'topic')
+  assert.equal(resolveStackNavigation(child, branches, 'bottom')?.name, 'topic')
+  assert.equal(resolveStackNavigation(stacked, branches, 'parent')?.ref, main.ref)
+
+  const navigationTarget = (selected: Branch, id: string) => {
+    const items = buildPaletteItems({
+      snapshot: makeMockSnapshot({ branches, currentBranch: selected.name }),
+      selectedBranch: selected,
+      recentRepositories: [],
+      isBusy: false,
+      operationActive: false,
+      shortcutMap: DEFAULT_SHORTCUTS,
+    })
+    return items.find((item) => item.id === id)?.detail ?? ''
+  }
+
+  assert.equal(navigationTarget(topic, 'stack.child'), 'Target: child')
+  assert.equal(navigationTarget(main, 'stack.child'), 'Target: stacked')
+  assert.equal(navigationTarget(main, 'stack.top'), 'Target: stacked')
+  assert.equal(navigationTarget(remoteMain, 'stack.top'), 'Target: stacked')
+  assert.equal(navigationTarget(remoteMain, 'stack.child'), 'Target: stacked')
 })
