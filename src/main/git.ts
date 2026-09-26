@@ -12,9 +12,12 @@ import type {
   Branch,
   ChangedFile,
   Commit,
+  DiffHunk,
   FileView,
   GitAction,
   HistoryPage,
+  HunkSide,
+  HunkSideName,
   PullRequest,
   PushPreview,
   RepositorySnapshot,
@@ -49,12 +52,14 @@ import {
   requireString,
   resolveParentRef,
   runGit,
+  runGitWithInput,
   statusPathCandidates,
   stripTrailingNewline,
   tryGit,
   validateBranchName,
 } from './git-core'
 import type { RefRecord } from './git-core'
+import { buildHunkPatch, hunkSideUnavailable, parseHunkBlock } from './hunks'
 import { getGitHubData } from './github'
 import {
   getStackProgress,
@@ -306,6 +311,48 @@ function validateAction(value: unknown): GitAction {
         strategy: value.strategy,
         content: value.content,
       }
+    case 'stageHunk':
+    case 'unstageHunk': {
+      const hunkId = requireString(value.hunkId, 'hunkId', 64)
+      if (!/^[0-9a-f]{16}$/u.test(hunkId)) {
+        throw new Error('hunkId must be a hunk identity from the current file view')
+      }
+      if (value.lineIndexes !== undefined) {
+        if (
+          !Array.isArray(value.lineIndexes) ||
+          value.lineIndexes.length === 0 ||
+          value.lineIndexes.length > 10_000
+        ) {
+          throw new Error('lineIndexes must list the changed lines to apply')
+        }
+        const indexes = value.lineIndexes.map((entry) => {
+          if (
+            !Number.isInteger(entry) ||
+            (entry as number) < 0 ||
+            (entry as number) > MAX_DIFF_LINES
+          ) {
+            throw new Error('lineIndexes must be non-negative line positions')
+          }
+          return entry as number
+        })
+        if (new Set(indexes).size !== indexes.length) {
+          throw new Error('lineIndexes must not contain duplicates')
+        }
+        return {
+          type: value.type,
+          path: requirePathInput(value.path, 'path'),
+          hunkId,
+          fingerprint: requireString(value.fingerprint, 'fingerprint', 1024),
+          lineIndexes: indexes,
+        }
+      }
+      return {
+        type: value.type,
+        path: requirePathInput(value.path, 'path'),
+        hunkId,
+        fingerprint: requireString(value.fingerprint, 'fingerprint', 1024),
+      }
+    }
     default:
       throw new Error(`Unsupported Git action: ${value.type}`)
   }
@@ -2164,6 +2211,7 @@ async function runCreatePr(
 const MAX_FILE_BYTES = 2 * 1024 * 1024
 const MAX_DIFF_BYTES = 4 * 1024 * 1024
 const MAX_HISTORY_SKIP = 1_000_000
+const MAX_DIFF_LINES = 4 * 1024 * 1024
 
 function boundedText(value: string, maxBytes: number): { text: string; truncated: boolean } {
   const bytes = Buffer.from(value, 'utf8')
@@ -2422,6 +2470,8 @@ async function changedDiff(
   relativePath: string,
 ): Promise<{ text: string; truncated: boolean }> {
   const args = [
+    '-c',
+    'core.quotePath=false',
     '--literal-pathspecs',
     'diff',
     '--no-ext-diff',
@@ -2431,6 +2481,33 @@ async function changedDiff(
     relativePath,
   ]
   return boundedText(await runGit(repoPath, args), MAX_DIFF_BYTES)
+}
+
+/**
+ * Resolves one side of a file's diff into hunks Git can apply, or the reason it
+ * cannot. The same resolution backs the inspector view and the action, so a
+ * refusal the user reads is the refusal that stops the write.
+ */
+function resolveHunkSide(
+  entry: ChangedFile,
+  identity: FileIdentity,
+  side: HunkSideName,
+  diff: { text: string; truncated: boolean },
+): HunkSide {
+  const block = parseHunkBlock(diff.text, {
+    path: entry.path,
+    originalPath: entry.originalPath ?? null,
+  })
+  const worktreeChanged = entry.worktree !== ' ' && entry.worktree !== ''
+  const unavailable = hunkSideUnavailable(side, block, {
+    binary: identity.binary,
+    truncated: diff.truncated,
+    conflicted: entry.conflicted,
+    untracked: entry.index === '?' || entry.worktree === '?',
+    renamed: side === 'staged' && entry.originalPath !== undefined,
+    changed: side === 'staged' ? diff.text.length > 0 : worktreeChanged,
+  })
+  return { hunks: block.hunks, unavailable }
 }
 
 export async function getFileView(repoPath: string, requestedPath: string): Promise<FileView> {
@@ -2459,6 +2536,10 @@ export async function getFileView(repoPath: string, requestedPath: string): Prom
     fingerprint: identity.fingerprint,
     conflicted: entry.conflicted,
     truncated: stagedDiff.truncated || unstagedDiff.truncated || contentResult.truncated,
+    hunks: {
+      staged: resolveHunkSide(entry, identity, 'staged', stagedDiff),
+      unstaged: resolveHunkSide(entry, identity, 'unstaged', unstagedDiff),
+    },
   }
 }
 
@@ -3350,6 +3431,97 @@ export async function runResolveFile(
   return { message: `Resolved ${actualPath} using ${strategy}` }
 }
 
+/**
+ * Applies one hunk, or a subset of its changed lines, to the index only. The
+ * working tree is never written: `git apply --cached` rebuilds the index entry
+ * from the preimage it verifies, so unstaged edits elsewhere in the file, in this
+ * file's other hunks, and in other files are left exactly as they are.
+ */
+export async function runStageHunk(
+  repoPath: string,
+  action: 'stageHunk' | 'unstageHunk',
+  filePath: string,
+  hunkId: string,
+  fingerprint: string,
+  lineIndexes?: number[],
+): Promise<ActionResult> {
+  const root = await resolveRepository(repoPath)
+  await recoverFileActionJournals(root)
+  const { entry, identity } = await checkFileFingerprint(root, filePath, fingerprint)
+  const side: HunkSideName = action === 'unstageHunk' ? 'staged' : 'unstaged'
+  const diff = await changedDiff(root, side === 'staged' ? 'cached' : 'worktree', entry.path)
+  const resolved = resolveHunkSide(entry, identity, side, diff)
+  if (resolved.unavailable) throw new Error(resolved.unavailable)
+  const block = parseHunkBlock(diff.text, {
+    path: entry.path,
+    originalPath: entry.originalPath ?? null,
+  })
+  const hunk = resolved.hunks.find((candidate) => candidate.id === hunkId)
+  if (!hunk) {
+    throw new Error(
+      `That hunk is no longer part of the ${side} diff of ${entry.path}; refresh the file and try again`,
+    )
+  }
+  const selected = validateHunkSelection(hunk, lineIndexes)
+  const patch = buildHunkPatch(block, hunk, selected)
+  await safeRepositoryPath(root, entry.path)
+  // Building the patch takes time; do not apply it against a file or index that
+  // changed since the diff and hunk identity were resolved.
+  await checkFileFingerprint(root, filePath, fingerprint)
+  try {
+    await runGitWithInput(
+      root,
+      [
+        '--literal-pathspecs',
+        'apply',
+        '--cached',
+        '--unidiff-zero',
+        '--whitespace=nowarn',
+        ...(side === 'staged' ? ['--reverse'] : []),
+        '-',
+      ],
+      patch,
+    )
+  } catch (error) {
+    throw new Error(
+      `Git refused the hunk patch for ${entry.path}: ${commandDetail(error)}. Nothing was changed.`,
+    )
+  }
+  const applied = await fileFingerprint(root, entry.path)
+  if (applied.contentFingerprint !== identity.contentFingerprint) {
+    throw new Error(
+      'The working tree changed while the patch was applied; refresh and review the file',
+    )
+  }
+  if (applied.indexFingerprint === identity.indexFingerprint) {
+    throw new Error('The patch did not change the index; refresh and try again')
+  }
+  const position = resolved.hunks.indexOf(hunk) + 1
+  const count = selected
+    ? selected.length
+    : hunk.lines.filter((l) => l.kind === 'add' || l.kind === 'remove').length
+  const scope = selected
+    ? `${count} line${count === 1 ? '' : 's'}`
+    : `hunk ${position} of ${resolved.hunks.length}`
+  return {
+    message: `${side === 'staged' ? 'Unstaged' : 'Staged'} ${scope} in ${entry.path}`,
+  }
+}
+
+function validateHunkSelection(
+  hunk: DiffHunk,
+  lineIndexes: number[] | undefined,
+): number[] | undefined {
+  if (!lineIndexes) return undefined
+  for (const index of lineIndexes) {
+    const line = hunk.lines[index]
+    if (!line || (line.kind !== 'add' && line.kind !== 'remove')) {
+      throw new Error('Only changed lines of the selected hunk can be applied')
+    }
+  }
+  return [...lineIndexes].sort((left, right) => left - right)
+}
+
 function requireHistorySkip(value: unknown): number {
   if (!Number.isInteger(value) || (value as number) < 0 || (value as number) > MAX_HISTORY_SKIP) {
     throw new Error(`history skip must be an integer from 0 to ${MAX_HISTORY_SKIP}`)
@@ -3850,6 +4022,8 @@ async function ensureStackWriteAllowed(repoPath: string, action: GitAction): Pro
   if (
     action.type === 'stage' ||
     action.type === 'unstage' ||
+    action.type === 'stageHunk' ||
+    action.type === 'unstageHunk' ||
     action.type === 'resolveFile' ||
     action.type === 'stackContinue' ||
     action.type === 'stackAbort'
@@ -4244,6 +4418,16 @@ export async function runAction(repoPath: string, value: GitAction): Promise<Act
       return runDiscardFile(root, action.path, action.fingerprint)
     case 'resolveFile':
       return runResolveFile(root, action.path, action.fingerprint, action.strategy, action.content)
+    case 'stageHunk':
+    case 'unstageHunk':
+      return runStageHunk(
+        root,
+        action.type,
+        action.path,
+        action.hunkId,
+        action.fingerprint,
+        action.lineIndexes,
+      )
     case 'createPr':
       return runCreatePr(root, action.title, action.body, action.base, action.draft)
   }

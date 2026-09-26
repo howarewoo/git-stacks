@@ -23,6 +23,7 @@ import { workflowError, type RunAction, type WorkflowRequest } from './workflow-
 import { PhaseStatus, WorkflowActions } from './workflow-composition'
 import { partialProgress, workflowPhase } from './workflow-policy'
 import { BranchHoverCard, PullRequestHoverCard } from './repository-hover-cards'
+import { HunkDiffView } from './hunk-diff'
 
 type CommonProps = {
   snapshot: RepositorySnapshot
@@ -470,9 +471,22 @@ export function FileInspector({
               </pre>
             </div>
           ) : (
-            <DiffView
-              text={tab === 'staged' ? file.stagedDiff : file.unstagedDiff}
-              truncated={file.truncated}
+            <HunkDiffView
+              key={`${file.path}:${tab}`}
+              side={tab === 'staged' ? file.hunks.staged : file.hunks.unstaged}
+              sideName={tab === 'staged' ? 'staged' : 'unstaged'}
+              busy={busy || loading}
+              onApply={(selection) =>
+                runAction(
+                  {
+                    type: tab === 'staged' ? 'unstageHunk' : 'stageHunk',
+                    path: file.path,
+                    fingerprint: file.fingerprint,
+                    ...selection,
+                  },
+                  tab === 'staged' ? 'Unstage hunk' : 'Stage hunk',
+                )
+              }
             />
           )}
           {canDiscard && tab === 'working' ? (

@@ -37,6 +37,16 @@ export function fileIsUnstaged(file: ChangedFile): boolean {
   return file.worktree !== '' && file.worktree !== ' '
 }
 
+/**
+ * Tri-state file staging. It is independent from the file row, which only opens
+ * the inspector: a partially staged file reads as partial rather than as either
+ * state, and a conflicted file cannot be staged at all.
+ */
+export function fileStagingState(file: ChangedFile): 'staged' | 'partial' | 'unstaged' {
+  if (fileIsStaged(file) && fileIsUnstaged(file)) return 'partial'
+  return fileIsStaged(file) ? 'staged' : 'unstaged'
+}
+
 function statusLetter(value: string): string {
   if (!value || value === ' ') return '·'
   if (value === '?') return 'U'
@@ -159,24 +169,26 @@ export function ChangesView({
           {file.conflicted ? 'Resolve' : 'Inspect'}
         </span>
       </button>
-      <Button
-        disabled={busy}
-        tooltip={
-          action === 'stage'
-            ? "Stage this file's working-tree changes for the next commit. Local index only."
-            : 'Remove this file from the index; its working-tree edits remain. Nothing is discarded.'
+      <Checkbox
+        data-staging={fileStagingState(file)}
+        aria-label={`${action === 'stage' ? 'Stage' : 'Unstage'} ${file.path}`}
+        checked={action === 'unstage' && fileStagingState(file) !== 'partial'}
+        indeterminate={fileStagingState(file) === 'partial'}
+        disabled={busy || file.conflicted}
+        title={
+          file.conflicted
+            ? 'Resolve this conflict before staging'
+            : action === 'stage'
+              ? `Stage this file's working-tree changes for the next commit. Local index only.`
+              : 'Remove this file from the index; its working-tree edits remain. Nothing is discarded.'
         }
-        onClick={() =>
+        onChange={() =>
           runAction(
             { type: action, paths: changePaths([file]) },
             action === 'stage' ? 'Stage file' : 'Unstage file',
           )
         }
-        size="sm"
-        variant="ghost"
-      >
-        {action === 'stage' ? 'Stage' : 'Unstage'}
-      </Button>
+      />
     </div>
   )
 

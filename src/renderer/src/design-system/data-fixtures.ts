@@ -1,7 +1,11 @@
 import type {
   ChangedFile,
   Commit,
+  DiffHunk,
+  DiffHunkLine,
+  FileHunks,
   FileView,
+  HunkSide,
   PullRequest,
   RepositorySnapshot,
   Stash,
@@ -221,6 +225,66 @@ export const largeDiffText = Array.from({ length: 2400 }, (_, index) => `+line $
   '\n',
 )
 
+function hunkLine(kind: DiffHunkLine['kind'], text: string, line: number): DiffHunkLine {
+  return {
+    kind,
+    text,
+    oldLine: kind === 'add' ? line - 1 : kind === 'marker' ? null : line,
+    newLine: kind === 'remove' ? line - 1 : kind === 'marker' ? null : line,
+  }
+}
+
+function hunk(id: string, oldStart: number, entries: DiffHunkLine[]): DiffHunk {
+  return {
+    id,
+    header: `@@ -${oldStart},2 +${oldStart},2 @@`,
+    oldStart,
+    oldLines: 2,
+    newStart: oldStart,
+    newLines: 2,
+    lines: entries,
+  }
+}
+
+function hunks(
+  staged: { hunks: DiffHunk[]; unavailable: string | null },
+  unstaged: { hunks: DiffHunk[]; unavailable: string | null },
+): FileHunks {
+  return { staged, unstaged }
+}
+
+const noStagedHunks: HunkSide = { hunks: [], unavailable: 'Nothing is staged in this file yet.' }
+const noWorktreeHunks: HunkSide = {
+  hunks: [],
+  unavailable: 'The working tree matches the index for this file.',
+}
+const renameHunks: HunkSide = {
+  hunks: [],
+  unavailable: 'A rename is staged or unstaged as a whole file so both paths stay consistent.',
+}
+const conflictHunks: HunkSide = {
+  hunks: [],
+  unavailable: 'Resolve this conflict before applying individual hunks.',
+}
+const binaryHunks: HunkSide = {
+  hunks: [],
+  unavailable: 'This file is binary, so it cannot be patched hunk by hunk.',
+}
+const oversizedHunks: HunkSide = {
+  hunks: [],
+  unavailable: 'This diff is too large to apply safely. Stage or unstage the whole file instead.',
+}
+
+const stagedHunk = hunk('a1b2c3d4e5f60718', 1, [
+  hunkLine('remove', '-old staged line', 1),
+  hunkLine('add', '+new staged line', 1),
+])
+const worktreeHunk = hunk('0f1e2d3c4b5a697', 8, [
+  hunkLine('remove', '-old worktree line', 8),
+  hunkLine('add', '+new worktree line', 8),
+  hunkLine('context', ' trailing context', 9),
+])
+
 export const fileViewFixtures: Record<string, FileView> = {
   rename: {
     path: 'src/renderer/src/components/legacy-views.tsx',
@@ -231,6 +295,7 @@ export const fileViewFixtures: Record<string, FileView> = {
     fingerprint: 'fingerprint-legacy',
     conflicted: false,
     truncated: false,
+    hunks: hunks(renameHunks, noWorktreeHunks),
   },
   conflicted: {
     path: 'src/renderer/src/components/conflicted.tsx',
@@ -242,6 +307,7 @@ export const fileViewFixtures: Record<string, FileView> = {
     fingerprint: 'fingerprint-conflict',
     conflicted: true,
     truncated: false,
+    hunks: hunks(conflictHunks, conflictHunks),
   },
   binary: {
     path: 'resources/icon.icns',
@@ -252,6 +318,7 @@ export const fileViewFixtures: Record<string, FileView> = {
     fingerprint: 'fingerprint-binary',
     conflicted: false,
     truncated: false,
+    hunks: hunks(noStagedHunks, binaryHunks),
   },
   truncated: {
     path: 'src/renderer/src/components/big-file.tsx',
@@ -262,6 +329,7 @@ export const fileViewFixtures: Record<string, FileView> = {
     fingerprint: 'fingerprint-truncated',
     conflicted: false,
     truncated: true,
+    hunks: hunks(noStagedHunks, oversizedHunks),
   },
   bothSides: {
     path: 'src/renderer/src/components/data-views.tsx',
@@ -274,6 +342,10 @@ export const fileViewFixtures: Record<string, FileView> = {
     fingerprint: 'fingerprint-both',
     conflicted: false,
     truncated: false,
+    hunks: hunks(
+      { hunks: [stagedHunk], unavailable: null },
+      { hunks: [worktreeHunk], unavailable: null },
+    ),
   },
 }
 

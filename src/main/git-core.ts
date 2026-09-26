@@ -1,4 +1,4 @@
-import { execFile as execFileCallback } from 'node:child_process'
+import { execFile as execFileCallback, spawn } from 'node:child_process'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import { promisify } from 'node:util'
@@ -97,6 +97,83 @@ export async function runGit(
   env?: NodeJS.ProcessEnv,
 ): Promise<string> {
   return execute('git', args, repoPath, env)
+}
+
+/**
+ * Runs a command with text on stdin. `execFile` cannot write stdin, and a patch
+ * must reach Git as a stream so a path with spaces or a NUL never has to be
+ * spelled on the command line.
+ */
+export async function executeWithInput(
+  command: string,
+  args: string[],
+  cwd: string,
+  input: string,
+  env?: NodeJS.ProcessEnv,
+): Promise<string> {
+  const { promise, resolve, reject } = Promise.withResolvers<string>()
+  const child = spawn(command, args, {
+    cwd,
+    env: {
+      ...process.env,
+      GIT_TERMINAL_PROMPT: '0',
+      GH_PROMPT_DISABLED: '1',
+      GCM_INTERACTIVE: 'Never',
+      ...env,
+    },
+    shell: false,
+    windowsHide: true,
+    stdio: ['pipe', 'pipe', 'pipe'],
+  })
+  let stdout = ''
+  let stderr = ''
+  const finish = (error: CommandError | null) => {
+    clearTimeout(timer)
+    if (error) {
+      error.stdout = stdout
+      error.stderr = stderr
+      reject(error)
+    } else {
+      resolve(stdout)
+    }
+  }
+  const timer = setTimeout(() => {
+    child.kill('SIGKILL')
+    const error: CommandError = new Error(`${command} timed out`)
+    error.code = 'ETIMEDOUT'
+    finish(error)
+  }, 120_000)
+  timer.unref?.()
+  child.stdout.setEncoding('utf8')
+  child.stderr.setEncoding('utf8')
+  child.stdout.on('data', (chunk: string) => {
+    stdout += chunk
+    if (stdout.length > MAX_BUFFER) child.kill('SIGKILL')
+  })
+  child.stderr.on('data', (chunk: string) => {
+    stderr += chunk
+  })
+  child.on('error', (cause) => {
+    const error: CommandError = new Error(String(cause))
+    error.code = (cause as NodeJS.ErrnoException).code
+    finish(error)
+  })
+  child.on('close', (code) => {
+    if (code === 0) {
+      finish(null)
+      return
+    }
+    const error: CommandError = new Error(`${command} exited with code ${code ?? 'unknown'}`)
+    error.code = code ?? 1
+    finish(error)
+  })
+  child.stdin.on('error', () => undefined)
+  child.stdin.end(input)
+  return promise
+}
+
+export function runGitWithInput(repoPath: string, args: string[], input: string): Promise<string> {
+  return executeWithInput('git', args, repoPath, input)
 }
 
 export async function tryGit(repoPath: string, args: string[]): Promise<string | null> {
