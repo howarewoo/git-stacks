@@ -439,6 +439,14 @@ test('lifecycle, checks, and review stay independent labels on the same row', ()
   assert.ok(!closed.includes('review approved'))
 })
 
+test('pull request inspector status values use description-list semantics', () => {
+  const inspector = renderInspector(branchByRef(branchFixtureRefs.linearBase))
+  assert.match(
+    inspector,
+    /<dl class="detail-grid"><dt>Checks<\/dt><dd>checks failing<\/dd><dt>Review<\/dt><dd>review changes requested<\/dd><dt>Merge<\/dt><dd>[^<]+<\/dd><\/dl>/,
+  )
+})
+
 test('selecting a row never checks the branch out, and checkout is a separate control', () => {
   const markup = renderBranchTree(branchFixtureRefs.restack)
   const rowButtons = markup.match(/<button[^>]*class="branch-select"[^>]*>/g) ?? []

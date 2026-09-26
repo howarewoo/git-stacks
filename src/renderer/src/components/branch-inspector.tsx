@@ -185,12 +185,12 @@ export function BranchInspector({
                 </span>
               </div>
               <dl className="detail-grid">
-                <span>Checks</span>
-                <strong>{checkLabel(pullRequest.checks)}</strong>
-                <span>Review</span>
-                <strong>{reviewLabel(pullRequest)}</strong>
-                <span>Merge</span>
-                <strong>{mergeStateLabel(pullRequest)}</strong>
+                <dt>Checks</dt>
+                <dd>{checkLabel(pullRequest.checks)}</dd>
+                <dt>Review</dt>
+                <dd>{reviewLabel(pullRequest)}</dd>
+                <dt>Merge</dt>
+                <dd>{mergeStateLabel(pullRequest)}</dd>
               </dl>
               <div className="pr-detail-actions">
                 <Button
