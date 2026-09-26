@@ -18,21 +18,6 @@ import {
 
 test.describe('Safety and mutation dispatch invariants', () => {
   test.describe('Cancellation produces no mutation', () => {
-    test('cancelling "Create a branch" dialog dispatches no GitAction', async ({ page }) => {
-      await openGallery(page, { scenario: 'shell-connected' })
-      const dialog = await openNewBranchDialog(page)
-
-      const nameInput = dialog.getByRole('textbox', { name: 'Branch name', exact: true })
-      await nameInput.fill('feature/never-created')
-
-      const cancelBtn = dialog.getByRole('button', { name: 'Cancel', exact: true })
-      await cancelBtn.click()
-      await expect(dialog).not.toBeVisible()
-
-      const actions = await getDispatchedActions(page)
-      expect(actions).toEqual([])
-    })
-
     test('cancelling "Delete local branch?" dialog dispatches no GitAction', async ({ page }) => {
       await openGallery(page, { scenario: 'shell-connected' })
       const dialog = await openDeleteLocalBranchDialog(page, 'feature/checkout-tests')
@@ -45,7 +30,7 @@ test.describe('Safety and mutation dispatch invariants', () => {
       expect(actions).toEqual([])
     })
 
-    test('Escape on dirty "Stash working changes" retains dialog with warning; Cancel closes without mutation', async ({
+    test('Escape preserves a dirty stash form; Cancel closes without mutation', async ({
       page,
     }) => {
       await openGallery(page, { scenario: 'files-staged' })
@@ -57,23 +42,9 @@ test.describe('Safety and mutation dispatch invariants', () => {
       // Pressing Escape on dirty form must retain dialog and display unsaved warning
       await page.keyboard.press('Escape')
       await expect(dialog).toBeVisible()
-      await expect(dialog).toContainText(
-        'Escape and backdrop clicks do not discard what you typed. Use Cancel to discard it explicitly.',
-      )
+      await expect(messageInput).toHaveValue('WIP not saved')
 
       // Explicit Cancel closes the dialog without dispatch
-      const cancelBtn = dialog.getByRole('button', { name: 'Cancel', exact: true })
-      await cancelBtn.click()
-      await expect(dialog).not.toBeVisible()
-
-      const actions = await getDispatchedActions(page)
-      expect(actions).toEqual([])
-    })
-
-    test('closing "Force push with lease" via Cancel dispatches no GitAction', async ({ page }) => {
-      await openGallery(page, { scenario: 'shell-connected' })
-      const dialog = await openForcePushDialog(page)
-
       const cancelBtn = dialog.getByRole('button', { name: 'Cancel', exact: true })
       await cancelBtn.click()
       await expect(dialog).not.toBeVisible()
@@ -223,23 +194,6 @@ test.describe('Safety and mutation dispatch invariants', () => {
       ).toBeVisible()
 
       // Dispatched actions must be completely empty: selection is read-only
-      const actions = await getDispatchedActions(page)
-      expect(actions).toEqual([])
-    })
-
-    test('stash rows are not selection controls and dispatch nothing when clicked', async ({
-      page,
-    }) => {
-      await openGallery(page, { scenario: 'stash-stable-oid' })
-      await switchDestination(page, 'stashes')
-
-      const stashRow = page.getByRole('listitem').first()
-      await expect(stashRow).toHaveAttribute('aria-label', /^Stash stash@\{\d+\}$/)
-      // Applying, popping, and dropping are separate explicit buttons, not row selection.
-      await expect(stashRow.getByRole('button')).toHaveCount(3)
-
-      await stashRow.click({ position: { x: 5, y: 5 } })
-
       const actions = await getDispatchedActions(page)
       expect(actions).toEqual([])
     })

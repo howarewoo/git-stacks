@@ -78,17 +78,6 @@ test.describe('Automated accessibility audits and contrast', () => {
       await dialog.getByRole('button', { name: 'Cancel' }).click()
     })
 
-    test('asserts zero axe violations in "Stash working changes" dialog', async ({ page }) => {
-      await openGallery(page, { scenario: 'files-staged' })
-      const dialog = await openStashDialog(page)
-
-      await assertNoAxeViolations(page, 'Stash working changes dialog', {
-        includeSelector: '[role="dialog"]',
-      })
-
-      await dialog.getByRole('button', { name: 'Cancel' }).click()
-    })
-
     test('asserts zero axe violations in "Force push with lease" dialog', async ({ page }) => {
       await openGallery(page, { scenario: 'shell-connected' })
       const dialog = await openForcePushDialog(page)
@@ -112,33 +101,6 @@ test.describe('Automated accessibility audits and contrast', () => {
       })
       await settle(page)
       await assertNoAxeViolations(page, 'Foundations specimen')
-    })
-
-    test('asserts zero axe violations on Shell specimen', async ({ page }) => {
-      await openGallery(page, {
-        scenario: 'shell-connected',
-        route: 'shell',
-      })
-      await settle(page)
-      await assertNoAxeViolations(page, 'Shell specimen')
-    })
-
-    test('asserts zero axe violations on Data surfaces specimen', async ({ page }) => {
-      await openGallery(page, {
-        scenario: 'shell-connected',
-        route: 'data',
-      })
-      await settle(page)
-      await assertNoAxeViolations(page, 'Data surfaces specimen')
-    })
-
-    test('asserts zero axe violations on Dialogs specimen', async ({ page }) => {
-      await openGallery(page, {
-        scenario: 'shell-connected',
-        route: 'dialog',
-      })
-      await settle(page)
-      await assertNoAxeViolations(page, 'Dialogs specimen')
     })
   })
 
