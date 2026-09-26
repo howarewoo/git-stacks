@@ -65,7 +65,7 @@ interface BranchRecord {
   parent: string | null
   parentTip: string | null
   invalidParentTip: boolean
-  parentSource: 'recorded' | 'pullRequest' | 'inferred' | null
+  parentSource: 'recorded' | 'pullRequest' | 'stack' | 'inferred' | null
   pr: PullRequest | null
   mergedHeadPr: string | null
   mergedHeadOid: string | null
