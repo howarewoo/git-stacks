@@ -10,6 +10,8 @@ import {
   ShieldCheck,
 } from 'lucide-react'
 import type { ChangedFile, PullRequest, RepositorySnapshot } from '../../../shared/types'
+import { capabilityReport } from '../../../shared/capabilities'
+import type { CapabilityState } from '../../../shared/capabilities'
 import { Badge } from './ui/badge'
 import { Button } from './ui/button'
 import { Checkbox } from './ui/checkbox'
@@ -591,6 +593,93 @@ export function StashesView({
           <p>Stash changes before switching context when you need a clean tree.</p>
         </EmptyState>
       )}
+    </div>
+  )
+}
+
+const capabilityStateLabel: Record<CapabilityState, string> = {
+  supported: 'Supported',
+  limited: 'Limited',
+  unsupported: 'Unsupported',
+}
+
+const capabilityStateVariant: Record<CapabilityState, 'success' | 'warning' | 'danger'> = {
+  supported: 'success',
+  limited: 'warning',
+  unsupported: 'danger',
+}
+
+/**
+ * The support matrix for the open repository. Every detected shape states what it
+ * allows, and every operation an unsupported shape refuses is listed with its reason.
+ */
+export function DiagnosticsView({ snapshot }: { snapshot: RepositorySnapshot }) {
+  const { capabilities } = snapshot
+  const report = capabilityReport(capabilities)
+  const disabled = report.flatMap((entry) => entry.restrictions)
+  const facts: [string, string][] = [
+    ['Reference storage', capabilities.refStorage],
+    ['Object format', capabilities.objectFormat ?? 'unknown'],
+    ['Git', capabilities.gitVersion ?? 'unknown'],
+    ['Worktree config', capabilities.worktreeConfig ? 'enabled' : 'not enabled'],
+  ]
+
+  return (
+    <div className="diagnostics-view">
+      <div className="list-toolbar">
+        <div className="list-title-group">
+          <h1>Diagnostics</h1>
+          <span className="list-subtitle">
+            {report.filter((entry) => entry.state === 'supported').length} of {report.length} fully
+            supported
+          </span>
+        </div>
+      </div>
+      <div className="capability-scroll">
+        <div className="capability-facts" role="list" aria-label="Repository facts">
+          {facts.map(([label, value]) => (
+            <div className="capability-fact" key={label} role="listitem">
+              <span className="capability-fact-key">{label}</span>
+              <span className="capability-fact-value">{value}</span>
+            </div>
+          ))}
+        </div>
+        <div className="capability-list" role="list" aria-label="Detected capabilities">
+          {report.map((entry) => (
+            <div className="capability-row" key={entry.id} role="listitem">
+              <span className="capability-copy">
+                <strong>{entry.label}</strong>
+                <small>{entry.detail}</small>
+              </span>
+              <Badge variant={capabilityStateVariant[entry.state]}>
+                {capabilityStateLabel[entry.state]}
+              </Badge>
+            </div>
+          ))}
+        </div>
+        {disabled.length > 0 ? (
+          <section aria-labelledby="diagnostics-disabled-heading">
+            <h2 className="capability-section-heading" id="diagnostics-disabled-heading">
+              Unavailable here
+            </h2>
+            <div className="capability-list" role="list" aria-label="Unavailable operations">
+              {disabled.map((restriction) => (
+                <div
+                  className="capability-row"
+                  key={`${restriction.operation}:${restriction.reason}`}
+                  role="listitem"
+                >
+                  <span className="capability-copy">
+                    <strong>{restriction.operation}</strong>
+                    <small>{restriction.reason}</small>
+                  </span>
+                  <Badge variant="danger">Disabled</Badge>
+                </div>
+              ))}
+            </div>
+          </section>
+        ) : null}
+      </div>
     </div>
   )
 }

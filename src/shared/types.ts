@@ -1,3 +1,5 @@
+import type { RepositoryCapabilities } from './capabilities'
+
 export interface PullRequest {
   number: number
   title: string
@@ -40,6 +42,10 @@ export interface ChangedFile {
   index: string
   worktree: string
   conflicted: boolean
+  /** Index mode 160000: the path is a submodule gitlink, not a file Git Stacks rewrites. */
+  submodule?: boolean
+  /** Sparse checkout left the path out of the working set, so it is not materialized. */
+  sparseExcluded?: boolean
 }
 export interface RepositorySnapshot {
   path: string
@@ -56,6 +62,7 @@ export interface RepositorySnapshot {
   stackOperation: StackProgress | null
   headOid: string | null
   github: { available: boolean; message: string }
+  capabilities: RepositoryCapabilities
 }
 export interface RecentRepository {
   path: string
@@ -87,6 +94,15 @@ export interface FileView {
   fingerprint: string
   conflicted: boolean
   truncated: boolean
+  /** Set when the path is a submodule gitlink: only the recorded commit is shown. */
+  submodule?: boolean
+  /** Present when the working-tree file is a Git LFS pointer rather than the object. */
+  lfs?: LfsPointer | null
+}
+/** A Git LFS pointer file carries the object identity instead of the object. */
+export interface LfsPointer {
+  oid: string
+  size: number
 }
 export interface PushPreview {
   branch: string

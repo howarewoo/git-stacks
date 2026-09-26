@@ -101,6 +101,21 @@ export const baseSnapshot: RepositorySnapshot = {
   stackOperation: null,
   headOid: featureBranch.oid ?? null,
   github: { available: true, message: '' },
+  capabilities: {
+    bare: false,
+    detachedHead: false,
+    linkedWorktree: false,
+    worktreeCount: 1,
+    refStorage: 'files',
+    refStorageDetail: null,
+    sparseCheckout: false,
+    sparseCheckoutCone: false,
+    submodules: false,
+    gitLfs: false,
+    worktreeConfig: false,
+    objectFormat: 'sha1',
+    gitVersion: 'git version 2.52.0',
+  },
 }
 
 function withSnapshot(overrides: Partial<RepositorySnapshot>): RepositorySnapshot {

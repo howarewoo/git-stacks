@@ -73,6 +73,7 @@ import { WorkspaceNavigation } from './components/workspace-navigation'
 import { HistoryView, OperationBanner, StackView } from './components/repository-views'
 import {
   ChangesView,
+  DiagnosticsView,
   PullRequestListView,
   StashesView,
   changeGroups,
@@ -87,8 +88,11 @@ import {
   WorkflowFrame,
 } from './components/workflow-composition'
 import { CLOSE_INTENT_MESSAGES, closeIntent } from './components/workflow-policy'
+import { capabilityAttentionCount, capabilityReport } from '../../shared/capabilities'
 
-type WorkspaceView = 'branches' | 'stacks' | 'history' | 'changes' | 'pullRequests' | 'stashes'
+type WorkspaceView =
+  'branches' | 'stacks' | 'history' | 'changes' | 'pullRequests' | 'stashes' | 'diagnostics'
+
 type BranchFilter = 'all' | 'local' | 'remote' | 'prs'
 
 type BranchTreeInfo = {
@@ -487,6 +491,10 @@ function App() {
   const branchCount = combinedBranches.length
   const pullRequestCount = snapshot?.pullRequests.length ?? 0
   const stashCount = snapshot?.stashes.length ?? 0
+  const capabilityAttention = React.useMemo(
+    () => (snapshot ? capabilityAttentionCount(capabilityReport(snapshot.capabilities)) : 0),
+    [snapshot],
+  )
   const detailsVisible = showDetails && (workspaceView === 'branches' || workspaceView === 'stacks')
   const operationActive = Boolean(snapshot?.operation || snapshot?.stackOperation)
   const openWorkflow = (request: WorkflowRequest) => {
@@ -668,6 +676,7 @@ function App() {
           <span className="nav-label">Workspace</span>
           <WorkspaceNavigation
             activeView={workspaceView}
+            attentionCount={capabilityAttention}
             branchCount={branchCount}
             changeCount={snapshot?.files.length ?? 0}
             onSelect={setWorkspaceView}
@@ -1136,6 +1145,7 @@ function App() {
     if (workspaceView === 'changes') return renderChanges()
     if (workspaceView === 'pullRequests') return renderPullRequests()
     if (workspaceView === 'stashes') return renderStashes()
+    if (workspaceView === 'diagnostics') return <DiagnosticsView snapshot={snapshot} />
     if (workspaceView === 'history')
       return (
         <HistoryView snapshot={snapshot} busy={isBusy} onRequest={openWorkflow} search={search} />

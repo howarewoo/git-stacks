@@ -249,8 +249,11 @@ export function isStackAction(value: unknown): value is StackAction {
 }
 
 async function repositoryPath(repoPath: string): Promise<string> {
-  const output = await runGit(repoPath, ['rev-parse', '--show-toplevel'])
-  return path.resolve(stripTrailingNewline(output))
+  const workTree = await tryGit(repoPath, ['rev-parse', '--show-toplevel'])
+  if (workTree) return path.resolve(stripTrailingNewline(workTree))
+  return path.resolve(
+    stripTrailingNewline(await runGit(repoPath, ['rev-parse', '--absolute-git-dir'])),
+  )
 }
 
 async function gitDirectory(repoPath: string): Promise<string> {

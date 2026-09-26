@@ -1,3 +1,4 @@
+import type { RepositoryCapabilities } from '../../../shared/capabilities'
 import type {
   ChangedFile,
   Commit,
@@ -6,6 +7,22 @@ import type {
   RepositorySnapshot,
   Stash,
 } from '../../../shared/types'
+
+export const standardCapabilities: RepositoryCapabilities = {
+  bare: false,
+  detachedHead: false,
+  linkedWorktree: false,
+  worktreeCount: 1,
+  refStorage: 'files',
+  refStorageDetail: null,
+  sparseCheckout: false,
+  sparseCheckoutCone: false,
+  submodules: false,
+  gitLfs: false,
+  worktreeConfig: false,
+  objectFormat: 'sha1',
+  gitVersion: 'git version 2.52.0',
+}
 
 const baseBranches = [
   {
@@ -61,6 +78,7 @@ function snapshot(
     stackOperation: null,
     headOid: '0f1e2d3c4b5a69788796a5b4c3d2e1f001122334',
     github: { available: true, message: 'GitHub metadata available; 0 pull requests' },
+    capabilities: standardCapabilities,
     ...overrides,
   }
 }

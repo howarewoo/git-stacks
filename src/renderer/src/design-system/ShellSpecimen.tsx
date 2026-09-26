@@ -128,6 +128,7 @@ export function ShellSpecimen() {
               <span className="nav-label">Workspace</span>
               <WorkspaceNavigation
                 activeView={activeView}
+                attentionCount={1}
                 branchCount={3}
                 changeCount={2}
                 onSelect={setActiveView}
