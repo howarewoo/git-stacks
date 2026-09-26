@@ -11,6 +11,11 @@ import type {
   ActionResult,
   Branch,
   ChangedFile,
+  ConflictChoice,
+  ConflictFile,
+  ConflictMove,
+  ConflictResolution,
+  GitOperation,
   Commit,
   FileView,
   GitAction,
@@ -20,6 +25,7 @@ import type {
   RepositorySnapshot,
 } from '../shared/types'
 import {
+  MAX_BUFFER,
   MAX_BRANCH_LENGTH,
   MAX_MESSAGE_LENGTH,
   MAX_PATH_LENGTH,
@@ -29,6 +35,7 @@ import {
   ensureNoBusyOperation,
   ensureNotCheckedOutElsewhere,
   execute,
+  execFile,
   getBranchParent,
   getConfigValue,
   getCurrentBranch,
@@ -55,6 +62,13 @@ import {
   validateBranchName,
 } from './git-core'
 import type { RefRecord } from './git-core'
+import {
+  conflictKind,
+  conflictLabels,
+  conflictRegions,
+  hasConflictMarkers,
+  parseConflictSegments,
+} from '../shared/conflict'
 import { getGitHubData } from './github'
 import {
   getStackProgress,
@@ -288,23 +302,48 @@ function validateAction(value: unknown): GitAction {
         path: requirePathInput(value.path, 'path'),
         fingerprint: requireString(value.fingerprint, 'fingerprint', 1024),
       }
-    case 'resolveFile':
-      if (value.strategy !== 'ours' && value.strategy !== 'theirs' && value.strategy !== 'manual') {
-        throw new Error('resolve strategy must be ours, theirs, or manual')
+    case 'resolveConflict': {
+      if (!isRecord(value.resolution) || typeof value.resolution.kind !== 'string') {
+        throw new Error('resolveConflict requires a resolution')
+      }
+      if (value.resolution.kind === 'choice') {
+        if (
+          value.resolution.choice !== 'current' &&
+          value.resolution.choice !== 'incoming' &&
+          value.resolution.choice !== 'both' &&
+          value.resolution.choice !== 'delete'
+        ) {
+          throw new Error('resolution choice must be current, incoming, both, or delete')
+        }
+        return {
+          type: 'resolveConflict',
+          path: requirePathInput(value.path, 'path'),
+          fingerprint: requireString(value.fingerprint, 'fingerprint', 1024),
+          resolution: { kind: 'choice', choice: value.resolution.choice },
+        }
+      }
+      if (value.resolution.kind !== 'content') {
+        throw new Error('resolution kind must be content or choice')
       }
       if (
-        typeof value.content !== 'string' ||
-        Buffer.byteLength(value.content, 'utf8') > MAX_FILE_BYTES ||
-        value.content.includes('\0')
+        typeof value.resolution.content !== 'string' ||
+        Buffer.byteLength(value.resolution.content, 'utf8') > MAX_FILE_BYTES ||
+        value.resolution.content.includes('\0')
       ) {
         throw new Error('content must be a UTF-8 string without NUL bytes')
       }
       return {
-        type: 'resolveFile',
+        type: 'resolveConflict',
         path: requirePathInput(value.path, 'path'),
         fingerprint: requireString(value.fingerprint, 'fingerprint', 1024),
-        strategy: value.strategy,
-        content: value.content,
+        resolution: { kind: 'content', content: value.resolution.content },
+      }
+    }
+    case 'conflictMergeTool':
+      return {
+        type: 'conflictMergeTool',
+        path: requirePathInput(value.path, 'path'),
+        fingerprint: requireString(value.fingerprint, 'fingerprint', 1024),
       }
     default:
       throw new Error(`Unsupported Git action: ${value.type}`)
@@ -3291,12 +3330,18 @@ export async function runDiscardFile(
   return { message: `Discarded unstaged changes in ${entry.path}` }
 }
 
-async function hasConflictStage(
-  repoPath: string,
-  relativePath: string,
-  stage: number,
-): Promise<boolean> {
-  const output = await runGit(repoPath, [
+interface ConflictStageEntry {
+  stage: number
+  oid: string
+}
+/** Index stage number (1 base, 2 current, 3 incoming) to the content Git holds. */
+interface ConflictSides {
+  [stage: number]: { text: string | null; binary: boolean }
+}
+
+/** The unmerged index stages Git left for one path, read without a pathspec quote. */
+async function conflictStages(root: string, relativePath: string): Promise<ConflictStageEntry[]> {
+  const output = await runGit(root, [
     '--literal-pathspecs',
     'ls-files',
     '-u',
@@ -3304,50 +3349,432 @@ async function hasConflictStage(
     '--',
     relativePath,
   ])
-  return output.split('\0').some((token) => token.split(/\s+/u)[2] === String(stage))
+  const stages: ConflictStageEntry[] = []
+  for (const token of output.split('\0')) {
+    if (!token) continue
+    const separator = token.indexOf('\t')
+    if (separator < 0) throw new Error('Git returned an unmerged entry without a path')
+    const [mode, oid, stage] = token.slice(0, separator).split(/\s+/u)
+    if (!/^1[0-9]{5}$/u.test(mode) || !/^[0-9a-f]{40,64}$/u.test(oid) || !/^[123]$/u.test(stage)) {
+      throw new Error('Git returned a malformed unmerged index entry')
+    }
+    stages.push({ stage: Number(stage), oid })
+  }
+  return stages
 }
 
-export async function runResolveFile(
+async function readConflictBlob(root: string, oid: string): Promise<Buffer> {
+  const result = await execFile('git', ['cat-file', 'blob', oid], {
+    cwd: root,
+    maxBuffer: MAX_BUFFER,
+    encoding: 'buffer',
+  })
+  return Buffer.isBuffer(result.stdout) ? result.stdout : Buffer.from(String(result.stdout))
+}
+
+function decodeConflictBlob(buffer: Buffer): { text: string | null; binary: boolean } {
+  if (buffer.includes(0)) return { text: null, binary: true }
+  try {
+    return { text: new TextDecoder('utf-8', { fatal: true }).decode(buffer), binary: false }
+  } catch {
+    return { text: null, binary: true }
+  }
+}
+
+/**
+ * A revision read from Git. Command output keeps the trailing newline, and a
+ * revision argument carrying one is not a revision, so it is dropped here once
+ * instead of at every use.
+ */
+async function gitRevision(root: string, args: string[]): Promise<string | null> {
+  const output = await tryGit(root, args)
+  return output ? stripTrailingNewline(output) : null
+}
+
+function commitSummary(root: string, ref: string): Promise<string | null> {
+  return tryGit(root, ['show', '-s', '--format=%h %s', '--end-of-options', ref])
+}
+
+interface ConflictContext {
+  operation: GitOperation | null
+  incomingRef: string | null
+  incomingSubject: string | null
+  /** What each side changed against this base, for rename evidence. */
+  sides: { side: 'current' | 'incoming'; base: string; target: string }[]
+  stash: { ref: string; message: string } | null
+  stashAvailable: boolean
+}
+
+/**
+ * What Git itself recorded for the operation in progress. A stash apply leaves
+ * no state file, so its side is only claimed when stage 3 is found in a stash
+ * entry; otherwise the resolver says the operation is unknown instead of
+ * guessing from the worktree.
+ */
+async function conflictContext(
+  root: string,
+  relativePath: string,
+  stages: ConflictStageEntry[],
+): Promise<ConflictContext> {
+  const state = await getOperationState(root)
+  const incomingRef =
+    (state.rebase
+      ? await gitRevision(root, [
+          'rev-parse',
+          '--verify',
+          '--end-of-options',
+          'REBASE_HEAD^{commit}',
+        ])
+      : null) ??
+    (state.operation === 'merge'
+      ? await gitRevision(root, [
+          'rev-parse',
+          '--verify',
+          '--end-of-options',
+          'MERGE_HEAD^{commit}',
+        ])
+      : null) ??
+    (state.operation === 'cherryPick'
+      ? await gitRevision(root, [
+          'rev-parse',
+          '--verify',
+          '--end-of-options',
+          'CHERRY_PICK_HEAD^{commit}',
+        ])
+      : null) ??
+    (state.operation === 'revert'
+      ? await gitRevision(root, [
+          'rev-parse',
+          '--verify',
+          '--end-of-options',
+          'REVERT_HEAD^{commit}',
+        ])
+      : null)
+  const incomingSubject = incomingRef ? await commitSummary(root, incomingRef) : null
+  const sides: ConflictContext['sides'] = []
+  if (incomingRef) {
+    if (state.operation === 'merge') {
+      const base = await gitRevision(root, ['merge-base', 'HEAD', incomingRef])
+      if (base) {
+        sides.push({ side: 'current', base, target: 'HEAD' })
+        sides.push({ side: 'incoming', base, target: incomingRef })
+      }
+    } else {
+      sides.push({ side: 'incoming', base: `${incomingRef}^`, target: incomingRef })
+    }
+  }
+  const incomingStage = stages.find((stage) => stage.stage === 3)
+  const stashes = (await getStashes(root)).map((entry) => ({
+    ref: entry.ref,
+    message: entry.message.replace(/^[^:]*:\s*/u, ''),
+    oid: entry.oid,
+  }))
+  let stash: ConflictContext['stash'] = null
+  if (!state.operation && incomingStage) {
+    for (const entry of stashes) {
+      const listing = await tryGit(root, [
+        '--literal-pathspecs',
+        'ls-tree',
+        '-z',
+        '--end-of-options',
+        entry.oid,
+        '--',
+        relativePath,
+      ])
+      const matched = listing
+        ?.split('\0')
+        .some((token) => token.split('\t')[0]?.split(/\s+/u)[2] === incomingStage.oid)
+      if (matched) {
+        stash = { ref: entry.ref, message: entry.message }
+        break
+      }
+    }
+  }
+  return {
+    operation: state.operation,
+    incomingRef,
+    incomingSubject: incomingSubject ? stripTrailingNewline(incomingSubject) : null,
+    sides,
+    stash,
+    stashAvailable: stashes.length > 0,
+  }
+}
+
+/**
+ * A path one side of the operation moved, taken from Git's own name-status diff
+ * rather than guessed. A pair Git reports as one added and one deleted path is
+ * a move of that path.
+ */
+async function conflictMoves(
+  root: string,
+  relativePath: string,
+  context: ConflictContext,
+): Promise<ConflictMove[]> {
+  const moves: ConflictMove[] = []
+  for (const side of context.sides) {
+    const listing = await tryGit(root, [
+      'diff',
+      '--name-status',
+      '-M',
+      '--no-ext-diff',
+      '--end-of-options',
+      side.base,
+      side.target,
+    ])
+    if (!listing) continue
+    const added: string[] = []
+    let deleted: string | null = null
+    for (const line of listing.split('\n')) {
+      if (!line) continue
+      const [status, ...paths] = line.split('\t')
+      if (status?.startsWith('R') && (paths[0] === relativePath || paths[1] === relativePath)) {
+        moves.push({ from: paths[0], to: paths[1], side: side.side })
+      } else if (status === 'A') {
+        added.push(paths[0])
+      } else if (status === 'D') {
+        deleted = paths[0]
+      }
+    }
+    // Git records a move as one added and one deleted path. Either endpoint can
+    // be the conflicted path: a side that renamed a file here conflicts on the
+    // new name, a side that renamed it away conflicts on the old one.
+    const pair =
+      !moves.some((move) => move.side === side.side) && deleted && added.length === 1
+        ? { from: deleted, to: added[0] }
+        : null
+    if (pair && (pair.from === relativePath || pair.to === relativePath)) {
+      moves.push({ ...pair, side: side.side })
+    }
+  }
+  return moves
+}
+
+export async function getConflictView(
+  repoPath: string,
+  requestedPath: string,
+): Promise<ConflictFile> {
+  const root = await resolveRepository(repoPath)
+  await recoverFileActionJournals(root)
+  const entry = changedEntry(await getStatus(root), requirePathInput(requestedPath, 'path'))
+  if (!entry.conflicted) throw new Error('The selected file has no unresolved conflict')
+  const relativePath = entry.path
+  await safeRepositoryPath(root, relativePath)
+  const stages = await conflictStages(root, relativePath)
+  if (!stages.length) throw new Error('The selected file has no unresolved conflict')
+  const context = await conflictContext(root, relativePath, stages)
+  const [identity, currentBranch, moves] = await Promise.all([
+    fileFingerprint(root, relativePath),
+    getCurrentBranch(root),
+    conflictMoves(root, relativePath, context),
+  ])
+  const sides: ConflictSides = {}
+  await Promise.all(
+    stages.map(async (stage) => {
+      sides[stage.stage] = decodeConflictBlob(await readConflictBlob(root, stage.oid))
+    }),
+  )
+  const worktree = identity.binary || !identity.preview ? null : identity.preview.toString('utf8')
+  const segments = worktree && !identity.truncated ? parseConflictSegments(worktree) : []
+  const stageNumbers = stages.map((stage) => stage.stage)
+  const tool = process.env.GIT_MERGE_TOOL || (await getConfigValue(root, 'merge.tool'))
+  const binary = identity.binary || Object.values(sides).some((side) => side.binary)
+  return {
+    path: relativePath,
+    kind: conflictKind(stageNumbers, moves.length > 0),
+    stages: stageNumbers,
+    binary,
+    labels: conflictLabels({
+      operation: context.operation,
+      currentBranch,
+      incomingSubject: context.incomingSubject,
+      incomingRef: context.incomingRef,
+      stash: context.stash,
+      stashAvailable: context.stashAvailable,
+    }),
+    base: sides[1]?.text ?? null,
+    current: sides[2]?.text ?? null,
+    incoming: sides[3]?.text ?? null,
+    worktree,
+    regions: conflictRegions(segments),
+    moves,
+    truncated: identity.truncated,
+    fingerprint: identity.fingerprint,
+    mergeTool: tool
+      ? { available: true, tool, reason: `Runs the configured merge tool ${tool} on this file.` }
+      : {
+          available: false,
+          tool: null,
+          reason: 'No merge tool is configured. Set merge.tool or GIT_MERGE_TOOL in Git.',
+        },
+  }
+}
+
+/**
+ * Put the chosen side, both sides, or nothing in the worktree. Side selection
+ * goes through Git's own checkout so file modes and binary content survive;
+ * nothing is staged here.
+ */
+async function writeConflictChoice(
+  root: string,
+  relativePath: string,
+  choice: ConflictChoice,
+  sides: ConflictSides,
+  identity: FileIdentity,
+): Promise<void> {
+  if (choice === 'delete') {
+    await runGit(root, ['--literal-pathspecs', 'rm', '-f', '--', relativePath])
+    return
+  }
+  if (choice === 'both') {
+    const current = sides[2]?.text
+    const incoming = sides[3]?.text
+    if (current === null || current === undefined || incoming === null || incoming === undefined) {
+      throw new Error('Keeping both copies needs a version of the file on each side')
+    }
+    await replaceCheckedFile(root, relativePath, identity, null, current + incoming)
+    return
+  }
+  if (!sides[choice === 'current' ? 2 : 3]) {
+    throw new Error('That side of the conflict has no content; accept the deletion instead')
+  }
+  const materialized = await materializeGitWorktreePath(root, relativePath, [
+    '--literal-pathspecs',
+    'checkout',
+    choice === 'current' ? '--ours' : '--theirs',
+    '--',
+    relativePath,
+  ])
+  try {
+    await replaceCheckedFile(root, relativePath, identity, materialized.path)
+  } finally {
+    await fs.rm(materialized.root, { recursive: true, force: true })
+  }
+}
+
+/**
+ * Mark one conflicted path resolved. The worktree and index identity the
+ * decision was made under is revalidated first, so an edit made elsewhere while
+ * the resolver was open is refused instead of overwritten.
+ */
+export async function runResolveConflict(
   repoPath: string,
   filePath: string,
   fingerprint: string,
-  strategy: 'ours' | 'theirs' | 'manual',
-  content: string,
+  resolution: ConflictResolution,
 ): Promise<ActionResult> {
   const root = await resolveRepository(repoPath)
   await recoverFileActionJournals(root)
   const { entry, identity } = await checkFileFingerprint(root, filePath, fingerprint)
   if (!entry.conflicted) throw new Error('The selected file has no unresolved conflict')
-  const actualPath = entry.path
-  await safeRepositoryPath(root, actualPath)
-  let materializedRoot: string | null = null
-  let sourcePath: string | null = null
-  try {
-    if (strategy === 'manual') {
-      await replaceCheckedFile(root, actualPath, identity, null, content)
-    } else {
-      const stage = strategy === 'ours' ? 2 : 3
-      if (await hasConflictStage(root, actualPath, stage)) {
-        const materialized = await materializeGitWorktreePath(root, actualPath, [
-          '--literal-pathspecs',
-          'checkout',
-          `--${strategy}`,
-          '--',
-          actualPath,
-        ])
-        materializedRoot = materialized.root
-        sourcePath = materialized.path
-      }
-      await replaceCheckedFile(root, actualPath, identity, sourcePath)
+  const relativePath = entry.path
+  await safeRepositoryPath(root, relativePath)
+  if (resolution.kind === 'content') {
+    if (identity.binary) {
+      throw new Error(
+        'This conflict is a binary file, so it cannot be resolved by editing text. ' +
+          'Accept one side, open the external merge tool, or resolve it outside Git Stacks.',
+      )
     }
-  } finally {
-    if (materializedRoot) {
-      await fs.rm(materializedRoot, { recursive: true, force: true })
+    if (hasConflictMarkers(resolution.content)) {
+      throw new Error('Conflict markers are still present; resolve every region before staging')
     }
+    await replaceCheckedFile(root, relativePath, identity, null, resolution.content)
+  } else {
+    const stages = await conflictStages(root, relativePath)
+    if (!stages.length) throw new Error('The selected file has no unresolved conflict')
+    const sides: ConflictSides = {}
+    await Promise.all(
+      stages.map(async (stage) => {
+        sides[stage.stage] = decodeConflictBlob(await readConflictBlob(root, stage.oid))
+      }),
+    )
+    if (resolution.choice === 'both' && Object.values(sides).some((side) => side.binary)) {
+      throw new Error('Keeping both copies is only possible for text files')
+    }
+    await writeConflictChoice(root, relativePath, resolution.choice, sides, identity)
   }
-  await safeRepositoryPath(root, actualPath)
-  await runGit(root, ['--literal-pathspecs', 'add', '--', actualPath])
-  return { message: `Resolved ${actualPath} using ${strategy}` }
+  if (resolution.kind !== 'choice' || resolution.choice !== 'delete') {
+    await safeRepositoryPath(root, relativePath)
+    await runGit(root, ['--literal-pathspecs', 'add', '--', relativePath])
+  }
+  if ((await conflictStages(root, relativePath)).length) {
+    throw new Error('Git still reports this path as unmerged; nothing was marked resolved')
+  }
+  return { message: `Resolved and staged ${relativePath}` }
+}
+
+/**
+ * `git mergetool` for one path, with its stdin closed. The tool is whatever
+ * Git is configured to run; Git decides how to call it and what a failed run
+ * means, and a non-zero exit is reported with Git's own words.
+ */
+function runMergeTool(root: string, relativePath: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const child = spawn('git', ['mergetool', '--no-prompt', '--no-gui', '--', relativePath], {
+      cwd: root,
+      env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+      stdio: ['ignore', 'pipe', 'pipe'],
+      shell: false,
+    })
+    let output = ''
+    let failure = ''
+    child.stdout.setEncoding('utf8')
+    child.stderr.setEncoding('utf8')
+    child.stdout.on('data', (chunk: string) => {
+      output += chunk
+    })
+    child.stderr.on('data', (chunk: string) => {
+      output += chunk
+      failure += chunk
+    })
+    child.once('error', reject)
+    child.once('close', (code) => {
+      if (code === 0) resolve(output)
+      else {
+        reject(
+          new Error(
+            (failure || output).trim() ||
+              `git mergetool exited with status ${code} for ${relativePath}`,
+          ),
+        )
+      }
+    })
+  })
+}
+
+/**
+ * Hand the conflicted file to the configured merge tool. Git's own
+ * `--no-save` keeps the staging decision here, so the result is reviewed and
+ * marked resolved through the resolver rather than staged behind it.
+ */
+export async function runConflictMergeTool(
+  repoPath: string,
+  filePath: string,
+  fingerprint: string,
+): Promise<ActionResult> {
+  const root = await resolveRepository(repoPath)
+  await recoverFileActionJournals(root)
+  const { entry } = await checkFileFingerprint(root, filePath, fingerprint)
+  if (!entry.conflicted) throw new Error('The selected file has no unresolved conflict')
+  const relativePath = entry.path
+  await safeRepositoryPath(root, relativePath)
+  const tool = process.env.GIT_MERGE_TOOL || (await getConfigValue(root, 'merge.tool'))
+  if (!tool) {
+    throw new Error('No merge tool is configured. Set merge.tool or GIT_MERGE_TOOL in Git.')
+  }
+  // `mergetool` takes no `--literal-pathspecs` and no `--no-save`: it leaves the
+  // tool's result in the worktree for review, which is what the resolver stages
+  // afterwards. It runs with no stdin, so the question Git asks before saving a
+  // result fails fast instead of waiting on a prompt no one can answer.
+  await runMergeTool(root, relativePath)
+  const after = await fileFingerprint(root, relativePath)
+  const markers =
+    after.preview && !after.binary ? hasConflictMarkers(after.preview.toString('utf8')) : true
+  return {
+    message: markers
+      ? `${tool} left unresolved markers in ${relativePath}. Nothing was staged.`
+      : `${tool} finished with ${relativePath}. Review the result, then mark it resolved to stage it.`,
+  }
 }
 
 function requireHistorySkip(value: unknown): number {
@@ -3850,7 +4277,8 @@ async function ensureStackWriteAllowed(repoPath: string, action: GitAction): Pro
   if (
     action.type === 'stage' ||
     action.type === 'unstage' ||
-    action.type === 'resolveFile' ||
+    action.type === 'resolveConflict' ||
+    action.type === 'conflictMergeTool' ||
     action.type === 'stackContinue' ||
     action.type === 'stackAbort'
   ) {
@@ -4242,8 +4670,10 @@ export async function runAction(repoPath: string, value: GitAction): Promise<Act
       return runOperation(root, 'abort')
     case 'discardFile':
       return runDiscardFile(root, action.path, action.fingerprint)
-    case 'resolveFile':
-      return runResolveFile(root, action.path, action.fingerprint, action.strategy, action.content)
+    case 'resolveConflict':
+      return runResolveConflict(root, action.path, action.fingerprint, action.resolution)
+    case 'conflictMergeTool':
+      return runConflictMergeTool(root, action.path, action.fingerprint)
     case 'createPr':
       return runCreatePr(root, action.title, action.body, action.base, action.draft)
   }

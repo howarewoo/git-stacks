@@ -106,6 +106,7 @@ export function ChangesView({
   onSubmitCommit,
   actionError,
   onStash,
+  onResolveConflict,
 }: {
   snapshot: RepositorySnapshot
   groups: ChangeGroups
@@ -121,6 +122,7 @@ export function ChangesView({
   onCommitAmendChange: (value: boolean) => void
   onSubmitCommit: (event: React.FormEvent<HTMLFormElement>) => void
   onStash: () => void
+  onResolveConflict: (path: string) => void
   actionError: string | null
 }) {
   const fileSearch = groups.search
@@ -296,6 +298,7 @@ export function ChangesView({
           busy={busy}
           runAction={runAction}
           onClose={() => onInspect(null)}
+          onResolveConflict={onResolveConflict}
           actionError={actionError}
         />
       ) : null}

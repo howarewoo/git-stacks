@@ -88,6 +88,51 @@ export interface FileView {
   conflicted: boolean
   truncated: boolean
 }
+/** What Git itself recorded as happening: a revert undoes a commit. */
+export type ConflictOperation =
+  'rebase' | 'merge' | 'cherryPick' | 'revert' | 'stashApply' | 'unknown'
+export type ConflictKind = 'content' | 'addAdd' | 'modifyDelete' | 'deleteModify' | 'rename'
+export type ConflictChoice = 'current' | 'incoming' | 'both' | 'delete'
+/** A path one side of the operation moved, as Git's own diff reported it. */
+export interface ConflictMove {
+  from: string
+  to: string
+  side: 'current' | 'incoming'
+}
+export interface ConflictLabels {
+  operation: ConflictOperation
+  title: string
+  base: string
+  current: string
+  incoming: string
+  explanation: string
+}
+export interface ConflictRegion {
+  index: number
+  startLine: number
+  current: string
+  incoming: string
+}
+export interface ConflictFile {
+  path: string
+  kind: ConflictKind
+  /** Index stages Git left for this path: 1 base, 2 current, 3 incoming. */
+  stages: number[]
+  binary: boolean
+  labels: ConflictLabels
+  base: string | null
+  current: string | null
+  incoming: string | null
+  worktree: string | null
+  regions: ConflictRegion[]
+  moves: ConflictMove[]
+  truncated: boolean
+  /** Worktree and index identity this view was read under. */
+  fingerprint: string
+  mergeTool: { available: boolean; tool: string | null; reason: string }
+}
+export type ConflictResolution =
+  { kind: 'content'; content: string } | { kind: 'choice'; choice: ConflictChoice }
 export interface PushPreview {
   branch: string
   remote: string
@@ -169,12 +214,12 @@ export type GitAction =
   | { type: 'operationContinue' | 'operationSkip' | 'operationAbort' }
   | { type: 'discardFile'; path: string; fingerprint: string }
   | {
-      type: 'resolveFile'
+      type: 'resolveConflict'
       path: string
       fingerprint: string
-      strategy: 'ours' | 'theirs' | 'manual'
-      content: string
+      resolution: ConflictResolution
     }
+  | { type: 'conflictMergeTool'; path: string; fingerprint: string }
   | StackAction
 export interface ActionResult {
   message: string
@@ -186,6 +231,7 @@ export interface DesktopAPI {
   refresh(): Promise<RepositorySnapshot>
   runAction(action: GitAction): Promise<ActionResult>
   fileView(path: string): Promise<FileView>
+  conflictView(path: string): Promise<ConflictFile>
   history(ref: string, skip: number): Promise<HistoryPage>
   commitDiff(oid: string): Promise<{ text: string; truncated: boolean }>
   pushPreview(): Promise<PushPreview>
