@@ -83,6 +83,7 @@ function checkEntry(pr) {
 function graphPullRequest(pr, withBody) {
   const merged = pr.state === 'MERGED'
   const value = {
+    id: `PR_${pr.number}`,
     number: pr.number,
     title: pr.title,
     url: pr.url,
@@ -241,10 +242,10 @@ function handleApi(state, args) {
     const pr = findPr(state, prNumber)
     if (method === 'GET') return restPullRequest(pr)
     if (method !== 'PATCH') fail(`unsupported pull request method ${method}`)
+    if (forms.has('draft')) fail('draft cannot be updated through REST')
     if (forms.has('title')) pr.title = forms.get('title')
     if (forms.has('body')) pr.body = forms.get('body')
     if (forms.has('base')) pr.base = forms.get('base')
-    if (forms.has('draft')) pr.draft = String(forms.get('draft')) === 'true'
     if (forms.has('state')) {
       const requested = String(forms.get('state')).toLowerCase()
       if (requested === 'open' && pr.state !== 'MERGED') pr.state = 'OPEN'
@@ -267,7 +268,7 @@ function handleApi(state, args) {
     const key = String(number)
     if (!Array.isArray(state.comments[key])) state.comments[key] = []
     if (method === 'GET')
-      return [state.comments[key].map((comment) => commentResponse(state, comment))]
+      return state.comments[key].map((comment) => commentResponse(state, comment))
     if (method !== 'POST') fail(`unsupported issue comments method ${method}`)
     const id = Number.isInteger(state.nextCommentId)
       ? state.nextCommentId++
@@ -300,6 +301,19 @@ function handleGraphql(state, args) {
   const forms = formValues(args)
   requireRepository(state, args)
   const query = forms.get('query') || ''
+  const field = query.includes('convertPullRequestToDraft')
+    ? 'convertPullRequestToDraft'
+    : query.includes('markPullRequestReadyForReview')
+      ? 'markPullRequestReadyForReview'
+      : null
+  if (field) {
+    const match = /^PR_(\d+)$/u.exec(String(forms.get('pullRequestId') || ''))
+    if (!match) fail('Invalid pull request ID')
+    const pr = findPr(state, Number(match[1]))
+    if (pr.state !== 'OPEN') fail('Pull request is not open')
+    pr.draft = field === 'convertPullRequestToDraft'
+    return { data: { [field]: { pullRequest: { id: `PR_${pr.number}`, isDraft: pr.draft } } } }
+  }
   if (query.includes('pullRequest(number:')) {
     const pr = findPr(state, Number(forms.get('number')))
     return { data: { repository: { pullRequest: graphPullRequest(pr, true) } } }
@@ -370,6 +384,16 @@ try {
   else if (args[0] === 'api') result = handleApi(state, args)
   else fail(`unknown gh request: ${args.join(' ')}`)
   saveState(state)
+  if (args.includes('--include')) {
+    const status =
+      args.includes('repos/' + state.repository.owner + '/' + state.repository.name + '/pulls') &&
+      args.includes('POST')
+        ? 201
+        : 200
+    process.stdout.write(
+      `HTTP/2 ${status} OK\r\nx-ratelimit-limit: 5000\r\nx-ratelimit-remaining: 4998\r\nx-ratelimit-reset: 1800000000\r\nx-ratelimit-resource: core\r\n\r\n`,
+    )
+  }
   if (typeof result === 'string') process.stdout.write(result)
   else process.stdout.write(`${JSON.stringify(result)}\n`)
 } catch (error) {

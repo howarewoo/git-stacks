@@ -35,6 +35,7 @@ const open = [
   { number: 4, title: 'Fork feature', url: 'https://github.com/acme/widgets/pull/4', headRefName: 'feature', headRefOid: 'b'.repeat(40), baseRefName: 'main', isDraft: false, state: 'OPEN', headRepository: { nameWithOwner: 'evil/widgets' }, commits: { nodes: [{ commit: { statusCheckRollup: { state: 'SUCCESS' } } }] } }
 ]
 const tracked = { number: 7, title: 'Merged parent', url: 'https://github.com/acme/widgets/pull/7', body: 'body', state: 'MERGED', isDraft: false, headRefName: 'parent', headRefOid: 'c'.repeat(40), headRepository: { nameWithOwner: 'acme/widgets' }, baseRefName: 'main', mergeStateStatus: 'CLEAN', reviewDecision: 'APPROVED', mergeCommit: { oid: 'd'.repeat(40) }, commits: { nodes: [{ commit: { statusCheckRollup: { state: 'SUCCESS' } } }] } }
+if (args.includes('--include')) process.stdout.write('HTTP/2 200 OK\\r\\nx-ratelimit-remaining: 4998\\r\\n\\r\\n')
 const single = args.some((arg) => arg.includes('pullRequest(number:'))
 if (args.includes('graphql') && single) {
   process.stdout.write(JSON.stringify({ data: { repository: { pullRequest: tracked } } }))

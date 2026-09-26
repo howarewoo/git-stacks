@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { createServer } from 'node:http'
 import { chmod, mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { delimiter, join } from 'node:path'
@@ -283,71 +284,150 @@ test('gh stays optional and the selected transport follows the environment', () 
     'direct',
   )
 })
-test('the gh adapter maps CLI failures onto the same typed kinds', async () => {
-  const notFound = new GhGitHubTransport({
-    run: async () => {
-      const error: Error & { stderr?: string; code?: string } = new Error('gh failed')
-      error.stderr = 'gh: Not Found (HTTP 404)'
-      error.code = '1'
-      throw error
-    },
-  })
-  await assert.rejects(
-    notFound.rest({ path: 'repos/acme/widgets/pulls/9' }),
-    (error: unknown) =>
-      error instanceof GitHubTransportError && error.kind === 'not-found' && error.status === 404,
-  )
-
-  const missing = new GhGitHubTransport({
-    run: async () => {
-      const error: Error & { code?: string } = new Error('spawn gh ENOENT')
-      error.code = 'ENOENT'
-      throw error
-    },
-  })
-  await assert.rejects(
-    missing.rest({ path: 'user' }),
-    (error: unknown) => error instanceof GitHubTransportError && error.kind === 'unsupported',
-  )
-
+test('gh consumes HTTP response metadata and version without parsing stderr', async () => {
   const commands: string[][] = []
   const adapter = new GhGitHubTransport({
+    env: { GIT_STACKS_GITHUB_API_VERSION: '2026-01-01' },
     run: async (args) => {
       commands.push(args)
-      if (args.includes('--method') && args.includes('PATCH'))
-        return JSON.stringify({ number: 3, draft: false })
-      if (args.includes('--paginate')) return JSON.stringify([[{ id: 1 }], [{ id: 2 }]])
-      return JSON.stringify({ data: { repository: { pullRequest: { number: 3 } } } })
+      if (args.includes('repos/acme/widgets/pulls/9')) {
+        const error = new Error('gh failed') as Error & { stdout: string }
+        error.stdout =
+          'HTTP/2.0 403 Forbidden\r\nx-ratelimit-remaining: 0\r\nretry-after: 60\r\n\r\n{"message":"API rate limit exceeded"}\n'
+        throw error
+      }
+      const page = args.find((arg) => arg.includes('comments?page=2'))
+      return `HTTP/2.0 ${args.includes('PATCH') ? 200 : 201} OK\r\nx-ratelimit-limit: 5000\r\nx-ratelimit-remaining: 4321\r\n${!page && args.some((arg) => arg.includes('/comments')) ? 'link: <https://api.github.com/repos/acme/widgets/issues/3/comments?page=2>; rel="next"\r\n' : ''}\r\n${args.some((arg) => arg.includes('/comments')) ? JSON.stringify([{ id: page ? 2 : 1 }]) : JSON.stringify({ data: { repository: { pullRequest: { number: 3 } } } })}\n`
     },
   })
-  const patched = await adapter.rest<{ draft: boolean }>({
+  const patched = await adapter.rest({
     method: 'PATCH',
     path: 'repos/acme/widgets/pulls/3',
-    body: { title: 'Next', draft: false },
+    body: { title: 'Next' },
   })
-  assert.equal(patched.data.draft, false)
-  assert.deepEqual(commands[0], [
-    'api',
-    '--hostname',
-    'github.com',
-    '--method',
-    'PATCH',
-    'repos/acme/widgets/pulls/3',
-    '-f',
-    'title=Next',
-    '-F',
-    'draft=false',
-  ])
+  assert.equal(patched.status, 200)
+  assert.equal(patched.rateLimit.remaining, 4321)
+  assert.ok(commands[0].includes('X-GitHub-Api-Version: 2026-01-01'))
+  assert.ok(commands[0].includes('--include'))
   assert.deepEqual(await adapter.paginate({ path: 'repos/acme/widgets/issues/3/comments' }), [
     { id: 1 },
     { id: 2 },
   ])
   const data = await adapter.graphql<{ repository: { pullRequest: { number: number } } }>(
     'query {}',
-    {
-      owner: 'acme',
-    },
+    { owner: 'acme' },
   )
   assert.equal(data.repository.pullRequest.number, 3)
-  assert.ok(commands[2].includes('owner=acme'))
+  await assert.rejects(adapter.rest({ path: 'repos/acme/widgets/pulls/9' }), (error: unknown) => {
+    assert.ok(error instanceof GitHubTransportError)
+    assert.equal(error.kind, 'rate-limited')
+    assert.equal(error.status, 403)
+    assert.equal(error.rateLimit.remaining, 0)
+    assert.equal(error.rateLimit.retryAfterSeconds, 60)
+    return true
+  })
+})
+
+test('gh rejects pre-cancelled requests and forwards deadlines to the subprocess', async () => {
+  let calls = 0
+  const adapter = new GhGitHubTransport({
+    run: async (_args, options) => {
+      calls += 1
+      await new Promise<void>((_resolve, reject) => {
+        options?.signal?.addEventListener('abort', () => reject(new Error('aborted')), {
+          once: true,
+        })
+      })
+      return ''
+    },
+  })
+  const preCancelled = new AbortController()
+  preCancelled.abort()
+  await assert.rejects(
+    adapter.rest({ path: 'user', signal: preCancelled.signal }),
+    (error: unknown) => error instanceof GitHubTransportError && error.kind === 'cancelled',
+  )
+  assert.equal(calls, 0)
+  await assert.rejects(
+    adapter.graphql('query {}', {}, { timeoutMs: 20 }),
+    (error: unknown) => error instanceof GitHubTransportError && error.kind === 'timeout',
+  )
+  const controller = new AbortController()
+  const pending = adapter.rest({ path: 'user', signal: controller.signal })
+  controller.abort()
+  await assert.rejects(
+    pending,
+    (error: unknown) => error instanceof GitHubTransportError && error.kind === 'cancelled',
+  )
+})
+
+// Real socket timing is essential: fake timers cannot drive fetch's body stream.
+test('direct deadlines and cancellation apply while streaming a response body', async () => {
+  const server = createServer((request, response) => {
+    response.writeHead(200, { 'content-type': 'application/json' })
+    response.flushHeaders()
+    response.write('{"ok":')
+    if (request.url === '/broken') setImmediate(() => response.destroy())
+    else setTimeout(() => response.end('true}'), 250)
+  })
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  try {
+    const address = server.address()
+    assert.ok(address && typeof address !== 'string')
+    const transport = new DirectGitHubTransport({
+      token: 'local-test',
+      apiUrl: `http://127.0.0.1:${address.port}`,
+    })
+    await assert.rejects(
+      transport.rest({ path: 'user', timeoutMs: 35 }),
+      (error: unknown) => error instanceof GitHubTransportError && error.kind === 'timeout',
+    )
+    const controller = new AbortController()
+    const pending = transport.graphql('query {}', {}, { signal: controller.signal })
+    setTimeout(() => controller.abort(), 35)
+    await assert.rejects(
+      pending,
+      (error: unknown) => error instanceof GitHubTransportError && error.kind === 'cancelled',
+    )
+    await assert.rejects(
+      transport.rest({ path: 'broken' }),
+      (error: unknown) => error instanceof GitHubTransportError && error.kind === 'network',
+    )
+  } finally {
+    server.closeAllConnections()
+    await new Promise<void>((resolve, reject) =>
+      server.close((error) => (error ? reject(error) : resolve())),
+    )
+  }
+})
+
+test('GraphQL HTTP 200 rate limit errors retain their response metadata', async () => {
+  const cases: Array<{ message: string; headers: Record<string, string>; kind: GitHubErrorKind }> =
+    [
+      {
+        message: 'API rate limit exceeded',
+        headers: { 'x-ratelimit-remaining': '0' },
+        kind: 'rate-limited',
+      },
+      {
+        message: 'You have exceeded a secondary rate limit',
+        headers: { 'retry-after': '45' },
+        kind: 'secondary-rate-limit',
+      },
+    ]
+  for (const expected of cases) {
+    const { fetch: response } = recordingFetch([
+      { body: { errors: [{ message: expected.message }] }, headers: expected.headers },
+    ])
+    await assert.rejects(
+      new DirectGitHubTransport({ token: 'token', fetch: response }).graphql('query {}'),
+      (error: unknown) => {
+        assert.ok(error instanceof GitHubTransportError)
+        assert.equal(error.kind, expected.kind)
+        assert.equal(error.status, 200)
+        assert.equal(error.rateLimit.remaining, expected.kind === 'rate-limited' ? 0 : 4321)
+        return true
+      },
+    )
+  }
 })

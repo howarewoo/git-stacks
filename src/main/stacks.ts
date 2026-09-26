@@ -2441,6 +2441,32 @@ async function patchPullRequest(
   })
 }
 
+async function changePullRequestDraft(
+  fullName: string,
+  number: number,
+  draft: boolean,
+): Promise<void> {
+  const [owner, name] = fullName.split('/')
+  const transport = githubTransport()
+  const lookup = await transport.graphql<unknown>(
+    'query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { id } } }',
+    { owner, name, number },
+  )
+  const repository = isRecord(lookup) ? lookup.repository : null
+  const pullRequest = isRecord(repository) ? repository.pullRequest : null
+  if (!isRecord(pullRequest) || typeof pullRequest.id !== 'string')
+    throw new Error(`Could not identify pull request #${number} for readiness update`)
+  const field = draft ? 'convertPullRequestToDraft' : 'markPullRequestReadyForReview'
+  const result = await transport.graphql<unknown>(
+    `mutation($pullRequestId: ID!) { ${field}(input: {pullRequestId: $pullRequestId}) { pullRequest { id isDraft } } }`,
+    { pullRequestId: pullRequest.id },
+  )
+  const payload = isRecord(result) ? result[field] : null
+  const updated = isRecord(payload) ? payload.pullRequest : null
+  if (!isRecord(updated) || updated.id !== pullRequest.id || updated.isDraft !== draft)
+    throw new Error(`Pull request #${number} did not change readiness`)
+}
+
 async function linkStackComments(
   fullName: string,
   pullRequests: Array<{ branch: string; pr: PullRequest }>,
@@ -2776,7 +2802,7 @@ async function updatePullRequest(
   const current = await getPullRequest(repoPath, number)
   if (current.state === 'MERGED') throw new Error(`Pull request #${number} is already merged`)
   await patchPullRequest(origin.fullName, number, { title, body })
-  if (current.draft !== draft) await patchPullRequest(origin.fullName, number, { draft })
+  if (current.draft !== draft) await changePullRequestDraft(origin.fullName, number, draft)
   const readBack = await getPullRequest(repoPath, number)
   if (readBack.title !== title || readBack.body !== body || readBack.draft !== draft) {
     throw new Error(`Pull request #${number} did not match the requested update`)

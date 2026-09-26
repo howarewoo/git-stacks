@@ -725,6 +725,16 @@ test(
         'Updated human description',
       )
 
+      await runAction(harness.repo, {
+        type: 'updatePr',
+        number: pr.number,
+        title: 'Updated title',
+        body: 'Updated human description',
+        draft: true,
+      })
+      state = await harness.readState()
+      assert.equal(prFor(state, 'topic').draft, true)
+
       await runAction(harness.repo, { type: 'closePr', number: pr.number })
       state = await harness.readState()
       assert.equal(prFor(state, 'topic').state, 'CLOSED')

@@ -67,6 +67,7 @@ function checkEntry(pr: GitHubFixtureState['prs'][number]) {
 function graphPullRequest(pr: GitHubFixtureState['prs'][number], withBody: boolean) {
   const merged = pr.state === 'MERGED'
   const value: Record<string, unknown> = {
+    id: `PR_${pr.number}`,
     number: pr.number,
     title: pr.title,
     url: pr.url,
@@ -245,12 +246,13 @@ function handleRest(
     const pr = findPr(state, Number(pull[1]))
     if (method === 'GET') return { status: 200, body: restPullRequest(pr) }
     if (method === 'PATCH') {
-      if (pr.state === 'MERGED' && (body.state === 'open' || body.draft !== undefined))
+      if (body.draft !== undefined)
+        throw new HttpError(422, 'Unprocessable Entity', 'draft cannot be updated through REST')
+      if (pr.state === 'MERGED' && body.state === 'open')
         throw new HttpError(422, 'Unprocessable Entity', 'Pull request is merged')
       if (typeof body.title === 'string') pr.title = body.title
       if (typeof body.body === 'string') pr.body = body.body
       if (typeof body.base === 'string') pr.base = body.base
-      if (body.draft === true || body.draft === false) pr.draft = body.draft
       if (typeof body.state === 'string') {
         if (body.state === 'open' && pr.state !== 'MERGED') pr.state = 'OPEN'
         else if (body.state === 'closed' && pr.state !== 'MERGED') pr.state = 'CLOSED'
@@ -303,6 +305,23 @@ function handleGraphql(
 ): { status: number; body: unknown } {
   const query = String(body.query || '')
   const variables = (body.variables ?? {}) as Record<string, unknown>
+  const field = query.includes('convertPullRequestToDraft')
+    ? 'convertPullRequestToDraft'
+    : query.includes('markPullRequestReadyForReview')
+      ? 'markPullRequestReadyForReview'
+      : null
+  if (field) {
+    const match = /^PR_(\d+)$/u.exec(String(variables.pullRequestId || ''))
+    if (!match) throw new HttpError(422, 'Unprocessable Entity', 'Invalid pull request ID')
+    const pr = findPr(state, Number(match[1]))
+    if (pr.state !== 'OPEN')
+      throw new HttpError(422, 'Unprocessable Entity', 'Pull request is not open')
+    pr.draft = field === 'convertPullRequestToDraft'
+    return {
+      status: 200,
+      body: { data: { [field]: { pullRequest: { id: `PR_${pr.number}`, isDraft: pr.draft } } } },
+    }
+  }
   if (query.includes('pullRequest(number:')) {
     const pr = findPr(state, Number(variables.number))
     return {
