@@ -22,6 +22,15 @@ import { workflowError, type RunAction, type WorkflowRequest } from './workflow-
 import { PhaseStatus, WorkflowActions } from './workflow-composition'
 import { partialProgress, workflowPhase } from './workflow-policy'
 import { BranchHoverCard, PullRequestHoverCard } from './repository-hover-cards'
+import { CurrentBadge } from './branch-workspace'
+import { parentProvenanceLabel, requiresRestack } from '../lib/branch-workspace'
+import {
+  checkLabel,
+  checksVariant,
+  prStateLabel,
+  prStateVariant,
+  reviewLabel,
+} from '../lib/pull-request-state'
 
 type CommonProps = {
   snapshot: RepositorySnapshot
@@ -774,9 +783,7 @@ export function StackView({
         : (groups.keys().next().value ?? null)
   const members = root ? (groups.get(root) ?? []) : []
   const ordered = sortBranchesByUpdatedAt(members)
-  const stale = members.filter(
-    (branch) => branch.needsRestack || (branch.parentBehind ?? 0) > 0,
-  ).length
+  const stale = members.filter(requiresRestack).length
   const blocked = busy || !!snapshot.operation || !!snapshot.stackOperation
   return (
     <div className="stacks-view">
@@ -806,24 +813,26 @@ export function StackView({
       ) : (
         <>
           <div className="stack-workspace-header">
-            <label htmlFor="stack-selection">Stack root</label>
-            <Select
-              id="stack-selection"
-              className="workflow-select"
-              value={root}
-              onChange={(event) => {
-                setSelection(event.target.value)
-                const branch = byName.get(event.target.value)
-                if (branch) onSelect(branch)
-              }}
-            >
-              {[...groups].map(([name, branches]) => (
-                <option value={name} key={name}>
-                  {name} · {branches.length} branch{branches.length === 1 ? '' : 'es'}
-                </option>
-              ))}
-            </Select>
-            <p>
+            <div className="stack-root-field">
+              <label htmlFor="stack-selection">Stack root</label>
+              <Select
+                id="stack-selection"
+                className="workflow-select"
+                value={root}
+                onChange={(event) => {
+                  setSelection(event.target.value)
+                  const branch = byName.get(event.target.value)
+                  if (branch) onSelect(branch)
+                }}
+              >
+                {[...groups].map(([name, branches]) => (
+                  <option value={name} key={name}>
+                    {name} · {branches.length} branch{branches.length === 1 ? '' : 'es'}
+                  </option>
+                ))}
+              </Select>
+            </div>
+            <p className="stack-guidance">
               {stale
                 ? `${stale} branch${stale === 1 ? ' requires' : 'es require'} restacking.`
                 : 'Review the stack, publish its PRs, and merge from the base upward.'}
@@ -834,7 +843,7 @@ export function StackView({
                 variant={stale ? 'accent' : 'secondary'}
                 disabled={blocked}
                 onClick={() => onRequest({ kind: 'stack', branch: root, operation: 'restack' })}
-                tooltip="Preview parent-first rebases of this stack. Publishing is a separate step."
+                tooltip="Preview parent-first rebases of this stack locally. Publishing is a separate step."
               >
                 <RefreshCw className="size-3.5" />
                 Restack…
@@ -872,28 +881,40 @@ export function StackView({
                 <article className="stack-member" key={branch.ref}>
                   <div className="stack-member-heading">
                     <BranchHoverCard branch={branch}>
-                      <button onClick={() => onSelect(branch)} className="stack-member-name">
-                        <GitBranch className="size-4" />
+                      <button
+                        aria-label={`Inspect ${branch.name}`}
+                        className="stack-member-name"
+                        onClick={() => onSelect(branch)}
+                      >
+                        <GitBranch aria-hidden="true" className="size-4" />
                         <strong>{branch.name}</strong>
-                        <ChevronRight className="size-3.5" />
+                        <ChevronRight aria-hidden="true" className="size-3.5" />
                       </button>
                     </BranchHoverCard>
-                    {branch.current ? <Badge variant="accent">current</Badge> : null}
-                    {branch.needsRestack || (branch.parentBehind ?? 0) > 0 ? (
+                    {branch.current ? <CurrentBadge /> : null}
+                    {requiresRestack(branch) ? (
                       <Badge variant="warning">Requires restack</Badge>
                     ) : null}
                   </div>
-                  <div className="stack-member-meta">
-                    <span>
-                      Parent: <strong>{branch.parent ?? 'Not set'}</strong>
-                    </span>
-                    <span>
-                      {branch.parentSource === 'recorded'
-                        ? 'Recorded parent'
-                        : branch.parentSource === 'pullRequest'
-                          ? 'From PR base'
-                          : 'Inferred — confirm before publishing'}
-                    </span>
+                  <dl className="stack-member-meta">
+                    <div>
+                      <dt>Parent</dt>
+                      <dd>{branch.parent ?? 'Not set'}</dd>
+                    </div>
+                    <div>
+                      <dt>Provenance</dt>
+                      <dd
+                        className={
+                          branch.parent && branch.parentSource !== 'recorded'
+                            ? 'stack-provenance-unconfirmed'
+                            : undefined
+                        }
+                      >
+                        {parentProvenanceLabel(branch)}
+                      </dd>
+                    </div>
+                  </dl>
+                  <div className="stack-member-actions">
                     <Button
                       size="sm"
                       variant="ghost"
@@ -916,25 +937,12 @@ export function StackView({
                           #{branch.pr.number} {branch.pr.title}
                         </Button>
                       </PullRequestHoverCard>
-                      <div className="workflow-row">
-                        <Badge variant={branch.pr.state === 'MERGED' ? 'accent' : 'secondary'}>
-                          {branch.pr.draft ? 'draft' : branch.pr.state.toLowerCase()}
+                      <div className="stack-pr-status">
+                        <Badge variant={prStateVariant(branch.pr)}>{prStateLabel(branch.pr)}</Badge>
+                        <Badge variant={checksVariant(branch.pr.checks)}>
+                          {checkLabel(branch.pr.checks)}
                         </Badge>
-                        <Badge
-                          variant={
-                            branch.pr.checks === 'failing'
-                              ? 'danger'
-                              : branch.pr.checks === 'passing'
-                                ? 'success'
-                                : 'secondary'
-                          }
-                        >
-                          {branch.pr.checks === 'none' ? 'No checks' : `Checks ${branch.pr.checks}`}
-                        </Badge>
-                        <span className="workflow-note">
-                          {branch.pr.reviewDecision?.replaceAll('_', ' ').toLowerCase() ||
-                            'No review decision'}
-                        </span>
+                        <span className="workflow-note">{reviewLabel(branch.pr)}</span>
                       </div>
                       {branch.pr.state === 'OPEN' && branch.pr.base === snapshot.defaultBranch ? (
                         <Button

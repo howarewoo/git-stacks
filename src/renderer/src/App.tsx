@@ -5,23 +5,20 @@ import {
   ArrowDown,
   ArrowLeftRight,
   ArrowUp,
+  Check,
   ChevronRight,
   Circle,
   Clock3,
-  Cloud,
   Download,
-  ExternalLink,
   Files,
   FolderGit2,
   FolderOpen,
   GitBranch,
   GitCommitHorizontal,
   GitFork,
-  GitMerge,
   GitPullRequest,
   Info,
   History,
-  Layers,
   LoaderCircle,
   MoreHorizontal,
   PanelRightClose,
@@ -42,7 +39,6 @@ import type {
   ChangedFile,
   DesktopAPI,
   GitAction,
-  PullRequest,
   RecentRepository,
   RepositorySnapshot,
 } from '../../shared/types'
@@ -65,12 +61,15 @@ import { BranchHoverCard, PullRequestHoverCard } from './components/repository-h
 import { Field } from './components/ui/field'
 import { cn } from './lib/utils'
 import { EmptyState, InlineAlert } from './components/ui/surface'
+import { checkLabel, checksVariant } from './lib/pull-request-state'
 import {
-  getCombinedBranches,
-  getRepresentedRemoteRef,
-  indexBranchesByParentName,
-  sortBranchesByUpdatedAt,
-} from './lib/branches'
+  branchFilterOptions,
+  getBranchWorkspace,
+  resolveSelectedBranch,
+  type BranchFilter,
+} from './lib/branch-workspace'
+import { BranchTree } from './components/branch-workspace'
+import { BranchInspector } from './components/branch-inspector'
 import { WorkflowDialog, type WorkflowRequest } from './components/workflow-dialog'
 import { WorkspaceNavigation } from './components/workspace-navigation'
 import {
@@ -89,136 +88,11 @@ import {
 import { CLOSE_INTENT_MESSAGES, closeIntent } from './components/workflow-policy'
 
 type WorkspaceView = 'branches' | 'stacks' | 'history' | 'changes' | 'pullRequests' | 'stashes'
-type BranchFilter = 'all' | 'local' | 'remote' | 'prs'
-
-type BranchTreeInfo = {
-  depth: number
-  cycle: boolean
-  missingParent: boolean
-}
 
 function readableError(value: unknown): string {
   if (value instanceof Error && value.message) return value.message
   if (typeof value === 'string' && value) return value
   return 'The operation failed. Check the repository and try again.'
-}
-
-function branchTreeInfo(
-  branch: Branch,
-  byName: Map<string, Branch>,
-  childCounts: Map<string, number>,
-): BranchTreeInfo {
-  const visited = new Set<string>([branch.name])
-  let parent = branch.parent
-  let depth = 0
-  let cycle = false
-  let missingParent = false
-
-  while (parent) {
-    if (visited.has(parent)) {
-      cycle = true
-      break
-    }
-    visited.add(parent)
-    const parentBranch = byName.get(parent)
-    if (!parentBranch) {
-      missingParent = true
-      break
-    }
-    if (!parentBranch.parent || (childCounts.get(parentBranch.ref) ?? 0) > 1) depth += 1
-    parent = parentBranch.parent
-  }
-
-  return { depth, cycle, missingParent }
-}
-
-type BranchTreeRow = BranchTreeInfo & {
-  trunks: { lane: number; kind: 'start' | 'start-node' | 'full' | 'end-parent' | 'end-child' }[]
-  elbows: { lane: number }[]
-}
-
-function getBranchTreeGeometry(visibleBranches: readonly Branch[], byName: Map<string, Branch>) {
-  const childCounts = new Map<string, number>()
-  for (const branch of getCombinedBranches([...new Set(byName.values())])) {
-    const parent = byName.get(branch.parent ?? '')
-    if (parent) childCounts.set(parent.ref, (childCounts.get(parent.ref) ?? 0) + 1)
-  }
-  const rows: BranchTreeRow[] = visibleBranches.map((branch) => ({
-    ...branchTreeInfo(branch, byName, childCounts),
-    trunks: [],
-    elbows: [],
-  }))
-  const visibleByName = indexBranchesByParentName(visibleBranches)
-  const visibleIndex = new Map(visibleBranches.map((branch, index) => [branch.ref, index]))
-  for (let index = 0; index < visibleBranches.length; index += 1) {
-    const counterpart = getRepresentedRemoteRef(visibleBranches[index])
-    if (counterpart && !visibleIndex.has(counterpart)) visibleIndex.set(counterpart, index)
-  }
-  const groups = new Map<
-    string,
-    { parent: number | undefined; depth: number; children: number[]; start: number; end: number }
-  >()
-
-  for (let index = 0; index < visibleBranches.length; index += 1) {
-    const branch = visibleBranches[index]
-    if (!branch.parent || rows[index].cycle || rows[index].missingParent) continue
-    const parent = visibleByName.get(branch.parent) ?? byName.get(branch.parent)
-    if (!parent) continue
-    const parentIndex = visibleIndex.get(parent.ref)
-    if (parentIndex !== undefined && parentIndex <= index) continue
-    const key = parentIndex === undefined ? parent.ref : visibleBranches[parentIndex].ref
-    const group = groups.get(key)
-    if (group) {
-      group.children.push(index)
-      if (group.parent === undefined) group.end = index
-    } else {
-      groups.set(key, {
-        parent: parentIndex,
-        depth:
-          parentIndex === undefined
-            ? branchTreeInfo(parent, byName, childCounts).depth
-            : rows[parentIndex].depth,
-        children: [index],
-        start: index,
-        end: parentIndex ?? index,
-      })
-    }
-  }
-
-  for (const group of groups.values()) {
-    const lane = group.depth
-    for (let index = group.start; index <= group.end && group.start !== group.end; index += 1) {
-      rows[index].trunks.push({
-        lane,
-        kind:
-          index === group.start
-            ? rows[group.start].depth === lane
-              ? 'start-node'
-              : 'start'
-            : index === group.end
-              ? group.parent === undefined
-                ? 'end-child'
-                : 'end-parent'
-              : 'full',
-      })
-    }
-    for (const child of group.children) {
-      if (rows[child].depth !== lane) rows[child].elbows.push({ lane })
-    }
-  }
-
-  return { rows }
-}
-
-function formatBranchDate(value: string): string {
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) return value
-  const elapsed = Date.now() - date.getTime()
-  if (elapsed < 60_000) return 'just now'
-  if (elapsed < 3_600_000) return `${Math.max(1, Math.floor(elapsed / 60_000))}m ago`
-  if (elapsed < 86_400_000) return `${Math.max(1, Math.floor(elapsed / 3_600_000))}h ago`
-  if (elapsed < 604_800_000) return `${Math.max(1, Math.floor(elapsed / 86_400_000))}d ago`
-  return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
 }
 
 function fileIsStaged(file: ChangedFile): boolean {
@@ -233,22 +107,6 @@ function statusLetter(value: string): string {
   if (!value || value === ' ') return '·'
   if (value === '?') return 'U'
   return value
-}
-
-function checksVariant(
-  checks: PullRequest['checks'],
-): 'success' | 'danger' | 'warning' | 'secondary' {
-  if (checks === 'passing') return 'success'
-  if (checks === 'failing') return 'danger'
-  if (checks === 'pending') return 'warning'
-  return 'secondary'
-}
-
-function checkLabel(checks: PullRequest['checks']): string {
-  if (checks === 'passing') return 'checks passing'
-  if (checks === 'failing') return 'checks failing'
-  if (checks === 'pending') return 'checks pending'
-  return 'no checks'
 }
 
 function App() {
@@ -448,60 +306,20 @@ function App() {
     [desktop, refreshSnapshot, snapshot],
   )
 
-  const selectedBranch = React.useMemo(() => {
-    const branch = snapshot?.branches.find((candidate) => candidate.ref === selectedBranchRef)
-    if (branch?.remote && branchFilter !== 'remote') {
-      return (
-        snapshot?.branches.find(
-          (candidate) => !candidate.remote && candidate.upstreamRef === branch.ref,
-        ) ??
-        snapshot?.branches.find((candidate) => getRepresentedRemoteRef(candidate) === branch.ref) ??
-        branch
-      )
-    }
-    return branch ?? null
-  }, [branchFilter, selectedBranchRef, snapshot])
+  const branchWorkspace = React.useMemo(
+    () => getBranchWorkspace(snapshot?.branches ?? [], branchFilter, search),
+    [branchFilter, search, snapshot],
+  )
+
+  const selectedBranch = React.useMemo(
+    () => resolveSelectedBranch(snapshot?.branches ?? [], selectedBranchRef, branchFilter),
+    [branchFilter, selectedBranchRef, snapshot],
+  )
 
   const selectedPullRequest = React.useMemo(() => {
     if (!snapshot || !selectedBranch) return null
     return selectedBranch.pr
   }, [selectedBranch, snapshot])
-
-  const branchByName = React.useMemo(
-    () => indexBranchesByParentName(snapshot?.branches ?? []),
-    [snapshot],
-  )
-  const combinedBranches = React.useMemo(
-    () => getCombinedBranches(snapshot?.branches ?? []),
-    [snapshot],
-  )
-  const orderedBranches = React.useMemo(
-    () =>
-      sortBranchesByUpdatedAt(
-        branchFilter === 'remote'
-          ? (snapshot?.branches.filter((branch) => branch.remote) ?? [])
-          : combinedBranches,
-      ),
-    [snapshot, branchFilter, combinedBranches],
-  )
-
-  const visibleBranches = React.useMemo(() => {
-    if (!snapshot) return []
-    const needle = search.trim().toLowerCase()
-    return orderedBranches.filter((branch) => {
-      if (branchFilter === 'local' && branch.remote) return false
-      if (branchFilter === 'remote' && !branch.remote) return false
-      if (branchFilter === 'prs' && !branch.pr) return false
-      if (!needle) return true
-      return `${branch.name} ${branch.subject} ${branch.upstream ?? ''}`
-        .toLowerCase()
-        .includes(needle)
-    })
-  }, [branchFilter, search, snapshot, orderedBranches])
-  const branchTree = React.useMemo(
-    () => getBranchTreeGeometry(visibleBranches, branchByName),
-    [branchByName, visibleBranches],
-  )
 
   const stagedFiles = React.useMemo(
     () => snapshot?.files.filter((file) => fileIsStaged(file)) ?? [],
@@ -528,7 +346,7 @@ function App() {
   const isBusy = Boolean(busyAction || opening || refreshing)
   const currentBranch = snapshot?.currentBranch ?? null
   const allBranches = snapshot?.branches ?? []
-  const branchCount = combinedBranches.length
+  const branchCount = branchWorkspace.combined.length
   const pullRequestCount = snapshot?.pullRequests.length ?? 0
   const stashCount = snapshot?.stashes.length ?? 0
   const detailsVisible = showDetails && (workspaceView === 'branches' || workspaceView === 'stacks')
@@ -543,7 +361,7 @@ function App() {
         (branch) =>
           !branch.remote &&
           branch.parent &&
-          branchByName.get(branch.parent)?.ref === deleteTarget.branch.ref,
+          branchWorkspace.byName.get(branch.parent)?.ref === deleteTarget.branch.ref,
       )
     : []
 
@@ -920,7 +738,7 @@ function App() {
       </div>
       {snapshot && (workspaceView === 'branches' || workspaceView === 'stacks') ? (
         <Button
-          aria-controls="branch-inspector"
+          aria-controls={detailsVisible ? 'branch-inspector' : undefined}
           aria-expanded={detailsVisible}
           aria-label={detailsVisible ? 'Hide details pane' : 'Show details pane'}
           className="toolbar-control toolbar-details-toggle"
@@ -943,25 +761,22 @@ function App() {
     <div className="list-toolbar">
       <div className="list-title-group">
         <h1>Branches</h1>
-        <span className="list-subtitle">{visibleBranches.length} shown</span>
+        <span className="list-subtitle">
+          {branchWorkspace.shown} of {branchWorkspace.total} shown
+        </span>
       </div>
       <SegmentedControl<BranchFilter>
         label="Branch filters"
         value={branchFilter}
         onValueChange={setBranchFilter}
-        options={[
-          { value: 'all', label: 'All' },
-          { value: 'local', label: 'Local' },
-          { value: 'remote', label: 'Remote' },
-          { value: 'prs', label: 'With PRs' },
-        ]}
+        options={branchFilterOptions}
       />
     </div>
   )
 
   const renderBranchList = () => {
     if (!snapshot) return null
-    if (visibleBranches.length === 0) {
+    if (!branchWorkspace.visible.length) {
       return (
         <div className="empty-state compact-empty">
           <GitBranch className="empty-icon" />
@@ -987,123 +802,15 @@ function App() {
     }
 
     return (
-      <div className="branch-list" role="group" aria-label="Repository branches">
-        {visibleBranches.map((branch, branchIndex) => {
-          const tree = branchTree.rows[branchIndex]
-          const pullRequest = branch.pr
-          const selected = branch.ref === selectedBranch?.ref
-          return (
-            <div
-              className={cn('branch-row', selected && 'branch-row-selected')}
-              key={branch.ref}
-              style={{ '--branch-depth': tree.depth } as React.CSSProperties}
-            >
-              <BranchHoverCard branch={branch}>
-                <button
-                  aria-current={selected ? 'true' : undefined}
-                  aria-label={`${branch.name}${branch.remote ? ', remote branch' : ''}${branch.current ? ', current branch' : ''}`}
-                  className="branch-select"
-                  onClick={() => setSelectedBranchRef(branch.ref)}
-                  type="button"
-                />
-              </BranchHoverCard>
-              {tree.trunks.map((trunk, segmentIndex) => (
-                <span
-                  aria-hidden="true"
-                  className={cn('branch-tree-trunk', `branch-tree-trunk-${trunk.kind}`)}
-                  key={`trunk-${segmentIndex}`}
-                  style={{ '--branch-lane': trunk.lane } as React.CSSProperties}
-                />
-              ))}
-              {tree.elbows.map((elbow, segmentIndex) => (
-                <span
-                  aria-hidden="true"
-                  className="branch-tree-elbow"
-                  key={`elbow-${segmentIndex}`}
-                  style={{ '--branch-lane': elbow.lane } as React.CSSProperties}
-                />
-              ))}
-              <span className={cn('branch-icon', branch.current && 'branch-icon-current')}>
-                {branch.remote ? (
-                  <Cloud className="size-3.5" />
-                ) : (
-                  <GitBranch className="size-3.5" />
-                )}
-              </span>
-              <span className="branch-copy">
-                <span className="branch-name-line">
-                  <strong>{branch.name}</strong>
-                  {branch.current ? <Badge variant="accent">current</Badge> : null}
-                  {branch.remote ? <Badge variant="outline">remote</Badge> : null}
-                  {tree.cycle ? <Badge variant="warning">cycle</Badge> : null}
-                  {tree.missingParent ? <Badge variant="warning">parent missing</Badge> : null}
-                  {branch.needsRestack || (branch.parentBehind ?? 0) > 0 ? (
-                    <Badge variant="warning">Requires restack</Badge>
-                  ) : null}
-                </span>
-                <span className="branch-summary">
-                  {pullRequest ? (
-                    <PullRequestHoverCard pr={pullRequest}>
-                      <a
-                        className="branch-pr-link"
-                        href={pullRequest.url}
-                        aria-label={`Open pull request #${pullRequest.number} on GitHub`}
-                        onClick={(event) => {
-                          event.preventDefault()
-                          desktop
-                            ?.openExternal(pullRequest.url)
-                            .catch((value) => setError(readableError(value)))
-                        }}
-                      >
-                        #{pullRequest.number}
-                        <ExternalLink className="size-3" aria-hidden="true" />
-                      </a>
-                    </PullRequestHoverCard>
-                  ) : null}
-                  <span className="branch-subject">{branch.subject || 'No commit subject'}</span>
-                </span>
-              </span>
-              <span className="branch-metrics">
-                {pullRequest ? (
-                  <Badge variant={checksVariant(pullRequest.checks)}>
-                    <ShieldCheck className="size-3" />
-                    {checkLabel(pullRequest.checks)}
-                  </Badge>
-                ) : null}
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <span
-                      className="ahead-behind relative z-[2] rounded-sm outline-none focus-visible:ring-2 focus-visible:ring-[var(--ring)]"
-                      tabIndex={0}
-                      aria-label={
-                        branch.upstream
-                          ? `${branch.ahead} ahead, ${branch.behind} behind ${branch.upstream}`
-                          : 'No upstream configured'
-                      }
-                    >
-                      <span className={branch.ahead > 0 ? 'metric-positive' : 'metric-muted'}>
-                        <ArrowUp className="size-3" />
-                        {branch.ahead}
-                      </span>
-                      <span className={branch.behind > 0 ? 'metric-negative' : 'metric-muted'}>
-                        <ArrowDown className="size-3" />
-                        {branch.behind}
-                      </span>
-                    </span>
-                  </TooltipTrigger>
-                  <TooltipContent>
-                    {branch.upstream
-                      ? `${branch.ahead} commits ahead and ${branch.behind} behind ${branch.upstream}`
-                      : 'Set an upstream to compare this branch with its remote.'}
-                  </TooltipContent>
-                </Tooltip>
-                <span className="branch-updated">{formatBranchDate(branch.updatedAt)}</span>
-              </span>
-              <ChevronRight className="branch-chevron size-4" />
-            </div>
-          )
-        })}
-      </div>
+      <BranchTree
+        branches={branchWorkspace.visible}
+        onOpenPullRequest={(pullRequest) =>
+          desktop?.openExternal(pullRequest.url).catch((value) => setError(readableError(value)))
+        }
+        onSelect={setSelectedBranchRef}
+        rows={branchWorkspace.rows}
+        selectedRef={selectedBranch?.ref ?? null}
+      />
     )
   }
 
@@ -1559,7 +1266,7 @@ function App() {
   const renderDetails = () => {
     if (!snapshot) {
       return (
-        <aside className="details-pane details-pane-empty">
+        <aside className="details-pane details-pane-empty" id="branch-inspector">
           <EmptyState>
             <PanelRightClose aria-hidden="true" className="size-5" />
             <strong>No repository open</strong>
@@ -1578,7 +1285,7 @@ function App() {
     }
     if (!selectedBranch) {
       return (
-        <aside className="details-pane details-pane-empty">
+        <aside className="details-pane details-pane-empty" id="branch-inspector">
           <EmptyState>
             <GitBranch aria-hidden="true" className="size-5" />
             <strong>No branch selected</strong>
@@ -1587,318 +1294,53 @@ function App() {
         </aside>
       )
     }
-    const parent = selectedBranch.parent ? branchByName.get(selectedBranch.parent) : null
-    const canRebase = Boolean(
-      selectedBranch.current &&
-      selectedBranch.parent &&
-      parent &&
-      !selectedBranch.remote &&
-      !operationActive,
-    )
+    const parent = selectedBranch.parent
+      ? (branchWorkspace.byName.get(selectedBranch.parent) ?? null)
+      : null
     return (
-      <aside className="details-pane" id="branch-inspector" aria-label="Selected branch details">
-        <div className="details-header">
-          <div>
-            <h2 title={selectedBranch.name}>{selectedBranch.name}</h2>
-          </div>
-          <IconButton label="Clear branch selection" onClick={() => setSelectedBranchRef(null)}>
-            <X className="size-4" />
-          </IconButton>
-        </div>
-        <div className="details-scroll">
-          <div className="details-status-row">
-            {selectedBranch.current ? (
-              <Badge variant="accent">
-                <Circle className="size-2.5 fill-current" />
-                Current
-              </Badge>
-            ) : (
-              <Badge variant="secondary">{selectedBranch.remote ? 'Remote' : 'Local'}</Badge>
-            )}
-            {selectedPullRequest ? (
-              <Badge variant={checksVariant(selectedPullRequest.checks)}>
-                <ShieldCheck className="size-3" />
-                {checkLabel(selectedPullRequest.checks)}
-              </Badge>
-            ) : null}
-          </div>
-          <section className="detail-section">
-            <h3>Stack position</h3>
-            <div className="detail-grid">
-              <span>Parent</span>
-              <strong className={selectedBranch.parent && !parent ? 'detail-missing' : ''}>
-                {selectedBranch.parent ?? 'No parent'}
-              </strong>
-              <span>Upstream</span>
-              <strong>{selectedBranch.upstream ?? 'Not tracking'}</strong>
-              <span>Last update</span>
-              <strong>{formatBranchDate(selectedBranch.updatedAt)}</strong>
-            </div>
-            {selectedBranch.needsRestack || (selectedBranch.parentBehind ?? 0) > 0 ? (
-              <div className="restack-notice">
-                <strong>Requires restack</strong>
-                <p>
-                  {selectedBranch.parentTip
-                    ? 'The parent or recorded boundary changed. Preview a stack restack to update this branch and its descendants together.'
-                    : `${selectedBranch.parent} has ${selectedBranch.parentBehind ?? 0} commits not in this branch. Preview a restack before publishing.`}
-                </p>
-              </div>
-            ) : null}
-          </section>
-          {!selectedBranch.remote && selectedBranch.name !== snapshot.defaultBranch ? (
-            <section className="detail-section detail-actions">
-              <h3>Stack workflow</h3>
-              <Button
-                variant="accent"
-                disabled={isBusy || operationActive}
-                tooltip="Preview rebasing this stack onto updated parents locally, branch by branch. Remotes stay unchanged until published."
-                onClick={() =>
-                  openWorkflow({ kind: 'stack', operation: 'restack', branch: selectedBranch.name })
-                }
-              >
-                <Layers className="size-3.5" />
-                Restack stack…
-              </Button>
-              <Button
-                variant="secondary"
-                disabled={isBusy || operationActive || !snapshot.github.available}
-                tooltip={
-                  !snapshot.github.available
-                    ? snapshot.github.message ||
-                      'Connect an authenticated GitHub repository to publish stacks.'
-                    : 'Push reviewed stack tips and update their pull requests without rebasing. Requires a clean, restacked stack.'
-                }
-                onClick={() =>
-                  openWorkflow({ kind: 'stack', operation: 'publish', branch: selectedBranch.name })
-                }
-              >
-                <Upload className="size-3.5" />
-                Publish stack…
-              </Button>
-              <Button
-                variant="ghost"
-                disabled={isBusy || operationActive}
-                tooltip="Record a different local parent without rewriting commits. Preview Restack next to move this branch and descendants."
-                onClick={() => openWorkflow({ kind: 'parent', branch: selectedBranch })}
-              >
-                Set stack parent…
-              </Button>
-              {selectedPullRequest?.state === 'OPEN' ? (
-                <Button
-                  variant="secondary"
-                  disabled={isBusy || operationActive}
-                  tooltip="Preview merging this open pull request into the default branch. Nothing merges until confirmed; remaining branches still need restack."
-                  onClick={() =>
-                    openWorkflow({ kind: 'stack', operation: 'merge', branch: selectedBranch.name })
-                  }
-                >
-                  <GitMerge className="size-3.5" />
-                  Preview PR merge
-                </Button>
-              ) : null}
-            </section>
-          ) : null}
-          <section className="detail-section">
-            <h3>Sync status</h3>
-            <div className="sync-stat-grid">
-              <div>
-                <ArrowUp className="size-3.5" />
-                <strong>{selectedBranch.ahead}</strong>
-                <span>ahead</span>
-              </div>
-              <div>
-                <ArrowDown className="size-3.5" />
-                <strong>{selectedBranch.behind}</strong>
-                <span>behind</span>
-              </div>
-            </div>
-          </section>
-          {selectedPullRequest ? (
-            <section className="detail-section">
-              <h3>Pull request</h3>
-              <div className="pr-detail">
-                <div className="pr-detail-heading">
-                  <GitPullRequest className="size-4" />
-                  <strong>
-                    #{selectedPullRequest.number} {selectedPullRequest.title}
-                  </strong>
-                </div>
-                <div className="pr-detail-meta">
-                  <Badge variant={selectedPullRequest.state === 'OPEN' ? 'success' : 'secondary'}>
-                    {selectedPullRequest.state.toLowerCase()}
-                  </Badge>
-                  {selectedPullRequest.draft ? <Badge variant="outline">draft</Badge> : null}
-                  <span>
-                    {selectedPullRequest.head} → {selectedPullRequest.base}
-                  </span>
-                </div>
-                <Button
-                  onClick={() =>
-                    desktop
-                      ?.openExternal(selectedPullRequest.url)
-                      .catch((value) => setError(readableError(value)))
-                  }
-                  size="sm"
-                  variant="secondary"
-                  tooltip="Open this pull request in the browser. Read-only; no local or remote changes."
-                >
-                  <ExternalLink className="size-3.5" />
-                  Open on GitHub
-                </Button>
-                <Button
-                  disabled={isBusy}
-                  tooltip="Preview checks, reviews, and merge or close options for this pull request. Nothing changes until confirmed."
-                  size="sm"
-                  variant="accent"
-                  onClick={() => openWorkflow({ kind: 'pr', number: selectedPullRequest.number })}
-                >
-                  Manage pull request
-                </Button>
-              </div>
-            </section>
-          ) : (
-            <section className="detail-section detail-section-muted">
-              <h3>Pull request</h3>
-              <p>No pull request for this branch.</p>
-              <Button
-                disabled={!selectedBranch.current || !snapshot.github.available || isBusy}
-                tooltip={
-                  !snapshot.github.available
-                    ? snapshot.github.message ||
-                      'Connect an authenticated GitHub repository to create pull requests.'
-                    : !selectedBranch.current
-                      ? 'Switch to this branch to open its pull request on GitHub.'
-                      : 'Review creating a PR from this branch’s published upstream. Unpushed commits are not included.'
-                }
-                onClick={openPrDialog}
-                size="sm"
-                variant="secondary"
-              >
-                <GitPullRequest className="size-3.5" />
-                Create pull request
-              </Button>
-              {!selectedBranch.current ? (
-                <small>Switch to this branch to create its pull request.</small>
-              ) : !snapshot.github.available ? (
-                <small>{snapshot.github.message || 'GitHub CLI is unavailable.'}</small>
-              ) : null}
-            </section>
-          )}
-          <section className="detail-section detail-actions">
-            <h3>Branch actions</h3>
-            <Button
-              disabled={selectedBranch.current || isBusy || operationActive}
-              tooltip={
-                selectedBranch.current
-                  ? 'This is already the checked-out branch.'
-                  : 'Switch the working tree to this branch. Requires a clean tree; remotes create a local tracking copy.'
-              }
-              onClick={() =>
-                runAction({ type: 'switch', ref: selectedBranch.ref }, 'Switch branch')
-              }
-              variant="accent"
-            >
-              <ArrowLeftRight className="size-3.5" />
-              Switch to this branch
-            </Button>
-            <Button
-              disabled={!canRebase || isBusy}
-              tooltip="Rebase only the current branch onto its recorded parent locally. Rewrites its history; use Restack to move descendants together."
-              onClick={() =>
-                openWorkflow({
-                  kind: 'confirm',
-                  action: { type: 'rebase', parent: selectedBranch.parent as string },
-                  title: 'Rebase current branch?',
-                  label: 'Rebase onto parent',
-                  description:
-                    'This rewrites only the current branch. Use Restack stack to update dependent branches together.',
-                })
-              }
-              variant="secondary"
-            >
-              <GitMerge className="size-3.5" />
-              Rebase current onto parent
-            </Button>
-            {!selectedBranch.current ? (
-              <span className="action-hint">Switch to this branch before rebasing.</span>
-            ) : selectedBranch.remote ? (
-              <span className="action-hint">Remote branches cannot be rebased directly.</span>
-            ) : !selectedBranch.parent ? (
-              <span className="action-hint">This branch has no recorded parent.</span>
-            ) : null}
-            {!selectedBranch.remote ? (
-              <>
-                <Button
-                  variant="secondary"
-                  disabled={
-                    isBusy || operationActive || selectedBranch.name === snapshot.defaultBranch
-                  }
-                  tooltip={
-                    selectedBranch.name === snapshot.defaultBranch
-                      ? 'The default branch cannot be renamed here.'
-                      : 'Rename this local branch. Remote tracking and open pull requests may need updating.'
-                  }
-                  onClick={() => openWorkflow({ kind: 'rename', branch: selectedBranch })}
-                >
-                  Rename local branch…
-                </Button>
-                <Button
-                  variant="secondary"
-                  disabled={isBusy || operationActive}
-                  tooltip="Choose which remote branch this branch pushes to and pulls from. Local config only; no commits move."
-                  onClick={() => openWorkflow({ kind: 'upstream', branch: selectedBranch })}
-                >
-                  Set upstream…
-                </Button>
-                <Button
-                  ref={deleteTriggerRef}
-                  disabled={
-                    selectedBranch.current ||
-                    selectedBranch.name === snapshot.defaultBranch ||
-                    isBusy ||
-                    operationActive
-                  }
-                  onClick={openDeleteDialog}
-                  tooltip={
-                    selectedBranch.name === snapshot.defaultBranch
-                      ? 'The default branch cannot be deleted.'
-                      : selectedBranch.current
-                        ? 'Cannot delete the checked-out branch — switch away first. Remotes and pull requests are kept.'
-                        : 'Delete this local branch. Remotes and pull requests are kept; unmerged work needs force and can orphan commits.'
-                  }
-                  variant="danger"
-                >
-                  <Trash2 className="size-3.5" />
-                  Delete local branch
-                </Button>
-                {selectedBranch.name === snapshot.defaultBranch ? (
-                  <span className="action-hint">The default branch cannot be deleted.</span>
-                ) : selectedBranch.current ? (
-                  <span className="action-hint">
-                    Switch to another branch before deleting this one.
-                  </span>
-                ) : null}
-              </>
-            ) : null}
-            {selectedBranch.remote ? (
-              <Button
-                variant="danger"
-                disabled={
-                  isBusy ||
-                  operationActive ||
-                  !selectedBranch.oid ||
-                  selectedBranch.name.endsWith(`/${snapshot.defaultBranch}`)
-                }
-                onClick={() => openWorkflow({ kind: 'deleteRemote', branch: selectedBranch })}
-                tooltip="Preview removing this branch from its remote. Local copies remain; open PRs may close and collaborators must prune."
-              >
-                <Trash2 className="size-3.5" />
-                Delete remote branch…
-              </Button>
-            ) : null}
-          </section>
-        </div>
-      </aside>
+      <BranchInspector
+        branch={selectedBranch}
+        busy={isBusy}
+        defaultBranch={snapshot.defaultBranch}
+        deleteButtonRef={deleteTriggerRef}
+        github={snapshot.github}
+        onClose={() => setSelectedBranchRef(null)}
+        onCreatePullRequest={openPrDialog}
+        onDeleteLocal={openDeleteDialog}
+        onDeleteRemote={() => openWorkflow({ kind: 'deleteRemote', branch: selectedBranch })}
+        onManagePullRequest={() =>
+          openWorkflow({ kind: 'pr', number: selectedPullRequest?.number as number })
+        }
+        onOpenExternal={(url) =>
+          desktop?.openExternal(url).catch((value) => setError(readableError(value)))
+        }
+        onPreviewMerge={() =>
+          openWorkflow({ kind: 'stack', operation: 'merge', branch: selectedBranch.name })
+        }
+        onPublish={() =>
+          openWorkflow({ kind: 'stack', operation: 'publish', branch: selectedBranch.name })
+        }
+        onRebaseOntoParent={() =>
+          openWorkflow({
+            kind: 'confirm',
+            action: { type: 'rebase', parent: selectedBranch.parent as string },
+            title: 'Rebase current branch?',
+            label: 'Rebase onto parent',
+            description:
+              'This rewrites only the current branch. Use Restack stack to update dependent branches together.',
+          })
+        }
+        onRename={() => openWorkflow({ kind: 'rename', branch: selectedBranch })}
+        onRestack={() =>
+          openWorkflow({ kind: 'stack', operation: 'restack', branch: selectedBranch.name })
+        }
+        onSetParent={() => openWorkflow({ kind: 'parent', branch: selectedBranch })}
+        onSetUpstream={() => openWorkflow({ kind: 'upstream', branch: selectedBranch })}
+        onSwitch={() => runAction({ type: 'switch', ref: selectedBranch.ref }, 'Switch branch')}
+        operationActive={operationActive}
+        parent={parent}
+        pullRequest={selectedPullRequest}
+      />
     )
   }
 

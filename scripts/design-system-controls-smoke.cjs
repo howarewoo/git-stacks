@@ -30,6 +30,13 @@ async function runInPage(body) {
   return window.webContents.executeJavaScript(pageAction(body), true)
 }
 
+async function evaluateInPage(expression) {
+  return window.webContents.executeJavaScript(
+    `(async () => {${pageHelpers}return (${expression})})()`,
+    true,
+  )
+}
+
 async function waitFor(description, expression, timeout = 3000) {
   const deadline = Date.now() + timeout
   while (Date.now() < deadline) {
@@ -75,7 +82,7 @@ async function main() {
   await runInPage(`press('Escape')`)
   await waitFor('the menu to close', `!document.querySelector('[role="menu"]')`)
   assert.equal(
-    await runInPage(`document.activeElement === buttonNamed('Open actions')`),
+    await evaluateInPage(`document.activeElement === buttonNamed('Open actions')`),
     true,
     'menu focus should return to its trigger',
   )
@@ -89,7 +96,7 @@ async function main() {
   await runInPage(`press('Escape')`)
   await waitFor('the tooltip to close', `!document.querySelector('[role="tooltip"]')`)
   assert.equal(
-    await runInPage(`document.activeElement === buttonNamed('Focusable tooltip')`),
+    await evaluateInPage(`document.activeElement === buttonNamed('Focusable tooltip')`),
     true,
     'tooltip focus should remain on its trigger',
   )
@@ -102,32 +109,69 @@ async function main() {
   `)
   await waitFor('the dialog to open', `document.querySelector('[role="dialog"]')`)
   assert.equal(
-    await runInPage(`document.activeElement?.id === 'specimen-dialog-name'`),
+    await evaluateInPage(`document.activeElement?.id === 'specimen-dialog-name'`),
     true,
     'dialog should focus its first field',
   )
   await runInPage(`press('Escape')`)
   await waitFor('the dialog to close', `!document.querySelector('[role="dialog"]')`)
   assert.equal(
-    await runInPage(`document.activeElement === buttonNamed('Open dialog')`),
+    await evaluateInPage(`document.activeElement === buttonNamed('Open dialog')`),
     true,
     'dialog focus should return to its trigger',
   )
 
+  await window.loadURL(`${pathToFileURL(rendererPath).href}#/design-system-shell-specimen`)
+  await waitFor('the shell specimen', `document.querySelector('.shell-fixture-content')`)
+
   window.webContents.debugger.attach('1.3')
   debuggerAttached = true
+  for (const width of [1000, 810, 761]) {
+    await window.webContents.debugger.sendCommand('Emulation.setDeviceMetricsOverride', {
+      width,
+      height: 900,
+      deviceScaleFactor: 1,
+      mobile: false,
+    })
+    await runInPage(
+      `await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))`,
+    )
+    const toolbar = await evaluateInPage(`(() => {
+      const element = document.querySelector('.toolbar')
+      const bounds = element.getBoundingClientRect()
+      const clipped = Array.from(element.querySelectorAll('button')).filter((button) => {
+        const rect = button.getBoundingClientRect()
+        return rect.left < bounds.left || rect.right > bounds.right
+      })
+      return {
+        width: document.documentElement.clientWidth,
+        mobile: window.matchMedia('(max-width: 760px)').matches,
+        overflows: element.scrollWidth > element.clientWidth,
+        clipped: clipped.map((button) => button.getAttribute('aria-label') || button.textContent.trim()),
+      }
+    })()`)
+    assert.equal(toolbar.width, width, `the ${width}px CSS viewport should be active`)
+    assert.equal(
+      toolbar.mobile,
+      false,
+      `the ${width}px viewport should remain above the mobile breakpoint`,
+    )
+    assert.equal(toolbar.overflows, false, `the toolbar should fit at ${width}px`)
+    assert.deepEqual(toolbar.clipped, [], `all toolbar actions should be reachable at ${width}px`)
+  }
+
   await window.webContents.debugger.sendCommand('Emulation.setEmulatedMedia', {
     features: [{ name: 'prefers-reduced-motion', value: 'reduce' }],
   })
   assert.equal(
-    await runInPage(`window.matchMedia('(prefers-reduced-motion: reduce)').matches`),
+    await evaluateInPage(`window.matchMedia('(prefers-reduced-motion: reduce)').matches`),
     true,
     'reduced-motion media emulation should be active',
   )
   await runInPage(`buttonNamed('Open dialog')?.click()`)
   await waitFor('the reduced-motion dialog', `document.querySelector('.animate-dialog-in')`)
   assert.equal(
-    await runInPage(
+    await evaluateInPage(
       `getComputedStyle(document.querySelector('.animate-dialog-in')).animationDuration.includes('0.01')`,
     ),
     true,
