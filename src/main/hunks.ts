@@ -172,7 +172,6 @@ function parseGitDiffHeaderPaths(line: string): { oldPath: string | null; newPat
   return { oldPath: diffPath(first), newPath: diffPath(second) }
 }
 
-
 /**
  * A hunk id is derived from the file identity and the exact hunk text, so it stays
  * the same while the hunk is unchanged and differs once the hunk moves or edits.
@@ -288,7 +287,6 @@ function gitLineNamesPath(header: string[], identity: HunkFileIdentity): boolean
     (identity.originalPath !== null && oldPath === identity.originalPath)
   )
 }
-
 
 /**
  * Parses the file block of a path-limited unified diff. A block whose paths do not
@@ -453,7 +451,6 @@ function windowHeader(
 
   return `@@ -${oldStart},${oldCount} +${newStart},${newCount} @@`
 }
-
 
 /**
  * Builds the patch for one hunk. Without a line selection Git's own hunk text is

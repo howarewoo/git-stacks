@@ -219,7 +219,9 @@ test('interior added or removed lines anchor at their exact position when staged
     assert.equal(text('show', ':deletions.txt'), 'alpha\nomega\n')
     const viewStaged = await getFileView(repo, 'deletions.txt')
     const hunkStaged = viewStaged.hunks.staged.hunks[0]
-    const unstageDelBIndex = hunkStaged.lines.findIndex((l) => l.kind === 'remove' && l.text === '-delB')
+    const unstageDelBIndex = hunkStaged.lines.findIndex(
+      (l) => l.kind === 'remove' && l.text === '-delB',
+    )
     assert.ok(unstageDelBIndex !== -1)
     await runAction(repo, {
       type: 'unstageHunk',
@@ -296,7 +298,11 @@ test('atomic index transaction fails closed on concurrent lock or state change w
       await unlink(join(repo, '.git', 'index.lock'))
     }
 
-    assert.equal(text('show', ':lines.txt'), initialIndexContent, 'the real index remained completely unmutated')
+    assert.equal(
+      text('show', ':lines.txt'),
+      initialIndexContent,
+      'the real index remained completely unmutated',
+    )
   } finally {
     await rm(root, { recursive: true, force: true })
   }
