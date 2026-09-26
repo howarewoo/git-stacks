@@ -47,16 +47,131 @@ function splitLines(text: string): string[] {
 }
 
 /**
+ * Unquotes a C-style quoted path that Git outputs when a path contains quotes,
+ * tabs, newlines, spaces with certain flags, or non-ASCII bytes.
+ */
+export function unquoteGitPath(raw: string): string {
+  if (!raw.startsWith('"') || !raw.endsWith('"') || raw.length < 2) {
+    return raw
+  }
+  const inner = raw.slice(1, -1)
+  const bytes: number[] = []
+  for (let i = 0; i < inner.length; i++) {
+    const ch = inner[i]
+    if (ch === '\\' && i + 1 < inner.length) {
+      const next = inner[i + 1]
+      if (next === '"') {
+        bytes.push(34)
+        i++
+      } else if (next === '\\') {
+        bytes.push(92)
+        i++
+      } else if (next === 'n') {
+        bytes.push(10)
+        i++
+      } else if (next === 't') {
+        bytes.push(9)
+        i++
+      } else if (next === 'r') {
+        bytes.push(13)
+        i++
+      } else if (next === 'a') {
+        bytes.push(7)
+        i++
+      } else if (next === 'b') {
+        bytes.push(8)
+        i++
+      } else if (next === 'f') {
+        bytes.push(12)
+        i++
+      } else if (next === 'v') {
+        bytes.push(11)
+        i++
+      } else if (/[0-7]/.test(next)) {
+        let octalStr = next
+        i++
+        if (i + 1 < inner.length && /[0-7]/.test(inner[i + 1])) {
+          octalStr += inner[++i]
+          if (i + 1 < inner.length && /[0-7]/.test(inner[i + 1])) {
+            octalStr += inner[++i]
+          }
+        }
+        bytes.push(parseInt(octalStr, 8))
+      } else {
+        bytes.push(next.charCodeAt(0))
+        i++
+      }
+    } else {
+      const buf = Buffer.from(ch, 'utf8')
+      for (const b of buf) bytes.push(b)
+    }
+  }
+  return Buffer.from(bytes).toString('utf8')
+}
+
+/**
  * Git ends a `---`/`+++` path at the first tab, which is how it separates a path
- * containing spaces from the timestamp column.
+ * containing spaces from the timestamp column. Quoted paths keep their closing quote
+ * and are unquoted back to the original filename.
  */
 function diffPath(value: string): string | null {
-  const tab = value.indexOf('\t')
-  const raw = (tab === -1 ? value : value.slice(0, tab)).trimEnd()
+  let raw = value
+  if (raw.startsWith('"')) {
+    let endQuote = -1
+    for (let i = 1; i < raw.length; i++) {
+      if (raw[i] === '\\') i++
+      else if (raw[i] === '"') {
+        endQuote = i
+        break
+      }
+    }
+    if (endQuote !== -1) {
+      raw = raw.slice(0, endQuote + 1)
+    }
+    raw = unquoteGitPath(raw)
+  } else {
+    const tab = raw.indexOf('\t')
+    if (tab !== -1) raw = raw.slice(0, tab)
+  }
   if (raw === '/dev/null') return null
   if (raw.startsWith('a/') || raw.startsWith('b/')) return raw.slice(2)
   return raw
 }
+
+function parseGitDiffHeaderPaths(line: string): { oldPath: string | null; newPath: string | null } {
+  if (!line.startsWith('diff --git ')) return { oldPath: null, newPath: null }
+  const rest = line.slice('diff --git '.length)
+  let first: string
+  let second: string
+  if (rest.startsWith('"')) {
+    let endQuote = -1
+    for (let i = 1; i < rest.length; i++) {
+      if (rest[i] === '\\') i++
+      else if (rest[i] === '"') {
+        endQuote = i
+        break
+      }
+    }
+    if (endQuote !== -1) {
+      first = rest.slice(0, endQuote + 1)
+      second = rest.slice(endQuote + 1).trimStart()
+    } else {
+      return { oldPath: null, newPath: null }
+    }
+  } else {
+    const bIndex = rest.search(/\s+(?:b\/|"b\/)/)
+    if (bIndex !== -1) {
+      first = rest.slice(0, bIndex)
+      second = rest.slice(bIndex).trimStart()
+    } else {
+      const parts = rest.split(' ')
+      first = parts[0]
+      second = parts.slice(1).join(' ')
+    }
+  }
+  return { oldPath: diffPath(first), newPath: diffPath(second) }
+}
+
 
 /**
  * A hunk id is derived from the file identity and the exact hunk text, so it stays
@@ -166,8 +281,14 @@ function headerSays(header: string[], prefix: string): boolean {
 function gitLineNamesPath(header: string[], identity: HunkFileIdentity): boolean {
   const line = header.find((entry) => entry.startsWith('diff --git '))
   if (!line) return false
-  return line.includes(` a/${identity.path}`) || line.includes(` b/${identity.path}`)
+  const { oldPath, newPath } = parseGitDiffHeaderPaths(line)
+  return (
+    newPath === identity.path ||
+    oldPath === identity.path ||
+    (identity.originalPath !== null && oldPath === identity.originalPath)
+  )
 }
+
 
 /**
  * Parses the file block of a path-limited unified diff. A block whose paths do not
@@ -276,27 +397,63 @@ export function hunkSideUnavailable(
  * the new side, so Git verifies the window against the index even when the window
  * opens with an addition.
  */
-function windowHeader(lines: readonly DiffHunkLine[], from: number, to: number): string {
-  let oldStart = -1
-  let newStart = -1
+function windowHeader(
+  hunk: DiffHunk,
+  selected: Set<number>,
+  from: number,
+  to: number,
+  delta: number,
+): string {
+  const lines = hunk.lines
+  let preimageAnchor = hunk.oldStart - 1
+  let postimageAnchor = hunk.newStart - 1
+
+  for (let i = 0; i < from; i++) {
+    const line = lines[i]
+    if (line.kind === 'context') {
+      preimageAnchor += 1
+      postimageAnchor += 1
+    } else if (line.kind === 'remove') {
+      if (selected.has(i)) {
+        preimageAnchor += 1
+      }
+    } else if (line.kind === 'add') {
+      if (selected.has(i)) {
+        postimageAnchor += 1
+      }
+    }
+  }
+
   let oldCount = 0
   let newCount = 0
-  for (let index = from; index <= to; index += 1) {
-    const line = lines[index]
+
+  for (let i = from; i <= to; i++) {
+    const line = lines[i]
     if (line.kind === 'context' || line.kind === 'remove') {
-      if (oldStart === -1) oldStart = line.oldLine ?? 0
       oldCount += 1
     }
     if (line.kind === 'context' || line.kind === 'add') {
-      if (newStart === -1) newStart = line.newLine ?? 0
       newCount += 1
     }
   }
-  // A window that keeps nothing on one side still records where it sits.
-  const old = oldStart === -1 ? (lines[from].oldLine ?? 0) : oldStart
-  const next = newStart === -1 ? (lines[from].newLine ?? 0) : newStart
-  return `@@ -${old},${oldCount} +${next},${newCount} @@`
+
+  let oldStart: number
+  let newStart: number
+
+  if (oldCount === 0) {
+    oldStart = preimageAnchor
+    newStart = postimageAnchor + 1 + delta
+  } else if (newCount === 0) {
+    oldStart = preimageAnchor + 1
+    newStart = postimageAnchor + delta
+  } else {
+    oldStart = preimageAnchor + 1
+    newStart = postimageAnchor + 1 + delta
+  }
+
+  return `@@ -${oldStart},${oldCount} +${newStart},${newCount} @@`
 }
+
 
 /**
  * Builds the patch for one hunk. Without a line selection Git's own hunk text is
@@ -339,6 +496,7 @@ export function buildHunkPatch(block: HunkBlock, hunk: DiffHunk, lineIndexes?: n
   if (runs.length === 0) throw new Error('Select at least one changed line before applying a hunk')
 
   const body: string[] = []
+  let delta = 0
   for (const run of runs) {
     // Anchor each run with the adjacent context lines, then keep the
     // no-newline marker of every line the run includes.
@@ -346,8 +504,13 @@ export function buildHunkPatch(block: HunkBlock, hunk: DiffHunk, lineIndexes?: n
     let to = run.to
     while (to + 1 < lines.length && lines[to + 1].kind === 'context') to += 1
     while (to + 1 < lines.length && lines[to + 1].kind === MARKER) to += 1
-    body.push(windowHeader(lines, from, to))
+    const headerLine = windowHeader(hunk, selected, from, to, delta)
+    const match = HUNK_HEADER.exec(headerLine)
+    const oldCount = match ? Number(match[2] ?? 1) : 0
+    const newCount = match ? Number(match[4] ?? 1) : 0
+    body.push(headerLine)
     for (let index = from; index <= to; index += 1) body.push(lines[index].text)
+    delta += newCount - oldCount
   }
   return `${[...header, ...body].join('\n')}\n`
 }

@@ -3468,33 +3468,89 @@ export async function runStageHunk(
   // Building the patch takes time; do not apply it against a file or index that
   // changed since the diff and hunk identity were resolved.
   await checkFileFingerprint(root, filePath, fingerprint)
+  const initialHead = (await tryGit(root, ['rev-parse', 'HEAD']))?.trim() ?? ''
+  const relativeIndex = (await runGit(root, ['rev-parse', '--git-path', 'index'])).trim()
+  const realIndexPath = path.resolve(root, relativeIndex)
+  const lockPath = `${realIndexPath}.lock`
+  const tempIndexPath = `${realIndexPath}.stage-${randomUUID()}`
+
+  const indexExists = await fs
+    .access(realIndexPath, fsConstants.F_OK)
+    .then(() => true)
+    .catch(() => false)
+  if (indexExists) {
+    await fs.copyFile(realIndexPath, tempIndexPath)
+  }
+
+  let lockHandle: FileHandle | null = null
+  let lockAcquired = false
   try {
-    await runGitWithInput(
+    try {
+      await runGitWithInput(
+        root,
+        [
+          '--literal-pathspecs',
+          'apply',
+          '--cached',
+          '--unidiff-zero',
+          '--whitespace=nowarn',
+          ...(side === 'staged' ? ['--reverse'] : []),
+          '-',
+        ],
+        patch,
+        { GIT_INDEX_FILE: tempIndexPath },
+      )
+    } catch (error) {
+      throw new Error(
+        `Git refused the hunk patch for ${entry.path}: ${commandDetail(error)}. Nothing was changed.`,
+      )
+    }
+
+    const tempStage = await runGit(
       root,
-      [
-        '--literal-pathspecs',
-        'apply',
-        '--cached',
-        '--unidiff-zero',
-        '--whitespace=nowarn',
-        ...(side === 'staged' ? ['--reverse'] : []),
-        '-',
-      ],
-      patch,
+      ['--literal-pathspecs', 'ls-files', '--stage', '-z', '--', entry.path],
+      { GIT_INDEX_FILE: tempIndexPath },
     )
-  } catch (error) {
-    throw new Error(
-      `Git refused the hunk patch for ${entry.path}: ${commandDetail(error)}. Nothing was changed.`,
-    )
-  }
-  const applied = await fileFingerprint(root, entry.path)
-  if (applied.contentFingerprint !== identity.contentFingerprint) {
-    throw new Error(
-      'The working tree changed while the patch was applied; refresh and review the file',
-    )
-  }
-  if (applied.indexFingerprint === identity.indexFingerprint) {
-    throw new Error('The patch did not change the index; refresh and try again')
+    const tempIndexFingerprint = createHash('sha256').update(tempStage).digest('hex')
+    if (tempIndexFingerprint === identity.indexFingerprint) {
+      throw new Error('The patch did not change the index; refresh and try again')
+    }
+
+    try {
+      lockHandle = await fs.open(lockPath, 'wx', 0o666)
+      lockAcquired = true
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
+        throw new Error('Another Git process is modifying the index; retry after it completes')
+      }
+      throw error
+    }
+
+    const currentHead = (await tryGit(root, ['rev-parse', 'HEAD']))?.trim() ?? ''
+    if (currentHead !== initialHead) {
+      throw new Error('The repository HEAD changed while staging; refresh and review the file')
+    }
+    const currentIdentity = await fileFingerprint(root, entry.path)
+    if (currentIdentity.contentFingerprint !== identity.contentFingerprint) {
+      throw new Error(
+        'The working tree changed while the patch was applied; refresh and review the file',
+      )
+    }
+    if (currentIdentity.indexFingerprint !== identity.indexFingerprint) {
+      throw new Error('The index changed while the patch was applied; refresh and review the file')
+    }
+
+    await lockHandle.close()
+    lockHandle = null
+    await fs.rename(tempIndexPath, realIndexPath)
+  } finally {
+    if (lockHandle) {
+      await lockHandle.close().catch(() => {})
+    }
+    if (lockAcquired) {
+      await fs.unlink(lockPath).catch(() => {})
+    }
+    await fs.rm(tempIndexPath, { force: true }).catch(() => {})
   }
   const position = resolved.hunks.indexOf(hunk) + 1
   const count = selected

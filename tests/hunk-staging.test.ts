@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdtemp, open, readFile, rm, unlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -169,6 +169,134 @@ test('selected lines unstage without removing a neighboring staged edit', async 
     assert.doesNotMatch(text('diff', '--cached'), /line 5 unstaged/u)
     assert.match(text('diff', '--cached'), /line 7 stays staged/u)
     assert.match(text('diff'), /line 5 unstaged/u)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('interior added or removed lines anchor at their exact position when staged or unstaged', async () => {
+  const { root, repo, git, text } = await fixture()
+  try {
+    // 1. Interior addition: base file has alpha/omega. Worktree has alpha/first/middle/last/omega.
+    await writeFile(join(repo, 'additions.txt'), 'alpha\nomega\n')
+    git('add', 'additions.txt')
+    git('commit', '-qm', 'Add additions base')
+    await writeFile(join(repo, 'additions.txt'), 'alpha\nfirst\nmiddle\nlast\nomega\n')
+    const viewAdd = await getFileView(repo, 'additions.txt')
+    const hunkAdd = viewAdd.hunks.unstaged.hunks[0]
+    const middleAddIndex = hunkAdd.lines.findIndex((l) => l.kind === 'add' && l.text === '+middle')
+    assert.ok(middleAddIndex !== -1)
+    await runAction(repo, {
+      type: 'stageHunk',
+      path: 'additions.txt',
+      hunkId: hunkAdd.id,
+      fingerprint: viewAdd.fingerprint,
+      lineIndexes: [middleAddIndex],
+    })
+    assert.equal(text('show', ':additions.txt'), 'alpha\nmiddle\nomega\n')
+
+    // 2. Interior deletion: base file has alpha/delA/delB/delC/omega. Worktree has alpha/omega.
+    await writeFile(join(repo, 'deletions.txt'), 'alpha\ndelA\ndelB\ndelC\nomega\n')
+    git('add', 'deletions.txt')
+    git('commit', '-qm', 'Add deletions base')
+    await writeFile(join(repo, 'deletions.txt'), 'alpha\nomega\n')
+    const viewDel = await getFileView(repo, 'deletions.txt')
+    const hunkDel = viewDel.hunks.unstaged.hunks[0]
+    const middleDelIndex = hunkDel.lines.findIndex((l) => l.kind === 'remove' && l.text === '-delB')
+    assert.ok(middleDelIndex !== -1)
+    await runAction(repo, {
+      type: 'stageHunk',
+      path: 'deletions.txt',
+      hunkId: hunkDel.id,
+      fingerprint: viewDel.fingerprint,
+      lineIndexes: [middleDelIndex],
+    })
+    // delB is removed from index; delA and delC remain
+    assert.equal(text('show', ':deletions.txt'), 'alpha\ndelA\ndelC\nomega\n')
+
+    // 3. Symmetrically unstage an interior deletion
+    git('add', 'deletions.txt')
+    assert.equal(text('show', ':deletions.txt'), 'alpha\nomega\n')
+    const viewStaged = await getFileView(repo, 'deletions.txt')
+    const hunkStaged = viewStaged.hunks.staged.hunks[0]
+    const unstageDelBIndex = hunkStaged.lines.findIndex((l) => l.kind === 'remove' && l.text === '-delB')
+    assert.ok(unstageDelBIndex !== -1)
+    await runAction(repo, {
+      type: 'unstageHunk',
+      path: 'deletions.txt',
+      hunkId: hunkStaged.id,
+      fingerprint: viewStaged.fingerprint,
+      lineIndexes: [unstageDelBIndex],
+    })
+    // Unstaging delB puts delB back into index between alpha and omega
+    assert.equal(text('show', ':deletions.txt'), 'alpha\ndelB\nomega\n')
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('quoted file paths preserve hunks and stage and unstage cleanly', async () => {
+  const { root, repo, git, text } = await fixture()
+  try {
+    const quotedPath = 'say"hello.txt'
+    await writeFile(join(repo, quotedPath), 'before\n')
+    git('add', '.')
+    git('commit', '-qm', 'Add quoted file')
+    await writeFile(join(repo, quotedPath), 'after\n')
+
+    const view = await getFileView(repo, quotedPath)
+    assert.equal(view.hunks.unstaged.unavailable, null)
+    assert.equal(view.hunks.unstaged.hunks.length, 1)
+
+    await runAction(repo, {
+      type: 'stageHunk',
+      path: quotedPath,
+      hunkId: view.hunks.unstaged.hunks[0].id,
+      fingerprint: view.fingerprint,
+    })
+    assert.equal(text('show', `:${quotedPath}`), 'after\n')
+
+    const stagedView = await getFileView(repo, quotedPath)
+    assert.equal(stagedView.hunks.staged.unavailable, null)
+    assert.equal(stagedView.hunks.staged.hunks.length, 1)
+
+    await runAction(repo, {
+      type: 'unstageHunk',
+      path: quotedPath,
+      hunkId: stagedView.hunks.staged.hunks[0].id,
+      fingerprint: stagedView.fingerprint,
+    })
+    assert.equal(text('show', `:${quotedPath}`), 'before\n')
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('atomic index transaction fails closed on concurrent lock or state change without mutating index', async () => {
+  const { root, repo, text } = await fixture()
+  try {
+    await writeFile(join(repo, 'lines.txt'), numbered(20, { 2: 'line 2 staged' }))
+    const view = await getFileView(repo, 'lines.txt')
+    const hunk = view.hunks.unstaged.hunks[0]
+    const initialIndexContent = text('show', ':lines.txt')
+
+    const lockHandle = await open(join(repo, '.git', 'index.lock'), 'wx')
+    try {
+      await assert.rejects(
+        runAction(repo, {
+          type: 'stageHunk',
+          path: 'lines.txt',
+          hunkId: hunk.id,
+          fingerprint: view.fingerprint,
+        }),
+        /Another Git process is modifying the index/u,
+      )
+    } finally {
+      await lockHandle.close()
+      await unlink(join(repo, '.git', 'index.lock'))
+    }
+
+    assert.equal(text('show', ':lines.txt'), initialIndexContent, 'the real index remained completely unmutated')
   } finally {
     await rm(root, { recursive: true, force: true })
   }

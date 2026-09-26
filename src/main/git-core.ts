@@ -172,8 +172,13 @@ export async function executeWithInput(
   return promise
 }
 
-export function runGitWithInput(repoPath: string, args: string[], input: string): Promise<string> {
-  return executeWithInput('git', args, repoPath, input)
+export function runGitWithInput(
+  repoPath: string,
+  args: string[],
+  input: string,
+  env?: NodeJS.ProcessEnv,
+): Promise<string> {
+  return executeWithInput('git', args, repoPath, input, env)
 }
 
 export async function tryGit(repoPath: string, args: string[]): Promise<string | null> {
