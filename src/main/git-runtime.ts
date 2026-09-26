@@ -1,9 +1,14 @@
 import { execFile as execFileCallback } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { promises as fs } from 'node:fs'
+import { createReadStream, promises as fs } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { promisify } from 'node:util'
-import type { BundledRuntimeInfo, GitCapability, GitRuntimeInfo } from '../shared/types'
+import type {
+  BundledRuntimeInfo,
+  GitCapability,
+  GitRuntimeInfo,
+  GitRuntimeStatus,
+} from '../shared/types'
 
 const execFileAsync = promisify(execFileCallback)
 
@@ -121,6 +126,10 @@ function parseManifest(value: unknown): BundledRuntimeManifest | null {
       gitVersion: fields.gitVersion,
       sha256: fields.sha256,
       source: fields.source,
+      files:
+        typeof fields.files === 'object' && fields.files !== null
+          ? (fields.files as Record<string, string>)
+          : undefined,
     }
   }
   return { appVersion: record.appVersion, platforms }
@@ -142,16 +151,27 @@ async function readManifest(resourcesRoot: string | null): Promise<BundledRuntim
 }
 
 async function sha256(filePath: string): Promise<string> {
-  return createHash('sha256')
-    .update(await fs.readFile(filePath))
-    .digest('hex')
+  const hash = createHash('sha256')
+  for await (const chunk of createReadStream(filePath)) hash.update(chunk)
+  return hash.digest('hex')
+}
+async function runtimeFiles(directory: string, prefix = ''): Promise<Record<string, string>> {
+  const entries: Record<string, string> = {}
+  for (const item of await fs.readdir(directory, { withFileTypes: true })) {
+    const name = prefix ? `${prefix}/${item.name}` : item.name
+    const path = join(directory, item.name)
+    if (item.isDirectory()) Object.assign(entries, await runtimeFiles(path, name))
+    else if (item.isSymbolicLink()) entries[name] = `link:${await fs.readlink(path)}`
+    else if (item.isFile()) entries[name] = await sha256(path)
+    else throw new Error(`Unexpected bundled Git runtime entry: ${name}`)
+  }
+  return entries
 }
 
 async function assertBundledRuntime(
   manifest: BundledRuntimeManifest | null,
   platform: string,
   executable: string,
-  version: string,
 ): Promise<BundledRuntimeInfo> {
   if (configuration?.packaged && manifest?.appVersion !== configuration.appVersion) {
     throw new Error(
@@ -165,19 +185,63 @@ async function assertBundledRuntime(
         `This build records no Git runtime for ${platform}. Git Stacks only runs a Git runtime that ships inside a signed release.`,
       )
     }
-    return { gitVersion: version, sha256: '', source: 'unverified development runtime' }
+    return { gitVersion: '', sha256: '', source: 'unverified development runtime' }
   }
-  if (entry.gitVersion !== version) {
-    throw new Error(
-      `The bundled Git runtime reports ${version} but the release manifest records ${entry.gitVersion}.`,
-    )
-  }
-  if (entry.sha256.toLowerCase() !== (await sha256(executable))) {
+  if (
+    !/^[a-f0-9]{64}$/iu.test(entry.sha256) ||
+    entry.sha256.toLowerCase() !== (await sha256(executable))
+  ) {
     throw new Error(
       `The bundled Git runtime at ${executable} does not match its release digest. Reinstall Git Stacks from a signed release.`,
     )
   }
+  if (configuration?.packaged) {
+    if (!entry.files || Object.values(entry.files).some((hash) => typeof hash !== 'string')) {
+      throw new Error('The bundled Git runtime has no complete release inventory.')
+    }
+    const actual = await runtimeFiles(dirname(dirname(executable)))
+    if (
+      Object.keys(actual).length !== Object.keys(entry.files).length ||
+      Object.entries(actual).some(([name, hash]) => entry.files?.[name] !== hash)
+    ) {
+      throw new Error('The bundled Git runtime files do not match the signed release inventory.')
+    }
+  }
   return entry
+}
+
+/** Relocate managed Git's helpers without replacing user credentials, hooks, or Git config. */
+export function gitCommandEnvironment(
+  runtime: Pick<GitRuntimeInfo, 'source' | 'executable' | 'platform'>,
+  environment: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
+  if (runtime.source !== 'bundled') return environment
+  const root = dirname(dirname(runtime.executable))
+  const windows = runtime.platform.startsWith('win32-')
+  const env = { ...environment }
+  if (env.GIT_EXEC_PATH === undefined) {
+    env.GIT_EXEC_PATH = join(
+      root,
+      windows ? (runtime.platform.endsWith('-arm64') ? 'clangarm64' : 'mingw64') : '',
+      'libexec',
+      'git-core',
+    )
+  }
+  if (windows) {
+    const prefix = runtime.platform.endsWith('-arm64') ? 'clangarm64' : 'mingw64'
+    env.PATH = [join(root, prefix, 'bin'), join(root, 'usr', 'bin'), env.PATH]
+      .filter(Boolean)
+      .join(';')
+  } else {
+    if (env.GIT_CONFIG_SYSTEM === undefined) env.GIT_CONFIG_SYSTEM = join(root, 'etc', 'gitconfig')
+    if (env.GIT_TEMPLATE_DIR === undefined)
+      env.GIT_TEMPLATE_DIR = join(root, 'share', 'git-core', 'templates')
+    if (runtime.platform.startsWith('linux-')) {
+      env.PREFIX = root
+      if (env.GIT_SSL_CAINFO === undefined) env.GIT_SSL_CAINFO = join(root, 'ssl', 'cacert.pem')
+    }
+  }
+  return env
 }
 
 /** Resolve the one Git executable every Git Stacks operation runs through, and record its facts. */
@@ -194,19 +258,32 @@ export async function resolveGitRuntime(): Promise<GitRuntimeRecord> {
     settings.platform,
     settings.arch,
   ])
-  if (cached?.key === key) return cached.record
+  if (cached?.key === key) {
+    const { record } = cached
+    if (
+      record.packaged &&
+      record.bundled &&
+      record.bundled.sha256 !== (await sha256(record.executable))
+    ) {
+      cached = null
+      throw new Error(
+        `The bundled Git runtime at ${record.executable} does not match its release digest. Reinstall Git Stacks from a signed release.`,
+      )
+    }
+    return record
+  }
 
   const platform = platformKey(settings.platform, settings.arch)
   const candidates = settings.useSystemGit
     ? []
     : [
-        settings.env.GIT_STACKS_BUNDLED_GIT,
+        !settings.packaged ? settings.env.GIT_STACKS_BUNDLED_GIT : null,
         settings.resourcesRoot
           ? join(
               settings.resourcesRoot,
               'git',
               platform,
-              'bin',
+              settings.platform === 'win32' ? 'cmd' : 'bin',
               settings.platform === 'win32' ? 'git.exe' : 'git',
             )
           : null,
@@ -227,11 +304,15 @@ export async function resolveGitRuntime(): Promise<GitRuntimeRecord> {
       `The bundled Git runtime for ${platform} is missing from this build. Turn on Use system Git in Git runtime diagnostics to run a Git installed on this computer.`,
     )
   }
+  const bundled =
+    source === 'bundled'
+      ? await assertBundledRuntime(await readManifest(settings.resourcesRoot), platform, executable)
+      : null
 
   let versionOutput = ''
   try {
     const result = await execFileAsync(executable, ['--version'], {
-      env: settings.env,
+      env: gitCommandEnvironment({ source, executable, platform }, settings.env),
       timeout: 20_000,
       windowsHide: true,
       encoding: 'utf8',
@@ -245,6 +326,11 @@ export async function resolveGitRuntime(): Promise<GitRuntimeRecord> {
   const version = parseVersion(versionOutput)
   if (!version) {
     throw new Error(`Could not read a version from "${versionOutput}" reported by ${executable}.`)
+  }
+  if (bundled && bundled.gitVersion && bundled.gitVersion !== version) {
+    throw new Error(
+      `The bundled Git runtime reports ${version} but the release manifest records ${bundled.gitVersion}.`,
+    )
   }
 
   const record: GitRuntimeRecord = {
@@ -262,24 +348,12 @@ export async function resolveGitRuntime(): Promise<GitRuntimeRecord> {
         compareGitVersions(version, GIT_CAPABILITY_VERSIONS.referenceTransactions) >= 0,
       rebaseUpdateRefs: compareGitVersions(version, GIT_CAPABILITY_VERSIONS.rebaseUpdateRefs) >= 0,
     },
-    bundled:
-      source === 'bundled'
-        ? await assertBundledRuntime(
-            await readManifest(settings.resourcesRoot),
-            platform,
-            executable,
-            version,
-          )
-        : null,
+    bundled,
     preservedEnvironment: PRESERVED_ENVIRONMENT,
     preservedConfiguration: PRESERVED_CONFIGURATION,
   }
   cached = { key, record }
   return record
-}
-
-export async function gitExecutable(): Promise<string> {
-  return (await resolveGitRuntime()).executable
 }
 
 /** Fail an operation with an explicit message when the resolved runtime cannot provide what it needs. */
@@ -324,4 +398,24 @@ export async function writeGitRuntimePreference(
   const temporaryPath = `${settingsFile}.tmp`
   await fs.writeFile(temporaryPath, JSON.stringify(value), { mode: 0o600 })
   await fs.rename(temporaryPath, settingsFile)
+}
+
+/** Diagnostics retain the configured preference even if its selected executable cannot start. */
+export async function gitRuntimeStatus(settingsFile: string): Promise<GitRuntimeStatus> {
+  try {
+    const runtime = await resolveGitRuntime()
+    return {
+      runtime,
+      useSystemGit: runtime.useSystemGit,
+      error: null,
+      minimumVersion: MINIMUM_GIT_VERSION,
+    }
+  } catch (error) {
+    return {
+      runtime: null,
+      useSystemGit: (await readGitRuntimePreference(settingsFile))?.useSystemGit ?? false,
+      error: error instanceof Error ? error.message : String(error),
+      minimumVersion: MINIMUM_GIT_VERSION,
+    }
+  }
 }

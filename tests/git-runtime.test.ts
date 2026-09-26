@@ -2,16 +2,18 @@ import assert from 'node:assert/strict'
 import { execFileSync, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { readFileSync } from 'node:fs'
 import { createServer, type Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { after, test } from 'node:test'
 import { runAction } from '../src/main/git'
 import { runGit } from '../src/main/git-core'
 import {
   compareGitVersions,
   configureGitRuntime,
+  gitRuntimeStatus,
   platformKey,
   readGitRuntimePreference,
   requireGitCapability,
@@ -20,11 +22,33 @@ import {
 } from '../src/main/git-runtime'
 import type { GitAction } from '../src/shared/types'
 
-const APP_VERSION = '0.1.0'
+const packageData: unknown = JSON.parse(
+  readFileSync(new URL('../package.json', import.meta.url), 'utf8'),
+)
+if (
+  !packageData ||
+  typeof packageData !== 'object' ||
+  !('version' in packageData) ||
+  typeof packageData.version !== 'string'
+) {
+  throw new Error('package.json must specify the app version')
+}
+const APP_VERSION = packageData.version
 const platform = platformKey(process.platform, process.arch)
-const realGit = execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim()
+const realGit =
+  process.platform === 'win32'
+    ? 'git'
+    : execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim()
 const systemVersionOutput = execFileSync('git', ['--version'], { encoding: 'utf8' }).trim()
 const systemVersion = /(\d+\.\d+\.\d+)/u.exec(systemVersionOutput)?.[1] ?? ''
+const releaseResources = resolve('resources')
+const releaseExecutable = join(
+  releaseResources,
+  'git',
+  platform,
+  process.platform === 'win32' ? 'cmd' : 'bin',
+  process.platform === 'win32' ? 'git.exe' : 'git',
+)
 
 const temporaryRoots: string[] = []
 
@@ -85,6 +109,11 @@ async function provisionRuntime(
                     .update(await readFile(executable))
                     .digest('hex'),
                 source: 'https://git-scm.com/downloads (release fixture)',
+                files: {
+                  [`bin/${process.platform === 'win32' ? 'git.exe' : 'git'}`]: createHash('sha256')
+                    .update(await readFile(executable))
+                    .digest('hex'),
+                },
               },
             },
     }),
@@ -144,7 +173,7 @@ test('the resolver records the runtime version, capabilities, and preserved beha
 })
 
 test('the bundled runtime replaces PATH Git and the system override reverses it', async () => {
-  const bundled = await provisionRuntime()
+  const bundled = { resourcesRoot: releaseResources, executable: releaseExecutable }
   const { repo, git } = await repository()
   try {
     configureGitRuntime({
@@ -156,8 +185,17 @@ test('the bundled runtime replaces PATH Git and the system override reverses it'
     const bundledRuntime = await resolveGitRuntime()
     assert.equal(bundledRuntime.source, 'bundled')
     assert.equal(bundledRuntime.executable, bundled.executable)
-    assert.equal(bundledRuntime.bundled?.gitVersion, systemVersion)
+    assert.equal(bundledRuntime.bundled?.gitVersion, '2.53.0')
     assert.match(await runGit(repo, ['--version']), /git version/u)
+    const helperRoot =
+      process.platform === 'win32' ? (process.arch === 'arm64' ? 'clangarm64' : 'mingw64') : ''
+    assert.equal(
+      (await runGit(repo, ['--exec-path'])).trim().replace(/\\/gu, '/').toLowerCase(),
+      join(releaseResources, 'git', platform, helperRoot, 'libexec', 'git-core')
+        .replace(/\\/gu, '/')
+        .toLowerCase(),
+    )
+    assert.match(await runGit(repo, ['lfs', 'version']), /^git-lfs\//u)
 
     configureGitRuntime({ useSystemGit: true })
     const systemRuntime = await resolveGitRuntime()
@@ -199,34 +237,72 @@ test('a packaged build refuses PATH Git until the system override is explicit', 
   }
 })
 
-test('a runtime that does not match its release digest, build, or platform is rejected', async () => {
-  configureGitRuntime({ appVersion: APP_VERSION, packaged: true, useSystemGit: false })
-  try {
-    const tampered = await provisionRuntime({ digest: '0'.repeat(64) })
-    configureGitRuntime({ resourcesRoot: tampered.resourcesRoot })
-    await assert.rejects(resolveGitRuntime(), /does not match its release digest/u)
+test(
+  'a runtime that does not match its release digest, build, or platform is rejected',
+  { skip: process.platform === 'win32' },
+  async () => {
+    configureGitRuntime({ appVersion: APP_VERSION, packaged: true, useSystemGit: false })
+    try {
+      const tampered = await provisionRuntime({ digest: '0'.repeat(64) })
+      configureGitRuntime({ resourcesRoot: tampered.resourcesRoot })
+      await assert.rejects(resolveGitRuntime(), /does not match its release digest/u)
+      const marker = join(tampered.resourcesRoot, 'executed')
+      await writeFile(
+        tampered.executable,
+        `#!/bin/sh\nprintf ran > \"${marker}\"\necho git version ${systemVersion}\n`,
+        { mode: 0o755 },
+      )
+      configureGitRuntime({
+        resourcesRoot: tampered.resourcesRoot,
+        env: { ...process.env, GIT_STACKS_BUNDLED_GIT: realGit },
+      })
+      await assert.rejects(resolveGitRuntime(), /does not match its release digest/u)
+      await assert.rejects(readFile(marker), { code: 'ENOENT' })
+      configureGitRuntime({
+        resourcesRoot: releaseResources,
+        env: { ...process.env, GIT_STACKS_BUNDLED_GIT: tampered.executable },
+      })
+      assert.equal((await resolveGitRuntime()).executable, releaseExecutable)
+      await assert.rejects(readFile(marker), { code: 'ENOENT' })
+      await rm(tampered.manifestPath)
+      configureGitRuntime({ resourcesRoot: tampered.resourcesRoot })
+      await assert.rejects(resolveGitRuntime(), /manifest records app version none/u)
+      await assert.rejects(readFile(marker), { code: 'ENOENT' })
 
-    const otherBuild = await provisionRuntime({ appVersion: '9.9.9' })
-    configureGitRuntime({ resourcesRoot: otherBuild.resourcesRoot })
-    await assert.rejects(resolveGitRuntime(), /does not match this build/u)
+      const otherBuild = await provisionRuntime({ appVersion: '9.9.9' })
+      configureGitRuntime({ resourcesRoot: otherBuild.resourcesRoot, env: process.env })
+      await assert.rejects(resolveGitRuntime(), /does not match this build/u)
 
-    const unrecorded = await provisionRuntime({ recordPlatform: false })
-    configureGitRuntime({ resourcesRoot: unrecorded.resourcesRoot })
-    await assert.rejects(resolveGitRuntime(), /records no Git runtime for/u)
+      const unrecorded = await provisionRuntime({ recordPlatform: false })
+      configureGitRuntime({ resourcesRoot: unrecorded.resourcesRoot })
+      await assert.rejects(resolveGitRuntime(), /records no Git runtime for/u)
 
-    const otherVersion = await provisionRuntime({
-      reportedVersion: systemVersion,
-      version: '2.30.0',
-    })
-    configureGitRuntime({ resourcesRoot: otherVersion.resourcesRoot })
-    await assert.rejects(resolveGitRuntime(), /reports .* but the release manifest records/u)
-  } finally {
-    configureGitRuntime({ resourcesRoot: null, packaged: false, useSystemGit: false })
-  }
-})
+      const otherVersion = await provisionRuntime({
+        reportedVersion: systemVersion,
+        version: '2.30.0',
+      })
+      configureGitRuntime({ resourcesRoot: otherVersion.resourcesRoot })
+      await assert.rejects(resolveGitRuntime(), /reports .* but the release manifest records/u)
+
+      const cachedFixture = await provisionRuntime()
+      configureGitRuntime({ resourcesRoot: cachedFixture.resourcesRoot })
+      assert.equal((await resolveGitRuntime()).source, 'bundled')
+      const cachedMarker = join(cachedFixture.resourcesRoot, 'cached-executed')
+      await writeFile(
+        cachedFixture.executable,
+        `#!/bin/sh\nprintf ran > \"${cachedMarker}\"\necho git version ${systemVersion}\n`,
+        { mode: 0o755 },
+      )
+      await assert.rejects(resolveGitRuntime(), /does not match its release digest/u)
+      await assert.rejects(readFile(cachedMarker), { code: 'ENOENT' })
+    } finally {
+      configureGitRuntime({ resourcesRoot: null, packaged: false, useSystemGit: false })
+    }
+  },
+)
 
 test('core workflows complete against the bundled runtime and the system Git', async () => {
-  const bundled = await provisionRuntime()
+  const bundled = { resourcesRoot: releaseResources, executable: releaseExecutable }
   const observed: string[] = []
   for (const source of ['bundled', 'system'] as const) {
     configureGitRuntime({
@@ -259,41 +335,64 @@ test('core workflows complete against the bundled runtime and the system Git', a
   configureGitRuntime({ resourcesRoot: null, packaged: false, useSystemGit: false })
 })
 
-test('guarded ref transactions report the required Git version before running', async () => {
-  const old = await provisionRuntime({ version: '2.20.1', reportedVersion: '2.20.1' })
-  const { repo, git } = await repository()
-  try {
-    await writeFile(join(repo, 'shared.txt'), 'base\n')
-    git('add', '.')
-    git('commit', '-m', 'Initial commit')
-    configureGitRuntime({
-      appVersion: APP_VERSION,
-      packaged: true,
-      resourcesRoot: old.resourcesRoot,
-      useSystemGit: false,
+test(
+  'guarded ref transactions report the required Git version before running',
+  { skip: process.platform === 'win32' },
+  async () => {
+    const old = await provisionRuntime({ version: '2.20.1', reportedVersion: '2.20.1' })
+    const { repo, git } = await repository()
+    try {
+      await writeFile(join(repo, 'shared.txt'), 'base\n')
+      git('add', '.')
+      git('commit', '-m', 'Initial commit')
+      configureGitRuntime({
+        appVersion: APP_VERSION,
+        packaged: true,
+        resourcesRoot: old.resourcesRoot,
+        useSystemGit: false,
+      })
+      const runtime = await resolveGitRuntime()
+      assert.equal(runtime.version, '2.20.1')
+      assert.equal(runtime.meetsMinimum, false)
+      assert.equal(runtime.capabilities.referenceTransactions, false)
+
+      await assert.rejects(
+        requireGitCapability('referenceTransactions', 'merge a branch'),
+        /Cannot merge a branch: bundled Git 2\.20\.1 .* is older than the required Git 2\.29\.0/u,
+      )
+      await writeFile(join(repo, 'other.txt'), 'other\n')
+      await runAction(repo, { type: 'stage', paths: ['other.txt'] })
+      await assert.rejects(
+        runAction(repo, commitAction(repo, 'Add other file')),
+        /is older than the required Git 2\.29\.0/u,
+      )
+      assert.equal(git('log', '--format=%s', '-1'), 'Initial commit')
+    } finally {
+      configureGitRuntime({ resourcesRoot: null, packaged: false, useSystemGit: false })
+    }
+  },
+)
+
+function testOnRuntimes(name: string, scenario: () => Promise<void>) {
+  for (const useSystemGit of [false, true]) {
+    test(`${name} (${useSystemGit ? 'system' : 'bundled'} Git)`, async () => {
+      configureGitRuntime({
+        appVersion: APP_VERSION,
+        packaged: true,
+        resourcesRoot: releaseResources,
+        useSystemGit,
+        env: process.env,
+      })
+      try {
+        await scenario()
+      } finally {
+        configureGitRuntime({ resourcesRoot: null, packaged: false, useSystemGit: false })
+      }
     })
-    const runtime = await resolveGitRuntime()
-    assert.equal(runtime.version, '2.20.1')
-    assert.equal(runtime.meetsMinimum, false)
-    assert.equal(runtime.capabilities.referenceTransactions, false)
-
-    await assert.rejects(
-      requireGitCapability('referenceTransactions', 'merge a branch'),
-      /Cannot merge a branch: bundled Git 2\.20\.1 .* is older than the required Git 2\.29\.0/u,
-    )
-    await writeFile(join(repo, 'other.txt'), 'other\n')
-    await runAction(repo, { type: 'stage', paths: ['other.txt'] })
-    await assert.rejects(
-      runAction(repo, commitAction(repo, 'Add other file')),
-      /is older than the required Git 2\.29\.0/u,
-    )
-    assert.equal(git('log', '--format=%s', '-1'), 'Initial commit')
-  } finally {
-    configureGitRuntime({ resourcesRoot: null, packaged: false, useSystemGit: false })
   }
-})
+}
 
-test('a repository hook runs and receives the preserved Git environment', async () => {
+testOnRuntimes('a repository hook runs and receives the preserved Git environment', async () => {
   const { repo, git } = await repository()
   const hooks = join(repo, 'user-hooks')
   await mkdir(hooks, { recursive: true })
@@ -322,7 +421,7 @@ test('a repository hook runs and receives the preserved Git environment', async 
   }
 })
 
-test('commit signing is neither forced nor silently bypassed', async () => {
+testOnRuntimes('commit signing is neither forced nor silently bypassed', async () => {
   const { repo, git } = await repository()
   await writeFile(join(repo, 'shared.txt'), 'base\n')
   git('add', '.')
@@ -331,7 +430,7 @@ test('commit signing is neither forced nor silently bypassed', async () => {
 
   git('config', 'commit.gpgsign', 'true')
   git('config', 'user.signingkey', '0000000000000000000000000000000000000000')
-  git('config', 'gpg.program', '/usr/bin/false')
+  git('config', 'gpg.program', 'git-stacks-missing-signer')
   await writeFile(join(repo, 'signed.txt'), 'signed\n')
   await runAction(repo, { type: 'stage', paths: ['signed.txt'] })
   await assert.rejects(runAction(repo, commitAction(repo, 'Signed commit')))
@@ -342,56 +441,60 @@ test('commit signing is neither forced nor silently bypassed', async () => {
   assert.equal(git('log', '--format=%s', '-1'), 'Signed commit')
 })
 
-test('a configured credential helper supplies credentials to a remote operation', async () => {
-  const authorizations: (string | undefined)[] = []
-  const server: Server = createServer((request, response) => {
-    authorizations.push(request.headers.authorization)
-    response.writeHead(401, { 'www-authenticate': 'Basic realm="git"' })
-    response.end('unauthorized')
-  })
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
-  const { port } = server.address() as AddressInfo
-  const { repo, git } = await repository()
-  const marker = join(repo, 'helper-ran.txt')
-  git('remote', 'add', 'origin', `http://127.0.0.1:${port}/workspace.git`)
-  git(
-    'config',
-    'credential.helper',
-    `!f() { echo ran >> "${marker}"; echo "username=git-stacks"; echo "password=s3cret-token"; }; f`,
-  )
-  // A machine-wide credential helper would answer first, so this case runs against no
-  // inherited configuration; the repository's own helper is the only source of secrets.
-  const isolated = join(await temporaryRoot('git-stacks-credential-'), 'gitconfig')
-  await writeFile(isolated, '')
-  process.env.GIT_CONFIG_GLOBAL = isolated
-  process.env.GIT_CONFIG_SYSTEM = isolated
-  process.env.GIT_TERMINAL_PROMPT = '0'
-  try {
-    await assert.rejects(runAction(repo, { type: 'fetch' }))
-    assert.match(await readFile(marker, 'utf8'), /^ran$/mu)
-    assert.equal(authorizations.length, 2)
-    assert.equal(authorizations[0], undefined)
-    assert.equal(
-      authorizations[1],
-      `Basic ${Buffer.from('git-stacks:s3cret-token').toString('base64')}`,
+testOnRuntimes(
+  'a configured credential helper supplies credentials to a remote operation',
+  async () => {
+    const authorizations: (string | undefined)[] = []
+    const server: Server = createServer((request, response) => {
+      authorizations.push(request.headers.authorization)
+      response.writeHead(401, { 'www-authenticate': 'Basic realm="git"' })
+      response.end('unauthorized')
+    })
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+    const { port } = server.address() as AddressInfo
+    const { repo, git } = await repository()
+    const marker = join(repo, 'helper-ran.txt')
+    git('remote', 'add', 'origin', `http://127.0.0.1:${port}/workspace.git`)
+    git(
+      'config',
+      'credential.helper',
+      `!f() { echo ran >> "${marker}"; echo "username=git-stacks"; echo "password=s3cret-token"; }; f`,
     )
-  } finally {
-    delete process.env.GIT_CONFIG_GLOBAL
-    delete process.env.GIT_CONFIG_SYSTEM
-    delete process.env.GIT_TERMINAL_PROMPT
-    await new Promise<void>((resolve) => server.close(() => resolve()))
-  }
-})
+    // A machine-wide credential helper would answer first, so this case runs against no
+    // inherited configuration; the repository's own helper is the only source of secrets.
+    const isolated = join(await temporaryRoot('git-stacks-credential-'), 'gitconfig')
+    await writeFile(isolated, '')
+    process.env.GIT_CONFIG_GLOBAL = isolated
+    process.env.GIT_CONFIG_SYSTEM = isolated
+    process.env.GIT_TERMINAL_PROMPT = '0'
+    try {
+      await assert.rejects(runAction(repo, { type: 'fetch' }))
+      assert.match(await readFile(marker, 'utf8'), /^ran$/mu)
+      assert.equal(authorizations.length, 2)
+      assert.equal(authorizations[0], undefined)
+      assert.equal(
+        authorizations[1],
+        `Basic ${Buffer.from('git-stacks:s3cret-token').toString('base64')}`,
+      )
+    } finally {
+      delete process.env.GIT_CONFIG_GLOBAL
+      delete process.env.GIT_CONFIG_SYSTEM
+      delete process.env.GIT_TERMINAL_PROMPT
+      await new Promise<void>((resolve) => server.close(() => resolve()))
+    }
+  },
+)
 
-test('a clean and smudge filter configured like Git LFS still runs', async () => {
+testOnRuntimes('a clean and smudge filter configured like Git LFS still runs', async () => {
   const { repo, git } = await repository()
   const filters = join(repo, 'lfs-filters')
   await mkdir(filters, { recursive: true })
   const cleanMarker = join(filters, 'clean.log')
+  const smudgeMarker = join(filters, 'smudge.log')
   const clean = join(filters, 'clean')
   const smudge = join(filters, 'smudge')
   await writeFile(clean, `#!/bin/sh\necho "$1" >> "${cleanMarker}"\ncat\n`, { mode: 0o755 })
-  await writeFile(smudge, '#!/bin/sh\ncat\n', { mode: 0o755 })
+  await writeFile(smudge, `#!/bin/sh\necho "$1" >> "${smudgeMarker}"\ncat\n`, { mode: 0o755 })
   await chmod(clean, 0o755)
   await chmod(smudge, 0o755)
   git('config', 'filter.lfs.clean', `${clean} %f`)
@@ -407,6 +510,9 @@ test('a clean and smudge filter configured like Git LFS still runs', async () =>
   try {
     await runAction(repo, { type: 'stage', paths: ['model.bin'] })
     assert.match(await readFile(cleanMarker, 'utf8'), /model\.bin/u)
+    await rm(join(repo, 'model.bin'))
+    await runGit(repo, ['checkout', '--', 'model.bin'])
+    assert.match(await readFile(smudgeMarker, 'utf8'), /model\.bin/u)
     assert.equal(
       (await runGit(repo, ['config', '--get', 'filter.lfs.clean'])).trim(),
       `${clean} %f`,
@@ -426,4 +532,31 @@ test('the system Git override is stored as a reversible preference', async () =>
   assert.equal(await readGitRuntimePreference(settings), null)
   await writeGitRuntimePreference(settings, { useSystemGit: false })
   assert.deepEqual(await readGitRuntimePreference(settings), { useSystemGit: false })
+})
+
+test('diagnostics retain the system override when its executable cannot start', async () => {
+  const settings = join(await temporaryRoot('git-stacks-settings-'), 'settings.json')
+  await writeGitRuntimePreference(settings, { useSystemGit: true })
+  configureGitRuntime({
+    packaged: true,
+    resourcesRoot: releaseResources,
+    useSystemGit: true,
+    env: { PATH: '/nonexistent' },
+  })
+  try {
+    const status = await gitRuntimeStatus(settings)
+    assert.equal(status.runtime, null)
+    assert.equal(status.useSystemGit, true)
+    assert.match(status.error ?? '', /Git could not be started/u)
+    configureGitRuntime({ useSystemGit: false, env: process.env, appVersion: APP_VERSION })
+    const restored = await gitRuntimeStatus(settings)
+    assert.equal(restored.runtime?.source, 'bundled')
+  } finally {
+    configureGitRuntime({
+      packaged: false,
+      resourcesRoot: null,
+      useSystemGit: false,
+      env: process.env,
+    })
+  }
 })

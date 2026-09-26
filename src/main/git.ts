@@ -56,7 +56,7 @@ import {
   validateBranchName,
 } from './git-core'
 import type { RefRecord } from './git-core'
-import { gitExecutable, requireGitCapability } from './git-runtime'
+import { gitCommandEnvironment, requireGitCapability, resolveGitRuntime } from './git-runtime'
 import { getGitHubData } from './github'
 import {
   getStackProgress,
@@ -3922,9 +3922,10 @@ async function withAbsentRefLock(
   ref: string,
   operation: () => Promise<void>,
 ): Promise<void> {
-  const child = spawn(await gitExecutable(), ['update-ref', '--stdin'], {
+  const runtime = await resolveGitRuntime()
+  const child = spawn(runtime.executable, ['update-ref', '--stdin'], {
     cwd: repoPath,
-    env: commandEnvironment(),
+    env: gitCommandEnvironment(runtime, commandEnvironment()),
     stdio: ['pipe', 'pipe', 'pipe'],
   })
   let pendingOutput = ''
@@ -4015,10 +4016,10 @@ async function deleteLocalBranchRef(
   expectedOid: string,
   cleanupConfig: () => Promise<void>,
 ): Promise<void> {
-  await requireGitCapability('referenceTransactions', `delete ${branchName}`)
-  const child = spawn(await gitExecutable(), ['update-ref', '--stdin'], {
+  const runtime = await requireGitCapability('referenceTransactions', `delete ${branchName}`)
+  const child = spawn(runtime.executable, ['update-ref', '--stdin'], {
     cwd: repoPath,
-    env: commandEnvironment(),
+    env: gitCommandEnvironment(runtime, commandEnvironment()),
     stdio: ['pipe', 'pipe', 'pipe'],
   })
   let pendingOutput = ''

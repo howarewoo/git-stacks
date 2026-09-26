@@ -14,13 +14,12 @@ import {
 } from './git'
 import { previewStack } from './stacks'
 import { getPullRequest } from './github'
-import type { GitAction, GitRuntimeStatus, RecentRepository, StackKind } from '../shared/types'
+import type { GitAction, RecentRepository, StackKind } from '../shared/types'
 import { RepositoryOperations } from './repository-operations'
 import {
-  MINIMUM_GIT_VERSION,
   configureGitRuntime,
+  gitRuntimeStatus,
   readGitRuntimePreference,
-  resolveGitRuntime,
   writeGitRuntimePreference,
 } from './git-runtime'
 
@@ -63,22 +62,6 @@ if (devUrl) {
 const trustedOrigin = devUrl ? new URL(devUrl).origin : productionOrigin
 const settingsPath = () => join(app.getPath('userData'), 'repositories.json')
 const settingsFile = () => join(app.getPath('userData'), 'settings.json')
-
-async function gitRuntimeStatus(): Promise<GitRuntimeStatus> {
-  try {
-    return {
-      runtime: await resolveGitRuntime(),
-      error: null,
-      minimumVersion: MINIMUM_GIT_VERSION,
-    }
-  } catch (error) {
-    return {
-      runtime: null,
-      error: error instanceof Error ? error.message : String(error),
-      minimumVersion: MINIMUM_GIT_VERSION,
-    }
-  }
-}
 
 function validateSender(event: IpcMainInvokeEvent) {
   if (
@@ -203,14 +186,14 @@ function installHandlers() {
   })
   ipcMain.handle('git-runtime', async (event) => {
     validateSender(event)
-    return gitRuntimeStatus()
+    return gitRuntimeStatus(settingsFile())
   })
   ipcMain.handle('git-runtime:system-git', async (event, requested: unknown) => {
     validateSender(event)
     if (typeof requested !== 'boolean') throw new Error('Use system Git must be true or false.')
     await writeGitRuntimePreference(settingsFile(), { useSystemGit: requested })
     configureGitRuntime({ useSystemGit: requested })
-    return gitRuntimeStatus()
+    return gitRuntimeStatus(settingsFile())
   })
 }
 

@@ -79,7 +79,12 @@ export function GitRuntimeDialog({
           <WorkflowSection label="Runtime">
             <OperationFacts
               facts={runtimeFacts(
-                status ?? { runtime: null, error: null, minimumVersion: 'Unknown' },
+                status ?? {
+                  runtime: null,
+                  error: null,
+                  minimumVersion: 'Unknown',
+                  useSystemGit: false,
+                },
               )}
             />
           </WorkflowSection>
@@ -107,7 +112,7 @@ export function GitRuntimeDialog({
                 { value: 'bundled', label: 'Bundled runtime' },
                 { value: 'system', label: 'System Git' },
               ]}
-              value={runtime?.useSystemGit ? 'system' : 'bundled'}
+              value={status?.useSystemGit ? 'system' : 'bundled'}
             />
             <p className="m-0 text-[length:var(--gs-semantic-type-metadata-size)] text-[var(--gs-semantic-text-secondary)]">
               This choice is stored with your preferences and applies to every repository. Turn it

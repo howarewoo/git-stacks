@@ -1,0 +1,104 @@
+name: Signed desktop release
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            platform: darwin
+          - os: macos-15-intel
+            platform: darwin
+          - os: windows-2025
+            platform: win32
+          - os: ubuntu-24.04
+            platform: linux
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - name: Check release identity and signing prerequisites
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          test "$RELEASE_TAG" = "v$(node -p 'require("./package.json").version')"
+          if [[ '${{ matrix.platform }}' != linux ]]; then
+            test -n "$CSC_LINK" && test -n "$CSC_KEY_PASSWORD"
+          fi
+          if [[ '${{ matrix.platform }}' == darwin ]]; then
+            test -n "$APPLE_ID" && test -n "$APPLE_APP_SPECIFIC_PASSWORD" && test -n "$APPLE_TEAM_ID"
+          fi
+      - run: npm ci
+      - run: npm test
+      - run: npm run dist
+        env:
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      - name: Verify macOS app signature
+        if: matrix.platform == 'darwin'
+        shell: bash
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          shopt -s nullglob
+          apps=(release/mac*/"Git Stacks.app")
+          test "${#apps[@]}" -eq 1
+          codesign --verify --deep --strict --verbose=2 "${apps[0]}"
+          codesign -dv --verbose=4 "${apps[0]}" 2>&1 | grep -Fq 'Authority=Developer ID Application:'
+          xcrun stapler validate "${apps[0]}"
+          test "$(codesign -dv --verbose=2 "${apps[0]}" 2>&1 | sed -n 's/^TeamIdentifier=//p')" = "$APPLE_TEAM_ID"
+      - name: Verify Windows installer signature
+        if: matrix.platform == 'win32'
+        shell: pwsh
+        run: |
+          $artifacts = @(Get-ChildItem release -Filter *.exe)
+          if ($artifacts.Count -eq 0) { throw 'No signed installer found' }
+          foreach ($artifact in $artifacts) {
+            if ((Get-AuthenticodeSignature $artifact.FullName).Status -ne 'Valid') {
+              throw "Invalid Authenticode signature: $($artifact.Name)"
+            }
+          }
+      - name: Select distributable artifacts
+        shell: bash
+        run: |
+          mkdir signed-release
+          shopt -s nullglob
+          artifacts=(release/*.dmg release/*.exe release/*.AppImage)
+          test "${#artifacts[@]}" -gt 0
+          cp "${artifacts[@]}" signed-release/
+      - name: Attest the packaged release artifacts
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: signed-release/*
+      - name: Upload only verified release artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        shell: bash
+        run: gh release upload "$RELEASE_TAG" signed-release/*

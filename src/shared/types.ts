@@ -202,6 +202,7 @@ export interface BundledRuntimeInfo {
   gitVersion: string
   sha256: string
   source: string
+  files?: Record<string, string>
 }
 
 export interface GitRuntimeInfo {
@@ -224,6 +225,7 @@ export interface GitRuntimeStatus {
   runtime: GitRuntimeInfo | null
   error: string | null
   minimumVersion: string
+  useSystemGit: boolean
 }
 declare global {
   interface Window {

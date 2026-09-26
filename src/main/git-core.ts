@@ -3,7 +3,7 @@ import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import { promisify } from 'node:util'
 import type { ChangedFile, GitOperation, Stash } from '../shared/types'
-import { gitExecutable } from './git-runtime'
+import { gitCommandEnvironment, resolveGitRuntime } from './git-runtime'
 
 export const execFile = promisify(execFileCallback)
 export const MAX_BUFFER = 32 * 1024 * 1024
@@ -86,8 +86,8 @@ export async function execute(
   }
 }
 
-// Prompt suppression is the only environment Git Stacks adds; user SSH, LFS, proxy,
-// askpass, hooks, signing, and credential-helper configuration is passed through untouched.
+// Prompt suppression is the only general environment Git Stacks adds. Managed Git also
+// receives its own relocated helper paths; user SSH, LFS, hooks and signing pass through.
 export function commandEnvironment(env?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   return {
     ...process.env,
@@ -103,7 +103,13 @@ export async function runGit(
   args: string[],
   env?: NodeJS.ProcessEnv,
 ): Promise<string> {
-  return execute(await gitExecutable(), args, repoPath, env)
+  const runtime = await resolveGitRuntime()
+  return execute(
+    runtime.executable,
+    args,
+    repoPath,
+    gitCommandEnvironment(runtime, commandEnvironment(env)),
+  )
 }
 
 export async function tryGit(repoPath: string, args: string[]): Promise<string | null> {
