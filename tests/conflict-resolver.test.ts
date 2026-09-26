@@ -8,6 +8,7 @@ import { test } from 'node:test'
 
 import {
   getConflictView,
+  getFileView,
   getSnapshot,
   resolveRepository,
   runAction,
@@ -911,6 +912,38 @@ test('the external merge tool runs without staging, and its result can still be 
   }
 })
 
+test('an environment-selected merge tool overrides merge.tool in native Git dispatch', async () => {
+  const { root, repo, git, gitExpectedFailure } = await fixture()
+  const previous = process.env.GIT_MERGE_TOOL
+  try {
+    git('config', 'mergetool.git-stacks-fallback.trustExitCode', 'true')
+    git('config', 'mergetool.git-stacks-fallback.cmd', 'printf "wrong tool\\n" > "$MERGED"')
+    git('config', 'mergetool.git-stacks-override.trustExitCode', 'true')
+    git('config', 'mergetool.git-stacks-override.cmd', 'printf "chosen tool\\n" > "$MERGED"')
+    git('config', 'merge.tool', 'git-stacks-fallback')
+    await writeFile(join(repo, 'shared.txt'), 'base\n')
+    git('add', '.')
+    git('commit', '-m', 'Base')
+    git('checkout', '-b', 'topic')
+    await writeFile(join(repo, 'shared.txt'), 'incoming\n')
+    git('commit', '-am', 'Incoming')
+    git('checkout', 'main')
+    await writeFile(join(repo, 'shared.txt'), 'current\n')
+    git('commit', '-am', 'Current')
+    gitExpectedFailure('merge', 'topic')
+    process.env.GIT_MERGE_TOOL = 'git-stacks-override'
+    const view = await getConflictView(repo, 'shared.txt')
+    assert.equal(view.mergeTool.tool, 'git-stacks-override')
+    await runConflictMergeTool(repo, 'shared.txt', view.fingerprint)
+    assert.equal(await readFile(join(repo, 'shared.txt'), 'utf8'), 'chosen tool\n')
+    assert.notEqual(git('ls-files', '--unmerged', '--', 'shared.txt'), '')
+  } finally {
+    if (previous === undefined) delete process.env.GIT_MERGE_TOOL
+    else process.env.GIT_MERGE_TOOL = previous
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 test('a repository with no configured merge tool says so instead of guessing one', async () => {
   const { root, repo, git, gitExpectedFailure } = await fixture()
   try {
@@ -991,11 +1024,12 @@ for (const variant of ['binary', 'oversize'] as const) {
     const { root, repo, git, gitExpectedFailure } = await fixture()
     try {
       const filename = variant === 'binary' ? 'image.bin' : 'large.txt'
-      const base = variant === 'binary' ? Buffer.from([0, 1, 2]) : Buffer.alloc(2_097_160, 65)
-      const incoming = variant === 'binary' ? Buffer.from([0, 3, 4]) : Buffer.alloc(2_097_160, 66)
-      const current = variant === 'binary' ? Buffer.from([0, 5, 6]) : Buffer.alloc(2_097_160, 67)
+      const large = 34 * 1024 * 1024 + 17
+      const base = variant === 'binary' ? Buffer.from([0, 1, 2]) : Buffer.alloc(large, 65)
+      const incoming = variant === 'binary' ? Buffer.from([0, 3, 4]) : Buffer.alloc(large, 66)
+      const current = variant === 'binary' ? Buffer.from([0, 5, 6]) : Buffer.alloc(large, 67)
       const resolved =
-        variant === 'binary' ? Buffer.from([0, 127, 255, 42]) : Buffer.alloc(2_097_169, 68)
+        variant === 'binary' ? Buffer.from([0, 127, 255, 42]) : Buffer.alloc(large + 9, 68)
       const resultPath = join(root, 'resolved-file')
       await writeFile(resultPath, resolved)
       git('config', 'mergetool.git-stacks-copy.trustExitCode', 'true')
@@ -1017,6 +1051,16 @@ for (const variant of ['binary', 'oversize'] as const) {
       const view = await getConflictView(repo, filename)
       assert.equal(view.worktreePresent, true)
       assert.equal(variant === 'binary' ? view.binary : view.truncated, true)
+      if (variant === 'oversize') {
+        assert.deepEqual(view.stagePreviewTruncated, [1, 2, 3])
+        assert.equal(view.current?.length, 2 * 1024 * 1024)
+        assert.equal(view.incoming?.length, 2 * 1024 * 1024)
+        const inspector = await getFileView(repo, filename)
+        assert.equal(inspector.conflicted, true)
+        assert.equal(inspector.truncated, true)
+        assert.ok(Buffer.byteLength(inspector.stagedDiff) <= 4 * 1024 * 1024)
+        assert.ok(Buffer.byteLength(inspector.unstagedDiff) <= 4 * 1024 * 1024)
+      }
       const otherStages = git('ls-files', '-u', '--', 'other.txt')
       await runConflictMergeTool(repo, filename, view.fingerprint)
       assert.deepEqual(await readFile(join(repo, filename)), resolved)
@@ -1048,6 +1092,46 @@ for (const variant of ['binary', 'oversize'] as const) {
     }
   })
 }
+
+test('a stage blob over 32 MiB opens with a bounded preview but accepting a side stages every byte', async () => {
+  const { root, repo, git, gitExpectedFailure } = await fixture()
+  try {
+    const bytes = 34 * 1024 * 1024 + 11
+    const base = Buffer.alloc(bytes, 65)
+    const incoming = Buffer.alloc(bytes, 66)
+    const current = Buffer.alloc(bytes, 67)
+    incoming.set(Buffer.from('incoming end'), bytes - 12)
+    incoming[bytes - 1] = 0
+    await writeFile(join(repo, 'large.bin'), base)
+    git('add', '.')
+    git('commit', '-m', 'Base')
+    git('checkout', '-b', 'topic')
+    await writeFile(join(repo, 'large.bin'), incoming)
+    git('commit', '-am', 'Incoming')
+    git('checkout', 'main')
+    await writeFile(join(repo, 'large.bin'), current)
+    git('commit', '-am', 'Current')
+    gitExpectedFailure('merge', 'topic')
+    const view = await getConflictView(repo, 'large.bin')
+    assert.equal(view.truncated, true)
+    assert.equal(view.binary, true, 'a NUL beyond the bounded preview is still detected')
+    assert.equal(view.incoming, null)
+    assert.deepEqual(view.stagePreviewTruncated, [1, 2, 3])
+    const inspector = await getFileView(repo, 'large.bin')
+    assert.equal(inspector.conflicted, true)
+    assert.equal(inspector.binary, true, 'late NUL must not be shown as text in the inspector')
+    assert.equal(inspector.content, null)
+    await runResolveConflict(repo, 'large.bin', view.fingerprint, {
+      kind: 'choice',
+      choice: 'incoming',
+    })
+    assert.deepEqual(await readFile(join(repo, 'large.bin')), incoming)
+    assert.equal(git('ls-files', '--unmerged', '--', 'large.bin'), '')
+    assert.equal(git('rev-parse', ':large.bin'), git('rev-parse', 'topic:large.bin'))
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
 
 test('a conflicted cherry-pick resolves and continues through Git', async () => {
   const { root, repo, git, gitExpectedFailure } = await fixture()

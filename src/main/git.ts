@@ -2477,7 +2477,47 @@ async function changedDiff(
     '--',
     relativePath,
   ]
-  return boundedText(await runGit(repoPath, args), MAX_DIFF_BYTES)
+  // The inspector opens before the resolver; cap the stream itself rather than
+  // buffering an arbitrarily large diff and truncating only after Git exits.
+  return new Promise((resolve, reject) => {
+    const child = spawn('git', args, {
+      cwd: repoPath,
+      env: {
+        ...process.env,
+        GIT_TERMINAL_PROMPT: '0',
+        GH_PROMPT_DISABLED: '1',
+        GCM_INTERACTIVE: 'Never',
+      },
+      timeout: 120_000,
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      shell: false,
+    })
+    const chunks: Buffer[] = []
+    let retained = 0
+    let truncated = false
+    let failure = ''
+    child.stdout.on('data', (chunk: Buffer) => {
+      const take = Math.min(MAX_DIFF_BYTES - retained, chunk.length)
+      if (take > 0) {
+        chunks.push(Buffer.from(chunk.subarray(0, take)))
+        retained += take
+      }
+      if (take < chunk.length) truncated = true
+    })
+    child.stderr.setEncoding('utf8')
+    child.stderr.on('data', (chunk: string) => {
+      failure = (failure + chunk).slice(-4096)
+    })
+    child.once('error', reject)
+    child.once('close', (code) => {
+      if (code !== 0) {
+        reject(new Error(failure.trim() || `git diff exited with status ${code}`))
+        return
+      }
+      resolve({ text: Buffer.concat(chunks).toString('utf8'), truncated })
+    })
+  })
 }
 
 export async function getFileView(repoPath: string, requestedPath: string): Promise<FileView> {
@@ -3344,7 +3384,7 @@ interface ConflictStageEntry {
 }
 /** Index stage number (1 base, 2 current, 3 incoming) to the content Git holds. */
 interface ConflictSides {
-  [stage: number]: { text: string | null; binary: boolean }
+  [stage: number]: { text: string | null; binary: boolean; truncated: boolean }
 }
 
 /** Keep the exact staged index bytes with the entries used to render a conflict. */
@@ -3378,22 +3418,69 @@ async function conflictStages(root: string, relativePath: string): Promise<Confl
   return (await conflictIndex(root, relativePath)).stages
 }
 
-async function readConflictBlob(root: string, oid: string): Promise<Buffer> {
-  const result = await execFile('git', ['cat-file', 'blob', oid], {
-    cwd: root,
-    maxBuffer: MAX_BUFFER,
-    encoding: 'buffer',
+/** Read every byte to classify a stage, but retain only a bounded text preview. */
+async function readConflictBlob(
+  root: string,
+  oid: string,
+): Promise<{ text: string | null; binary: boolean; truncated: boolean }> {
+  // ES2022's Promise typings do not expose withResolvers; Git streams settle
+  // this promise from child-process events.
+  return new Promise((resolve, reject) => {
+    const child = spawn('git', ['cat-file', 'blob', oid], {
+      cwd: root,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      shell: false,
+    })
+    const decoder = new TextDecoder('utf-8', { fatal: true })
+    const chunks: Buffer[] = []
+    let retained = 0
+    let totalBytes = 0
+    let binary = false
+    let failure = ''
+    child.stdout.on('data', (chunk: Buffer) => {
+      totalBytes += chunk.length
+      if (chunk.includes(0)) binary = true
+      if (!binary) {
+        try {
+          decoder.decode(chunk, { stream: true })
+        } catch {
+          binary = true
+        }
+      }
+      if (retained < MAX_FILE_BYTES) {
+        const take = Math.min(MAX_FILE_BYTES - retained, chunk.length)
+        chunks.push(Buffer.from(chunk.subarray(0, take)))
+        retained += take
+      }
+    })
+    child.stderr.setEncoding('utf8')
+    child.stderr.on('data', (chunk: string) => {
+      failure = (failure + chunk).slice(-4096)
+    })
+    child.once('error', reject)
+    child.once('close', (code) => {
+      if (code !== 0) {
+        reject(new Error(failure.trim() || `git cat-file failed for ${oid}`))
+        return
+      }
+      if (!binary) {
+        try {
+          decoder.decode()
+        } catch {
+          binary = true
+        }
+      }
+      const truncated = totalBytes > MAX_FILE_BYTES
+      const preview = Buffer.concat(chunks)
+      resolve({
+        text: binary
+          ? null
+          : new TextDecoder('utf-8', { fatal: true }).decode(preview, { stream: truncated }),
+        binary,
+        truncated,
+      })
+    })
   })
-  return Buffer.isBuffer(result.stdout) ? result.stdout : Buffer.from(String(result.stdout))
-}
-
-function decodeConflictBlob(buffer: Buffer): { text: string | null; binary: boolean } {
-  if (buffer.includes(0)) return { text: null, binary: true }
-  try {
-    return { text: new TextDecoder('utf-8', { fatal: true }).decode(buffer), binary: false }
-  } catch {
-    return { text: null, binary: true }
-  }
 }
 
 /**
@@ -3571,7 +3658,7 @@ export async function getConflictView(
   const sides: ConflictSides = {}
   await Promise.all(
     stages.map(async (stage) => {
-      sides[stage.stage] = decodeConflictBlob(await readConflictBlob(root, stage.oid))
+      sides[stage.stage] = await readConflictBlob(root, stage.oid)
     }),
   )
   if (captured.fingerprint !== identity.indexFingerprint) {
@@ -3582,6 +3669,9 @@ export async function getConflictView(
   const stageNumbers = stages.map((stage) => stage.stage)
   const tool = process.env.GIT_MERGE_TOOL || (await getConfigValue(root, 'merge.tool'))
   const binary = identity.binary || Object.values(sides).some((side) => side.binary)
+  const stagePreviewTruncated = stages
+    .filter((stage) => sides[stage.stage].truncated)
+    .map((stage) => stage.stage)
   return {
     path: relativePath,
     kind: conflictKind(stageNumbers, moves.length > 0),
@@ -3602,7 +3692,8 @@ export async function getConflictView(
     worktreePresent: identity.stat !== null,
     regions: conflictRegions(segments),
     moves,
-    truncated: identity.truncated,
+    truncated: identity.truncated || stagePreviewTruncated.length > 0,
+    stagePreviewTruncated,
     fingerprint: identity.fingerprint,
     mergeTool: tool
       ? { available: true, tool, reason: `Runs the configured merge tool ${tool} on this file.` }
@@ -3682,11 +3773,17 @@ async function writeConflictChoice(
   try {
     if (!materialized.path) throw new Error('The selected side could not be restored')
     if (renamedSource) {
-      const original = decodeConflictBlob(await fs.readFile(materialized.path))
-      if (original.text !== null && hasConflictMarkers(original.text)) {
+      const original = await fileFingerprintAt(root, sourcePath, materialized.path)
+      if (
+        original.preview &&
+        !original.binary &&
+        !original.truncated &&
+        hasConflictMarkers(original.preview.toString('utf8'))
+      ) {
         throw new Error('A chosen side still contains conflict markers; resolve its regions first')
       }
     }
+
     await replaceCheckedFile(root, relativePath, identity, materialized.path)
   } finally {
     await fs.rm(materialized.root, { recursive: true, force: true })
@@ -3788,15 +3885,24 @@ export async function runResolveConflict(
         'The index changed since the conflict was opened; refresh before applying this action',
       )
     }
-    const stages = captured.stages
+    const selectedStage = resolution.choice === 'current' ? 2 : 3
     const sides: ConflictSides = {}
-    await Promise.all(
-      stages.map(async (stage) => {
-        sides[stage.stage] = decodeConflictBlob(await readConflictBlob(root, stage.oid))
-      }),
-    )
-    if (resolution.choice === 'both' && Object.values(sides).some((side) => side.binary)) {
-      throw new Error('Keeping both copies is only possible for text files')
+    if (resolution.choice !== 'delete') {
+      await Promise.all(
+        captured.stages
+          .filter((stage) =>
+            resolution.choice === 'both' ? stage.stage !== 1 : stage.stage === selectedStage,
+          )
+          .map(async (stage) => {
+            sides[stage.stage] = await readConflictBlob(root, stage.oid)
+          }),
+      )
+    }
+    if (
+      resolution.choice === 'both' &&
+      [sides[2], sides[3]].some((side) => side?.binary || side?.truncated)
+    ) {
+      throw new Error('Keeping both copies requires complete text versions of both sides')
     }
     await writeConflictChoice(root, relativePath, resolution.choice, sides, identity)
   }
@@ -3811,29 +3917,34 @@ export async function runResolveConflict(
 }
 
 /**
- * `git mergetool` for one path, with its stdin closed. The tool is whatever
- * Git is configured to run; Git decides how to call it and what a failed run
- * means, and a non-zero exit is reported with Git's own words.
+ * `git mergetool` for one path, with its stdin closed. Git controls invocation
+ * and failure; the tool selected for this view is passed explicitly so an
+ * environment override cannot silently run the configured fallback instead.
  */
 function runMergeTool(
   gitDirectory: string,
   relativePath: string,
   indexPath: string,
   worktree: string,
+  tool: string,
 ): Promise<string> {
   return new Promise((resolve, reject) => {
-    const child = spawn('git', ['mergetool', '--no-prompt', '--no-gui', '--', relativePath], {
-      cwd: worktree,
-      env: {
-        ...process.env,
-        GIT_DIR: gitDirectory,
-        GIT_INDEX_FILE: indexPath,
-        GIT_WORK_TREE: worktree,
-        GIT_TERMINAL_PROMPT: '0',
+    const child = spawn(
+      'git',
+      ['mergetool', '--no-prompt', '--no-gui', `--tool=${tool}`, '--', relativePath],
+      {
+        cwd: worktree,
+        env: {
+          ...process.env,
+          GIT_DIR: gitDirectory,
+          GIT_INDEX_FILE: indexPath,
+          GIT_WORK_TREE: worktree,
+          GIT_TERMINAL_PROMPT: '0',
+        },
+        stdio: ['ignore', 'pipe', 'pipe'],
+        shell: false,
       },
-      stdio: ['ignore', 'pipe', 'pipe'],
-      shell: false,
-    })
+    )
     let output = ''
     let failure = ''
     child.stdout.setEncoding('utf8')
@@ -3899,6 +4010,7 @@ export async function runConflictMergeTool(
       relativePath,
       indexPath,
       worktree,
+      tool,
     )
     let result: string | null = isolatedPath
     try {

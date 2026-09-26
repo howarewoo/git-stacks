@@ -35,11 +35,24 @@ const KIND_LABELS: Record<ConflictFile['kind'], string> = {
 
 const STAGE_LABELS: Record<number, string> = { 1: 'base', 2: 'current', 3: 'incoming' }
 
-function stagePane(text: string | null, present: boolean, binary: boolean, label: string) {
+function stagePane(
+  text: string | null,
+  present: boolean,
+  binary: boolean,
+  label: string,
+  truncated: boolean,
+) {
   if (!present) return `${label} has no version in this conflict.`
-  if (binary) return `${label} is binary, so there is no text to merge here.`
-  if (text === null) return `${label} could not be read as text.`
-  return text
+  if (text === null)
+    return binary
+      ? `${label} is binary, so there is no text to merge here.`
+      : `${label} could not be read as text.`
+  // A multi-megabyte single line can be present in a Git blob but cannot be
+  // painted reliably as one <pre> line. Keep the pane small; choices use Git bytes.
+  const display = text.length > 4096 ? text.slice(0, 4096) : text
+  return truncated || display.length < text.length
+    ? `${display}\n\n[Preview ends here; the full staged version is kept by Git.]`
+    : display
 }
 
 function regionResult(region: ConflictRegion, choice: ConflictRegionChoice | undefined) {
@@ -162,11 +175,13 @@ function RegionCard({
 export function ConflictResolver({
   path,
   busy,
+  conflictPresent,
   actionError,
   runAction,
   onClose,
 }: {
   path: string
+  conflictPresent: boolean
   busy: boolean
   actionError: string | null
   runAction: RunAction
@@ -224,6 +239,7 @@ export function ConflictResolver({
   )
   const result = edited ?? (file?.regions.length ? composed : (file?.worktree ?? ''))
   const editable = Boolean(file && !file.binary && !file.truncated && file.worktree !== null)
+  const outdated = stale || !conflictPresent
   const markersRemain = hasConflictMarkers(result)
 
   const regionEditBlocked = edited !== null && edited !== composed
@@ -252,7 +268,7 @@ export function ConflictResolver({
   }
 
   const apply = async (resolution: ConflictResolution) => {
-    if (!file || busy || loading) return
+    if (!file || busy || loading || outdated) return
     const succeeded = await runAction(
       {
         type: 'resolveConflict',
@@ -278,7 +294,7 @@ export function ConflictResolver({
   }
 
   const openMergeTool = async (discardDraft = false) => {
-    if (!file || busy || loading) return
+    if (!file || busy || loading || outdated) return
     if (dirty && !discardDraft) {
       setHandoffNotice(true)
       return
@@ -351,11 +367,19 @@ export function ConflictResolver({
               <PhaseStatus phase="failed" title="Cannot open this conflict" message={error} />
             ) : file ? (
               <>
-                {stale ? (
+                {outdated ? (
                   <PhaseStatus
                     phase="blocked"
-                    title="This file changed while the resolver was open"
-                    message="Nothing was written or staged. Reload to read the current conflict and decide again."
+                    title={
+                      conflictPresent
+                        ? 'This file changed while the resolver was open'
+                        : 'This conflict was resolved outside the resolver'
+                    }
+                    message={
+                      conflictPresent
+                        ? 'Nothing was written or staged. Your draft remains here. Keep editing it, or explicitly discard it and reload the current conflict.'
+                        : 'The index no longer has this conflict (it may have been staged or the operation aborted). Your unstaged draft remains here so you can copy it before explicitly closing; it cannot be staged against the old conflict.'
+                    }
                   />
                 ) : null}
                 {handoffNotice ? (
@@ -392,8 +416,8 @@ export function ConflictResolver({
                 {file.truncated ? (
                   <PhaseStatus
                     phase="blocked"
-                    title="File too large to read here"
-                    message="Only the first part of this file was read. Keep one side, or resolve it in an external merge tool."
+                    title="File too large to edit here"
+                    message="Stage and worktree text is shown only as a bounded preview. Accepting one side or staging the worktree uses the complete original bytes, never this preview."
                   />
                 ) : null}
                 {file.kind === 'rename' ? (
@@ -410,7 +434,13 @@ export function ConflictResolver({
                       <Badge variant="secondary">stage 1</Badge>
                     </div>
                     <pre className="code-diff" aria-label={file.labels.base}>
-                      {stagePane(file.base, file.stages.includes(1), file.binary, 'The base')}
+                      {stagePane(
+                        file.base,
+                        file.stages.includes(1),
+                        file.binary,
+                        'The base',
+                        file.stagePreviewTruncated.includes(1),
+                      )}
                     </pre>
                   </div>
                   <div className="conflict-pane">
@@ -419,7 +449,13 @@ export function ConflictResolver({
                       <Badge variant="secondary">stage 2</Badge>
                     </div>
                     <pre className="code-diff" aria-label={file.labels.current}>
-                      {stagePane(file.current, file.stages.includes(2), file.binary, 'This side')}
+                      {stagePane(
+                        file.current,
+                        file.stages.includes(2),
+                        file.binary,
+                        'This side',
+                        file.stagePreviewTruncated.includes(2),
+                      )}
                     </pre>
                   </div>
                   <div className="conflict-pane">
@@ -428,7 +464,13 @@ export function ConflictResolver({
                       <Badge variant="secondary">stage 3</Badge>
                     </div>
                     <pre className="code-diff" aria-label={file.labels.incoming}>
-                      {stagePane(file.incoming, file.stages.includes(3), file.binary, 'This side')}
+                      {stagePane(
+                        file.incoming,
+                        file.stages.includes(3),
+                        file.binary,
+                        'This side',
+                        file.stagePreviewTruncated.includes(3),
+                      )}
                     </pre>
                   </div>
                 </div>
@@ -533,7 +575,7 @@ export function ConflictResolver({
                   <div className="workflow-row">
                     <Button
                       aria-label={`Accept ${file.labels.current} and stage`}
-                      disabled={busy || !file.stages.includes(2)}
+                      disabled={busy || outdated || !file.stages.includes(2)}
                       size="sm"
                       tooltip={`Replace this file with the ${file.labels.current} version and stage it.`}
                       variant="secondary"
@@ -543,7 +585,7 @@ export function ConflictResolver({
                     </Button>
                     <Button
                       aria-label={`Accept ${file.labels.incoming} and stage`}
-                      disabled={busy || !file.stages.includes(3)}
+                      disabled={busy || outdated || !file.stages.includes(3)}
                       size="sm"
                       tooltip={`Replace this file with the ${file.labels.incoming} version and stage it.`}
                       variant="secondary"
@@ -554,7 +596,9 @@ export function ConflictResolver({
                     {!file.binary && !file.truncated ? (
                       <Button
                         aria-label="Accept both sides and stage"
-                        disabled={busy || !file.stages.includes(2) || !file.stages.includes(3)}
+                        disabled={
+                          busy || outdated || !file.stages.includes(2) || !file.stages.includes(3)
+                        }
                         size="sm"
                         tooltip="Keep the current version and then the incoming version in one file."
                         variant="secondary"
@@ -567,7 +611,7 @@ export function ConflictResolver({
                 ) : null}
                 <div className="workflow-row">
                   <Button
-                    disabled={busy || !file.mergeTool.available}
+                    disabled={busy || outdated || !file.mergeTool.available}
                     size="sm"
                     tooltip={
                       file.mergeTool.available
@@ -582,7 +626,7 @@ export function ConflictResolver({
                   </Button>
                   <Button
                     aria-label="Accept the deletion and stage it"
-                    disabled={busy}
+                    disabled={busy || outdated}
                     size="sm"
                     tooltip="Accept the deletion: the file is removed and the removal is staged. This cannot be undone through Git."
                     variant="danger"
@@ -597,21 +641,31 @@ export function ConflictResolver({
               <Button
                 disabled={busy}
                 onClick={() => {
-                  if (stale || !file) setAttempt((value) => value + 1)
+                  if (file && outdated && conflictPresent) setAttempt((value) => value + 1)
                   else onClose()
                 }}
                 tooltip={
-                  file
-                    ? 'Close without staging. The Git operation stays paused, so it can still be continued or aborted.'
-                    : undefined
+                  file && !conflictPresent
+                    ? 'Discard this local draft and close. The externally staged result or abort is not changed.'
+                    : file && outdated
+                      ? 'Discard the local draft and reload the current index stages.'
+                      : file
+                        ? dirty
+                          ? 'Discard this local draft and close without staging. The Git operation stays paused.'
+                          : 'Close without staging. The Git operation stays paused, so it can still be continued or aborted.'
+                        : undefined
                 }
                 variant="secondary"
               >
-                {stale ? 'Reload conflict' : 'Close'}
+                {file && outdated
+                  ? conflictPresent
+                    ? 'Discard draft and reload conflict'
+                    : 'Discard draft and close'
+                  : 'Close'}
               </Button>
               {editable ? (
                 <Button
-                  disabled={busy || loading || markersRemain}
+                  disabled={busy || loading || outdated || markersRemain}
                   loading={busy}
                   tooltip={
                     markersRemain
@@ -626,7 +680,7 @@ export function ConflictResolver({
                 </Button>
               ) : file && (file.binary || file.truncated) && file.worktreePresent ? (
                 <Button
-                  disabled={busy || loading}
+                  disabled={busy || loading || outdated}
                   loading={busy}
                   tooltip="Stage the entire existing worktree file without converting or replacing its bytes. Review the external result first."
                   variant="accent"
@@ -637,11 +691,11 @@ export function ConflictResolver({
                 </Button>
               ) : null}
             </WorkflowActions>
-            {stale ? (
+            {outdated && conflictPresent ? (
               <p className="workflow-note">
                 <TriangleAlert aria-hidden="true" className="conflict-inline-icon" />
-                Reloading re-reads the index stages and the working tree. Choices made here are not
-                applied to the reloaded file.
+                Reloading re-reads the index stages and working tree and discards the draft shown
+                here.
               </p>
             ) : null}
           </WorkflowFrame>

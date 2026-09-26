@@ -1655,14 +1655,15 @@ function App() {
           onRequest={openWorkflow}
         />
       ) : null}
-      {conflictPath &&
-      snapshot &&
-      snapshot.files.some((file) => file.conflicted && file.path === conflictPath) ? (
+      {conflictPath && snapshot ? (
         <ConflictResolver
           key={conflictPath}
           busy={isBusy}
           actionError={actionError}
           path={conflictPath}
+          conflictPresent={snapshot.files.some(
+            (file) => file.conflicted && file.path === conflictPath,
+          )}
           runAction={runAction}
           onClose={() => setConflictPath(null)}
         />

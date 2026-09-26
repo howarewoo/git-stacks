@@ -118,6 +118,8 @@ export interface ConflictFile {
   kind: ConflictKind
   /** Index stages Git left for this path: 1 base, 2 current, 3 incoming. */
   stages: number[]
+  /** Stage numbers whose text is a bounded preview rather than the complete blob. */
+  stagePreviewTruncated: number[]
   binary: boolean
   labels: ConflictLabels
   base: string | null
