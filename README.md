@@ -48,9 +48,13 @@ npm run bench:performance
 ```
 
 The harness builds its own fixtures with the local `git` binary — a working tree
-of 100,000 files, 3,000 branches, a 5,000-commit history, and a commit touching
-5,000 files. No clone, token, or private repository is involved, so the numbers
-are comparable across runs, machines, and contributors.
+of 100,000 files, 3,000 branches with distinct non-default tips (including
+450 recorded stack members), a 5,000-commit history, and a commit touching
+5,000 files. The snapshot benchmark exercises actual parent comparisons rather
+than sharing the default tip across the fixture's branches. No clone, token, or
+private repository is involved. Compare runs on the same runner class and
+benchmark version; older measurements with different definitions are not
+carried into the current trend.
 
 The `startup` measurement runs the built Electron app against the 3,000-ref
 fixture. It starts before process launch and ends after the automation clicks
@@ -76,9 +80,11 @@ local branch. It now reads them all in a single
 `git config --null --get-regexp` pass, using the same idiom the GitHub
 integration already used for tracked pull request numbers.
 
-**A concurrency ceiling instead of one process per branch.** Parent inference and
-behind-counts used `Promise.all` over every branch, forking one `git` per branch
-at once. Both phases now run through `mapWithConcurrency` at `GIT_CONCURRENCY`.
+**A concurrency ceiling instead of one process per branch.** Parent inference
+probes distinct tips in batches; direct descendants of the default branch need
+no individual merge-base process, while deeper histories use the existing
+merge-base fallback. Behind-counts run through `mapWithConcurrency` at
+`GIT_CONCURRENCY`, rather than forking one process per branch at once.
 
 **A branch-analysis budget.** `SNAPSHOT_BRANCH_BUDGET` caps per-branch
 merge-base and behind probes. A branch is counted once in snapshot limits even
@@ -88,15 +94,17 @@ available, but inferred parents or behind counts can be unknown.
 the Branches view states this limit rather than claiming an exact comparison.
 
 **Streaming reads instead of buffer-then-copy.** `executeCapped` retains at most
-its byte cap while the child process runs, so a 100k-file status or a 5k-file
-diff never allocates the full output plus a truncated copy of it. Record-shaped
-output (status, history) is cut on NUL boundaries so what is kept is always well
-formed.
+its byte cap while the child process runs. Cancellation sends TERM, escalates
+when necessary, and waits for the process to close before releasing the read
+queue. Record-shaped output (status, history) is cut on NUL boundaries; history
+accepts only rows with all five terminated fields.
 
-**Incremental lists.** Branch, changed-file, pull request, stash, commit, and
-stack-member lists render `LIST_PAGE_SIZE` rows and reveal the rest on request
-through `useListWindow` and `ListWindowMore`. Diff regions do the same at
-`DIFF_PAGE_SIZE`.
+**Incremental lists.** Branch, changed-file, pull request, stash, and
+stack-member lists mount 200 rows initially, expand to 400 on the first reveal,
+then slide a bounded two-page window on deeper navigation. Previous controls
+return to earlier rows rather than accumulating the entire traversed prefix.
+History holds one fetched page of at most 50 commits and navigates older/newer
+pages. Diff regions expand from 1,000 to at most 2,000 mounted lines, then slide.
 
 ### Stale results and cancellation
 
@@ -127,11 +135,11 @@ These are the extreme cases the app states rather than hanging or crashing on.
   `limits.branchesSkipped`, as described above.
 - **A diff past `MAX_DIFF_BYTES` or a file past `MAX_FILE_BYTES`.** The
   backend retains only the bounded preview. The desktop diff view separately
-  limits rendering to the first 512 KiB of text and reveals at most 1,000 lines
-  at a time. Truncated previews are labelled; inspect the complete change in
-  an editor.
-- **History is paged, not loaded.** A repository with a million commits is not a
-  failure case: the view holds what the reader asked for.
+  limits rendering to the first 512 KiB of text and mounts at most 2,000 lines
+  after reveal. Truncated previews are labelled; inspect the complete change
+  in an editor.
+- **History is paged, not accumulated.** A repository with a million commits is
+  navigable one page at a time without retaining previous pages.
 - **An individual history entry over 1 MiB.** The reader reports a preview
   limit error instead of presenting a partial entry as the end of history.
 - **Pull request enumeration follows `gh`.** The renderer reveals pull requests

@@ -233,11 +233,28 @@ export function DiffView({ text, truncated = false }: { text: string; truncated?
             })
           : 'No textual diff in this view.'}
       </pre>
-      {window_.hasMore ? (
-        <Button className="code-region-more" variant="secondary" size="sm" onClick={window_.reveal}>
-          Show more diff lines ({window_.remaining} remaining)
-        </Button>
-      ) : null}
+      <div className="list-window-controls">
+        {window_.hasPrevious ? (
+          <Button
+            className="code-region-more"
+            variant="secondary"
+            size="sm"
+            onClick={window_.retreat}
+          >
+            Show previous diff lines
+          </Button>
+        ) : null}
+        {window_.hasMore ? (
+          <Button
+            className="code-region-more"
+            variant="secondary"
+            size="sm"
+            onClick={window_.reveal}
+          >
+            Show more diff lines ({window_.remaining} remaining)
+          </Button>
+        ) : null}
+      </div>
     </div>
   )
 }
@@ -288,6 +305,7 @@ export function FileInspector({
       })
     return () => {
       active = false
+      void window.desktop.cancel(`file:${path}`)
     }
   }, [path, snapshot, revision])
   const resolve = async (strategy: 'ours' | 'theirs' | 'manual') => {
@@ -544,6 +562,7 @@ export function HistoryView({
   )
   const [commits, setCommits] = React.useState<Commit[]>([])
   const [hasMore, setHasMore] = React.useState(false)
+  const [offset, setOffset] = React.useState(0)
   const [loading, setLoading] = React.useState(true)
   const [error, setError] = React.useState<string | null>(null)
   const [selected, setSelected] = React.useState<Commit | null>(null)
@@ -562,8 +581,9 @@ export function HistoryView({
     setLoading(true)
     setError(null)
     setSelected(null)
+    setCommits([])
     window.desktop
-      .history(ref, 0, requestId)
+      .history(ref, offset, requestId)
       .then((page) => {
         if (!historyGate.current(claim)) return
         setCommits(page.commits)
@@ -580,7 +600,7 @@ export function HistoryView({
       historyGate.reset()
       void window.desktop.cancel(requestId)
     }
-  }, [historyGate, snapshot.path, snapshot.headOid, ref, revision])
+  }, [historyGate, snapshot.path, snapshot.headOid, ref, offset, revision])
   const selectedOid = selected?.oid
   React.useEffect(() => {
     const claim = diffGate.claim()
@@ -605,21 +625,9 @@ export function HistoryView({
       void window.desktop.cancel(requestId)
     }
   }, [diffGate, snapshot.path, selectedOid])
-  const loadMore = async () => {
-    if (loading || diffLoading || busy) return
-    const claim = historyGate.claim()
-    setLoading(true)
-    setError(null)
-    try {
-      const page = await window.desktop.history(ref, commits.length, `history:${ref}`)
-      if (!historyGate.current(claim)) return
-      setCommits((previous) => [...previous, ...page.commits])
-      setHasMore(page.hasMore)
-    } catch (value) {
-      if (historyGate.current(claim)) setError(workflowError(value))
-    } finally {
-      if (historyGate.current(claim)) setLoading(false)
-    }
+  const loadMore = () => {
+    if (loading || diffLoading || busy || commits.length === 0) return
+    setOffset((value) => value + commits.length)
   }
   const visible = React.useMemo(
     () =>
@@ -630,7 +638,6 @@ export function HistoryView({
       ),
     [commits, search],
   )
-  const commitWindow = useListWindow(visible, LIST_PAGE_SIZE)
   const actionable =
     !busy &&
     !snapshot.operation &&
@@ -645,7 +652,8 @@ export function HistoryView({
         <div className="list-title-group">
           <h1>History</h1>
           <span className="list-subtitle">
-            {refName} · {commits.length} loaded{hasMore ? ' (more available)' : ''}
+            {refName} · commits {offset + 1}–{offset + commits.length}
+            {hasMore ? ' (more available)' : ''}
           </span>
         </div>
         <div className="workflow-row">
@@ -658,7 +666,10 @@ export function HistoryView({
             controlSize="compact"
             disabled={busy || loading || diffLoading}
             value={ref}
-            onChange={(event) => setRef(event.target.value)}
+            onChange={(event) => {
+              setOffset(0)
+              setRef(event.target.value)
+            }}
           >
             {!snapshot.branches.some((branch) => branch.ref === ref) ? (
               <option value={ref}>{ref}</option>
@@ -686,7 +697,7 @@ export function HistoryView({
         </p>
       ) : null}
       <div className="history-list" aria-label="Commit history">
-        {commitWindow.visible.map((commit) => (
+        {visible.map((commit) => (
           <button
             className={`history-row ${selected?.oid === commit.oid ? 'history-row-selected' : ''}`}
             key={commit.oid}
@@ -704,12 +715,6 @@ export function HistoryView({
             <code className="history-oid">{commit.oid.slice(0, 8)}</code>
           </button>
         ))}
-        <ListWindowMore
-          pageSize={LIST_PAGE_SIZE}
-          remaining={commitWindow.remaining}
-          noun="loaded commits"
-          onReveal={commitWindow.reveal}
-        />
         {loading ? (
           <p className="workflow-loading" role="status">
             <LoaderCircle className="size-4 animate-spin" />
@@ -721,6 +726,17 @@ export function HistoryView({
               ? 'No matching loaded commits. Load more history or change your search.'
               : 'No commits in this history yet.'}
           </p>
+        ) : null}
+        {offset > 0 ? (
+          <Button
+            className="history-more"
+            size="sm"
+            variant="ghost"
+            disabled={loading || busy || diffLoading}
+            onClick={() => setOffset((value) => Math.max(0, value - 50))}
+          >
+            Load newer commits
+          </Button>
         ) : null}
         {hasMore ? (
           <Button
@@ -822,17 +838,20 @@ export function StackView({
   onCreate: () => void
 }) {
   const [selection, setSelection] = React.useState<string | null>(null)
-  const local = snapshot.branches.filter(
-    (branch) => !branch.remote && branch.name !== snapshot.defaultBranch,
-  )
-  const byName = new Map(local.map((branch) => [branch.name, branch]))
-  const groups = new Map<string, Branch[]>()
-  for (const branch of local) {
-    const root = stackRoot(branch, byName, snapshot.defaultBranch)
-    const members = groups.get(root) ?? []
-    members.push(branch)
-    groups.set(root, members)
-  }
+  const { byName, groups } = React.useMemo(() => {
+    const local = snapshot.branches.filter(
+      (branch) => !branch.remote && branch.name !== snapshot.defaultBranch,
+    )
+    const byName = new Map(local.map((branch) => [branch.name, branch]))
+    const groups = new Map<string, Branch[]>()
+    for (const branch of local) {
+      const root = stackRoot(branch, byName, snapshot.defaultBranch)
+      const members = groups.get(root) ?? []
+      members.push(branch)
+      groups.set(root, members)
+    }
+    return { byName, groups }
+  }, [snapshot.branches, snapshot.defaultBranch])
   const current = snapshot.currentBranch ? byName.get(snapshot.currentBranch) : null
   const root =
     selection && groups.has(selection)
@@ -841,7 +860,7 @@ export function StackView({
         ? stackRoot(current, byName, snapshot.defaultBranch)
         : (groups.keys().next().value ?? null)
   const members = root ? (groups.get(root) ?? []) : []
-  const ordered = sortBranchesByUpdatedAt(members)
+  const ordered = React.useMemo(() => sortBranchesByUpdatedAt(members), [members])
   const memberWindow = useListWindow(
     React.useMemo(
       () =>
@@ -1041,8 +1060,10 @@ export function StackView({
             <ListWindowMore
               pageSize={LIST_PAGE_SIZE}
               remaining={memberWindow.remaining}
+              previous={memberWindow.hasPrevious}
               noun="stack branches"
               onReveal={memberWindow.reveal}
+              onPrevious={memberWindow.retreat}
             />
           </div>
         </>

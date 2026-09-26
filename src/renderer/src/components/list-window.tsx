@@ -1,25 +1,34 @@
 import { Button } from './ui/button'
 
-/**
- * The single reveal affordance for every repository-sized list. Nothing in the
- * app mounts an unbounded branch, file, pull request, stash, or commit list
- * without one of these below it.
- */
+/** One-page navigation for repository-sized lists. */
 export function ListWindowMore({
   pageSize,
   remaining,
+  previous,
   noun,
   onReveal,
+  onPrevious,
 }: {
   pageSize: number
   remaining: number
+  previous: boolean
   noun: string
   onReveal: () => void
+  onPrevious: () => void
 }) {
-  if (remaining <= 0) return null
+  if (remaining <= 0 && !previous) return null
   return (
-    <Button className="list-window-more" size="sm" variant="ghost" onClick={onReveal}>
-      Show {pageSize} more {noun} ({remaining} remaining)
-    </Button>
+    <div className="list-window-controls">
+      {previous ? (
+        <Button size="sm" variant="ghost" onClick={onPrevious}>
+          Show previous {noun}
+        </Button>
+      ) : null}
+      {remaining > 0 ? (
+        <Button className="list-window-more" size="sm" variant="ghost" onClick={onReveal}>
+          Show {pageSize} more {noun} ({remaining} remaining)
+        </Button>
+      ) : null}
+    </div>
   )
 }

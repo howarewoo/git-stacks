@@ -1098,8 +1098,10 @@ function App() {
           <ListWindowMore
             pageSize={LIST_PAGE_SIZE}
             remaining={branchWindow.remaining}
+            previous={branchWindow.hasPrevious}
             noun="branches"
             onReveal={branchWindow.reveal}
+            onPrevious={branchWindow.retreat}
           />
         </div>
       </>

@@ -36,12 +36,12 @@ export function buildWorkingTree(root) {
     for (let index = start; index < end; index += 1) {
       script.push(`printf 'export const id = 1\\n' > src/generated/module-${index}.ts`)
     }
-    execFileSync('sh', ['-c', script.join('\n')], { cwd: repo })
+    execFileSync('sh', [], { cwd: repo, input: `${script.join('\n')}\n` })
   }
   return repo
 }
 
-/** `FIXTURE_SIZES.refs` branches on one commit, for snapshot cost. */
+/** Thousands of refs with distinct tips for real parent probes. */
 export function buildManyRefs(root) {
   const repo = join(root, 'many-refs')
   mkdirSync(repo, { recursive: true })
@@ -52,15 +52,24 @@ export function buildManyRefs(root) {
   git(repo, ['add', 'README.md'])
   git(repo, ['commit', '-m', 'Base'])
   const head = git(repo, ['rev-parse', 'HEAD']).trim()
-  const commands = []
+  const commits = []
   for (let index = 0; index < FIXTURE_SIZES.refs; index += 1) {
-    commands.push(`create refs/heads/feature/branch-${index} ${head}`)
+    const message = `Branch ${index}\n`
+    commits.push(
+      `commit refs/heads/feature/branch-${index}\n` +
+        `committer Benchmark <benchmark@example.invalid> ${1700000000 + index} +0000\n` +
+        `data ${Buffer.byteLength(message)}\n${message}from ${head}\n`,
+    )
   }
-  // Create all refs through one Git process so fixture setup does not measure
-  // thousands of unrelated process startups.
-  git(repo, ['update-ref', '--stdin'], `${commands.join('\n')}\n`)
-  for (let index = 0; index < 200; index += 1) {
-    git(repo, ['config', `branch.feature/branch-${index}.parent`, 'main'])
+  // Distinct tips force real parent comparisons rather than same-tip shortcuts.
+  // Fast-import avoids thousands of fixture-setup process startups.
+  git(repo, ['fast-import', '--quiet'], commits.join('\n'))
+  for (let index = 0; index < 450; index += 1) {
+    git(repo, [
+      'config',
+      `branch.feature/branch-${index}.parent`,
+      index === 0 ? 'main' : 'feature/branch-0',
+    ])
   }
   return repo
 }
@@ -106,16 +115,12 @@ export function buildLargePullRequest(root) {
   const line = 'export const changed = true\n'
   for (let start = 0; start < tree.length; start += 2_000) {
     const slice = tree.slice(start, start + 2_000)
-    execFileSync(
-      'sh',
-      [
-        '-c',
-        `mkdir -p src/pr\n${slice
-          .map((file, offset) => `printf '${line}// ${start + offset}\\n' > '${file}'`)
-          .join('\n')}`,
-      ],
-      { cwd: repo },
-    )
+    execFileSync('sh', [], {
+      cwd: repo,
+      input: `mkdir -p src/pr\n${slice
+        .map((file, offset) => `printf '${line}// ${start + offset}\\n' > '${file}'`)
+        .join('\n')}\n`,
+    })
   }
   git(repo, ['add', '.'])
   git(repo, ['commit', '-m', `Touch ${FIXTURE_SIZES.pullRequestFiles} files`])

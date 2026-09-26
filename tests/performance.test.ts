@@ -1,13 +1,15 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { setTimeout as delay } from 'node:timers/promises'
 import { test } from 'node:test'
 import { getCommitDiff, getHistory, getSnapshot } from '../src/main/git'
 import {
   getBranchConfigs,
   isCancelled,
+  executeCapped,
   listStatus,
   mapWithConcurrency,
   parseStatus,
@@ -17,7 +19,11 @@ import { RepositoryOperations } from '../src/main/repository-operations'
 import { RequestRegistry } from '../src/main/request-registry'
 import { windowSlice } from '../src/renderer/src/lib/list-window'
 import { createRequestGate } from '../src/renderer/src/lib/request-gate'
-import { MAX_DIFF_BYTES, SNAPSHOT_BRANCH_BUDGET } from '../src/shared/performance'
+import {
+  MAX_DIFF_BYTES,
+  MAX_HISTORY_BYTES,
+  SNAPSHOT_BRANCH_BUDGET,
+} from '../src/shared/performance'
 
 /** The project targets ES2022, so the deferred helper is spelled out here. */
 function deferred(): { promise: Promise<void>; resolve: () => void } {
@@ -164,6 +170,41 @@ test('per-branch work runs under a concurrency ceiling', async () => {
   assert.ok(peak <= 4, `expected at most 4 concurrent workers, saw ${peak}`)
 })
 
+test('a cancelled branch batch waits for every running probe before releasing its read', async () => {
+  const first = deferred()
+  const second = deferred()
+  const started: number[] = []
+  let active = 0
+  let rejected = false
+  const pending = mapWithConcurrency([0, 1, 2], 2, async (index) => {
+    started.push(index)
+    active += 1
+    try {
+      if (index === 0) {
+        await first.promise
+        throw new Error('cancelled')
+      }
+      await second.promise
+    } finally {
+      active -= 1
+    }
+  })
+  void pending.catch(() => {
+    rejected = true
+  })
+  first.resolve()
+  await delay(0)
+  try {
+    assert.equal(rejected, false, 'the failed probe must not release the read ahead of its peer')
+    assert.deepEqual(started, [0, 1], 'no new work begins after a probe fails')
+    assert.equal(active, 1)
+  } finally {
+    second.resolve()
+  }
+  await assert.rejects(pending, /cancelled/)
+  assert.equal(active, 0)
+})
+
 test('a huge changed-file listing is bounded and reported instead of hanging', async () => {
   const { root, repo, git } = await repository()
   try {
@@ -230,6 +271,82 @@ test('cancelling a diff read ends the request instead of returning it', async ()
   }
 })
 
+test('aborting a live read waits until its Git-sized child has exited', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'git-stacks-cancel-'))
+  const ready = join(root, 'child.pid')
+  const controller = new AbortController()
+  try {
+    const pending = executeCapped(
+      process.execPath,
+      [
+        '-e',
+        "require('node:fs').writeFileSync(process.argv[1], String(process.pid)); process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)",
+        ready,
+      ],
+      root,
+      { maxBytes: 1024, signal: controller.signal },
+    )
+    let pid = 0
+    for (let attempt = 0; attempt < 200; attempt += 1) {
+      try {
+        pid = Number(await readFile(ready, 'utf8'))
+        break
+      } catch {
+        await delay(10)
+      }
+    }
+    assert.ok(pid > 0, 'a real child started before cancellation')
+    controller.abort()
+    await assert.rejects(pending, (error: unknown) => isCancelled(error))
+    assert.throws(
+      () => process.kill(pid, 0),
+      { code: 'ESRCH' },
+      'the child was reaped before rejection',
+    )
+  } finally {
+    controller.abort()
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('a skipped comparison never invents a restack when recorded parent tip still matches', async () => {
+  const { root, repo, git } = await repository()
+  try {
+    const head = git('rev-parse', 'HEAD')
+    git('branch', 'feature/known')
+    git('config', 'branch.feature/known.parent', 'main')
+    git('config', 'branch.feature/known.parentTip', head)
+    const snapshot = await getSnapshot(repo, undefined, 0)
+    const branch = snapshot.branches.find((item) => item.name === 'feature/known')
+    assert.equal(branch?.needsRestack, false)
+    assert.equal(branch?.parentBehind, null)
+    assert.equal(snapshot.limits.branchesSkipped, 1)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('batched direct descendants and deeper merge-base fallback infer the same real parent', async () => {
+  const { root, repo, git } = await repository()
+  try {
+    git('checkout', '-b', 'feature/direct')
+    git('commit', '--allow-empty', '-m', 'Direct')
+    git('branch', 'feature/deep')
+    git('checkout', 'feature/deep')
+    git('commit', '--allow-empty', '-m', 'Deeper')
+    git('checkout', 'main')
+    const snapshot = await getSnapshot(repo)
+    for (const name of ['feature/direct', 'feature/deep']) {
+      const branch = snapshot.branches.find((item) => item.name === name)
+      assert.equal(branch?.parent, 'main', `${name} should retain its Git ancestry`)
+      assert.equal(branch?.parentSource, 'inferred')
+      assert.equal(branch?.parentBehind, 0)
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 test('a snapshot states the branches its analysis budget left out', async () => {
   const { root, repo, git } = await repository()
   try {
@@ -288,13 +405,57 @@ test('an oversized history entry reports its limit instead of hiding later commi
   }
 })
 
-test('list windows reveal a bounded prefix of a very large list', () => {
+test('a date cut by the history cap is not returned as a complete commit', async () => {
+  const { root, repo, git } = await repository()
+  try {
+    const parent = git('rev-parse', 'HEAD')
+    const tree = git('rev-parse', 'HEAD^{tree}')
+    const name = 'N'.repeat(MAX_HISTORY_BYTES - 105)
+    const identity = `${name} <n@example.invalid> 1700000000 +0000`
+    const oid = execFileSync('git', ['-C', repo, 'hash-object', '-t', 'commit', '-w', '--stdin'], {
+      input: `tree ${tree}\nparent ${parent}\nauthor ${identity}\ncommitter ${identity}\n\nBoundary\n`,
+      encoding: 'utf8',
+      maxBuffer: MAX_HISTORY_BYTES * 3,
+    }).trim()
+    git('update-ref', 'refs/heads/main', oid)
+    const complete = execFileSync(
+      'git',
+      ['-C', repo, 'log', '-1', '--format=%H%x00%P%x00%s%x00%an%x00%cI%x00'],
+      {
+        encoding: 'utf8',
+        maxBuffer: MAX_HISTORY_BYTES * 3,
+      },
+    )
+    const dateStart = complete.indexOf('\0', complete.indexOf('\0', complete.indexOf('\0') + 1) + 1)
+    const dateField = complete.indexOf('\0', dateStart + 1)
+    assert.ok(
+      dateField < MAX_HISTORY_BYTES && complete.indexOf('\0', dateField + 1) > MAX_HISTORY_BYTES,
+    )
+    await assert.rejects(getHistory(repo, 'refs/heads/main', 0), /preview limit/)
+    git('commit', '--allow-empty', '-m', 'Newer')
+    const first = await getHistory(repo, 'refs/heads/main', 0)
+    assert.deepEqual(
+      first.commits.map((commit) => commit.subject),
+      ['Newer'],
+    )
+    assert.equal(first.hasMore, true)
+    await assert.rejects(getHistory(repo, 'refs/heads/main', 1), /preview limit/)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('list windows expand once and keep deep navigation bounded', () => {
   const items = Array.from({ length: 50_000 }, (_, index) => index)
   const first = windowSlice(items, 200)
-  assert.equal(first.visible.length, 200)
-  assert.equal(first.hasMore, true)
-  assert.equal(first.remaining, 49_800)
-  const last = windowSlice(items, items.length)
-  assert.equal(last.hasMore, false)
-  assert.equal(last.remaining, 0)
+  assert.deepEqual([first.visible.length, first.remaining], [200, 49_800])
+  const second = windowSlice(items, 400)
+  assert.deepEqual([second.visible[0], second.visible.at(-1), second.visible.length], [0, 399, 400])
+  const deep = windowSlice(items, 400, 49_400)
+  assert.deepEqual(
+    [deep.visible[0], deep.visible.at(-1), deep.visible.length],
+    [49_400, 49_799, 400],
+  )
+  const last = windowSlice(items, 400, 49_600)
+  assert.deepEqual([last.visible[0], last.hasMore, last.remaining], [49_600, false, 0])
 })

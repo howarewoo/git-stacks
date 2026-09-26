@@ -4,6 +4,7 @@ import {
   commandDetail,
   execute,
   getConfigValue,
+  isCancelled,
   isRecord,
   parseRemote,
   runGit,
@@ -168,14 +169,17 @@ function unavailable(message: string): GitHubResult {
   return { pullRequests: [], available: false, message, sameRepository: () => false }
 }
 
-async function trackedPullRequestNumbers(repoPath: string): Promise<number[]> {
+async function trackedPullRequestNumbers(
+  repoPath: string,
+  signal?: AbortSignal,
+): Promise<number[]> {
   try {
-    const output = await runGit(repoPath, [
-      'config',
-      '--null',
-      '--get-regexp',
-      '^branch\\..*\\.gitstackspr$',
-    ])
+    const output = await runGit(
+      repoPath,
+      ['config', '--null', '--get-regexp', '^branch\\..*\\.gitstackspr$'],
+      undefined,
+      signal,
+    )
     const numbers = new Set<number>()
     for (const token of output.split('\0')) {
       const match = /^branch\..+\.gitstackspr\s+([0-9]+)$/u.exec(token)
@@ -199,6 +203,7 @@ async function trackedPullRequestNumbers(repoPath: string): Promise<number[]> {
 export async function getGitHubData(
   repoPath: string,
   originUrl: string | null,
+  signal?: AbortSignal,
 ): Promise<GitHubResult> {
   const remote = parseRemote(originUrl)
   if (!originUrl) return unavailable('GitHub metadata unavailable: no origin remote is configured')
@@ -239,13 +244,15 @@ export async function getGitHubData(
         `query=${query}`,
       ],
       repoPath,
+      undefined,
+      signal,
     )
     const entries = parseGraphQlPages(output)
-    const tracked = await trackedPullRequestNumbers(repoPath)
+    const tracked = await trackedPullRequestNumbers(repoPath, signal)
     const known = new Set(entries.map((entry) => entry.pullRequest.number))
     for (const number of tracked) {
       if (known.has(number)) continue
-      const exact = await getPullRequest(repoPath, number)
+      const exact = await getPullRequest(repoPath, number, signal)
       entries.push({ pullRequest: exact, headRepository: exact.headRepository ?? null })
       known.add(number)
     }
@@ -270,6 +277,7 @@ export async function getGitHubData(
       sameRepository,
     }
   } catch (error) {
+    if (isCancelled(error)) throw error
     return unavailable(githubErrorMessage(error))
   }
 }
@@ -278,6 +286,7 @@ export async function getGitHubData(
 export async function getPullRequest(
   repoPath: string,
   number: number,
+  signal?: AbortSignal,
 ): Promise<PullRequest & { body: string }> {
   if (!Number.isInteger(number) || number <= 0)
     throw new Error('Pull request number must be a positive integer')
@@ -313,6 +322,8 @@ export async function getPullRequest(
         `query=${query}`,
       ],
       repoPath,
+      undefined,
+      signal,
     )
     const value: unknown = JSON.parse(output)
     if (!isRecord(value) || (Array.isArray(value.errors) && value.errors.length > 0))
@@ -336,6 +347,7 @@ export async function getPullRequest(
     }
     return { ...parsed.pullRequest, body: node.body }
   } catch (error) {
+    if (isCancelled(error)) throw error
     throw new Error(`Could not load pull request #${number}: ${githubErrorMessage(error)}`)
   }
 }

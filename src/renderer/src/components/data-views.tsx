@@ -259,8 +259,10 @@ export function ChangesView({
               <ListWindowMore
                 pageSize={LIST_PAGE_SIZE}
                 remaining={stagedWindow.remaining}
+                previous={stagedWindow.hasPrevious}
                 noun="staged files"
                 onReveal={stagedWindow.reveal}
+                onPrevious={stagedWindow.retreat}
               />
             </div>
           ) : (
@@ -314,8 +316,10 @@ export function ChangesView({
               <ListWindowMore
                 pageSize={LIST_PAGE_SIZE}
                 remaining={unstagedWindow.remaining}
+                previous={unstagedWindow.hasPrevious}
                 noun="unstaged files"
                 onReveal={unstagedWindow.reveal}
+                onPrevious={unstagedWindow.retreat}
               />
             </div>
           ) : (
@@ -499,8 +503,10 @@ export function PullRequestListView({
           <ListWindowMore
             pageSize={LIST_PAGE_SIZE}
             remaining={prWindow.remaining}
+            previous={prWindow.hasPrevious}
             noun="pull requests"
             onReveal={prWindow.reveal}
+            onPrevious={prWindow.retreat}
           />
         </div>
       ) : (
@@ -631,8 +637,10 @@ export function StashesView({
           <ListWindowMore
             pageSize={LIST_PAGE_SIZE}
             remaining={stashWindow.remaining}
+            previous={stashWindow.hasPrevious}
             noun="stashes"
             onReveal={stashWindow.reveal}
+            onPrevious={stashWindow.retreat}
           />
         </div>
       ) : (

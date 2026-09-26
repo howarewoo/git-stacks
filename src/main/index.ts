@@ -180,7 +180,10 @@ function installHandlers() {
   })
   ipcMain.handle('repository:pull-request', (event, number: number) => {
     validateSender(event)
-    return readRepository((root) => getPullRequest(root, number), `pull-request:${number}`)
+    return readRepository(
+      (root, signal) => getPullRequest(root, number, signal),
+      `pull-request:${number}`,
+    )
   })
   ipcMain.handle('operation:cancel', (event, requestId: unknown) => {
     validateSender(event)

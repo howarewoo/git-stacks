@@ -80,6 +80,7 @@ async function main() {
     const desktop = await measureDesktop(repoRoot, repos.manyRefs)
     record('startup', 'many-refs-desktop', STARTUP_BUDGET_MS, desktop.startupMs, {
       branches: FIXTURE_SIZES.refs + 1,
+      differingTips: FIXTURE_SIZES.refs,
       visibleRows: 200,
     })
     record('interaction', 'many-refs-desktop', INTERACTION_BUDGET_MS, desktop.interactionMs, {
@@ -90,6 +91,7 @@ async function main() {
     const snapshot = await elapsed(() => getSnapshot(repos.manyRefs))
     record('snapshot', 'many-refs', SNAPSHOT_BUDGET_MS, snapshot.ms, {
       branches: snapshot.value.branches.length,
+      differingTips: FIXTURE_SIZES.refs,
       branchesAnalyzed: snapshot.value.limits.branchesAnalyzed,
       branchesSkipped: snapshot.value.limits.branchesSkipped,
     })
@@ -128,7 +130,7 @@ async function main() {
 
     mkdirSync(out, { recursive: true })
     const report = {
-      version: 1 as const,
+      version: 2 as const,
       node: process.version,
       platform: `${process.platform}-${process.arch}`,
       generatedAt: new Date().toISOString(),
@@ -136,10 +138,24 @@ async function main() {
     }
     writeFileSync(join(out, 'latest.json'), `${JSON.stringify(report, null, 2)}\n`)
     const trend = existsSync(join(out, 'trend.jsonl'))
-      ? readFileSync(join(out, 'trend.jsonl'), 'utf8').split('\n').filter(Boolean)
+      ? readFileSync(join(out, 'trend.jsonl'), 'utf8')
+          .split('\n')
+          .filter((line) => {
+            if (!line) return false
+            try {
+              return JSON.parse(line).version === report.version
+            } catch {
+              return false
+            }
+          })
       : []
     trend.push(
-      JSON.stringify({ generatedAt: report.generatedAt, platform: report.platform, measurements }),
+      JSON.stringify({
+        version: report.version,
+        generatedAt: report.generatedAt,
+        platform: report.platform,
+        measurements,
+      }),
     )
     writeFileSync(join(out, 'trend.jsonl'), `${trend.slice(-200).join('\n')}\n`)
     process.stdout.write(`trend data written to ${join(out, 'trend.jsonl')}\n`)
