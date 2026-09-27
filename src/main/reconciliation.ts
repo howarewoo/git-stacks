@@ -37,7 +37,7 @@ import {
   tryGit,
   validateBranchName,
 } from './git-core'
-import { canonicalRemoteName, getGitHubData, pullRequestRepository } from './github'
+import { canonicalRemoteName, getGitHubData, getPullRequest, pullRequestRepository } from './github'
 import { githubTransport } from './github-transport'
 
 const PLAN_TTL_MS = 5 * 60_000
@@ -288,6 +288,9 @@ function repairsFor(
     if (!member?.recordedParent) continue
     if (adopted.has(entry.member.branch)) continue
     const detached = entry.member.state === 'externally-unstacked'
+    // A branch now registered in another native stack belongs to that stack's
+    // repair plan. Its local children may still have valid hints there.
+    if (detached && member.pullRequest?.stackNumber != null) continue
     const unresolvableParent = entry.submitted && !entry.parentResolvable
     const invalidBoundary = member.ancestry.recordedParentTipValid === false
     if (!detached && !unresolvableParent && !invalidBoundary) continue
@@ -1055,6 +1058,7 @@ interface CapturedPullRequest {
   base: string
   headOid: string | null
   state: 'OPEN' | 'CLOSED' | 'MERGED'
+  mergeOid: string | null
   stackNumber: number | null
 }
 
@@ -1079,6 +1083,9 @@ interface RepairOperation {
   targetOid: string | null
   /** retarget-pull-request: the base the submitted chain requires. */
   base: string | null
+  /** Preserve a verified merged predecessor's immutable replay boundary. */
+  mergedCommitOid: string | null
+  mergedParentPullRequest: number | null
   previous: ReconciliationEvidence | null
 }
 
@@ -1138,6 +1145,7 @@ function capturePullRequest(pullRequest: PullRequest): CapturedPullRequest {
     base: pullRequest.base,
     headOid: pullRequest.headOid ?? null,
     state: pullRequest.state,
+    mergeOid: pullRequest.mergeOid ?? null,
     stackNumber: pullRequest.stack?.stackNumber ?? null,
   }
 }
@@ -1164,6 +1172,8 @@ async function captureOperation(
     parentTip: null,
     targetOid: null,
     base: null,
+    mergedCommitOid: null,
+    mergedParentPullRequest: null,
     previous: repair.evidence,
   }
   if (repair.kind === 'clear-stale-hint') return operation
@@ -1182,10 +1192,38 @@ async function captureOperation(
     if (!parentOid) return null
     const boundary = await tryGit(repoPath, ['merge-base', parentOid, member.localOid])
     if (!boundary) return null
+    const mergedParent = stack.members.find(
+      (entry) => entry.branch === member.recordedParent && entry.state === 'merged',
+    )
+    let replayBoundary = stripTrailingNewline(boundary)
+    let mergedCommitOid: string | null = null
+    if (mergedParent) {
+      const mergedPr = mergedParent.pullRequest
+        ? await getPullRequest(repoPath, mergedParent.pullRequest)
+        : null
+      const recorded = member.recordedParentTip
+      if (
+        mergedPr?.state !== 'MERGED' ||
+        !mergedPr.mergeOid ||
+        !mergedParent.submittedHeadOid ||
+        !recorded ||
+        (await containment(repoPath, mergedPr.mergeOid, parentOid)).mergeBase !==
+          mergedPr.mergeOid ||
+        (await containment(repoPath, mergedParent.submittedHeadOid, recorded)).mergeBase !==
+          mergedParent.submittedHeadOid ||
+        (await containment(repoPath, recorded, member.localOid)).mergeBase !== recorded
+      ) {
+        return null
+      }
+      replayBoundary = recorded
+      mergedCommitOid = mergedPr.mergeOid
+    }
     return {
       ...operation,
       parent,
-      parentTip: stripTrailingNewline(boundary),
+      parentTip: replayBoundary,
+      mergedCommitOid,
+      mergedParentPullRequest: mergedParent?.pullRequest ?? null,
       previous: {
         branch: repair.branch,
         backupRef: null,
@@ -1342,6 +1380,15 @@ async function revalidatePlan(repoPath: string, plan: ReconciliationPlan): Promi
       throw new Error(`${STALE_PREFIX} ${branch} changed since the preview was captured`)
     }
   }
+  for (const operation of plan.operations) {
+    if (!operation.mergedCommitOid || !operation.mergedParentPullRequest) continue
+    const merged = await getPullRequest(repoPath, operation.mergedParentPullRequest)
+    if (merged.state !== 'MERGED' || merged.mergeOid !== operation.mergedCommitOid) {
+      throw new Error(
+        `${STALE_PREFIX} pull request #${operation.mergedParentPullRequest} changed since the preview was captured`,
+      )
+    }
+  }
   if (!plan.pullRequests.size && !plan.stack) return
   const data = await getGitHubData(repoPath, plan.originUrl)
   if (!data.available) {
@@ -1356,6 +1403,7 @@ async function revalidatePlan(repoPath: string, plan: ReconciliationPlan): Promi
       identity.base !== captured.base ||
       identity.headOid !== captured.headOid ||
       identity.state !== captured.state ||
+      identity.mergeOid !== captured.mergeOid ||
       identity.stackNumber !== captured.stackNumber
     ) {
       throw new Error(
@@ -1514,7 +1562,24 @@ async function applyOperation(
     if (!operation.parent || !operation.parentTip) return false
     await validateBranchName(repoPath, operation.parent)
     let nextParentTip = operation.parentTip
-    if (movedTips.has(branch) || movedTips.has(operation.parent)) {
+    if (operation.mergedCommitOid) {
+      const parentOid = await resolveOid(
+        repoPath,
+        await resolveParentRef(repoPath, operation.parent),
+      )
+      if (
+        !parentOid ||
+        !currentOid ||
+        (await containment(repoPath, operation.mergedCommitOid, parentOid)).mergeBase !==
+          operation.mergedCommitOid ||
+        (await containment(repoPath, operation.parentTip, currentOid)).mergeBase !==
+          operation.parentTip
+      ) {
+        throw new Error(
+          `Cannot record ${branch} under ${operation.parent}: merged predecessor or safe replay boundary changed`,
+        )
+      }
+    } else if (movedTips.has(branch) || movedTips.has(operation.parent)) {
       const parentOid = await resolveOid(
         repoPath,
         await resolveParentRef(repoPath, operation.parent),
