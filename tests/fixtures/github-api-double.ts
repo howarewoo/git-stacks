@@ -213,9 +213,24 @@ class HttpError extends Error {
     readonly status: number,
     readonly reason: string,
     message: string,
+    readonly headers: Record<string, string> = {},
   ) {
     super(message)
   }
+}
+
+/** A canned failure for every native-stacks endpoint, used to prove probe error propagation. */
+function stacksFailure(state: GitHubFixtureState): HttpError | null {
+  const failure = state.stacksFailure
+  if (!failure) return null
+  return new HttpError(
+    failure.status,
+    failure.reason,
+    failure.message,
+    failure.rateLimitRemaining === undefined
+      ? {}
+      : { 'x-ratelimit-remaining': String(failure.rateLimitRemaining) },
+  )
 }
 
 function createPullRequest(state: GitHubFixtureState, body: Record<string, unknown>) {
@@ -277,6 +292,8 @@ function handleRest(
     if (state.stacksPreviewDisabled) {
       throw new HttpError(404, 'Not Found', 'Not Found: stacks preview unavailable')
     }
+    const failure = stacksFailure(state)
+    if (failure) throw failure
     if (rawPath === `${prefix}/stacks`) {
       if (method === 'GET') {
         let stacks = state.stacks ?? []
@@ -637,7 +654,9 @@ export function createGitHubApiDouble(): typeof globalThis.fetch {
       return json(result.status, result.body)
     } catch (error) {
       saveState(state)
-      if (error instanceof HttpError) return json(error.status, { message: error.message })
+      if (error instanceof HttpError) {
+        return json(error.status, { message: error.message }, error.headers)
+      }
       throw error
     }
   }) as typeof globalThis.fetch
