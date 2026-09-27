@@ -705,6 +705,37 @@ function stackFor(snapshot: RepositorySnapshot, key: string) {
   return stack
 }
 
+test('an unfetched GitHub stack head blocks repairs in a real repository report', async () => {
+  await withHarness(async (harness) => {
+    const heads = await setupStack(harness)
+    const created = await createPullRequestStack('acme', 'widgets', [101, 102, 103])
+    const unavailable = bareGit(harness, [
+      'commit-tree',
+      `${heads[1]}^{tree}`,
+      '-p',
+      heads[1],
+      '-m',
+      'unfetched remote head',
+    ])
+    bareGit(harness, ['update-ref', 'refs/heads/feature/step-2', unavailable, heads[1]])
+    assert.equal(optionalGit(harness, ['cat-file', '-t', unavailable]), null)
+
+    const snapshot = await getSnapshot(harness.repo)
+    assert.equal(
+      snapshot.nativeStacks?.find((entry) => entry.number === created.number)?.pullRequests[1]
+        .headSha,
+      unavailable,
+    )
+    const stack = stackFor(snapshot, `native:${created.number}`)
+    assert.equal(stack.state, 'ambiguous')
+    assert.match(
+      stack.blockers.join(' '),
+      /Submitted head .* for feature\/step-2 is unavailable locally/,
+    )
+    assert.deepEqual(stack.repairs, [])
+  })
+})
+
 test('submitted order is reconstructed from GitHub after local metadata is deleted', async () => {
   await withHarness(async (harness) => {
     const heads = await setupStack(harness)
@@ -1171,6 +1202,130 @@ test('a force-pushed remote branch leaves the local branch behind its submitted 
     )
     assert.equal(git(harness, ['rev-parse', 'feature/step-3']), heads[2])
     assert.equal(git(harness, ['status', '--porcelain']), '')
+  })
+})
+
+test('one confirmed repair moves a submitted ref and then records its parent without a false stale error', async () => {
+  await withHarness(async (harness) => {
+    const heads = await setupStack(harness)
+    const created = await createPullRequestStack('acme', 'widgets', [101, 102, 103])
+    const rewritten = bareGit(harness, [
+      'commit-tree',
+      `${heads[2]}^{tree}`,
+      '-p',
+      heads[2],
+      '-m',
+      'remote ahead',
+    ])
+    bareGit(harness, ['update-ref', 'refs/heads/feature/step-3', rewritten, heads[2]])
+    git(harness, [
+      'fetch',
+      harness.bare,
+      '+refs/heads/feature/step-3:refs/remotes/origin/feature/step-3',
+    ])
+    git(harness, ['checkout', 'main'])
+    const state = await harness.readState()
+    state.prs[2].headOid = rewritten
+    const submitted = state.stacks?.find((stack) => stack.number === created.number)
+    assert.ok(submitted)
+    const third = submitted.pull_requests.find((pr) => pr.number === 103)
+    assert.ok(third)
+    third.head.sha = rewritten
+    await harness.writeState(state)
+
+    const key = `native:${created.number}`
+    const preview = await previewReconciliationRepair(
+      harness.repo,
+      await getSnapshot(harness.repo),
+      key,
+    )
+    const repairs = preview.repairs.filter((repair) => repair.branch === 'feature/step-3')
+    assert.deepEqual(
+      new Set(repairs.map((repair) => repair.kind)),
+      new Set(['adopt-remote-tip', 'adopt-remote-order']),
+    )
+    const result = await runReconciliationRepair(harness.repo, {
+      token: preview.token,
+      ids: repairs.map((repair) => repair.id),
+      confirmRewrites: true,
+    })
+    assert.match(result.message, /Move feature\/step-3 to the submitted head/)
+    assert.match(result.message, /Record feature\/step-3 under feature\/step-2/)
+    assert.equal(git(harness, ['rev-parse', 'feature/step-3']), rewritten)
+    assert.equal(recordedParent(harness, 'feature/step-3'), 'feature/step-2')
+    assert.equal(
+      optionalGit(harness, ['config', '--local', '--get', 'branch.feature/step-3.parentTip']),
+      heads[1],
+    )
+    const evidence = (await getSnapshot(harness.repo)).reconciliation?.evidence
+    assert.deepEqual(
+      evidence?.applied.map((entry) => entry.kind),
+      ['adopt-remote-tip', 'adopt-remote-order'],
+    )
+    assert.equal(evidence?.evidence[0].previousOid, heads[2])
+    assert.equal(git(harness, ['rev-parse', evidence!.evidence[0].backupRef!]), heads[2])
+  })
+})
+
+test('a selected ref move can precede clearing its stale parent hint', async () => {
+  await withHarness(async (harness) => {
+    const heads = await setupStack(harness)
+    const created = await createPullRequestStack('acme', 'widgets', [101, 102, 103])
+    recordParent(harness, 'feature/step-3', 'feature/step-2', 'f'.repeat(40))
+    const rewritten = bareGit(harness, [
+      'commit-tree',
+      `${heads[2]}^{tree}`,
+      '-p',
+      heads[1],
+      '-m',
+      'remote rewrite',
+    ])
+    bareGit(harness, ['update-ref', 'refs/heads/feature/step-3', rewritten, heads[2]])
+    git(harness, [
+      'fetch',
+      harness.bare,
+      '+refs/heads/feature/step-3:refs/remotes/origin/feature/step-3',
+    ])
+    git(harness, ['checkout', 'main'])
+    const state = await harness.readState()
+    state.prs[2].headOid = rewritten
+    const submitted = state.stacks?.find((stack) => stack.number === created.number)
+    assert.ok(submitted)
+    const third = submitted.pull_requests.find((pr) => pr.number === 103)
+    assert.ok(third)
+    third.head.sha = rewritten
+    await harness.writeState(state)
+
+    const key = `native:${created.number}`
+    const preview = await previewReconciliationRepair(
+      harness.repo,
+      await getSnapshot(harness.repo),
+      key,
+    )
+    const repairs = preview.repairs.filter((repair) => repair.branch === 'feature/step-3')
+    assert.deepEqual(
+      new Set(repairs.map((repair) => repair.kind)),
+      new Set(['adopt-remote-tip', 'clear-stale-hint']),
+    )
+    await runReconciliationRepair(harness.repo, {
+      token: preview.token,
+      ids: repairs.map((repair) => repair.id),
+      confirmRewrites: true,
+    })
+    assert.equal(git(harness, ['rev-parse', 'feature/step-3']), rewritten)
+    assert.equal(recordedParent(harness, 'feature/step-3'), null)
+    assert.equal(
+      optionalGit(harness, ['config', '--local', '--get', 'branch.feature/step-3.parentTip']),
+      null,
+    )
+    const evidence = (await getSnapshot(harness.repo)).reconciliation?.evidence
+    assert.deepEqual(
+      evidence?.applied.map((entry) => entry.kind),
+      ['adopt-remote-tip', 'clear-stale-hint'],
+    )
+    assert.equal(evidence?.evidence[1].previousParent, 'feature/step-2')
+    assert.equal(evidence?.evidence[1].previousOid, rewritten)
+    assert.equal(git(harness, ['rev-parse', evidence!.evidence[0].backupRef!]), heads[2])
   })
 })
 
