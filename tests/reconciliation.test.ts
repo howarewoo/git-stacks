@@ -1064,6 +1064,51 @@ test('a parent hint changed during GitHub revalidation is not overwritten by an 
   })
 })
 
+test('a changed, removed, or re-resolved stack base invalidates an adoption preview', async () => {
+  for (const drift of ['move', 'remove', 'fallback'] as const) {
+    await withHarness(async (harness) => {
+      await setupStack(harness)
+      const created = await createPullRequestStack('acme', 'widgets', [101, 102, 103])
+      const preview = await previewReconciliationRepair(
+        harness.repo,
+        await getSnapshot(harness.repo),
+        `native:${created.number}`,
+      )
+      const adopt = preview.repairs.find(
+        (repair) => repair.kind === 'adopt-remote-order' && repair.branch === 'feature/step-1',
+      )
+      assert.ok(adopt)
+      const before = git(harness, ['rev-parse', 'main'])
+      if (drift === 'move') {
+        const moved = git(harness, [
+          'commit-tree',
+          `${before}^{tree}`,
+          '-p',
+          before,
+          '-m',
+          'externally moved main',
+        ])
+        git(harness, ['update-ref', 'refs/heads/main', moved, before])
+      } else {
+        git(harness, ['update-ref', '-d', 'refs/heads/main'])
+        if (drift === 'remove') {
+          git(harness, ['update-ref', '-d', 'refs/remotes/origin/main'])
+        }
+      }
+
+      await assert.rejects(
+        runReconciliationRepair(harness.repo, {
+          token: preview.token,
+          ids: [adopt.id],
+          confirmRewrites: false,
+        }),
+        /Reconciliation repair is stale: parent main changed/,
+      )
+      assert.equal(recordedParent(harness, 'feature/step-1'), null)
+    })
+  }
+})
+
 test('a preview token is single use and rejects repairs it never offered', async () => {
   await withHarness(async (harness) => {
     await setupStack(harness)
@@ -1133,6 +1178,41 @@ test('a deleted local branch is reported and restored without moving any other r
     })
     assert.equal(git(harness, ['rev-parse', 'feature/step-3']), heads[2])
     assert.equal(git(harness, ['rev-parse', 'feature/step-1']), heads[0])
+  })
+})
+
+test('restoring a missing branch refuses to move the HEAD of another worktree', async () => {
+  await withHarness(async (harness) => {
+    await setupStack(harness)
+    const created = await createPullRequestStack('acme', 'widgets', [101, 102, 103])
+    git(harness, ['switch', 'main'])
+    const linked = join(harness.root, 'linked')
+    git(harness, ['worktree', 'add', linked, 'feature/step-3'])
+    execFileSync(
+      harness.env.GIT_STACKS_REAL_GIT || 'git',
+      ['-C', linked, 'commit', '--allow-empty', '-m', 'linked worktree unsubmitted commit'],
+      { env: { ...process.env, ...harness.env }, stdio: ['ignore', 'pipe', 'pipe'] },
+    )
+    git(harness, ['update-ref', '-d', 'refs/heads/feature/step-3'])
+    const preview = await previewReconciliationRepair(
+      harness.repo,
+      await getSnapshot(harness.repo),
+      `native:${created.number}`,
+    )
+    const restore = preview.repairs.find(
+      (repair) => repair.kind === 'restore-missing-branch' && repair.branch === 'feature/step-3',
+    )
+    assert.ok(restore)
+
+    await assert.rejects(
+      runReconciliationRepair(harness.repo, {
+        token: preview.token,
+        ids: [restore.id],
+        confirmRewrites: false,
+      }),
+      /checked out in another worktree/,
+    )
+    assert.equal(optionalGit(harness, ['rev-parse', '--verify', 'refs/heads/feature/step-3']), null)
   })
 })
 
