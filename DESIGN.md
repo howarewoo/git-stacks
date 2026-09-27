@@ -310,6 +310,7 @@ Selected branch restorations and tip moves settle before parent-hint adoption; w
 Selecting only some parent-order repairs is checked against the resulting local parent graph before any write; a subset that would create a cycle is rejected without consuming the preview, so the dependent order repairs can be selected together.
 An ordinary reordered member keeps its valid recorded replay boundary even when its new parent is already ahead of the child; replacing that boundary with the new parent's merge-base would change commit ownership during restack. A missing or invalid boundary with an existing recorded parent withholds adoption, and selected ref moves recheck that the retained boundary still belongs to the child before writing metadata.
 For submitted native members, reconciliation binds the canonical pull request by the stack's PR number, not by the branch head: another open PR can share that head. If that numbered PR now identifies a different head or repository, the native stack is ambiguous and offers no repair; closed or merged members missing from the open-PR query retain their submitted stack identity.
+Adopt-order previews capture the exact resolved parent ref and commit used for the replay boundary. A changed, removed, or differently resolved parent invalidates the preview before any write; the selected parent is checked again at the mutation boundary, accounting for selected ref moves. Restoring a missing branch refuses to update a symbolic HEAD in the current or another worktree.
 
 ## Do's and Don'ts
 

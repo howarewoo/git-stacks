@@ -1095,6 +1095,9 @@ interface RepairOperation {
   /** adopt-remote-order: the authoritative parent and boundary to record. */
   parent: string | null
   parentTip: string | null
+  /** Exact resolved parent ref and OID the adopt-order boundary used. */
+  parentRef: string | null
+  parentOid: string | null
   /** adopt-remote-tip and restore-missing-branch: the ref value to write. */
   targetOid: string | null
   /** retarget-pull-request: the base the submitted chain requires. */
@@ -1185,6 +1188,8 @@ async function captureOperation(
     branch: repair.branch,
     pullRequest: repair.pullRequest,
     parent: null,
+    parentRef: null,
+    parentOid: null,
     parentTip: null,
     targetOid: null,
     base: null,
@@ -1204,7 +1209,8 @@ async function captureOperation(
   if (repair.kind === 'adopt-remote-order') {
     const parent = member?.expectedParent ?? null
     if (!member || !parent || !member.localOid || !repair.branch) return null
-    const parentOid = await resolveOid(repoPath, await resolveParentRef(repoPath, parent))
+    const parentRef = await resolveParentRef(repoPath, parent)
+    const parentOid = await resolveOid(repoPath, parentRef)
     if (!parentOid) return null
     const boundary = await tryGit(repoPath, ['merge-base', parentOid, member.localOid])
     if (!boundary) return null
@@ -1255,6 +1261,8 @@ async function captureOperation(
     return {
       ...operation,
       parent,
+      parentRef,
+      parentOid,
       parentTip: replayBoundary,
       mergedCommitOid,
       mergedParentPullRequest: mergedParent?.pullRequest ?? null,
@@ -1415,6 +1423,16 @@ async function revalidatePlan(repoPath: string, plan: ReconciliationPlan): Promi
     }
   }
   for (const operation of plan.operations) {
+    if (operation.kind !== 'adopt-remote-order' || !operation.parent) continue
+    const resolved = await resolveParentRef(repoPath, operation.parent).catch(() => null)
+    const currentOid = resolved ? await resolveOid(repoPath, resolved) : null
+    if (resolved !== operation.parentRef || currentOid !== operation.parentOid) {
+      throw new Error(
+        `${STALE_PREFIX} parent ${operation.parent} changed since the preview was captured`,
+      )
+    }
+  }
+  for (const operation of plan.operations) {
     if (!operation.mergedCommitOid || !operation.mergedParentPullRequest) continue
     const merged = await getPullRequest(repoPath, operation.mergedParentPullRequest)
     if (merged.state !== 'MERGED' || merged.mergeOid !== operation.mergedCommitOid) {
@@ -1545,6 +1563,12 @@ async function applyOperation(
   if (operation.kind === 'restore-missing-branch') {
     if (!operation.targetOid) return false
     if (await refExists(repoPath, `refs/heads/${branch}`)) return false
+    if ((await getCurrentBranch(repoPath)) === branch) {
+      throw new Error(
+        `Switch away from ${branch} before restoring its tip; the checked-out worktree cannot be updated by this repair`,
+      )
+    }
+    await ensureNotCheckedOutElsewhere(repoPath, branch)
     record.evidence.push({
       branch,
       backupRef: null,
@@ -1594,6 +1618,23 @@ async function applyOperation(
   }
   if (operation.kind === 'adopt-remote-order') {
     if (!operation.parent || !operation.parentTip) return false
+    // A selected restore creates the local ref that now takes precedence over
+    // the captured remote parent; no unselected ref-resolution change is allowed.
+    const expectedRef =
+      movedTips.has(operation.parent) && operation.parentRef !== `refs/heads/${operation.parent}`
+        ? `refs/heads/${operation.parent}`
+        : operation.parentRef
+    const resolved = await resolveParentRef(repoPath, operation.parent).catch(() => null)
+    const currentParentOid = resolved ? await resolveOid(repoPath, resolved) : null
+    if (
+      !resolved ||
+      resolved !== expectedRef ||
+      currentParentOid !== (movedTips.get(operation.parent) ?? operation.parentOid)
+    ) {
+      throw new Error(
+        `${STALE_PREFIX} parent ${operation.parent} changed since the preview was captured`,
+      )
+    }
     await validateBranchName(repoPath, operation.parent)
     let nextParentTip = operation.parentTip
     if (operation.mergedCommitOid) {
