@@ -533,6 +533,56 @@ test('reconcileStack reports externally-unstacked for a member GitHub no longer 
   assert.equal(clear?.branch, 'step-2')
 })
 
+test('a moved stack keeps its valid child hint and repairs a stale parent only in the destination', () => {
+  const movedMembers = [
+    member('step-1', { recordedParent: 'main', pullRequest: pullRequest('step-1', 'main') }),
+    member('step-2', {
+      recordedParent: 'step-1',
+      pullRequest: pullRequest('step-2', 'main', {
+        number: 102,
+        stackNumber: 8,
+        stackPosition: 1,
+      }),
+    }),
+    member('step-3', {
+      recordedParent: 'step-2',
+      recordedParentTip: oid('2'),
+      pullRequest: pullRequest('step-3', 'step-2', {
+        number: 103,
+        stackNumber: 8,
+        stackPosition: 2,
+      }),
+    }),
+  ]
+  const source = reconcileStack(
+    stackInput({
+      submittedOrder: ['step-1'],
+      submittedHeadOids: { 'step-1': oid('1') },
+      members: movedMembers,
+    }),
+  )
+  assert.equal(source.state, 'externally-unstacked')
+  assert.deepEqual(
+    source.repairs.filter((repair) => repair.kind === 'clear-stale-hint'),
+    [],
+  )
+
+  const destination = reconcileStack(
+    stackInput({
+      key: 'native:8',
+      stackNumber: 8,
+      submittedOrder: ['step-2', 'step-3'],
+      submittedHeadOids: { 'step-2': oid('2'), 'step-3': oid('3') },
+      members: movedMembers.slice(1),
+    }),
+  )
+  assert.deepEqual(
+    destination.repairs.map((repair) => `${repair.kind}:${repair.branch}`),
+    ['adopt-remote-order:step-2'],
+  )
+  assert.equal(destination.members.find((entry) => entry.branch === 'step-3')?.state, 'matching')
+})
+
 test('reconcileStack blocks on a duplicated submitted head instead of guessing', () => {
   const stack = reconcileStack(stackInput({ submittedOrder: ['step-1', 'step-1', 'step-2'] }))
   assert.equal(stack.state, 'ambiguous')
@@ -1148,6 +1198,74 @@ test('a merged member keeps its identity even without local pull-request trackin
       merged.repairs.map((repair) => `${repair.kind}:${repair.branch}`),
       ['adopt-remote-order:feature/step-2'],
     )
+  })
+})
+
+test('adopting a squash-merged parent keeps the merged head out of child replay', async () => {
+  await withHarness(async (harness) => {
+    const heads = await setupStack(harness)
+    const created = await createPullRequestStack('acme', 'widgets', [101, 102, 103])
+    recordParent(harness, 'feature/step-2', 'feature/step-1', heads[0])
+    const previousMain = git(harness, ['rev-parse', 'main'])
+    const squash = git(harness, [
+      'commit-tree',
+      `${previousMain}^{tree}`,
+      '-p',
+      previousMain,
+      '-m',
+      'squash first PR into main',
+    ])
+    git(harness, ['update-ref', 'refs/heads/main', squash, previousMain])
+    git(harness, ['update-ref', 'refs/remotes/origin/main', squash, previousMain])
+    git(harness, ['push', harness.bare, 'main:refs/heads/main'])
+    assert.equal(git(harness, ['merge-base', 'main', 'feature/step-2']), previousMain)
+    const state = await harness.readState()
+    state.prs[0].state = 'MERGED'
+    state.prs[0].mergeOid = squash
+    state.prs[0].mergedAt = new Date().toISOString()
+    state.stacks = (state.stacks ?? []).map((entry) => ({
+      ...entry,
+      pull_requests: entry.pull_requests.map((pr) =>
+        pr.number === 101
+          ? { ...pr, state: 'closed' as const, merged_at: '2026-01-01T00:00:00Z' }
+          : pr,
+      ),
+    }))
+    await harness.writeState(state)
+
+    const preview = await previewReconciliationRepair(
+      harness.repo,
+      await getSnapshot(harness.repo),
+      `native:${created.number}`,
+    )
+    const adopt = preview.repairs.find(
+      (repair) => repair.kind === 'adopt-remote-order' && repair.branch === 'feature/step-2',
+    )
+    assert.ok(adopt)
+    state.prs[0].mergeOid = previousMain
+    await harness.writeState(state)
+    await assert.rejects(
+      runReconciliationRepair(harness.repo, {
+        token: preview.token,
+        ids: [adopt.id],
+        confirmRewrites: false,
+      }),
+      /Reconciliation repair is stale: pull request #101 changed/,
+    )
+    assert.equal(recordedParent(harness, 'feature/step-2'), 'feature/step-1')
+    state.prs[0].mergeOid = squash
+    await harness.writeState(state)
+    await runReconciliationRepair(harness.repo, {
+      token: preview.token,
+      ids: [adopt.id],
+      confirmRewrites: false,
+    })
+    assert.equal(recordedParent(harness, 'feature/step-2'), 'main')
+    assert.equal(
+      optionalGit(harness, ['config', '--local', '--get', 'branch.feature/step-2.parentTip']),
+      heads[0],
+    )
+    assert.equal(git(harness, ['rev-list', '--count', 'feature/step-1..feature/step-2']), '1')
   })
 })
 
