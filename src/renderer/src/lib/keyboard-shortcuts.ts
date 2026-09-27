@@ -189,19 +189,61 @@ function isPrintableSymbol(key: string): boolean {
   return key.length === 1 && !/[\p{L}\p{N}]/u.test(key)
 }
 
+/**
+ * Canonical spellings for the named keys a chord can end with. Dispatch compares
+ * key names case-insensitively, so `Home` and `home` are one keystroke there;
+ * resolving every alias to a single spelling keeps collision detection, the
+ * reserved-opener check, and dispatch describing the same set of chords.
+ */
+const CANONICAL_KEY_NAMES: Record<string, string> = {
+  ' ': 'Space',
+  space: 'Space',
+  spacebar: 'Space',
+  plus: '+',
+  enter: 'Enter',
+  return: 'Enter',
+  arrowup: 'ArrowUp',
+  up: 'ArrowUp',
+  arrowdown: 'ArrowDown',
+  down: 'ArrowDown',
+  arrowleft: 'ArrowLeft',
+  left: 'ArrowLeft',
+  arrowright: 'ArrowRight',
+  right: 'ArrowRight',
+  escape: 'Escape',
+  esc: 'Escape',
+  tab: 'Tab',
+  home: 'Home',
+  end: 'End',
+  pageup: 'PageUp',
+  pgup: 'PageUp',
+  pagedown: 'PageDown',
+  pgdown: 'PageDown',
+  pgdn: 'PageDown',
+  insert: 'Insert',
+  ins: 'Insert',
+  delete: 'Delete',
+  del: 'Delete',
+  backspace: 'Backspace',
+  bksp: 'Backspace',
+  capslock: 'CapsLock',
+  numlock: 'NumLock',
+  scrolllock: 'ScrollLock',
+  printscreen: 'PrintScreen',
+  contextmenu: 'ContextMenu',
+  menu: 'ContextMenu',
+  pause: 'Pause',
+}
+
 function normalizeKeyName(rawKey: string): string {
   const lower = rawKey.toLowerCase()
-  if (lower === 'plus') return '+'
-  if (lower === 'enter' || lower === 'return') return 'Enter'
-  if (lower === 'arrowup' || lower === 'up') return 'ArrowUp'
-  if (lower === 'arrowdown' || lower === 'down') return 'ArrowDown'
-  if (lower === 'arrowleft' || lower === 'left') return 'ArrowLeft'
-  if (lower === 'arrowright' || lower === 'right') return 'ArrowRight'
-  if (lower === 'escape' || lower === 'esc') return 'Escape'
-  if (lower === 'space' || lower === ' ') return 'Space'
-  if (lower === 'tab') return 'Tab'
+  const named = CANONICAL_KEY_NAMES[lower]
+  if (named) return named
   if (rawKey.length === 1) return lower
-  return rawKey
+  // Function keys arrive as `F5` from a real keydown and as `f5` from a
+  // hand-edited binding; both are the same key.
+  const functionKey = /^f(\d{1,2})$/.exec(lower)
+  return functionKey ? `F${functionKey[1]}` : rawKey
 }
 
 export function canonicalChord(chord: string): string | null {
@@ -245,6 +287,31 @@ function formatKey(key: string, isMac: boolean): string {
   if (key === 'Enter') return isMac ? '↵' : 'Enter'
   if (key === 'Escape') return 'Esc'
   if (key === 'Space') return 'Space'
+  if (key.length === 1) return key.toUpperCase()
+  return key
+}
+
+/**
+ * Serializes a chord for `aria-keyshortcuts`, which expects the DOM
+ * `KeyboardEvent.key` modifier names joined with `+` rather than the platform
+ * glyphs `formatChord` draws. `Mod` resolves to the primary modifier token of
+ * the platform the chord is dispatched on.
+ */
+export function ariaKeyShortcuts(chord: string, isMac = isMacPlatform()): string {
+  const parsed = parseChord(chord)
+  if (!parsed) return ''
+
+  const parts: string[] = []
+  if (parsed.mod) parts.push(isMac ? 'Meta' : 'Control')
+  if (parsed.alt) parts.push('Alt')
+  if (parsed.shift) parts.push('Shift')
+  parts.push(parsed.key === '+' ? 'Plus' : ariaKeyName(parsed.key))
+  return parts.join('+')
+}
+
+function ariaKeyName(key: string): string {
+  // Single characters name themselves; a letter is written in upper case, the
+  // spelling the ARIA key table uses and the one the drawn label shows.
   if (key.length === 1) return key.toUpperCase()
   return key
 }

@@ -93,6 +93,7 @@ import { ShortcutSettings } from './components/shortcut-settings'
 import { DirtyCheckoutGuard } from './components/dirty-checkout-guard'
 import { buildPaletteItems, type PaletteItem } from './lib/command-palette'
 import {
+  ariaKeyShortcuts,
   formatChord,
   isComposingKeyEvent,
   isEditableTarget,
@@ -1207,7 +1208,7 @@ function App() {
         size="sm"
         variant="secondary"
         onClick={() => setPaletteOpen(true)}
-        aria-keyshortcuts={formatChord(shortcutBindings['palette.open'], isMac)}
+        aria-keyshortcuts={ariaKeyShortcuts(shortcutBindings['palette.open'], isMac)}
         aria-label="Open command palette"
         tooltip="Search actions, repositories, branches, PRs, issues, and settings"
       >
@@ -1220,7 +1221,7 @@ function App() {
       <div className="toolbar-search">
         <Search className="size-3.5" />
         <Input
-          aria-keyshortcuts={formatChord(shortcutBindings['search.focus'], isMac)}
+          aria-keyshortcuts={ariaKeyShortcuts(shortcutBindings['search.focus'], isMac)}
           aria-label="Filter current view branches, files, and pull requests"
           onChange={(event) => setSearch(event.target.value)}
           placeholder="Filter view"

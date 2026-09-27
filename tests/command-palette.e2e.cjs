@@ -543,6 +543,14 @@ async function main() {
     )
     await page(`${button('Done')}.click()`)
     await until('shortcut settings closed', `!document.querySelector('[role="dialog"]')`)
+    // The accessible metadata is serialized separately from the drawn label, so
+    // a remapped shortcut is still announced with standardized key names.
+    const remappedOpenerAria = await page(
+      `document.querySelector('[aria-label="Open command palette"]')?.getAttribute('aria-keyshortcuts') ?? null`,
+    )
+    // A printable remap records the bare character, and the ARIA token names it
+    // the way the key value table spells it.
+    assert.equal(remappedOpenerAria, 'Plus')
     const filter = '[aria-label="Filter current view branches, files, and pull requests"]'
     await page(`document.querySelector(${JSON.stringify(filter)}).focus()`)
     await send('Input.dispatchKeyEvent', {
@@ -851,7 +859,14 @@ async function main() {
       'palette dismissed before rehydration',
       `!document.querySelector('[role="combobox"]')`,
     )
-    const storedChords = JSON.stringify({ 'palette.open': 'ArrowDown', 'search.focus': 'Mod+K' })
+    // The same Home keydown was stored under two spellings, so hydration has to
+    // settle it to one owner the way it settles a shared chord.
+    const storedChords = JSON.stringify({
+      'palette.open': 'ArrowDown',
+      'search.focus': 'Mod+K',
+      'view.branches': 'Home',
+      'view.stacks': 'home',
+    })
     assert.equal(
       await page(
         `(() => { localStorage.setItem('git-stacks.shortcuts.v1', ${JSON.stringify(storedChords)}); return localStorage.getItem('git-stacks.shortcuts.v1') })()`,
@@ -887,6 +902,14 @@ async function main() {
     )
     const rehydratedFilterChord = await page(chordExpression('Focus search filter'))
     const rehydratedOpenerChord = await page(chordExpression('Open command palette'))
+    const rehydratedBranchesChord = await page(chordExpression('Go to Branches'))
+    const rehydratedStacksChord = await page(chordExpression('Go to Stacks'))
+    assert.equal(rehydratedBranchesChord, 'Home')
+    assert.equal(
+      rehydratedStacksChord,
+      process.platform === 'darwin' ? '⌘2' : 'Ctrl+2',
+      'the second Home spelling did not fall back to its own default',
+    )
     assert.equal(rehydratedFilterChord, '/')
     assert.equal(
       rehydratedOpenerChord,
@@ -928,14 +951,67 @@ async function main() {
       false,
       'the restored filter shortcut opened the palette',
     )
+    // The focused field keeps its own shortcut, advertised with the same
+    // standardized tokens as the drawn label beside it.
+    const rehydratedFilterAria = await page(
+      `document.querySelector(${JSON.stringify(filter)})?.getAttribute('aria-keyshortcuts') ?? null`,
+    )
+    assert.equal(rehydratedFilterAria, '/')
     await openPalette()
     const restoredOpenerOpenedPalette = await page(
       `Boolean(document.querySelector('[role="combobox"]'))`,
     )
     assert.equal(restoredOpenerOpenedPalette, true, 'the restored opener did not open the palette')
+    const rehydratedOpenerAria = await page(
+      `document.querySelector('[aria-label="Open command palette"]')?.getAttribute('aria-keyshortcuts') ?? null`,
+    )
+    assert.equal(
+      rehydratedOpenerAria,
+      process.platform === 'darwin' ? 'Meta+K' : 'Control+K',
+      'the restored opener advertised non-standardized shortcut metadata',
+    )
     await until(
       'restored opener still opens the palette',
       `document.querySelector('[role="combobox"]')`,
+    )
+    await key('Escape')
+    await until(
+      'palette dismissed before the Home press',
+      `!document.querySelector('[role="combobox"]')`,
+    )
+    // One Home keydown must reach exactly one view, and it must reach it from a
+    // view that is not already showing it.
+    await page(`${button('Fetch')}.focus()`)
+    await send('Input.dispatchKeyEvent', {
+      type: 'keyDown',
+      key: '2',
+      code: 'Digit2',
+      windowsVirtualKeyCode: 50,
+      modifiers: process.platform === 'darwin' ? 4 : 2,
+    })
+    await send('Input.dispatchKeyEvent', {
+      type: 'keyUp',
+      key: '2',
+      code: 'Digit2',
+      windowsVirtualKeyCode: 50,
+      modifiers: process.platform === 'darwin' ? 4 : 2,
+    })
+    await until('stacks view', `document.querySelector('main h1')?.textContent === 'Stacks'`)
+    await send('Input.dispatchKeyEvent', {
+      type: 'keyDown',
+      key: 'Home',
+      code: 'Home',
+      windowsVirtualKeyCode: 36,
+    })
+    await send('Input.dispatchKeyEvent', {
+      type: 'keyUp',
+      key: 'Home',
+      code: 'Home',
+      windowsVirtualKeyCode: 36,
+    })
+    await until(
+      'the surviving Home owner switched to the branches view',
+      `document.querySelector('main h1')?.textContent === 'Branches'`,
     )
     console.log(
       JSON.stringify({
@@ -960,6 +1036,11 @@ async function main() {
         rehydratedFilterChord,
         rehydratedOpenerChord,
         filterFocusedBySlash,
+        remappedOpenerAria,
+        rehydratedOpenerAria,
+        rehydratedFilterAria,
+        rehydratedBranchesChord,
+        rehydratedStacksChord,
         restoredOpenerOpenedPalette,
       }),
     )

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
   DEFAULT_SHORTCUTS,
+  ariaKeyShortcuts,
   assignShortcut,
   chordFromEvent,
   canonicalChord,
@@ -343,6 +344,66 @@ test('rehydrating a reserved opener leaves collision-free bindings that dispatch
   assert.deepEqual(detectShortcutConflicts(shared), [])
   assert.equal(shared['view.stacks'], 'Mod+2')
   assert.equal(shared['view.branches'], DEFAULT_SHORTCUTS['view.branches'])
+})
+
+test('stored bindings that only differ in key case hydrate into one dispatchable owner', () => {
+  // Both values were accepted into storage before named keys were canonicalized,
+  // so rehydration has to see the Home keydown as one contested chord.
+  let stored: string | null = null
+  const storage = {
+    getItem: () => stored,
+    setItem: (_key: string, value: string) => {
+      stored = value
+    },
+    removeItem: () => {
+      stored = null
+    },
+  }
+  saveShortcuts(
+    { ...DEFAULT_SHORTCUTS, 'view.branches': 'Home', 'view.stacks': 'home' } as Record<
+      ShortcutId,
+      string
+    >,
+    storage,
+  )
+
+  const loaded = loadShortcuts(storage)
+  assert.deepEqual(detectShortcutConflicts(loaded), [])
+  assert.equal(loaded['view.branches'], 'Home')
+  assert.equal(loaded['view.stacks'], DEFAULT_SHORTCUTS['view.stacks'])
+
+  for (const isMac of [true, false]) {
+    const home = { key: 'Home' }
+    const owners = (Object.keys(loaded) as ShortcutId[]).filter((id) =>
+      matchesChord(home, loaded[id], isMac),
+    )
+    assert.deepEqual(owners, ['view.branches'])
+  }
+
+  // The same key with the other spelling is a single chord, never two.
+  assert.equal(canonicalChord('home'), 'Home')
+  assert.equal(canonicalChord('F5'), canonicalChord('f5'))
+  const reassigned = assignShortcut(loaded, 'view.stacks', 'home')
+  assert.equal(reassigned.conflict?.conflictingId, 'view.branches')
+  assert.equal(reassigned.bindings['view.branches'], 'Home')
+
+  // A stored opener on the palette-local Home key is refused in either spelling.
+  saveShortcuts({ ...DEFAULT_SHORTCUTS, 'palette.open': 'home' }, storage)
+  assert.equal(loadShortcuts(storage)['palette.open'], DEFAULT_SHORTCUTS['palette.open'])
+})
+
+test('aria-keyshortcuts metadata uses standardized tokens, not the drawn glyphs', () => {
+  for (const isMac of [true, false]) {
+    const primary = isMac ? 'Meta' : 'Control'
+    assert.equal(ariaKeyShortcuts('Mod+K', isMac), `${primary}+K`)
+    assert.equal(ariaKeyShortcuts('Mod+Shift+R', isMac), `${primary}+Shift+R`)
+    assert.equal(ariaKeyShortcuts('Alt+ArrowUp', isMac), 'Alt+ArrowUp')
+    assert.equal(ariaKeyShortcuts('Mod++', isMac), `${primary}+Plus`)
+    assert.equal(ariaKeyShortcuts('/', isMac), '/')
+    assert.equal(ariaKeyShortcuts('K+J', isMac), '')
+    // The drawn label keeps the platform glyphs the keyboard shows.
+    assert.equal(formatChord('Mod+K', isMac), isMac ? '⌘K' : 'Ctrl+K')
+  }
 })
 
 test('Escape dismisses the palette only outside a confirmation and outside an IME composition', () => {
