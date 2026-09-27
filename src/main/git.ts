@@ -6,6 +6,7 @@ import type { Stats } from 'node:fs'
 import type { FileHandle } from 'node:fs/promises'
 import { createHash, randomUUID } from 'node:crypto'
 import { tmpdir } from 'node:os'
+import { fileURLToPath } from 'node:url'
 
 import type {
   ActionResult,
@@ -1331,14 +1332,16 @@ function localFilesUriPath(value: string): string {
   }
   let decodedPath: string
   try {
-    decodedPath = decodeURIComponent(uri.pathname)
+    // Git's `files:` scheme carries a file URL path, including a Windows drive.
+    // path.resolve('/', '/C:/...') would turn C: into a directory on Windows.
+    decodedPath = fileURLToPath(uri.href.replace(/^files:/u, 'file:'))
   } catch {
     throw new Error('Invalid local files reference-storage URI')
   }
   if (decodedPath.includes('\0')) {
     throw new Error('Invalid local files reference-storage URI')
   }
-  return path.resolve('/', decodedPath)
+  return decodedPath
 }
 
 function assertFilesRefStorage(refStorage: string | null, ref: string): string | null {

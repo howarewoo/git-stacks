@@ -1,20 +1,22 @@
-#!/usr/bin/env node
 'use strict'
 
 const fs = require('node:fs')
 const { spawnSync } = require('node:child_process')
 
-const statePath = process.env.GIT_STACKS_FIXTURE_STATE
-const barePath = process.env.GIT_STACKS_FIXTURE_BARE
-const realGit = process.env.GIT_STACKS_REAL_GIT || '/usr/bin/git'
-if (!statePath || !barePath) fail('fixture state and bare paths are required')
-
-function fail(message) {
-  process.stderr.write(`${message}\n`)
-  process.exit(2)
+/** A request the fixture refuses, reported to Git Stacks as a failed `gh` run. */
+class GitHubCliFailure extends Error {
+  constructor(message) {
+    super(message)
+    this.name = 'GitHubCliFailure'
+    this.code = 2
+  }
 }
 
-function loadState() {
+function fail(message) {
+  throw new GitHubCliFailure(message)
+}
+
+function loadState(statePath) {
   try {
     return JSON.parse(fs.readFileSync(statePath, 'utf8'))
   } catch (error) {
@@ -22,7 +24,7 @@ function loadState() {
   }
 }
 
-function saveState(state) {
+function saveState(state, statePath) {
   const temporary = `${statePath}.${process.pid}.tmp`
   fs.writeFileSync(temporary, `${JSON.stringify(state, null, 2)}\n`, 'utf8')
   fs.renameSync(temporary, statePath)
@@ -47,8 +49,8 @@ function formValues(args) {
   return result
 }
 
-function bareGit(args, options = {}) {
-  const result = spawnSync(realGit, ['--git-dir', barePath, ...args], {
+function bareGit(args, fixture, options = {}) {
+  const result = spawnSync(fixture.realGit, ['--git-dir', fixture.barePath, ...args], {
     encoding: 'utf8',
     env: { ...process.env, ...(options.env || {}) },
   })
@@ -59,16 +61,16 @@ function bareGit(args, options = {}) {
   return String(result.stdout || '').trim()
 }
 
-function bareRef(ref) {
+function bareRef(ref, fixture) {
   try {
-    return bareGit(['rev-parse', '--verify', '--end-of-options', ref])
+    return bareGit(['rev-parse', '--verify', '--end-of-options', ref], fixture)
   } catch {
     return null
   }
 }
 
-function currentHead(pr) {
-  const value = bareRef(`refs/heads/${pr.head}`)
+function currentHead(pr, fixture) {
+  const value = bareRef(`refs/heads/${pr.head}`, fixture)
   pr.headOid = value
   return value
 }
@@ -80,14 +82,14 @@ function checkEntry(pr) {
   return null
 }
 
-function graphPullRequest(pr, withBody) {
+function graphPullRequest(pr, withBody, fixture) {
   const merged = pr.state === 'MERGED'
   const value = {
     number: pr.number,
     title: pr.title,
     url: pr.url,
     headRefName: pr.head,
-    headRefOid: currentHead(pr),
+    headRefOid: currentHead(pr, fixture),
     baseRefName: pr.base,
     isDraft: pr.draft === true,
     state: pr.state,
@@ -103,7 +105,7 @@ function graphPullRequest(pr, withBody) {
   return value
 }
 
-function restPullRequest(pr) {
+function restPullRequest(pr, fixture) {
   const merged = pr.state === 'MERGED'
   return {
     number: pr.number,
@@ -113,7 +115,7 @@ function restPullRequest(pr) {
     state: merged ? 'closed' : pr.state.toLowerCase(),
     merged_at: merged ? pr.mergedAt || '2026-01-01T00:00:00.000Z' : null,
     draft: pr.draft === true,
-    head: { ref: pr.head, sha: currentHead(pr), repo: { full_name: pr.headRepository } },
+    head: { ref: pr.head, sha: currentHead(pr, fixture), repo: { full_name: pr.headRepository } },
     base: { ref: pr.base },
     mergeable_state: String(pr.mergeState || 'clean').toLowerCase(),
     merge_commit_sha: pr.mergeOid || null,
@@ -151,11 +153,11 @@ function nextNumber(state) {
   return number
 }
 
-function record(state, args) {
+function record(state, args, cwd) {
   if (!Array.isArray(state.requests)) state.requests = []
   state.requests.push({
     argv: [...args],
-    cwd: process.cwd(),
+    cwd,
     at: new Date().toISOString(),
   })
 }
@@ -165,7 +167,7 @@ function parseNumberFromEndpoint(endpoint, segment) {
   return match ? Number(match[1]) : null
 }
 
-function mergePullRequest(state, pr, fields) {
+function mergePullRequest(state, pr, fields, fixture) {
   const requestedSha = fields.get('sha')
   const method = fields.get('merge_method')
   const allowed = {
@@ -174,18 +176,17 @@ function mergePullRequest(state, pr, fields) {
     rebase: state.repository.allowRebaseMerge === true,
   }
   if (!allowed[method]) return { merged: false, message: `merge method ${method} is disabled` }
-  const head = currentHead(pr)
+  const head = currentHead(pr, fixture)
   if (!head || requestedSha !== head)
     return { merged: false, message: 'head SHA no longer matches' }
   if (pr.state !== 'OPEN') return { merged: false, message: 'pull request is not open' }
   const baseRef = `refs/heads/${pr.base}`
-  const base = bareRef(baseRef)
-  if (!base) return { merged: false, message: `base branch ${pr.base} is missing` }
-  const tree = bareGit(['rev-parse', `${head}^{tree}`])
+  const base = bareRef(baseRef, fixture)
+  const tree = bareGit(['rev-parse', `${head}^{tree}`], fixture)
   const parentArgs = method === 'merge' ? ['-p', base, '-p', head] : ['-p', base]
   const mergeMessage =
     method === 'squash' ? `${pr.title} (#${pr.number})` : `Merge pull request #${pr.number}`
-  const mergedOid = bareGit(['commit-tree', tree, ...parentArgs, '-m', mergeMessage], {
+  const mergedOid = bareGit(['commit-tree', tree, ...parentArgs, '-m', mergeMessage], fixture, {
     env: {
       GIT_AUTHOR_NAME: 'GitHub Fixture',
       GIT_AUTHOR_EMAIL: 'github-fixture@example.invalid',
@@ -195,7 +196,7 @@ function mergePullRequest(state, pr, fields) {
       GIT_COMMITTER_DATE: '2026-01-01T00:00:00Z',
     },
   })
-  bareGit(['update-ref', baseRef, mergedOid, base])
+  bareGit(['update-ref', baseRef, mergedOid, base], fixture)
   pr.state = 'MERGED'
   pr.mergedAt = new Date().toISOString()
   pr.mergeOid = mergedOid
@@ -214,7 +215,7 @@ function commentResponse(state, comment) {
   return { ...comment, user: actor(comment.user?.login || comment.author || state.currentUser) }
 }
 
-function handleApi(state, args) {
+function handleApi(state, args, fixture) {
   requireRepository(state, args)
   const endpoint = args.find((arg) => /^repos\//u.test(arg) || arg === 'user')
   const method = valueFor(args, '--method') || 'GET'
@@ -235,7 +236,7 @@ function handleApi(state, args) {
   const prNumber = parseNumberFromEndpoint(endpoint, `${prefix}/pulls`)
   if (prNumber !== null && endpoint.endsWith(`/pulls/${prNumber}`)) {
     const pr = findPr(state, prNumber)
-    if (method === 'GET') return restPullRequest(pr)
+    if (method === 'GET') return restPullRequest(pr, fixture)
     if (method !== 'PATCH') fail(`unsupported pull request method ${method}`)
     if (forms.has('title')) pr.title = forms.get('title')
     if (forms.has('body')) pr.body = forms.get('body')
@@ -245,12 +246,12 @@ function handleApi(state, args) {
       if (requested === 'open' && pr.state !== 'MERGED') pr.state = 'OPEN'
       else if (requested === 'closed' && pr.state !== 'MERGED') pr.state = 'CLOSED'
     }
-    return restPullRequest(pr)
+    return restPullRequest(pr, fixture)
   }
   const mergeNumber = parseNumberFromEndpoint(endpoint, `${prefix}/pulls`)
   if (mergeNumber !== null && endpoint.endsWith(`/pulls/${mergeNumber}/merge`)) {
     if (method !== 'PUT') fail(`unsupported merge method ${method}`)
-    return mergePullRequest(state, findPr(state, mergeNumber), forms)
+    return mergePullRequest(state, findPr(state, mergeNumber), forms, fixture)
   }
   const commentsPath = new RegExp(
     `^${prefix.replace('/', '\\/')}/issues/(\\d+)/comments$`,
@@ -291,7 +292,7 @@ function handleApi(state, args) {
   fail(`unknown gh api endpoint ${endpoint}`)
 }
 
-function handleGraphql(state, args) {
+function handleGraphql(state, args, fixture) {
   const forms = formValues(args)
   requireRepository(state, args)
   const query = forms.get('query') || ''
@@ -299,11 +300,11 @@ function handleGraphql(state, args) {
   if (query.includes('pullRequest(number:')) {
     const number = Number(numberValue)
     const pr = findPr(state, number)
-    return { data: { repository: { pullRequest: graphPullRequest(pr, true) } } }
+    return { data: { repository: { pullRequest: graphPullRequest(pr, true, fixture) } } }
   }
   const nodes = state.prs
     .filter((pr) => pr.state === 'OPEN')
-    .map((pr) => graphPullRequest(pr, false))
+    .map((pr) => graphPullRequest(pr, false, fixture))
   return [
     {
       data: {
@@ -318,7 +319,7 @@ function handleGraphql(state, args) {
   ]
 }
 
-function handlePr(state, args) {
+function handlePr(state, args, fixture) {
   const subcommand = args[1]
   requireRepository(state, args)
   if (subcommand === 'create') {
@@ -333,7 +334,7 @@ function handlePr(state, args) {
     const owner = separator >= 0 ? headValue.slice(0, separator) : state.repository.owner
     const head = separator >= 0 ? headValue.slice(separator + 1) : headValue
     const headRepository = `${owner}/${state.repository.name}`
-    const headOid = bareRef(`refs/heads/${head}`)
+    const headOid = bareRef(`refs/heads/${head}`, fixture)
     if (!headOid) fail(`cannot create PR for missing branch ${head}`)
     const number = nextNumber(state)
     const pr = {
@@ -368,25 +369,37 @@ function handlePr(state, args) {
   fail(`unknown gh pr request: ${args.join(' ')}`)
 }
 
-const args = process.argv.slice(2)
-const state = loadState()
-record(state, args)
-let result
-try {
-  if (args.includes('--hostname')) {
-    const hostname = valueFor(args, '--hostname')
-    if (hostname !== 'github.com') fail(`fixture does not serve hostname ${hostname}`)
+/**
+ * Answers one `gh` request the way the CLI would and returns what it would have
+ * written to stdout. The harness calls this in the test process instead of
+ * launching a `gh` executable, because `child_process` cannot run a shebang
+ * script or a `.cmd` file on Windows without a shell.
+ */
+function runGitHubCli({ statePath, barePath, realGit, args, cwd }) {
+  if (!statePath || !barePath || !realGit) {
+    fail('fixture state, bare repository, and real Git are required')
   }
-  if (args[0] === 'api' && args.includes('graphql')) result = handleGraphql(state, args)
-  else if (args[0] === 'api') result = handleApi(state, args)
-  else if (args[0] === 'pr') result = handlePr(state, args)
-  else if (args[0] === 'auth' && args[1] === 'status')
-    result = 'github.com\n  Logged in to github.com as fixture-user\n'
-  else fail(`unknown gh request: ${args.join(' ')}`)
-  saveState(state)
-  if (typeof result === 'string') process.stdout.write(result)
-  else process.stdout.write(`${JSON.stringify(result)}\n`)
-} catch (error) {
-  saveState(state)
-  fail(error instanceof Error ? error.message : String(error))
+  const fixture = { statePath, barePath, realGit }
+  const state = loadState(statePath)
+  record(state, args, cwd)
+  let result
+  try {
+    if (args.includes('--hostname')) {
+      const hostname = valueFor(args, '--hostname')
+      if (hostname !== 'github.com') fail(`fixture does not serve hostname ${hostname}`)
+    }
+    if (args[0] === 'api' && args.includes('graphql')) result = handleGraphql(state, args, fixture)
+    else if (args[0] === 'api') result = handleApi(state, args, fixture)
+    else if (args[0] === 'pr') result = handlePr(state, args, fixture)
+    else if (args[0] === 'auth' && args[1] === 'status')
+      result = 'github.com\n  Logged in to github.com as fixture-user\n'
+    else fail(`unknown gh request: ${args.join(' ')}`)
+    saveState(state, statePath)
+    return typeof result === 'string' ? result : `${JSON.stringify(result)}\n`
+  } catch (error) {
+    saveState(state, statePath)
+    throw error
+  }
 }
+
+module.exports = { GitHubCliFailure, runGitHubCli }

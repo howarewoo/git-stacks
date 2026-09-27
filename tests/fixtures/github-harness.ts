@@ -1,14 +1,81 @@
-import { chmod, copyFile, mkdtemp, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
-import { execFile, execFileSync } from 'node:child_process'
-import { promisify } from 'node:util'
+import { accessSync, constants as fsConstants, statSync } from 'node:fs'
+import { mkdtemp, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
+import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { basename, delimiter, join } from 'node:path'
+import { promisify } from 'node:util'
+import type {
+  execFileSync as execFileSyncFunction,
+  ChildProcess,
+  ExecFileOptions,
+} from 'node:child_process'
 
-const execFileAsync = promisify(execFile)
-const thisDirectory = dirname(fileURLToPath(import.meta.url))
-const gitTransportFixture = join(thisDirectory, 'git-transport.cjs')
-const githubCliFixture = join(thisDirectory, 'github-cli.cjs')
+const nodeRequire = createRequire(import.meta.url)
+const childProcess = nodeRequire('node:child_process') as {
+  execFile: ExecFileBoundary
+  execFileSync: typeof execFileSyncFunction
+}
+const gitTransportFixture = nodeRequire('./git-transport.cjs') as GitTransportFixture
+const githubCliFixture = nodeRequire('./github-cli.cjs') as GitHubCliFixture
+
+/** The `git` and `gh` this harness answers, and the real Git they delegate to. */
+interface ActiveHarness {
+  realGit: string
+  barePath: string
+  statePath: string
+  transportLog: string
+  overrides: GitOverride[]
+  pushHooks: GitPushHook[]
+}
+
+type ExecFileDone = (error: Error | null, stdout: string, stderr: string) => void
+
+interface ExecFileBoundary {
+  (
+    file: string,
+    args?: readonly string[],
+    options?: ExecFileOptions,
+    callback?: ExecFileDone,
+  ): ChildProcess
+  /**
+   * Node's own promisified form of `execFile`. Git Stacks wraps `execFile` with
+   * `promisify` when its modules load, and `promisify` hands back this form, so
+   * the harness has to carry it to keep answering the commands Git Stacks makes.
+   */
+  [promisify.custom]: (
+    file: string,
+    args: readonly string[],
+    options: ExecFileOptions,
+  ) => Promise<{ stdout: string; stderr: string }>
+}
+
+interface CommandError extends Error {
+  code: number
+  stdout: string
+  stderr: string
+  killed: boolean
+  signal: null
+  cmd: string
+}
+
+interface GitTransportFixture {
+  planGitTransport(request: {
+    args: string[]
+    barePath: string
+    logPath: string
+    cwd: string
+  }): { ok: true; args: string[] } | { ok: false; refused: string }
+}
+
+interface GitHubCliFixture {
+  runGitHubCli(request: {
+    statePath: string
+    barePath: string
+    realGit: string
+    args: string[]
+    cwd: string
+  }): string
+}
 
 export interface GitHubFixtureComment {
   id: number
@@ -53,24 +120,220 @@ export interface GitHubFixtureState {
   requests: Array<{ argv: string[]; cwd: string; at: string }>
 }
 
+/**
+ * Answers a Git command Git Stacks would otherwise run for real. `match` sees
+ * the arguments after any leading `-C <repository>`, and `run` returns what the
+ * command would have written to stdout.
+ */
+export interface GitOverride {
+  match(args: readonly string[]): boolean
+  run(args: readonly string[]): string
+}
+
+/**
+ * Mutates the fixture at the moment Git Stacks publishes `branch`. `before` runs
+ * once the push is claimed and before real Git sees it, and `after` runs only
+ * once that push has succeeded, which is the window Git Stacks has to notice a
+ * concurrently deleted branch, closed pull request, or new pull request.
+ */
+export interface GitPushHook {
+  branch: string
+  armed: boolean
+  before?(): void
+  after?(): void
+}
+
 export interface GitHubHarness {
   root: string
   repo: string
   bare: string
-  bin: string
+  statePath: string
   env: NodeJS.ProcessEnv
+  /** Installs `override`; later overrides are consulted first. */
+  overrideGit(override: GitOverride): void
+  /** Installs `hook`, which the test keeps a handle on so it can disarm it. */
+  hookGitPush(hook: GitPushHook): void
+  /** Runs a Git command against real Git, bypassing the fixture's own answers. */
+  runGit(args: string[]): string
   readState(): Promise<GitHubFixtureState>
   writeState(state: GitHubFixtureState): Promise<void>
   close(): Promise<void>
 }
 
-async function runGit(
+/**
+ * Resolves the one real Git the fixture delegates to, the way the platform does
+ * it, by walking `PATH`. `which` is a POSIX program Windows does not have, and a
+ * fixed `/usr/bin/git` names nothing on the other platforms, so the scan honours
+ * `PATHEXT` and fails loudly when Git is not installed.
+ */
+function resolveRealGit(): string {
+  const searchPath = (process.env.PATH || '').split(delimiter).filter(Boolean)
+  const extensions =
+    process.platform === 'win32'
+      ? (process.env.PATHEXT || '.COM;.EXE;.BAT;.CMD').split(';').filter(Boolean)
+      : ['']
+  for (const directory of searchPath) {
+    for (const extension of extensions) {
+      const candidate = join(directory, `git${extension}`)
+      try {
+        if (!statSync(candidate).isFile()) continue
+        accessSync(candidate, fsConstants.X_OK)
+        return candidate
+      } catch {
+        continue
+      }
+    }
+  }
+  throw new Error('The GitHub harness needs a real git executable on PATH')
+}
+
+const realExecFile = childProcess.execFile
+const realPromisifiedExecFile = realExecFile[promisify.custom]
+const realExecFileSync = childProcess.execFileSync
+let active: ActiveHarness | null = null
+
+function commandError(file: string, args: readonly string[], code: number, stderr: string) {
+  const cmd = [file, ...args].join(' ')
+  const error = new Error(`Command failed: ${cmd}\n${stderr}`) as CommandError
+  error.code = code
+  error.stdout = ''
+  error.stderr = stderr
+  error.killed = false
+  error.signal = null
+  error.cmd = cmd
+  return error
+}
+
+function withoutRepository(args: readonly string[]): { repository: string | null; args: string[] } {
+  if (args[0] === '-C' && typeof args[1] === 'string') {
+    return { repository: args[1], args: args.slice(2) }
+  }
+  return { repository: null, args: [...args] }
+}
+
+function claimedPushHook(harness: ActiveHarness, args: readonly string[]): GitPushHook | null {
+  if (!args.includes('push')) return null
+  return (
+    harness.pushHooks.find(
+      (hook) => hook.armed && args.some((arg) => arg.endsWith(`:refs/heads/${hook.branch}`)),
+    ) || null
+  )
+}
+
+function runHookStep(
+  hook: GitPushHook | null,
+  step: 'before' | 'after',
+  file: string,
+  argv: readonly string[],
+): void {
+  try {
+    hook?.[step]?.()
+  } catch (error) {
+    throw commandError(file, argv, 1, error instanceof Error ? error.message : String(error))
+  }
+}
+
+function commandName(file: string): string {
+  return basename(file)
+    .replace(/\.exe$/iu, '')
+    .toLowerCase()
+}
+
+async function runGitFixture(
+  harness: ActiveHarness,
+  file: string,
+  args: readonly string[],
+  options: ExecFileOptions,
+): Promise<{ stdout: string; stderr: string }> {
+  const argv = [...args]
+  const { repository, args: rest } = withoutRepository(argv)
+  const override = harness.overrides.find((entry) => entry.match(rest))
+  if (override) return { stdout: override.run(rest), stderr: '' }
+  const hook = claimedPushHook(harness, argv)
+  runHookStep(hook, 'before', file, argv)
+  const plan = gitTransportFixture.planGitTransport({
+    args: argv,
+    barePath: harness.barePath,
+    logPath: harness.transportLog,
+    cwd: typeof options.cwd === 'string' ? options.cwd : process.cwd(),
+  })
+  if (!plan.ok) throw commandError(file, argv, 2, `${plan.refused}\n`)
+  const command = repository ? ['-C', repository, ...plan.args] : plan.args
+  const result = await realPromisifiedExecFile(harness.realGit, command, options)
+  runHookStep(hook, 'after', file, argv)
+  return result
+}
+
+function runGhFixture(
+  harness: ActiveHarness,
+  file: string,
+  args: readonly string[],
+  options: ExecFileOptions,
+): { stdout: string; stderr: string } {
+  try {
+    const stdout = githubCliFixture.runGitHubCli({
+      statePath: harness.statePath,
+      barePath: harness.barePath,
+      realGit: harness.realGit,
+      args: [...args],
+      cwd: typeof options.cwd === 'string' ? options.cwd : process.cwd(),
+    })
+    return { stdout, stderr: '' }
+  } catch (error) {
+    const code = (error as { code?: unknown }).code
+    throw commandError(
+      file,
+      args,
+      typeof code === 'number' ? code : 2,
+      `${error instanceof Error ? error.message : String(error)}\n`,
+    )
+  }
+}
+
+function runFixtureCommand(
+  file: string,
+  args: readonly string[],
+  options: ExecFileOptions,
+): Promise<{ stdout: string; stderr: string }> {
+  const harness = active
+  if (!harness) return realPromisifiedExecFile(file, args, options)
+  const command = commandName(file)
+  if (command === 'git') return runGitFixture(harness, file, args, options)
+  if (command === 'gh') return Promise.resolve(runGhFixture(harness, file, args, options))
+  return realPromisifiedExecFile(file, args, options)
+}
+
+childProcess.execFile = Object.assign(
+  function execFileWithGitHubFixture(
+    file: string,
+    args?: readonly string[],
+    options?: ExecFileOptions,
+    callback?: ExecFileDone,
+  ): ChildProcess {
+    if (typeof callback === 'function') {
+      const command = commandName(file)
+      // A `gh` or `git` request that bypasses the promisified boundary would
+      // reach the real tools, so it fails here instead of answering from the
+      // wrong process.
+      if (active && ['git', 'gh'].includes(command)) {
+        throw new Error(
+          `The GitHub harness answers ${file} only through the promisified execFile boundary`,
+        )
+      }
+      return realExecFile(file, args, options, callback)
+    }
+    return realExecFile(file, args, options)
+  },
+  { [promisify.custom]: runFixtureCommand },
+)
+
+async function runRealGit(
   realGit: string,
   cwd: string,
   args: string[],
   env?: NodeJS.ProcessEnv,
 ): Promise<string> {
-  const result = await execFileAsync(realGit, args, {
+  const result = await realPromisifiedExecFile(realGit, args, {
     cwd,
     env: { ...process.env, ...(env || {}) },
     encoding: 'utf8',
@@ -80,18 +343,7 @@ async function runGit(
 }
 
 async function runBareGit(realGit: string, bare: string, args: string[]): Promise<string> {
-  return runGit(realGit, process.cwd(), ['--git-dir', bare, ...args])
-}
-
-function realGitPath(): string {
-  try {
-    return execFileSync('which', ['git'], {
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'pipe'],
-    }).trim()
-  } catch {
-    return '/usr/bin/git'
-  }
+  return runRealGit(realGit, process.cwd(), ['--git-dir', bare, ...args])
 }
 
 const initialState = (): GitHubFixtureState => ({
@@ -116,59 +368,63 @@ export async function createGitHubHarness(): Promise<GitHubHarness> {
   const root = await mkdtemp(join(tmpdir(), 'git-stacks-github-harness-'))
   const repo = join(root, 'repo')
   const bare = join(root, 'remote.git')
-  const bin = join(root, 'bin')
   const statePath = join(root, 'github-state.json')
   const transportLog = join(root, 'git-transport.jsonl')
-  const realGit = realGitPath()
+  const realGit = resolveRealGit()
   let isClosed = false
   try {
-    await Promise.all([mkdir(repo), mkdir(bin)])
+    await mkdir(repo)
     await writeFile(statePath, `${JSON.stringify(initialState(), null, 2)}\n`, 'utf8')
     await writeFile(transportLog, '', 'utf8')
-    await copyFile(gitTransportFixture, join(bin, 'git'))
-    await copyFile(githubCliFixture, join(bin, 'gh'))
-    await chmod(join(bin, 'git'), 0o755)
-    await chmod(join(bin, 'gh'), 0o755)
 
-    await runGit(realGit, root, ['init', '--bare', bare])
+    await runRealGit(realGit, root, ['init', '--bare', bare])
     await runBareGit(realGit, bare, ['config', 'user.name', 'GitHub Fixture'])
     await runBareGit(realGit, bare, ['config', 'user.email', 'github-fixture@example.invalid'])
-    await runGit(realGit, repo, ['init', '-b', 'main'])
-    await runGit(realGit, repo, ['config', 'user.name', 'Git Stacks GitHub fixture'])
-    await runGit(realGit, repo, [
+    await runRealGit(realGit, repo, ['init', '-b', 'main'])
+    await runRealGit(realGit, repo, ['config', 'user.name', 'Git Stacks GitHub fixture'])
+    await runRealGit(realGit, repo, [
       'config',
       'user.email',
       'git-stacks-github-fixture@example.invalid',
     ])
     await writeFile(join(repo, 'base.txt'), 'base\n', 'utf8')
-    await runGit(realGit, repo, ['add', '--', 'base.txt'])
-    await runGit(realGit, repo, ['commit', '-m', 'Fixture baseline'])
-    await runGit(realGit, repo, ['push', bare, 'refs/heads/main:refs/heads/main'])
+    await runRealGit(realGit, repo, ['add', '--', 'base.txt'])
+    await runRealGit(realGit, repo, ['commit', '-m', 'Fixture baseline'])
+    await runRealGit(realGit, repo, ['push', bare, 'refs/heads/main:refs/heads/main'])
     await runBareGit(realGit, bare, ['symbolic-ref', 'HEAD', 'refs/heads/main'])
-    await runGit(realGit, repo, ['remote', 'add', 'origin', 'https://github.com/acme/widgets.git'])
-    await runGit(realGit, repo, [
+    await runRealGit(realGit, repo, [
+      'remote',
+      'add',
+      'origin',
+      'https://github.com/acme/widgets.git',
+    ])
+    await runRealGit(realGit, repo, [
       'remote',
       'set-url',
       '--push',
       'origin',
       'https://github.com/acme/widgets.git',
     ])
-    await runGit(realGit, repo, ['fetch', bare, `refs/heads/main:refs/remotes/origin/main`])
-    await runGit(realGit, repo, ['branch', '--set-upstream-to=origin/main', 'main'])
-    await runGit(realGit, repo, [
+    await runRealGit(realGit, repo, ['fetch', bare, `refs/heads/main:refs/remotes/origin/main`])
+    await runRealGit(realGit, repo, ['branch', '--set-upstream-to=origin/main', 'main'])
+    await runRealGit(realGit, repo, [
       'symbolic-ref',
       'refs/remotes/origin/HEAD',
       'refs/remotes/origin/main',
     ])
 
+    const fixture: ActiveHarness = {
+      realGit,
+      barePath: bare,
+      statePath,
+      transportLog,
+      overrides: [],
+      pushHooks: [],
+    }
+    active = fixture
+
     const env: NodeJS.ProcessEnv = {
       ...process.env,
-      PATH: `${bin}:${process.env.PATH || ''}`,
-      GIT_STACKS_FIXTURE_ROOT: root,
-      GIT_STACKS_FIXTURE_STATE: statePath,
-      GIT_STACKS_FIXTURE_BARE: bare,
-      GIT_STACKS_REAL_GIT: realGit,
-      GIT_STACKS_TRANSPORT_LOG: transportLog,
       GH_HOST: 'github.com',
       GH_TOKEN: 'fixture-token',
       GH_REPO: 'acme/widgets',
@@ -178,8 +434,21 @@ export async function createGitHubHarness(): Promise<GitHubHarness> {
       root,
       repo,
       bare,
-      bin,
+      statePath,
       env,
+      overrideGit(override) {
+        fixture.overrides.unshift(override)
+      },
+      hookGitPush(hook) {
+        fixture.pushHooks.push(hook)
+      },
+      runGit(args) {
+        return realExecFileSync(realGit, args, {
+          encoding: 'utf8',
+          env: { ...process.env, ...env },
+          stdio: ['ignore', 'pipe', 'pipe'],
+        }).trim()
+      },
       async readState() {
         return JSON.parse(await readFile(statePath, 'utf8')) as GitHubFixtureState
       },
@@ -191,6 +460,7 @@ export async function createGitHubHarness(): Promise<GitHubHarness> {
       async close() {
         if (isClosed) return
         isClosed = true
+        if (active?.statePath === statePath) active = null
         await rm(root, { recursive: true, force: true })
       },
     }

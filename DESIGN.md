@@ -298,6 +298,8 @@ The advanced Git runtime choice uses a labeled two-way control: **Bundled runtim
 
 Display the active source, version, executable path, minimum-version result, and capability labels as text rather than color alone. If resolution fails, say that the runtime is unavailable instead of showing stale details.
 
+Both runtime choices use the same Git operation guards. Custom `files:` reference-storage paths are decoded as native absolute file paths, including Windows drive letters; a remote host, credentials, query, fragment, malformed escape, or NUL is refused instead of treated as a local lock path. Passing local runtime tests does not establish that a signed Windows or macOS release artifact was produced; signing and shipment remain release-workflow gates.
+
 ## Do's and Don'ts
 
 Concrete guardrails for the existing system and the user-confirmed Quiet Workbench direction:

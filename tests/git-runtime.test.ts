@@ -630,8 +630,11 @@ testOnRuntimes('a repository hook runs and receives the preserved Git environmen
     await runAction(repo, commitAction(repo, 'Add shared file'))
     assert.equal(await readFile(marker, 'utf8'), 'pre-commit|ssh -i /keys/deploy|/tmp/agent.sock')
     assert.equal(
-      (await runGit(repo, ['config', '--path', '--get', 'core.hooksPath'])).trim(),
-      hooks,
+      (await runGit(repo, ['config', '--path', '--get', 'core.hooksPath']))
+        .trim()
+        .replace(/\\/gu, '/')
+        .toLowerCase(),
+      hooks.replace(/\\/gu, '/').toLowerCase(),
     )
   } finally {
     delete process.env.GIT_SSH_COMMAND

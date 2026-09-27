@@ -1,16 +1,6 @@
-#!/usr/bin/env node
 'use strict'
 
-const { spawnSync } = require('node:child_process')
 const fs = require('node:fs')
-
-const args = process.argv.slice(2)
-const realGit = process.env.GIT_STACKS_REAL_GIT || '/usr/bin/git'
-const barePath = process.env.GIT_STACKS_FIXTURE_BARE
-if (!barePath) {
-  process.stderr.write('GIT_STACKS_FIXTURE_BARE is required\n')
-  process.exit(2)
-}
 
 const transportCommands = new Set(['push', 'fetch', 'ls-remote'])
 const valueOptions = new Set([
@@ -21,35 +11,20 @@ const valueOptions = new Set([
   '-c',
   '--config-env',
 ])
-let commandIndex = -1
-for (let index = 0; index < args.length; index += 1) {
-  const token = args[index]
-  if (valueOptions.has(token)) {
-    index += 1
-    continue
+
+function transportCommandIndex(args) {
+  for (let index = 0; index < args.length; index += 1) {
+    const token = args[index]
+    if (valueOptions.has(token)) {
+      index += 1
+      continue
+    }
+    if (transportCommands.has(token)) return index
   }
-  if (transportCommands.has(token)) {
-    commandIndex = index
-    break
-  }
+  return -1
 }
 
-function logCall(finalArgs) {
-  const logPath = process.env.GIT_STACKS_TRANSPORT_LOG
-  if (!logPath) return
-  try {
-    fs.appendFileSync(
-      logPath,
-      `${JSON.stringify({ argv: args, redirectedArgv: finalArgs, cwd: process.cwd() })}\n`,
-      'utf8',
-    )
-  } catch {
-    // Transport logging is diagnostic only and must never affect Git behavior.
-  }
-}
-
-function positionalRemoteIndex() {
-  if (commandIndex < 0) return -1
+function positionalRemoteIndex(args, commandIndex) {
   let afterEnd = false
   for (let index = commandIndex + 1; index < args.length; index += 1) {
     const token = args[index]
@@ -66,34 +41,58 @@ function positionalRemoteIndex() {
   return -1
 }
 
-const redirected = [...args]
-if (commandIndex >= 0) {
+function logCall({ logPath, argv, redirectedArgv, cwd }) {
+  if (!logPath) return
+  try {
+    fs.appendFileSync(logPath, `${JSON.stringify({ argv, redirectedArgv, cwd })}\n`, 'utf8')
+  } catch {
+    // Transport logging is diagnostic only and must never affect Git behavior.
+  }
+}
+
+/**
+ * Plans the Git command line the GitHub harness runs for one Git Stacks command.
+ * `remote.origin.url` and `remote.origin.pushurl` keep naming the GitHub
+ * repository for every ordinary inspection command while transport itself is
+ * redirected to the harness's own bare repository, and each transport call is
+ * appended to the log the publication tests read.
+ *
+ * The plan is returned instead of executed because the harness runs it in the
+ * test process: `child_process` cannot launch an extensionless shebang script or
+ * a `.cmd` file on Windows without a shell, and a copy of the Node binary named
+ * `git.exe` cannot carry Git's own argument forms, because Node rejects
+ * `--literal-pathspecs` and friends before any preload runs.
+ *
+ * Returns `{ ok: true, args }` to run, or `{ ok: false, refused }` naming the
+ * transport target this fixture will not touch.
+ */
+function planGitTransport({ args, barePath, logPath, cwd }) {
+  if (typeof barePath !== 'string' || !barePath) {
+    return { ok: false, refused: 'GIT_STACKS_FIXTURE_BARE is required' }
+  }
+  const commandIndex = transportCommandIndex(args)
+  if (commandIndex < 0) return { ok: true, args: [...args] }
+
   const command = args[commandIndex]
-  const remoteIndex = positionalRemoteIndex()
+  const remoteIndex = positionalRemoteIndex(args, commandIndex)
   const remote = remoteIndex >= 0 ? args[remoteIndex] : null
   const apparentUrl =
     typeof remote === 'string' &&
     /^https:\/\/github\.com\/acme\/widgets(?:\.git)?\/?$/iu.test(remote)
   const isOrigin = remote === 'origin'
+  const redirected = [...args]
   if (isOrigin || (command === 'fetch' && remoteIndex < 0)) {
-    // Preserve remote.origin.url and remote.origin.pushurl for all ordinary
-    // inspection commands while making transport use the owned bare repository.
     redirected.unshift('-c', `url.${barePath}.insteadOf=https://github.com/acme/widgets.git`)
   } else if (apparentUrl && remoteIndex >= 0) {
     redirected[remoteIndex] = barePath
   } else if (remoteIndex >= 0) {
-    process.stderr.write(`fixture refuses unowned ${command} transport target ${String(remote)}\n`)
-    process.exit(2)
+    return {
+      ok: false,
+      refused: `fixture refuses unowned ${command} transport target ${String(remote)}`,
+    }
   }
-  logCall(redirected)
+  logCall({ logPath, argv: args, redirectedArgv: redirected, cwd })
+  return { ok: true, args: redirected }
 }
 
-const result = spawnSync(realGit, redirected, {
-  stdio: 'inherit',
-  env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
-})
-if (result.error) {
-  process.stderr.write(`${result.error.message}\n`)
-  process.exit(1)
-}
-process.exit(typeof result.status === 'number' ? result.status : 1)
+module.exports = { planGitTransport }

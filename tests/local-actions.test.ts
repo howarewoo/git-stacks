@@ -1,6 +1,5 @@
 import assert from 'node:assert/strict'
-import { execFileSync } from 'node:child_process'
-import { promises as fs } from 'node:fs'
+import { promises as fs, writeFileSync } from 'node:fs'
 import {
   link,
   lstat,
@@ -13,26 +12,21 @@ import {
   writeFile,
 } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { basename, delimiter, dirname, join, resolve } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import { test } from 'node:test'
-import {
-  getFileView,
-  getPushPreview,
-  getSnapshot,
-  resolveRepository,
-  runAction,
-} from '../src/main/git'
+import { beginGitRace, runRealGit } from './fixtures/git-race-shim'
 import type { GitAction } from '../src/shared/types'
+
+// Git Stacks captures Node's spawn API when its own modules load, and the race
+// fixture shims that API, so the Git Stacks modules under test are loaded here.
+const { getFileView, getPushPreview, getSnapshot, resolveRepository, runAction } =
+  await import('../src/main/git')
 
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), 'git-stacks-local-actions-'))
   const repo = join(root, 'workspace')
   await mkdir(repo)
-  const git = (...args: string[]) =>
-    execFileSync('git', ['-C', repo, ...args], {
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'pipe'],
-    }).trim()
+  const git = (...args: string[]) => runRealGit(repo, args)
   git('init', '-b', 'main')
   git('config', 'user.name', 'Git Stacks test')
   git('config', 'user.email', 'test@example.invalid')
@@ -51,45 +45,25 @@ async function withNewerStashAfterIdentityCheck(
   repo: string,
   action: () => Promise<void>,
 ): Promise<{ inserted: string; newerOid: string }> {
-  const shimDir = join(root, 'git-shim')
-  await mkdir(shimDir)
-  const shimPath = join(shimDir, 'git')
   const inserted = join(root, 'stash-inserted')
   const newerOid = join(root, 'newer-stash-oid')
-  await writeFile(
-    shimPath,
-    `#!/bin/sh
-real="$GIT_STACKS_TEST_REAL_GIT"
-if [ ! -e "$GIT_STACKS_STASH_INSERTED" ]; then
-  case "$1:$2:$3" in
-    config:--get:extensions.refstorage|stash:apply:*|stash:pop:*|stash:drop:*)
-      "$real" -C "$GIT_STACKS_STASH_REPO" stash push --include-untracked --message=newer >/dev/null 2>&1 || exit $?
-      "$real" -C "$GIT_STACKS_STASH_REPO" rev-parse refs/stash > "$GIT_STACKS_STASH_NEWER_OID"
-      : > "$GIT_STACKS_STASH_INSERTED"
-      ;;
-  esac
-fi
-exec "$real" "$@"
-`,
-    { mode: 0o755 },
-  )
-  const realGit = execFileSync('/bin/sh', ['-c', 'command -v git'], {
-    encoding: 'utf8',
-  }).trim()
-  const savedPath = process.env.PATH
-  process.env.PATH = `${shimDir}${delimiter}${savedPath ?? ''}`
-  process.env.GIT_STACKS_TEST_REAL_GIT = realGit
-  process.env.GIT_STACKS_STASH_REPO = repo
-  process.env.GIT_STACKS_STASH_INSERTED = inserted
-  process.env.GIT_STACKS_STASH_NEWER_OID = newerOid
+  // A stash action reads the ref storage format and the displayed stash ref
+  // before it touches the stash, so the newer stash lands after that check and
+  // before the action applies or drops the object the user selected.
+  const race = beginGitRace({
+    matches: (args) =>
+      (args[0] === 'config' && args[1] === '--get' && args[2] === 'extensions.refstorage') ||
+      (args[0] === 'stash' && ['apply', 'pop', 'drop'].includes(args[1] ?? '')),
+    inject: () => {
+      runRealGit(repo, ['stash', 'push', '--include-untracked', '--message=newer'])
+      writeFileSync(newerOid, runRealGit(repo, ['rev-parse', 'refs/stash']))
+      writeFileSync(inserted, '')
+    },
+  })
   try {
     await action()
   } finally {
-    process.env.PATH = savedPath
-    delete process.env.GIT_STACKS_TEST_REAL_GIT
-    delete process.env.GIT_STACKS_STASH_REPO
-    delete process.env.GIT_STACKS_STASH_INSERTED
-    delete process.env.GIT_STACKS_STASH_NEWER_OID
+    race.end()
   }
   return { inserted, newerOid }
 }
@@ -102,56 +76,30 @@ async function withParentBranchRace(
   advancedOid: string,
   action: () => Promise<void>,
 ): Promise<string> {
-  const shimDir = join(root, 'parent-race-shim')
-  await mkdir(shimDir)
   const triggered = join(root, 'parent-race-triggered')
-  await writeFile(
-    join(shimDir, 'git'),
-    `#!/bin/sh
-real="$GIT_STACKS_TEST_REAL_GIT"
-trigger=false
-if [ ! -e "$GIT_STACKS_RACE_TRIGGERED" ]; then
-  case "$GIT_STACKS_RACE_COMMAND" in
-    create)
-      if [ "$1" = "switch" ] && [ "$4" = "--create" ]; then trigger=true; fi
-      ;;
-    rebase)
-      if [ "$1" = "-c" ] && [ "$5" = "rebase" ]; then trigger=true; fi
-      ;;
-  esac
-fi
-if [ "$trigger" = true ]; then
-  "$real" -C "$GIT_STACKS_RACE_REPO" update-ref refs/heads/main "$GIT_STACKS_RACE_ADVANCED" "$GIT_STACKS_RACE_EXPECTED" || exit $?
-  : > "$GIT_STACKS_RACE_TRIGGERED"
-fi
-exec "$real" "$@"
-`,
-    { mode: 0o755 },
-  )
-  const realGit = execFileSync('/bin/sh', ['-c', 'command -v git'], {
-    encoding: 'utf8',
-  }).trim()
-  const savedPath = process.env.PATH
-  process.env.PATH = `${shimDir}${delimiter}${savedPath ?? ''}`
-  process.env.GIT_STACKS_TEST_REAL_GIT = realGit
-  process.env.GIT_STACKS_RACE_REPO = repo
-  process.env.GIT_STACKS_RACE_COMMAND = command
-  process.env.GIT_STACKS_RACE_EXPECTED = expectedOid
-  process.env.GIT_STACKS_RACE_ADVANCED = advancedOid
-  process.env.GIT_STACKS_RACE_TRIGGERED = triggered
+  // Branch creation switches with
+  // `switch --no-overwrite-ignore --no-recurse-submodules --create <name> <tip>`
+  // and a rebase runs with `-c rebase.updateRefs=false -c
+  // rebase.autoStash=false rebase <tip>`, so the parent ref advances after Git
+  // Stacks captured the parent it resolved and before the branch moves.
+  const race = beginGitRace({
+    matches: (args) =>
+      command === 'create'
+        ? args[0] === 'switch' && args[3] === '--create'
+        : args[0] === '-c' && args[4] === 'rebase',
+    inject: () => {
+      runRealGit(repo, ['update-ref', 'refs/heads/main', advancedOid, expectedOid])
+      writeFileSync(triggered, '')
+    },
+  })
   try {
     await action()
   } finally {
-    process.env.PATH = savedPath
-    delete process.env.GIT_STACKS_TEST_REAL_GIT
-    delete process.env.GIT_STACKS_RACE_REPO
-    delete process.env.GIT_STACKS_RACE_COMMAND
-    delete process.env.GIT_STACKS_RACE_EXPECTED
-    delete process.env.GIT_STACKS_RACE_ADVANCED
-    delete process.env.GIT_STACKS_RACE_TRIGGERED
+    race.end()
   }
   return triggered
 }
+
 async function withConcurrentFileEdit(
   root: string,
   repo: string,
@@ -159,54 +107,30 @@ async function withConcurrentFileEdit(
   content: string,
   run: () => Promise<void>,
 ): Promise<string> {
-  const shimDir = join(root, 'file-race-shim')
-  await mkdir(shimDir)
   const triggered = join(root, 'file-race-triggered')
-  await writeFile(
-    join(shimDir, 'git'),
-    `#!/bin/sh
-real="$GIT_STACKS_TEST_REAL_GIT"
-trigger=false
-if [ ! -e "$GIT_STACKS_FILE_RACE_TRIGGERED" ]; then
-  case "$GIT_STACKS_FILE_RACE_ACTION" in
-    discard)
-      if [ "$1" = "--literal-pathspecs" ] && [ "$2" = "restore" ]; then trigger=true; fi
-      ;;
-    resolve)
-      if [ "$1" = "--literal-pathspecs" ] && [ "$2" = "checkout" ] && [ "$3" = "--ours" ]; then trigger=true; fi
-      ;;
-  esac
-fi
-if [ "$trigger" = true ]; then
-  printf '%s' "$GIT_STACKS_FILE_RACE_CONTENT" > "$GIT_STACKS_FILE_RACE_FILE" || exit $?
-  : > "$GIT_STACKS_FILE_RACE_TRIGGERED"
-fi
-exec "$real" "$@"
-`,
-    { mode: 0o755 },
-  )
-  const realGit = execFileSync('/bin/sh', ['-c', 'command -v git'], {
-    encoding: 'utf8',
-  }).trim()
-  const savedPath = process.env.PATH
-  process.env.PATH = `${shimDir}${delimiter}${savedPath ?? ''}`
-  process.env.GIT_STACKS_TEST_REAL_GIT = realGit
-  process.env.GIT_STACKS_FILE_RACE_ACTION = action
-  process.env.GIT_STACKS_FILE_RACE_CONTENT = content
-  process.env.GIT_STACKS_FILE_RACE_FILE = join(repo, 'shared.txt')
-  process.env.GIT_STACKS_FILE_RACE_TRIGGERED = triggered
+  // A discard materializes the indexed content with `--literal-pathspecs
+  // restore --worktree -- <path>` and a resolution takes a side with
+  // `--literal-pathspecs checkout --ours -- <path>`, so the editor's save lands
+  // after Git Stacks fingerprinted the file and before it replaces the content.
+  const race = beginGitRace({
+    matches: (args) =>
+      args[0] === '--literal-pathspecs' &&
+      (action === 'discard'
+        ? args[1] === 'restore'
+        : args[1] === 'checkout' && args[2] === '--ours'),
+    inject: () => {
+      writeFileSync(join(repo, 'shared.txt'), content)
+      writeFileSync(triggered, '')
+    },
+  })
   try {
     await run()
   } finally {
-    process.env.PATH = savedPath
-    delete process.env.GIT_STACKS_TEST_REAL_GIT
-    delete process.env.GIT_STACKS_FILE_RACE_ACTION
-    delete process.env.GIT_STACKS_FILE_RACE_CONTENT
-    delete process.env.GIT_STACKS_FILE_RACE_FILE
-    delete process.env.GIT_STACKS_FILE_RACE_TRIGGERED
+    race.end()
   }
   return triggered
 }
+
 async function withHeadAdvanceBeforeCommand(
   root: string,
   repo: string,
@@ -216,44 +140,21 @@ async function withHeadAdvanceBeforeCommand(
   advancedOid: string,
   run: () => Promise<void>,
 ): Promise<string> {
-  const shimDir = join(root, 'head-race-shim')
-  await mkdir(shimDir)
   const triggered = join(root, 'head-race-triggered')
-  await writeFile(
-    join(shimDir, 'git'),
-    `#!/bin/sh
-real="$GIT_STACKS_TEST_REAL_GIT"
-if [ ! -e "$GIT_STACKS_HEAD_RACE_TRIGGERED" ] && [ "$1" = "-c" ] && [ "$3" = "$GIT_STACKS_HEAD_RACE_COMMAND" ]; then
-  "$real" -C "$GIT_STACKS_HEAD_RACE_REPO" update-ref "$GIT_STACKS_HEAD_RACE_REF" "$GIT_STACKS_HEAD_RACE_ADVANCED" "$GIT_STACKS_HEAD_RACE_EXPECTED" || exit $?
-  : > "$GIT_STACKS_HEAD_RACE_TRIGGERED"
-fi
-exec "$real" "$@"
-`,
-    { mode: 0o755 },
-  )
-  const realGit = execFileSync('/bin/sh', ['-c', 'command -v git'], {
-    encoding: 'utf8',
-  }).trim()
-  const savedPath = process.env.PATH
-  process.env.PATH = `${shimDir}${delimiter}${savedPath ?? ''}`
-  process.env.GIT_STACKS_TEST_REAL_GIT = realGit
-  process.env.GIT_STACKS_HEAD_RACE_COMMAND = command
-  process.env.GIT_STACKS_HEAD_RACE_REPO = repo
-  process.env.GIT_STACKS_HEAD_RACE_REF = ref
-  process.env.GIT_STACKS_HEAD_RACE_EXPECTED = expectedOid
-  process.env.GIT_STACKS_HEAD_RACE_ADVANCED = advancedOid
-  process.env.GIT_STACKS_HEAD_RACE_TRIGGERED = triggered
+  // Every guarded command runs behind the reference-transaction guard as
+  // `-c core.hooksPath=<guard> <command> ...`, so the ref advances after Git
+  // Stacks captured HEAD and before the command records the new commit.
+  const race = beginGitRace({
+    matches: (args) => args[0] === '-c' && args[2] === command,
+    inject: () => {
+      runRealGit(repo, ['update-ref', ref, advancedOid, expectedOid])
+      writeFileSync(triggered, '')
+    },
+  })
   try {
     await run()
   } finally {
-    process.env.PATH = savedPath
-    delete process.env.GIT_STACKS_TEST_REAL_GIT
-    delete process.env.GIT_STACKS_HEAD_RACE_COMMAND
-    delete process.env.GIT_STACKS_HEAD_RACE_REPO
-    delete process.env.GIT_STACKS_HEAD_RACE_REF
-    delete process.env.GIT_STACKS_HEAD_RACE_EXPECTED
-    delete process.env.GIT_STACKS_HEAD_RACE_ADVANCED
-    delete process.env.GIT_STACKS_HEAD_RACE_TRIGGERED
+    race.end()
   }
   return triggered
 }
@@ -263,11 +164,14 @@ test('branch creation uses the captured parent when its ref advances before swit
   try {
     const parentTip = git('rev-parse', 'refs/heads/main')
     const tree = git('rev-parse', `${parentTip}^{tree}`)
-    const advancedTip = execFileSync(
-      'git',
-      ['-C', repo, 'commit-tree', tree, '-p', parentTip, '-m', 'Advanced parent'],
-      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] },
-    ).trim()
+    const advancedTip = runRealGit(repo, [
+      'commit-tree',
+      tree,
+      '-p',
+      parentTip,
+      '-m',
+      'Advanced parent',
+    ])
 
     const triggered = await withParentBranchRace(
       root,
@@ -302,11 +206,14 @@ test('rebase uses the captured parent when its ref advances before rebase', asyn
     git('commit', '-m', 'Main change')
     const parentTip = git('rev-parse', 'refs/heads/main')
     const tree = git('rev-parse', `${parentTip}^{tree}`)
-    const advancedTip = execFileSync(
-      'git',
-      ['-C', repo, 'commit-tree', tree, '-p', parentTip, '-m', 'Advanced parent'],
-      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] },
-    ).trim()
+    const advancedTip = runRealGit(repo, [
+      'commit-tree',
+      tree,
+      '-p',
+      parentTip,
+      '-m',
+      'Advanced parent',
+    ])
     git('switch', 'feature')
 
     const triggered = await withParentBranchRace(
@@ -457,11 +364,14 @@ test('a no-op merge rejects a branch advanced after preflight', async () => {
   try {
     const expectedHead = git('rev-parse', 'HEAD')
     const tree = git('rev-parse', `${expectedHead}^{tree}`)
-    const advancedHead = execFileSync(
-      'git',
-      ['-C', repo, 'commit-tree', tree, '-p', expectedHead, '-m', 'Advanced during merge'],
-      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] },
-    ).trim()
+    const advancedHead = runRealGit(repo, [
+      'commit-tree',
+      tree,
+      '-p',
+      expectedHead,
+      '-m',
+      'Advanced during merge',
+    ])
     const triggered = await withHeadAdvanceBeforeCommand(
       root,
       repo,
@@ -509,11 +419,14 @@ test('merge continuation rejects a branch advanced during conflict resolution', 
       }),
     )
     const tree = git('rev-parse', `${expectedHead}^{tree}`)
-    const advancedHead = execFileSync(
-      'git',
-      ['-C', repo, 'commit-tree', tree, '-p', expectedHead, '-m', 'External conflict-time advance'],
-      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] },
-    ).trim()
+    const advancedHead = runRealGit(repo, [
+      'commit-tree',
+      tree,
+      '-p',
+      expectedHead,
+      '-m',
+      'External conflict-time advance',
+    ])
     git('update-ref', 'refs/heads/main', advancedHead, expectedHead)
 
     await assert.rejects(runAction(repo, { type: 'operationContinue' }), /HEAD changed/u)
@@ -1142,11 +1055,14 @@ test('commit, merge, cherry-pick, and revert reject a ref advanced after preflig
 
       const expectedHead = git('rev-parse', 'HEAD')
       const tree = git('rev-parse', `${expectedHead}^{tree}`)
-      const advancedHead = execFileSync(
-        'git',
-        ['-C', repo, 'commit-tree', tree, '-p', expectedHead, '-m', `External ${command} race`],
-        { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] },
-      ).trim()
+      const advancedHead = runRealGit(repo, [
+        'commit-tree',
+        tree,
+        '-p',
+        expectedHead,
+        '-m',
+        `External ${command} race`,
+      ])
       const run = async () => {
         if (command === 'commit') {
           await assert.rejects(
@@ -1264,18 +1180,18 @@ test('force push rejects a remote lease race using the exact preview destination
   try {
     const remote = join(root, 'remote.git')
     const peer = join(root, 'peer')
-    execFileSync('git', ['init', '--bare', remote], { stdio: 'pipe' })
+    runRealGit(root, ['init', '--bare', remote])
     git('remote', 'add', 'origin', remote)
     git('switch', '-c', 'feature')
     git('push', '-u', 'origin', 'feature')
     const preview = await getPushPreview(repo)
-    execFileSync('git', ['clone', '-b', 'feature', remote, peer], { stdio: 'pipe' })
-    execFileSync('git', ['-C', peer, 'config', 'user.name', 'Peer'])
-    execFileSync('git', ['-C', peer, 'config', 'user.email', 'peer@example.invalid'])
+    runRealGit(root, ['clone', '-b', 'feature', remote, peer])
+    runRealGit(peer, ['config', 'user.name', 'Peer'])
+    runRealGit(peer, ['config', 'user.email', 'peer@example.invalid'])
     await writeFile(join(peer, 'peer.txt'), 'peer\n')
-    execFileSync('git', ['-C', peer, 'add', '.'])
-    execFileSync('git', ['-C', peer, 'commit', '-m', 'peer'])
-    execFileSync('git', ['-C', peer, 'push'])
+    runRealGit(peer, ['add', '.'])
+    runRealGit(peer, ['commit', '-m', 'peer'])
+    runRealGit(peer, ['push'])
     await assert.rejects(
       runAction(repo, {
         type: 'forcePush',
@@ -1291,63 +1207,42 @@ test('force push publishes the preview OID when the local branch advances after 
   const { root, repo, git } = await fixture()
   try {
     const remote = join(root, 'remote.git')
-    execFileSync('git', ['init', '--bare', remote], { stdio: 'pipe' })
+    runRealGit(root, ['init', '--bare', remote])
     git('remote', 'add', 'origin', remote)
     git('switch', '-c', 'feature')
     git('push', '-u', 'origin', 'feature')
     const preview = await getPushPreview(repo)
     const tree = git('rev-parse', 'HEAD^{tree}')
-    const advancedOid = execFileSync(
-      'git',
-      ['-C', repo, 'commit-tree', tree, '-p', preview.localOid, '-m', 'Local branch advanced'],
-      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] },
-    ).trim()
+    const advancedOid = runRealGit(repo, [
+      'commit-tree',
+      tree,
+      '-p',
+      preview.localOid,
+      '-m',
+      'Local branch advanced',
+    ])
 
-    const shimDir = join(root, 'git-shim')
-    await mkdir(shimDir)
-    const shimPath = join(shimDir, 'git')
     const advanced = join(root, 'branch-advanced')
-    await writeFile(
-      shimPath,
-      `#!/bin/sh
-real="$GIT_STACKS_TEST_REAL_GIT"
-if [ "$1" = "-c" ] && [ "$2" = "push.followTags=false" ] && [ "$3" = "push" ] && [ ! -e "$GIT_STACKS_BRANCH_ADVANCED" ]; then
-  "$real" -C "$GIT_STACKS_PUSH_REPO" update-ref refs/heads/feature "$GIT_STACKS_ADVANCED_OID" "$GIT_STACKS_PREVIEW_OID" || exit $?
-  : > "$GIT_STACKS_BRANCH_ADVANCED"
-fi
-exec "$real" "$@"
-`,
-      { mode: 0o755 },
-    )
-    const realGit = execFileSync('/bin/sh', ['-c', 'command -v git'], {
-      encoding: 'utf8',
-    }).trim()
-    const savedPath = process.env.PATH
-    process.env.PATH = `${shimDir}${delimiter}${savedPath ?? ''}`
-    process.env.GIT_STACKS_TEST_REAL_GIT = realGit
-    process.env.GIT_STACKS_PUSH_REPO = repo
-    process.env.GIT_STACKS_BRANCH_ADVANCED = advanced
-    process.env.GIT_STACKS_ADVANCED_OID = advancedOid
-    process.env.GIT_STACKS_PREVIEW_OID = preview.localOid
+    // The push runs as `-c push.followTags=false push --force-with-lease=...`, so
+    // the branch advances after Git Stacks checked the lease and before the push
+    // publishes the previewed commit.
+    const race = beginGitRace({
+      matches: (args) =>
+        args[0] === '-c' && args[1] === 'push.followTags=false' && args[2] === 'push',
+      inject: () => {
+        runRealGit(repo, ['update-ref', 'refs/heads/feature', advancedOid, preview.localOid])
+        writeFileSync(advanced, '')
+      },
+    })
     try {
       await runAction(repo, { type: 'forcePush', preview })
     } finally {
-      process.env.PATH = savedPath
-      delete process.env.GIT_STACKS_TEST_REAL_GIT
-      delete process.env.GIT_STACKS_PUSH_REPO
-      delete process.env.GIT_STACKS_BRANCH_ADVANCED
-      delete process.env.GIT_STACKS_ADVANCED_OID
-      delete process.env.GIT_STACKS_PREVIEW_OID
+      race.end()
     }
 
     assert.equal(await readFile(advanced, 'utf8'), '')
     assert.equal(git('rev-parse', 'refs/heads/feature'), advancedOid)
-    assert.equal(
-      execFileSync('git', ['--git-dir', remote, 'rev-parse', 'refs/heads/feature'], {
-        encoding: 'utf8',
-      }).trim(),
-      preview.localOid,
-    )
+    assert.equal(runRealGit(remote, ['rev-parse', 'refs/heads/feature']), preview.localOid)
   } finally {
     await cleanup(root)
   }
