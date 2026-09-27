@@ -49,6 +49,7 @@ import {
   createPullRequestStack,
   detectNativeStacksCapability,
   listPullRequestStacks,
+  revalidatePublishedStackRegistration,
   unstackNativeStackAction,
   validatePublishedStackRegistration,
 } from './native-stacks'
@@ -2631,7 +2632,9 @@ async function publishStack(
           knownPullRequests: published.map((entry) => entry.pr),
         })
       } else {
-        const registration = validatePublishedStackRegistration(
+        const registration = await revalidatePublishedStackRegistration(
+          owner,
+          name,
           matched,
           published.map((entry) => entry.pr),
         )
