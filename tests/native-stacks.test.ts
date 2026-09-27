@@ -682,6 +682,25 @@ async function applyExternalDrift(
   await harness.writeState(state)
 }
 
+/** Unstacks a native stack behind the app's back through GitHub's own unstack endpoint. */
+async function unstackExternally(
+  double: typeof globalThis.fetch,
+  stackNumber: number,
+): Promise<void> {
+  const response = await double(
+    `https://api.github.com/repos/acme/widgets/stacks/${stackNumber}/unstack`,
+    {
+      method: 'POST',
+      headers: { authorization: 'Bearer fixture-token', 'content-type': 'application/json' },
+      body: JSON.stringify({}),
+    },
+  )
+  assert.equal(response.status, 204)
+}
+
+/** The unparameterized native stacks listing that selects the registration target. */
+const STACKS_LISTING = 'https://api.github.com/repos/acme/widgets/stacks'
+
 test('publishStack rejects an already-registered stack when a published pull request drifts after its readback', async () => {
   for (const drift of ['force-push', 'retarget'] as const) {
     await withHarness(async (harness) => {
@@ -768,6 +787,63 @@ test('publishStack accepts an unchanged already-registered stack without creatin
     const published = await runStackAction(harness.repo, publishAction(preview.token))
     assert.match(published.message, /Published 3 stack pull requests/u)
     assert.deepEqual(stackWrites, [])
+  })
+})
+
+test('publishStack rejects an already-registered stack another actor unstacked before the final re-read', async () => {
+  await withHarness(async (harness) => {
+    await setupThreeBranches(harness)
+    await registerOpenStack(harness)
+
+    const snapshot = await getSnapshot(harness.repo)
+    const preview = await previewStack(harness.repo, snapshot, 'publish', 'feature/step-2')
+    assert.deepEqual(preview.blockers, [])
+
+    const inner = createGitHubApiDouble()
+    const stackWrites: string[] = []
+    let topReadback = false
+    let armed = true
+    setGitHubTransport(
+      new DirectGitHubTransport({
+        token: 'fixture-token',
+        fetch: (async (input: RequestInfo | URL, init?: RequestInit) => {
+          const url = String(input instanceof Request ? input.url : (input as string))
+          const method = init?.method ?? 'GET'
+          if (
+            method !== 'GET' &&
+            /^https:\/\/api\.github\.com\/repos\/acme\/widgets\/stacks/u.test(url)
+          )
+            stackWrites.push(`${method} ${url}`)
+          // The readback of the top published pull request is the last request before the native
+          // stack step, so the stacks listing that follows it is the one selecting the
+          // registration target.
+          const body = url.endsWith('/graphql') ? String(init?.body ?? '') : ''
+          if (body.includes('pullRequest(number: $number)') && body.includes('"number":103'))
+            topReadback = true
+          const response = await inner(input, init)
+          // The external unstack lands right after that listing, so the canonical re-read that
+          // follows observes the same published pull requests with no stack membership at all.
+          if (armed && topReadback && method === 'GET' && url === STACKS_LISTING) {
+            armed = false
+            await unstackExternally(inner, 99)
+          }
+          return response
+        }) as typeof globalThis.fetch,
+      }),
+    )
+
+    await assert.rejects(
+      runStackAction(harness.repo, publishAction(preview.token)),
+      (error) =>
+        error instanceof NativeStackError &&
+        error.status === 'invalid-chain' &&
+        /no longer registered in native stack #99/u.test(error.message),
+    )
+    assert.equal(armed, false)
+    assert.deepEqual(stackWrites, [])
+    // The unstacked registration is gone and the failed publication must not recreate it.
+    assert.deepEqual((await harness.readState()).stacks, [])
+    assert.equal((await listPullRequestStacks('acme', 'widgets')).length, 0)
   })
 })
 
