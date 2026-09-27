@@ -634,10 +634,21 @@ async function pullRequestsForValidation(
           `GitHub returned incomplete pull request #${number}`,
         )
       }
-      if (isRecord(raw.stack) && raw.stack.number !== options.memberStackNumber) {
+      // GitHub omits `stack` once a pull request belongs to no stack, so an unstack that lands
+      // after the registration target was chosen must fail the re-read instead of leaving the
+      // cached stack to validate an unregistration. Membership in a different stack stays the
+      // create/add duplicate rejection.
+      const membership = isRecord(raw.stack) ? raw.stack : null
+      if (!membership && options.memberStackNumber !== undefined) {
+        throw new NativeStackError(
+          'invalid-chain',
+          `Pull request #${number} is no longer registered in native stack #${options.memberStackNumber}`,
+        )
+      }
+      if (membership && membership.number !== options.memberStackNumber) {
         throw new NativeStackError(
           'duplicate-pr',
-          `Pull request #${number} is already in stack #${raw.stack.number}`,
+          `Pull request #${number} is already in stack #${membership.number}`,
         )
       }
       const current = {
