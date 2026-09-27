@@ -422,7 +422,7 @@ function summaryFor(state: ReconciliationState, stack: ReconciliationStackInput)
  * it. The result is read-only: it names repairs, it never performs them.
  */
 export function reconcileStack(input: ReconciliationStackInput): ReconciledStack {
-  const blockers: string[] = []
+  const blockers: string[] = [...(input.identityConflicts ?? [])]
   const base = input.submittedBase ?? input.defaultBranch
   const order = input.submittedOrder.filter(
     (head) => head.length > 0 && head !== input.defaultBranch,
@@ -737,7 +737,11 @@ async function collectStackInputs(
     remoteOids.set(branch.name.slice('origin/'.length), branch.oid ?? '')
   }
   const pullRequests = new Map<string, PullRequest>()
+  const pullRequestsByNumber = new Map<number, PullRequest>()
   for (const pullRequest of snapshot.pullRequests) {
+    if (!pullRequestsByNumber.has(pullRequest.number)) {
+      pullRequestsByNumber.set(pullRequest.number, pullRequest)
+    }
     if (originFullName && pullRequestRepository(pullRequest) !== originFullName) continue
     if (!pullRequests.has(pullRequest.head)) pullRequests.set(pullRequest.head, pullRequest)
   }
@@ -816,6 +820,7 @@ async function collectStackInputs(
       base || defaultBranch,
       new Set([...merged, ...mergedHeads]),
     )
+    const identityConflicts: string[] = []
     const members: ReconciliationMemberInput[] = []
     for (const name of [...groupNames].sort()) {
       const hint = hints.get(name) ?? { parent: null, tip: null }
@@ -832,20 +837,30 @@ async function collectStackInputs(
       // (a closed or merged one) still carries its identity in the stack
       // payload, so the state machine never has to infer it from local hints.
       const stackMember = stackPullRequests.get(name)
-      const pullRequest =
-        pullRequests.get(name) ??
-        (stackMember
-          ? {
-              number: stackMember.number,
-              title: '',
-              url: stack.url,
-              head: name,
-              base: memberBase(name),
-              state: stackMember.state,
-              draft: stackMember.draft,
-              checks: 'none' as const,
-            }
-          : null)
+      const canonical = stackMember ? pullRequestsByNumber.get(stackMember.number) : null
+      const matchingCanonical =
+        canonical &&
+        canonical.head === name &&
+        (!originFullName || pullRequestRepository(canonical) === originFullName)
+          ? canonical
+          : null
+      if (stackMember && canonical && !matchingCanonical) {
+        const conflict = `Native stack #${stack.number} member #${stackMember.number} no longer identifies ${name} in this repository`
+        identityConflicts.push(conflict)
+        blockers.push(conflict)
+      }
+      const pullRequest = stackMember
+        ? (matchingCanonical ?? {
+            number: stackMember.number,
+            title: '',
+            url: stack.url,
+            head: name,
+            base: memberBase(name),
+            state: stackMember.state,
+            draft: stackMember.draft,
+            checks: 'none' as const,
+          })
+        : (pullRequests.get(name) ?? null)
       members.push({
         branch: name,
         localOid: facts.localOid,
@@ -864,8 +879,9 @@ async function collectStackInputs(
       submittedHeadOids: shas,
       submittedBase: stack.base || defaultBranch,
       stackNumber: stack.number,
-      stackUrl: stack.url || null,
+      stackUrl: stack.url,
       submittedStatus: stack.status,
+      identityConflicts,
       members,
     })
   }

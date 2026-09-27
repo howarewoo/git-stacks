@@ -933,6 +933,53 @@ test('an externally retargeted pull request is retargeted back only through a pr
   })
 })
 
+test('a native member retargets its numbered PR, never a newer unrelated PR sharing its head', async () => {
+  await withHarness(async (harness) => {
+    const heads = await setupStack(harness)
+    const created = await createPullRequestStack('acme', 'widgets', [101, 102, 103])
+    const state = await harness.readState()
+    state.prs[0].base = 'develop'
+    state.prs.unshift(pullRequestFixture(201, 'feature/step-1', 'release', { headOid: heads[0] }))
+    state.nextNumber = 202
+    await harness.writeState(state)
+
+    const preview = await previewReconciliationRepair(
+      harness.repo,
+      await getSnapshot(harness.repo),
+      `native:${created.number}`,
+    )
+    const retarget = preview.repairs.find(
+      (repair) => repair.kind === 'retarget-pull-request' && repair.branch === 'feature/step-1',
+    )
+    assert.ok(retarget)
+    assert.equal(retarget.pullRequest, 101)
+    assert.equal(retarget.evidence?.previousBase, 'develop')
+    await runReconciliationRepair(harness.repo, {
+      token: preview.token,
+      ids: [retarget.id],
+      confirmRewrites: true,
+    })
+    const after = await harness.readState()
+    assert.equal(after.prs.find((pr) => pr.number === 101)?.base, 'main')
+    assert.equal(after.prs.find((pr) => pr.number === 201)?.base, 'release')
+  })
+})
+
+test('a native member whose numbered PR moved to another head cannot be repaired', async () => {
+  await withHarness(async (harness) => {
+    await setupStack(harness)
+    const created = await createPullRequestStack('acme', 'widgets', [101, 102, 103])
+    const state = await harness.readState()
+    state.prs[0].head = 'feature/step-2'
+    await harness.writeState(state)
+
+    const stack = stackFor(await getSnapshot(harness.repo), `native:${created.number}`)
+    assert.equal(stack.state, 'ambiguous')
+    assert.match(stack.blockers.join(' '), /member #101 no longer identifies feature\/step-1/)
+    assert.deepEqual(stack.repairs, [])
+  })
+})
+
 test('a concurrent edit between preview and execute is reported instead of overwritten', async () => {
   await withHarness(async (harness) => {
     const heads = await setupStack(harness)
