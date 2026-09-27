@@ -1197,11 +1197,11 @@ async function captureOperation(
     // Collapsing a merged PR changes the effective parent even when B has no
     // app-local hint. The submitted predecessor still requires a proven replay boundary.
     const skippedPredecessor = submittedPredecessor !== null && submittedPredecessor !== parent
-    const mergedParent = stack.members.find(
-      (entry) =>
-        (skippedPredecessor && entry.branch === submittedPredecessor) ||
-        (entry.branch === member.recordedParent && entry.state === 'merged'),
-    )
+    const mergedParent = skippedPredecessor
+      ? stack.members.find((entry) => entry.branch === submittedPredecessor)
+      : stack.members.find(
+          (entry) => entry.branch === member.recordedParent && entry.state === 'merged',
+        )
     if (skippedPredecessor && !mergedParent) return null
     let replayBoundary = stripTrailingNewline(boundary)
     let mergedCommitOid: string | null = null

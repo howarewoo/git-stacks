@@ -1286,6 +1286,83 @@ test('adopting a squash-merged parent keeps the merged head out of child replay'
   })
 })
 
+test('multiple squash-merged predecessors require the immediately submitted head as replay boundary', async () => {
+  await withHarness(async (harness) => {
+    const heads = await setupStack(harness)
+    const created = await createPullRequestStack('acme', 'widgets', [101, 102, 103])
+    recordParent(harness, 'feature/step-3', 'feature/step-1', heads[0])
+    const previousMain = git(harness, ['rev-parse', 'main'])
+    const mergedA = git(harness, [
+      'commit-tree',
+      `${previousMain}^{tree}`,
+      '-p',
+      previousMain,
+      '-m',
+      'squash A',
+    ])
+    const mergedB = git(harness, [
+      'commit-tree',
+      `${previousMain}^{tree}`,
+      '-p',
+      mergedA,
+      '-m',
+      'squash B',
+    ])
+    git(harness, ['update-ref', 'refs/heads/main', mergedB, previousMain])
+    git(harness, ['update-ref', 'refs/remotes/origin/main', mergedB, previousMain])
+    git(harness, ['push', harness.bare, 'main:refs/heads/main'])
+    const state = await harness.readState()
+    for (const [index, mergeOid] of [mergedA, mergedB].entries()) {
+      state.prs[index].state = 'MERGED'
+      state.prs[index].mergeOid = mergeOid
+      state.prs[index].mergedAt = new Date().toISOString()
+    }
+    state.stacks = (state.stacks ?? []).map((entry) => ({
+      ...entry,
+      pull_requests: entry.pull_requests.map((pr) =>
+        pr.number <= 102
+          ? { ...pr, state: 'closed' as const, merged_at: '2026-01-01T00:00:00Z' }
+          : pr,
+      ),
+    }))
+    await harness.writeState(state)
+
+    const key = `native:${created.number}`
+    const preview = await previewReconciliationRepair(
+      harness.repo,
+      await getSnapshot(harness.repo),
+      key,
+    )
+    assert.equal(
+      preview.repairs.find(
+        (repair) => repair.kind === 'adopt-remote-order' && repair.branch === 'feature/step-3',
+      ),
+      undefined,
+    )
+    recordParent(harness, 'feature/step-3', 'feature/step-2', heads[1])
+    const proven = await previewReconciliationRepair(
+      harness.repo,
+      await getSnapshot(harness.repo),
+      key,
+    )
+    const adopt = proven.repairs.find(
+      (repair) => repair.kind === 'adopt-remote-order' && repair.branch === 'feature/step-3',
+    )
+    assert.ok(adopt)
+    await runReconciliationRepair(harness.repo, {
+      token: proven.token,
+      ids: [adopt.id],
+      confirmRewrites: false,
+    })
+    assert.equal(recordedParent(harness, 'feature/step-3'), 'main')
+    assert.equal(
+      optionalGit(harness, ['config', '--local', '--get', 'branch.feature/step-3.parentTip']),
+      heads[1],
+    )
+    assert.equal(git(harness, ['rev-list', '--count', 'feature/step-2..feature/step-3']), '1')
+  })
+})
+
 test('a force-pushed remote branch leaves the local branch behind its submitted head', async () => {
   await withHarness(async (harness) => {
     const heads = await setupStack(harness)
