@@ -1514,7 +1514,7 @@ async function applyOperation(
     if (!operation.parent || !operation.parentTip) return false
     await validateBranchName(repoPath, operation.parent)
     let nextParentTip = operation.parentTip
-    if (movedTips.has(branch)) {
+    if (movedTips.has(branch) || movedTips.has(operation.parent)) {
       const parentOid = await resolveOid(
         repoPath,
         await resolveParentRef(repoPath, operation.parent),

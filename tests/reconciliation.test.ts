@@ -1267,6 +1267,48 @@ test('one confirmed repair moves a submitted ref and then records its parent wit
   })
 })
 
+test('adopting a selected parent tip records the child boundary against its new tip', async () => {
+  await withHarness(async (harness) => {
+    const heads = await setupStack(harness)
+    const created = await createPullRequestStack('acme', 'widgets', [101, 102, 103])
+    git(harness, ['checkout', 'main'])
+    const oldParentTip = git(harness, ['rev-parse', 'main'])
+    git(harness, ['update-ref', 'refs/heads/feature/step-1', oldParentTip, heads[0]])
+    assert.equal(git(harness, ['merge-base', 'feature/step-1', 'feature/step-2']), oldParentTip)
+
+    const preview = await previewReconciliationRepair(
+      harness.repo,
+      await getSnapshot(harness.repo),
+      `native:${created.number}`,
+    )
+    const moveParent = preview.repairs.find(
+      (repair) => repair.kind === 'adopt-remote-tip' && repair.branch === 'feature/step-1',
+    )
+    const recordChild = preview.repairs.find(
+      (repair) => repair.kind === 'adopt-remote-order' && repair.branch === 'feature/step-2',
+    )
+    assert.ok(moveParent)
+    assert.ok(recordChild)
+    await runReconciliationRepair(harness.repo, {
+      token: preview.token,
+      ids: [moveParent.id, recordChild.id],
+      confirmRewrites: true,
+    })
+    assert.equal(git(harness, ['rev-parse', 'feature/step-1']), heads[0])
+    assert.equal(recordedParent(harness, 'feature/step-2'), 'feature/step-1')
+    assert.equal(
+      optionalGit(harness, ['config', '--local', '--get', 'branch.feature/step-2.parentTip']),
+      heads[0],
+    )
+    const evidence = (await getSnapshot(harness.repo)).reconciliation?.evidence
+    assert.deepEqual(
+      evidence?.applied.map((entry) => `${entry.kind}:${entry.branch}`),
+      ['adopt-remote-tip:feature/step-1', 'adopt-remote-order:feature/step-2'],
+    )
+    assert.equal(git(harness, ['rev-parse', evidence!.evidence[0].backupRef!]), oldParentTip)
+  })
+})
+
 test('a selected ref move can precede clearing its stale parent hint', async () => {
   await withHarness(async (harness) => {
     const heads = await setupStack(harness)
