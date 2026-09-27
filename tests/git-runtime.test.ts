@@ -587,6 +587,10 @@ test(
   },
 )
 
+function shellQuotedPath(file: string): string {
+  return `'${file.replaceAll('\\', '/').replaceAll("'", `'"'"'`)}'`
+}
+
 function testOnRuntimes(name: string, scenario: () => Promise<void>) {
   for (const useSystemGit of [false, true]) {
     test(`${name} (${useSystemGit ? 'system' : 'bundled'} Git)`, async () => {
@@ -613,7 +617,7 @@ testOnRuntimes('a repository hook runs and receives the preserved Git environmen
   const marker = join(repo, 'hook-ran.txt')
   await writeFile(
     join(hooks, 'pre-commit'),
-    `#!/bin/sh\nprintf 'pre-commit|%s|%s' "$GIT_SSH_COMMAND" "$SSH_AUTH_SOCK" > "${marker}"\n`,
+    `#!/bin/sh\nprintf 'pre-commit|%s|%s' "$GIT_SSH_COMMAND" "$SSH_AUTH_SOCK" > ${shellQuotedPath(marker)}\n`,
     { mode: 0o755 },
   )
   await chmod(join(hooks, 'pre-commit'), 0o755)
@@ -672,7 +676,7 @@ testOnRuntimes(
     git(
       'config',
       'credential.helper',
-      `!f() { echo ran >> "${marker}"; echo "username=git-stacks"; echo "password=s3cret-token"; }; f`,
+      `!f() { echo ran >> ${shellQuotedPath(marker)}; echo "username=git-stacks"; echo "password=s3cret-token"; }; f`,
     )
     // A machine-wide credential helper would answer first, so this case runs against no
     // inherited configuration; the repository's own helper is the only source of secrets.
@@ -701,18 +705,22 @@ testOnRuntimes(
 
 testOnRuntimes('a clean and smudge filter configured like Git LFS still runs', async () => {
   const { repo, git } = await repository()
-  const filters = join(repo, 'lfs-filters')
+  const filters = join(repo, "lfs filters' path")
   await mkdir(filters, { recursive: true })
   const cleanMarker = join(filters, 'clean.log')
   const smudgeMarker = join(filters, 'smudge.log')
   const clean = join(filters, 'clean')
   const smudge = join(filters, 'smudge')
-  await writeFile(clean, `#!/bin/sh\necho "$1" >> "${cleanMarker}"\ncat\n`, { mode: 0o755 })
-  await writeFile(smudge, `#!/bin/sh\necho "$1" >> "${smudgeMarker}"\ncat\n`, { mode: 0o755 })
+  await writeFile(clean, `#!/bin/sh\necho "$1" >> ${shellQuotedPath(cleanMarker)}\ncat\n`, {
+    mode: 0o755,
+  })
+  await writeFile(smudge, `#!/bin/sh\necho "$1" >> ${shellQuotedPath(smudgeMarker)}\ncat\n`, {
+    mode: 0o755,
+  })
   await chmod(clean, 0o755)
   await chmod(smudge, 0o755)
-  git('config', 'filter.lfs.clean', `${clean} %f`)
-  git('config', 'filter.lfs.smudge', `${smudge} %f`)
+  git('config', 'filter.lfs.clean', `${shellQuotedPath(clean)} %f`)
+  git('config', 'filter.lfs.smudge', `${shellQuotedPath(smudge)} %f`)
   git('config', 'filter.lfs.required', 'true')
   await writeFile(join(repo, '.gitattributes'), '*.bin filter=lfs diff=lfs merge=lfs -text\n')
   await writeFile(join(repo, 'model.bin'), 'version https://git-lfs.github.com/spec/v1\n')
@@ -729,7 +737,7 @@ testOnRuntimes('a clean and smudge filter configured like Git LFS still runs', a
     assert.match(await readFile(smudgeMarker, 'utf8'), /model\.bin/u)
     assert.equal(
       (await runGit(repo, ['config', '--get', 'filter.lfs.clean'])).trim(),
-      `${clean} %f`,
+      `${shellQuotedPath(clean)} %f`,
     )
   } finally {
     delete process.env.GIT_CONFIG_GLOBAL
