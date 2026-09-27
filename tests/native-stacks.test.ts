@@ -613,7 +613,7 @@ test('publishStack validates a matched stack that already contains every publish
 })
 
 /** Registers an open native stack that already contains all three published pull requests. */
-async function registerOpenStack(harness: GitHubHarness): Promise<void> {
+async function registerOpenStack(harness: GitHubHarness, competingStack?: number): Promise<void> {
   const branches = ['feature/step-1', 'feature/step-2', 'feature/step-3']
   const state = await harness.readState()
   state.stacks = [
@@ -634,6 +634,24 @@ async function registerOpenStack(harness: GitHubHarness): Promise<void> {
       })),
     },
   ]
+  if (competingStack !== undefined) {
+    state.stacks.unshift({
+      id: competingStack * 1000,
+      number: competingStack,
+      node_id: `STACK_${competingStack}`,
+      url: `https://api.github.com/repos/acme/widgets/stacks/${competingStack}`,
+      base: { ref: 'main' },
+      open: true,
+      created_at: new Date().toISOString(),
+      pull_requests: [101].map((number) => ({
+        number,
+        state: 'open' as const,
+        draft: false,
+        merged_at: null,
+        head: { ref: 'feature/step-1', sha: git(harness, ['rev-parse', 'feature/step-1']) },
+      })),
+    })
+  }
   await harness.writeState(state)
 }
 
@@ -842,6 +860,29 @@ test('an already-registered stack must record the current head commit of every p
   const headResult = validatePublishedStackRegistration(staleHead, published)
   assert.equal(headResult.valid, false)
   assert.match(headResult.message ?? '', /at c{40} rather than b{40}/u)
+})
+
+test('revalidating an already-registered publication rejects a pull request GitHub reports in another stack', async () => {
+  await withHarness(async (harness) => {
+    await setupThreeBranches(harness)
+    // GitHub answers the bottom pull request with stack #100 membership while the listing that
+    // selected the registration target still reported stack #99.
+    await registerOpenStack(harness, 100)
+
+    const listed = await listPullRequestStacks('acme', 'widgets')
+    const matched = listed.find((stack) => stack.number === 99)
+    assert.ok(matched)
+    const captured = [101, 102, 103].map((number) => getPullRequest(harness.repo, number))
+    const published = await Promise.all(captured)
+
+    await assert.rejects(
+      revalidatePublishedStackRegistration('acme', 'widgets', matched, published),
+      (error) =>
+        error instanceof NativeStackError &&
+        error.status === 'duplicate-pr' &&
+        /already in stack #100/u.test(error.message),
+    )
+  })
 })
 
 test('publishStack propagates native stack probe failures instead of reporting chained success', async () => {
