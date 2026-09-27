@@ -243,7 +243,13 @@ function normalizeKeyName(rawKey: string): string {
   // Function keys arrive as `F5` from a real keydown and as `f5` from a
   // hand-edited binding; both are the same key.
   const functionKey = /^f(\d{1,2})$/.exec(lower)
-  return functionKey ? `F${functionKey[1]}` : rawKey
+  if (functionKey) return `F${functionKey[1]}`
+  // Any other named key has one spelling too. Dispatch compares key names
+  // case-insensitively, so `Clear` and `clear` are a single keystroke there
+  // and must be a single chord here; the lower-case form is the one a real
+  // keydown never contradicts. Tables would go stale on the next key the
+  // browser adds, so the equivalence is derived instead of enumerated.
+  return lower
 }
 
 export function canonicalChord(chord: string): string | null {
@@ -288,7 +294,9 @@ function formatKey(key: string, isMac: boolean): string {
   if (key === 'Escape') return 'Esc'
   if (key === 'Space') return 'Space'
   if (key.length === 1) return key.toUpperCase()
-  return key
+  // Named keys the canonical table does not list keep the initial capital the
+  // keyboard itself writes them with.
+  return key.charAt(0).toUpperCase() + key.slice(1)
 }
 
 /**
@@ -311,9 +319,11 @@ export function ariaKeyShortcuts(chord: string, isMac = isMacPlatform()): string
 
 function ariaKeyName(key: string): string {
   // Single characters name themselves; a letter is written in upper case, the
-  // spelling the ARIA key table uses and the one the drawn label shows.
+  // spelling the ARIA key table uses and the one the drawn label shows. Named
+  // keys use the `KeyboardEvent.key` spelling, including any key the table
+  // does not enumerate.
   if (key.length === 1) return key.toUpperCase()
-  return key
+  return key.charAt(0).toUpperCase() + key.slice(1)
 }
 
 export interface KeyboardEventLike {

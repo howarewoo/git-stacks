@@ -392,6 +392,76 @@ test('stored bindings that only differ in key case hydrate into one dispatchable
   assert.equal(loadShortcuts(storage)['palette.open'], DEFAULT_SHORTCUTS['palette.open'])
 })
 
+test('named keys outside the canonical table collide by case, not just the table entries', () => {
+  // `Clear` and `Help` reach the same keystroke as their lower-case spelling,
+  // so two actions stored on both spellings are one contested chord even
+  // though neither name is in the canonical table.
+  let stored: string | null = null
+  const storage = {
+    getItem: () => stored,
+    setItem: (_key: string, value: string) => {
+      stored = value
+    },
+    removeItem: () => {
+      stored = null
+    },
+  }
+  saveShortcuts(
+    {
+      ...DEFAULT_SHORTCUTS,
+      'view.branches': 'Clear',
+      'view.stacks': 'clear',
+      'view.history': 'Help',
+      'view.changes': 'HELP',
+    } as Record<ShortcutId, string>,
+    storage,
+  )
+
+  const loaded = loadShortcuts(storage)
+  assert.deepEqual(detectShortcutConflicts(loaded), [])
+  assert.equal(loaded['view.branches'], 'clear')
+  assert.equal(loaded['view.stacks'], DEFAULT_SHORTCUTS['view.stacks'])
+  assert.equal(loaded['view.history'], 'help')
+  assert.equal(loaded['view.changes'], DEFAULT_SHORTCUTS['view.changes'])
+
+  for (const isMac of [true, false]) {
+    // One keydown reaches one action: the reset action answers its own default.
+    const clear = { key: 'Clear' }
+    const clearOwners = (Object.keys(loaded) as ShortcutId[]).filter((id) =>
+      matchesChord(clear, loaded[id], isMac),
+    )
+    assert.deepEqual(clearOwners, ['view.branches'])
+    const help = { key: 'Help' }
+    const helpOwners = (Object.keys(loaded) as ShortcutId[]).filter((id) =>
+      matchesChord(help, loaded[id], isMac),
+    )
+    assert.deepEqual(helpOwners, ['view.history'])
+
+    // The action that lost the contested key answers its own default instead.
+    const stacksEvent = { key: '2', metaKey: isMac, ctrlKey: !isMac }
+    const changesEvent = { key: '4', metaKey: isMac, ctrlKey: !isMac }
+    assert.equal(matchesChord(stacksEvent, loaded['view.stacks'], isMac), true)
+    assert.equal(matchesChord(changesEvent, loaded['view.changes'], isMac), true)
+  }
+
+  // Assignment refuses every spelling of a key another action already holds.
+  for (const spelling of ['clear', 'CLEAR', 'Clear']) {
+    const reassigned = assignShortcut(loaded, 'view.stacks', spelling)
+    assert.equal(reassigned.conflict?.conflictingId, 'view.branches')
+    assert.equal(reassigned.conflict?.chord, 'clear')
+    assert.equal(reassigned.bindings['view.stacks'], DEFAULT_SHORTCUTS['view.stacks'])
+  }
+  assert.equal(canonicalChord('CLEAR'), 'clear')
+  assert.equal(canonicalChord('Shift+Help'), canonicalChord('shift+help'))
+
+  // The advertised label and ARIA metadata keep the key's own spelling.
+  for (const isMac of [true, false]) {
+    assert.equal(formatChord('clear', isMac), 'Clear')
+    const primary = isMac ? 'Meta' : 'Control'
+    assert.equal(ariaKeyShortcuts('Mod+Clear', isMac), `${primary}+Clear`)
+  }
+})
+
 test('aria-keyshortcuts metadata uses standardized tokens, not the drawn glyphs', () => {
   for (const isMac of [true, false]) {
     const primary = isMac ? 'Meta' : 'Control'

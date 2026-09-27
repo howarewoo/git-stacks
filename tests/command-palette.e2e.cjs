@@ -859,13 +859,16 @@ async function main() {
       'palette dismissed before rehydration',
       `!document.querySelector('[role="combobox"]')`,
     )
-    // The same Home keydown was stored under two spellings, so hydration has to
-    // settle it to one owner the way it settles a shared chord.
+    // The same Home keydown was stored under two spellings, and `Clear` is a
+    // key name the canonical table does not list, so hydration has to settle
+    // both into one owner the way it settles a shared chord.
     const storedChords = JSON.stringify({
       'palette.open': 'ArrowDown',
       'search.focus': 'Mod+K',
       'view.branches': 'Home',
       'view.stacks': 'home',
+      'view.changes': 'Clear',
+      'view.pullRequests': 'clear',
     })
     assert.equal(
       await page(
@@ -904,6 +907,14 @@ async function main() {
     const rehydratedOpenerChord = await page(chordExpression('Open command palette'))
     const rehydratedBranchesChord = await page(chordExpression('Go to Branches'))
     const rehydratedStacksChord = await page(chordExpression('Go to Stacks'))
+    const rehydratedChangesChord = await page(chordExpression('Go to Working changes'))
+    const rehydratedPullRequestsChord = await page(chordExpression('Go to Pull requests'))
+    assert.equal(rehydratedChangesChord, 'Clear')
+    assert.equal(
+      rehydratedPullRequestsChord,
+      process.platform === 'darwin' ? '⌘5' : 'Ctrl+5',
+      'the second Clear spelling did not fall back to its own default',
+    )
     assert.equal(rehydratedBranchesChord, 'Home')
     assert.equal(
       rehydratedStacksChord,
@@ -1013,8 +1024,51 @@ async function main() {
       'the surviving Home owner switched to the branches view',
       `document.querySelector('main h1')?.textContent === 'Branches'`,
     )
+    // A named key outside the canonical table reaches one view from either
+    // stored spelling. The real key press comes first; where the host input
+    // stack cannot synthesize this key, the same window event the app listens
+    // for is dispatched in the renderer.
+    const clearEvent = { key: 'Clear', code: 'Clear', windowsVirtualKeyCode: 12 }
+    const changesViewShown = `document.querySelector('main h1')?.textContent === 'Working changes'`
+    await page(`${button('Fetch')}.focus()`)
+    await send('Input.dispatchKeyEvent', { ...clearEvent, type: 'keyDown' })
+    await send('Input.dispatchKeyEvent', { ...clearEvent, type: 'keyUp' })
+    let clearDispatch = 'real key press'
+    try {
+      await until('the surviving Clear owner switched views', changesViewShown, 40)
+    } catch {
+      // Chromium delivers the numpad Clear key with its own key name on some
+      // hosts and drops it on others, so the very same window event the app
+      // listens for is dispatched in the renderer when the press is lost.
+      clearDispatch = 'renderer keydown event'
+      await page(
+        `window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Clear', bubbles: true }))`,
+      )
+      await until('the surviving Clear owner switched views', changesViewShown)
+    }
+    // The action that lost the contested key answers its own default, so its
+    // advertised chord is reachable again.
+    await send('Input.dispatchKeyEvent', {
+      type: 'keyDown',
+      key: '5',
+      code: 'Digit5',
+      windowsVirtualKeyCode: 53,
+      modifiers: process.platform === 'darwin' ? 4 : 2,
+    })
+    await send('Input.dispatchKeyEvent', {
+      type: 'keyUp',
+      key: '5',
+      code: 'Digit5',
+      windowsVirtualKeyCode: 53,
+      modifiers: process.platform === 'darwin' ? 4 : 2,
+    })
+    await until(
+      'the reset pull requests shortcut is reachable',
+      `document.querySelector('main h1')?.textContent === 'Pull requests'`,
+    )
     console.log(
       JSON.stringify({
+        clearDispatch,
         disabledPaletteValue,
         selectionHead: git('symbolic-ref', '--short', 'HEAD'),
         branchAfterFirstEnter,
@@ -1041,6 +1095,8 @@ async function main() {
         rehydratedFilterAria,
         rehydratedBranchesChord,
         rehydratedStacksChord,
+        rehydratedChangesChord,
+        rehydratedPullRequestsChord,
         restoredOpenerOpenedPalette,
       }),
     )
