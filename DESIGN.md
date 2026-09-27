@@ -307,6 +307,8 @@ The Stacks reconciliation panel has its own keyboard-scrollable, bounded region,
 
 A missing submitted or recorded parent is an ambiguity blocker, never inferred as matching ancestry; the native report follows local parent links transitively so multiple unstacked descendants remain visible with their own explicit repairs. A failed repair presents the backend's actionable refusal inside the focused dialog, not only in the global banner behind it.
 
+An unfetched submitted head is likewise ambiguous; a known submitted head strictly ahead of the local branch is stale even when its origin tracking ref lags, and moving the branch requires an explicit backed-up repair. Local-only reports include one-member roots and all sibling descendants without treating separate branches based on the default branch as one stack. After GitHub revalidation, each parent-hint write checks the captured branch tip and hint again at the mutation boundary so a concurrent local edit cannot be overwritten.
+
 ## Do's and Don'ts
 
 Concrete guardrails for the existing system and the user-confirmed Quiet Workbench direction:

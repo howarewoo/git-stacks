@@ -115,11 +115,11 @@ interface EvaluatedMember {
 function hasRecordedParentCycle(
   members: Map<string, ReconciliationMemberInput>,
   head: string,
-  present: readonly string[],
+  inStack: ReadonlySet<string>,
 ): boolean {
   const seen = new Set<string>([head])
   let cursor = members.get(head)?.recordedParent ?? null
-  while (cursor && present.includes(cursor)) {
+  while (cursor && inStack.has(cursor)) {
     if (seen.has(cursor)) return true
     seen.add(cursor)
     cursor = members.get(cursor)?.recordedParent ?? null
@@ -213,6 +213,16 @@ function memberState(
     return {
       state: 'diverged',
       detail: `Local tip ${shortOid(input.localOid)} is neither an ancestor nor a descendant of the submitted head ${shortOid(ancestry.parentOid)}`,
+    }
+  }
+  if (
+    submitted &&
+    ancestry.submittedContainsBranch === false &&
+    ancestry.branchContainsSubmitted === true
+  ) {
+    return {
+      state: 'stale',
+      detail: `GitHub's submitted head ${shortOid(pullRequest?.headOid ?? null)} is ahead of local ${input.branch}`,
     }
   }
   if (ancestry.recordedParentTipValid === false) {
@@ -318,8 +328,13 @@ function repairsFor(
     })
   }
   for (const entry of evaluated) {
-    if (entry.member.state !== 'diverged') continue
     const member = members.get(entry.member.branch)
+    const behindSubmitted =
+      entry.submitted &&
+      member?.ancestry.submittedContainsBranch === false &&
+      member.ancestry.branchContainsSubmitted === true
+    if (entry.member.state !== 'diverged' && !(entry.member.state === 'stale' && behindSubmitted))
+      continue
     if (!member?.adoptTargetOid || !member.localOid) continue
     repairs.push({
       kind: 'adopt-remote-tip',
@@ -438,19 +453,32 @@ export function reconcileStack(input: ReconciliationStackInput): ReconciledStack
   for (const member of input.members) {
     const submitted = expectedParents.has(member.branch)
     const parent = submitted ? (expectedParents.get(member.branch) ?? null) : member.recordedParent
-    if (!parent || member.ancestry.parentOid !== null) continue
-    blockers.push(
-      `${submitted ? 'Submitted' : 'Recorded'} parent ${parent} for ${member.branch} is unavailable; fetch or restore it before reconciling this stack`,
-    )
+    if (parent && member.ancestry.parentOid === null) {
+      blockers.push(
+        `${submitted ? 'Submitted' : 'Recorded'} parent ${parent} for ${member.branch} is unavailable; fetch or restore it before reconciling this stack`,
+      )
+    }
+    if (
+      submitted &&
+      member.localOid &&
+      input.submittedHeadOids[member.branch] &&
+      member.ancestry.submittedContainsBranch === null &&
+      member.ancestry.branchContainsSubmitted === null
+    ) {
+      blockers.push(
+        `Submitted head ${input.submittedHeadOids[member.branch]} for ${member.branch} is unavailable locally; fetch it before reconciling this stack`,
+      )
+    }
   }
 
-  const present = order.filter((head) => members.has(head))
-  for (const head of present) {
-    if (!hasRecordedParentCycle(members, head, present)) continue
+  const cycleMembers = new Set(input.members.map((member) => member.branch))
+  for (const head of cycleMembers) {
+    if (!hasRecordedParentCycle(members, head, cycleMembers)) continue
     blockers.push(`Recorded parents form a cycle through ${head} inside this stack`)
     break
   }
 
+  const present = order.filter((head) => members.has(head))
   const connected = connectedToStack(members, present)
 
   const evaluated: EvaluatedMember[] = []
@@ -841,27 +869,41 @@ async function collectStackInputs(
 
   // Remaining local branches form purely local stacks from recorded parents.
   const byParent = new Map<string, string[]>()
+  const localCandidates: string[] = []
   for (const branch of localBranches) {
     if (claimed.has(branch.name)) continue
     const parent = hints.get(branch.name)?.parent
-    if (!parent || parent === defaultBranch || parent === branch.name) continue
-    if (!byParent.has(parent)) byParent.set(parent, [])
-    byParent.get(parent)!.push(branch.name)
+    if (!parent) continue
+    localCandidates.push(branch.name)
+    const siblings = byParent.get(parent)
+    if (siblings) siblings.push(branch.name)
+    else byParent.set(parent, [branch.name])
   }
+  for (const siblings of byParent.values()) siblings.sort()
   const visited = new Set<string>()
-  for (const parent of [...byParent.keys()].sort()) {
+  for (const seed of localCandidates.sort()) {
+    if (visited.has(seed)) continue
+    let root = seed
+    const seen = new Set<string>([seed])
+    while (true) {
+      const parent = hints.get(root)?.parent
+      if (!parent || !localNames.has(parent) || claimed.has(parent) || seen.has(parent)) break
+      root = parent
+      seen.add(parent)
+    }
     const chain: string[] = []
-    const guard = new Set<string>()
-    let cursor: string | undefined = parent
-    while (cursor && !guard.has(cursor)) {
-      guard.add(cursor)
-      chain.push(cursor)
-      cursor = byParent.get(cursor)?.[0]
+    const queue = [root]
+    for (let index = 0; index < queue.length; index++) {
+      const name = queue[index]
+      if (visited.has(name)) continue
+      visited.add(name)
+      chain.push(name)
+      for (const child of byParent.get(name) ?? []) {
+        if (!visited.has(child)) queue.push(child)
+      }
     }
     const members: ReconciliationMemberInput[] = []
     for (const name of chain) {
-      if (visited.has(name)) continue
-      visited.add(name)
       const hint = hints.get(name) ?? { parent: null, tip: null }
       const facts = await collectMemberFacts(
         repoPath,
@@ -1458,6 +1500,14 @@ async function applyOperation(
     getBranchParent(repoPath, branch),
     getConfigValue(repoPath, `branch.${branch}.parentTip`),
   ])
+  if (
+    !operation.previous ||
+    parent !== operation.previous.previousParent ||
+    parentTip !== operation.previous.previousParentTip ||
+    (await resolveOid(repoPath, `refs/heads/${branch}`)) !== operation.previous.previousOid
+  ) {
+    throw new Error(`${STALE_PREFIX} ${branch} changed since the preview was captured`)
+  }
   if (operation.kind === 'adopt-remote-order') {
     if (!operation.parent || !operation.parentTip) return false
     await validateBranchName(repoPath, operation.parent)
