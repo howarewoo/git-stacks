@@ -295,7 +295,11 @@ export function validateTopAppend(
   return { status: 'valid', valid: true }
 }
 
-/** Capability-detect the native stacks REST preview API. */
+/**
+ * Capability-detect the native stacks REST preview API. Only a confirmed missing preview
+ * endpoint degrades to chained pull requests; every other failure propagates so a mutation
+ * path never reports success after an unconfirmed probe.
+ */
 export async function detectNativeStacksCapability(
   owner: string,
   repo: string,
@@ -314,10 +318,14 @@ export async function detectNativeStacksCapability(
         message: 'Native stacked pull requests API preview is available',
       }
     }
+    if (response.status !== 404) {
+      throw new Error(`Native stacked pull requests API returned status ${response.status}`)
+    }
     return {
       available: false,
       state: 'preview-unavailable',
-      message: `Native stacked pull requests API returned status ${response.status}`,
+      message:
+        'GitHub native stacked pull requests preview API is not available on this repository',
     }
   } catch (error) {
     if (error instanceof GitHubTransportError) {
@@ -330,11 +338,7 @@ export async function detectNativeStacksCapability(
         }
       }
     }
-    return {
-      available: false,
-      state: 'preview-unavailable',
-      message: error instanceof Error ? error.message : String(error),
-    }
+    throw error
   }
 }
 
@@ -432,7 +436,119 @@ export async function getPullRequestStack(
   }
 }
 
-/** Fill incomplete snapshot metadata from canonical REST resources before a stack mutation. */
+/** Reject a stack mutation when a captured pull request drifted after it was published. */
+function assertCapturedPullRequestUnchanged(captured: PullRequest, current: PullRequest): void {
+  const number = captured.number
+  if (captured.base !== current.base) {
+    throw new NativeStackError(
+      'invalid-chain',
+      `Pull request #${number} base changed from ${captured.base} to ${current.base} since it was captured; refresh the stack preview`,
+    )
+  }
+  if (captured.head !== current.head) {
+    throw new NativeStackError(
+      'invalid-chain',
+      `Pull request #${number} head changed from ${captured.head} to ${current.head} since it was captured; refresh the stack preview`,
+    )
+  }
+  if (captured.headOid && current.headOid && captured.headOid !== current.headOid) {
+    throw new NativeStackError(
+      'invalid-chain',
+      `Pull request #${number} head moved to ${current.headOid} since it was captured; refresh the stack preview`,
+    )
+  }
+  if (
+    captured.headRepository &&
+    captured.headRepository.toLowerCase() !== (current.headRepository ?? '').toLowerCase()
+  ) {
+    throw new NativeStackError(
+      'invalid-chain',
+      `Pull request #${number} head repository changed from ${captured.headRepository} to ${current.headRepository} since it was captured; refresh the stack preview`,
+    )
+  }
+  if (captured.state !== current.state) {
+    throw new NativeStackError(
+      current.state === 'MERGED'
+        ? 'completed'
+        : current.state === 'CLOSED'
+          ? 'closed'
+          : 'invalid-chain',
+      `Pull request #${number} changed from ${captured.state.toLowerCase()} to ${current.state.toLowerCase()} since it was captured; refresh the stack preview`,
+    )
+  }
+}
+
+/**
+ * Validate that an existing native stack already registers exactly the published pull
+ * requests, in order, so an idempotent no-write publication is only a success when the
+ * matched stack is genuinely open and correctly ordered.
+ */
+export function validatePublishedStackRegistration(
+  stack: NativeStack,
+  published: readonly PullRequest[],
+): NativeStackValidationResult {
+  if (!stack.open) {
+    return {
+      status: 'closed',
+      valid: false,
+      message: `Cannot publish into closed stack #${stack.number}`,
+    }
+  }
+  if (stack.status === 'completed') {
+    return {
+      status: 'completed',
+      valid: false,
+      message: `Cannot publish into completed stack #${stack.number}`,
+    }
+  }
+  if (stack.status !== 'valid') {
+    return {
+      status: stack.status,
+      valid: false,
+      message: `Native stack #${stack.number} is not a valid registration target (${stack.status})`,
+    }
+  }
+  let previous = 0
+  for (const pr of published) {
+    const member = stack.pullRequests.find((item) => item.number === pr.number)
+    if (!member) {
+      return {
+        status: 'invalid-chain',
+        valid: false,
+        message: `Pull request #${pr.number} is missing from native stack #${stack.number}`,
+      }
+    }
+    if (member.head !== pr.head) {
+      return {
+        status: 'invalid-chain',
+        valid: false,
+        message: `Pull request #${pr.number} is registered in stack #${stack.number} on head ${member.head} rather than ${pr.head}`,
+      }
+    }
+    if (member.state !== 'OPEN') {
+      return {
+        status: member.state === 'MERGED' ? 'completed' : 'closed',
+        valid: false,
+        message: `Pull request #${pr.number} is ${member.state.toLowerCase()} in native stack #${stack.number}`,
+      }
+    }
+    if (member.position <= previous) {
+      return {
+        status: 'invalid-chain',
+        valid: false,
+        message: `Pull request #${pr.number} is out of order in native stack #${stack.number}`,
+      }
+    }
+    previous = member.position
+  }
+  return { status: 'valid', valid: true }
+}
+
+/**
+ * Re-read the requested pull requests from GitHub immediately before a stack mutation and
+ * reject any drift from the captured model, so a retargeted or force-pushed pull request is
+ * never stacked against a base other than the one that was published.
+ */
 async function pullRequestsForValidation(
   owner: string,
   repo: string,
@@ -447,8 +563,6 @@ async function pullRequestsForValidation(
       if (!Number.isInteger(number) || number <= 0) {
         throw new NativeStackError('invalid-chain', `Invalid pull request number: ${number}`)
       }
-      const cached = known.get(number)
-      if (cached?.headRepository && cached.head && cached.base) return cached
       let raw: unknown
       try {
         raw = (
@@ -492,7 +606,7 @@ async function pullRequestsForValidation(
           `Pull request #${number} is already in stack #${raw.stack.number}`,
         )
       }
-      return {
+      const current = {
         number,
         title: raw.title,
         url: raw.html_url,
@@ -503,7 +617,11 @@ async function pullRequestsForValidation(
           typeof raw.merged_at === 'string' ? 'MERGED' : raw.state === 'open' ? 'OPEN' : 'CLOSED',
         draft: raw.draft === true,
         checks: 'none',
+        ...(typeof raw.head.sha === 'string' && raw.head.sha ? { headOid: raw.head.sha } : {}),
       } satisfies PullRequest
+      const captured = known.get(number)
+      if (captured) assertCapturedPullRequestUnchanged(captured, current)
+      return current
     }),
   )
 }
@@ -718,17 +836,18 @@ export async function loadRepositoryNativeStacks(
     }
   }
 
-  const capability = await detectNativeStacksCapability(remote.owner, remote.name)
-  if (!capability.available) {
-    return {
-      available: false,
-      nativeStacks: [],
-      state: capability.state,
-      message: capability.message,
-    }
-  }
-
   try {
+    // The read path reports an unconfirmed probe as an explicit unavailable state instead of
+    // failing the whole repository snapshot; only mutations require a confirmed capability.
+    const capability = await detectNativeStacksCapability(remote.owner, remote.name)
+    if (!capability.available) {
+      return {
+        available: false,
+        nativeStacks: [],
+        state: capability.state,
+        message: capability.message,
+      }
+    }
     const stacks = await listPullRequestStacks(remote.owner, remote.name)
     const byNumber = new Map(pullRequests.map((pr) => [pr.number, pr]))
     for (const stack of stacks) {

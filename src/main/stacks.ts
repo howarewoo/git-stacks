@@ -50,6 +50,7 @@ import {
   detectNativeStacksCapability,
   listPullRequestStacks,
   unstackNativeStackAction,
+  validatePublishedStackRegistration,
 } from './native-stacks'
 import { canonicalRemoteName, getGitHubData, getPullRequest, pullRequestRepository } from './github'
 import { githubTransport } from './github-transport'
@@ -2629,6 +2630,14 @@ async function publishStack(
           existingStack: matched,
           knownPullRequests: published.map((entry) => entry.pr),
         })
+      } else {
+        const registration = validatePublishedStackRegistration(
+          matched,
+          published.map((entry) => entry.pr),
+        )
+        if (!registration.valid) {
+          throw new Error(registration.message ?? 'Published pull requests are not registered')
+        }
       }
     } else if (published.length >= 1) {
       await createPullRequestStack(owner, name, publishedNumbers, {

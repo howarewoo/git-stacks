@@ -66,6 +66,13 @@ export interface GitHubFixtureState {
   nextCommentId: number
   nextStackNumber?: number
   stacksPreviewDisabled?: boolean
+  /** When set, every native-stacks endpoint answers with this error instead of stack data. */
+  stacksFailure?: {
+    status: number
+    reason: string
+    message: string
+    rateLimitRemaining?: number
+  }
   prs: GitHubFixturePullRequest[]
   comments: Record<string, GitHubFixtureComment[]>
   stacks?: GitHubFixtureStack[]
