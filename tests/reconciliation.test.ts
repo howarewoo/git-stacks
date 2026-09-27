@@ -1422,6 +1422,54 @@ test('multiple squash-merged predecessors require the immediately submitted head
   })
 })
 
+test('a selected order repair cannot create a parent cycle unless its dependent repair is selected', async () => {
+  await withHarness(async (harness) => {
+    const heads = await setupStack(harness)
+    const main = git(harness, ['rev-parse', 'main'])
+    recordParent(harness, 'feature/step-1', 'main', main)
+    recordParent(harness, 'feature/step-2', 'feature/step-1', heads[0])
+    recordParent(harness, 'feature/step-3', 'feature/step-2', heads[1])
+    const state = await harness.readState()
+    state.prs[0].base = 'feature/step-2'
+    state.prs[1].base = 'main'
+    state.prs[2].base = 'feature/step-1'
+    await harness.writeState(state)
+    const created = await createPullRequestStack('acme', 'widgets', [102, 101, 103])
+    const key = `native:${created.number}`
+    const preview = await previewReconciliationRepair(
+      harness.repo,
+      await getSnapshot(harness.repo),
+      key,
+    )
+    const first = preview.repairs.find(
+      (repair) => repair.kind === 'adopt-remote-order' && repair.branch === 'feature/step-1',
+    )
+    const second = preview.repairs.find(
+      (repair) => repair.kind === 'adopt-remote-order' && repair.branch === 'feature/step-2',
+    )
+    assert.ok(first)
+    assert.ok(second)
+    await assert.rejects(
+      runReconciliationRepair(harness.repo, {
+        token: preview.token,
+        ids: [first.id],
+        confirmRewrites: false,
+      }),
+      /Selected repairs would create a local parent cycle/,
+    )
+    assert.equal(recordedParent(harness, 'feature/step-1'), 'main')
+    assert.equal(recordedParent(harness, 'feature/step-2'), 'feature/step-1')
+    await runReconciliationRepair(harness.repo, {
+      token: preview.token,
+      ids: [first.id, second.id],
+      confirmRewrites: false,
+    })
+    assert.equal(recordedParent(harness, 'feature/step-1'), 'feature/step-2')
+    assert.equal(recordedParent(harness, 'feature/step-2'), 'main')
+    assert.notEqual(stackFor(await getSnapshot(harness.repo), key).state, 'ambiguous')
+  })
+})
+
 test('a force-pushed remote branch leaves the local branch behind its submitted head', async () => {
   await withHarness(async (harness) => {
     const heads = await setupStack(harness)
