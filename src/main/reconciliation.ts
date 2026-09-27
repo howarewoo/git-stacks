@@ -1647,6 +1647,51 @@ function canonicalPath(value: string): string {
   }
 }
 
+/** A selected subset can be cyclic even when every offered repair is safe alone. */
+function assertSelectedParentGraphAcyclic(
+  plan: ReconciliationPlan,
+  operations: readonly RepairOperation[],
+): void {
+  if (
+    !operations.some(
+      (operation) =>
+        operation.branch &&
+        (operation.kind === 'adopt-remote-order' || operation.kind === 'clear-stale-hint'),
+    )
+  ) {
+    return
+  }
+  const parents = new Map<string, string | null>()
+  for (const [branch, captured] of plan.branches) parents.set(branch, captured.parent)
+  for (const operation of operations) {
+    if (!operation.branch) continue
+    if (operation.kind === 'adopt-remote-order') {
+      parents.set(operation.branch, operation.parent)
+    } else if (operation.kind === 'clear-stale-hint') {
+      parents.set(operation.branch, null)
+    }
+  }
+  for (const operation of operations) {
+    if (
+      !operation.branch ||
+      (operation.kind !== 'adopt-remote-order' && operation.kind !== 'clear-stale-hint')
+    ) {
+      continue
+    }
+    const visited = new Set<string>()
+    let branch: string | null = operation.branch
+    while (branch && parents.has(branch)) {
+      if (visited.has(branch)) {
+        throw new Error(
+          `Selected repairs would create a local parent cycle through ${branch}; select the dependent order repairs together`,
+        )
+      }
+      visited.add(branch)
+      branch = parents.get(branch) ?? null
+    }
+  }
+}
+
 export async function runReconciliationRepair(
   repoPath: string,
   action: { token: string; ids: string[]; confirmRewrites: boolean },
@@ -1678,6 +1723,7 @@ export async function runReconciliationRepair(
   }
   await ensureNoBusyOperation(repoPath, 'reconcile a submitted stack')
   await revalidatePlan(repoPath, plan)
+  assertSelectedParentGraphAcyclic(plan, operations)
   const checkedOut = await getCurrentBranch(repoPath)
   const rewritingCheckout = operations.find(
     (operation) => operation.kind === 'adopt-remote-tip' && operation.branch === checkedOut,
