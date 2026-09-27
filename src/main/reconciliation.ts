@@ -1192,9 +1192,17 @@ async function captureOperation(
     if (!parentOid) return null
     const boundary = await tryGit(repoPath, ['merge-base', parentOid, member.localOid])
     if (!boundary) return null
+    const position = stack.submittedOrder.indexOf(member.branch)
+    const submittedPredecessor = position > 0 ? stack.submittedOrder[position - 1] : null
+    // Collapsing a merged PR changes the effective parent even when B has no
+    // app-local hint. The submitted predecessor still requires a proven replay boundary.
+    const skippedPredecessor = submittedPredecessor !== null && submittedPredecessor !== parent
     const mergedParent = stack.members.find(
-      (entry) => entry.branch === member.recordedParent && entry.state === 'merged',
+      (entry) =>
+        (skippedPredecessor && entry.branch === submittedPredecessor) ||
+        (entry.branch === member.recordedParent && entry.state === 'merged'),
     )
+    if (skippedPredecessor && !mergedParent) return null
     let replayBoundary = stripTrailingNewline(boundary)
     let mergedCommitOid: string | null = null
     if (mergedParent) {
