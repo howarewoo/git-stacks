@@ -11,7 +11,7 @@ import {
   reconcileStack,
   runReconciliationRepair,
 } from '../src/main/reconciliation'
-import { runStackAction } from '../src/main/stacks'
+import { previewStack, runStackAction } from '../src/main/stacks'
 import { DirectGitHubTransport, setGitHubTransport } from '../src/main/github-transport'
 import type {
   ReconciliationAncestry,
@@ -1466,7 +1466,52 @@ test('a selected order repair cannot create a parent cycle unless its dependent 
     })
     assert.equal(recordedParent(harness, 'feature/step-1'), 'feature/step-2')
     assert.equal(recordedParent(harness, 'feature/step-2'), 'main')
+    assert.equal(
+      optionalGit(harness, ['config', '--local', '--get', 'branch.feature/step-2.parentTip']),
+      heads[0],
+    )
+    assert.equal(
+      optionalGit(harness, ['config', '--local', '--get', 'branch.feature/step-1.parentTip']),
+      main,
+    )
+    assert.equal(git(harness, ['rev-list', '--count', `${heads[0]}..feature/step-2`]), '1')
+    assert.equal(git(harness, ['rev-list', '--count', `${main}..feature/step-1`]), '1')
+    const restack = await previewStack(
+      harness.repo,
+      await getSnapshot(harness.repo),
+      'restack',
+      'feature/step-1',
+    )
+    assert.equal(restack.steps.find((step) => step.branch === 'feature/step-2')?.commits, 1)
+    assert.equal(restack.steps.find((step) => step.branch === 'feature/step-1')?.commits, 1)
     assert.notEqual(stackFor(await getSnapshot(harness.repo), key).state, 'ambiguous')
+  })
+})
+
+test('reordered member with a missing recorded boundary cannot infer commit ownership from the new parent', async () => {
+  await withHarness(async (harness) => {
+    const heads = await setupStack(harness)
+    recordParent(harness, 'feature/step-1', 'main', git(harness, ['rev-parse', 'main']))
+    recordParent(harness, 'feature/step-2', 'feature/step-1', heads[0])
+    git(harness, ['config', '--local', '--unset-all', 'branch.feature/step-2.parentTip'])
+    const state = await harness.readState()
+    state.prs[0].base = 'feature/step-2'
+    state.prs[1].base = 'main'
+    state.prs[2].base = 'feature/step-1'
+    await harness.writeState(state)
+    const created = await createPullRequestStack('acme', 'widgets', [102, 101, 103])
+    const preview = await previewReconciliationRepair(
+      harness.repo,
+      await getSnapshot(harness.repo),
+      `native:${created.number}`,
+    )
+    assert.equal(
+      preview.repairs.find(
+        (repair) => repair.kind === 'adopt-remote-order' && repair.branch === 'feature/step-2',
+      ),
+      undefined,
+    )
+    assert.equal(recordedParent(harness, 'feature/step-2'), 'feature/step-1')
   })
 })
 

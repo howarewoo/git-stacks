@@ -1226,6 +1226,15 @@ async function captureOperation(
       }
       replayBoundary = recorded
       mergedCommitOid = mergedPr.mergeOid
+    } else if (member.recordedParent !== null || member.recordedParentTip !== null) {
+      const recorded = member.recordedParentTip
+      if (
+        !recorded ||
+        (await containment(repoPath, recorded, member.localOid)).mergeBase !== recorded
+      ) {
+        return null
+      }
+      replayBoundary = recorded
     }
     return {
       ...operation,
@@ -1589,18 +1598,30 @@ async function applyOperation(
         )
       }
     } else if (movedTips.has(branch) || movedTips.has(operation.parent)) {
-      const parentOid = await resolveOid(
-        repoPath,
-        await resolveParentRef(repoPath, operation.parent),
-      )
-      const boundary =
-        parentOid && currentOid
-          ? await tryGit(repoPath, ['merge-base', parentOid, currentOid])
-          : null
-      if (!boundary) {
-        throw new Error(`Cannot record ${branch} under ${operation.parent}: no common ancestor`)
+      if (operation.previous?.previousParentTip === operation.parentTip) {
+        if (
+          !currentOid ||
+          (await containment(repoPath, operation.parentTip, currentOid)).mergeBase !==
+            operation.parentTip
+        ) {
+          throw new Error(
+            `Cannot record ${branch} under ${operation.parent}: recorded replay boundary is no longer in the branch`,
+          )
+        }
+      } else {
+        const parentOid = await resolveOid(
+          repoPath,
+          await resolveParentRef(repoPath, operation.parent),
+        )
+        const boundary =
+          parentOid && currentOid
+            ? await tryGit(repoPath, ['merge-base', parentOid, currentOid])
+            : null
+        if (!boundary) {
+          throw new Error(`Cannot record ${branch} under ${operation.parent}: no common ancestor`)
+        }
+        nextParentTip = stripTrailingNewline(boundary)
       }
-      nextParentTip = stripTrailingNewline(boundary)
     }
     record.evidence.push({
       branch,
