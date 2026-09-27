@@ -147,6 +147,27 @@ test('an unresolved authoritative parent blocks submitted repairs even when the 
   }
 })
 
+test('an unfetched submitted head is an ambiguity blocker, not a matching stack', () => {
+  const stack = reconcileStack(
+    stackInput({
+      members: [
+        member('step-1', { recordedParent: 'main', pullRequest: pullRequest('step-1', 'main') }),
+        member('step-2', {
+          recordedParent: 'step-1',
+          ancestry: ancestry({
+            submittedContainsBranch: null,
+            branchContainsSubmitted: null,
+          }),
+          pullRequest: pullRequest('step-2', 'step-1', { stackPosition: 2 }),
+        }),
+      ],
+    }),
+  )
+  assert.equal(stack.state, 'ambiguous')
+  assert.match(stack.blockers.join(' '), /Submitted head .* for step-2 is unavailable locally/)
+  assert.deepEqual(stack.repairs, [])
+})
+
 test('reconcileStack reports local-only when nothing was ever submitted', () => {
   const stack = reconcileStack(
     stackInput({
@@ -163,6 +184,26 @@ test('reconcileStack reports local-only when nothing was ever submitted', () => 
     }),
   )
   assert.equal(stack.state, 'local-only')
+  assert.deepEqual(stack.repairs, [])
+})
+
+test('a cyclic local-only ancestry chain blocks rather than claiming a valid local stack', () => {
+  const stack = reconcileStack(
+    stackInput({
+      key: 'local:step-1',
+      submittedOrder: [],
+      submittedHeadOids: {},
+      submittedBase: null,
+      stackNumber: null,
+      stackUrl: null,
+      members: [
+        member('step-1', { recordedParent: 'step-2' }),
+        member('step-2', { recordedParent: 'step-1' }),
+      ],
+    }),
+  )
+  assert.equal(stack.state, 'ambiguous')
+  assert.match(stack.blockers.join(' '), /Recorded parents form a cycle/)
   assert.deepEqual(stack.repairs, [])
 })
 
@@ -382,6 +423,31 @@ test('reconcileStack reports stale when origin is strictly ahead of the local br
     stack.members.find((entry) => entry.branch === 'step-2')?.detail ?? '',
     /origin\/step-2 is at .*ahead of the local tip/,
   )
+})
+
+test('the submitted head, not an older origin tracking ref, determines local stale state', () => {
+  const stack = reconcileStack(
+    stackInput({
+      members: [
+        member('step-1', { recordedParent: 'main', pullRequest: pullRequest('step-1', 'main') }),
+        member('step-2', {
+          recordedParent: 'step-1',
+          ancestry: ancestry({
+            submittedContainsBranch: false,
+            branchContainsSubmitted: true,
+          }),
+          adoptTargetOid: oid('2'),
+          pullRequest: pullRequest('step-2', 'step-1', { stackPosition: 2 }),
+        }),
+      ],
+    }),
+  )
+  assert.equal(stack.state, 'stale')
+  assert.match(stack.members[1].detail, /GitHub's submitted head .* is ahead of local step-2/)
+  const move = stack.repairs.find((repair) => repair.kind === 'adopt-remote-tip')
+  assert.equal(move?.branch, 'step-2')
+  assert.equal(move.requiresConfirmation, true)
+  assert.equal(move.evidence?.previousOid, oid('s'))
 })
 
 test('a locally ahead branch is not mislabeled as an origin-ahead stale branch', () => {
@@ -823,6 +889,53 @@ test('a concurrent edit between preview and execute is reported instead of overw
   })
 })
 
+test('a parent hint changed during GitHub revalidation is not overwritten by an adopted order', async () => {
+  await withHarness(async (harness) => {
+    const heads = await setupStack(harness)
+    const created = await createPullRequestStack('acme', 'widgets', [101, 102, 103])
+    const key = `native:${created.number}`
+    recordParent(harness, 'feature/step-2', 'main', heads[0])
+    const preview = await previewReconciliationRepair(
+      harness.repo,
+      await getSnapshot(harness.repo),
+      key,
+    )
+    const adopt = preview.repairs.find(
+      (repair) => repair.kind === 'adopt-remote-order' && repair.branch === 'feature/step-2',
+    )
+    assert.ok(adopt)
+
+    const fetchFromFixture = createGitHubApiDouble()
+    let injected = false
+    setGitHubTransport(
+      new DirectGitHubTransport({
+        token: 'fixture-token',
+        fetch: async (input, init) => {
+          if (!injected) {
+            injected = true
+            recordParent(harness, 'feature/step-2', 'feature/step-3', heads[1])
+          }
+          return fetchFromFixture(input, init)
+        },
+      }),
+    )
+    await assert.rejects(
+      runReconciliationRepair(harness.repo, {
+        token: preview.token,
+        ids: [adopt.id],
+        confirmRewrites: false,
+      }),
+      /Reconciliation repair is stale: feature\/step-2 changed/,
+    )
+    assert.equal(injected, true)
+    assert.equal(recordedParent(harness, 'feature/step-2'), 'feature/step-3')
+    assert.equal(
+      optionalGit(harness, ['config', '--local', '--get', 'branch.feature/step-2.parentTip']),
+      heads[1],
+    )
+  })
+})
+
 test('a preview token is single use and rejects repairs it never offered', async () => {
   await withHarness(async (harness) => {
     await setupStack(harness)
@@ -1082,5 +1195,35 @@ test('a report without submitted membership stays read-only and reports local st
     assert.equal(local.state, 'local-only')
     assert.deepEqual(local.repairs, [])
     assert.equal(git(harness, ['rev-parse', 'feature/local-2']).length, 40)
+  })
+})
+
+test('local-only report includes independent single-branch roots and every sibling', async () => {
+  await withHarness(async (harness) => {
+    const main = git(harness, ['rev-parse', 'main'])
+    for (const branch of ['feature/solo', 'feature/root']) {
+      git(harness, ['checkout', '-b', branch, 'main'])
+      git(harness, ['commit', '--allow-empty', '-m', branch])
+      recordParent(harness, branch, 'main', main)
+    }
+    for (const branch of ['feature/child-a', 'feature/child-b']) {
+      git(harness, ['checkout', '-b', branch, 'feature/root'])
+      git(harness, ['commit', '--allow-empty', '-m', branch])
+      recordParent(harness, branch, 'feature/root', git(harness, ['rev-parse', 'feature/root']))
+    }
+    const report = (await getSnapshot(harness.repo)).reconciliation
+    assert.ok(report)
+    const solo = report.stacks.find((stack) => stack.key === 'local:feature/solo')
+    assert.equal(solo?.state, 'local-only')
+    assert.deepEqual(
+      solo.members.map((entry) => entry.branch),
+      ['feature/solo'],
+    )
+    const root = report.stacks.find((stack) => stack.key === 'local:feature/root')
+    assert.equal(root?.state, 'local-only')
+    assert.deepEqual(
+      new Set(root.members.map((entry) => entry.branch)),
+      new Set(['feature/root', 'feature/child-a', 'feature/child-b']),
+    )
   })
 })
