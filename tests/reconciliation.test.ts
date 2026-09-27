@@ -1266,6 +1266,23 @@ test('adopting a squash-merged parent keeps the merged head out of child replay'
       heads[0],
     )
     assert.equal(git(harness, ['rev-list', '--count', 'feature/step-1..feature/step-2']), '1')
+
+    // Reconstructing the same native chain without app-local metadata must not
+    // replace the now-unknown replay boundary with merge-base(main, B).
+    git(harness, ['config', '--local', '--unset-all', 'branch.feature/step-2.parent'])
+    git(harness, ['config', '--local', '--unset-all', 'branch.feature/step-2.parentTip'])
+    const missingHint = await previewReconciliationRepair(
+      harness.repo,
+      await getSnapshot(harness.repo),
+      `native:${created.number}`,
+    )
+    assert.equal(
+      missingHint.repairs.find(
+        (repair) => repair.kind === 'adopt-remote-order' && repair.branch === 'feature/step-2',
+      ),
+      undefined,
+    )
+    assert.equal(recordedParent(harness, 'feature/step-2'), null)
   })
 })
 
