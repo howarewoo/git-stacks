@@ -655,6 +655,32 @@ async function registerOpenStack(harness: GitHubHarness, competingStack?: number
   await harness.writeState(state)
 }
 
+/** Registers an open native stack that already contains only the bottom published pull request. */
+async function registerBottomOnlyStack(harness: GitHubHarness, stackNumber = 99): Promise<void> {
+  const state = await harness.readState()
+  state.stacks = [
+    {
+      id: stackNumber * 1000,
+      number: stackNumber,
+      node_id: `STACK_${stackNumber}`,
+      url: `https://api.github.com/repos/acme/widgets/stacks/${stackNumber}`,
+      base: { ref: 'main' },
+      open: true,
+      created_at: new Date().toISOString(),
+      pull_requests: [
+        {
+          number: 101,
+          state: 'open' as const,
+          draft: false,
+          merged_at: null,
+          head: { ref: 'feature/step-1', sha: git(harness, ['rev-parse', 'feature/step-1']) },
+        },
+      ],
+    },
+  ]
+  await harness.writeState(state)
+}
+
 function publishAction(token: string) {
   return {
     type: 'executeStack' as const,
@@ -844,6 +870,106 @@ test('publishStack rejects an already-registered stack another actor unstacked b
     // The unstacked registration is gone and the failed publication must not recreate it.
     assert.deepEqual((await harness.readState()).stacks, [])
     assert.equal((await listPullRequestStacks('acme', 'widgets')).length, 0)
+  })
+})
+
+test('publishStack rejects extending a partially registered stack when an already-registered pull request drifts', async () => {
+  await withHarness(async (harness) => {
+    await setupThreeBranches(harness)
+    await registerBottomOnlyStack(harness)
+
+    const snapshot = await getSnapshot(harness.repo)
+    const preview = await previewStack(harness.repo, snapshot, 'publish', 'feature/step-2')
+    assert.deepEqual(preview.blockers, [])
+
+    const inner = createGitHubApiDouble()
+    const stackWrites: string[] = []
+    let topReadback = false
+    let armed = true
+    setGitHubTransport(
+      new DirectGitHubTransport({
+        token: 'fixture-token',
+        fetch: (async (input: RequestInfo | URL, init?: RequestInit) => {
+          const url = String(input instanceof Request ? input.url : (input as string))
+          const method = init?.method ?? 'GET'
+          if (
+            method !== 'GET' &&
+            /^https:\/\/api\.github\.com\/repos\/acme\/widgets\/stacks/u.test(url)
+          )
+            stackWrites.push(`${method} ${url}`)
+          // The readback of the top published pull request is the last request before the
+          // registration target is chosen from the unparameterized stacks listing.
+          const body = url.endsWith('/graphql') ? String(init?.body ?? '') : ''
+          if (body.includes('pullRequest(number: $number)') && body.includes('"number":103'))
+            topReadback = true
+          const response = await inner(input, init)
+          // The already-registered pull request is force-pushed after the stack that holds it
+          // was selected, so only the append that follows can observe the moved commit.
+          if (armed && topReadback && method === 'GET' && url === STACKS_LISTING) {
+            armed = false
+            await applyExternalDrift(harness, 'force-push')
+          }
+          return response
+        }) as typeof globalThis.fetch,
+      }),
+    )
+
+    await assert.rejects(
+      runStackAction(harness.repo, publishAction(preview.token)),
+      (error) =>
+        error instanceof NativeStackError &&
+        error.status === 'invalid-chain' &&
+        /Pull request #101 head moved to/u.test(error.message),
+    )
+    assert.equal(armed, false)
+    assert.deepEqual(stackWrites, [])
+    // The already-registered member is left alone: nothing appended, nothing recreated.
+    assert.deepEqual(
+      (await harness.readState()).stacks?.flatMap((stack) =>
+        stack.pull_requests.map((pr) => pr.number),
+      ),
+      [101],
+    )
+  })
+})
+
+test('publishStack extends an unchanged partially registered stack with one append', async () => {
+  await withHarness(async (harness) => {
+    await setupThreeBranches(harness)
+    await registerBottomOnlyStack(harness)
+
+    const snapshot = await getSnapshot(harness.repo)
+    const preview = await previewStack(harness.repo, snapshot, 'publish', 'feature/step-2')
+    assert.deepEqual(preview.blockers, [])
+
+    const inner = createGitHubApiDouble()
+    const stackWrites: string[] = []
+    setGitHubTransport(
+      new DirectGitHubTransport({
+        token: 'fixture-token',
+        fetch: ((input: RequestInfo | URL, init?: RequestInit) => {
+          const url = String(input instanceof Request ? input.url : (input as string))
+          const method = init?.method ?? 'GET'
+          if (
+            method !== 'GET' &&
+            /^https:\/\/api\.github\.com\/repos\/acme\/widgets\/stacks/u.test(url)
+          )
+            stackWrites.push(`${method} ${url}`)
+          return inner(input, init)
+        }) as typeof globalThis.fetch,
+      }),
+    )
+
+    const published = await runStackAction(harness.repo, publishAction(preview.token))
+    assert.match(published.message, /Published 3 stack pull requests/u)
+    // The already-registered pull request keeps stack #99, so only the missing members are added.
+    assert.deepEqual(stackWrites, ['POST https://api.github.com/repos/acme/widgets/stacks/99/add'])
+    assert.deepEqual(
+      (await harness.readState()).stacks?.flatMap((stack) =>
+        stack.pull_requests.map((pr) => pr.number),
+      ),
+      [101, 102, 103],
+    )
   })
 })
 
