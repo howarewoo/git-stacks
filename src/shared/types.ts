@@ -122,6 +122,8 @@ export interface ReconciliationStackInput {
   stackUrl: string | null
   /** GitHub's own verdict on the submitted chain. */
   submittedStatus: NativeStackValidationStatus
+  /** Canonical PR numbers that no longer identify submitted branch heads. */
+  identityConflicts?: string[]
   members: ReconciliationMemberInput[]
 }
 
