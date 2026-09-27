@@ -1210,6 +1210,8 @@ async function captureOperation(
         ? await getPullRequest(repoPath, mergedParent.pullRequest)
         : null
       const recorded = member.recordedParentTip
+      // A later recorded tip can contain work excluded from the squash merge.
+      // Only the submitted head is proven safe to exclude from child replay.
       if (
         mergedPr?.state !== 'MERGED' ||
         !mergedPr.mergeOid ||
@@ -1217,8 +1219,7 @@ async function captureOperation(
         !recorded ||
         (await containment(repoPath, mergedPr.mergeOid, parentOid)).mergeBase !==
           mergedPr.mergeOid ||
-        (await containment(repoPath, mergedParent.submittedHeadOid, recorded)).mergeBase !==
-          mergedParent.submittedHeadOid ||
+        recorded !== mergedParent.submittedHeadOid ||
         (await containment(repoPath, recorded, member.localOid)).mergeBase !== recorded
       ) {
         return null
