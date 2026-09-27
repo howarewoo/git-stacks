@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { execFileSync } from 'node:child_process'
 import { test } from 'node:test'
@@ -1283,6 +1283,65 @@ test('adopting a squash-merged parent keeps the merged head out of child replay'
       undefined,
     )
     assert.equal(recordedParent(harness, 'feature/step-2'), null)
+  })
+})
+
+test('merged parent advancing past its submitted head cannot discard unmerged child ancestry', async () => {
+  await withHarness(async (harness) => {
+    const heads = await setupStack(harness)
+    const created = await createPullRequestStack('acme', 'widgets', [101, 102, 103])
+    git(harness, ['checkout', 'feature/step-2'])
+    writeFileSync(join(harness.repo, 'unmerged-work.txt'), 'unmerged parent work\n')
+    git(harness, ['add', 'unmerged-work.txt'])
+    git(harness, ['commit', '-m', 'parent advanced after squash submission'])
+    const unmergedTip = git(harness, ['rev-parse', 'HEAD'])
+    git(harness, ['branch', '-f', 'feature/step-1', unmergedTip])
+    git(harness, ['commit', '--allow-empty', '-m', 'child after advanced parent'])
+    const childTip = git(harness, ['rev-parse', 'HEAD'])
+    git(harness, ['push', harness.bare, 'feature/step-2:refs/heads/feature/step-2'])
+    git(harness, ['update-ref', 'refs/remotes/origin/feature/step-2', childTip, heads[1]])
+    recordParent(harness, 'feature/step-2', 'feature/step-1', unmergedTip)
+    const previousMain = git(harness, ['rev-parse', 'main'])
+    const squash = git(harness, [
+      'commit-tree',
+      `${previousMain}^{tree}`,
+      '-p',
+      previousMain,
+      '-m',
+      'squash submitted parent head',
+    ])
+    git(harness, ['update-ref', 'refs/heads/main', squash, previousMain])
+    git(harness, ['update-ref', 'refs/remotes/origin/main', squash, previousMain])
+    git(harness, ['push', harness.bare, 'main:refs/heads/main'])
+    const state = await harness.readState()
+    state.prs[0].state = 'MERGED'
+    state.prs[0].mergeOid = squash
+    state.prs[0].mergedAt = new Date().toISOString()
+    state.prs[1].headOid = childTip
+    state.stacks = (state.stacks ?? []).map((entry) => ({
+      ...entry,
+      pull_requests: entry.pull_requests.map((pr) =>
+        pr.number === 101
+          ? { ...pr, state: 'closed' as const, merged_at: '2026-01-01T00:00:00Z' }
+          : pr,
+      ),
+    }))
+    await harness.writeState(state)
+
+    assert.equal(git(harness, ['show', `${childTip}:unmerged-work.txt`]), 'unmerged parent work')
+    assert.equal(optionalGit(harness, ['show', `${squash}:unmerged-work.txt`]), null)
+    const preview = await previewReconciliationRepair(
+      harness.repo,
+      await getSnapshot(harness.repo),
+      `native:${created.number}`,
+    )
+    assert.equal(
+      preview.repairs.find(
+        (repair) => repair.kind === 'adopt-remote-order' && repair.branch === 'feature/step-2',
+      ),
+      undefined,
+    )
+    assert.equal(recordedParent(harness, 'feature/step-2'), 'feature/step-1')
   })
 })
 
