@@ -11,11 +11,13 @@ import {
   detectNativeStacksCapability,
   getPullRequestStack,
   listPullRequestStacks,
+  revalidatePublishedStackRegistration,
   unstackPullRequests,
   validateNativeStackChain,
+  validatePublishedStackRegistration,
 } from '../src/main/native-stacks'
 import { previewStack, runStackAction } from '../src/main/stacks'
-import type { PullRequest } from '../src/shared/types'
+import type { NativeStack, PullRequest } from '../src/shared/types'
 import { createGitHubApiDouble } from './fixtures/github-api-double'
 import {
   createGitHubHarness,
@@ -564,32 +566,7 @@ test('stack mutations re-read captured pull requests and reject concurrent drift
 test('publishStack validates a matched stack that already contains every published pull request', async () => {
   await withHarness(async (harness) => {
     await setupThreeBranches(harness)
-    const oids = ['feature/step-1', 'feature/step-2', 'feature/step-3'].map((branch) =>
-      git(harness, ['rev-parse', branch]),
-    )
-    const state = await harness.readState()
-    state.stacks = [
-      {
-        id: 99,
-        number: 99,
-        node_id: 'STACK_99',
-        url: 'https://api.github.com/repos/acme/widgets/stacks/99',
-        base: { ref: 'main' },
-        open: true,
-        created_at: new Date().toISOString(),
-        pull_requests: [101, 102, 103].map((number, index) => ({
-          number,
-          state: 'open',
-          draft: false,
-          merged_at: null,
-          head: {
-            ref: `feature/step-${index + 1}`,
-            sha: oids[index],
-          },
-        })),
-      },
-    ]
-    await harness.writeState(state)
+    await registerOpenStack(harness)
 
     const snapshot = await getSnapshot(harness.repo)
     const preview = await previewStack(harness.repo, snapshot, 'publish', 'feature/step-2')
@@ -633,6 +610,238 @@ test('publishStack validates a matched stack that already contains every publish
       /closed stack #99/u,
     )
   })
+})
+
+/** Registers an open native stack that already contains all three published pull requests. */
+async function registerOpenStack(harness: GitHubHarness): Promise<void> {
+  const branches = ['feature/step-1', 'feature/step-2', 'feature/step-3']
+  const state = await harness.readState()
+  state.stacks = [
+    {
+      id: 99_000,
+      number: 99,
+      node_id: 'STACK_99',
+      url: 'https://api.github.com/repos/acme/widgets/stacks/99',
+      base: { ref: 'main' },
+      open: true,
+      created_at: new Date().toISOString(),
+      pull_requests: branches.map((ref, index) => ({
+        number: 101 + index,
+        state: 'open' as const,
+        draft: false,
+        merged_at: null,
+        head: { ref, sha: git(harness, ['rev-parse', ref]) },
+      })),
+    },
+  ]
+  await harness.writeState(state)
+}
+
+function publishAction(token: string) {
+  return {
+    type: 'executeStack' as const,
+    token,
+    allowForce: false,
+    draft: false,
+    titles: { 'feature/step-1': 'Step 1 PR', 'feature/step-2': 'Step 2 PR' },
+    mergeMethod: 'squash' as const,
+  }
+}
+
+/** Moves a published pull request behind the app's back, the way another actor would. */
+async function applyExternalDrift(
+  harness: GitHubHarness,
+  drift: 'force-push' | 'retarget',
+): Promise<void> {
+  if (drift === 'force-push') {
+    git(harness, ['checkout', 'feature/step-1'])
+    git(harness, ['reset', '--hard', 'HEAD~1'])
+    git(harness, ['push', '--force', harness.bare, 'feature/step-1:refs/heads/feature/step-1'])
+    return
+  }
+  const state = await harness.readState()
+  state.prs[0].base = 'release'
+  await harness.writeState(state)
+}
+
+test('publishStack rejects an already-registered stack when a published pull request drifts after its readback', async () => {
+  for (const drift of ['force-push', 'retarget'] as const) {
+    await withHarness(async (harness) => {
+      await setupThreeBranches(harness)
+      await registerOpenStack(harness)
+
+      const snapshot = await getSnapshot(harness.repo)
+      const preview = await previewStack(harness.repo, snapshot, 'publish', 'feature/step-2')
+      assert.deepEqual(preview.blockers, [], drift)
+
+      const inner = createGitHubApiDouble()
+      const stackWrites: string[] = []
+      let armed = true
+      setGitHubTransport(
+        new DirectGitHubTransport({
+          token: 'fixture-token',
+          fetch: (async (input: RequestInfo | URL, init?: RequestInit) => {
+            const url = String(input instanceof Request ? input.url : (input as string))
+            const method = init?.method ?? 'GET'
+            if (method !== 'GET') {
+              if (/^https:\/\/api\.github\.com\/repos\/acme\/widgets\/stacks/u.test(url))
+                stackWrites.push(`${method} ${url}`)
+              // The readback of the top published pull request is the last request before the
+              // native stack listing and the already-registered no-write path.
+              const body = url.endsWith('/graphql') ? String(init?.body ?? '') : ''
+              if (
+                armed &&
+                body.includes('pullRequest(number: $number)') &&
+                body.includes('"number":103')
+              ) {
+                armed = false
+                await applyExternalDrift(harness, drift)
+              }
+            }
+            return inner(input, init)
+          }) as typeof globalThis.fetch,
+        }),
+      )
+
+      await assert.rejects(
+        runStackAction(harness.repo, publishAction(preview.token)),
+        drift === 'force-push' ? /head moved to/u : /base changed from main to release/u,
+        drift,
+      )
+      assert.deepEqual(stackWrites, [], drift)
+      assert.deepEqual(
+        (await harness.readState()).stacks?.flatMap((stack) =>
+          stack.pull_requests.map((pr) => pr.number),
+        ),
+        [101, 102, 103],
+        drift,
+      )
+    })
+  }
+})
+
+test('publishStack accepts an unchanged already-registered stack without creating or extending one', async () => {
+  await withHarness(async (harness) => {
+    await setupThreeBranches(harness)
+    await registerOpenStack(harness)
+
+    const snapshot = await getSnapshot(harness.repo)
+    const preview = await previewStack(harness.repo, snapshot, 'publish', 'feature/step-2')
+    assert.deepEqual(preview.blockers, [])
+
+    const inner = createGitHubApiDouble()
+    const stackWrites: string[] = []
+    setGitHubTransport(
+      new DirectGitHubTransport({
+        token: 'fixture-token',
+        fetch: ((input: RequestInfo | URL, init?: RequestInit) => {
+          const url = String(input instanceof Request ? input.url : (input as string))
+          const method = init?.method ?? 'GET'
+          if (
+            method !== 'GET' &&
+            /^https:\/\/api\.github\.com\/repos\/acme\/widgets\/stacks/u.test(url)
+          )
+            stackWrites.push(`${method} ${url}`)
+          return inner(input, init)
+        }) as typeof globalThis.fetch,
+      }),
+    )
+
+    const published = await runStackAction(harness.repo, publishAction(preview.token))
+    assert.match(published.message, /Published 3 stack pull requests/u)
+    assert.deepEqual(stackWrites, [])
+  })
+})
+
+test('an already-registered stack must record the current head commit of every published pull request', async () => {
+  const published: PullRequest[] = [
+    {
+      number: 101,
+      title: 'Step 1 PR',
+      url: 'https://github.com/acme/widgets/pull/101',
+      head: 'feature/step-1',
+      base: 'main',
+      state: 'OPEN',
+      draft: false,
+      checks: 'none',
+      headOid: 'a'.repeat(40),
+    },
+    {
+      number: 102,
+      title: 'Step 2 PR',
+      url: 'https://github.com/acme/widgets/pull/102',
+      head: 'feature/step-2',
+      base: 'feature/step-1',
+      state: 'OPEN',
+      draft: false,
+      checks: 'none',
+      headOid: 'b'.repeat(40),
+    },
+  ]
+  const stack: NativeStack = {
+    id: 99_000,
+    number: 99,
+    url: 'https://api.github.com/repos/acme/widgets/stacks/99',
+    base: 'main',
+    open: true,
+    createdAt: '2026-01-01T00:00:00Z',
+    size: 2,
+    status: 'valid',
+    pullRequests: [
+      {
+        number: 101,
+        position: 1,
+        total: 2,
+        head: 'feature/step-1',
+        headSha: 'a'.repeat(40),
+        base: 'main',
+        state: 'OPEN',
+        draft: false,
+      },
+      {
+        number: 102,
+        position: 2,
+        total: 2,
+        head: 'feature/step-2',
+        headSha: 'b'.repeat(40),
+        base: 'feature/step-1',
+        state: 'OPEN',
+        draft: false,
+      },
+    ],
+  }
+
+  // The matched stack still records the published commits and bases, so the no-write path holds.
+  assert.deepEqual(validatePublishedStackRegistration(stack, published), {
+    status: 'valid',
+    valid: true,
+  })
+  await withHarness(async (harness) => {
+    await setupThreeBranches(harness)
+    await registerOpenStack(harness)
+    const current = await Promise.all(
+      [101, 102, 103].map((number) => getPullRequest(harness.repo, number)),
+    )
+    const registered = await listPullRequestStacks('acme', 'widgets')
+    assert.equal(registered.length, 1)
+    const revalidated = await revalidatePublishedStackRegistration(
+      'acme',
+      'widgets',
+      registered[0],
+      current,
+    )
+    assert.deepEqual(revalidated, { status: 'valid', valid: true })
+  })
+
+  const staleHead = {
+    ...stack,
+    pullRequests: stack.pullRequests.map((member) =>
+      member.number === 102 ? { ...member, headSha: 'c'.repeat(40) } : member,
+    ),
+  }
+  const headResult = validatePublishedStackRegistration(staleHead, published)
+  assert.equal(headResult.valid, false)
+  assert.match(headResult.message ?? '', /at c{40} rather than b{40}/u)
 })
 
 test('publishStack propagates native stack probe failures instead of reporting chained success', async () => {

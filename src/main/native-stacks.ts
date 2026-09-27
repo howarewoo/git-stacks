@@ -525,6 +525,13 @@ export function validatePublishedStackRegistration(
         message: `Pull request #${pr.number} is registered in stack #${stack.number} on head ${member.head} rather than ${pr.head}`,
       }
     }
+    if (member.headSha && pr.headOid && member.headSha !== pr.headOid) {
+      return {
+        status: 'invalid-chain',
+        valid: false,
+        message: `Pull request #${pr.number} is registered in stack #${stack.number} at ${member.headSha} rather than ${pr.headOid}`,
+      }
+    }
     if (member.state !== 'OPEN') {
       return {
         status: member.state === 'MERGED' ? 'completed' : 'closed',
@@ -545,6 +552,29 @@ export function validatePublishedStackRegistration(
 }
 
 /**
+ * Re-read every published pull request and confirm the matched native stack still registers
+ * exactly those commits, so an already-registered publication cannot report success after a
+ * force-push or retarget that happened after the publication readback. A stack member's recorded
+ * base is the position base GitHub derived for the stack rather than the pull request's own
+ * base, so the base is compared between the captured and the re-read pull request only.
+ */
+export async function revalidatePublishedStackRegistration(
+  owner: string,
+  repo: string,
+  stack: NativeStack,
+  published: readonly PullRequest[],
+  options: { signal?: AbortSignal } = {},
+): Promise<NativeStackValidationResult> {
+  const refreshed = await pullRequestsForValidation(
+    owner,
+    repo,
+    published.map((pr) => pr.number),
+    { knownPullRequests: published, signal: options.signal, memberStackNumber: stack.number },
+  )
+  return validatePublishedStackRegistration(stack, refreshed)
+}
+
+/**
  * Re-read the requested pull requests from GitHub immediately before a stack mutation and
  * reject any drift from the captured model, so a retargeted or force-pushed pull request is
  * never stacked against a base other than the one that was published.
@@ -553,10 +583,14 @@ async function pullRequestsForValidation(
   owner: string,
   repo: string,
   numbers: readonly number[],
-  knownPullRequests: readonly PullRequest[] | undefined,
-  signal: AbortSignal | undefined,
+  options: {
+    knownPullRequests?: readonly PullRequest[]
+    signal?: AbortSignal
+    /** Stack number whose membership each re-read pull request is expected to already carry. */
+    memberStackNumber?: number
+  },
 ): Promise<PullRequest[]> {
-  const known = new Map(knownPullRequests?.map((pr) => [pr.number, pr]) ?? [])
+  const known = new Map(options.knownPullRequests?.map((pr) => [pr.number, pr]) ?? [])
   const transport = githubTransport()
   return Promise.all(
     numbers.map(async (number) => {
@@ -570,7 +604,7 @@ async function pullRequestsForValidation(
             method: 'GET',
             path: `repos/${owner}/${repo}/pulls/${number}`,
             headers: STACK_HEADERS,
-            signal,
+            signal: options.signal,
           })
         ).data
       } catch (error) {
@@ -600,7 +634,7 @@ async function pullRequestsForValidation(
           `GitHub returned incomplete pull request #${number}`,
         )
       }
-      if (isRecord(raw.stack)) {
+      if (isRecord(raw.stack) && raw.stack.number !== options.memberStackNumber) {
         throw new NativeStackError(
           'duplicate-pr',
           `Pull request #${number} is already in stack #${raw.stack.number}`,
@@ -644,13 +678,10 @@ export async function createPullRequestStack(
     )
   }
 
-  const chain = await pullRequestsForValidation(
-    owner,
-    repo,
-    pullRequests,
-    options.knownPullRequests,
-    options.signal,
-  )
+  const chain = await pullRequestsForValidation(owner, repo, pullRequests, {
+    knownPullRequests: options.knownPullRequests,
+    signal: options.signal,
+  })
   const validation = validateNativeStackChain(chain, {
     targetRepository: `${owner}/${repo}`,
     defaultBranch: options.defaultBranch,
@@ -714,13 +745,10 @@ export async function addPullRequestsToStack(
 
   const existing =
     options.existingStack ?? (await getPullRequestStack(owner, repo, stackNumber, options))
-  const chain = await pullRequestsForValidation(
-    owner,
-    repo,
-    pullRequests,
-    options.knownPullRequests,
-    options.signal,
-  )
+  const chain = await pullRequestsForValidation(owner, repo, pullRequests, {
+    knownPullRequests: options.knownPullRequests,
+    signal: options.signal,
+  })
   const validation = validateTopAppend(existing, chain, {
     targetRepository: `${owner}/${repo}`,
   })
