@@ -38,6 +38,176 @@ export interface PullRequestStackMembership {
   open: boolean
   url: string
 }
+/**
+ * How one submitted stack compares with the local graph, the local parent
+ * hints, and real Git ancestry. The order of this union is documentation
+ * only; `reconcileStack` decides the state with an explicit precedence.
+ */
+export type ReconciliationState =
+  | 'local-only'
+  | 'remote-native'
+  | 'matching'
+  | 'stale'
+  | 'diverged'
+  | 'reordered'
+  | 'missing-branch'
+  | 'retargeted'
+  | 'merged'
+  | 'externally-unstacked'
+  | 'ambiguous'
+
+export type ReconciliationRepairKind =
+  | 'adopt-remote-order'
+  | 'clear-stale-hint'
+  | 'adopt-remote-tip'
+  | 'restore-missing-branch'
+  | 'retarget-pull-request'
+
+export interface ReconciliationPullRequest {
+  number: number
+  head: string
+  base: string
+  headOid: string | null
+  state: 'OPEN' | 'CLOSED' | 'MERGED'
+  stackNumber: number | null
+  stackPosition: number | null
+  stackSize: number | null
+  stackBase: string | null
+}
+
+/**
+ * Real Git containment facts. `null` means Git could not answer — for example
+ * two unrelated histories — and the reconciliation state machine turns that
+ * into an explicit blocker instead of a guess.
+ */
+export interface ReconciliationAncestry {
+  parentOid: string | null
+  mergeBase: string | null
+  /** The authoritative parent tip is contained in the local branch tip. */
+  parentContainsBranch: boolean | null
+  /** The local branch tip is contained in the authoritative parent tip. */
+  branchContainsParent: boolean | null
+  /** The recorded parent boundary is still an ancestor of the local branch tip. */
+  recordedParentTipValid: boolean | null
+  /** The submitted head commit is contained in the local branch tip. */
+  submittedContainsBranch: boolean | null
+  /** The local branch tip is contained in the submitted head commit. */
+  branchContainsSubmitted: boolean | null
+  /** The origin tracking ref is contained in the local branch tip. */
+  remoteContainsBranch: boolean | null
+  /** The local branch tip is contained in the origin tracking ref. */
+  branchContainsRemote: boolean | null
+}
+
+export interface ReconciliationMemberInput {
+  branch: string
+  localOid: string | null
+  remoteOid: string | null
+  recordedParent: string | null
+  recordedParentTip: string | null
+  ancestry: ReconciliationAncestry
+  pullRequest: ReconciliationPullRequest | null
+  /** A commit this repository already has that the branch may be moved to. */
+  adoptTargetOid: string | null
+}
+
+export interface ReconciliationStackInput {
+  key: string
+  defaultBranch: string
+  /** Authoritative bottom-to-top head refs; empty for a purely local stack. */
+  submittedOrder: string[]
+  submittedHeadOids: Record<string, string | null>
+  submittedBase: string | null
+  stackNumber: number | null
+  stackUrl: string | null
+  /** GitHub's own verdict on the submitted chain. */
+  submittedStatus: NativeStackValidationStatus
+  members: ReconciliationMemberInput[]
+}
+
+export interface ReconciliationMember {
+  branch: string
+  position: number
+  submittedHeadOid: string | null
+  localOid: string | null
+  remoteOid: string | null
+  recordedParent: string | null
+  recordedParentTip: string | null
+  expectedParent: string | null
+  pullRequest: number | null
+  state: ReconciliationState
+  detail: string
+}
+
+/** The pre-repair state retained so a person can undo a repair by hand. */
+export interface ReconciliationEvidence {
+  branch: string
+  backupRef: string | null
+  previousOid: string | null
+  previousParent: string | null
+  previousParentTip: string | null
+  previousBase: string | null
+}
+
+export interface ReconciliationRepair {
+  /** Stable identity for this concrete branch or pull-request write. */
+  id: string
+  kind: ReconciliationRepairKind
+  branch: string | null
+  pullRequest: number | null
+  summary: string
+  detail: string
+  /** True when the repair can move a branch tip or rewrite a PR base. */
+  requiresConfirmation: boolean
+  evidence: ReconciliationEvidence | null
+}
+
+export interface ReconciledStack {
+  key: string
+  base: string
+  stackNumber: number | null
+  stackUrl: string | null
+  state: ReconciliationState
+  summary: string
+  submittedOrder: string[]
+  members: ReconciliationMember[]
+  repairs: ReconciliationRepair[]
+  blockers: string[]
+}
+
+export interface ReconciliationRepairRecord {
+  id: string
+  at: string
+  stackKey: string
+  state: ReconciliationState
+  applied: {
+    kind: ReconciliationRepairKind
+    branch: string | null
+    pullRequest: number | null
+  }[]
+  evidence: ReconciliationEvidence[]
+}
+
+export interface ReconciliationReport {
+  available: boolean
+  message: string
+  stacks: ReconciledStack[]
+  blockers: string[]
+  evidence: ReconciliationRepairRecord | null
+}
+
+export interface ReconciliationPreview {
+  token: string
+  stackKey: string
+  state: ReconciliationState
+  summary: string
+  base: string
+  submittedOrder: string[]
+  repairs: ReconciliationRepair[]
+  blockers: string[]
+  warnings: string[]
+  capturedAt: string
+}
 
 export interface PullRequest {
   number: number
@@ -101,6 +271,8 @@ export interface RepositorySnapshot {
   nativeStacks?: NativeStack[]
   nativeStackPreviewAvailable?: boolean
   nativeStackMessage?: string
+  /** GitHub-authoritative comparison of submitted stacks with the local graph. */
+  reconciliation?: ReconciliationReport
 }
 export interface RecentRepository {
   path: string
@@ -184,6 +356,13 @@ export type StackAction =
   | { type: 'createNativeStack'; pullRequests: number[] }
   | { type: 'addPullRequestsToNativeStack'; stackNumber: number; pullRequests: number[] }
   | { type: 'unstackNativeStack'; stackNumber: number }
+  | {
+      type: 'reconcileRepair'
+      token: string
+      ids: string[]
+      confirmRewrites: boolean
+    }
+
 export type GitAction =
   | { type: 'switch'; ref: string }
   | { type: 'createBranch'; name: string; parent: string }
@@ -238,6 +417,7 @@ export interface DesktopAPI {
   commitDiff(oid: string): Promise<{ text: string; truncated: boolean }>
   pushPreview(): Promise<PushPreview>
   stackPreview(kind: StackKind, branch: string): Promise<StackPreview>
+  reconciliationPreview?: (stackKey: string) => Promise<ReconciliationPreview>
   pullRequest(number: number): Promise<PullRequest & { body: string }>
   listNativeStacks?: () => Promise<NativeStack[]>
   createNativeStack?: (pullRequests: number[]) => Promise<NativeStack>

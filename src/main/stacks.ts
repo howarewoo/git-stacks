@@ -56,6 +56,7 @@ import {
 import { canonicalRemoteName, getGitHubData, getPullRequest, pullRequestRepository } from './github'
 import { githubTransport } from './github-transport'
 import type { GitHubResult } from './github'
+import { runReconciliationRepair } from './reconciliation'
 
 const PLAN_TTL_MS = 5 * 60_000
 const JOURNAL_VERSION = 1
@@ -284,6 +285,22 @@ export function validateStackAction(value: unknown): StackAction {
         stackActionError('Invalid unstackNativeStack action')
       }
       return { type: 'unstackNativeStack', stackNumber: value.stackNumber }
+    case 'reconcileRepair': {
+      if (
+        !hasOnlyKeys(value, ['type', 'token', 'ids', 'confirmRewrites']) ||
+        typeof value.confirmRewrites !== 'boolean' ||
+        !Array.isArray(value.ids)
+      ) {
+        stackActionError('Invalid reconcileRepair action')
+      }
+      const ids = value.ids.map((id) => requireString(id, 'reconciliation repair ID', 2048))
+      return {
+        type: 'reconcileRepair',
+        token: requireString(value.token, 'reconciliation preview token', 512),
+        ids,
+        confirmRewrites: value.confirmRewrites,
+      }
+    }
     default:
       stackActionError(`Unsupported stack action: ${String(value.type)}`)
   }
@@ -3004,5 +3021,11 @@ export async function runStackAction(
       const origin = await currentOrigin(root)
       return unstackNativeStackAction(root, origin.fullName, action.stackNumber)
     }
+    case 'reconcileRepair':
+      return runReconciliationRepair(root, {
+        token: action.token,
+        ids: action.ids,
+        confirmRewrites: action.confirmRewrites,
+      })
   }
 }

@@ -2258,6 +2258,14 @@ button:disabled {
   flex-direction: column;
   overflow: hidden;
 }
+
+.stacks-view .gs-reconciliation {
+  flex: 0 1 auto;
+  min-height: 0;
+  max-height: 42%;
+  overflow-y: auto;
+  border-bottom: 1px solid var(--gs-semantic-border-decorative);
+}
 .history-view .list-toolbar,
 .stacks-view .list-toolbar {
   justify-content: space-between;

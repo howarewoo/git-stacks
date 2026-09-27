@@ -11,6 +11,8 @@ const desktop: DesktopAPI = {
   commitDiff: (oid) => ipcRenderer.invoke('repository:commit-diff', oid),
   pushPreview: () => ipcRenderer.invoke('repository:push-preview'),
   stackPreview: (kind, branch) => ipcRenderer.invoke('repository:stack-preview', kind, branch),
+  reconciliationPreview: (stackKey) =>
+    ipcRenderer.invoke('repository:reconciliation-preview', stackKey),
   pullRequest: (number) => ipcRenderer.invoke('repository:pull-request', number),
   openExternal: (url) => ipcRenderer.invoke('external:open', url),
 }

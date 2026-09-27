@@ -23,6 +23,7 @@ import { workflowError, type RunAction, type WorkflowRequest } from './workflow-
 import { PhaseStatus, WorkflowActions } from './workflow-composition'
 import { partialProgress, workflowPhase } from './workflow-policy'
 import { BranchHoverCard, PullRequestHoverCard } from './repository-hover-cards'
+import { ReconciliationPanel } from './reconciliation-view'
 
 type CommonProps = {
   snapshot: RepositorySnapshot
@@ -792,13 +793,18 @@ function stackRoot(branch: Branch, byName: Map<string, Branch>, defaultBranch: s
 }
 
 export function StackView({
+  actionError,
+  onClearActionError,
   snapshot,
   busy,
+  runAction,
   onRequest,
   onSelect,
   search,
   onCreate,
-}: Omit<CommonProps, 'runAction'> & {
+}: CommonProps & {
+  actionError: string | null
+  onClearActionError: () => void
   onSelect: (branch: Branch) => void
   search: string
   onCreate: () => void
@@ -844,6 +850,13 @@ export function StackView({
           New branch
         </Button>
       </div>
+      <ReconciliationPanel
+        snapshot={snapshot}
+        busy={busy}
+        runAction={runAction}
+        actionError={actionError}
+        onClearActionError={onClearActionError}
+      />
       {!root ? (
         <div className="empty-state">
           <Layers className="empty-icon" />

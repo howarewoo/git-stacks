@@ -65,6 +65,7 @@ import {
   runStackAction,
   validateStackAction,
 } from './stacks'
+import { buildReconciliationReport } from './reconciliation'
 
 function requireOid(value: unknown, label: string, allowNull = false): string | null {
   if (allowNull && value === null) {
@@ -3619,8 +3620,7 @@ export async function getSnapshot(repoPath: string): Promise<RepositorySnapshot>
         Boolean(branch.parentTip && branch.parentTip !== parent.objectName)
     }),
   )
-
-  return {
+  const snapshot: RepositorySnapshot = {
     path: root,
     name: path.basename(root) || root,
     currentBranch,
@@ -3639,6 +3639,10 @@ export async function getSnapshot(repoPath: string): Promise<RepositorySnapshot>
     nativeStackPreviewAvailable: github.nativeStackPreviewAvailable ?? false,
     nativeStackMessage: github.nativeStackMessage,
   }
+  // Read-only: the report compares submitted membership with the local graph
+  // and never rewrites a branch, a local hint, or a pull-request base.
+  snapshot.reconciliation = await buildReconciliationReport(root, snapshot)
+  return snapshot
 }
 async function runRenameBranch(
   repoPath: string,
