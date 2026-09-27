@@ -670,9 +670,10 @@ async function collectMemberFacts(
     }
   }
   const parentOid = parentRef ? await resolveOid(repoPath, parentRef) : null
+  const submittedTarget = submittedOid ? await resolveOid(repoPath, submittedOid) : null
   const [parentLink, submittedLink, remoteLink] = await Promise.all([
     containment(repoPath, parentOid, localOid),
-    containment(repoPath, submittedOid, localOid),
+    containment(repoPath, submittedTarget, localOid),
     containment(repoPath, remoteOid, localOid),
   ])
   let recordedParentTipValid: boolean | null = null
@@ -684,7 +685,6 @@ async function collectMemberFacts(
     )
     recordedParentTipValid = link.mergeBase ? link.firstContainsSecond : false
   }
-  const submittedTarget = submittedOid ? await resolveOid(repoPath, submittedOid) : null
   const remoteTarget = !submittedOid && remoteOid ? await resolveOid(repoPath, remoteOid) : null
   const adoptTargetOid = submittedTarget ?? remoteTarget
   return {
@@ -1437,6 +1437,7 @@ async function applyOperation(
   record: ReconciliationRepairRecord,
   id: string,
   originFullName: string | null,
+  movedTips: ReadonlyMap<string, string>,
 ): Promise<boolean> {
   if (operation.kind === 'retarget-pull-request') {
     if (operation.pullRequest === null || !originFullName || !operation.base) return false
@@ -1500,34 +1501,50 @@ async function applyOperation(
     getBranchParent(repoPath, branch),
     getConfigValue(repoPath, `branch.${branch}.parentTip`),
   ])
+  const currentOid = await resolveOid(repoPath, `refs/heads/${branch}`)
   if (
     !operation.previous ||
     parent !== operation.previous.previousParent ||
     parentTip !== operation.previous.previousParentTip ||
-    (await resolveOid(repoPath, `refs/heads/${branch}`)) !== operation.previous.previousOid
+    currentOid !== (movedTips.get(branch) ?? operation.previous.previousOid)
   ) {
     throw new Error(`${STALE_PREFIX} ${branch} changed since the preview was captured`)
   }
   if (operation.kind === 'adopt-remote-order') {
     if (!operation.parent || !operation.parentTip) return false
     await validateBranchName(repoPath, operation.parent)
+    let nextParentTip = operation.parentTip
+    if (movedTips.has(branch)) {
+      const parentOid = await resolveOid(
+        repoPath,
+        await resolveParentRef(repoPath, operation.parent),
+      )
+      const boundary =
+        parentOid && currentOid
+          ? await tryGit(repoPath, ['merge-base', parentOid, currentOid])
+          : null
+      if (!boundary) {
+        throw new Error(`Cannot record ${branch} under ${operation.parent}: no common ancestor`)
+      }
+      nextParentTip = stripTrailingNewline(boundary)
+    }
     record.evidence.push({
       branch,
       backupRef: null,
-      previousOid: operation.previous?.previousOid ?? null,
+      previousOid: currentOid,
       previousParent: parent,
       previousParentTip: parentTip,
       previousBase: operation.previous?.previousBase ?? null,
     })
     await writeEvidence(repoPath, record)
-    await setBranchMetadata(repoPath, branch, operation.parent, operation.parentTip)
+    await setBranchMetadata(repoPath, branch, operation.parent, nextParentTip)
     return true
   }
   if (parent === null && parentTip === null) return false
   record.evidence.push({
     branch,
     backupRef: null,
-    previousOid: await resolveOid(repoPath, `refs/heads/${branch}`),
+    previousOid: currentOid,
     previousParent: parent,
     previousParentTip: parentTip,
     previousBase: operation.previous?.previousBase ?? null,
@@ -1612,10 +1629,21 @@ export async function runReconciliationRepair(
   await writeEvidence(repoPath, record)
   const originFullName = canonicalRemoteName(plan.originUrl)
   const summaries: string[] = []
+  const movedTips = new Map<string, string>()
   for (const kind of APPLY_ORDER) {
     for (const operation of operations.filter((entry) => entry.kind === kind)) {
-      const changed = await applyOperation(repoPath, operation, record, id, originFullName)
+      const changed = await applyOperation(
+        repoPath,
+        operation,
+        record,
+        id,
+        originFullName,
+        movedTips,
+      )
       if (!changed) continue
+      if (operation.kind === 'adopt-remote-tip' && operation.branch && operation.targetOid) {
+        movedTips.set(operation.branch, operation.targetOid)
+      }
       record.applied.push({
         kind: operation.kind,
         branch: operation.branch,
