@@ -2625,22 +2625,25 @@ async function publishStack(
     )
     if (matched) {
       const existingNumbers = new Set(matched.pullRequests.map((member) => member.number))
+      const registered = published.filter((entry) => existingNumbers.has(entry.pr.number))
       const toAdd = publishedNumbers.filter((num) => !existingNumbers.has(num))
+      // The already-registered pull requests were read back before the stack listing, so a
+      // force-push, retarget, or unstack that lands while the registration target is chosen
+      // would otherwise extend the stack from a base that no longer exists.
+      const registration = await revalidatePublishedStackRegistration(
+        owner,
+        name,
+        matched,
+        registered.map((entry) => entry.pr),
+      )
+      if (!registration.valid) {
+        throw new Error(registration.message ?? 'Published pull requests are not registered')
+      }
       if (toAdd.length > 0) {
         await addPullRequestsToStack(owner, name, matched.number, toAdd, {
           existingStack: matched,
           knownPullRequests: published.map((entry) => entry.pr),
         })
-      } else {
-        const registration = await revalidatePublishedStackRegistration(
-          owner,
-          name,
-          matched,
-          published.map((entry) => entry.pr),
-        )
-        if (!registration.valid) {
-          throw new Error(registration.message ?? 'Published pull requests are not registered')
-        }
       }
     } else if (published.length >= 1) {
       await createPullRequestStack(owner, name, publishedNumbers, {
