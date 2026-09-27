@@ -1641,7 +1641,11 @@ export async function runReconciliationRepair(
         movedTips,
       )
       if (!changed) continue
-      if (operation.kind === 'adopt-remote-tip' && operation.branch && operation.targetOid) {
+      if (
+        (operation.kind === 'adopt-remote-tip' || operation.kind === 'restore-missing-branch') &&
+        operation.branch &&
+        operation.targetOid
+      ) {
         movedTips.set(operation.branch, operation.targetOid)
       }
       record.applied.push({
