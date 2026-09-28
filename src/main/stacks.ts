@@ -3388,27 +3388,32 @@ async function runPublishStep(
   await provePublishedHeads(repoPath, operation, published)
   const numbers = published.map((layer) => layer.pullRequest as number)
   const stacks = await listPullRequestStacks(owner, name)
+  // Extensions remain bound to the reviewed stack. Overlap can identify our own lost
+  // create response only when no stack number has been saved yet.
   const matched = stacks.find((stack) =>
-    stack.pullRequests.some((member) => numbers.includes(member.number)),
+    operation.stackNumber !== null
+      ? stack.number === operation.stackNumber
+      : stack.pullRequests.some((member) => numbers.includes(member.number)),
   )
   // The preview captured exactly which native stack these pull requests belonged to, so a
   // stack created, unstack, or re-stack that lands while the layers are pushed invalidates
   // the submission instead of silently binding it to whichever stack now owns a member.
   if (operation.stackNumber !== null) {
-    const captured = stacks.find((stack) => stack.number === operation.stackNumber)
+    const captured = matched
     // A member that left the stack it was previewed in is a registration loss, whether the
     // stack was unstacked outright or the member was moved somewhere else.
-    const anywhere = new Set(stacks.flatMap((stack) => stack.pullRequests.map((m) => m.number)))
+    const registered = new Set(captured?.pullRequests.map((member) => member.number))
     for (const member of operation.capturedMembers) {
-      if (numbers.includes(member.number) && !anywhere.has(member.number)) {
+      if (numbers.includes(member.number) && !registered.has(member.number)) {
         throw new NativeStackError(
           'invalid-chain',
           `Pull request #${member.number} is no longer registered in native stack #${operation.stackNumber}`,
         )
       }
     }
-    if (!captured) {
-      throw new Error(
+    if (!captured || !captured.open) {
+      throw new NativeStackError(
+        'invalid-chain',
         `Stack preview is stale: native stack #${operation.stackNumber} was closed or removed`,
       )
     }

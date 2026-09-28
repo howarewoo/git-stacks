@@ -2129,3 +2129,193 @@ test('non-retryable native rejection preserves failure until dismissed without m
     )
   })
 })
+
+for (const outcome of ['append', 'no-add'] as const) {
+  for (const savedOpen of [true, false]) {
+    test(`extend retry rejects moved members before ${outcome} when saved stack is ${savedOpen ? 'open' : 'closed'}`, async () => {
+      await withHarness(async (harness) => {
+        await setupThreeBranches(harness)
+        await registerBottomOnlyStack(harness)
+        // Keep A valid and listed after its submitted member is moved to B.
+        git(harness, ['checkout', '-b', 'unrelated', 'main'])
+        git(harness, ['commit', '--allow-empty', '-m', 'Unrelated stack member'])
+        git(harness, ['push', harness.bare, 'unrelated:refs/heads/unrelated'])
+        git(harness, ['checkout', 'feature/step-3'])
+        const preview = await previewStack(
+          harness.repo,
+          await getSnapshot(harness.repo),
+          'publish',
+          'feature/step-2',
+        )
+        assert.deepEqual(preview.blockers, [])
+        assert.equal(preview.publish?.stackNumber, 99)
+        const inner = createGitHubApiDouble()
+        let interrupt = true
+        const writes: string[] = []
+        setGitHubTransport(
+          new DirectGitHubTransport({
+            token: 'fixture-token',
+            fetch: async (input, init) => {
+              if (
+                (init?.method ?? 'GET') !== 'GET' &&
+                (!String(input).endsWith('/graphql') || /\bmutation\b/u.test(String(init?.body)))
+              ) {
+                writes.push(`${init?.method} ${String(input)}`)
+              }
+              if (
+                interrupt &&
+                String(input).endsWith('/stacks/99/add') &&
+                init?.method === 'POST'
+              ) {
+                interrupt = false
+                return new Response(JSON.stringify({ message: 'Append interrupted' }), {
+                  status: 503,
+                })
+              }
+              return inner(input, init)
+            },
+          }),
+        )
+        await assert.rejects(
+          runStackAction(harness.repo, publishAction(preview.token)),
+          /Append interrupted/iu,
+        )
+        assert.equal(
+          (await getSubmitStackProgress(harness.repo))?.steps.find(
+            (step) => step.status === 'failed',
+          )?.kind,
+          'extend-stack',
+        )
+        const state = await harness.readState()
+        const saved = state.stacks!.find((stack) => stack.number === 99)!
+        const original = state.prs.find((pr) => pr.number === 101)!
+        const unrelated = {
+          ...original,
+          number: 104,
+          head: 'unrelated',
+          headOid: git(harness, ['rev-parse', 'unrelated']),
+          url: 'https://github.com/acme/widgets/pull/104',
+        }
+        state.prs.push(unrelated)
+        const moved = {
+          ...saved,
+          id: 100_000,
+          number: 100,
+          node_id: 'STACK_100',
+          url: 'https://api.github.com/repos/acme/widgets/stacks/100',
+          pull_requests: state.prs
+            .filter((pr) =>
+              outcome === 'append' ? pr.number === 101 : [101, 102, 103].includes(pr.number),
+            )
+            .map((pr) => ({
+              number: pr.number,
+              state: 'open' as const,
+              draft: pr.draft,
+              merged_at: null,
+              head: { ref: pr.head, sha: pr.headOid! },
+            })),
+        }
+        saved.open = savedOpen
+        saved.pull_requests = [
+          {
+            number: unrelated.number,
+            state: 'open',
+            draft: false,
+            merged_at: null,
+            head: { ref: unrelated.head, sha: unrelated.headOid },
+          },
+        ]
+        state.stacks = [saved, moved]
+        await harness.writeState(state)
+        // Both targets are visible; no missing-stack or malformed-chain shortcut is involved.
+        const listed = await listPullRequestStacks('acme', 'widgets')
+        assert.deepEqual(
+          listed.map((stack) => stack.number),
+          [99, 100],
+        )
+        assert.equal(listed.find((stack) => stack.number === 100)?.status, 'valid')
+        writes.length = 0
+        await assert.rejects(
+          runStackAction(harness.repo, { type: 'submitStackRetry' }),
+          (error) => error instanceof NativeStackError && error.status === 'invalid-chain',
+        )
+        assert.deepEqual(writes, [], 'retry must not mutate either native stack or any PR')
+        const progress = await getSubmitStackProgress(harness.repo)
+        assert.equal(progress?.status, 'failed')
+        assert.equal(progress?.steps.find((step) => step.status === 'failed')?.kind, 'extend-stack')
+        assert.deepEqual((await harness.readState()).stacks, state.stacks)
+      })
+    })
+  }
+}
+
+for (const accepted of [false, true]) {
+  for (const closed of [false, true]) {
+    test(`extend retry ${closed ? 'rejects closed' : 'retains saved'} target after ${accepted ? 'lost response' : 'rejected append'}`, async () => {
+      await withHarness(async (harness) => {
+        await setupThreeBranches(harness)
+        await registerBottomOnlyStack(harness)
+        const preview = await previewStack(
+          harness.repo,
+          await getSnapshot(harness.repo),
+          'publish',
+          'feature/step-2',
+        )
+        const inner = createGitHubApiDouble()
+        let interrupt = true
+        const writes: string[] = []
+        setGitHubTransport(
+          new DirectGitHubTransport({
+            token: 'fixture-token',
+            fetch: async (input, init) => {
+              if (init?.method === 'POST' && String(input).includes('/stacks/')) {
+                writes.push(String(input))
+                if (interrupt) {
+                  interrupt = false
+                  if (accepted) assert.equal((await inner(input, init)).ok, true)
+                  return new Response(JSON.stringify({ message: 'Append interrupted' }), {
+                    status: 503,
+                  })
+                }
+              }
+              return inner(input, init)
+            },
+          }),
+        )
+        await assert.rejects(
+          runStackAction(harness.repo, publishAction(preview.token)),
+          /Append interrupted/iu,
+        )
+        const stopped = await harness.readState()
+        if (closed) {
+          stopped.stacks![0].open = false
+          await harness.writeState(stopped)
+        }
+        writes.length = 0
+        if (closed) {
+          await assert.rejects(
+            runStackAction(harness.repo, { type: 'submitStackRetry' }),
+            (error) => error instanceof NativeStackError && error.status === 'invalid-chain',
+          )
+          assert.equal((await getSubmitStackProgress(harness.repo))?.status, 'failed')
+          assert.deepEqual(writes, [])
+          assert.deepEqual((await harness.readState()).stacks, stopped.stacks)
+          return
+        }
+        await runStackAction(harness.repo, { type: 'submitStackRetry' })
+        assert.equal((await getSubmitStackProgress(harness.repo))?.status, 'completed')
+        assert.deepEqual(
+          writes,
+          accepted ? [] : ['https://api.github.com/repos/acme/widgets/stacks/99/add'],
+        )
+        assert.deepEqual(
+          (await harness.readState()).stacks?.map((stack) => ({
+            number: stack.number,
+            members: stack.pull_requests.map((pr) => pr.number),
+          })),
+          [{ number: 99, members: [101, 102, 103] }],
+        )
+      })
+    })
+  }
+}
