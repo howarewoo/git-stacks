@@ -4,6 +4,8 @@ import type {
   Branch,
   Commit,
   GitAction,
+  PublishLayerChoice,
+  PublishProgress,
   PullRequest,
   PushPreview,
   RepositorySnapshot,
@@ -24,10 +26,12 @@ import {
   OperationContext,
   OperationSteps,
   PhaseStatus,
+  PublishProgressPanel,
   TypedConfirmation,
   WarningNote,
   WorkflowActions,
   WorkflowFrame,
+  WorkflowSection,
   type ContextFact,
 } from './workflow-composition'
 import {
@@ -130,14 +134,15 @@ export function WorkflowDialog({
   const [mainline, setMainline] = React.useState('')
   const [confirmation, setConfirmation] = React.useState('')
   const [allowForce, setAllowForce] = React.useState(false)
-  const [draft, setDraft] = React.useState(true)
-  const [titles, setTitles] = React.useState<Record<string, string>>({})
+  const [layerChoices, setLayerChoices] = React.useState<Record<string, PublishLayerChoice>>({})
+  const [progress, setProgress] = React.useState<PublishProgress | null>(null)
   const [mergeMethod, setMergeMethod] = React.useState<'' | 'merge' | 'squash' | 'rebase'>('')
   const [preview, setPreview] = React.useState<StackPreview | null>(null)
   const [push, setPush] = React.useState<PushPreview | null>(null)
   const [pr, setPr] = React.useState<(PullRequest & { body: string }) | null>(null)
   const [prTitle, setPrTitle] = React.useState('')
   const [body, setBody] = React.useState('')
+  const [prDraft, setPrDraft] = React.useState(true)
   const [error, setError] = React.useState<string | null>(null)
   const [loading, setLoading] = React.useState(previewKinds.includes(request.kind))
   const [loaded, setLoaded] = React.useState(false)
@@ -215,10 +220,20 @@ export function WorkflowDialog({
         setRejectedIdentities([])
         if (data.kind === 'stack') {
           setPreview(data.value)
-          // Entered titles survive a preview reload; only untouched branches are seeded.
-          setTitles((current) =>
+          // Entered layer choices survive a preview reload; untouched layers are seeded
+          // from the reviewed offer so title, body, draft and base start where Git Stacks
+          // proposes them.
+          setLayerChoices((current) =>
             Object.fromEntries(
-              data.value.steps.map((step) => [step.branch, current[step.branch] ?? step.title]),
+              (data.value.publish?.layers ?? []).map((layer) => [
+                layer.branch,
+                current[layer.branch] ?? {
+                  title: layer.title,
+                  body: layer.body,
+                  draft: layer.draft,
+                  updateBase: layer.updateBase,
+                },
+              ]),
             ),
           )
         } else if (data.kind === 'forcePush') {
@@ -228,7 +243,7 @@ export function WorkflowDialog({
           if (!hasEditedRef.current) {
             setPrTitle(data.value.title)
             setBody(data.value.body)
-            setDraft(data.value.draft)
+            setPrDraft(data.value.draft)
           }
         }
         setLoaded(true)
@@ -246,6 +261,23 @@ export function WorkflowDialog({
       active = false
     }
   }, [request, attempt])
+
+  // A submission that stopped part-way survives a restart; show it before anything
+  // else so a person can resume or dismiss it instead of starting a second one.
+  React.useEffect(() => {
+    if (request.kind !== 'stack' || request.operation !== 'publish') {
+      setProgress(null)
+      return
+    }
+    let active = true
+    void window.desktop.submitStackProgress?.().then(
+      (value) => active && setProgress(value),
+      () => active && setProgress(null),
+    )
+    return () => {
+      active = false
+    }
+  }, [request])
 
   const title =
     request.kind === 'stack'
@@ -296,14 +328,29 @@ export function WorkflowDialog({
                               ? 'Push the reviewed branches, create missing PRs, and update their bases and linked stack navigation.'
                               : 'Merge one bottom PR into the default branch. Then explicitly restack and publish the remaining branches. No automatic merges or queue enrollment.'
 
+  const readProgress = async () => {
+    if (request.kind !== 'stack' || request.operation !== 'publish') return
+    try {
+      setProgress((await window.desktop.submitStackProgress?.()) ?? null)
+    } catch {
+      setProgress(null)
+    }
+  }
+
   const run = async (action: GitAction, label: string) => {
     if (locked || captured.current.path !== snapshot.path) return
     const attemptRun = dispatch(async () => {
       const success = await runAction(action, label)
-      if (!success && identity)
-        setRejectedIdentities((current) =>
-          current.includes(identity) ? current : [...current, identity],
-        )
+      if (!success) {
+        // A stopped submission is resumable, so read what it managed to finish
+        // before deciding the reviewed preview may or may not run again.
+        await readProgress()
+        if (identity) {
+          setRejectedIdentities((current) =>
+            current.includes(identity) ? current : [...current, identity],
+          )
+        }
+      }
       return success
     })
     const { dispatched, value: success } = await attemptRun
@@ -325,20 +372,25 @@ export function WorkflowDialog({
       ? { kind: 'confirm', action: request.action, label: request.label }
       : request.kind === 'stack'
         ? preview
-          ? {
-              kind: 'stack',
-              operation: request.operation,
-              preview,
-              allowForce,
-              confirmation,
-              confirmationTarget,
-              draft,
-              titles,
-              mergeMethod,
-            }
+          ? request.operation === 'publish'
+            ? {
+                kind: 'submit',
+                preview,
+                allowForce,
+                layers: layerChoices,
+              }
+            : {
+                kind: 'stack',
+                operation: request.operation,
+                preview,
+                allowForce,
+                confirmation,
+                confirmationTarget,
+                mergeMethod,
+              }
           : null
         : request.kind === 'pr'
-          ? { kind: 'pr', number: request.number, title: prTitle, body, draft }
+          ? { kind: 'pr', number: request.number, title: prTitle, body, draft: prDraft }
           : request.kind === 'forcePush'
             ? { kind: 'forcePush', push, confirmation }
             : request.kind === 'deleteRemote'
@@ -381,11 +433,12 @@ export function WorkflowDialog({
           (step) => request.operation !== 'merge' || step.branch === request.branch,
         )
       : []
+  const publishOffer = preview?.publish ?? null
   const untitledBranches =
-    request.kind === 'stack' && request.operation === 'publish' && preview
-      ? preview.steps
-          .filter((step) => !step.pr && !titles[step.branch]?.trim())
-          .map((s) => s.branch)
+    request.kind === 'stack' && request.operation === 'publish' && publishOffer
+      ? publishOffer.layers
+          .filter((layer) => layer.create && !layerChoices[layer.branch]?.title.trim())
+          .map((layer) => layer.branch)
       : []
   const blocker = workflowBlocker({
     kind: request.kind,
@@ -729,17 +782,9 @@ export function WorkflowDialog({
                     <WarningNote key={`${index}-${warning}`}>{warning}</WarningNote>
                   ))}
                   <BlockerList items={preview.blockers} />
-                  {request.operation === 'publish' ? (
+                  {request.operation === 'publish' && publishOffer ? (
                     <>
-                      <Checkbox
-                        id="workflow-create-drafts"
-                        label="Create new PRs as drafts"
-                        checked={draft}
-                        onChange={(event) => {
-                          markEdited()
-                          setDraft(event.target.checked)
-                        }}
-                      />
+                      <PublishProgressPanel progress={progress} />
                       <Checkbox
                         id="workflow-allow-force"
                         label="Allow rewritten branches to be pushed with exact leases"
@@ -768,27 +813,67 @@ export function WorkflowDialog({
                           />
                         </>
                       ) : null}
-                      {stackSteps
-                        .filter((step) => !step.pr)
-                        .map((step) => (
-                          <Field
-                            key={`title-${encodeURIComponent(step.branch)}`}
-                            id={`title-${encodeURIComponent(step.branch)}`}
-                            label={`PR title for ${step.branch}`}
-                            required
+                      {publishOffer.layers.map((layer) => {
+                        const choice = layerChoices[layer.branch]
+                        const id = encodeURIComponent(layer.branch)
+                        const setChoice = (update: Partial<PublishLayerChoice>) => {
+                          markEdited()
+                          setLayerChoices((current) => ({
+                            ...current,
+                            [layer.branch]: { ...current[layer.branch], ...update },
+                          }))
+                        }
+                        return (
+                          <WorkflowSection
+                            key={`layer-${id}`}
+                            label={`${layer.branch} → ${layer.base}`}
                           >
-                            <Input
-                              value={titles[step.branch] ?? ''}
-                              onChange={(event) => {
-                                markEdited()
-                                setTitles((current) => ({
-                                  ...current,
-                                  [step.branch]: event.target.value,
-                                }))
-                              }}
-                            />
-                          </Field>
-                        ))}
+                            <p className="m-0 text-[length:var(--gs-semantic-type-metadata-size)] text-[var(--gs-semantic-text-secondary)]">
+                              {layer.create
+                                ? 'A new pull request is opened with the title, description and readiness chosen below.'
+                                : `Pull request #${
+                                    layer.pullRequest ?? '?'
+                                  } keeps its title, description and review; only its base can change.`}
+                            </p>
+                            {publishOffer.baseChanges.includes(layer.branch) ? (
+                              <Checkbox
+                                id={`base-${id}`}
+                                label={`Rebase pull request #${
+                                  layer.pullRequest ?? '?'
+                                } onto ${layer.base}`}
+                                checked={choice?.updateBase ?? false}
+                                onChange={(event) =>
+                                  setChoice({ updateBase: event.target.checked })
+                                }
+                              />
+                            ) : null}
+                            <Field
+                              id={`title-${id}`}
+                              label={`PR title for ${layer.branch}`}
+                              required
+                            >
+                              <Input
+                                value={choice?.title ?? ''}
+                                onChange={(event) => setChoice({ title: event.target.value })}
+                              />
+                            </Field>
+                            <Field id={`body-${id}`} label={`PR description for ${layer.branch}`}>
+                              <Textarea
+                                value={choice?.body ?? ''}
+                                onChange={(event) => setChoice({ body: event.target.value })}
+                              />
+                            </Field>
+                            {layer.create ? (
+                              <Checkbox
+                                id={`draft-${id}`}
+                                label={`Open the pull request for ${layer.branch} as a draft`}
+                                checked={choice?.draft ?? true}
+                                onChange={(event) => setChoice({ draft: event.target.checked })}
+                              />
+                            ) : null}
+                          </WorkflowSection>
+                        )
+                      })}
                     </>
                   ) : null}
                   {request.operation === 'merge' ? (
@@ -868,11 +953,11 @@ export function WorkflowDialog({
                   <Checkbox
                     id="workflow-pr-draft"
                     label="Draft pull request"
-                    checked={draft}
+                    checked={prDraft}
                     disabled={pr.state !== 'OPEN'}
                     onChange={(event) => {
                       markEdited()
-                      setDraft(event.target.checked)
+                      setPrDraft(event.target.checked)
                     }}
                   />
                   {pr.state === 'OPEN' &&
@@ -1001,6 +1086,29 @@ export function WorkflowDialog({
                     </Button>
                   ))
                 )
+              ) : progress && progress.status !== 'completed' ? (
+                <>
+                  <Button
+                    variant="secondary"
+                    disabled={busy}
+                    onClick={() => run({ type: 'submitStackDismiss' }, 'Dismiss submission')}
+                    tooltip="Stop tracking this submission. Pushed branches and pull requests stay on GitHub; take a fresh preview to submit again."
+                  >
+                    Dismiss submission
+                  </Button>
+                  <Button
+                    variant="accent"
+                    disabled={busy}
+                    loading={busy}
+                    onClick={() => run({ type: 'submitStackRetry' }, 'Resume submission')}
+                    tooltip="Continue from the first unfinished step. Finished pushes and pull requests are not repeated."
+                  >
+                    {busy ? (
+                      <LoaderCircle aria-hidden="true" className="size-3.5 animate-spin" />
+                    ) : null}
+                    Resume submission
+                  </Button>
+                </>
               ) : (
                 <Button
                   type="submit"

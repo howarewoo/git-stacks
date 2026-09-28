@@ -333,7 +333,88 @@ export interface StackPreview {
   warnings: string[]
   blockers: string[]
   mergeMethods: ('merge' | 'squash' | 'rebase')[]
+  /** Present only for a publish preview: the resumable submission plan. */
+  publish: PublishPreview | null
 }
+
+/** One resumable unit of Submit Stack work, in bottom-to-top order. */
+export type PublishStepKind = 'push' | 'create-pr' | 'retarget-pr' | 'create-stack' | 'extend-stack'
+
+export type PublishStepStatus = 'pending' | 'running' | 'completed' | 'failed'
+
+/** What a person can do about a step that stopped, without a new preview. */
+export interface PublishStepFailure {
+  summary: string
+  recovery: string
+  retryable: boolean
+}
+
+export interface PublishStep {
+  kind: PublishStepKind
+  /** Null for the stack registration step, which spans every layer. */
+  branch: string | null
+  label: string
+  status: PublishStepStatus
+  pullRequest: number | null
+  detail: string
+  failure: PublishStepFailure | null
+}
+
+/** The reviewable choice for one layer, fixed before the first push happens. */
+export interface PublishLayer {
+  branch: string
+  base: string
+  title: string
+  body: string
+  draft: boolean
+  /** True when the base changes an existing pull request and was explicitly previewed. */
+  updateBase: boolean
+  /** False when a captured pull request already sits on the correct base. */
+  create: boolean
+  /** The push replaces remote history and needs the captured-OID lease consent. */
+  force: boolean
+  pullRequest: number | null
+}
+
+export type PublishStackAction = 'create' | 'extend' | 'none'
+
+export interface PublishPreview {
+  branch: string
+  layers: PublishLayer[]
+  steps: PublishStep[]
+  stackNumber: number | null
+  stackAction: PublishStackAction
+  /** Layers whose base must change on an existing pull request to be submitted. */
+  baseChanges: string[]
+  capturedAt: string
+}
+
+export interface PublishProgress {
+  operationId: string
+  status: 'running' | 'failed' | 'completed'
+  steps: PublishStep[]
+  message: string
+  /** Index of the first step a retry resumes at; null once every step completed. */
+  resumeAt: number | null
+}
+
+/** The per-layer choices a reviewed submission carries to the main process. */
+export interface PublishLayerChoice {
+  title: string
+  body: string
+  draft: boolean
+  updateBase: boolean
+}
+export type SubmitStackAction =
+  | {
+      type: 'submitStack'
+      token: string
+      allowForce: boolean
+      layers: Record<string, PublishLayerChoice>
+    }
+  | { type: 'submitStackRetry' }
+  | { type: 'submitStackDismiss' }
+
 export interface StackProgress {
   kind: 'restack'
   originalBranch: string
@@ -348,10 +429,9 @@ export type StackAction =
       type: 'executeStack'
       token: string
       allowForce: boolean
-      draft: boolean
-      titles: Record<string, string>
       mergeMethod: 'merge' | 'squash' | 'rebase'
     }
+  | SubmitStackAction
   | { type: 'stackContinue' | 'stackAbort' }
   | { type: 'updatePr'; number: number; title: string; body: string; draft: boolean }
   | { type: 'closePr' | 'reopenPr'; number: number }
@@ -419,6 +499,8 @@ export interface DesktopAPI {
   commitDiff(oid: string): Promise<{ text: string; truncated: boolean }>
   pushPreview(): Promise<PushPreview>
   stackPreview(kind: StackKind, branch: string): Promise<StackPreview>
+  /** Resumable Submit Stack progress left on disk, or null when nothing is pending. */
+  submitStackProgress?: () => Promise<PublishProgress | null>
   reconciliationPreview?: (stackKey: string) => Promise<ReconciliationPreview>
   pullRequest(number: number): Promise<PullRequest & { body: string }>
   listNativeStacks?: () => Promise<NativeStack[]>

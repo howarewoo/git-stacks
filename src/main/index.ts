@@ -12,7 +12,7 @@ import {
   getCommitDiff,
   getPushPreview,
 } from './git'
-import { previewStack } from './stacks'
+import { getSubmitStackProgress, previewStack } from './stacks'
 import { previewReconciliationRepair } from './reconciliation'
 import { getPullRequest } from './github'
 import type { GitAction, RecentRepository, StackKind } from '../shared/types'
@@ -164,6 +164,10 @@ function installHandlers() {
     return readRepository(async (root) =>
       previewReconciliationRepair(root, await getSnapshot(root), stackKey),
     )
+  })
+  ipcMain.handle('repository:submit-stack-progress', (event) => {
+    validateSender(event)
+    return readRepository((root) => getSubmitStackProgress(root))
   })
   ipcMain.handle('repository:pull-request', (event, number: number) => {
     validateSender(event)

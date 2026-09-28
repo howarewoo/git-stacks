@@ -2,6 +2,7 @@ import type {
   Branch,
   Commit,
   GitAction,
+  PublishLayerChoice,
   PushPreview,
   StackKind,
   StackPreview,
@@ -35,9 +36,13 @@ export type WorkflowActionInput =
       /** Exact branch name the person typed before remote history may be replaced. */
       confirmation: string
       confirmationTarget: string | null
-      draft: boolean
-      titles: Record<string, string>
       mergeMethod: string
+    }
+  | {
+      kind: 'submit'
+      preview: StackPreview
+      allowForce: boolean
+      layers: Record<string, PublishLayerChoice>
     }
 
 /** The repository state captured when the dialog opened. */
@@ -78,6 +83,8 @@ export function workflowActionLabel(input: WorkflowActionInput): string {
       return input.mode === 'cherryPick' ? 'Cherry-pick commit' : 'Revert commit'
     case 'stack':
       return stackActionLabel(input.operation)
+    case 'submit':
+      return 'Submit stack'
     case 'pr':
       return 'Update pull request'
     case 'confirm':
@@ -154,9 +161,17 @@ export function workflowAction(
         type: 'executeStack',
         token: input.preview.token,
         allowForce: input.allowForce,
-        draft: input.draft,
-        titles: input.titles,
         mergeMethod: (input.mergeMethod || 'squash') as 'merge' | 'squash' | 'rebase',
       }
+    case 'submit': {
+      if (!input.preview.publish || input.preview.publish.layers.length === 0) return null
+      if (input.preview.blockers.length > 0) return null
+      return {
+        type: 'submitStack',
+        token: input.preview.token,
+        allowForce: input.allowForce,
+        layers: input.layers,
+      }
+    }
   }
 }

@@ -97,8 +97,6 @@ function executePreview(repo: string, token: string) {
     type: 'executeStack',
     token,
     allowForce: false,
-    draft: false,
-    titles: {},
     mergeMethod: 'squash',
   })
 }

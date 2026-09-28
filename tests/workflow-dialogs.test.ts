@@ -431,16 +431,12 @@ test('the representative flows produce their exact reviewed payloads', () => {
         confirmation: '',
         confirmationTarget: null,
         allowForce: false,
-        draft: true,
-        titles: { 'feature/checkout': 'Add checkout validation' },
         mergeMethod: '',
       },
       {
         type: 'executeStack',
         token: 'preview-restack-1',
         allowForce: false,
-        draft: true,
-        titles: { 'feature/checkout': 'Add checkout validation' },
         mergeMethod: 'squash',
       },
     ],
@@ -793,15 +789,17 @@ test('a forced publication still needs the exact branch name typed', () => {
   assert.equal(
     workflowAction(
       {
-        kind: 'stack',
-        operation: 'publish',
+        kind: 'submit',
         preview: publishPreview,
         allowForce: true,
-        confirmation: '',
-        confirmationTarget: featureBranch.name,
-        draft: true,
-        titles: { 'feature/checkout': 'Checkout validation' },
-        mergeMethod: 'squash',
+        layers: {
+          'feature/checkout': {
+            title: 'Checkout validation',
+            body: '',
+            draft: true,
+            updateBase: false,
+          },
+        },
       },
       context,
     ),

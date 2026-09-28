@@ -211,6 +211,7 @@ export const restackPreview: StackPreview = {
   warnings: ['feature/checkout-tests has an open draft pull request; its base moves with it.'],
   blockers: [],
   mergeMethods: ['merge', 'squash', 'rebase'],
+  publish: null,
 }
 
 export const blockedRestackPreview: StackPreview = {

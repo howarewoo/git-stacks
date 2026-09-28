@@ -449,14 +449,15 @@ test('publishStack automatically registers native stack on origin and reflects i
     const preview = await previewStack(harness.repo, snapshot, 'publish', 'feature/step-2')
     assert.deepEqual(preview.blockers, [])
     const publishRes = await runStackAction(harness.repo, {
-      type: 'executeStack',
+      type: 'submitStack',
       token: preview.token,
       allowForce: false,
-      draft: false,
-      titles: { 'feature/step-1': 'Step 1 PR', 'feature/step-2': 'Step 2 PR' },
-      mergeMethod: 'squash',
+      layers: {
+        'feature/step-1': { title: 'Step 1 PR', body: '', draft: false, updateBase: true },
+        'feature/step-2': { title: 'Step 2 PR', body: '', draft: false, updateBase: true },
+      },
     })
-    assert.match(publishRes.message, /Published 3 stack pull requests/u)
+    assert.match(publishRes.message, /Submitted 3 stack layers/u)
 
     const stacks = await listPullRequestStacks('acme', 'widgets')
     assert.equal(stacks.length, 1)
@@ -506,12 +507,14 @@ test('publishStack propagates native registration failure when preview capabilit
 
     await assert.rejects(
       runStackAction(harness.repo, {
-        type: 'executeStack',
+        type: 'submitStack',
         token: preview.token,
         allowForce: false,
-        draft: false,
-        titles: { 'feature/step-1': 'Step 1 PR', 'feature/step-2': 'Step 2 PR' },
-        mergeMethod: 'squash',
+        layers: {
+          'feature/step-1': { title: 'Step 1 PR', body: '', draft: false, updateBase: true },
+          'feature/step-2': { title: 'Step 2 PR', body: '', draft: false, updateBase: true },
+          'feature/step-3': { title: 'Step 3 PR', body: '', draft: false, updateBase: true },
+        },
       }),
       /closed stack|cannot add pull requests/iu,
     )
@@ -572,14 +575,15 @@ test('publishStack validates a matched stack that already contains every publish
     const preview = await previewStack(harness.repo, snapshot, 'publish', 'feature/step-2')
     assert.deepEqual(preview.blockers, [])
     const published = await runStackAction(harness.repo, {
-      type: 'executeStack',
+      type: 'submitStack',
       token: preview.token,
       allowForce: false,
-      draft: false,
-      titles: { 'feature/step-1': 'Step 1 PR', 'feature/step-2': 'Step 2 PR' },
-      mergeMethod: 'squash',
+      layers: {
+        'feature/step-1': { title: 'Step 1 PR', body: '', draft: false, updateBase: true },
+        'feature/step-2': { title: 'Step 2 PR', body: '', draft: false, updateBase: true },
+      },
     })
-    assert.match(published.message, /Published 3 stack pull requests/u)
+    assert.match(published.message, /Submitted 3 stack layers/u)
     assert.equal((await harness.readState()).stacks?.length, 1)
     assert.deepEqual(
       (await harness.readState()).stacks?.[0]?.pull_requests.map((pr) => pr.number),
@@ -600,12 +604,14 @@ test('publishStack validates a matched stack that already contains every publish
     assert.deepEqual(closedPreview.blockers, [])
     await assert.rejects(
       runStackAction(harness.repo, {
-        type: 'executeStack',
+        type: 'submitStack',
         token: closedPreview.token,
         allowForce: false,
-        draft: false,
-        titles: { 'feature/step-1': 'Step 1 PR', 'feature/step-2': 'Step 2 PR' },
-        mergeMethod: 'squash',
+        layers: {
+          'feature/step-1': { title: 'Step 1 PR', body: '', draft: false, updateBase: true },
+          'feature/step-2': { title: 'Step 2 PR', body: '', draft: false, updateBase: true },
+          'feature/step-3': { title: 'Step 3 PR', body: '', draft: false, updateBase: true },
+        },
       }),
       /closed stack #99/u,
     )
@@ -683,12 +689,14 @@ async function registerBottomOnlyStack(harness: GitHubHarness, stackNumber = 99)
 
 function publishAction(token: string) {
   return {
-    type: 'executeStack' as const,
+    type: 'submitStack' as const,
     token,
     allowForce: false,
-    draft: false,
-    titles: { 'feature/step-1': 'Step 1 PR', 'feature/step-2': 'Step 2 PR' },
-    mergeMethod: 'squash' as const,
+    layers: {
+      'feature/step-1': { title: 'Step 1 PR', body: '', draft: false, updateBase: true },
+      'feature/step-2': { title: 'Step 2 PR', body: '', draft: false, updateBase: true },
+      'feature/step-3': { title: 'Step 3 PR', body: '', draft: false, updateBase: true },
+    },
   }
 }
 
@@ -768,7 +776,9 @@ test('publishStack rejects an already-registered stack when a published pull req
 
       await assert.rejects(
         runStackAction(harness.repo, publishAction(preview.token)),
-        drift === 'force-push' ? /head moved to/u : /base changed from main to release/u,
+        drift === 'force-push'
+          ? /Pull request #101 (head moved to|is registered in stack #99 at .* rather than)/u
+          : /base changed from main to release/u,
         drift,
       )
       assert.deepEqual(stackWrites, [], drift)
@@ -811,7 +821,7 @@ test('publishStack accepts an unchanged already-registered stack without creatin
     )
 
     const published = await runStackAction(harness.repo, publishAction(preview.token))
-    assert.match(published.message, /Published 3 stack pull requests/u)
+    assert.match(published.message, /Submitted 3 stack layers/u)
     assert.deepEqual(stackWrites, [])
   })
 })
@@ -840,15 +850,13 @@ test('publishStack rejects an already-registered stack another actor unstacked b
             /^https:\/\/api\.github\.com\/repos\/acme\/widgets\/stacks/u.test(url)
           )
             stackWrites.push(`${method} ${url}`)
-          // The readback of the top published pull request is the last request before the native
-          // stack step, so the stacks listing that follows it is the one selecting the
-          // registration target.
+          // The canonical readback of the top published pull request is the last request
+          // before the append, so the unstack that lands on it must be observed by the
+          // registration check that follows.
           const body = url.endsWith('/graphql') ? String(init?.body ?? '') : ''
           if (body.includes('pullRequest(number: $number)') && body.includes('"number":103'))
             topReadback = true
           const response = await inner(input, init)
-          // The external unstack lands right after that listing, so the canonical re-read that
-          // follows observes the same published pull requests with no stack membership at all.
           if (armed && topReadback && method === 'GET' && url === STACKS_LISTING) {
             armed = false
             await unstackExternally(inner, 99)
@@ -897,14 +905,20 @@ test('publishStack rejects extending a partially registered stack when an alread
             /^https:\/\/api\.github\.com\/repos\/acme\/widgets\/stacks/u.test(url)
           )
             stackWrites.push(`${method} ${url}`)
-          // The readback of the top published pull request is the last request before the
-          // registration target is chosen from the unparameterized stacks listing.
-          const body = url.endsWith('/graphql') ? String(init?.body ?? '') : ''
-          if (body.includes('pullRequest(number: $number)') && body.includes('"number":103'))
+          // The canonical readback of the top published pull request is the last request
+          // before the append.
+          const readback = url.endsWith('/graphql') ? String(init?.body ?? '') : ''
+          if (
+            readback.includes('pullRequest(number: $number)') &&
+            readback.includes('"number":103')
+          )
             topReadback = true
           const response = await inner(input, init)
           // The already-registered pull request is force-pushed after the stack that holds it
           // was selected, so only the append that follows can observe the moved commit.
+          // The already-registered pull request is force-pushed after the stack that holds it
+          // was listed, so only the registration check that follows can observe the moved
+          // commit.
           if (armed && topReadback && method === 'GET' && url === STACKS_LISTING) {
             armed = false
             await applyExternalDrift(harness, 'force-push')
@@ -919,7 +933,9 @@ test('publishStack rejects extending a partially registered stack when an alread
       (error) =>
         error instanceof NativeStackError &&
         error.status === 'invalid-chain' &&
-        /Pull request #101 head moved to/u.test(error.message),
+        /Pull request #101 (head moved to|is registered in stack #99 at .* rather than)/u.test(
+          error.message,
+        ),
     )
     assert.equal(armed, false)
     assert.deepEqual(stackWrites, [])
@@ -961,7 +977,7 @@ test('publishStack extends an unchanged partially registered stack with one appe
     )
 
     const published = await runStackAction(harness.repo, publishAction(preview.token))
-    assert.match(published.message, /Published 3 stack pull requests/u)
+    assert.match(published.message, /Submitted 3 stack layers/u)
     // The already-registered pull request keeps stack #99, so only the missing members are added.
     assert.deepEqual(stackWrites, ['POST https://api.github.com/repos/acme/widgets/stacks/99/add'])
     assert.deepEqual(
@@ -1126,12 +1142,13 @@ test('publishStack propagates native stack probe failures instead of reporting c
       assert.deepEqual(preview.blockers, [], testCase.name)
       await assert.rejects(
         runStackAction(harness.repo, {
-          type: 'executeStack',
+          type: 'submitStack',
           token: preview.token,
           allowForce: false,
-          draft: false,
-          titles: { 'feature/step-1': 'Step 1 PR', 'feature/step-2': 'Step 2 PR' },
-          mergeMethod: 'squash',
+          layers: {
+            'feature/step-1': { title: 'Step 1 PR', body: '', draft: false, updateBase: true },
+            'feature/step-2': { title: 'Step 2 PR', body: '', draft: false, updateBase: true },
+          },
         }),
         testCase.expected,
         testCase.name,
@@ -1163,12 +1180,14 @@ test('publishStack propagates a native stack probe timeout', async () => {
     assert.deepEqual(preview.blockers, [])
     await assert.rejects(
       runStackAction(harness.repo, {
-        type: 'executeStack',
+        type: 'submitStack',
         token: preview.token,
         allowForce: false,
-        draft: false,
-        titles: { 'feature/step-1': 'Step 1 PR', 'feature/step-2': 'Step 2 PR' },
-        mergeMethod: 'squash',
+        layers: {
+          'feature/step-1': { title: 'Step 1 PR', body: '', draft: false, updateBase: true },
+          'feature/step-2': { title: 'Step 2 PR', body: '', draft: false, updateBase: true },
+          'feature/step-3': { title: 'Step 3 PR', body: '', draft: false, updateBase: true },
+        },
       }),
       /did not complete within/iu,
     )

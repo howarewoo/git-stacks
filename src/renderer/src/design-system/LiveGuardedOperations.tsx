@@ -93,15 +93,17 @@ export function LiveGuardedOperations() {
               tooltip={forceBlocker?.message ?? 'Publish every branch, replacing remote history.'}
               onClick={() =>
                 show({
-                  kind: 'stack',
-                  operation: 'publish',
+                  kind: 'submit',
                   preview: publishPreview,
                   allowForce: true,
-                  confirmation: forceName,
-                  confirmationTarget: guardedBranch.name,
-                  draft: true,
-                  titles: { [guardedBranch.name]: 'Checkout validation' },
-                  mergeMethod: 'squash',
+                  layers: {
+                    [guardedBranch.name]: {
+                      title: 'Checkout validation',
+                      body: 'Fixture layer for the guarded publish specimen.',
+                      draft: true,
+                      updateBase: false,
+                    },
+                  },
                 })
               }
             >
