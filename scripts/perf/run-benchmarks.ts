@@ -99,7 +99,12 @@ async function main() {
     const status = await elapsed(() => listStatus(repos.workingTree))
     record('status', 'working-tree', SNAPSHOT_BUDGET_MS, status.ms, {
       filesListed: status.value.files.length,
-      filesTruncated: status.value.filesTruncated ? 1 : 0,
+      filesTruncated: status.value.truncated ? 1 : 0,
+    })
+    const workingSnapshot = await elapsed(() => getSnapshot(repos.workingTree))
+    record('snapshot', 'working-tree', SNAPSHOT_BUDGET_MS, workingSnapshot.ms, {
+      filesListed: workingSnapshot.value.limits.filesListed,
+      filesTruncated: workingSnapshot.value.limits.filesTruncated ? 1 : 0,
     })
 
     const history = await elapsed(() => getHistory(repos.longHistory, 'refs/heads/main', 0))

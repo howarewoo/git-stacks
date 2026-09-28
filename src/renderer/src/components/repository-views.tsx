@@ -865,6 +865,9 @@ export function StackView({
   const stale = members.filter(
     (branch) => branch.needsRestack || (branch.parentBehind ?? 0) > 0,
   ).length
+  const unknown = members.filter(
+    (branch) => branch.parent && branch.parentBehind === null && !branch.needsRestack,
+  ).length
   const blocked = busy || !!snapshot.operation || !!snapshot.stackOperation
   return (
     <div className="stacks-view">
@@ -929,8 +932,17 @@ export function StackView({
               ))}
             </Select>
             <p>
-              {stale
-                ? `${stale} branch${stale === 1 ? ' requires' : 'es require'} restacking.`
+              {stale || unknown
+                ? [
+                    stale
+                      ? `${stale} branch${stale === 1 ? ' requires' : 'es require'} restacking.`
+                      : '',
+                    unknown
+                      ? `${unknown} parent comparison${unknown === 1 ? ' is' : 's are'} unavailable. Check ancestry before publishing.`
+                      : '',
+                  ]
+                    .filter(Boolean)
+                    .join(' ')
                 : 'Review the stack, publish its PRs, and merge from the base upward.'}
             </p>
             <div className="workflow-row">
@@ -951,7 +963,7 @@ export function StackView({
               </Button>
               <Button
                 size="sm"
-                variant={stale ? 'secondary' : 'accent'}
+                variant={stale || unknown ? 'secondary' : 'accent'}
                 disabled={
                   blocked ||
                   !snapshot.github.available ||
@@ -994,6 +1006,8 @@ export function StackView({
                   {branch.current ? <Badge variant="accent">current</Badge> : null}
                   {branch.needsRestack || (branch.parentBehind ?? 0) > 0 ? (
                     <Badge variant="warning">Requires restack</Badge>
+                  ) : branch.parent && branch.parentBehind === null ? (
+                    <Badge variant="secondary">Parent comparison unavailable</Badge>
                   ) : null}
                 </div>
                 <div className="stack-member-meta">

@@ -943,15 +943,24 @@ function App() {
                 </DropdownMenu.Item>
                 <DropdownMenu.Item
                   disabled={
-                    operationActive || !snapshot?.files.length || Boolean(shapeReason('stash'))
+                    operationActive ||
+                    !snapshot?.files.length ||
+                    snapshot.limits.filesTruncated ||
+                    Boolean(shapeReason('stash'))
                   }
                   onSelect={() => openWorkflow({ kind: 'stash' })}
                 >
                   Stash changes…
                 </DropdownMenu.Item>
-                {shapeReason('merge') || shapeReason('forcePush') || shapeReason('stash') ? (
+                {shapeReason('merge') ||
+                shapeReason('forcePush') ||
+                shapeReason('stash') ||
+                snapshot?.limits.filesTruncated ? (
                   <p className="workflow-note" role="status">
-                    {shapeReason('merge') ?? shapeReason('forcePush') ?? shapeReason('stash')}
+                    {shapeReason('merge') ??
+                      shapeReason('forcePush') ??
+                      shapeReason('stash') ??
+                      'Stash unavailable while the changed-file listing is incomplete.'}
                   </p>
                 ) : null}
                 <DropdownMenu.Separator className="workflow-menu-separator" />
@@ -1390,6 +1399,11 @@ function App() {
                     ? 'The parent or recorded boundary changed. Preview a stack restack to update this branch and its descendants together.'
                     : `${selectedBranch.parent} has ${selectedBranch.parentBehind ?? 0} commits not in this branch. Preview a restack before publishing.`}
                 </p>
+              </div>
+            ) : selectedBranch.parent && selectedBranch.parentBehind === null ? (
+              <div className="restack-notice">
+                <strong>Parent comparison unavailable</strong>
+                <p>Parent ancestry was not measured. Check the stack before publishing.</p>
               </div>
             ) : null}
           </section>

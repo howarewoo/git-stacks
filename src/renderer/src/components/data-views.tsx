@@ -605,10 +605,17 @@ export function StashesView({
           <span className="list-subtitle">{snapshot.stashes.length} saved</span>
         </div>
         <Button
-          disabled={snapshot.files.length === 0 || busy || Boolean(stashReason)}
+          disabled={
+            snapshot.files.length === 0 ||
+            busy ||
+            snapshot.limits.filesTruncated ||
+            Boolean(stashReason)
+          }
           tooltip={
             stashReason ??
-            'Shelve current working changes into a local stash and restore a clean tree. Choose whether untracked files are included.'
+            (snapshot.limits.filesTruncated
+              ? 'Stash unavailable while the changed-file listing is incomplete.'
+              : 'Shelve current working changes into a local stash and restore a clean tree. Choose whether untracked files are included.')
           }
           onClick={onStash}
           size="sm"

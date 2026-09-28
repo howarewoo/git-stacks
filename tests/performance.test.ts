@@ -279,6 +279,23 @@ test('a huge changed-file listing is bounded and reported instead of hanging', a
   }
 })
 
+test('snapshot enriches changed files across multiple bounded pathspec batches', async () => {
+  const { root, repo, git } = await repository()
+  try {
+    const paths = Array.from({ length: 1100 }, (_, index) => `tracked-${index}.txt`)
+    await Promise.all(paths.map((filePath) => writeFile(join(repo, filePath), 'before\n')))
+    git('add', '.')
+    git('commit', '-m', 'Tracked files')
+    await Promise.all(paths.map((filePath) => writeFile(join(repo, filePath), 'after\n')))
+    const snapshot = await getSnapshot(repo)
+    assert.equal(snapshot.files.length, paths.length)
+    assert.equal(snapshot.limits.filesTruncated, false)
+    assert.ok(snapshot.files.every((file) => !file.submodule && !file.sparseExcluded))
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 test('a capped rename status drops only the incomplete final pair', () => {
   const complete = '?? standalone.txt\0R  new.txt\0old.txt\0'
   const partial = '?? standalone.txt\0R  new.txt\0'

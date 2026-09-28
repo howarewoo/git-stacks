@@ -10,7 +10,7 @@ import {
   changePaths,
   matchesPullRequest,
 } from '../src/renderer/src/components/data-views'
-import { DiffView, diffLineKind } from '../src/renderer/src/components/repository-views'
+import { DiffView, StackView, diffLineKind } from '../src/renderer/src/components/repository-views'
 import { RepositoryHoverCardProvider } from '../src/renderer/src/components/repository-hover-cards'
 import { TooltipProvider } from '../src/renderer/src/components/ui/tooltip'
 import {
@@ -367,6 +367,61 @@ test('stash rows show the ref and OID with distinct action labels', () => {
   assert.match(markup, /aria-label="Apply stash@\{0\}"/)
   assert.match(markup, /aria-label="Pop stash@\{0\}"/)
   assert.match(markup, /aria-label="Drop stash@\{0\}"/)
+})
+
+test('truncated changes disable stash creation in both data views', () => {
+  const snapshot = {
+    ...changesSnapshots.mixed,
+    limits: { ...changesSnapshots.mixed.limits, filesTruncated: true },
+  }
+  const stashMarkup = render(
+    React.createElement(StashesView, {
+      busy: false,
+      busyAction: null,
+      onRequest: noopRequest,
+      onStash: () => undefined,
+      operationActive: false,
+      runAction: noopRunAction,
+      snapshot,
+    }),
+  )
+  assert.match(
+    changes(snapshot),
+    /<button[^>]*disabled[^>]*>[^<]*<svg[\s\S]*?Stash changes<\/button>/,
+  )
+  assert.match(stashMarkup, /Stash unavailable while the changed-file listing is incomplete/)
+  assert.match(stashMarkup, /<button[^>]*disabled[^>]*>[\s\S]*?Stash current changes<\/button>/)
+})
+
+test('unmeasured parent comparison is not presented as publish-ready', () => {
+  const snapshot = {
+    ...changesSnapshots.clean,
+    branches: [
+      {
+        ...changesSnapshots.clean.branches[0],
+        ref: 'refs/heads/feature/unmeasured',
+        name: 'feature/unmeasured',
+        current: true,
+        parent: changesSnapshots.clean.defaultBranch,
+        parentBehind: null,
+        needsRestack: false,
+      },
+    ],
+    currentBranch: 'feature/unmeasured',
+  }
+  const markup = render(
+    React.createElement(StackView, {
+      snapshot,
+      busy: false,
+      onRequest: noopRequest,
+      onSelect: () => undefined,
+      onCreate: () => undefined,
+      search: '',
+    }),
+  )
+  assert.match(markup, /Parent comparison unavailable/)
+  assert.match(markup, /Check ancestry before publishing/)
+  assert.doesNotMatch(markup, /Review the stack, publish its PRs/)
 })
 
 test('an empty stash list states the recovery instead of a count of zero actions', () => {
