@@ -13,5 +13,6 @@ resources/git/
 !.impeccable/
 .impeccable/*
 !.impeccable/design.json
+benchmarks/
 test-results/
 playwright-report/

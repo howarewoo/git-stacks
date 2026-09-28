@@ -25,6 +25,7 @@ import {
   stagedOnlyChanges,
   unstagedOnlyChanges,
 } from '../../../src/renderer/src/design-system/data-fixtures'
+import { EMPTY_SNAPSHOT_LIMITS } from '../../../src/shared/performance'
 import type { FixtureScenario } from './types'
 import type { ScenarioName } from './manifest'
 
@@ -155,6 +156,7 @@ function repository(overrides: Partial<RepositorySnapshot> = {}): RepositorySnap
     headOid: checkoutBranch.oid ?? null,
     github: { available: true, message: 'GitHub metadata available; 1 pull request' },
     capabilities: standardCapabilities,
+    limits: EMPTY_SNAPSHOT_LIMITS,
     ...overrides,
   }
 }

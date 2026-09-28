@@ -24,6 +24,7 @@ export type FixtureCall =
   | 'openExternal'
   | 'gitRuntimeStatus'
   | 'setSystemGit'
+  | 'cancel'
 
 /** One entry of the ordered {@link FixtureControl.calls} log. */
 export interface FixtureCallRecord {

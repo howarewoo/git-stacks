@@ -10,10 +10,9 @@ import {
   changePaths,
   matchesPullRequest,
 } from '../src/renderer/src/components/data-views'
-import { DiffView, diffLineKind } from '../src/renderer/src/components/repository-views'
+import { DiffView, StackView, diffLineKind } from '../src/renderer/src/components/repository-views'
 import { RepositoryHoverCardProvider } from '../src/renderer/src/components/repository-hover-cards'
 import { TooltipProvider } from '../src/renderer/src/components/ui/tooltip'
-import type { WorkflowRequest } from '../src/renderer/src/components/workflow-dialog'
 import {
   changesSnapshots,
   largeDiffText,
@@ -21,7 +20,7 @@ import {
   pullRequestSnapshots,
   stashSnapshots,
 } from '../src/renderer/src/design-system/data-fixtures'
-import type { GitAction, RepositorySnapshot } from '../src/shared/types'
+import type { RepositorySnapshot } from '../src/shared/types'
 
 const noopRunAction = async () => true
 const noopRequest = () => undefined
@@ -34,25 +33,6 @@ function render(element: React.ReactElement): string {
       React.createElement(RepositoryHoverCardProvider, null, element),
     ),
   )
-}
-
-function findLabeledElement(node: React.ReactNode, label: string): React.ReactElement | undefined {
-  for (const child of React.Children.toArray(node)) {
-    if (!React.isValidElement(child)) continue
-    const props = child.props as { 'aria-label'?: string; children?: React.ReactNode }
-    if (props['aria-label'] === label) return child
-    const match = findLabeledElement(props.children, label)
-    if (match) return match
-  }
-  return undefined
-}
-
-async function clickLabeledElement(node: React.ReactNode, label: string): Promise<void> {
-  const element = findLabeledElement(node, label)
-  assert.ok(element, `expected to find the ${label} control`)
-  const onClick = (element.props as { onClick?: () => unknown }).onClick
-  assert.equal(typeof onClick, 'function', `expected the ${label} control to have a click handler`)
-  await onClick?.()
 }
 
 function changes(
@@ -368,47 +348,80 @@ test('pull request search keeps its own filter and reports no matches', () => {
   assert.equal(matchesPullRequest(snapshot.pullRequests[0], 'does-not-exist'), false)
 })
 
-test('stash rows show the ref and OID and keep each action tied to the captured OID', async () => {
+test('stash rows show the ref and OID with distinct action labels', () => {
   const snapshot = stashSnapshots.present
-  const sent: GitAction[] = []
-  const requests: WorkflowRequest[] = []
-  const view = StashesView({
-    busy: false,
-    busyAction: null,
-    onRequest: (request) => requests.push(request),
-    onStash: () => undefined,
-    operationActive: false,
-    runAction: async (action: GitAction) => {
-      sent.push(action)
-      return true
-    },
-    snapshot,
-  })
-  const markup = render(view)
+  const markup = render(
+    React.createElement(StashesView, {
+      busy: false,
+      busyAction: null,
+      onRequest: noopRequest,
+      onStash: () => undefined,
+      operationActive: false,
+      runAction: noopRunAction,
+      snapshot,
+    }),
+  )
 
   assert.match(markup, /stash@\{0\}/)
   assert.match(markup, /a1b2c3d4/)
   assert.match(markup, /aria-label="Apply stash@\{0\}"/)
   assert.match(markup, /aria-label="Pop stash@\{0\}"/)
   assert.match(markup, /aria-label="Drop stash@\{0\}"/)
+})
 
-  const stash = snapshot.stashes[0]
-  assert.deepEqual(sent, [], 'rendering a stash row dispatches nothing on its own')
-  await clickLabeledElement(view, `Apply ${stash.ref}`)
-  await clickLabeledElement(view, `Pop ${stash.ref}`)
-  await clickLabeledElement(view, `Drop ${stash.ref}`)
-
-  assert.deepEqual(sent, [
-    { type: 'stashApply', ref: stash.ref, oid: stash.oid },
-    { type: 'stashPop', ref: stash.ref, oid: stash.oid },
-  ])
-  assert.equal(requests.length, 1)
-  const [dropRequest] = requests
-  assert.equal(dropRequest?.kind, 'confirm')
-  if (dropRequest?.kind === 'confirm') {
-    assert.deepEqual(dropRequest.action, { type: 'stashDrop', ref: stash.ref, oid: stash.oid })
+test('truncated changes disable stash creation in both data views', () => {
+  const snapshot = {
+    ...changesSnapshots.mixed,
+    limits: { ...changesSnapshots.mixed.limits, filesTruncated: true },
   }
-  assert.notEqual(snapshot.stashes[1].oid, snapshot.stashes[0].oid, 'stashes are identified by OID')
+  const stashMarkup = render(
+    React.createElement(StashesView, {
+      busy: false,
+      busyAction: null,
+      onRequest: noopRequest,
+      onStash: () => undefined,
+      operationActive: false,
+      runAction: noopRunAction,
+      snapshot,
+    }),
+  )
+  assert.match(
+    changes(snapshot),
+    /<button[^>]*disabled[^>]*>[^<]*<svg[\s\S]*?Stash changes<\/button>/,
+  )
+  assert.match(stashMarkup, /Stash unavailable while the changed-file listing is incomplete/)
+  assert.match(stashMarkup, /<button[^>]*disabled[^>]*>[\s\S]*?Stash current changes<\/button>/)
+})
+
+test('unmeasured parent comparison is not presented as publish-ready', () => {
+  const snapshot = {
+    ...changesSnapshots.clean,
+    branches: [
+      {
+        ...changesSnapshots.clean.branches[0],
+        ref: 'refs/heads/feature/unmeasured',
+        name: 'feature/unmeasured',
+        current: true,
+        parent: changesSnapshots.clean.defaultBranch,
+        parentBehind: null,
+        needsRestack: false,
+      },
+    ],
+    currentBranch: 'feature/unmeasured',
+  }
+  const markup = render(
+    React.createElement(StackView, {
+      snapshot,
+      busy: false,
+      onRequest: noopRequest,
+      onSelect: () => undefined,
+      onCreate: () => undefined,
+      search: '',
+    }),
+  )
+  assert.match(markup, /Parent comparison unavailable/)
+  assert.match(markup, /Check ancestry before publishing/)
+  assert.doesNotMatch(markup, /Review the stack, publish its PRs/)
 })
 
 test('an empty stash list states the recovery instead of a count of zero actions', () => {

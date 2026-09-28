@@ -44,6 +44,10 @@ import type {
   RecentRepository,
   RepositorySnapshot,
 } from '../../shared/types'
+import { LIST_PAGE_SIZE } from '../../shared/performance'
+import { ListWindowMore } from './components/list-window'
+import { useListWindow } from './lib/list-window'
+import { createRequestGate } from './lib/request-gate'
 import { Badge } from './components/ui/badge'
 import { Button, IconButton } from './components/ui/button'
 import { Checkbox } from './components/ui/checkbox'
@@ -286,12 +290,15 @@ function App() {
   const workflowSequence = React.useRef(0)
 
   const [showDetails, setShowDetails] = React.useState(true)
-  const refreshSequence = React.useRef(0)
   const busyRef = React.useRef<string | null>(null)
   const openingRef = React.useRef(false)
   const searchRef = React.useRef<HTMLInputElement>(null)
   const deleteCancelRef = React.useRef<HTMLButtonElement>(null)
   const deleteTriggerRef = React.useRef<HTMLButtonElement>(null)
+  // One gate covers every read that can paint the repository: an open, a
+  // refresh, or the snapshot either returns. Switching repositories resets it
+  // so no result computed for the previous repository is ever applied.
+  const repositoryGate = React.useRef(createRequestGate()).current
 
   const setSnapshotAndSelection = React.useCallback((next: RepositorySnapshot) => {
     setSnapshot(next)
@@ -304,21 +311,20 @@ function App() {
 
   const refreshSnapshot = React.useCallback(async (): Promise<RepositorySnapshot | null> => {
     if (!desktop) return null
-    const sequence = ++refreshSequence.current
+    const claim = repositoryGate.claim()
     setRefreshing(true)
     try {
       const next = await desktop.refresh()
-      if (sequence !== refreshSequence.current) return null
+      if (!repositoryGate.current(claim)) return null
       setSnapshotAndSelection(next)
-
       return next
     } catch (value) {
-      if (sequence === refreshSequence.current) setError(readableError(value))
+      if (repositoryGate.current(claim)) setError(readableError(value))
       return null
     } finally {
-      if (sequence === refreshSequence.current) setRefreshing(false)
+      if (repositoryGate.current(claim)) setRefreshing(false)
     }
-  }, [desktop, setSnapshotAndSelection])
+  }, [desktop, repositoryGate, setSnapshotAndSelection])
 
   React.useEffect(() => {
     let cancelled = false
@@ -362,13 +368,17 @@ function App() {
     async (path?: string) => {
       if (!desktop || openingRef.current || busyRef.current) return
       openingRef.current = true
+      // Resetting the gate before awaiting retires every in-flight refresh, so
+      // a snapshot taken from the previous repository cannot land here.
+      repositoryGate.reset()
+      const claim = repositoryGate.claim()
       setOpening(true)
       setError(null)
       setActionError(null)
       setNotice(null)
       try {
         const next = await desktop.openRepository(path)
-        if (next) {
+        if (next && repositoryGate.current(claim)) {
           setSnapshotAndSelection(next)
           setDeleteTarget(null)
           setWorkflow(null)
@@ -376,17 +386,17 @@ function App() {
           setCommitAmend(false)
           setCommitMessage('')
           setWorkspaceView('branches')
-          const repositories = await desktop.recentRepositories().catch(() => null)
-          if (repositories) setRecentRepositories(repositories)
         }
+        const repositories = await desktop.recentRepositories().catch(() => null)
+        if (repositories) setRecentRepositories(repositories)
       } catch (value) {
-        setError(readableError(value))
+        if (repositoryGate.current(claim)) setError(readableError(value))
       } finally {
+        if (repositoryGate.current(claim)) setOpening(false)
         openingRef.current = false
-        setOpening(false)
       }
     },
-    [desktop, setSnapshotAndSelection],
+    [desktop, repositoryGate, setSnapshotAndSelection],
   )
 
   const isBusy = Boolean(busyAction || opening || refreshing)
@@ -517,10 +527,15 @@ function App() {
     () => getBranchTreeGeometry(visibleBranches, branchByName),
     [branchByName, visibleBranches],
   )
+  const branchWindow = useListWindow(visibleBranches, LIST_PAGE_SIZE)
 
   const changeState = React.useMemo(
     () => changeGroups(snapshot?.files ?? [], search),
     [snapshot, search],
+  )
+  const visiblePullRequests = React.useMemo(
+    () => (snapshot?.pullRequests ?? []).filter((pr) => matchesPullRequest(pr, search)),
+    [search, snapshot],
   )
   const stagedFiles = changeState.staged
   const conflictedFiles = changeState.conflicted
@@ -928,15 +943,24 @@ function App() {
                 </DropdownMenu.Item>
                 <DropdownMenu.Item
                   disabled={
-                    operationActive || !snapshot?.files.length || Boolean(shapeReason('stash'))
+                    operationActive ||
+                    !snapshot?.files.length ||
+                    snapshot.limits.filesTruncated ||
+                    Boolean(shapeReason('stash'))
                   }
                   onSelect={() => openWorkflow({ kind: 'stash' })}
                 >
                   Stash changes…
                 </DropdownMenu.Item>
-                {shapeReason('merge') || shapeReason('forcePush') || shapeReason('stash') ? (
+                {shapeReason('merge') ||
+                shapeReason('forcePush') ||
+                shapeReason('stash') ||
+                snapshot?.limits.filesTruncated ? (
                   <p className="workflow-note" role="status">
-                    {shapeReason('merge') ?? shapeReason('forcePush') ?? shapeReason('stash')}
+                    {shapeReason('merge') ??
+                      shapeReason('forcePush') ??
+                      shapeReason('stash') ??
+                      'Stash unavailable while the changed-file listing is incomplete.'}
                   </p>
                 ) : null}
                 <DropdownMenu.Separator className="workflow-menu-separator" />
@@ -1013,6 +1037,20 @@ function App() {
     </div>
   )
 
+  // Extreme repositories are reported, never silently truncated: the reader
+  // learns which per-branch analysis the budget left out and what that means.
+  const renderBranchBudgetNote = () => {
+    const skipped = snapshot?.limits.branchesSkipped ?? 0
+    if (!skipped) return null
+    return (
+      <p className="workflow-note" role="status">
+        {skipped} branch{skipped === 1 ? ' has' : 'es have'} incomplete parent or behind analysis
+        under the snapshot budget. Recorded parents remain available; inspect omitted branches with
+        Git when an exact comparison is needed.
+      </p>
+    )
+  }
+
   const renderBranchList = () => {
     if (!snapshot) return null
     if (visibleBranches.length === 0) {
@@ -1045,124 +1083,134 @@ function App() {
     }
 
     return (
-      <div className="branch-list" role="group" aria-label="Repository branches">
-        {visibleBranches.map((branch, branchIndex) => {
-          const tree = branchTree.rows[branchIndex]
-          const pullRequest = branch.pr
-          const selected = branch.ref === selectedBranch?.ref
-          return (
-            <div
-              className={cn('branch-row', selected && 'branch-row-selected')}
-              key={branch.ref}
-              style={{ '--branch-depth': tree.depth } as React.CSSProperties}
-            >
-              <BranchHoverCard branch={branch}>
-                <button
-                  aria-current={selected ? 'true' : undefined}
-                  aria-label={`${branch.name}${branch.remote ? ', remote branch' : ''}${branch.current ? ', current branch' : ''}`}
-                  className="branch-select"
-                  onClick={() => setSelectedBranchRef(branch.ref)}
-                  type="button"
-                />
-              </BranchHoverCard>
-              {tree.trunks.map((trunk, segmentIndex) => (
-                <span
-                  aria-hidden="true"
-                  className={cn('branch-tree-trunk', `branch-tree-trunk-${trunk.kind}`)}
-                  key={`trunk-${segmentIndex}`}
-                  style={{ '--branch-lane': trunk.lane } as React.CSSProperties}
-                />
-              ))}
-              {tree.elbows.map((elbow, segmentIndex) => (
-                <span
-                  aria-hidden="true"
-                  className="branch-tree-elbow"
-                  key={`elbow-${segmentIndex}`}
-                  style={{ '--branch-lane': elbow.lane } as React.CSSProperties}
-                />
-              ))}
-              <span className={cn('branch-icon', branch.current && 'branch-icon-current')}>
-                {branch.remote ? (
-                  <Cloud className="size-3.5" />
-                ) : (
-                  <GitBranch className="size-3.5" />
-                )}
-              </span>
-              <span className="branch-copy">
-                <span className="branch-name-line">
-                  <strong>{branch.name}</strong>
-                  {branch.current ? <Badge variant="accent">current</Badge> : null}
-                  {branch.remote ? <Badge variant="outline">remote</Badge> : null}
-                  {tree.cycle ? <Badge variant="warning">cycle</Badge> : null}
-                  {tree.missingParent ? <Badge variant="warning">parent missing</Badge> : null}
-                  {branch.needsRestack || (branch.parentBehind ?? 0) > 0 ? (
-                    <Badge variant="warning">Requires restack</Badge>
-                  ) : null}
+      <>
+        {renderBranchBudgetNote()}
+        <div className="branch-list" role="group" aria-label="Repository branches">
+          {branchWindow.visible.map((branch, branchIndex) => {
+            const tree = branchTree.rows[branchWindow.start + branchIndex]
+            const pullRequest = branch.pr
+            const selected = branch.ref === selectedBranch?.ref
+            return (
+              <div
+                className={cn('branch-row', selected && 'branch-row-selected')}
+                key={branch.ref}
+                style={{ '--branch-depth': tree.depth } as React.CSSProperties}
+              >
+                <BranchHoverCard branch={branch}>
+                  <button
+                    aria-current={selected ? 'true' : undefined}
+                    aria-label={`${branch.name}${branch.remote ? ', remote branch' : ''}${branch.current ? ', current branch' : ''}`}
+                    className="branch-select"
+                    onClick={() => setSelectedBranchRef(branch.ref)}
+                    type="button"
+                  />
+                </BranchHoverCard>
+                {tree.trunks.map((trunk, segmentIndex) => (
+                  <span
+                    aria-hidden="true"
+                    className={cn('branch-tree-trunk', `branch-tree-trunk-${trunk.kind}`)}
+                    key={`trunk-${segmentIndex}`}
+                    style={{ '--branch-lane': trunk.lane } as React.CSSProperties}
+                  />
+                ))}
+                {tree.elbows.map((elbow, segmentIndex) => (
+                  <span
+                    aria-hidden="true"
+                    className="branch-tree-elbow"
+                    key={`elbow-${segmentIndex}`}
+                    style={{ '--branch-lane': elbow.lane } as React.CSSProperties}
+                  />
+                ))}
+                <span className={cn('branch-icon', branch.current && 'branch-icon-current')}>
+                  {branch.remote ? (
+                    <Cloud className="size-3.5" />
+                  ) : (
+                    <GitBranch className="size-3.5" />
+                  )}
                 </span>
-                <span className="branch-summary">
+                <span className="branch-copy">
+                  <span className="branch-name-line">
+                    <strong>{branch.name}</strong>
+                    {branch.current ? <Badge variant="accent">current</Badge> : null}
+                    {branch.remote ? <Badge variant="outline">remote</Badge> : null}
+                    {tree.cycle ? <Badge variant="warning">cycle</Badge> : null}
+                    {tree.missingParent ? <Badge variant="warning">parent missing</Badge> : null}
+                    {branch.needsRestack || (branch.parentBehind ?? 0) > 0 ? (
+                      <Badge variant="warning">Requires restack</Badge>
+                    ) : null}
+                  </span>
+                  <span className="branch-summary">
+                    {pullRequest ? (
+                      <PullRequestHoverCard pr={pullRequest}>
+                        <a
+                          className="branch-pr-link"
+                          href={pullRequest.url}
+                          aria-label={`Open pull request #${pullRequest.number} on GitHub`}
+                          onClick={(event) => {
+                            event.preventDefault()
+                            desktop
+                              ?.openExternal(pullRequest.url)
+                              .catch((value) => setError(readableError(value)))
+                          }}
+                        >
+                          #{pullRequest.number}
+                          <ExternalLink className="size-3" aria-hidden="true" />
+                        </a>
+                      </PullRequestHoverCard>
+                    ) : null}
+                    <span className="branch-subject">{branch.subject || 'No commit subject'}</span>
+                  </span>
+                </span>
+                <span className="branch-metrics">
                   {pullRequest ? (
-                    <PullRequestHoverCard pr={pullRequest}>
-                      <a
-                        className="branch-pr-link"
-                        href={pullRequest.url}
-                        aria-label={`Open pull request #${pullRequest.number} on GitHub`}
-                        onClick={(event) => {
-                          event.preventDefault()
-                          desktop
-                            ?.openExternal(pullRequest.url)
-                            .catch((value) => setError(readableError(value)))
-                        }}
-                      >
-                        #{pullRequest.number}
-                        <ExternalLink className="size-3" aria-hidden="true" />
-                      </a>
-                    </PullRequestHoverCard>
+                    <Badge variant={checksVariant(pullRequest.checks)}>
+                      <ShieldCheck className="size-3" />
+                      {checkLabel(pullRequest.checks)}
+                    </Badge>
                   ) : null}
-                  <span className="branch-subject">{branch.subject || 'No commit subject'}</span>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <span
+                        className="ahead-behind relative z-[2] rounded-sm outline-none focus-visible:ring-2 focus-visible:ring-[var(--ring)]"
+                        tabIndex={0}
+                        aria-label={
+                          branch.upstream
+                            ? `${branch.ahead} ahead, ${branch.behind} behind ${branch.upstream}`
+                            : 'No upstream configured'
+                        }
+                      >
+                        <span className={branch.ahead > 0 ? 'metric-positive' : 'metric-muted'}>
+                          <ArrowUp className="size-3" />
+                          {branch.ahead}
+                        </span>
+                        <span className={branch.behind > 0 ? 'metric-negative' : 'metric-muted'}>
+                          <ArrowDown className="size-3" />
+                          {branch.behind}
+                        </span>
+                      </span>
+                    </TooltipTrigger>
+                    <TooltipContent>
+                      {branch.upstream
+                        ? `${branch.ahead} commits ahead and ${branch.behind} behind ${branch.upstream}`
+                        : 'Set an upstream to compare this branch with its remote.'}
+                    </TooltipContent>
+                  </Tooltip>
+                  <span className="branch-updated">{formatBranchDate(branch.updatedAt)}</span>
                 </span>
-              </span>
-              <span className="branch-metrics">
-                {pullRequest ? (
-                  <Badge variant={checksVariant(pullRequest.checks)}>
-                    <ShieldCheck className="size-3" />
-                    {checkLabel(pullRequest.checks)}
-                  </Badge>
-                ) : null}
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <span
-                      role="img"
-                      className="ahead-behind relative z-[2] rounded-sm outline-none focus-visible:ring-2 focus-visible:ring-[var(--ring)]"
-                      tabIndex={0}
-                      aria-label={
-                        branch.upstream
-                          ? `${branch.ahead} ahead, ${branch.behind} behind ${branch.upstream}`
-                          : 'No upstream configured'
-                      }
-                    >
-                      <span className={branch.ahead > 0 ? 'metric-positive' : 'metric-muted'}>
-                        <ArrowUp className="size-3" />
-                        {branch.ahead}
-                      </span>
-                      <span className={branch.behind > 0 ? 'metric-negative' : 'metric-muted'}>
-                        <ArrowDown className="size-3" />
-                        {branch.behind}
-                      </span>
-                    </span>
-                  </TooltipTrigger>
-                  <TooltipContent>
-                    {branch.upstream
-                      ? `${branch.ahead} commits ahead and ${branch.behind} behind ${branch.upstream}`
-                      : 'Set an upstream to compare this branch with its remote.'}
-                  </TooltipContent>
-                </Tooltip>
-                <span className="branch-updated">{formatBranchDate(branch.updatedAt)}</span>
-              </span>
-              <ChevronRight className="branch-chevron size-4" />
-            </div>
-          )
-        })}
-      </div>
+                <ChevronRight className="branch-chevron size-4" />
+              </div>
+            )
+          })}
+          <ListWindowMore
+            pageSize={LIST_PAGE_SIZE}
+            remaining={branchWindow.remaining}
+            previous={branchWindow.hasPrevious}
+            noun="branches"
+            onReveal={branchWindow.reveal}
+            onPrevious={branchWindow.retreat}
+          />
+        </div>
+      </>
     )
   }
 
@@ -1215,7 +1263,7 @@ function App() {
         }
         onCreate={openPrDialog}
         onRequest={openWorkflow}
-        pullRequests={snapshot.pullRequests.filter((pr) => matchesPullRequest(pr, search))}
+        pullRequests={visiblePullRequests}
         snapshot={snapshot}
       />
     )
@@ -1351,6 +1399,11 @@ function App() {
                     ? 'The parent or recorded boundary changed. Preview a stack restack to update this branch and its descendants together.'
                     : `${selectedBranch.parent} has ${selectedBranch.parentBehind ?? 0} commits not in this branch. Preview a restack before publishing.`}
                 </p>
+              </div>
+            ) : selectedBranch.parent && selectedBranch.parentBehind === null ? (
+              <div className="restack-notice">
+                <strong>Parent comparison unavailable</strong>
+                <p>Parent ancestry was not measured. Check the stack before publishing.</p>
               </div>
             ) : null}
           </section>

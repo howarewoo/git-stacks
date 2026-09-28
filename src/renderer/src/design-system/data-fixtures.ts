@@ -11,6 +11,7 @@ import type {
   RepositorySnapshot,
   Stash,
 } from '../../../shared/types'
+import { EMPTY_SNAPSHOT_LIMITS } from '../../../shared/performance'
 
 export const standardCapabilities: RepositoryCapabilities = {
   bare: false,
@@ -82,6 +83,7 @@ function snapshot(
     stackOperation: null,
     headOid: '0f1e2d3c4b5a69788796a5b4c3d2e1f001122334',
     github: { available: true, message: 'GitHub metadata available; 0 pull requests' },
+    limits: EMPTY_SNAPSHOT_LIMITS,
     capabilities: standardCapabilities,
     ...overrides,
   }

@@ -10,6 +10,9 @@ import {
   ShieldCheck,
 } from 'lucide-react'
 import type { ChangedFile, PullRequest, RepositorySnapshot } from '../../../shared/types'
+import { LIST_PAGE_SIZE } from '../../../shared/performance'
+import { useListWindow } from '../lib/list-window'
+import { ListWindowMore } from './list-window'
 import {
   actionBlockReason,
   capabilityReport,
@@ -141,6 +144,12 @@ export function ChangesView({
   onResolveConflict: (path: string) => void
   actionError: string | null
 }) {
+  const stagedWindow = useListWindow(groups.visibleStaged)
+  const unstagedWindow = useListWindow(groups.visibleUnstaged)
+  // Bulk actions act on the retained listing. When the main process had to cut
+  // that listing, staging "all" would silently skip the rest, so both are
+  // locked and the limit is stated.
+  const listingTruncated = snapshot.limits.filesTruncated
   const fileSearch = groups.search
   const renderFileRow = (file: ChangedFile, action: 'stage' | 'unstage') => (
     <div
@@ -216,6 +225,7 @@ export function ChangesView({
           disabled={
             snapshot.files.length === 0 ||
             busy ||
+            listingTruncated ||
             Boolean(actionBlockReason(snapshot.capabilities, 'stash'))
           }
           tooltip={
@@ -234,6 +244,13 @@ export function ChangesView({
           Stash changes
         </Button>
       </div>
+      {listingTruncated ? (
+        <p className="workflow-note" role="status">
+          Showing the first {snapshot.limits.filesListed} changed files. This repository reports
+          more, so bulk stage, unstage, and stash are unavailable. Narrow the search, or use your
+          editor or the command line for the remaining files.
+        </p>
+      ) : null}
       <div className="changes-columns">
         <section className="change-section" aria-labelledby="staged-heading">
           <div className="change-section-header">
@@ -252,13 +269,16 @@ export function ChangesView({
               disabled={
                 busy ||
                 !groups.visibleStaged.length ||
+                listingTruncated ||
                 Boolean(actionBlockReason(snapshot.capabilities, 'unstage'))
               }
               tooltip={
                 actionBlockReason(snapshot.capabilities, 'unstage') ??
-                (fileSearch
-                  ? 'Remove the shown files from the index; working-tree edits remain. Hidden staged files stay staged.'
-                  : 'Remove all staged changes from the index; working-tree edits remain. Nothing is discarded.')
+                (listingTruncated
+                  ? 'The changed-file listing was cut at the read budget, so unstaging everything would skip files that are not shown. Inspect files individually.'
+                  : fileSearch
+                    ? 'Remove the shown files from the index; working-tree edits remain. Hidden staged files stay staged.'
+                    : 'Remove all staged changes from the index; working-tree edits remain. Nothing is discarded.')
               }
               onClick={() =>
                 runAction(
@@ -272,7 +292,15 @@ export function ChangesView({
           </div>
           {groups.visibleStaged.length > 0 ? (
             <div className="file-list">
-              {groups.visibleStaged.map((file) => renderFileRow(file, 'unstage'))}
+              {stagedWindow.visible.map((file) => renderFileRow(file, 'unstage'))}
+              <ListWindowMore
+                pageSize={LIST_PAGE_SIZE}
+                remaining={stagedWindow.remaining}
+                previous={stagedWindow.hasPrevious}
+                noun="staged files"
+                onReveal={stagedWindow.reveal}
+                onPrevious={stagedWindow.retreat}
+              />
             </div>
           ) : (
             <p className="section-empty">
@@ -298,15 +326,18 @@ export function ChangesView({
                 busy ||
                 !groups.visibleUnstaged.length ||
                 groups.conflicted.length > 0 ||
+                listingTruncated ||
                 Boolean(actionBlockReason(snapshot.capabilities, 'stage'))
               }
               tooltip={
                 actionBlockReason(snapshot.capabilities, 'stage') ??
-                (groups.conflicted.length > 0
-                  ? 'Resolve conflicts before staging — conflicted files cannot be staged in bulk.'
-                  : fileSearch
-                    ? 'Stage the shown working-tree changes for the next commit. Hidden unstaged files stay unstaged.'
-                    : 'Stage all working-tree changes for the next commit. Local index only; nothing is committed yet.')
+                (listingTruncated
+                  ? 'The changed-file listing was cut at the read budget, so staging everything would skip files that are not shown. Inspect files individually.'
+                  : groups.conflicted.length > 0
+                    ? 'Resolve conflicts before staging — conflicted files cannot be staged in bulk.'
+                    : fileSearch
+                      ? 'Stage the shown working-tree changes for the next commit. Hidden unstaged files stay unstaged.'
+                      : 'Stage all working-tree changes for the next commit. Local index only; nothing is committed yet.')
               }
               onClick={() =>
                 runAction(
@@ -320,7 +351,15 @@ export function ChangesView({
           </div>
           {groups.visibleUnstaged.length > 0 ? (
             <div className="file-list">
-              {groups.visibleUnstaged.map((file) => renderFileRow(file, 'stage'))}
+              {unstagedWindow.visible.map((file) => renderFileRow(file, 'stage'))}
+              <ListWindowMore
+                pageSize={LIST_PAGE_SIZE}
+                remaining={unstagedWindow.remaining}
+                previous={unstagedWindow.hasPrevious}
+                noun="unstaged files"
+                onReveal={unstagedWindow.reveal}
+                onPrevious={unstagedWindow.retreat}
+              />
             </div>
           ) : (
             <p className="section-empty">
@@ -443,6 +482,7 @@ export function PullRequestListView({
   createTooltip: React.ReactNode
 }) {
   const filtered = pullRequests.length !== snapshot.pullRequests.length
+  const prWindow = useListWindow(pullRequests)
   return (
     <div className="pull-requests-view">
       <div className="list-toolbar">
@@ -476,7 +516,7 @@ export function PullRequestListView({
       ) : null}
       {pullRequests.length > 0 ? (
         <div className="pr-list">
-          {pullRequests.map((pr) => (
+          {prWindow.visible.map((pr) => (
             <PullRequestHoverCard pr={pr} key={pr.number}>
               <button
                 className="pr-row"
@@ -504,6 +544,14 @@ export function PullRequestListView({
               </button>
             </PullRequestHoverCard>
           ))}
+          <ListWindowMore
+            pageSize={LIST_PAGE_SIZE}
+            remaining={prWindow.remaining}
+            previous={prWindow.hasPrevious}
+            noun="pull requests"
+            onReveal={prWindow.reveal}
+            onPrevious={prWindow.retreat}
+          />
         </div>
       ) : (
         <EmptyState className="compact-empty">
@@ -545,6 +593,7 @@ export function StashesView({
   onRequest: (request: WorkflowRequest) => void
   onStash: () => void
 }) {
+  const stashWindow = useListWindow(snapshot.stashes)
   const stashReason = actionBlockReason(snapshot.capabilities, 'stash')
   const applyReason = actionBlockReason(snapshot.capabilities, 'stashApply')
   const removalReason = stashRemovalBlockReason(snapshot.capabilities)
@@ -556,10 +605,17 @@ export function StashesView({
           <span className="list-subtitle">{snapshot.stashes.length} saved</span>
         </div>
         <Button
-          disabled={snapshot.files.length === 0 || busy || Boolean(stashReason)}
+          disabled={
+            snapshot.files.length === 0 ||
+            busy ||
+            snapshot.limits.filesTruncated ||
+            Boolean(stashReason)
+          }
           tooltip={
             stashReason ??
-            'Shelve current working changes into a local stash and restore a clean tree. Choose whether untracked files are included.'
+            (snapshot.limits.filesTruncated
+              ? 'Stash unavailable while the changed-file listing is incomplete.'
+              : 'Shelve current working changes into a local stash and restore a clean tree. Choose whether untracked files are included.')
           }
           onClick={onStash}
           size="sm"
@@ -575,7 +631,7 @@ export function StashesView({
       </div>
       {snapshot.stashes.length > 0 ? (
         <div className="stash-list" role="list">
-          {snapshot.stashes.map((stash) => (
+          {stashWindow.visible.map((stash) => (
             <div
               className="stash-row"
               key={stash.oid}
@@ -650,6 +706,14 @@ export function StashesView({
               </Button>
             </div>
           ))}
+          <ListWindowMore
+            pageSize={LIST_PAGE_SIZE}
+            remaining={stashWindow.remaining}
+            previous={stashWindow.hasPrevious}
+            noun="stashes"
+            onReveal={stashWindow.reveal}
+            onPrevious={stashWindow.retreat}
+          />
         </div>
       ) : (
         <EmptyState className="compact-empty">

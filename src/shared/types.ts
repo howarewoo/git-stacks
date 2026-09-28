@@ -1,3 +1,4 @@
+import type { SnapshotLimits } from './performance'
 import type { RepositoryCapabilities } from './capabilities'
 
 export interface PullRequest {
@@ -62,6 +63,8 @@ export interface RepositorySnapshot {
   stackOperation: StackProgress | null
   headOid: string | null
   github: { available: boolean; message: string }
+  /** What an extreme repository forced this snapshot to leave out. */
+  limits: SnapshotLimits
   capabilities: RepositoryCapabilities
 }
 export interface RecentRepository {
@@ -292,12 +295,14 @@ export interface DesktopAPI {
   runAction(action: GitAction): Promise<ActionResult>
   fileView(path: string): Promise<FileView>
   conflictView(path: string): Promise<ConflictFile>
-  history(ref: string, skip: number): Promise<HistoryPage>
-  commitDiff(oid: string): Promise<{ text: string; truncated: boolean }>
+  history(ref: string, skip: number, requestId?: string): Promise<HistoryPage>
+  commitDiff(oid: string, requestId?: string): Promise<{ text: string; truncated: boolean }>
   pushPreview(): Promise<PushPreview>
   stackPreview(kind: StackKind, branch: string): Promise<StackPreview>
   pullRequest(number: number): Promise<PullRequest & { body: string }>
   openExternal(url: string): Promise<void>
+  /** Cancel an in-flight read by the request id the caller supplied. */
+  cancel(requestId: string): Promise<void>
   gitRuntimeStatus(): Promise<GitRuntimeStatus>
   setSystemGit(enabled: boolean): Promise<GitRuntimeStatus>
 }

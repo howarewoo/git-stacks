@@ -11,6 +11,7 @@
     "build": "npm run typecheck && electron-vite build",
     "typecheck": "tsc --noEmit",
     "test": "npm run provision:git-runtime && tsx --test tests/*.test.ts",
+    "bench:performance": "tsx scripts/perf/run-benchmarks.ts",
     "gallery": "vite --config tests/renderer/vite.config.ts",
     "build:gallery": "vite build --config tests/renderer/vite.config.ts",
     "test:ui": "playwright test --grep-invert @visual",

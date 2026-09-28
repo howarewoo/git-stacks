@@ -27,8 +27,18 @@ import type {
   PullRequest,
   PushPreview,
   RepositorySnapshot,
+  Stash,
 } from '../shared/types'
 import {
+  GIT_CONCURRENCY,
+  MAX_DIFF_BYTES,
+  MAX_FILE_BYTES,
+  MAX_HISTORY_BYTES,
+  SNAPSHOT_BRANCH_BUDGET,
+  type SnapshotLimits,
+} from '../shared/performance'
+import {
+  CommandCancelled,
   MAX_BUFFER,
   MAX_BRANCH_LENGTH,
   MAX_MESSAGE_LENGTH,
@@ -40,6 +50,8 @@ import {
   ensureNoBusyOperation,
   ensureNotCheckedOutElsewhere,
   execute,
+  executeCapped,
+  getBranchConfigs,
   execFile,
   getBranchParent,
   getConfigValue,
@@ -52,8 +64,11 @@ import {
   getRemotes,
   getStashes,
   getStatus,
+  isCancelled,
   isExitCode,
   isRecord,
+  listStatus,
+  mapWithConcurrency,
   parseRemote,
   parseTrack,
   refExists,
@@ -61,6 +76,7 @@ import {
   requireString,
   resolveParentRef,
   runGit,
+  runGitCapped,
   runGitWithInput,
   statusPathCandidates,
   stripTrailingNewline,
@@ -429,7 +445,7 @@ function validateAction(value: unknown): GitAction {
   }
 }
 
-export async function resolveRepository(inputPath: string): Promise<string> {
+export async function resolveRepository(inputPath: string, signal?: AbortSignal): Promise<string> {
   if (typeof inputPath !== 'string' || inputPath.length === 0 || inputPath.includes('\0')) {
     throw new Error('Repository path must be a non-empty path')
   }
@@ -444,9 +460,10 @@ export async function resolveRepository(inputPath: string): Promise<string> {
   let isBare: string
   try {
     isBare = stripTrailingNewline(
-      await runGit(candidate, ['rev-parse', '--is-bare-repository']),
+      await runGit(candidate, ['rev-parse', '--is-bare-repository'], undefined, signal),
     ).trim()
   } catch (error) {
+    if (isCancelled(error)) throw error
     throw new Error(`Not a Git repository: ${commandDetail(error)}`)
   }
   if (isBare === 'true') {
@@ -462,8 +479,11 @@ export async function resolveRepository(inputPath: string): Promise<string> {
 
   let topLevel: string
   try {
-    topLevel = stripTrailingNewline(await runGit(candidate, ['rev-parse', '--show-toplevel']))
+    topLevel = stripTrailingNewline(
+      await runGit(candidate, ['rev-parse', '--show-toplevel'], undefined, signal),
+    )
   } catch (error) {
+    if (isCancelled(error)) throw error
     throw new Error(`Not a Git repository: ${commandDetail(error)}`)
   }
   if (!topLevel) {
@@ -504,13 +524,12 @@ async function runStage(
   return { message: `Unstaged ${paths.length} path${paths.length === 1 ? '' : 's'}` }
 }
 
-async function currentHeadOid(repoPath: string): Promise<string | null> {
-  const value = await tryGit(repoPath, [
-    'rev-parse',
-    '--verify',
-    '--end-of-options',
-    'HEAD^{commit}',
-  ])
+async function currentHeadOid(repoPath: string, signal?: AbortSignal): Promise<string | null> {
+  const value = await tryGit(
+    repoPath,
+    ['rev-parse', '--verify', '--end-of-options', 'HEAD^{commit}'],
+    signal,
+  )
   return value ? stripTrailingNewline(value) : null
 }
 
@@ -2287,16 +2306,8 @@ async function runCreatePr(
   }
 }
 
-const MAX_FILE_BYTES = 2 * 1024 * 1024
-const MAX_DIFF_BYTES = 4 * 1024 * 1024
 const MAX_HISTORY_SKIP = 1_000_000
 const MAX_DIFF_LINES = 4 * 1024 * 1024
-
-function boundedText(value: string, maxBytes: number): { text: string; truncated: boolean } {
-  const bytes = Buffer.from(value, 'utf8')
-  if (bytes.length <= maxBytes) return { text: value, truncated: false }
-  return { text: bytes.subarray(0, maxBytes).toString('utf8'), truncated: true }
-}
 
 async function safeRepositoryPath(repoPath: string, relativePath: string): Promise<string> {
   const candidate = path.resolve(repoPath, relativePath)
@@ -2415,21 +2426,22 @@ async function fileFingerprintAt(
   repoPath: string,
   relativePath: string,
   absolutePath: string,
+  signal?: AbortSignal,
 ): Promise<FileIdentity> {
-  const index = await runGit(repoPath, [
-    '--literal-pathspecs',
-    'ls-files',
-    '--stage',
-    '-z',
-    '--',
-    relativePath,
-  ])
+  if (signal?.aborted) throw new CommandCancelled()
+  const index = await runGit(
+    repoPath,
+    ['--literal-pathspecs', 'ls-files', '--stage', '-z', '--', relativePath],
+    undefined,
+    signal,
+  )
   const indexFingerprint = createHash('sha256').update(index).digest('hex')
   let stat: Stats | null = null
   let preview: Buffer | null = null
   let binary = false
   let truncated = false
   try {
+    if (signal?.aborted) throw new CommandCancelled()
     stat = await fs.lstat(absolutePath)
     if (!stat.isFile()) throw new Error('Changed path is not a regular file')
     const hash = createHash('sha256')
@@ -2453,6 +2465,7 @@ async function fileFingerprintAt(
     const buffer = Buffer.allocUnsafe(64 * 1024)
     try {
       while (true) {
+        if (signal?.aborted) throw new CommandCancelled()
         const result = await handle.read(buffer, 0, buffer.length, null)
         if (result.bytesRead === 0) break
         const chunk = buffer.subarray(0, result.bytesRead)
@@ -2472,6 +2485,7 @@ async function fileFingerprintAt(
         }
         if (totalBytes > MAX_FILE_BYTES) truncated = true
       }
+      if (signal?.aborted) throw new CommandCancelled()
       try {
         decoder.decode()
       } catch {
@@ -2490,7 +2504,9 @@ async function fileFingerprintAt(
     } finally {
       await handle.close()
     }
+    if (signal?.aborted) throw new CommandCancelled()
     const currentStat = await fs.lstat(absolutePath)
+    if (signal?.aborted) throw new CommandCancelled()
     if (currentStat.dev !== stat.dev || currentStat.ino !== stat.ino) {
       throw new Error('The file changed while it was being read; refresh and retry')
     }
@@ -2507,6 +2523,7 @@ async function fileFingerprintAt(
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
   }
+  if (signal?.aborted) throw new CommandCancelled()
   const contentFingerprint = createHash('sha256').update('missing').digest('hex')
   const hash = createHash('sha256')
   hash.update(index)
@@ -2522,9 +2539,15 @@ async function fileFingerprintAt(
   }
 }
 
-async function fileFingerprint(repoPath: string, relativePath: string): Promise<FileIdentity> {
+async function fileFingerprint(
+  repoPath: string,
+  relativePath: string,
+  signal?: AbortSignal,
+): Promise<FileIdentity> {
+  if (signal?.aborted) throw new CommandCancelled()
   const absolute = await safeRepositoryPath(repoPath, relativePath)
-  return fileFingerprintAt(repoPath, relativePath, absolute)
+  if (signal?.aborted) throw new CommandCancelled()
+  return fileFingerprintAt(repoPath, relativePath, absolute, signal)
 }
 
 function sameFileMutationIdentity(expected: FileIdentity, actual: FileIdentity): boolean {
@@ -2547,6 +2570,7 @@ async function changedDiff(
   repoPath: string,
   mode: 'cached' | 'worktree',
   relativePath: string,
+  signal?: AbortSignal,
 ): Promise<{ text: string; truncated: boolean }> {
   const args = [
     '-c',
@@ -2559,41 +2583,12 @@ async function changedDiff(
     '--',
     relativePath,
   ]
-  // Cap the stream itself rather than buffering an arbitrarily large diff.
-  const runtime = await resolveGitRuntime()
-  return new Promise((resolve, reject) => {
-    const child = spawn(runtime.executable, args, {
-      cwd: repoPath,
-      env: gitCommandEnvironment(runtime, commandEnvironment({ GIT_OPTIONAL_LOCKS: '0' })),
-      timeout: 120_000,
-      windowsHide: true,
-      stdio: ['ignore', 'pipe', 'pipe'],
-      shell: false,
-    })
-    const chunks: Buffer[] = []
-    let retained = 0
-    let truncated = false
-    let failure = ''
-    child.stdout.on('data', (chunk: Buffer) => {
-      const take = Math.min(MAX_DIFF_BYTES - retained, chunk.length)
-      if (take > 0) {
-        chunks.push(Buffer.from(chunk.subarray(0, take)))
-        retained += take
-      }
-      if (take < chunk.length) truncated = true
-    })
-    child.stderr.setEncoding('utf8')
-    child.stderr.on('data', (chunk: string) => {
-      failure = (failure + chunk).slice(-4096)
-    })
-    child.once('error', reject)
-    child.once('close', (code) => {
-      if (code !== 0) {
-        reject(new Error(failure.trim() || `git diff exited with status ${code}`))
-        return
-      }
-      resolve({ text: Buffer.concat(chunks).toString('utf8'), truncated })
-    })
+  // Cap the stream itself rather than buffering an arbitrarily large diff, and
+  // abandon it when the caller navigates away from the file.
+  return runGitCapped(repoPath, args, {
+    maxBytes: MAX_DIFF_BYTES,
+    signal,
+    env: { GIT_OPTIONAL_LOCKS: '0' },
   })
 }
 
@@ -2624,19 +2619,34 @@ function resolveHunkSide(
   return { hunks: block.hunks, unavailable }
 }
 
-export async function getFileView(repoPath: string, requestedPath: string): Promise<FileView> {
-  const root = await resolveRepository(repoPath)
+export async function getFileView(
+  repoPath: string,
+  requestedPath: string,
+  signal?: AbortSignal,
+): Promise<FileView> {
+  const root = await resolveRepository(repoPath, signal)
   const filePath = requirePathInput(requestedPath, 'path')
   // Sparse-excluded paths never reach the status list, so check the index first.
   const indexEntry = (await getIndexEntries(root, [filePath])).get(filePath)
   if (indexEntry?.sparseExcluded) throw new Error(sparsePathReason(filePath))
-  const entry = changedEntry(await getStatus(root), filePath)
+  const entry = changedEntry(await getStatus(root, signal), filePath)
   const actualPath = entry.path
-  const [stagedDiff, unstagedDiff] = await Promise.all([
-    changedDiff(root, 'cached', actualPath),
-    changedDiff(root, 'worktree', actualPath),
-  ])
-  const headGitlink = (await getHeadGitlinks(root, [actualPath])).get(actualPath)
+  // One cancelled file view must not leave a sibling diff or the gitlink lookup
+  // running, so every read is awaited before the rejection escapes. The
+  // fingerprint is deliberately not in this batch: a gitlink is a directory, so
+  // it has no readable file to scan.
+  const reads = [
+    changedDiff(root, 'cached', actualPath, signal),
+    changedDiff(root, 'worktree', actualPath, signal),
+    getHeadGitlinks(root, [actualPath]),
+  ] as const
+  const [stagedDiff, unstagedDiff, gitlinks] = await Promise.all(reads).catch(
+    async (error: unknown) => {
+      await Promise.allSettled(reads)
+      throw error
+    },
+  )
+  const headGitlink = gitlinks.get(actualPath)
   if (indexEntry?.submodule || headGitlink) {
     // A gitlink has no readable file: show the recorded-commit diff and nothing else.
     return {
@@ -2656,7 +2666,7 @@ export async function getFileView(repoPath: string, requestedPath: string): Prom
       },
     }
   }
-  const identity = await fileFingerprint(root, actualPath)
+  const identity = await fileFingerprint(root, actualPath, signal)
   const contentResult = identity.preview
     ? {
         text: identity.binary ? '' : identity.preview.toString('utf8'),
@@ -4360,18 +4370,18 @@ export async function getHistory(
   repoPath: string,
   ref: string,
   skip: number,
+  signal?: AbortSignal,
 ): Promise<HistoryPage> {
-  const root = await resolveRepository(repoPath)
+  const root = await resolveRepository(repoPath, signal)
   const requestedRef = requireRefInput(ref, 'history ref')
   const offset = requireHistorySkip(skip)
-  const resolved = await tryGit(root, [
-    'rev-parse',
-    '--verify',
-    '--end-of-options',
-    `${requestedRef}^{commit}`,
-  ])
+  const resolved = await tryGit(
+    root,
+    ['rev-parse', '--verify', '--end-of-options', `${requestedRef}^{commit}`],
+    signal,
+  )
   if (!resolved) {
-    const current = await getCurrentBranch(root)
+    const current = await getCurrentBranch(root, signal)
     if (
       requestedRef !== 'HEAD' &&
       requestedRef !== current &&
@@ -4381,20 +4391,26 @@ export async function getHistory(
     }
     return { commits: [], hasMore: false }
   }
-  const output = await runGit(root, [
-    'log',
-    '--no-ext-diff',
-    '--skip',
-    String(offset),
-    '-n',
-    '51',
-    '--format=%H%x00%P%x00%s%x00%an%x00%cI%x00',
-    '--end-of-options',
-    requestedRef,
-  ])
+  const { text: output, truncated } = await runGitCapped(
+    root,
+    [
+      'log',
+      '--no-ext-diff',
+      '--skip',
+      String(offset),
+      '-n',
+      '51',
+      '--format=%H%x00%P%x00%s%x00%an%x00%cI%x00',
+      '--end-of-options',
+      requestedRef,
+    ],
+    { maxBytes: MAX_HISTORY_BYTES, boundary: '\0', signal },
+  )
   const values = output.split('\0')
   const commits: Commit[] = []
-  for (let index = 0; index + 4 < values.length; index += 5) {
+  // A NUL terminates a field, not a commit: a capped author field must not
+  // become a fabricated row whose missing date shifts subsequent skip values.
+  for (let index = 0; index + 5 < values.length; index += 5) {
     const oid = stripTrailingNewline(values[index])
     if (!oid) continue
     const parents = stripTrailingNewline(values[index + 1])
@@ -4408,33 +4424,39 @@ export async function getHistory(
       date: stripTrailingNewline(values[index + 4]),
     })
   }
-  return { commits: commits.slice(0, 50), hasMore: commits.length > 50 }
+  if (truncated && commits.length === 0) {
+    throw new Error('History entry exceeds the 1 MiB preview limit.')
+  }
+  return { commits: commits.slice(0, 50), hasMore: truncated || commits.length > 50 }
 }
 
 export async function getCommitDiff(
   repoPath: string,
   oid: string,
+  signal?: AbortSignal,
 ): Promise<{ text: string; truncated: boolean }> {
-  const root = await resolveRepository(repoPath)
+  const root = await resolveRepository(repoPath, signal)
   const commitOid = requireOid(oid, 'commit oid')!
-  const resolved = await tryGit(root, [
-    'rev-parse',
-    '--verify',
-    '--end-of-options',
-    `${commitOid}^{commit}`,
-  ])
+  const resolved = await tryGit(
+    root,
+    ['rev-parse', '--verify', '--end-of-options', `${commitOid}^{commit}`],
+    signal,
+  )
   if (!resolved) throw new Error(`Commit "${commitOid}" does not exist`)
-  const output = await runGit(root, [
-    'show',
-    '--format=',
-    '--no-ext-diff',
-    '--no-textconv',
-    '--binary',
-    '--patch',
-    '--end-of-options',
-    commitOid,
-  ])
-  return boundedText(output, MAX_DIFF_BYTES)
+  return runGitCapped(
+    root,
+    [
+      'show',
+      '--format=',
+      '--no-ext-diff',
+      '--no-textconv',
+      '--binary',
+      '--patch',
+      '--end-of-options',
+      commitOid,
+    ],
+    { maxBytes: MAX_DIFF_BYTES, signal },
+  )
 }
 
 export async function getPushPreview(repoPath: string): Promise<PushPreview> {
@@ -4476,24 +4498,72 @@ function branchFromRef(ref: RefRecord, currentBranch: string | null, remote: boo
     needsRestack: false,
   }
 }
-export async function getSnapshot(repoPath: string): Promise<RepositorySnapshot> {
-  const root = await resolveRepository(repoPath)
+export async function getSnapshot(
+  repoPath: string,
+  signal?: AbortSignal,
+  // Overridable so a test can exercise the budget with a handful of branches
+  // instead of materialising SNAPSHOT_BRANCH_BUDGET of them.
+  branchBudget = SNAPSHOT_BRANCH_BUDGET,
+): Promise<RepositorySnapshot> {
+  const root = await resolveRepository(repoPath, signal)
   await recoverStashDropForRepository(root)
   await recoverFileActionJournals(root)
   await recoverStaleBranchLocks(root)
   const capabilities = await getRepositoryCapabilities(root)
-  const [refs, currentBranch, files, stashes, originUrl, operationState, stackOperation, headOid] =
-    await Promise.all([
-      getRefs(root),
-      getCurrentBranch(root),
-      // A bare repository has no index to compare against a worktree.
-      capabilities.bare ? Promise.resolve([]) : getStatus(root),
-      capabilities.bare ? Promise.resolve([]) : getStashes(root),
-      getOriginUrl(root),
-      getOperationState(root),
-      getStackProgress(root),
-      currentHeadOid(root),
-    ])
+  // A bare repository has no index to compare against a worktree.
+  const noWorkingTree = { files: [] as ChangedFile[], truncated: false }
+  const reads = [
+    getRefs(root, signal),
+    getCurrentBranch(root, signal),
+    capabilities.bare ? Promise.resolve(noWorkingTree) : listStatus(root, signal),
+    capabilities.bare ? Promise.resolve([] as Stash[]) : getStashes(root, signal),
+    getOriginUrl(root, signal),
+    getOperationState(root, signal),
+    getStackProgress(root, signal),
+    currentHeadOid(root, signal),
+    getBranchConfigs(root, signal),
+  ] as const
+  const [
+    refs,
+    currentBranch,
+    workingTree,
+    stashes,
+    originUrl,
+    operationState,
+    stackOperation,
+    headOid,
+    configParents,
+  ] = await Promise.all(reads).catch(async (error: unknown) => {
+    await Promise.allSettled(reads)
+    throw error
+  })
+  const files = workingTree.files
+  const limits: SnapshotLimits = {
+    branchesAnalyzed: 0,
+    branchesSkipped: 0,
+    filesListed: files.length,
+    filesTruncated: workingTree.truncated,
+  }
+  // Budget per-branch Git work while reporting each branch only once, even
+  // when it needs both parent inference and a behind-count.
+  let remaining = branchBudget
+  const analyzed = new Set<Branch>()
+  const skipped = new Set<Branch>()
+  const takeBudget = (candidates: Branch[]): Branch[] => {
+    const allowed: Branch[] = []
+    for (const branch of candidates) {
+      if (analyzed.has(branch)) {
+        allowed.push(branch)
+      } else if (remaining > 0) {
+        remaining -= 1
+        analyzed.add(branch)
+        allowed.push(branch)
+      } else {
+        skipped.add(branch)
+      }
+    }
+    return allowed
+  }
 
   const indexEntries = await getIndexEntries(
     root,
@@ -4519,7 +4589,7 @@ export async function getSnapshot(repoPath: string): Promise<RepositorySnapshot>
     currentBranch &&
     !branches.some((branch) => !branch.remote && branch.name === currentBranch)
   ) {
-    const upstream = await branchUpstream(root, currentBranch)
+    const upstream = await branchUpstream(root, currentBranch, signal)
     branches.unshift({
       ref: `refs/heads/${currentBranch}`,
       name: currentBranch,
@@ -4541,23 +4611,8 @@ export async function getSnapshot(repoPath: string): Promise<RepositorySnapshot>
     })
   }
 
-  const defaultBranch = await getDefaultBranch(root, refs, currentBranch)
-  const github = await getGitHubData(root, originUrl)
-  const parentConfigs = await Promise.all(
-    branches
-      .filter((branch) => !branch.remote)
-      .map(async (branch) => ({
-        name: branch.name,
-        parent: await getBranchParent(root, branch.name),
-        parentTip: await getConfigValue(root, `branch.${branch.name}.parentTip`),
-      })),
-  )
-  const configParents = new Map(
-    parentConfigs.map((entry) => [
-      entry.name,
-      { parent: entry.parent, parentTip: entry.parentTip },
-    ]),
-  )
+  const defaultBranch = await getDefaultBranch(root, refs, currentBranch, signal)
+  const github = await getGitHubData(root, originUrl, signal)
   const localPullRequests = new Map<string, PullRequest>()
   github.pullRequests.forEach((pullRequest, index) => {
     if (github.sameRepository(index) && !localPullRequests.has(pullRequest.head)) {
@@ -4580,60 +4635,138 @@ export async function getSnapshot(repoPath: string): Promise<RepositorySnapshot>
     refsByName.get(`refs/heads/${defaultBranch}`) ??
     refsByName.get(`refs/remotes/origin/${defaultBranch}`)
   if (defaultRef) {
-    await Promise.all(
-      branches.map(async (branch) => {
-        if (branch.parent) return
-        const child = refsByName.get(branch.ref)
-        const local = !branch.remote
-        const originRemote = branch.remote && branch.ref.startsWith('refs/remotes/origin/')
-        if (
-          !child ||
-          (!local && !originRemote) ||
-          branch.ref === `refs/heads/${defaultBranch}` ||
-          branch.ref === `refs/remotes/origin/${defaultBranch}` ||
-          branch.ref === defaultRef.refname
-        ) {
-          return
-        }
-        if (
-          (await tryGit(root, ['merge-base', child.objectName, defaultRef.objectName])) !== null
-        ) {
-          branch.parent = defaultBranch
-          branch.parentSource = 'inferred'
-        }
-      }),
+    const defaultRefs = new Set([
+      `refs/heads/${defaultBranch}`,
+      `refs/remotes/origin/${defaultBranch}`,
+      defaultRef.refname,
+    ])
+    const analyzable = takeBudget(
+      branches
+        .filter((branch) => {
+          if (branch.parent) return false
+          if (!refsByName.get(branch.ref)) return false
+          const originRemote = branch.ref.startsWith('refs/remotes/origin/')
+          if (branch.remote && !originRemote) return false
+          return !defaultRefs.has(branch.ref)
+        })
+        .sort((left, right) => Number(right.current) - Number(left.current)),
     )
+    // Inspect the tips in batches: a branch one commit above the default is
+    // already known to descend from it. Avoid forking merge-base once per
+    // branch for the common case, while retaining that probe for deeper DAGs.
+    const divergent = [
+      ...new Set(
+        analyzable
+          .map((branch) => (refsByName.get(branch.ref) as RefRecord).objectName)
+          .filter((oid) => oid !== defaultRef.objectName),
+      ),
+    ]
+    const directParents = new Map<string, string[]>()
+    for (let start = 0; start < divergent.length; start += 200) {
+      const output = await tryGit(
+        root,
+        ['log', '--no-walk=unsorted', '--format=%H:%P', ...divergent.slice(start, start + 200)],
+        signal,
+      )
+      for (const line of (output ?? '').split('\n')) {
+        const separator = line.indexOf(':')
+        if (separator < 0) continue
+        directParents.set(
+          line.slice(0, separator),
+          line
+            .slice(separator + 1)
+            .trim()
+            .split(' '),
+        )
+      }
+    }
+    await mapWithConcurrency(analyzable, GIT_CONCURRENCY, async (branch) => {
+      const child = refsByName.get(branch.ref) as RefRecord
+      if (child.objectName === defaultRef.objectName) {
+        branch.parent = defaultBranch
+        branch.parentSource = 'inferred'
+        return
+      }
+      if (directParents.get(child.objectName)?.includes(defaultRef.objectName)) {
+        branch.parent = defaultBranch
+        branch.parentSource = 'inferred'
+        return
+      }
+      try {
+        await runGitCapped(root, ['merge-base', child.objectName, defaultRef.objectName], {
+          maxBytes: 4096,
+          signal,
+        })
+        branch.parent = defaultBranch
+        branch.parentSource = 'inferred'
+      } catch (error) {
+        if (
+          !isCancelled(error) &&
+          !isExitCode(error, 1) &&
+          !isExitCode(error, 2) &&
+          !isExitCode(error, 128)
+        ) {
+          throw error
+        }
+        if (isCancelled(error)) throw error
+      }
+    })
   }
+  if (signal?.aborted) throw new CommandCancelled()
 
-  const effectiveDefault = await parentTarget(root, defaultBranch, defaultBranch, false)
-  await Promise.all(
-    branches.map(async (branch) => {
-      if (!branch.parent) return
-      const child = refsByName.get(branch.ref)
-      const parent =
-        (branch.parent === defaultBranch && effectiveDefault
+  const effectiveDefault = await parentTarget(root, defaultBranch, defaultBranch, false, signal)
+  const parentOf = (branch: Branch): RefRecord | undefined =>
+    branch.parent
+      ? ((branch.parent === defaultBranch && effectiveDefault
           ? refsByName.get(effectiveDefault.ref)
           : null) ??
         refsByName.get(`refs/heads/${branch.parent}`) ??
         refsByName.get(`refs/remotes/${branch.parent}`) ??
-        refsByName.get(`refs/remotes/origin/${branch.parent}`)
-      if (!child || !parent || child.refname === parent.refname) {
-        branch.needsRestack = Boolean(branch.parentTip && !parent)
-        return
-      }
-      branch.parentBehind = Number(
-        await runGit(root, [
-          'rev-list',
-          '--count',
-          `${child.objectName}..${parent.objectName}`,
-          '--',
-        ]),
-      )
-      branch.needsRestack =
-        (branch.parentBehind ?? 0) > 0 ||
-        Boolean(branch.parentTip && branch.parentTip !== parent.objectName)
-    }),
-  )
+        refsByName.get(`refs/remotes/origin/${branch.parent}`))
+      : undefined
+  const comparable = branches.filter((branch) => {
+    const child = refsByName.get(branch.ref)
+    const parent = parentOf(branch)
+    if (!child || !parent) return false
+    if (child.refname === parent.refname) {
+      branch.needsRestack = Boolean(branch.parentTip)
+      return false
+    }
+    return true
+  })
+  for (const branch of branches) {
+    if (branch.parent && !parentOf(branch)) branch.needsRestack = Boolean(branch.parentTip)
+  }
+  const behind = takeBudget(comparable)
+  await mapWithConcurrency(behind, GIT_CONCURRENCY, async (branch) => {
+    const child = refsByName.get(branch.ref) as RefRecord
+    const parent = parentOf(branch) as RefRecord
+    if (child.objectName === parent.objectName) {
+      branch.parentBehind = 0
+      branch.needsRestack = Boolean(branch.parentTip && branch.parentTip !== parent.objectName)
+      return
+    }
+    const { text } = await runGitCapped(
+      root,
+      ['rev-list', '--count', `${child.objectName}..${parent.objectName}`, '--'],
+      { maxBytes: 1024, signal },
+    )
+    branch.parentBehind = Number(text)
+    branch.needsRestack =
+      (branch.parentBehind ?? 0) > 0 ||
+      Boolean(branch.parentTip && branch.parentTip !== parent.objectName)
+  })
+  const measured = new Set(behind)
+  for (const branch of comparable) {
+    if (measured.has(branch)) continue
+    const parent = parentOf(branch) as RefRecord
+    // Behind remains unknown outside the budget; a recorded tip is only
+    // evidence of drift when it differs from the resolved parent object.
+    branch.needsRestack = Boolean(branch.parentTip && branch.parentTip !== parent.objectName)
+  }
+
+  limits.branchesAnalyzed = analyzed.size
+  limits.branchesSkipped = skipped.size
 
   return {
     path: root,
@@ -4650,6 +4783,7 @@ export async function getSnapshot(repoPath: string): Promise<RepositorySnapshot>
     stackOperation,
     headOid,
     github: { available: github.available, message: github.message },
+    limits,
     capabilities,
   }
 }
