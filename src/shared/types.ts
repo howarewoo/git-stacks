@@ -94,10 +94,42 @@ export interface FileView {
   fingerprint: string
   conflicted: boolean
   truncated: boolean
+  hunks: FileHunks
   /** Set when the path is a submodule gitlink: only the recorded commit is shown. */
   submodule?: boolean
   /** Present when the working-tree file is a Git LFS pointer rather than the object. */
   lfs?: LfsPointer | null
+}
+
+export type HunkSideName = 'staged' | 'unstaged'
+export type DiffHunkLineKind = 'context' | 'add' | 'remove' | 'marker'
+export interface DiffHunkLine {
+  kind: DiffHunkLineKind
+  /** The literal diff text, including its leading marker and any trailing CR. */
+  text: string
+  /** The preimage line this line occupies, or the one an addition follows. */
+  oldLine: number | null
+  /** The postimage line this line occupies, or the one a removal precedes. */
+  newLine: number | null
+}
+export interface DiffHunk {
+  /** Stable for as long as this hunk stays at this position with this content. */
+  id: string
+  header: string
+  oldStart: number
+  oldLines: number
+  newStart: number
+  newLines: number
+  lines: DiffHunkLine[]
+}
+export interface HunkSide {
+  hunks: DiffHunk[]
+  /** Why this side cannot be patched hunk by hunk, or null when it can. */
+  unavailable: string | null
+}
+export interface FileHunks {
+  staged: HunkSide
+  unstaged: HunkSide
 }
 /** A Git LFS pointer file carries the object identity instead of the object. */
 export interface LfsPointer {
@@ -239,6 +271,13 @@ export type GitAction =
       path: string
       fingerprint: string
       resolution: ConflictResolution
+    }
+  | {
+      type: 'stageHunk' | 'unstageHunk'
+      path: string
+      hunkId: string
+      fingerprint: string
+      lineIndexes?: number[]
     }
   | { type: 'conflictMergeTool'; path: string; fingerprint: string }
   | StackAction

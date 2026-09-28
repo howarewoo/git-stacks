@@ -2109,6 +2109,121 @@ button:disabled {
   color: var(--gs-component-diff-hunk-text);
   font-weight: 600;
 }
+
+.file-staging {
+  min-height: 0;
+  flex: 0 0 auto;
+}
+
+.hunk-unavailable {
+  margin-bottom: 8px;
+}
+
+.hunk-hint {
+  margin: 0 0 8px;
+  color: var(--gs-semantic-text-muted);
+  font-size: var(--gs-semantic-type-metadata-size);
+  line-height: var(--gs-semantic-type-metadata-line);
+}
+
+.hunk-list {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.hunk {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 6px;
+  border: 1px solid var(--gs-semantic-border-decorative);
+  border-radius: var(--gs-semantic-radius-control);
+  background: var(--gs-semantic-surface-content);
+  padding: 8px;
+}
+
+.hunk:focus {
+  outline: 2px solid var(--gs-semantic-focus-ring);
+  outline-offset: 2px;
+}
+
+.hunk-header {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.hunk-range {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  color: var(--gs-semantic-text-secondary);
+  font-family: var(--gs-semantic-font-mono);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hunk-selection {
+  color: var(--gs-semantic-feedback-warning-text);
+  font-family: var(--gs-semantic-font-mono);
+  font-size: 11px;
+}
+
+.hunk-body {
+  max-height: 220px;
+  margin: 0;
+  padding: 8px 10px;
+}
+
+.hunk-line {
+  display: block;
+  min-width: 0;
+  font: inherit;
+  text-align: left;
+  white-space: pre;
+}
+
+.hunk-line-selectable {
+  width: 100%;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+}
+
+.hunk-line-selectable:hover {
+  outline: 1px solid var(--gs-semantic-selection-border);
+  outline-offset: -1px;
+}
+
+.hunk-line-selectable:focus-visible {
+  outline: 2px solid var(--gs-semantic-focus-ring);
+  outline-offset: -2px;
+}
+
+.hunk-line-excluded {
+  opacity: 0.5;
+  text-decoration: line-through;
+}
+
+.hunk-line-gutter {
+  display: inline-block;
+  width: 1ch;
+  color: var(--gs-semantic-text-muted);
+}
+
+.hunk-context {
+  color: var(--gs-semantic-text-primary);
+}
+
+.hunk-marker {
+  color: var(--gs-semantic-text-muted);
+  font-style: italic;
+}
 .conflict-editor {
   padding: 12px 17px 16px;
 }
