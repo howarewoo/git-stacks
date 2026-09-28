@@ -3799,6 +3799,7 @@ async function stageCheckedConflict(
   expected: FileIdentity,
 ): Promise<void> {
   const indexPath = await repositoryGitPath(root, 'index', null)
+  const indexMode = (await fs.stat(indexPath)).mode & 0o7777
   const original = await fs.readFile(indexPath)
   const temporary = await fs.mkdtemp(path.join(tmpdir(), 'git-stacks-stage-'))
   const privateIndex = path.join(temporary, 'index')
@@ -3821,6 +3822,7 @@ async function stageCheckedConflict(
     if (unresolved) throw new Error('Git still reports this path as unmerged')
     lock = await fs.open(lockPath, 'wx')
     ownsLock = true
+    await lock.chmod(indexMode)
     if (
       !(await fs.readFile(indexPath)).equals(original) ||
       (await fileFingerprint(root, relativePath)).fingerprint !== expected.fingerprint

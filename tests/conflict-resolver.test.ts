@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { execFileSync, spawnSync } from 'node:child_process'
-import { access, chmod, mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { access, chmod, mkdtemp, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { setTimeout as delay } from 'node:timers/promises'
 import { join } from 'node:path'
@@ -295,11 +295,14 @@ test('a rebase conflict resolves region by region, then continues on the same re
     )
     assert.notEqual(untouched.fingerprint, conflicted.fingerprint)
 
+    const indexPath = join(repo, git('rev-parse', '--git-path', 'index'))
+    await chmod(indexPath, 0o660)
     const result = await runResolveConflict(repo, 'shared.txt', conflicted.fingerprint, {
       kind: 'content',
       content: 'merged\nintact\n',
     })
     assert.match(result.message, /shared\.txt/u)
+    assert.equal((await stat(indexPath)).mode & 0o777, 0o660)
     assert.equal(
       git('ls-files', '--unmerged', '--', 'other.txt') !== '',
       true,
