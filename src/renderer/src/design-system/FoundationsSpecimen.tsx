@@ -204,11 +204,7 @@ export function FoundationsSpecimen() {
                 </DialogDescription>
               </DialogHeader>
               <Field id="specimen-dialog-name" label="New branch" required>
-                <Input
-                  autoFocus
-                  value={dialogName}
-                  onChange={(event) => setDialogName(event.target.value)}
-                />
+                <Input value={dialogName} onChange={(event) => setDialogName(event.target.value)} />
               </Field>
               <DialogFooter>
                 <Button variant="secondary" onClick={() => setDialogOpen(false)}>

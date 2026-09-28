@@ -8,6 +8,7 @@ import {
   resolveRepository,
   runAction,
   getFileView,
+  getConflictView,
   getHistory,
   getCommitDiff,
   getPushPreview,
@@ -17,6 +18,14 @@ import { getPullRequest } from './github'
 import type { GitAction, RecentRepository, StackKind } from '../shared/types'
 import { RepositoryOperations } from './repository-operations'
 import { RequestRegistry } from './request-registry'
+import {
+  configureGitRuntime,
+  gitRuntimeStatus,
+  readGitRuntimePreference,
+  resolveGitRuntime,
+  withGitRuntime,
+  writeGitRuntimePreference,
+} from './git-runtime'
 
 const readKeys = new RequestRegistry()
 
@@ -58,6 +67,7 @@ if (devUrl) {
 }
 const trustedOrigin = devUrl ? new URL(devUrl).origin : productionOrigin
 const settingsPath = () => join(app.getPath('userData'), 'repositories.json')
+const settingsFile = () => join(app.getPath('userData'), 'settings.json')
 
 function validateSender(event: IpcMainInvokeEvent) {
   if (
@@ -94,9 +104,8 @@ function readRepository<T>(
   return operations
     .read(async () => {
       if (root !== activeRepository) throw superseded()
-      const value = await operation(root, controller.signal)
-      if (root !== activeRepository) throw superseded()
-      return value
+      const runtime = await resolveGitRuntime()
+      return withGitRuntime(runtime, () => operation(root, controller.signal))
     }, controller.signal)
     .finally(() => readKeys.release(root, requestId, controller))
 }
@@ -142,10 +151,13 @@ function installHandlers() {
     // history/diff must not delay switching to a newly selected repository.
     if (activeRepository) readKeys.cancelRoot(activeRepository)
     return operations.switchRepository(async () => {
-      const snapshot = await getSnapshot(path)
-      await remember(path)
-      activeRepository = path
-      return snapshot
+      const runtime = await resolveGitRuntime()
+      return withGitRuntime(runtime, async () => {
+        const snapshot = await getSnapshot(path)
+        await remember(path)
+        activeRepository = path
+        return snapshot
+      })
     })
   })
   ipcMain.handle('repository:refresh', async (event) => {
@@ -154,11 +166,18 @@ function installHandlers() {
   })
   ipcMain.handle('repository:action', async (event, action: GitAction) => {
     validateSender(event)
-    return operations.write(() => runAction(repository(), action))
+    return operations.write(async () => {
+      const runtime = await resolveGitRuntime()
+      return withGitRuntime(runtime, () => runAction(repository(), action))
+    })
   })
   ipcMain.handle('repository:file', (event, filePath: string) => {
     validateSender(event)
     return readRepository((root, signal) => getFileView(root, filePath, signal), `file:${filePath}`)
+  })
+  ipcMain.handle('repository:conflict', (event, filePath: string) => {
+    validateSender(event)
+    return readRepository((root) => getConflictView(root, filePath))
   })
   ipcMain.handle('repository:history', (event, ref: string, skip: number, requestId?: string) => {
     validateSender(event)
@@ -204,6 +223,19 @@ function installHandlers() {
       throw new Error('Only HTTPS links on github.com can be opened.')
     }
     await shell.openExternal(url.href)
+  })
+  ipcMain.handle('git-runtime', async (event) => {
+    validateSender(event)
+    return operations.read(() => gitRuntimeStatus(settingsFile()))
+  })
+  ipcMain.handle('git-runtime:system-git', async (event, requested: unknown) => {
+    validateSender(event)
+    if (typeof requested !== 'boolean') throw new Error('Use system Git must be true or false.')
+    return operations.write(async () => {
+      await writeGitRuntimePreference(settingsFile(), { useSystemGit: requested })
+      configureGitRuntime({ useSystemGit: requested })
+      return gitRuntimeStatus(settingsFile())
+    })
   })
 }
 
@@ -279,6 +311,13 @@ app
       const path = await resolveRepository(process.env.GIT_STACKS_REPO)
       recents = [{ path, name: basename(path) }, ...recents.filter((item) => item.path !== path)]
     }
+    const preference = await readGitRuntimePreference(settingsFile()).catch(() => null)
+    configureGitRuntime({
+      appVersion: app.getVersion(),
+      packaged: app.isPackaged,
+      resourcesRoot: app.isPackaged ? process.resourcesPath : resolve(bundleDir, '../../resources'),
+      useSystemGit: preference?.useSystemGit ?? false,
+    })
     installHandlers()
     Menu.setApplicationMenu(
       Menu.buildFromTemplate([

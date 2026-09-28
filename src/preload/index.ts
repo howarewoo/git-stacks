@@ -5,6 +5,7 @@ const desktop: DesktopAPI = {
   recentRepositories: () => ipcRenderer.invoke('repositories:recent'),
   openRepository: (path) => ipcRenderer.invoke('repositories:open', path),
   refresh: () => ipcRenderer.invoke('repository:refresh'),
+  conflictView: (path) => ipcRenderer.invoke('repository:conflict', path),
   runAction: (action) => ipcRenderer.invoke('repository:action', action),
   fileView: (path) => ipcRenderer.invoke('repository:file', path),
   history: (ref, skip, requestId) => ipcRenderer.invoke('repository:history', ref, skip, requestId),
@@ -14,6 +15,8 @@ const desktop: DesktopAPI = {
   pullRequest: (number) => ipcRenderer.invoke('repository:pull-request', number),
   openExternal: (url) => ipcRenderer.invoke('external:open', url),
   cancel: (requestId) => ipcRenderer.invoke('operation:cancel', requestId),
+  gitRuntimeStatus: () => ipcRenderer.invoke('git-runtime'),
+  setSystemGit: (enabled) => ipcRenderer.invoke('git-runtime:system-git', enabled),
 }
 
 contextBridge.exposeInMainWorld('desktop', desktop)

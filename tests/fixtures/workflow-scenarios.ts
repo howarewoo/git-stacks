@@ -9,6 +9,7 @@ import type {
   StackProgress,
 } from '../../src/shared/types'
 import { EMPTY_SNAPSHOT_LIMITS } from '../../src/shared/performance'
+import type { RepositoryCapabilities } from '../../src/shared/capabilities'
 
 /**
  * Deterministic Git Stacks fixtures for the workflow dialog state and recovery
@@ -87,6 +88,23 @@ export const conflictedFiles: ChangedFile[] = [
   { path: 'tests/checkout.test.ts', index: 'M', worktree: 'M', conflicted: false },
 ]
 
+/** An ordinary, fully supported checkout: a worktree with files reference storage. */
+export const standardCapabilities: RepositoryCapabilities = {
+  bare: false,
+  detachedHead: false,
+  linkedWorktree: false,
+  worktreeCount: 1,
+  refStorage: 'files',
+  refStorageDetail: null,
+  sparseCheckout: false,
+  sparseCheckoutCone: false,
+  submodules: false,
+  gitLfs: false,
+  worktreeConfig: false,
+  objectFormat: 'sha1',
+  gitVersion: 'git version 2.52.0',
+}
+
 export const baseSnapshot: RepositorySnapshot = {
   path: '/private/tmp/git-stacks-fixture/repository-with-a-long-name',
   name: 'git-stacks-fixture',
@@ -103,6 +121,7 @@ export const baseSnapshot: RepositorySnapshot = {
   headOid: featureBranch.oid ?? null,
   github: { available: true, message: '' },
   limits: EMPTY_SNAPSHOT_LIMITS,
+  capabilities: standardCapabilities,
 }
 
 function withSnapshot(overrides: Partial<RepositorySnapshot>): RepositorySnapshot {

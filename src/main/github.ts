@@ -2,13 +2,13 @@ import type { PullRequest } from '../shared/types'
 import {
   commandCode,
   commandDetail,
-  execute,
   getConfigValue,
   isCancelled,
   isRecord,
   parseRemote,
   runGit,
 } from './git-core'
+import { GitHubTransportError, githubTransport } from './github-transport'
 
 export interface GitHubResult {
   pullRequests: PullRequest[]
@@ -124,35 +124,24 @@ function parseGraphQlPullRequest(value: unknown): PullRequestWithRepository | nu
   return { pullRequest, headRepository }
 }
 
-function parseGraphQlPages(output: string): PullRequestWithRepository[] {
-  let pages: unknown
-  try {
-    pages = JSON.parse(output)
-  } catch {
-    throw new Error('GitHub CLI returned invalid pull request JSON')
-  }
-  if (!Array.isArray(pages)) throw new Error('Unexpected GitHub pagination response')
-  const result: PullRequestWithRepository[] = []
-  for (const page of pages) {
-    if (!isRecord(page)) throw new Error('GitHub returned an unexpected pagination response')
-    if (Array.isArray(page.errors) && page.errors.length > 0) {
-      throw new Error('GitHub could not load pull requests')
-    }
-    const data = page.data
-    const repository = isRecord(data) ? data.repository : null
-    const pullRequests = isRecord(repository) ? repository.pullRequests : null
-    const nodes =
-      isRecord(pullRequests) && Array.isArray(pullRequests.nodes) ? pullRequests.nodes : null
-    if (!nodes) throw new Error('GitHub could not load pull requests')
-    for (const node of nodes) {
-      const parsed = parseGraphQlPullRequest(node)
-      if (parsed) result.push(parsed)
-    }
-  }
-  return result
-}
-
 function githubErrorMessage(error: unknown): string {
+  if (error instanceof GitHubTransportError) {
+    switch (error.kind) {
+      case 'unsupported':
+        return 'GitHub metadata unavailable: the gh CLI is not installed'
+      case 'unauthorized':
+        return `GitHub metadata unavailable: authentication is required (${error.detail})`
+      case 'rate-limited':
+      case 'secondary-rate-limit':
+        return `GitHub metadata unavailable: GitHub API rate limit reached (${error.detail})`
+      case 'cancelled':
+        return 'GitHub metadata unavailable: the request was cancelled'
+      case 'timeout':
+        return `GitHub metadata unavailable: the request timed out (${error.detail})`
+      default:
+        return `GitHub metadata unavailable: ${error.detail}`
+    }
+  }
   const detail = commandDetail(error)
   if (commandCode(error) === 'ENOENT')
     return 'GitHub metadata unavailable: the gh CLI is not installed'
@@ -227,42 +216,48 @@ export async function getGitHubData(
         }
       }
     }`
-    const output = await execute(
-      'gh',
-      [
-        'api',
-        'graphql',
-        '--hostname',
-        'github.com',
-        '--paginate',
-        '--slurp',
-        '-f',
-        `owner=${remote.owner}`,
-        '-f',
-        `name=${remote.name}`,
-        '-f',
-        `query=${query}`,
-      ],
-      repoPath,
-      undefined,
-      signal,
-    )
-    const entries = parseGraphQlPages(output)
-    const tracked = await trackedPullRequestNumbers(repoPath, signal)
-    const known = new Set(entries.map((entry) => entry.pullRequest.number))
-    for (const number of tracked) {
-      if (known.has(number)) continue
-      const exact = await getPullRequest(repoPath, number, signal)
-      entries.push({ pullRequest: exact, headRepository: exact.headRepository ?? null })
-      known.add(number)
-    }
+
     const pullRequests: PullRequest[] = []
     const headRepositories: (string | null)[] = []
-    const originFullName = remote.fullName.toLowerCase()
-    for (const entry of entries) {
-      pullRequests.push(entry.pullRequest)
-      headRepositories.push(entry.headRepository)
+    let endCursor: string | null = null
+    for (;;) {
+      const page: Record<string, unknown> = await githubTransport().graphql(query, {
+        owner: remote.owner,
+        name: remote.name,
+        endCursor,
+      })
+      const repository = isRecord(page) ? page.repository : null
+      const connection = isRecord(repository) ? repository.pullRequests : null
+      const nodes =
+        isRecord(connection) && Array.isArray(connection.nodes) ? connection.nodes : null
+      if (!nodes) throw new Error('GitHub could not load pull requests')
+      for (const node of nodes) {
+        const parsed = parseGraphQlPullRequest(node)
+        if (!parsed) continue
+        pullRequests.push(parsed.pullRequest)
+        headRepositories.push(parsed.headRepository)
+      }
+      const pageInfo = isRecord(connection) ? connection.pageInfo : null
+      const next = isRecord(pageInfo) ? pageInfo.endCursor : null
+      if (
+        !isRecord(pageInfo) ||
+        pageInfo.hasNextPage !== true ||
+        typeof next !== 'string' ||
+        !next ||
+        next === endCursor
+      )
+        break
+      endCursor = next
     }
+    const known = new Set(pullRequests.map((entry) => entry.number))
+    for (const number of await trackedPullRequestNumbers(repoPath, signal)) {
+      if (known.has(number)) continue
+      const exact = await getPullRequest(repoPath, number, signal)
+      pullRequests.push(exact)
+      headRepositories.push(exact.headRepository ?? null)
+      known.add(number)
+    }
+    const originFullName = remote.fullName.toLowerCase()
     const sameRepository = (value: unknown): boolean => {
       if (typeof value !== 'number' || !Number.isInteger(value)) return false
       return headRepositories[value]?.toLowerCase() === originFullName
@@ -305,30 +300,12 @@ export async function getPullRequest(
     }
   }`
   try {
-    const output = await execute(
-      'gh',
-      [
-        'api',
-        'graphql',
-        '--hostname',
-        'github.com',
-        '-f',
-        `owner=${remote.owner}`,
-        '-f',
-        `name=${remote.name}`,
-        '-F',
-        `number=${number}`,
-        '-f',
-        `query=${query}`,
-      ],
-      repoPath,
-      undefined,
-      signal,
-    )
-    const value: unknown = JSON.parse(output)
-    if (!isRecord(value) || (Array.isArray(value.errors) && value.errors.length > 0))
-      throw new Error('GitHub returned GraphQL errors')
-    const repository = isRecord(value.data) ? value.data.repository : null
+    const value = await githubTransport().graphql(query, {
+      owner: remote.owner,
+      name: remote.name,
+      number,
+    })
+    const repository = isRecord(value) ? value.repository : null
     const node = isRecord(repository) ? repository.pullRequest : null
     const parsed = parseGraphQlPullRequest(node)
     if (

@@ -5,6 +5,7 @@ import { StringDecoder } from 'node:string_decoder'
 import { promisify } from 'node:util'
 import { MAX_COMMAND_BYTES, MAX_STATUS_BYTES } from '../shared/performance'
 import type { ChangedFile, GitOperation, Stash } from '../shared/types'
+import { gitCommandEnvironment, resolveGitRuntime } from './git-runtime'
 
 export const execFile = promisify(execFileCallback)
 export const MAX_BUFFER = MAX_COMMAND_BYTES
@@ -76,13 +77,7 @@ export async function execute(
   try {
     const result = await execFile(command, args, {
       cwd,
-      env: {
-        ...process.env,
-        GIT_TERMINAL_PROMPT: '0',
-        GH_PROMPT_DISABLED: '1',
-        GCM_INTERACTIVE: 'Never',
-        ...env,
-      },
+      env: commandEnvironment(env),
       timeout: command === 'gh' ? 20_000 : 120_000,
       shell: false,
       windowsHide: true,
@@ -145,13 +140,7 @@ export async function executeCapped(
     }
     const child = spawn(command, args, {
       cwd,
-      env: {
-        ...process.env,
-        GIT_TERMINAL_PROMPT: '0',
-        GH_PROMPT_DISABLED: '1',
-        GCM_INTERACTIVE: 'Never',
-        ...options.env,
-      },
+      env: commandEnvironment(options.env),
       shell: false,
       windowsHide: true,
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -278,13 +267,114 @@ export async function mapWithConcurrency<T>(
   if (failed) throw failure
 }
 
+// Prompt suppression is the only general environment Git Stacks adds. Managed Git also
+// receives its own relocated helper paths; user SSH, LFS, hooks and signing pass through.
+export function commandEnvironment(env?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  return {
+    ...process.env,
+    GIT_TERMINAL_PROMPT: '0',
+    GH_PROMPT_DISABLED: '1',
+    GCM_INTERACTIVE: 'Never',
+    ...env,
+  }
+}
 export async function runGit(
   repoPath: string,
   args: string[],
   env?: NodeJS.ProcessEnv,
   signal?: AbortSignal,
 ): Promise<string> {
-  return execute('git', args, repoPath, env, signal)
+  const runtime = await resolveGitRuntime()
+  return execute(
+    runtime.executable,
+    args,
+    repoPath,
+    gitCommandEnvironment(runtime, commandEnvironment(env)),
+    signal,
+  )
+}
+
+/**
+ * Runs a command with text on stdin. `execFile` cannot write stdin, and a patch
+ * must reach Git as a stream so a path with spaces or a NUL never has to be
+ * spelled on the command line.
+ */
+export async function executeWithInput(
+  command: string,
+  args: string[],
+  cwd: string,
+  input: string,
+  env?: NodeJS.ProcessEnv,
+): Promise<string> {
+  const { promise, resolve, reject } = Promise.withResolvers<string>()
+  const child = spawn(command, args, {
+    cwd,
+    env: commandEnvironment(env),
+    shell: false,
+    windowsHide: true,
+    stdio: ['pipe', 'pipe', 'pipe'],
+  })
+  let stdout = ''
+  let stderr = ''
+  const finish = (error: CommandError | null) => {
+    clearTimeout(timer)
+    if (error) {
+      error.stdout = stdout
+      error.stderr = stderr
+      reject(error)
+    } else {
+      resolve(stdout)
+    }
+  }
+  const timer = setTimeout(() => {
+    child.kill('SIGKILL')
+    const error: CommandError = new Error(`${command} timed out`)
+    error.code = 'ETIMEDOUT'
+    finish(error)
+  }, 120_000)
+  timer.unref?.()
+  child.stdout.setEncoding('utf8')
+  child.stderr.setEncoding('utf8')
+  child.stdout.on('data', (chunk: string) => {
+    stdout += chunk
+    if (stdout.length > MAX_BUFFER) child.kill('SIGKILL')
+  })
+  child.stderr.on('data', (chunk: string) => {
+    stderr += chunk
+  })
+  child.on('error', (cause) => {
+    const error: CommandError = new Error(String(cause))
+    error.code = (cause as NodeJS.ErrnoException).code
+    finish(error)
+  })
+  child.on('close', (code) => {
+    if (code === 0) {
+      finish(null)
+      return
+    }
+    const error: CommandError = new Error(`${command} exited with code ${code ?? 'unknown'}`)
+    error.code = code ?? 1
+    finish(error)
+  })
+  child.stdin.on('error', () => undefined)
+  child.stdin.end(input)
+  return promise
+}
+
+export async function runGitWithInput(
+  repoPath: string,
+  args: string[],
+  input: string,
+  env?: NodeJS.ProcessEnv,
+): Promise<string> {
+  const runtime = await resolveGitRuntime()
+  return executeWithInput(
+    runtime.executable,
+    args,
+    repoPath,
+    input,
+    gitCommandEnvironment(runtime, commandEnvironment(env)),
+  )
 }
 
 export async function tryGit(
@@ -443,10 +533,29 @@ export async function getStatus(repoPath: string, signal?: AbortSignal): Promise
   const output = await runGit(
     repoPath,
     ['status', '--porcelain=v1', '-z', '--untracked-files=all'],
-    undefined,
+    {
+      GIT_OPTIONAL_LOCKS: '0',
+    },
     signal,
   )
   return parseStatus(output)
+}
+
+/**
+ * The capped counterpart of `runGit`. Bounded reads resolve the same managed
+ * runtime and relocated helper environment, so a large repository never forks
+ * the system Git directly and a bundled build still reports its own version.
+ */
+export async function runGitCapped(
+  repoPath: string,
+  args: string[],
+  options: CappedOptions,
+): Promise<CappedResult> {
+  const runtime = await resolveGitRuntime()
+  return executeCapped(runtime.executable, args, repoPath, {
+    ...options,
+    env: gitCommandEnvironment(runtime, commandEnvironment(options.env)),
+  })
 }
 
 /**
@@ -459,10 +568,9 @@ export async function listStatus(
   repoPath: string,
   signal?: AbortSignal,
 ): Promise<{ files: ChangedFile[]; truncated: boolean }> {
-  const { text, truncated } = await executeCapped(
-    'git',
-    ['status', '--porcelain=v1', '-z', '--untracked-files=all'],
+  const { text, truncated } = await runGitCapped(
     repoPath,
+    ['status', '--porcelain=v1', '-z', '--untracked-files=all'],
     { maxBytes: MAX_STATUS_BYTES, boundary: '\0', signal },
   )
   return { files: parseStatus(text, truncated), truncated }
