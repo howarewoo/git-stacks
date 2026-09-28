@@ -8,6 +8,7 @@ import {
   resolveRepository,
   runAction,
   getFileView,
+  getConflictView,
   getHistory,
   getCommitDiff,
   getPushPreview,
@@ -139,6 +140,10 @@ function installHandlers() {
   ipcMain.handle('repository:file', (event, filePath: string) => {
     validateSender(event)
     return readRepository((root) => getFileView(root, filePath))
+  })
+  ipcMain.handle('repository:conflict', (event, filePath: string) => {
+    validateSender(event)
+    return readRepository((root) => getConflictView(root, filePath))
   })
   ipcMain.handle('repository:history', (event, ref: string, skip: number) => {
     validateSender(event)

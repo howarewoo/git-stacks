@@ -10,6 +10,12 @@ import {
   ShieldCheck,
 } from 'lucide-react'
 import type { ChangedFile, PullRequest, RepositorySnapshot } from '../../../shared/types'
+import {
+  actionBlockReason,
+  capabilityReport,
+  stashRemovalBlockReason,
+} from '../../../shared/capabilities'
+import type { CapabilityState } from '../../../shared/capabilities'
 import { Badge } from './ui/badge'
 import { Button } from './ui/button'
 import { Checkbox } from './ui/checkbox'
@@ -106,6 +112,7 @@ export function ChangesView({
   onSubmitCommit,
   actionError,
   onStash,
+  onResolveConflict,
 }: {
   snapshot: RepositorySnapshot
   groups: ChangeGroups
@@ -121,6 +128,7 @@ export function ChangesView({
   onCommitAmendChange: (value: boolean) => void
   onSubmitCommit: (event: React.FormEvent<HTMLFormElement>) => void
   onStash: () => void
+  onResolveConflict: (path: string) => void
   actionError: string | null
 }) {
   const fileSearch = groups.search
@@ -160,11 +168,12 @@ export function ChangesView({
         </span>
       </button>
       <Button
-        disabled={busy}
+        disabled={busy || Boolean(actionBlockReason(snapshot.capabilities, action))}
         tooltip={
-          action === 'stage'
+          actionBlockReason(snapshot.capabilities, action) ??
+          (action === 'stage'
             ? "Stage this file's working-tree changes for the next commit. Local index only."
-            : 'Remove this file from the index; its working-tree edits remain. Nothing is discarded.'
+            : 'Remove this file from the index; its working-tree edits remain. Nothing is discarded.')
         }
         onClick={() =>
           runAction(
@@ -190,8 +199,15 @@ export function ChangesView({
           </span>
         </div>
         <Button
-          disabled={snapshot.files.length === 0 || busy}
-          tooltip="Shelve tracked working changes into a local stash and restore a clean tree. Choose whether untracked files are included."
+          disabled={
+            snapshot.files.length === 0 ||
+            busy ||
+            Boolean(actionBlockReason(snapshot.capabilities, 'stash'))
+          }
+          tooltip={
+            actionBlockReason(snapshot.capabilities, 'stash') ??
+            'Shelve tracked working changes into a local stash and restore a clean tree. Choose whether untracked files are included.'
+          }
           onClick={onStash}
           size="sm"
           variant="secondary"
@@ -219,11 +235,16 @@ export function ChangesView({
             <Button
               size="sm"
               variant="ghost"
-              disabled={busy || !groups.visibleStaged.length}
+              disabled={
+                busy ||
+                !groups.visibleStaged.length ||
+                Boolean(actionBlockReason(snapshot.capabilities, 'unstage'))
+              }
               tooltip={
-                fileSearch
+                actionBlockReason(snapshot.capabilities, 'unstage') ??
+                (fileSearch
                   ? 'Remove the shown files from the index; working-tree edits remain. Hidden staged files stay staged.'
-                  : 'Remove all staged changes from the index; working-tree edits remain. Nothing is discarded.'
+                  : 'Remove all staged changes from the index; working-tree edits remain. Nothing is discarded.')
               }
               onClick={() =>
                 runAction(
@@ -259,13 +280,19 @@ export function ChangesView({
             <Button
               size="sm"
               variant="ghost"
-              disabled={busy || !groups.visibleUnstaged.length || groups.conflicted.length > 0}
+              disabled={
+                busy ||
+                !groups.visibleUnstaged.length ||
+                groups.conflicted.length > 0 ||
+                Boolean(actionBlockReason(snapshot.capabilities, 'stage'))
+              }
               tooltip={
-                groups.conflicted.length > 0
+                actionBlockReason(snapshot.capabilities, 'stage') ??
+                (groups.conflicted.length > 0
                   ? 'Resolve conflicts before staging — conflicted files cannot be staged in bulk.'
                   : fileSearch
                     ? 'Stage the shown working-tree changes for the next commit. Hidden unstaged files stay unstaged.'
-                    : 'Stage all working-tree changes for the next commit. Local index only; nothing is committed yet.'
+                    : 'Stage all working-tree changes for the next commit. Local index only; nothing is committed yet.')
               }
               onClick={() =>
                 runAction(
@@ -296,6 +323,7 @@ export function ChangesView({
           busy={busy}
           runAction={runAction}
           onClose={() => onInspect(null)}
+          onResolveConflict={onResolveConflict}
           actionError={actionError}
         />
       ) : null}
@@ -327,9 +355,11 @@ export function ChangesView({
             busy ||
             operationActive ||
             !snapshot.headOid ||
-            snapshot.currentBranch === snapshot.defaultBranch
+            snapshot.currentBranch === snapshot.defaultBranch ||
+            Boolean(actionBlockReason(snapshot.capabilities, 'commit'))
           }
           onChange={(event) => onCommitAmendChange(event.target.checked)}
+          description={actionBlockReason(snapshot.capabilities, 'commit') ?? undefined}
         />
         <div className="commit-form-row">
           <Field
@@ -356,14 +386,16 @@ export function ChangesView({
               !commitMessage.trim() ||
               (!commitAmend && groups.staged.length === 0) ||
               busy ||
-              operationActive
+              operationActive ||
+              Boolean(actionBlockReason(snapshot.capabilities, 'commit'))
             }
             type="submit"
             variant="accent"
             tooltip={
-              commitAmend
+              actionBlockReason(snapshot.capabilities, 'commit') ??
+              (commitAmend
                 ? 'Review rewriting the last commit with the new message plus staged changes. Rewrites local history; pushed commits will need force push.'
-                : 'Create a local commit from staged changes only. Unstaged edits stay in the working tree; nothing is pushed.'
+                : 'Create a local commit from staged changes only. Unstaged edits stay in the working tree; nothing is pushed.')
             }
           >
             {busyAction === 'Commit staged changes' ? (
@@ -499,6 +531,9 @@ export function StashesView({
   onRequest: (request: WorkflowRequest) => void
   onStash: () => void
 }) {
+  const stashReason = actionBlockReason(snapshot.capabilities, 'stash')
+  const applyReason = actionBlockReason(snapshot.capabilities, 'stashApply')
+  const removalReason = stashRemovalBlockReason(snapshot.capabilities)
   return (
     <div className="stashes-view">
       <div className="list-toolbar">
@@ -507,8 +542,11 @@ export function StashesView({
           <span className="list-subtitle">{snapshot.stashes.length} saved</span>
         </div>
         <Button
-          disabled={snapshot.files.length === 0 || busy}
-          tooltip="Shelve current working changes into a local stash and restore a clean tree. Choose whether untracked files are included."
+          disabled={snapshot.files.length === 0 || busy || Boolean(stashReason)}
+          tooltip={
+            stashReason ??
+            'Shelve current working changes into a local stash and restore a clean tree. Choose whether untracked files are included.'
+          }
           onClick={onStash}
           size="sm"
           variant="accent"
@@ -538,9 +576,12 @@ export function StashesView({
                 </small>
               </span>
               <Button
-                disabled={busy || operationActive}
+                disabled={busy || operationActive || Boolean(applyReason)}
                 aria-label={`Apply ${stash.ref}`}
-                tooltip="Restore this stash’s working changes and saved staging state, and keep the stash. May conflict with current edits."
+                tooltip={
+                  applyReason ??
+                  'Restore this stash’s working changes and saved staging state, and keep the stash. May conflict with current edits.'
+                }
                 onClick={() =>
                   runAction({ type: 'stashApply', ref: stash.ref, oid: stash.oid }, 'Apply stash')
                 }
@@ -550,9 +591,13 @@ export function StashesView({
                 Apply
               </Button>
               <Button
-                disabled={busy}
+                disabled={busy || Boolean(applyReason || removalReason)}
                 aria-label={`Pop ${stash.ref}`}
-                tooltip="Reapply this stash to the working tree, then delete it from the list. Stops on conflicts so saved changes are not lost silently."
+                tooltip={
+                  applyReason ??
+                  removalReason ??
+                  'Reapply this stash to the working tree, then delete it from the list. Stops on conflicts so saved changes are not lost silently.'
+                }
                 onClick={() =>
                   runAction({ type: 'stashPop', ref: stash.ref, oid: stash.oid }, 'Pop stash')
                 }
@@ -563,9 +608,17 @@ export function StashesView({
                 Pop
               </Button>
               <Button
-                disabled={busy || operationActive}
+                disabled={
+                  busy ||
+                  operationActive ||
+                  Boolean(removalReason || actionBlockReason(snapshot.capabilities, 'stashDrop'))
+                }
                 aria-label={`Drop ${stash.ref}`}
-                tooltip="Preview permanently removing this saved stash without applying it. This app cannot restore a dropped stash."
+                tooltip={
+                  actionBlockReason(snapshot.capabilities, 'stashDrop') ??
+                  removalReason ??
+                  'Preview permanently removing this saved stash without applying it. This app cannot restore a dropped stash.'
+                }
                 onClick={() =>
                   onRequest({
                     kind: 'confirm',
@@ -591,6 +644,93 @@ export function StashesView({
           <p>Stash changes before switching context when you need a clean tree.</p>
         </EmptyState>
       )}
+    </div>
+  )
+}
+
+const capabilityStateLabel: Record<CapabilityState, string> = {
+  supported: 'Supported',
+  limited: 'Limited',
+  unsupported: 'Unsupported',
+}
+
+const capabilityStateVariant: Record<CapabilityState, 'success' | 'warning' | 'danger'> = {
+  supported: 'success',
+  limited: 'warning',
+  unsupported: 'danger',
+}
+
+/**
+ * The support matrix for the open repository. Every detected shape states what it
+ * allows, and every operation an unsupported shape refuses is listed with its reason.
+ */
+export function DiagnosticsView({ snapshot }: { snapshot: RepositorySnapshot }) {
+  const { capabilities } = snapshot
+  const report = capabilityReport(capabilities)
+  const disabled = report.flatMap((entry) => entry.restrictions)
+  const facts: [string, string][] = [
+    ['Reference storage', capabilities.refStorage],
+    ['Object format', capabilities.objectFormat ?? 'unknown'],
+    ['Git', capabilities.gitVersion ?? 'unknown'],
+    ['Worktree config', capabilities.worktreeConfig ? 'enabled' : 'not enabled'],
+  ]
+
+  return (
+    <div className="diagnostics-view">
+      <div className="list-toolbar">
+        <div className="list-title-group">
+          <h1>Diagnostics</h1>
+          <span className="list-subtitle">
+            {report.filter((entry) => entry.state === 'supported').length} of {report.length} fully
+            supported
+          </span>
+        </div>
+      </div>
+      <div className="capability-scroll">
+        <div className="capability-facts" role="list" aria-label="Repository facts">
+          {facts.map(([label, value]) => (
+            <div className="capability-fact" key={label} role="listitem">
+              <span className="capability-fact-key">{label}</span>
+              <span className="capability-fact-value">{value}</span>
+            </div>
+          ))}
+        </div>
+        <div className="capability-list" role="list" aria-label="Detected capabilities">
+          {report.map((entry) => (
+            <div className="capability-row" key={entry.id} role="listitem">
+              <span className="capability-copy">
+                <strong>{entry.label}</strong>
+                <small>{entry.detail}</small>
+              </span>
+              <Badge variant={capabilityStateVariant[entry.state]}>
+                {capabilityStateLabel[entry.state]}
+              </Badge>
+            </div>
+          ))}
+        </div>
+        {disabled.length > 0 ? (
+          <section aria-labelledby="diagnostics-disabled-heading">
+            <h2 className="capability-section-heading" id="diagnostics-disabled-heading">
+              Unavailable here
+            </h2>
+            <div className="capability-list" role="list" aria-label="Unavailable operations">
+              {disabled.map((restriction) => (
+                <div
+                  className="capability-row"
+                  key={`${restriction.operation}:${restriction.reason}`}
+                  role="listitem"
+                >
+                  <span className="capability-copy">
+                    <strong>{restriction.operation}</strong>
+                    <small>{restriction.reason}</small>
+                  </span>
+                  <Badge variant="danger">Disabled</Badge>
+                </div>
+              ))}
+            </div>
+          </section>
+        ) : null}
+      </div>
     </div>
   )
 }

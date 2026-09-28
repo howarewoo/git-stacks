@@ -10,6 +10,7 @@ import {
   openPullRequest,
   pausedRestackProgress,
   restackPreview,
+  standardCapabilities,
 } from '../../fixtures/workflow-scenarios'
 import {
   changedFile,
@@ -151,6 +152,7 @@ function repository(overrides: Partial<RepositorySnapshot> = {}): RepositorySnap
     stackOperation: null,
     headOid: checkoutBranch.oid ?? null,
     github: { available: true, message: 'GitHub metadata available; 1 pull request' },
+    capabilities: standardCapabilities,
     ...overrides,
   }
 }
