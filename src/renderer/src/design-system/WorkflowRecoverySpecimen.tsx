@@ -1,6 +1,6 @@
 import React from 'react'
 import type { PublishProgress, RepositorySnapshot, StackPreview } from '../../../shared/types'
-import { WorkflowDialog } from '../components/workflow-dialog'
+import { WorkflowDialog, type WorkflowStackAPI } from '../components/workflow-dialog'
 import { publishPreview } from './DialogSpecimenData'
 
 /**
@@ -132,64 +132,43 @@ const snapshot: RepositorySnapshot = {
 
 const noop = () => undefined
 
-function installDesktop(mode: string): () => void {
-  // The design-system routes run without a preload bridge, so the specimen supplies the
-  // backend surface the dialog reads. Where a bridge does exist, the three reads the recovery
-  // path depends on are overridden on it instead.
-  const existing = (window as unknown as { desktop?: Record<string, unknown> }).desktop
-  const target = (existing ?? {}) as Record<string, unknown>
-  const previous = {
-    stackPreview: target.stackPreview,
-    submitStackProgress: target.submitStackProgress,
-    onSubmitStackProgress: target.onSubmitStackProgress,
-  }
-  target.stackPreview = async () => {
-    if (mode === 'preview-failure') {
-      throw new Error('fatal: unable to access remote')
-    }
-    return mode === 'mismatch' ? movedPreview : publishPreview
-  }
-  target.submitStackProgress = async () =>
-    mode === 'non-retryable'
-      ? {
-          ...journal,
-          message: 'GitHub rejected the native stack chain.',
-          steps: [
-            {
-              kind: 'create-stack',
-              branch: null,
-              label: 'Register native stack',
-              status: 'failed',
-              pullRequest: null,
-              detail: '',
-              failure: {
-                summary: 'Invalid chain (422).',
-                recovery:
-                  'Fix the pull request bases or readiness on GitHub, then dismiss this submission and take a fresh preview.',
-                retryable: false,
+function recoveryApi(mode: string): WorkflowStackAPI {
+  return {
+    stackPreview: async () => {
+      if (mode === 'preview-failure') {
+        throw new Error('fatal: unable to access remote')
+      }
+      return mode === 'mismatch' ? movedPreview : publishPreview
+    },
+    submitStackProgress: async () =>
+      mode === 'non-retryable'
+        ? {
+            ...journal,
+            message: 'GitHub rejected the native stack chain.',
+            steps: [
+              {
+                kind: 'create-stack',
+                branch: null,
+                label: 'Register native stack',
+                status: 'failed',
+                pullRequest: null,
+                detail: '',
+                failure: {
+                  summary: 'Invalid chain (422).',
+                  recovery:
+                    'Fix the pull request bases or readiness on GitHub, then dismiss this submission and take a fresh preview.',
+                  retryable: false,
+                },
               },
-            },
-          ],
-        }
-      : journal
-  target.onSubmitStackProgress = () => () => undefined
-  if (!existing) {
-    ;(window as unknown as { desktop?: Record<string, unknown> }).desktop = target
-  }
-  return () => {
-    if (!existing) {
-      delete (window as unknown as { desktop?: Record<string, unknown> }).desktop
-      return
-    }
-    target.stackPreview = previous.stackPreview
-    target.submitStackProgress = previous.submitStackProgress
-    target.onSubmitStackProgress = previous.onSubmitStackProgress
+            ],
+          }
+        : journal,
+    onSubmitStackProgress: () => noop,
   }
 }
 
 export function WorkflowRecoverySpecimen({ mode }: { mode: string }) {
-  const restore = React.useMemo(() => installDesktop(mode), [mode])
-  React.useEffect(() => restore, [restore])
+  const stackApi = React.useMemo(() => recoveryApi(mode), [mode])
   const [actions, setActions] = React.useState<string[]>([])
   return (
     <>
@@ -197,6 +176,7 @@ export function WorkflowRecoverySpecimen({ mode }: { mode: string }) {
         {actions.join(',')}
       </output>
       <WorkflowDialog
+        stackApi={stackApi}
         request={{ kind: 'stack', branch: 'feature/checkout', operation: 'publish' }}
         snapshot={snapshot}
         busy={false}

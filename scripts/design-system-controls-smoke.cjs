@@ -2,9 +2,10 @@ const assert = require('node:assert/strict')
 const { existsSync } = require('node:fs')
 const { join } = require('node:path')
 const { pathToFileURL } = require('node:url')
-const { app, BrowserWindow } = require('electron')
+const { app, BrowserWindow, ipcMain } = require('electron')
 
 const rendererPath = join(__dirname, '..', 'out', 'renderer', 'index.html')
+const preloadPath = join(__dirname, '..', 'out', 'preload', 'index.cjs')
 const pageHelpers = `
   function buttonNamed(label) {
     return Array.from(document.querySelectorAll('button')).find(
@@ -236,6 +237,41 @@ async function main() {
     'the dispatched submission should carry the reviewed layer choice',
   )
 
+  await recoverySmoke()
+  if (debuggerAttached) {
+    window.webContents.debugger.detach()
+    debuggerAttached = false
+  }
+  const noPreloadWindow = window
+  assert.ok(existsSync(preloadPath), 'the production preload must be built')
+  const unexpectedReads = []
+  for (const channel of ['repository:stack-preview', 'repository:submit-stack-progress']) {
+    ipcMain.handle(channel, () => {
+      unexpectedReads.push(channel)
+      throw new Error(`Recovery specimen leaked into production IPC: ${channel}`)
+    })
+  }
+  window = new BrowserWindow({
+    show: true,
+    width: 1280,
+    height: 900,
+    webPreferences: { contextIsolation: true, sandbox: true, preload: preloadPath },
+  })
+  noPreloadWindow.destroy()
+  window.webContents.on('console-message', (details) => {
+    if (details.level === 'error') console.error(details.message)
+  })
+  await window.loadURL('about:blank')
+  assert.equal(await evaluateInPage('Object.isFrozen(window.desktop)'), true)
+  await recoverySmoke()
+  assert.equal(await evaluateInPage('Object.isFrozen(window.desktop)'), true)
+  assert.deepEqual(unexpectedReads, [], 'fixtures must never call the production repository API')
+  console.log(
+    'Production preload: frozen desktop bridge preserved; all three recovery modes passed without repository IPC.',
+  )
+}
+
+async function recoverySmoke() {
   // A recovered submission is resumed from its journal, so what the dialog says about each
   // layer has to come from the journal too. A fresh preview that describes a different base
   // must not relabel what Resume will run.

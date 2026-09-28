@@ -3,6 +3,7 @@ import { ExternalLink, LoaderCircle } from 'lucide-react'
 import type {
   Branch,
   Commit,
+  DesktopAPI,
   GitAction,
   PublishLayerChoice,
   PublishProgress,
@@ -98,6 +99,11 @@ export function previewIdentity(data: WorkflowData): string | null {
   return null
 }
 
+export type WorkflowStackAPI = Pick<
+  DesktopAPI,
+  'stackPreview' | 'submitStackProgress' | 'onSubmitStackProgress'
+>
+
 export function WorkflowDialog({
   request,
   snapshot,
@@ -107,6 +113,7 @@ export function WorkflowDialog({
   runAction,
   onClose,
   onRequest,
+  stackApi = window.desktop,
 }: {
   request: WorkflowRequest
   snapshot: RepositorySnapshot
@@ -117,6 +124,7 @@ export function WorkflowDialog({
   runAction: RunAction
   onClose: () => void
   onRequest: (request: WorkflowRequest) => void
+  stackApi?: WorkflowStackAPI
 }) {
   const [name, setName] = React.useState(
     'branch' in request
@@ -188,6 +196,7 @@ export function WorkflowDialog({
   const initialLoad = React.useRef<{
     request: WorkflowRequest
     attempt: number
+    stackApi: WorkflowStackAPI
     promise: Promise<WorkflowData>
   } | null>(null)
 
@@ -197,12 +206,16 @@ export function WorkflowDialog({
     setIdentity(null)
     setLoading(previewKinds.includes(request.kind))
     setLoaded(false)
-    if (initialLoad.current?.request !== request || initialLoad.current.attempt !== attempt) {
+    if (
+      initialLoad.current?.request !== request ||
+      initialLoad.current.attempt !== attempt ||
+      initialLoad.current.stackApi !== stackApi
+    ) {
       const load = async (): Promise<WorkflowData> => {
         if (request.kind === 'stack') {
           return {
             kind: 'stack',
-            value: await window.desktop.stackPreview(request.operation, request.branch),
+            value: await stackApi.stackPreview(request.operation, request.branch),
           }
         }
         if (request.kind === 'forcePush') {
@@ -213,7 +226,7 @@ export function WorkflowDialog({
         }
         return { kind: 'local' }
       }
-      initialLoad.current = { request, attempt, promise: load() }
+      initialLoad.current = { request, attempt, stackApi, promise: load() }
     }
     void initialLoad.current.promise.then(
       (data) => {
@@ -261,7 +274,7 @@ export function WorkflowDialog({
     return () => {
       active = false
     }
-  }, [request, attempt])
+  }, [request, attempt, stackApi])
 
   // A submission that stopped part-way survives a restart; show it before anything
   // else so a person can resume or dismiss it instead of starting a second one.
@@ -274,10 +287,10 @@ export function WorkflowDialog({
     // A running submission pushes its own progress. Reading it on a timer cannot work: that
     // read queues behind the action producing the steps, so it would only ever report the
     // state after the whole operation finished.
-    const unsubscribe = window.desktop.onSubmitStackProgress?.((value) => {
+    const unsubscribe = stackApi.onSubmitStackProgress?.((value) => {
       if (active) setProgress(value)
     })
-    void window.desktop.submitStackProgress?.().then(
+    void stackApi.submitStackProgress?.().then(
       (value) => active && setProgress(value),
       () => active && setProgress(null),
     )
@@ -285,7 +298,7 @@ export function WorkflowDialog({
       active = false
       unsubscribe?.()
     }
-  }, [request])
+  }, [request, stackApi])
 
   const title =
     request.kind === 'stack'
@@ -339,7 +352,7 @@ export function WorkflowDialog({
   const readProgress = async () => {
     if (request.kind !== 'stack' || request.operation !== 'publish') return
     try {
-      setProgress((await window.desktop.submitStackProgress?.()) ?? null)
+      setProgress((await stackApi.submitStackProgress?.()) ?? null)
     } catch {
       setProgress(null)
     }
