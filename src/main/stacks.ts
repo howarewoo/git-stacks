@@ -175,6 +175,8 @@ interface PublishBranchFacts {
   branch: string
   oid: string
   remoteOid: string | null
+  /** The existing PR base reviewed before approving a retarget, never refreshed on retry. */
+  pullRequestBase?: string | null
 }
 
 /**
@@ -200,7 +202,7 @@ interface PublishOperation {
    * The stack creation this operation issued. Persisted before the API call so a retry can
    * tell its own half-finished creation apart from a stack somebody else created.
    */
-  stackIntent: 'none' | 'create'
+  stackCreateRequested?: boolean
   /**
    * The exact members native stack `stackNumber` held when the preview was taken, with the
    * head they carried then. These are the immutable baseline every later re-read is proved
@@ -1906,6 +1908,8 @@ async function readPublishOperation(repoPath: string): Promise<PublishOperation 
     typeof parsed.allowForce !== 'boolean' ||
     typeof parsed.message !== 'string' ||
     (parsed.stackNumber !== null && !Number.isInteger(parsed.stackNumber)) ||
+    (parsed.stackCreateRequested !== undefined &&
+      typeof parsed.stackCreateRequested !== 'boolean') ||
     !['create', 'extend', 'none'].includes(String(parsed.stackAction)) ||
     !['running', 'failed', 'completed'].includes(String(parsed.status)) ||
     !Array.isArray(parsed.layers) ||
@@ -1918,7 +1922,10 @@ async function readPublishOperation(repoPath: string): Promise<PublishOperation 
         isRecord(fact) &&
         typeof fact.branch === 'string' &&
         isOid(fact.oid) &&
-        (fact.remoteOid === null || isOid(fact.remoteOid)),
+        (fact.remoteOid === null || isOid(fact.remoteOid)) &&
+        (fact.pullRequestBase === undefined ||
+          fact.pullRequestBase === null ||
+          typeof fact.pullRequestBase === 'string'),
     ) ||
     !parsed.layers.every(
       (layer) =>
@@ -2055,12 +2062,13 @@ async function buildPublishOperation(
       branch: entry.branch,
       oid: entry.oldTip,
       remoteOid: entry.remoteOid,
+      pullRequestBase: entry.pr?.state === 'OPEN' ? entry.pr.base : null,
     })),
     steps: publishSteps(layers, offer.stackAction, offer.stackNumber),
     stackNumber: offer.stackNumber,
     capturedMembers: capturedStackMembers(plan, offer.stackNumber),
     stackAction: offer.stackAction,
-    stackIntent: offer.stackAction === 'create' ? 'create' : 'none',
+    stackCreateRequested: false,
     status: 'running',
     message: 'Submitting the stack',
   }
@@ -3275,6 +3283,12 @@ async function runPublishStep(
       layer.branch,
       await canonicalPullRequests(repoPath).then((result) => result.data),
     )
+    if (layer.pullRequest !== null && existing?.number !== layer.pullRequest) {
+      throw new NativeStackError(
+        'invalid-chain',
+        `Recorded pull request #${layer.pullRequest} for ${layer.branch} is no longer the current pull request; take a fresh preview`,
+      )
+    }
     if (existing && layer.pullRequest === null && !layer.createIntent) {
       throw new Error(
         `Pull request for ${layer.branch} changed during publication; inspect the published branches before retrying`,
@@ -3293,6 +3307,7 @@ async function runPublishStep(
       }
       layer.pullRequest = existing.number
       step.pullRequest = existing.number
+      await writePublishOperation(repoPath, operation)
       await setPullRequestNumber(repoPath, layer.branch, existing.number)
       return `Adopted existing pull request #${existing.number}`
     }
@@ -3306,6 +3321,7 @@ async function runPublishStep(
     const number = await createPullRequest(repoPath, operation.fullName, layer)
     layer.pullRequest = number
     step.pullRequest = number
+    await writePublishOperation(repoPath, operation)
     await setPullRequestNumber(repoPath, layer.branch, number)
     const readBack = await getPullRequest(repoPath, number)
     if (
@@ -3330,6 +3346,13 @@ async function runPublishStep(
     }
     if (before.base === layer.base)
       return `Pull request #${number} is already based on ${layer.base}`
+    const capturedBase = factsOf(operation, layer.branch).pullRequestBase
+    if (before.base !== capturedBase) {
+      throw new NativeStackError(
+        'invalid-chain',
+        `Pull request #${number} base changed from ${capturedBase ?? 'an unknown base'} to ${before.base}; take a fresh preview`,
+      )
+    }
     await patchPullRequest(operation.fullName, number, { base: layer.base })
     const after = await getPullRequest(repoPath, number)
     if (after.base !== layer.base) {
@@ -3386,7 +3409,7 @@ async function runPublishStep(
     // whose members are the same open pull requests this operation published, not a closed
     // stack or one holding a pull request somebody closed in between.
     if (
-      operation.stackIntent === 'create' &&
+      operation.stackCreateRequested === true &&
       step.kind === 'create-stack' &&
       isOwnCreatedStack(captured, numbers, published)
     ) {
@@ -3397,7 +3420,7 @@ async function runPublishStep(
     // GitHub may have created this stack and lost the response, or the process may have stopped
     // before the completed step was marked complete. A stack that holds exactly this operation's
     // pull requests, in order, is its own work and is adopted rather than called stale.
-    if (operation.stackIntent !== 'create' || !isOwnCreatedStack(matched, numbers, published)) {
+    if (!operation.stackCreateRequested || !isOwnCreatedStack(matched, numbers, published)) {
       throw new Error(
         `Stack preview is stale: these pull requests now belong to native stack #${matched.number}`,
       )
@@ -3507,6 +3530,10 @@ async function runPublishStep(
   await createPullRequestStack(owner, name, numbers, {
     knownPullRequests: atBoundary,
     defaultBranch: operation.defaultBranch,
+    beforeCreate: async () => {
+      operation.stackCreateRequested = true
+      await writePublishOperation(repoPath, operation)
+    },
   })
   return `Registered native stack for pull requests ${numbers.join(', ')}`
 }

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { readFileSync, writeFileSync } from 'node:fs'
+import { chmodSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { test } from 'node:test'
 import { getSnapshot } from '../src/main/git'
@@ -1430,10 +1430,8 @@ test('a recovered stack creation is not rejected when the interruption repeats',
     )
     const journal = JSON.parse(readFileSync(journalPath, 'utf8')) as {
       stackNumber: number | null
-      stackIntent: string
       steps: Array<{ kind: string; status: string }>
     }
-    assert.equal(journal.stackIntent, 'create')
     assert.equal(journal.stackNumber, null)
     journal.stackNumber = stacks[0].number
     writeFileSync(journalPath, `${JSON.stringify(journal, null, 2)}\n`, 'utf8')
@@ -1616,7 +1614,6 @@ for (const recordedStack of [false, true]) {
             'git-stacks-publish.json',
           )
           const journal = JSON.parse(readFileSync(journalPath, 'utf8'))
-          assert.equal(journal.stackIntent, 'create')
           assert.equal(journal.stackNumber, null)
           journal.stackNumber = stack.number
           writeFileSync(journalPath, `${JSON.stringify(journal, null, 2)}\n`)
@@ -1678,3 +1675,254 @@ for (const recordedStack of [false, true]) {
     })
   }
 }
+
+for (const replacement of ['same', 'closed', 'replaced'] as const) {
+  test(`creation retry preserves the recorded PR when it is ${replacement}`, async () => {
+    await withHarness(async (harness) => {
+      await setupFreshBranches(harness)
+      const preview = await previewStack(
+        harness.repo,
+        await getSnapshot(harness.repo),
+        'publish',
+        'feature/step-2',
+      )
+      const inner = createGitHubApiDouble()
+      let created = false
+      let failReadback = true
+      setGitHubTransport(
+        new DirectGitHubTransport({
+          token: 'fixture-token',
+          fetch: async (input, init) => {
+            const url = String(input)
+            const body = typeof init?.body === 'string' ? JSON.parse(init.body) : {}
+            if (
+              created &&
+              failReadback &&
+              url.endsWith('/graphql') &&
+              body.variables?.number === 101
+            ) {
+              failReadback = false
+              return new Response(JSON.stringify({ message: 'Readback interrupted' }), {
+                status: 503,
+              })
+            }
+            const response = await inner(input, init)
+            if (url.endsWith('/pulls') && init?.method === 'POST') created = true
+            return response
+          },
+        }),
+      )
+      await assert.rejects(
+        runStackAction(harness.repo, {
+          type: 'submitStack',
+          token: preview.token,
+          allowForce: false,
+          layers: freshLayers(),
+        }),
+        /Readback interrupted/iu,
+      )
+      assert.equal((await getSubmitStackProgress(harness.repo))?.layers[0].pullRequest, 101)
+      const state = await harness.readState()
+      const original = state.prs.find((pr) => pr.number === 101)!
+      if (replacement !== 'same') original.state = 'CLOSED'
+      if (replacement === 'replaced') {
+        state.prs.push({
+          ...original,
+          number: 102,
+          state: 'OPEN',
+          url: 'https://github.com/acme/widgets/pull/102',
+        })
+        state.nextNumber = 103
+      }
+      state.requests = []
+      await harness.writeState(state)
+      if (replacement === 'same') {
+        await runStackAction(harness.repo, { type: 'submitStackRetry' })
+        assert.equal((await getSubmitStackProgress(harness.repo))?.status, 'completed')
+        assert.deepEqual(
+          (await harness.readState()).stacks?.[0].pull_requests.map((pr) => pr.number),
+          [101],
+        )
+      } else {
+        await assert.rejects(runStackAction(harness.repo, { type: 'submitStackRetry' }))
+        assert.equal((await getSubmitStackProgress(harness.repo))?.status, 'failed')
+        assert.deepEqual((await harness.readState()).stacks, [])
+      }
+      assert.equal((await getSubmitStackProgress(harness.repo))?.layers[0].pullRequest, 101)
+      const final = await harness.readState()
+      assert.equal(
+        final.requests.some(
+          (request) => request.argv[0] === 'repos/acme/widgets/pulls' && request.argv[1] === 'POST',
+        ),
+        false,
+      )
+      assert.equal(git(harness, ['config', '--get', 'branch.feature/step-2.gitStacksPr']), '101')
+    })
+  })
+}
+
+for (const currentBase of ['main', 'feature/step-1', 'release']) {
+  test(`retarget retry honors captured and intended bases when current base is ${currentBase}`, async () => {
+    await withHarness(async (harness) => {
+      await setupThreeBranches(harness)
+      git(harness, ['config', '--local', 'branch.feature/step-2.parent', 'feature/step-1'])
+      git(harness, [
+        'config',
+        '--local',
+        'branch.feature/step-2.parentTip',
+        git(harness, ['rev-parse', 'feature/step-1']),
+      ])
+      const state = await harness.readState()
+      state.prs.find((pr) => pr.number === 102)!.base = 'main'
+      await harness.writeState(state)
+      const preview = await previewStack(
+        harness.repo,
+        await getSnapshot(harness.repo),
+        'publish',
+        'feature/step-2',
+      )
+      assert.deepEqual(preview.blockers, [])
+      const inner = createGitHubApiDouble()
+      let interrupt = true
+      const patchedBases: string[] = []
+      setGitHubTransport(
+        new DirectGitHubTransport({
+          token: 'fixture-token',
+          fetch: async (input, init) => {
+            if (String(input).endsWith('/pulls/102') && init?.method === 'PATCH') {
+              if (interrupt) {
+                interrupt = false
+                return new Response(JSON.stringify({ message: 'Retarget interrupted' }), {
+                  status: 503,
+                })
+              }
+              patchedBases.push(JSON.parse(String(init.body)).base)
+            }
+            return inner(input, init)
+          },
+        }),
+      )
+      await assert.rejects(
+        runStackAction(harness.repo, publishAction(preview.token, ['feature/step-2'])),
+        /Retarget interrupted/iu,
+      )
+      const stopped = await getSubmitStackProgress(harness.repo)
+      assert.equal(stopped?.steps.find((step) => step.status === 'failed')?.kind, 'retarget-pr')
+      const changed = await harness.readState()
+      assert.equal(changed.prs.find((pr) => pr.number === 102)?.base, 'main')
+      changed.prs.find((pr) => pr.number === 102)!.base = currentBase
+      await harness.writeState(changed)
+      if (currentBase === 'release') {
+        await assert.rejects(runStackAction(harness.repo, { type: 'submitStackRetry' }))
+        assert.equal((await getSubmitStackProgress(harness.repo))?.status, 'failed')
+        assert.equal(
+          (await harness.readState()).prs.find((pr) => pr.number === 102)?.base,
+          'release',
+        )
+        assert.deepEqual(patchedBases, [])
+      } else {
+        await runStackAction(harness.repo, { type: 'submitStackRetry' })
+        assert.equal((await getSubmitStackProgress(harness.repo))?.status, 'completed')
+        assert.equal(
+          (await harness.readState()).prs.find((pr) => pr.number === 102)?.base,
+          'feature/step-1',
+        )
+        assert.deepEqual(patchedBases, currentBase === 'main' ? ['feature/step-1'] : [])
+      }
+    })
+  })
+}
+
+test('retry refuses external native registration after a push failed before create intent', async () => {
+  await withHarness(async (harness) => {
+    await setupThreeBranches(harness)
+    git(harness, ['commit', '--allow-empty', '-m', 'Unpublished top commit'])
+    const preview = await previewStack(
+      harness.repo,
+      await getSnapshot(harness.repo),
+      'publish',
+      'feature/step-2',
+    )
+    assert.deepEqual(preview.blockers, [])
+    const hook = path.join(harness.bare, 'hooks', 'pre-receive')
+    writeFileSync(hook, '#!/bin/sh\necho \"Push interrupted\" >&2\nexit 1\n')
+    chmodSync(hook, 0o755)
+    await assert.rejects(
+      runStackAction(harness.repo, publishAction(preview.token)),
+      /Push interrupted/iu,
+    )
+    unlinkSync(hook)
+    assert.equal(
+      (await getSubmitStackProgress(harness.repo))?.steps.find((step) => step.status === 'failed')
+        ?.kind,
+      'push',
+    )
+    const external = await createPullRequestStack('acme', 'widgets', [101, 102, 103])
+    const state = await harness.readState()
+    state.requests = []
+    await harness.writeState(state)
+    await assert.rejects(runStackAction(harness.repo, { type: 'submitStackRetry' }))
+    const progress = await getSubmitStackProgress(harness.repo)
+    assert.equal(progress?.status, 'failed')
+    assert.equal(progress?.steps.find((step) => step.status === 'failed')?.kind, 'create-stack')
+    const final = await harness.readState()
+    assert.deepEqual(
+      final.stacks?.map((stack) => stack.number),
+      [external.number],
+    )
+    assert.equal(
+      final.requests.some(
+        (request) => request.argv[0].includes('/stacks') && request.argv[1] !== 'GET',
+      ),
+      false,
+    )
+  })
+})
+
+test('retry refuses external native registration after create validation failed before the request', async () => {
+  await withHarness(async (harness) => {
+    await setupThreeBranches(harness)
+    const preview = await previewStack(
+      harness.repo,
+      await getSnapshot(harness.repo),
+      'publish',
+      'feature/step-2',
+    )
+    const inner = createGitHubApiDouble()
+    let interrupt = true
+    setGitHubTransport(
+      new DirectGitHubTransport({
+        token: 'fixture-token',
+        fetch: async (input, init) => {
+          if (interrupt && String(input).endsWith('/pulls/101') && init?.method === 'GET') {
+            interrupt = false
+            return new Response(JSON.stringify({ message: 'Native validation interrupted' }), {
+              status: 503,
+            })
+          }
+          return inner(input, init)
+        },
+      }),
+    )
+    await assert.rejects(
+      runStackAction(harness.repo, publishAction(preview.token)),
+      /Native validation interrupted/iu,
+    )
+    const progress = await getSubmitStackProgress(harness.repo)
+    assert.equal(progress?.steps.find((step) => step.status === 'failed')?.kind, 'create-stack')
+    const before = await harness.readState()
+    assert.equal(
+      before.requests.some(
+        (request) => request.argv[0] === 'repos/acme/widgets/stacks' && request.argv[1] === 'POST',
+      ),
+      false,
+    )
+    const external = await createPullRequestStack('acme', 'widgets', [101, 102, 103])
+    await assert.rejects(runStackAction(harness.repo, { type: 'submitStackRetry' }))
+    assert.equal((await getSubmitStackProgress(harness.repo))?.status, 'failed')
+    assert.deepEqual(
+      (await harness.readState()).stacks?.map((stack) => stack.number),
+      [external.number],
+    )
+  })
+})
