@@ -28,6 +28,7 @@ import {
   PhaseStatus,
   PublishProgressPanel,
   TypedConfirmation,
+  ImmutableApproval,
   WarningNote,
   WorkflowActions,
   WorkflowFrame,
@@ -880,6 +881,7 @@ export function WorkflowDialog({
                                   layer.pullRequest ?? '?'
                                 } to ${layer.base}`}
                                 checked={choice?.updateBase ?? false}
+                                disabled={recovering}
                                 onChange={(event) =>
                                   setChoice({ updateBase: event.target.checked })
                                 }

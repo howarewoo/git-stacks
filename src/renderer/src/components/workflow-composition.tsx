@@ -266,6 +266,19 @@ export function BlockerList({
 export function WarningNote({ children }: { children: React.ReactNode }) {
   return <InlineAlert tone="warning">{children}</InlineAlert>
 }
+/**
+ * A recorded approval, shown because it cannot be changed here. A control that looks
+ * editable while the saved value is what actually runs would let a person read a choice
+ * they never made; fixed text cannot drift from the journalled decision.
+ */
+export function ImmutableApproval({ label, summary }: { label: string; summary: string }) {
+  return (
+    <InlineAlert tone="info">
+      <span className="font-medium">{label}</span>
+      <span className="block">{summary}</span>
+    </InlineAlert>
+  )
+}
 
 /**
  * A typed confirmation. The input never enables its action by itself: the caller

@@ -654,6 +654,21 @@ export function createGitHubApiDouble(): typeof globalThis.fetch {
     const lost = (state.lostResponses ?? []).findIndex(
       (rule) => rule.method === method && request.path.includes(rule.pathIncludes),
     )
+    // Somebody else pushes while this request is in flight. The caller is about to read the
+    // heads again, so this is the window a single earlier read cannot cover.
+    const drift = (state.driftOnRequest ?? []).findIndex((rule) => {
+      if (!request.path.includes(rule.pathIncludes)) return false
+      const seen = (state.requests ?? []).filter((entry) =>
+        entry.argv[0]?.includes(rule.pathIncludes),
+      ).length
+      return seen - 1 === (rule.after ?? 0)
+    })
+    if (drift !== -1) {
+      const rule = (state.driftOnRequest ?? [])[drift]
+      state.driftOnRequest = (state.driftOnRequest ?? []).filter((_, index) => index !== drift)
+      saveState(state)
+      bareGit(['update-ref', rule.ref, rule.to])
+    }
     try {
       const result =
         request.path === 'graphql' ? handleGraphql(state, body) : handleRest(state, request)

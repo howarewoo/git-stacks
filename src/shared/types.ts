@@ -408,6 +408,12 @@ export interface PublishProgress {
    * submission and taking a fresh preview.
    */
   layers: PublishLayer[]
+  /**
+   * The consent to replace remote history that the saved submission was given. A retry force
+   * pushes under exactly this value, so the dialog has to show it rather than an unchecked
+   * box that would send the person into a push they never agreed to.
+   */
+  allowForce: boolean
 }
 
 /** The per-layer choices a reviewed submission carries to the main process. */

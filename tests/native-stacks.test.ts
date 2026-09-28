@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
+import { readFileSync, writeFileSync } from 'node:fs'
+import path from 'node:path'
 import { test } from 'node:test'
 import { getSnapshot } from '../src/main/git'
 import { getGitHubData, getPullRequest } from '../src/main/github'
@@ -1386,5 +1388,143 @@ test('a native stack 422 is reported as a rejected chain rather than a retryable
     const failed = progress?.steps.find((step) => step.status === 'failed')
     assert.equal(failed?.failure?.retryable, false)
     assert.match(failed?.failure?.recovery ?? '', /fresh preview/iu)
+  })
+})
+
+test('a recovered stack creation is not rejected when the interruption repeats', async () => {
+  await withHarness(async (harness) => {
+    await setupFreshBranches(harness)
+    const state = await harness.readState()
+    state.lostResponses = [
+      { method: 'POST', pathIncludes: 'stacks', status: 502, message: 'Bad gateway' },
+    ]
+    await harness.writeState(state)
+
+    const preview = await previewStack(
+      harness.repo,
+      await getSnapshot(harness.repo),
+      'publish',
+      'feature/step-2',
+    )
+    await assert.rejects(
+      runStackAction(harness.repo, {
+        type: 'submitStack',
+        token: preview.token,
+        allowForce: false,
+        layers: freshLayers(),
+      }),
+    )
+
+    // GitHub created the stack; the response never arrived.
+    const stacks = await listPullRequestStacks('acme', 'widgets')
+    assert.equal(stacks.length, 1)
+    assert.equal(stacks[0].pullRequests.length, 1)
+
+    // The recovery journals the stack number, so an interruption before the step is marked
+    // complete leaves a submission that already has one. That is the state a person finds
+    // after a second crash, and the retry has to finish rather than call its own stack stale.
+    const journalPath = path.resolve(
+      harness.repo,
+      git(harness, ['rev-parse', '--git-common-dir']).trim(),
+      'git-stacks-publish.json',
+    )
+    const journal = JSON.parse(readFileSync(journalPath, 'utf8')) as {
+      stackNumber: number | null
+      stackIntent: string
+      steps: Array<{ kind: string; status: string }>
+    }
+    assert.equal(journal.stackIntent, 'create')
+    assert.equal(journal.stackNumber, null)
+    journal.stackNumber = stacks[0].number
+    writeFileSync(journalPath, `${JSON.stringify(journal, null, 2)}\n`, 'utf8')
+
+    const resumed = await runStackAction(harness.repo, { type: 'submitStackRetry' })
+    assert.match(resumed.message, /Submitted \d+ stack layer/iu)
+    assert.equal((await getSubmitStackProgress(harness.repo))?.status, 'completed')
+    assert.equal((await listPullRequestStacks('acme', 'widgets')).length, 1)
+  })
+})
+
+test('a stack is never written over a head that moves after the first proof', async () => {
+  await withHarness(async (harness) => {
+    await setupFreshBranches(harness)
+    // A commit that exists but is not on the reviewed branch, so it can be pushed over the
+    // branch tip without the local review seeing it first.
+    git(harness, ['checkout', '-b', 'somebody-else'])
+    git(harness, ['commit', '--allow-empty', '-m', 'somebody else'])
+    const foreign = git(harness, ['rev-parse', 'somebody-else'])
+    // The commit reaches the remote, so the tip can be moved onto it.
+    git(harness, ['push', harness.bare, 'somebody-else:refs/heads/somebody-else'])
+    git(harness, ['checkout', 'feature/step-3'])
+
+    const preview = await previewStack(
+      harness.repo,
+      await getSnapshot(harness.repo),
+      'publish',
+      'feature/step-2',
+    )
+    assert.deepEqual(preview.blockers, [])
+
+    // The tip moves while the submission's own stack listing is in flight: after it has read
+    // the pull request, proved its head, and decided the stack write may proceed.
+    const state = await harness.readState()
+    state.driftOnRequest = [
+      // The last matched-stack lookup is the one the stack step itself makes, so the head
+      // moves after that step has already read and proved the pull request.
+      {
+        pathIncludes: 'stacks?pull_request=',
+        ref: 'refs/heads/feature/step-2',
+        to: foreign,
+        after: 2,
+      },
+    ]
+    await harness.writeState(state)
+    // The write is refused rather than registering a stack over a head nobody reviewed.
+    await assert.rejects(
+      runStackAction(harness.repo, {
+        type: 'submitStack',
+        token: preview.token,
+        allowForce: false,
+        layers: freshLayers(),
+      }),
+      /head moved/iu,
+    )
+    assert.equal((await listPullRequestStacks('acme', 'widgets')).length, 0)
+    assert.equal((await listPullRequestStacks('acme', 'widgets')).length, 0)
+  })
+})
+
+test('a resumed submission reports the force consent the retry will use', async () => {
+  await withHarness(async (harness) => {
+    await setupFreshBranches(harness)
+    const state = await harness.readState()
+    state.lostResponses = [
+      { method: 'POST', pathIncludes: '/pulls', status: 502, message: 'Bad gateway' },
+    ]
+    await harness.writeState(state)
+
+    const preview = await previewStack(
+      harness.repo,
+      await getSnapshot(harness.repo),
+      'publish',
+      'feature/step-2',
+    )
+    // The person agrees to replace rewritten branches; a dialog reopened afterwards starts
+    // with its own empty checkbox, so the consent has to survive in the journal.
+    await assert.rejects(
+      runStackAction(harness.repo, {
+        type: 'submitStack',
+        token: preview.token,
+        allowForce: true,
+        layers: freshLayers(),
+      }),
+    )
+    const progress = await getSubmitStackProgress(harness.repo)
+    assert.equal(progress?.status, 'failed')
+    assert.equal(progress?.allowForce, true)
+    assert.deepEqual(
+      progress?.layers.map((layer) => [layer.branch, layer.title, layer.draft]),
+      [['feature/step-2', 'feature/step-2 PR', false]],
+    )
   })
 })

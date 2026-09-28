@@ -1994,6 +1994,7 @@ function publishProgressOf(operation: PublishOperation): PublishProgress {
     message: operation.message,
     resumeAt: resumeAt === -1 ? null : resumeAt,
     layers: operation.layers.map((layer) => ({ ...layer })),
+    allowForce: operation.allowForce,
   }
 }
 
@@ -2099,6 +2100,35 @@ function publishFailure(step: PublishStep, error: unknown): PublishStepFailure {
             ? 'Check that every pull request is still open and stacked, then retry this step.'
             : 'Open the pull request on GitHub to check its base and state, then retry this step.'
   return { summary, recovery, retryable: true }
+}
+
+/**
+ * Proves a reading of the published pull requests against the immutable journal. The journal
+ * is the only record of what was reviewed, so it is the truth here: comparing a reading
+ * against itself would accept any head that landed after the proof ran.
+ */
+function proveJournalledHeads(
+  operation: PublishOperation,
+  published: readonly PublishLayer[],
+  reading: readonly PullRequest[],
+): void {
+  for (const layer of published) {
+    const intended = operation.branches.find((facts) => facts.branch === layer.branch)
+    if (!intended) continue
+    const pr = reading.find((candidate) => candidate.number === layer.pullRequest)
+    if (!pr) {
+      throw new NativeStackError(
+        'invalid-chain',
+        `Pull request #${layer.pullRequest} could not be read before the stack was written`,
+      )
+    }
+    if (pr.headOid !== intended.oid) {
+      throw new NativeStackError(
+        'invalid-chain',
+        `Pull request #${layer.pullRequest} head moved to ${pr.headOid ?? 'none'} since it was published at ${intended.oid}`,
+      )
+    }
+  }
 }
 
 /**
@@ -3349,6 +3379,17 @@ async function runPublishStep(
         `Stack preview is stale: native stack #${operation.stackNumber} was closed or removed`,
       )
     }
+    // A recovery that journalled its stack number can be interrupted again before the step is
+    // marked complete. The recorded stack is then this operation's own creation, and treating
+    // it as a matched stack below would call it a stale preview forever. The step is already
+    // done, so it stays done.
+    if (
+      operation.stackIntent === 'create' &&
+      step.kind === 'create-stack' &&
+      isOwnCreatedStack(captured, numbers, published)
+    ) {
+      return `Recovered native stack #${captured.number} from a lost response`
+    }
   } else if (matched) {
     // GitHub may have created this stack and lost the response, or the process may have stopped
     // before the completed step was journalled. A stack that holds exactly this operation's
@@ -3437,17 +3478,30 @@ async function runPublishStep(
     if (toAdd.length === 0) {
       return `Stack #${matched.number} already holds all ${numbers.length} pull requests`
     }
+    // `known` was read before the stack listing and the member proof above, so a force push
+    // landing in between would be validated against itself. The heads are proved again here,
+    // against the journal rather than against the latest reading, because the latest reading
+    // is exactly what may have moved.
+    const atBoundary = await Promise.all(
+      published.map((layer) => getPullRequest(repoPath, layer.pullRequest as number)),
+    )
+    proveJournalledHeads(operation, published, atBoundary)
     await addPullRequestsToStack(owner, name, matched.number, toAdd, {
       existingStack: matched,
-      knownPullRequests: known,
+      knownPullRequests: atBoundary,
     })
     return `Extended stack #${matched.number} with pull requests ${toAdd.join(', ')}`
   }
   if (step.kind !== 'create-stack') {
     throw new Error('Stack preview is stale: the native stack it extended is no longer registered')
   }
+  // Same boundary proof as the extend path: the journal is the truth, not the most recent read.
+  const atBoundary = await Promise.all(
+    published.map((layer) => getPullRequest(repoPath, layer.pullRequest as number)),
+  )
+  proveJournalledHeads(operation, published, atBoundary)
   await createPullRequestStack(owner, name, numbers, {
-    knownPullRequests: known,
+    knownPullRequests: atBoundary,
     defaultBranch: operation.defaultBranch,
   })
   return `Registered native stack for pull requests ${numbers.join(', ')}`

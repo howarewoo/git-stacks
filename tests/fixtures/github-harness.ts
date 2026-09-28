@@ -84,6 +84,12 @@ export interface GitHubFixtureState {
     status: number
     message: string
   }>
+  /**
+   * Branch refs moved by somebody else while a request is in flight, applied by the double
+   * before it answers the first matching request. This is the window a client cannot close
+   * with one read: the value changes between two reads that both looked consistent.
+   */
+  driftOnRequest?: Array<{ pathIncludes: string; ref: string; to: string; after?: number }>
   prs: GitHubFixturePullRequest[]
   comments: Record<string, GitHubFixtureComment[]>
   stacks?: GitHubFixtureStack[]
