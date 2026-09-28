@@ -1,3 +1,5 @@
+import type { RepositoryCapabilities } from './capabilities'
+
 export interface PullRequest {
   number: number
   title: string
@@ -40,6 +42,10 @@ export interface ChangedFile {
   index: string
   worktree: string
   conflicted: boolean
+  /** Index mode 160000: the path is a submodule gitlink, not a file Git Stacks rewrites. */
+  submodule?: boolean
+  /** Sparse checkout left the path out of the working set, so it is not materialized. */
+  sparseExcluded?: boolean
 }
 export interface RepositorySnapshot {
   path: string
@@ -56,6 +62,7 @@ export interface RepositorySnapshot {
   stackOperation: StackProgress | null
   headOid: string | null
   github: { available: boolean; message: string }
+  capabilities: RepositoryCapabilities
 }
 export interface RecentRepository {
   path: string
@@ -88,6 +95,10 @@ export interface FileView {
   conflicted: boolean
   truncated: boolean
   hunks: FileHunks
+  /** Set when the path is a submodule gitlink: only the recorded commit is shown. */
+  submodule?: boolean
+  /** Present when the working-tree file is a Git LFS pointer rather than the object. */
+  lfs?: LfsPointer | null
 }
 
 export type HunkSideName = 'staged' | 'unstaged'
@@ -120,6 +131,61 @@ export interface FileHunks {
   staged: HunkSide
   unstaged: HunkSide
 }
+/** A Git LFS pointer file carries the object identity instead of the object. */
+export interface LfsPointer {
+  oid: string
+  size: number
+}
+/** What Git itself recorded as happening: a revert undoes a commit. */
+export type ConflictOperation =
+  'rebase' | 'merge' | 'cherryPick' | 'revert' | 'stashApply' | 'unknown'
+export type ConflictKind = 'content' | 'addAdd' | 'modifyDelete' | 'deleteModify' | 'rename'
+export type ConflictChoice = 'current' | 'incoming' | 'both' | 'delete'
+/** A path one side of the operation moved, as Git's own diff reported it. */
+export interface ConflictMove {
+  from: string
+  to: string
+  side: 'current' | 'incoming'
+}
+export interface ConflictLabels {
+  operation: ConflictOperation
+  title: string
+  base: string
+  current: string
+  incoming: string
+  explanation: string
+}
+export interface ConflictRegion {
+  index: number
+  startLine: number
+  current: string
+  incoming: string
+}
+export interface ConflictFile {
+  path: string
+  kind: ConflictKind
+  /** Index stages Git left for this path: 1 base, 2 current, 3 incoming. */
+  stages: number[]
+  /** Stage numbers whose text is a bounded preview rather than the complete blob. */
+  stagePreviewTruncated: number[]
+  binary: boolean
+  labels: ConflictLabels
+  base: string | null
+  current: string | null
+  incoming: string | null
+  worktree: string | null
+  worktreePresent: boolean
+  regions: ConflictRegion[]
+  moves: ConflictMove[]
+  truncated: boolean
+  /** Worktree and index identity this view was read under. */
+  fingerprint: string
+  mergeTool: { available: boolean; tool: string | null; reason: string }
+}
+export type ConflictResolution =
+  | { kind: 'content'; content: string }
+  | { kind: 'choice'; choice: ConflictChoice }
+  | { kind: 'worktree' }
 export interface PushPreview {
   branch: string
   remote: string
@@ -201,11 +267,10 @@ export type GitAction =
   | { type: 'operationContinue' | 'operationSkip' | 'operationAbort' }
   | { type: 'discardFile'; path: string; fingerprint: string }
   | {
-      type: 'resolveFile'
+      type: 'resolveConflict'
       path: string
       fingerprint: string
-      strategy: 'ours' | 'theirs' | 'manual'
-      content: string
+      resolution: ConflictResolution
     }
   | {
       type: 'stageHunk' | 'unstageHunk'
@@ -214,6 +279,7 @@ export type GitAction =
       fingerprint: string
       lineIndexes?: number[]
     }
+  | { type: 'conflictMergeTool'; path: string; fingerprint: string }
   | StackAction
 export interface ActionResult {
   message: string
@@ -225,12 +291,47 @@ export interface DesktopAPI {
   refresh(): Promise<RepositorySnapshot>
   runAction(action: GitAction): Promise<ActionResult>
   fileView(path: string): Promise<FileView>
+  conflictView(path: string): Promise<ConflictFile>
   history(ref: string, skip: number): Promise<HistoryPage>
   commitDiff(oid: string): Promise<{ text: string; truncated: boolean }>
   pushPreview(): Promise<PushPreview>
   stackPreview(kind: StackKind, branch: string): Promise<StackPreview>
   pullRequest(number: number): Promise<PullRequest & { body: string }>
   openExternal(url: string): Promise<void>
+  gitRuntimeStatus(): Promise<GitRuntimeStatus>
+  setSystemGit(enabled: boolean): Promise<GitRuntimeStatus>
+}
+
+export type GitCapability = 'referenceTransactions' | 'rebaseUpdateRefs'
+
+export interface BundledRuntimeInfo {
+  gitVersion: string
+  sha256: string
+  source: string
+  files?: Record<string, string>
+}
+
+export interface GitRuntimeInfo {
+  source: 'bundled' | 'system'
+  executable: string
+  platform: string
+  version: string
+  versionOutput: string
+  minimumVersion: string
+  meetsMinimum: boolean
+  useSystemGit: boolean
+  packaged: boolean
+  capabilities: Record<GitCapability, boolean>
+  bundled: BundledRuntimeInfo | null
+  preservedEnvironment: readonly string[]
+  preservedConfiguration: readonly string[]
+}
+
+export interface GitRuntimeStatus {
+  runtime: GitRuntimeInfo | null
+  error: string | null
+  minimumVersion: string
+  useSystemGit: boolean
 }
 declare global {
   interface Window {

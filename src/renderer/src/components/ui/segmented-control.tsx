@@ -11,6 +11,7 @@ export interface SegmentedControlProps<T extends string> {
   value: T
   options: readonly SegmentedControlOption<T>[]
   onValueChange: (value: T) => void
+  disabled?: boolean
   className?: string
 }
 
@@ -19,6 +20,7 @@ export function SegmentedControl<T extends string>({
   value,
   options,
   onValueChange,
+  disabled = false,
   className,
 }: SegmentedControlProps<T>) {
   return (
@@ -35,6 +37,7 @@ export function SegmentedControl<T extends string>({
           key={option.value}
           type="button"
           aria-pressed={value === option.value}
+          disabled={disabled}
           className={cn(
             'min-h-[var(--gs-semantic-density-control-compact)] rounded-[var(--gs-semantic-radius-pill)] px-3 text-[length:var(--gs-semantic-type-label-size)] font-medium text-[var(--gs-semantic-text-secondary)] outline-none transition-colors hover:text-[var(--gs-semantic-text-primary)] focus-visible:ring-2 focus-visible:ring-[var(--gs-semantic-focus-ring)]',
             value === option.value

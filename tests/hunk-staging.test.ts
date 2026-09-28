@@ -1210,6 +1210,7 @@ test('file staging reads as three states, independent of the file row', async ()
     onInspect: (path: string | null) => inspected.push(path),
     onStash: () => undefined,
     onSubmitCommit: (event: React.FormEvent<HTMLFormElement>) => event.preventDefault(),
+    onResolveConflict: () => undefined,
     operationActive: false,
     runAction: async (action: GitAction) => {
       actions.push(action)

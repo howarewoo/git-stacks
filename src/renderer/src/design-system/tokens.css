@@ -269,23 +269,18 @@
   --gs-component-overlay-radius: 24px;
   --gs-component-overlay-background: #ffffff;
   --gs-component-overlay-text: #171c24;
-  --canvas: #e8ecf3;
   --surface: #ffffff;
   --surface-muted: #f2f4f8;
-  --surface-hover: #e1e6ef;
   --ink: #171c24;
   --ink-soft: #536176;
   --ink-muted: #536176;
   --line: #d7dde7;
-  --line-strong: #7c879a;
   --accent: #3155a6;
   --accent-strong: #3155a6;
   --accent-line: #3155a6;
   --accent-wash: #edf2fc;
   --ring: #355bc5;
-  --ring-soft: rgba(53, 91, 197, 0.2);
   --success: #276449;
-  --success-line: #276449;
   --success-wash: #dceee3;
   --warning: #865b13;
   --warning-line: #865b13;
@@ -293,7 +288,6 @@
   --danger: #9d3d43;
   --danger-line: #9d3d43;
   --danger-wash: #f9dfdf;
-  --danger-wash-strong: #f9dfdf;
 }
 
 @media (prefers-reduced-motion: reduce) {

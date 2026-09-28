@@ -1,12 +1,25 @@
+// The race fixture replaces `child_process.execFile` on the builtin's export
+// object, and linking `node:child_process` here would bind the unpatched
+// `execFile` into every module this test loads, so the fixture is imported
+// first and `execFileSync` is read through `createRequire` below.
+import { beginGitRace, runRealGit } from './fixtures/git-race-shim'
+import type { GitRace } from './fixtures/git-race-shim'
 import assert from 'node:assert/strict'
-import { execFileSync } from 'node:child_process'
+import { writeFileSync } from 'node:fs'
 import { chmod, mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
-import { delimiter, join } from 'node:path'
+import { join } from 'node:path'
 import { test } from 'node:test'
-import { getFileView, getSnapshot, runAction } from '../src/main/git'
-import { MAX_MESSAGE_LENGTH } from '../src/main/git-core'
-import { getStackProgress, isStackAction, previewStack } from '../src/main/stacks'
+import type * as ChildProcess from 'node:child_process'
+
+const { execFileSync } = createRequire(import.meta.url)('node:child_process') as typeof ChildProcess
+
+// Git Stacks captures Node's spawn API when its own modules load, so the modules
+// under test are loaded here, after the fixture has installed the race shim.
+const { getFileView, getSnapshot, runAction } = await import('../src/main/git')
+const { MAX_MESSAGE_LENGTH } = await import('../src/main/git-core')
+const { getStackProgress, isStackAction, previewStack } = await import('../src/main/stacks')
 
 type Git = (...args: string[]) => string
 
@@ -259,45 +272,26 @@ test('restack rejects a branch tip changed immediately after checkout', async ()
   const preview = await previewStack(repo, await getSnapshot(repo), 'restack', 'feature')
   assert.deepEqual(preview.blockers, [])
 
-  const shimDir = join(root, 'git-shim')
-  await mkdir(shimDir)
   const raceFlag = join(root, 'branch-advanced')
-  const shimPath = join(shimDir, 'git')
-  await writeFile(
-    shimPath,
-    `#!/bin/sh
-real="$GIT_STACKS_REAL_GIT"
-if [ "$1" = "switch" ] && [ "$2" = "--" ] && [ "$3" = "feature" ] && [ ! -e "$GIT_STACKS_SWITCH_RACE_FLAG" ]; then
-  out=$("$real" "$@"); rc=$?
-  if [ -n "$out" ]; then printf '%s\\n' "$out"; fi
-  if [ "$rc" = "0" ]; then
-    "$real" -C "$GIT_STACKS_RACE_REPO" update-ref refs/heads/feature "$GIT_STACKS_RACE_OID"
-    : > "$GIT_STACKS_SWITCH_RACE_FLAG"
-  fi
-  exit "$rc"
-fi
-exec "$real" "$@"
-`,
-    { mode: 0o755 },
-  )
-  const realGit = execFileSync('/bin/sh', ['-c', 'command -v git'], {
-    encoding: 'utf8',
-  }).trim()
-  await withEnv(
-    {
-      PATH: `${shimDir}${delimiter}${process.env.PATH ?? ''}`,
-      GIT_STACKS_REAL_GIT: realGit,
-      GIT_STACKS_RACE_REPO: repo,
-      GIT_STACKS_RACE_OID: advancedTip,
-      GIT_STACKS_SWITCH_RACE_FLAG: raceFlag,
+  // A restack checks the branch out with `switch -- <branch>` and then reads the
+  // tip back, so the concurrent update lands after the checkout succeeds and
+  // before Git Stacks confirms the tip it previewed.
+  const race = beginGitRace({
+    matches: (args) => args[0] === 'switch' && args[1] === '--' && args[2] === 'feature',
+    inject: () => {
+      runRealGit(repo, ['switch', '--', 'feature'])
+      runRealGit(repo, ['update-ref', 'refs/heads/feature', advancedTip])
+      writeFileSync(raceFlag, '')
     },
-    async () => {
-      await assert.rejects(
-        executePreview(repo, preview.token),
-        /Branch feature changed after preview; no replay was attempted/u,
-      )
-    },
-  )
+  })
+  try {
+    await assert.rejects(
+      executePreview(repo, preview.token),
+      /Branch feature changed after preview; no replay was attempted/u,
+    )
+  } finally {
+    race.end()
+  }
 
   assert.equal(await readFile(raceFlag, 'utf8'), '')
   assert.equal(tip(git, 'feature'), advancedTip)
@@ -335,46 +329,35 @@ test('restack refuses to launch when the HEAD reflog baseline is empty', async (
   const preview = await previewStack(repo, await getSnapshot(repo), 'restack', 'root')
   assert.deepEqual(preview.blockers, [])
 
-  const shimDir = join(root, 'git-shim')
-  await mkdir(shimDir)
   const emptyLogFlag = join(root, 'empty-head-reflog')
   const rebaseFlag = join(root, 'rebase-launched')
-  const shimPath = join(shimDir, 'git')
-  await writeFile(
-    shimPath,
-    `#!/bin/sh
-real="$GIT_STACKS_REAL_GIT"
-if [ "$1" = "reflog" ] && [ "$2" = "show" ] && [ "$3" = "HEAD" ] && [ "$4" = "--format=%H" ]; then
-  : > "$GIT_STACKS_EMPTY_LOG_FLAG"
-  exit 0
-fi
-is_rebase=0
-is_onto=0
-for arg in "$@"; do
-  [ "$arg" = "rebase" ] && is_rebase=1
-  [ "$arg" = "--onto" ] && is_onto=1
-done
-if [ "$is_rebase" = "1" ] && [ "$is_onto" = "1" ]; then
-  : > "$GIT_STACKS_REBASE_FLAG"
-fi
-exec "$real" "$@"
-`,
-    { mode: 0o755 },
-  )
-  const realGit = execFileSync('/bin/sh', ['-c', 'command -v git'], {
-    encoding: 'utf8',
-  }).trim()
-  await withEnv(
-    {
-      PATH: `${shimDir}${delimiter}${process.env.PATH ?? ''}`,
-      GIT_STACKS_REAL_GIT: realGit,
-      GIT_STACKS_EMPTY_LOG_FLAG: emptyLogFlag,
-      GIT_STACKS_REBASE_FLAG: rebaseFlag,
+  // The restack recovery guard reads the HEAD reflog baseline with `reflog show
+  // HEAD --format=%H` after the checkout and before the replay launches, so the
+  // baseline is emptied by real Git at that read. The injection also re-arms a
+  // race that only fires if a replay launch follows the read, which is the
+  // refusal this test asserts: no `rebase --onto` is started at all.
+  const openRaces: GitRace[] = []
+  const race = beginGitRace({
+    matches: (args) =>
+      args[0] === 'reflog' && args[1] === 'show' && args[2] === 'HEAD' && args[3] === '--format=%H',
+    inject: () => {
+      race.end()
+      runRealGit(repo, ['reflog', 'expire', '--expire=now', '--expire-unreachable=now', '--all'])
+      writeFileSync(emptyLogFlag, '')
+      openRaces.push(
+        beginGitRace({
+          matches: (args) => args.includes('rebase') && args.includes('--onto'),
+          inject: () => writeFileSync(rebaseFlag, ''),
+        }),
+      )
     },
-    async () => {
-      await assert.rejects(executePreview(repo, preview.token), /HEAD reflog/u)
-    },
-  )
+  })
+  openRaces.push(race)
+  try {
+    await assert.rejects(executePreview(repo, preview.token), /HEAD reflog/u)
+  } finally {
+    for (const open of openRaces) open.end()
+  }
 
   assert.equal(await readFile(emptyLogFlag, 'utf8'), '')
   await assert.rejects(readFile(rebaseFlag), { code: 'ENOENT' })
@@ -456,11 +439,10 @@ test('conflict recovery persists completed progress and continues after manual f
   const conflict = await getFileView(repo, 'shared.txt')
   assert.equal(conflict.conflicted, true)
   await runAction(repo, {
-    type: 'resolveFile',
+    type: 'resolveConflict',
     path: 'shared.txt',
     fingerprint: conflict.fingerprint,
-    strategy: 'manual',
-    content: 'resolved\n',
+    resolution: { kind: 'content', content: 'resolved\n' },
   })
   await runAction(repo, { type: 'stackContinue' })
 
@@ -650,44 +632,31 @@ test('recovery rejects a different-boundary replay after a pre-launch journal cr
   const preview = await previewStack(repo, await getSnapshot(repo), 'restack', 'child')
   assert.deepEqual(preview.blockers, [])
 
-  const shimDir = join(root, 'git-shim')
-  await mkdir(shimDir)
   const flagPath = join(root, 'pre-launch-rebase')
-  const shimPath = join(shimDir, 'git')
-  await writeFile(
-    shimPath,
-    `#!/bin/sh
-real="$GIT_STACKS_REAL_GIT"
-is_rebase=0
-is_onto=0
-is_child=0
-for arg in "$@"; do
-  [ "$arg" = "rebase" ] && is_rebase=1
-  [ "$arg" = "--onto" ] && is_onto=1
-  [ "$arg" = "child" ] && is_child=1
-done
-if [ "$is_rebase" = "1" ] && [ "$is_onto" = "1" ] && [ "$is_child" = "1" ]; then
-  printf 'intercepted\\n' > "$GIT_STACKS_PRELAUNCH_FLAG"
-  exit 1
-fi
-exec "$real" "$@"
-`,
-    { mode: 0o755 },
-  )
-  const realGit = execFileSync('/bin/sh', ['-c', 'command -v git'], {
-    encoding: 'utf8',
-  }).trim()
-  await withEnv(
-    {
-      PATH: `${shimDir}${delimiter}${process.env.PATH ?? ''}`,
-      GIT_STACKS_REAL_GIT: realGit,
-      GIT_STACKS_PRELAUNCH_FLAG: flagPath,
+  // A restack writes the journal and only then launches the replay with
+  // `rebase --onto <tip> <boundary> <branch>`, so the launch is the pre-launch
+  // crash window this recovery reads back. The injection leaves an unstaged
+  // change in the worktree, which makes real Git refuse the replay before it
+  // creates any rebase state: the journal keeps a `rebasing` entry for a replay
+  // that never started.
+  const race = beginGitRace({
+    matches: (args) => args.includes('rebase') && args.includes('--onto') && args.includes('child'),
+    inject: () => {
+      writeFileSync(flagPath, 'intercepted\n')
+      writeFileSync(join(repo, 'root.txt'), 'pre-launch race\n')
     },
-    async () => {
-      await assert.rejects(executePreview(repo, preview.token))
-    },
-  )
+  })
+  try {
+    await assert.rejects(executePreview(repo, preview.token))
+  } finally {
+    race.end()
+  }
+
   assert.equal(await readFile(flagPath, 'utf8'), 'intercepted\n')
+  // The refused replay left the concurrent change behind; drop it so the rest of
+  // the test replays against the clean worktree the crash window started from.
+  git('checkout', '--', 'root.txt')
+  assert.equal(git('status', '--porcelain'), '')
   const rewrittenRoot = tip(git, 'root')
   assert.notEqual(rewrittenRoot, rootTip)
   assert.equal(tip(git, 'child'), childTip)
