@@ -56,6 +56,7 @@ import {
 } from './git-core'
 import type { RefRecord } from './git-core'
 import {
+  getHeadGitlinks,
   getIndexEntries,
   getRepositoryCapabilities,
   getRepositoryShapeFacts,
@@ -2476,7 +2477,8 @@ export async function getFileView(repoPath: string, requestedPath: string): Prom
     changedDiff(root, 'cached', actualPath),
     changedDiff(root, 'worktree', actualPath),
   ])
-  if (indexEntry?.submodule) {
+  const headGitlink = (await getHeadGitlinks(root, [actualPath])).get(actualPath)
+  if (indexEntry?.submodule || headGitlink) {
     // A gitlink has no readable file: show the recorded-commit diff and nothing else.
     return {
       path: filePath,
@@ -2484,7 +2486,7 @@ export async function getFileView(repoPath: string, requestedPath: string): Prom
       unstagedDiff: unstagedDiff.text,
       content: null,
       binary: false,
-      fingerprint: indexEntry.fingerprint,
+      fingerprint: indexEntry?.fingerprint ?? headGitlink!,
       conflicted: entry.conflicted,
       truncated: stagedDiff.truncated || unstagedDiff.truncated,
       submodule: true,
@@ -2523,7 +2525,8 @@ async function checkFileFingerprint(
 ): Promise<{ entry: ChangedFile; identity: FileIdentity }> {
   const entry = changedEntry(await getStatus(repoPath), filePath)
   const index = await getIndexEntries(repoPath, [entry.path])
-  const blocked = pathActionBlockReason(index.get(entry.path), entry.path)
+  const headGitlink = (await getHeadGitlinks(repoPath, [entry.path])).has(entry.path)
+  const blocked = pathActionBlockReason(index.get(entry.path), entry.path, headGitlink)
   if (blocked) throw new Error(blocked)
   const identity = await fileFingerprint(repoPath, entry.path)
   if (identity.fingerprint !== expected) {
@@ -2532,9 +2535,13 @@ async function checkFileFingerprint(
   return { entry, identity }
 }
 
-function pathActionBlockReason(entry: IndexPathEntry | undefined, filePath: string): string | null {
+function pathActionBlockReason(
+  entry: IndexPathEntry | undefined,
+  filePath: string,
+  headGitlink: boolean,
+): string | null {
   if (entry?.sparseExcluded) return sparsePathReason(filePath)
-  if (entry?.submodule) return submodulePathReason(filePath)
+  if (entry?.submodule || headGitlink) return submodulePathReason(filePath)
   return null
 }
 
@@ -3563,9 +3570,13 @@ export async function getSnapshot(repoPath: string): Promise<RepositorySnapshot>
     root,
     files.flatMap((file) => (file.originalPath ? [file.path, file.originalPath] : [file.path])),
   )
+  const headGitlinks = await getHeadGitlinks(
+    root,
+    files.map((file) => file.path),
+  )
   for (const file of files) {
     const entry = indexEntries.get(file.path)
-    if (entry?.submodule) file.submodule = true
+    if (entry?.submodule || headGitlinks.has(file.path)) file.submodule = true
     if (entry?.sparseExcluded) file.sparseExcluded = true
   }
 

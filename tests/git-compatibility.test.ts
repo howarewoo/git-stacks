@@ -8,7 +8,7 @@ import { capabilityAttentionCount, capabilityReport } from '../src/shared/capabi
 import type { GitAction } from '../src/shared/types'
 import type { RepositoryCapabilities } from '../src/shared/capabilities'
 import { getFileView, getSnapshot, resolveRepository, runAction } from '../src/main/git'
-import { getRepositoryCapabilities } from '../src/main/capabilities'
+import { getRepositoryCapabilities, parseIndexEntries } from '../src/main/capabilities'
 import { previewStack } from '../src/main/stacks'
 
 type Git = (...args: string[]) => string
@@ -42,6 +42,14 @@ function reportEntry(capabilities: RepositoryCapabilities, id: string) {
   assert.ok(entry, `expected a ${id} entry in the support matrix`)
   return entry
 }
+
+test('unmerged index stages retain gitlink classification', () => {
+  const oid = 'a'.repeat(40)
+  const entries = parseIndexEntries(
+    `H 160000 ${oid} 2\tvendor/lib\0H 100644 ${oid} 3\tvendor/lib\0`,
+  )
+  assert.equal(entries.get('vendor/lib')?.submodule, true)
+})
 
 test('a standard repository reports a fully supported matrix', async () => {
   const root = await scratch()
@@ -202,6 +210,25 @@ test('a submodule shows its recorded commit and refuses content actions', async 
     assert.equal(superGit('ls-files', '--stage', '--', 'vendor/lib').split(' ')[0], '160000')
     assert.equal(await readFile(join(childRepo, 'inner.txt'), 'utf8'), 'second\n')
     assert.equal(child('status', '--porcelain'), '')
+
+    superGit('update-index', '--force-remove', 'vendor/lib')
+    assert.equal(superGit('ls-files', '--stage', '--', 'vendor/lib'), '')
+    const deleted = (await getSnapshot(superRepo)).files.find((file) => file.path === 'vendor/lib')
+    assert.equal(deleted?.index, 'D')
+    assert.equal(deleted?.submodule, true)
+    const deletedView = await getFileView(superRepo, 'vendor/lib')
+    assert.equal(deletedView.submodule, true)
+    assert.equal(deletedView.content, null)
+    assert.match(deletedView.stagedDiff, /-Subproject commit [0-9a-f]{40}/u)
+    await assert.rejects(
+      runAction(superRepo, {
+        type: 'discardFile',
+        path: 'vendor/lib',
+        fingerprint: deletedView.fingerprint,
+      }),
+      /vendor\/lib is a submodule/u,
+    )
+    assert.equal(await readFile(join(superRepo, 'vendor', 'lib', 'inner.txt'), 'utf8'), 'second\n')
   } finally {
     await rm(root, { recursive: true, force: true })
   }

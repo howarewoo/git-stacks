@@ -41,9 +41,10 @@ export function parseIndexEntries(output: string): Map<string, IndexPathEntry> {
     const [tag, mode] = record.slice(0, tab).split(' ')
     const filePath = record.slice(tab + 1)
     if (!filePath || !mode) continue
+    const previous = entries.get(filePath)
     entries.set(filePath, {
-      submodule: mode === '160000',
-      sparseExcluded: tag === 'S' || tag === 's',
+      submodule: mode === '160000' || previous?.submodule === true,
+      sparseExcluded: tag === 'S' || tag === 's' || previous?.sparseExcluded === true,
       fingerprint: createHash('sha256').update(record).digest('hex'),
     })
   }
@@ -65,6 +66,29 @@ export async function getIndexEntries(
     ...paths,
   ])
   return parseIndexEntries(output)
+}
+
+export async function getHeadGitlinks(
+  repoPath: string,
+  paths: readonly string[],
+): Promise<Map<string, string>> {
+  const gitlinks = new Map<string, string>()
+  if (paths.length === 0) return gitlinks
+  const output = await tryGit(repoPath, [
+    '--literal-pathspecs',
+    'ls-tree',
+    '-r',
+    '-z',
+    'HEAD',
+    '--',
+    ...paths,
+  ])
+  for (const record of (output ?? '').split('\0')) {
+    const tab = record.indexOf('\t')
+    if (tab < 0 || !record.startsWith('160000 ')) continue
+    gitlinks.set(record.slice(tab + 1), createHash('sha256').update(record).digest('hex'))
+  }
+  return gitlinks
 }
 
 function classifyRefStorage(value: string | null): RefStorageFormat {
