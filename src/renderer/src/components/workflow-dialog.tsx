@@ -824,34 +824,53 @@ export function WorkflowDialog({
                   {request.operation === 'publish' && publishOffer ? (
                     <>
                       <PublishProgressPanel progress={progress} />
-                      <Checkbox
-                        id="workflow-allow-force"
-                        label="Allow rewritten branches to be pushed with exact leases"
-                        checked={allowForce}
-                        onChange={(event) => {
-                          markEdited()
-                          setAllowForce(event.target.checked)
-                          setConfirmation('')
-                        }}
-                      />
-                      {allowForce ? (
+                      {/*
+                        A resumed submission republishes the consent it was given. An
+                        unchecked box here would read as "not agreed" while Resume force
+                        pushes under the recorded value, so the saved consent is shown as
+                        fixed text and the control is only offered for a new submission.
+                      */}
+                      {recovering ? (
+                        <ImmutableApproval
+                          label="Saved approval for rewritten branches"
+                          summary={
+                            progress?.allowForce
+                              ? 'Recorded: branches with a rewritten history are pushed with exact leases.'
+                              : 'Not given: no branch is pushed by replacing remote history.'
+                          }
+                        />
+                      ) : (
                         <>
-                          <WarningNote>
-                            Remote-only commits may be replaced. A changed remote tip stops the
-                            push.
-                          </WarningNote>
-                          <TypedConfirmation
-                            id="workflow-confirm"
-                            value={confirmation}
-                            target={request.branch}
-                            onChange={(value) => {
+                          <Checkbox
+                            id="workflow-allow-force"
+                            label="Allow rewritten branches to be pushed with exact leases"
+                            checked={allowForce}
+                            onChange={(event) => {
                               markEdited()
-                              setConfirmation(value)
+                              setAllowForce(event.target.checked)
+                              setConfirmation('')
                             }}
-                            disabled={locked}
                           />
+                          {allowForce ? (
+                            <>
+                              <WarningNote>
+                                Remote-only commits may be replaced. A changed remote tip stops the
+                                push.
+                              </WarningNote>
+                              <TypedConfirmation
+                                id="workflow-confirm"
+                                value={confirmation}
+                                target={request.branch}
+                                onChange={(value) => {
+                                  markEdited()
+                                  setConfirmation(value)
+                                }}
+                                disabled={locked}
+                              />
+                            </>
+                          ) : null}
                         </>
-                      ) : null}
+                      )}
                       {publishOffer.layers.map((layer) => {
                         const choice = layerChoices[layer.branch]
                         const id = encodeURIComponent(layer.branch)

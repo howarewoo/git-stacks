@@ -89,7 +89,22 @@ export interface GitHubFixtureState {
    * before it answers the first matching request. This is the window a client cannot close
    * with one read: the value changes between two reads that both looked consistent.
    */
-  driftOnRequest?: Array<{ pathIncludes: string; ref: string; to: string; after?: number }>
+  /**
+   * Branch refs moved by somebody else while a request is in flight, applied by the double
+   * before it answers the `after`-th matching request. Zero is the first match, so the rule
+   * can target a later read rather than the one that opened the step.
+   */
+  driftOnRequest?: Array<{
+    pathIncludes: string
+    ref: string
+    to: string
+    after?: number
+  }>
+  /**
+   * Pull requests closed by somebody else while a request is in flight, so a change that
+   * lands after an earlier step is read still shows up in the next one.
+   */
+  closeOnRequest?: Array<{ pathIncludes: string; number: number; after?: number }>
   prs: GitHubFixturePullRequest[]
   comments: Record<string, GitHubFixtureComment[]>
   stacks?: GitHubFixtureStack[]

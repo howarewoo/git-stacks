@@ -1471,12 +1471,7 @@ test('a stack is never written over a head that moves after the first proof', as
     state.driftOnRequest = [
       // The last matched-stack lookup is the one the stack step itself makes, so the head
       // moves after that step has already read and proved the pull request.
-      {
-        pathIncludes: 'stacks?pull_request=',
-        ref: 'refs/heads/feature/step-2',
-        to: foreign,
-        after: 2,
-      },
+      { pathIncludes: 'stacks?pull_request=', ref: 'refs/heads/feature/step-2', to: foreign },
     ]
     await harness.writeState(state)
     // The write is refused rather than registering a stack over a head nobody reviewed.
@@ -1526,5 +1521,54 @@ test('a resumed submission reports the force consent the retry will use', async 
       progress?.layers.map((layer) => [layer.branch, layer.title, layer.draft]),
       [['feature/step-2', 'feature/step-2 PR', false]],
     )
+  })
+})
+
+test('a recovered stack whose member pull request was closed is not reported as done', async () => {
+  await withHarness(async (harness) => {
+    await setupFreshBranches(harness)
+    const state = await harness.readState()
+    // The stack write is the step that fails, so every earlier step is already journalled
+    // complete and the retry runs the stack step alone.
+    state.lostResponses = [
+      { method: 'POST', pathIncludes: 'stacks', status: 502, message: 'Bad gateway' },
+    ]
+    await harness.writeState(state)
+
+    const preview = await previewStack(
+      harness.repo,
+      await getSnapshot(harness.repo),
+      'publish',
+      'feature/step-2',
+    )
+    await assert.rejects(
+      runStackAction(harness.repo, {
+        type: 'submitStack',
+        token: preview.token,
+        allowForce: false,
+        layers: freshLayers(),
+      }),
+    )
+    const stacks = await listPullRequestStacks('acme', 'widgets')
+    assert.equal(stacks.length, 1)
+    const memberNumber = stacks[0].pullRequests[0].number
+
+    // Somebody closes the member between the failure and the retry. The stack still names it,
+    // so only the native registration proof can see that it is not a usable stack now.
+    const after = await harness.readState()
+    const member = after.prs.find((pr) => pr.number === memberNumber)
+    assert.ok(member)
+    member.state = 'CLOSED'
+    const listed = (after.stacks ?? []).find((stack) => stack.number === stacks[0].number)
+    const listedMember = listed?.pull_requests.find((item) => item.number === memberNumber)
+    assert.ok(listedMember)
+    listedMember.state = 'closed'
+    await harness.writeState(after)
+
+    await assert.rejects(
+      runStackAction(harness.repo, { type: 'submitStackRetry' }),
+      /(?:closed|completed)/iu,
+    )
+    assert.equal((await getSubmitStackProgress(harness.repo))?.status, 'failed')
   })
 })

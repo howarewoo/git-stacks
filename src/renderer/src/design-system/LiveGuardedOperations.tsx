@@ -67,6 +67,29 @@ export function LiveGuardedOperations() {
   const show = (input: Parameters<typeof workflowAction>[0]) =>
     setRan(JSON.stringify(workflowAction(input, captured)))
 
+  // Ready means the real builder produces the real submission, not only that the guard
+  // finds no reason to stop. A button that reads ready while the builder returns null is a
+  // false confirmation: the person presses it and nothing is dispatched.
+  const publishInput = {
+    kind: 'submit' as const,
+    preview: publishPreview,
+    allowForce: true,
+    confirmation: forceName,
+    confirmationTarget: guardedBranch.name,
+    layers: {
+      [guardedBranch.name]: {
+        title: 'Checkout validation',
+        body: 'Fixture layer for the guarded publish specimen.',
+        draft: true,
+        updateBase: false,
+      },
+    },
+  }
+  const publishBlocker =
+    forceBlocker ??
+    (workflowAction(publishInput, captured)
+      ? null
+      : { code: 'no-action', message: 'These inputs produce no submission.' })
   return (
     <div className="specimen-grid">
       <section className="specimen-dialog" data-operation="publish">
@@ -89,31 +112,15 @@ export function LiveGuardedOperations() {
           <WorkflowActions>
             <Button
               variant="accent"
-              disabled={Boolean(forceBlocker)}
-              tooltip={forceBlocker?.message ?? 'Publish every branch, replacing remote history.'}
-              onClick={() =>
-                show({
-                  kind: 'submit',
-                  preview: publishPreview,
-                  allowForce: true,
-                  confirmation: forceName,
-                  confirmationTarget: guardedBranch.name,
-                  layers: {
-                    [guardedBranch.name]: {
-                      title: 'Checkout validation',
-                      body: 'Fixture layer for the guarded publish specimen.',
-                      draft: true,
-                      updateBase: false,
-                    },
-                  },
-                })
-              }
+              disabled={Boolean(publishBlocker)}
+              tooltip={publishBlocker?.message ?? 'Publish every branch, replacing remote history.'}
+              onClick={() => show(publishInput)}
             >
               Publish stack
             </Button>
           </WorkflowActions>
           <p className="specimen-banner-note" data-role="blocker">
-            {forceBlocker ? forceBlocker.code : 'ready'}
+            {publishBlocker ? publishBlocker.code : 'ready'}
           </p>
         </WorkflowFrame>
       </section>

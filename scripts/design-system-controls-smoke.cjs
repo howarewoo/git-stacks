@@ -194,6 +194,47 @@ async function main() {
     true,
     'reduced motion should shorten dialog animation',
   )
+
+  // The guarded publish card claims to be wired to the real guard and the real builder. A
+  // ready button that dispatches nothing is a false confirmation, so the smoke types the
+  // exact branch name and asserts the payload the real builder produces.
+  await window.loadURL('about:blank')
+  await window.loadURL(`${pathToFileURL(rendererPath).href}#/design-system-dialog-specimen`)
+  const publishCard = `document.querySelector('[data-operation="publish"]')`
+  await waitFor('the guarded publish card', publishCard)
+  assert.equal(
+    await evaluateInPage(
+      `${publishCard}.querySelector('[data-role="blocker"]').textContent.trim()`,
+    ),
+    'confirmation-incomplete',
+    'the guarded publish card should refuse before the exact branch name is typed',
+  )
+  await runInPage(`
+    const input = document.querySelector('[data-operation="publish"] input')
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set
+    setter.call(input, 'feature/checkout')
+    input.dispatchEvent(new Event('input', { bubbles: true }))
+  `)
+  await waitFor(
+    'the publish card to become ready',
+    `${publishCard}.querySelector('[data-role="blocker"]').textContent.trim() === 'ready'`,
+  )
+  const dispatched = await runInPage(`
+    const card = document.querySelector('[data-operation="publish"]')
+    card.querySelector('button').click()
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))
+    return document.querySelector('[data-operation="dispatched"] [data-role="dispatched"]').textContent.trim()
+  `)
+  const payload = /^(\{.*\})$/su.exec(dispatched)
+  assert.ok(payload, 'pressing the ready publish card should show the dispatched action')
+  const action = JSON.parse(payload[1])
+  assert.equal(action.type, 'submitStack', 'the ready card should dispatch a real submission')
+  assert.equal(action.allowForce, true, 'the consent the card shows is the consent it dispatches')
+  assert.equal(
+    action.layers['feature/checkout'].title,
+    'Checkout validation',
+    'the dispatched submission should carry the reviewed layer choice',
+  )
 }
 
 main()

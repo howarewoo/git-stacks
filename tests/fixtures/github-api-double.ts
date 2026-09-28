@@ -669,6 +669,24 @@ export function createGitHubApiDouble(): typeof globalThis.fetch {
       saveState(state)
       bareGit(['update-ref', rule.ref, rule.to])
     }
+    const closeIndex = (state.closeOnRequest ?? []).findIndex((rule) => {
+      if (!request.path.includes(rule.pathIncludes)) return false
+      const seen = (state.requests ?? []).filter((entry) =>
+        entry.argv[0]?.includes(rule.pathIncludes),
+      ).length
+      return seen - 1 === (rule.after ?? 0)
+    })
+    if (closeIndex !== -1) {
+      const rule = (state.closeOnRequest ?? [])[closeIndex]
+      state.closeOnRequest = (state.closeOnRequest ?? []).filter((_, i) => i !== closeIndex)
+      const pr = state.prs.find((candidate) => candidate.number === rule.number)
+      if (pr) pr.state = 'CLOSED'
+      for (const stack of state.stacks ?? []) {
+        const member = stack.pull_requests.find((item) => item.number === rule.number)
+        if (member) member.state = 'closed'
+      }
+      saveState(state)
+    }
     try {
       const result =
         request.path === 'graphql' ? handleGraphql(state, body) : handleRest(state, request)

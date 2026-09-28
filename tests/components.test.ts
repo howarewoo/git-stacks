@@ -11,6 +11,12 @@ import { Textarea } from '../src/renderer/src/components/ui/textarea'
 import { TooltipProvider } from '../src/renderer/src/components/ui/tooltip'
 import { ShellSpecimen } from '../src/renderer/src/design-system/ShellSpecimen'
 import { ImmutableApproval } from '../src/renderer/src/components/workflow-composition'
+import {
+  liveGuardBase,
+  publishPreview as specimenPublishPreview,
+} from '../src/renderer/src/design-system/DialogSpecimenData'
+import { workflowAction } from '../src/renderer/src/components/workflow-action'
+import { workflowBlocker } from '../src/renderer/src/components/workflow-policy'
 test('loading buttons retain their label, busy state, and disabled lock', () => {
   const markup = renderToStaticMarkup(
     React.createElement(
@@ -148,4 +154,65 @@ test('a recovered submission shows its saved consent as fixed text, not an unche
   )
   assert.match(withheld, /Not given/u)
   assert.doesNotMatch(withheld, /Recorded:/u)
+})
+
+test('the guarded publish specimen is ready only when the builder produces a submission', () => {
+  const context = {
+    headOid: '1111111111111111111111111111111111111111',
+    currentBranch: 'feature/checkout',
+  }
+  const layers = {
+    'feature/checkout': {
+      title: 'Checkout validation',
+      body: 'Fixture layer for the guarded publish specimen.',
+      draft: true,
+      updateBase: false,
+    },
+  }
+  // What the specimen shows when the name has not been typed.
+  const beforeName = workflowBlocker({
+    ...liveGuardBase,
+    kind: 'stack',
+    allowForce: true,
+    name: '',
+    requiresName: false,
+    previewToken: `stack:${specimenPublishPreview.token}`,
+    confirmationTarget: 'feature/checkout',
+    confirmation: '',
+    untitledBranches: [],
+  })
+  assert.equal(beforeName?.code, 'confirmation-incomplete')
+
+  // With the exact name the real builder produces the real submission, so ready is truthful.
+  const action = workflowAction(
+    {
+      kind: 'submit',
+      preview: specimenPublishPreview,
+      allowForce: true,
+      confirmation: 'feature/checkout',
+      confirmationTarget: 'feature/checkout',
+      layers,
+    },
+    context,
+  )
+  assert.deepEqual(action, {
+    type: 'submitStack',
+    token: specimenPublishPreview.token,
+    allowForce: true,
+    layers,
+  })
+
+  // A specimen preview with no offer cannot dispatch anything, so it must not read as ready.
+  const noOffer = workflowAction(
+    {
+      kind: 'submit',
+      preview: { ...specimenPublishPreview, publish: null },
+      allowForce: true,
+      confirmation: 'feature/checkout',
+      confirmationTarget: 'feature/checkout',
+      layers,
+    },
+    context,
+  )
+  assert.equal(noOffer, null)
 })

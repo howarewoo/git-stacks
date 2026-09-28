@@ -3382,23 +3382,27 @@ async function runPublishStep(
     // A recovery that journalled its stack number can be interrupted again before the step is
     // marked complete. The recorded stack is then this operation's own creation, and treating
     // it as a matched stack below would call it a stale preview forever. The step is already
-    // done, so it stays done.
+    // done, so it stays done, but only once the native registration is proved: an open stack
+    // whose members are the same open pull requests this operation published, not a closed
+    // stack or one holding a pull request somebody closed in between.
     if (
       operation.stackIntent === 'create' &&
       step.kind === 'create-stack' &&
       isOwnCreatedStack(captured, numbers, published)
     ) {
+      await proveRecoveredRegistration(repoPath, captured)
       return `Recovered native stack #${captured.number} from a lost response`
     }
   } else if (matched) {
     // GitHub may have created this stack and lost the response, or the process may have stopped
-    // before the completed step was journalled. A stack that holds exactly this operation's
+    // before the completed step was marked complete. A stack that holds exactly this operation's
     // pull requests, in order, is its own work and is adopted rather than called stale.
     if (operation.stackIntent !== 'create' || !isOwnCreatedStack(matched, numbers, published)) {
       throw new Error(
         `Stack preview is stale: these pull requests now belong to native stack #${matched.number}`,
       )
     }
+    await proveRecoveredRegistration(repoPath, matched)
     operation.stackNumber = matched.number
     await writePublishOperation(repoPath, operation)
     return `Recovered native stack #${matched.number} from a lost response`
@@ -3475,17 +3479,17 @@ async function runPublishStep(
         )
       }
     }
-    if (toAdd.length === 0) {
-      return `Stack #${matched.number} already holds all ${numbers.length} pull requests`
-    }
-    // `known` was read before the stack listing and the member proof above, so a force push
-    // landing in between would be validated against itself. The heads are proved again here,
-    // against the journal rather than against the latest reading, because the latest reading
-    // is exactly what may have moved.
+    // The heads are proved again here, against the journal rather than against the most
+    // recent reading, because the most recent reading is exactly what may have moved. This
+    // runs before the no-add return too: an already-registered stack is still this
+    // submission's result, so a member moved after the first proof still invalidates it.
     const atBoundary = await Promise.all(
       published.map((layer) => getPullRequest(repoPath, layer.pullRequest as number)),
     )
     proveJournalledHeads(operation, published, atBoundary)
+    if (toAdd.length === 0) {
+      return `Stack #${matched.number} already holds all ${numbers.length} pull requests`
+    }
     await addPullRequestsToStack(owner, name, matched.number, toAdd, {
       existingStack: matched,
       knownPullRequests: atBoundary,
@@ -3505,6 +3509,25 @@ async function runPublishStep(
     defaultBranch: operation.defaultBranch,
   })
   return `Registered native stack for pull requests ${numbers.join(', ')}`
+}
+
+/**
+ * Proves a recovered stack is still a usable registration before the submission calls it
+ * done. Owning the right pull requests is not enough: the stack can be closed, or a member
+ * can have been closed or moved since, and reporting success there would hand back a stack
+ * the person cannot use.
+ */
+async function proveRecoveredRegistration(repoPath: string, stack: NativeStack): Promise<void> {
+  const members = await Promise.all(
+    stack.pullRequests.map((member) => getPullRequest(repoPath, member.number)),
+  )
+  const registration = validatePublishedStackRegistration(stack, members)
+  if (!registration.valid) {
+    throw new NativeStackError(
+      registration.status,
+      registration.message ?? 'Recovered native stack is not a valid registration',
+    )
+  }
 }
 
 /**
