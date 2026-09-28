@@ -576,7 +576,7 @@ export class GhGitHubTransport implements GitHubTransport {
         : request.path
     args.push(endpoint)
     const input = request.body === undefined ? undefined : JSON.stringify(request.body)
-    if (input !== undefined) args.push('--input', '-')
+    if (input !== undefined) args.push('--header', 'Content-Type: application/json', '--input', '-')
     const { status, headers, body } = await this.api(args, request, input)
     return { status, data: body as T, headers, rateLimit: parseRateLimit(headers) }
   }
