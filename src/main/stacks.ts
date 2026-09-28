@@ -3311,6 +3311,17 @@ async function runPublishStep(
       await setPullRequestNumber(repoPath, layer.branch, existing.number)
       return `Adopted existing pull request #${existing.number}`
     }
+    // Creation uses a branch name, not an OID. A retry skips completed pushes, so
+    // prove that name still points to the reviewed commit before issuing a new request.
+    const facts = factsOf(operation, layer.branch)
+    const local = await resolveCommit(repoPath, `refs/heads/${facts.branch}`)
+    if (local !== facts.oid) {
+      throw new Error(`Stack preview is stale: local ${facts.branch} changed`)
+    }
+    const remote = await remoteOid(repoPath, operation.pushUrl, facts.branch)
+    if (remote !== facts.oid) {
+      throw new Error(`Stack preview is stale: remote ${facts.branch} changed`)
+    }
     // The intent is journalled before the request leaves, so a lost response or an
     // interruption between the POST and this assignment still lets a retry recognise the
     // pull request it asked GitHub to create instead of calling it somebody else's.

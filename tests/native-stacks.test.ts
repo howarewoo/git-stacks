@@ -2319,3 +2319,82 @@ for (const accepted of [false, true]) {
     })
   }
 }
+
+for (const drift of ['remote', 'local', 'none'] as const) {
+  for (const draft of [false, true]) {
+    test(`PR creation retry checks ${drift} tip drift before ${draft ? 'draft' : 'ready'} POST`, async () => {
+      await withHarness(async (harness) => {
+        await setupFreshBranches(harness)
+        const preview = await previewStack(
+          harness.repo,
+          await getSnapshot(harness.repo),
+          'publish',
+          'feature/step-2',
+        )
+        assert.deepEqual(preview.blockers, [])
+        const inner = createGitHubApiDouble()
+        let interrupt = true
+        const writes: string[] = []
+        setGitHubTransport(
+          new DirectGitHubTransport({
+            token: 'fixture-token',
+            fetch: async (input, init) => {
+              if (
+                (init?.method ?? 'GET') !== 'GET' &&
+                (!String(input).endsWith('/graphql') || /\bmutation\b/u.test(String(init?.body)))
+              ) {
+                writes.push(`${init?.method} ${String(input)}`)
+              }
+              if (interrupt && init?.method === 'POST' && String(input).endsWith('/pulls')) {
+                interrupt = false
+                // The API has not accepted this request: no PR exists to adopt on retry.
+                return new Response(JSON.stringify({ message: 'Create unavailable' }), {
+                  status: 503,
+                })
+              }
+              return inner(input, init)
+            },
+          }),
+        )
+        const action = publishAction(preview.token)
+        action.layers['feature/step-2'].draft = draft
+        await assert.rejects(runStackAction(harness.repo, action))
+        const stopped = await getSubmitStackProgress(harness.repo)
+        assert.equal(stopped?.steps.find((step) => step.kind === 'push')?.status, 'completed')
+        assert.equal(stopped?.steps.find((step) => step.status === 'failed')?.kind, 'create-pr')
+        assert.deepEqual((await harness.readState()).prs, [])
+        const reviewed = git(harness, ['rev-parse', 'feature/step-2'])
+        const moved = git(harness, ['rev-parse', 'feature/step-1'])
+        assert.notEqual(moved, reviewed)
+        if (drift === 'remote') {
+          bareGit(harness, ['update-ref', 'refs/heads/feature/step-2', moved])
+        } else if (drift === 'local') {
+          git(harness, ['update-ref', 'refs/heads/feature/step-2', moved])
+        }
+        writes.length = 0
+        if (drift === 'none') {
+          await runStackAction(harness.repo, { type: 'submitStackRetry' })
+          const after = await harness.readState()
+          assert.deepEqual(
+            after.prs.map((pr) => ({
+              head: pr.head,
+              headOid: pr.headOid,
+              draft: pr.draft,
+            })),
+            [{ head: 'feature/step-2', headOid: reviewed, draft }],
+          )
+          assert.equal(writes.filter((write) => write.endsWith('/pulls')).length, 1)
+          assert.equal((await getSubmitStackProgress(harness.repo))?.status, 'completed')
+          return
+        }
+        await assert.rejects(runStackAction(harness.repo, { type: 'submitStackRetry' }))
+        assert.deepEqual(writes, [], 'drift must be detected before any retry mutation')
+        assert.deepEqual((await harness.readState()).prs, [])
+        assert.deepEqual((await harness.readState()).stacks, [])
+        const failed = await getSubmitStackProgress(harness.repo)
+        assert.equal(failed?.status, 'failed')
+        assert.equal(failed?.steps.find((step) => step.status === 'failed')?.kind, 'create-pr')
+      })
+    })
+  }
+}
