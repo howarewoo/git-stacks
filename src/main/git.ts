@@ -4550,11 +4550,18 @@ export async function getSnapshot(
   const analyzed = new Set<Branch>()
   const skipped = new Set<Branch>()
   const takeBudget = (candidates: Branch[]): Branch[] => {
-    const allowed = candidates.slice(0, remaining)
-    remaining -= allowed.length
-    for (const branch of allowed) analyzed.add(branch)
-    for (let index = allowed.length; index < candidates.length; index += 1)
-      skipped.add(candidates[index])
+    const allowed: Branch[] = []
+    for (const branch of candidates) {
+      if (analyzed.has(branch)) {
+        allowed.push(branch)
+      } else if (remaining > 0) {
+        remaining -= 1
+        analyzed.add(branch)
+        allowed.push(branch)
+      } else {
+        skipped.add(branch)
+      }
+    }
     return allowed
   }
 

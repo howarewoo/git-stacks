@@ -403,6 +403,26 @@ test('batched direct descendants and deeper merge-base fallback infer the same r
   }
 })
 
+test('an inferred branch keeps its restack comparison within a one-branch budget', async () => {
+  const { root, repo, git } = await repository()
+  try {
+    git('checkout', '-b', 'feature/diverged')
+    git('commit', '--allow-empty', '-m', 'Feature')
+    git('checkout', 'main')
+    git('commit', '--allow-empty', '-m', 'Advance parent')
+    const snapshot = await getSnapshot(repo, undefined, 1)
+    const branch = snapshot.branches.find((item) => item.name === 'feature/diverged')
+    assert.equal(branch?.parent, 'main')
+    assert.equal(branch?.parentSource, 'inferred')
+    assert.equal(branch?.parentBehind, 1)
+    assert.equal(branch?.needsRestack, true)
+    assert.equal(snapshot.limits.branchesAnalyzed, 1)
+    assert.equal(snapshot.limits.branchesSkipped, 0)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 test('a snapshot states the branches its analysis budget left out', async () => {
   const { root, repo, git } = await repository()
   try {
@@ -420,7 +440,7 @@ test('a snapshot states the branches its analysis budget left out', async () => 
     // A budget of six buys exactly six branch analyses; everything past it is
     // reported instead of quietly analysed anyway.
     assert.equal(budgeted.limits.branchesAnalyzed, 6)
-    assert.equal(budgeted.limits.branchesSkipped, 12)
+    assert.equal(budgeted.limits.branchesSkipped, 6)
     const full = await getSnapshot(repo)
     assert.equal(full.limits.branchesSkipped, 0)
     assert.equal(full.limits.branchesAnalyzed, 12, 'a branch is counted once across both probes')

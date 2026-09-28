@@ -89,9 +89,10 @@ merge-base fallback. Behind-counts run through `mapWithConcurrency` at
 `GIT_CONCURRENCY`, rather than forking one process per branch at once.
 
 **A branch-analysis budget.** `SNAPSHOT_BRANCH_BUDGET` caps per-branch
-merge-base and behind probes. A branch is counted once in snapshot limits even
-if both probes were needed. Beyond the budget, recorded parents remain
-available, but inferred parents or behind counts can be unknown.
+merge-base and behind probes. A branch consumes one budget slot across both
+phases: admission for parent inference also reserves its behind comparison.
+Beyond the budget, recorded parents remain available, but inferred parents or
+behind counts can be unknown.
 `snapshot.limits.branchesSkipped` counts branches with incomplete analysis;
 the Branches view states this limit rather than claiming an exact comparison.
 
