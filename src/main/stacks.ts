@@ -3243,6 +3243,16 @@ async function runPublishStep(
     }
     const remote = await remoteOid(repoPath, operation.pushUrl, facts.branch)
     if (remote === facts.oid) {
+      // Finish local tracking even if the remote push succeeded before an interruption.
+      // Reuse the locked no-push path so upstream conflicts and tip races still reject.
+      await pushBranch(
+        repoPath,
+        facts.branch,
+        facts.oid,
+        facts.oid,
+        operation.allowForce,
+        operation.pushUrl,
+      )
       return `Already published at ${shortOid(facts.oid)}`
     }
     if (remote !== facts.remoteOid) {
@@ -3362,6 +3372,7 @@ async function runPublishStep(
         `Pull request #${number} does not point at ${layer.branch} based on ${layer.base}`,
       )
     }
+    await provePublishedHead(repoPath, operation, layer, readBack)
     return `Opened pull request #${number}${layer.draft ? ' as a draft' : ''}`
   }
 

@@ -1463,12 +1463,10 @@ test('a stack is never written over a head that moves after the first proof', as
     )
     assert.deepEqual(preview.blockers, [])
 
-    // The tip moves while the submission's own stack listing is in flight: after it has read
-    // the pull request, proved its head, and decided the stack write may proceed.
+    // The tip moves during the membership lookup after the API head is read.
+    // Creation readback may reject this before the final stack boundary is reached.
     const state = await harness.readState()
     state.driftOnRequest = [
-      // The last matched-stack lookup is the one the stack step itself makes, so the head
-      // moves after that step has already read and proved the pull request.
       { pathIncludes: 'stacks?pull_request=', ref: 'refs/heads/feature/step-2', to: foreign },
     ]
     await harness.writeState(state)
@@ -1480,10 +1478,9 @@ test('a stack is never written over a head that moves after the first proof', as
         allowForce: false,
         layers: freshLayers(),
       }),
-      /head moved/iu,
     )
     assert.equal((await listPullRequestStacks('acme', 'widgets')).length, 0)
-    assert.equal((await listPullRequestStacks('acme', 'widgets')).length, 0)
+    assert.equal((await getSubmitStackProgress(harness.repo))?.status, 'failed')
   })
 })
 
@@ -2537,3 +2534,135 @@ for (const drift of ['head', 'remote', 'local', 'none'] as const) {
     })
   })
 }
+
+for (const drift of ['remote', 'stale-remote', 'local'] as const) {
+  test(`successful PR readback rejects ${drift} drift before later layers mutate`, async () => {
+    await withHarness(async (harness) => {
+      await setupFreshBranches(harness)
+      const branches = ['feature/step-1', 'feature/step-2', 'feature/step-3']
+      for (const [index, branch] of branches.entries()) {
+        const parent = index === 0 ? 'main' : branches[index - 1]
+        git(harness, ['config', '--local', `branch.${branch}.parent`, parent])
+        git(harness, [
+          'config',
+          '--local',
+          `branch.${branch}.parentTip`,
+          git(harness, ['rev-parse', parent]),
+        ])
+      }
+      const preview = await previewStack(
+        harness.repo,
+        await getSnapshot(harness.repo),
+        'publish',
+        'feature/step-2',
+      )
+      assert.deepEqual(
+        preview.publish?.layers.map((layer) => layer.branch),
+        branches,
+      )
+      const reviewed = git(harness, ['rev-parse', branches[0]])
+      const moved = git(harness, ['rev-parse', 'main'])
+      const inner = createGitHubApiDouble()
+      let created = false
+      let armed = true
+      let remoteAtDrift = ''
+      const writes: string[] = []
+      setGitHubTransport(
+        new DirectGitHubTransport({
+          token: 'fixture-token',
+          fetch: async (input, init) => {
+            if (
+              (init?.method ?? 'GET') !== 'GET' &&
+              (!String(input).endsWith('/graphql') || /\bmutation\b/u.test(String(init?.body)))
+            )
+              writes.push(`${init?.method} ${String(input)}`)
+            if (armed && created && String(init?.body).includes('pullRequest(number:')) {
+              armed = false
+              const stale = drift === 'stale-remote' ? await inner(input, init) : null
+              if (drift === 'local') {
+                git(harness, ['update-ref', `refs/heads/${branches[0]}`, moved])
+              } else {
+                bareGit(harness, ['update-ref', `refs/heads/${branches[0]}`, moved])
+              }
+              remoteAtDrift = bareGit(harness, [
+                'for-each-ref',
+                '--format=%(refname) %(objectname)',
+                'refs/heads',
+              ])
+              writes.length = 0
+              return stale ?? inner(input, init)
+            }
+            const response = await inner(input, init)
+            if (init?.method === 'POST' && String(input).endsWith('/pulls')) {
+              assert.equal(response.ok, true)
+              created = true
+            }
+            return response
+          },
+        }),
+      )
+      await assert.rejects(runStackAction(harness.repo, publishAction(preview.token)))
+      assert.equal(armed, false)
+      assert.deepEqual(
+        writes,
+        [],
+        'a successful lower POST must not authorize later writes after drift',
+      )
+      assert.equal(
+        bareGit(harness, ['for-each-ref', '--format=%(refname) %(objectname)', 'refs/heads']),
+        remoteAtDrift,
+      )
+      const failed = await getSubmitStackProgress(harness.repo)
+      assert.equal(failed?.status, 'failed')
+      assert.equal(failed?.steps.find((step) => step.status === 'failed')?.kind, 'create-pr')
+      assert.equal(
+        failed?.layers[0].pullRequest,
+        101,
+        'retain the returned identity for safe recovery',
+      )
+      assert.deepEqual(
+        (await harness.readState()).prs.map((pr) => pr.head),
+        [branches[0]],
+      )
+      assert.deepEqual((await harness.readState()).stacks, [])
+      // Restoring the reviewed tip must recover the recorded PR, not create it again.
+      git(harness, ['update-ref', `refs/heads/${branches[0]}`, reviewed])
+      bareGit(harness, ['update-ref', `refs/heads/${branches[0]}`, reviewed])
+      await runStackAction(harness.repo, { type: 'submitStackRetry' })
+      assert.equal((await getSubmitStackProgress(harness.repo))?.status, 'completed')
+      assert.deepEqual(
+        (await harness.readState()).prs.map((pr) => pr.head),
+        branches,
+      )
+      assert.equal(writes.filter((write: string) => write.endsWith('/pulls')).length, 2)
+    })
+  })
+}
+
+test('idempotent published push restores usable origin tracking', async () => {
+  await withHarness(async (harness) => {
+    await setupFreshBranches(harness)
+    const branch = 'feature/step-2'
+    const reviewed = git(harness, ['rev-parse', branch])
+    // The remote already accepted this commit, but no local tracking was installed.
+    git(harness, ['push', harness.bare, `${branch}:refs/heads/${branch}`])
+    git(harness, ['fetch', harness.bare, `refs/heads/${branch}:refs/remotes/origin/${branch}`])
+    assert.equal(git(harness, ['for-each-ref', '--format=%(upstream)', `refs/heads/${branch}`]), '')
+    const preview = await previewStack(
+      harness.repo,
+      await getSnapshot(harness.repo),
+      'publish',
+      branch,
+    )
+    assert.deepEqual(preview.blockers, [])
+    await runStackAction(harness.repo, publishAction(preview.token))
+    assert.equal((await getSubmitStackProgress(harness.repo))?.status, 'completed')
+    assert.equal(git(harness, ['config', '--get', `branch.${branch}.remote`]), 'origin')
+    assert.equal(
+      git(harness, ['config', '--get', `branch.${branch}.merge`]),
+      `refs/heads/${branch}`,
+    )
+    assert.equal(git(harness, ['rev-parse', `${branch}@{upstream}`]), reviewed)
+    assert.equal(bareGit(harness, ['rev-parse', `refs/heads/${branch}`]), reviewed)
+  })
+})
