@@ -16,6 +16,7 @@ export type FixtureCall =
   | 'refresh'
   | 'runAction'
   | 'fileView'
+  | 'conflictView'
   | 'history'
   | 'commitDiff'
   | 'pushPreview'

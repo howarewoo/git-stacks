@@ -65,7 +65,9 @@ animation frames. The `interaction` measurement starts at an actual search input
 event in that window and ends after the filtered branch result completes two
 animation frames. The separate `diff-render-ssr` measurement is server-side
 rendering cost for a 1,000-line diff preview; it is not an input-to-paint budget.
-CI builds first and runs Electron under Xvfb. Local runs need a display server.
+CI installs `xvfb` and `xauth` on the self-hosted Linux ARM64 runner, builds the
+app, and runs Electron under Xvfb. The runner needs passwordless `sudo` and
+Debian-compatible `apt-get`. Local runs need a display server.
 Compare trend results on the same runner class and Git/Node versions, since
 filesystem and process startup costs vary by machine.
 
@@ -173,6 +175,13 @@ Open the loopback URL printed by Vite. No GitHub credentials, Electron preload, 
 Append `#/index` for the scenario directory. App scenarios use `/?scenario=shell-connected#/app`; the gallery activates the real App's Open local repository control to load the deterministic snapshot. `shell-no-repository` and `shell-loading` intentionally stay on the no-repository/loading surface. Component routes retain `#/design-system-controls`, `#/design-system-shell-specimen`, `#/design-system-data-specimen`, and `#/design-system-dialog-specimen` in this separate gallery only.
 
 The typed control surface is `window.fixture`: `actions` and `externalUrls` record dispatch; `calls` records reads and writes; `hold(method)` and `release(method)` control in-flight requests; `failNext(method, message)` rejects one request; `setScenario(name)` remounts the App against another deterministic snapshot. This API exists only in the gallery. `manifest.ts` lists all scenario names; `scenarios.ts` owns their typed data.
+
+The `files-conflicts` scenario supplies all three index stages through `conflictView`.
+Its safety check chooses incoming content in the resolver and verifies that only
+**Mark resolved and stage** dispatches the displayed fingerprint and resolved content.
+History recovery coverage holds a commit diff while a repository refresh changes
+HEAD and fails the replacement history read; the branch picker and reload control
+must remain usable, and retrying must restore the commit list.
 
 | Area      | Gallery scenarios / exercised controls                                                                                                                                                                                                                                                                                                                               |
 | --------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

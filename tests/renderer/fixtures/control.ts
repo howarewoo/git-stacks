@@ -1,5 +1,6 @@
 import type {
   ActionResult,
+  ConflictFile,
   DesktopAPI,
   GitAction,
   GitRuntimeInfo,
@@ -122,8 +123,14 @@ function actionMessage(action: GitAction): string {
       return 'Aborted the operation and restored the previous state'
     case 'discardFile':
       return `Discarded unstaged changes in ${action.path}`
-    case 'resolveFile':
-      return `Staged the ${action.strategy} resolution for ${action.path}`
+    case 'resolveConflict':
+      return `Resolved and staged ${action.path}`
+    case 'conflictMergeTool':
+      return `Opened the merge tool for ${action.path}`
+    case 'stageHunk':
+      return `Staged selected changes in ${action.path}`
+    case 'unstageHunk':
+      return `Unstaged selected changes in ${action.path}`
     case 'setParent':
       return `Recorded ${action.branch} on ${action.parent}`
     case 'executeStack':
@@ -233,6 +240,46 @@ export function installFixtureControl(options: {
         if (override) return override
         const known = Object.values(fileViewFixtures).find((view) => view.path === path)
         return { ...(known ?? fileViewFixtures.bothSides), path }
+      })
+    },
+    conflictView: (path) => {
+      record('conflictView', [path])
+      return answer<ConflictFile>('conflictView', () => {
+        if (path !== fileViewFixtures.conflicted.path) {
+          throw new Error(`No conflict fixture for ${path}`)
+        }
+        return {
+          path,
+          kind: 'content',
+          stages: [1, 2, 3],
+          stagePreviewTruncated: [],
+          binary: false,
+          labels: {
+            operation: 'unknown',
+            title: 'Conflict',
+            base: 'Common ancestor',
+            current: 'Current side',
+            incoming: 'Incoming side',
+            explanation: 'Review both index stages before choosing the resolved content.',
+          },
+          base: 'export const value = 0\n',
+          current: 'export const value = 1\n',
+          incoming: 'export const value = 2\n',
+          worktree: fileViewFixtures.conflicted.content,
+          worktreePresent: true,
+          regions: [
+            {
+              index: 0,
+              startLine: 1,
+              current: 'export const value = 1\n',
+              incoming: 'export const value = 2\n',
+            },
+          ],
+          moves: [],
+          truncated: false,
+          fingerprint: fileViewFixtures.conflicted.fingerprint,
+          mergeTool: { available: false, tool: null, reason: 'No merge tool configured.' },
+        }
       })
     },
     history: (ref, skip) => {
