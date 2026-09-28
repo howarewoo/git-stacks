@@ -994,6 +994,25 @@ function markup(element: React.ReactElement): string {
   return renderToStaticMarkup(React.createElement(TooltipProvider, null, element))
 }
 
+/**
+ * Call a component that uses hooks and keep the element tree it returns. The
+ * component runs inside a real `renderToStaticMarkup` pass, so the hook
+ * dispatcher is active, and the probe hands back the tree so the assertions
+ * below can still read props and invoke handlers directly.
+ */
+function renderTree<P extends object>(
+  component: (props: P) => React.ReactElement,
+  props: P,
+): React.ReactElement {
+  let captured: React.ReactElement = React.createElement(component, props)
+  function Probe(): React.ReactElement {
+    captured = component(props)
+    return captured
+  }
+  markup(React.createElement(Probe))
+  return captured
+}
+
 function hunkMarkup(side: HunkSide, sideName: HunkSideName = 'unstaged'): string {
   return markup(
     React.createElement(HunkDiffView, {
@@ -1221,7 +1240,7 @@ test('file staging reads as three states, independent of the file row', async ()
 
   const actions: GitAction[] = []
   const inspected: (string | null)[] = []
-  const view = ChangesView({
+  const view = renderTree(ChangesView, {
     actionError: null,
     busy: false,
     busyAction: null,

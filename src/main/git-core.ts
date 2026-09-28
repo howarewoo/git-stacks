@@ -1,12 +1,14 @@
 import { execFile as execFileCallback, spawn } from 'node:child_process'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
+import { StringDecoder } from 'node:string_decoder'
 import { promisify } from 'node:util'
+import { MAX_COMMAND_BYTES, MAX_STATUS_BYTES } from '../shared/performance'
 import type { ChangedFile, GitOperation, Stash } from '../shared/types'
 import { gitCommandEnvironment, resolveGitRuntime } from './git-runtime'
 
 export const execFile = promisify(execFileCallback)
-export const MAX_BUFFER = 32 * 1024 * 1024
+export const MAX_BUFFER = MAX_COMMAND_BYTES
 export const MAX_BRANCH_LENGTH = 1024
 export const MAX_PATH_LENGTH = 32 * 1024
 export const MAX_MESSAGE_LENGTH = 256 * 1024
@@ -65,7 +67,13 @@ export async function execute(
   args: string[],
   cwd: string,
   env?: NodeJS.ProcessEnv,
+  signal?: AbortSignal,
 ): Promise<string> {
+  if (signal) {
+    const result = await executeCapped(command, args, cwd, { env, maxBytes: MAX_BUFFER, signal })
+    if (result.truncated) throw new Error(`${command} output exceeds the 32 MiB command limit.`)
+    return result.text
+  }
   try {
     const result = await execFile(command, args, {
       cwd,
@@ -86,6 +94,179 @@ export async function execute(
   }
 }
 
+/** A read the caller abandoned; never a repository or command failure. */
+export class CommandCancelled extends Error {
+  readonly cancelled = true
+
+  constructor() {
+    super('The request was cancelled.')
+    this.name = 'CommandCancelled'
+  }
+}
+
+export function isCancelled(error: unknown): boolean {
+  return error instanceof CommandCancelled
+}
+
+export interface CappedOptions {
+  env?: NodeJS.ProcessEnv
+  /** Stop retaining output past this many bytes and end the process. */
+  maxBytes: number
+  /** Cut the retained output at the last whole occurrence of this separator. */
+  boundary?: string
+  signal?: AbortSignal
+}
+
+export interface CappedResult {
+  text: string
+  truncated: boolean
+}
+
+/**
+ * Runs a read-only command and retains at most `maxBytes` of stdout. Nothing
+ * larger than the cap is ever accumulated, so a 100k-file status or a 5k-file
+ * diff costs bounded memory instead of a full-repository buffer plus a copy.
+ */
+export async function executeCapped(
+  command: string,
+  args: string[],
+  cwd: string,
+  options: CappedOptions,
+): Promise<CappedResult> {
+  return new Promise<CappedResult>((resolve, reject) => {
+    if (options.signal?.aborted) {
+      reject(new CommandCancelled())
+      return
+    }
+    const child = spawn(command, args, {
+      cwd,
+      env: commandEnvironment(options.env),
+      shell: false,
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    const decoder = new StringDecoder('utf8')
+    const parts: string[] = []
+    const stderr: string[] = []
+    let retained = 0
+    let truncated = false
+    let settled = false
+    let stopped: 'abort' | 'timeout' | 'limit' | null = null
+    let escalation: NodeJS.Timeout | undefined
+
+    const settle = (finish: () => void) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      clearTimeout(escalation)
+      options.signal?.removeEventListener('abort', onAbort)
+      finish()
+    }
+    const stop = (reason: 'abort' | 'timeout' | 'limit') => {
+      if (stopped) return
+      stopped = reason
+      child.kill('SIGTERM')
+      // The serial read queue must not advance until the child has exited.
+      escalation = setTimeout(() => child.kill('SIGKILL'), 1000)
+      escalation.unref()
+    }
+    const onAbort = () => {
+      if (stopped) stopped = 'abort'
+      else stop('abort')
+    }
+    const timer = setTimeout(() => stop('timeout'), command === 'gh' ? 20_000 : 120_000)
+    options.signal?.addEventListener('abort', onAbort, { once: true })
+    if (options.signal?.aborted) onAbort()
+
+    child.stdout.on('data', (chunk: Buffer) => {
+      const room = options.maxBytes - retained
+      if (room > 0) {
+        const take = Math.min(room, chunk.length)
+        retained += take
+        parts.push(decoder.write(chunk.subarray(0, take)))
+        if (take < chunk.length) truncated = true
+      } else {
+        truncated = true
+      }
+      if (truncated) stop('limit')
+    })
+    child.stderr.on('data', (chunk: Buffer) => {
+      if (stderr.length < 64) stderr.push(chunk.toString('utf8'))
+    })
+    child.on('error', (error) => settle(() => reject(error)))
+    child.on('close', (code) => {
+      if (stopped === 'abort') {
+        settle(() => reject(new CommandCancelled()))
+        return
+      }
+      if (stopped === 'timeout') {
+        settle(() =>
+          reject(
+            Object.assign(new Error(`${command} timed out`), {
+              code: 'ETIMEDOUT',
+              stderr: stderr.join(''),
+            }),
+          ),
+        )
+        return
+      }
+      const tail = decoder.end()
+      if (tail) parts.push(tail)
+      let text = parts.join('')
+      if (truncated) {
+        if (options.boundary) {
+          const cut = text.lastIndexOf(options.boundary)
+          if (cut >= 0) text = text.slice(0, cut + options.boundary.length)
+        } else if (text.endsWith('\uFFFD')) {
+          // A byte cap can land inside a multi-byte character; drop the lone
+          // replacement character rather than rendering a corrupt final glyph.
+          text = text.slice(0, -1)
+        }
+      } else if (code !== 0) {
+        settle(() =>
+          reject(
+            Object.assign(new Error(`${command} failed with exit code ${code}`), {
+              code,
+              stderr: stderr.join(''),
+            }),
+          ),
+        )
+        return
+      }
+      settle(() => resolve({ text, truncated }))
+    })
+  })
+}
+
+/**
+ * Runs at most `limit` workers at a time. Per-branch Git work is bounded by
+ * this rather than by the branch count, so a repository with thousands of
+ * refs no longer forks thousands of processes at once.
+ */
+export async function mapWithConcurrency<T>(
+  items: readonly T[],
+  limit: number,
+  worker: (item: T) => Promise<void>,
+): Promise<void> {
+  let cursor = 0
+  let failed = false
+  let failure: unknown
+  const runners = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (!failed && cursor < items.length) {
+      try {
+        await worker(items[cursor++])
+      } catch (error) {
+        if (!failed) {
+          failed = true
+          failure = error
+        }
+      }
+    }
+  })
+  await Promise.all(runners)
+  if (failed) throw failure
+}
+
 // Prompt suppression is the only general environment Git Stacks adds. Managed Git also
 // receives its own relocated helper paths; user SSH, LFS, hooks and signing pass through.
 export function commandEnvironment(env?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
@@ -97,11 +278,11 @@ export function commandEnvironment(env?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
     ...env,
   }
 }
-
 export async function runGit(
   repoPath: string,
   args: string[],
   env?: NodeJS.ProcessEnv,
+  signal?: AbortSignal,
 ): Promise<string> {
   const runtime = await resolveGitRuntime()
   return execute(
@@ -109,6 +290,7 @@ export async function runGit(
     args,
     repoPath,
     gitCommandEnvironment(runtime, commandEnvironment(env)),
+    signal,
   )
 }
 
@@ -195,9 +377,13 @@ export async function runGitWithInput(
   )
 }
 
-export async function tryGit(repoPath: string, args: string[]): Promise<string | null> {
+export async function tryGit(
+  repoPath: string,
+  args: string[],
+  signal?: AbortSignal,
+): Promise<string | null> {
   try {
-    return await runGit(repoPath, args)
+    return await runGit(repoPath, args, undefined, signal)
   } catch (error) {
     if (isExitCode(error, 1) || isExitCode(error, 2) || isExitCode(error, 128)) {
       return null
@@ -234,10 +420,13 @@ export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
-export async function getCurrentBranch(repoPath: string): Promise<string | null> {
+export async function getCurrentBranch(
+  repoPath: string,
+  signal?: AbortSignal,
+): Promise<string | null> {
   try {
     const value = stripTrailingNewline(
-      await runGit(repoPath, ['symbolic-ref', '--quiet', '--short', 'HEAD']),
+      await runGit(repoPath, ['symbolic-ref', '--quiet', '--short', 'HEAD'], undefined, signal),
     )
     return value || null
   } catch (error) {
@@ -263,13 +452,18 @@ export function parseRefRecords(output: string): RefRecord[] {
   return records
 }
 
-export async function getRefs(repoPath: string): Promise<RefRecord[]> {
-  const output = await runGit(repoPath, [
-    'for-each-ref',
-    '--format=%(refname)%00%(objectname)%00%(upstream)%00%(upstream:track)%00%(subject)%00%(committerdate:iso-strict)%00%(symref)%00',
-    'refs/heads',
-    'refs/remotes',
-  ])
+export async function getRefs(repoPath: string, signal?: AbortSignal): Promise<RefRecord[]> {
+  const output = await runGit(
+    repoPath,
+    [
+      'for-each-ref',
+      '--format=%(refname)%00%(objectname)%00%(upstream)%00%(upstream:track)%00%(subject)%00%(committerdate:iso-strict)%00%(symref)%00',
+      'refs/heads',
+      'refs/remotes',
+    ],
+    undefined,
+    signal,
+  )
   return parseRefRecords(output)
 }
 
@@ -291,7 +485,7 @@ export function isConflicted(indexStatus: string, worktreeStatus: string): boole
   )
 }
 
-export function parseStatus(output: string): ChangedFile[] {
+export function parseStatus(output: string, truncated = false): ChangedFile[] {
   if (!output) {
     return []
   }
@@ -318,6 +512,9 @@ export function parseStatus(output: string): ChangedFile[] {
       originalPath = tokens[index + 1]
       index += 1
       if (!originalPath) {
+        // `-z` renames have two NUL-terminated paths. The byte cap can end
+        // after the new path, before the old one has arrived.
+        if (truncated && index === tokens.length - 1) break
         throw new Error('Git returned a rename status without its original path')
       }
     }
@@ -332,19 +529,60 @@ export function parseStatus(output: string): ChangedFile[] {
   return files
 }
 
-export async function getStatus(repoPath: string): Promise<ChangedFile[]> {
+export async function getStatus(repoPath: string, signal?: AbortSignal): Promise<ChangedFile[]> {
   const output = await runGit(
     repoPath,
     ['status', '--porcelain=v1', '-z', '--untracked-files=all'],
     {
       GIT_OPTIONAL_LOCKS: '0',
     },
+    signal,
   )
   return parseStatus(output)
 }
 
-export async function getStashes(repoPath: string): Promise<Stash[]> {
-  const output = await runGit(repoPath, ['stash', 'list', '--format=%gd%x00%H%x00%gs%x00'])
+/**
+ * The capped counterpart of `runGit`. Bounded reads resolve the same managed
+ * runtime and relocated helper environment, so a large repository never forks
+ * the system Git directly and a bundled build still reports its own version.
+ */
+export async function runGitCapped(
+  repoPath: string,
+  args: string[],
+  options: CappedOptions,
+): Promise<CappedResult> {
+  const runtime = await resolveGitRuntime()
+  return executeCapped(runtime.executable, args, repoPath, {
+    ...options,
+    env: gitCommandEnvironment(runtime, commandEnvironment(options.env)),
+  })
+}
+
+/**
+ * The working-tree listing used by snapshots. A repository with 100k changed
+ * files is cut on a whole-record boundary at `MAX_STATUS_BYTES` and reports
+ * `truncated` so the renderer states the limit instead of silently dropping
+ * files. Actions that must see every path keep using `getStatus`.
+ */
+export async function listStatus(
+  repoPath: string,
+  signal?: AbortSignal,
+): Promise<{ files: ChangedFile[]; truncated: boolean }> {
+  const { text, truncated } = await runGitCapped(
+    repoPath,
+    ['status', '--porcelain=v1', '-z', '--untracked-files=all'],
+    { maxBytes: MAX_STATUS_BYTES, boundary: '\0', signal },
+  )
+  return { files: parseStatus(text, truncated), truncated }
+}
+
+export async function getStashes(repoPath: string, signal?: AbortSignal): Promise<Stash[]> {
+  const output = await runGit(
+    repoPath,
+    ['stash', 'list', '--format=%gd%x00%H%x00%gs%x00'],
+    undefined,
+    signal,
+  )
   const values = output.split('\0')
   const stashes: Stash[] = []
   for (let index = 0; index + 2 < values.length; index += 3) {
@@ -358,9 +596,11 @@ export async function getStashes(repoPath: string): Promise<Stash[]> {
   return stashes
 }
 
-export async function getOriginUrl(repoPath: string): Promise<string | null> {
+export async function getOriginUrl(repoPath: string, signal?: AbortSignal): Promise<string | null> {
   try {
-    const value = stripTrailingNewline(await runGit(repoPath, ['remote', 'get-url', 'origin']))
+    const value = stripTrailingNewline(
+      await runGit(repoPath, ['remote', 'get-url', 'origin'], undefined, signal),
+    )
     return value || null
   } catch (error) {
     if (isExitCode(error, 2) || isExitCode(error, 128)) {
@@ -424,9 +664,15 @@ export function parseRemote(urlValue: string | null): ParsedRemote | null {
   return { host: host.toLowerCase(), owner, name, fullName: `${owner}/${name}` }
 }
 
-export async function getConfigValue(repoPath: string, key: string): Promise<string | null> {
+export async function getConfigValue(
+  repoPath: string,
+  key: string,
+  signal?: AbortSignal,
+): Promise<string | null> {
   try {
-    const value = stripTrailingNewline(await runGit(repoPath, ['config', '--get', key]))
+    const value = stripTrailingNewline(
+      await runGit(repoPath, ['config', '--get', key], undefined, signal),
+    )
     return value || null
   } catch (error) {
     if (isExitCode(error, 1) || isExitCode(error, 2) || isExitCode(error, 128)) {
@@ -434,6 +680,48 @@ export async function getConfigValue(repoPath: string, key: string): Promise<str
     }
     throw error
   }
+}
+
+export interface BranchConfig {
+  parent: string | null
+  parentTip: string | null
+}
+
+export function parseBranchConfig(output: string): Map<string, BranchConfig> {
+  const configs = new Map<string, BranchConfig>()
+  for (const token of output.split('\0')) {
+    const match = /^branch\.(.+)\.(parent|parenttip)\n([\s\S]*)$/iu.exec(token)
+    if (!match) continue
+    const [, name, field, value] = match
+    const entry = configs.get(name) ?? { parent: null, parentTip: null }
+    if (field.toLowerCase() === 'parent') entry.parent = value || null
+    else entry.parentTip = value || null
+    configs.set(name, entry)
+  }
+  return configs
+}
+
+/**
+ * One read for every branch's recorded parent and parent tip. The previous
+ * per-branch `git config --get` cost two child processes per branch, which is
+ * what made a repository with thousands of refs unusable.
+ */
+export async function getBranchConfigs(
+  repoPath: string,
+  signal?: AbortSignal,
+): Promise<Map<string, BranchConfig>> {
+  const output = await tryGit(
+    repoPath,
+    [
+      'config',
+      '--null',
+      '--get-regexp',
+      // Git reports config keys lower-cased, so the match must be lower-case too.
+      '^branch\\..*\\.(parent|parenttip)$',
+    ],
+    signal,
+  )
+  return parseBranchConfig(output ?? '')
 }
 
 export async function getBranchParent(repoPath: string, branch: string): Promise<string | null> {
@@ -444,6 +732,7 @@ export async function getDefaultBranch(
   repoPath: string,
   refs: RefRecord[],
   currentBranch: string | null,
+  signal?: AbortSignal,
 ): Promise<string> {
   const remoteHead = refs.find(
     (ref) =>
@@ -453,7 +742,7 @@ export async function getDefaultBranch(
   if (remoteHead?.symref) {
     return remoteHead.symref.slice('refs/remotes/origin/'.length)
   }
-  const configured = await getConfigValue(repoPath, 'init.defaultBranch')
+  const configured = await getConfigValue(repoPath, 'init.defaultBranch', signal)
   if (configured) {
     return configured
   }
@@ -472,18 +761,29 @@ export async function getDefaultBranch(
   return localNames[0] ?? 'main'
 }
 
-export async function gitPathExists(repoPath: string, name: string): Promise<boolean> {
-  const output = stripTrailingNewline(await runGit(repoPath, ['rev-parse', '--git-path', name]))
+export async function gitPathExists(
+  repoPath: string,
+  name: string,
+  signal?: AbortSignal,
+): Promise<boolean> {
+  const output = stripTrailingNewline(
+    await runGit(repoPath, ['rev-parse', '--git-path', name], undefined, signal),
+  )
   const candidate = path.isAbsolute(output) ? output : path.resolve(repoPath, output)
   try {
     await fs.stat(candidate)
+    if (signal?.aborted) throw new CommandCancelled()
     return true
-  } catch {
+  } catch (error) {
+    if (isCancelled(error) || signal?.aborted) throw new CommandCancelled()
     return false
   }
 }
 
-export async function getOperationState(repoPath: string): Promise<OperationState> {
+export async function getOperationState(
+  repoPath: string,
+  signal?: AbortSignal,
+): Promise<OperationState> {
   const names = [
     'rebase-merge',
     'rebase-apply',
@@ -493,7 +793,14 @@ export async function getOperationState(repoPath: string): Promise<OperationStat
     'sequencer',
     'BISECT_LOG',
   ]
-  const existing = await Promise.all(names.map((name) => gitPathExists(repoPath, name)))
+  const reads = names.map((name) => gitPathExists(repoPath, name, signal))
+  let existing: boolean[]
+  try {
+    existing = await Promise.all(reads)
+  } catch (error) {
+    await Promise.allSettled(reads)
+    throw error
+  }
   const rebase = existing[0] || existing[1]
   const operation = rebase
     ? 'rebase'
@@ -638,10 +945,19 @@ export async function ensureNotCheckedOutElsewhere(
   }
 }
 
-export async function branchUpstream(repoPath: string, branch: string): Promise<string | null> {
+export async function branchUpstream(
+  repoPath: string,
+  branch: string,
+  signal?: AbortSignal,
+): Promise<string | null> {
   try {
     const value = stripTrailingNewline(
-      await runGit(repoPath, ['rev-parse', '--symbolic-full-name', `${branch}@{upstream}`]),
+      await runGit(
+        repoPath,
+        ['rev-parse', '--symbolic-full-name', `${branch}@{upstream}`],
+        undefined,
+        signal,
+      ),
     )
     return value.replace(/^refs\/remotes\//, '').replace(/^refs\/heads\//, './') || null
   } catch (error) {

@@ -285,6 +285,10 @@ export function installFixtureControl(options: {
       record('setSystemGit', [enabled])
       return answer('setSystemGit', () => runtimeStatus(enabled))
     },
+    cancel: (requestId) => {
+      record('cancel', [requestId])
+      return answer('cancel', () => undefined)
+    },
   }
 
   const control: FixtureControl = {

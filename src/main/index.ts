@@ -17,6 +17,7 @@ import { previewStack } from './stacks'
 import { getPullRequest } from './github'
 import type { GitAction, RecentRepository, StackKind } from '../shared/types'
 import { RepositoryOperations } from './repository-operations'
+import { RequestRegistry } from './request-registry'
 import {
   configureGitRuntime,
   gitRuntimeStatus,
@@ -25,6 +26,8 @@ import {
   withGitRuntime,
   writeGitRuntimePreference,
 } from './git-runtime'
+
+const readKeys = new RequestRegistry()
 
 const bundleDir = dirname(fileURLToPath(import.meta.url))
 protocol.registerSchemesAsPrivileged([
@@ -84,15 +87,27 @@ function repository() {
   return activeRepository
 }
 
-function readRepository<T>(operation: (root: string) => Promise<T>): Promise<T> {
+/**
+ * Repository reads are serialised so a write never interleaves with a read.
+ * Each read also claims a cancellable request id: a read that started before a
+ * repository switch is ended rather than allowed to answer for the repository
+ * the window is now showing.
+ */
+function readRepository<T>(
+  operation: (root: string, signal: AbortSignal) => Promise<T>,
+  requestId = 'read',
+): Promise<T> {
   const root = repository()
-  return operations.read(async () => {
-    if (root !== activeRepository) {
-      throw new Error('The active repository changed. Reopen this view to load its current state.')
-    }
-    const runtime = await resolveGitRuntime()
-    return withGitRuntime(runtime, () => operation(root))
-  })
+  const controller = readKeys.claim(root, requestId)
+  const superseded = () =>
+    new Error('The active repository changed. Reopen this view to load its current state.')
+  return operations
+    .read(async () => {
+      if (root !== activeRepository) throw superseded()
+      const runtime = await resolveGitRuntime()
+      return withGitRuntime(runtime, () => operation(root, controller.signal))
+    }, controller.signal)
+    .finally(() => readKeys.release(root, requestId, controller))
 }
 
 async function remember(path: string) {
@@ -113,28 +128,31 @@ function installHandlers() {
   })
   ipcMain.handle('repositories:open', async (event, requestedPath: unknown) => {
     validateSender(event)
-    return operations.write(async () => {
+    let selected: string
+    if (requestedPath !== undefined) {
+      if (
+        typeof requestedPath !== 'string' ||
+        !recents.some((item) => item.path === requestedPath)
+      ) {
+        throw new Error('Use Open repository to choose a new folder.')
+      }
+      selected = requestedPath
+    } else {
+      const result = await dialog.showOpenDialog(window!, {
+        title: 'Open Git repository',
+        properties: ['openDirectory'],
+        buttonLabel: 'Open repository',
+      })
+      if (result.canceled || !result.filePaths[0]) return null
+      selected = result.filePaths[0]
+    }
+    const path = await resolveRepository(selected)
+    // Retire old reads before waiting for the operation queue; a long-running
+    // history/diff must not delay switching to a newly selected repository.
+    if (activeRepository) readKeys.cancelRoot(activeRepository)
+    return operations.switchRepository(async () => {
       const runtime = await resolveGitRuntime()
       return withGitRuntime(runtime, async () => {
-        let selected: string
-        if (requestedPath !== undefined) {
-          if (
-            typeof requestedPath !== 'string' ||
-            !recents.some((item) => item.path === requestedPath)
-          ) {
-            throw new Error('Use Open repository to choose a new folder.')
-          }
-          selected = requestedPath
-        } else {
-          const result = await dialog.showOpenDialog(window!, {
-            title: 'Open Git repository',
-            properties: ['openDirectory'],
-            buttonLabel: 'Open repository',
-          })
-          if (result.canceled || !result.filePaths[0]) return null
-          selected = result.filePaths[0]
-        }
-        const path = await resolveRepository(selected)
         const snapshot = await getSnapshot(path)
         await remember(path)
         activeRepository = path
@@ -144,7 +162,7 @@ function installHandlers() {
   })
   ipcMain.handle('repository:refresh', async (event) => {
     validateSender(event)
-    return readRepository(getSnapshot)
+    return readRepository((root, signal) => getSnapshot(root, signal), 'refresh')
   })
   ipcMain.handle('repository:action', async (event, action: GitAction) => {
     validateSender(event)
@@ -155,33 +173,41 @@ function installHandlers() {
   })
   ipcMain.handle('repository:file', (event, filePath: string) => {
     validateSender(event)
-    return readRepository((root) => getFileView(root, filePath))
+    return readRepository((root, signal) => getFileView(root, filePath, signal), `file:${filePath}`)
   })
   ipcMain.handle('repository:conflict', (event, filePath: string) => {
     validateSender(event)
     return readRepository((root) => getConflictView(root, filePath))
   })
-  ipcMain.handle('repository:history', (event, ref: string, skip: number) => {
+  ipcMain.handle('repository:history', (event, ref: string, skip: number, requestId?: string) => {
     validateSender(event)
-    return readRepository((root) => getHistory(root, ref, skip))
+    return readRepository((root, signal) => getHistory(root, ref, skip, signal), requestId)
   })
-  ipcMain.handle('repository:commit-diff', (event, oid: string) => {
+  ipcMain.handle('repository:commit-diff', (event, oid: string, requestId?: string) => {
     validateSender(event)
-    return readRepository((root) => getCommitDiff(root, oid))
+    return readRepository((root, signal) => getCommitDiff(root, oid, signal), requestId)
   })
   ipcMain.handle('repository:push-preview', (event) => {
     validateSender(event)
-    return readRepository(getPushPreview)
+    return readRepository((root) => getPushPreview(root))
   })
   ipcMain.handle('repository:stack-preview', (event, kind: StackKind, branch: string) => {
     validateSender(event)
-    return readRepository(async (root) => {
-      return previewStack(root, await getSnapshot(root), kind, branch)
-    })
+    return readRepository(async (root, signal) =>
+      previewStack(root, await getSnapshot(root, signal), kind, branch),
+    )
   })
   ipcMain.handle('repository:pull-request', (event, number: number) => {
     validateSender(event)
-    return readRepository((root) => getPullRequest(root, number))
+    return readRepository(
+      (root, signal) => getPullRequest(root, number, signal),
+      `pull-request:${number}`,
+    )
+  })
+  ipcMain.handle('operation:cancel', (event, requestId: unknown) => {
+    validateSender(event)
+    if (typeof requestId !== 'string' || !requestId || !activeRepository) return
+    readKeys.cancel(activeRepository, requestId)
   })
   ipcMain.handle('external:open', async (event, value: unknown) => {
     validateSender(event)
