@@ -5,11 +5,14 @@ import { FoundationsSpecimen } from './design-system/FoundationsSpecimen'
 import { ShellSpecimen } from './design-system/ShellSpecimen'
 import { DataSurfacesSpecimen } from './design-system/DataSurfacesSpecimen'
 import { DialogSpecimen } from './design-system/DialogSpecimen'
+import { WorkflowRecoverySpecimen } from './design-system/WorkflowRecoverySpecimen'
 import { TooltipProvider } from './components/ui/tooltip'
 import { RepositoryHoverCardProvider } from './components/repository-hover-cards'
 import './styles.css'
 
 const route = window.location.hash
+const recoverySpecimen = route.startsWith('#/design-system-recovery-specimen')
+const recoveryMode = new URLSearchParams(route.split('?')[1] ?? '').get('mode') ?? 'saved'
 const specimen = ['#/design-system-specimen', '#/design-system-controls'].includes(route)
 const shellSpecimen = route === '#/design-system-shell-specimen'
 const dataSpecimen = route === '#/design-system-data-specimen'
@@ -33,6 +36,8 @@ createRoot(root).render(
           <DataSurfacesSpecimen />
         ) : dialogSpecimen ? (
           <DialogSpecimen />
+        ) : recoverySpecimen ? (
+          <WorkflowRecoverySpecimen mode={recoveryMode} />
         ) : (
           <App />
         )}

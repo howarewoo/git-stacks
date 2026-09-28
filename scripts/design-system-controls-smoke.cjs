@@ -235,6 +235,92 @@ async function main() {
     'Checkout validation',
     'the dispatched submission should carry the reviewed layer choice',
   )
+
+  // A recovered submission is resumed from its journal, so what the dialog says about each
+  // layer has to come from the journal too. A fresh preview that describes a different base
+  // must not relabel what Resume will run.
+  await window.loadURL('about:blank')
+  await window.loadURL(
+    `${pathToFileURL(rendererPath).href}#/design-system-recovery-specimen?mode=mismatch`,
+  )
+  await waitFor('the recovered submit dialog', `document.querySelector('.workflow-dialog')`)
+  await waitFor(
+    'the saved consent to render',
+    `document.querySelector('.workflow-dialog').textContent.includes('Saved approval for rewritten branches')`,
+  )
+  const mismatched = await evaluateInPage(
+    `document.querySelector('.workflow-dialog').textContent.replace(/\\s+/g, ' ')`,
+  )
+  assert.match(
+    mismatched,
+    /feature\/checkout-orders → feature\/checkoutPull request #102 keeps its title/,
+    'a recovered layer should be described by the journalled base and pull request',
+  )
+  assert.equal(
+    await evaluateInPage(
+      `Array.from(document.querySelectorAll('label')).some((label) => label.textContent.startsWith('Change the base of pull request'))`,
+    ),
+    false,
+    'a recovered base change must be shown as saved, not offered as an unchecked control',
+  )
+  assert.equal(
+    await evaluateInPage(
+      `document.querySelector('[role="dialog"] input[type="checkbox"]:not(:disabled)') === null`,
+    ),
+    true,
+    'a recovered submission should offer no editable consent checkbox',
+  )
+  assert.equal(
+    await evaluateInPage(`buttonNamed('Resume submission')?.disabled === false`),
+    true,
+    'the recovered submission should still be resumable',
+  )
+  assert.doesNotMatch(mismatched, /feature\/moved-parent|#902|Planned stack operations/)
+  assert.equal(
+    await evaluateInPage(`document.getElementById('title-feature%2Fcheckout')?.value`),
+    'Checkout validation',
+  )
+  assert.equal(await evaluateInPage(`buttonNamed('Dismiss submission')?.disabled === false`), true)
+
+  // A fresh read that fails must not take the saved operation with it: Resume stays enabled,
+  // so the steps and the consent it will run under have to stay on screen.
+  await window.loadURL('about:blank')
+  await window.loadURL(
+    `${pathToFileURL(rendererPath).href}#/design-system-recovery-specimen?mode=preview-failure`,
+  )
+  await waitFor(
+    'the recovered submit dialog without a fresh preview',
+    `document.querySelector('.workflow-dialog')`,
+  )
+  await waitFor(
+    'the saved consent to survive a failed fresh read',
+    `document.querySelector('.workflow-dialog').textContent.includes('Saved approval for rewritten branches')`,
+  )
+  const withoutPreview = await evaluateInPage(
+    `document.querySelector('.workflow-dialog').textContent.replace(/\\s+/g, ' ')`,
+  )
+  assert.match(
+    withoutPreview,
+    /Push feature\/checkout-orders/,
+    'the saved steps should remain visible when the fresh preview fails',
+  )
+  assert.match(
+    withoutPreview,
+    /feature\/checkout-orders → feature\/checkoutPull request #102 keeps its title/,
+    'the saved layer should remain visible when the fresh preview fails',
+  )
+  assert.match(
+    withoutPreview,
+    /Recorded: branches with a rewritten history are pushed with exact leases\./,
+    'the recorded force consent must remain visible when the fresh preview fails',
+  )
+  assert.match(withoutPreview, /Remote refused the update/)
+  assert.match(withoutPreview, /Fetch the remote, confirm nobody pushed/)
+  assert.equal(await evaluateInPage(`buttonNamed('Resume submission')?.disabled === false`), true)
+  assert.equal(await evaluateInPage(`buttonNamed('Dismiss submission')?.disabled === false`), true)
+  console.log(
+    'Electron controls: guarded submitStack dispatch; journal identity, saved approvals, failed steps, recovery guidance and enabled Resume/Dismiss with mismatched or unavailable preview.',
+  )
 }
 
 main()

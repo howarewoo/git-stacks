@@ -1572,3 +1572,109 @@ test('a recovered stack whose member pull request was closed is not reported as 
     assert.equal((await getSubmitStackProgress(harness.repo))?.status, 'failed')
   })
 })
+
+for (const recordedStack of [false, true]) {
+  for (const race of ['close', 'drift'] as const) {
+    test(`recovery rejects ${race} after a stale listing with stack number ${recordedStack ? 'saved' : 'unsaved'}`, async () => {
+      await withHarness(async (harness) => {
+        await setupFreshBranches(harness)
+        const reviewed = git(harness, ['rev-parse', 'feature/step-2'])
+        git(harness, ['checkout', '-b', 'external-writer'])
+        git(harness, ['commit', '--allow-empty', '-m', 'External replacement'])
+        const foreign = git(harness, ['rev-parse', 'HEAD'])
+        git(harness, ['push', harness.bare, 'external-writer'])
+        git(harness, ['checkout', 'feature/step-3'])
+        const state = await harness.readState()
+        state.lostResponses = [
+          { method: 'POST', pathIncludes: 'stacks', status: 502, message: 'Bad gateway' },
+        ]
+        await harness.writeState(state)
+        const preview = await previewStack(
+          harness.repo,
+          await getSnapshot(harness.repo),
+          'publish',
+          'feature/step-2',
+        )
+        await assert.rejects(
+          runStackAction(harness.repo, {
+            type: 'submitStack',
+            token: preview.token,
+            allowForce: false,
+            layers: freshLayers(),
+          }),
+          /Bad gateway/iu,
+        )
+        const after = await harness.readState()
+        assert.equal(after.stacks?.length, 1)
+        const stack = after.stacks![0]
+        const number = stack.pull_requests[0].number
+        assert.equal(bareGit(harness, ['rev-parse', 'feature/step-2']), reviewed)
+        if (recordedStack) {
+          const journalPath = path.resolve(
+            harness.repo,
+            git(harness, ['rev-parse', '--git-common-dir']),
+            'git-stacks-publish.json',
+          )
+          const journal = JSON.parse(readFileSync(journalPath, 'utf8'))
+          assert.equal(journal.stackIntent, 'create')
+          assert.equal(journal.stackNumber, null)
+          journal.stackNumber = stack.number
+          writeFileSync(journalPath, `${JSON.stringify(journal, null, 2)}\n`)
+        }
+        // Arm only after the capability probe. The first paginated recovery listing
+        // then returns its snapshot before the close or force-push lands.
+        const pathIncludes = 'repos/acme/widgets/stacks?per_page=1'
+        if (race === 'close') {
+          after.closeOnRequest = [{ pathIncludes, number, after: 0 }]
+        } else {
+          after.driftOnRequest = [
+            { pathIncludes, ref: 'refs/heads/feature/step-2', to: foreign, after: 0 },
+          ]
+        }
+        const inner = createGitHubApiDouble()
+        const armedFetch: typeof globalThis.fetch = async (input, init) => {
+          const url = String(input)
+          const snapshot = await inner(url.endsWith('/stacks') ? `${url}?per_page=1` : input, init)
+          // A force-push can precede the listing snapshot too: both GitHub reads
+          // then agree on B, but the immutable journal still requires A.
+          const response =
+            race === 'drift' && url.endsWith('/stacks') ? await inner(input, init) : snapshot
+          if (String(input).endsWith('/stacks?per_page=1')) {
+            const current = await harness.readState()
+            current.requests = []
+            current.closeOnRequest = after.closeOnRequest
+            current.driftOnRequest = after.driftOnRequest
+            await harness.writeState(current)
+          }
+          return response
+        }
+        setGitHubTransport(new DirectGitHubTransport({ token: 'fixture-token', fetch: armedFetch }))
+        await assert.rejects(
+          runStackAction(harness.repo, { type: 'submitStackRetry' }),
+          race === 'close'
+            ? /(?:closed|completed)/iu
+            : /(?:head moved|no longer matches|rather than)/iu,
+        )
+        const progress = await getSubmitStackProgress(harness.repo)
+        assert.equal(progress?.status, 'failed')
+        assert.equal(progress?.steps.find((step) => step.status === 'failed')?.kind, 'create-stack')
+        const final = await harness.readState()
+        assert.equal(final.stacks?.length, 1)
+        assert.equal(
+          final.prs.find((pr) => pr.number === number)?.state,
+          race === 'close' ? 'CLOSED' : 'OPEN',
+        )
+        assert.equal(
+          bareGit(harness, ['rev-parse', 'feature/step-2']),
+          race === 'drift' ? foreign : reviewed,
+        )
+        assert.equal(
+          final.requests?.some(
+            (request) => request.argv[1] !== 'GET' && request.argv[0] !== 'graphql',
+          ),
+          false,
+        )
+      })
+    })
+  }
+}

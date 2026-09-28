@@ -810,18 +810,34 @@ export function WorkflowDialog({
                   </Select>
                 </Field>
               ) : null}
-              {request.kind === 'stack' && preview ? (
+              {/*
+                A recovered submission is described by its journal, not by a fresh preview.
+                Gating this whole region on the preview would hide the saved steps, the saved
+                consent and the base changes the moment a fresh read fails, while Resume
+                stayed enabled. The preview-dependent parts stay gated; the saved ones do not.
+              */}
+              {request.kind === 'stack' && (preview || recovering) ? (
                 <>
-                  <OperationSteps
-                    steps={stackSteps}
-                    label="Planned stack operations"
-                    emptyNote="This preview contains no steps to run."
-                  />
-                  {preview.warnings.map((warning, index) => (
-                    <WarningNote key={`${index}-${warning}`}>{warning}</WarningNote>
-                  ))}
-                  <BlockerList items={preview.blockers} />
-                  {request.operation === 'publish' && publishOffer ? (
+                  {!preview ? (
+                    <WarningNote>
+                      This stack could not be re-read just now, so it shows no new preview. The
+                      saved submission below is the operation Resume will run.
+                    </WarningNote>
+                  ) : null}
+                  {!recovering ? (
+                    <>
+                      <OperationSteps
+                        steps={stackSteps}
+                        label="Planned stack operations"
+                        emptyNote="This preview contains no steps to run."
+                      />
+                      {(preview?.warnings ?? []).map((warning, index) => (
+                        <WarningNote key={`${index}-${warning}`}>{warning}</WarningNote>
+                      ))}
+                      {preview ? <BlockerList items={preview.blockers} /> : null}
+                    </>
+                  ) : null}
+                  {request.operation === 'publish' && (publishOffer || recovering) ? (
                     <>
                       <PublishProgressPanel progress={progress} />
                       {/*
@@ -871,80 +887,99 @@ export function WorkflowDialog({
                           ) : null}
                         </>
                       )}
-                      {publishOffer.layers.map((layer) => {
-                        const choice = layerChoices[layer.branch]
-                        const id = encodeURIComponent(layer.branch)
-                        const setChoice = (update: Partial<PublishLayerChoice>) => {
-                          markEdited()
-                          setLayerChoices((current) => ({
-                            ...current,
-                            [layer.branch]: { ...current[layer.branch], ...update },
-                          }))
-                        }
-                        return (
-                          <WorkflowSection
-                            key={`layer-${id}`}
-                            label={`${layer.branch} → ${layer.base}`}
-                          >
-                            <p className="m-0 text-[length:var(--gs-semantic-type-metadata-size)] text-[var(--gs-semantic-text-secondary)]">
-                              {layer.create
-                                ? 'A new pull request is opened with the title, description and readiness chosen below.'
-                                : `Pull request #${
+                      {/*
+                        A recovered submission describes the saved operation, not a fresh
+                        preview of a repository that may since have moved. Rendering the
+                        fresh offer here would label each section with a new base and pull
+                        request identity while Resume executes the journalled ones.
+                        */}
+                      {(recovering ? (progress?.layers ?? []) : (publishOffer?.layers ?? [])).map(
+                        (layer) => {
+                          const choice = recovering ? layer : layerChoices[layer.branch]
+                          const id = encodeURIComponent(layer.branch)
+                          const setChoice = (update: Partial<PublishLayerChoice>) => {
+                            markEdited()
+                            setLayerChoices((current) => ({
+                              ...current,
+                              [layer.branch]: { ...current[layer.branch], ...update },
+                            }))
+                          }
+                          return (
+                            <WorkflowSection
+                              key={`layer-${id}`}
+                              label={`${layer.branch} → ${layer.base}`}
+                            >
+                              <p className="m-0 text-[length:var(--gs-semantic-type-metadata-size)] text-[var(--gs-semantic-text-secondary)]">
+                                {layer.create
+                                  ? 'A new pull request is opened with the title, description and readiness chosen below.'
+                                  : `Pull request #${
+                                      layer.pullRequest ?? '?'
+                                    } keeps its title, description and review; only its base can change.`}
+                              </p>
+                              {recovering ? (
+                                layer.updateBase ? (
+                                  <ImmutableApproval
+                                    label={`Saved approval: change the base of pull request #${
+                                      layer.pullRequest ?? '?'
+                                    } to ${layer.base}`}
+                                    summary="Recorded: this base change is applied when the submission resumes."
+                                  />
+                                ) : null
+                              ) : (publishOffer?.baseChanges.includes(layer.branch) ?? false) ? (
+                                <Checkbox
+                                  id={`base-${id}`}
+                                  label={`Change the base of pull request #${
                                     layer.pullRequest ?? '?'
-                                  } keeps its title, description and review; only its base can change.`}
-                            </p>
-                            {publishOffer.baseChanges.includes(layer.branch) ? (
-                              <Checkbox
-                                id={`base-${id}`}
-                                label={`Change the base of pull request #${
-                                  layer.pullRequest ?? '?'
-                                } to ${layer.base}`}
-                                checked={choice?.updateBase ?? false}
-                                disabled={recovering}
-                                onChange={(event) =>
-                                  setChoice({ updateBase: event.target.checked })
-                                }
-                              />
-                            ) : null}
-                            {/*
+                                  } to ${layer.base}`}
+                                  checked={choice?.updateBase ?? false}
+                                  onChange={(event) =>
+                                    setChoice({ updateBase: event.target.checked })
+                                  }
+                                />
+                              ) : null}
+                              {/*
                               An existing pull request keeps the title, description, and review
                               state it already has. This submission does not rewrite them, so
                               there is nothing truthful to edit: the title is shown for reading
                               and the description is not shown at all, because this preview
                               never read the real one.
                             */}
-                            <Field
-                              id={`title-${id}`}
-                              label={`PR title for ${layer.branch}`}
-                              required
-                            >
-                              <Input
-                                readOnly={!layer.create || recovering}
-                                value={choice?.title ?? ''}
-                                onChange={(event) => setChoice({ title: event.target.value })}
-                              />
-                            </Field>
-                            {layer.create ? (
-                              <Field id={`body-${id}`} label={`PR description for ${layer.branch}`}>
-                                <Textarea
-                                  readOnly={recovering}
-                                  value={choice?.body ?? ''}
-                                  onChange={(event) => setChoice({ body: event.target.value })}
+                              <Field
+                                id={`title-${id}`}
+                                label={`PR title for ${layer.branch}`}
+                                required
+                              >
+                                <Input
+                                  readOnly={!layer.create || recovering}
+                                  value={choice?.title ?? ''}
+                                  onChange={(event) => setChoice({ title: event.target.value })}
                                 />
                               </Field>
-                            ) : null}
-                            {layer.create ? (
-                              <Checkbox
-                                id={`draft-${id}`}
-                                label={`Open the pull request for ${layer.branch} as a draft`}
-                                checked={choice?.draft ?? true}
-                                disabled={recovering}
-                                onChange={(event) => setChoice({ draft: event.target.checked })}
-                              />
-                            ) : null}
-                          </WorkflowSection>
-                        )
-                      })}
+                              {layer.create ? (
+                                <Field
+                                  id={`body-${id}`}
+                                  label={`PR description for ${layer.branch}`}
+                                >
+                                  <Textarea
+                                    readOnly={recovering}
+                                    value={choice?.body ?? ''}
+                                    onChange={(event) => setChoice({ body: event.target.value })}
+                                  />
+                                </Field>
+                              ) : null}
+                              {layer.create ? (
+                                <Checkbox
+                                  id={`draft-${id}`}
+                                  label={`Open the pull request for ${layer.branch} as a draft`}
+                                  checked={choice?.draft ?? true}
+                                  disabled={recovering}
+                                  onChange={(event) => setChoice({ draft: event.target.checked })}
+                                />
+                              ) : null}
+                            </WorkflowSection>
+                          )
+                        },
+                      )}
                     </>
                   ) : null}
                   {request.operation === 'merge' ? (
@@ -958,7 +993,7 @@ export function WorkflowDialog({
                         }}
                       >
                         <option value="">Choose a repository-supported method</option>
-                        {preview.mergeMethods.map((method) => (
+                        {(preview?.mergeMethods ?? []).map((method) => (
                           <option key={method} value={method}>
                             {method === 'squash'
                               ? 'Squash and merge'

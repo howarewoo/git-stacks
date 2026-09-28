@@ -58,11 +58,11 @@ import {
   createNativeStackAction,
   createPullRequestStack,
   detectNativeStacksCapability,
+  getPullRequestStack,
   listPullRequestStacks,
   NativeStackError,
   revalidatePublishedStackRegistration,
   unstackNativeStackAction,
-  validatePublishedStackRegistration,
 } from './native-stacks'
 import { canonicalRemoteName, getGitHubData, getPullRequest, pullRequestRepository } from './github'
 import { GitHubTransportError, githubTransport } from './github-transport'
@@ -3390,7 +3390,7 @@ async function runPublishStep(
       step.kind === 'create-stack' &&
       isOwnCreatedStack(captured, numbers, published)
     ) {
-      await proveRecoveredRegistration(repoPath, captured)
+      await proveRecoveredRegistration(repoPath, operation, published, captured)
       return `Recovered native stack #${captured.number} from a lost response`
     }
   } else if (matched) {
@@ -3402,7 +3402,7 @@ async function runPublishStep(
         `Stack preview is stale: these pull requests now belong to native stack #${matched.number}`,
       )
     }
-    await proveRecoveredRegistration(repoPath, matched)
+    await proveRecoveredRegistration(repoPath, operation, published, matched)
     operation.stackNumber = matched.number
     await writePublishOperation(repoPath, operation)
     return `Recovered native stack #${matched.number} from a lost response`
@@ -3512,22 +3512,74 @@ async function runPublishStep(
 }
 
 /**
- * Proves a recovered stack is still a usable registration before the submission calls it
- * done. Owning the right pull requests is not enough: the stack can be closed, or a member
- * can have been closed or moved since, and reporting success there would hand back a stack
- * the person cannot use.
+ * Proves a recovered stack is still this submission's usable result before it is called
+ * done. The stack listing is a snapshot, so three things are checked against the journal and
+ * against a fresh read rather than against the listing: the pull requests are still open,
+ * they still carry the commits and branches this operation published, and the stack still
+ * registers them. A listing that said open and a pull request that closed behind it, or a
+ * head that moved after the first proof, both pass every comparison inside the listing and
+ * fail here.
  */
-async function proveRecoveredRegistration(repoPath: string, stack: NativeStack): Promise<void> {
+async function proveRecoveredRegistration(
+  repoPath: string,
+  operation: PublishOperation,
+  published: readonly PublishLayer[],
+  stack: NativeStack,
+): Promise<void> {
   const members = await Promise.all(
     stack.pullRequests.map((member) => getPullRequest(repoPath, member.number)),
   )
-  const registration = validatePublishedStackRegistration(stack, members)
+  for (const pr of members) {
+    if (pr.state !== 'OPEN') {
+      throw new NativeStackError(
+        pr.state === 'MERGED' ? 'completed' : 'closed',
+        `Pull request #${pr.number} is ${pr.state.toLowerCase()}, so the recovered stack is not usable`,
+      )
+    }
+  }
+  // The journal is the only immutable record of what was reviewed, so it is what the fresh
+  // reading is compared against rather than the listing this same step just took.
+  for (const layer of published) {
+    const pr = members.find((candidate) => candidate.number === layer.pullRequest)
+    const intended = operation.branches.find((facts) => facts.branch === layer.branch)
+    if (
+      !pr ||
+      !intended ||
+      pr.headRepository?.toLowerCase() !== operation.fullName.toLowerCase() ||
+      pr.head !== layer.branch ||
+      pr.base !== layer.base ||
+      pr.headOid !== intended.oid
+    ) {
+      throw new NativeStackError(
+        'invalid-chain',
+        `Pull request #${layer.pullRequest} no longer matches what this submission published; refresh the stack preview`,
+      )
+    }
+  }
+  const [owner, name] = operation.fullName.split('/')
+  const currentStack = await getPullRequestStack(owner, name, stack.number)
+  if (
+    !isOwnCreatedStack(
+      currentStack,
+      published.map((layer) => layer.pullRequest as number),
+      published,
+    )
+  ) {
+    throw new NativeStackError('invalid-chain', 'Recovered native stack membership changed')
+  }
+  const registration = await revalidatePublishedStackRegistration(
+    owner,
+    name,
+    currentStack,
+    members,
+  )
   if (!registration.valid) {
     throw new NativeStackError(
       registration.status,
       registration.message ?? 'Recovered native stack is not a valid registration',
     )
   }
+  await provePublishedHeads(repoPath, operation, published)
 }
 
 /**
