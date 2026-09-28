@@ -270,12 +270,19 @@ export function WorkflowDialog({
       return
     }
     let active = true
+    // A running submission pushes its own progress. Reading it on a timer cannot work: that
+    // read queues behind the action producing the steps, so it would only ever report the
+    // state after the whole operation finished.
+    const unsubscribe = window.desktop.onSubmitStackProgress?.((value) => {
+      if (active) setProgress(value)
+    })
     void window.desktop.submitStackProgress?.().then(
       (value) => active && setProgress(value),
       () => active && setProgress(null),
     )
     return () => {
       active = false
+      unsubscribe?.()
     }
   }, [request])
 
@@ -378,6 +385,8 @@ export function WorkflowDialog({
                 preview,
                 allowForce,
                 layers: layerChoices,
+                confirmation,
+                confirmationTarget,
               }
             : {
                 kind: 'stack',
@@ -434,6 +443,35 @@ export function WorkflowDialog({
         )
       : []
   const publishOffer = preview?.publish ?? null
+  // A saved submission that stopped part-way is being recovered, not planned. Its choices are
+  // the ones already journalled, so the fields show them and stay locked: Resume republishes
+  // exactly those. Changing them means dismissing the submission and taking a fresh preview.
+  const recovering =
+    request.kind === 'stack' &&
+    request.operation === 'publish' &&
+    (progress?.status === 'failed' || progress?.status === 'running') &&
+    (progress?.layers.length ?? 0) > 0
+  // While a saved submission is being recovered the journalled choices win over the fresh
+  // preview: Resume republishes exactly those, and the fields are locked to match. Without
+  // this the dialog would show a different title or readiness than the one that will open.
+  React.useEffect(() => {
+    const saved = recovering ? (progress?.layers ?? []) : []
+    if (saved.length === 0) return
+    setLayerChoices((current) => ({
+      ...current,
+      ...Object.fromEntries(
+        saved.map((layer) => [
+          layer.branch,
+          {
+            title: layer.title,
+            body: layer.body,
+            draft: layer.draft,
+            updateBase: layer.updateBase,
+          },
+        ]),
+      ),
+    }))
+  }, [progress, recovering])
   const untitledBranches =
     request.kind === 'stack' && request.operation === 'publish' && publishOffer
       ? publishOffer.layers
@@ -849,9 +887,10 @@ export function WorkflowDialog({
                             ) : null}
                             {/*
                               An existing pull request keeps the title, description, and review
-                              state it already has. This submission does not rewrite them, so the
-                              fields are shown for reading only rather than accepting an edit
-                              that would be silently dropped.
+                              state it already has. This submission does not rewrite them, so
+                              there is nothing truthful to edit: the title is shown for reading
+                              and the description is not shown at all, because this preview
+                              never read the real one.
                             */}
                             <Field
                               id={`title-${id}`}
@@ -859,23 +898,26 @@ export function WorkflowDialog({
                               required
                             >
                               <Input
-                                readOnly={!layer.create}
+                                readOnly={!layer.create || recovering}
                                 value={choice?.title ?? ''}
                                 onChange={(event) => setChoice({ title: event.target.value })}
                               />
                             </Field>
-                            <Field id={`body-${id}`} label={`PR description for ${layer.branch}`}>
-                              <Textarea
-                                readOnly={!layer.create}
-                                value={choice?.body ?? ''}
-                                onChange={(event) => setChoice({ body: event.target.value })}
-                              />
-                            </Field>
+                            {layer.create ? (
+                              <Field id={`body-${id}`} label={`PR description for ${layer.branch}`}>
+                                <Textarea
+                                  readOnly={recovering}
+                                  value={choice?.body ?? ''}
+                                  onChange={(event) => setChoice({ body: event.target.value })}
+                                />
+                              </Field>
+                            ) : null}
                             {layer.create ? (
                               <Checkbox
                                 id={`draft-${id}`}
                                 label={`Open the pull request for ${layer.branch} as a draft`}
                                 checked={choice?.draft ?? true}
+                                disabled={recovering}
                                 onChange={(event) => setChoice({ draft: event.target.checked })}
                               />
                             ) : null}

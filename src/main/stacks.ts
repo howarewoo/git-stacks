@@ -197,6 +197,11 @@ interface PublishOperation {
   steps: PublishStep[]
   stackNumber: number | null
   /**
+   * The stack creation this operation issued. Persisted before the API call so a retry can
+   * tell its own half-finished creation apart from a stack somebody else created.
+   */
+  stackIntent: 'none' | 'create'
+  /**
    * The exact members native stack `stackNumber` held when the preview was taken, with the
    * head they carried then. These are the immutable baseline every later re-read is proved
    * against, so a push this submission made on purpose is the only thing that may differ.
@@ -1759,6 +1764,7 @@ async function publishPreview(plan: StackPlan): Promise<PublishPreview> {
       draft: true,
       updateBase: false,
       create: !open,
+      createIntent: false,
       // A push only needs a lease when the remote tip is not already an ancestor of the
       // local tip. A branch that merely moved forward publishes as an ordinary fast-forward
       // and must not demand force consent.
@@ -1941,14 +1947,37 @@ async function readPublishOperation(repoPath: string): Promise<PublishOperation 
   return operation
 }
 
+type PublishProgressListener = (progress: PublishProgress | null) => void
+
+const publishProgressListeners = new Set<PublishProgressListener>()
+
+/**
+ * Subscribes to submission progress. The journal write is the only place a step can change, so
+ * it publishes there: a running multi-step submission reports itself without the renderer
+ * polling a read that would queue behind the action that is producing it.
+ */
+export function onPublishProgress(listener: PublishProgressListener): () => void {
+  publishProgressListeners.add(listener)
+  return () => {
+    publishProgressListeners.delete(listener)
+  }
+}
+
+export async function readPublishProgress(repoPath: string): Promise<PublishProgress | null> {
+  const operation = await readPublishOperation(await repositoryPath(repoPath))
+  return operation ? publishProgressOf(operation) : null
+}
+
 async function writePublishOperation(repoPath: string, operation: PublishOperation): Promise<void> {
   const target = await publishPath(repoPath)
   const temporary = `${target}.tmp-${process.pid}-${randomUUID()}`
   await fs.writeFile(temporary, JSON.stringify(operation), { encoding: 'utf8', mode: 0o600 })
   await fs.rename(temporary, target)
+  for (const listener of publishProgressListeners) listener(publishProgressOf(operation))
 }
 
 async function removePublishOperation(repoPath: string): Promise<void> {
+  for (const listener of publishProgressListeners) listener(null)
   try {
     await fs.unlink(await publishPath(repoPath))
   } catch (error) {
@@ -1964,6 +1993,7 @@ function publishProgressOf(operation: PublishOperation): PublishProgress {
     steps: operation.steps.map((step) => ({ ...step })),
     message: operation.message,
     resumeAt: resumeAt === -1 ? null : resumeAt,
+    layers: operation.layers.map((layer) => ({ ...layer })),
   }
 }
 
@@ -2029,6 +2059,7 @@ async function buildPublishOperation(
     stackNumber: offer.stackNumber,
     capturedMembers: capturedStackMembers(plan, offer.stackNumber),
     stackAction: offer.stackAction,
+    stackIntent: offer.stackAction === 'create' ? 'create' : 'none',
     status: 'running',
     message: 'Submitting the stack',
   }
@@ -2044,7 +2075,11 @@ function publishFailure(step: PublishStep, error: unknown): PublishStepFailure {
   const status = error instanceof GitHubTransportError ? error.status : null
   const kind = error instanceof GitHubTransportError ? error.kind : null
   const stackStep = step.kind === 'create-stack' || step.kind === 'extend-stack'
-  const rejectedChain = stackStep && status === 422
+  // The native stack writes translate a GitHub 422 into a typed NativeStackError that keeps
+  // the HTTP status, so a rejected chain is recognised from either error surface. A progress
+  // record that calls it retryable would send the person back into the same rejection.
+  const nativeStatus = error instanceof NativeStackError ? error.httpStatus : null
+  const rejectedChain = stackStep && (status === 422 || nativeStatus === 422)
   if (rejectedChain) {
     return {
       summary,
@@ -2064,6 +2099,67 @@ function publishFailure(step: PublishStep, error: unknown): PublishStepFailure {
             ? 'Check that every pull request is still open and stacked, then retry this step.'
             : 'Open the pull request on GitHub to check its base and state, then retry this step.'
   return { summary, recovery, retryable: true }
+}
+
+/**
+ * Proves each published pull request still carries the commit this operation published, and
+ * that the branch still carries it locally and on the remote. This is the check that keeps a
+ * resumed submission honest: completed push steps are skipped, so without it an external
+ * force-push would be silently stacked as if it were the reviewed commit.
+ */
+async function provePublishedHeads(
+  repoPath: string,
+  operation: PublishOperation,
+  published: readonly PublishLayer[],
+): Promise<void> {
+  for (const layer of published) {
+    const intended = operation.branches.find((facts) => facts.branch === layer.branch)
+    if (!intended) continue
+    const pr = await getPullRequest(repoPath, layer.pullRequest as number)
+    if (pr.head !== layer.branch) {
+      throw new Error(
+        `Pull request #${layer.pullRequest} for ${layer.branch} now points at ${pr.head}`,
+      )
+    }
+    if (pr.base !== layer.base) {
+      throw new Error(
+        `Pull request #${layer.pullRequest} for ${layer.branch} is now based on ${pr.base}, not ${layer.base}`,
+      )
+    }
+    if (pr.headOid !== intended.oid) {
+      throw new NativeStackError(
+        'invalid-chain',
+        `Pull request #${layer.pullRequest} head moved to ${pr.headOid ?? 'none'} since it was published at ${intended.oid}`,
+      )
+    }
+    const local = await resolveCommit(repoPath, `refs/heads/${layer.branch}`)
+    if (local !== intended.oid) {
+      throw new Error(`Stack preview is stale: local ${layer.branch} changed`)
+    }
+    const remote = await remoteOid(repoPath, operation.pushUrl, layer.branch)
+    if (remote !== intended.oid) {
+      throw new Error(`Stack preview is stale: remote ${layer.branch} changed`)
+    }
+  }
+}
+
+/**
+ * True when `stack` holds exactly the pull requests this operation created, in the same
+ * order, each still on the head and base the operation published. Anything else is somebody
+ * else's membership change.
+ */
+function isOwnCreatedStack(
+  stack: NativeStack,
+  numbers: readonly number[],
+  published: readonly PublishLayer[],
+): boolean {
+  if (stack.pullRequests.length !== numbers.length) return false
+  return numbers.every((number, index) => {
+    const member = stack.pullRequests[index]
+    if (!member || member.number !== number) return false
+    const layer = published[index]
+    return Boolean(layer) && member.head === layer?.branch && member.base === layer?.base
+  })
 }
 
 function layerOf(operation: PublishOperation, branch: string): PublishLayer {
@@ -3149,7 +3245,7 @@ async function runPublishStep(
       layer.branch,
       await canonicalPullRequests(repoPath).then((result) => result.data),
     )
-    if (existing && layer.pullRequest === null) {
+    if (existing && layer.pullRequest === null && !layer.createIntent) {
       throw new Error(
         `Pull request for ${layer.branch} changed during publication; inspect the published branches before retrying`,
       )
@@ -3160,10 +3256,22 @@ async function runPublishStep(
           `Pull request for ${layer.branch} changed during publication; inspect the published branches before retrying`,
         )
       }
+      if (layer.pullRequest === null) {
+        // GitHub accepted this operation's own creation and the response was lost. The pull
+        // request is proven to be ours by the branch and base this operation asked for.
+        step.detail = `Recovered pull request #${existing.number} from a lost response`
+      }
       layer.pullRequest = existing.number
       step.pullRequest = existing.number
       await setPullRequestNumber(repoPath, layer.branch, existing.number)
       return `Adopted existing pull request #${existing.number}`
+    }
+    // The intent is journalled before the request leaves, so a lost response or an
+    // interruption between the POST and this assignment still lets a retry recognise the
+    // pull request it asked GitHub to create instead of calling it somebody else's.
+    if (!layer.createIntent) {
+      layer.createIntent = true
+      await writePublishOperation(repoPath, operation)
     }
     const number = await createPullRequest(repoPath, operation.fullName, layer)
     layer.pullRequest = number
@@ -3210,6 +3318,11 @@ async function runPublishStep(
   }
   const published = operation.layers.filter((layer) => layer.pullRequest !== null)
   if (published.length === 0) throw new Error('No published pull request is available to stack')
+  // A resumed submission skips the push steps it already completed, so the journal is the only
+  // record of what was reviewed. Every published pull request is proved against the tip this
+  // operation intended to publish, which is what rejects an external force-push that landed
+  // after those steps finished.
+  await provePublishedHeads(repoPath, operation, published)
   const numbers = published.map((layer) => layer.pullRequest as number)
   const stacks = await listPullRequestStacks(owner, name)
   const matched = stacks.find((stack) =>
@@ -3237,9 +3350,17 @@ async function runPublishStep(
       )
     }
   } else if (matched) {
-    throw new Error(
-      `Stack preview is stale: these pull requests now belong to native stack #${matched.number}`,
-    )
+    // GitHub may have created this stack and lost the response, or the process may have stopped
+    // before the completed step was journalled. A stack that holds exactly this operation's
+    // pull requests, in order, is its own work and is adopted rather than called stale.
+    if (operation.stackIntent !== 'create' || !isOwnCreatedStack(matched, numbers, published)) {
+      throw new Error(
+        `Stack preview is stale: these pull requests now belong to native stack #${matched.number}`,
+      )
+    }
+    operation.stackNumber = matched.number
+    await writePublishOperation(repoPath, operation)
+    return `Recovered native stack #${matched.number} from a lost response`
   }
   const known = await Promise.all(
     published.map((layer) => getPullRequest(repoPath, layer.pullRequest as number)),

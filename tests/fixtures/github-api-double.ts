@@ -292,8 +292,12 @@ function handleRest(
     if (state.stacksPreviewDisabled) {
       throw new HttpError(404, 'Not Found', 'Not Found: stacks preview unavailable')
     }
-    const failure = stacksFailure(state)
-    if (failure) throw failure
+    // Reads still work: a chain write GitHub rejects is a submission failure, not a
+    // repository that cannot report anything.
+    if (method !== 'GET') {
+      const failure = stacksFailure(state)
+      if (failure) throw failure
+    }
     if (rawPath === `${prefix}/stacks`) {
       if (method === 'GET') {
         let stacks = state.stacks ?? []
@@ -647,10 +651,21 @@ export function createGitHubApiDouble(): typeof globalThis.fetch {
       ...(Object.keys(body).length > 0 ? { body } : {}),
     })
     const request: GitHubApiDoubleRequest = { method, path, body, headers }
+    const lost = (state.lostResponses ?? []).findIndex(
+      (rule) => rule.method === method && request.path.includes(rule.pathIncludes),
+    )
     try {
       const result =
         request.path === 'graphql' ? handleGraphql(state, body) : handleRest(state, request)
       saveState(state)
+      if (lost !== -1) {
+        // GitHub took the change; the caller never hears about it, which is what a dropped
+        // connection mid-request looks like to the person waiting.
+        const rule = (state.lostResponses ?? [])[lost]
+        state.lostResponses = (state.lostResponses ?? []).filter((_, index) => index !== lost)
+        saveState(state)
+        return json(rule.status, { message: rule.message })
+      }
       return json(result.status, result.body)
     } catch (error) {
       saveState(state)

@@ -786,25 +786,48 @@ test('a forced publication still needs the exact branch name typed', () => {
   assert.equal(workflowBlocker(forced)?.code, 'confirmation-incomplete')
   const confirmed = { ...forced, confirmation: featureBranch.name }
   assert.equal(workflowBlocker(confirmed), null)
+  const layers = {
+    'feature/checkout': {
+      title: 'Checkout validation',
+      body: '',
+      draft: true,
+      updateBase: false,
+    },
+  }
   assert.equal(
     workflowAction(
       {
         kind: 'submit',
         preview: publishPreview,
         allowForce: true,
-        layers: {
-          'feature/checkout': {
-            title: 'Checkout validation',
-            body: '',
-            draft: true,
-            updateBase: false,
-          },
-        },
+        layers,
+        confirmation: '',
+        confirmationTarget: featureBranch.name,
       },
       context,
     ),
     null,
     'the builder refuses a forced publish with an unconfirmed name even if the guard is bypassed',
+  )
+  assert.deepEqual(
+    workflowAction(
+      {
+        kind: 'submit',
+        preview: publishPreview,
+        allowForce: true,
+        layers,
+        confirmation: featureBranch.name,
+        confirmationTarget: featureBranch.name,
+      },
+      context,
+    ),
+    {
+      type: 'submitStack',
+      token: publishPreview.token,
+      allowForce: true,
+      layers,
+    },
+    'the confirmed name produces the submission, so the refusal above is the confirmation and not a missing offer',
   )
 })
 

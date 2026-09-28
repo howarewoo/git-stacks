@@ -228,6 +228,49 @@ export const publishPreview: StackPreview = {
   token: 'preview-publish-1',
   kind: 'publish',
   steps: [restackPreview.steps[0], { ...restackPreview.steps[1], pr: null }],
+  // A real offer, so a caller that reaches the publish builder is refused for the reason it
+  // was actually asked about rather than for a missing offer.
+  publish: {
+    branch: 'feature/checkout',
+    stackNumber: null,
+    stackAction: 'create',
+    baseChanges: [],
+    capturedAt: '2026-01-01T00:00:00.000Z',
+    steps: [
+      {
+        kind: 'push',
+        branch: 'feature/checkout',
+        label: 'Push feature/checkout',
+        status: 'pending',
+        pullRequest: null,
+        detail: '',
+        failure: null,
+      },
+      {
+        kind: 'create-pr',
+        branch: 'feature/checkout',
+        label: 'Open pull request #1 for feature/checkout',
+        status: 'pending',
+        pullRequest: null,
+        detail: '',
+        failure: null,
+      },
+    ],
+    layers: [
+      {
+        branch: 'feature/checkout',
+        base: 'main',
+        title: 'Add checkout validation',
+        body: '',
+        draft: true,
+        updateBase: false,
+        create: true,
+        force: false,
+        pullRequest: null,
+        createIntent: false,
+      },
+    ],
+  },
 }
 
 export const mergePreview: StackPreview = {

@@ -73,6 +73,17 @@ export interface GitHubFixtureState {
     message: string
     rateLimitRemaining?: number
   }
+  /**
+   * Mutations that succeed on GitHub but whose response never reaches the caller, which is
+   * what a dropped connection mid-request looks like to the person waiting. Each entry is
+   * consumed once, in order, by the first matching method and path.
+   */
+  lostResponses?: Array<{
+    method: string
+    pathIncludes: string
+    status: number
+    message: string
+  }>
   prs: GitHubFixturePullRequest[]
   comments: Record<string, GitHubFixtureComment[]>
   stacks?: GitHubFixtureStack[]

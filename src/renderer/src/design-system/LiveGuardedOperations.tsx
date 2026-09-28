@@ -96,6 +96,8 @@ export function LiveGuardedOperations() {
                   kind: 'submit',
                   preview: publishPreview,
                   allowForce: true,
+                  confirmation: forceName,
+                  confirmationTarget: guardedBranch.name,
                   layers: {
                     [guardedBranch.name]: {
                       title: 'Checkout validation',

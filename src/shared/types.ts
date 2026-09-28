@@ -374,6 +374,12 @@ export interface PublishLayer {
   /** The push replaces remote history and needs the captured-OID lease consent. */
   force: boolean
   pullRequest: number | null
+  /**
+   * True once this operation has asked GitHub to open the pull request. Journalled before the
+   * request leaves, so a lost response is recovered instead of being read as somebody else's
+   * pull request.
+   */
+  createIntent: boolean
 }
 
 export type PublishStackAction = 'create' | 'extend' | 'none'
@@ -396,6 +402,12 @@ export interface PublishProgress {
   message: string
   /** Index of the first step a retry resumes at; null once every step completed. */
   resumeAt: number | null
+  /**
+   * The per-layer choices the saved submission will use, which is what a retry actually
+   * publishes. They are shown read-only during recovery: changing them requires dismissing the
+   * submission and taking a fresh preview.
+   */
+  layers: PublishLayer[]
 }
 
 /** The per-layer choices a reviewed submission carries to the main process. */
@@ -501,6 +513,12 @@ export interface DesktopAPI {
   stackPreview(kind: StackKind, branch: string): Promise<StackPreview>
   /** Resumable Submit Stack progress left on disk, or null when nothing is pending. */
   submitStackProgress?: () => Promise<PublishProgress | null>
+  /**
+   * Subscribes to progress pushed by a running submission, and returns the unsubscribe. The
+   * dialog uses this rather than polling, because a read queues behind the action that is
+   * producing the steps.
+   */
+  onSubmitStackProgress?: (listener: (progress: PublishProgress | null) => void) => () => void
   reconciliationPreview?: (stackKey: string) => Promise<ReconciliationPreview>
   pullRequest(number: number): Promise<PullRequest & { body: string }>
   listNativeStacks?: () => Promise<NativeStack[]>

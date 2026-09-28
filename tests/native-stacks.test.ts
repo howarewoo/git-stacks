@@ -16,8 +16,8 @@ import {
   validateNativeStackChain,
   validatePublishedStackRegistration,
 } from '../src/main/native-stacks'
-import { previewStack, runStackAction } from '../src/main/stacks'
-import type { NativeStack, PullRequest } from '../src/shared/types'
+import { getSubmitStackProgress, previewStack, runStackAction } from '../src/main/stacks'
+import type { NativeStack, PublishLayerChoice, PullRequest } from '../src/shared/types'
 import { createGitHubApiDouble } from './fixtures/github-api-double'
 import {
   createGitHubHarness,
@@ -140,6 +140,30 @@ async function setupThreeBranches(harness: GitHubHarness) {
   state.nextNumber = 104
   await harness.writeState(state)
 }
+
+/** Three stacked local branches with no remote branch and no pull request: the zero case. */
+async function setupFreshBranches(harness: GitHubHarness): Promise<void> {
+  git(harness, ['checkout', '-b', 'feature/step-1'])
+  git(harness, ['commit', '--allow-empty', '-m', 'step 1'])
+  git(harness, ['checkout', '-b', 'feature/step-2'])
+  git(harness, ['commit', '--allow-empty', '-m', 'step 2'])
+  git(harness, ['checkout', '-b', 'feature/step-3'])
+  git(harness, ['commit', '--allow-empty', '-m', 'step 3'])
+  const state = await harness.readState()
+  state.prs = []
+  state.stacks = []
+  state.nextNumber = 101
+  await harness.writeState(state)
+}
+
+/** The layer choices the resumed submission publishes, one per branch, all ready for review. */
+const freshLayers = (): Record<string, PublishLayerChoice> =>
+  Object.fromEntries(
+    ['feature/step-1', 'feature/step-2', 'feature/step-3'].map((branch) => [
+      branch,
+      { title: `${branch} PR`, body: '', draft: false, updateBase: false },
+    ]),
+  )
 
 test('detectNativeStacksCapability returns true when preview endpoint responds', async () => {
   await withHarness(async (harness) => {
@@ -1207,5 +1231,160 @@ test('publishStack propagates a native stack probe timeout', async () => {
       }),
       /did not complete within/iu,
     )
+  })
+})
+
+test('a submission recovers a pull request whose creation response was lost', async () => {
+  await withHarness(async (harness) => {
+    await setupFreshBranches(harness)
+    const state = await harness.readState()
+    // GitHub opens the middle pull request and the response never arrives.
+    state.lostResponses = [
+      { method: 'POST', pathIncludes: '/pulls', status: 502, message: 'Bad gateway' },
+    ]
+    await harness.writeState(state)
+
+    const preview = await previewStack(
+      harness.repo,
+      await getSnapshot(harness.repo),
+      'publish',
+      'feature/step-2',
+    )
+    await assert.rejects(
+      runStackAction(harness.repo, {
+        type: 'submitStack',
+        token: preview.token,
+        allowForce: false,
+        layers: freshLayers(),
+      }),
+    )
+    assert.equal((await getSubmitStackProgress(harness.repo))?.status, 'failed')
+
+    const resumed = await runStackAction(harness.repo, { type: 'submitStackRetry' })
+    assert.match(resumed.message, /Submitted \d+ stack layer/iu)
+    assert.equal((await getSubmitStackProgress(harness.repo))?.status, 'completed')
+
+    // Exactly one pull request per submitted branch: the recovered one was adopted, not
+    // duplicated, and the lost response cost no second pull request.
+    const after = await harness.readState()
+    const open = after.prs.filter((pr) => pr.state === 'OPEN')
+    assert.equal(new Set(open.map((pr) => pr.head)).size, open.length)
+    assert.ok(open.length > 0)
+    const stacks = await listPullRequestStacks('acme', 'widgets')
+    assert.equal(stacks.length, 1)
+    assert.equal(stacks[0].pullRequests.length, open.length)
+  })
+})
+
+test('a submission recovers a native stack whose creation response was lost', async () => {
+  await withHarness(async (harness) => {
+    await setupFreshBranches(harness)
+    const state = await harness.readState()
+    // GitHub registers the stack and the response never arrives.
+    state.lostResponses = [
+      { method: 'POST', pathIncludes: 'stacks', status: 502, message: 'Bad gateway' },
+    ]
+    await harness.writeState(state)
+
+    const preview = await previewStack(
+      harness.repo,
+      await getSnapshot(harness.repo),
+      'publish',
+      'feature/step-2',
+    )
+    await assert.rejects(
+      runStackAction(harness.repo, {
+        type: 'submitStack',
+        token: preview.token,
+        allowForce: false,
+        layers: freshLayers(),
+      }),
+    )
+    assert.equal((await getSubmitStackProgress(harness.repo))?.status, 'failed')
+
+    const resumed = await runStackAction(harness.repo, { type: 'submitStackRetry' })
+    assert.match(resumed.message, /Submitted \d+ stack layer/iu)
+    assert.equal((await getSubmitStackProgress(harness.repo))?.status, 'completed')
+
+    // The stack GitHub already holds is adopted rather than created a second time.
+    const stacks = await listPullRequestStacks('acme', 'widgets')
+    assert.equal(stacks.length, 1)
+    const open = (await harness.readState()).prs.filter((pr) => pr.state === 'OPEN')
+    assert.equal(stacks[0].pullRequests.length, open.length)
+  })
+})
+
+test('a resumed submission refuses to stack a head somebody else moved after the push', async () => {
+  await withHarness(async (harness) => {
+    await setupFreshBranches(harness)
+    const state = await harness.readState()
+    state.lostResponses = [
+      { method: 'POST', pathIncludes: '/pulls', status: 502, message: 'Bad gateway' },
+    ]
+    await harness.writeState(state)
+
+    const preview = await previewStack(
+      harness.repo,
+      await getSnapshot(harness.repo),
+      'publish',
+      'feature/step-2',
+    )
+    await assert.rejects(
+      runStackAction(harness.repo, {
+        type: 'submitStack',
+        token: preview.token,
+        allowForce: false,
+        layers: freshLayers(),
+      }),
+    )
+    assert.equal((await getSubmitStackProgress(harness.repo))?.status, 'failed')
+
+    // A resume skips the push steps that already completed, so the journal is the only record
+    // of what was reviewed. Somebody replaces the remote tip and GitHub follows it.
+    git(harness, ['checkout', 'main'])
+    git(harness, ['checkout', '-B', 'feature/step-2'])
+    git(harness, ['commit', '--allow-empty', '-m', 'somebody else'])
+    git(harness, ['push', '--force', harness.bare, 'feature/step-2:refs/heads/feature/step-2'])
+    const moved = git(harness, ['rev-parse', 'feature/step-2'])
+
+    await assert.rejects(runStackAction(harness.repo, { type: 'submitStackRetry' }))
+    const progress = await getSubmitStackProgress(harness.repo)
+    assert.equal(progress?.status, 'failed')
+    const failed = progress?.steps.find((step) => step.status === 'failed')
+    assert.match(failed?.failure?.summary ?? '', new RegExp(moved.slice(0, 8), 'iu'))
+
+    // The submission stopped at the drift instead of registering a chain over somebody
+    // else's commit.
+    assert.equal((await listPullRequestStacks('acme', 'widgets')).length, 0)
+  })
+})
+
+test('a native stack 422 is reported as a rejected chain rather than a retryable fault', async () => {
+  await withHarness(async (harness) => {
+    await setupThreeBranches(harness)
+    const state = await harness.readState()
+    // GitHub refuses the chain write with a validation failure.
+    state.stacksFailure = { status: 422, reason: 'Unprocessable Entity', message: 'Invalid chain' }
+    await harness.writeState(state)
+
+    const preview = await previewStack(
+      harness.repo,
+      await getSnapshot(harness.repo),
+      'publish',
+      'feature/step-2',
+    )
+    await assert.rejects(
+      runStackAction(harness.repo, {
+        type: 'submitStack',
+        token: preview.token,
+        allowForce: false,
+        layers: freshLayers(),
+      }),
+    )
+    const progress = await getSubmitStackProgress(harness.repo)
+    assert.equal(progress?.status, 'failed')
+    const failed = progress?.steps.find((step) => step.status === 'failed')
+    assert.equal(failed?.failure?.retryable, false)
+    assert.match(failed?.failure?.recovery ?? '', /fresh preview/iu)
   })
 })

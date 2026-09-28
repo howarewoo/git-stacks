@@ -43,6 +43,9 @@ export type WorkflowActionInput =
       preview: StackPreview
       allowForce: boolean
       layers: Record<string, PublishLayerChoice>
+      /** Exact branch name the person typed before remote history may be replaced. */
+      confirmation: string
+      confirmationTarget: string | null
     }
 
 /** The repository state captured when the dialog opened. */
@@ -166,6 +169,10 @@ export function workflowAction(
     case 'submit': {
       if (!input.preview.publish || input.preview.publish.layers.length === 0) return null
       if (input.preview.blockers.length > 0) return null
+      // Replacing remote history needs the exact branch name typed, the same rule the guard
+      // applies. The builder refuses independently so a bypassed guard still cannot dispatch
+      // a force push nobody confirmed.
+      if (input.allowForce && input.confirmation !== input.confirmationTarget) return null
       return {
         type: 'submitStack',
         token: input.preview.token,
