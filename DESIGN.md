@@ -289,6 +289,10 @@ Checked-out, selected, pull-request lifecycle, checks, review, requires-restack,
 
 Preserve the local-first Electron sandbox, context isolation, typed preload/IPC boundary, and production Content-Security-Policy. Visual migrations must not change Git semantics, preview/confirmation/busy locks, typed confirmations, or navigation behavior.
 
+### GitHub transport
+
+All GitHub access runs in the main process through one typed transport (`src/main/github-transport.ts`) that owns the API version, authentication, pagination, rate-limit metadata, timeouts, and cancellation, and reports failures as typed kinds rather than parsed CLI text. The default transport speaks REST and GraphQL over HTTPS and is selected whenever `GIT_STACKS_GITHUB_TOKEN`, `GITHUB_TOKEN`, or `GH_TOKEN` is available; `gh` remains an optional fallback and diagnostic path used only when no token is present or `GIT_STACKS_GITHUB_TRANSPORT=gh` is set, so removing `gh` from `PATH` never disables GitHub features. The renderer keeps its narrow preload surface: it receives pull-request data only, never a token, raw HTTP, or transport control.
+
 ## Do's and Don'ts
 
 Concrete guardrails for the existing system and the user-confirmed Quiet Workbench direction:

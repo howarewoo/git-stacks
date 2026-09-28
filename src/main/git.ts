@@ -56,6 +56,7 @@ import {
 } from './git-core'
 import type { RefRecord } from './git-core'
 import { getGitHubData } from './github'
+import { githubTransport } from './github-transport'
 import {
   getStackProgress,
   isStackAction,
@@ -2131,30 +2132,18 @@ async function runCreatePr(
     origin.fullName.toLowerCase() === headRemote.fullName.toLowerCase()
       ? remoteBranch
       : `${headRemote.owner}:${remoteBranch}`
-  const args = [
-    'pr',
-    'create',
-    '--repo',
-    `github.com/${origin.fullName}`,
-    '--title',
-    title,
-    '--body',
-    body,
-    '--base',
-    ghBase,
-    '--head',
-    head,
-  ]
-  if (draft) {
-    args.push('--draft')
-  }
-  let output: string
+  let created: Record<string, unknown>
   try {
-    output = await execute('gh', args, repoPath)
+    const response = await githubTransport().rest<Record<string, unknown>>({
+      method: 'POST',
+      path: `repos/${origin.fullName}/pulls`,
+      body: { title, head, base: ghBase, body, draft },
+    })
+    created = response.data
   } catch (error) {
     throw new Error(`Could not create pull request: ${commandDetail(error)}`)
   }
-  const url = /(https?:\/\/[^\s]+)/u.exec(output)?.[1]
+  const url = isRecord(created) && typeof created.html_url === 'string' ? created.html_url : null
   return {
     message: `Created pull request from ${currentBranch} to ${ghBase}`,
     ...(url ? { url } : {}),

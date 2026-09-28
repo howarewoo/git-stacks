@@ -5,8 +5,15 @@ import { mkdir, readFile, unlink, writeFile } from 'node:fs/promises'
 import { delimiter, join } from 'node:path'
 import { test } from 'node:test'
 import { getSnapshot, runAction } from '../src/main/git'
-import { getPullRequest } from '../src/main/github'
+import { getGitHubData, getPullRequest } from '../src/main/github'
+import {
+  DirectGitHubTransport,
+  GhGitHubTransport,
+  setGitHubTransport,
+  type GitHubTransport,
+} from '../src/main/github-transport'
 import { previewStack, recoverStaleBranchLocks } from '../src/main/stacks'
+import { createGitHubApiDouble } from './fixtures/github-api-double'
 import {
   createGitHubHarness,
   type GitHubHarness,
@@ -35,9 +42,17 @@ function bareGit(harness: GitHubHarness, args: string[]): string {
   ).trim()
 }
 
-async function withHarness(run: (harness: GitHubHarness) => Promise<void>): Promise<void> {
-  const harness = await createGitHubHarness()
+async function withHarness(
+  run: (harness: GitHubHarness) => Promise<void>,
+  options: { ghCli?: boolean; transport?: GitHubTransport } = {},
+): Promise<void> {
+  // The direct transport suite runs with no `gh` binary at all.
+  const harness = await createGitHubHarness({ ghCli: options.ghCli })
   const original = { ...process.env }
+  setGitHubTransport(
+    options.transport ??
+      new DirectGitHubTransport({ token: 'fixture-token', fetch: createGitHubApiDouble() }),
+  )
   try {
     for (const [key, value] of Object.entries(harness.env)) {
       if (value === undefined) delete process.env[key]
@@ -45,6 +60,7 @@ async function withHarness(run: (harness: GitHubHarness) => Promise<void>): Prom
     }
     await run(harness)
   } finally {
+    setGitHubTransport(null)
     for (const key of Object.keys(process.env)) {
       if (!(key in original)) delete process.env[key]
     }
@@ -314,8 +330,9 @@ test(
       assert.equal(state.prs.length, 1)
       assert.equal(prFor(state, 'parent').title, 'Racing pull request')
       assert.equal(
-        state.requests.filter((request) => request.argv[0] === 'pr' && request.argv[1] === 'create')
-          .length,
+        state.requests.filter(
+          (request) => request.argv[0] === 'repos/acme/widgets/pulls' && request.argv[1] === 'POST',
+        ).length,
         0,
       )
     })
@@ -368,8 +385,9 @@ test(
       state = await harness.readState()
       assert.equal(state.prs.length, 2)
       assert.equal(
-        state.requests.filter((request) => request.argv[0] === 'pr' && request.argv[1] === 'create')
-          .length,
+        state.requests.filter(
+          (request) => request.argv[0] === 'repos/acme/widgets/pulls' && request.argv[1] === 'POST',
+        ).length,
         2,
       )
     })
@@ -524,7 +542,7 @@ test(
       assert.equal(localOid(harness, 'child'), secondBefore.child)
       assert.equal(
         second.requests.filter(
-          (request) => request.argv[0] === 'pr' && request.argv[1] === 'create',
+          (request) => request.argv[0] === 'repos/acme/widgets/pulls' && request.argv[1] === 'POST',
         ).length,
         2,
       )
@@ -707,6 +725,16 @@ test(
         'Updated human description',
       )
 
+      await runAction(harness.repo, {
+        type: 'updatePr',
+        number: pr.number,
+        title: 'Updated title',
+        body: 'Updated human description',
+        draft: true,
+      })
+      state = await harness.readState()
+      assert.equal(prFor(state, 'topic').draft, true)
+
       await runAction(harness.repo, { type: 'closePr', number: pr.number })
       state = await harness.readState()
       assert.equal(prFor(state, 'topic').state, 'CLOSED')
@@ -811,9 +839,10 @@ test(
       assert.equal(
         state.requests.some(
           (request) =>
-            request.argv.includes('repos/acme/widgets/pulls/1/merge') &&
-            request.argv.includes(`sha=${headBeforeMerge}`) &&
-            request.argv.includes('merge_method=squash'),
+            request.argv[0] === 'repos/acme/widgets/pulls/1/merge' &&
+            request.argv[1] === 'PUT' &&
+            request.body?.sha === headBeforeMerge &&
+            request.body?.merge_method === 'squash',
         ),
         true,
       )
@@ -1811,5 +1840,35 @@ test(
         ),
       )
     })
+  },
+)
+
+test(
+  'the optional gh adapter serves the same pull request reads without a direct transport',
+  { concurrency: false },
+  async () => {
+    await withHarness(
+      async (harness) => {
+        await createStack(harness)
+        await publishStack(harness)
+        const state = await harness.readState()
+        assert.deepEqual(state.prs.map((pr) => pr.head).sort(), ['child', 'parent'])
+        const parent = prFor(state, 'parent')
+        assert.equal(parent.headOid, remoteOid(harness, 'parent'))
+        const comments = state.comments[String(parent.number)] || []
+        assert.equal(comments.length, 1)
+        assert.match(comments[0].body, /Stack navigation:/u)
+        const data = await getGitHubData(harness.repo, 'https://github.com/acme/widgets.git')
+        assert.equal(data.available, true)
+        assert.deepEqual(
+          data.pullRequests.map((pr) => pr.number).sort((a, b) => a - b),
+          state.prs.map((pr) => pr.number).sort((a, b) => a - b),
+        )
+        const exact = await getPullRequest(harness.repo, parent.number)
+        assert.equal(exact.body, parent.body)
+        assert.equal(exact.headOid, parent.headOid)
+      },
+      { ghCli: true, transport: new GhGitHubTransport() },
+    )
   },
 )

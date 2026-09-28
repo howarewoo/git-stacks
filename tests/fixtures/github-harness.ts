@@ -50,7 +50,7 @@ export interface GitHubFixtureState {
   nextCommentId: number
   prs: GitHubFixturePullRequest[]
   comments: Record<string, GitHubFixtureComment[]>
-  requests: Array<{ argv: string[]; cwd: string; at: string }>
+  requests: Array<{ argv: string[]; cwd: string; at: string; body?: Record<string, unknown> }>
 }
 
 export interface GitHubHarness {
@@ -112,7 +112,9 @@ const initialState = (): GitHubFixtureState => ({
   requests: [],
 })
 
-export async function createGitHubHarness(): Promise<GitHubHarness> {
+export async function createGitHubHarness(
+  options: { ghCli?: boolean } = {},
+): Promise<GitHubHarness> {
   const root = await mkdtemp(join(tmpdir(), 'git-stacks-github-harness-'))
   const repo = join(root, 'repo')
   const bare = join(root, 'remote.git')
@@ -126,9 +128,11 @@ export async function createGitHubHarness(): Promise<GitHubHarness> {
     await writeFile(statePath, `${JSON.stringify(initialState(), null, 2)}\n`, 'utf8')
     await writeFile(transportLog, '', 'utf8')
     await copyFile(gitTransportFixture, join(bin, 'git'))
-    await copyFile(githubCliFixture, join(bin, 'gh'))
     await chmod(join(bin, 'git'), 0o755)
-    await chmod(join(bin, 'gh'), 0o755)
+    if (options.ghCli !== false) {
+      await copyFile(githubCliFixture, join(bin, 'gh'))
+      await chmod(join(bin, 'gh'), 0o755)
+    }
 
     await runGit(realGit, root, ['init', '--bare', bare])
     await runBareGit(realGit, bare, ['config', 'user.name', 'GitHub Fixture'])
