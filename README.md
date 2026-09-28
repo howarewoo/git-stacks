@@ -174,6 +174,13 @@ Append `#/index` for the scenario directory. App scenarios use `/?scenario=shell
 
 The typed control surface is `window.fixture`: `actions` and `externalUrls` record dispatch; `calls` records reads and writes; `hold(method)` and `release(method)` control in-flight requests; `failNext(method, message)` rejects one request; `setScenario(name)` remounts the App against another deterministic snapshot. This API exists only in the gallery. `manifest.ts` lists all scenario names; `scenarios.ts` owns their typed data.
 
+The `files-conflicts` scenario supplies all three index stages through `conflictView`.
+Its safety check chooses incoming content in the resolver and verifies that only
+**Mark resolved and stage** dispatches the displayed fingerprint and resolved content.
+History recovery coverage holds a commit diff while a repository refresh changes
+HEAD and fails the replacement history read; the branch picker and reload control
+must remain usable, and retrying must restore the commit list.
+
 | Area      | Gallery scenarios / exercised controls                                                                                                                                                                                                                                                                                                                               |
 | --------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Shell     | `shell-no-repository`, `shell-loading`, `shell-connected`, `shell-long-content`, `shell-offline`; the real Hide details pane control                                                                                                                                                                                                                                 |
