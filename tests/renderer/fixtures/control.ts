@@ -2,6 +2,8 @@ import type {
   ActionResult,
   DesktopAPI,
   GitAction,
+  GitRuntimeInfo,
+  GitRuntimeStatus,
   HistoryPage,
   PushPreview,
   StackKind,
@@ -33,6 +35,33 @@ const stackPreviewsByKind: Record<StackKind, StackPreview> = {
   publish: publishPreview,
   merge: mergePreview,
 }
+
+const bundledRuntime: GitRuntimeInfo = {
+  source: 'bundled',
+  executable: '/Applications/Git Stacks.app/Contents/Resources/git/bin/git',
+  platform: 'darwin',
+  version: '2.51.0',
+  versionOutput: 'git version 2.51.0',
+  minimumVersion: '2.40.0',
+  meetsMinimum: true,
+  useSystemGit: false,
+  packaged: true,
+  capabilities: { referenceTransactions: true, rebaseUpdateRefs: true },
+  bundled: {
+    gitVersion: '2.51.0',
+    sha256: 'b'.repeat(64),
+    source: 'https://github.com/git/git/releases/download/v2.51.0/git-v2.51.0.tar.xz',
+  },
+  preservedEnvironment: ['GIT_EXEC_PATH', 'GIT_TEMPLATE_DIR'],
+  preservedConfiguration: [],
+}
+
+const runtimeStatus = (useSystemGit: boolean): GitRuntimeStatus => ({
+  runtime: { ...bundledRuntime, useSystemGit, source: useSystemGit ? 'system' : 'bundled' },
+  error: null,
+  minimumVersion: bundledRuntime.minimumVersion,
+  useSystemGit,
+})
 
 /** Deterministic status message per action, so success notices are screenshot-stable. */
 function actionMessage(action: GitAction): string {
@@ -247,6 +276,14 @@ export function installFixtureControl(options: {
       record('openExternal', [url])
       externalUrls.push(url)
       return answer('openExternal', () => undefined)
+    },
+    gitRuntimeStatus: () => {
+      record('gitRuntimeStatus', [])
+      return answer('gitRuntimeStatus', () => runtimeStatus(false))
+    },
+    setSystemGit: (enabled) => {
+      record('setSystemGit', [enabled])
+      return answer('setSystemGit', () => runtimeStatus(enabled))
     },
   }
 

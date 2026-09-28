@@ -6,14 +6,7 @@ import type {
   RepositoryShapeFacts,
 } from '../shared/capabilities'
 import type { LfsPointer } from '../shared/types'
-import {
-  execute,
-  getConfigValue,
-  getOperationState,
-  runGit,
-  stripTrailingNewline,
-  tryGit,
-} from './git-core'
+import { getConfigValue, getOperationState, runGit, stripTrailingNewline, tryGit } from './git-core'
 
 const LFS_POINTER_VERSION = 'version https://git-lfs.github.com/spec/v1'
 const TRUTHY = /^(true|yes|on|1)$/iu
@@ -185,7 +178,7 @@ export async function getRepositoryCapabilities(repoPath: string): Promise<Repos
     detectGitLfs(repoPath),
     getConfigValue(repoPath, 'extensions.worktreeConfig'),
     tryGit(repoPath, ['rev-parse', '--show-object-format']),
-    execute('git', ['--version'], repoPath),
+    runGit(repoPath, ['--version']),
   ])
   return {
     ...shape,

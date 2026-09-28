@@ -600,6 +600,38 @@ button:disabled {
   white-space: nowrap;
 }
 
+.sidebar-footer-actions {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+}
+
+.version-label-action {
+  border: 0;
+  border-radius: var(--gs-semantic-radius-pill);
+  background: transparent;
+  padding: 2px 6px;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.version-label-action:hover:not(:disabled) {
+  background: var(--gs-semantic-surface-hover);
+  color: var(--gs-semantic-text-primary);
+}
+
+.version-label-action:focus-visible {
+  outline: 2px solid var(--gs-semantic-focus-ring);
+  outline-offset: 1px;
+}
+
+.version-label-action:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
 .main-pane {
   min-width: 0;
   min-height: 0;

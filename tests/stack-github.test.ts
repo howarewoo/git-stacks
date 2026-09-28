@@ -1,53 +1,40 @@
 import assert from 'node:assert/strict'
-import { execFileSync } from 'node:child_process'
 import * as fs from 'node:fs'
 import { mkdir, readFile, unlink, writeFile } from 'node:fs/promises'
-import { delimiter, join } from 'node:path'
+import { join } from 'node:path'
 import { test } from 'node:test'
-import { getSnapshot, runAction } from '../src/main/git'
-import { getGitHubData, getPullRequest } from '../src/main/github'
-import {
-  DirectGitHubTransport,
-  GhGitHubTransport,
-  setGitHubTransport,
-  type GitHubTransport,
-} from '../src/main/github-transport'
-import { previewStack, recoverStaleBranchLocks } from '../src/main/stacks'
-import { createGitHubApiDouble } from './fixtures/github-api-double'
-import {
-  createGitHubHarness,
-  type GitHubHarness,
-  type GitHubFixtureState,
-} from './fixtures/github-harness'
+import { pathToFileURL } from 'node:url'
+import { createGitHubHarness } from './fixtures/github-harness'
+import type { GitHubFixtureState, GitHubHarness, GitPushHook } from './fixtures/github-harness'
+import type { GitHubTransport } from '../src/main/github-transport'
+
+// Git Stacks captures Node's spawn API when its own modules load, and the GitHub
+// harness answers `git` and `gh` on that API, so Git Stacks is loaded here.
+// Nothing may reach `node:child_process` through an ESM import before the harness
+// module body runs: the builtin facade keeps the export it first sees, so a
+// static import above would hand Git Stacks the unpatched `execFile`.
+const { getSnapshot, runAction } = await import('../src/main/git')
+const { getGitHubData, getPullRequest } = await import('../src/main/github')
+const { previewStack, recoverStaleBranchLocks } = await import('../src/main/stacks')
+const { DirectGitHubTransport, GhGitHubTransport, setGitHubTransport } =
+  await import('../src/main/github-transport')
+const { createGitHubApiDouble } = await import('./fixtures/github-api-double')
 
 const marker = '<!-- git-stacks:stack-links:v1 -->'
 
 function git(harness: GitHubHarness, args: string[]): string {
-  return execFileSync(harness.env.GIT_STACKS_REAL_GIT || 'git', ['-C', harness.repo, ...args], {
-    encoding: 'utf8',
-    env: { ...process.env, ...harness.env },
-    stdio: ['ignore', 'pipe', 'pipe'],
-  }).trim()
+  return harness.runGit(['-C', harness.repo, ...args])
 }
 
 function bareGit(harness: GitHubHarness, args: string[]): string {
-  return execFileSync(
-    harness.env.GIT_STACKS_REAL_GIT || 'git',
-    ['--git-dir', harness.bare, ...args],
-    {
-      encoding: 'utf8',
-      env: { ...process.env, ...harness.env },
-      stdio: ['ignore', 'pipe', 'pipe'],
-    },
-  ).trim()
+  return harness.runGit(['--git-dir', harness.bare, ...args])
 }
 
 async function withHarness(
   run: (harness: GitHubHarness) => Promise<void>,
-  options: { ghCli?: boolean; transport?: GitHubTransport } = {},
+  options: { transport?: GitHubTransport } = {},
 ): Promise<void> {
-  // The direct transport suite runs with no `gh` binary at all.
-  const harness = await createGitHubHarness({ ghCli: options.ghCli })
+  const harness = await createGitHubHarness()
   const original = { ...process.env }
   setGitHubTransport(
     options.transport ??
@@ -78,7 +65,7 @@ async function commitFile(
   contents: string,
   message: string,
 ): Promise<string> {
-  await writeFile(`${harness.repo}/${filePath}`, contents, 'utf8')
+  await writeFile(join(harness.repo, filePath), contents, 'utf8')
   git(harness, ['add', '--', filePath])
   git(harness, ['commit', '-m', message])
   return git(harness, ['rev-parse', 'HEAD'])
@@ -142,7 +129,19 @@ async function makeRemoteDivergence(harness: GitHubHarness, branch: string): Pro
   return next
 }
 
-async function installGitPublicationHook(
+/**
+ * Mutates the fixture at the moment Git Stacks publishes `branch`. The harness
+ * answers every Git command Git Stacks starts, so a race belongs on that
+ * boundary instead of on `PATH`: `before` runs once the push is claimed and
+ * before real Git sees it, and `after` runs only once that push succeeded, which
+ * is the window Git Stacks has to notice a concurrently deleted branch, a
+ * closed pull request, or a pull request that appeared mid-publication.
+ *
+ * The shared race shim injects once, before a command runs, so it cannot express
+ * a pull request that closes or appears only after its push succeeded; that is
+ * the outcome these tests pin down.
+ */
+function installGitPublicationHook(
   harness: GitHubHarness,
   options: {
     branch: string
@@ -150,85 +149,61 @@ async function installGitPublicationHook(
     closePrBranch?: string
     appearPrBranch?: string
   },
-): Promise<void> {
-  const bin = join(harness.root, 'publication-hook-bin')
-  await mkdir(bin)
-  await writeFile(
-    join(bin, 'git'),
-    `#!/usr/bin/env node
-'use strict'
-const { spawnSync } = require('node:child_process')
-const fs = require('node:fs')
-const args = process.argv.slice(2)
-const branch = process.env.GIT_STACKS_TEST_HOOK_BRANCH
-const targetSuffix = \`:refs/heads/\${branch}\`
-const targetPush = args.includes('push') && args.some((arg) => arg.endsWith(targetSuffix))
-if (targetPush && process.env.GIT_STACKS_TEST_HOOK_REMOVE_BRANCH) {
-  const update = spawnSync(process.env.GIT_STACKS_REAL_GIT, [
-    '-C',
-    process.env.GIT_STACKS_TEST_HOOK_REPO,
-    'update-ref',
-    '-d',
-    \`refs/heads/\${branch}\`,
-    process.env.GIT_STACKS_TEST_HOOK_REMOVE_BRANCH,
-  ], { encoding: 'utf8' })
-  if (update.status !== 0) {
-    process.stderr.write(String(update.stderr || 'could not delete the test branch ref'))
-    process.exit(1)
+): GitPushHook {
+  const readState = (): GitHubFixtureState =>
+    JSON.parse(fs.readFileSync(harness.statePath, 'utf8')) as GitHubFixtureState
+  const writeState = (state: GitHubFixtureState): void => {
+    fs.writeFileSync(harness.statePath, `${JSON.stringify(state, null, 2)}\n`, 'utf8')
   }
-}
-const result = spawnSync(process.env.GIT_STACKS_TEST_HOOK_FIXTURE_GIT, args, {
-  stdio: 'inherit',
-  env: process.env,
-})
-if (result.status === 0 && targetPush && process.env.GIT_STACKS_TEST_HOOK_CLOSE_PR) {
-  const statePath = process.env.GIT_STACKS_FIXTURE_STATE
-  const state = JSON.parse(fs.readFileSync(statePath, 'utf8'))
-  const pr = state.prs.find(
-    (candidate) => candidate.head === process.env.GIT_STACKS_TEST_HOOK_CLOSE_PR,
-  )
-  if (!pr) {
-    process.stderr.write('the test could not find the PR to close')
-    process.exit(1)
+  const removeBranch = options.removeBranchAtPush
+  const closePrBranch = options.closePrBranch
+  const appearPrBranch = options.appearPrBranch
+  const hook: GitPushHook = {
+    branch: options.branch,
+    armed: true,
+    ...(removeBranch
+      ? {
+          before() {
+            git(harness, ['update-ref', '-d', `refs/heads/${options.branch}`, removeBranch])
+          },
+        }
+      : {}),
+    ...(closePrBranch || appearPrBranch
+      ? {
+          after() {
+            const state = readState()
+            if (closePrBranch) {
+              const pr = state.prs.find((candidate) => candidate.head === closePrBranch)
+              if (!pr) throw new Error('the test could not find the PR to close')
+              pr.state = 'CLOSED'
+            }
+            if (appearPrBranch) {
+              const number = state.nextNumber++
+              state.prs.push({
+                number,
+                title: 'Racing pull request',
+                body: '',
+                base: state.repository.defaultBranch,
+                head: appearPrBranch,
+                headRepository: `${state.repository.owner}/${state.repository.name}`,
+                draft: false,
+                state: 'OPEN',
+                checks: 'none',
+                reviewDecision: null,
+                mergeState: 'CLEAN',
+                url: `https://github.com/${state.repository.owner}/${state.repository.name}/pull/${number}`,
+                headOid: null,
+                mergeOid: null,
+                mergedAt: null,
+              })
+            }
+            writeState(state)
+          },
+        }
+      : {}),
   }
-  pr.state = 'CLOSED'
-  fs.writeFileSync(statePath, \`\${JSON.stringify(state, null, 2)}\\n\`, 'utf8')
-}
-if (result.status === 0 && targetPush && process.env.GIT_STACKS_TEST_HOOK_APPEAR_PR) {
-  const statePath = process.env.GIT_STACKS_FIXTURE_STATE
-  const state = JSON.parse(fs.readFileSync(statePath, 'utf8'))
-  const branch = process.env.GIT_STACKS_TEST_HOOK_APPEAR_PR
-  const number = state.nextNumber++
-  state.prs.push({
-    number,
-    title: 'Racing pull request',
-    body: '',
-    base: state.repository.defaultBranch,
-    head: branch,
-    headRepository: \`\${state.repository.owner}/\${state.repository.name}\`,
-    draft: false,
-    state: 'OPEN',
-    checks: 'none',
-    reviewDecision: null,
-    mergeState: 'CLEAN',
-    url: \`https://github.com/\${state.repository.owner}/\${state.repository.name}/pull/\${number}\`,
-    headOid: null,
-    mergeOid: null,
-    mergedAt: null,
-  })
-  fs.writeFileSync(statePath, \`\${JSON.stringify(state, null, 2)}\\n\`, 'utf8')
-}
-process.exit(typeof result.status === 'number' ? result.status : 1)
-`,
-    { mode: 0o755 },
-  )
-  process.env.PATH = `${bin}${delimiter}${process.env.PATH || ''}`
-  process.env.GIT_STACKS_TEST_HOOK_BRANCH = options.branch
-  process.env.GIT_STACKS_TEST_HOOK_REPO = harness.repo
-  process.env.GIT_STACKS_TEST_HOOK_FIXTURE_GIT = join(harness.bin, 'git')
-  process.env.GIT_STACKS_TEST_HOOK_CLOSE_PR = options.closePrBranch || ''
-  process.env.GIT_STACKS_TEST_HOOK_APPEAR_PR = options.appearPrBranch || ''
-  process.env.GIT_STACKS_TEST_HOOK_REMOVE_BRANCH = options.removeBranchAtPush || ''
+  harness.hookGitPush(hook)
+  return hook
 }
 
 async function pushedGitTransports(harness: GitHubHarness): Promise<string[][]> {
@@ -268,7 +243,7 @@ async function assertPublicationRejectsConcurrentRefDeletion(allowForce: boolean
     }
     const remoteBefore = remoteOid(harness, 'child')
     const pushesBefore = await pushedGitTransports(harness)
-    await installGitPublicationHook(harness, {
+    const hook = installGitPublicationHook(harness, {
       branch: 'child',
       removeBranchAtPush: capturedTip,
     })
@@ -278,7 +253,7 @@ async function assertPublicationRejectsConcurrentRefDeletion(allowForce: boolean
     assert.equal(localOid(harness, 'child'), capturedTip)
     assert.equal(remoteOid(harness, 'child'), remoteBefore)
     assert.equal((await pushedGitTransports(harness)).length, pushesBefore.length)
-    process.env.GIT_STACKS_TEST_HOOK_REMOVE_BRANCH = ''
+    hook.armed = false
     await publishStack(harness, { allowForce })
     assert.equal(remoteOid(harness, 'child'), capturedTip)
   })
@@ -300,7 +275,7 @@ test(
   async () => {
     await withHarness(async (harness) => {
       const { parentTip } = await createStack(harness)
-      await installGitPublicationHook(harness, {
+      installGitPublicationHook(harness, {
         branch: 'parent',
         appearPrBranch: 'parent',
       })
@@ -430,7 +405,7 @@ test(
       const childRemoteBefore = remoteOid(harness, 'child')
       assert.notEqual(git(harness, ['merge-base', childRemoteBefore, childTip]), childRemoteBefore)
       const pushesBefore = await pushedGitTransports(harness)
-      await installGitPublicationHook(harness, {
+      installGitPublicationHook(harness, {
         branch: 'parent',
         closePrBranch: 'child',
       })
@@ -1334,8 +1309,7 @@ test(
       const customRoot = join(harness.root, 'custom refs')
       const customHeadsDir = join(customRoot, 'refs', 'heads')
       const customLockPath = join(customHeadsDir, 'child.lock')
-      const refStorage = `files://${encodeURI(customRoot)}`
-      const shimDir = join(harness.root, 'ref-storage-shim')
+      const refStorage = `files://${pathToFileURL(customRoot).pathname}`
       const transactionId = 'deadbeef-dead-beef-dead-beefdeadbeef'
       const lockData = {
         pid: 99999999,
@@ -1345,43 +1319,23 @@ test(
         transactionId,
       }
       await mkdir(customHeadsDir, { recursive: true })
-      await mkdir(shimDir)
-      await writeFile(
-        join(shimDir, 'git'),
-        `#!/bin/sh
-repo=''
-if [ "$1" = "-C" ]; then
-  repo=$2
-  shift 2
-fi
-if [ "$1" = "config" ] && [ "$2" = "--get" ] && [ "$3" = "extensions.refstorage" ]; then
-  printf '%s\\n' "$GIT_STACKS_TEST_REF_STORAGE"
-  exit 0
-fi
-if [ "$1" = "rev-parse" ] && [ "$2" = "--git-path" ]; then
-  case "$3" in
-    refs/heads/*)
-      printf '%s\\n' "$3"
-      exit 0
-      ;;
-  esac
-fi
-if [ -n "$repo" ]; then
-  exec "$GIT_STACKS_TEST_DELEGATE_GIT" -C "$repo" "$@"
-fi
-exec "$GIT_STACKS_TEST_DELEGATE_GIT" "$@"
-`,
-        { mode: 0o755 },
-      )
+      // A custom `files://` ref storage reports its ref storage setting and
+      // answers `--git-path` for branch refs with the ref itself, which is where
+      // the lock for this branch lives. The harness answers those two commands
+      // and leaves every other Git command to real Git.
+      harness.overrideGit({
+        match: (args) =>
+          (args[0] === 'config' && args[1] === '--get' && args[2] === 'extensions.refstorage') ||
+          (args[0] === 'rev-parse' &&
+            args[1] === '--git-path' &&
+            String(args[2] || '').startsWith('refs/heads/')),
+        run: (args) => (args[0] === 'config' ? `${refStorage}\n` : `${String(args[2])}\n`),
+      })
       await writeFile(customLockPath, JSON.stringify(lockData), 'utf8')
       const locksDir = join(harness.repo, '.git', 'git-stacks-branch-locks')
       await mkdir(locksDir, { recursive: true })
       const journalPath = join(locksDir, `${transactionId}.json`)
       await writeFile(journalPath, JSON.stringify(lockData), 'utf8')
-
-      process.env.PATH = `${shimDir}:${process.env.PATH || ''}`
-      process.env.GIT_STACKS_TEST_REF_STORAGE = refStorage
-      process.env.GIT_STACKS_TEST_DELEGATE_GIT = join(harness.bin, 'git')
 
       await recoverStaleBranchLocks(harness.repo)
       await assert.rejects(readFile(customLockPath), { code: 'ENOENT' })
@@ -1868,7 +1822,7 @@ test(
         assert.equal(exact.body, parent.body)
         assert.equal(exact.headOid, parent.headOid)
       },
-      { ghCli: true, transport: new GhGitHubTransport() },
+      { transport: new GhGitHubTransport() },
     )
   },
 )

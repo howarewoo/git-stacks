@@ -10,7 +10,7 @@
     "start": "electron-vite preview",
     "build": "npm run typecheck && electron-vite build",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test tests/*.test.ts",
+    "test": "npm run provision:git-runtime && tsx --test tests/*.test.ts",
     "gallery": "vite --config tests/renderer/vite.config.ts",
     "build:gallery": "vite build --config tests/renderer/vite.config.ts",
     "test:ui": "playwright test --grep-invert @visual",
@@ -22,8 +22,11 @@
     "tokens:check": "node src/renderer/src/design-system/generate-tokens.mjs --check",
     "format": "prettier --write .",
     "format:check": "prettier --check . '!./.github/workflows/pullfrog.yml'",
-    "package": "npm run build && electron-builder --dir --publish never",
-    "dist": "npm run build && electron-builder --publish never"
+    "package": "npm run build && npm run provision:git-runtime && npm run verify:git-runtime && electron-builder --dir --publish never && npm run verify:packaged-git-runtime",
+    "dist": "npm run build && npm run provision:git-runtime && npm run verify:git-runtime && electron-builder --publish never && npm run verify:packaged-git-runtime",
+    "provision:git-runtime": "node scripts/provision-git-runtime.mjs",
+    "verify:git-runtime": "node scripts/verify-git-runtime.mjs",
+    "verify:packaged-git-runtime": "node scripts/verify-packaged-git-runtime.mjs"
   },
   "build": {
     "appId": "dev.gitstacks.desktop",
@@ -37,9 +40,23 @@
       "out/renderer/**/*",
       "package.json"
     ],
+    "extraResources": [
+      {
+        "from": "resources/git",
+        "to": "git",
+        "filter": [
+          "**/*",
+          "!.provision/**"
+        ]
+      }
+    ],
+    "afterPack": "scripts/refresh-win-git-runtime.cjs",
     "mac": {
       "icon": "resources/icon.icns",
       "category": "public.app-category.developer-tools",
+      "identity": "Developer ID Application",
+      "sign": "scripts/sign-mac-git-runtime.cjs",
+      "signIgnore": "Contents/Resources/git/",
       "target": [
         "dmg"
       ]
@@ -70,6 +87,7 @@
   "devDependencies": {
     "@axe-core/playwright": "4.13.0",
     "@electron/asar": "3.4.1",
+    "@electron/osx-sign": "1.3.3",
     "@playwright/test": "1.63.0",
     "@tailwindcss/vite": "4.3.3",
     "@types/node": "26.6.2",

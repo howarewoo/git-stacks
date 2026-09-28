@@ -22,6 +22,8 @@ export type FixtureCall =
   | 'stackPreview'
   | 'pullRequest'
   | 'openExternal'
+  | 'gitRuntimeStatus'
+  | 'setSystemGit'
 
 /** One entry of the ordered {@link FixtureControl.calls} log. */
 export interface FixtureCallRecord {

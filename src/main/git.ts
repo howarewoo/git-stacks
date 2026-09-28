@@ -6,6 +6,7 @@ import type { Stats } from 'node:fs'
 import type { FileHandle } from 'node:fs/promises'
 import { createHash, randomUUID } from 'node:crypto'
 import { tmpdir } from 'node:os'
+import { fileURLToPath } from 'node:url'
 
 import type {
   ActionResult,
@@ -31,6 +32,7 @@ import {
   MAX_PATH_LENGTH,
   branchUpstream,
   commandDetail,
+  commandEnvironment,
   ensureClean,
   ensureNoBusyOperation,
   ensureNotCheckedOutElsewhere,
@@ -62,6 +64,12 @@ import {
   validateBranchName,
 } from './git-core'
 import type { RefRecord } from './git-core'
+import {
+  gitCommandEnvironment,
+  requireGitCapability,
+  resolveGitRuntime,
+  withGitRuntime,
+} from './git-runtime'
 import {
   getHeadGitlinks,
   getIndexEntries,
@@ -615,6 +623,7 @@ async function runGitWithExpectedHead(
   operation: string,
   env?: NodeJS.ProcessEnv,
 ): Promise<string> {
+  await requireGitCapability('referenceTransactions', operation)
   const hooks = await installReferenceTransactionGuard(repoPath)
   const verifiedPath = path.join(hooks.hooksPath, 'expected-head-verified')
   try {
@@ -1403,14 +1412,16 @@ function localFilesUriPath(value: string): string {
   }
   let decodedPath: string
   try {
-    decodedPath = decodeURIComponent(uri.pathname)
+    // Git's `files:` scheme carries a file URL path, including a Windows drive.
+    // path.resolve('/', '/C:/...') would turn C: into a directory on Windows.
+    decodedPath = fileURLToPath(uri.href.replace(/^files:/u, 'file:'))
   } catch {
     throw new Error('Invalid local files reference-storage URI')
   }
   if (decodedPath.includes('\0')) {
     throw new Error('Invalid local files reference-storage URI')
   }
-  return path.resolve('/', decodedPath)
+  return decodedPath
 }
 
 function assertFilesRefStorage(refStorage: string | null, ref: string): string | null {
@@ -2498,17 +2509,12 @@ async function changedDiff(
     '--',
     relativePath,
   ]
-  // The inspector opens before the resolver; cap the stream itself rather than
-  // buffering an arbitrarily large diff and truncating only after Git exits.
+  // Cap the stream itself rather than buffering an arbitrarily large diff.
+  const runtime = await resolveGitRuntime()
   return new Promise((resolve, reject) => {
-    const child = spawn('git', args, {
+    const child = spawn(runtime.executable, args, {
       cwd: repoPath,
-      env: {
-        ...process.env,
-        GIT_TERMINAL_PROMPT: '0',
-        GH_PROMPT_DISABLED: '1',
-        GCM_INTERACTIVE: 'Never',
-      },
+      env: gitCommandEnvironment(runtime, commandEnvironment()),
       timeout: 120_000,
       windowsHide: true,
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -3482,11 +3488,13 @@ async function readConflictBlob(
   root: string,
   oid: string,
 ): Promise<{ text: string | null; binary: boolean; truncated: boolean }> {
+  const runtime = await resolveGitRuntime()
   // ES2022's Promise typings do not expose withResolvers; Git streams settle
   // this promise from child-process events.
   return new Promise((resolve, reject) => {
-    const child = spawn('git', ['cat-file', 'blob', oid], {
+    const child = spawn(runtime.executable, ['cat-file', 'blob', oid], {
       cwd: root,
+      env: gitCommandEnvironment(runtime, commandEnvironment()),
       stdio: ['ignore', 'pipe', 'pipe'],
       shell: false,
     })
@@ -3982,26 +3990,28 @@ export async function runResolveConflict(
  * and failure; the tool selected for this view is passed explicitly so an
  * environment override cannot silently run the configured fallback instead.
  */
-function runMergeTool(
+async function runMergeTool(
   gitDirectory: string,
   relativePath: string,
   indexPath: string,
   worktree: string,
   tool: string,
 ): Promise<string> {
+  const runtime = await resolveGitRuntime()
   return new Promise((resolve, reject) => {
     const child = spawn(
-      'git',
+      runtime.executable,
       ['mergetool', '--no-prompt', '--no-gui', `--tool=${tool}`, '--', relativePath],
       {
         cwd: worktree,
-        env: {
-          ...process.env,
-          GIT_DIR: gitDirectory,
-          GIT_INDEX_FILE: indexPath,
-          GIT_WORK_TREE: worktree,
-          GIT_TERMINAL_PROMPT: '0',
-        },
+        env: gitCommandEnvironment(
+          runtime,
+          commandEnvironment({
+            GIT_DIR: gitDirectory,
+            GIT_INDEX_FILE: indexPath,
+            GIT_WORK_TREE: worktree,
+          }),
+        ),
         stdio: ['ignore', 'pipe', 'pipe'],
         shell: false,
       },
@@ -4689,14 +4699,10 @@ async function withAbsentRefLock(
   ref: string,
   operation: () => Promise<void>,
 ): Promise<void> {
-  const child = spawn('git', ['update-ref', '--stdin'], {
+  const runtime = await resolveGitRuntime()
+  const child = spawn(runtime.executable, ['update-ref', '--stdin'], {
     cwd: repoPath,
-    env: {
-      ...process.env,
-      GIT_TERMINAL_PROMPT: '0',
-      GH_PROMPT_DISABLED: '1',
-      GCM_INTERACTIVE: 'Never',
-    },
+    env: gitCommandEnvironment(runtime, commandEnvironment()),
     stdio: ['pipe', 'pipe', 'pipe'],
   })
   let pendingOutput = ''
@@ -4787,14 +4793,10 @@ async function deleteLocalBranchRef(
   expectedOid: string,
   cleanupConfig: () => Promise<void>,
 ): Promise<void> {
-  const child = spawn('git', ['update-ref', '--stdin'], {
+  const runtime = await requireGitCapability('referenceTransactions', `delete ${branchName}`)
+  const child = spawn(runtime.executable, ['update-ref', '--stdin'], {
     cwd: repoPath,
-    env: {
-      ...process.env,
-      GIT_TERMINAL_PROMPT: '0',
-      GH_PROMPT_DISABLED: '1',
-      GCM_INTERACTIVE: 'Never',
-    },
+    env: gitCommandEnvironment(runtime, commandEnvironment()),
     stdio: ['pipe', 'pipe', 'pipe'],
   })
   let pendingOutput = ''
@@ -4942,83 +4944,86 @@ async function runDeleteBranch(
 }
 
 export async function runAction(repoPath: string, value: GitAction): Promise<ActionResult> {
-  const root = await resolveRepository(repoPath)
-  const action = validateAction(value)
-  const blocked = actionBlockReason(await getRepositoryShapeFacts(root), action.type)
-  if (blocked) throw new Error(blocked)
-  if (isStackAction(action)) {
-    return runStackAction(root, action)
-  }
-  await ensureStackWriteAllowed(root, action)
-  switch (action.type) {
-    case 'stage':
-    case 'unstage':
-      return runStage(root, action.type, action.paths)
-    case 'commit':
-      return runCommit(
-        root,
-        action.message,
-        action.amend,
-        action.expectedHead,
-        action.expectedHeadRef,
-      )
-    case 'forcePush':
-      return runForcePush(root, action.preview)
-    case 'fetch':
-      return runFetch(root)
-    case 'pull':
-      return runPull(root, action.strategy)
-    case 'push':
-      return runPush(root)
-    case 'stash':
-      return runStash(root, action.message, action.includeUntracked)
-    case 'stashPop':
-    case 'stashApply':
-    case 'stashDrop':
-      return runStashAction(root, action.type, action.ref, action.oid)
-    case 'switch':
-      return runSwitch(root, action.ref)
-    case 'createBranch':
-      return runCreateBranch(root, action.name, action.parent)
-    case 'deleteBranch':
-      return runDeleteBranch(root, action.ref, action.force, action.expectedOid)
-    case 'deleteRemoteBranch':
-      return runDeleteRemoteBranch(root, action.ref, action.expectedOid)
-    case 'renameBranch':
-      return runRenameBranch(root, action.ref, action.name)
-    case 'setUpstream':
-      return runSetUpstream(root, action.ref, action.upstream)
-    case 'rebase':
-      return runRebase(root, action.parent)
-    case 'rebaseContinue':
-      return runRebaseContinue(root)
-    case 'rebaseAbort':
-      return runRebaseAbort(root)
-    case 'merge':
-      return runMerge(root, action.ref, action.expectedHead, action.expectedHeadRef)
-    case 'cherryPick':
-    case 'revert':
-      return runCherryPickOrRevert(
-        root,
-        action.type,
-        action.oid,
-        action.expectedHead,
-        action.expectedHeadRef,
-        action.mainline,
-      )
-    case 'operationContinue':
-      return runOperation(root, 'continue')
-    case 'operationSkip':
-      return runOperation(root, 'skip')
-    case 'operationAbort':
-      return runOperation(root, 'abort')
-    case 'discardFile':
-      return runDiscardFile(root, action.path, action.fingerprint)
-    case 'resolveConflict':
-      return runResolveConflict(root, action.path, action.fingerprint, action.resolution)
-    case 'conflictMergeTool':
-      return runConflictMergeTool(root, action.path, action.fingerprint)
-    case 'createPr':
-      return runCreatePr(root, action.title, action.body, action.base, action.draft)
-  }
+  const runtime = await resolveGitRuntime()
+  return withGitRuntime(runtime, async () => {
+    const root = await resolveRepository(repoPath)
+    const action = validateAction(value)
+    const blocked = actionBlockReason(await getRepositoryShapeFacts(root), action.type)
+    if (blocked) throw new Error(blocked)
+    if (isStackAction(action)) {
+      return runStackAction(root, action)
+    }
+    await ensureStackWriteAllowed(root, action)
+    switch (action.type) {
+      case 'stage':
+      case 'unstage':
+        return runStage(root, action.type, action.paths)
+      case 'commit':
+        return runCommit(
+          root,
+          action.message,
+          action.amend,
+          action.expectedHead,
+          action.expectedHeadRef,
+        )
+      case 'forcePush':
+        return runForcePush(root, action.preview)
+      case 'fetch':
+        return runFetch(root)
+      case 'pull':
+        return runPull(root, action.strategy)
+      case 'push':
+        return runPush(root)
+      case 'stash':
+        return runStash(root, action.message, action.includeUntracked)
+      case 'stashPop':
+      case 'stashApply':
+      case 'stashDrop':
+        return runStashAction(root, action.type, action.ref, action.oid)
+      case 'switch':
+        return runSwitch(root, action.ref)
+      case 'createBranch':
+        return runCreateBranch(root, action.name, action.parent)
+      case 'deleteBranch':
+        return runDeleteBranch(root, action.ref, action.force, action.expectedOid)
+      case 'deleteRemoteBranch':
+        return runDeleteRemoteBranch(root, action.ref, action.expectedOid)
+      case 'renameBranch':
+        return runRenameBranch(root, action.ref, action.name)
+      case 'setUpstream':
+        return runSetUpstream(root, action.ref, action.upstream)
+      case 'rebase':
+        return runRebase(root, action.parent)
+      case 'rebaseContinue':
+        return runRebaseContinue(root)
+      case 'rebaseAbort':
+        return runRebaseAbort(root)
+      case 'merge':
+        return runMerge(root, action.ref, action.expectedHead, action.expectedHeadRef)
+      case 'cherryPick':
+      case 'revert':
+        return runCherryPickOrRevert(
+          root,
+          action.type,
+          action.oid,
+          action.expectedHead,
+          action.expectedHeadRef,
+          action.mainline,
+        )
+      case 'operationContinue':
+        return runOperation(root, 'continue')
+      case 'operationSkip':
+        return runOperation(root, 'skip')
+      case 'operationAbort':
+        return runOperation(root, 'abort')
+      case 'discardFile':
+        return runDiscardFile(root, action.path, action.fingerprint)
+      case 'resolveConflict':
+        return runResolveConflict(root, action.path, action.fingerprint, action.resolution)
+      case 'conflictMergeTool':
+        return runConflictMergeTool(root, action.path, action.fingerprint)
+      case 'createPr':
+        return runCreatePr(root, action.title, action.body, action.base, action.draft)
+    }
+  })
 }

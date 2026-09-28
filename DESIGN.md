@@ -299,6 +299,14 @@ Preserve the local-first Electron sandbox, context isolation, typed preload/IPC 
 
 All GitHub access runs in the main process through one typed transport (`src/main/github-transport.ts`) that owns the API version, authentication, pagination, rate-limit metadata, timeouts, and cancellation, and reports failures as typed kinds rather than parsed CLI text. The default transport speaks REST and GraphQL over HTTPS and is selected whenever `GIT_STACKS_GITHUB_TOKEN`, `GITHUB_TOKEN`, or `GH_TOKEN` is available; `gh` remains an optional fallback and diagnostic path used only when no token is present or `GIT_STACKS_GITHUB_TRANSPORT=gh` is set, so removing `gh` from `PATH` never disables GitHub features. The renderer keeps its narrow preload surface: it receives pull-request data only, never a token, raw HTTP, or transport control.
 
+### Git runtime diagnostics
+
+The advanced Git runtime choice uses a labeled two-way control: **Bundled runtime** and **System Git**. Keep the selected choice visible even if that executable cannot start; pair the failure message with a recovery path so users can reverse the choice without guessing.
+
+Display the active source, version, executable path, minimum-version result, and capability labels as text rather than color alone. If resolution fails, say that the runtime is unavailable instead of showing stale details.
+
+Both runtime choices use the same Git operation guards. Custom `files:` reference-storage paths are decoded as native absolute file paths, including Windows drive letters; a remote host, credentials, query, fragment, malformed escape, or NUL is refused instead of treated as a local lock path. Passing local runtime tests does not establish that a signed Windows or macOS release artifact was produced; signing and shipment remain release-workflow gates.
+
 ## Do's and Don'ts
 
 Concrete guardrails for the existing system and the user-confirmed Quiet Workbench direction:

@@ -39,6 +39,7 @@ import type {
   Branch,
   DesktopAPI,
   GitAction,
+  GitRuntimeStatus,
   PullRequest,
   RecentRepository,
   RepositorySnapshot,
@@ -72,6 +73,7 @@ import { WorkflowDialog, type WorkflowRequest } from './components/workflow-dial
 import { WorkspaceNavigation } from './components/workspace-navigation'
 import { ConflictResolver } from './components/conflict-resolver'
 import { HistoryView, OperationBanner, StackView } from './components/repository-views'
+import { GitRuntimeDialog } from './components/git-runtime-dialog'
 import {
   ChangesView,
   DiagnosticsView,
@@ -278,6 +280,9 @@ function App() {
     repoPath: string
     request: WorkflowRequest
   } | null>(null)
+  const [gitRuntimeOpen, setGitRuntimeOpen] = React.useState(false)
+  const [gitRuntimeStatus, setGitRuntimeStatus] = React.useState<GitRuntimeStatus | null>(null)
+  const [gitRuntimeBusy, setGitRuntimeBusy] = React.useState(false)
   const workflowSequence = React.useRef(0)
 
   const [showDetails, setShowDetails] = React.useState(true)
@@ -382,6 +387,33 @@ function App() {
       }
     },
     [desktop, setSnapshotAndSelection],
+  )
+
+  const isBusy = Boolean(busyAction || opening || refreshing)
+  const operationActive = Boolean(snapshot?.operation || snapshot?.stackOperation)
+
+  const openGitRuntime = React.useCallback(() => {
+    if (!desktop || isBusy || operationActive) return
+    setGitRuntimeOpen(true)
+    desktop
+      .gitRuntimeStatus()
+      .then(setGitRuntimeStatus)
+      .catch((value) => setError(readableError(value)))
+  }, [desktop, isBusy, operationActive])
+
+  const selectGitRuntime = React.useCallback(
+    async (useSystemGit: boolean) => {
+      if (!desktop || isBusy || operationActive) return
+      setGitRuntimeBusy(true)
+      try {
+        setGitRuntimeStatus(await desktop.setSystemGit(useSystemGit))
+      } catch (value) {
+        setError(readableError(value))
+      } finally {
+        setGitRuntimeBusy(false)
+      }
+    },
+    [desktop, isBusy, operationActive],
   )
 
   const runAction = React.useCallback(
@@ -492,7 +524,6 @@ function App() {
   )
   const stagedFiles = changeState.staged
   const conflictedFiles = changeState.conflicted
-  const isBusy = Boolean(busyAction || opening || refreshing)
   const currentBranch = snapshot?.currentBranch ?? null
   const allBranches = snapshot?.branches ?? []
   const branchCount = combinedBranches.length
@@ -503,7 +534,6 @@ function App() {
     [snapshot],
   )
   const detailsVisible = showDetails && (workspaceView === 'branches' || workspaceView === 'stacks')
-  const operationActive = Boolean(snapshot?.operation || snapshot?.stackOperation)
   const openWorkflow = (request: WorkflowRequest) => {
     if (!snapshot || isBusy) return
     setActionError(null)
@@ -780,7 +810,18 @@ function App() {
           />
           <span>{desktop ? 'Desktop connected' : 'Desktop integration unavailable'}</span>
         </div>
-        <span className="version-label">Git Stacks</span>
+        <div className="sidebar-footer-actions">
+          <button
+            className="version-label version-label-action"
+            disabled={!desktop || isBusy || operationActive}
+            onClick={openGitRuntime}
+            title="Git runtime diagnostics"
+            type="button"
+          >
+            Git runtime
+          </button>
+          <span className="version-label">Git Stacks</span>
+        </div>
       </div>
     </aside>
   )
@@ -1756,6 +1797,13 @@ function App() {
           onRequest={openWorkflow}
         />
       ) : null}
+      <GitRuntimeDialog
+        busy={gitRuntimeBusy || isBusy || operationActive}
+        onOpenChange={setGitRuntimeOpen}
+        onSelectSystemGit={selectGitRuntime}
+        open={gitRuntimeOpen}
+        status={gitRuntimeStatus}
+      />
       {conflictPath && snapshot ? (
         <ConflictResolver
           key={conflictPath}

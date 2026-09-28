@@ -543,11 +543,16 @@ function localFilesRefStoragePath(value: string): string {
   ) {
     throw new Error('The configured files ref-storage URI cannot be locked safely')
   }
-  const decodedPath = decodeURIComponent(uri.pathname)
+  let decodedPath: string
+  try {
+    decodedPath = fileURLToPath(uri.href.replace(/^files:/u, 'file:'))
+  } catch {
+    throw new Error('The configured files ref-storage URI cannot be locked safely')
+  }
   if (decodedPath.includes('\0')) {
     throw new Error('The configured files ref-storage URI cannot be locked safely')
   }
-  return path.resolve('/', decodedPath)
+  return decodedPath
 }
 
 function gitPathOnDisk(repoPath: string, value: string, refRoot: string | null): string {

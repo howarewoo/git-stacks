@@ -259,6 +259,40 @@ export interface DesktopAPI {
   stackPreview(kind: StackKind, branch: string): Promise<StackPreview>
   pullRequest(number: number): Promise<PullRequest & { body: string }>
   openExternal(url: string): Promise<void>
+  gitRuntimeStatus(): Promise<GitRuntimeStatus>
+  setSystemGit(enabled: boolean): Promise<GitRuntimeStatus>
+}
+
+export type GitCapability = 'referenceTransactions' | 'rebaseUpdateRefs'
+
+export interface BundledRuntimeInfo {
+  gitVersion: string
+  sha256: string
+  source: string
+  files?: Record<string, string>
+}
+
+export interface GitRuntimeInfo {
+  source: 'bundled' | 'system'
+  executable: string
+  platform: string
+  version: string
+  versionOutput: string
+  minimumVersion: string
+  meetsMinimum: boolean
+  useSystemGit: boolean
+  packaged: boolean
+  capabilities: Record<GitCapability, boolean>
+  bundled: BundledRuntimeInfo | null
+  preservedEnvironment: readonly string[]
+  preservedConfiguration: readonly string[]
+}
+
+export interface GitRuntimeStatus {
+  runtime: GitRuntimeInfo | null
+  error: string | null
+  minimumVersion: string
+  useSystemGit: boolean
 }
 declare global {
   interface Window {
