@@ -1,7 +1,7 @@
 {
   "compilerOptions": {
     "target": "ES2022",
-    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "lib": ["ES2024", "DOM", "DOM.Iterable"],
     "module": "ESNext",
     "moduleResolution": "Bundler",
     "jsx": "react-jsx",
@@ -13,5 +13,5 @@
     "types": ["node", "electron-vite/node", "vite/client"],
     "paths": { "@/*": ["./src/renderer/src/*"] }
   },
-  "include": ["src/**/*", "tests/**/*", "electron.vite.config.ts"]
+  "include": ["src/**/*", "tests/**/*", "electron.vite.config.ts", "playwright.config.ts"]
 }

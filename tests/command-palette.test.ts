@@ -23,6 +23,7 @@ import {
 } from '../src/renderer/src/lib/command-palette'
 import { resolveStackNavigation } from '../src/renderer/src/lib/stack-navigation'
 import type { Branch, RepositorySnapshot } from '../src/shared/types'
+import { standardCapabilities } from './fixtures/workflow-scenarios'
 
 function makeMockBranch(name: string, overrides: Partial<Branch> = {}): Branch {
   return {
@@ -75,6 +76,7 @@ function makeMockSnapshot(overrides: Partial<RepositorySnapshot> = {}): Reposito
     stackOperation: null,
     headOid: 'abcdef1234567890',
     github: { available: true, message: '' },
+    capabilities: standardCapabilities,
     ...overrides,
   }
 }

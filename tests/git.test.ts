@@ -1,22 +1,173 @@
 import assert from 'node:assert/strict'
-import { execFileSync, spawnSync } from 'node:child_process'
+import type {
+  ChildProcess,
+  ExecFileOptions,
+  execFileSync as ExecFileSyncFunction,
+  spawnSync as SpawnSyncFunction,
+} from 'node:child_process'
+import { writeFileSync } from 'node:fs'
 import { chmod, mkdtemp, mkdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises'
+import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
-import { delimiter, join, resolve, sep } from 'node:path'
+import { join, resolve } from 'node:path'
 import { test } from 'node:test'
-import { getSnapshot, resolveRepository, runAction } from '../src/main/git'
+import { pathToFileURL } from 'node:url'
+import { promisify } from 'node:util'
+import { beginGitRace, runRealGit } from './fixtures/git-race-shim'
 import type { GitAction } from '../src/shared/types'
 import { getCombinedBranches, sortBranchesByUpdatedAt } from '../src/renderer/src/lib/branches'
+
+type ExecFileDone = (error: Error | null, stdout: string, stderr: string) => void
+type PromisifiedExecFile = (
+  file: string,
+  args: readonly string[],
+  options: ExecFileOptions,
+) => Promise<{ stdout: string; stderr: string }>
+
+interface ExecFileBoundary {
+  (
+    file: string,
+    args?: readonly string[],
+    options?: ExecFileOptions,
+    callback?: ExecFileDone,
+  ): ChildProcess
+  /** Git Stacks promisifies this boundary, and only this form reports both streams. */
+  [promisify.custom]: PromisifiedExecFile
+}
+
+interface SpawnBoundary {
+  (command: string, args?: readonly string[], options?: unknown): ChildProcess
+}
+
+interface ChildProcessModule {
+  execFile: ExecFileBoundary
+  execFileSync: typeof ExecFileSyncFunction
+  spawn: SpawnBoundary
+  spawnSync: typeof SpawnSyncFunction
+}
+
+/**
+ * A Git Stacks scenario that the shared race fixture cannot express, because it
+ * does not wrap a boundary the fixture leaves alone or because the Git it would
+ * have to answer is one no installed Git produces.
+ */
+interface ArmedScenario {
+  /** Answers a claimed Git Stacks request itself; null runs real Git. */
+  respond?: (args: readonly string[]) => string | null
+  /** Runs before Git Stacks spawns its first reference transaction. */
+  beforeRefTransaction?: () => void
+  /** Runs once Git Stacks' first reference transaction has committed. */
+  afterRefTransaction?: () => void
+}
+
+interface GitScenario {
+  end(): void
+}
+
+/**
+ * Node freezes a builtin's ESM named exports the first time a module links it,
+ * so this file reaches `node:child_process` through `createRequire`: a runtime
+ * import of the builtin would bind Git Stacks to the unpatched spawn API before
+ * the race fixture shims it. Every boundary below is installed before the
+ * dynamic import that loads the Git Stacks modules under test, because they
+ * capture the spawn API when their own modules load.
+ */
+const childProcess = createRequire(import.meta.url)('node:child_process') as ChildProcessModule
+const { execFileSync, spawnSync } = childProcess
+
+// Git Stacks spawns the Git it resolved, `git.exe` on Windows and `git`
+// elsewhere, which the shared race fixture matches on the same way.
+const GIT_EXECUTABLE = /(?:^|[\\/])git(?:\.exe)?$/u
+
+let armed: ArmedScenario | null = null
+let refTransactionClaimed = false
+
+const realExecFile = childProcess.execFile
+
+/**
+ * The answer an armed scenario gives a Git Stacks request, or null when the
+ * real Git boundary has to run. Both forms of the boundary below decide this
+ * the same way, because a divergence between them would arm a race on the
+ * callback form only.
+ */
+function claimedResponse(file: string, args: readonly string[]): string | null {
+  const respond = armed?.respond
+  return respond && GIT_EXECUTABLE.test(file) ? respond(args) : null
+}
+
+childProcess.execFile = Object.assign(
+  (
+    file: string,
+    args: readonly string[] = [],
+    options?: ExecFileOptions | ExecFileDone,
+    callback?: ExecFileDone,
+  ): ChildProcess => {
+    if (typeof options === 'function') {
+      callback = options
+      options = undefined
+    }
+    const stdout = claimedResponse(file, args)
+    if (stdout === null) return realExecFile(file, args, options, callback)
+    if (!callback) throw new Error(`Git Stacks read ${args.join(' ')} without a callback`)
+    queueMicrotask(() => callback(null, `${stdout}\n`, ''))
+    return {} as ChildProcess
+  },
+  {
+    // Git Stacks reads command output only through the promisified form, and
+    // only this form reports both streams the way the real one does.
+    [promisify.custom]: (file: string, args: readonly string[], options: ExecFileOptions) => {
+      const stdout = claimedResponse(file, args)
+      if (stdout === null) return realExecFile[promisify.custom](file, args, options)
+      return Promise.resolve({ stdout: `${stdout}\n`, stderr: '' })
+    },
+  },
+)
+
+const realSpawn = childProcess.spawn
+childProcess.spawn = (
+  command: string,
+  args: readonly string[] = [],
+  options?: unknown,
+): ChildProcess => {
+  const claims =
+    !refTransactionClaimed &&
+    GIT_EXECUTABLE.test(command) &&
+    args[0] === 'update-ref' &&
+    Boolean(armed?.beforeRefTransaction || armed?.afterRefTransaction)
+  if (claims) refTransactionClaimed = true
+  // The window before the child exists is the only one in which the branch ref
+  // is still unlocked after Git Stacks' pre-check and before its recheck.
+  if (claims) armed?.beforeRefTransaction?.()
+  const child = realSpawn(command, args, options)
+  if (claims && armed?.afterRefTransaction) {
+    child.prependOnceListener('close', armed.afterRefTransaction)
+  }
+  return child
+}
+
+function beginScenario(scenario: ArmedScenario): GitScenario {
+  if (armed) throw new Error('A Git Stacks scenario is already armed.')
+  armed = scenario
+  refTransactionClaimed = false
+  return {
+    end() {
+      armed = null
+      refTransactionClaimed = false
+    },
+  }
+}
+
+// Git Stacks captures Node's spawn API when its own modules load, and the race
+// fixture shims that API, so the Git Stacks modules under test are loaded here.
+const { getSnapshot, resolveRepository, runAction } = await import('../src/main/git')
 
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), 'git-stacks-test-'))
   const repo = join(root, 'workspace')
   await mkdir(repo)
-  const git = (...args: string[]) =>
-    execFileSync('git', ['-C', repo, ...args], {
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'pipe'],
-    }).trim()
+  // Git is spawned by the name every platform resolves, because Windows has no
+  // `which` and no extensionless executable on PATH.
+  const git = (...args: string[]) => runRealGit(repo, args)
   git('init', '-b', 'main')
   git('config', 'user.name', 'Git Stacks test')
   git('config', 'user.email', 'test@example.invalid')
@@ -263,16 +414,16 @@ test('stash drop resolves relative ref paths from a custom files URI', async () 
   const root = await mkdtemp(join(tmpdir(), 'git-stacks-test-'))
   const repo = join(root, 'workspace')
   const refsStore = join(root, 'custom refs')
-  const shimDir = join(root, 'git-shim')
   await mkdir(repo)
-  const git = (...args: string[]) =>
-    execFileSync('git', ['-C', repo, ...args], {
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'pipe'],
-    }).trim()
-  const originalPath = process.env.PATH
-  const originalRealGit = process.env.GIT_STACKS_REAL_GIT
-  const originalRefStorage = process.env.GIT_STACKS_TEST_REF_STORAGE
+  const git = (...args: string[]) => runRealGit(repo, args)
+  const stashFiles = new Set([
+    'refs/stash',
+    'refs/stash.lock',
+    'logs/refs/stash',
+    'logs/refs/stash.lock',
+    'packed-refs',
+    'packed-refs.lock',
+  ])
   try {
     git('init', '-b', 'main')
     git('config', 'user.name', 'Git Stacks test')
@@ -288,51 +439,35 @@ test('stash drop resolves relative ref paths from a custom files URI', async () 
     const refPath = join(refsStore, 'refs', 'stash')
     assert.equal((await readFile(refPath, 'utf8')).trim(), stash.oid)
 
-    const refStorage = `files://${encodeURI(refsStore)}`
-    const realGit = execFileSync('which', ['git'], { encoding: 'utf8' }).trim()
-    await mkdir(shimDir)
-    await writeFile(
-      join(shimDir, 'git'),
-      `#!/bin/sh
-repo=''
-if [ "$1" = "-C" ]; then
-  repo=$2
-  shift 2
-fi
-if [ "$1" = "config" ] && [ "$2" = "--get" ] && [ "$3" = "extensions.refstorage" ]; then
-  printf '%s\\n' "$GIT_STACKS_TEST_REF_STORAGE"
-  exit 0
-fi
-if [ "$1" = "rev-parse" ] && [ "$2" = "--git-path" ]; then
-  case "$3" in
-    refs/stash|refs/stash.lock|logs/refs/stash|logs/refs/stash.lock|packed-refs|packed-refs.lock)
-      printf '%s\\n' "$3"
-      exit 0
-      ;;
-  esac
-fi
-if [ -n "$repo" ]; then
-  exec "$GIT_STACKS_REAL_GIT" -C "$repo" "$@"
-fi
-exec "$GIT_STACKS_REAL_GIT" "$@"
-`,
-      { mode: 0o755 },
-    )
-    process.env.GIT_STACKS_REAL_GIT = realGit
-    process.env.GIT_STACKS_TEST_REF_STORAGE = refStorage
-    process.env.PATH = `${shimDir}${delimiter}${originalPath || ''}`
+    // No installed Git reports this ref storage: Git rejects a `files://…`
+    // `extensions.refstorage` value while reading its own config, so the value
+    // Git Stacks resolves and the repo-relative paths Git reports for the stash
+    // files are answered here instead of by a Git on PATH. The files URI keeps
+    // the platform's own path shape, which is what Git Stacks resolves back.
+    const refStorage = `files://${pathToFileURL(refsStore).pathname}`
+    let served = 0
+    const race = beginScenario({
+      respond: (args) => {
+        if (args[0] === 'config' && args[1] === '--get' && args[2] === 'extensions.refstorage') {
+          served += 1
+          return refStorage
+        }
+        if (args[0] === 'rev-parse' && args[1] === '--git-path' && stashFiles.has(args[2] ?? '')) {
+          return args[2]!
+        }
+        return null
+      },
+    })
+    try {
+      await runAction(repo, { type: 'stashDrop', ref: stash.ref, oid: stash.oid })
+    } finally {
+      race.end()
+    }
 
-    await runAction(repo, { type: 'stashDrop', ref: stash.ref, oid: stash.oid })
-
+    assert.ok(served > 0, 'Git Stacks never read the configured ref storage')
     await assert.rejects(readFile(refPath))
     assert.deepEqual((await getSnapshot(repo)).stashes, [])
   } finally {
-    if (originalPath === undefined) delete process.env.PATH
-    else process.env.PATH = originalPath
-    if (originalRealGit === undefined) delete process.env.GIT_STACKS_REAL_GIT
-    else process.env.GIT_STACKS_REAL_GIT = originalRealGit
-    if (originalRefStorage === undefined) delete process.env.GIT_STACKS_TEST_REF_STORAGE
-    else process.env.GIT_STACKS_TEST_REF_STORAGE = originalRefStorage
     await rm(root, { recursive: true, force: true })
   }
 })
@@ -341,11 +476,7 @@ test('stash drop safely rejects a non-files reference backend', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'git-stacks-test-'))
   const repo = join(root, 'workspace')
   await mkdir(repo)
-  const git = (...args: string[]) =>
-    execFileSync('git', ['-C', repo, ...args], {
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'pipe'],
-    }).trim()
+  const git = (...args: string[]) => runRealGit(repo, args)
   try {
     const init = spawnSync('git', ['init', '--ref-format=reftable', '-b', 'main', repo], {
       encoding: 'utf8',
@@ -844,34 +975,17 @@ test('branch deletion preserves config for a same-name branch recreated before c
     const replacementTip = git('rev-parse', 'HEAD')
     git('config', 'branch.racing.parent', 'old-parent')
 
-    const shimDir = join(root, 'git-shim')
-    await mkdir(shimDir)
-    const shimPath = join(shimDir, 'git')
     const recreated = join(root, 'branch-recreated')
-    await writeFile(
-      shimPath,
-      `#!/bin/sh
-real="$GIT_STACKS_TEST_REAL_GIT"
-if [ "$1" = "update-ref" ] && [ "$2" = "--stdin" ] && [ ! -e "$GIT_STACKS_BRANCH_RECREATED" ]; then
-  "$real" "$@" || exit $?
-  "$real" -C "$GIT_STACKS_RACE_REPO" update-ref refs/heads/racing "$GIT_STACKS_REPLACEMENT_OID"
-  "$real" -C "$GIT_STACKS_RACE_REPO" config branch.racing.parent replacement-parent
-  : > "$GIT_STACKS_BRANCH_RECREATED"
-  exit 0
-fi
-exec "$real" "$@"
-`,
-      { mode: 0o755 },
-    )
-    const realGit = execFileSync('/bin/sh', ['-c', 'command -v git'], {
-      encoding: 'utf8',
-    }).trim()
-    const savedPath = process.env.PATH
-    process.env.PATH = `${shimDir}${delimiter}${savedPath ?? ''}`
-    process.env.GIT_STACKS_TEST_REAL_GIT = realGit
-    process.env.GIT_STACKS_RACE_REPO = repo
-    process.env.GIT_STACKS_BRANCH_RECREATED = recreated
-    process.env.GIT_STACKS_REPLACEMENT_OID = replacementTip
+    // The branch has to reappear once the deletion transaction has committed and
+    // before Git Stacks locks the absent ref for its configuration cleanup, so
+    // the cleanup finds the ref present and leaves the new branch's config be.
+    const race = beginScenario({
+      afterRefTransaction: () => {
+        runRealGit(repo, ['update-ref', 'refs/heads/racing', replacementTip])
+        runRealGit(repo, ['config', 'branch.racing.parent', 'replacement-parent'])
+        writeFileSync(recreated, '')
+      },
+    })
     try {
       await runAction(repo, {
         type: 'deleteBranch',
@@ -880,11 +994,7 @@ exec "$real" "$@"
         expectedOid: deletedTip,
       })
     } finally {
-      process.env.PATH = savedPath
-      delete process.env.GIT_STACKS_TEST_REAL_GIT
-      delete process.env.GIT_STACKS_RACE_REPO
-      delete process.env.GIT_STACKS_BRANCH_RECREATED
-      delete process.env.GIT_STACKS_REPLACEMENT_OID
+      race.end()
     }
 
     assert.equal(await readFile(recreated, 'utf8'), '')
@@ -939,30 +1049,17 @@ test('merged deletion uses the upstream object captured before a concurrent fetc
     const baseTip = git('rev-parse', 'main')
     git('switch', 'main')
 
-    const shimDir = join(root, 'git-shim')
-    await mkdir(shimDir)
-    const shimPath = join(shimDir, 'git')
     const fetchFlag = join(root, 'upstream-advanced')
-    await writeFile(
-      shimPath,
-      `#!/bin/sh
-real="$GIT_STACKS_REAL_GIT"
-if [ "$1" = "merge-base" ] && [ "$2" = "--is-ancestor" ] && [ ! -e "$GIT_STACKS_FETCH_FLAG" ]; then
-  "$real" update-ref refs/remotes/origin/feature "$GIT_STACKS_FETCH_OID"
-  : > "$GIT_STACKS_FETCH_FLAG"
-fi
-exec "$real" "$@"
-`,
-      { mode: 0o755 },
-    )
-    const realGit = execFileSync('/bin/sh', ['-c', 'command -v git'], {
-      encoding: 'utf8',
-    }).trim()
-    const savedPath = process.env.PATH
-    process.env.PATH = `${shimDir}${delimiter}${savedPath ?? ''}`
-    process.env.GIT_STACKS_REAL_GIT = realGit
-    process.env.GIT_STACKS_FETCH_FLAG = fetchFlag
-    process.env.GIT_STACKS_FETCH_OID = baseTip
+    // The merge check reads the upstream ref Git Stacks captured, so a fetch
+    // that advances the remote branch lands between that capture and the
+    // deletion the app then performs.
+    const race = beginGitRace({
+      matches: (args) => args[0] === 'merge-base' && args[1] === '--is-ancestor',
+      inject: () => {
+        runRealGit(repo, ['update-ref', 'refs/remotes/origin/feature', baseTip])
+        writeFileSync(fetchFlag, '')
+      },
+    })
     try {
       await runAction(repo, {
         type: 'deleteBranch',
@@ -971,10 +1068,7 @@ exec "$real" "$@"
         expectedOid: featureTip,
       })
     } finally {
-      process.env.PATH = savedPath
-      delete process.env.GIT_STACKS_REAL_GIT
-      delete process.env.GIT_STACKS_FETCH_FLAG
-      delete process.env.GIT_STACKS_FETCH_OID
+      race.end()
     }
 
     assert.equal(await readFile(fetchFlag, 'utf8'), '')
@@ -1086,11 +1180,7 @@ test('branch deletion protects a branch being rebased in a detached linked workt
 
     const linked = join(root, 'linked')
     git('worktree', 'add', linked, 'feature')
-    const linkedGit = (...args: string[]) =>
-      execFileSync('git', ['-C', linked, ...args], {
-        encoding: 'utf8',
-        stdio: ['ignore', 'pipe', 'pipe'],
-      }).trim()
+    const linkedGit = (...args: string[]) => runRealGit(linked, args)
     assert.throws(() => linkedGit('rebase', 'main'))
     assert.match(git('worktree', 'list', '--porcelain'), /detached/u)
     const gitDir = linkedGit('rev-parse', '--absolute-git-dir')
@@ -1124,33 +1214,15 @@ test('branch deletion rechecks worktrees after locking the branch ref', async ()
 
     const linked = join(root, 'linked')
     const created = join(root, 'linked-created')
-    const shimDir = join(root, 'git-shim')
-    await mkdir(shimDir)
-    const shimPath = join(shimDir, 'git')
-    await writeFile(
-      shimPath,
-      `#!/bin/sh
-real="$GIT_STACKS_TEST_REAL_GIT"
-if [ "$1" = "worktree" ] && [ "$2" = "list" ] && [ ! -e "$GIT_STACKS_LINKED_CREATED" ]; then
-  out=$("$real" "$@")
-  printf '%s\\n' "$out"
-  "$real" -C "$GIT_STACKS_RACE_REPO" worktree add "$GIT_STACKS_LINKED" racing >/dev/null
-  : > "$GIT_STACKS_LINKED_CREATED"
-  exit 0
-fi
-exec "$real" "$@"
-`,
-      { mode: 0o755 },
-    )
-    const realGit = execFileSync('/bin/sh', ['-c', 'command -v git'], {
-      encoding: 'utf8',
-    }).trim()
-    const savedPath = process.env.PATH
-    process.env.PATH = `${shimDir}${delimiter}${savedPath ?? ''}`
-    process.env.GIT_STACKS_TEST_REAL_GIT = realGit
-    process.env.GIT_STACKS_RACE_REPO = repo
-    process.env.GIT_STACKS_LINKED = linked
-    process.env.GIT_STACKS_LINKED_CREATED = created
+    // The linked worktree has to appear after the check Git Stacks makes before
+    // it locks the branch ref and while that ref is still unlocked, so the
+    // recheck it makes with the lock held is the one that refuses the deletion.
+    const race = beginScenario({
+      beforeRefTransaction: () => {
+        runRealGit(repo, ['worktree', 'add', linked, 'racing'])
+        writeFileSync(created, '')
+      },
+    })
     try {
       await assert.rejects(
         runAction(repo, {
@@ -1162,11 +1234,7 @@ exec "$real" "$@"
         /checked out in another worktree/u,
       )
     } finally {
-      process.env.PATH = savedPath
-      delete process.env.GIT_STACKS_TEST_REAL_GIT
-      delete process.env.GIT_STACKS_RACE_REPO
-      delete process.env.GIT_STACKS_LINKED
-      delete process.env.GIT_STACKS_LINKED_CREATED
+      race.end()
     }
     assert.equal(await readFile(created, 'utf8'), '')
     assert.equal(git('rev-parse', 'refs/heads/racing'), racingTip)
@@ -1257,39 +1325,22 @@ test('force deletion rejects a branch that advances between validation and remov
     const advanced = git('rev-parse', 'HEAD')
     assert.notEqual(advanced, captured)
 
-    // The shim validates nothing itself: it forwards the app's expected-OID
-    // read, then advances the ref in the window before the app deletes it.
-    const shimDir = join(root, 'git-shim')
-    await mkdir(shimDir)
-    const shimPath = join(shimDir, 'git')
-    await writeFile(
-      shimPath,
-      `#!/bin/sh
-real="$GIT_STACKS_TEST_REAL_GIT"
-race=0
-if [ -n "\${GIT_STACKS_RACE_REF:-}" ] && [ "$1" = "rev-parse" ]; then
-  for arg in "$@"; do
-    if [ "$arg" = "\${GIT_STACKS_RACE_REF}^{commit}" ]; then race=1; fi
-  done
-fi
-if [ "$race" = "1" ]; then
-  out=$("$real" "$@"); rc=$?
-  if [ -n "$out" ]; then printf '%s\\n' "$out"; fi
-  "$real" update-ref "$GIT_STACKS_RACE_REF" "$GIT_STACKS_RACE_OID"
-  exit $rc
-fi
-exec "$real" "$@"
-`,
-      { mode: 0o755 },
-    )
-    const realGit = execFileSync('/bin/sh', ['-c', 'command -v git'], {
-      encoding: 'utf8',
-    }).trim()
-    const savedPath = process.env.PATH
-    process.env.PATH = `${shimDir}${delimiter}${savedPath}`
-    process.env.GIT_STACKS_TEST_REAL_GIT = realGit
-    process.env.GIT_STACKS_RACE_REF = 'refs/heads/racing'
-    process.env.GIT_STACKS_RACE_OID = advanced
+    // The race advances the ref in the window the action cannot close: after
+    // Git Stacks read the tip it validated against the expected OID, and before
+    // the deletion transaction it locks that tip with.
+    let validated = false
+    const race = beginGitRace({
+      matches: (args) => {
+        if (args.includes('refs/heads/racing^{commit}')) {
+          validated = true
+          return false
+        }
+        return validated && args[0] === 'worktree' && args[1] === 'list'
+      },
+      inject: () => {
+        runRealGit(repo, ['update-ref', 'refs/heads/racing', advanced])
+      },
+    })
     try {
       await assert.rejects(
         runAction(repo, {
@@ -1301,10 +1352,7 @@ exec "$real" "$@"
         { message: /refresh before deleting/ },
       )
     } finally {
-      process.env.PATH = savedPath
-      delete process.env.GIT_STACKS_TEST_REAL_GIT
-      delete process.env.GIT_STACKS_RACE_REF
-      delete process.env.GIT_STACKS_RACE_OID
+      race.end()
     }
     assert.equal(git('rev-parse', 'refs/heads/racing'), advanced)
     assert.equal(
@@ -1326,39 +1374,21 @@ test('branch deletion commits its ref before metadata cleanup', async () => {
     git('config', 'branch.racing.parent', 'old-parent')
     git('config', 'branch.racing.remote', 'old-remote')
 
-    const shimDir = join(root, 'git-shim')
-    await mkdir(shimDir)
-    const shimPath = join(shimDir, 'git')
     const cleanupState = join(root, 'ref-state-during-cleanup')
-    await writeFile(
-      shimPath,
-      `#!/bin/sh
-real="$GIT_STACKS_REAL_GIT"
-is_remove=0
-is_section=0
-for arg in "$@"; do
-  [ "$arg" = "--remove-section" ] && is_remove=1
-  [ "$arg" = "branch.racing" ] && is_section=1
-done
-if [ "$is_remove" = "1" ] && [ "$is_section" = "1" ]; then
-  if "$real" -C "$GIT_STACKS_RACE_REPO" show-ref --verify --quiet refs/heads/racing; then
-    printf 'present\\n' > "$GIT_STACKS_CLEANUP_STATE"
-  else
-    printf 'absent\\n' > "$GIT_STACKS_CLEANUP_STATE"
-  fi
-fi
-exec "$real" "$@"
-`,
-      { mode: 0o755 },
-    )
-    const realGit = execFileSync('/bin/sh', ['-c', 'command -v git'], {
-      encoding: 'utf8',
-    }).trim()
-    const savedPath = process.env.PATH
-    process.env.PATH = `${shimDir}${delimiter}${savedPath ?? ''}`
-    process.env.GIT_STACKS_REAL_GIT = realGit
-    process.env.GIT_STACKS_RACE_REPO = repo
-    process.env.GIT_STACKS_CLEANUP_STATE = cleanupState
+    // Recording the ref as Git Stacks removes the branch configuration shows
+    // the deletion transaction had already committed when the cleanup ran.
+    const race = beginGitRace({
+      matches: (args) => args.includes('--remove-section') && args.includes('branch.racing'),
+      inject: () => {
+        let present = true
+        try {
+          runRealGit(repo, ['show-ref', '--verify', '--quiet', 'refs/heads/racing'])
+        } catch {
+          present = false
+        }
+        writeFileSync(cleanupState, present ? 'present\n' : 'absent\n')
+      },
+    })
     try {
       await runAction(repo, {
         type: 'deleteBranch',
@@ -1367,10 +1397,7 @@ exec "$real" "$@"
         expectedOid: captured,
       })
     } finally {
-      process.env.PATH = savedPath
-      delete process.env.GIT_STACKS_REAL_GIT
-      delete process.env.GIT_STACKS_RACE_REPO
-      delete process.env.GIT_STACKS_CLEANUP_STATE
+      race.end()
     }
 
     assert.equal(await readFile(cleanupState, 'utf8'), 'absent\n')

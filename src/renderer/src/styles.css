@@ -1,208 +1,16 @@
 @import 'tailwindcss';
 @import './design-system/tokens.css';
 
+/* Production renderer sources only: the development/test fixture gallery lives in tests/. */
+@source './';
+@source not '../../../tests';
+
 :root {
   color: var(--gs-semantic-text-primary);
   background: var(--gs-semantic-surface-canvas);
   font-family: var(--gs-semantic-font-sans);
   font-synthesis: none;
   text-rendering: optimizeLegibility;
-}
-
-.foundations-specimen {
-  min-height: 0;
-  max-height: 100%;
-  overflow: auto;
-  background: var(--gs-semantic-surface-canvas);
-  color: var(--gs-semantic-text-primary);
-  padding: 40px;
-}
-
-.foundations-specimen-header,
-.foundations-specimen-section-heading {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 24px;
-}
-
-.foundations-specimen-header {
-  max-width: 880px;
-  margin: 0 auto 24px;
-}
-
-.foundations-specimen-header h1 {
-  margin: 0;
-  font-size: var(--gs-semantic-type-heading-size);
-  line-height: var(--gs-semantic-type-heading-line);
-  letter-spacing: -0.02em;
-}
-
-.foundations-specimen-header p,
-.foundations-specimen-section-heading p {
-  margin: 6px 0 0;
-  color: var(--gs-semantic-text-secondary);
-  font-size: var(--gs-semantic-type-body-size);
-  line-height: var(--gs-semantic-type-body-line);
-}
-
-.foundations-specimen-eyebrow {
-  color: var(--gs-semantic-text-link) !important;
-  font-size: var(--gs-semantic-type-metadata-size) !important;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-}
-
-.foundations-specimen-card {
-  max-width: 880px;
-  margin: 0 auto 16px;
-  border: 1px solid var(--gs-semantic-border-essential);
-  border-radius: var(--gs-semantic-radius-workbench);
-  background: var(--gs-semantic-surface-content);
-  box-shadow: var(--gs-semantic-elevation-small);
-  padding: 24px;
-}
-
-.foundations-specimen-section-heading {
-  align-items: center;
-  margin-bottom: 20px;
-}
-
-.foundations-specimen-section-heading h2 {
-  margin: 0;
-  font-size: var(--gs-semantic-type-heading-size);
-  line-height: var(--gs-semantic-type-heading-line);
-}
-
-.foundations-specimen-form {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-}
-
-.foundations-specimen-form label {
-  color: var(--gs-semantic-text-secondary);
-  font-size: var(--gs-semantic-type-label-size);
-}
-
-.foundations-specimen-form input {
-  flex: 1 1 280px;
-  min-height: var(--gs-semantic-density-control-standard);
-  border-color: var(--gs-component-field-border);
-  border-radius: var(--gs-semantic-radius-control);
-}
-
-.foundations-specimen-form button {
-  min-height: var(--gs-semantic-density-control-standard);
-  border-radius: var(--gs-semantic-radius-control);
-}
-
-.foundations-specimen-rows {
-  overflow: hidden;
-  border: 1px solid var(--gs-semantic-border-essential);
-  border-radius: var(--gs-semantic-radius-item);
-}
-
-.foundations-specimen-row {
-  display: flex;
-  min-height: var(--gs-semantic-density-row-standard);
-  align-items: center;
-  gap: 12px;
-  border-bottom: 1px solid var(--gs-semantic-border-decorative);
-  padding: 12px 16px;
-}
-
-.foundations-specimen-row:last-child {
-  border-bottom: 0;
-}
-
-.foundations-specimen-row:hover {
-  background: var(--gs-component-row-hover-background);
-}
-
-.foundations-specimen-row-selected {
-  border-left: 3px solid var(--gs-component-row-selected-border);
-  background: var(--gs-component-row-selected-background);
-}
-
-.foundations-specimen-branch-mark {
-  width: 24px;
-  color: var(--gs-component-git-selection-text);
-  font-size: 16px;
-  text-align: center;
-}
-
-.foundations-specimen-branch-copy {
-  display: grid;
-  min-width: 0;
-  flex: 1;
-  gap: 2px;
-}
-
-.foundations-specimen-branch-copy small {
-  color: var(--gs-component-row-metadata);
-  font-size: var(--gs-semantic-type-metadata-size);
-}
-
-.foundations-specimen-diff {
-  margin: 0;
-  overflow: auto;
-  border: 1px solid var(--gs-semantic-border-essential);
-  border-radius: var(--gs-semantic-radius-control);
-  background: var(--gs-semantic-surface-inset);
-  padding: 16px;
-  color: var(--gs-semantic-text-primary);
-  font: var(--gs-semantic-type-metadata-size) / 1.6 var(--gs-semantic-font-mono);
-}
-
-.foundations-specimen-diff:focus-visible {
-  outline: 2px solid var(--gs-semantic-focus-ring);
-  outline-offset: 2px;
-}
-
-.foundations-diff-add {
-  background: var(--gs-component-diff-add-surface);
-  color: var(--gs-component-diff-add-text);
-}
-
-.foundations-diff-remove {
-  background: var(--gs-component-diff-remove-surface);
-  color: var(--gs-component-diff-remove-text);
-}
-
-.foundations-diff-hunk {
-  color: var(--gs-component-diff-hunk-text);
-}
-.foundations-specimen > section,
-.foundations-specimen > .controls-specimen-grid {
-  max-width: 880px;
-  margin-right: auto;
-  margin-left: auto;
-}
-
-.foundations-specimen > section {
-  margin-bottom: 16px;
-}
-
-.controls-specimen-row {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 12px;
-  margin-top: 20px;
-}
-
-.controls-specimen-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-  align-items: start;
-  gap: 16px;
-  margin-top: 20px;
-}
-
-.controls-specimen-note {
-  color: var(--gs-semantic-text-secondary);
-  font-size: var(--gs-semantic-type-metadata-size);
 }
 
 * {
@@ -792,6 +600,38 @@ button:disabled {
   white-space: nowrap;
 }
 
+.sidebar-footer-actions {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+}
+
+.version-label-action {
+  border: 0;
+  border-radius: var(--gs-semantic-radius-pill);
+  background: transparent;
+  padding: 2px 6px;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.version-label-action:hover:not(:disabled) {
+  background: var(--gs-semantic-surface-hover);
+  color: var(--gs-semantic-text-primary);
+}
+
+.version-label-action:focus-visible {
+  outline: 2px solid var(--gs-semantic-focus-ring);
+  outline-offset: 1px;
+}
+
+.version-label-action:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
 .main-pane {
   min-width: 0;
   min-height: 0;
@@ -839,38 +679,6 @@ button:disabled {
 .list-subtitle {
   color: var(--ink-muted);
   font-size: 11px;
-}
-
-.filter-group {
-  display: flex;
-  margin-left: auto;
-  align-items: center;
-  gap: 2px;
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  background: var(--surface-muted);
-  padding: 2px;
-}
-
-.filter-button {
-  height: 25px;
-  border: 0;
-  border-radius: 4px;
-  background: transparent;
-  color: var(--ink-muted);
-  font-size: 11px;
-  padding: 0 8px;
-}
-
-.filter-button:hover {
-  color: var(--ink);
-}
-
-.filter-button-active {
-  background: var(--surface);
-  color: var(--ink);
-  box-shadow: 0 1px 2px rgba(26, 32, 43, 0.08);
-  font-weight: 600;
 }
 
 .branch-list,
@@ -1754,6 +1562,90 @@ button:disabled {
   color: var(--gs-semantic-text-muted);
 }
 
+.diagnostics-view {
+  display: flex;
+  height: 100%;
+  min-height: 0;
+  flex-direction: column;
+}
+
+.capability-scroll {
+  min-height: 0;
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px 16px 24px;
+}
+
+.capability-section-heading {
+  margin: 20px 0 6px;
+  color: var(--gs-semantic-text-secondary);
+  font-size: var(--gs-semantic-type-label-size);
+  font-weight: 600;
+}
+
+.capability-facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.capability-fact {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  border: 1px solid var(--gs-semantic-border-decorative);
+  border-radius: var(--gs-semantic-radius-container-sm, 8px);
+  background: var(--gs-semantic-surface-inset, var(--surface-muted));
+  padding: 8px 10px;
+}
+
+.capability-fact-key {
+  color: var(--gs-semantic-text-muted);
+  font-size: var(--gs-semantic-type-metadata-size);
+}
+
+.capability-fact-value {
+  color: var(--gs-semantic-text-primary);
+  font-size: var(--gs-semantic-type-body-size);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.capability-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.capability-row {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 12px;
+  border-bottom: 1px solid var(--gs-semantic-border-decorative);
+  padding: 10px 4px;
+}
+
+.capability-copy {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.capability-copy strong {
+  color: var(--gs-semantic-text-primary);
+  font-size: var(--gs-semantic-type-body-size);
+  font-weight: 600;
+}
+
+.capability-copy small {
+  color: var(--gs-semantic-text-muted);
+  font-size: var(--gs-semantic-type-metadata-size);
+  line-height: var(--gs-semantic-type-metadata-line-height, 1.4);
+}
+
 .stash-list {
   display: flex;
   flex: 1;
@@ -2217,20 +2109,206 @@ button:disabled {
   color: var(--gs-component-diff-hunk-text);
   font-weight: 600;
 }
+
+.file-staging {
+  min-height: 0;
+  flex: 0 0 auto;
+}
+
+.hunk-unavailable {
+  margin-bottom: 8px;
+}
+
+.hunk-hint {
+  margin: 0 0 8px;
+  color: var(--gs-semantic-text-muted);
+  font-size: var(--gs-semantic-type-metadata-size);
+  line-height: var(--gs-semantic-type-metadata-line);
+}
+
+.hunk-list {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.hunk {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 6px;
+  border: 1px solid var(--gs-semantic-border-decorative);
+  border-radius: var(--gs-semantic-radius-control);
+  background: var(--gs-semantic-surface-content);
+  padding: 8px;
+}
+
+.hunk:focus {
+  outline: 2px solid var(--gs-semantic-focus-ring);
+  outline-offset: 2px;
+}
+
+.hunk-header {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.hunk-range {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  color: var(--gs-semantic-text-secondary);
+  font-family: var(--gs-semantic-font-mono);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hunk-selection {
+  color: var(--gs-semantic-feedback-warning-text);
+  font-family: var(--gs-semantic-font-mono);
+  font-size: 11px;
+}
+
+.hunk-body {
+  max-height: 220px;
+  margin: 0;
+  padding: 8px 10px;
+}
+
+.hunk-line {
+  display: block;
+  min-width: 0;
+  font: inherit;
+  text-align: left;
+  white-space: pre;
+}
+
+.hunk-line-selectable {
+  width: 100%;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+}
+
+.hunk-line-selectable:hover {
+  outline: 1px solid var(--gs-semantic-selection-border);
+  outline-offset: -1px;
+}
+
+.hunk-line-selectable:focus-visible {
+  outline: 2px solid var(--gs-semantic-focus-ring);
+  outline-offset: -2px;
+}
+
+.hunk-line-excluded {
+  opacity: 0.5;
+  text-decoration: line-through;
+}
+
+.hunk-line-gutter {
+  display: inline-block;
+  width: 1ch;
+  color: var(--gs-semantic-text-muted);
+}
+
+.hunk-context {
+  color: var(--gs-semantic-text-primary);
+}
+
+.hunk-marker {
+  color: var(--gs-semantic-text-muted);
+  font-style: italic;
+}
 .conflict-editor {
   padding: 12px 17px 16px;
 }
-.conflict-editor textarea.conflict-content {
+.conflict-editor textarea.conflict-content,
+textarea.conflict-content {
   min-height: 220px;
   max-height: 420px;
-  font:
-    12px/1.6 ui-monospace,
-    SFMono-Regular,
-    Menlo,
-    monospace;
+  font-family: var(--gs-semantic-font-mono);
+  font-size: 12px;
+  line-height: 1.6;
   tab-size: 4;
   white-space: pre;
   overflow-wrap: normal;
+}
+.conflict-editor > button {
+  align-self: flex-start;
+}
+/* The resolver shows the three index stages side by side and one card per
+   conflicting region, so the decision stays attached to the region it settles. */
+.conflict-resolver .conflict-panes,
+.conflict-region-sides {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 8px;
+}
+
+.conflict-pane {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+}
+
+.conflict-pane-head {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px;
+  padding-bottom: 4px;
+  color: var(--gs-semantic-text-primary);
+  font-size: var(--gs-semantic-type-label-size);
+  font-weight: 600;
+}
+
+.conflict-pane .code-diff {
+  max-height: 220px;
+  overflow: auto;
+  white-space: pre-wrap;
+}
+
+.conflict-regions {
+  display: grid;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  gap: 12px;
+  list-style: none;
+}
+
+.conflict-region {
+  display: grid;
+  min-width: 0;
+  gap: 8px;
+  border: 1px solid var(--gs-semantic-border-essential);
+  border-radius: var(--gs-semantic-radius-item);
+  background: var(--gs-semantic-surface-inset);
+  padding: 12px;
+}
+
+.conflict-region-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  color: var(--gs-semantic-text-primary);
+  font-size: var(--gs-semantic-type-label-size);
+}
+
+.conflict-inline-icon {
+  display: inline;
+  width: 14px;
+  height: 14px;
+  margin-right: 4px;
+  vertical-align: -2px;
 }
 .conflict-editor > button {
   align-self: flex-start;
@@ -2673,10 +2751,6 @@ button:disabled {
     flex-wrap: wrap;
     gap: 8px;
   }
-
-  .filter-group {
-    flex-wrap: wrap;
-  }
 }
 
 @media (pointer: coarse) {
@@ -2691,156 +2765,7 @@ button:disabled {
   }
 }
 
-/* Data surfaces specimen: opt-in renderer route for evidence and interaction fixtures. */
-.specimen-shell {
-  display: grid;
-  height: 100vh;
-  min-width: 0;
-  grid-template-rows: auto minmax(0, 1fr);
-  grid-template-columns: minmax(0, 1fr) 340px;
-  grid-template-areas:
-    'header header'
-    'surface log';
-  gap: 0;
-  background: var(--gs-semantic-surface-canvas);
-  color: var(--gs-semantic-text-primary);
-}
-
-.specimen-header {
-  grid-area: header;
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 12px;
-  border-bottom: 1px solid var(--gs-semantic-border-essential);
-  background: var(--gs-semantic-surface-content);
-  padding: 12px 16px;
-}
-
-.specimen-header h1 {
-  margin: 0;
-  font-size: var(--gs-semantic-type-heading-size);
-  font-weight: 600;
-}
-
-.specimen-controls {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 12px;
-}
-
-.specimen-field {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  color: var(--gs-semantic-text-secondary);
-  font-size: var(--gs-semantic-type-metadata-size);
-}
-
-.specimen-field input {
-  min-height: var(--gs-semantic-density-control-compact);
-  border: 1px solid var(--gs-component-field-border);
-  border-radius: var(--gs-semantic-radius-control);
-  background: var(--gs-component-field-background);
-  color: var(--gs-component-field-text);
-  padding: 0 10px;
-  font: inherit;
-}
-
-.specimen-field input:focus-visible {
-  border-color: var(--gs-component-field-focus-border);
-  outline: 2px solid var(--gs-component-field-focus-ring);
-  outline-offset: 1px;
-}
-
-.specimen-surface {
-  grid-area: surface;
-  display: flex;
-  min-width: 0;
-  min-height: 0;
-  flex-direction: column;
-  overflow: hidden;
-}
-
-.specimen-log {
-  grid-area: log;
-  display: flex;
-  min-width: 0;
-  flex-direction: column;
-  gap: 6px;
-  border-top: 1px solid var(--gs-semantic-border-essential);
-  background: var(--gs-semantic-surface-content);
-  padding: 10px 16px;
-}
-
-.specimen-log-heading {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-
-.specimen-log-heading strong {
-  font-size: var(--gs-semantic-type-label-size);
-}
-
-.specimen-log-empty {
-  margin: 0;
-  color: var(--gs-semantic-text-muted);
-  font-size: var(--gs-semantic-type-metadata-size);
-}
-
-.specimen-log ol {
-  display: flex;
-  margin: 0;
-  flex-direction: column;
-  gap: 4px;
-  padding: 0 0 0 18px;
-}
-
-.specimen-log li {
-  display: flex;
-  min-width: 0;
-  flex-direction: column;
-  font-size: var(--gs-semantic-type-metadata-size);
-}
-
-.specimen-log code {
-  overflow-x: auto;
-  color: var(--gs-semantic-text-secondary);
-  font-family: var(--gs-semantic-font-mono);
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}
-
-@media (max-width: 900px) {
-  .specimen-shell {
-    grid-template-rows: auto minmax(0, 1fr);
-    grid-template-columns: minmax(0, 1fr);
-    grid-template-areas:
-      'header'
-      'surface';
-  }
-
-  .specimen-header {
-    gap: 8px;
-    padding: 8px 12px;
-  }
-
-  .specimen-header h1 {
-    font-size: var(--gs-semantic-type-label-size);
-  }
-
-  .specimen-log {
-    display: none;
-  }
-}
-
 @media (max-height: 480px) {
-  .specimen-header {
-    display: none;
-  }
-
   .changes-view,
   .history-view {
     overflow-y: auto;
@@ -2899,92 +2824,6 @@ button:disabled {
     transition-duration: 0.01ms !important;
     scroll-behavior: auto !important;
   }
-}
-
-/* Dialog specimen gallery: the three compositions and the recovery states,
-   rendered side by side so their shared rhythm and state tones can be compared. */
-.specimen-page {
-  display: grid;
-  gap: 20px;
-  min-height: 100vh;
-  align-content: start;
-  background: var(--gs-semantic-surface-canvas);
-  padding: 20px;
-}
-.specimen-header {
-  display: grid;
-  gap: 4px;
-  border-radius: var(--gs-semantic-radius-workbench);
-  border: 1px solid var(--gs-semantic-border-essential);
-  background: var(--gs-semantic-surface-content);
-  padding: 14px 16px;
-}
-.specimen-header strong {
-  font-size: 14px;
-}
-.specimen-header span {
-  max-width: 78ch;
-  color: var(--gs-semantic-text-secondary);
-  font-size: 12px;
-  line-height: 1.55;
-}
-.specimen-heading {
-  margin: 4px 0 0;
-  font-size: 13px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: var(--gs-semantic-text-secondary);
-}
-.specimen-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
-  gap: 16px;
-  align-items: start;
-}
-.specimen-dialog {
-  display: grid;
-  gap: 12px;
-  min-width: 0;
-  border-radius: var(--gs-semantic-radius-workbench);
-  border: 1px solid var(--gs-semantic-border-essential);
-  background: var(--gs-semantic-surface-content);
-  box-shadow: var(--gs-semantic-elevation-small);
-  padding: 16px;
-}
-.specimen-dialog > header {
-  display: grid;
-  gap: 3px;
-  padding-bottom: 10px;
-  border-bottom: 1px solid var(--gs-semantic-border-essential);
-}
-.specimen-dialog > header strong {
-  font-size: 13px;
-}
-.specimen-dialog > header span {
-  color: var(--gs-semantic-text-secondary);
-  font-size: 11px;
-  line-height: 1.5;
-}
-.specimen-recovery {
-  display: grid;
-  gap: 10px;
-}
-.specimen-banner {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 10px;
-  align-items: center;
-  border-radius: var(--gs-semantic-radius-item);
-  border: 1px solid var(--gs-semantic-border-essential);
-  background: var(--gs-semantic-surface-inset);
-  padding: 10px 12px;
-}
-.specimen-banner-note {
-  grid-column: 1 / -1;
-  margin: 0;
-  color: var(--gs-semantic-text-secondary);
-  font-size: 11px;
 }
 
 .palette-dialog {
