@@ -452,6 +452,9 @@ export function WorkflowDialog({
     request.operation === 'publish' &&
     (progress?.status === 'failed' || progress?.status === 'running') &&
     (progress?.layers.length ?? 0) > 0
+  const resumeBlocked = progress?.steps.find(
+    (step) => step.status !== 'completed' && step.failure?.retryable === false,
+  )?.failure
   // While a saved submission is being recovered the journalled choices win over the fresh
   // preview: Resume republishes exactly those, and the fields are locked to match. Without
   // this the dialog would show a different title or readiness than the one that will open.
@@ -1204,10 +1207,14 @@ export function WorkflowDialog({
                   </Button>
                   <Button
                     variant="accent"
-                    disabled={busy}
+                    disabled={busy || Boolean(resumeBlocked)}
                     loading={busy}
                     onClick={() => run({ type: 'submitStackRetry' }, 'Resume submission')}
-                    tooltip="Continue from the first unfinished step. Finished pushes and pull requests are not repeated."
+                    tooltip={
+                      resumeBlocked
+                        ? `This submission cannot be resumed. ${resumeBlocked.recovery}`
+                        : 'Continue from the first unfinished step. Finished pushes and pull requests are not repeated.'
+                    }
                   >
                     {busy ? (
                       <LoaderCircle aria-hidden="true" className="size-3.5 animate-spin" />

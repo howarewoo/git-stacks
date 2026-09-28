@@ -149,7 +149,29 @@ function installDesktop(mode: string): () => void {
     }
     return mode === 'mismatch' ? movedPreview : publishPreview
   }
-  target.submitStackProgress = async () => journal
+  target.submitStackProgress = async () =>
+    mode === 'non-retryable'
+      ? {
+          ...journal,
+          message: 'GitHub rejected the native stack chain.',
+          steps: [
+            {
+              kind: 'create-stack',
+              branch: null,
+              label: 'Register native stack',
+              status: 'failed',
+              pullRequest: null,
+              detail: '',
+              failure: {
+                summary: 'Invalid chain (422).',
+                recovery:
+                  'Fix the pull request bases or readiness on GitHub, then dismiss this submission and take a fresh preview.',
+                retryable: false,
+              },
+            },
+          ],
+        }
+      : journal
   target.onSubmitStackProgress = () => () => undefined
   if (!existing) {
     ;(window as unknown as { desktop?: Record<string, unknown> }).desktop = target
@@ -168,16 +190,25 @@ function installDesktop(mode: string): () => void {
 export function WorkflowRecoverySpecimen({ mode }: { mode: string }) {
   const restore = React.useMemo(() => installDesktop(mode), [mode])
   React.useEffect(() => restore, [restore])
+  const [actions, setActions] = React.useState<string[]>([])
   return (
-    <WorkflowDialog
-      request={{ kind: 'stack', branch: 'feature/checkout', operation: 'publish' }}
-      snapshot={snapshot}
-      busy={false}
-      actionError={null}
-      onClearActionError={noop}
-      runAction={async () => true}
-      onClose={noop}
-      onRequest={noop}
-    />
+    <>
+      <output hidden data-role="recovery-actions">
+        {actions.join(',')}
+      </output>
+      <WorkflowDialog
+        request={{ kind: 'stack', branch: 'feature/checkout', operation: 'publish' }}
+        snapshot={snapshot}
+        busy={false}
+        actionError={null}
+        onClearActionError={noop}
+        runAction={async (action) => {
+          setActions((current) => [...current, action.type])
+          return true
+        }}
+        onClose={noop}
+        onRequest={noop}
+      />
+    </>
   )
 }

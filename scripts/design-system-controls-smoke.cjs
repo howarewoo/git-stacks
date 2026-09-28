@@ -318,8 +318,36 @@ async function main() {
   assert.match(withoutPreview, /Fetch the remote, confirm nobody pushed/)
   assert.equal(await evaluateInPage(`buttonNamed('Resume submission')?.disabled === false`), true)
   assert.equal(await evaluateInPage(`buttonNamed('Dismiss submission')?.disabled === false`), true)
+  await window.loadURL('about:blank')
+  await window.loadURL(
+    `${pathToFileURL(rendererPath).href}#/design-system-recovery-specimen?mode=non-retryable`,
+  )
+  await waitFor(
+    'the rejected native submission',
+    `document.querySelector('.workflow-dialog')?.textContent.includes('Invalid chain (422)')`,
+  )
+  assert.equal(
+    await evaluateInPage(`buttonNamed('Resume submission')?.disabled`),
+    true,
+    'a non-retryable rejection must disable Resume',
+  )
+  assert.equal(await evaluateInPage(`buttonNamed('Dismiss submission')?.disabled`), false)
+  assert.match(
+    await evaluateInPage(`document.querySelector('.workflow-dialog').textContent`),
+    /dismiss this submission and take a fresh preview/i,
+  )
+  await runInPage(`buttonNamed('Resume submission').click()`)
+  assert.equal(
+    await evaluateInPage(`document.querySelector('[data-role="recovery-actions"]').textContent`),
+    '',
+  )
+  await runInPage(`buttonNamed('Dismiss submission').click()`)
+  await waitFor(
+    'Dismiss to dispatch without a retry',
+    `document.querySelector('[data-role="recovery-actions"]').textContent === 'submitStackDismiss'`,
+  )
   console.log(
-    'Electron controls: guarded submitStack dispatch; journal identity, saved approvals, failed steps, recovery guidance and enabled Resume/Dismiss with mismatched or unavailable preview.',
+    'Electron controls: guarded submitStack dispatch; saved recovery identity and approvals; retryable Resume/Dismiss; non-retryable Resume disabled with actionable Dismiss.',
   )
 }
 

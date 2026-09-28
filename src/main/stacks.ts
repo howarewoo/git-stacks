@@ -2074,6 +2074,17 @@ async function buildPublishOperation(
   }
 }
 
+function definitivelyRejectedCreation(error: unknown): boolean {
+  const status =
+    error instanceof GitHubTransportError
+      ? error.status
+      : error instanceof NativeStackError
+        ? error.httpStatus
+        : null
+  // Timeouts and server/transport failures can hide an accepted mutation.
+  return status !== null && status >= 400 && status < 500 && status !== 408
+}
+
 /**
  * A GitHub 422 on a stack write is a rejected chain, not a transient fault: the
  * person has to change a pull request on GitHub, so retrying the same operation
@@ -2139,6 +2150,40 @@ function proveJournalledHeads(
   }
 }
 
+async function provePublishedHead(
+  repoPath: string,
+  operation: PublishOperation,
+  layer: PublishLayer,
+  pr: PullRequest,
+): Promise<void> {
+  const intended = factsOf(operation, layer.branch)
+  if (
+    pr.number !== layer.pullRequest ||
+    pr.head !== layer.branch ||
+    pr.headRepository !== operation.fullName ||
+    pr.state !== 'OPEN'
+  ) {
+    throw new NativeStackError(
+      'invalid-chain',
+      `Pull request #${layer.pullRequest} no longer matches the published branch and repository or is no longer open`,
+    )
+  }
+  if (pr.headOid !== intended.oid) {
+    throw new NativeStackError(
+      'invalid-chain',
+      `Pull request #${layer.pullRequest} head moved to ${pr.headOid ?? 'none'} since it was published at ${intended.oid}`,
+    )
+  }
+  const local = await resolveCommit(repoPath, `refs/heads/${layer.branch}`)
+  if (local !== intended.oid) {
+    throw new Error(`Stack preview is stale: local ${layer.branch} changed`)
+  }
+  const remote = await remoteOid(repoPath, operation.pushUrl, layer.branch)
+  if (remote !== intended.oid) {
+    throw new Error(`Stack preview is stale: remote ${layer.branch} changed`)
+  }
+}
+
 /**
  * Proves each published pull request still carries the commit this operation published, and
  * that the branch still carries it locally and on the remote. This is the check that keeps a
@@ -2151,33 +2196,13 @@ async function provePublishedHeads(
   published: readonly PublishLayer[],
 ): Promise<void> {
   for (const layer of published) {
-    const intended = operation.branches.find((facts) => facts.branch === layer.branch)
-    if (!intended) continue
     const pr = await getPullRequest(repoPath, layer.pullRequest as number)
-    if (pr.head !== layer.branch) {
-      throw new Error(
-        `Pull request #${layer.pullRequest} for ${layer.branch} now points at ${pr.head}`,
-      )
-    }
     if (pr.base !== layer.base) {
       throw new Error(
         `Pull request #${layer.pullRequest} for ${layer.branch} is now based on ${pr.base}, not ${layer.base}`,
       )
     }
-    if (pr.headOid !== intended.oid) {
-      throw new NativeStackError(
-        'invalid-chain',
-        `Pull request #${layer.pullRequest} head moved to ${pr.headOid ?? 'none'} since it was published at ${intended.oid}`,
-      )
-    }
-    const local = await resolveCommit(repoPath, `refs/heads/${layer.branch}`)
-    if (local !== intended.oid) {
-      throw new Error(`Stack preview is stale: local ${layer.branch} changed`)
-    }
-    const remote = await remoteOid(repoPath, operation.pushUrl, layer.branch)
-    if (remote !== intended.oid) {
-      throw new Error(`Stack preview is stale: remote ${layer.branch} changed`)
-    }
+    await provePublishedHead(repoPath, operation, layer, pr)
   }
 }
 
@@ -3116,49 +3141,24 @@ async function pushBranch(
   })
 }
 
-/**
- * Opens one pull request and returns the number GitHub assigned. A 422 is not
- * fatal on its own: a lost response or an earlier partial run can already have
- * opened this exact pull request, so the branch is re-read before giving up.
- */
-async function createPullRequest(
-  repoPath: string,
-  fullName: string,
-  layer: PublishLayer,
-): Promise<number> {
-  let rejected: string | null = null
-  try {
-    const { data } = await githubTransport().rest<Record<string, unknown>>({
-      method: 'POST',
-      path: `repos/${fullName}/pulls`,
-      body: {
-        title: layer.title,
-        head: layer.branch,
-        base: layer.base,
-        body: layer.body,
-        draft: layer.draft,
-      },
-    })
-    if (isRecord(data) && typeof data.number === 'number' && Number.isInteger(data.number)) {
-      return data.number
-    }
-  } catch (error) {
-    if (!(error instanceof GitHubTransportError) || error.status !== 422) {
-      throw new Error(
-        `Could not create the pull request for ${layer.branch}: ${commandDetail(error)}`,
-      )
-    }
-    rejected = error.detail
+/** Return the assigned identity without treating a rejected POST as evidence of ownership. */
+async function createPullRequest(fullName: string, layer: PublishLayer): Promise<number> {
+  const { data } = await githubTransport().rest<Record<string, unknown>>({
+    method: 'POST',
+    path: `repos/${fullName}/pulls`,
+    body: {
+      title: layer.title,
+      head: layer.branch,
+      base: layer.base,
+      body: layer.body,
+      draft: layer.draft,
+    },
+  })
+  if (isRecord(data) && typeof data.number === 'number' && Number.isInteger(data.number)) {
+    return data.number
   }
-  const adopted = await exactPrForBranch(
-    layer.branch,
-    await canonicalPullRequests(repoPath).then((result) => result.data),
-  )
-  if (adopted && adopted.state === 'OPEN' && adopted.base === layer.base) return adopted.number
   throw new Error(
-    rejected
-      ? `GitHub rejected the pull request for ${layer.branch}: ${rejected}`
-      : `Creating the pull request for ${layer.branch} returned no number; retry this step`,
+    `Creating the pull request for ${layer.branch} returned no number; retry this step`,
   )
 }
 
@@ -3318,7 +3318,16 @@ async function runPublishStep(
       layer.createIntent = true
       await writePublishOperation(repoPath, operation)
     }
-    const number = await createPullRequest(repoPath, operation.fullName, layer)
+    let number: number
+    try {
+      number = await createPullRequest(operation.fullName, layer)
+    } catch (error) {
+      if (definitivelyRejectedCreation(error)) {
+        layer.createIntent = false
+        await writePublishOperation(repoPath, operation)
+      }
+      throw error
+    }
     layer.pullRequest = number
     step.pullRequest = number
     await writePublishOperation(repoPath, operation)
@@ -3353,6 +3362,7 @@ async function runPublishStep(
         `Pull request #${number} base changed from ${capturedBase ?? 'an unknown base'} to ${before.base}; take a fresh preview`,
       )
     }
+    await provePublishedHead(repoPath, operation, layer, before)
     await patchPullRequest(operation.fullName, number, { base: layer.base })
     const after = await getPullRequest(repoPath, number)
     if (after.base !== layer.base) {
@@ -3527,14 +3537,24 @@ async function runPublishStep(
     published.map((layer) => getPullRequest(repoPath, layer.pullRequest as number)),
   )
   proveJournalledHeads(operation, published, atBoundary)
-  await createPullRequestStack(owner, name, numbers, {
-    knownPullRequests: atBoundary,
-    defaultBranch: operation.defaultBranch,
-    beforeCreate: async () => {
-      operation.stackCreateRequested = true
+  let requested = false
+  try {
+    await createPullRequestStack(owner, name, numbers, {
+      knownPullRequests: atBoundary,
+      defaultBranch: operation.defaultBranch,
+      beforeCreate: async () => {
+        operation.stackCreateRequested = true
+        await writePublishOperation(repoPath, operation)
+        requested = true
+      },
+    })
+  } catch (error) {
+    if (requested && definitivelyRejectedCreation(error)) {
+      operation.stackCreateRequested = false
       await writePublishOperation(repoPath, operation)
-    },
-  })
+    }
+    throw error
+  }
   return `Registered native stack for pull requests ${numbers.join(', ')}`
 }
 
@@ -3749,6 +3769,14 @@ async function retrySubmitStack(repoPath: string): Promise<ActionResult> {
   if (!operation) throw new Error('There is no Submit Stack operation to resume')
   if (operation.status === 'completed') {
     throw new Error('That Submit Stack operation already finished every step')
+  }
+  const blocked = operation.steps.find(
+    (step) => step.status !== 'completed' && step.failure?.retryable === false,
+  )
+  if (blocked) {
+    throw new Error(
+      `${blocked.failure!.summary} This submission cannot be resumed; dismiss it and take a fresh preview. ${blocked.failure!.recovery}`,
+    )
   }
   const origin = await currentOrigin(root, true)
   if (origin.url !== operation.originUrl || origin.pushUrl !== operation.pushUrl) {
