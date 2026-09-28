@@ -439,11 +439,10 @@ test('conflict recovery persists completed progress and continues after manual f
   const conflict = await getFileView(repo, 'shared.txt')
   assert.equal(conflict.conflicted, true)
   await runAction(repo, {
-    type: 'resolveFile',
+    type: 'resolveConflict',
     path: 'shared.txt',
     fingerprint: conflict.fingerprint,
-    strategy: 'manual',
-    content: 'resolved\n',
+    resolution: { kind: 'content', content: 'resolved\n' },
   })
   await runAction(repo, { type: 'stackContinue' })
 

@@ -12,7 +12,7 @@ import { getGitHubData, getPullRequest } from '../src/main/github'
  * fails loudly so a broken query no longer passes as an empty result.
  */
 const fakeGitHubCli = `'use strict'
-const { writeSync } = require('node:fs')
+const { readFileSync, writeSync } = require('node:fs')
 const { basename } = require('node:path')
 const open = [
   { number: 3, title: 'Feature', url: 'https://github.com/acme/widgets/pull/3', headRefName: 'feature', headRefOid: 'a'.repeat(40), baseRefName: 'main', isDraft: false, state: 'OPEN', reviewDecision: 'APPROVED', mergeStateStatus: 'CLEAN', headRepository: { nameWithOwner: 'acme/widgets' }, commits: { nodes: [{ commit: { statusCheckRollup: { state: 'SUCCESS' } } }] } },
@@ -25,30 +25,21 @@ const tracked = { number: 7, title: 'Merged parent', url: 'https://github.com/ac
 const argv = process.argv.slice(1)
 const entry = argv.findIndex((value) => basename(value) === 'api')
 const args = entry === -1 ? argv.slice(1) : argv.slice(entry)
+const input = args.includes('--input') ? JSON.parse(readFileSync(0, 'utf8')) : {}
 let response = null
-if (
-  basename(args[0] || '') === 'api' &&
-  args[1] === 'graphql' &&
-  args.includes('owner=acme') &&
-  args.includes('name=widgets')
-) {
-  if (args.includes('--paginate')) {
-    response = [
-      {
-        data: {
-          repository: {
-            pullRequests: { nodes: open, pageInfo: { hasNextPage: false, endCursor: null } },
-          },
-        },
-      },
-    ]
-  } else if (args.includes('number=7')) {
+if (basename(args[0] || '') === 'api' && args.includes('graphql')) {
+  if (String(input.query || '').includes('pullRequest(number:') && input.variables?.number === 7) {
     response = { data: { repository: { pullRequest: tracked } } }
+  } else {
+    response = { data: { repository: { pullRequests: { nodes: open, pageInfo: { hasNextPage: false, endCursor: null } } } } }
   }
 }
 if (!response) {
   process.stderr.write('unexpected gh fixture request: ' + argv.join(' ') + '\\n')
   process.exit(2)
+}
+if (args.includes('--include')) {
+  writeSync(1, 'HTTP/2 200 OK\\r\\nx-ratelimit-remaining: 4998\\r\\n\\r\\n')
 }
 writeSync(1, JSON.stringify(response))
 process.exit(0)

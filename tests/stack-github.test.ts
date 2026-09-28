@@ -6,6 +6,7 @@ import { test } from 'node:test'
 import { pathToFileURL } from 'node:url'
 import { createGitHubHarness } from './fixtures/github-harness'
 import type { GitHubFixtureState, GitHubHarness, GitPushHook } from './fixtures/github-harness'
+import type { GitHubTransport } from '../src/main/github-transport'
 
 // Git Stacks captures Node's spawn API when its own modules load, and the GitHub
 // harness answers `git` and `gh` on that API, so Git Stacks is loaded here.
@@ -13,8 +14,11 @@ import type { GitHubFixtureState, GitHubHarness, GitPushHook } from './fixtures/
 // module body runs: the builtin facade keeps the export it first sees, so a
 // static import above would hand Git Stacks the unpatched `execFile`.
 const { getSnapshot, runAction } = await import('../src/main/git')
-const { getPullRequest } = await import('../src/main/github')
+const { getGitHubData, getPullRequest } = await import('../src/main/github')
 const { previewStack, recoverStaleBranchLocks } = await import('../src/main/stacks')
+const { DirectGitHubTransport, GhGitHubTransport, setGitHubTransport } =
+  await import('../src/main/github-transport')
+const { createGitHubApiDouble } = await import('./fixtures/github-api-double')
 
 const marker = '<!-- git-stacks:stack-links:v1 -->'
 
@@ -26,9 +30,16 @@ function bareGit(harness: GitHubHarness, args: string[]): string {
   return harness.runGit(['--git-dir', harness.bare, ...args])
 }
 
-async function withHarness(run: (harness: GitHubHarness) => Promise<void>): Promise<void> {
+async function withHarness(
+  run: (harness: GitHubHarness) => Promise<void>,
+  options: { transport?: GitHubTransport } = {},
+): Promise<void> {
   const harness = await createGitHubHarness()
   const original = { ...process.env }
+  setGitHubTransport(
+    options.transport ??
+      new DirectGitHubTransport({ token: 'fixture-token', fetch: createGitHubApiDouble() }),
+  )
   try {
     for (const [key, value] of Object.entries(harness.env)) {
       if (value === undefined) delete process.env[key]
@@ -36,6 +47,7 @@ async function withHarness(run: (harness: GitHubHarness) => Promise<void>): Prom
     }
     await run(harness)
   } finally {
+    setGitHubTransport(null)
     for (const key of Object.keys(process.env)) {
       if (!(key in original)) delete process.env[key]
     }
@@ -293,8 +305,9 @@ test(
       assert.equal(state.prs.length, 1)
       assert.equal(prFor(state, 'parent').title, 'Racing pull request')
       assert.equal(
-        state.requests.filter((request) => request.argv[0] === 'pr' && request.argv[1] === 'create')
-          .length,
+        state.requests.filter(
+          (request) => request.argv[0] === 'repos/acme/widgets/pulls' && request.argv[1] === 'POST',
+        ).length,
         0,
       )
     })
@@ -347,8 +360,9 @@ test(
       state = await harness.readState()
       assert.equal(state.prs.length, 2)
       assert.equal(
-        state.requests.filter((request) => request.argv[0] === 'pr' && request.argv[1] === 'create')
-          .length,
+        state.requests.filter(
+          (request) => request.argv[0] === 'repos/acme/widgets/pulls' && request.argv[1] === 'POST',
+        ).length,
         2,
       )
     })
@@ -503,7 +517,7 @@ test(
       assert.equal(localOid(harness, 'child'), secondBefore.child)
       assert.equal(
         second.requests.filter(
-          (request) => request.argv[0] === 'pr' && request.argv[1] === 'create',
+          (request) => request.argv[0] === 'repos/acme/widgets/pulls' && request.argv[1] === 'POST',
         ).length,
         2,
       )
@@ -686,6 +700,16 @@ test(
         'Updated human description',
       )
 
+      await runAction(harness.repo, {
+        type: 'updatePr',
+        number: pr.number,
+        title: 'Updated title',
+        body: 'Updated human description',
+        draft: true,
+      })
+      state = await harness.readState()
+      assert.equal(prFor(state, 'topic').draft, true)
+
       await runAction(harness.repo, { type: 'closePr', number: pr.number })
       state = await harness.readState()
       assert.equal(prFor(state, 'topic').state, 'CLOSED')
@@ -790,9 +814,10 @@ test(
       assert.equal(
         state.requests.some(
           (request) =>
-            request.argv.includes('repos/acme/widgets/pulls/1/merge') &&
-            request.argv.includes(`sha=${headBeforeMerge}`) &&
-            request.argv.includes('merge_method=squash'),
+            request.argv[0] === 'repos/acme/widgets/pulls/1/merge' &&
+            request.argv[1] === 'PUT' &&
+            request.body?.sha === headBeforeMerge &&
+            request.body?.merge_method === 'squash',
         ),
         true,
       )
@@ -1769,5 +1794,35 @@ test(
         ),
       )
     })
+  },
+)
+
+test(
+  'the optional gh adapter serves the same pull request reads without a direct transport',
+  { concurrency: false },
+  async () => {
+    await withHarness(
+      async (harness) => {
+        await createStack(harness)
+        await publishStack(harness)
+        const state = await harness.readState()
+        assert.deepEqual(state.prs.map((pr) => pr.head).sort(), ['child', 'parent'])
+        const parent = prFor(state, 'parent')
+        assert.equal(parent.headOid, remoteOid(harness, 'parent'))
+        const comments = state.comments[String(parent.number)] || []
+        assert.equal(comments.length, 1)
+        assert.match(comments[0].body, /Stack navigation:/u)
+        const data = await getGitHubData(harness.repo, 'https://github.com/acme/widgets.git')
+        assert.equal(data.available, true)
+        assert.deepEqual(
+          data.pullRequests.map((pr) => pr.number).sort((a, b) => a - b),
+          state.prs.map((pr) => pr.number).sort((a, b) => a - b),
+        )
+        const exact = await getPullRequest(harness.repo, parent.number)
+        assert.equal(exact.body, parent.body)
+        assert.equal(exact.headOid, parent.headOid)
+      },
+      { transport: new GhGitHubTransport() },
+    )
   },
 )

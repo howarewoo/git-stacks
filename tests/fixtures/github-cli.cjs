@@ -35,18 +35,15 @@ function valueFor(args, flag) {
   return index >= 0 ? args[index + 1] : undefined
 }
 
-function formValues(args) {
-  const result = new Map()
-  for (let index = 0; index < args.length; index += 1) {
-    if (args[index] !== '-f' && args[index] !== '-F') continue
-    const value = args[index + 1]
-    if (typeof value !== 'string') continue
-    const separator = value.indexOf('=')
-    if (separator <= 0) continue
-    result.set(value.slice(0, separator), value.slice(separator + 1))
-    index += 1
+function jsonValues(args, input) {
+  const flag = valueFor(args, '--input')
+  if (flag === undefined) return {}
+  if (flag !== '-') fail('the fixture expects JSON on stdin')
+  try {
+    return JSON.parse(input === undefined ? '' : input)
+  } catch {
+    fail('invalid JSON input')
   }
-  return result
 }
 
 function bareGit(args, fixture, options = {}) {
@@ -85,6 +82,7 @@ function checkEntry(pr) {
 function graphPullRequest(pr, withBody, fixture) {
   const merged = pr.state === 'MERGED'
   const value = {
+    id: `PR_${pr.number}`,
     number: pr.number,
     title: pr.title,
     url: pr.url,
@@ -129,8 +127,7 @@ function repositoryName(args) {
   return null
 }
 
-function requireRepository(state, args) {
-  const forms = formValues(args)
+function requireRepository(state, args, forms) {
   const owner = forms.get('owner')
   const name = forms.get('name')
   const explicit = repositoryName(args)
@@ -216,10 +213,10 @@ function commentResponse(state, comment) {
 }
 
 function handleApi(state, args, fixture) {
-  requireRepository(state, args)
+  const forms = new Map(Object.entries(jsonValues(args, fixture.input)))
+  requireRepository(state, args, forms)
   const endpoint = args.find((arg) => /^repos\//u.test(arg) || arg === 'user')
   const method = valueFor(args, '--method') || 'GET'
-  const forms = formValues(args)
   if (endpoint === 'user') return actor(state.currentUser)
   if (!endpoint) fail(`unknown gh api endpoint: ${args.join(' ')}`)
   const repository = `${state.repository.owner}/${state.repository.name}`
@@ -233,11 +230,16 @@ function handleApi(state, args, fixture) {
       allow_rebase_merge: state.repository.allowRebaseMerge === true,
     }
   }
+  if (endpoint === `${prefix}/pulls` && method === 'POST') {
+    const pr = createPullRequest(state, forms, fixture)
+    return { ...restPullRequest(pr), html_url: pr.url }
+  }
   const prNumber = parseNumberFromEndpoint(endpoint, `${prefix}/pulls`)
   if (prNumber !== null && endpoint.endsWith(`/pulls/${prNumber}`)) {
     const pr = findPr(state, prNumber)
     if (method === 'GET') return restPullRequest(pr, fixture)
     if (method !== 'PATCH') fail(`unsupported pull request method ${method}`)
+    if (forms.has('draft')) fail('draft cannot be updated through REST')
     if (forms.has('title')) pr.title = forms.get('title')
     if (forms.has('body')) pr.body = forms.get('body')
     if (forms.has('base')) pr.base = forms.get('base')
@@ -263,7 +265,7 @@ function handleApi(state, args, fixture) {
     const key = String(number)
     if (!Array.isArray(state.comments[key])) state.comments[key] = []
     if (method === 'GET')
-      return [state.comments[key].map((comment) => commentResponse(state, comment))]
+      return state.comments[key].map((comment) => commentResponse(state, comment))
     if (method !== 'POST') fail(`unsupported issue comments method ${method}`)
     const id = Number.isInteger(state.nextCommentId)
       ? state.nextCommentId++
@@ -293,80 +295,78 @@ function handleApi(state, args, fixture) {
 }
 
 function handleGraphql(state, args, fixture) {
-  const forms = formValues(args)
-  requireRepository(state, args)
-  const query = forms.get('query') || ''
-  const numberValue = forms.get('number')
+  const body = jsonValues(args, fixture.input)
+  const forms = new Map(Object.entries(body.variables || {}))
+  requireRepository(state, args, forms)
+  const query = body.query || ''
+  const field = query.includes('convertPullRequestToDraft')
+    ? 'convertPullRequestToDraft'
+    : query.includes('markPullRequestReadyForReview')
+      ? 'markPullRequestReadyForReview'
+      : null
+  if (field) {
+    const match = /^PR_(\d+)$/u.exec(String(forms.get('pullRequestId') || ''))
+    if (!match) fail('Invalid pull request ID')
+    const pr = findPr(state, Number(match[1]))
+    if (pr.state !== 'OPEN') fail('Pull request is not open')
+    pr.draft = field === 'convertPullRequestToDraft'
+    return { data: { [field]: { pullRequest: { id: `PR_${pr.number}`, isDraft: pr.draft } } } }
+  }
   if (query.includes('pullRequest(number:')) {
-    const number = Number(numberValue)
-    const pr = findPr(state, number)
+    const pr = findPr(state, Number(forms.get('number')))
     return { data: { repository: { pullRequest: graphPullRequest(pr, true, fixture) } } }
   }
-  const nodes = state.prs
-    .filter((pr) => pr.state === 'OPEN')
-    .map((pr) => graphPullRequest(pr, false, fixture))
-  return [
-    {
-      data: {
-        repository: {
-          pullRequests: {
-            nodes,
-            pageInfo: { hasNextPage: false, endCursor: null },
+  const open = state.prs.filter((pr) => pr.state === 'OPEN')
+  // One PR per page, so a second request carrying a cursor proves pagination advanced.
+  const after = forms.get('endCursor')
+  const start = after && after !== 'null' ? Number(String(after).replace('cursor:', '')) : 0
+  const next = start + 1
+  return {
+    data: {
+      repository: {
+        pullRequests: {
+          nodes: open.slice(start, start + 1).map((pr) => graphPullRequest(pr, false, fixture)),
+          pageInfo: {
+            hasNextPage: next < open.length,
+            endCursor: next < open.length ? `cursor:${next}` : null,
           },
         },
       },
     },
-  ]
+  }
 }
 
-function handlePr(state, args, fixture) {
-  const subcommand = args[1]
-  requireRepository(state, args)
-  if (subcommand === 'create') {
-    const headValue = valueFor(args, '--head')
-    const base = valueFor(args, '--base')
-    const title = valueFor(args, '--title')
-    const body = valueFor(args, '--body')
-    if (!headValue || !base || typeof title !== 'string' || typeof body !== 'string') {
-      fail('pr create requires head, base, title, and body')
-    }
-    const separator = headValue.indexOf(':')
-    const owner = separator >= 0 ? headValue.slice(0, separator) : state.repository.owner
-    const head = separator >= 0 ? headValue.slice(separator + 1) : headValue
-    const headRepository = `${owner}/${state.repository.name}`
-    const headOid = bareRef(`refs/heads/${head}`, fixture)
-    if (!headOid) fail(`cannot create PR for missing branch ${head}`)
-    const number = nextNumber(state)
-    const pr = {
-      number,
-      title,
-      body,
-      base,
-      head,
-      headRepository,
-      draft: args.includes('--draft'),
-      state: 'OPEN',
-      checks: 'none',
-      reviewDecision: null,
-      mergeState: 'CLEAN',
-      url: `https://github.com/${state.repository.owner}/${state.repository.name}/pull/${number}`,
-      headOid,
-      mergeOid: null,
-      mergedAt: null,
-    }
-    state.prs.push(pr)
-    if (!state.comments) state.comments = {}
-    state.comments[String(number)] = []
-    return `${pr.url}\n`
+function createPullRequest(state, forms, fixture) {
+  const head = forms.get('head') || ''
+  const separator = head.indexOf(':')
+  const owner = separator >= 0 ? head.slice(0, separator) : state.repository.owner
+  const branch = separator >= 0 ? head.slice(separator + 1) : head
+  const headOid = bareRef(`refs/heads/${branch}`, fixture)
+  if (!headOid) fail(`cannot create PR for missing branch ${branch}`)
+  if (state.prs.some((pr) => pr.head === branch && pr.state === 'OPEN'))
+    fail(`a pull request for ${branch} already exists`)
+  const number = nextNumber(state)
+  const pr = {
+    number,
+    title: forms.get('title') || '',
+    body: forms.get('body') || '',
+    base: forms.get('base') || '',
+    head: branch,
+    headRepository: `${owner}/${state.repository.name}`,
+    draft: forms.get('draft') === 'true',
+    state: 'OPEN',
+    checks: 'none',
+    reviewDecision: null,
+    mergeState: 'CLEAN',
+    url: `https://github.com/${state.repository.owner}/${state.repository.name}/pull/${number}`,
+    headOid,
+    mergeOid: null,
+    mergedAt: null,
   }
-  if (subcommand === 'ready') {
-    const number = Number(args[2])
-    const pr = findPr(state, number)
-    if (pr.state === 'MERGED') fail(`pull request #${number} is already merged`)
-    pr.draft = args.includes('--undo')
-    return ''
-  }
-  fail(`unknown gh pr request: ${args.join(' ')}`)
+  state.prs.push(pr)
+  if (!state.comments) state.comments = {}
+  state.comments[String(number)] = []
+  return pr
 }
 
 /**
@@ -375,11 +375,11 @@ function handlePr(state, args, fixture) {
  * launching a `gh` executable, because `child_process` cannot run a shebang
  * script or a `.cmd` file on Windows without a shell.
  */
-function runGitHubCli({ statePath, barePath, realGit, args, cwd }) {
+function runGitHubCli({ statePath, barePath, realGit, args, cwd, input }) {
   if (!statePath || !barePath || !realGit) {
     fail('fixture state, bare repository, and real Git are required')
   }
-  const fixture = { statePath, barePath, realGit }
+  const fixture = { statePath, barePath, realGit, input }
   const state = loadState(statePath)
   record(state, args, cwd)
   let result
@@ -390,16 +390,33 @@ function runGitHubCli({ statePath, barePath, realGit, args, cwd }) {
     }
     if (args[0] === 'api' && args.includes('graphql')) result = handleGraphql(state, args, fixture)
     else if (args[0] === 'api') result = handleApi(state, args, fixture)
-    else if (args[0] === 'pr') result = handlePr(state, args, fixture)
     else if (args[0] === 'auth' && args[1] === 'status')
       result = 'github.com\n  Logged in to github.com as fixture-user\n'
     else fail(`unknown gh request: ${args.join(' ')}`)
     saveState(state, statePath)
-    return typeof result === 'string' ? result : `${JSON.stringify(result)}\n`
+    return response(state, result, args)
   } catch (error) {
     saveState(state, statePath)
     throw error
   }
+}
+
+/**
+ * The `gh api --include` envelope: the HTTP status line and rate limit headers
+ * ahead of the body, which is what the `gh` transport parses before the JSON.
+ */
+function response(state, result, args) {
+  const body = typeof result === 'string' ? result : `${JSON.stringify(result)}\n`
+  if (!args.includes('--include')) return body
+  const prefix = `repos/${state.repository.owner}/${state.repository.name}/pulls`
+  const status = args.includes(prefix) && args.includes('POST') ? 201 : 200
+  const headers =
+    `HTTP/2 ${status} OK\r\n` +
+    'x-ratelimit-limit: 5000\r\n' +
+    'x-ratelimit-remaining: 4998\r\n' +
+    'x-ratelimit-reset: 1800000000\r\n' +
+    'x-ratelimit-resource: core\r\n\r\n'
+  return `${headers}${body}`
 }
 
 module.exports = { GitHubCliFailure, runGitHubCli }

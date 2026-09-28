@@ -49,6 +49,14 @@ interface ExecFileBoundary {
   ) => Promise<{ stdout: string; stderr: string }>
 }
 
+/**
+ * What a real `execFile` call hands back: the promise Git Stacks awaits, plus
+ * the child whose stdin it writes the request body to before awaiting.
+ */
+interface PromiseWithChild<T> extends Promise<T> {
+  child: { stdin: { end(chunk: string): void } }
+}
+
 interface CommandError extends Error {
   code: number
   stdout: string
@@ -74,6 +82,7 @@ interface GitHubCliFixture {
     realGit: string
     args: string[]
     cwd: string
+    input: string
   }): string
 }
 
@@ -117,7 +126,7 @@ export interface GitHubFixtureState {
   nextCommentId: number
   prs: GitHubFixturePullRequest[]
   comments: Record<string, GitHubFixtureComment[]>
-  requests: Array<{ argv: string[]; cwd: string; at: string }>
+  requests: Array<{ argv: string[]; cwd: string; at: string; body?: Record<string, unknown> }>
 }
 
 /**
@@ -264,30 +273,55 @@ async function runGitFixture(
   return result
 }
 
+/**
+ * Answers a `gh` request, and answers it only once the caller has finished
+ * writing the request body. The `gh` transport runs `child.child.stdin?.end(input)`
+ * and only then awaits the call, so the body reaches the fixture through a
+ * deferred promise instead of the stdin it would have been written to.
+ */
 function runGhFixture(
   harness: ActiveHarness,
   file: string,
   args: readonly string[],
   options: ExecFileOptions,
-): { stdout: string; stderr: string } {
-  try {
-    const stdout = githubCliFixture.runGitHubCli({
-      statePath: harness.statePath,
-      barePath: harness.barePath,
-      realGit: harness.realGit,
-      args: [...args],
-      cwd: typeof options.cwd === 'string' ? options.cwd : process.cwd(),
+): PromiseWithChild<{ stdout: string; stderr: string }> {
+  let input = ''
+  const result = new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
+    queueMicrotask(() => {
+      try {
+        resolve({
+          stdout: githubCliFixture.runGitHubCli({
+            statePath: harness.statePath,
+            barePath: harness.barePath,
+            realGit: harness.realGit,
+            args: [...args],
+            cwd: typeof options.cwd === 'string' ? options.cwd : process.cwd(),
+            input,
+          }),
+          stderr: '',
+        })
+      } catch (error) {
+        const code = (error as { code?: unknown }).code
+        reject(
+          commandError(
+            file,
+            args,
+            typeof code === 'number' ? code : 2,
+            `${error instanceof Error ? error.message : String(error)}\n`,
+          ),
+        )
+      }
     })
-    return { stdout, stderr: '' }
-  } catch (error) {
-    const code = (error as { code?: unknown }).code
-    throw commandError(
-      file,
-      args,
-      typeof code === 'number' ? code : 2,
-      `${error instanceof Error ? error.message : String(error)}\n`,
-    )
-  }
+  })
+  return Object.assign(result, {
+    child: {
+      stdin: {
+        end(chunk: string) {
+          input += chunk
+        },
+      },
+    },
+  })
 }
 
 function runFixtureCommand(
@@ -299,7 +333,7 @@ function runFixtureCommand(
   if (!harness) return realPromisifiedExecFile(file, args, options)
   const command = commandName(file)
   if (command === 'git') return runGitFixture(harness, file, args, options)
-  if (command === 'gh') return Promise.resolve(runGhFixture(harness, file, args, options))
+  if (command === 'gh') return runGhFixture(harness, file, args, options)
   return realPromisifiedExecFile(file, args, options)
 }
 
@@ -376,7 +410,6 @@ export async function createGitHubHarness(): Promise<GitHubHarness> {
     await mkdir(repo)
     await writeFile(statePath, `${JSON.stringify(initialState(), null, 2)}\n`, 'utf8')
     await writeFile(transportLog, '', 'utf8')
-
     await runRealGit(realGit, root, ['init', '--bare', bare])
     await runBareGit(realGit, bare, ['config', 'user.name', 'GitHub Fixture'])
     await runBareGit(realGit, bare, ['config', 'user.email', 'github-fixture@example.invalid'])
@@ -423,8 +456,16 @@ export async function createGitHubHarness(): Promise<GitHubHarness> {
     }
     active = fixture
 
+    // The API double and the transport log read the fixture through the
+    // environment, because they are loaded as plain modules the test process
+    // imports rather than as the intercepted `gh` and `git` commands.
     const env: NodeJS.ProcessEnv = {
       ...process.env,
+      GIT_STACKS_FIXTURE_ROOT: root,
+      GIT_STACKS_FIXTURE_STATE: statePath,
+      GIT_STACKS_FIXTURE_BARE: bare,
+      GIT_STACKS_REAL_GIT: realGit,
+      GIT_STACKS_TRANSPORT_LOG: transportLog,
       GH_HOST: 'github.com',
       GH_TOKEN: 'fixture-token',
       GH_REPO: 'acme/widgets',

@@ -787,22 +787,20 @@ test('manual conflict resolution accepts UTF-8 content through the file byte lim
     const tooLarge = 'é'.repeat(1_100_000)
     await assert.rejects(
       runAction(repo, {
-        type: 'resolveFile',
+        type: 'resolveConflict',
         path: 'shared.txt',
         fingerprint: view.fingerprint,
-        strategy: 'manual',
-        content: tooLarge,
+        resolution: { kind: 'content', content: tooLarge },
       }),
     )
     assert.equal((await getFileView(repo, 'shared.txt')).fingerprint, view.fingerprint)
 
     const resolved = 'é'.repeat(400_000)
     await runAction(repo, {
-      type: 'resolveFile',
+      type: 'resolveConflict',
       path: 'shared.txt',
       fingerprint: view.fingerprint,
-      strategy: 'manual',
-      content: resolved,
+      resolution: { kind: 'content', content: resolved },
     })
     assert.equal(await readFile(join(repo, 'shared.txt'), 'utf8'), resolved)
     await runAction(repo, { type: 'rebaseAbort' })
@@ -866,11 +864,10 @@ test('conflict resolution preserves a file edited after preflight', async () => 
       async () => {
         await assert.rejects(
           runAction(repo, {
-            type: 'resolveFile',
+            type: 'resolveConflict',
             path: 'shared.txt',
             fingerprint: view.fingerprint,
-            strategy: 'ours',
-            content: '',
+            resolution: { kind: 'choice', choice: 'current' },
           }),
           /file changed during the action/u,
         )

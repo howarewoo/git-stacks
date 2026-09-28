@@ -13,5 +13,5 @@
     "types": ["node", "electron-vite/node", "vite/client"],
     "paths": { "@/*": ["./src/renderer/src/*"] }
   },
-  "include": ["src/**/*", "tests/**/*", "electron.vite.config.ts"]
+  "include": ["src/**/*", "tests/**/*", "electron.vite.config.ts", "playwright.config.ts"]
 }
