@@ -99,7 +99,7 @@ test('change groups separate staged, unstaged, untracked, renamed, and conflicte
     [
       'src/renderer/src/components/data-views.tsx',
       'src/renderer/src/styles.css',
-      'docs/design-system/README.md',
+      'DESIGN.md',
       'src/renderer/src/lib/pull-request-state.ts',
       'src/renderer/src/components/conflicted.tsx',
     ],
@@ -123,7 +123,7 @@ test('a filtered bulk action only covers the visible files', () => {
   )
   assert.deepEqual(changePaths(groups.visibleUnstaged), ['src/renderer/src/styles.css'])
   assert.ok(
-    !changePaths(groups.visibleUnstaged).includes('docs/design-system/README.md'),
+    !changePaths(groups.visibleUnstaged).includes('DESIGN.md'),
     'a hidden file must not be staged by a filtered bulk action',
   )
 })
@@ -165,7 +165,7 @@ test('clean, staged-only, unstaged-only, and filtered states each read truthfull
   assert.match(filtered, /Stage shown/)
   assert.match(filtered, /Unstage shown/)
   assert.match(filtered, /No staged files match your search\./)
-  assert.ok(!filtered.includes('docs/design-system/README.md'))
+  assert.ok(!filtered.includes('DESIGN.md'))
 })
 
 test('a conflicted file blocks bulk staging and says why', () => {
