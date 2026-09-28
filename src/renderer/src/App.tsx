@@ -70,6 +70,7 @@ import {
 } from './lib/branches'
 import { WorkflowDialog, type WorkflowRequest } from './components/workflow-dialog'
 import { WorkspaceNavigation } from './components/workspace-navigation'
+import { ConflictResolver } from './components/conflict-resolver'
 import { HistoryView, OperationBanner, StackView } from './components/repository-views'
 import {
   ChangesView,
@@ -262,6 +263,7 @@ function App() {
   const [commitMessage, setCommitMessage] = React.useState('')
   const [commitAmend, setCommitAmend] = React.useState(false)
   const [inspectedPath, setInspectedPath] = React.useState<string | null>(null)
+  const [conflictPath, setConflictPath] = React.useState<string | null>(null)
   const [workflow, setWorkflow] = React.useState<{
     id: number
     repoPath: string
@@ -493,6 +495,11 @@ function App() {
     if (!snapshot || isBusy) return
     setActionError(null)
     setWorkflow({ id: ++workflowSequence.current, repoPath: snapshot.path, request })
+  }
+  const openConflictResolver = (path: string) => {
+    if (!snapshot || isBusy) return
+    setActionError(null)
+    setConflictPath(path)
   }
   const deleteChildren = deleteTarget
     ? allBranches.filter(
@@ -1086,6 +1093,7 @@ function App() {
           setActionError(null)
           setInspectedPath(path)
         }}
+        onResolveConflict={openConflictResolver}
         onStash={() => openWorkflow({ kind: 'stash' })}
         onSubmitCommit={submitCommit}
         operationActive={operationActive}
@@ -1627,6 +1635,7 @@ function App() {
           busy={isBusy}
           runAction={runAction}
           onRequest={openWorkflow}
+          onResolveConflict={openConflictResolver}
           onShowChanges={() => setWorkspaceView('changes')}
         />
       ) : null}
@@ -1646,6 +1655,19 @@ function App() {
           runAction={runAction}
           onClose={() => setWorkflow(null)}
           onRequest={openWorkflow}
+        />
+      ) : null}
+      {conflictPath && snapshot ? (
+        <ConflictResolver
+          key={conflictPath}
+          busy={isBusy}
+          actionError={actionError}
+          path={conflictPath}
+          conflictPresent={snapshot.files.some(
+            (file) => file.conflicted && file.path === conflictPath,
+          )}
+          runAction={runAction}
+          onClose={() => setConflictPath(null)}
         />
       ) : null}
       <Dialog

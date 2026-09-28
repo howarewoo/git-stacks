@@ -139,6 +139,7 @@ export function DataSurfacesSpecimen() {
                 onCommitAmendChange={setCommitAmend}
                 onCommitMessageChange={setCommitMessage}
                 onInspect={setInspectedPath}
+                onResolveConflict={() => undefined}
                 onStash={() => openWorkflow({ kind: 'stash' })}
                 onSubmitCommit={(event) => {
                   event.preventDefault()

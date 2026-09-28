@@ -70,6 +70,7 @@ function changes(
       groups: changeGroups(snapshot.files, search),
       inspectedPath: null,
       onCommitAmendChange: () => undefined,
+      onResolveConflict: () => undefined,
       onCommitMessageChange: () => undefined,
       onInspect: () => undefined,
       onStash: () => undefined,

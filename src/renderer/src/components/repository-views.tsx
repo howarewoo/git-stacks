@@ -1,6 +1,5 @@
 import * as React from 'react'
 import {
-  Check,
   ChevronRight,
   GitBranch,
   GitCommitHorizontal,
@@ -17,7 +16,6 @@ import { Badge } from './ui/badge'
 import { Button } from './ui/button'
 import { SegmentedControl } from './ui/segmented-control'
 import { Select } from './ui/select'
-import { Textarea } from './ui/textarea'
 import { sortBranchesByUpdatedAt } from '../lib/branches'
 import { workflowError, type RunAction, type WorkflowRequest } from './workflow-dialog'
 import { PhaseStatus, WorkflowActions } from './workflow-composition'
@@ -43,10 +41,12 @@ export function OperationBanner({
   runAction,
   onRequest,
   onShowChanges,
-}: CommonProps & { onShowChanges: () => void }) {
+  onResolveConflict,
+}: CommonProps & { onShowChanges: () => void; onResolveConflict: (path: string) => void }) {
   const operation = snapshot.operation
   const stack = snapshot.stackOperation
   const conflicts = snapshot.files.filter((file) => file.conflicted).length
+  const firstConflict = snapshot.files.find((file) => file.conflicted)?.path ?? null
   if (!operation && !stack && !conflicts) return null
   const label = stack
     ? 'Stack restack'
@@ -90,6 +90,16 @@ export function OperationBanner({
         <Button size="sm" variant="secondary" onClick={onShowChanges}>
           View changes
         </Button>
+        {conflicts > 0 && firstConflict ? (
+          <Button
+            size="sm"
+            variant="secondary"
+            tooltip="Open the three-way resolver for the first conflicted file. It explains the operation, shows index stages 1, 2, and 3, and stages a result only after the file is revalidated."
+            onClick={() => onResolveConflict(firstConflict)}
+          >
+            Resolve conflicts
+          </Button>
+        ) : null}
         {resumable ? (
           <>
             <Button
@@ -250,18 +260,19 @@ export function FileInspector({
   busy,
   runAction,
   onClose,
+  onResolveConflict,
   actionError,
 }: Omit<CommonProps, 'onRequest'> & {
   path: string
   onClose: () => void
+  onResolveConflict: (path: string) => void
   actionError: string | null
 }) {
   const [file, setFile] = React.useState<FileView | null>(null)
   const [loading, setLoading] = React.useState(true)
   const [error, setError] = React.useState<string | null>(null)
   const [tab, setTab] = React.useState<'working' | 'staged' | 'resolve'>('working')
-  const [content, setContent] = React.useState('')
-  const [pending, setPending] = React.useState<'discard' | 'ours' | 'theirs' | null>(null)
+  const [pending, setPending] = React.useState<'discard' | null>(null)
   const [revision, setRevision] = React.useState(0)
   React.useEffect(() => {
     let active = true
@@ -273,7 +284,6 @@ export function FileInspector({
       .then((next) => {
         if (!active) return
         setFile(next)
-        setContent(next.content ?? '')
         setTab(
           next.conflicted
             ? 'resolve'
@@ -292,20 +302,6 @@ export function FileInspector({
       active = false
     }
   }, [path, snapshot, revision])
-  const resolve = async (strategy: 'ours' | 'theirs' | 'manual') => {
-    if (!file || busy || loading) return
-    const success = await runAction(
-      {
-        type: 'resolveFile',
-        path,
-        fingerprint: file.fingerprint,
-        strategy,
-        content: strategy === 'manual' ? content : '',
-      },
-      'Resolve and stage file',
-    )
-    if (success) setPending(null)
-  }
   const discard = async () => {
     if (!file || busy || loading) return
     if (
@@ -318,7 +314,6 @@ export function FileInspector({
   }
   const state = snapshot.files.find((item) => item.path === path)
   const canDiscard = state && !state.conflicted && (state.worktree !== ' ' || state.index === '?')
-  const rebase = snapshot.operation === 'rebase'
   const tabOptions = (
     [
       { value: 'working', label: 'Working tree' },
@@ -382,68 +377,18 @@ export function FileInspector({
           {tab === 'resolve' ? (
             <div className="conflict-editor dialog-form">
               <p className="workflow-note">
-                {rebase
-                  ? 'During rebase, “ours” is the new base; “theirs” is the commit being replayed.'
-                  : '“Ours” is the current branch; “theirs” is the incoming version. A deleted side resolves by deleting the file.'}
+                The resolver reads index stages 1, 2, and 3 for this path, names both sides the way
+                the active Git operation means them, and stages a result only after the file it
+                showed is still the file on disk.
               </p>
-              <div className="workflow-row">
-                <Button
-                  size="sm"
-                  variant="secondary"
-                  disabled={busy}
-                  tooltip={
-                    rebase
-                      ? 'Keep the new-base (ours) version for this file. Confirming stages it and replaces manual edits.'
-                      : 'Keep the current-branch (ours) version for this file. Confirming stages it and replaces manual edits.'
-                  }
-                  onClick={() => setPending('ours')}
-                >
-                  {rebase ? 'Use new base (ours)…' : 'Use ours…'}
-                </Button>
-                <Button
-                  size="sm"
-                  variant="secondary"
-                  disabled={busy}
-                  tooltip={
-                    rebase
-                      ? 'Keep the replayed-commit (theirs) version for this file. Confirming stages it and replaces manual edits.'
-                      : 'Keep the incoming (theirs) version for this file. Confirming stages it and replaces manual edits.'
-                  }
-                  onClick={() => setPending('theirs')}
-                >
-                  {rebase ? 'Use replayed commit (theirs)…' : 'Use theirs…'}
-                </Button>
-              </div>
-              {file.content !== null && !file.binary && !file.truncated ? (
-                <>
-                  <label htmlFor="conflict-content">Edit the resolved file</label>
-                  <Textarea
-                    id="conflict-content"
-                    rows={12}
-                    spellCheck={false}
-                    value={content}
-                    disabled={busy}
-                    onChange={(event) => setContent(event.target.value)}
-                  />
-                  <p className="workflow-note">
-                    Remove conflict markers, keep the intended content, then save and stage.
-                  </p>
-                  <Button
-                    variant="accent"
-                    disabled={busy}
-                    onClick={() => resolve('manual')}
-                    tooltip="Save the edited content and stage it to mark this file resolved. Local working-tree change only; continue the operation afterwards."
-                  >
-                    <Check className="size-3.5" />
-                    Save and stage resolution
-                  </Button>
-                </>
-              ) : (
-                <p className="workflow-note">
-                  This file cannot be safely edited as text here. Choose a side, or resolve it in
-                  your editor and stage it.
-                </p>
-              )}
+              <Button
+                variant="accent"
+                disabled={busy}
+                tooltip="Open the three-way resolver for this file. Nothing is staged until you mark the conflict resolved there."
+                onClick={() => onResolveConflict(path)}
+              >
+                Open conflict resolver
+              </Button>
             </div>
           ) : tab === 'working' && state?.index === '?' ? (
             <div className="code-region">
@@ -493,11 +438,7 @@ export function FileInspector({
             <div className="inline-confirm" data-composition="destructive">
               <PhaseStatus
                 phase="blocked"
-                message={
-                  pending === 'discard'
-                    ? 'Discard the displayed unstaged changes? An untracked file will be deleted. This cannot be undone through Git.'
-                    : `Replace this conflicted file with the ${pending} version and stage it? Manual edits to the file will be replaced.`
-                }
+                message="Discard the displayed unstaged changes? An untracked file will be deleted. This cannot be undone through Git."
               />
               <WorkflowActions>
                 <Button
@@ -512,14 +453,10 @@ export function FileInspector({
                   variant="danger"
                   size="sm"
                   disabled={busy}
-                  tooltip={
-                    pending === 'discard'
-                      ? 'Confirm discarding the displayed unstaged changes. Untracked files are deleted and cannot be recovered through Git.'
-                      : `Confirm replacing this file with the ${pending} version and staging it. Manual edits are replaced.`
-                  }
-                  onClick={() => (pending === 'discard' ? discard() : resolve(pending))}
+                  tooltip="Confirm discarding the displayed unstaged changes. Untracked files are deleted and cannot be recovered through Git."
+                  onClick={discard}
                 >
-                  Confirm {pending === 'discard' ? 'discard' : 'resolution'}
+                  Confirm discard
                 </Button>
               </WorkflowActions>
             </div>
