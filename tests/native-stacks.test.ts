@@ -687,15 +687,25 @@ async function registerBottomOnlyStack(harness: GitHubHarness, stackNumber = 99)
   await harness.writeState(state)
 }
 
-function publishAction(token: string) {
+/**
+ * A submission that approves no base change, so an external retarget stays observable. Tests
+ * that genuinely need a layer retargeted pass the branches to approve.
+ */
+function publishAction(token: string, approveBase: string[] = []) {
+  const layer = (branch: string) => ({
+    title: `${branch} PR`,
+    body: '',
+    draft: false,
+    updateBase: approveBase.includes(branch),
+  })
   return {
     type: 'submitStack' as const,
     token,
     allowForce: false,
     layers: {
-      'feature/step-1': { title: 'Step 1 PR', body: '', draft: false, updateBase: true },
-      'feature/step-2': { title: 'Step 2 PR', body: '', draft: false, updateBase: true },
-      'feature/step-3': { title: 'Step 3 PR', body: '', draft: false, updateBase: true },
+      'feature/step-1': layer('feature/step-1'),
+      'feature/step-2': layer('feature/step-2'),
+      'feature/step-3': layer('feature/step-3'),
     },
   }
 }
@@ -867,7 +877,10 @@ test('publishStack rejects an already-registered stack another actor unstacked b
     )
 
     await assert.rejects(
-      runStackAction(harness.repo, publishAction(preview.token)),
+      runStackAction(
+        harness.repo,
+        publishAction(preview.token, ['feature/step-1', 'feature/step-2', 'feature/step-3']),
+      ),
       (error) =>
         error instanceof NativeStackError &&
         error.status === 'invalid-chain' &&
@@ -929,7 +942,10 @@ test('publishStack rejects extending a partially registered stack when an alread
     )
 
     await assert.rejects(
-      runStackAction(harness.repo, publishAction(preview.token)),
+      runStackAction(
+        harness.repo,
+        publishAction(preview.token, ['feature/step-1', 'feature/step-2', 'feature/step-3']),
+      ),
       (error) =>
         error instanceof NativeStackError &&
         error.status === 'invalid-chain' &&

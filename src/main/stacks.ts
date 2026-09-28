@@ -196,11 +196,23 @@ interface PublishOperation {
   branches: PublishBranchFacts[]
   steps: PublishStep[]
   stackNumber: number | null
-  /** The members native stack `stackNumber` held when the preview was taken. */
-  capturedMembers: number[]
+  /**
+   * The exact members native stack `stackNumber` held when the preview was taken, with the
+   * head they carried then. These are the immutable baseline every later re-read is proved
+   * against, so a push this submission made on purpose is the only thing that may differ.
+   */
+  capturedMembers: CapturedStackMember[]
   stackAction: PublishStackAction
   status: 'running' | 'failed' | 'completed'
   message: string
+}
+
+interface CapturedStackMember {
+  number: number
+  headSha: string | undefined
+  head: string
+  base: string
+  state: string
 }
 
 const PUBLISH_VERSION = 1
@@ -1959,10 +1971,17 @@ function publishProgressOf(operation: PublishOperation): PublishProgress {
  * The pull requests the previewed native stack already held, so the submission can prove
  * that stack still owns them before it appends anything to it.
  */
-function capturedStackMembers(plan: StackPlan, stackNumber: number | null): number[] {
+function capturedStackMembers(plan: StackPlan, stackNumber: number | null): CapturedStackMember[] {
   if (stackNumber === null) return []
   const stack = plan.capturedStacks.find((entry) => entry.number === stackNumber)
-  return stack ? stack.members.map((member) => member.number) : []
+  if (!stack) return []
+  return stack.members.map((member) => ({
+    number: member.number,
+    headSha: member.headSha,
+    head: member.head,
+    base: member.base,
+    state: member.state,
+  }))
 }
 
 async function buildPublishOperation(
@@ -3205,10 +3224,10 @@ async function runPublishStep(
     // stack was unstacked outright or the member was moved somewhere else.
     const anywhere = new Set(stacks.flatMap((stack) => stack.pullRequests.map((m) => m.number)))
     for (const member of operation.capturedMembers) {
-      if (numbers.includes(member) && !anywhere.has(member)) {
+      if (numbers.includes(member.number) && !anywhere.has(member.number)) {
         throw new NativeStackError(
           'invalid-chain',
-          `Pull request #${member} is no longer registered in native stack #${operation.stackNumber}`,
+          `Pull request #${member.number} is no longer registered in native stack #${operation.stackNumber}`,
         )
       }
     }
@@ -3243,25 +3262,59 @@ async function runPublishStep(
       known.filter((pr) => registered.has(pr.number)),
     )
     if (!registration.valid) {
-      throw new Error(registration.message ?? 'Published pull requests are not registered')
+      // The typed status is carried through so callers branch on the failure, not its wording.
+      throw new NativeStackError(
+        registration.status,
+        registration.message ?? 'Published pull requests are not registered',
+      )
+    }
+    // The registration check re-reads the members concurrently, so a force-push, retarget, or
+    // unstack that lands part-way through that batch leaves at least one stale reading behind.
+    // Every already-registered member is therefore read once more, one at a time and only after
+    // every call that could expose drift, and compared to the head the stack still records.
+    // This runs even when there is nothing to append, because a drifted member invalidates the
+    // submission either way.
+    const baseline = new Map(operation.capturedMembers.map((member) => [member.number, member]))
+    for (const member of matched.pullRequests) {
+      if (!numbers.includes(member.number)) continue
+      const captured = baseline.get(member.number)
+      // A member this submission pushed is expected to have moved; every other member must
+      // still carry the exact head the preview recorded.
+      const fresh = await getPullRequest(repoPath, member.number)
+      if (fresh.state !== 'OPEN') {
+        throw new NativeStackError(
+          'invalid-chain',
+          `Pull request #${member.number} is no longer open`,
+        )
+      }
+      // A layer this submission approved for a base change legitimately differs from what the
+      // stack still records until its retarget step runs; any other base difference is drift.
+      const layer = operation.layers.find((item) => item.pullRequest === member.number)
+      if (layer && !layer.updateBase && fresh.base !== member.base) {
+        throw new NativeStackError(
+          'invalid-chain',
+          `Pull request #${member.number} base changed from ${member.base} to ${fresh.base}`,
+        )
+      }
+      // A branch this submission pushed on purpose has legitimately moved; only a member this
+      // submission did not touch has to still carry the head the preview recorded.
+      const pushedByThisSubmission = operation.branches.some(
+        (facts) => facts.branch === layer?.branch && facts.remoteOid !== facts.oid,
+      )
+      if (
+        !pushedByThisSubmission &&
+        captured?.headSha &&
+        fresh.headOid &&
+        captured.headSha !== fresh.headOid
+      ) {
+        throw new NativeStackError(
+          'invalid-chain',
+          `Pull request #${member.number} head moved to ${fresh.headOid} since it was captured; refresh the stack preview`,
+        )
+      }
     }
     if (toAdd.length === 0) {
       return `Stack #${matched.number} already holds all ${numbers.length} pull requests`
-    }
-    // The registration check above reads the members concurrently, so a force-push, retarget,
-    // or unstack that lands part-way through that batch can leave a stale reading behind. The
-    // already-registered members are read once more, in order, right before the mutation.
-    for (const member of matched.pullRequests) {
-      if (!numbers.includes(member.number)) continue
-      const fresh = await getPullRequest(repoPath, member.number)
-      if (fresh.headOid !== member.headSha) {
-        throw new NativeStackError(
-          'invalid-chain',
-          `Pull request #${member.number} is registered in native stack #${matched.number} at ${
-            fresh.headOid ?? 'none'
-          } rather than ${member.headSha ?? 'none'}`,
-        )
-      }
     }
     await addPullRequestsToStack(owner, name, matched.number, toAdd, {
       existingStack: matched,

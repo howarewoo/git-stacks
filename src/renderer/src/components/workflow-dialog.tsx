@@ -838,27 +838,35 @@ export function WorkflowDialog({
                             {publishOffer.baseChanges.includes(layer.branch) ? (
                               <Checkbox
                                 id={`base-${id}`}
-                                label={`Rebase pull request #${
+                                label={`Change the base of pull request #${
                                   layer.pullRequest ?? '?'
-                                } onto ${layer.base}`}
+                                } to ${layer.base}`}
                                 checked={choice?.updateBase ?? false}
                                 onChange={(event) =>
                                   setChoice({ updateBase: event.target.checked })
                                 }
                               />
                             ) : null}
+                            {/*
+                              An existing pull request keeps the title, description, and review
+                              state it already has. This submission does not rewrite them, so the
+                              fields are shown for reading only rather than accepting an edit
+                              that would be silently dropped.
+                            */}
                             <Field
                               id={`title-${id}`}
                               label={`PR title for ${layer.branch}`}
                               required
                             >
                               <Input
+                                readOnly={!layer.create}
                                 value={choice?.title ?? ''}
                                 onChange={(event) => setChoice({ title: event.target.value })}
                               />
                             </Field>
                             <Field id={`body-${id}`} label={`PR description for ${layer.branch}`}>
                               <Textarea
+                                readOnly={!layer.create}
                                 value={choice?.body ?? ''}
                                 onChange={(event) => setChoice({ body: event.target.value })}
                               />
