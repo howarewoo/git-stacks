@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import { promises as fs } from 'node:fs'
-import { chmod, mkdtemp, open, readFile, rm, unlink, writeFile } from 'node:fs/promises'
+import { chmod, mkdtemp, open, readFile, rm, stat, unlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -9,6 +9,8 @@ import React from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 
 import { getFileView, resolveRepository, runAction } from '../src/main/git'
+import { runGitWithInput } from '../src/main/git-core'
+import { resolveGitRuntime, withGitRuntime } from '../src/main/git-runtime'
 import { hunkSideUnavailable, parseHunkBlock } from '../src/main/hunks'
 import {
   HunkDiffView,
@@ -83,8 +85,17 @@ async function applyHunk(
   return { view, hunk, result }
 }
 
+test('stdin-fed Git commands use the selected runtime', async () => {
+  const runtime = await resolveGitRuntime()
+  await withGitRuntime({ ...runtime, executable: '/nonexistent/git-stacks-test-git' }, async () => {
+    await assert.rejects(runGitWithInput(process.cwd(), ['apply', '--cached', '-'], ''), {
+      code: 'ENOENT',
+    })
+  })
+})
+
 test('a file keeps staged and unstaged hunks and commits only the staged subset', async () => {
-  const { root, repo, text } = await fixture()
+  const { root, repo, git, text } = await fixture()
   try {
     await writeFile(
       join(repo, 'lines.txt'),
@@ -106,13 +117,7 @@ test('a file keeps staged and unstaged hunks and commits only the staged subset'
     assert.equal(after.hunks.unstaged.hunks.length, 1)
     assert.equal(after.hunks.staged.hunks.length, 1)
 
-    await runAction(repo, {
-      type: 'commit',
-      message: 'Stage the first hunk only',
-      amend: false,
-      expectedHead: text('rev-parse', 'HEAD').trim(),
-      expectedHeadRef: 'refs/heads/main',
-    })
+    git('commit', '-m', 'Stage the first hunk only')
     const committed = text('show', 'HEAD:lines.txt')
     assert.match(committed, /line 2 staged/u)
     assert.ok(!committed.includes('line 18 left alone'), 'the commit carries only the staged hunk')
@@ -450,6 +455,37 @@ test('atomic index transaction fails closed on concurrent lock or state change w
   }
 })
 
+test('hunk staging and unstaging preserve the existing index permissions', async () => {
+  const { root, repo, text } = await fixture()
+  try {
+    const indexPath = join(repo, '.git', 'index')
+    for (const mode of [0o600, 0o660]) {
+      await writeFile(join(repo, 'lines.txt'), numbered(20, { 2: 'line 2 staged' }))
+      const unstaged = await getFileView(repo, 'lines.txt')
+      await chmod(indexPath, mode)
+      await runAction(repo, {
+        type: 'stageHunk',
+        path: 'lines.txt',
+        hunkId: unstaged.hunks.unstaged.hunks[0].id,
+        fingerprint: unstaged.fingerprint,
+      })
+      assert.equal((await stat(indexPath)).mode & 0o777, mode)
+      const staged = await getFileView(repo, 'lines.txt')
+      await chmod(indexPath, mode)
+      await runAction(repo, {
+        type: 'unstageHunk',
+        path: 'lines.txt',
+        hunkId: staged.hunks.staged.hunks[0].id,
+        fingerprint: staged.fingerprint,
+      })
+      assert.equal((await stat(indexPath)).mode & 0o777, mode)
+      assert.equal(text('diff', '--cached'), '')
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 test('in-flight other-entry staging is preserved before the lock and refused while it is owned', async () => {
   const { root, repo, git, text } = await fixture()
   const originalOpen = fs.open
@@ -598,26 +634,14 @@ test('a hunk patch fails closed when the index changed and never guesses a hunk 
 })
 
 test('a rename is refused as a whole file while its working-tree hunks still apply', async () => {
-  const { root, repo, text } = await fixture()
+  const { root, repo, git, text } = await fixture()
   try {
     await writeFile(join(repo, 'renamed.txt'), numbered(12))
     await runAction(repo, { type: 'stage', paths: ['renamed.txt'] })
-    await runAction(repo, {
-      type: 'commit',
-      message: 'Add renamed',
-      amend: false,
-      expectedHead: text('rev-parse', 'HEAD').trim(),
-      expectedHeadRef: 'refs/heads/main',
-    })
+    git('commit', '-m', 'Add renamed')
     await writeFile(join(repo, 'renamed.txt'), numbered(12, { 2: 'line 2 renamed' }))
     await runAction(repo, { type: 'stage', paths: ['renamed.txt'] })
-    await runAction(repo, {
-      type: 'commit',
-      message: 'Rename the file',
-      amend: false,
-      expectedHead: text('rev-parse', 'HEAD').trim(),
-      expectedHeadRef: 'refs/heads/main',
-    })
+    git('commit', '-m', 'Rename the file')
     execFileSync('git', ['-C', repo, 'mv', 'renamed.txt', 'moved.txt'])
 
     const staged = await getFileView(repo, 'moved.txt')

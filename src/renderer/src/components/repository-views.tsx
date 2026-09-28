@@ -426,23 +426,32 @@ export function FileInspector({
               </pre>
             </div>
           ) : (
-            <HunkDiffView
-              key={`${file.path}:${tab}`}
-              side={tab === 'staged' ? file.hunks.staged : file.hunks.unstaged}
-              sideName={tab === 'staged' ? 'staged' : 'unstaged'}
-              busy={busy || loading}
-              onApply={(selection) =>
-                runAction(
-                  {
-                    type: tab === 'staged' ? 'unstageHunk' : 'stageHunk',
-                    path: file.path,
-                    fingerprint: file.fingerprint,
-                    ...selection,
-                  },
-                  tab === 'staged' ? 'Unstage hunk' : 'Stage hunk',
-                )
-              }
-            />
+            <>
+              <HunkDiffView
+                key={`${file.path}:${tab}`}
+                side={tab === 'staged' ? file.hunks.staged : file.hunks.unstaged}
+                sideName={tab === 'staged' ? 'staged' : 'unstaged'}
+                busy={busy || loading}
+                onApply={(selection) =>
+                  runAction(
+                    {
+                      type: tab === 'staged' ? 'unstageHunk' : 'stageHunk',
+                      path: file.path,
+                      fingerprint: file.fingerprint,
+                      ...selection,
+                    },
+                    tab === 'staged' ? 'Unstage hunk' : 'Stage hunk',
+                  )
+                }
+              />
+              {(tab === 'staged' ? file.hunks.staged : file.hunks.unstaged).unavailable &&
+              (tab === 'staged' ? file.stagedDiff : file.unstagedDiff) ? (
+                <DiffView
+                  text={tab === 'staged' ? file.stagedDiff : file.unstagedDiff}
+                  truncated={file.truncated}
+                />
+              ) : null}
+            </>
           )}
           {canDiscard && tab === 'working' ? (
             <div className="inspector-actions">

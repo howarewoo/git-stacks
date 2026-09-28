@@ -127,13 +127,7 @@ export async function executeWithInput(
   const { promise, resolve, reject } = Promise.withResolvers<string>()
   const child = spawn(command, args, {
     cwd,
-    env: {
-      ...process.env,
-      GIT_TERMINAL_PROMPT: '0',
-      GH_PROMPT_DISABLED: '1',
-      GCM_INTERACTIVE: 'Never',
-      ...env,
-    },
+    env: commandEnvironment(env),
     shell: false,
     windowsHide: true,
     stdio: ['pipe', 'pipe', 'pipe'],
@@ -185,13 +179,20 @@ export async function executeWithInput(
   return promise
 }
 
-export function runGitWithInput(
+export async function runGitWithInput(
   repoPath: string,
   args: string[],
   input: string,
   env?: NodeJS.ProcessEnv,
 ): Promise<string> {
-  return executeWithInput('git', args, repoPath, input, env)
+  const runtime = await resolveGitRuntime()
+  return executeWithInput(
+    runtime.executable,
+    args,
+    repoPath,
+    input,
+    gitCommandEnvironment(runtime, commandEnvironment(env)),
+  )
 }
 
 export async function tryGit(repoPath: string, args: string[]): Promise<string | null> {
@@ -332,7 +333,13 @@ export function parseStatus(output: string): ChangedFile[] {
 }
 
 export async function getStatus(repoPath: string): Promise<ChangedFile[]> {
-  const output = await runGit(repoPath, ['status', '--porcelain=v1', '-z', '--untracked-files=all'])
+  const output = await runGit(
+    repoPath,
+    ['status', '--porcelain=v1', '-z', '--untracked-files=all'],
+    {
+      GIT_OPTIONAL_LOCKS: '0',
+    },
+  )
   return parseStatus(output)
 }
 

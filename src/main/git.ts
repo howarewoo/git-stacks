@@ -2564,7 +2564,7 @@ async function changedDiff(
   return new Promise((resolve, reject) => {
     const child = spawn(runtime.executable, args, {
       cwd: repoPath,
-      env: gitCommandEnvironment(runtime, commandEnvironment()),
+      env: gitCommandEnvironment(runtime, commandEnvironment({ GIT_OPTIONAL_LOCKS: '0' })),
       timeout: 120_000,
       windowsHide: true,
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -4260,6 +4260,7 @@ export async function runStageHunk(
       .access(realIndexPath, fsConstants.F_OK)
       .then(() => true)
       .catch(() => false)
+    const indexMode = indexExists ? (await fs.stat(realIndexPath)).mode & 0o777 : null
     if (indexExists) {
       await fs.copyFile(realIndexPath, tempIndexPath)
     }
@@ -4309,6 +4310,7 @@ export async function runStageHunk(
       throw new Error('The index changed while the patch was applied; refresh and review the file')
     }
 
+    if (indexMode !== null) await fs.chmod(tempIndexPath, indexMode)
     await lockHandle.close()
     lockHandle = null
     await fs.rename(tempIndexPath, realIndexPath)
