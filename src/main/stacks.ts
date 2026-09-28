@@ -2155,23 +2155,24 @@ async function provePublishedHead(
   operation: PublishOperation,
   layer: PublishLayer,
   pr: PullRequest,
+  expectedNumber = layer.pullRequest,
 ): Promise<void> {
   const intended = factsOf(operation, layer.branch)
   if (
-    pr.number !== layer.pullRequest ||
+    pr.number !== expectedNumber ||
     pr.head !== layer.branch ||
-    pr.headRepository !== operation.fullName ||
+    pr.headRepository?.toLowerCase() !== operation.fullName.toLowerCase() ||
     pr.state !== 'OPEN'
   ) {
     throw new NativeStackError(
       'invalid-chain',
-      `Pull request #${layer.pullRequest} no longer matches the published branch and repository or is no longer open`,
+      `Pull request #${expectedNumber} no longer matches the published branch and repository or is no longer open`,
     )
   }
   if (pr.headOid !== intended.oid) {
     throw new NativeStackError(
       'invalid-chain',
-      `Pull request #${layer.pullRequest} head moved to ${pr.headOid ?? 'none'} since it was published at ${intended.oid}`,
+      `Pull request #${expectedNumber} head moved to ${pr.headOid ?? 'none'} since it was published at ${intended.oid}`,
     )
   }
   const local = await resolveCommit(repoPath, `refs/heads/${layer.branch}`)
@@ -3300,9 +3301,17 @@ async function runPublishStep(
           `Pull request for ${layer.branch} changed during publication; inspect the published branches before retrying`,
         )
       }
+      // An accepted creation is not permission to continue from a moved head. Prove
+      // the journalled commit and both tips before recording adoption or running later layers.
+      await provePublishedHead(
+        repoPath,
+        operation,
+        layer,
+        existing,
+        layer.pullRequest ?? existing.number,
+      )
       if (layer.pullRequest === null) {
-        // GitHub accepted this operation's own creation and the response was lost. The pull
-        // request is proven to be ours by the branch and base this operation asked for.
+        // GitHub accepted this operation's own creation and the response was lost.
         step.detail = `Recovered pull request #${existing.number} from a lost response`
       }
       layer.pullRequest = existing.number

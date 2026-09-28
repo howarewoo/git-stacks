@@ -2398,3 +2398,142 @@ for (const drift of ['remote', 'local', 'none'] as const) {
     })
   }
 }
+
+test('publication accepts mixed-case GitHub repository identity', async () => {
+  await withHarness(async (harness) => {
+    await setupThreeBranches(harness)
+    const state = await harness.readState()
+    for (const pr of state.prs) pr.headRepository = 'Acme/Widgets'
+    await harness.writeState(state)
+    const preview = await previewStack(
+      harness.repo,
+      await getSnapshot(harness.repo),
+      'publish',
+      'feature/step-2',
+    )
+    assert.deepEqual(preview.blockers, [])
+    await runStackAction(harness.repo, publishAction(preview.token))
+    assert.equal((await getSubmitStackProgress(harness.repo))?.status, 'completed')
+    assert.deepEqual(
+      (await harness.readState()).stacks?.[0].pull_requests.map((pr) => pr.number),
+      [101, 102, 103],
+    )
+  })
+})
+
+for (const drift of ['head', 'remote', 'local', 'none'] as const) {
+  test(`lost PR adoption proves ${drift} drift before later layers mutate`, async () => {
+    await withHarness(async (harness) => {
+      await setupFreshBranches(harness)
+      const branches = ['feature/step-1', 'feature/step-2', 'feature/step-3']
+      for (const [index, branch] of branches.entries()) {
+        const parent = index === 0 ? 'main' : branches[index - 1]
+        git(harness, ['config', '--local', `branch.${branch}.parent`, parent])
+        git(harness, [
+          'config',
+          '--local',
+          `branch.${branch}.parentTip`,
+          git(harness, ['rev-parse', parent]),
+        ])
+      }
+      const preview = await previewStack(
+        harness.repo,
+        await getSnapshot(harness.repo),
+        'publish',
+        'feature/step-2',
+      )
+      assert.deepEqual(preview.blockers, [])
+      assert.deepEqual(
+        preview.publish?.layers.map((layer) => layer.branch),
+        branches,
+      )
+      const reviewed = git(harness, ['rev-parse', branches[0]])
+      const moved = git(harness, ['rev-parse', 'main'])
+      const inner = createGitHubApiDouble()
+      let interrupt = true
+      let reportedHead: string | null = null
+      const writes: string[] = []
+      setGitHubTransport(
+        new DirectGitHubTransport({
+          token: 'fixture-token',
+          fetch: async (input, init) => {
+            if (
+              (init?.method ?? 'GET') !== 'GET' &&
+              (!String(input).endsWith('/graphql') || /\bmutation\b/u.test(String(init?.body)))
+            )
+              writes.push(`${init?.method} ${String(input)}`)
+            const response = await inner(input, init)
+            if (interrupt && init?.method === 'POST' && String(input).endsWith('/pulls')) {
+              interrupt = false
+              assert.equal(response.ok, true)
+              return new Response(JSON.stringify({ message: 'Lost accepted creation' }), {
+                status: 502,
+              })
+            }
+            if (reportedHead && String(input).endsWith('/graphql')) {
+              const payload = await response.json()
+              const repository = payload.data?.repository
+              const prs = repository?.pullRequests?.nodes ?? [repository?.pullRequest]
+              for (const pr of prs) {
+                if (pr?.headRefName === branches[0]) pr.headRefOid = reportedHead
+              }
+              return new Response(JSON.stringify(payload), { status: response.status })
+            }
+            return response
+          },
+        }),
+      )
+      await assert.rejects(runStackAction(harness.repo, publishAction(preview.token)))
+      const stopped = await getSubmitStackProgress(harness.repo)
+      assert.equal(stopped?.steps.find((step) => step.status === 'failed')?.branch, branches[0])
+      assert.equal(stopped?.layers[0].pullRequest, null)
+      const state = await harness.readState()
+      assert.deepEqual(
+        state.prs.map((pr) => pr.head),
+        [branches[0]],
+      )
+      // GitHub casing is cosmetic on both the known-number and lost-response paths.
+      state.prs[0].headRepository = 'Acme/Widgets'
+      await harness.writeState(state)
+      if (drift === 'remote') {
+        bareGit(harness, ['update-ref', `refs/heads/${branches[0]}`, moved])
+        reportedHead = reviewed // A stale API read must not substitute for remote tip proof.
+      } else if (drift === 'local') {
+        git(harness, ['update-ref', `refs/heads/${branches[0]}`, moved])
+      } else if (drift === 'head') {
+        reportedHead = moved // A PR OID mismatch must fail even if both branch tips match.
+      }
+      const remoteBefore = bareGit(harness, [
+        'for-each-ref',
+        '--format=%(refname) %(objectname)',
+        'refs/heads',
+      ])
+      writes.length = 0
+      if (drift === 'none') {
+        await runStackAction(harness.repo, { type: 'submitStackRetry' })
+        assert.equal((await getSubmitStackProgress(harness.repo))?.status, 'completed')
+        assert.deepEqual(
+          (await harness.readState()).prs.map((pr) => pr.head),
+          branches,
+        )
+        assert.equal(writes.filter((write) => write.endsWith('/pulls')).length, 2)
+        return
+      }
+      await assert.rejects(runStackAction(harness.repo, { type: 'submitStackRetry' }))
+      assert.deepEqual(writes, [], 'drift must block before creating any later PR or stack')
+      assert.equal(
+        bareGit(harness, ['for-each-ref', '--format=%(refname) %(objectname)', 'refs/heads']),
+        remoteBefore,
+      )
+      const failed = await getSubmitStackProgress(harness.repo)
+      assert.equal(failed?.status, 'failed')
+      assert.equal(failed?.layers[0].pullRequest, null, 'failed proof must not persist adoption')
+      assert.equal(failed?.steps.find((step) => step.status === 'failed')?.kind, 'create-pr')
+      assert.deepEqual(
+        (await harness.readState()).prs.map((pr) => pr.head),
+        [branches[0]],
+      )
+      assert.deepEqual((await harness.readState()).stacks, [])
+    })
+  })
+}
