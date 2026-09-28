@@ -304,27 +304,26 @@ test.describe('Safety and mutation dispatch invariants', () => {
       })
       await expect(fileInspector).toBeVisible()
 
-      // Choosing a side must not dispatch: the file is replaced and staged only on confirmation.
-      await fileInspector.getByRole('button', { name: 'Use theirs…', exact: true }).click()
-      await expect(
-        fileInspector.getByText(
-          'Replace this conflicted file with the theirs version and stage it? Manual edits to the file will be replaced.',
-          { exact: true },
-        ),
-      ).toBeVisible()
+      await fileInspector
+        .getByRole('button', { name: 'Open conflict resolver', exact: true })
+        .click()
+      const dialog = page.getByRole('dialog', { name: 'Resolve conflict', exact: true })
+      await expect(dialog).toBeVisible()
+      await dialog
+        .getByRole('button', { name: 'Accept Incoming side for every conflict', exact: true })
+        .click()
       expect(await getDispatchedActions(page)).toEqual([])
 
-      await fileInspector.getByRole('button', { name: 'Confirm resolution', exact: true }).click()
+      await dialog.getByRole('button', { name: 'Mark resolved and stage', exact: true }).click()
       await settle(page)
 
       const actions = await getDispatchedActions(page)
-      expect(actions.filter((action) => action.type === 'resolveFile')).toEqual([
+      expect(actions.filter((action) => action.type === 'resolveConflict')).toEqual([
         {
-          type: 'resolveFile',
+          type: 'resolveConflict',
           path: 'src/renderer/src/components/conflicted.tsx',
           fingerprint: 'fingerprint-conflict',
-          strategy: 'theirs',
-          content: '',
+          resolution: { kind: 'content', content: 'export const value = 2\n' },
         },
       ])
     })
