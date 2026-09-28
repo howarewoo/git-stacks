@@ -298,14 +298,12 @@ export function gitCommandEnvironment(
   const root = dirname(dirname(runtime.executable))
   const windows = runtime.platform.startsWith('win32-')
   const env = { ...environment }
-  if (env.GIT_EXEC_PATH === undefined) {
-    env.GIT_EXEC_PATH = join(
-      root,
-      windows ? (runtime.platform.endsWith('-arm64') ? 'clangarm64' : 'mingw64') : '',
-      'libexec',
-      'git-core',
-    )
-  }
+  env.GIT_EXEC_PATH = join(
+    root,
+    windows ? (runtime.platform.endsWith('-arm64') ? 'clangarm64' : 'mingw64') : '',
+    'libexec',
+    'git-core',
+  )
   if (windows) {
     const prefix = runtime.platform.endsWith('-arm64') ? 'clangarm64' : 'mingw64'
     env.PATH = [join(root, prefix, 'bin'), join(root, 'usr', 'bin'), env.PATH]

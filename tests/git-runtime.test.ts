@@ -9,7 +9,13 @@ import type { AddressInfo } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { after, test } from 'node:test'
-import { runAction } from '../src/main/git'
+import {
+  getConflictView,
+  getFileView,
+  getSnapshot,
+  runAction,
+  runConflictMergeTool,
+} from '../src/main/git'
 import { runGit } from '../src/main/git-core'
 import {
   compareGitVersions,
@@ -206,6 +212,21 @@ test('the bundled runtime replaces PATH Git and the system override reverses it'
     )
     assert.match(await runGit(repo, ['lfs', 'version']), /^git-lfs\//u)
 
+    const inheritedExecPath = process.env.GIT_EXEC_PATH
+    try {
+      process.env.GIT_EXEC_PATH = join(repo, 'wrong-helpers')
+      assert.equal(
+        (await runGit(repo, ['--exec-path'])).trim().replace(/\\/gu, '/').toLowerCase(),
+        join(releaseResources, 'git', platform, helperRoot, 'libexec', 'git-core')
+          .replace(/\\/gu, '/')
+          .toLowerCase(),
+      )
+      assert.match(await runGit(repo, ['lfs', 'version']), /^git-lfs\//u)
+    } finally {
+      if (inheritedExecPath === undefined) delete process.env.GIT_EXEC_PATH
+      else process.env.GIT_EXEC_PATH = inheritedExecPath
+    }
+
     configureGitRuntime({ useSystemGit: true })
     const systemRuntime = await resolveGitRuntime()
     assert.equal(systemRuntime.source, 'system')
@@ -220,6 +241,61 @@ test('the bundled runtime replaces PATH Git and the system override reverses it'
     configureGitRuntime({ resourcesRoot: null, packaged: false, useSystemGit: false })
   }
 })
+
+test(
+  'repository opening, streamed diffs, conflict previews, and mergetool work without PATH Git',
+  { skip: process.platform === 'win32' },
+  async () => {
+    const { root, repo, git } = await repository()
+    const tool = join(root, 'merge-tool.sh')
+    await writeFile(tool, '#!/bin/sh\nprintf "resolved by tool\\n" > "$1"\n', { mode: 0o755 })
+    git('config', 'mergetool.git-stacks-test.trustExitCode', 'true')
+    git('config', 'mergetool.git-stacks-test.cmd', `/bin/sh "${tool}" "$MERGED"`)
+    git('config', 'merge.tool', 'git-stacks-test')
+    await writeFile(join(repo, 'shared.txt'), 'base\n')
+    git('add', '.')
+    git('commit', '-m', 'Base')
+    git('checkout', '-b', 'topic')
+    await writeFile(join(repo, 'shared.txt'), 'topic\n')
+    git('add', '.')
+    git('commit', '-m', 'Topic edit')
+    git('checkout', 'main')
+    await writeFile(join(repo, 'shared.txt'), 'main\n')
+    git('add', '.')
+    git('commit', '-m', 'Main edit')
+    const merged = spawnSync(realGit, ['-C', repo, 'merge', 'topic'], { encoding: 'utf8' })
+    assert.notEqual(merged.status, 0)
+
+    const previousPath = process.env.PATH
+    const previousExecPath = process.env.GIT_EXEC_PATH
+    try {
+      process.env.PATH = ''
+      process.env.GIT_EXEC_PATH = join(root, 'wrong-helpers')
+      configureGitRuntime({
+        appVersion: APP_VERSION,
+        packaged: true,
+        resourcesRoot: releaseResources,
+        useSystemGit: false,
+      })
+      const snapshot = await getSnapshot(repo)
+      assert.equal(snapshot.capabilities.gitVersion, (await resolveGitRuntime()).versionOutput)
+      const file = await getFileView(repo, 'shared.txt')
+      assert.match(file.unstagedDiff, /shared\.txt/u)
+      const conflict = await getConflictView(repo, 'shared.txt')
+      assert.equal(conflict.base, 'base\n')
+      assert.equal(conflict.current, 'main\n')
+      assert.equal(conflict.incoming, 'topic\n')
+      await runConflictMergeTool(repo, 'shared.txt', conflict.fingerprint)
+      assert.equal(await readFile(join(repo, 'shared.txt'), 'utf8'), 'resolved by tool\n')
+    } finally {
+      if (previousPath === undefined) delete process.env.PATH
+      else process.env.PATH = previousPath
+      if (previousExecPath === undefined) delete process.env.GIT_EXEC_PATH
+      else process.env.GIT_EXEC_PATH = previousExecPath
+      configureGitRuntime({ resourcesRoot: null, packaged: false, useSystemGit: false })
+    }
+  },
+)
 
 test('a packaged build refuses PATH Git until the system override is explicit', async () => {
   const empty = await temporaryRoot('git-stacks-empty-')

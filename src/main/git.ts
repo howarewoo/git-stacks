@@ -2509,17 +2509,12 @@ async function changedDiff(
     '--',
     relativePath,
   ]
-  // The inspector opens before the resolver; cap the stream itself rather than
-  // buffering an arbitrarily large diff and truncating only after Git exits.
+  // Cap the stream itself rather than buffering an arbitrarily large diff.
+  const runtime = await resolveGitRuntime()
   return new Promise((resolve, reject) => {
-    const child = spawn('git', args, {
+    const child = spawn(runtime.executable, args, {
       cwd: repoPath,
-      env: {
-        ...process.env,
-        GIT_TERMINAL_PROMPT: '0',
-        GH_PROMPT_DISABLED: '1',
-        GCM_INTERACTIVE: 'Never',
-      },
+      env: gitCommandEnvironment(runtime, commandEnvironment()),
       timeout: 120_000,
       windowsHide: true,
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -3493,11 +3488,13 @@ async function readConflictBlob(
   root: string,
   oid: string,
 ): Promise<{ text: string | null; binary: boolean; truncated: boolean }> {
+  const runtime = await resolveGitRuntime()
   // ES2022's Promise typings do not expose withResolvers; Git streams settle
   // this promise from child-process events.
   return new Promise((resolve, reject) => {
-    const child = spawn('git', ['cat-file', 'blob', oid], {
+    const child = spawn(runtime.executable, ['cat-file', 'blob', oid], {
       cwd: root,
+      env: gitCommandEnvironment(runtime, commandEnvironment()),
       stdio: ['ignore', 'pipe', 'pipe'],
       shell: false,
     })
@@ -3993,26 +3990,28 @@ export async function runResolveConflict(
  * and failure; the tool selected for this view is passed explicitly so an
  * environment override cannot silently run the configured fallback instead.
  */
-function runMergeTool(
+async function runMergeTool(
   gitDirectory: string,
   relativePath: string,
   indexPath: string,
   worktree: string,
   tool: string,
 ): Promise<string> {
+  const runtime = await resolveGitRuntime()
   return new Promise((resolve, reject) => {
     const child = spawn(
-      'git',
+      runtime.executable,
       ['mergetool', '--no-prompt', '--no-gui', `--tool=${tool}`, '--', relativePath],
       {
         cwd: worktree,
-        env: {
-          ...process.env,
-          GIT_DIR: gitDirectory,
-          GIT_INDEX_FILE: indexPath,
-          GIT_WORK_TREE: worktree,
-          GIT_TERMINAL_PROMPT: '0',
-        },
+        env: gitCommandEnvironment(
+          runtime,
+          commandEnvironment({
+            GIT_DIR: gitDirectory,
+            GIT_INDEX_FILE: indexPath,
+            GIT_WORK_TREE: worktree,
+          }),
+        ),
         stdio: ['ignore', 'pipe', 'pipe'],
         shell: false,
       },
