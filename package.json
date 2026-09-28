@@ -11,7 +11,13 @@
     "build": "npm run typecheck && electron-vite build",
     "typecheck": "tsc --noEmit",
     "test": "tsx --test tests/*.test.ts",
-    "test:controls": "npm run build && electron --headless --no-sandbox --disable-gpu scripts/design-system-controls-smoke.cjs",
+    "gallery": "vite --config tests/renderer/vite.config.ts",
+    "build:gallery": "vite build --config tests/renderer/vite.config.ts",
+    "test:ui": "playwright test --grep-invert @visual",
+    "test:visual": "playwright test --grep @visual",
+    "test:visual:update": "npm run test:visual -- --update-snapshots",
+    "test:controls": "npm run build:gallery && electron --headless --no-sandbox --disable-gpu scripts/design-system-controls-smoke.cjs",
+    "test:desktop": "node scripts/packaged-desktop-smoke.mjs",
     "tokens:generate": "node src/renderer/src/design-system/generate-tokens.mjs",
     "tokens:check": "node src/renderer/src/design-system/generate-tokens.mjs --check",
     "format": "prettier --write .",
@@ -26,7 +32,9 @@
       "output": "release"
     },
     "files": [
-      "out/**/*",
+      "out/main/**/*",
+      "out/preload/**/*",
+      "out/renderer/**/*",
       "package.json"
     ],
     "mac": {
@@ -60,6 +68,9 @@
     "tailwind-merge": "3.7.0"
   },
   "devDependencies": {
+    "@axe-core/playwright": "4.13.0",
+    "@electron/asar": "3.4.1",
+    "@playwright/test": "1.63.0",
     "@tailwindcss/vite": "4.3.3",
     "@types/node": "26.6.2",
     "@types/react": "19.3.0",

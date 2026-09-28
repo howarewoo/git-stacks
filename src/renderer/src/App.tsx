@@ -70,6 +70,7 @@ import {
 } from './lib/branches'
 import { WorkflowDialog, type WorkflowRequest } from './components/workflow-dialog'
 import { WorkspaceNavigation } from './components/workspace-navigation'
+import { ConflictResolver } from './components/conflict-resolver'
 import { HistoryView, OperationBanner, StackView } from './components/repository-views'
 import {
   ChangesView,
@@ -271,6 +272,7 @@ function App() {
   const [commitMessage, setCommitMessage] = React.useState('')
   const [commitAmend, setCommitAmend] = React.useState(false)
   const [inspectedPath, setInspectedPath] = React.useState<string | null>(null)
+  const [conflictPath, setConflictPath] = React.useState<string | null>(null)
   const [workflow, setWorkflow] = React.useState<{
     id: number
     repoPath: string
@@ -519,6 +521,11 @@ function App() {
     },
     [snapshot],
   )
+  const openConflictResolver = (path: string) => {
+    if (!snapshot || isBusy) return
+    setActionError(null)
+    setConflictPath(path)
+  }
   const deleteChildren = deleteTarget
     ? allBranches.filter(
         (branch) =>
@@ -1083,6 +1090,7 @@ function App() {
                 <Tooltip>
                   <TooltipTrigger asChild>
                     <span
+                      role="img"
                       className="ahead-behind relative z-[2] rounded-sm outline-none focus-visible:ring-2 focus-visible:ring-[var(--ring)]"
                       tabIndex={0}
                       aria-label={
@@ -1134,6 +1142,7 @@ function App() {
           setActionError(null)
           setInspectedPath(path)
         }}
+        onResolveConflict={openConflictResolver}
         onStash={() => openWorkflow({ kind: 'stash' })}
         onSubmitCommit={submitCommit}
         operationActive={operationActive}
@@ -1605,7 +1614,7 @@ function App() {
   }
 
   const renderOnboarding = () => (
-    <div className="onboarding-pane">
+    <main className="onboarding-pane">
       <div className="onboarding-content">
         <div className="onboarding-icon">
           <GitBranch className="size-7" />
@@ -1657,7 +1666,7 @@ function App() {
           </div>
         ) : null}
       </div>
-    </div>
+    </main>
   )
 
   return (
@@ -1669,6 +1678,7 @@ function App() {
           <strong>Git Stacks</strong>
         </div>
         <div
+          role="group"
           aria-label={
             snapshot ? `Repository ${snapshot.name}, ${snapshot.path}` : 'Repository workbench'
           }
@@ -1717,13 +1727,14 @@ function App() {
           </span>
         </InlineAlert>
       ) : null}
-      {snapshot ? renderToolbar() : null}
+      {snapshot ? <section aria-label="Repository controls">{renderToolbar()}</section> : null}
       {snapshot ? (
         <OperationBanner
           snapshot={snapshot}
           busy={isBusy}
           runAction={runAction}
           onRequest={openWorkflow}
+          onResolveConflict={openConflictResolver}
           onShowChanges={() => setWorkspaceView('changes')}
         />
       ) : null}
@@ -1743,6 +1754,19 @@ function App() {
           runAction={runAction}
           onClose={() => setWorkflow(null)}
           onRequest={openWorkflow}
+        />
+      ) : null}
+      {conflictPath && snapshot ? (
+        <ConflictResolver
+          key={conflictPath}
+          busy={isBusy}
+          actionError={actionError}
+          path={conflictPath}
+          conflictPresent={snapshot.files.some(
+            (file) => file.conflicted && file.path === conflictPath,
+          )}
+          runAction={runAction}
+          onClose={() => setConflictPath(null)}
         />
       ) : null}
       <Dialog
@@ -1906,7 +1930,6 @@ function App() {
                 description="Local only. Nothing is pushed and no commit is created."
               >
                 <Input
-                  autoFocus
                   onChange={(event) => {
                     setNewBranchName(event.target.value)
                     setNewBranchEdited(true)
@@ -2020,7 +2043,6 @@ function App() {
               />
               <Field id="pr-title" label="Title" required>
                 <Input
-                  autoFocus
                   onChange={(event) => {
                     setPrTitle(event.target.value)
                     setPrEdited(true)
