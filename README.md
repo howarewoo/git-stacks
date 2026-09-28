@@ -65,7 +65,9 @@ animation frames. The `interaction` measurement starts at an actual search input
 event in that window and ends after the filtered branch result completes two
 animation frames. The separate `diff-render-ssr` measurement is server-side
 rendering cost for a 1,000-line diff preview; it is not an input-to-paint budget.
-CI builds first and runs Electron under Xvfb. Local runs need a display server.
+CI installs `xvfb` and `xauth` on the self-hosted Linux ARM64 runner, builds the
+app, and runs Electron under Xvfb. The runner needs passwordless `sudo` and
+Debian-compatible `apt-get`. Local runs need a display server.
 Compare trend results on the same runner class and Git/Node versions, since
 filesystem and process startup costs vary by machine.
 
