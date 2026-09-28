@@ -12,9 +12,11 @@ import {
   X,
 } from 'lucide-react'
 import type { Branch, Commit, FileView, RepositorySnapshot } from '../../../shared/types'
+import { actionBlockReason, submodulePathReason } from '../../../shared/capabilities'
 import { Badge } from './ui/badge'
 import { Button } from './ui/button'
 import { SegmentedControl } from './ui/segmented-control'
+import { InlineAlert } from './ui/surface'
 import { Select } from './ui/select'
 import { sortBranchesByUpdatedAt } from '../lib/branches'
 import { workflowError, type RunAction, type WorkflowRequest } from './workflow-dialog'
@@ -302,8 +304,9 @@ export function FileInspector({
       active = false
     }
   }, [path, snapshot, revision])
+
   const discard = async () => {
-    if (!file || busy || loading) return
+    if (!file || file.submodule || busy || loading) return
     if (
       await runAction(
         { type: 'discardFile', path, fingerprint: file.fingerprint },
@@ -314,6 +317,7 @@ export function FileInspector({
   }
   const state = snapshot.files.find((item) => item.path === path)
   const canDiscard = state && !state.conflicted && (state.worktree !== ' ' || state.index === '?')
+  const submoduleReason = file?.submodule ? submodulePathReason(path) : null
   const tabOptions = (
     [
       { value: 'working', label: 'Working tree' },
@@ -365,6 +369,12 @@ export function FileInspector({
         </p>
       ) : file ? (
         <>
+          {file.lfs ? (
+            <InlineAlert className="mx-4 mt-3" title="Git LFS pointer, not object content">
+              Object sha256:{file.lfs.oid} · {file.lfs.size.toLocaleString()} bytes. Git Stacks does
+              not check whether the object is available locally; use Git LFS to retrieve it.
+            </InlineAlert>
+          ) : null}
           <div className="inspector-tabs">
             <SegmentedControl
               className="inspector-tab-control"
@@ -425,13 +435,18 @@ export function FileInspector({
               <Button
                 size="sm"
                 variant="danger"
-                disabled={busy}
-                tooltip="Discard unstaged working-tree changes only; staged content is kept. Untracked files are deleted and cannot be recovered through Git."
+                disabled={busy || Boolean(submoduleReason)}
+                tooltip={
+                  submoduleReason ??
+                  'Discard unstaged working-tree changes only; staged content is kept. Untracked files are deleted and cannot be recovered through Git.'
+                }
                 onClick={() => setPending('discard')}
               >
                 Discard unstaged changes…
               </Button>
-              <span className="workflow-note">Staged content is preserved.</span>
+              <span className="workflow-note">
+                {submoduleReason ?? 'Staged content is preserved.'}
+              </span>
             </div>
           ) : null}
           {pending ? (
@@ -667,8 +682,15 @@ export function HistoryView({
               <Button
                 size="sm"
                 variant="secondary"
-                disabled={!actionable || diffLoading}
-                tooltip={`Copy this commit onto ${snapshot.currentBranch ?? 'the current branch'} locally as a new commit. Remote branches stay unchanged until pushed.`}
+                disabled={
+                  !actionable ||
+                  diffLoading ||
+                  Boolean(actionBlockReason(snapshot.capabilities, 'cherryPick'))
+                }
+                tooltip={
+                  actionBlockReason(snapshot.capabilities, 'cherryPick') ??
+                  `Copy this commit onto ${snapshot.currentBranch ?? 'the current branch'} locally as a new commit. Remote branches stay unchanged until pushed.`
+                }
                 onClick={() =>
                   onRequest({ kind: 'commitAction', commit: selected, mode: 'cherryPick' })
                 }
@@ -678,8 +700,15 @@ export function HistoryView({
               <Button
                 size="sm"
                 variant="secondary"
-                disabled={!actionable || diffLoading}
-                tooltip={`Create a new local commit on ${snapshot.currentBranch ?? 'the current branch'} that undoes this commit. Original history is kept; remote stays unchanged until pushed.`}
+                disabled={
+                  !actionable ||
+                  diffLoading ||
+                  Boolean(actionBlockReason(snapshot.capabilities, 'revert'))
+                }
+                tooltip={
+                  actionBlockReason(snapshot.capabilities, 'revert') ??
+                  `Create a new local commit on ${snapshot.currentBranch ?? 'the current branch'} that undoes this commit. Original history is kept; remote stays unchanged until pushed.`
+                }
                 onClick={() =>
                   onRequest({ kind: 'commitAction', commit: selected, mode: 'revert' })
                 }
@@ -774,7 +803,16 @@ export function StackView({
             {groups.size} local stack{groups.size === 1 ? '' : 's'}
           </span>
         </div>
-        <Button size="sm" variant="accent" disabled={blocked} onClick={onCreate}>
+        <Button
+          size="sm"
+          variant="accent"
+          disabled={blocked || Boolean(actionBlockReason(snapshot.capabilities, 'createBranch'))}
+          tooltip={
+            actionBlockReason(snapshot.capabilities, 'createBranch') ??
+            'Create a local branch and switch to it.'
+          }
+          onClick={onCreate}
+        >
           New branch
         </Button>
       </div>
@@ -786,7 +824,15 @@ export function StackView({
             Create a branch from your default branch, then add dependent branches. Existing branches
             can be adopted by setting their stack parent.
           </p>
-          <Button variant="accent" disabled={blocked} onClick={onCreate}>
+          <Button
+            variant="accent"
+            disabled={blocked || Boolean(actionBlockReason(snapshot.capabilities, 'createBranch'))}
+            tooltip={
+              actionBlockReason(snapshot.capabilities, 'createBranch') ??
+              'Create a local branch and switch to it.'
+            }
+            onClick={onCreate}
+          >
             Create a stack branch
           </Button>
         </div>
@@ -819,9 +865,14 @@ export function StackView({
               <Button
                 size="sm"
                 variant={stale ? 'accent' : 'secondary'}
-                disabled={blocked}
+                disabled={
+                  blocked || Boolean(actionBlockReason(snapshot.capabilities, 'executeStack'))
+                }
                 onClick={() => onRequest({ kind: 'stack', branch: root, operation: 'restack' })}
-                tooltip="Preview parent-first rebases of this stack. Publishing is a separate step."
+                tooltip={
+                  actionBlockReason(snapshot.capabilities, 'executeStack') ??
+                  'Preview parent-first rebases of this stack. Publishing is a separate step.'
+                }
               >
                 <RefreshCw className="size-3.5" />
                 Restack…
@@ -829,13 +880,18 @@ export function StackView({
               <Button
                 size="sm"
                 variant={stale ? 'secondary' : 'accent'}
-                disabled={blocked || !snapshot.github.available}
+                disabled={
+                  blocked ||
+                  !snapshot.github.available ||
+                  Boolean(actionBlockReason(snapshot.capabilities, 'executeStack'))
+                }
                 onClick={() => onRequest({ kind: 'stack', branch: root, operation: 'publish' })}
                 tooltip={
-                  snapshot.github.available
+                  actionBlockReason(snapshot.capabilities, 'executeStack') ??
+                  (snapshot.github.available
                     ? 'Push reviewed branches and update their pull requests without restacking.'
                     : snapshot.github.message ||
-                      'Connect an authenticated GitHub repository to publish.'
+                      'Connect an authenticated GitHub repository to publish.')
                 }
               >
                 <Upload className="size-3.5" />
@@ -888,8 +944,13 @@ export function StackView({
                     <Button
                       size="sm"
                       variant="ghost"
-                      disabled={blocked}
-                      tooltip="Record the intended parent locally without rewriting commits. Preview Restack next to move this branch and its descendants."
+                      disabled={
+                        blocked || Boolean(actionBlockReason(snapshot.capabilities, 'setParent'))
+                      }
+                      tooltip={
+                        actionBlockReason(snapshot.capabilities, 'setParent') ??
+                        'Record the intended parent locally without rewriting commits. Preview Restack next to move this branch and descendants.'
+                      }
                       onClick={() => onRequest({ kind: 'parent', branch })}
                     >
                       Set parent…
@@ -931,8 +992,14 @@ export function StackView({
                         <Button
                           size="sm"
                           variant="secondary"
-                          disabled={blocked}
-                          tooltip="Preview merging this pull request into the default branch. Nothing is merged until confirmed; remaining branches still need restack and publish."
+                          disabled={
+                            blocked ||
+                            Boolean(actionBlockReason(snapshot.capabilities, 'executeStack'))
+                          }
+                          tooltip={
+                            actionBlockReason(snapshot.capabilities, 'executeStack') ??
+                            'Preview merging this pull request into the default branch. Nothing is merged until confirmed; remaining branches still need restack and publish.'
+                          }
                           onClick={() =>
                             onRequest({ kind: 'stack', branch: branch.name, operation: 'merge' })
                           }

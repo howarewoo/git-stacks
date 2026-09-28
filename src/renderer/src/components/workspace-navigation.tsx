@@ -6,12 +6,13 @@ import {
   GitPullRequest,
   History,
   Layers,
+  SlidersHorizontal,
   type LucideIcon,
 } from 'lucide-react'
 import { cn } from '../lib/utils'
 
 export type WorkspaceView =
-  'branches' | 'stacks' | 'history' | 'changes' | 'pullRequests' | 'stashes'
+  'branches' | 'stacks' | 'history' | 'changes' | 'pullRequests' | 'stashes' | 'diagnostics'
 
 type WorkspaceDestination = {
   id: WorkspaceView
@@ -26,6 +27,7 @@ const workspaceDestinations: readonly WorkspaceDestination[] = [
   { id: 'changes', label: 'Working changes', icon: Files },
   { id: 'pullRequests', label: 'Pull requests', icon: GitPullRequest },
   { id: 'stashes', label: 'Stashes', icon: Archive },
+  { id: 'diagnostics', label: 'Diagnostics', icon: SlidersHorizontal },
 ]
 
 export function WorkspaceNavigation({
@@ -34,6 +36,7 @@ export function WorkspaceNavigation({
   changeCount,
   pullRequestCount,
   stashCount,
+  attentionCount,
   onSelect,
 }: {
   activeView: WorkspaceView
@@ -41,6 +44,7 @@ export function WorkspaceNavigation({
   changeCount: number
   pullRequestCount: number
   stashCount: number
+  attentionCount: number
   onSelect: (view: WorkspaceView) => void
 }) {
   const countFor = (view: WorkspaceView) => {
@@ -48,6 +52,7 @@ export function WorkspaceNavigation({
     if (view === 'changes') return changeCount || undefined
     if (view === 'pullRequests') return pullRequestCount
     if (view === 'stashes') return stashCount
+    if (view === 'diagnostics') return attentionCount || undefined
     return undefined
   }
 

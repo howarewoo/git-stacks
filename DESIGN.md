@@ -285,6 +285,12 @@ The renderer builds on the repository's existing [shadcn/ui](https://ui.shadcn.c
 
 Checked-out, selected, pull-request lifecycle, checks, review, requires-restack, unknown, and diff states use the semantic/component roles in `tokens.json`. The state is represented by text/icon/color together; unknown and unavailable remain explicit. Diff addition, deletion, and hunk excerpts use their separate text and surface roles.
 
+### Repository compatibility
+
+Diagnostics names each detected repository shape and labels its support as supported, limited, or unsupported. A restricted action remains visible but disabled with the same specific reason at its trigger and confirmation gate; a disabled control's explanation remains keyboard-discoverable. Bare repositories allow reading refs, fetching, and branch-owned pushing, but not worktree or branch mutations; detached HEAD allows local file work and commits but not operations that require an owning branch. Linked worktrees share repository metadata and must not take over a branch checked out elsewhere. Submodule rows show the recorded commit; discard and in-app conflict resolution are disabled because the app never rewrites submodule contents. Sparse paths outside the working set are not treated as deleted, and Git LFS pointers are identified without claiming to transfer LFS objects independently. Files-backed refs support safe stash removal; reftable and unknown storage permit stash Apply but disable Pop and Drop because those operations require direct ref-file manipulation. Never silently convert repository formats or rewrite configuration to enable an operation.
+
+When an LFS pointer is visible in the file inspector, show its object ID and size alongside an explicit distinction between pointer metadata and object content; do not imply that local object availability was checked. Git LFS's own client and hooks, not the inspector or push-status text, own object transfer.
+
 ### Renderer integration and safety
 
 Preserve the local-first Electron sandbox, context isolation, typed preload/IPC boundary, and production Content-Security-Policy. Visual migrations must not change Git semantics, preview/confirmation/busy locks, typed confirmations, or navigation behavior.

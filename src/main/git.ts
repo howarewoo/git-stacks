@@ -63,6 +63,21 @@ import {
 } from './git-core'
 import type { RefRecord } from './git-core'
 import {
+  getHeadGitlinks,
+  getIndexEntries,
+  getRepositoryCapabilities,
+  getRepositoryShapeFacts,
+  detectGitLfs,
+  parseLfsPointer,
+} from './capabilities'
+import type { IndexPathEntry } from './capabilities'
+import {
+  LFS_PUSH_NOTE,
+  actionBlockReason,
+  sparsePathReason,
+  submodulePathReason,
+} from '../shared/capabilities'
+import {
   conflictKind,
   conflictLabels,
   conflictRegions,
@@ -380,7 +395,14 @@ export async function resolveRepository(inputPath: string): Promise<string> {
     throw new Error(`Not a Git repository: ${commandDetail(error)}`)
   }
   if (isBare === 'true') {
-    throw new Error('Bare Git repositories are not supported; choose a working tree')
+    // A bare repository is opened read-only; the capability matrix disables worktree actions.
+    try {
+      return await fs.realpath(
+        stripTrailingNewline(await runGit(candidate, ['rev-parse', '--absolute-git-dir'])),
+      )
+    } catch {
+      return candidate
+    }
   }
 
   let topLevel: string
@@ -406,6 +428,11 @@ async function runStage(
   requestedPaths: string[],
 ): Promise<ActionResult> {
   const files = await getStatus(repoPath)
+  // Staging a path that sparse checkout left unmaterialized would record a deletion.
+  const index = await getIndexEntries(repoPath, requestedPaths)
+  for (const requested of requestedPaths) {
+    if (index.get(requested)?.sparseExcluded) throw new Error(sparsePathReason(requested))
+  }
   const paths = statusPathCandidates(files, requestedPaths, action)
   if (paths.length === 0) {
     throw new Error('No changed paths were selected')
@@ -817,6 +844,11 @@ async function getPushTarget(repoPath: string, requireExplicit: boolean): Promis
   }
 }
 
+/** The Git LFS client owns any object upload triggered by Git's push hooks. */
+async function lfsPushSuffix(repoPath: string): Promise<string> {
+  return (await detectGitLfs(repoPath)) ? ` ${LFS_PUSH_NOTE}` : ''
+}
+
 async function runPush(repoPath: string): Promise<ActionResult> {
   await ensureNoBusyOperation(repoPath, 'push')
   const target = await getPushTarget(repoPath, false)
@@ -833,7 +865,7 @@ async function runPush(repoPath: string): Promise<ActionResult> {
   ]
   await runGit(repoPath, args)
   return {
-    message: `Pushed ${target.branch} to ${target.remote}/${target.destination.slice('refs/heads/'.length)}`,
+    message: `Pushed ${target.branch} to ${target.remote}/${target.destination.slice('refs/heads/'.length)}${await lfsPushSuffix(repoPath)}`,
   }
 }
 
@@ -894,7 +926,7 @@ async function runForcePush(repoPath: string, preview: PushPreview): Promise<Act
     `${preview.localOid}:${target.destination}`,
   ])
   return {
-    message: `Force pushed ${target.branch} to ${target.remote}/${target.destination.slice('refs/heads/'.length)}`,
+    message: `Force pushed ${target.branch} to ${target.remote}/${target.destination.slice('refs/heads/'.length)}${await lfsPushSuffix(repoPath)}`,
   }
 }
 
@@ -2512,13 +2544,32 @@ async function changedDiff(
 export async function getFileView(repoPath: string, requestedPath: string): Promise<FileView> {
   const root = await resolveRepository(repoPath)
   const filePath = requirePathInput(requestedPath, 'path')
+  // Sparse-excluded paths never reach the status list, so check the index first.
+  const indexEntry = (await getIndexEntries(root, [filePath])).get(filePath)
+  if (indexEntry?.sparseExcluded) throw new Error(sparsePathReason(filePath))
   const entry = changedEntry(await getStatus(root), filePath)
   const actualPath = entry.path
-  const [stagedDiff, unstagedDiff, identity] = await Promise.all([
+  const [stagedDiff, unstagedDiff] = await Promise.all([
     changedDiff(root, 'cached', actualPath),
     changedDiff(root, 'worktree', actualPath),
-    fileFingerprint(root, actualPath),
   ])
+  const headGitlink = (await getHeadGitlinks(root, [actualPath])).get(actualPath)
+  if (indexEntry?.submodule || headGitlink) {
+    // A gitlink has no readable file: show the recorded-commit diff and nothing else.
+    return {
+      path: filePath,
+      stagedDiff: stagedDiff.text,
+      unstagedDiff: unstagedDiff.text,
+      content: null,
+      binary: false,
+      fingerprint: indexEntry?.fingerprint ?? headGitlink!,
+      conflicted: entry.conflicted,
+      truncated: stagedDiff.truncated || unstagedDiff.truncated,
+      submodule: true,
+      lfs: null,
+    }
+  }
+  const identity = await fileFingerprint(root, actualPath)
   const contentResult = identity.preview
     ? {
         text: identity.binary ? '' : identity.preview.toString('utf8'),
@@ -2535,20 +2586,39 @@ export async function getFileView(repoPath: string, requestedPath: string): Prom
     fingerprint: identity.fingerprint,
     conflicted: entry.conflicted,
     truncated: stagedDiff.truncated || unstagedDiff.truncated || contentResult.truncated,
+    lfs: identity.preview ? parseLfsPointer(contentResult.text) : null,
   }
 }
 
+/**
+ * Sparse-excluded and submodule paths are refused before any worktree or index
+ * write: one is not a change, and the other is a commit this app does not own.
+ */
 async function checkFileFingerprint(
   repoPath: string,
   filePath: string,
   expected: string,
 ): Promise<{ entry: ChangedFile; identity: FileIdentity }> {
   const entry = changedEntry(await getStatus(repoPath), filePath)
+  const index = await getIndexEntries(repoPath, [entry.path])
+  const headGitlink = (await getHeadGitlinks(repoPath, [entry.path])).has(entry.path)
+  const blocked = pathActionBlockReason(index.get(entry.path), entry.path, headGitlink)
+  if (blocked) throw new Error(blocked)
   const identity = await fileFingerprint(repoPath, entry.path)
   if (identity.fingerprint !== expected) {
     throw new Error('The file changed since it was opened; refresh before applying this action')
   }
   return { entry, identity }
+}
+
+function pathActionBlockReason(
+  entry: IndexPathEntry | undefined,
+  filePath: string,
+  headGitlink: boolean,
+): string | null {
+  if (entry?.sparseExcluded) return sparsePathReason(filePath)
+  if (entry?.submodule || headGitlink) return submodulePathReason(filePath)
+  return null
 }
 
 async function materializeGitWorktreePath(
@@ -4164,17 +4234,33 @@ export async function getSnapshot(repoPath: string): Promise<RepositorySnapshot>
   await recoverStashDropForRepository(root)
   await recoverFileActionJournals(root)
   await recoverStaleBranchLocks(root)
+  const capabilities = await getRepositoryCapabilities(root)
   const [refs, currentBranch, files, stashes, originUrl, operationState, stackOperation, headOid] =
     await Promise.all([
       getRefs(root),
       getCurrentBranch(root),
-      getStatus(root),
-      getStashes(root),
+      // A bare repository has no index to compare against a worktree.
+      capabilities.bare ? Promise.resolve([]) : getStatus(root),
+      capabilities.bare ? Promise.resolve([]) : getStashes(root),
       getOriginUrl(root),
       getOperationState(root),
       getStackProgress(root),
       currentHeadOid(root),
     ])
+
+  const indexEntries = await getIndexEntries(
+    root,
+    files.flatMap((file) => (file.originalPath ? [file.path, file.originalPath] : [file.path])),
+  )
+  const headGitlinks = await getHeadGitlinks(
+    root,
+    files.map((file) => file.path),
+  )
+  for (const file of files) {
+    const entry = indexEntries.get(file.path)
+    if (entry?.submodule || headGitlinks.has(file.path)) file.submodule = true
+    if (entry?.sparseExcluded) file.sparseExcluded = true
+  }
 
   const localRefs = refs.filter((ref) => ref.refname.startsWith('refs/heads/') && !ref.symref)
   const remoteRefs = refs.filter((ref) => ref.refname.startsWith('refs/remotes/') && !ref.symref)
@@ -4317,6 +4403,7 @@ export async function getSnapshot(repoPath: string): Promise<RepositorySnapshot>
     stackOperation,
     headOid,
     github: { available: github.available, message: github.message },
+    capabilities,
   }
 }
 async function runRenameBranch(
@@ -4857,6 +4944,8 @@ async function runDeleteBranch(
 export async function runAction(repoPath: string, value: GitAction): Promise<ActionResult> {
   const root = await resolveRepository(repoPath)
   const action = validateAction(value)
+  const blocked = actionBlockReason(await getRepositoryShapeFacts(root), action.type)
+  if (blocked) throw new Error(blocked)
   if (isStackAction(action)) {
     return runStackAction(root, action)
   }

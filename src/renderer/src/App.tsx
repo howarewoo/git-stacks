@@ -74,6 +74,7 @@ import { ConflictResolver } from './components/conflict-resolver'
 import { HistoryView, OperationBanner, StackView } from './components/repository-views'
 import {
   ChangesView,
+  DiagnosticsView,
   PullRequestListView,
   StashesView,
   changeGroups,
@@ -88,8 +89,16 @@ import {
   WorkflowFrame,
 } from './components/workflow-composition'
 import { CLOSE_INTENT_MESSAGES, closeIntent } from './components/workflow-policy'
+import {
+  actionBlockReason,
+  capabilityAttentionCount,
+  capabilityReport,
+  stashRemovalBlockReason,
+} from '../../shared/capabilities'
 
-type WorkspaceView = 'branches' | 'stacks' | 'history' | 'changes' | 'pullRequests' | 'stashes'
+type WorkspaceView =
+  'branches' | 'stacks' | 'history' | 'changes' | 'pullRequests' | 'stashes' | 'diagnostics'
+
 type BranchFilter = 'all' | 'local' | 'remote' | 'prs'
 
 type BranchTreeInfo = {
@@ -489,6 +498,10 @@ function App() {
   const branchCount = combinedBranches.length
   const pullRequestCount = snapshot?.pullRequests.length ?? 0
   const stashCount = snapshot?.stashes.length ?? 0
+  const capabilityAttention = React.useMemo(
+    () => (snapshot ? capabilityAttentionCount(capabilityReport(snapshot.capabilities)) : 0),
+    [snapshot],
+  )
   const detailsVisible = showDetails && (workspaceView === 'branches' || workspaceView === 'stacks')
   const operationActive = Boolean(snapshot?.operation || snapshot?.stackOperation)
   const openWorkflow = (request: WorkflowRequest) => {
@@ -496,6 +509,18 @@ function App() {
     setActionError(null)
     setWorkflow({ id: ++workflowSequence.current, repoPath: snapshot.path, request })
   }
+  const shapeReason = React.useCallback(
+    (type: GitAction['type']) => {
+      if (!snapshot) return null
+      return (
+        actionBlockReason(snapshot.capabilities, type) ??
+        (type === 'stashPop' || type === 'stashDrop'
+          ? stashRemovalBlockReason(snapshot.capabilities)
+          : null)
+      )
+    },
+    [snapshot],
+  )
   const openConflictResolver = (path: string) => {
     if (!snapshot || isBusy) return
     setActionError(null)
@@ -675,6 +700,7 @@ function App() {
           <span className="nav-label">Workspace</span>
           <WorkspaceNavigation
             activeView={workspaceView}
+            attentionCount={capabilityAttention}
             branchCount={branchCount}
             changeCount={snapshot?.files.length ?? 0}
             onSelect={setWorkspaceView}
@@ -780,9 +806,11 @@ function App() {
             Fetch
           </Button>
           <Button
-            disabled={!snapshot || isBusy || operationActive}
+            disabled={!snapshot || isBusy || operationActive || Boolean(shapeReason('pull'))}
             onClick={() => openWorkflow({ kind: 'pull' })}
-            tooltip="Choose how to integrate updates from this branch’s upstream."
+            tooltip={
+              shapeReason('pull') ?? 'Choose how to integrate updates from this branch’s upstream.'
+            }
             size="sm"
             variant="secondary"
           >
@@ -794,9 +822,11 @@ function App() {
             Pull
           </Button>
           <Button
-            disabled={!snapshot || isBusy || operationActive}
+            disabled={!snapshot || isBusy || operationActive || Boolean(shapeReason('push'))}
             onClick={() => runAction({ type: 'push' }, 'Push')}
-            tooltip="Push the current branch without rewriting remote history."
+            tooltip={
+              shapeReason('push') ?? 'Push the current branch without rewriting remote history.'
+            }
             size="sm"
             variant="secondary"
           >
@@ -811,8 +841,13 @@ function App() {
         <span className="toolbar-divider" aria-hidden="true" />
         <div className="toolbar-action-group" role="group" aria-label="Branch and Git actions">
           <Button
-            disabled={!snapshot || isBusy || operationActive}
-            tooltip="Create a local branch from an existing branch and switch to it. Records its stack parent; nothing is pushed."
+            disabled={
+              !snapshot || isBusy || operationActive || Boolean(shapeReason('createBranch'))
+            }
+            tooltip={
+              shapeReason('createBranch') ??
+              'Create a local branch from an existing branch and switch to it. Records its stack parent; nothing is pushed.'
+            }
             onClick={openBranchDialog}
             size="sm"
           >
@@ -834,25 +869,35 @@ function App() {
             <DropdownMenu.Portal>
               <DropdownMenu.Content className="workflow-menu" align="start" sideOffset={6}>
                 <DropdownMenu.Item
-                  disabled={operationActive || !currentBranch}
+                  disabled={operationActive || !currentBranch || Boolean(shapeReason('merge'))}
                   onSelect={() => openWorkflow({ kind: 'merge' })}
                 >
                   Merge into current branch…
                 </DropdownMenu.Item>
                 <DropdownMenu.Item
                   disabled={
-                    operationActive || !currentBranch || currentBranch === snapshot?.defaultBranch
+                    operationActive ||
+                    !currentBranch ||
+                    currentBranch === snapshot?.defaultBranch ||
+                    Boolean(shapeReason('forcePush'))
                   }
                   onSelect={() => openWorkflow({ kind: 'forcePush' })}
                 >
                   Force push with lease…
                 </DropdownMenu.Item>
                 <DropdownMenu.Item
-                  disabled={operationActive || !snapshot?.files.length}
+                  disabled={
+                    operationActive || !snapshot?.files.length || Boolean(shapeReason('stash'))
+                  }
                   onSelect={() => openWorkflow({ kind: 'stash' })}
                 >
                   Stash changes…
                 </DropdownMenu.Item>
+                {shapeReason('merge') || shapeReason('forcePush') || shapeReason('stash') ? (
+                  <p className="workflow-note" role="status">
+                    {shapeReason('merge') ?? shapeReason('forcePush') ?? shapeReason('stash')}
+                  </p>
+                ) : null}
                 <DropdownMenu.Separator className="workflow-menu-separator" />
                 <DropdownMenu.Item onSelect={() => setWorkspaceView('history')}>
                   Browse commit history
@@ -941,10 +986,14 @@ function App() {
           </p>
           {!search ? (
             <Button
+              disabled={Boolean(shapeReason('createBranch'))}
               onClick={openBranchDialog}
               size="sm"
               variant="accent"
-              tooltip="Create a local branch to start a stack. Switches to it; nothing is pushed."
+              tooltip={
+                shapeReason('createBranch') ??
+                'Create a local branch to start a stack. Switches to it; nothing is pushed.'
+              }
             >
               <Plus className="size-3.5" />
               New branch
@@ -1108,14 +1157,20 @@ function App() {
     return (
       <PullRequestListView
         busy={isBusy}
-        canCreate={Boolean(selectedBranch?.current) && snapshot.github.available && !isBusy}
+        canCreate={
+          Boolean(selectedBranch?.current) &&
+          snapshot.github.available &&
+          !isBusy &&
+          !shapeReason('createPr')
+        }
         createTooltip={
-          !snapshot.github.available
+          shapeReason('createPr') ??
+          (!snapshot.github.available
             ? snapshot.github.message ||
               'Connect an authenticated GitHub repository to create pull requests.'
             : !selectedBranch?.current
               ? 'Switch to a local branch to open its pull request on GitHub.'
-              : 'Review creating a PR from this branch’s published upstream. Unpushed commits are not included.'
+              : 'Review creating a PR from this branch’s published upstream. Unpushed commits are not included.')
         }
         onCreate={openPrDialog}
         onRequest={openWorkflow}
@@ -1145,6 +1200,7 @@ function App() {
     if (workspaceView === 'changes') return renderChanges()
     if (workspaceView === 'pullRequests') return renderPullRequests()
     if (workspaceView === 'stashes') return renderStashes()
+    if (workspaceView === 'diagnostics') return <DiagnosticsView snapshot={snapshot} />
     if (workspaceView === 'history')
       return (
         <HistoryView snapshot={snapshot} busy={isBusy} onRequest={openWorkflow} search={search} />
@@ -1262,8 +1318,11 @@ function App() {
               <h3>Stack workflow</h3>
               <Button
                 variant="accent"
-                disabled={isBusy || operationActive}
-                tooltip="Preview rebasing this stack onto updated parents locally, branch by branch. Remotes stay unchanged until published."
+                disabled={isBusy || operationActive || Boolean(shapeReason('executeStack'))}
+                tooltip={
+                  shapeReason('executeStack') ??
+                  'Preview rebasing this stack onto updated parents locally, branch by branch. Remotes stay unchanged until published.'
+                }
                 onClick={() =>
                   openWorkflow({ kind: 'stack', operation: 'restack', branch: selectedBranch.name })
                 }
@@ -1273,12 +1332,18 @@ function App() {
               </Button>
               <Button
                 variant="secondary"
-                disabled={isBusy || operationActive || !snapshot.github.available}
+                disabled={
+                  isBusy ||
+                  operationActive ||
+                  !snapshot.github.available ||
+                  Boolean(shapeReason('executeStack'))
+                }
                 tooltip={
-                  !snapshot.github.available
+                  shapeReason('executeStack') ??
+                  (!snapshot.github.available
                     ? snapshot.github.message ||
                       'Connect an authenticated GitHub repository to publish stacks.'
-                    : 'Push reviewed stack tips and update their pull requests without rebasing. Requires a clean, restacked stack.'
+                    : 'Push reviewed stack tips and update their pull requests without rebasing. Requires a clean, restacked stack.')
                 }
                 onClick={() =>
                   openWorkflow({ kind: 'stack', operation: 'publish', branch: selectedBranch.name })
@@ -1289,8 +1354,11 @@ function App() {
               </Button>
               <Button
                 variant="ghost"
-                disabled={isBusy || operationActive}
-                tooltip="Record a different local parent without rewriting commits. Preview Restack next to move this branch and descendants."
+                disabled={isBusy || operationActive || Boolean(shapeReason('setParent'))}
+                tooltip={
+                  shapeReason('setParent') ??
+                  'Record a different local parent without rewriting commits. Preview Restack next to move this branch and descendants.'
+                }
                 onClick={() => openWorkflow({ kind: 'parent', branch: selectedBranch })}
               >
                 Set stack parent…
@@ -1298,8 +1366,11 @@ function App() {
               {selectedPullRequest?.state === 'OPEN' ? (
                 <Button
                   variant="secondary"
-                  disabled={isBusy || operationActive}
-                  tooltip="Preview merging this open pull request into the default branch. Nothing merges until confirmed; remaining branches still need restack."
+                  disabled={isBusy || operationActive || Boolean(shapeReason('executeStack'))}
+                  tooltip={
+                    shapeReason('executeStack') ??
+                    'Preview merging this open pull request into the default branch. Nothing merges until confirmed; remaining branches still need restack.'
+                  }
                   onClick={() =>
                     openWorkflow({ kind: 'stack', operation: 'merge', branch: selectedBranch.name })
                   }
@@ -1373,14 +1444,20 @@ function App() {
               <h3>Pull request</h3>
               <p>No pull request for this branch.</p>
               <Button
-                disabled={!selectedBranch.current || !snapshot.github.available || isBusy}
+                disabled={
+                  !selectedBranch.current ||
+                  !snapshot.github.available ||
+                  isBusy ||
+                  Boolean(shapeReason('createPr'))
+                }
                 tooltip={
-                  !snapshot.github.available
+                  shapeReason('createPr') ??
+                  (!snapshot.github.available
                     ? snapshot.github.message ||
                       'Connect an authenticated GitHub repository to create pull requests.'
                     : !selectedBranch.current
                       ? 'Switch to this branch to open its pull request on GitHub.'
-                      : 'Review creating a PR from this branch’s published upstream. Unpushed commits are not included.'
+                      : 'Review creating a PR from this branch’s published upstream. Unpushed commits are not included.')
                 }
                 onClick={openPrDialog}
                 size="sm"
@@ -1399,11 +1476,17 @@ function App() {
           <section className="detail-section detail-actions">
             <h3>Branch actions</h3>
             <Button
-              disabled={selectedBranch.current || isBusy || operationActive}
+              disabled={
+                selectedBranch.current ||
+                isBusy ||
+                operationActive ||
+                Boolean(shapeReason('switch'))
+              }
               tooltip={
-                selectedBranch.current
+                shapeReason('switch') ??
+                (selectedBranch.current
                   ? 'This is already the checked-out branch.'
-                  : 'Switch the working tree to this branch. Requires a clean tree; remotes create a local tracking copy.'
+                  : 'Switch the working tree to this branch. Requires a clean tree; remotes create a local tracking copy.')
               }
               onClick={() =>
                 runAction({ type: 'switch', ref: selectedBranch.ref }, 'Switch branch')
@@ -1414,8 +1497,11 @@ function App() {
               Switch to this branch
             </Button>
             <Button
-              disabled={!canRebase || isBusy}
-              tooltip="Rebase only the current branch onto its recorded parent locally. Rewrites its history; use Restack to move descendants together."
+              disabled={!canRebase || isBusy || Boolean(shapeReason('rebase'))}
+              tooltip={
+                shapeReason('rebase') ??
+                'Rebase only the current branch onto its recorded parent locally. Rewrites its history; use Restack to move descendants together.'
+              }
               onClick={() =>
                 openWorkflow({
                   kind: 'confirm',
@@ -1443,12 +1529,16 @@ function App() {
                 <Button
                   variant="secondary"
                   disabled={
-                    isBusy || operationActive || selectedBranch.name === snapshot.defaultBranch
+                    isBusy ||
+                    operationActive ||
+                    selectedBranch.name === snapshot.defaultBranch ||
+                    Boolean(shapeReason('renameBranch'))
                   }
                   tooltip={
-                    selectedBranch.name === snapshot.defaultBranch
+                    shapeReason('renameBranch') ??
+                    (selectedBranch.name === snapshot.defaultBranch
                       ? 'The default branch cannot be renamed here.'
-                      : 'Rename this local branch. Remote tracking and open pull requests may need updating.'
+                      : 'Rename this local branch. Remote tracking and open pull requests may need updating.')
                   }
                   onClick={() => openWorkflow({ kind: 'rename', branch: selectedBranch })}
                 >
@@ -1456,8 +1546,11 @@ function App() {
                 </Button>
                 <Button
                   variant="secondary"
-                  disabled={isBusy || operationActive}
-                  tooltip="Choose which remote branch this branch pushes to and pulls from. Local config only; no commits move."
+                  disabled={isBusy || operationActive || Boolean(shapeReason('setUpstream'))}
+                  tooltip={
+                    shapeReason('setUpstream') ??
+                    'Choose which remote branch this branch pushes to and pulls from. Local config only; no commits move.'
+                  }
                   onClick={() => openWorkflow({ kind: 'upstream', branch: selectedBranch })}
                 >
                   Set upstream…
@@ -1468,15 +1561,17 @@ function App() {
                     selectedBranch.current ||
                     selectedBranch.name === snapshot.defaultBranch ||
                     isBusy ||
-                    operationActive
+                    operationActive ||
+                    Boolean(shapeReason('deleteBranch'))
                   }
                   onClick={openDeleteDialog}
                   tooltip={
-                    selectedBranch.name === snapshot.defaultBranch
+                    shapeReason('deleteBranch') ??
+                    (selectedBranch.name === snapshot.defaultBranch
                       ? 'The default branch cannot be deleted.'
                       : selectedBranch.current
                         ? 'Cannot delete the checked-out branch — switch away first. Remotes and pull requests are kept.'
-                        : 'Delete this local branch. Remotes and pull requests are kept; unmerged work needs force and can orphan commits.'
+                        : 'Delete this local branch. Remotes and pull requests are kept; unmerged work needs force and can orphan commits.')
                   }
                   variant="danger"
                 >
@@ -1499,10 +1594,14 @@ function App() {
                   isBusy ||
                   operationActive ||
                   !selectedBranch.oid ||
-                  selectedBranch.name.endsWith(`/${snapshot.defaultBranch}`)
+                  selectedBranch.name.endsWith(`/${snapshot.defaultBranch}`) ||
+                  Boolean(shapeReason('deleteRemoteBranch'))
                 }
                 onClick={() => openWorkflow({ kind: 'deleteRemote', branch: selectedBranch })}
-                tooltip="Preview removing this branch from its remote. Local copies remain; open PRs may close and collaborators must prune."
+                tooltip={
+                  shapeReason('deleteRemoteBranch') ??
+                  'Preview removing this branch from its remote. Local copies remain; open PRs may close and collaborators must prune.'
+                }
               >
                 <Trash2 className="size-3.5" />
                 Delete remote branch…
@@ -1774,15 +1873,18 @@ function App() {
                 </Button>
                 <Button
                   disabled={
-                    isBusy || (deleteForce && deleteConfirmation !== deleteTarget?.branch.name)
+                    isBusy ||
+                    Boolean(shapeReason('deleteBranch')) ||
+                    (deleteForce && deleteConfirmation !== deleteTarget?.branch.name)
                   }
                   type="submit"
                   variant="danger"
                   loading={busyAction === 'Delete branch'}
                   tooltip={
-                    deleteForce && deleteConfirmation !== deleteTarget?.branch.name
+                    shapeReason('deleteBranch') ??
+                    (deleteForce && deleteConfirmation !== deleteTarget?.branch.name
                       ? 'Type the branch name to enable force deletion. Unmerged commits can become unreachable.'
-                      : 'Delete this local branch now. Remotes and pull requests are kept.'
+                      : 'Delete this local branch now. Remotes and pull requests are kept.')
                   }
                 >
                   <Trash2 aria-hidden="true" className="size-3.5" />
@@ -1862,14 +1964,20 @@ function App() {
                   Cancel
                 </Button>
                 <Button
-                  disabled={isBusy || !newBranchName.trim() || !newBranchParent}
+                  disabled={
+                    isBusy ||
+                    Boolean(shapeReason('createBranch')) ||
+                    !newBranchName.trim() ||
+                    !newBranchParent
+                  }
                   type="submit"
                   variant="accent"
                   loading={busyAction === 'Create branch'}
                   tooltip={
-                    !newBranchName.trim() || !newBranchParent
+                    shapeReason('createBranch') ??
+                    (!newBranchName.trim() || !newBranchParent
                       ? 'Enter a branch name and choose a parent branch first.'
-                      : 'Create the local branch, record its stack parent, and switch to it. Nothing is pushed.'
+                      : 'Create the local branch, record its stack parent, and switch to it. Nothing is pushed.')
                   }
                 >
                   <Plus aria-hidden="true" className="size-3.5" />
@@ -1998,18 +2106,20 @@ function App() {
                     !snapshot?.github.available ||
                     !selectedBranch?.current ||
                     isBusy ||
-                    !prBase.trim()
+                    !prBase.trim() ||
+                    Boolean(shapeReason('createPr'))
                   }
                   loading={busyAction === 'Create pull request'}
                   tooltip={
-                    !snapshot?.github.available
+                    shapeReason('createPr') ??
+                    (!snapshot?.github.available
                       ? snapshot?.github.message ||
                         'Connect an authenticated GitHub repository to create pull requests.'
                       : !selectedBranch?.current
                         ? 'Switch to a local branch to create its pull request.'
                         : !prBase.trim()
                           ? 'Choose the base branch this pull request targets.'
-                          : 'Create the PR using this branch’s published upstream. This does not push newer local commits.'
+                          : 'Create the PR using this branch’s published upstream. This does not push newer local commits.')
                   }
                   type="submit"
                   variant="accent"
