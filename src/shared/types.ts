@@ -983,6 +983,119 @@ export interface ActionResult {
   /** Present only for a merge: the per-pull-request outcome, including queue state. */
   merge?: MergeResult
 }
+
+/**
+ * A repository the signed-in credential can reach, exactly as GitHub reports it.
+ * Nothing here is a credential: discovery reads the API, and the clone uses
+ * ordinary Git with the account's own Git credentials.
+ */
+export interface GitHubRepositorySummary {
+  fullName: string
+  name: string
+  owner: string
+  description: string | null
+  private: boolean
+  fork: boolean
+  archived: boolean
+  /** GitHub has no commits yet, so the first branch starts from nothing. */
+  empty: boolean
+  language: string | null
+  defaultBranch: string
+  pushedAt: string | null
+  url: string
+  httpsUrl: string
+  sshUrl: string
+  canPush: boolean
+}
+
+/**
+ * Every onboarding refusal is named rather than left as Git's own text, so an
+ * organization single sign-on denial, a missing credential, and a destination
+ * that already holds someone's files each say what happened and what to do.
+ */
+export type OnboardingFailureReason =
+  | 'signed-out'
+  | 'sso-denied'
+  | 'rate-limited'
+  | 'unavailable'
+  | 'cancelled'
+  | 'not-found'
+  | 'authentication'
+  | 'ssh'
+  | 'network'
+  | 'destination-exists'
+  | 'invalid-destination'
+  | 'failed'
+
+export interface OnboardingFailure {
+  reason: OnboardingFailureReason
+  message: string
+}
+
+/**
+ * Every onboarding call answers with a named outcome rather than a thrown
+ * string, so the onboarding surface can tell an organization denial from a
+ * cancelled clone from a destination someone already has files in.
+ */
+export type OnboardingResult<T> = { ok: true; value: T } | { ok: false; failure: OnboardingFailure }
+
+export interface RepositoryDiscovery {
+  repositories: GitHubRepositorySummary[]
+  /** The query that produced this list, echoed so a slow page can be labelled. */
+  query: string
+}
+
+export interface RepositoryDiscoveryRequest {
+  /** An empty query lists everything the credential can reach. */
+  query?: string
+  /** Cancels the in-flight search when the same id is cancelled. */
+  requestId?: string
+}
+
+export type CloneProtocol = 'https' | 'ssh'
+
+export interface RepositoryCloneRequest {
+  repository: GitHubRepositorySummary
+  protocol: CloneProtocol
+  /** An existing absolute directory the repository folder is created inside. */
+  parentDirectory: string
+  /** The single folder name created inside `parentDirectory`. */
+  directoryName: string
+  shallow: boolean
+  /** Cancels the in-flight clone when the same id is cancelled. */
+  requestId?: string
+}
+
+export interface RepositoryCloneResult {
+  path: string
+  name: string
+  /** GitHub had no commits; the working tree is an empty repository. */
+  empty: boolean
+  /** The exact `git clone` invocation, for copying into a terminal. */
+  gitCommand: string
+  /** The equivalent `gh repo clone` invocation. */
+  ghCommand: string
+}
+
+/** The exact terminal commands a clone would run, shown before anything is written. */
+export interface CloneCommandPreview {
+  gitCommand: string
+  ghCommand: string
+}
+
+/**
+ * What this machine can already do with Git: the identity commits are authored
+ * with, the branch Git names first, whether an HTTPS credential helper is
+ * configured, and whether an SSH client Git can drive is on PATH. Git Stacks
+ * reads this and changes none of it.
+ */
+export interface GitEnvironmentStatus {
+  identity: { name: string | null; email: string | null }
+  /** `init.defaultBranch` as configured; null means Git's own built-in applies. */
+  defaultBranch: string | null
+  httpsCredentials: { configured: boolean; helper: string | null }
+  ssh: { available: boolean; version: string | null }
+}
 /**
  * Where the GitHub account stands. Every field is a status: an opaque reference
  * to the sealed credential, never the credential itself, so nothing here can be
@@ -1039,6 +1152,29 @@ export interface GitHubAccountStatus {
 export interface DesktopAPI {
   recentRepositories(): Promise<RecentRepository[]>
   openRepository(path?: string): Promise<RepositorySnapshot | null>
+  /** Adds an existing local repository by absolute path, for a folder dialog or a dropped folder. */
+  addRepository?(path: string): Promise<RepositorySnapshot | null>
+  /** Accessible repositories for the signed-in account; paginated and cancellable. */
+  searchRepositories?(
+    request: RepositoryDiscoveryRequest,
+  ): Promise<OnboardingResult<RepositoryDiscovery>>
+  /** Git identity, default branch, HTTPS credential helper, and SSH client availability. */
+  gitEnvironment?(requestId?: string): Promise<OnboardingResult<GitEnvironmentStatus>>
+  /** Clones with ordinary Git, then registers the finished repository. */
+  cloneRepository?(
+    request: RepositoryCloneRequest,
+  ): Promise<OnboardingResult<RepositoryCloneResult>>
+  /** The terminal commands a clone would run, without running anything. */
+  previewCloneCommand?(
+    request: RepositoryCloneRequest,
+  ): Promise<OnboardingResult<CloneCommandPreview>>
+  /** Opens the platform folder picker for a clone destination; null when cancelled. */
+  chooseDestinationDirectory?(current?: string): Promise<string | null>
+  /**
+   * Subscribes to folders dropped onto the window, resolved to absolute paths in
+   * the preload. Returns the unsubscribe.
+   */
+  onRepositoryDropped?(listener: (paths: string[]) => void): () => void
   refresh(): Promise<RepositorySnapshot>
   runAction(action: GitAction): Promise<ActionResult>
   fileView(path: string): Promise<FileView>

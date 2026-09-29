@@ -1342,6 +1342,148 @@ button:disabled {
   border-color: var(--line);
 }
 
+/* Onboarding: the actions that start a repository, and the facts about this
+   machine's Git. Every colour comes from a semantic token. */
+.onboarding-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: center;
+}
+
+.onboarding-hint {
+  color: var(--gs-semantic-text-secondary);
+  font-size: var(--gs-semantic-type-caption-size);
+  text-align: center;
+}
+
+.onboarding-environment {
+  width: 100%;
+  max-width: 560px;
+  text-align: left;
+}
+
+.onboarding-discovery {
+  display: grid;
+  gap: 12px;
+  min-height: 0;
+}
+
+.onboarding-search {
+  display: flex;
+  align-items: end;
+  gap: 8px;
+}
+
+.onboarding-search > :first-child {
+  flex: 1;
+}
+
+.onboarding-results {
+  display: grid;
+  gap: 6px;
+  max-height: 40vh;
+  margin: 0;
+  padding: 0;
+  overflow: auto;
+  list-style: none;
+}
+
+.onboarding-result {
+  display: grid;
+  gap: 3px;
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid var(--gs-semantic-border-decorative);
+  border-radius: var(--gs-semantic-radius-item);
+  background: var(--gs-semantic-surface-content);
+  text-align: left;
+  transition:
+    background 150ms ease,
+    border-color 150ms ease;
+}
+
+.onboarding-result:hover {
+  border-color: var(--gs-semantic-border-essential);
+}
+
+.onboarding-result[aria-pressed='true'] {
+  border-color: var(--gs-semantic-selection-border);
+  background: var(--gs-semantic-selection-background);
+}
+
+.onboarding-result-name {
+  font-weight: 600;
+}
+
+.onboarding-result-description {
+  color: var(--gs-semantic-text-secondary);
+  font-size: var(--gs-semantic-type-caption-size);
+}
+
+.onboarding-result-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.onboarding-clone {
+  display: grid;
+  gap: 12px;
+  border-top: 1px solid var(--gs-semantic-border-decorative);
+  padding-top: 12px;
+}
+
+.onboarding-clone-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: end;
+}
+
+.onboarding-folder {
+  display: flex;
+  gap: 8px;
+}
+
+.onboarding-commands {
+  display: grid;
+  gap: 6px;
+}
+
+.onboarding-command {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: var(--gs-semantic-radius-item);
+  background: var(--gs-semantic-surface-inset);
+}
+
+.onboarding-command-label {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 4px;
+  color: var(--gs-semantic-text-secondary);
+  font-size: var(--gs-semantic-type-caption-size);
+}
+
+.onboarding-command-text {
+  flex: 1;
+  min-width: 0;
+  overflow-x: auto;
+  white-space: nowrap;
+  font-family: var(--gs-semantic-font-mono);
+  font-size: var(--gs-semantic-type-caption-size);
+}
+
+.onboarding-clone-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
 .browser-disclaimer {
   position: fixed;
   right: 12px;

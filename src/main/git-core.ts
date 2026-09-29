@@ -120,6 +120,8 @@ export interface CappedOptions {
   /** Cut the retained output at the last whole occurrence of this separator. */
   boundary?: string
   signal?: AbortSignal
+  /** Overrides the per-command deadline; a clone needs longer than a status read. */
+  timeoutMs?: number
 }
 
 export interface CappedResult {
@@ -179,7 +181,10 @@ export async function executeCapped(
       if (stopped) stopped = 'abort'
       else stop('abort')
     }
-    const timer = setTimeout(() => stop('timeout'), command === 'gh' ? 20_000 : 120_000)
+    const timer = setTimeout(
+      () => stop('timeout'),
+      options.timeoutMs ?? (command === 'gh' ? 20_000 : 120_000),
+    )
     options.signal?.addEventListener('abort', onAbort, { once: true })
     if (options.signal?.aborted) onAbort()
 

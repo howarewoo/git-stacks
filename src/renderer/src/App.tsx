@@ -40,16 +40,20 @@ import type {
   Branch,
   DesktopAPI,
   GitAction,
+  GitEnvironmentStatus,
   GitRuntimeStatus,
   GitHubAccountState,
   GitHubAccountStatus,
   LinkedIssue,
+  OnboardingFailure,
   PullRequest,
   RecentRepository,
+  RepositoryCloneResult,
   RepositorySnapshot,
   RemoteFreshness,
   RemoteFreshnessState,
 } from '../../shared/types'
+import { GitEnvironmentPanel, RepositoryDiscoveryDialog } from './components/onboarding'
 import { LIST_PAGE_SIZE } from '../../shared/performance'
 import { ListWindowMore } from './components/list-window'
 import { useListWindow } from './lib/list-window'
@@ -395,6 +399,10 @@ function App() {
   const [accountOpen, setAccountOpen] = React.useState(false)
   const [account, setAccount] = React.useState<GitHubAccountStatus | null>(null)
   const [accountBusy, setAccountBusy] = React.useState(false)
+  const [discoveryOpen, setDiscoveryOpen] = React.useState(false)
+  const [gitEnvironment, setGitEnvironment] = React.useState<GitEnvironmentStatus | null>(null)
+  const [gitEnvironmentFailure, setGitEnvironmentFailure] =
+    React.useState<OnboardingFailure | null>(null)
   const accountRequest = React.useRef(0)
   const workflowSequence = React.useRef(0)
 
@@ -537,8 +545,12 @@ function App() {
     }
   }, [desktop])
 
+  /**
+   * Adopts a repository the main process just opened, whether it came from the
+   * recents list, the folder dialog, a dropped folder, or a finished clone.
+   */
   const openRepository = React.useCallback(
-    async (path?: string) => {
+    async (path?: string, mode: 'recent' | 'add' = 'recent') => {
       if (!desktop || openingRef.current || busyRef.current) return
       openingRef.current = true
       // Resetting the gate before awaiting retires every in-flight refresh, so
@@ -550,7 +562,10 @@ function App() {
       setActionError(null)
       setNotice(null)
       try {
-        const next = await desktop.openRepository(path)
+        const next =
+          mode === 'add'
+            ? await desktop.addRepository?.(path ?? '')
+            : await desktop.openRepository(path)
         if (next && repositoryGate.current(claim)) {
           setSnapshotAndSelection(next)
           setDeleteTarget(null)
@@ -645,6 +660,72 @@ function App() {
     if (!desktop || !uri) return
     desktop.openExternal(uri).catch((value) => setError(readableError(value)))
   }, [account, desktop])
+
+  const openDiscovery = React.useCallback(() => {
+    if (!desktop || isBusy || operationActive) return
+    setDiscoveryOpen(true)
+  }, [desktop, isBusy, operationActive])
+
+  // A finished clone registered its repository in the main process, so the
+  // window only has to read the repository it is now showing.
+  const adoptClonedRepository = React.useCallback(
+    async (result: RepositoryCloneResult) => {
+      repositoryGate.reset()
+      const claim = repositoryGate.claim()
+      setError(null)
+      try {
+        const next = await desktop?.refresh()
+        if (next && repositoryGate.current(claim)) {
+          setSnapshotAndSelection(next)
+          setWorkspaceView('branches')
+        }
+        const repositories = await desktop?.recentRepositories().catch(() => null)
+        if (repositories) setRecentRepositories(repositories)
+        setNotice(
+          result.empty
+            ? `Cloned ${result.name}. It has no commits yet — create a branch to add the first one.`
+            : `Cloned ${result.name} into ${result.path}.`,
+        )
+      } catch (value) {
+        if (repositoryGate.current(claim)) setError(readableError(value))
+      }
+    },
+    [desktop, repositoryGate, setSnapshotAndSelection],
+  )
+
+  // Onboarding reads this machine's Git facts once; they never change while the
+  // window shows them, and nothing here writes a Git setting.
+  React.useEffect(() => {
+    if (!desktop?.gitEnvironment) return
+    let cancelled = false
+    desktop
+      .gitEnvironment('onboarding:environment')
+      .then((outcome) => {
+        if (cancelled) return
+        if (outcome.ok) {
+          setGitEnvironment(outcome.value)
+          setGitEnvironmentFailure(null)
+        } else {
+          setGitEnvironmentFailure(outcome.failure)
+        }
+      })
+      .catch(() => undefined)
+    return () => {
+      cancelled = true
+    }
+  }, [desktop])
+
+  // A folder dropped on the window is added as it was found, and only while no
+  // repository is open: switching away from a workspace by accident is worse
+  // than asking for the action again.
+  React.useEffect(() => {
+    if (!desktop?.onRepositoryDropped) return
+    return desktop.onRepositoryDropped((paths) => {
+      if (snapshot || openingRef.current || busyRef.current) return
+      const first = paths[0]
+      if (first) void openRepository(first, 'add')
+    })
+  }, [desktop, openRepository, snapshot])
 
   const ACCOUNT_LABELS: Record<GitHubAccountState, string> = {
     'not-configured': 'GitHub: not configured',
@@ -2719,22 +2800,35 @@ function App() {
         <div className="onboarding-icon">
           <GitBranch className="size-7" />
         </div>
-        <h1>Open a repository</h1>
+        <h1>Start with a repository</h1>
         <p>
           Git Stacks gives you a focused view of branches, working changes, and pull requests
-          without leaving your desktop.
+          without leaving your desktop. A repository stays ordinary Git: clone it here, then keep
+          using it in your terminal, your editor, or GitHub Desktop.
         </p>
-        <Button disabled={opening} onClick={() => openRepository()} size="lg" variant="accent">
-          {opening ? (
-            <LoaderCircle className="size-4 animate-spin" />
-          ) : (
-            <FolderOpen className="size-4" />
-          )}
-          Open local repository
-        </Button>
+        <div className="onboarding-actions">
+          <Button disabled={opening || !desktop} onClick={openDiscovery} size="lg" variant="accent">
+            {opening ? (
+              <LoaderCircle aria-hidden="true" className="size-4 animate-spin" />
+            ) : (
+              <Search aria-hidden="true" className="size-4" />
+            )}
+            Search GitHub
+          </Button>
+          <Button
+            disabled={opening || !desktop}
+            onClick={() => void openRepository(undefined, 'recent')}
+            size="lg"
+            variant="secondary"
+          >
+            <FolderOpen aria-hidden="true" className="size-4" />
+            Add local repository
+          </Button>
+        </div>
+        <p className="onboarding-hint">Or drop a Git repository folder anywhere on this window.</p>
         {!desktop ? (
           <div className="desktop-notice" role="status">
-            <Terminal className="size-4" />
+            <Terminal aria-hidden="true" className="size-4" />
             <span>
               Open Git Stacks in the desktop app to access local Git repositories. This browser view
               does not include demo data.
@@ -2744,7 +2838,7 @@ function App() {
         {recentRepositories.length > 0 ? (
           <div className="onboarding-recents">
             <div className="onboarding-recents-heading">
-              <Clock3 className="size-4" />
+              <Clock3 aria-hidden="true" className="size-4" />
               <h2>Recent repositories</h2>
             </div>
             {recentRepositories.map((repository) => (
@@ -2752,19 +2846,20 @@ function App() {
                 className="onboarding-recent"
                 disabled={opening}
                 key={repository.path}
-                onClick={() => openRepository(repository.path)}
+                onClick={() => void openRepository(repository.path)}
                 type="button"
               >
-                <FolderGit2 className="size-4" />
+                <FolderGit2 aria-hidden="true" className="size-4" />
                 <span>
                   <strong>{repository.name}</strong>
                   <small>{repository.path}</small>
                 </span>
-                <ChevronRight className="size-4" />
+                <ChevronRight aria-hidden="true" className="size-4" />
               </button>
             ))}
           </div>
         ) : null}
+        <GitEnvironmentPanel failure={gitEnvironmentFailure} status={gitEnvironment} />
       </div>
     </main>
   )
@@ -2915,6 +3010,14 @@ function App() {
         onSignOut={() => runAccountAction(() => desktop!.signOutOfGitHub!(), true)}
         open={accountOpen}
         status={account}
+      />
+      <RepositoryDiscoveryDialog
+        account={account}
+        busy={isBusy || operationActive}
+        onCloned={(result) => void adoptClonedRepository(result)}
+        onOpenAccount={openAccount}
+        onOpenChange={setDiscoveryOpen}
+        open={discoveryOpen}
       />
       {conflictPath && snapshot ? (
         <ConflictResolver

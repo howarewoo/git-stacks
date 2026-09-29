@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer } from 'electron'
+import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import type {
   DesktopAPI,
   GitHubAccountStatus,
@@ -9,9 +9,42 @@ import type {
   RepositorySnapshot,
 } from '../shared/types'
 
+/**
+ * Dropped folders never cross the bridge as `File` objects. The preload resolves
+ * them to absolute paths itself and publishes only strings, so the renderer
+ * never holds a file handle it cannot validate.
+ */
+const dropListeners = new Set<(paths: string[]) => void>()
+
+function reportDrop(event: DragEvent): void {
+  // A dropped folder would otherwise navigate the window away from the app.
+  event.preventDefault()
+  const paths = [...(event.dataTransfer?.files ?? [])]
+    .map((file) => webUtils.getPathForFile(file))
+    .filter((path): path is string => Boolean(path))
+  if (!paths.length) return
+  for (const listener of dropListeners) listener(paths)
+}
+
+window.addEventListener('dragover', (event) => event.preventDefault())
+window.addEventListener('drop', reportDrop)
+
 const desktop: DesktopAPI = {
   recentRepositories: () => ipcRenderer.invoke('repositories:recent'),
   openRepository: (path) => ipcRenderer.invoke('repositories:open', path),
+  addRepository: (path) => ipcRenderer.invoke('repositories:add', path),
+  searchRepositories: (request) => ipcRenderer.invoke('repositories:search', request),
+  gitEnvironment: (requestId) => ipcRenderer.invoke('git-environment', requestId),
+  cloneRepository: (request) => ipcRenderer.invoke('repositories:clone', request),
+  previewCloneCommand: (request) => ipcRenderer.invoke('repositories:clone-preview', request),
+  chooseDestinationDirectory: (current) =>
+    ipcRenderer.invoke('repositories:choose-destination', current),
+  onRepositoryDropped: (listener: (paths: string[]) => void) => {
+    dropListeners.add(listener)
+    return () => {
+      dropListeners.delete(listener)
+    }
+  },
   refresh: () => ipcRenderer.invoke('repository:refresh'),
   conflictView: (path) => ipcRenderer.invoke('repository:conflict', path),
   runAction: (action) => ipcRenderer.invoke('repository:action', action),

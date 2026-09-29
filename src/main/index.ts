@@ -78,8 +78,27 @@ import {
 import { CredentialVault } from './credentials'
 import { safeStorageProtector } from './secret-storage'
 import { GitHubAccount } from './github-account'
+import {
+  assertDirectoryName,
+  assertFullName,
+  classifyTransportFailure,
+  cloneCommandText,
+  discoverRepositories,
+  ghCloneCommandText,
+} from './github-repositories'
+import { CloneError, cloneRepository, readGitEnvironment } from './clone-repository'
+import { isCancelled as isCommandCancelled } from './git-core'
+import type {
+  CloneCommandPreview,
+  CloneProtocol,
+  OnboardingFailure,
+  RepositoryCloneResult,
+} from '../shared/types'
 
 const readKeys = new RequestRegistry()
+const onboardingKeys = new RequestRegistry()
+/** Discovery and clone run before any repository exists, under their own root. */
+const ONBOARDING_ROOT = 'onboarding'
 
 const bundleDir = dirname(fileURLToPath(import.meta.url))
 protocol.registerSchemesAsPrivileged([
@@ -380,6 +399,58 @@ function requireCommitOid(value: unknown): string {
   return value
 }
 
+/**
+ * Opens a local repository and, only once its snapshot reads, registers it as a
+ * recent repository. Adding a repository this way never writes to the
+ * repository itself: it is read, never rewritten.
+ */
+async function activateRepository(selected: string) {
+  const path = await resolveRepository(selected)
+  // Retire old reads before waiting for the operation queue; a long-running
+  // history/diff must not delay switching to a newly selected repository.
+  if (activeRepository) readKeys.cancelRoot(activeRepository)
+  stopBackgroundSync()
+  return operations.switchRepository(path, async () => {
+    const runtime = await resolveGitRuntime()
+    return withGitRuntime(runtime, async () => {
+      const snapshot = await getSnapshot(path)
+      await remember(path)
+      activeRepository = path
+      startBackgroundSync(path, snapshot)
+      return snapshot
+    })
+  })
+}
+
+/**
+ * Onboarding runs before a repository exists, so its own cancellable requests
+ * are tracked apart from the active repository's reads.
+ */
+function onboardingRequest<T>(requestId: string, operation: (signal: AbortSignal) => Promise<T>) {
+  const controller = onboardingKeys.claim(ONBOARDING_ROOT, requestId)
+  return operation(controller.signal).finally(() =>
+    onboardingKeys.release(ONBOARDING_ROOT, requestId, controller),
+  )
+}
+
+function onboardingFailure(error: unknown): OnboardingFailure {
+  if (error instanceof CloneError) return { reason: error.reason, message: error.message }
+  if (isCommandCancelled(error)) return { reason: 'cancelled', message: 'The clone was cancelled.' }
+  return classifyTransportFailure(error)
+}
+
+function readRequestId(value: unknown): string {
+  return typeof value === 'string' && value ? value : 'onboarding'
+}
+
+function requireString(value: unknown, name: string, limit = 4096): string {
+  if (typeof value !== 'string' || !value.trim() || value.length > limit || value.includes('\0')) {
+    throw new CloneError('invalid-destination', `Choose a valid ${name}.`)
+  }
+  return value
+}
+
+
 
 function requireDraft(value: unknown): ReviewDraft {
   if (typeof value !== 'object' || value === null) throw new Error('Invalid review comment draft.')
@@ -488,14 +559,60 @@ function requireCommentBody(value: unknown): string {
 }
 
 
+
+function cloneProtocol(value: unknown): CloneProtocol {
+  return value === 'ssh' ? 'ssh' : 'https'
+}
+
+/** A clone request whose repository, folder name, and destination all passed validation. */
+interface ValidatedClone {
+  url: string
+  fullName: string
+  parentDirectory: string
+  directoryName: string
+  protocol: CloneProtocol
+  shallow: boolean
+}
+
+/**
+ * Validates a clone request before anything is written. The URL is rebuilt from
+ * `owner/name` and the chosen protocol, never taken from the request, so a
+ * crafted payload cannot send Git somewhere else.
+ */
+function validatedClone(request: unknown): ValidatedClone {
+  const asked = (request ?? {}) as Record<string, unknown>
+  const repository = (asked.repository ?? {}) as Record<string, unknown>
+  const fullName = assertFullName(repository.fullName)
+  const protocol = cloneProtocol(asked.protocol)
+  return {
+    url:
+      protocol === 'ssh' ? `git@github.com:${fullName}.git` : `https://github.com/${fullName}.git`,
+    fullName,
+    directoryName: assertDirectoryName(asked.directoryName),
+    parentDirectory: requireString(asked.parentDirectory, 'destination folder'),
+    protocol,
+    shallow: asked.shallow === true,
+  }
+}
 function installHandlers() {
+  // The clone destination is chosen with the platform folder picker, so the
+  // renderer never composes a filesystem path of its own.
+  ipcMain.handle('repositories:choose-destination', async (event, current: unknown) => {
+    validateSender(event)
+    const result = await dialog.showOpenDialog(window!, {
+      title: 'Choose where to clone',
+      buttonLabel: 'Use this folder',
+      defaultPath: typeof current === 'string' && current ? current : undefined,
+      properties: ['openDirectory', 'createDirectory'],
+    })
+    return result.canceled ? null : (result.filePaths[0] ?? null)
+  })
   ipcMain.handle('repositories:recent', (event) => {
     validateSender(event)
     return recents
   })
   ipcMain.handle('repositories:open', async (event, requestedPath: unknown) => {
     validateSender(event)
-    let selected: string
     if (requestedPath !== undefined) {
       if (
         typeof requestedPath !== 'string' ||
@@ -503,31 +620,106 @@ function installHandlers() {
       ) {
         throw new Error('Use Open repository to choose a new folder.')
       }
-      selected = requestedPath
-    } else {
-      const result = await dialog.showOpenDialog(window!, {
-        title: 'Open Git repository',
-        properties: ['openDirectory'],
-        buttonLabel: 'Open repository',
-      })
-      if (result.canceled || !result.filePaths[0]) return null
-      selected = result.filePaths[0]
+      return activateRepository(requestedPath)
     }
-    const path = await resolveRepository(selected)
-    // Retire old reads before waiting for the operation queue; a long-running
-    // history/diff must not delay switching to a newly selected repository.
-    if (activeRepository) readKeys.cancelRoot(activeRepository)
-    stopBackgroundSync()
-    return operations.switchRepository(path, async () => {
-      const runtime = await resolveGitRuntime()
-      return withGitRuntime(runtime, async () => {
-        const snapshot = await getSnapshot(path)
-        await remember(path)
-        activeRepository = path
-        startBackgroundSync(path, snapshot)
-        return snapshot
-      })
+    const result = await dialog.showOpenDialog(window!, {
+      title: 'Open Git repository',
+      properties: ['openDirectory'],
+      buttonLabel: 'Open repository',
     })
+    if (result.canceled || !result.filePaths[0]) return null
+    return activateRepository(result.filePaths[0])
+  })
+  // A folder chosen by dialog or dropped on the window is added by its absolute
+  // path. It is read exactly as it is found: nothing inside it is written.
+  ipcMain.handle('repositories:add', async (event, requestedPath: unknown) => {
+    validateSender(event)
+    return activateRepository(requireString(requestedPath, 'folder'))
+  })
+  ipcMain.handle('git-environment', async (event, requestId: unknown) => {
+    validateSender(event)
+    try {
+      const value = await onboardingRequest(readRequestId(requestId), (signal) =>
+        readGitEnvironment(signal),
+      )
+      return { ok: true as const, value }
+    } catch (error) {
+      return { ok: false as const, failure: onboardingFailure(error) }
+    }
+  })
+  ipcMain.handle('repositories:search', async (event, request: unknown) => {
+    validateSender(event)
+    const asked = (request ?? {}) as { query?: unknown; requestId?: unknown }
+    const query = typeof asked.query === 'string' ? asked.query : ''
+    try {
+      const value = await onboardingRequest(readRequestId(asked.requestId), (signal) =>
+        discoverRepositories({ query, signal }),
+      )
+      return { ok: true as const, value }
+    } catch (error) {
+      return { ok: false as const, failure: onboardingFailure(error) }
+    }
+  })
+  // The clone is built in a staging folder and renamed into place before it is
+  // registered, so a cancelled or failed clone leaves nothing behind to open.
+  ipcMain.handle('repositories:clone', async (event, request: unknown) => {
+    validateSender(event)
+    const asked = (request ?? {}) as Record<string, unknown>
+    try {
+      const clone = validatedClone(asked)
+      const value = await onboardingRequest(readRequestId(asked.requestId), async (signal) => {
+        const outcome = await cloneRepository({ ...clone, signal })
+        // The repository is registered only after it reads as a finished clone.
+        await activateRepository(outcome.path)
+        return {
+          path: outcome.path,
+          name: clone.directoryName,
+          empty: outcome.empty,
+          gitCommand: cloneCommandText(
+            clone.url,
+            clone.parentDirectory,
+            clone.directoryName,
+            clone.shallow,
+          ),
+          ghCommand: ghCloneCommandText(
+            clone.fullName,
+            clone.parentDirectory,
+            clone.directoryName,
+            clone.shallow,
+          ),
+        } satisfies RepositoryCloneResult
+      })
+      return { ok: true as const, value }
+    } catch (error) {
+      return { ok: false as const, failure: onboardingFailure(error) }
+    }
+  })
+  // The same commands without running anything, so the clone can be reproduced
+  // in a terminal or with `gh repo clone` before a single file is written.
+  ipcMain.handle('repositories:clone-preview', async (event, request: unknown) => {
+    validateSender(event)
+    try {
+      const clone = validatedClone(request)
+      return {
+        ok: true as const,
+        value: {
+          gitCommand: cloneCommandText(
+            clone.url,
+            clone.parentDirectory,
+            clone.directoryName,
+            clone.shallow,
+          ),
+          ghCommand: ghCloneCommandText(
+            clone.fullName,
+            clone.parentDirectory,
+            clone.directoryName,
+            clone.shallow,
+          ),
+        } satisfies CloneCommandPreview,
+      }
+    } catch (error) {
+      return { ok: false as const, failure: onboardingFailure(error) }
+    }
   })
   ipcMain.handle('repository:refresh', async (event) => {
     validateSender(event)
@@ -860,7 +1052,9 @@ function installHandlers() {
 
   ipcMain.handle('operation:cancel', (event, requestId: unknown) => {
     validateSender(event)
-    if (typeof requestId !== 'string' || !requestId || !activeRepository) return
+    if (typeof requestId !== 'string' || !requestId) return
+    onboardingKeys.cancel(ONBOARDING_ROOT, requestId)
+    if (!activeRepository) return
     readKeys.cancel(activeRepository, requestId)
   })
   ipcMain.handle('external:open', async (event, value: unknown) => {

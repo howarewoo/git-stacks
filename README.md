@@ -144,6 +144,39 @@ late device-code response cannot reopen it. If saving the account record fails
 after its new credential was stored, that staged credential is removed and the
 previous account remains selected.
 
+## Onboarding
+
+With no repository open, the window offers three ways in, and all of them end
+with an ordinary Git working tree:
+
+- **Search GitHub** lists the repositories the signed-in credential can reach,
+  paged through the REST API. Selecting one opens a clone form with a
+  destination folder, HTTPS or SSH, and an optional shallow clone. Before
+  anything is written, the dialog shows the exact `git clone` and
+  `gh repo clone` commands and copies either one to the clipboard.
+- **Add local repository** opens the folder picker and adopts whatever is
+  there. It is read, never written: adding a repository never rewrites its
+  config, refs, or files.
+- **Drop a folder** on the window. Drops are ignored while a repository is
+  already open so a stray drag cannot switch workspaces.
+
+The clone is built in a staging folder next to the destination and renamed into
+place only after it reads as a finished clone, and it is registered with the app
+only then. Cancelling, a failed authentication, or a destination that already
+exists leaves nothing behind and opens nothing. Only the staging folder this
+clone created is ever removed.
+
+The onboarding pane also reports what this machine can already do with Git: the
+commit identity, the default branch, whether a credential helper is configured
+for HTTPS, and whether an `ssh` client is on `PATH`. Those are read-only facts.
+Git Stacks never sets a Git credential helper, `user.name`, `user.email`, or
+`init.defaultBranch`; a private HTTPS clone needs a credential helper the user
+already has, and the dialog says so rather than configuring one.
+
+Repository discovery sends one `Authorization` header to `api.github.com` and
+nothing else. Access tokens never reach a command line, a log, the renderer, or
+a remote URL: the app-signed transport is used directly from the main process.
+
 ## Performance budgets
 
 Git Stacks is used on repositories far larger than the ones it was built
