@@ -269,6 +269,10 @@ export async function discoverRepositories(
     const value = query
       ? await searchRepositories(transport, query, options, options.host)
       : { repositories: await listAccessible(transport, options, options.host), query: '' }
+    // Checked here, at the moment of publication, not only by the caller: the
+    // run may have been cancelled while it was in flight, and an answer recorded
+    // after its host was retired would be published for a host that never ran it.
+    if (options.signal?.aborted) throw cancelledRequest(options.signal)
     // A discovery run is the only evidence that discovery works on this host, so
     // it is what records that, against the host it actually ran on.
     observeHostRequest(options.host.host, 'repository-discovery', {
@@ -281,6 +285,14 @@ export async function discoverRepositories(
     observeHostRequest(options.host.host, 'repository-discovery', discoveryFailure(error))
     throw error
   }
+}
+
+/** The refusal a cancelled discovery run raises instead of recording anything. */
+function cancelledRequest(signal: AbortSignal): GitHubTransportError {
+  return new GitHubTransportError({
+    kind: 'cancelled',
+    detail: signal.reason instanceof Error ? signal.reason.message : 'the request was cancelled',
+  })
 }
 
 /** What a failed discovery run established, said as a capability state. */

@@ -381,6 +381,9 @@ export async function probeNativeStacksCapability(
       message: `the stacked pull requests resource answered ${response.status}`,
     }
   } catch (error) {
+    // A cancellation is this build stopping, not a fact about the host, and is
+    // raised here exactly as it is on the repository read above.
+    if (options.signal?.aborted || isCancelled(error)) throw error
     if (error instanceof GitHubTransportError && (error.status === 404 || error.kind === 'not-found')) {
       return {
         available: false,

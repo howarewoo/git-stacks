@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { parseRemote } from '../src/main/git-core'
+import { discoverRepositories } from '../src/main/github-repositories'
 import {
   ghCloneCommandText,
   summarizeRepository,
@@ -781,5 +782,73 @@ test('a probe cancelled before it finishes records nothing about the host', asyn
   assert.equal(
     hostStatus(context).capabilities.find((entry) => entry.id === 'native-stacks')?.state,
     'unknown',
+  )
+})
+
+test('a discovery run cancelled in flight records nothing about the host', async () => {
+  forgetHost()
+  const context = githubHostContext('ghe-retired-discovery.example.com')
+  const api = 'https://ghe-retired-discovery.example.com/api/v3'
+  const controller = new AbortController()
+  const inner = hostFetch([
+    [/\/user\/repos\?/u, { body: [{ full_name: 'acme/widgets' }] }],
+  ])
+  const fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const response = await inner.fetch(input, init)
+    // The run is cancelled after the host answered but before its answer is
+    // written down, which is the window the check itself guards.
+    controller.abort()
+    return response
+  }) as typeof globalThis.fetch
+  await assert.rejects(
+    discoverRepositories({
+      host: context,
+      transport: new DirectGitHubTransport({
+        host: context.host,
+        apiUrl: api,
+        graphqlUrl: context.graphqlUrl,
+        token: 'ghe-token',
+        env: {},
+        fetch,
+      }),
+      signal: controller.signal,
+    }),
+    (error: unknown) => (error as { kind?: string }).kind === 'cancelled',
+  )
+  assert.equal(
+    hostStatus(context).capabilities.find((entry) => entry.id === 'repository-discovery')?.state,
+    'unknown',
+    'a cancelled discovery run was recorded as the host answering',
+  )
+})
+
+test('a stacks probe cancelled in flight is raised, not read as an absent resource', async () => {
+  forgetHost()
+  const context = githubHostContext('ghe-retired-stacks.example.com')
+  const api = 'https://ghe-retired-stacks.example.com/api/v3'
+  const controller = new AbortController()
+  const inner = hostFetch([
+    [`${api}/repos/acme/widgets`, { body: { full_name: 'acme/widgets' } }],
+    [`${api}/repos/acme/widgets/stacks?per_page=1`, { body: [] }],
+  ])
+  const fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const response = await inner.fetch(input, init)
+    controller.abort()
+    return response
+  }) as typeof globalThis.fetch
+  await assert.rejects(
+    probeNativeStacksCapability('acme', 'widgets', {
+      transport: new DirectGitHubTransport({
+        host: context.host,
+        apiUrl: api,
+        graphqlUrl: context.graphqlUrl,
+        token: 'ghe-token',
+        env: {},
+        fetch,
+      }),
+      signal: controller.signal,
+    }),
+    (error: unknown) => (error as { name?: string }).name === 'GitHubTransportError',
+    'the cancellation was turned into a capability state',
   )
 })
