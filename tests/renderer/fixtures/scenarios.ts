@@ -593,6 +593,7 @@ function check(
   return {
     source: 'check-run',
     app: null,
+    appId: null,
     state: 'success',
     requirement: 'informational',
     summary: null,
@@ -611,6 +612,7 @@ const mixedChecksReport = checksReport([
     key: 'check-run:8101',
     name: 'build',
     app: 'github-actions',
+    appId: 15368,
     state: 'failure',
     requirement: 'required',
     summary: '2 annotations on the build job',
@@ -621,6 +623,7 @@ const mixedChecksReport = checksReport([
     key: 'check-run:8102',
     name: 'super-linter',
     app: 'super-linter',
+    appId: 1,
     state: 'action-required',
     summary: 'Fix the reported issues before merging',
   }),
