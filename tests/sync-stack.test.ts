@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { join } from 'node:path'
 import { test } from 'node:test'
-import { writeFile, readFile } from 'node:fs/promises'
+import { writeFile, readFile, unlink } from 'node:fs/promises'
 import { createGitHubHarness } from './fixtures/github-harness'
 import type { GitHubFixtureState, GitHubHarness } from './fixtures/github-harness'
 import type { GitHubTransport } from '../src/main/github-transport'
@@ -218,10 +218,90 @@ test('Sync Stack detects diverged trunk (upstream force update)', async () => {
     assert.equal(preview.sync.trunk.diverged, true)
     assert.ok(preview.sync.trunk.ahead > 0)
     assert.ok(preview.sync.trunk.behind > 0)
-    assert.ok(
-      preview.sync.warnings.some((w) => w.includes('diverged') || w.includes('rewritten')),
-      'Must warn about diverged trunk',
+    assert.equal(preview.sync.trunk.blockers.length > 0, true)
+    assert.match(preview.blockers.join('\n'), /publish or reconcile the trunk/i)
+    await assert.rejects(
+      runAction(harness.repo, {
+        type: 'executeStack',
+        token: preview.token,
+        allowForce: true,
+        mergeMethod: 'squash',
+      }),
+      /publish or reconcile the trunk/i,
     )
+    assert.equal(git(harness, ['merge-base', '--is-ancestor', 'main', 'feature-1']), '')
+    assert.equal(bareGit(harness, ['for-each-ref', '--format=%(objectname)', 'refs/heads/feature-1']), '')
+  })
+})
+
+test('Sync Stack refuses to drop unpublished local trunk commits from a stack', async () => {
+  await withHarness(async (harness) => {
+    const localMain = await commitFile(harness, 'local.txt', 'local\n', 'Local main commit')
+    await runAction(harness.repo, { type: 'createBranch', name: 'feature-ahead', parent: 'main' })
+    const featureTip = await commitFile(harness, 'feature.txt', 'feature\n', 'Feature commit')
+    const preview = await previewStack(harness.repo, await getSnapshot(harness.repo), 'sync', 'feature-ahead')
+    assert.match(preview.blockers.join('\n'), /publish or reconcile the trunk/i)
+    assert.match(preview.sync?.blockers.join('\n') ?? '', /publish or reconcile the trunk/i)
+    await assert.rejects(
+      runAction(harness.repo, {
+        type: 'executeStack', token: preview.token, allowForce: false, mergeMethod: 'squash',
+      }),
+      /publish or reconcile the trunk/i,
+    )
+    assert.equal(git(harness, ['rev-parse', 'feature-ahead']), featureTip)
+    assert.equal(git(harness, ['rev-parse', 'feature-ahead~1']), localMain)
+    assert.equal(bareGit(harness, ['for-each-ref', '--format=%(objectname)', 'refs/heads/feature-ahead']), '')
+  })
+})
+
+test('Sync Stack shows remote-ahead layer blockers and rejects execution', async () => {
+  await withHarness(async (harness) => {
+    await runAction(harness.repo, { type: 'createBranch', name: 'feature-remote', parent: 'main' })
+    await commitFile(harness, 'feature.txt', 'feature\n', 'Feature commit')
+    git(harness, ['push', harness.bare, 'feature-remote:refs/heads/feature-remote'])
+    const remoteTip = bareGit(harness, ['rev-parse', 'refs/heads/feature-remote'])
+    const tree = bareGit(harness, ['rev-parse', `${remoteTip}^{tree}`])
+    const advanced = bareGit(harness, ['commit-tree', tree, '-p', remoteTip, '-m', 'Remote advance'])
+    bareGit(harness, ['update-ref', 'refs/heads/feature-remote', advanced])
+
+    const preview = await previewStack(harness.repo, await getSnapshot(harness.repo), 'sync', 'feature-remote')
+    assert.equal(preview.sync?.layers.find((layer) => layer.branch === 'feature-remote')?.state, 'blocked')
+    assert.match(preview.blockers.join('\n'), /ahead of the local branch/i)
+    await assert.rejects(
+      runAction(harness.repo, {
+        type: 'executeStack', token: preview.token, allowForce: false, mergeMethod: 'squash',
+      }),
+      /ahead of the local branch/i,
+    )
+    assert.equal(bareGit(harness, ['rev-parse', 'refs/heads/feature-remote']), advanced)
+  })
+})
+
+test('Sync Stack push-only execution respects busy and dirty worktree guards', async () => {
+  await withHarness(async (harness) => {
+    await runAction(harness.repo, { type: 'createBranch', name: 'feature-push', parent: 'main' })
+    await commitFile(harness, 'feature.txt', 'feature\n', 'Feature commit')
+    const gitDir = git(harness, ['rev-parse', '--absolute-git-dir'])
+    await writeFile(join(gitDir, 'MERGE_HEAD'), git(harness, ['rev-parse', 'main']) + '\n')
+    const blocked = await previewStack(harness.repo, await getSnapshot(harness.repo), 'sync', 'feature-push')
+    assert.match(blocked.blockers.join('\n'), /Git operation is already in progress/i)
+    await assert.rejects(
+      runAction(harness.repo, {
+        type: 'executeStack', token: blocked.token, allowForce: false, mergeMethod: 'squash',
+      }),
+      /Git operation is already in progress/i,
+    )
+    await unlink(join(gitDir, 'MERGE_HEAD'))
+    const ready = await previewStack(harness.repo, await getSnapshot(harness.repo), 'sync', 'feature-push')
+    assert.deepEqual(ready.blockers, [])
+    await writeFile(join(harness.repo, 'untracked.txt'), 'uncommitted\n')
+    await assert.rejects(
+      runAction(harness.repo, {
+        type: 'executeStack', token: ready.token, allowForce: false, mergeMethod: 'squash',
+      }),
+      /commit or stash|clean/i,
+    )
+    assert.equal(bareGit(harness, ['for-each-ref', '--format=%(objectname)', 'refs/heads/feature-push']), '')
   })
 })
 
@@ -505,6 +585,51 @@ test('Sync Stack partial push retry: completed push is checkpointed and continua
     assert.equal(finalRemoteP2, finalLocalP2)
     assert.equal(finalRemoteP1, intermediateRemoteP1)
     assert.notEqual(finalRemoteP2, initialRemoteP2)
+  })
+})
+
+test('Sync Stack continues when a push succeeded before its checkpoint was written', async () => {
+  await withHarness(async (harness) => {
+    await runAction(harness.repo, { type: 'createBranch', name: 'first', parent: 'main' })
+    await commitFile(harness, 'first.txt', 'first\n', 'First layer')
+    await runAction(harness.repo, { type: 'createBranch', name: 'second', parent: 'first' })
+    await commitFile(harness, 'second.txt', 'second\n', 'Second layer')
+    await publishStack(harness, 'second')
+    git(harness, ['switch', 'main'])
+    await commitFile(harness, 'advance.txt', 'advance\n', 'Advance trunk')
+    git(harness, ['push', harness.bare, 'main:refs/heads/main'])
+    git(harness, ['switch', 'second'])
+
+    const preview = await previewStack(harness.repo, await getSnapshot(harness.repo), 'sync', 'second')
+    let failSecond = true
+    harness.hookGitPush({
+      branch: 'second',
+      armed: true,
+      before() {
+        if (failSecond) throw new Error('Simulated second push failure')
+      },
+    })
+    await assert.rejects(
+      runAction(harness.repo, {
+        type: 'executeStack', token: preview.token, allowForce: true, mergeMethod: 'squash',
+      }),
+      /Simulated second push failure/i,
+    )
+    const journalPath = join(git(harness, ['rev-parse', '--absolute-git-dir']), 'git-stacks-stack.json')
+    const journal = JSON.parse(await readFile(journalPath, 'utf8'))
+    const first = journal.syncPushes.branches.find((item: { branch: string }) => item.branch === 'first')
+    assert.ok(first)
+    assert.equal(first.status, 'completed')
+    assert.equal(first.publishedOid, bareGit(harness, ['rev-parse', 'refs/heads/first']))
+    first.status = 'pending'
+    delete first.publishedOid
+    await writeFile(journalPath, JSON.stringify(journal), 'utf8')
+
+    failSecond = false
+    const result = await runAction(harness.repo, { type: 'stackContinue' })
+    assert.match(result.message, /Synced/i)
+    assert.equal(bareGit(harness, ['rev-parse', 'refs/heads/first']), git(harness, ['rev-parse', 'first']))
+    assert.equal(bareGit(harness, ['rev-parse', 'refs/heads/second']), git(harness, ['rev-parse', 'second']))
   })
 })
 

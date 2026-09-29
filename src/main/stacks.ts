@@ -1464,6 +1464,11 @@ async function captureSyncTrunk(
   const ahead = localOid && remoteOidValue ? await commitCount(repoPath, remoteOidValue, localOid) : 0
   const behind =
     localOid && remoteOidValue ? await commitCount(repoPath, localOid, remoteOidValue) : 0
+  if (ahead > 0) {
+    blockers.push(
+      `Local ${trunk} has ${ahead} commit${ahead === 1 ? '' : 's'} not on origin/${trunk}; publish or reconcile the trunk before syncing so stack branches retain those commits`,
+    )
+  }
   const diverged = Boolean(
     localOid &&
       remoteOidValue &&
@@ -1673,8 +1678,8 @@ async function capturePlan(
       }
     }
     const retargetedFrom = oldParent && oldParent !== parent ? oldParent : null
-    // A sync always replays onto the tip it just fetched, so a trunk that moved
-    // under the local branch is a difference to report, not a reason to stop.
+    // Sync replays onto the fetched tip; captureSyncTrunk blocks unpublished
+    // local trunk commits before that replay can discard their ancestry.
     const preferRemoteTrunk = kind !== 'restack' || Boolean(retargetedFrom && parent === trunk)
     const localTrunkOid =
       parent === trunk ? await resolveCommit(root, `refs/heads/${trunk}`) : null
@@ -1975,6 +1980,8 @@ async function capturePlan(
     mergeMethods,
     sync: syncCapture,
   }
+  const syncPreview = syncCapture ? buildSyncPreview(syncCapture, selectedBranch) : null
+  if (syncPreview) blockers.push(...syncPreview.blockers.filter((reason) => !blockers.includes(reason)))
   plans.set(token, plan)
   return {
     plan,
@@ -1987,7 +1994,7 @@ async function capturePlan(
       blockers,
       mergeMethods: plan.mergeMethods,
       publish: kind === 'publish' ? await publishPreview(plan) : null,
-      sync: syncCapture ? buildSyncPreview(syncCapture, selectedBranch) : null,
+      sync: syncPreview,
     },
   }
 }
@@ -3117,6 +3124,14 @@ async function restackJournal(repoPath: string, journal: StackJournal): Promise<
         await writeJournal(repoPath, journal)
         continue
       }
+      if ((await remoteOid(repoPath, pushUrl, item.branch)) === oid) {
+        await pushBranch(repoPath, item.branch, oid, oid, false, pushUrl)
+        item.status = 'completed'
+        item.publishedOid = oid
+        await writeJournal(repoPath, journal)
+        pushed.push(item.branch)
+        continue
+      }
       await pushBranch(repoPath, item.branch, oid, item.expectedRemoteOid, allowForce, pushUrl)
       item.status = 'completed'
       item.publishedOid = oid
@@ -3203,6 +3218,7 @@ async function runPlanSync(
   const capture = plan.sync
   const pushUrl = plan.pushUrl
   if (!capture || !pushUrl) throw new Error('This preview does not describe a stack sync')
+  if (plan.blockers.length > 0) throw new Error(plan.blockers.join('; '))
   const preview = buildSyncPreview(capture, plan.branch)
   if (preview.blockers.length > 0) throw new Error(preview.blockers.join('; '))
   const rebases = syncRebaseLayers(preview)
@@ -3216,6 +3232,8 @@ async function runPlanSync(
   if (rebases.length === 0 && pushes.length === 0) {
     return { message: `Stack is already in sync with ${preview.trunk.remote}` }
   }
+  await ensureNoBusyOperation(repoPath, 'sync the stack')
+  await ensureClean(repoPath, 'sync the stack')
   await revalidatePlan(repoPath, plan)
   const syncPushes: SyncPushConfig = {
     originUrl: plan.originUrl ?? (await getOriginUrl(repoPath)) ?? undefined,
