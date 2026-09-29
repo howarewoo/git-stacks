@@ -5995,8 +5995,16 @@ function confirmedNoNativeStacks(reason: NativeStackCapabilityReason | 'not-appl
   return reason === 'endpoint-missing' || reason === 'not-applicable'
 }
 
-/** Whether this failure is the host refusing the stacks resource itself. */
+/**
+ * Whether this failure is the host refusing the stacks resource itself.
+ *
+ * The read path turns that refusal into its own unavailability error, so the
+ * status it carries is what decides — and only that status. Every other
+ * unavailability, whatever its cause, is this build's own answer not having
+ * arrived, and is raised rather than read as confirmation.
+ */
 function stacksResourceAbsent(error: unknown): boolean {
+  if (error instanceof NativeStackError) return error.httpStatus === 404
   return (
     error instanceof GitHubTransportError &&
     (error.status === 404 || error.kind === 'not-found' || error.kind === 'unsupported')

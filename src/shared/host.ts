@@ -10,6 +10,19 @@ export type GitHubHostKind = 'github.com' | 'enterprise'
 export const GITHUB_DEFAULT_HOST = 'github.com'
 
 /**
+ * The host name as one name.
+ *
+ * Every origin this app builds is HTTPS, so the port it uses when none is named
+ * is 443: a name that spells it out is the same host, and treating it as another
+ * would give one host two credential scopes, two cache entries, and two
+ * different answers to whether it is the same host.
+ */
+export function canonicalHostName(host: string): string {
+  const name = host.trim().toLowerCase().replace(/\.$/u, '')
+  return name.endsWith(':443') ? name.slice(0, -':443'.length) : name
+}
+
+/**
  * What is known about one capability.
  *
  * `unsupported` means the host answered and does not offer it. `unauthenticated`

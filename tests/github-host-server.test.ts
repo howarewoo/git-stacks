@@ -332,10 +332,14 @@ test('a real gh child is given this host’s token and no other credential', asy
       const equals = line.indexOf('=')
       if (equals > 0) seen[line.slice(0, equals)] = line.slice(equals + 1)
     }
-    assert.equal(seen.GH_TOKEN, 'ghe-secret', 'the child is given this host’s own token')
+    assert.equal(
+      seen.GH_ENTERPRISE_TOKEN,
+      'ghe-secret',
+      'a custom host’s token is handed over under the name the CLI reads for it',
+    )
+    assert.equal(seen.GH_TOKEN, undefined)
     for (const name of [
       'GITHUB_TOKEN',
-      'GH_ENTERPRISE_TOKEN',
       'GITHUB_ENTERPRISE_TOKEN',
       'GIT_STACKS_GITHUB_TOKEN',
       environmentTokenName('ghe.other.example.com'),
@@ -345,5 +349,47 @@ test('a real gh child is given this host’s token and no other credential', asy
   } finally {
     process.env.PATH = original
     await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('a token for one host never reaches another host that differs only in its name', async () => {
+  process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0'
+  // Two real hosts on two real sockets. Their names are the same host name on
+  // the same address and differ only in the port digits, which is the smallest
+  // difference a name can carry and the one a variable name would swallow.
+  const issued = await startHost('internal', () => ({ body: { full_name: 'acme/widgets' } }))
+  const lookalike = await startHost('internal-dash', () => ({ body: { full_name: 'acme/other' } }))
+  try {
+    const transportFor = (host: string, context: ReturnType<typeof githubHostContext>) =>
+      new DirectGitHubTransport({
+        host,
+        apiUrl: context.apiBase,
+        graphqlUrl: context.graphqlUrl,
+        env: { [environmentTokenName(issued.host)]: 'the-one-secret' },
+      })
+    // The host the token was issued by is served with it.
+    const served = await transportFor(issued.host, issued.context).rest<{ full_name: string }>({
+      path: 'repos/acme/widgets',
+    })
+    assert.equal(served.data.full_name, 'acme/widgets')
+    assert.equal(issued.requested[0]?.authorization, 'Bearer the-one-secret')
+    assert.notEqual(
+      environmentTokenName(issued.host),
+      environmentTokenName(lookalike.host),
+      'two hosts whose names differ only in digits share a token name',
+    )
+    // The other host answers on its own socket, and answers only a request that
+    // carries a credential of its own: a request made in the belief that it
+    // shares the first host's name is refused rather than served.
+    await assert.rejects(
+      transportFor(lookalike.host, lookalike.context).rest({ path: 'repos/acme/other' }),
+      (error: unknown) => (error as { kind?: string }).kind === 'unauthorized',
+    )
+    assert.equal(lookalike.requested.length, 0, 'the first host’s token reached the lookalike host')
+    assert.equal(issued.requested.length, 1, 'the token went to its own host exactly once')
+  } finally {
+    delete process.env.NODE_TLS_REJECT_UNAUTHORIZED
+    await issued.close()
+    await lookalike.close()
   }
 })

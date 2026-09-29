@@ -1,5 +1,6 @@
 import { execFile as execFileCallback } from 'node:child_process'
 import { promisify } from 'node:util'
+import { canonicalHostName } from '../shared/host'
 import { commandCode, commandDetail, isRecord, MAX_BUFFER } from './git-core'
 import {
   conditionalCacheKey,
@@ -186,28 +187,21 @@ export function environmentTokenName(host: string): string {
 }
 
 /**
- * The host name as a suffix for an environment variable, in a way two different
- * hosts can never share.
+ * The host name as a suffix for an environment variable.
  *
- * Collapsing every separator to one underscore is not enough: `ghe.a.b.example`
- * and `ghe.a-b.example` would both collapse to the same name, and a token set
- * for one host would then be sent to the other. A host name is lower-case
- * letters, digits, hyphens, dots, and at most one port, so the dot and the port
- * are spelled in markers that a host name can never contain — a host name has no
- * upper-case letters and no underscores — and each of them maps to exactly one
- * host. Anything outside that alphabet is encoded so no two inputs can collide.
+ * Collapsing separators to one underscore is not enough: `ghe.a.b.example` and
+ * `ghe.a-b.example` would share a name, and a token set for one host would then
+ * be sent to the other. Spelling a separator with a marker is not enough either,
+ * because a host name may contain that marker's own characters: a literal
+ * `ghe-dot-internal.example.com` would read the same as a dotted one.
+ *
+ * So the name is not spelled at all. The canonical authority is written as
+ * upper-case hexadecimal, which differs for every host by construction, uses
+ * only characters a shell accepts in a variable name, and leaves nothing for a
+ * host name to imitate.
  */
 function encodeAuthority(host: string): string {
-  const name = host.trim().toLowerCase()
-  let encoded = ''
-  for (const character of name) {
-    if (/[a-z0-9]/u.test(character)) encoded += character
-    else if (character === '-') encoded += '-'
-    else if (character === '.') encoded += '-DOT-'
-    else if (character === ':') encoded += '_PORT_'
-    else encoded += `_${character.codePointAt(0)!.toString(16).toUpperCase()}_`
-  }
-  return encoded.toUpperCase()
+  return Buffer.from(canonicalHostName(host), 'utf8').toString('hex').toUpperCase()
 }
 
 export function resolveGitHubToken(
@@ -852,9 +846,15 @@ export function hostScopedEnvironment(
     scoped[name] = value
   }
   const token = host ? resolveGitHubToken(env, host) : null
-  // `gh` reads one of these two names. The token is this host's own, or the
-  // child is left with none rather than with someone else's.
-  if (token !== null) scoped.GH_TOKEN = token
+  // `gh` does not read one variable for every host: it reads `GH_TOKEN` for
+  // github.com and `GH_ENTERPRISE_TOKEN` for any other host. This build's own
+  // scoped token is therefore handed over under the name the CLI will actually
+  // read for that host — or the child is left with none rather than with
+  // someone else's.
+  if (token !== null) {
+    if (host && canonicalHostName(host) !== GITHUB_HOST) scoped.GH_ENTERPRISE_TOKEN = token
+    else scoped.GH_TOKEN = token
+  }
   return scoped
 }
 

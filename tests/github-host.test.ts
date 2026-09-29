@@ -7,6 +7,7 @@ import {
 } from '../src/main/github-repositories'
 import {
   forgetHost,
+  hostStatus,
   GITHUB_DOTCOM_API_BASE,
   GITHUB_DOTCOM_WEB_ORIGIN,
   githubHostContext,
@@ -614,21 +615,52 @@ test('a refusal that names a field this build does not query is not repeated any
 })
 
 test('two different hosts can never share one scoped token name', () => {
-  // Collapsing every separator to one underscore would give these two hosts the
-  // same name, and a token set for one would then be sent to the other.
-  const dotted = environmentTokenName('ghe.internal.example.com')
-  const dashed = environmentTokenName('ghe.internal-example.com')
-  assert.notEqual(dotted, dashed)
-  assert.notEqual(dotted, environmentTokenName('ghe-internal.example.com'))
-  // github.com keeps its own unscoped names and never a scoped one of its own.
-  assert.equal(environmentTokenName('github.com'), 'GIT_STACKS_GITHUB_TOKEN_GITHUB-DOT-COM')
-  // A token in one host's scope is invisible to every other host.
-  const env: NodeJS.ProcessEnv = { [dotted]: 'dotted-secret', [dashed]: 'dashed-secret' }
+  // Every pair here names two hosts a person could really configure, and each
+  // pair used to collapse to a single variable.
+  const pairs: Array<[string, string]> = [
+    ['ghe.internal.example.com', 'ghe.internal-example.com'],
+    ['ghe.internal.example.com', 'ghe-dot-internal.example.com'],
+    ['ghe.internal.example.com', 'ghe_port_internal.example.com'],
+    ['ghe.example.com', 'ghe-example.com'],
+  ]
+  for (const [one, other] of pairs) {
+    assert.notEqual(
+      environmentTokenName(one),
+      environmentTokenName(other),
+      `${one} and ${other} share one token name`,
+    )
+  }
+  // The variable name is written in the alphabet a shell accepts, and the
+  // canonical authority is what is encoded: a host on the default port and the
+  // same host without it are one host.
+  const scoped = environmentTokenName('github.com')
+  assert.match(scoped, /^GIT_STACKS_GITHUB_TOKEN_[A-Z0-9]+$/u)
+  assert.equal(scoped, environmentTokenName('github.com:443'))
+  assert.equal(scoped, environmentTokenName('github.com.'))
+  // A token in one host's scope is invisible to every other host, including the
+  // two names above that are one character away from it.
+  const env: NodeJS.ProcessEnv = {
+    [environmentTokenName('ghe.internal.example.com')]: 'dotted-secret',
+  }
   assert.equal(resolveGitHubToken(env, 'ghe.internal.example.com'), 'dotted-secret')
-  assert.equal(resolveGitHubToken(env, 'ghe.internal-example.com'), 'dashed-secret')
-  assert.equal(resolveGitHubToken(env, 'ghe.internal_example.com'), null)
+  for (const other of [
+    'ghe.internal-example.com',
+    'ghe-dot-internal.example.com',
+    'ghe_port_internal.example.com',
+    'ghe.example.com',
+  ]) {
+    assert.equal(resolveGitHubToken(env, other), null, `${other} can read another's token`)
+  }
+  // github.com keeps the unscoped names it has always had.
+  assert.equal(
+    resolveGitHubToken({ GIT_STACKS_GITHUB_TOKEN: 'dotcom-secret' }, 'github.com'),
+    'dotcom-secret',
+  )
+  assert.equal(
+    resolveGitHubToken({ GH_TOKEN: 'dotcom-secret' }, 'github.com'),
+    'dotcom-secret',
+  )
 })
-
 test('a child process is given only the host its own credential came from', () => {
   const scoped = hostScopedEnvironment(
     {
@@ -644,10 +676,21 @@ test('a child process is given only the host its own credential came from', () =
     'ghe.example.com',
   )
   assert.equal(scoped.PATH, '/usr/bin')
-  assert.equal(scoped.GH_TOKEN, 'ghe-secret', 'the child is given this host’s own token')
+  assert.equal(
+    scoped.GH_ENTERPRISE_TOKEN,
+    'ghe-secret',
+    'a custom host’s token is handed over under the name the CLI reads for it',
+  )
+  assert.equal(scoped.GH_TOKEN, undefined)
+  // github.com is read from the other name, and keeps its own.
+  const dotcom = hostScopedEnvironment(
+    { [environmentTokenName('github.com')]: 'dotcom-scoped', GH_TOKEN: 'ambient' },
+    'github.com',
+  )
+  assert.equal(dotcom.GH_TOKEN, 'dotcom-scoped')
+  assert.equal(dotcom.GH_ENTERPRISE_TOKEN, undefined)
   for (const name of [
     'GITHUB_TOKEN',
-    'GH_ENTERPRISE_TOKEN',
     'GITHUB_ENTERPRISE_TOKEN',
     'GIT_STACKS_GITHUB_TOKEN',
     environmentTokenName('ghe.other.example.com'),
@@ -696,4 +739,47 @@ test('a host that signs in again is not handed the transport of the sign-in it r
     'a repeated call within one sign-in still reuses the transport',
   )
   setGitHubCredentialSource(null)
+})
+
+test('a probe cancelled before it finishes records nothing about the host', async () => {
+  forgetHost()
+  const context = githubHostContext('ghe-retired.example.com')
+  const api = 'https://ghe-retired.example.com/api/v3'
+  const controller = new AbortController()
+  const { fetch } = hostFetch([
+    [`${api}/`, { body: { current_user_url: `${api}/user` } }],
+    [`${api}/meta`, { body: { installed_version: '3.9.0' } }],
+    [context.graphqlUrl, { body: { data: { viewer: { login: 'octo' } } } }],
+    // The stacks read is where a host change lands: the probe is cancelled
+    // while the repository's own stacks are being read.
+    [`${api}/repos/acme/widgets`, { body: { full_name: 'acme/widgets' } }],
+    [`${api}/repos/acme/widgets/stacks?per_page=1`, { body: [] }],
+  ])
+  await assert.rejects(
+    probeGitHubHost(context, {
+      repository: { owner: 'acme', name: 'widgets' },
+      transport: new DirectGitHubTransport({
+        host: context.host,
+        apiUrl: api,
+        graphqlUrl: context.graphqlUrl,
+        token: 'ghe-token',
+        env: {},
+        fetch: ((input: RequestInfo | URL, init?: RequestInit) => {
+          const url = String(input instanceof Request ? input.url : (input as string))
+          if (url.includes('/stacks')) controller.abort()
+          return fetch(input, init)
+        }) as typeof globalThis.fetch,
+      }),
+      signal: controller.signal,
+    }),
+    (error: unknown) => (error as { kind?: string }).kind === 'cancelled',
+    'a cancelled probe is this build stopping, not a host that did not answer',
+  )
+  // Nothing about the retired host is remembered: its last observed probe is
+  // the empty one, not the answer a cancelled probe had almost finished.
+  assert.equal(hostStatus(context).probedAt, null)
+  assert.equal(
+    hostStatus(context).capabilities.find((entry) => entry.id === 'native-stacks')?.state,
+    'unknown',
+  )
 })

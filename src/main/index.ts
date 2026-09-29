@@ -392,6 +392,16 @@ async function forSelectedHost<T>(
   selected: SelectedHost = captureSelectedHost(),
 ): Promise<T> {
   const { generation } = selected
+  // Checked before the work starts, not only after it finishes. Work captured
+  // against a host that was retired before it began would otherwise run to the
+  // end against the old host, publish into the old host's record, and be
+  // refused only at the very last moment — after the wrong answer was stored.
+  if (generation !== hostGeneration) {
+    throw new GitHubTransportError({
+      kind: 'cancelled',
+      detail: 'the selected GitHub host changed before this request started',
+    })
+  }
   const controller = new AbortController()
   hostWork.add(controller)
   try {
@@ -801,7 +811,10 @@ function validatedClone(request: unknown): ValidatedClone {
       repository.cloneUrl.startsWith('file://')
         ? repository.cloneUrl
         : protocol === 'ssh'
-          ? `git@${host.host}:${fullName}.git`
+          ? // The SSH remote is written with the host name alone. A web port is
+            // not an SSH port, and `git@host:8443:owner/repo.git` names a path
+            // that does not exist on that host.
+            `git@${host.sshHost}:${fullName}.git`
           : `${host.webOrigin}/${fullName}.git`,
     directoryName: assertDirectoryName(asked.directoryName),
     parentDirectory: requireString(asked.parentDirectory, 'destination folder'),

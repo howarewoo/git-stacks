@@ -2931,3 +2931,85 @@ test('idempotent published push restores usable origin tracking', async () => {
     assert.equal(bareGit(harness, ['rev-parse', `refs/heads/${branch}`]), reviewed)
   })
 })
+
+test('a host that still refuses the stacks resource still publishes an ordinary chain', async () => {
+  await withHarness(async (harness) => {
+    await setupThreeBranches(harness)
+    const state = await harness.readState()
+    state.stacksPreviewDisabled = true
+    await harness.writeState(state)
+
+    const preview = await previewStack(
+      harness.repo,
+      await getSnapshot(harness.repo),
+      'publish',
+      'feature/step-2',
+    )
+    assert.deepEqual(preview.blockers, [])
+    assert.match(preview.warnings.join('\n'), /does not serve native stacked pull requests/iu)
+
+    // The resource is still absent when the submission runs, so the proof
+    // confirms the absence the preview recorded and the chain goes ahead.
+    const result = await runStackAction(harness.repo, {
+      type: 'submitStack',
+      token: preview.token,
+      allowForce: false,
+      layers: {
+        'feature/step-1': { title: 'Step 1 PR', body: '', draft: false, updateBase: true },
+        'feature/step-2': { title: 'Step 2 PR', body: '', draft: false, updateBase: true },
+        'feature/step-3': { title: 'Step 3 PR', body: '', draft: false, updateBase: true },
+      },
+    })
+    assert.match(result.message, /Submitted 3 stack layers/iu)
+    const after = await harness.readState()
+    assert.deepEqual(after.stacks, [], 'no stack was registered for a host that has none')
+    assert.deepEqual(
+      [...after.prs.map((pr) => pr.base)].sort(),
+      ['feature/step-1', 'feature/step-2', 'main'],
+      'each pull request is based on the one below it',
+    )
+  })
+})
+
+test('a preview made before a host served stacks is refused before anything is published', async () => {
+  await withHarness(async (harness) => {
+    await setupThreeBranches(harness)
+    const state = await harness.readState()
+    state.stacksPreviewDisabled = true
+    await harness.writeState(state)
+    const preview = await previewStack(
+      harness.repo,
+      await getSnapshot(harness.repo),
+      'publish',
+      'feature/step-2',
+    )
+    assert.deepEqual(preview.blockers, [])
+
+    // The host starts serving the resource between the preview and the run.
+    const before = await harness.readState()
+    const restored = await harness.readState()
+    restored.stacksPreviewDisabled = false
+    await harness.writeState(restored)
+
+    await assert.rejects(
+      runStackAction(harness.repo, {
+        type: 'submitStack',
+        token: preview.token,
+        allowForce: false,
+        layers: {
+          'feature/step-1': { title: 'Step 1 PR', body: '', draft: false, updateBase: true },
+          'feature/step-2': { title: 'Step 2 PR', body: '', draft: false, updateBase: true },
+          'feature/step-3': { title: 'Step 3 PR', body: '', draft: false, updateBase: true },
+        },
+      }),
+      /now answers for native stacks/iu,
+    )
+    const after = await harness.readState()
+    assert.deepEqual(
+      after.prs.map((pr) => pr.title),
+      before.prs.map((pr) => pr.title),
+      'the submission opened nothing new',
+    )
+    assert.deepEqual(after.stacks, [], 'and registered no stack')
+  })
+})

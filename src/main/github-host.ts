@@ -1,4 +1,5 @@
-import { isRecord, type ParsedRemote } from './git-core'
+import { canonicalHostName } from '../shared/host'
+import { isCancelled, isRecord, type ParsedRemote } from './git-core'
 import {
   GITHUB_API_VERSION,
   GITHUB_STACKS_API_VERSION,
@@ -139,16 +140,6 @@ export function hostTransport(
   return githubTransportForHost(context.host, context.apiBase, env, graphqlUrl)
 }
 
-/**
- * The host name as one name. Every origin this app builds is HTTPS, so the port
- * it uses when none is named is 443: a name that spells it out is the same host,
- * and treating it as another would give one host two credential scopes, two
- * cache entries, and two different answers to whether it is the same host.
- */
-export function canonicalHostName(host: string): string {
-  const name = host.trim().toLowerCase().replace(/\.$/u, '')
-  return name.endsWith(':443') ? name.slice(0, -':443'.length) : name
-}
 
 /** Where a GitHub host's web pages, REST API, and GraphQL endpoint live. */
 export function githubHostContext(host: string): GitHubHostContext {
@@ -346,6 +337,8 @@ export async function probeNativeStacksCapability(
       ...signal,
     })
   } catch (error) {
+    // A cancellation is this build stopping, not a fact about the host.
+    if (options.signal?.aborted || isCancelled(error)) throw error
     if (error instanceof GitHubTransportError && (error.status === 404 || error.kind === 'not-found')) {
       return {
         available: false,
@@ -682,6 +675,12 @@ export async function probeGitHubHost(
         capabilities.find((capability) => capability.id === id) ??
         (id === 'device-sign-in' ? deviceSignInCapability(context, env) : unprobedCapability(id)),
     ),
+  }
+  // The last moment before this answer is written down. A host retired while
+  // the probe was running has no record to publish, and recording one would put
+  // what it said about a host back into the record for the host selected now.
+  if (options.signal?.aborted) {
+    throw new GitHubTransportError({ kind: 'cancelled', detail: 'the probe was cancelled' })
   }
   recordHostProbe(status)
   return status
