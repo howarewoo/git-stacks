@@ -1,18 +1,20 @@
-import type { ReviewComparison, ReviewFile } from '../shared/review'
-import { sameReviewComparison } from '../shared/review'
+import type { ReviewComparison, ReviewFile, ReviewFileDiff } from '../shared/review'
+import { looksGenerated, sameReviewComparison } from '../shared/review'
 import type {
   ReviewHistory,
   ReviewHistoryDiff,
   ReviewSnapshot,
 } from '../shared/review-snapshots'
 import { reviewHistoryOf } from '../shared/review-snapshots'
-import { isRecord, type ParsedRemote } from './git-core'
+import { isRecord, type ParsedRemote, runGit } from './git-core'
 import { GitHubTransportError, githubTransport } from './github-transport'
+import { parseHunkBlock } from './hunks'
 import {
   originRemote,
   parseReviewFileEntry,
   readReviewIdentity,
   ReviewRevisionMovedError,
+  toReviewHunk,
 } from './review'
 import {
   clearReviewSnapshots,
@@ -87,12 +89,153 @@ async function probeCommitExists(
 }
 
 /**
+ * Uses local Git to compute a true two-endpoint tree diff between two commits.
+ *
+ * Unlike GitHub's compare API which computes a 3-dot merge-base diff, Git's
+ * direct commit diff compares tree(fromOid) to tree(toOid) faithfully across
+ * force-pushes, rebases, and unrelated histories.
+ */
+async function diffEndpointWithGit(
+  repoPath: string,
+  fromOid: string,
+  toOid: string,
+  signal?: AbortSignal,
+): Promise<{ files: ReviewFile[]; additions: number; deletions: number; truncated: boolean } | null> {
+  try {
+    const fromExists = await runGit(repoPath, ['cat-file', '-e', `${fromOid}^{commit}`], undefined, signal)
+      .then(() => true)
+      .catch(() => false)
+    if (!fromExists) {
+      try {
+        await runGit(repoPath, ['fetch', 'origin', fromOid], undefined, signal)
+      } catch {
+        return null
+      }
+    }
+
+    const toExists = await runGit(repoPath, ['cat-file', '-e', `${toOid}^{commit}`], undefined, signal)
+      .then(() => true)
+      .catch(() => false)
+    if (!toExists) {
+      try {
+        await runGit(repoPath, ['fetch', 'origin', toOid], undefined, signal)
+      } catch {
+        return null
+      }
+    }
+
+    const nameStatusRaw = await runGit(
+      repoPath,
+      ['diff', '--name-status', '-z', '-M', fromOid, toOid],
+      undefined,
+      signal,
+    )
+    const tokens = nameStatusRaw.split('\0')
+    const statusEntries: { path: string; previousPath: string | null; status: ReviewFile['status'] }[] = []
+    let i = 0
+    while (i < tokens.length - 1) {
+      const statusToken = tokens[i++]
+      if (!statusToken) break
+      const statusChar = statusToken[0]
+      if (statusChar === 'R' || statusChar === 'C') {
+        const previousPath = tokens[i++]
+        const path = tokens[i++]
+        statusEntries.push({
+          path,
+          previousPath,
+          status: statusChar === 'R' ? 'renamed' : 'copied',
+        })
+      } else {
+        const path = tokens[i++]
+        const status: ReviewFile['status'] =
+          statusChar === 'A' ? 'added' : statusChar === 'D' ? 'removed' : 'modified'
+        statusEntries.push({ path, previousPath: null, status })
+      }
+    }
+
+    const numstatRaw = await runGit(
+      repoPath,
+      ['diff', '--numstat', '-z', '-M', fromOid, toOid],
+      undefined,
+      signal,
+    )
+    const numTokens = numstatRaw.split('\0')
+    const statsMap = new Map<string, { additions: number; deletions: number }>()
+    let j = 0
+    while (j < numTokens.length - 1) {
+      const entry = numTokens[j++]
+      if (!entry) break
+      const parts = entry.split('\t')
+      if (parts.length >= 3 && parts[2] !== '') {
+        statsMap.set(parts[2], {
+          additions: parseInt(parts[0], 10) || 0,
+          deletions: parseInt(parts[1], 10) || 0,
+        })
+      } else if (parts.length >= 2) {
+        const oldP = numTokens[j++]
+        const newP = numTokens[j++]
+        statsMap.set(newP, {
+          additions: parseInt(parts[0], 10) || 0,
+          deletions: parseInt(parts[1], 10) || 0,
+        })
+      }
+    }
+
+    const truncated = statusEntries.length > 300
+    const chosenEntries = statusEntries.slice(0, 300)
+    const parsedFiles: ReviewFile[] = []
+
+    for (const entry of chosenEntries) {
+      const stats = statsMap.get(entry.path) ?? { additions: 0, deletions: 0 }
+      let diff: ReviewFileDiff
+      try {
+        const patch = await runGit(
+          repoPath,
+          ['diff', '-M', '--no-ext-diff', '--no-textconv', fromOid, toOid, '--', entry.path],
+          undefined,
+          signal,
+        )
+        if (patch.trim() === '') {
+          diff =
+            stats.additions === 0 && stats.deletions === 0
+              ? { kind: 'binary' }
+              : { kind: 'text', hunks: [] }
+        } else {
+          const block = parseHunkBlock(patch, { path: entry.path, originalPath: entry.previousPath })
+          diff = { kind: 'text', hunks: block.hunks.map((hunk) => toReviewHunk(entry.path, hunk)) }
+        }
+      } catch {
+        diff = { kind: 'unreadable', reason: 'Could not read diff patch from Git.' }
+      }
+
+      parsedFiles.push({
+        path: entry.path,
+        previousPath: entry.previousPath,
+        status: entry.status,
+        additions: stats.additions,
+        deletions: stats.deletions,
+        changes: stats.additions + stats.deletions,
+        sha: null,
+        generated: looksGenerated(entry.path),
+        diff,
+      })
+    }
+
+    const additions = parsedFiles.reduce((sum, f) => sum + f.additions, 0)
+    const deletions = parsedFiles.reduce((sum, f) => sum + f.deletions, 0)
+
+    return { files: parsedFiles, additions, deletions, truncated }
+  } catch {
+    return null
+  }
+}
+
+/**
  * Compares an observed historical snapshot against the pull request's current head.
  *
- * Two endpoints are compared faithfully via GitHub's compare API. A missing
- * commit, a deleted ref, or unrelated histories that share no merge base
- * produce an explicit unavailable state with the exact reason, never a
- * fabricated fallback diff.
+ * Two endpoints are compared faithfully. A missing commit, a deleted ref, or
+ * unrelated histories that share no merge base produce an explicit unavailable
+ * state with the exact reason, never a fabricated fallback diff.
  */
 export async function readReviewHistoryDiff(
   repoPath: string,
@@ -169,6 +312,28 @@ export async function readReviewHistoryDiff(
     }
   }
 
+  // 1. Try local Git endpoint diff first for a true tree-to-tree comparison across force-push/rebase.
+  const gitResult = await diffEndpointWithGit(repoPath, fromOid, currentHead, signal)
+  if (gitResult) {
+    const after = await readReviewIdentity(remote, number, signal)
+    if (!sameReviewComparison(before.comparison, after.comparison)) {
+      throw new ReviewRevisionMovedError(number)
+    }
+    return {
+      number,
+      from: snapshot,
+      to: after.comparison,
+      state: 'files',
+      reason: '',
+      mergeBaseOid: null,
+      files: gitResult.files,
+      additions: gitResult.additions,
+      deletions: gitResult.deletions,
+      truncated: gitResult.truncated,
+    }
+  }
+
+  // 2. Fall back to GitHub compare API, checking that the comparison is an endpoint diff.
   try {
     const response = await githubTransport().rest<unknown>({
       method: 'GET',
@@ -189,6 +354,23 @@ export async function readReviewHistoryDiff(
         state: 'unavailable',
         reason: `The two heads share no common ancestor (merge base was lost), so GitHub cannot show changes between ${fromOid.slice(0, 7)} and ${currentHead.slice(0, 7)}.`,
         mergeBaseOid: null,
+        files: [],
+        additions: 0,
+        deletions: 0,
+        truncated: false,
+      }
+    }
+
+    // When the merge base is NOT fromOid, GitHub compare is a 3-dot diff from their common ancestor,
+    // which does not equal a true endpoint comparison between the two heads.
+    if (mergeBaseOid !== fromOid) {
+      return {
+        number,
+        from: snapshot,
+        to: before.comparison,
+        state: 'unavailable',
+        reason: `GitHub comparison between diverged revisions is relative to their common ancestor rather than an endpoint comparison between the two heads, and local Git could not establish the endpoint diff.`,
+        mergeBaseOid,
         files: [],
         additions: 0,
         deletions: 0,

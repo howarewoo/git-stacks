@@ -16,6 +16,7 @@ import type {
   ReviewCommitSet,
   ReviewComparison,
   ReviewDiffMode,
+  ReviewFile,
   ReviewFileSet,
   ReviewHeadline,
   ReviewStackRail,
@@ -328,7 +329,7 @@ export function ReviewView({
   // words are never discarded for being stale.
   React.useEffect(() => {
     if (!headline || !files || desktop?.reviewResolveDrafts === undefined) return
-    const drafts = draftRecord?.number === headline.pullRequest.number ? draftRecord.drafts : []
+    const drafts = draftRecord && draftRecord.number === headline.pullRequest.number ? draftRecord.drafts : []
     if (drafts.length === 0) {
       setResolutions([])
       return
@@ -471,10 +472,27 @@ export function ReviewView({
   const unchangedPathSet = React.useMemo(() => new Set(unchangedPaths), [unchangedPaths])
 
   const eligibleFiles = React.useMemo(() => {
-    const list = files?.files ?? []
-    if (!isComparing || !hideUnchanged) return list
-    return list.filter((file) => !unchangedPathSet.has(file.path))
-  }, [files, hideUnchanged, isComparing, unchangedPathSet])
+    if (!isComparing) return files?.files ?? []
+    if (historyDiff?.state !== 'files') {
+      return files?.files ?? []
+    }
+    const diffFiles = historyDiff.files
+    if (hideUnchanged) {
+      return diffFiles
+    }
+    const seenPaths = new Set(diffFiles.map((f) => f.path))
+    const unchangedFromCurrent: ReviewFile[] = (files?.files ?? [])
+      .filter((f) => !seenPaths.has(f.path))
+      .map((f) => ({
+        ...f,
+        status: 'unchanged' as const,
+        additions: 0,
+        deletions: 0,
+        changes: 0,
+        diff: { kind: 'text', hunks: [] },
+      }))
+    return [...diffFiles, ...unchangedFromCurrent]
+  }, [files, hideUnchanged, historyDiff, isComparing])
 
   const filePaths = React.useMemo(
     () =>
@@ -704,6 +722,7 @@ export function ReviewView({
             activeSnapshotOid={activeSnapshotOid}
             hideUnchanged={hideUnchanged}
             unchangedCount={unchangedPaths.length}
+            truncated={historyDiff?.truncated ?? false}
             clearing={clearingHistory}
             onSelectSnapshot={(oid) => setActiveSnapshotOid(oid)}
             onToggleHideUnchanged={(checked) => setHideUnchanged(checked)}
@@ -714,7 +733,11 @@ export function ReviewView({
             <section className="review-tree" aria-label="Changed files">
               <div className="review-tree-header">
                 <strong>Files</strong>
-                {files ? (
+                {isComparing && historyDiff?.state === 'files' ? (
+                  <span className="code-region-meta">
+                    {summary.changed} changed · +{historyDiff.additions} −{historyDiff.deletions}
+                  </span>
+                ) : files ? (
                   <span className="code-region-meta">
                     {summary.changed} changed · +{files.additions} −{files.deletions}
                   </span>
@@ -877,7 +900,15 @@ export function ReviewView({
                       selection={null}
                       onSelect={() => {}}
                     />
-                  ) : (
+                  ) : historyDiff?.truncated ? (
+                    <EmptyState className="compact-empty">
+                      <FileQuestion className="empty-icon" />
+                      <h2>Comparison truncated</h2>
+                      <p>
+                        <code>{selected.path}</code> was omitted from the 300-file comparison limit.
+                      </p>
+                    </EmptyState>
+                  ) : historyDiff?.state === 'files' ? (
                     <EmptyState className="compact-empty">
                       <FileQuestion className="empty-icon" />
                       <h2>File unchanged since snapshot</h2>
@@ -886,6 +917,12 @@ export function ReviewView({
                         <code>{shortOid(activeSnapshot?.headOid ?? null)}</code> and the
                         current head.
                       </p>
+                    </EmptyState>
+                  ) : (
+                    <EmptyState className="compact-empty">
+                      <FileQuestion className="empty-icon" />
+                      <h2>Historical comparison unavailable</h2>
+                      <p>Changes for this file could not be determined.</p>
                     </EmptyState>
                   )
                 ) : (
@@ -1181,6 +1218,7 @@ function ReviewHistoryBar({
   activeSnapshotOid,
   hideUnchanged,
   unchangedCount,
+  truncated,
   clearing,
   onSelectSnapshot,
   onToggleHideUnchanged,
@@ -1192,6 +1230,7 @@ function ReviewHistoryBar({
   activeSnapshotOid: string | null
   hideUnchanged: boolean
   unchangedCount: number
+  truncated: boolean
   clearing: boolean
   onSelectSnapshot: (oid: string | null) => void
   onToggleHideUnchanged: (checked: boolean) => void
@@ -1269,6 +1308,11 @@ function ReviewHistoryBar({
               <span className="review-history-unchanged-note">
                 {unchangedCount} unchanged file{unchangedCount === 1 ? '' : 's'} hidden
               </span>
+            ) : null}
+            {truncated ? (
+              <Badge variant="warning">
+                Truncated at 300 files
+              </Badge>
             ) : null}
             <Button size="sm" variant="ghost" onClick={() => onSelectSnapshot(null)}>
               Return to current diff

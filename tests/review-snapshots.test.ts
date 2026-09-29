@@ -15,7 +15,7 @@
  */
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { mkdir, mkdtemp, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -42,11 +42,13 @@ import type { ReviewComparison, ReviewFile } from '../src/shared/review'
 import {
   observeReviewHead,
   pruneReviewSnapshots,
+  reviewedSnapshot,
   reviewHistoryGap,
   reviewHistoryOf,
   reviewHistoryUnchangedPaths,
   reviewSnapshotLabel,
   REVIEW_SNAPSHOTS_MAX,
+  withReviewedSnapshot,
   type ReviewSnapshot,
   type ReviewSnapshotLog,
 } from '../src/shared/review-snapshots'
@@ -223,15 +225,15 @@ test('first open after many updates produces an explicit gap stating earlier hea
   assert.equal(history.gap?.commits, 7)
   assert.match(
     history.gap?.message ?? '',
-    /first opened #26 at 5555000 on 2026-09-23, when GitHub counted 7 commits/u,
+    /first opened #26 at 5555000 on 2026-09-23.*counted 7 commits/u,
   )
   assert.match(
     history.gap?.message ?? '',
-    /heads before that one were never observed here, so a comparison from them is not available/u,
+    /comparison from earlier revisions is not available/u,
   )
 })
 
-test('first open with 1 commit records no gap because no earlier updates were missed', () => {
+test('first open with 1 commit records observation gap because earlier force-pushes cannot be ruled out', () => {
   const head = comparison({ headOid: '1111'.padEnd(40, '0') })
   const log = observeReviewHead(null, {
     number: 26,
@@ -242,7 +244,87 @@ test('first open with 1 commit records no gap because no earlier updates were mi
     now: '2026-09-23T18:00:00.000Z',
   })
   const history = reviewHistoryOf(26, head, log)
-  assert.equal(history.gap, null)
+  assert.ok(history.gap !== null)
+  assert.match(history.gap?.message ?? '', /first opened #26 at 1111000/u)
+  assert.match(history.gap?.message ?? '', /1 commit/u)
+})
+
+test('reviewedSnapshot selects anchor by review recency rather than observation order (A -> B -> A)', () => {
+  const oidA = 'aaaa'.padEnd(40, '0')
+  const oidB = 'bbbb'.padEnd(40, '0')
+
+  let log = observeReviewHead(null, {
+    number: 26,
+    repo: 'howarewoo/git-stacks',
+    viewer: 'alice',
+    comparison: comparison({ headOid: oidA }),
+    commits: 1,
+    now: '2026-01-01T10:00:00.000Z',
+  })
+  // Review A first
+  log = withReviewedSnapshot(log, oidA, 'REV_1', '2026-01-01T11:00:00.000Z')
+
+  // PR updates to B
+  log = observeReviewHead(log, {
+    number: 26,
+    repo: 'howarewoo/git-stacks',
+    viewer: 'alice',
+    comparison: comparison({ headOid: oidB }),
+    commits: 2,
+    now: '2026-01-02T10:00:00.000Z',
+  })
+  // Review B
+  log = withReviewedSnapshot(log, oidB, 'REV_2', '2026-01-02T11:00:00.000Z')
+
+  // PR moves back to A (e.g. author reverted or force-pushed back to A)
+  log = observeReviewHead(log, {
+    number: 26,
+    repo: 'howarewoo/git-stacks',
+    viewer: 'alice',
+    comparison: comparison({ headOid: oidA }),
+    commits: 3,
+    now: '2026-01-03T10:00:00.000Z',
+  })
+  // Review A again
+  log = withReviewedSnapshot(log, oidA, 'REV_3', '2026-01-03T11:00:00.000Z')
+
+  // reviewedSnapshot MUST pick A because REV_3 (2026-01-03) is more recent than REV_2 (2026-01-02)
+  const anchor = reviewedSnapshot(log)
+  assert.equal(anchor?.headOid, oidA)
+  assert.equal(anchor?.reviewId, 'REV_3')
+})
+
+test('bounded pruning retains newly observed head even when all previous 40 snapshots were reviewed', () => {
+  const snapshots: ReviewSnapshot[] = []
+  for (let i = 1; i <= REVIEW_SNAPSHOTS_MAX; i++) {
+    const hex = i.toString(16).padStart(4, '0').padEnd(40, '0')
+    snapshots.push(
+      snapshot({
+        headOid: hex,
+        firstSeenAt: `2026-01-01T${String(i).padStart(2, '0')}:00:00.000Z`,
+        reviewed: true,
+        reviewedAt: `2026-01-02T${String(i).padStart(2, '0')}:00:00.000Z`,
+        reviewId: `REV_${i}`,
+      }),
+    )
+  }
+
+  // 41st snapshot arrives (unreviewed new head)
+  const hex41 = '4141'.padEnd(40, '0')
+  snapshots.push(
+    snapshot({
+      headOid: hex41,
+      firstSeenAt: '2026-01-03T00:00:00.000Z',
+      reviewed: false,
+    }),
+  )
+
+  const pruned = pruneReviewSnapshots(snapshots)
+  assert.ok(pruned.length <= REVIEW_SNAPSHOTS_MAX)
+  // 41st snapshot MUST be kept
+  assert.ok(pruned.some((s) => s.headOid === hex41))
+  // The latest reviewed anchor (snapshot 40) MUST be kept
+  assert.ok(pruned.some((s) => s.headOid === snapshots[REVIEW_SNAPSHOTS_MAX - 1].headOid))
 })
 
 test('bounded pruning retains user-visible reviewed anchors while capping total snapshot count', () => {
@@ -653,4 +735,85 @@ test('main service clearReviewHistory resets snapshot history and returns fresh 
   assert.equal(reset.current.headOid, currentHead)
   assert.equal(reset.reviewed, null)
   assert.equal(reset.gap, null)
+})
+
+test('main service readReviewHistoryDiff uses real Git to produce faithful endpoint tree diff across force-push/reversal', async (t) => {
+  const workspace = await createTestWorkspace()
+  t.after(workspace.dispose)
+  const repo = workspace.repo
+
+  // Initial commit
+  execFileSync('git', ['commit', '--allow-empty', '-m', 'initial'], { cwd: repo })
+
+  // Commit A (old tip): adds file_reverted.txt and file_kept.txt
+  await writeFile(join(repo, 'file_reverted.txt'), 'content to be reverted\n')
+  await writeFile(join(repo, 'file_kept.txt'), 'kept content\n')
+  execFileSync('git', ['add', '.'], { cwd: repo })
+  execFileSync('git', ['commit', '-m', 'commit A'], { cwd: repo })
+  const oidA = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf8' }).trim()
+
+  // Commit B (new tip after force-push): file_reverted.txt is removed, file_kept.txt is modified
+  await rm(join(repo, 'file_reverted.txt'))
+  await writeFile(join(repo, 'file_kept.txt'), 'kept content modified\n')
+  execFileSync('git', ['add', '.'], { cwd: repo })
+  execFileSync('git', ['commit', '-m', 'commit B'], { cwd: repo })
+  const oidB = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf8' }).trim()
+
+  // Record snapshot A
+  await recordObservedHead(
+    repo,
+    'howarewoo/git-stacks',
+    'tester-viewer',
+    26,
+    comparison({ headOid: oidA }),
+    2,
+    '2026-09-23T18:00:00.000Z',
+  )
+  // Record snapshot B (new head)
+  await recordObservedHead(
+    repo,
+    'howarewoo/git-stacks',
+    'tester-viewer',
+    26,
+    comparison({ headOid: oidB }),
+    3,
+    '2026-09-23T19:00:00.000Z',
+  )
+
+  const transport = mockTransport({
+    graphql: () => ({
+      viewer: { login: 'tester-viewer' },
+      repository: {
+        pullRequest: {
+          state: 'OPEN',
+          viewerPermission: 'WRITE',
+          viewerCanUpdate: true,
+          author: { login: 'author' },
+        },
+      },
+    }),
+    rest: (request) => {
+      if (request.path?.includes('/pulls/26')) {
+        return {
+          head: { sha: oidB },
+          base: { sha: 'b00000'.padEnd(40, '0'), ref: 'main' },
+          commits: 3,
+        }
+      }
+      return {}
+    },
+  })
+  setGitHubTransport(transport)
+  t.after(() => setGitHubTransport(null))
+
+  const diff = await readReviewHistoryDiff(repo, 26, oidA)
+  assert.equal(diff.state, 'files')
+  // file_reverted.txt must appear in endpoint diff as removed!
+  const revertedFile = diff.files.find((f) => f.path === 'file_reverted.txt')
+  assert.ok(revertedFile, 'file_reverted.txt must appear in endpoint diff')
+  assert.equal(revertedFile?.status, 'removed')
+  // file_kept.txt must be modified
+  const keptFile = diff.files.find((f) => f.path === 'file_kept.txt')
+  assert.ok(keptFile, 'file_kept.txt must appear in endpoint diff')
+  assert.equal(keptFile?.status, 'modified')
 })

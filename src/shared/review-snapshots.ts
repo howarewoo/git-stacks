@@ -242,15 +242,20 @@ function emptyLog(input: {
  */
 export function pruneReviewSnapshots(snapshots: readonly ReviewSnapshot[]): ReviewSnapshot[] {
   if (snapshots.length <= REVIEW_SNAPSHOTS_MAX) return [...snapshots]
-  const newestFirst = [...snapshots].reverse()
-  const reviewed = newestFirst.filter((entry) => entry.reviewed)
-  const unreviewedBudget = Math.max(
-    0,
-    REVIEW_SNAPSHOTS_MAX - Math.min(reviewed.length, REVIEW_SNAPSHOTS_MAX),
-  )
-  const unreviewed = newestFirst.filter((entry) => !entry.reviewed).slice(0, unreviewedBudget)
-  const keptReviewed = reviewed.slice(0, REVIEW_SNAPSHOTS_MAX)
-  const keptOids = new Set([...keptReviewed, ...unreviewed].map((entry) => entry.headOid))
+  const newestHead = snapshots[snapshots.length - 1]
+  const latestReviewed = reviewedSnapshot({ snapshots } as ReviewSnapshotLog)
+
+  const protectedOids = new Set<string>()
+  if (newestHead) protectedOids.add(newestHead.headOid)
+  if (latestReviewed) protectedOids.add(latestReviewed.headOid)
+
+  const remainingBudget = Math.max(0, REVIEW_SNAPSHOTS_MAX - protectedOids.size)
+  const candidates = [...snapshots]
+    .reverse()
+    .filter((entry) => !protectedOids.has(entry.headOid))
+    .slice(0, remainingBudget)
+
+  const keptOids = new Set([...protectedOids, ...candidates.map((c) => c.headOid)])
   return snapshots.filter((entry) => keptOids.has(entry.headOid))
 }
 
@@ -265,7 +270,7 @@ export function withReviewedSnapshot(
   return {
     ...log,
     snapshots: log.snapshots.map((entry) =>
-      entry.headOid === headOid && !entry.reviewed
+      entry.headOid === headOid
         ? { ...entry, reviewed: true, reviewedAt: now, reviewId }
         : entry,
     ),
@@ -281,16 +286,21 @@ export function snapshotByOid(
   return log?.snapshots.find((entry) => entry.headOid === headOid) ?? null
 }
 
-/** The newest head this account is known to have reviewed, or null when it never has. */
+/** The head this account most recently confirmed a review for, or null when it never has. */
 export function reviewedSnapshot(log: ReviewSnapshotLog | null): ReviewSnapshot | null {
-  if (!log) return null
-  for (let index = log.snapshots.length - 1; index >= 0; index -= 1) {
-    const entry = log.snapshots[index]
-    if (entry?.reviewed) return entry
+  if (!log || log.snapshots.length === 0) return null
+  let latestReviewed: ReviewSnapshot | null = null
+  let latestTime = -Infinity
+  for (const entry of log.snapshots) {
+    if (!entry.reviewed) continue
+    const entryTime = entry.reviewedAt ? Date.parse(entry.reviewedAt) : 0
+    if (latestReviewed === null || entryTime >= latestTime) {
+      latestReviewed = entry
+      latestTime = entryTime
+    }
   }
-  return null
+  return latestReviewed
 }
-
 /** The newest head this account observed, or null when it has observed none. */
 export function latestSnapshot(log: ReviewSnapshotLog | null): ReviewSnapshot | null {
   return log?.snapshots[log.snapshots.length - 1] ?? null
@@ -309,17 +319,19 @@ export function latestSnapshot(log: ReviewSnapshotLog | null): ReviewSnapshot | 
  */
 export function reviewHistoryGap(log: ReviewSnapshotLog | null): ReviewHistoryGap | null {
   if (!log || log.first.headOid === '') return null
-  const { commits } = log.first
-  if (commits === null || commits <= 1) return null
   const head = log.first.headOid.slice(0, 7)
+  const commitClause =
+    log.first.commits !== null && log.first.commits > 0
+      ? ` when GitHub counted ${log.first.commits} commit${log.first.commits === 1 ? '' : 's'}`
+      : ''
   return {
     headOid: log.first.headOid,
     at: log.first.at,
-    commits,
+    commits: log.first.commits,
     message:
-      `This app first opened #${log.number} at ${head} on ${log.first.at.slice(0, 10)}, ` +
-      `when GitHub counted ${commits} commits. The heads before that one ` +
-      'were never observed here, so a comparison from them is not available.',
+      `This app first opened #${log.number} at ${head} on ${log.first.at.slice(0, 10)}${commitClause}. ` +
+      'Heads updated before this session were not observed by Git Stacks, ' +
+      'so a comparison from earlier revisions is not available.',
   }
 }
 

@@ -170,7 +170,7 @@ function reviewSideFor(line: DiffHunkLine): ReviewLine['side'] {
   return 'head'
 }
 
-function toReviewHunk(path: string, hunk: DiffHunk): ReviewHunk {
+export function toReviewHunk(path: string, hunk: DiffHunk): ReviewHunk {
   return {
     id: hunk.id,
     header: hunk.header,

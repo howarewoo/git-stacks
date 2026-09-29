@@ -1,6 +1,8 @@
 import { defineConfig, devices } from '@playwright/test'
 
-const PORT = Number(process.env.PLAYWRIGHT_PORT ?? 5224)
+// `TEST_PORT` is what the repository's own tooling sets; `PLAYWRIGHT_PORT`
+// lets a second browser run coexist with an already-running server.
+const PORT = Number(process.env.TEST_PORT ?? process.env.PLAYWRIGHT_PORT ?? 5224)
 const BASE_URL = `http://localhost:${PORT}`
 
 export default defineConfig({
