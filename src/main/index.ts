@@ -16,6 +16,7 @@ import {
 import { CommandCancelled, getOriginUrl } from './git-core'
 import { getGitHubIssues, getPullRequest } from './github'
 import {
+  getMergeStatus,
   getSubmitStackProgress,
   onMergeProgress,
   onPublishProgress,
@@ -358,6 +359,12 @@ function installHandlers() {
   ipcMain.handle('repository:submit-stack-progress', (event) => {
     validateSender(event)
     return readRepository((root) => getSubmitStackProgress(root))
+  })
+  // Read-only: a queue outcome or a still-running request is read from the journal and GitHub,
+  // never by asking for another merge.
+  ipcMain.handle('repository:merge-status', (event) => {
+    validateSender(event)
+    return readRepository((root) => getMergeStatus(root))
   })
   // A running submission pushes its own progress. The renderer cannot poll for it: the read
   // queues behind the very action that is producing the steps, so it would only ever observe

@@ -242,12 +242,15 @@ export type MergeMethod = 'merge' | 'squash' | 'rebase'
  * joined one and, as the documentation states, that result never changes afterwards, so a
  * later read of the pull request itself is the only later signal.
  */
-export type MergeQueueOutcome = 'queued' | 'merged' | 'dropped'
+export type MergeQueueOutcome = 'pending' | 'queued' | 'merged' | 'dropped'
 
 export interface MergeQueueState {
   /** True once GitHub accepted an enqueue for this base ref, which is the only proof of a queue. */
   configured: boolean
-  /** `dropped` means the enqueued pull request was closed without merging, so the queue did not land it. */
+  /**
+   * `pending` means GitHub accepted the asynchronous request and has not reported a terminal
+   * result for it yet; its UUID is kept so the result can be read again without a new request.
+   */
   outcome: MergeQueueOutcome | null
   requestedAt: string | null
 }
@@ -913,7 +916,8 @@ export type GitAction =
   | { type: 'conflictMergeTool'; path: string; fingerprint: string }
   | StackAction
 
-export type MergeLayerStatus = 'merged' | 'enqueued' | 'failed' | 'pending' | 'not-merged'
+export type MergeLayerStatus =
+  'merged' | 'enqueued' | 'failed' | 'pending' | 'not-requested' | 'not-merged'
 
 export interface MergeLayerResult {
   branch: string
@@ -923,6 +927,11 @@ export interface MergeLayerResult {
   /** The merge commit GitHub reports, once the pull request is merged. */
   mergedOid: string | null
   queue: MergeQueueState | null
+  /**
+   * The UUID GitHub returned for an accepted asynchronous merge request that has not reported
+   * a terminal result, so the result can be read again without submitting another request.
+   */
+  requestUuid: string | null
 }
 
 /** What one merge action did to every pull request it was reviewed against. */
@@ -939,6 +948,15 @@ export interface MergeResult {
 export interface MergeProgress {
   action: MergeAction
   status: 'running' | 'queued' | 'succeeded' | 'failed'
+  layers: MergeLayerResult[]
+  message: string
+}
+
+/**
+ * What a read-only refresh reports about merge requests Git Stacks made earlier. Nothing here
+ * submits anything: it is what the journal remembers, read back from GitHub.
+ */
+export interface MergeStatus {
   layers: MergeLayerResult[]
   message: string
 }
@@ -974,6 +992,11 @@ export interface DesktopAPI {
    * result, so the dialog cannot poll for it: the read queues behind the action itself.
    */
   onMergeProgress?: (listener: (progress: MergeProgress | null) => void) => () => void
+  /**
+   * Read-only: what GitHub now reports for merge requests made earlier, including requests it
+   * is still running and pull requests it dropped from a merge queue. It submits nothing.
+   */
+  mergeStatus?: () => Promise<MergeStatus | null>
   reconciliationPreview?: (stackKey: string) => Promise<ReconciliationPreview>
   pullRequest(number: number): Promise<PullRequest & { body: string }>
   listNativeStacks?: () => Promise<NativeStack[]>

@@ -6,6 +6,7 @@ import type {
   GitRuntimeInfo,
   GitRuntimeStatus,
   HistoryPage,
+  MergeStatus,
   PushPreview,
   RemoteFreshness,
   RepositorySnapshot,
@@ -28,6 +29,7 @@ import {
   insertSurgeryPreview,
   leasePreview,
   mergePreview,
+  mergeStatus,
   publishPreview,
   restackPreview,
   syncPreview,
@@ -202,6 +204,7 @@ export function installFixtureControl(options: {
   const released = new Set<FixtureCall>()
   const waiting: WaitingCall[] = []
   let startsPending = new Set<FixtureCall>()
+  let mergeStatusReads = 0
 
   const scenarioFor = (name: string): FixtureScenario =>
     scenarios[name as ScenarioName] ?? scenarios[DEFAULT_SCENARIO]
@@ -343,6 +346,33 @@ export function installFixtureControl(options: {
       return answer<SurgeryPreview>('surgeryPreview', () => {
         const preview = scenario.surgeryPreview ?? insertSurgeryPreview
         return preview.kind === request.kind ? preview : { ...preview, kind: request.kind }
+      })
+    },
+    mergeStatus: () => {
+      record('mergeStatus', [])
+      return answer<MergeStatus>('mergeStatus', () => {
+        const base = scenario.mergeStatus ?? mergeStatus
+        // The queue lands the group between reads, so a refresh visibly replaces the queued
+        // layer with what GitHub now reports for it.
+        if (mergeStatusReads++ === 0) return base
+        return {
+          ...base,
+          layers: base.layers.map((layer) =>
+            layer.status === 'enqueued'
+              ? {
+                  ...layer,
+                  status: 'merged' as const,
+                  detail: 'Merged on GitHub as 4444444444',
+                  mergedOid: '4444444444444444444444444444444444444444',
+                  queue: { ...layer.queue!, outcome: 'merged' as const },
+                }
+              : layer,
+          ),
+          message: base.message.replace(
+            'Pull request #40 is in the merge queue.',
+            'Pull request #40 merged.',
+          ),
+        }
       })
     },
     pullRequest: (number) => {

@@ -424,9 +424,10 @@ const mergeLayerPresentation: Record<
   MergeLayerResult['status'],
   { label: string; tone: 'success' | 'warning' | 'danger' | 'info' }
 > = {
-  pending: { label: 'waiting', tone: 'info' },
+  pending: { label: 'running', tone: 'info' },
   merged: { label: 'merged', tone: 'success' },
   enqueued: { label: 'in the queue', tone: 'info' },
+  'not-requested': { label: 'not requested', tone: 'info' },
   'not-merged': { label: 'not merged', tone: 'warning' },
   failed: { label: 'failed', tone: 'danger' },
 }
@@ -441,6 +442,8 @@ function queueDetail(queue: NonNullable<MergeLayerResult['queue']>): string {
   if (queue.outcome === 'merged') return 'The merge queue landed this pull request.'
   if (queue.outcome === 'dropped')
     return 'The merge queue did not land this pull request: it is closed without merging. Close it out locally and enqueue again once the failing rule is resolved.'
+  if (queue.outcome === 'pending')
+    return 'GitHub accepted this merge request and has not reported a result for it. Refresh to read the request again.'
   if (queue.outcome === 'queued')
     return 'Queued. GitHub keeps the enqueued result final, so this pull request is the record: it reports merged once the queue lands it.'
   return 'Queued, and this pull request reports no state GitHub published.'
@@ -449,9 +452,12 @@ function queueDetail(queue: NonNullable<MergeLayerResult['queue']>): string {
 export function MergeOutcomePanel({
   progress,
   className,
+  label,
 }: {
   progress: MergeProgress | null
   className?: string
+  /** Overridden when the layers come from a read of earlier requests rather than from one run. */
+  label?: string
 }) {
   if (!progress) return null
   const failed = progress.layers.find((layer) => layer.status === 'failed')
@@ -459,9 +465,12 @@ export function MergeOutcomePanel({
   return (
     <WorkflowSection
       className={className}
-      label={`Merge result \u2014 ${progress.layers.length} pull request${
-        progress.layers.length === 1 ? '' : 's'
-      } in this operation`}
+      label={
+        label ??
+        `Merge result \u2014 ${progress.layers.length} pull request${
+          progress.layers.length === 1 ? '' : 's'
+        } in this operation`
+      }
     >
       {failed ? (
         <InlineAlert tone="error">

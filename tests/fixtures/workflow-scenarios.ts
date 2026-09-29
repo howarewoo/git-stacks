@@ -2,6 +2,7 @@ import type {
   Branch,
   ChangedFile,
   Commit,
+  MergeStatus,
   PullRequest,
   PushPreview,
   RepositorySnapshot,
@@ -387,6 +388,34 @@ export const syncPreview: StackPreview = {
     blockers: [],
     warnings: [],
   },
+}
+
+/** What a read-only refresh reports: one pull request still in the queue, one still running. */
+export const mergeStatus: MergeStatus = {
+  layers: [
+    {
+      branch: 'feature/checkout',
+      pullRequest: 40,
+      status: 'enqueued',
+      detail:
+        'In the merge queue since 2026-09-29T10:00:00.000Z; refresh to read what the queue did with it',
+      mergedOid: null,
+      queue: { configured: true, outcome: 'queued', requestedAt: '2026-09-29T10:00:00.000Z' },
+      requestUuid: 'fixture-queued-40',
+    },
+    {
+      branch: 'feature/checkout-tests',
+      pullRequest: 41,
+      status: 'pending',
+      detail:
+        'The merge request GitHub accepted at 2026-09-29T10:05:00.000Z has not reported a result yet',
+      mergedOid: null,
+      queue: { configured: true, outcome: 'pending', requestedAt: '2026-09-29T10:05:00.000Z' },
+      requestUuid: 'fixture-pending-41',
+    },
+  ],
+  message:
+    'GitHub is still running the merge request for pull request #41. Pull request #40 is in the merge queue.',
 }
 
 export const leasePreview: PushPreview = {

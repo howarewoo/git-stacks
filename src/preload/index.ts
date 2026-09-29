@@ -35,6 +35,7 @@ const desktop: DesktopAPI = {
       ipcRenderer.removeListener('merge-progress', handler)
     }
   },
+  mergeStatus: () => ipcRenderer.invoke('repository:merge-status'),
   reconciliationPreview: (stackKey) =>
     ipcRenderer.invoke('repository:reconciliation-preview', stackKey),
   pullRequest: (number) => ipcRenderer.invoke('repository:pull-request', number),

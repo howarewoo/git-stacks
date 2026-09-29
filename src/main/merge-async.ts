@@ -50,6 +50,7 @@ const MERGE_ACTIONS: Record<string, MergeAction> = {
 }
 
 const MERGE_OUTCOMES: Record<string, MergeQueueOutcome> = {
+  pending: 'pending',
   queued: 'queued',
   merged: 'merged',
   dropped: 'dropped',
@@ -204,14 +205,20 @@ export async function pollAsyncMerge(
   return result
 }
 
-/** What Git Stacks last asked GitHub to do with a pull request, so a queue outcome is readable later. */
+/**
+ * What Git Stacks last asked GitHub to do with a pull request. The UUID is the accepted
+ * request's own identity, so a still-pending result can be read again after a refresh or a
+ * restart without submitting a second request.
+ */
 export interface MergeQueueObservation {
   pullRequest: number
   branch: string
-  /** The base ref GitHub accepted the enqueue for, which is the ref a queue belongs to. */
+  /** The base ref GitHub accepted the request for, which is the ref a queue belongs to. */
   base: string
   headOid: string
   action: MergeAction
+  method: MergeMethod | null
+  uuid: string | null
   requestedAt: number
   outcome: MergeQueueOutcome
 }
@@ -242,12 +249,15 @@ export async function readMergeObservations(
       const action = MERGE_ACTIONS[typeof value.action === 'string' ? value.action : ''] ?? null
       const outcome = MERGE_OUTCOMES[typeof value.outcome === 'string' ? value.outcome : '']
       if (!action || !outcome) continue
+      const method = MERGE_METHODS[typeof value.method === 'string' ? value.method : ''] ?? null
       observations.set(value.pullRequest, {
         pullRequest: value.pullRequest,
         branch: value.branch,
         base: value.base,
         headOid: value.headOid,
         action,
+        method,
+        uuid: typeof value.uuid === 'string' && value.uuid ? value.uuid : null,
         requestedAt: value.requestedAt,
         outcome,
       })
@@ -300,11 +310,37 @@ export function mergeQueueState(
       ? 'merged'
       : state === 'CLOSED'
         ? 'dropped'
-        : 'queued'
+        : observation.outcome === 'pending'
+          ? 'pending'
+          : 'queued'
   return {
     configured: true,
     outcome,
     requestedAt: new Date(observation.requestedAt).toISOString(),
+  }
+}
+
+/**
+ * Read what GitHub now reports for a request this client already made. Nothing is submitted:
+ * the pull request is read for its own state, and an accepted request that never reported a
+ * terminal result is read again through its own UUID.
+ */
+export async function readMergeRequest(input: {
+  fullName: string
+  observation: MergeQueueObservation
+}): Promise<AsyncMergeResult | null> {
+  const { observation } = input
+  if (!observation.uuid || observation.outcome === 'queued') return null
+  try {
+    return await readAsyncMerge({
+      fullName: input.fullName,
+      number: observation.pullRequest,
+      uuid: observation.uuid,
+    })
+  } catch {
+    // The result is retained for 24 hours and then the endpoint answers 404. A request this
+    // client can no longer read is reported through the pull request itself instead.
+    return null
   }
 }
 

@@ -227,6 +227,11 @@ export interface GitHubFixtureState {
    * can stand in for a queue that accepted, or refused, the group.
    */
   asyncMergeResult?: { status: 'merged' | 'enqueued' | 'failed'; message?: string }
+  /**
+   * Keeps an accepted request `pending` on every read, standing in for a merge GitHub is still
+   * running. Cleared again to let that same request report its result.
+   */
+  asyncMergeStaysPending?: boolean
   asyncMerge?: {
     number: number
     sha: string

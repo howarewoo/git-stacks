@@ -80,6 +80,38 @@ Renderer checks distinguish the `/` in-view filter from the `Mod+K` command
 palette. The safety suite advances pending hover timers after opening a
 destructive dialog to verify that contextual cards cannot cover its warning.
 
+### Merging a pull request
+
+Merging uses GitHub's asynchronous merge API for a pull request that belongs
+to a stack, and the operation is worth knowing about from the outside:
+
+- The dialog previews the contiguous unmerged run below the selected pull
+  request, and asks how GitHub should land it: the repository default, a direct
+  merge, or the merge queue. A direct merge also asks for the method, because a
+  queued merge runs the repository's own settings instead.
+- The submitted stack is re-checked at the moment of the request. If a pull
+  request joined or left the stack, or a head moved, since the preview, nothing
+  is sent and the dialog says what changed.
+- A merge GitHub is still running does not finish: the dialog shows it as
+  running and keeps the request. While that run is in flight the dialog follows
+  it; the moment it returns, what GitHub reports is what the dialog shows, because
+  a read is newer than the progress the run pushed. **Refresh what GitHub reports**
+  asks again at any time, including after the run has finished, and a read that
+  fails keeps the last result GitHub published instead of blanking it.
+- Every accepted request is written down before it is read, together with the
+  pull request state a read confirmed, so a crash, a restart, an expired result,
+  or a refresh that cannot reach GitHub still reports what was confirmed — merged,
+  enqueued, or failed with GitHub's reason.
+- A merge queue has no published position or ejection feed, so what the queue
+  did is read back from the pull requests themselves: merged, still queued, or
+  dropped when it was closed without merging. A queue is offered for a base ref
+  once GitHub has accepted an enqueue for it, and not before. A pull request that
+  GitHub could not be asked about keeps what a read last confirmed; a read that
+  failed is never reported as a queue still holding the group.
+- GitHub owns what happens to a merged pull request. Git Stacks never deletes
+  or retargets a local branch for you, and any base GitHub moved is reported
+  for you to restack and publish.
+
 ## Performance budgets
 
 Git Stacks is used on repositories far larger than the ones it was built

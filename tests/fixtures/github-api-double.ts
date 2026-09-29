@@ -629,6 +629,15 @@ function handleRest(
       const pending = state.asyncMerge
       if (!pending || pending.uuid !== asyncMerge[2] || pending.number !== number)
         throw new HttpError(404, 'Not Found', 'Unknown merge request')
+      if (state.asyncMergeStaysPending) {
+        return {
+          status: 200,
+          body: {
+            status: 'pending',
+            details: { uuid: pending.uuid, message: 'merge in progress' },
+          },
+        }
+      }
       const canned = state.asyncMergeResult
       const pr = findPr(state, number)
       if (canned?.status === 'enqueued') {

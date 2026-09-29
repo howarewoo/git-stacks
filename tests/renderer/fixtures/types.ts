@@ -3,6 +3,7 @@ import type {
   GitAction,
   HistoryPage,
   LinkedIssue,
+  MergeStatus,
   PushPreview,
   RecentRepository,
   RemoteFreshness,
@@ -25,6 +26,7 @@ export type FixtureCall =
   | 'pushPreview'
   | 'stackPreview'
   | 'surgeryPreview'
+  | 'mergeStatus'
   | 'pullRequest'
   | 'openExternal'
   | 'gitRuntimeStatus'
@@ -65,6 +67,8 @@ export interface FixtureScenario {
   readonly stackPreviews?: Readonly<Partial<Record<StackKind, StackPreview>>>
   /** The surgery preview a scenario answers; insert between two layers by default. */
   readonly surgeryPreview?: SurgeryPreview
+  /** What the read-only merge-status read reports; nothing is submitted. */
+  readonly mergeStatus?: MergeStatus
   /** Git action types that always reject; every other action resolves with a status message. */
   readonly actionFailures?: Readonly<Partial<Record<GitAction['type'], string>>>
   /** Linked issues per pull request number, covering both contextual and closing relations. */

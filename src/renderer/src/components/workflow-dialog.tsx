@@ -8,6 +8,7 @@ import type {
   MergeAction,
   MergeLayerResult,
   MergeProgress,
+  MergeStatus,
   PublishLayerChoice,
   PublishProgress,
   PullRequest,
@@ -213,7 +214,11 @@ export function previewIdentity(data: WorkflowData): string | null {
 
 export type WorkflowStackAPI = Pick<
   DesktopAPI,
-  'stackPreview' | 'submitStackProgress' | 'onSubmitStackProgress' | 'onMergeProgress'
+  | 'stackPreview'
+  | 'submitStackProgress'
+  | 'onSubmitStackProgress'
+  | 'onMergeProgress'
+  | 'mergeStatus'
 > &
   Partial<
     Pick<DesktopAPI, 'searchIssues' | 'pullRequestIssueLinks' | 'previewIssueLink' | 'pullRequest'>
@@ -778,6 +783,7 @@ export function WorkflowDialog({
   const [mergeMethod, setMergeMethod] = React.useState<'' | 'merge' | 'squash' | 'rebase'>('')
   const [mergeAction, setMergeAction] = React.useState<MergeAction>('default')
   const [mergeProgress, setMergeProgress] = React.useState<MergeProgress | null>(null)
+  const [mergeStatus, setMergeStatus] = React.useState<MergeStatus | null>(null)
   const [preview, setPreview] = React.useState<StackPreview | null>(null)
   const [surgery, setSurgery] = React.useState<SurgeryPreview | null>(null)
   const [closePullRequests, setClosePullRequests] = React.useState(false)
@@ -973,6 +979,26 @@ export function WorkflowDialog({
       unsubscribe?.()
     }
   }, [request, stackApi])
+
+  // What GitHub reported for earlier merge requests is read, never re-requested: a queue that
+  // later merged or dropped a pull request, or a request that is still running, is only
+  // visible through a read. Reopening the dialog reads it again, so a refresh replaces what
+  // the previous run left behind without another merge.
+  const readMergeStatus = React.useCallback(async () => {
+    if (!stackApi.mergeStatus) return
+    try {
+      setMergeStatus(await stackApi.mergeStatus())
+    } catch {
+      setMergeStatus(null)
+    }
+  }, [stackApi])
+  React.useEffect(() => {
+    if (request.kind !== 'stack' || request.operation !== 'merge') {
+      setMergeStatus(null)
+      return
+    }
+    void readMergeStatus()
+  }, [request, readMergeStatus, mergeProgress])
 
   const title =
     request.kind === 'surgery'
@@ -1977,6 +2003,30 @@ export function WorkflowDialog({
                   ) : null}
                   {request.operation === 'merge' && mergeProgress ? (
                     <MergeOutcomePanel progress={mergeProgress} />
+                  ) : null}
+                  {request.operation === 'merge' && !mergeProgress && mergeStatus ? (
+                    <div className="grid gap-2">
+                      <MergeOutcomePanel
+                        label={`What GitHub reports now \u2014 ${mergeStatus.layers.length} pull request${
+                          mergeStatus.layers.length === 1 ? '' : 's'
+                        } from earlier merge requests`}
+                        progress={{
+                          action: 'default',
+                          status: mergeStatus.layers.some((layer) => layer.status === 'pending')
+                            ? 'running'
+                            : mergeStatus.layers.some((layer) => layer.status === 'enqueued')
+                              ? 'queued'
+                              : 'succeeded',
+                          layers: mergeStatus.layers,
+                          message: mergeStatus.message,
+                        }}
+                      />
+                      <div>
+                        <Button type="button" onClick={() => void readMergeStatus()}>
+                          Refresh what GitHub reports
+                        </Button>
+                      </div>
+                    </div>
                   ) : null}
                   {request.operation === 'merge' ? (
                     <Field
