@@ -104,21 +104,31 @@ export function GitHubAccountDialog({
             ) : null}
           </WorkflowSection>
 
-          {status?.challenge ? (
+          {state === 'signing-in' ? (
             <WorkflowSection label="One-time code">
-              <p className="m-0 text-[length:var(--gs-semantic-type-body-size)]">
-                Open GitHub&rsquo;s device page, enter this code, and authorize the app. The code
-                expires {when(status.challenge.expiresAt)}.
-              </p>
-              <p className="m-0 font-mono text-[length:var(--gs-semantic-type-metadata-size)]">
-                {status.challenge.userCode}
-              </p>
+              {status?.challenge ? (
+                <>
+                  <p className="m-0 text-[length:var(--gs-semantic-type-body-size)]">
+                    Open GitHub&rsquo;s device page, enter this code, and authorize the app. The
+                    code expires {when(status.challenge.expiresAt)}.
+                  </p>
+                  <p className="m-0 font-mono text-[length:var(--gs-semantic-type-metadata-size)]">
+                    {status.challenge.userCode}
+                  </p>
+                </>
+              ) : (
+                <p className="m-0 text-[length:var(--gs-semantic-type-body-size)]">
+                  Asking GitHub for a one-time code.
+                </p>
+              )}
               <div className="flex flex-wrap gap-2">
-                <Button onClick={onOpenVerification} size="sm">
-                  Open device page
-                </Button>
-                {/* Never disabled: a sign-in waiting on GitHub is exactly the
-                    case a user needs to be able to abandon. */}
+                {/* Never disabled and shown before the code exists: a sign-in
+                    waiting on GitHub is exactly the case to be able to abandon. */}
+                {status?.challenge ? (
+                  <Button onClick={onOpenVerification} size="sm">
+                    Open device page
+                  </Button>
+                ) : null}
                 <Button onClick={onCancelSignIn} size="sm" variant="secondary">
                   Cancel sign-in
                 </Button>
@@ -181,7 +191,11 @@ export function GitHubAccountDialog({
             <Button disabled={!canSignIn} loading={state === 'signing-in'} onClick={onSignIn}>
               {signedIn ? 'Sign in again' : 'Sign in to GitHub'}
             </Button>
-            <Button disabled={busy || !status?.reference} onClick={onSignOut} variant="secondary">
+            <Button
+              disabled={!status?.reference && state !== 'signing-in'}
+              onClick={onSignOut}
+              variant="secondary"
+            >
               Sign out
             </Button>
           </div>

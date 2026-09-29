@@ -192,12 +192,28 @@ export function resolveGitHubToken(env: NodeJS.ProcessEnv = process.env): string
 export type GitHubCredentialOrigin = 'account' | 'environment' | 'gh'
 
 /**
+ * Which credential a request authenticated as, and which session of it. The
+ * session is opaque and carries no secret; it exists so a response that arrives
+ * after a renewal is recognised as belonging to a credential that is gone.
+ */
+export interface GitHubCredentialFailure {
+  origin: GitHubCredentialOrigin
+  session: string | null
+}
+
+/** A credential the account handed to the transport for one request. */
+export interface GitHubCredential extends GitHubCredentialFailure {
+  origin: 'account'
+  token: string
+}
+
+/**
  * The signed-in account's credential. `current` refreshes it when it has
  * expired and returns null when sign-in is required; the credential itself
  * never leaves this call, so no caller and no renderer can observe it.
  */
 export interface GitHubCredentialSource {
-  current(): Promise<string | null>
+  current(): Promise<GitHubCredential | null>
   /** Whether a usable credential is held right now, which drives transport choice. */
   available(): boolean
   /** The host the credential was issued for; it is never sent anywhere else. */
@@ -205,23 +221,16 @@ export interface GitHubCredentialSource {
 }
 
 let credentialSource: GitHubCredentialSource | null = null
-let credentialGeneration = 0
 
 /** Installs the account credential for the process, or clears it on sign-out. */
 export function setGitHubCredentialSource(source: GitHubCredentialSource | null): void {
   credentialSource = source
-  credentialGeneration += 1
 }
 
-/**
- * Re-reads credential availability, which changes the automatic transport choice
- * on sign-in and on sign-out without restarting the process.
- */
-export function refreshGitHubCredentialSource(): void {
-  credentialGeneration += 1
-}
-
-type GitHubFailureListener = (error: GitHubTransportError) => void | Promise<void>
+type GitHubFailureListener = (
+  error: GitHubTransportError,
+  credential: GitHubCredentialFailure,
+) => void | Promise<void>
 let failureListener: GitHubFailureListener | null = null
 
 /**
@@ -234,17 +243,18 @@ export function onGitHubFailure(listener: GitHubFailureListener | null): void {
 
 /**
  * Awaited so a recovered credential is in place before the next request is made.
- * Only a rejection of the application-owned credential is reported: an invalid
- * environment override or a `gh` session says nothing about the stored account,
- * and must never delete it.
+ * Only a rejection of the application-owned credential is reported, and only for
+ * the session that was actually rejected: an invalid environment override or a
+ * `gh` session says nothing about the stored account, and a response for a
+ * superseded session says nothing about its replacement.
  */
 async function reportFailure(
   error: GitHubTransportError,
-  origin: GitHubCredentialOrigin,
+  credential: GitHubCredentialFailure,
 ): Promise<void> {
   if (error.kind !== 'unauthorized' && error.kind !== 'forbidden') return
-  if (origin !== 'account') return
-  await failureListener?.(error)
+  if (credential.origin !== 'account') return
+  await failureListener?.(error, credential)
 }
 
 function numberHeader(value: string | null): number | null {
@@ -398,20 +408,24 @@ export class DirectGitHubTransport implements GitHubTransport {
    */
   private async accessCredential(): Promise<{
     token: string
-    origin: GitHubCredentialOrigin
+    credential: GitHubCredentialFailure
   } | null> {
     const explicit = this.options.token ?? resolveGitHubToken(this.env)
-    if (explicit) return { token: explicit, origin: 'environment' }
+    if (explicit) {
+      return { token: explicit, credential: { origin: 'environment', session: null } }
+    }
     const credential = this.options.credential
     if (!credential || !this.servesGitHubOrigin) return null
-    const token = await credential.current()
-    return token === null ? null : { token, origin: 'account' }
+    const held = await credential.current()
+    return held === null
+      ? null
+      : { token: held.token, credential: { origin: held.origin, session: held.session } }
   }
 
   private async headers(
     hasBody: boolean,
     customHeaders?: Record<string, string>,
-  ): Promise<{ headers: Headers; origin: GitHubCredentialOrigin }> {
+  ): Promise<{ headers: Headers; origin: GitHubCredentialFailure }> {
     const access = await this.accessCredential()
     if (!access) {
       throw new GitHubTransportError({
@@ -433,7 +447,7 @@ export class DirectGitHubTransport implements GitHubTransport {
         headers.set(key, value)
       }
     }
-    return { headers, origin: access.origin }
+    return { headers, origin: access.credential }
   }
 
   private async send(
@@ -457,12 +471,12 @@ export class DirectGitHubTransport implements GitHubTransport {
     const request$ = (this.options.fetch ?? globalThis.fetch) as typeof globalThis.fetch
     // Which credential this request authenticates as, so a rejection is only ever
     // attributed to the credential that actually caused it.
-    let origin: GitHubCredentialOrigin = 'environment'
+    let credential: GitHubCredentialFailure = { origin: 'environment', session: null }
     try {
       // Resolving the credential can suspend; an abort in that window must not
       // be lost, because a fetch invoked with an already-aborted signal never settles.
       const access = await this.headers(payload !== undefined, request.headers)
-      origin = access.origin
+      credential = access.origin
       if (controller.signal.aborted) {
         throw new GitHubTransportError(
           timedOut
@@ -496,7 +510,7 @@ export class DirectGitHubTransport implements GitHubTransport {
       return { status: response.status, body, headers: response.headers, rateLimit }
     } catch (error) {
       if (error instanceof GitHubTransportError) {
-        await reportFailure(error, origin)
+        await reportFailure(error, credential)
         throw error
       }
       if (timedOut) {
@@ -784,7 +798,7 @@ export class GhGitHubTransport implements GitHubTransport {
         rateLimit,
         body: response.body,
       })
-      await reportFailure(failure, 'gh')
+      await reportFailure(failure, { origin: 'gh', session: null })
       throw failure
     }
     return response
@@ -903,7 +917,7 @@ export class GhGitHubTransport implements GitHubTransport {
 }
 
 /** The only origin an application-owned GitHub App credential may be sent to. */
-const GITHUB_CREDENTIAL_ORIGIN = 'https://api.github.com'
+export const GITHUB_CREDENTIAL_ORIGIN = 'https://api.github.com'
 
 export type GitHubTransportChoice = 'auto' | 'direct' | 'gh'
 
@@ -932,15 +946,15 @@ export function githubTransport(env: NodeJS.ProcessEnv = process.env): GitHubTra
     configured === 'direct' || configured === 'gh' ? configured : 'auto'
   const token = resolveGitHubToken(env)
   // A different token, API version, or signed-in identity changes what a stored
-  // body means, so the cache is dropped rather than reused across identities.
-  const key = `${choice}:${githubApiUrl(env)}:${githubApiVersion(env)}:${token ?? ''}:${credentialGeneration}`
+  // body means. Availability is part of the key, so a sign-in or a sign-out
+  // changes the choice on the next call without any explicit invalidation.
+  const available = credentialSource?.available() === true
+  const key = `${choice}:${githubApiUrl(env)}:${githubApiVersion(env)}:${token ?? ''}:${available}`
   if (cached?.key === key) return cached.transport
   if (cached) responseCache.clear()
   // Only a usable account credential selects the direct transport: an account
   // service that is merely constructed must never disable an existing `gh`.
-  const direct =
-    choice === 'direct' ||
-    (choice === 'auto' && (token !== null || credentialSource?.available() === true))
+  const direct = choice === 'direct' || (choice === 'auto' && (token !== null || available))
   const transport: GitHubTransport = direct
     ? new DirectGitHubTransport({
         env,

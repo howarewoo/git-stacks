@@ -395,6 +395,7 @@ function App() {
   const [accountOpen, setAccountOpen] = React.useState(false)
   const [account, setAccount] = React.useState<GitHubAccountStatus | null>(null)
   const [accountBusy, setAccountBusy] = React.useState(false)
+  const accountRequest = React.useRef(0)
   const workflowSequence = React.useRef(0)
 
   const [paletteOpen, setPaletteOpen] = React.useState(false)
@@ -623,13 +624,17 @@ function App() {
       // Cancelling and signing out must stay reachable while a sign-in is in
       // progress; only starting one is prevented from being doubled up.
       if (!desktop || (accountBusy && !interruptible)) return
+      const request = ++accountRequest.current
       setAccountBusy(true)
       try {
-        setAccount(await action())
+        const next = await action()
+        // A slow sign-in must not overwrite the state a later cancel already
+        // reached; only the newest action's result is applied.
+        if (request === accountRequest.current) setAccount(next)
       } catch (value) {
-        setError(readableError(value))
+        if (request === accountRequest.current) setError(readableError(value))
       } finally {
-        setAccountBusy(false)
+        if (request === accountRequest.current) setAccountBusy(false)
       }
     },
     [accountBusy, desktop],
