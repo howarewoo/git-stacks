@@ -167,6 +167,13 @@ export interface GitHubFixtureState {
   lostResponses?: Array<{
     method: string
     pathIncludes: string
+    /**
+     * Matches only when the path also ends with this, which is how a collection
+     * endpoint is told apart from a member endpoint under the same prefix: a lost
+     * `POST /repos/o/r/stacks` is a different event from a lost
+     * `POST /repos/o/r/stacks/1/unstack`.
+     */
+    pathEndsWith?: string
     status: number
     message: string
   }>

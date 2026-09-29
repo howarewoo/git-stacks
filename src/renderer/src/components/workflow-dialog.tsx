@@ -1606,6 +1606,15 @@ export function WorkflowDialog({
                       facts={[]}
                     />
                   ) : null}
+                  {(surgery.creates ?? []).length > 0 ? (
+                    <WarningNote>
+                      {surgery.creates.join(', ')} {surgery.creates.length === 1 ? 'is' : 'are'}{' '}
+                      published as a new branch on the remote before the pull request above{' '}
+                      {surgery.creates.length === 1 ? 'it is' : 'them are'} retargeted onto{' '}
+                      {surgery.creates.length === 1 ? 'it' : 'them'}. That push refuses to replace a
+                      branch that already exists there.
+                    </WarningNote>
+                  ) : null}
                   {surgery.closes.length > 0 ? (
                     <WarningNote>
                       Pull request {surgery.closes.map((number) => `#${number}`).join(', ')} will

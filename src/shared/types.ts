@@ -586,6 +586,13 @@ export interface SurgeryPlanPreview {
   order: string[]
   layers: SurgeryLayer[]
   forcePushes: string[]
+  /**
+   * Remote branches this surgery publishes for the first time. GitHub refuses to
+   * retarget a pull request onto a branch that does not exist, so a layer that has
+   * to become somebody's base is created on the remote before the retargets run,
+   * and the push refuses to replace a branch somebody else created.
+   */
+  creates: string[]
   /** Pull requests whose base changes, bottom-to-top. */
   retargets: { number: number; branch: string; from: string; to: string }[]
   /** Pull requests the surgery closes because their layer leaves the stack. */

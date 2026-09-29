@@ -440,6 +440,7 @@ export const insertSurgeryPreview: SurgeryPreview = {
     },
   ],
   forcePushes: ['feature/checkout'],
+  creates: ['feature/checkout-helpers'],
   retargets: [
     {
       number: 42,

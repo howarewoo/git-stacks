@@ -341,7 +341,14 @@ it and the original tips stay recoverable.
 - **Native stack membership** is GitHub's to own. Reordering submitted layers unstack
   the native stack and registers the pull requests again in the new order; layers that
   are not part of a native stack, and a repository that cannot use native stacks, plan a
-  local-only surgery and say so in the preview.
+  local-only surgery and say so in the preview. An inserted layer has no pull request of
+  its own, so a stack whose members no longer form one chain from the trunk is unstacked
+  rather than left registered in an order GitHub cannot hold.
+- **An inserted layer that a pull request hangs from** is published to the remote before
+  the retarget, because GitHub refuses a pull request whose base branch does not exist.
+  The preview names that creation next to the retarget, and the push refuses to replace
+  a branch somebody else created. Without a GitHub origin to push to, an insert below a
+  submitted layer is blocked instead of planned.
 
 ### Preview and safety
 
@@ -361,6 +368,19 @@ it and the original tips stay recoverable.
   branch it created and the branch it removed. Continue resumes from the journal without
   repeating completed layers; Abort restores every tip, the created branch, and the
   removed branch.
+  removed branch. A removed branch stays in place until every replay and remote step has
+  finished, so an Abort that arrives earlier finds it already restored at the tip the
+  preview captured.
+- The remote half of a run - the pull request retargets and closes, and the native stack
+  unstack and re-registration - is part of the same journal, and Continue runs it again
+  after a resolved conflict as well as after a lost response. Every step reads what
+  GitHub actually holds, in full, before it writes: a step whose result is already there
+  is recognised and completed instead of repeated, including a push whose ref already
+  moved, a retarget that landed, an unstack that dissolved the stack, and a stack
+  creation that was registered before the response was lost. A step whose pull request
+  head, base, or state, or whose native stack membership, differs from both the reviewed
+  pre-state and the reviewed result stops the run instead of overwriting it.
+
 ## Linked issues
 
 A pull request inspector and the pull request workflow dialog both list the issues
@@ -403,3 +423,4 @@ request, so a change landing between that read and the write can still be lost;
 this is a property of the API, not something the app can close. A refresh that
 follows a link change never overwrites description text the user typed while the
 refresh was in flight.
+>>>>>>> 4d65928 (fix(stacks): prove every remote surgery step and publish inserted bases)

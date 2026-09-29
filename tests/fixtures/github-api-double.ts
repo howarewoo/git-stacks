@@ -782,7 +782,10 @@ export function createGitHubApiDouble(): typeof globalThis.fetch {
     })
     const request: GitHubApiDoubleRequest = { method, path, body, headers }
     const lost = (state.lostResponses ?? []).findIndex(
-      (rule) => rule.method === method && request.path.includes(rule.pathIncludes),
+      (rule) =>
+        rule.method === method &&
+        request.path.includes(rule.pathIncludes) &&
+        (rule.pathEndsWith === undefined || request.path.endsWith(rule.pathEndsWith)),
     )
     try {
       const result =

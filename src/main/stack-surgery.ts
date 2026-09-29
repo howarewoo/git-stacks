@@ -96,6 +96,10 @@ export interface SurgeryPullRequestPlan {
   branch: string
   number: number
   action: 'retarget' | 'close'
+  /** The head ref GitHub recorded when the preview was taken. */
+  headRef: string
+  /** The head commit GitHub recorded when the preview was taken. */
+  headOid: string | null
   /** The base GitHub recorded when the preview was taken. */
   fromBase: string
   toBase: string
@@ -121,6 +125,8 @@ export interface SurgeryPlan {
   stackStep: {
     stackNumber: number
     action: 'unstack' | 'unstack-and-create'
+    /** The membership this stack held when the preview was taken, bottom-to-top. */
+    membersBefore: number[]
     members: number[]
   } | null
   layers: SurgeryPlanLayer[]
@@ -291,6 +297,8 @@ export function planSurgery(capture: SurgeryCapture, request: SurgeryRequest): S
   const closes: number[] = []
   const pullRequests: SurgeryPullRequestPlan[] = []
   const replayed = new Set<string>()
+  /** Remote branches this run has to publish before a pull request can point at them. */
+  const creates: string[] = []
 
   for (const branch of order) {
     if (!affected.has(branch)) continue
@@ -299,6 +307,32 @@ export function planSurgery(capture: SurgeryCapture, request: SurgeryRequest): S
     const targetTip = facts.get(parent)?.oid ?? capture.trunkOid
     if (!layerFacts) {
       // The only layer without captured facts is the branch this surgery creates.
+      // A submitted layer hanging from it needs that branch on the remote before
+      // its pull request can be retargeted, so the insert publishes it as a new
+      // remote branch and the preview names that creation as part of the review.
+      const submittedChild = order.find((other) => {
+        const otherFacts = facts.get(other)
+        return (
+          parentAfter(other) === branch &&
+          otherFacts !== undefined &&
+          otherFacts.pullRequest !== null &&
+          otherFacts.pullRequestState === 'OPEN'
+        )
+      })
+      let publish = false
+      if (submittedChild) {
+        if (!capture.pushUrl) {
+          blockers.push(
+            `Retargeting pull request #${facts.get(submittedChild)?.pullRequest} onto the new ${branch} needs a GitHub origin: GitHub refuses a pull request whose base branch does not exist on the remote`,
+          )
+        } else {
+          publish = true
+          creates.push(branch)
+          warnings.push(
+            `${branch} is published as a new branch on ${capture.pushUrl} before the pull request above it is retargeted onto it, and that push refuses to replace a branch that already exists there.`,
+          )
+        }
+      }
       layers.push({
         branch,
         action: 'insert',
@@ -310,7 +344,7 @@ export function planSurgery(capture: SurgeryCapture, request: SurgeryRequest): S
         boundary: targetTip,
         boundarySource: 'recorded',
         commits: 0,
-        push: 'none',
+        push: publish ? 'create' : 'none',
         remoteOid: null,
         replay: false,
       })
@@ -322,11 +356,13 @@ export function planSurgery(capture: SurgeryCapture, request: SurgeryRequest): S
         oid: null,
         remoteOid: null,
         commits: 0,
-        push: 'none',
+        push: publish ? 'create' : 'none',
         pullRequest: null,
         pullRequestBase: null,
         pullRequestAction: 'none',
-        note: `Created at ${targetTip.slice(0, 12)} with no commits of its own`,
+        note: publish
+          ? `Created at ${targetTip.slice(0, 12)} with no commits of its own, then published as a new remote branch`
+          : `Created at ${targetTip.slice(0, 12)} with no commits of its own`,
         blockers: [],
       })
       continue
@@ -411,6 +447,8 @@ export function planSurgery(capture: SurgeryCapture, request: SurgeryRequest): S
           branch,
           number,
           action: 'retarget',
+          headRef: branch,
+          headOid: layerFacts.remoteOid,
           fromBase: layerFacts.pullRequestBase ?? layerFacts.parent,
           toBase: parent,
         })
@@ -485,6 +523,8 @@ export function planSurgery(capture: SurgeryCapture, request: SurgeryRequest): S
         branch: layerFacts.branch,
         number: layerFacts.pullRequest,
         action: 'close',
+        headRef: layerFacts.branch,
+        headOid: layerFacts.remoteOid,
         fromBase: layerFacts.pullRequestBase ?? layerFacts.parent,
         toBase: layerFacts.pullRequestBase ?? layerFacts.parent,
       })
@@ -556,6 +596,7 @@ export function planSurgery(capture: SurgeryCapture, request: SurgeryRequest): S
         ? {
             stackNumber: nativeStack.number as number,
             action: nativeStack.action,
+            membersBefore: capture.stack?.members ?? [],
             members: nativeStack.action === 'unstack-and-create' ? nativeStack.members : [],
           }
         : null,
@@ -566,6 +607,7 @@ export function planSurgery(capture: SurgeryCapture, request: SurgeryRequest): S
       order,
       layers: previewLayers,
       forcePushes: unique(forcePushes),
+      creates: unique(creates),
       retargets,
       closes,
       nativeStack,
@@ -599,7 +641,9 @@ function planNativeStack(
     .filter((layer): layer is SurgeryLayerFacts => layer !== undefined)
     .filter((layer) => layer.pullRequest !== null && layer.pullRequestState === 'OPEN')
   const members = submitted.map((layer) => layer.pullRequest as number)
-  if (sameOrder(stack.members, members)) return { number: stack.number, action: 'none', members }
+  // The chain is checked before the order is: an unchanged membership whose bases
+  // no longer form one chain is a stack GitHub cannot keep, because a layer this
+  // surgery inserted between two of its members has no pull request of its own.
   let chainValid = members.length > 0
   let previous: string | null = null
   for (const layer of submitted) {
@@ -621,6 +665,7 @@ function planNativeStack(
     )
     return { number: stack.number, action: 'unstack', members: [] }
   }
+  if (sameOrder(stack.members, members)) return { number: stack.number, action: 'none', members }
   if (capture.stackCapability !== 'available') {
     blockers.push(
       'This repository cannot use native pull request stacks, so the changed order cannot be registered; unstack the stack on GitHub first',

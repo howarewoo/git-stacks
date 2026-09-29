@@ -620,6 +620,10 @@ test(
       let staleState = await harness.readState()
       updatePr(staleState, 'child', { base: 'main' })
       await harness.writeState(staleState)
+      // A pull request that changed on GitHub after the preview invalidates the plan
+      // before anything runs. The refusal itself is the behaviour under test; the
+      // exact wording belongs to no assertion.
+
       const beforeStaleBase = {
         parent: localOid(harness, 'parent'),
         child: localOid(harness, 'child'),
