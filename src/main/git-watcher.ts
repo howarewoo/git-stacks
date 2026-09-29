@@ -184,9 +184,17 @@ export class RepositoryWatcher {
     this.attach(dirname(this.root), false, (changed) => {
       if (changed === null || changed === name) void this.checkPresence()
     })
+    // Watch the worktree as well as Git metadata, so editing a tracked source
+    // file or creating an untracked file triggers a debounced local refresh
+    // without having to run a Git command first.
+    this.attachWorktree(this.root)
     for (const directory of this.gitDirectories) this.attachGitDirectory(directory)
   }
 
+  private attachWorktree(root: string): void {
+    if (this.attach(root, true)) return
+    this.attach(root, false)
+  }
   private attachGitDirectory(directory: string): void {
     if (this.attach(directory, true)) return
     // Recursive watches are unavailable here; cover the state a snapshot reads.

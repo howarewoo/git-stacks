@@ -33,7 +33,7 @@ import type {
   SyncActivity,
 } from '../shared/types'
 import { RepositoryOperations } from './repository-operations'
-import { RequestRegistry } from './request-registry'
+import { RequestRegistry, performBackgroundRead } from './request-registry'
 import { RepositoryScheduler } from './repository-scheduler'
 import { RepositorySyncCoordinator } from './sync-coordinator'
 import { RepositoryWatcher } from './git-watcher'
@@ -83,34 +83,36 @@ let watcher: RepositoryWatcher | null = null
  * commit, or branch switch look busy, and a Git operation must not wait for a
  * refresh to finish.
  */
-function backgroundRead<T>(
+export function backgroundRead<T>(
   root: string,
+  signal: AbortSignal | undefined,
   operation: (root: string, signal: AbortSignal) => Promise<T>,
   requestId: string,
 ): Promise<T> {
-  const controller = readKeys.claim(root, requestId)
-  return scheduler
-    .read(
-      root,
-      async () => {
-        const runtime = await resolveGitRuntime()
-        return withGitRuntime(runtime, () => operation(root, controller.signal))
-      },
-      controller.signal,
-    )
-    .finally(() => readKeys.release(root, requestId, controller))
+  return performBackgroundRead(
+    readKeys,
+    root,
+    signal,
+    async (combined) => {
+      const runtime = await resolveGitRuntime()
+      return withGitRuntime(runtime, () => operation(root, combined))
+    },
+    requestId,
+  )
 }
 
 const sync = new RepositorySyncCoordinator({
   readSnapshot: (root, signal, request) =>
     backgroundRead(
       root,
+      signal,
       (path, readSignal) => getSnapshot(path, readSignal, undefined, request.github.remote),
       request.requestId,
     ),
-  readIssues: (root) =>
+  readIssues: (root, signal) =>
     backgroundRead(
       root,
+      signal,
       async (path, readSignal) => {
         const issues = await getGitHubIssues(path, await getOriginUrl(path, readSignal))
         // The issues read reports a failure as text; a lost answer must not empty the inbox.

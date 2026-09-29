@@ -37,3 +37,27 @@ export class RequestRegistry {
     this.live.delete(root)
   }
 }
+
+/**
+ * Runs a background read operation on behalf of the scheduler or sync coordinator,
+ * combining the outer scheduler signal with the registry controller signal.
+ * When a mutation aborts the scheduler lane, or when the request id is superseded / cancelled,
+ * the combined signal aborts immediately.
+ */
+export async function performBackgroundRead<T>(
+  registry: RequestRegistry,
+  root: string,
+  signal: AbortSignal | undefined,
+  operation: (signal: AbortSignal) => Promise<T>,
+  requestId: string,
+): Promise<T> {
+  const controller = registry.claim(root, requestId)
+  const combined = signal
+    ? AbortSignal.any([signal, controller.signal])
+    : controller.signal
+  try {
+    return await operation(combined)
+  } finally {
+    registry.release(root, requestId, controller)
+  }
+}

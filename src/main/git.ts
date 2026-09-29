@@ -4548,6 +4548,7 @@ function knownAncestor(
 export type SnapshotGitHubRemote = 'live' | 'reuse' | 'on-failure'
 
 interface ConfirmedGitHubPayload {
+  originUrl: string | null
   data: GitHubResult
   issues: { issues: RepositoryIssue[]; message: string }
   fetchedAt: string
@@ -4567,10 +4568,18 @@ function rememberConfirmedPayload(root: string, payload: ConfirmedGitHubPayload)
 }
 
 /** The last GitHub payload this repository confirmed, if any. */
-export function confirmedGitHubPayload(root: string): ConfirmedGitHubPayload | null {
-  return confirmedPayloads.get(root) ?? null
+export function confirmedGitHubPayload(
+  root: string,
+  originUrl?: string | null,
+): ConfirmedGitHubPayload | null {
+  const cached = confirmedPayloads.get(root) ?? null
+  if (!cached) return null
+  if (originUrl !== undefined && cached.originUrl !== originUrl) {
+    confirmedPayloads.delete(root)
+    return null
+  }
+  return cached
 }
-
 export async function getSnapshot(
   repoPath: string,
   signal?: AbortSignal,
@@ -4686,7 +4695,13 @@ export async function getSnapshot(
   }
 
   const defaultBranch = await getDefaultBranch(root, refs, currentBranch, signal)
-  const confirmed = confirmedPayloads.get(root) ?? null
+  const cached = confirmedPayloads.get(root) ?? null
+  // Bind confirmed payloads to the remote identity: if the origin URL changed,
+  // reject and drop the confirmed payload from the previous repository.
+  const confirmed = cached && cached.originUrl === originUrl ? cached : null
+  if (cached && cached.originUrl !== originUrl) {
+    confirmedPayloads.delete(root)
+  }
   const confirmedAt = new Date().toISOString()
   // A background refresh of local Git must not spend a GitHub request, and a
   // refresh whose GitHub answer was lost must keep the last confirmed payload
@@ -4702,7 +4717,12 @@ export async function getSnapshot(
         ])
   const answered = live !== null && live[0].available
   if (answered) {
-    rememberConfirmedPayload(root, { data: live[0], issues: live[1], fetchedAt: confirmedAt })
+    rememberConfirmedPayload(root, {
+      originUrl,
+      data: live[0],
+      issues: live[1],
+      fetchedAt: confirmedAt,
+    })
   }
   // A live read is authoritative by definition: a caller that asked for one
   // (a mutation preview, a publication) must never be handed an older payload

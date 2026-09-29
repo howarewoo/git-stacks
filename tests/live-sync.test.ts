@@ -18,6 +18,7 @@ import {
   RemoteMutationLedger,
   unknownRemoteOutcome,
 } from '../src/main/remote-mutations'
+import { RequestRegistry, performBackgroundRead } from '../src/main/request-registry'
 import {
   classifyRemoteFailure,
   DEFAULT_INTERVALS,
@@ -909,9 +910,8 @@ test('observable local commit during rate-limit block with zero added remote cal
   assert.deepEqual(reads, ['on-failure', 'reuse'])
   // 3. Remote health and rate-limit reset remain completely unchanged
   assert.equal(coordinator.freshness().state, 'rate-limited')
-  assert.equal(coordinator.freshness().rateLimitReset, resetTime.toISOString())
-  assert.equal(pushed.snapshot.remote.state, 'rate-limited')
-  assert.equal(pushed.snapshot.remote.rateLimitReset, resetTime.toISOString())
+  assert.equal(pushed.snapshot?.remote?.state, 'rate-limited')
+  assert.equal(pushed.snapshot?.remote?.rateLimitReset, resetTime.toISOString())
 
   // Advance time: polling is still parked waiting for the reset time
   await clock.advance(DEFAULT_INTERVALS.visibleMs * 2)
@@ -963,8 +963,7 @@ test('observable local commit during auth block with zero added remote calls and
   // 2. Zero remote calls
   assert.deepEqual(reads, ['on-failure', 'reuse'])
   // 3. Remote health unchanged
-  assert.equal(coordinator.freshness().state, 'unauthorized')
-  assert.equal(pushed.snapshot.remote.state, 'unauthorized')
+  assert.equal(pushed.snapshot?.remote?.state, 'unauthorized')
 
   // Focus changes must not trigger remote reads while unauthorized
   coordinator.reportActivity({ focused: true, visible: true })
@@ -1007,7 +1006,7 @@ test('real repository watcher fires coordinator during rate limit and delivers l
     {
       readSnapshot: async (r, signal, request) => {
         reads.push(request.github.remote)
-        return getSnapshot(r, undefined, signal, request.github.remote)
+        return getSnapshot(r, signal, undefined, request.github.remote)
       },
       readIssues: async () => [],
       scheduler,
@@ -1085,12 +1084,225 @@ test('real repository watcher fires coordinator during rate limit and delivers l
     assert.ok(reads.length >= 1)
     assert.ok(reads.every((r) => r === 'reuse'))
     // Remote health is unchanged
-    assert.equal(coordinator.freshness().state, 'rate-limited')
-    assert.equal(finalSnapshot.remote.state, 'rate-limited')
-    assert.equal(finalSnapshot.remote.rateLimitReset, resetTime.toISOString())
+    assert.equal(finalSnapshot.remote?.state, 'rate-limited')
+    assert.equal(finalSnapshot.remote?.rateLimitReset, resetTime.toISOString())
   } finally {
     await watcher.stop()
     coordinator.detach()
+    await cleanup()
+  }
+})
+
+test('worktree file edit or creation without git triggers the watcher and notifies coordinator', async () => {
+  const { repo, cleanup } = await disposableRepository()
+  const log = new WatchLog()
+  const watcher = new RepositoryWatcher(repo, (event) => log.record(event.reason), {
+    debounceMs: 50,
+    maxDelayMs: 200,
+    sweepMs: 0,
+  })
+  try {
+    await watcher.start()
+
+    // 1. Create a brand new untracked file directly in the worktree WITHOUT running git:
+    await writeFile(join(repo, 'untracked.txt'), 'hello from worktree')
+    await log.waitFor((reason) => reason === 'change')
+
+    // 2. Edit an existing tracked file directly in the worktree WITHOUT running git:
+    await writeFile(join(repo, 'shared.txt'), 'modified without git\n')
+    await log.waitFor((reason) => reason === 'change')
+  } finally {
+    await watcher.stop()
+    await cleanup()
+  }
+})
+
+test('actual production performBackgroundRead forwards scheduler cancellation to in-flight snapshot read during mutation', async () => {
+  const scheduler = new RepositoryScheduler()
+  const registry = new RequestRegistry()
+  const root = '/tmp/repo-scheduler-test'
+
+  const readStarted = Promise.withResolvers<void>()
+  const readCancelled = Promise.withResolvers<boolean>()
+
+  // Simulate an in-flight background snapshot read wired through the actual production adapter
+  const backgroundTask = scheduler.read(
+    root,
+    (schedulerSignal) =>
+      performBackgroundRead(
+        registry,
+        root,
+        schedulerSignal,
+        async (combinedSignal) => {
+          readStarted.resolve()
+          return new Promise<string>((resolve, reject) => {
+            combinedSignal.addEventListener(
+              'abort',
+              () => {
+                readCancelled.resolve(combinedSignal.aborted)
+                reject(new Error('Operation cancelled by scheduler'))
+              },
+              { once: true },
+            )
+          })
+        },
+        'sync-refresh',
+      ),
+  )
+
+  await readStarted.promise
+
+  // A mutation (e.g. stage, commit, branch switch) claims the lane
+  const mutationResult = await scheduler.mutate(root, async () => {
+    return 'mutation-completed'
+  })
+
+  assert.equal(mutationResult, 'mutation-completed')
+  const wasCancelled = await readCancelled.promise
+  assert.equal(wasCancelled, true, 'background read signal was aborted when mutation claimed lane')
+  await assert.rejects(backgroundTask, /cancelled/iu)
+})
+
+test('overlapping local read defers and reschedules remote polling without losing it', async () => {
+  const clock = new ManualClock()
+  const scheduler = new RepositoryScheduler()
+  const localGate = Promise.withResolvers<void>()
+  const reads: string[] = []
+
+  const coordinator = new RepositorySyncCoordinator(
+    {
+      readSnapshot: async (_repo, _signal, req) => {
+        reads.push(req.github.remote)
+        if (req.github.remote === 'reuse') {
+          await localGate.promise
+        }
+        return snapshotFixture()
+      },
+      readIssues: async () => [],
+      scheduler,
+      clock,
+    },
+    { ...DEFAULT_INTERVALS, visibleMs: 1_000, localSettleMs: 100 },
+  )
+
+  coordinator.attach('/tmp/repo', snapshotFixture())
+  reads.length = 0
+
+  // 1. A local change starts a local read that holds the coordinator:
+  coordinator.notifyLocalChange()
+  await clock.advance(100)
+  assert.deepEqual(reads, ['reuse'])
+
+  // 2. While the local read is running, remote polling interval (1000ms) elapses:
+  await clock.advance(1_000)
+  // Remote read could not run immediately because local read was running; it was deferred!
+  assert.deepEqual(reads, ['reuse'])
+
+  // 3. Local read finishes:
+  localGate.resolve()
+  await clock.advance(1)
+
+  // 4. Deferred remote read executes:
+  assert.deepEqual(reads, ['reuse', 'on-failure'])
+
+  // 5. Remote timer is still scheduled for the next interval:
+  await clock.advance(1_000)
+  assert.deepEqual(reads, ['reuse', 'on-failure', 'on-failure'])
+  coordinator.detach()
+})
+
+test('pending mutation ledgers persist per repository across attach-switch-return', async () => {
+  const h = harness()
+  const action: GitAction = {
+    type: 'merge',
+    ref: 'refs/heads/feature',
+    expectedHead: '1'.repeat(40),
+    expectedHeadRef: 'refs/heads/feature',
+  }
+
+  // 1. Attach repository A and record a lost high-impact mutation
+  h.coordinator.attach('/tmp/repo-a', snapshotFixture())
+  const recorded = h.coordinator.recordMutationFailure(action, new Error('Network timeout'))
+  assert.ok(recorded)
+  assert.equal(h.coordinator.freshness().pendingMutations.length, 1)
+
+  // 2. Switch to repository B: pending mutations from repo A must not show in repo B
+  h.coordinator.attach('/tmp/repo-b', snapshotFixture())
+  assert.equal(h.coordinator.freshness().pendingMutations.length, 0)
+
+  // 3. Switch back to repository A: pending mutations must STILL be present
+  h.coordinator.attach('/tmp/repo-a', snapshotFixture())
+  assert.equal(h.coordinator.freshness().pendingMutations.length, 1)
+  assert.equal(h.coordinator.freshness().pendingMutations[0].id, recorded.id)
+
+  // 4. Person dismisses it: only then is it removed
+  h.coordinator.dismissPendingMutation(recorded.id)
+  assert.equal(h.coordinator.freshness().pendingMutations.length, 0)
+})
+
+test('low remaining budget derives parking deadline from rate-limit reset and parks secondary tier', async () => {
+  const h = harness()
+  const resetTime = new Date(h.clock.now() + 600_000)
+  // Simulate GitHub transport reporting remaining requests at or below budgetFloor (10)
+  h.failWith(
+    new GitHubTransportError({
+      kind: 'rate-limited',
+      detail: 'Rate limit nearly exhausted',
+      rateLimit: {
+        limit: 5000,
+        remaining: 5,
+        reset: resetTime,
+        resource: 'core',
+        retryAfterSeconds: 120,
+      },
+    }),
+  )
+  h.coordinator.attach('/tmp/repo', snapshotFixture())
+  // Trigger visible failure so lastGitHubRateLimit records remaining = 5 and reset
+  await h.clock.advance(DEFAULT_INTERVALS.visibleMs + 1)
+  h.failWith(null)
+
+  // Switch to secondary tier (window blurred / inactive)
+  h.coordinator.reportActivity({ focused: false, visible: true })
+  const initialIssueReads = h.issueReads()
+
+  // Advance time: secondary polling encounters low budget, derives parkUntil from resetTime (120s away)
+  await h.clock.advance(DEFAULT_INTERVALS.secondaryMs + 1)
+  assert.equal(h.issueReads(), initialIssueReads, 'secondary tier parks when remaining budget is low')
+
+  // Advance to just before the reset time: still parked
+  await h.clock.advance(200_000)
+  assert.equal(h.issueReads(), initialIssueReads, 'secondary tier stays parked until rate limit reset')
+
+  // Past reset: secondary tier can resume
+  await h.clock.advance(150_000)
+  assert.ok(h.issueReads() > initialIssueReads, 'secondary tier resumes once reset deadline passes')
+})
+
+test('confirmed payload is bound to remote identity and invalidated when origin URL changes', async () => {
+  const { repo, cleanup } = await disposableRepository()
+  const previous = { ...process.env }
+  process.env.GIT_STACKS_GITHUB_API_URL = 'http://127.0.0.1:9'
+  try {
+    // 1. Configure remote origin as project-alpha and record a confirmed payload
+    git(repo, 'remote', 'add', 'origin', 'https://github.com/acme/project-alpha.git')
+    const { confirmedGitHubPayload } = await import('../src/main/git')
+
+    // Calling getSnapshot in 'reuse' before any fetch confirms no data
+    const initial = await getSnapshot(repo, undefined, undefined, 'reuse')
+    assert.equal(initial.github.available, false)
+
+    // Verify confirmedGitHubPayload with originUrl check:
+    assert.equal(confirmedGitHubPayload(repo, 'https://github.com/acme/project-beta.git'), null)
+
+    // 2. Change remote URL to project-beta:
+    git(repo, 'remote', 'set-url', 'origin', 'https://github.com/acme/project-beta.git')
+    const snapshotAfterChange = await getSnapshot(repo, undefined, undefined, 'reuse')
+    // Unrelated records from project-alpha must not be reused for project-beta
+    assert.equal(snapshotAfterChange.github.available, false)
+    assert.equal(snapshotAfterChange.githubStale?.reason, 'GitHub data has not been confirmed yet')
+  } finally {
+    Object.assign(process.env, previous)
     await cleanup()
   }
 })

@@ -140,6 +140,7 @@ export class RepositorySyncCoordinator {
   private readonly deps: SyncCoordinatorDependencies
   private readonly intervals: SyncIntervals
   private readonly clock: SyncClock
+  private readonly ledgers = new Map<string, RemoteMutationLedger>()
   private ledger: RemoteMutationLedger = new RemoteMutationLedger()
   private readonly listeners = new Set<(event: SyncEvent) => void>()
   private repository: string | null = null
@@ -148,6 +149,7 @@ export class RepositorySyncCoordinator {
   private localTimer: SyncTimer | undefined
   private running: Promise<unknown> | null = null
   private dirtyLocal = false
+  private dirtyRemoteTier: 'visible' | 'secondary' | null = null
   private failures = 0
   private state: RemoteFreshnessState = 'stale'
   private detail: string | null = null
@@ -192,9 +194,14 @@ export class RepositorySyncCoordinator {
   attach(repository: string, snapshot?: RepositorySnapshot): void {
     this.detach()
     this.repository = repository
-    // A mutation lost in one repository says nothing about another, so the list
-    // is rebuilt per repository instead of outliving the open one.
-    this.ledger = new RemoteMutationLedger()
+    // Retain pending mutation ledgers per repository across attach-switch-return,
+    // so switching repositories never dismisses an unresolved mutation warning.
+    let ledger = this.ledgers.get(repository)
+    if (!ledger) {
+      ledger = new RemoteMutationLedger()
+      this.ledgers.set(repository, ledger)
+    }
+    this.ledger = ledger
     if (snapshot) this.adopt(snapshot)
     this.emit({ kind: 'status', freshness: this.freshness() })
     this.scheduleRemote(this.intervalFor(this.currentTier()))
@@ -206,8 +213,10 @@ export class RepositorySyncCoordinator {
     this.remoteTimer = undefined
     this.localTimer = undefined
     this.repository = null
+    this.ledger = new RemoteMutationLedger()
     this.running = null
     this.dirtyLocal = false
+    this.dirtyRemoteTier = null
     this.failures = 0
     this.state = 'stale'
     this.detail = null
@@ -325,14 +334,26 @@ export class RepositorySyncCoordinator {
     if (!repository) return null
     if (!options.manual) {
       if (tier === 'secondary') {
-        const parked = this.secondarySuspended || this.budgetExhausted()
-        // A limit parks the nonessential tier for a while, never forever: once the
-        // park is over the tier tries again and an answer lifts the state.
-        if (parked && this.clock.now() < this.parkUntil) {
+        if (this.budgetExhausted()) {
+          const report = lastGitHubRateLimit()
+          const resetMs = report.rateLimit.reset ? report.rateLimit.reset.getTime() : null
+          const deadline =
+            resetMs !== null && resetMs > this.clock.now()
+              ? resetMs
+              : this.clock.now() + this.intervals.secondaryMs
+          if (this.parkUntil < deadline) {
+            this.parkUntil = deadline
+          }
+          if (this.clock.now() < this.parkUntil) {
+            this.scheduleRemote(this.parkUntil - this.clock.now())
+            return null
+          }
+        }
+        if (this.secondarySuspended && this.clock.now() < this.parkUntil) {
           this.scheduleRemote(this.parkUntil - this.clock.now())
           return null
         }
-        if (parked) this.secondarySuspended = false
+        this.secondarySuspended = false
       }
       if (tier !== 'local') {
         if (this.state === 'unauthorized') return null
@@ -343,7 +364,11 @@ export class RepositorySyncCoordinator {
         }
       }
       if (this.running) {
-        if (tier === 'local') this.dirtyLocal = true
+        if (tier === 'local') {
+          this.dirtyLocal = true
+        } else {
+          this.dirtyRemoteTier = tier
+        }
         return null
       }
     } else {
@@ -352,9 +377,22 @@ export class RepositorySyncCoordinator {
     }
     const work = this.execute(repository, tier, options).finally(() => {
       this.running = null
-      if (this.dirtyLocal && this.repository === repository) {
+      if (this.repository !== repository) return
+      if (this.dirtyLocal) {
         this.dirtyLocal = false
         this.scheduleLocal(this.intervals.localSettleMs)
+      }
+      if (this.dirtyRemoteTier) {
+        const deferredTier = this.dirtyRemoteTier
+        this.dirtyRemoteTier = null
+        if (!this.dirtyLocal) {
+          void this.run(deferredTier)
+        } else {
+          this.scheduleRemote(this.intervals.localSettleMs + 10)
+        }
+      } else if (!this.remoteTimer && this.state !== 'unauthorized') {
+        const wait = this.resumeAt === null ? 0 : this.resumeAt - this.clock.now()
+        this.scheduleRemote(Math.max(wait, this.intervalFor(this.currentTier())))
       }
     })
     this.running = work
@@ -408,7 +446,9 @@ export class RepositorySyncCoordinator {
     this.resumeAt = null
     this.rateLimitReset = null
     this.secondarySuspended = false
-    this.parkUntil = 0
+    if (!this.budgetExhausted()) {
+      this.parkUntil = 0
+    }
     this.emit({ kind: 'snapshot', snapshot: { ...snapshot, remote: this.freshness() } })
     this.emit({ kind: 'status', freshness: this.freshness() })
     this.scheduleRemote(this.intervalFor(this.currentTier()))
@@ -423,7 +463,9 @@ export class RepositorySyncCoordinator {
     this.checkedAt = this.clock.now()
     this.failures = 0
     this.secondarySuspended = false
-    this.parkUntil = 0
+    if (!this.budgetExhausted()) {
+      this.parkUntil = 0
+    }
     // An answer at all proves the limit is over, so a parked state lifts without
     // the person having to do anything.
     if (this.state === 'rate-limited') this.state = this.fetchedAt === null ? 'stale' : 'fresh'
@@ -440,7 +482,10 @@ export class RepositorySyncCoordinator {
 
   /** Nonessential polling stops once GitHub's remaining budget runs low. */
   private budgetExhausted(): boolean {
-    const remaining = lastGitHubRateLimit().rateLimit.remaining
+    const report = lastGitHubRateLimit()
+    const remaining = report.rateLimit.remaining
+    const reset = report.rateLimit.reset
+    if (reset && this.clock.now() >= reset.getTime()) return false
     return remaining !== null && remaining <= this.intervals.budgetFloor
   }
 
