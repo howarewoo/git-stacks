@@ -786,6 +786,7 @@ export function WorkflowDialog({
   const [mergeProgress, setMergeProgress] = React.useState<MergeProgress | null>(null)
   const [mergeStatus, setMergeStatus] = React.useState<MergeStatus | null>(null)
   const [mergeStatusError, setMergeStatusError] = React.useState<string | null>(null)
+  const [mergeRunning, setMergeRunning] = React.useState(false)
   const [preview, setPreview] = React.useState<StackPreview | null>(null)
   const [surgery, setSurgery] = React.useState<SurgeryPreview | null>(null)
   const [closePullRequests, setClosePullRequests] = React.useState(false)
@@ -1004,7 +1005,9 @@ export function WorkflowDialog({
       return
     }
     void readMergeStatus()
-  }, [request, readMergeStatus, mergeProgress])
+    // A run that ends is read again: its result is what GitHub published, and a read is
+    // newer than the progress that run pushed.
+  }, [request, readMergeStatus, mergeProgress, mergeRunning])
 
   const title =
     request.kind === 'surgery'
@@ -1090,19 +1093,28 @@ export function WorkflowDialog({
       actionBlockReason(snapshot.capabilities, action.type)
     )
       return
+    const merging =
+      action.type === 'executeStack' && request.kind === 'stack' && request.operation === 'merge'
     const attemptRun = dispatch(async () => {
-      const success = await runAction(action, label)
-      if (!success) {
-        // A stopped submission is resumable, so read what it managed to finish
-        // before deciding the reviewed preview may or may not run again.
-        await readProgress()
-        if (identity) {
-          setRejectedIdentities((current) =>
-            current.includes(identity) ? current : [...current, identity],
-          )
+      if (merging) setMergeRunning(true)
+      try {
+        const success = await runAction(action, label)
+        if (!success) {
+          // A stopped submission is resumable, so read what it managed to finish
+          // before deciding the reviewed preview may or may not run again.
+          await readProgress()
+          if (identity) {
+            setRejectedIdentities((current) =>
+              current.includes(identity) ? current : [...current, identity],
+            )
+          }
         }
+        return success
+      } finally {
+        // The run is over: what GitHub reports from here on is a read, and that read is
+        // newer than the progress this run pushed.
+        if (merging) setMergeRunning(false)
       }
-      return success
     })
     const { dispatched, value: success } = await attemptRun
     if (!dispatched || !success) return
@@ -2007,42 +2019,6 @@ export function WorkflowDialog({
                       )}
                     </>
                   ) : null}
-                  {request.operation === 'merge' && (mergeProgress || mergeStatus) ? (
-                    <div className="grid gap-2">
-                      {mergeStatusError ? (
-                        <InlineAlert tone="error">
-                          GitHub could not be read: {mergeStatusError} The last result it reported
-                          is kept until a read succeeds.
-                        </InlineAlert>
-                      ) : null}
-                      {/* A run in flight speaks for itself; the read is what reports on it
-                          afterwards, and on any request GitHub is still running. */}
-                      {mergeProgress ? (
-                        <MergeOutcomePanel progress={mergeProgress} />
-                      ) : (
-                        <MergeOutcomePanel
-                          label={`What GitHub reports now \u2014 ${mergeStatus!.layers.length} pull request${
-                            mergeStatus!.layers.length === 1 ? '' : 's'
-                          } from this and earlier merge requests`}
-                          progress={{
-                            action: 'default',
-                            status: mergeStatus!.layers.some((layer) => layer.status === 'pending')
-                              ? 'running'
-                              : mergeStatus!.layers.some((layer) => layer.status === 'enqueued')
-                                ? 'queued'
-                                : 'succeeded',
-                            layers: mergeStatus!.layers,
-                            message: mergeStatus!.message,
-                          }}
-                        />
-                      )}
-                      <div>
-                        <Button type="button" onClick={() => void readMergeStatus()}>
-                          Refresh what GitHub reports
-                        </Button>
-                      </div>
-                    </div>
-                  ) : null}
                   {request.operation === 'merge' ? (
                     <Field
                       id="workflow-merge-action"
@@ -2279,6 +2255,49 @@ export function WorkflowDialog({
                 </>
               ) : null}
             </fieldset>
+
+            {/* Outside the fieldset on purpose: a finished run locks every control that
+                dispatches, and reading what GitHub did afterwards is not a dispatch. */}
+            {request.kind === 'stack' &&
+            request.operation === 'merge' &&
+            (mergeProgress || mergeStatus) ? (
+              <div className="grid gap-2">
+                {mergeStatusError ? (
+                  <InlineAlert tone="error">
+                    GitHub could not be read: {mergeStatusError} The last result it reported is kept
+                    until a read succeeds.
+                  </InlineAlert>
+                ) : null}
+                {/* A run in flight speaks for itself. Once it returns, a read is newer
+                          than the progress it pushed, and a read that arrives later is newer
+                          still, so the read-back is what the panel shows; the run's own result
+                          stands only until a read answers. */}
+                {mergeProgress && (mergeRunning || !mergeStatus) ? (
+                  <MergeOutcomePanel progress={mergeProgress} />
+                ) : (
+                  <MergeOutcomePanel
+                    label={`What GitHub reports now \u2014 ${mergeStatus!.layers.length} pull request${
+                      mergeStatus!.layers.length === 1 ? '' : 's'
+                    } from this and earlier merge requests`}
+                    progress={{
+                      action: 'default',
+                      status: mergeStatus!.layers.some((layer) => layer.status === 'pending')
+                        ? 'running'
+                        : mergeStatus!.layers.some((layer) => layer.status === 'enqueued')
+                          ? 'queued'
+                          : 'succeeded',
+                      layers: mergeStatus!.layers,
+                      message: mergeStatus!.message,
+                    }}
+                  />
+                )}
+                <div>
+                  <Button type="button" onClick={() => void readMergeStatus()}>
+                    Refresh what GitHub reports
+                  </Button>
+                </div>
+              </div>
+            ) : null}
             {!loading &&
             (((error || actionError) && previewKinds.includes(request.kind)) ||
               (request.kind === 'surgery' && !surgery)) ? (

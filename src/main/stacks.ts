@@ -4998,6 +4998,9 @@ async function recordMergeRequest(
       requestedAt: input.requestedAt,
       outcome: input.outcome,
       message: input.message,
+      // A new request is new evidence: whatever a previous request's read confirmed does not
+      // describe this one.
+      confirmed: null,
     })
   }
 }
@@ -6075,19 +6078,33 @@ export async function getMergeStatus(repoPath: string): Promise<MergeStatus | nu
       ? `${observation.request.pullRequest}:${observation.request.uuid}`
       : null
     const result = key ? reported.get(key) : undefined
-    if (result && result.status !== 'pending') {
-      // A terminal result is kept, so a later read without the request still reports it.
-      await recordMergeObservation(root, {
-        ...observation,
-        outcome: result.status,
-        enqueuedAt: result.status === 'enqueued' ? observation.requestedAt : observation.enqueuedAt,
-        message: result.message ?? observation.message,
-      })
-    }
     const live = await getPullRequest(root, observation.pullRequest).catch(() => null)
-    const effective: MergeQueueObservation = result
-      ? { ...observation, outcome: result.status, message: result.message ?? observation.message }
-      : observation
+    // One effective observation: what the request now says, the enqueue evidence that
+    // carries, and the pull request's own state as this read observed it. It is both what is
+    // persisted and what is reported, so a result and the state derived from it cannot
+    // disagree, and a read that cannot reach GitHub keeps what an earlier read confirmed.
+    const enqueuedAt =
+      result?.status === 'enqueued' ? observation.requestedAt : observation.enqueuedAt
+    const confirmed: MergeQueueObservation['confirmed'] =
+      live?.state === 'MERGED'
+        ? 'merged'
+        : live?.state === 'CLOSED'
+          ? 'dropped'
+          : observation.confirmed
+    const effective: MergeQueueObservation = {
+      ...observation,
+      outcome: result ? result.status : observation.outcome,
+      enqueuedAt,
+      confirmed,
+      message: result ? (result.message ?? observation.message) : observation.message,
+    }
+    if (
+      (result && result.status !== 'pending') ||
+      effective.enqueuedAt !== observation.enqueuedAt ||
+      effective.confirmed !== observation.confirmed
+    ) {
+      await recordMergeObservation(root, effective)
+    }
     const queue = mergeQueueState(
       effective.enqueuedAt === null ? undefined : effective,
       live?.state ?? '',
@@ -6096,7 +6113,9 @@ export async function getMergeStatus(repoPath: string): Promise<MergeStatus | nu
       branch: observation.branch,
       pullRequest: observation.pullRequest,
       status:
-        live?.state === 'MERGED' || effective.outcome === 'merged'
+        live?.state === 'MERGED' ||
+        effective.confirmed === 'merged' ||
+        effective.outcome === 'merged'
           ? 'merged'
           : queue?.outcome === 'dropped'
             ? 'not-merged'
@@ -6105,7 +6124,7 @@ export async function getMergeStatus(repoPath: string): Promise<MergeStatus | nu
               : effective.outcome === 'failed'
                 ? 'not-merged'
                 : 'pending',
-      detail: mergeStatusDetail(effective, queue, result?.mergeOid ?? live?.mergeOid ?? null),
+      detail: mergeStatusDetail(effective, queue, result?.mergeOid ?? live?.mergeOid ?? null, live),
       mergedOid: result?.mergeOid ?? live?.mergeOid ?? null,
       queue,
       requestUuid: observation.request?.uuid ?? null,
@@ -6118,24 +6137,24 @@ function mergeStatusDetail(
   observation: MergeQueueObservation,
   queue: MergeQueueState | null,
   mergeOid: string | null,
+  live: { state: string } | null,
 ): string {
   const requested = new Date(observation.requestedAt).toISOString()
-  if (queue?.outcome === 'merged') {
-    return mergeOid ? `Merged on GitHub as ${mergeOid.slice(0, 10)}` : 'Merged on GitHub'
-  }
-  if (queue?.outcome === 'dropped') {
-    return 'The pull request was closed without merging, so the queue dropped it'
-  }
-  if (queue?.outcome === 'queued') {
-    return `In the merge queue since ${requested}; refresh to read what the queue did with it`
-  }
-  if (observation.outcome === 'failed') {
-    return observation.message ?? 'GitHub reported that the merge request failed'
-  }
-  if (observation.outcome === 'merged') {
-    return mergeOid ? `Merged on GitHub as ${mergeOid.slice(0, 10)}` : 'Merged on GitHub'
-  }
-  return `The merge request GitHub accepted at ${requested} has not reported a result yet`
+  const merged = mergeOid ? `Merged on GitHub as ${mergeOid.slice(0, 10)}` : 'Merged on GitHub'
+  let detail: string
+  if (queue?.outcome === 'merged') detail = merged
+  else if (queue?.outcome === 'dropped') {
+    detail = 'The pull request was closed without merging, so the queue dropped it'
+  } else if (queue?.outcome === 'queued') {
+    detail = `In the merge queue since ${requested}; refresh to read what the queue did with it`
+  } else if (observation.outcome === 'failed') {
+    detail = observation.message ?? 'GitHub reported that the merge request failed'
+  } else if (observation.outcome === 'merged') detail = merged
+  else detail = `The merge request GitHub accepted at ${requested} has not reported a result yet`
+  // This refresh could not reach the pull request. What is reported is the last state a read
+  // confirmed, labelled as not re-read, because a read that failed is not evidence that
+  // anything changed.
+  return live === null ? `${detail} GitHub could not be read to confirm it just now.` : detail
 }
 
 function mergeStatusMessage(layers: MergeLayerResult[]): string {

@@ -6,6 +6,7 @@ import type {
   GitRuntimeInfo,
   GitRuntimeStatus,
   HistoryPage,
+  MergeProgress,
   MergeStatus,
   PushPreview,
   RemoteFreshness,
@@ -205,6 +206,10 @@ export function installFixtureControl(options: {
   const waiting: WaitingCall[] = []
   let startsPending = new Set<FixtureCall>()
   let mergeStatusReads = 0
+  const mergeListeners = new Set<(progress: MergeProgress | null) => void>()
+  const publishMergeProgress = (progress: MergeProgress | null): void => {
+    for (const listener of mergeListeners) listener(progress)
+  }
 
   const scenarioFor = (name: string): FixtureScenario =>
     scenarios[name as ScenarioName] ?? scenarios[DEFAULT_SCENARIO]
@@ -262,6 +267,31 @@ export function installFixtureControl(options: {
     runAction: (action) => {
       record('runAction', [action])
       actions.push(action)
+      // A merge reports through the progress channel the way the main process does, and it
+      // reports while the run is still going: the request is accepted, GitHub is still
+      // running it, and the run returns before the result exists. What GitHub reports
+      // afterwards comes from a read, not from this.
+      if (action.type === 'executeStack' && action.mergeMethod) {
+        const layer = mergePreview.merge?.layers[0]
+        if (layer) {
+          publishMergeProgress({
+            action: 'default',
+            status: 'running',
+            message: `GitHub has not reported a result for pull request #${layer.pullRequest} yet`,
+            layers: [
+              {
+                branch: layer.branch,
+                pullRequest: layer.pullRequest,
+                status: 'pending',
+                detail: 'GitHub has not reported a result yet; refresh to read this request',
+                mergedOid: null,
+                queue: null,
+                requestUuid: 'fixture-request-1',
+              },
+            ],
+          })
+        }
+      }
       return answer<ActionResult>(
         'runAction',
         () => ({ message: actionMessage(action) }),
@@ -388,6 +418,12 @@ export function installFixtureControl(options: {
           body: `${found.title}\n\nDeterministic fixture body for pull request #${number}.`,
         }
       })
+    },
+    onMergeProgress: (listener) => {
+      mergeListeners.add(listener)
+      return () => {
+        mergeListeners.delete(listener)
+      }
     },
     openExternal: (url) => {
       record('openExternal', [url])

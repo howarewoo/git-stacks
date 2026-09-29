@@ -238,6 +238,13 @@ export interface MergeQueueObservation {
   outcome: MergeRequestOutcome
   /** GitHub's message for a terminal result, kept so a reopen does not need the request. */
   message: string | null
+  /**
+   * The pull request's own state as a read observed it. An enqueued result is final, so what
+   * the queue did later is only ever known from the pull request; keeping that observation
+   * means a read that cannot reach GitHub reports what was confirmed instead of quietly
+   * reporting the request as queued again.
+   */
+  confirmed: 'merged' | 'dropped' | null
 }
 
 async function observationPath(repoPath: string): Promise<string> {
@@ -288,6 +295,8 @@ export async function readMergeObservations(
         requestedAt: value.requestedAt,
         outcome,
         message: typeof value.message === 'string' && value.message ? value.message : null,
+        confirmed:
+          value.confirmed === 'merged' || value.confirmed === 'dropped' ? value.confirmed : null,
       })
     }
   } catch {
@@ -333,14 +342,17 @@ export function mergeQueueState(
 ): MergeQueueState | null {
   if (!observation) return null
   const state = pullRequestState.toUpperCase()
-  const outcome: MergeQueueOutcome =
-    state === 'MERGED' || observation.outcome === 'merged'
-      ? 'merged'
-      : state === 'CLOSED'
-        ? 'dropped'
-        : observation.outcome === 'pending'
-          ? 'pending'
-          : 'queued'
+  // What a read confirmed outranks the request it confirmed it from, including when this
+  // read could not reach GitHub at all: an unreadable pull request is not a queue that
+  // somehow took the group back.
+  const merged = state === 'MERGED' || observation.confirmed === 'merged'
+  const outcome: MergeQueueOutcome = merged
+    ? 'merged'
+    : state === 'CLOSED' || observation.confirmed === 'dropped'
+      ? 'dropped'
+      : observation.outcome === 'pending'
+        ? 'pending'
+        : 'queued'
   return {
     configured: true,
     outcome,
