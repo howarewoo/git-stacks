@@ -11,7 +11,7 @@ import {
   stat,
   writeFile,
 } from 'node:fs/promises'
-import { existsSync, readFileSync, statSync } from 'node:fs'
+import { closeSync, existsSync, fstatSync, openSync, readSync, statSync } from 'node:fs'
 import { basename, dirname, join, win32 as winPath } from 'node:path'
 import { tmpdir } from 'node:os'
 import { promisify } from 'node:util'
@@ -244,60 +244,158 @@ const THIN_MAGIC_64 = 0xfeedfacf
 const CPU_ARCH_ABI64 = 0x01000000
 const CPU_TYPE_X86 = 7
 const CPU_TYPE_ARM = 12
+/** The most a universal binary's slice table is ever allowed to claim. */
+const FAT_TABLE_LIMIT = 4096
+/** The most slices a table is allowed to describe before it stops being one. */
+const FAT_SLICE_LIMIT = 64
+/** The most a single slice's own header may be, to read the one field read. */
+const SLICE_HEADER_LIMIT = 4096
 
 /**
- * The architectures a Mach-O file carries, read out of its own header.
+ * The architectures a Mach-O file carries, read out of its own headers.
  *
  * `lipo` is a developer tool, and asking a person to install one to be able to
- * update the app they already have is not a thing this app can do. The header
- * says the same thing and is in the file: a universal binary is a big-endian
- * table of slices, a single-architecture binary is one header naming its own
- * processor, and both forms are read here rather than asked about. An `arm64e`
- * slice is an arm64 slice as far as running it goes, so it is reported as one.
+ * update the app they already have is not a thing this app can do. The file says
+ * the same thing and is in the file: a universal binary is a table of slices,
+ * each with an offset, a size, and a header naming its own processor, and a
+ * single-architecture binary is one such header at the start of the file.
  *
- * A file that is not a Mach-O file at all reads as no architectures, which is a
- * refusal rather than a guess.
+ * Three things this will not do, because each of them would let a file claim an
+ * architecture it does not have:
+ *
+ * - **Read the whole file.** Only the bytes a header or a table actually says
+ *   are read, each with an explicit length, from a file descriptor, and every
+ *   read is bounded by what the file itself is large enough to contain. A
+ *   200 MB executable is read as a few kilobytes.
+ * - **Trust the table.** The table says which offsets to look at; the header at
+ *   each of those offsets has to say the same processor. A table that points at
+ *   something which is not a slice of that architecture is a file that is not
+ *   what it claims, and it is refused rather than believed.
+ * - **Believe a name for a 32-bit build.** The 64-bit flag is cleared to compare
+ *   processor families, so a 32-bit x86 or ARM header would otherwise be read as
+ *   its 64-bit sibling. A 32-bit slice is named for what it is and does not
+ *   satisfy a 64-bit machine.
+ *
+ * An `arm64e` slice is an arm64 slice as far as running it goes, so it is
+ * reported as one. A file that is not a Mach-O file, a truncated one, a table
+ * pointing outside the file, and a slice whose header contradicts the table all
+ * read as no architectures: a refusal, not a guess.
  */
-export function readMachArchitectures(file: string, header?: Buffer): string[] {
-  const bytes = header ?? readFileSync(file).subarray(0, 4096)
-  const wide = (offset: number) => bytes.readUInt32BE(offset)
-  const fatMagic = bytes.length >= 4 ? wide(0) : 0
-  if (fatMagic === FAT_MAGIC || fatMagic === FAT_MAGIC_64) {
-    const wide64 = fatMagic === FAT_MAGIC_64
-    const entrySize = wide64 ? 32 : 20
-    const count = wide(4)
-    const found = new Set<string>()
-    for (let slice = 0; slice < count; slice += 1) {
-      const at = 8 + slice * entrySize
-      if (at + 4 > bytes.length) break
-      const name = architectureName(wide(at))
-      if (name) found.add(name)
+export function readMachArchitectures(file: string): string[] {
+  let handle: number | undefined
+  try {
+    handle = openSync(file, 'r')
+    const size = fstatSync(handle).size
+    const leading = readAt(handle, 0, Math.min(size, FAT_TABLE_LIMIT), size)
+    if (leading.length < 8) return []
+    for (const order of BYTE_ORDERS) {
+      const magic = u32(leading, order, 0)
+      if (magic === THIN_MAGIC || magic === THIN_MAGIC_64) {
+        return readThin(handle, order, size)
+      }
     }
-    // Sorted, so the same file always reads the same way round.
-    return [...found].sort()
+    for (const order of BYTE_ORDERS) {
+      const magic = u32(leading, order, 0)
+      if (magic === FAT_MAGIC || magic === FAT_MAGIC_64) {
+        return readUniversal(handle, order, size)
+      }
+    }
+    return []
+  } catch {
+    // A file that cannot be read is a file whose architectures are unknown, and
+    // an update whose architecture is unknown is not installed.
+    return []
+  } finally {
+    if (handle !== undefined) closeSync(handle)
   }
-  const thin = thinMagic(bytes)
-  if (thin === null) return []
-  return [architectureName(thin)].filter((name): name is string => name !== null)
 }
 
-/** The processor a Mach-O header names, or null when it is not one. */
-function thinMagic(bytes: Buffer): number | null {
-  if (bytes.length < 8) return null
-  // A thin header names its own byte order: the magic is one value read either
-  // way, and the processor type that follows it is in the same one.
-  const candidates: [number, number][] = [
-    [bytes.readUInt32LE(0), bytes.readUInt32LE(4)],
-    [bytes.readUInt32BE(0), bytes.readUInt32BE(4)],
-  ]
-  for (const [magic, cpuType] of candidates) {
-    if (magic === THIN_MAGIC || magic === THIN_MAGIC_64) return cpuType
+const BYTE_ORDERS = ['LE', 'BE'] as const
+type ByteOrder = (typeof BYTE_ORDERS)[number]
+
+/** A four-byte field in the order its own header declares. */
+function u32(buffer: Buffer, order: ByteOrder, at: number): number {
+  return order === 'LE' ? buffer.readUInt32LE(at) : buffer.readUInt32BE(at)
+}
+
+/** An eight-byte field in the order its own table declares. */
+function u64(buffer: Buffer, order: ByteOrder, at: number): number {
+  const value = order === 'LE' ? buffer.readBigUInt64LE(at) : buffer.readBigUInt64BE(at)
+  if (value > BigInt(Number.MAX_SAFE_INTEGER)) return Number.NaN
+  return Number(value)
+}
+
+/** Exactly `length` bytes at `at`, or nothing if the file is not that long. */
+function readAt(handle: number, at: number, length: number, size: number): Buffer {
+  if (at < 0 || length < 0 || at + length > size) return Buffer.alloc(0)
+  const buffer = Buffer.alloc(length)
+  const read = readSync(handle, buffer, 0, length, at)
+  return read === length ? buffer : Buffer.alloc(0)
+}
+
+function readThin(handle: number, order: ByteOrder, size: number): string[] {
+  const header = readAt(handle, 0, Math.min(size, 32), size)
+  if (header.length < 8) return []
+  const magic = u32(header, order, 0)
+  // A 64-bit magic on a header that does not declare the 64-bit ABI is not a
+  // 64-bit build, and a 32-bit one is not this machine's architecture.
+  const sixtyFour = magic === THIN_MAGIC_64
+  // The 64-bit ABI is a bit in the cpu type, not the whole of it: the check is
+  // that bit, so a 32-bit header and a 64-bit one cannot be told apart by
+  // clearing it.
+  if ((u32(header, order, 4) & CPU_ARCH_ABI64) !== (sixtyFour ? CPU_ARCH_ABI64 : 0)) return []
+  const name = architectureName(u32(header, order, 8), sixtyFour)
+  return name ? [name] : []
+}
+
+function readUniversal(handle: number, order: ByteOrder, size: number): string[] {
+  const table = readAt(handle, 0, Math.min(size, FAT_TABLE_LIMIT), size)
+  if (table.length < 8) return []
+  const sixtyFour = u32(table, order, 0) === FAT_MAGIC_64
+  const entrySize = sixtyFour ? 32 : 20
+  const count = u32(table, order, 4)
+  // A table that claims more slices than a table can hold, or more than any
+  // real file has, is refused before a single offset is followed.
+  if (count === 0 || count > FAT_SLICE_LIMIT) return []
+  if (8 + count * entrySize > table.length) return []
+  const found = new Set<string>()
+  for (let slice = 0; slice < count; slice += 1) {
+    const at = 8 + slice * entrySize
+    const claimed = u32(table, order, at)
+    const claimedSixtyFour = (claimed & CPU_ARCH_ABI64) !== 0
+    const offset = sixtyFour ? u64(table, order, at + 8) : u32(table, order, at + 8)
+    const sliceSize = sixtyFour ? u64(table, order, at + 16) : u32(table, order, at + 12)
+    if (!Number.isSafeInteger(offset) || !Number.isSafeInteger(sliceSize)) return []
+    // The slice has to be inside the file and big enough to hold a header.
+    if (offset < 8 || sliceSize < 32 || offset + sliceSize > size) return []
+    const header = readAt(handle, offset, Math.min(sliceSize, SLICE_HEADER_LIMIT), size)
+    if (header.length < 12) return []
+    // The slice's own header decides, and it has to agree with the table: a
+    // table entry pointing at something else is a file that is not what it says.
+    let declared: { name: string | null; sixtyFour: boolean } | null = null
+    for (const sliceOrder of BYTE_ORDERS) {
+      const magic = u32(header, sliceOrder, 0)
+      if (magic !== THIN_MAGIC && magic !== THIN_MAGIC_64) continue
+      const sixtyFourMagic = magic === THIN_MAGIC_64
+      const cpu = u32(header, sliceOrder, 4)
+      if ((cpu & CPU_ARCH_ABI64) !== (sixtyFourMagic ? CPU_ARCH_ABI64 : 0)) continue
+      declared = {
+        name: architectureName(cpu, sixtyFourMagic),
+        sixtyFour: sixtyFourMagic,
+      }
+      break
+    }
+    if (declared === null) return []
+    if (declared.sixtyFour !== claimedSixtyFour) return []
+    if (architectureName(claimed, claimedSixtyFour) !== declared.name) return []
+    if (declared.name) found.add(declared.name)
   }
-  return null
+  return [...found].sort()
 }
 
 /** The name this app uses for a Mach-O cpu type, or null for another one. */
-function architectureName(cpuType: number): string | null {
+function architectureName(cpuType: number, sixtyFour: boolean): string | null {
+  if (!sixtyFour) return null
   const base = cpuType & ~CPU_ARCH_ABI64
   if (base === CPU_TYPE_X86) return 'x64'
   if (base === CPU_TYPE_ARM) return 'arm64'

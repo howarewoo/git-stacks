@@ -1,4 +1,4 @@
-import { mkdir, open, readFile, rename, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, open, readFile, rename, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import {
   compareVersions,
@@ -54,6 +54,14 @@ export interface UpdateServiceOptions {
    * observe that against.
    */
   prepare?: typeof privateInstallHandoff
+  /**
+   * The instant the verified download has been committed to disk, before the
+   * download reports back. The app passes nothing here; it is a parameter so
+   * the window can be exercised — a stop asked for after the last byte arrived
+   * must still leave nothing staged and nothing on offer, and no development
+   * machine can be made to stop at exactly that moment otherwise.
+   */
+  onStaged?: (staged: StagedUpdate) => Promise<void> | void
 }
 
 interface UpdateState {
@@ -410,7 +418,21 @@ export class UpdateService {
           this.progress = percent
           this.publish()
         },
+        // The window between the file being committed to the staging directory
+        // and the download reporting back. A stop asked for in it is honoured
+        // below, before the file becomes anything a person could act on.
+        onStaged: this.options.onStaged,
       })
+      // The stop is checked the moment the call returns, before the downloaded
+      // file becomes a candidate anything can act on. A cancel that arrived
+      // after the last byte arrived — while the file was being committed to the
+      // staging directory — would otherwise leave a download that reports
+      // itself ready to install, which is the opposite of what was asked for.
+      // Only the file this call created is removed, and only on this path.
+      if (run.controller.signal.aborted) {
+        await rm(downloaded.path, { force: true }).catch(() => undefined)
+        return this.classify(run, new Error('The update download was cancelled.'))
+      }
       staged = downloaded
       this.candidate = {
         staged: downloaded,
@@ -458,21 +480,35 @@ export class UpdateService {
       return this.publish()
     }
     const run = this.claim()
-    const handoffDirectory = join(this.options.userDataPath, 'handoff')
+    // A directory of this attempt's own, created inside the app's private data
+    // directory and never reused. A fixed name would be a name another process
+    // or an earlier run could already hold, and cleaning it up afterwards would
+    // then be deleting something this attempt never created — which is exactly
+    // what removing a fixed handoff directory did. Nothing outside the
+    // directory this run made is ever removed on any path below.
+    const handoffParent = join(this.options.userDataPath, 'handoff')
+    await mkdir(handoffParent, { recursive: true, mode: 0o700 })
+    const handoffDirectory = await mkdtemp(join(handoffParent, 'run-'))
     try {
       const digest = await hashStagedUpdate(candidate.staged)
       if (run.controller.signal.aborted) {
         return this.classify(run, new Error('The update install was cancelled.'))
       }
       if (digest !== candidate.sha256) {
+        // The bytes on disk are not the signed artifact, so nothing is
+        // prepared and nothing reaches the platform installer. The directory
+        // this attempt created is removed with it, and the release stays on
+        // offer: what is wrong is this machine's copy, not the signed release.
+        await rm(handoffDirectory, { recursive: true, force: true }).catch(() => undefined)
+        // The bytes this machine holds are not the signed artifact, so they are
+        // removed rather than kept for a retry: a retry must download again.
         await this.discardCandidate()
-        this.phase = 'failed'
-        this.failure = {
-          reason: 'bad-signature',
-          message:
-            'The downloaded installer no longer matches the signed release. It was not installed.',
-        }
-        return this.publish()
+        return this.classify(
+          run,
+          new Error(
+            'The downloaded installer no longer matches the signed release, so it was not installed.',
+          ),
+        )
       }
       // The verified build is copied into owner-private handoff storage and the
       // installer is handed that path. This reduces interference with the
@@ -486,15 +522,16 @@ export class UpdateService {
           handoffDirectory,
         )
       } catch (error) {
-        // The preparation failed. Whatever it left behind is this attempt's to
-        // remove, and nothing is handed to the platform installer.
+        // The preparation failed. What it left behind is inside the directory
+        // this attempt created, and nothing is handed to the platform installer.
         await rm(handoffDirectory, { recursive: true, force: true }).catch(() => undefined)
         return this.classify(run, error)
       }
       if (run.controller.signal.aborted) {
         // The stop arrived while the build was being prepared. The prepared copy
-        // is removed and the installer is never started, rather than a cancel
-        // being accepted here and the update running anyway.
+        // — inside the directory this attempt created — is removed and the
+        // installer is never started, rather than a cancel being accepted here
+        // and the update running anyway.
         await rm(handoffDirectory, { recursive: true, force: true }).catch(() => undefined)
         return this.classify(run, new Error('The update install was cancelled.'))
       }
@@ -523,9 +560,12 @@ export class UpdateService {
         await rm(handoffDirectory, { recursive: true, force: true }).catch(() => undefined)
       }
       if (!outcome.installed) {
-        this.phase = 'failed'
-        this.failure = { reason: 'bad-signature', message: outcome.reason }
-        return this.publish()
+        // The installer refused for its own honest reason — this build is
+        // unsigned, this platform has no in-app installer, the bundle could not
+        // be read — and the reason is reported as itself rather than as a
+        // signature failure, which is a different thing and would send a
+        // person looking in the wrong place.
+        return this.classify(run, new Error(outcome.reason))
       }
       return this.publish()
     } catch (error) {
@@ -645,13 +685,14 @@ export class UpdateService {
   private refuse(error: unknown): UpdateStatus {
     this.phase = 'failed'
     const message = error instanceof Error ? error.message : String(error)
-    const reason = /does not match the signed manifest|not the size the signed manifest/u.test(
-      message,
-    )
-      ? 'bad-signature'
-      : /outside the release location|redirected|outside this project|cancelled/iu.test(message)
-        ? 'malformed'
-        : 'unreachable'
+    const reason =
+      /does not match the signed manifest|not the size the signed manifest|no longer matches the signed release/u.test(
+        message,
+      )
+        ? 'bad-signature'
+        : /outside the release location|redirected|outside this project|cancelled/iu.test(message)
+          ? 'malformed'
+          : 'unreachable'
     this.failure = { reason, message }
     return this.publish()
   }

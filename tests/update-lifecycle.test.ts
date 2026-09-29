@@ -220,7 +220,7 @@ function unsignedBundle(): string {
 
 function harnessFor(
   base: string,
-  options: Pick<UpdateServiceOptions, 'install' | 'prepare'> = {},
+  options: Pick<UpdateServiceOptions, 'install' | 'prepare' | 'onStaged'> = {},
 ): Harness {
   const userDataPath = mkdtempSync(join(tmpdir(), 'git-stacks-update-data-'))
   const service = new UpdateService({
@@ -944,10 +944,10 @@ test('a stop asked for while the build is prepared never starts the installer', 
   assert.equal(afterStop.phase, 'cancelled', 'the stop was honoured before the cut-over')
   assert.equal(started, 0, 'the platform installer was never started')
   assert.equal(afterStop.readyToInstall, false)
-  assert.equal(
-    existsSync(join(app.userDataPath, 'handoff')),
-    false,
-    'the prepared copy was removed with the handoff directory',
+  assert.deepEqual(
+    readdirSync(join(app.userDataPath, 'handoff')),
+    [],
+    'the prepared copy went with the directory this attempt created, and the parent is untouched',
   )
 })
 
@@ -968,4 +968,141 @@ test('a channel request for the channel already in force still writes its other 
   })
   assert.equal(committed, 1, 'the write inside the change is not skipped as a no-op')
   assert.equal(same.channel, 'stable')
+})
+
+test('nothing a failed install cleans up was not this attempt’s own', async (t) => {
+  // The handoff lives in a directory each attempt creates, and every cleanup
+  // path removes only that directory. Anything else living under the app's data
+  // directory — another run's leftovers, a file another process put there, a
+  // person's own file — is never touched, on any way out of an install,
+  // including the paths that fail.
+  const feed = await startFeed()
+  t.after(() => feed.close())
+  feed.set({ version: '0.2.0', sequence: 1, bytes: ARTIFACT, channel: 'stable' })
+  const foreign = 'somebody-elses-installer.dmg'
+  const outcomes: { name: string; app: Harness }[] = []
+  let installed = 0
+  const reached = gate()
+  const releasing = gate()
+
+  // Four different ways out of an install, each one reaching the cleanup.
+  for (const failure of ['digest', 'prepare', 'stop', 'install'] as const) {
+    const app = harnessFor(feed.base, {
+      ...(failure === 'prepare'
+        ? {
+            prepare: async () => {
+              throw new Error('the handoff could not be made')
+            },
+          }
+        : {}),
+      ...(failure === 'stop'
+        ? {
+            prepare: async (staged, parent) => {
+              const handoff = await handoffOnce(staged, parent)
+              void reached.open()
+              await releasing.wait
+              return handoff
+            },
+          }
+        : {}),
+      install: async () => {
+        installed += 1
+        return { installed: false, reason: 'the platform installer refused the update' }
+      },
+    })
+    // Every case reaches the install with a downloaded candidate; the digest
+    // case then changes what is on disk, which is what a replacement looks like.
+    await app.service.start('stable')
+    await app.service.check()
+    await app.service.download()
+    if (failure === 'digest') {
+      const stagedFile = app.staged()[0]
+      assert.ok(stagedFile, 'the download is staged')
+      // The file the service will prove, changed on disk after the download:
+      // this is what the digest check at install time is for.
+      writeFileSync(join(app.userDataPath, 'updates', stagedFile), 'not the signed bytes')
+    }
+    // Something else already in the handoff parent, and something else in the
+    // data directory beside it.
+    const handoffParent = join(app.userDataPath, 'handoff')
+    mkdirSync(handoffParent, { recursive: true })
+    writeFileSync(join(handoffParent, foreign), 'not ours')
+    writeFileSync(join(app.userDataPath, 'settings.json'), '{"updates":{"channel":"stable"}}')
+    if (failure === 'stop') {
+      const install = app.service.install()
+      await reached.wait
+      app.service.cancel()
+      releasing.open()
+      await install
+    } else {
+      await app.service.install()
+    }
+    outcomes.push({ name: failure, app })
+  }
+
+  for (const { name, app } of outcomes) {
+    assert.equal(
+      readFileSync(join(app.userDataPath, 'handoff', foreign), 'utf8'),
+      'not ours',
+      `${name}: a file this attempt did not create survives`,
+    )
+    assert.equal(
+      readFileSync(join(app.userDataPath, 'settings.json'), 'utf8'),
+      '{"updates":{"channel":"stable"}}',
+      `${name}: the settings file survives`,
+    )
+    assert.deepEqual(
+      readdirSync(join(app.userDataPath, 'handoff')),
+      [foreign],
+      `${name}: only this attempt's own directory was removed`,
+    )
+    if (name === 'digest') {
+      // The bytes this machine held were not the signed artifact, so they are
+      // removed: a retry has to download again rather than reuse them.
+      assert.deepEqual(app.staged(), [], `${name}: bytes that are not the signed build are removed`)
+    } else {
+      // The download here is the verified artifact and nothing has claimed it
+      // is wrong, so it stays: a person who asks again is not made to fetch the
+      // same build twice. What the failure removed is the prepared copy, which
+      // the case above already proved.
+      assert.equal(
+        app.staged().length,
+        1,
+        `${name}: the verified download is kept, and only the prepared copy went`,
+      )
+    }
+  }
+  assert.equal(installed, 1, 'only the install that was supposed to run reached the installer')
+})
+
+test('a stop asked for after the last byte arrived leaves nothing staged or offered', async (t) => {
+  // The window between the download being committed to the staging directory
+  // and the download reporting back is real: a cancel that arrives there used to
+  // be accepted by the network layer, which had already finished, and the file
+  // was then published as a download that was ready to install. The stop is
+  // asked for at exactly that moment here, with the file already on disk.
+  const feed = await startFeed()
+  t.after(() => feed.close())
+  feed.set({ version: '0.2.0', sequence: 1, bytes: ARTIFACT, channel: 'stable' })
+  const committed = gate()
+  const reached = gate()
+  const app = harnessFor(feed.base, {
+    onStaged: async (staged) => {
+      // The verified bytes are on disk at this point, and the download has not
+      // returned yet: this is the whole window.
+      assert.ok(existsSync(staged.path), 'the file is committed before the caller hears about it')
+      void reached.open()
+      await committed.wait
+    },
+  })
+  await app.service.start('stable')
+  await app.service.check()
+  const downloading = app.service.download()
+  await reached.wait
+  app.service.cancel()
+  committed.open()
+  const afterStop = await downloading
+  assert.equal(afterStop.phase, 'cancelled', 'the stop is honoured after the last byte')
+  assert.equal(afterStop.readyToInstall, false, 'nothing is offered as installable')
+  assert.deepEqual(app.staged(), [], 'the file this run created is removed')
 })

@@ -242,6 +242,13 @@ jobs:
             "$signing_keychain" >/dev/null
           security list-keychains -d user -s "$signing_keychain"
 
+          # `security find-identity -v` prints one line per identity as
+          #   1) 0123456789ABCDEF...  "Developer ID Application: Name (TEAM)"
+          # and `codesign --sign` is given the fingerprint and nothing else, so
+          # what is taken off the line is the forty hex digits and then checked
+          # against exactly that. Anything that is not forty hex digits is not an
+          # identity, whatever the rest of the line says, and passing the whole
+          # line to codesign would be a release signed by a name.
           matched=0
           identity=""
           while IFS= read -r line; do
@@ -250,6 +257,11 @@ jobs:
               *) continue ;;
             esac
             candidate="${line#*\) }"
+            candidate="${candidate%% *}"
+            if ! printf '%s' "$candidate" | grep -Eq '^[0-9A-F]{40}$'; then
+              echo "the codesigning identity for team ${APPLE_TEAM_ID} is not a SHA-1 fingerprint: ${candidate}" >&2
+              exit 1
+            fi
             matched=$((matched + 1))
             identity="$candidate"
           done <<IDENTITIES
@@ -259,7 +271,7 @@ jobs:
             echo "expected exactly one codesigning identity for team ${APPLE_TEAM_ID}, found ${matched}" >&2
             exit 1
           fi
-          echo "signing the image with the ${APPLE_TEAM_ID} identity the keychain holds"
+          echo "signing the image as the ${APPLE_TEAM_ID} identity ${identity}"
 
           codesign --force --sign "$identity" --timestamp --options runtime "${images[0]}"
           codesign --verify --strict --verbose=2 "${images[0]}"
@@ -324,7 +336,22 @@ jobs:
           # source would fail this step because the app would answer differently
           # — and that is the moment the policy line above has to be rewritten,
           # rather than something that has to be remembered.
-          npx tsx --test tests/update-security.test.ts
+          #
+          # Only that one test runs here. The rest of the file is about the
+          # release key, and by this point in the job the key set has been
+          # injected, so a suite-wide run would be testing the checkout this
+          # release is building rather than the policy it is stating. The run is
+          # required to report one passing test, because a pattern that matches
+          # nothing passes trivially and a renamed test would otherwise turn this
+          # step into a silence.
+          npx tsx --test --test-reporter=tap \
+            --test-name-pattern 'a Linux build refuses an update outright' \
+            tests/update-security.test.ts | tee "$RUNNER_TEMP/linux-policy.log"
+          grep -q '^1\.\.1$' "$RUNNER_TEMP/linux-policy.log" &&
+            grep -q '^ok 1 - a Linux build refuses' "$RUNNER_TEMP/linux-policy.log" || {
+            echo "::error::the Linux policy check did not run the installer refusal test, so this step proved nothing"
+            exit 1
+          }
           echo 'release policy — linux: best-effort artifact — built, published and signed, never updated in place by the app'
           shopt -s nullglob
           appimages=(signed-release/*.AppImage)

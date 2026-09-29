@@ -26,6 +26,14 @@ export interface DownloadOptions {
   signal?: AbortSignal
   timeoutMs: number
   onProgress?: (percent: number) => void
+  /**
+   * Called once the verified file has been moved into place and before this
+   * call returns, which is the window between the download being committed and
+   * its caller learning about it. A stop asked for in that window is honoured
+   * by the caller, which removes the file this call created and offers nothing;
+   * the app itself has nothing to do in it and passes nothing here.
+   */
+  onStaged?: (staged: StagedUpdate) => Promise<void> | void
 }
 
 /**
@@ -107,7 +115,14 @@ export async function downloadUpdateArtifact(options: DownloadOptions): Promise<
     }
     await rename(partialPath, finalPath)
     options.onProgress?.(100)
-    return { path: finalPath, sha256: digest, size: received, fileName: artifact.fileName }
+    const staged: StagedUpdate = {
+      path: finalPath,
+      sha256: digest,
+      size: received,
+      fileName: artifact.fileName,
+    }
+    await options.onStaged?.(staged)
+    return staged
   } finally {
     // The deadline is cleared only when the whole operation has ended. It used
     // to be cleared as soon as the response headers arrived, which left a peer

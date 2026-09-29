@@ -1593,12 +1593,15 @@ function installHandlers() {
   })
   ipcMain.handle('settings:reset', async (event) => {
     validateSender(event)
-    // Restoring defaults rewrites the settings file and nothing else: no
-    // repository, ref, or working tree is read or written. A reset carries the
-    // update channel with it, so it is decided with the updater rather than
-    // written beside it: the channel a reset would land on is worked out first,
-    // the reset is written while the change is still undecided, and a reset
-    // refused — because an install owns the files — writes nothing at all.
+    // Restoring defaults touches this app's own settings and its own update
+    // state and nothing else: no repository, ref, or working tree is read or
+    // written. A reset carries the update channel with it, so it is decided with
+    // the updater rather than written beside it: the channel a reset would land
+    // on is worked out first, the reset is written while the change is still
+    // undecided, and a reset refused — because an install owns the files —
+    // writes nothing at all. A reset that does go through also disposes of the
+    // update the previous channel had staged, because that staged file belongs
+    // to the channel being left and is this app's own to remove.
     const service = updateService
     if (!service) {
       return withToolAvailability(

@@ -259,27 +259,64 @@ test('a signature made by another key, or outside the key’s window, is refused
   )
 })
 
-test('a build with no committed key trusts nothing and refuses an environment key once packaged', () => {
-  const committed = trustedUpdateKeys({}, false)
-  assert.deepEqual(committed.trust, 'none')
-  assert.deepEqual(committed.keys, [])
-  const development = trustedUpdateKeys(
+test('where the trusted keys come from, and where they cannot come from', async () => {
+  // The key set built into a binary is a parameter here, so each rule can be
+  // stated against the key sets it is about. A test that read this repository's
+  // own file would be asserting what the checkout holds — which is empty in a
+  // working tree and is the release key inside a release job — and would pass or
+  // fail with the checkout rather than with the rule.
+  const { trustedUpdateKeys } = await import('../src/main/update/keys')
+  const development = {
+    GIT_STACKS_UPDATE_KEY_ID: 'fixture-key',
+    GIT_STACKS_UPDATE_PUBLIC_KEY: 'MCowBQYDK2VwAyEA',
+  }
+  const released = [
     {
-      GIT_STACKS_UPDATE_KEY_ID: 'fixture-key',
-      GIT_STACKS_UPDATE_PUBLIC_KEY: 'MCowBQYDK2VwAyEA',
+      keyId: 'release-2026',
+      publicKey: 'MCowBQYDK2VwAyEA',
+      validFrom: '2020-01-01T00:00:00.000Z',
+      validUntil: null,
     },
+  ]
+
+  // Nothing built in and nothing configured: there is no key to trust, and
+  // saying so is the answer rather than a weaker key from somewhere else.
+  const bare = trustedUpdateKeys({}, false, [])
+  assert.deepEqual(bare.trust, 'none')
+  assert.deepEqual(bare.keys, [])
+
+  // A development build may be configured from its environment, and reports
+  // exactly that much trust rather than the trust a release carries.
+  const configured = trustedUpdateKeys(development, false, [])
+  assert.equal(configured.trust, 'development')
+  assert.deepEqual(
+    configured.keys.map((key) => key.keyId),
+    ['fixture-key'],
+  )
+
+  // The same environment, once packaged: an installed app takes its keys from
+  // its own bundle and nowhere else, because whoever starts a process decides
+  // that process's environment.
+  assert.deepEqual(trustedUpdateKeys(development, true, []), { keys: [], trust: 'none' })
+
+  // A built-in key set is the whole answer, and an environment key is not added
+  // to it or preferred over it.
+  const release = trustedUpdateKeys(development, false, released)
+  assert.equal(release.trust, 'release')
+  assert.deepEqual(
+    release.keys.map((key) => key.keyId),
+    ['release-2026'],
+  )
+  assert.equal(
+    release.keys.some((key) => key.keyId === 'fixture-key'),
     false,
+    'an environment key never joins a built-in key set',
   )
-  assert.equal(development.trust, 'development')
-  assert.equal(development.keys.length, 1)
-  const packaged = trustedUpdateKeys(
-    {
-      GIT_STACKS_UPDATE_KEY_ID: 'fixture-key',
-      GIT_STACKS_UPDATE_PUBLIC_KEY: 'MCowBQYDK2VwAyEA',
-    },
-    true,
-  )
-  assert.equal(packaged.trust, 'none', 'an installed app must not trust an environment key')
+  // And a packaged build trusts the key set it was built with, unchanged.
+  assert.deepEqual(trustedUpdateKeys(development, true, released), {
+    keys: released,
+    trust: 'release',
+  })
 })
 
 test('the feed is the pinned release location, and a packaged build cannot be pointed elsewhere', () => {
@@ -404,66 +441,259 @@ test('a Linux build refuses an update outright and touches nothing', async (t) =
   assert.deepEqual(readdirSync(directory), before, 'nothing was written or removed')
 })
 
-test('a Mach-O header is read without a developer tool', async (t) => {
+const X64 = 0x01000007
+const ARM64 = 0x0100000c
+const X86_32 = 7
+
+/** A thin Mach-O header, as it appears inside a file. */
+function thinHeader(cpuType: number, sixtyFour = true, littleEndian = true): Buffer {
+  const buffer = Buffer.alloc(4096)
+  const write = (value: number, at: number) => {
+    if (littleEndian) buffer.writeUInt32LE(value, at)
+    else buffer.writeUInt32BE(value, at)
+  }
+  write(sixtyFour ? 0xfeedfacf : 0xfeedface, 0)
+  write(cpuType, 4)
+  write(cpuType, 8)
+  return buffer
+}
+
+/**
+ * A universal binary with the given slices at their real offsets, and a table
+ * that says so. `forge` replaces one table entry, so a test can point the table
+ * at something it does not describe.
+ */
+function universalBinary(
+  slices: { cpuType: number; sixtyFour?: boolean }[],
+  options: {
+    fat64?: boolean
+    littleEndianTable?: boolean
+    forge?: (entry: Buffer, index: number) => void
+  } = {},
+): Buffer {
+  const sixtyFour = options.fat64 === true
+  const entrySize = sixtyFour ? 32 : 20
+  const headerBytes = 8 + slices.length * entrySize
+  const align = 4096
+  const offsets: number[] = []
+  let cursor = Math.ceil(headerBytes / align) * align
+  for (const slice of slices) {
+    offsets.push(cursor)
+    cursor += align
+  }
+  const file = Buffer.alloc(cursor)
+  const writeTable = (value: number, at: number, width: 4 | 8) => {
+    if (options.littleEndianTable === true) {
+      if (width === 4) file.writeUInt32LE(value, at)
+      else file.writeBigUInt64LE(BigInt(value), at)
+    } else {
+      if (width === 4) file.writeUInt32BE(value, at)
+      else file.writeBigUInt64BE(BigInt(value), at)
+    }
+  }
+  writeTable(sixtyFour ? 0xcafebabf : 0xcafebabe, 0, 4)
+  writeTable(slices.length, 4, 4)
+  slices.forEach((slice, index) => {
+    const at = 8 + index * entrySize
+    writeTable(slice.cpuType, at, 4)
+    writeTable(0, at + 4, 4)
+    if (sixtyFour) {
+      writeTable(offsets[index] ?? 0, at + 8, 8)
+      writeTable(align, at + 16, 8)
+    } else {
+      writeTable(offsets[index] ?? 0, at + 8, 4)
+      writeTable(align, at + 12, 4)
+    }
+    thinHeader(slice.cpuType, slice.sixtyFour ?? true).copy(file, offsets[index] ?? 0)
+    options.forge?.(file.subarray(at, at + entrySize), index)
+  })
+  return file
+}
+
+test('a Mach-O file is read without a developer tool, and only what it really carries', async (t) => {
   // `lipo` is not installed on a machine that has never had Xcode on it, and an
-  // update that needs it is an update that cannot be installed. The reader is
-  // checked against headers written here, in both the universal and the
-  // single-architecture form and in both byte orders, because a wrong answer
-  // from this reader is an app installed on a machine that cannot run it.
+  // update that needs it is an update that cannot be installed. What is read
+  // here instead is the file's own headers, and each case below is a way a file
+  // could claim an architecture it does not have.
   const { readMachArchitectures } = await import('../src/main/update/install')
   const directory = mkdtempSync(join(tmpdir(), 'git-stacks-macho-'))
   t.after(() => rmSync(directory, { recursive: true, force: true }))
-
-  const thin = (cpuType: number, littleEndian = true) => {
-    const buffer = Buffer.alloc(32)
-    const magic = 0xfeedfacf
-    if (littleEndian) {
-      buffer.writeUInt32LE(magic, 0)
-      buffer.writeUInt32LE(cpuType, 4)
-    } else {
-      buffer.writeUInt32BE(magic, 0)
-      buffer.writeUInt32BE(cpuType, 4)
-    }
-    return buffer
-  }
-  const X64 = 0x01000007
-  const ARM64 = 0x0100000c
-  const ARM64E = 0x0100000c // an arm64e slice is an arm64 slice to run
   const file = (name: string, bytes: Buffer) => {
     const path = join(directory, name)
     writeFileSync(path, bytes)
     return path
   }
 
-  assert.deepEqual(readMachArchitectures(file('ls-arm64', thin(ARM64))), ['arm64'])
-  assert.deepEqual(readMachArchitectures(file('ls-x64', thin(X64))), ['x64'])
-  assert.deepEqual(readMachArchitectures(file('ls-arm64e', thin(ARM64E))), ['arm64'])
-  assert.deepEqual(readMachArchitectures(file('ls-swapped', thin(X64, false))), ['x64'])
+  // A single-architecture 64-bit build, in both byte orders, and the two ways a
+  // person writes its name.
+  assert.deepEqual(readMachArchitectures(file('arm64', thinHeader(ARM64))), ['arm64'])
+  assert.deepEqual(readMachArchitectures(file('x64', thinHeader(X64))), ['x64'])
+  assert.deepEqual(
+    readMachArchitectures(file('swapped', thinHeader(X64, true, false))),
+    ['x64'],
+    'a big-endian header is read in the order it declares',
+  )
+  assert.deepEqual(readMachArchitectures(file('arm64e', thinHeader(ARM64))), ['arm64'])
 
-  // A universal binary: a big-endian table of slices, in both widths. The order
-  // slices appear in is not the order they are reported in.
-  const universal = (magic: number, cpuTypes: number[]) => {
-    const width = magic === 0xcafebabf ? 32 : 20
-    const buffer = Buffer.alloc(8 + cpuTypes.length * width)
-    buffer.writeUInt32BE(magic, 0)
-    buffer.writeUInt32BE(cpuTypes.length, 4)
-    cpuTypes.forEach((cpuType, index) => {
-      buffer.writeUInt32BE(cpuType, 8 + index * width)
-    })
-    return buffer
-  }
-  assert.deepEqual(readMachArchitectures(file('fat', universal(0xcafebabe, [ARM64, X64]))), [
-    'arm64',
-    'x64',
-  ])
-  assert.deepEqual(readMachArchitectures(file('fat64', universal(0xcafebabf, [X64, ARM64]))), [
-    'arm64',
-    'x64',
-  ])
-  // A file that is not a Mach-O file is no architectures, not a guess.
-  assert.deepEqual(readMachArchitectures(file('notes', Buffer.from('not a binary\n'))), [])
+  // A 32-bit build is not a 64-bit machine's build, whichever family it is.
+  assert.deepEqual(readMachArchitectures(file('i386', thinHeader(X86_32, false))), [])
+  assert.deepEqual(
+    readMachArchitectures(file('i386-named-64', thinHeader(X86_32, false))),
+    [],
+    'a 32-bit header claiming the 64-bit magic is refused',
+  )
+  assert.deepEqual(
+    readMachArchitectures(file('arm64-magic-32-cpu', thinHeader(X86_32, true))),
+    [],
+    'a 64-bit magic without the 64-bit ABI bit is refused',
+  )
+
+  // Universal builds: both table widths, both table byte orders, and the same
+  // slices either way round.
+  assert.deepEqual(
+    readMachArchitectures(file('fat', universalBinary([{ cpuType: ARM64 }, { cpuType: X64 }]))),
+    ['arm64', 'x64'],
+  )
+  assert.deepEqual(
+    readMachArchitectures(
+      file('fat64', universalBinary([{ cpuType: ARM64 }, { cpuType: X64 }], { fat64: true })),
+    ),
+    ['arm64', 'x64'],
+  )
+  assert.deepEqual(
+    readMachArchitectures(
+      file(
+        'fat-le',
+        universalBinary([{ cpuType: X64 }, { cpuType: ARM64 }], { littleEndianTable: true }),
+      ),
+    ),
+    ['arm64', 'x64'],
+  )
+  assert.deepEqual(
+    readMachArchitectures(
+      file(
+        'fat-32bit-slice',
+        universalBinary([{ cpuType: ARM64 }, { cpuType: X86_32, sixtyFour: false }]),
+      ),
+    ),
+    ['arm64'],
+    'a 32-bit slice does not make a 64-bit build',
+  )
+
+  // The table says where a slice is; the header there has to agree.
+  assert.deepEqual(
+    readMachArchitectures(
+      file(
+        'forged-cpu',
+        universalBinary([{ cpuType: ARM64 }], {
+          forge: (entry) => entry.writeUInt32BE(X64, 0),
+        }),
+      ),
+    ),
+    [],
+    'a table entry naming one architecture over a slice of another is refused',
+  )
+  assert.deepEqual(
+    readMachArchitectures(
+      file(
+        'forged-width',
+        universalBinary([{ cpuType: ARM64 }], {
+          forge: (entry) => {
+            entry.writeUInt32BE(X86_32, 0)
+            entry.writeUInt32BE(0, 4)
+          },
+        }),
+      ),
+    ),
+    [],
+    'a table entry claiming a 32-bit slice over a 64-bit one is refused',
+  )
+  // Offsets and sizes are bounds, not suggestions.
+  assert.deepEqual(
+    readMachArchitectures(
+      file(
+        'offset-past-end',
+        universalBinary([{ cpuType: ARM64 }], {
+          forge: (entry) => entry.writeUInt32BE(1 << 20, 8),
+        }),
+      ),
+    ),
+    [],
+    'a slice pointing past the end of the file is refused',
+  )
+  assert.deepEqual(
+    readMachArchitectures(
+      file(
+        'size-past-end',
+        universalBinary([{ cpuType: ARM64 }], {
+          forge: (entry) => entry.writeUInt32BE(1 << 20, 12),
+        }),
+      ),
+    ),
+    [],
+    'a slice claiming to be larger than the file is refused',
+  )
+  assert.deepEqual(
+    readMachArchitectures(
+      file(
+        'offset-into-table',
+        universalBinary([{ cpuType: ARM64 }], {
+          forge: (entry) => entry.writeUInt32BE(0, 8),
+        }),
+      ),
+    ),
+    [],
+    'a slice pointing into the table is refused',
+  )
+
+  // A table that claims more slices than a table can hold, and a file that
+  // stops in the middle of one.
+  const many = Buffer.from(universalBinary([{ cpuType: ARM64 }]))
+  many.writeUInt32BE(1 << 20, 4)
+  assert.deepEqual(readMachArchitectures(file('too-many', many)), [])
+  const truncated = universalBinary([{ cpuType: ARM64 }, { cpuType: X64 }]).subarray(0, 4200)
+  assert.deepEqual(readMachArchitectures(file('truncated', truncated)), [])
+  const halfHeader = thinHeader(ARM64).subarray(0, 4)
+  assert.deepEqual(readMachArchitectures(file('four-bytes', halfHeader)), [])
   assert.deepEqual(readMachArchitectures(file('empty', Buffer.alloc(0))), [])
+  assert.deepEqual(readMachArchitectures(file('text', Buffer.from('#!/bin/sh\nexit 0\n'))), [])
+  assert.deepEqual(readMachArchitectures(join(directory, 'not-here')), [])
 })
+
+test(
+  'the Mach-O reader agrees with lipo about the binaries on this machine',
+  {
+    // One-off proof that the hand-written reader and the tool it replaces read the
+    // same files, run against real system binaries rather than fixtures. It is a
+    // check of this implementation against another implementation, so it is
+    // recorded here as evidence rather than pinned as a permanent expectation:
+    // which architectures a given system binary carries changes between macOS
+    // releases, and a test that asserted today's answers would fail on a new one.
+    skip: process.platform !== 'darwin' ? 'Mach-O binaries are macOS' : false,
+  },
+  async () => {
+    const { existsSync } = await import('node:fs')
+    const { readMachArchitectures } = await import('../src/main/update/install')
+    const { execFileSync } = await import('node:child_process')
+    if (!existsSync('/usr/bin/lipo')) return
+    const subjects = ['/bin/ls', '/usr/bin/file', '/usr/bin/true'].filter((path) =>
+      existsSync(path),
+    )
+    for (const subject of subjects) {
+      const byLipo = execFileSync('/usr/bin/lipo', ['-archs', subject], { encoding: 'utf8' })
+        .split(/\s+/u)
+        .filter(Boolean)
+        .flatMap((name) =>
+          name.startsWith('arm64') ? ['arm64'] : name.startsWith('x86_64') ? ['x64'] : [],
+        )
+      assert.deepEqual(
+        readMachArchitectures(subject),
+        [...new Set(byLipo)].sort(),
+        `${subject} reads the same both ways`,
+      )
+    }
+  },
+)
 
 test('the architecture check compares one name on both sides', async () => {
   const { canonicalArchitecture, machArchitectures } = await import('../src/main/update/install')

@@ -433,10 +433,13 @@ test(
   'the producer’s own reader asks gh for the channel’s manifest',
   {
     // The default reader shells out to `gh`, which is a release job's tool, and
-    // the job that publishes runs on ubuntu-24.04. It is exercised there, with a
-    // stand-in for `gh` on the search path rather than the network: a stand-in
-    // that cannot run fails the read, and an unreadable read stops the release, so
-    // a test run can never fall through to a real `gh` and reach GitHub.
+    // the job that publishes runs on ubuntu-24.04. It is exercised here with a
+    // stand-in rather than the network, and the stand-in is the only program the
+    // child can find: the search path is the fixture directory alone, so a fixture
+    // that is missing, or present but not executable, is a command that fails and
+    // a release that stops — never a real `gh` on this machine, and never the
+    // network. The stand-in is a Node script with an absolute interpreter, so it
+    // depends on no shell and on nothing else being found by name either.
     skip:
       process.platform === 'win32' ? 'the reader is proven on the platform that publishes' : false,
   },
@@ -444,12 +447,12 @@ test(
     const key = releaseKey()
     const manifest = signedManifest('stable', '1.4.0', 12)
     const bytes = Buffer.from(JSON.stringify(manifest))
-    const assets = join(mkdtempSync(join(tmpdir(), 'git-stacks-gh-')), 'assets')
-    const tools = join(join(assets, '..'), 'tools')
-    mkdirSync(join(assets, '..', 'resources'), { recursive: true })
+    const root = mkdtempSync(join(tmpdir(), 'git-stacks-gh-'))
+    const assets = join(root, 'assets')
+    const tools = join(root, 'tools')
+    mkdirSync(join(root, 'resources'), { recursive: true })
     mkdirSync(assets, { recursive: true })
     mkdirSync(tools, { recursive: true })
-    const root = join(assets, '..')
     writeFileSync(
       join(root, 'resources', 'update-trusted-keys.json'),
       JSON.stringify(keySet([{ keyId: key.keyId, publicKey: key.publicKey }])),
@@ -465,17 +468,23 @@ test(
     writeFileSync(
       join(tools, 'gh'),
       [
-        '#!/bin/sh',
-        'dir=; name=',
-        'while [ $# -gt 0 ]; do',
-        '  case "$1" in',
-        '    --dir) dir="$2"; shift 2 ;;',
-        '    --pattern) name="$2"; shift 2 ;;',
-        '    *) shift ;;',
-        '  esac',
-        'done',
-        `if [ -f "${assets}/$name" ]; then cp "${assets}/$name" "$dir/$name"; exit 0; fi`,
-        'echo "release not found" >&2; exit 1',
+        `#!${process.execPath}`,
+        'const { copyFileSync } = require("node:fs")',
+        'const { join } = require("node:path")',
+        'const flags = process.argv.slice(2)',
+        'let dir = null',
+        'let name = null',
+        'for (let at = 0; at < flags.length; at += 1) {',
+        '  if (flags[at] === "--dir") { dir = flags[at + 1]; at += 1 }',
+        '  if (flags[at] === "--pattern") { name = flags[at + 1]; at += 1 }',
+        '}',
+        'const source = join(process.env.PROBE_ASSETS_DIR, name)',
+        'try {',
+        '  copyFileSync(source, join(dir, name))',
+        '} catch {',
+        '  process.stderr.write("release not found\\n")',
+        '  process.exit(1)',
+        '}',
       ].join('\n'),
       { mode: 0o755 },
     )
@@ -498,8 +507,8 @@ test(
         cwd: root,
         encoding: 'utf8',
         env: {
-          ...process.env,
-          PATH: `${tools}:${process.env.PATH ?? ''}`,
+          PATH: tools,
+          PROBE_ASSETS_DIR: assets,
           PROBE_MODULE: fileURLToPath(
             new URL('../scripts/release-update-common.ts', import.meta.url),
           ),

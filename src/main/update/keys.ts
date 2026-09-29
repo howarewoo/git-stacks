@@ -34,6 +34,12 @@ const BASE64 = /^[A-Za-z0-9+/]+={0,2}$/
 /** The committed file's fields are checked below, not trusted from its literal type. */
 const registry: { schema: unknown; keys: unknown } = committed
 
+/**
+ * The key set that was built into this binary, read from the file the packager
+ * wrote. It is a parameter of `trustedUpdateKeys` so that what a caller claims
+ * about trust can be stated without also claiming what the checkout on disk
+ * happens to hold.
+ */
 function readCommittedKeys(): TrustedUpdateKey[] {
   if (registry.schema !== 1 || !Array.isArray(registry.keys)) return []
   const keys: TrustedUpdateKey[] = []
@@ -74,8 +80,8 @@ function readCommittedKeys(): TrustedUpdateKey[] {
 export function trustedUpdateKeys(
   env: NodeJS.ProcessEnv = process.env,
   packaged = false,
+  committed: TrustedUpdateKey[] = readCommittedKeys(),
 ): TrustedKeySet {
-  const committed = readCommittedKeys()
   if (committed.length > 0) return { keys: committed, trust: 'release' }
   if (packaged) return { keys: [], trust: 'none' }
   const keyId = env.GIT_STACKS_UPDATE_KEY_ID
