@@ -552,6 +552,7 @@ const unavailableGithub = {
   message: 'GitHub CLI is not authenticated for this repository.',
 }
 
+<<<<<<< HEAD
 const checksBranch = local({
   name: 'feature/lifecycle-open',
   current: true,
@@ -710,6 +711,33 @@ const staleChecksReport = checksReport(
   },
 )
 
+=======
+
+
+/** Comfortably past the point where revealing a second page starts sliding. */
+const DEEP_CHAIN_LENGTH = 620
+
+// A chain long enough that the branch list slides its mounted window: the first
+// two reveals mount one then two pages, and every later reveal slides. The
+// keyboard contract has to hold on the third page, not just the first.
+const deepChainBranches: Branch[] = [
+  mainBranch,
+  ...Array.from({ length: DEEP_CHAIN_LENGTH - 1 }, (_, index) =>
+    local({
+      name: `feature/deep-${String(index + 1).padStart(4, '0')}`,
+      parent: index === 0 ? 'main' : `feature/deep-${String(index).padStart(4, '0')}`,
+      subject: `Deep change ${index + 1}`,
+      updatedAt: new Date(Date.parse(UPDATED) - (DEEP_CHAIN_LENGTH - index) * 60_000).toISOString(),
+    }),
+  ),
+]
+
+const deepChainSnapshot = repository({
+  branches: deepChainBranches,
+  headOid: oid('local:feature/deep-0001'),
+})
+
+>>>>>>> e9b00be (fix(a11y): leave modified chords to the global dispatcher and keep roving inside the mounted window)
 export const scenarios: Record<ScenarioName, FixtureScenario> = {
   'shell-no-repository': {
     name: 'shell-no-repository',
@@ -789,13 +817,18 @@ export const scenarios: Record<ScenarioName, FixtureScenario> = {
     snapshot: repository({ branches: cycleBranches, currentBranch: 'feature/cycle-a' }),
     recentRepositories,
   },
+  'branches-deep-chain': {
+    name: 'branches-deep-chain',
+    summary: 'A branch chain far longer than one list page, for sliding-window keyboard behaviour.',
+    snapshot: deepChainSnapshot,
+    recentRepositories,
+  },
   'ancestry-requires-restack': {
     name: 'ancestry-requires-restack',
     summary: 'Both stacked branches are behind their recorded parent boundary.',
     snapshot: restackBase,
     recentRepositories,
   },
-
   'files-clean': {
     name: 'files-clean',
     summary: 'Clean working tree with nothing staged or unstaged.',

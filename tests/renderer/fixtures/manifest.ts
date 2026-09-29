@@ -35,6 +35,7 @@ export const SCENARIO_NAMES = [
   'ancestry-missing-parent',
   'ancestry-cycle',
   'ancestry-requires-restack',
+  'branches-deep-chain',
   // Working changes
   'files-clean',
   'files-staged',
@@ -103,6 +104,7 @@ export const SCENARIO_GROUPS = {
     'ancestry-missing-parent',
     'ancestry-cycle',
     'ancestry-requires-restack',
+    'branches-deep-chain',
   ],
   changes: [
     'files-clean',

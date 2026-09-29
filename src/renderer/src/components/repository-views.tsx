@@ -24,6 +24,7 @@ import { InlineAlert } from './ui/surface'
 import { Select } from './ui/select'
 import { describeBranchRow, sortBranchesByUpdatedAt } from '../lib/branches'
 import {
+  claimsRovingKey,
   clampRovingIndex,
   rovingAction,
   rovingTabIndex,
@@ -708,6 +709,9 @@ export function HistoryView({
                 onClick={() => setSelected(commit)}
                 onFocus={() => setActiveCommitIndex(commitIndex)}
                 onKeyDown={(event) => {
+                  // Only unmodified keys are claimed; a chord belongs to the global
+                  // shortcut dispatcher.
+                  if (!claimsRovingKey(event)) return
                   const action = rovingAction(event.key)
                   if (!action) return
                   const target = rovingTarget(action, commitIndex, visible.length)
@@ -925,9 +929,11 @@ export function StackView({
     setActiveMemberIndex(index)
     row.focus()
   }
+  // The active member is tracked by its position in the mounted window, so a
+  // sliding window has to re-clamp it or the tree loses its single Tab stop.
   React.useEffect(() => {
     setActiveMemberIndex((index) => clampRovingIndex(index, memberWindow.visible.length))
-  }, [memberWindow.visible.length])
+  }, [memberWindow.start, memberWindow.visible.length])
   return (
     <div className="stacks-view">
       <div className="list-toolbar">
@@ -1091,23 +1097,19 @@ export function StackView({
                       })}
                       className="stack-member-name"
                       onClick={() => onSelect(branch)}
-                      onFocus={() => setActiveMemberIndex(memberWindow.start + memberIndex)}
+                      onFocus={() => setActiveMemberIndex(memberIndex)}
                       onKeyDown={(event) => {
+                        // Only unmodified keys are claimed; a chord belongs to the
+                        // global shortcut dispatcher.
+                        if (!claimsRovingKey(event)) return
                         const action = rovingAction(event.key)
                         if (!action) return
-                        const target = rovingTarget(
-                          action,
-                          memberWindow.start + memberIndex,
-                          memberWindow.visible.length,
-                        )
+                        const target = rovingTarget(action, memberIndex, memberWindow.visible.length)
                         if (target === null) return
                         event.preventDefault()
                         focusStackMember(target)
                       }}
-                      tabIndex={rovingTabIndex(
-                        memberWindow.start + memberIndex,
-                        activeMemberIndex,
-                      )}
+                      tabIndex={rovingTabIndex(memberIndex, activeMemberIndex)}
                     >
                       <GitBranch className="size-4" />
                       <strong>{branch.name}</strong>

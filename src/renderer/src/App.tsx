@@ -80,6 +80,7 @@ import {
   sortBranchesByUpdatedAt,
 } from './lib/branches'
 import {
+  claimsRovingKey,
   clampRovingIndex,
   rovingAction,
   rovingTabIndex,
@@ -404,7 +405,6 @@ function App() {
   const [remoteStatus, setRemoteStatus] = React.useState<RemoteFreshness | null>(null)
   // A background snapshot only applies to the repository the window still shows.
   const snapshotPathRef = React.useRef<string | null>(null)
-
   const setSnapshotAndSelection = React.useCallback((next: RepositorySnapshot) => {
     setSnapshot(next)
     snapshotPathRef.current = next.path
@@ -791,19 +791,19 @@ function App() {
   const branchWindow = useListWindow(visibleBranches, LIST_PAGE_SIZE)
   // The branch tree is one composite widget: a single Tab stop whose position
   // follows keyboard focus, so Tab reaches the tree once instead of once per row.
+  // The active row is tracked by its position inside the mounted window, which is
+  // the same coordinate system the DOM lookup and the tabindex comparison use.
   const [branchTreeActiveIndex, setBranchTreeActiveIndex] = React.useState(0)
   const branchTreeListRef = React.useRef<HTMLDivElement>(null)
   const focusBranchRow = (index: number) => {
-    const target = branchTree.rows[index]
-    if (!target) return
+    const row = branchTreeListRef.current?.querySelectorAll<HTMLElement>('[role="treeitem"]')[index]
+    if (!row) return
     setBranchTreeActiveIndex(index)
-    branchTreeListRef.current
-      ?.querySelectorAll<HTMLElement>('[role="treeitem"]')
-      [index].focus()
+    row.focus()
   }
   React.useEffect(() => {
     setBranchTreeActiveIndex((index) => clampRovingIndex(index, branchWindow.visible.length))
-  }, [branchWindow.visible.length])
+  }, [branchWindow.start, branchWindow.visible.length])
 
   const changeState = React.useMemo(
     () => changeGroups(snapshot?.files ?? [], search),
@@ -1232,6 +1232,22 @@ function App() {
         if (!matchesChord(event, shortcutBindings[shortcut], isMac)) continue
         event.preventDefault()
         setWorkspaceView(view)
+        return
+      }
+
+      // The review workspace publishes its file and layer steps through a ref.
+      // The shell keeps every remappable key, and a key pressed while no pull
+      // request is open stays a no-op rather than reaching into the view.
+      const reviewChords: Array<[ShortcutId, () => void]> = [
+        ['review.nextFile', () => reviewCommands.current?.nextFile()],
+        ['review.previousFile', () => reviewCommands.current?.previousFile()],
+        ['review.nextLayer', () => reviewCommands.current?.nextLayer()],
+        ['review.previousLayer', () => reviewCommands.current?.previousLayer()],
+      ]
+      for (const [id, run] of reviewChords) {
+        if (!matchesChord(event, shortcutBindings[id], isMac)) continue
+        event.preventDefault()
+        if (workspaceView === 'review') run()
         return
       }
 
@@ -1761,16 +1777,18 @@ function App() {
                     }
                     setSelectedBranchRef(branch.ref)
                   }}
-                  onFocus={() => setBranchTreeActiveIndex(branchWindow.start + branchIndex)}
+                  onFocus={() => setBranchTreeActiveIndex(branchIndex)}
                   onKeyDown={(event) => {
-                    // A control inside the row owns its own keys; the roving
-                    // contract belongs to the row itself.
+                    // A control inside the row owns its own keys, and a chord is
+                    // the global shortcut dispatcher's business; the roving
+                    // contract covers unmodified keys on the row itself only.
                     if (event.target !== event.currentTarget) return
+                    if (!claimsRovingKey(event)) return
                     const action = rovingAction(event.key)
                     if (action) {
                       const target = rovingTarget(
                         action,
-                        branchWindow.start + branchIndex,
+                        branchIndex,
                         branchWindow.visible.length,
                       )
                       if (target === null) return
@@ -1785,7 +1803,7 @@ function App() {
                   }}
                   role="treeitem"
                   style={{ '--branch-depth': tree.depth } as React.CSSProperties}
-                  tabIndex={rovingTabIndex(branchWindow.start + branchIndex, branchTreeActiveIndex)}
+                  tabIndex={rovingTabIndex(branchIndex, branchTreeActiveIndex)}
                 >
                 {tree.trunks.map((trunk, segmentIndex) => (
                   <span

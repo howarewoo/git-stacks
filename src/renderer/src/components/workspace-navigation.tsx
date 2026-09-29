@@ -11,7 +11,7 @@ import {
   type LucideIcon,
 } from 'lucide-react'
 import { cn } from '../lib/utils'
-import { rovingAction, rovingTarget } from '../lib/tree-navigation'
+import { claimsRovingKey, rovingAction, rovingTarget } from '../lib/tree-navigation'
 import type { ShortcutId } from '../lib/keyboard-shortcuts'
 
 export type WorkspaceView =
@@ -65,6 +65,7 @@ export const WORKSPACE_VIEW_SHORTCUTS: readonly (readonly [ShortcutId, Workspace
   ['view.pullRequests', 'pullRequests'],
   ['view.stashes', 'stashes'],
   ['view.diagnostics', 'diagnostics'],
+  ['view.review', 'review'],
 ]
 
 export function WorkspaceNavigation({
@@ -100,6 +101,9 @@ export function WorkspaceNavigation({
       onKeyDown={(event) => {
         // Arrow keys walk the destination group. Every item also stays in the
         // tab order, so the rail is usable without knowing the arrow contract.
+        // Only unmodified keys are claimed; a chord belongs to the global
+        // shortcut dispatcher.
+        if (!claimsRovingKey(event)) return
         const action = rovingAction(event.key)
         if (!action) return
         const items = [...event.currentTarget.querySelectorAll<HTMLButtonElement>('.nav-item')]

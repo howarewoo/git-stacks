@@ -256,6 +256,94 @@ test.describe('Keyboard routes and accessibility navigation', () => {
     await expect(rows.first()).toBeFocused()
   })
 
+  test('a focused branch row leaves modified chords to the global dispatcher', async ({ page }) => {
+    await openGallery(page, { scenario: 'ancestry-requires-restack' })
+    await settle(page)
+
+    const tree = page.getByRole('tree', { name: 'Repository branches' })
+    const rows = tree.getByRole('treeitem')
+    await expect(rows.first()).toBeVisible()
+    await rows.first().focus()
+    // Alt+ArrowDown is the "select first child" shortcut, not a roving move. It
+    // must reach the dispatcher and leave focus on the row it was pressed from.
+    await page.keyboard.press('Alt+ArrowDown')
+    await settle(page)
+    await expect(rows.first()).toBeFocused()
+
+    const inspector = page.locator('.details-pane')
+    await expect(
+      inspector.getByRole('heading', { level: 2, name: 'feature/checkout-tests', exact: true }),
+    ).toBeVisible({ timeout: 10_000 })
+
+    // Mod+Enter is a global chord. A row that treated it as its own activation
+    // would re-select the row it is standing on, so the selection must not move.
+    const mainRow = tree.getByRole('treeitem', { name: /^main,/ })
+    await mainRow.focus()
+    await page.keyboard.press('Enter')
+    await settle(page)
+    await expect(
+      inspector.getByRole('heading', { level: 2, name: 'main', exact: true }),
+    ).toBeVisible()
+
+    const childRow = tree.getByRole('treeitem', { name: /^feature\/checkout-tests,/ })
+    await childRow.focus()
+    await page.keyboard.press('ControlOrMeta+Enter')
+    await settle(page)
+    await expect(
+      inspector.getByRole('heading', { level: 2, name: 'main', exact: true }),
+    ).toBeVisible()
+    expect(await getDispatchedActions(page)).toEqual([])
+  })
+
+  test('branch tree keeps one Tab stop and correct movement after the window slides', async ({
+    page,
+  }) => {
+    await openGallery(page, { scenario: 'branches-deep-chain' })
+    const tree = page.getByRole('tree', { name: 'Repository branches' })
+    await expect(tree.getByRole('treeitem').first()).toBeVisible()
+
+    // Reveal twice more: the first reveal mounts a second page, the second slides
+    // the mounted window forward. The tree must still be one Tab stop afterwards.
+    const reveal = page.getByRole('button', { name: /more branches|show more/i }).first()
+    await reveal.click()
+    await settle(page)
+    await reveal.click()
+    await settle(page)
+
+    const rows = tree.getByRole('treeitem')
+    const mounted = await rows.count()
+    expect(mounted).toBeGreaterThan(200)
+
+    const tabbable = await rows.evaluateAll((elements) =>
+      elements.filter((element) => element.getAttribute('tabindex') === '0').length,
+    )
+    expect(tabbable).toBe(1)
+
+    // Movement is relative to the mounted window: one ArrowDown from its first
+    // row lands on its second row, not two hundred rows away.
+    await rows.first().focus()
+    await page.keyboard.press('ArrowDown')
+    await expect(rows.nth(1)).toBeFocused()
+
+    // Home stays at the start of the mounted window instead of wrapping to the
+    // far end of the whole list.
+    await page.keyboard.press('End')
+    await expect(rows.nth(mounted - 1)).toBeFocused()
+    await page.keyboard.press('Home')
+    await expect(rows.first()).toBeFocused()
+
+    // Paging back must not strand the surface without a Tab stop.
+    await page.getByRole('button', { name: /previous/i }).first().click()
+    await settle(page)
+    expect(
+      await tree
+        .getByRole('treeitem')
+        .evaluateAll((elements) =>
+          elements.filter((element) => element.getAttribute('tabindex') === '0').length,
+        ),
+    ).toBe(1)
+  })
+
   test('branch tree rows expose level, sibling position, and state as text', async ({ page }) => {
     await openGallery(page, { scenario: 'shell-connected' })
 

@@ -32,6 +32,21 @@ export function rovingTarget(action: RovingAction, current: number, count: numbe
   return index === count - 1 ? null : count - 1
 }
 
+/**
+ * Whether a local roving surface may claim this keystroke. Only unmodified keys
+ * are claimed: a chord with a modifier belongs to the global shortcut
+ * dispatcher, and swallowing it here would make the shortcut unreachable from
+ * the row the user is standing on.
+ */
+export function claimsRovingKey(event: {
+  altKey: boolean
+  ctrlKey: boolean
+  metaKey: boolean
+  shiftKey: boolean
+}): boolean {
+  return !event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey
+}
+
 /** Roving tabindex: exactly one row of a composite surface stays in the tab order. */
 export function rovingTabIndex(index: number, activeIndex: number): 0 | -1 {
   return index === activeIndex ? 0 : -1
