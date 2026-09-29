@@ -102,26 +102,44 @@ async function diffEndpointWithGit(
   signal?: AbortSignal,
 ): Promise<{ files: ReviewFile[]; additions: number; deletions: number; truncated: boolean } | null> {
   try {
-    const fromExists = await runGit(repoPath, ['cat-file', '-e', `${fromOid}^{commit}`], undefined, signal)
+    let fromExists = await runGit(repoPath, ['cat-file', '-e', `${fromOid}^{commit}`], undefined, signal)
       .then(() => true)
       .catch(() => false)
     if (!fromExists) {
       try {
-        await runGit(repoPath, ['fetch', 'origin', fromOid], undefined, signal)
+        await runGit(
+          repoPath,
+          ['fetch', '--no-write-fetch-head', '--no-tags', '--recurse-submodules=no', 'origin', fromOid],
+          undefined,
+          signal,
+        )
+        fromExists = await runGit(repoPath, ['cat-file', '-e', `${fromOid}^{commit}`], undefined, signal)
+          .then(() => true)
+          .catch(() => false)
       } catch {
         return null
       }
+      if (!fromExists) return null
     }
 
-    const toExists = await runGit(repoPath, ['cat-file', '-e', `${toOid}^{commit}`], undefined, signal)
+    let toExists = await runGit(repoPath, ['cat-file', '-e', `${toOid}^{commit}`], undefined, signal)
       .then(() => true)
       .catch(() => false)
     if (!toExists) {
       try {
-        await runGit(repoPath, ['fetch', 'origin', toOid], undefined, signal)
+        await runGit(
+          repoPath,
+          ['fetch', '--no-write-fetch-head', '--no-tags', '--recurse-submodules=no', 'origin', toOid],
+          undefined,
+          signal,
+        )
+        toExists = await runGit(repoPath, ['cat-file', '-e', `${toOid}^{commit}`], undefined, signal)
+          .then(() => true)
+          .catch(() => false)
       } catch {
         return null
       }
+      if (!toExists) return null
     }
 
     const nameStatusRaw = await runGit(
@@ -189,9 +207,13 @@ async function diffEndpointWithGit(
       const stats = statsMap.get(entry.path) ?? { additions: 0, deletions: 0 }
       let diff: ReviewFileDiff
       try {
+        const pathArgs =
+          entry.previousPath && entry.previousPath !== entry.path
+            ? [`:(literal)${entry.previousPath}`, `:(literal)${entry.path}`]
+            : [`:(literal)${entry.path}`]
         const patch = await runGit(
           repoPath,
-          ['diff', '-M', '--no-ext-diff', '--no-textconv', fromOid, toOid, '--', entry.path],
+          ['diff', '-M', '--no-ext-diff', '--no-textconv', fromOid, toOid, '--', ...pathArgs],
           undefined,
           signal,
         )
@@ -202,7 +224,13 @@ async function diffEndpointWithGit(
               : { kind: 'text', hunks: [] }
         } else {
           const block = parseHunkBlock(patch, { path: entry.path, originalPath: entry.previousPath })
-          diff = { kind: 'text', hunks: block.hunks.map((hunk) => toReviewHunk(entry.path, hunk)) }
+          if (block.kind === 'binary') {
+            diff = { kind: 'binary' }
+          } else if (block.kind === 'unreadable') {
+            diff = { kind: 'unreadable', reason: 'Unreadable diff patch from Git.' }
+          } else {
+            diff = { kind: 'text', hunks: block.hunks.map((hunk) => toReviewHunk(entry.path, hunk)) }
+          }
         }
       } catch {
         diff = { kind: 'unreadable', reason: 'Could not read diff patch from Git.' }

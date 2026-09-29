@@ -15,7 +15,7 @@
  */
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -816,4 +816,236 @@ test('main service readReviewHistoryDiff uses real Git to produce faithful endpo
   const keptFile = diff.files.find((f) => f.path === 'file_kept.txt')
   assert.ok(keptFile, 'file_kept.txt must appear in endpoint diff')
   assert.equal(keptFile?.status, 'modified')
+})
+
+test('main service readReviewHistoryDiff handles pure and edited renames with faithful hunks and zero phantom additions', async (t) => {
+  const workspace = await createTestWorkspace()
+  t.after(workspace.dispose)
+  const repo = workspace.repo
+
+  // Initial commit
+  await writeFile(join(repo, 'clean.ts'), 'line 1\nline 2\nline 3\n')
+  await writeFile(join(repo, 'edited.ts'), 'line 1\nline 2\nline 3\nline 4\nline 5\n')
+  execFileSync('git', ['add', '.'], { cwd: repo })
+  execFileSync('git', ['commit', '-m', 'commit A: old files'], { cwd: repo })
+  const oidA = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf8' }).trim()
+
+  // Commit B: pure rename clean.ts -> renamed_clean.ts, edited rename edited.ts -> renamed_edited.ts
+  execFileSync('git', ['mv', 'clean.ts', 'renamed_clean.ts'], { cwd: repo })
+  execFileSync('git', ['mv', 'edited.ts', 'renamed_edited.ts'], { cwd: repo })
+  await writeFile(join(repo, 'renamed_edited.ts'), 'line 1\nline 2 edited\nline 3\nline 4\nline 5\n')
+  execFileSync('git', ['add', '.'], { cwd: repo })
+  execFileSync('git', ['commit', '-m', 'commit B: renames'], { cwd: repo })
+  const oidB = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf8' }).trim()
+
+  await recordObservedHead(repo, 'howarewoo/git-stacks', 'tester-viewer', 26, comparison({ headOid: oidA }), 1)
+  await recordObservedHead(repo, 'howarewoo/git-stacks', 'tester-viewer', 26, comparison({ headOid: oidB }), 2)
+
+  const transport = mockTransport({
+    graphql: () => ({
+      viewer: { login: 'tester-viewer' },
+      repository: {
+        pullRequest: {
+          state: 'OPEN',
+          viewerPermission: 'WRITE',
+          viewerCanUpdate: true,
+          author: { login: 'author' },
+        },
+      },
+    }),
+    rest: (request) => {
+      if (request.path?.includes('/pulls/26')) {
+        return {
+          head: { sha: oidB },
+          base: { sha: 'b00000'.padEnd(40, '0'), ref: 'main' },
+          commits: 2,
+        }
+      }
+      return {}
+    },
+  })
+  setGitHubTransport(transport)
+  t.after(() => setGitHubTransport(null))
+
+  const diff = await readReviewHistoryDiff(repo, 26, oidA)
+  assert.equal(diff.state, 'files')
+
+  // Pure rename checks
+  const pure = diff.files.find((f) => f.path === 'renamed_clean.ts')
+  assert.ok(pure, 'renamed_clean.ts must be present')
+  assert.equal(pure?.status, 'renamed')
+  assert.equal(pure?.previousPath, 'clean.ts')
+  assert.equal(pure?.additions, 0)
+  assert.equal(pure?.deletions, 0)
+  assert.equal(pure?.diff.kind, 'text')
+  if (pure?.diff.kind === 'text') {
+    assert.equal(pure.diff.hunks.length, 0, 'pure rename must have no hunks (not whole-file addition)')
+  }
+
+  // Edited rename checks
+  const edited = diff.files.find((f) => f.path === 'renamed_edited.ts')
+  assert.ok(edited, 'renamed_edited.ts must be present')
+  assert.equal(edited?.status, 'renamed')
+  assert.equal(edited?.previousPath, 'edited.ts')
+  assert.equal(edited?.additions, 1)
+  assert.equal(edited?.deletions, 1)
+  assert.equal(edited?.diff.kind, 'text')
+  if (edited?.diff.kind === 'text') {
+    assert.equal(edited.diff.hunks.length, 1)
+    const hunk = edited.diff.hunks[0]
+    // Diff hunk must show only the edited line, preserving original context
+    assert.ok(hunk.lines.some((l) => l.kind === 'remove' && l.text.includes('line 2')))
+    assert.ok(hunk.lines.some((l) => l.kind === 'add' && l.text.includes('line 2 edited')))
+  }
+})
+
+test('main service readReviewHistoryDiff preserves binary classification for binary file diffs', async (t) => {
+  const workspace = await createTestWorkspace()
+  t.after(workspace.dispose)
+  const repo = workspace.repo
+
+  // Initial commit with binary file
+  await writeFile(join(repo, 'image.png'), Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0x01]))
+  execFileSync('git', ['add', '.'], { cwd: repo })
+  execFileSync('git', ['commit', '-m', 'commit A: binary file'], { cwd: repo })
+  const oidA = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf8' }).trim()
+
+  // Commit B: modify binary file
+  await writeFile(join(repo, 'image.png'), Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0x02, 0x03]))
+  execFileSync('git', ['add', '.'], { cwd: repo })
+  execFileSync('git', ['commit', '-m', 'commit B: modified binary'], { cwd: repo })
+  const oidB = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf8' }).trim()
+
+  await recordObservedHead(repo, 'howarewoo/git-stacks', 'tester-viewer', 26, comparison({ headOid: oidA }), 1)
+  await recordObservedHead(repo, 'howarewoo/git-stacks', 'tester-viewer', 26, comparison({ headOid: oidB }), 2)
+
+  const transport = mockTransport({
+    graphql: () => ({
+      viewer: { login: 'tester-viewer' },
+      repository: {
+        pullRequest: {
+          state: 'OPEN',
+          viewerPermission: 'WRITE',
+          viewerCanUpdate: true,
+          author: { login: 'author' },
+        },
+      },
+    }),
+    rest: (request) => {
+      if (request.path?.includes('/pulls/26')) {
+        return {
+          head: { sha: oidB },
+          base: { sha: 'b00000'.padEnd(40, '0'), ref: 'main' },
+          commits: 2,
+        }
+      }
+      return {}
+    },
+  })
+  setGitHubTransport(transport)
+  t.after(() => setGitHubTransport(null))
+
+  const diff = await readReviewHistoryDiff(repo, 26, oidA)
+  assert.equal(diff.state, 'files')
+  const binFile = diff.files.find((f) => f.path === 'image.png')
+  assert.ok(binFile, 'image.png must be in diff')
+  assert.equal(binFile?.status, 'modified')
+  // Diff kind must be explicitly binary!
+  assert.equal(binFile?.diff.kind, 'binary')
+})
+
+test('main service diffEndpointWithGit performs object-only fetch preserving FETCH_HEAD, tags, and submodule config', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'test-fetch-sentinel-'))
+  t.after(() => rm(root, { recursive: true }))
+
+  const remote = join(root, 'remote')
+  const local = join(root, 'local')
+  await mkdir(remote, { recursive: true })
+  await mkdir(local, { recursive: true })
+
+  // Remote bare repository
+  execFileSync('git', ['init', '--bare', '-b', 'main'], { cwd: remote })
+
+  // Local repository with origin remote
+  execFileSync('git', ['init', '-b', 'main'], { cwd: local })
+  execFileSync('git', ['config', 'user.name', 'Test'], { cwd: local })
+  execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: local })
+  execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/howarewoo/git-stacks.git'], { cwd: local })
+  execFileSync('git', ['config', `url.file://${remote}/.insteadOf`, 'https://github.com/howarewoo/git-stacks.git'], { cwd: local })
+
+  await writeFile(join(local, 'file.txt'), 'base\n')
+  execFileSync('git', ['add', '.'], { cwd: local })
+  execFileSync('git', ['commit', '-m', 'initial'], { cwd: local })
+  execFileSync('git', ['push', '-u', 'origin', 'main'], { cwd: local })
+  const localOid = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: local, encoding: 'utf8' }).trim()
+
+  // Another clone pushes a new commit and tag to the remote
+  const other = join(root, 'other')
+  execFileSync('git', ['clone', `file://${remote}`, other])
+  execFileSync('git', ['config', 'user.name', 'Test'], { cwd: other })
+  execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: other })
+  await writeFile(join(other, 'external.txt'), 'external change\n')
+  execFileSync('git', ['add', '.'], { cwd: other })
+  execFileSync('git', ['commit', '-m', 'remote commit'], { cwd: other })
+  const remoteOid = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: other, encoding: 'utf8' }).trim()
+  execFileSync('git', ['tag', 'v1.0.0-sentinel-tag'], { cwd: other })
+  execFileSync('git', ['push', 'origin', 'main', '--tags'], { cwd: other })
+
+  // Write sentinel content in local .git/FETCH_HEAD
+  const sentinelContent = 'SENTINEL_FETCH_HEAD_PRESERVED_EXACTLY\n'
+  await writeFile(join(local, '.git', 'FETCH_HEAD'), sentinelContent)
+
+  // Verify remoteOid does not exist locally yet
+  let existsBefore = true
+  try {
+    execFileSync('git', ['cat-file', '-e', remoteOid], { cwd: local })
+  } catch {
+    existsBefore = false
+  }
+  assert.equal(existsBefore, false, 'remote commit must not exist locally yet')
+
+  // Set up mock transport for readReviewHistoryDiff
+  const transport = mockTransport({
+    graphql: () => ({
+      viewer: { login: 'tester-viewer' },
+      repository: {
+        pullRequest: {
+          state: 'OPEN',
+          viewerPermission: 'WRITE',
+          viewerCanUpdate: true,
+          author: { login: 'author' },
+        },
+      },
+    }),
+    rest: (request) => {
+      if (request.path?.includes('/pulls/26')) {
+        return {
+          head: { sha: remoteOid },
+          base: { sha: localOid, ref: 'main' },
+          commits: 2,
+        }
+      }
+      return {}
+    },
+  })
+  setGitHubTransport(transport)
+  t.after(() => setGitHubTransport(null))
+
+  await recordObservedHead(local, 'howarewoo/git-stacks', 'tester-viewer', 26, comparison({ headOid: localOid }), 1)
+  await recordObservedHead(local, 'howarewoo/git-stacks', 'tester-viewer', 26, comparison({ headOid: remoteOid }), 2)
+
+  // Call readReviewHistoryDiff: endpoint diff between localOid and remoteOid
+  const diff = await readReviewHistoryDiff(local, 26, localOid)
+  assert.equal(diff.state, 'files')
+  const extFile = diff.files.find((f) => f.path === 'external.txt')
+  assert.ok(extFile, 'external.txt must be found after fetching remote commit object')
+  assert.equal(extFile?.status, 'added')
+
+  // Verify sentinel FETCH_HEAD was NOT modified or overwritten!
+  const fetchHeadAfter = await readFile(join(local, '.git', 'FETCH_HEAD'), 'utf8')
+  assert.equal(fetchHeadAfter, sentinelContent, 'FETCH_HEAD must be preserved with zero side-effects')
+
+  // Verify remote tag was NOT downloaded into local repository!
+  const localTags = execFileSync('git', ['tag', '-l'], { cwd: local, encoding: 'utf8' }).trim()
+  assert.equal(localTags, '', 'Remote tags must not be imported during object-only fetch')
 })
