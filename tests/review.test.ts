@@ -22,7 +22,9 @@ import {
 } from '../src/main/github-transport'
 import {
   ReviewAnchorStaleError,
+  ReviewComparisonMovedError,
   ReviewOutcomeUnknownError,
+  ReviewWriteUncertainError,
   readReviewPermissions,
   readReviewThreads,
   replyToThread,
@@ -151,6 +153,10 @@ function fileSet(entry: ReviewFile): ReviewFileSet {
     truncated: false,
   }
 }
+
+/** The repository and account the draft journal is keyed by, as the workspace sees them. */
+const JOURNAL_OWNER = { repo: 'acme/widgets', viewer: 'ada' }
+
 
 test('a replaced line is addressed on the side it belongs to, with both numbers', () => {
   const [hunk] = hunks(['@@ -4,3 +4,3 @@ export function f() {', ' a', '-b', '+c', ' d'].join('\n'))
@@ -982,6 +988,40 @@ interface Write {
   text: string
 }
 
+/**
+ * The inline comments of a recorded create-review request, read by narrowing the
+ * body the double kept rather than by asserting a shape onto it.
+ */
+function reviewComments(write: Write): Array<Record<string, unknown>> {
+  const body = write.body
+  if (typeof body !== 'object' || body === null || !('comments' in body)) return []
+  const comments: unknown = body.comments
+  if (!Array.isArray(comments)) return []
+  return comments.filter(
+    (comment): comment is Record<string, unknown> =>
+      typeof comment === 'object' && comment !== null,
+  )
+}
+
+/**
+ * The selection set a GraphQL document starts at or after `from`, with its
+ * braces balanced. Enough to ask which fields a selection names without a
+ * GraphQL parser, and enough to notice a field selected one level too deep.
+ */
+function braceBlock(document: string, from: number): string {
+  const start = document.indexOf('{', from)
+  if (start === -1) return ''
+  let depth = 0
+  for (let index = start; index < document.length; index += 1) {
+    if (document[index] === '{') depth += 1
+    else if (document[index] === '}') {
+      depth -= 1
+      if (depth === 0) return document.slice(start + 1, index)
+    }
+  }
+  return ''
+}
+
 interface DoubleOptions {
   head?: string
   base?: string
@@ -991,11 +1031,26 @@ interface DoubleOptions {
   permission?: string
   isAuthor?: boolean
   state?: 'OPEN' | 'CLOSED' | 'MERGED'
+  /** The signed-in account, so a test can act as somebody other than the default. */
+  viewer?: string
   /** Fails the named GraphQL operation with this status instead of answering. */
   fail?: Record<string, { status: number; message: string }>
+  /**
+   * Fails the first create-review request the way a dropped connection does:
+   * GitHub may already have applied it, and the transport cannot say.
+   */
+  failReviewOnce?: { status: number; message: string }
+  /**
+   * The pages after the first of a thread's own comment connection, keyed by
+   * the thread and then by the cursor that asks for them.
+   */
+  commentPages?: Record<string, Array<{ after: string; nodes: ThreadComment[] }>>
 }
 
 function graphOperation(query: string): string {
+  // A thread's own comments are a connection inside the thread, read through
+  // an inline fragment on the node rather than through a named field.
+  if (query.includes('on PullRequestReviewThread')) return 'threadComments'
   for (const name of [
     'addPullRequestReviewThreadReply',
     'unresolveReviewThread',
@@ -1010,19 +1065,51 @@ function graphOperation(query: string): string {
 function threadDouble(options: DoubleOptions = {}): {
   transport: GitHubTransport
   writes: Write[]
+  /** Every GraphQL document the code under test sent, in order. */
+  queries: string[]
 } {
   const writes: Write[] = []
+  const queries: string[] = []
   const head = options.head ?? 'a'.repeat(40)
   const base = options.base ?? 'b'.repeat(40)
   const permission = options.permission ?? 'WRITE'
   const isAuthor = options.isAuthor === true
   const state = options.state ?? 'OPEN'
+  const viewer = options.viewer ?? 'ada'
   const threads = options.threads ?? []
   // The comparison identity, in the shape the pull request resource returns:
   // a base branch has both an object and a name, and the name is part of it.
   const identity = { head: { sha: head }, base: { sha: base, ref: options.baseRef ?? 'main' } }
+  // The comment pages of every thread, so a thread's own connection can be read
+  // again with its own cursor. The first page is the one the outer list already
+  // carries, and the later ones are what a long conversation has past it.
+  const commentPages = new Map<
+    string,
+    Array<{ after: string | null; total: number; nodes: Array<Record<string, unknown>> }>
+  >()
+  for (const node of threads as Array<Record<string, unknown>>) {
+    const id = node.id
+    const connection = node.comments
+    if (typeof id !== 'string' || typeof connection !== 'object' || connection === null) continue
+    const page = connection as { totalCount?: unknown; nodes?: unknown }
+    if (!Array.isArray(page.nodes)) continue
+    commentPages.set(id, [
+      {
+        after: null,
+        total: typeof page.totalCount === 'number' ? page.totalCount : page.nodes.length,
+        nodes: page.nodes.map((comment) => commentNode(comment as ThreadComment)),
+      },
+      ...(options.commentPages?.[id] ?? []).map((later) => ({
+        after: later.after,
+        total: 0,
+        nodes: later.nodes.map((comment) => commentNode(comment)),
+      })),
+    ])
+  }
+  let reviewFailed = false
   return {
     writes,
+    queries,
     transport: {
       kind: 'direct',
       async rest<T>(request: GitHubRestRequest): Promise<GitHubRestResponse<T>> {
@@ -1035,6 +1122,17 @@ function threadDouble(options: DoubleOptions = {}): {
             threadId: null,
             text: '',
           })
+          if (options.failReviewOnce && !reviewFailed) {
+            reviewFailed = true
+            throw new GitHubTransportError({
+              kind: statusKind(
+                options.failReviewOnce.status,
+                rateLimit(),
+                options.failReviewOnce.message,
+              ),
+              detail: `GitHub answered ${options.failReviewOnce.status} ${options.failReviewOnce.message}`,
+            })
+          }
           return {
             status: 201,
             rateLimit: rateLimit(),
@@ -1058,6 +1156,7 @@ function threadDouble(options: DoubleOptions = {}): {
       },
       async graphql<T>(query: string, variables: Record<string, unknown>): Promise<T> {
         const operation = graphOperation(query)
+        queries.push(query)
         const failure = options.fail?.[operation]
         if (failure) {
           // A failed mutation is still an attempt, and counting it is how a test
@@ -1098,6 +1197,24 @@ function threadDouble(options: DoubleOptions = {}): {
             [operation]: { thread: { id: threadId, isResolved: operation === 'resolveReviewThread' } },
           } as T
         }
+        if (operation === 'threadComments') {
+          // The connection inside the thread, paged by its own cursor: either the
+          // page the outer list carried or the one this cursor asks for. GitHub's
+          // own count is the first page's, because that is where it was sent.
+          const threadId = typeof variables.threadId === 'string' ? variables.threadId : ''
+          const after = typeof variables.after === 'string' ? variables.after : null
+          const pages = commentPages.get(threadId) ?? []
+          const page = pages.find((entry) => entry.after === after)
+          return {
+            node: {
+              comments: {
+                totalCount: pages[0]?.total ?? 0,
+                pageInfo: { hasNextPage: false, endCursor: null },
+                nodes: page?.nodes ?? [],
+              },
+            },
+          } as T
+        }
         if (operation === 'reviewThreads') {
           return {
             repository: {
@@ -1115,15 +1232,41 @@ function threadDouble(options: DoubleOptions = {}): {
             },
           } as T
         }
+        // The signed-in account is a field of the query root in GitHub's schema,
+        // so the double answers it there and nowhere else.
         return {
+          viewer: { login: viewer },
           repository: {
             viewerPermission: permission,
-            viewer: { login: 'ada' },
             pullRequest: { state, viewerDidAuthor: isAuthor, viewerCanUpdate: true },
           },
         } as T
       },
     },
+  }
+}
+
+/** One comment of a thread, as a test writes it. */
+interface ThreadComment {
+  id: string
+  author: string
+  body: string
+  viewerAuthor?: boolean
+}
+
+/** The cursor a thread's own comment connection ends on after `pages` of them. */
+function commentCursor(threadId: string, pages: number): string {
+  return `${threadId}:comments:${pages}`
+}
+
+function commentNode(comment: ThreadComment): Record<string, unknown> {
+  return {
+    id: comment.id,
+    body: comment.body,
+    author: { login: comment.author },
+    viewerDidAuthor: comment.viewerAuthor === true,
+    createdAt: '2026-09-23T10:00:00Z',
+    url: `https://github.com/acme/widgets/pull/7#discussion_${comment.id}`,
   }
 }
 
@@ -1137,8 +1280,18 @@ function threadNode(options: {
   path?: string
   resolved?: boolean
   outdated?: boolean
-  comments?: Array<{ id: string; author: string; body: string; viewerAuthor?: boolean }>
+  comments?: ThreadComment[]
+  /**
+   * GitHub's own count for the thread's comments. A count above the nodes the
+   * first page carries is what tells a reader the conversation continues.
+   */
+  commentTotal?: number
 }): Record<string, unknown> {
+  const comments = options.comments ?? [
+    { id: `${options.id}-c1`, author: 'ada', body: 'needs a name' },
+  ]
+  const total = options.commentTotal ?? comments.length
+  const continues = total > comments.length
   return {
     id: options.id,
     isResolved: options.resolved === true,
@@ -1148,18 +1301,15 @@ function threadNode(options: {
     startLine: options.startLine ?? null,
     startDiffSide: options.startSide ?? null,
     diffSide: options.side ?? 'RIGHT',
-    // The comments of a thread are a connection, not a bare array.
+    // The comments of a thread are a connection, not a bare array, and the
+    // thread carries it inside the outer connection the same way.
     comments: {
-      nodes: (options.comments ?? [{ id: `${options.id}-c1`, author: 'ada', body: 'needs a name' }]).map(
-        (comment) => ({
-          id: comment.id,
-          body: comment.body,
-          author: { login: comment.author },
-          viewerDidAuthor: comment.viewerAuthor === true,
-          createdAt: '2026-09-23T10:00:00Z',
-          url: `https://github.com/acme/widgets/pull/7#discussion_${comment.id}`,
-        }),
-      ),
+      totalCount: total,
+      pageInfo: {
+        hasNextPage: continues,
+        endCursor: continues ? commentCursor(options.id, 1) : null,
+      },
+      nodes: comments.map((comment) => commentNode(comment)),
     },
   }
 }
@@ -1187,6 +1337,9 @@ test('several pending comments are written as one review, not one request each',
   await submitReview(workspace.repo, 7, {
     event: 'COMMENT',
     body: '',
+    // The comparison the diff on screen was read at, which is the one the
+    // review must be pinned to.
+    comparison: comparison(),
     drafts: [
       draft({ id: 'd1', ref: refFor(hunk, hunk.lines.indexOf(added[0])), body: 'this needs a name' }),
       draft({ id: 'd2', ref: refFor(hunk, hunk.lines.indexOf(added[1])), body: 'so does this' }),
@@ -1217,6 +1370,7 @@ test('a multi-line draft sends start_line and start_side with the last line as l
   await submitReview(workspace.repo, 7, {
     event: 'COMMENT',
     body: '',
+    comparison: comparison(),
     drafts: [draft({ id: 'd1', ref: last, startRef: first, body: 'these belong together' })],
   })
 
@@ -1244,6 +1398,7 @@ test('a comment on a removed line is sent on the left, where the line it names i
   await submitReview(workspace.repo, 7, {
     event: 'COMMENT',
     body: '',
+    comparison: comparison(),
     drafts: [draft({ id: 'd1', ref: removed, body: 'why warn here' })],
   })
 
@@ -1276,6 +1431,7 @@ test('a draft whose line a force-push removed submits nothing at all', async (t)
   const error = await submitReview(workspace.repo, 7, {
     event: 'APPROVE',
     body: '',
+    comparison: comparison(),
     drafts: [draft({ id: 'd1', ref: removed, body: 'why warn here' })],
   }).then(
     () => null,
@@ -1322,6 +1478,7 @@ test('a draft whose line merely moved is posted at the line it now occupies', as
   await submitReview(workspace.repo, 7, {
     event: 'COMMENT',
     body: '',
+    comparison: comparison(),
     drafts: [draft({ id: 'd1', ref: original, body: 'why warn here' })],
   })
 
@@ -1354,6 +1511,7 @@ test('a range whose ends land on different sides is refused, and nothing is post
   const error = await submitReview(workspace.repo, 7, {
     event: 'COMMENT',
     body: '',
+    comparison: comparison(),
     drafts: [draft({ id: 'd1', ref: headLine, startRef: baseLine, body: 'this pair' })],
   }).then(
     () => null,
@@ -1366,6 +1524,82 @@ test('a range whose ends land on different sides is refused, and nothing is post
     0,
     'a range GitHub cannot address is not posted on whichever end resolves',
   )
+})
+
+test('a review is refused outright when the head moved after the reviewer read the diff', async (t) => {
+  const workspace = await reviewWorkspace()
+  t.after(workspace.dispose)
+  const patch = '@@ -1,2 +1,3 @@\n keep\n+added\n tail'
+  const entry = file({ diff: { kind: 'text', hunks: hunks(patch) } })
+  const hunk = textHunk(entry, 0)
+  const added = hunk.lines.findIndex((line) => line.side === 'head' && line.newLine !== null)
+  // The comment still resolves against the head the transport reports, so
+  // revalidating anchors alone would post it onto a revision nobody opened.
+  assert.equal(
+    resolveReviewDrafts(fileSet(entry), [
+      draft({ id: 'd1', ref: refFor(hunk, added), body: 'needs a name' }),
+    ])[0].match,
+    'exact',
+  )
+  const { transport, writes } = threadDouble({ files: [apiFile({ patch })] })
+  setGitHubTransport(transport)
+  t.after(() => setGitHubTransport(null))
+
+  const error = await submitReview(workspace.repo, 7, {
+    event: 'APPROVE',
+    body: '',
+    // The head the reviewer was shown, which the force-push has replaced.
+    comparison: comparison({ headOid: 'c'.repeat(40) }),
+    drafts: [draft({ id: 'd1', ref: refFor(hunk, added), body: 'needs a name' })],
+  }).then(
+    () => null,
+    (cause: unknown) => cause,
+  )
+
+  assert.ok(error instanceof ReviewComparisonMovedError, 'a moved comparison refuses the review')
+  assert.equal(
+    writes.filter((write) => write.path.endsWith('/pulls/7/reviews')).length,
+    0,
+    'nothing is approved against a revision the reviewer never opened',
+  )
+  // Both revisions travel with the refusal, so the view can name what to reload.
+  const moved = error as ReviewComparisonMovedError
+  assert.equal(moved.reviewed.headOid, 'c'.repeat(40))
+  assert.equal(moved.current.headOid, 'a'.repeat(40))
+})
+
+test('a base branch that moved under an unchanged head is the same refusal', async (t) => {
+  const workspace = await reviewWorkspace()
+  t.after(workspace.dispose)
+  const patch = '@@ -1,2 +1,3 @@\n keep\n+added\n tail'
+  const entry = file({ diff: { kind: 'text', hunks: hunks(patch) } })
+  const hunk = textHunk(entry, 0)
+  const added = hunk.lines.findIndex((line) => line.side === 'head' && line.newLine !== null)
+  const { transport, writes } = threadDouble({ files: [apiFile({ patch })] })
+  setGitHubTransport(transport)
+  t.after(() => setGitHubTransport(null))
+
+  // The head is the one the reviewer read, word for word. GitHub diffs against
+  // the merge base of head and base, so a push to the base branch renumbers
+  // every line of the same diff, and an APPROVE here would sign off a
+  // revision that is not the one on screen.
+  const error = await submitReview(workspace.repo, 7, {
+    event: 'APPROVE',
+    body: '',
+    comparison: comparison({ baseOid: 'd'.repeat(40) }),
+    drafts: [draft({ id: 'd1', ref: refFor(hunk, added), body: 'needs a name' })],
+  }).then(
+    () => null,
+    (cause: unknown) => cause,
+  )
+
+  assert.ok(error instanceof ReviewComparisonMovedError)
+  assert.equal(
+    writes.filter((write) => write.path.endsWith('/pulls/7/reviews')).length,
+    0,
+    'a fixed head does not make a moved base safe to approve',
+  )
+  assert.equal((error as ReviewComparisonMovedError).current.baseOid, 'b'.repeat(40))
 })
 
 test('a thread read returns the line, the range, and whether it is resolved or outdated', async (t) => {
@@ -1429,6 +1663,60 @@ test("a thread's comments keep the author and which of them is the viewer's own"
   assert.equal(comments[1].viewerDidAuthor, true)
 })
 
+test("a thread's later comment pages are read, and a short one is marked short", async (t) => {
+  const workspace = await reviewWorkspace()
+  t.after(workspace.dispose)
+  const { transport } = threadDouble({
+    threads: [
+      threadNode({
+        id: 'PRRT_1',
+        line: 12,
+        comments: [{ id: 'c1', author: 'ada', body: 'needs a name' }],
+        commentTotal: 3,
+      }),
+      threadNode({
+        id: 'PRRT_2',
+        line: 20,
+        comments: [{ id: 'c1', author: 'ada', body: 'still going' }],
+        commentTotal: 5,
+      }),
+    ],
+    commentPages: {
+      PRRT_1: [
+        {
+          after: commentCursor('PRRT_1', 1),
+          nodes: [
+            { id: 'c2', author: 'grace', body: 'renamed' },
+            { id: 'c3', author: 'ada', body: 'thank you' },
+          ],
+        },
+      ],
+      PRRT_2: [
+        { after: commentCursor('PRRT_2', 1), nodes: [{ id: 'c2', author: 'grace', body: 'one more' }] },
+      ],
+    },
+  })
+  setGitHubTransport(transport)
+  t.after(() => setGitHubTransport(null))
+
+  const read = await readReviewThreads(workspace.repo, 7)
+  const [whole, short] = read.threads.threads
+
+  // A thread's comments are a connection inside the thread, so paging the outer
+  // list alone ends the conversation at the first reply and hides the rest.
+  assert.deepEqual(
+    whole.comments.map((comment) => comment.body),
+    ['needs a name', 'renamed', 'thank you'],
+    'the replies past the first page belong to the thread',
+  )
+  assert.equal(whole.commentCount, 3, "GitHub's own count is what the thread reports")
+  assert.equal(whole.commentsTruncated, false, 'the whole conversation was read')
+  // Fewer comments than GitHub counts is a partial history, and it is marked as
+  // one rather than drawn as the whole reply record.
+  assert.equal(short.commentCount, 5)
+  assert.equal(short.commentsTruncated, true)
+})
+
 test('a reader without write permission is told it cannot post, before any write is attempted', async (t) => {
   const workspace = await reviewWorkspace()
   t.after(workspace.dispose)
@@ -1442,6 +1730,47 @@ test('a reader without write permission is told it cannot post, before any write
   assert.ok(read.permissions.blocked.APPROVE, 'an account with no access may not review')
   assert.ok(read.permissions.blocked.COMMENT)
   assert.equal(writes.length, 0, 'a read never mutates')
+})
+
+test('the signed-in account is read from the query root, which is where GitHub has it', async (t) => {
+  const workspace = await reviewWorkspace()
+  t.after(workspace.dispose)
+  const { transport } = threadDouble()
+  setGitHubTransport(transport)
+  t.after(() => setGitHubTransport(null))
+
+  const permissions = await readReviewPermissions(workspace.repo, 7)
+
+  // The double answers `viewer` at the root and nowhere else, so a reader that
+  // asked for it inside `repository` would come back with no account at all.
+  assert.equal(permissions.viewer, 'ada')
+  assert.equal(permissions.permission, 'WRITE')
+})
+
+test('the permissions query cannot be asking for a viewer the repository does not have', async (t) => {
+  const workspace = await reviewWorkspace()
+  t.after(workspace.dispose)
+  const { transport, queries } = threadDouble()
+  setGitHubTransport(transport)
+  t.after(() => setGitHubTransport(null))
+
+  await readReviewPermissions(workspace.repo, 7)
+
+  const document = queries.find((query) => query.includes('ReviewPermissions'))
+  assert.ok(document, 'the preflight must have asked GitHub what this account may do')
+  // GitHub's schema has no Repository.viewer, and a document asking for one
+  // fails whole with undefinedField before any review is written, so the place
+  // the field is selected is itself the contract.
+  assert.match(
+    braceBlock(document, 0),
+    /\bviewer\s*\{\s*login\s*\}/,
+    'the viewer is selected at the root of the document',
+  )
+  assert.doesNotMatch(
+    braceBlock(document, document.indexOf('repository(')),
+    /\bviewer\b/,
+    'the repository selection must not name a viewer',
+  )
 })
 
 test('a write whose outcome GitHub never confirms is not replayed into a duplicate', async (t) => {
@@ -1472,7 +1801,9 @@ test('a write whose outcome GitHub never confirms is not replayed into a duplica
       return {
         status: 200,
         rateLimit: rateLimit(),
-        data: { head: { sha: 'a'.repeat(40) }, base: { sha: 'b'.repeat(40) } },
+        // The comparison the reviewer read, with all three parts, so this
+        // submission is pinned to something the transport still reports.
+        data: { head: { sha: 'a'.repeat(40) }, base: { sha: 'b'.repeat(40), ref: 'main' } },
       } as GitHubRestResponse<T>
     },
     async paginate<T>(request: GitHubRestRequest): Promise<T[]> {
@@ -1480,9 +1811,9 @@ test('a write whose outcome GitHub never confirms is not replayed into a duplica
     },
     async graphql<T>(): Promise<T> {
       return {
+        viewer: { login: 'ada' },
         repository: {
           viewerPermission: 'WRITE',
-          viewer: { login: 'ada' },
           pullRequest: { state: 'OPEN', viewerDidAuthor: false, viewerCanUpdate: true },
         },
       } as T
@@ -1493,6 +1824,7 @@ test('a write whose outcome GitHub never confirms is not replayed into a duplica
   const error = await submitReview(workspace.repo, 7, {
     event: 'COMMENT',
     body: '',
+    comparison: comparison(),
     drafts: [draft({ id: 'd1', ref: refFor(hunk, added), body: 'needs a name' })],
   }).then(
     () => null,
@@ -1508,6 +1840,122 @@ test('a write whose outcome GitHub never confirms is not replayed into a duplica
   assert.equal(attempts.length, 1, 'an unconfirmed write is reported, never silently resent')
 })
 
+test('a review GitHub never confirmed is refused the second time, from the record on disk', async (t) => {
+  const workspace = await reviewWorkspace()
+  t.after(workspace.dispose)
+  const patch = '@@ -1,2 +1,3 @@\n keep\n+added\n tail'
+  const entry = file({ diff: { kind: 'text', hunks: hunks(patch) } })
+  const hunk = textHunk(entry, 0)
+  const added = hunk.lines.findIndex((line) => line.side === 'head' && line.newLine !== null)
+  const { transport, writes } = threadDouble({
+    files: [apiFile({ patch })],
+    failReviewOnce: { status: 502, message: 'Bad Gateway' },
+  })
+  setGitHubTransport(transport)
+  t.after(() => setGitHubTransport(null))
+  const submission = {
+    event: 'COMMENT' as const,
+    body: '',
+    comparison: comparison(),
+    drafts: [draft({ id: 'd1', ref: refFor(hunk, added), body: 'needs a name' })],
+  }
+
+  await assert.rejects(() => submitReview(workspace.repo, 7, submission), {
+    name: 'ReviewOutcomeUnknownError',
+  })
+  // A second call with nothing in memory but the submission, as if the
+  // workspace had been reopened. The message from the first call is gone by
+  // then, so only the journalled attempt can stop this.
+  await assert.rejects(() => submitReview(workspace.repo, 7, submission), {
+    name: 'ReviewWriteUncertainError',
+  })
+  assert.equal(writes.length, 1, 'the review was attempted once and never again')
+})
+
+test('the uncertain-write guard covers that review only, so changed words still go out', async (t) => {
+  const workspace = await reviewWorkspace()
+  t.after(workspace.dispose)
+  const patch = '@@ -1,2 +1,3 @@\n keep\n+added\n tail'
+  const entry = file({ diff: { kind: 'text', hunks: hunks(patch) } })
+  const hunk = textHunk(entry, 0)
+  const added = hunk.lines.findIndex((line) => line.side === 'head' && line.newLine !== null)
+  const { transport, writes } = threadDouble({
+    files: [apiFile({ patch })],
+    failReviewOnce: { status: 502, message: 'Bad Gateway' },
+  })
+  setGitHubTransport(transport)
+  t.after(() => setGitHubTransport(null))
+  const at = refFor(hunk, added)
+
+  await assert.rejects(
+    () =>
+      submitReview(workspace.repo, 7, {
+        event: 'COMMENT',
+        body: '',
+        comparison: comparison(),
+        drafts: [draft({ id: 'd1', ref: at, body: 'needs a name' })],
+      }),
+    { name: 'ReviewOutcomeUnknownError' },
+  )
+  // The reviewer has plainly abandoned those words, so a guard that refused
+  // every review of the pull request would leave them unable to review at all.
+  const result = await submitReview(workspace.repo, 7, {
+    event: 'COMMENT',
+    body: '',
+    comparison: comparison(),
+    drafts: [draft({ id: 'd1', ref: at, body: 'renamed the function' })],
+  })
+
+  assert.equal(result.state, 'COMMENTED')
+  assert.equal(writes.length, 2, 'a different review is a different write, so it is sent')
+  assert.equal(reviewComments(writes[1])[0].body, 'renamed the function')
+})
+
+test("another account's unresolved write does not hold this one's button shut", async (t) => {
+  const workspace = await reviewWorkspace()
+  t.after(workspace.dispose)
+  const patch = '@@ -1,2 +1,3 @@\n keep\n+added\n tail'
+  const entry = file({ diff: { kind: 'text', hunks: hunks(patch) } })
+  const hunk = textHunk(entry, 0)
+  const added = hunk.lines.findIndex((line) => line.side === 'head' && line.newLine !== null)
+  const at = refFor(hunk, added)
+  const body = 'the same words either account might write'
+  const submission = {
+    event: 'COMMENT' as const,
+    body: '',
+    comparison: comparison(),
+    drafts: [draft({ id: 'd1', ref: at, body })],
+  }
+
+  // One account sends and never hears back. The record holds the words, and the
+  // journal is shared by every worktree of the repository, so the guard has to
+  // name the account or the next person to sign in is locked out of a review
+  // they never attempted.
+  const first = threadDouble({
+    files: [apiFile({ patch })],
+    viewer: 'ada',
+    failReviewOnce: { status: 502, message: 'Bad Gateway' },
+  })
+  setGitHubTransport(first.transport)
+  await assert.rejects(() => submitReview(workspace.repo, 7, submission), {
+    name: 'ReviewOutcomeUnknownError',
+  })
+  // The very same call is still refused for the account that made it.
+  await assert.rejects(() => submitReview(workspace.repo, 7, submission), {
+    name: 'ReviewWriteUncertainError',
+  })
+
+  // A different account on the same repository is not blocked by it.
+  const second = threadDouble({ files: [apiFile({ patch })], viewer: 'grace' })
+  setGitHubTransport(second.transport)
+  t.after(() => setGitHubTransport(null))
+  const result = await submitReview(workspace.repo, 7, submission)
+
+  assert.equal(result.state, 'COMMENTED')
+  assert.equal(second.writes.length, 1, "another account's review is its own write")
+  assert.equal(reviewComments(second.writes[0])[0].body, body)
+})
+
 test('a reply is posted through the documented mutation, naming its thread and body', async (t) => {
   const workspace = await reviewWorkspace()
   t.after(workspace.dispose)
@@ -1517,13 +1965,34 @@ test('a reply is posted through the documented mutation, naming its thread and b
   setGitHubTransport(transport)
   t.after(() => setGitHubTransport(null))
 
-  const result = await replyToThread(workspace.repo, 'PRRT_1', 'agreed, renaming')
+  const result = await replyToThread(workspace.repo, 7, 'PRRT_1', 'agreed, renaming')
 
   assert.equal(writes.length, 1)
   assert.equal(writes[0].operation, 'addPullRequestReviewThreadReply')
   assert.equal(writes[0].threadId, 'PRRT_1')
   assert.equal((writes[0].body as { body: string }).body, 'agreed, renaming')
   assert.equal(result.id, 'IC_1', 'the outcome is reported from what GitHub returned')
+})
+
+test('a reply GitHub never confirmed is not sent again to the same thread', async (t) => {
+  const workspace = await reviewWorkspace()
+  t.after(workspace.dispose)
+  const { transport, writes } = threadDouble({
+    threads: [threadNode({ id: 'PRRT_1', line: 12 })],
+    fail: { addPullRequestReviewThreadReply: { status: 502, message: 'Bad Gateway' } },
+  })
+  setGitHubTransport(transport)
+  t.after(() => setGitHubTransport(null))
+
+  await assert.rejects(() => replyToThread(workspace.repo, 7, 'PRRT_1', 'agreed, renaming'), {
+    name: 'ReviewOutcomeUnknownError',
+  })
+  // The thread is read back to find out whether the reply landed; it did not, so
+  // the attempt is journalled and the same words to the same thread are refused.
+  await assert.rejects(() => replyToThread(workspace.repo, 7, 'PRRT_1', 'agreed, renaming'), {
+    name: 'ReviewWriteUncertainError',
+  })
+  assert.equal(writes.length, 1, 'the reply was attempted once and never again')
 })
 
 test('resolve and unresolve are opposite mutations on the same thread', async (t) => {
@@ -1575,6 +2044,8 @@ test('pending comments survive leaving the workspace and are bound to the head t
   const added = hunk.lines.findIndex((line) => line.side === 'head' && line.newLine !== null)
   const record: ReviewDraftRecord = {
     number: 7,
+    repo: JOURNAL_OWNER.repo,
+    viewer: JOURNAL_OWNER.viewer,
     comparison: comparison(),
     drafts: [draft({ id: 'd1', ref: refFor(hunk, added), body: 'still thinking about this' })],
     updatedAt: '2026-09-23T10:00:00Z',
@@ -1582,7 +2053,7 @@ test('pending comments survive leaving the workspace and are bound to the head t
 
   await writeReviewDrafts(workspace.repo, record)
   // A second read stands in for leaving for another workspace and coming back.
-  const reopened = await readReviewDrafts(workspace.repo, 7)
+  const reopened = await readReviewDrafts(workspace.repo, JOURNAL_OWNER.repo, JOURNAL_OWNER.viewer, 7)
 
   assert.ok(reopened, 'the drafts must be found again')
   assert.equal(reopened.number, 7)
@@ -1606,20 +2077,71 @@ test("one pull request's drafts are not another's", async (t) => {
 
   await writeReviewDrafts(workspace.repo, {
     number: 7,
+    repo: JOURNAL_OWNER.repo,
+    viewer: JOURNAL_OWNER.viewer,
     comparison: comparison(),
     drafts: [draft({ id: 'd1', ref: line, body: 'on seven' })],
     updatedAt: '2026-09-23T10:00:00Z',
   })
   await writeReviewDrafts(workspace.repo, {
     number: 8,
+    repo: JOURNAL_OWNER.repo,
+    viewer: JOURNAL_OWNER.viewer,
     comparison: comparison(),
     drafts: [draft({ id: 'd1', ref: line, body: 'on eight' })],
     updatedAt: '2026-09-23T10:00:00Z',
   })
 
-  assert.equal((await readReviewDrafts(workspace.repo, 7))?.drafts[0].body, 'on seven')
-  assert.equal((await readReviewDrafts(workspace.repo, 8))?.drafts[0].body, 'on eight')
-  assert.equal(await readReviewDrafts(workspace.repo, 9), null)
+  assert.equal(
+    (await readReviewDrafts(workspace.repo, JOURNAL_OWNER.repo, JOURNAL_OWNER.viewer, 7))?.drafts[0].body,
+    'on seven',
+  )
+  assert.equal(
+    (await readReviewDrafts(workspace.repo, JOURNAL_OWNER.repo, JOURNAL_OWNER.viewer, 8))?.drafts[0].body,
+    'on eight',
+  )
+  assert.equal(
+    await readReviewDrafts(workspace.repo, JOURNAL_OWNER.repo, JOURNAL_OWNER.viewer, 9),
+    null,
+  )
+})
+
+test('drafts are kept apart by repository and by account, not by pull request number', async (t) => {
+  const workspace = await reviewWorkspace()
+  t.after(workspace.dispose)
+  const entry = file({ diff: { kind: 'text', hunks: hunks('@@ -1,2 +1,3 @@\n keep\n+added\n tail') } })
+  const hunk = textHunk(entry, 0)
+  const added = hunk.lines.findIndex((line) => line.side === 'head' && line.newLine !== null)
+  const line = refFor(hunk, added)
+
+  await writeReviewDrafts(workspace.repo, {
+    number: 7,
+    repo: JOURNAL_OWNER.repo,
+    viewer: JOURNAL_OWNER.viewer,
+    comparison: comparison(),
+    drafts: [draft({ id: 'd1', ref: line, body: 'mine' })],
+    updatedAt: '2026-09-23T10:00:00Z',
+  })
+
+  // One journal file is shared by every worktree of the repository, so a record
+  // belonging to another repository or another account is on disk and is
+  // deliberately not returned: a number alone collides across repositories,
+  // and unsent words belong to whoever wrote them.
+  assert.equal(
+    await readReviewDrafts(workspace.repo, 'acme/sprockets', JOURNAL_OWNER.viewer, 7),
+    null,
+    'a pull request number is unique only inside one repository',
+  )
+  assert.equal(
+    await readReviewDrafts(workspace.repo, JOURNAL_OWNER.repo, 'grace', 7),
+    null,
+    'another account must not be offered this reviewer pending words',
+  )
+  assert.equal(
+    (await readReviewDrafts(workspace.repo, JOURNAL_OWNER.repo, JOURNAL_OWNER.viewer, 7))?.drafts[0].body,
+    'mine',
+    'the account that wrote them still finds them',
+  )
 })
 
 test('writing an empty list is what retires a sent review, so it is not offered again', async (t) => {
@@ -1630,21 +2152,28 @@ test('writing an empty list is what retires a sent review, so it is not offered 
   const added = hunk.lines.findIndex((line) => line.side === 'head' && line.newLine !== null)
   await writeReviewDrafts(workspace.repo, {
     number: 7,
+    repo: JOURNAL_OWNER.repo,
+    viewer: JOURNAL_OWNER.viewer,
     comparison: comparison(),
     drafts: [draft({ id: 'd1', ref: refFor(hunk, added), body: 'sent' })],
     updatedAt: '2026-09-23T10:00:00Z',
   })
-  assert.ok(await readReviewDrafts(workspace.repo, 7), 'precondition: the draft is pending')
+  assert.ok(
+    await readReviewDrafts(workspace.repo, JOURNAL_OWNER.repo, JOURNAL_OWNER.viewer, 7),
+    'precondition: the draft is pending',
+  )
 
   await writeReviewDrafts(workspace.repo, {
     number: 7,
+    repo: JOURNAL_OWNER.repo,
+    viewer: JOURNAL_OWNER.viewer,
     comparison: comparison(),
     drafts: [],
     updatedAt: '2026-09-23T10:05:00Z',
   })
 
   assert.equal(
-    await readReviewDrafts(workspace.repo, 7),
+    await readReviewDrafts(workspace.repo, JOURNAL_OWNER.repo, JOURNAL_OWNER.viewer, 7),
     null,
     'a sent review leaves nothing behind to submit twice',
   )
@@ -1657,6 +2186,8 @@ test('a draft is not offered again once the base branch moves under a fixed head
   const written = comparison()
   const record: ReviewDraftRecord = {
     number: 7,
+    repo: JOURNAL_OWNER.repo,
+    viewer: JOURNAL_OWNER.viewer,
     comparison: written,
     drafts: [draft({ id: 'd1', ref: refFor(hunk, added), body: 'mine' })],
     updatedAt: '2026-09-23T10:00:00Z',
@@ -1696,6 +2227,8 @@ test('a thread that is both resolved and outdated keeps both facts, because a pu
     viewerCanResolve: true,
     viewerCanUnresolve: true,
     comments: [],
+    commentCount: 0,
+    commentsTruncated: false,
   }
   const both: ReviewThread = { ...base, resolved: true, outdated: true }
   assert.equal(reviewThreadState(both), 'resolved')

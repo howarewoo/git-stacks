@@ -67,6 +67,19 @@ export interface ReviewDraft {
  */
 export interface ReviewDraftRecord {
   number: number
+  /**
+   * The GitHub repository these drafts belong to, as `owner/name`. A pull
+   * request number is only unique inside one repository, so keying the journal
+   * by number alone would load the previous repository's pending words the
+   * moment a worktree's origin was pointed somewhere else.
+   */
+  repo: string
+  /**
+   * The account that was signed in when the words were written. A draft is
+   * unsent work belonging to whoever wrote it, and submitting it under a
+   * different account would post one person's review under another's name.
+   */
+  viewer: string
   /** The comparison the drafts' line numbers were read at. */
   comparison: ReviewComparison
   drafts: ReviewDraft[]
@@ -79,6 +92,13 @@ export interface ReviewDraftRecord {
  * the record stays inside the repository's own Git directory.
  */
 export const REVIEW_DRAFTS_MAX = 200
+
+/**
+ * Ceiling on remembered unresolved writes. Each one blocks a button, so the
+ * list is small by nature; the cap only stops the file growing without bound if
+ * a connection fails repeatedly, and the newest are the ones kept.
+ */
+export const REVIEW_UNCERTAIN_MAX = 50
 
 /** What one draft resolves to against a particular head, for display and for submit. */
 export interface ReviewDraftResolution {
@@ -125,6 +145,15 @@ export interface ReviewThread {
   viewerCanResolve: boolean
   viewerCanUnresolve: boolean
   comments: ReviewThreadComment[]
+  /**
+   * GitHub's own count for this thread's comments, against the ones paged in.
+   * A thread's comments are a second connection inside the thread, so paging the
+   * outer list alone leaves the tail of a long conversation unread; when the
+   * two disagree the thread says so instead of presenting a partial reply
+   * history as the whole one.
+   */
+  commentCount: number
+  commentsTruncated: boolean
 }
 
 /** Every thread of one pull request, read against the comparison the file set was read at. */
@@ -193,11 +222,57 @@ export interface ReviewThreadRead {
   permissions: ReviewPermissions
 }
 
-/** What one submission carries: the decision, the summary, and the drafts. */
+/**
+ * What one submission carries: the decision, the summary, the drafts, and the
+ * comparison the reviewer actually looked at.
+ *
+ * The comparison is what makes a stale submit a refusal rather than a silent
+ * re-anchor. The backend re-reads the pull request to resolve anchors, and a
+ * draft whose text still matches a line after a force-push would otherwise be
+ * posted against a commit the reviewer never opened — worst of all for an
+ * APPROVE, which would sign off a revision nobody saw. So the review is pinned
+ * to the comparison the diff was rendered from, and a mismatch is reported as
+ * one instead of being adopted.
+ */
 export interface ReviewSubmission {
   event: ReviewEvent
   body: string
   drafts: ReviewDraft[]
+  /** The comparison the diff on screen was read at. */
+  comparison: ReviewComparison
+}
+
+/**
+ * A write GitHub may or may not have accepted, remembered so it is never
+ * blindly repeated.
+ *
+ * A dropped connection after a POST is the one failure that cannot be retried
+ * safely: the review may be on GitHub already, and pressing Submit again posts
+ * it twice. An error message is not a guard, because it disappears on reload
+ * and leaves the same button live. So the attempt itself is journalled, and the
+ * next write of the same kind is refused until the record is reconciled
+ * against what GitHub actually holds.
+ */
+export interface ReviewUncertainWrite {
+  /** Stable within a pull request: one review attempt, or one thread write. */
+  id: string
+  number: number
+  /** What was being written, so the guard covers the same write and no other. */
+  kind: 'review' | 'reply' | 'resolve'
+  /** The words of the write, so a reconciliation can recognise it on GitHub. */
+  summary: string
+  /** A reply's thread, or a review's head commit — where to look for it. */
+  threadId: string | null
+  headOid: string | null
+  event: ReviewEvent | null
+  /** When the attempt was made, so the oldest can be reasoned about. */
+  at: string
+  /**
+   * The account that attempted the write. The record holds the words, so it is
+   * scoped the way the drafts are: one account's unresolved attempt must not
+   * hold another account's button shut.
+   */
+  viewer: string
 }
 /** A stable local identifier for a draft, so a list keeps its key across edits. */
 export function reviewDraftKey(ref: ReviewLineRef, startRef: ReviewLineRef | null): string {
@@ -237,6 +312,11 @@ export function withReviewDraft(
   const drafts = sortReviewDrafts([...kept, draft])
   return {
     number,
+    // The owner is carried from the record being edited. A draft is added to
+    // the drafts this account already owns, so a new draft never lands a
+    // record under a repository or account it does not belong to.
+    repo: record?.repo ?? '',
+    viewer: record?.viewer ?? '',
     comparison,
     drafts: drafts.length > REVIEW_DRAFTS_MAX ? drafts.slice(0, REVIEW_DRAFTS_MAX) : drafts,
     updatedAt: now,
@@ -252,7 +332,7 @@ export function withReviewDraftBody(
   const drafts = (record?.drafts ?? []).map((entry) =>
     entry.id === id ? { ...entry, body } : entry,
   )
-  return { number: record?.number ?? 0, comparison: record?.comparison ?? UNKNOWN_REVIEW_COMPARISON, drafts, updatedAt: now }
+  return { number: record?.number ?? 0, repo: record?.repo ?? '', viewer: record?.viewer ?? '', comparison: record?.comparison ?? UNKNOWN_REVIEW_COMPARISON, drafts, updatedAt: now }
 }
 
 export function withoutReviewDraft(
@@ -261,7 +341,7 @@ export function withoutReviewDraft(
   now: string,
 ): ReviewDraftRecord {
   const drafts = (record?.drafts ?? []).filter((entry) => entry.id !== id)
-  return { number: record?.number ?? 0, comparison: record?.comparison ?? UNKNOWN_REVIEW_COMPARISON, drafts, updatedAt: now }
+  return { number: record?.number ?? 0, repo: record?.repo ?? '', viewer: record?.viewer ?? '', comparison: record?.comparison ?? UNKNOWN_REVIEW_COMPARISON, drafts, updatedAt: now }
 }
 
 /**

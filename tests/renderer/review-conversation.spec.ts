@@ -168,8 +168,17 @@ test.describe('Anchors that no longer name their line', () => {
     await expect(draft).toContainText('a push moved it')
     // The words are the reviewer's; a push is not a reason to lose them.
     await expect(draft.getByRole('textbox')).toHaveValue('Written before the push.')
+    // The whole review is held rather than quietly trimmed. The count still
+    // names the draft the reviewer wrote, because it is their review being
+    // held — but the button is dead and says why, so a stale comment can never
+    // be left behind by a submit that succeeds without it.
+    const submit = page.getByRole('button', { name: 'Submit 1 comment as one review' })
+    await expect(submit).toBeVisible()
+    await expect(submit).toBeDisabled()
+    await expect(page.locator('.review-submit-reason')).toContainText(
+      'no longer names a line in this diff, so the whole review is held',
+    )
     // And nothing was posted anywhere, because the draft no longer names a line.
-    await expect(page.getByRole('button', { name: 'Submit 0 comments as one review' })).toBeVisible()
     expect(await submissions(page)).toEqual([])
   })
 })

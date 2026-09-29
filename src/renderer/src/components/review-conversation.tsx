@@ -96,6 +96,20 @@ function readableError(value: unknown): string {
   return 'The review could not be sent to GitHub.'
 }
 
+/**
+ * Whether a failure left the write in a state that must not simply be retried.
+ *
+ * The error's own name is what the main process set on the two errors that
+ * mean "Git Stacks cannot tell whether this landed". Anything else — a refusal,
+ * a stale anchor, a permissions block — is a decision the reviewer can act on
+ * and re-send after fixing, so the button comes back.
+ */
+function isUncertainOutcome(cause: unknown): boolean {
+  if (typeof cause !== 'object' || cause === null || !('name' in cause)) return false
+  const name = (cause as { name?: unknown }).name
+  return name === 'ReviewOutcomeUnknownError' || name === 'ReviewWriteUncertainError'
+}
+
 export interface ReviewConversationProps {
   desktop: DesktopAPI | undefined
   number: number
@@ -138,11 +152,21 @@ export function ReviewConversation({
     () => new Map(resolutions.map((entry) => [entry.id, entry])),
     [resolutions],
   )
-  const sendable = draftList.filter(
-    (draft) => draft.body.trim() !== '' && byId.get(draft.id)?.match !== 'unresolved',
-  )
+  // Every draft with words is submitted or none is. Filtering the unresolved
+  // ones out here would make the backend unable to enforce its whole-review
+  // refusal, and the clear on success would then take the unresolved draft with
+  // them — the one comment that was never sent would be the one deleted.
+  const intended = draftList.filter((draft) => draft.body.trim() !== '')
+  const sendable = intended.filter((draft) => byId.get(draft.id)?.match !== 'unresolved')
   const stale = draftList.filter((draft) => byId.get(draft.id)?.match === 'unresolved')
+  // A draft that cannot be sent where it was written blocks the whole review, and
+  // says so, rather than being quietly left behind by a successful submit.
+  const blockedByStale = stale.length > 0
   const permissions: ReviewPermissions | null = read?.permissions ?? null
+  // An uncertain outcome outlives the message that reported it, so the guard is
+  // this component's own state as well as the backend's: while it is set, the
+  // button stays dead even though the drafts and the error are still here.
+  const [uncertain, setUncertain] = React.useState(false)
 
   const addDraft = () => {
     const ends = orderedEnds(files, selection)
@@ -164,7 +188,12 @@ export function ReviewConversation({
   }
 
   const submit = async () => {
-    if (!desktop?.reviewSubmit || sendable.length === 0) return
+    if (!desktop?.reviewSubmit || intended.length === 0) return
+    if (blockedByStale || uncertain) return
+    if (!files) {
+      setError('The diff has to be loaded before a review can be sent.')
+      return
+    }
     setSending(true)
     setError(null)
     setNotice(null)
@@ -172,18 +201,28 @@ export function ReviewConversation({
       const result = await desktop.reviewSubmit(number, {
         event,
         body: summary,
-        drafts: sendable,
+        // The whole intended review, including anything the backend will refuse.
+        // It decides atomicity itself; the view must not decide it by omission.
+        drafts: intended,
+        // The comparison the diff on screen was read at, so a pull request that
+        // moved since is refused rather than re-anchored onto a new revision.
+        comparison: files.comparison,
       })
+      setUncertain(false)
       setSummary('')
       onDraftChange([])
       onReload()
       setNotice(
-        `Sent one ${REVIEW_EVENT_LABELS[event].toLowerCase()} review with ${sendable.length} comment${
-          sendable.length === 1 ? '' : 's'
+        `Sent one ${REVIEW_EVENT_LABELS[event].toLowerCase()} review with ${intended.length} comment${
+          intended.length === 1 ? '' : 's'
         }${result.state ? `; GitHub recorded it as ${result.state}` : ''}.`,
       )
     } catch (cause) {
       setError(readableError(cause))
+      // An outcome GitHub never confirmed leaves the write in doubt, so the
+      // button stays disabled for this session too. The backend refuses the
+      // same write after a reload; this keeps the two consistent meanwhile.
+      setUncertain(isUncertainOutcome(cause))
     } finally {
       setSending(false)
     }
@@ -220,7 +259,9 @@ export function ReviewConversation({
         permissions={permissions}
         event={event}
         summary={summary}
-        sendableCount={sendable.length}
+        intendedCount={intended.length}
+        staleCount={stale.length}
+        uncertain={uncertain}
         busy={sending}
         onEvent={setEvent}
         onSummary={setSummary}
@@ -369,7 +410,9 @@ function SubmitBar({
   permissions,
   event,
   summary,
-  sendableCount,
+  intendedCount,
+  staleCount,
+  uncertain,
   busy,
   onEvent,
   onSummary,
@@ -378,7 +421,9 @@ function SubmitBar({
   permissions: ReviewPermissions | null
   event: ReviewEvent
   summary: string
-  sendableCount: number
+  intendedCount: number
+  staleCount: number
+  uncertain: boolean
   busy: boolean
   onEvent: (event: ReviewEvent) => void
   onSummary: (summary: string) => void
@@ -386,16 +431,29 @@ function SubmitBar({
 }) {
   const blocked = reviewEventBlocked(permissions, event)
   const needsSummary = event === 'REQUEST_CHANGES' && summary.trim() === ''
-  const disabled = busy || sendableCount === 0 || blocked !== null || needsSummary
+  // A stale draft blocks the review rather than being left out of it, and an
+  // uncertain write blocks it because sending the same words twice is worse
+  // than sending none. Both say why instead of just going dead.
+  const disabled =
+    busy ||
+    intendedCount === 0 ||
+    blocked !== null ||
+    needsSummary ||
+    staleCount > 0 ||
+    uncertain
   const reason =
     blocked ??
-    (needsSummary
-      ? 'Requesting changes needs a summary saying what must change.'
-      : sendableCount === 0
-        ? 'Write at least one pending comment first.'
-        : `Submit ${sendableCount} comment${sendableCount === 1 ? '' : 's'} as one ${
-            REVIEW_EVENT_LABELS[event]
-          } review.`)
+    (uncertain
+      ? 'This review was sent but Git Stacks never heard back, so it is not sent again automatically. Reload to see whether GitHub recorded it.'
+      : needsSummary
+        ? 'Requesting changes needs a summary saying what must change.'
+        : staleCount > 0
+          ? `${staleCount} pending comment${staleCount === 1 ? '' : 's'} no longer names a line in this diff, so the whole review is held. Reopen it or remove ${staleCount === 1 ? 'it' : 'them'} first.`
+          : intendedCount === 0
+            ? 'Write at least one pending comment first.'
+            : `Submit ${intendedCount} comment${intendedCount === 1 ? '' : 's'} as one ${
+                REVIEW_EVENT_LABELS[event]
+              } review.`)
   return (
     <div className="review-submit" role="group" aria-label="Submit review">
       <label className="review-submit-summary">
@@ -434,7 +492,7 @@ function SubmitBar({
       <Button disabled={disabled} size="sm" tooltip={reason} variant="accent" onClick={onSubmit}>
         {busy
           ? 'Sending…'
-          : `Submit ${sendableCount} comment${sendableCount === 1 ? '' : 's'} as one review`}
+          : `Submit ${intendedCount} comment${intendedCount === 1 ? '' : 's'} as one review`}
       </Button>
       <p className="review-submit-reason">{reason}</p>
     </div>
@@ -465,8 +523,13 @@ function ThreadList({
   const [busy, setBusy] = React.useState<string | null>(null)
   const [actionError, setActionError] = React.useState<string | null>(null)
 
+  // Threads whose last write left GitHub's answer unknown. A reply is its own
+  // comment, so a repeat is a second comment rather than a harmless repeat, and
+  // the words stay in the box while the button is held.
+  const [uncertain, setUncertain] = React.useState<ReadonlySet<string>>(new Set())
+
   const sendReply = async (thread: ReviewThread) => {
-    if (!desktop?.reviewReply) return
+    if (!desktop?.reviewReply || uncertain.has(thread.id)) return
     setBusy(thread.id)
     setActionError(null)
     try {
@@ -476,6 +539,9 @@ function ThreadList({
       onReload()
     } catch (cause) {
       setActionError(readableError(cause))
+      if (isUncertainOutcome(cause)) {
+        setUncertain((current) => new Set([...current, thread.id]))
+      }
     } finally {
       setBusy(null)
     }
@@ -593,8 +659,15 @@ function ThreadList({
                       value={replyBody}
                     />
                     <Button
-                      disabled={busy === thread.id || replyBody.trim() === ''}
+                      disabled={
+                        busy === thread.id || replyBody.trim() === '' || uncertain.has(thread.id)
+                      }
                       size="sm"
+                      tooltip={
+                        uncertain.has(thread.id)
+                          ? 'This reply was sent but Git Stacks never heard back, so it is not sent again automatically. Reload to see whether GitHub recorded it.'
+                          : undefined
+                      }
                       variant="accent"
                       onClick={() => void sendReply(thread)}
                     >

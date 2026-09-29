@@ -3005,6 +3005,19 @@ textarea.conflict-content {
   color: var(--gs-semantic-text-secondary);
 }
 
+.review-comparison-alert {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  font-size: 12px;
+}
+
+.review-comparison-reload {
+  margin-inline-start: auto;
+}
+
 .review-selection {
   display: flex;
   flex-wrap: wrap;

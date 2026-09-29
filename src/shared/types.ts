@@ -5,8 +5,8 @@ import type {
   ReviewDraft,
   ReviewDraftRecord,
   ReviewDraftResolution,
-  ReviewEvent,
   ReviewMutationResult,
+  ReviewSubmission,
   ReviewThreadRead,
 } from './review-threads'
 
@@ -1039,12 +1039,11 @@ export interface DesktopAPI {
   /**
    * Writes every pending comment as one review. The anchors are revalidated in
    * the main process, so a draft that no longer names its line refuses the whole
-   * submission rather than being posted elsewhere.
+   * submission rather than being posted elsewhere, and the comparison travels
+   * with it so a pull request that moved since is refused rather than
+   * re-anchored onto a revision the reviewer never read.
    */
-  reviewSubmit?(
-    number: number,
-    submission: { event: ReviewEvent; body: string; drafts: ReviewDraft[] },
-  ): Promise<ReviewMutationResult>
+  reviewSubmit?(number: number, submission: ReviewSubmission): Promise<ReviewMutationResult>
   reviewReply?(number: number, threadId: string, body: string): Promise<ReviewMutationResult>
   reviewSetResolved?(number: number, threadId: string, resolved: boolean): Promise<ReviewMutationResult>
   listNativeStacks?: () => Promise<NativeStack[]>

@@ -656,10 +656,13 @@ Drafts are local. They are journalled to the repository's own storage under the
 app's data directory — GitHub has no "pending comments" resource to hold them —
 and are re-read when the workspace opens, so navigating away to another pull
 request and back does not lose them. A draft record carries the whole comparison
-it was written at, so drafts from a superseded revision are shown as stale
-instead of being re-anchored onto a diff nobody was looking at. A draft is drawn
-with a dashed rule and a "pending" label, and never looks like something already
-sent.
+it was written at, plus the repository and the signed-in account it belongs to:
+the journal is shared by every worktree of a repository, so the record rather
+than the file is the boundary, and drafts written for another repository or by
+another account are never offered for submission. A draft from a superseded
+revision is shown as stale instead of being re-anchored onto a diff nobody was
+looking at. A draft is drawn with a dashed rule and a "pending" label, and never
+looks like something already sent.
 
 Submitting writes every pending draft as **one** review: GitHub's
 `POST /pulls/{number}/reviews` takes a single `comments` array, so several
@@ -675,13 +678,34 @@ Anchors are revalidated in the main process immediately before the write, not
 from what the renderer happened to be holding. A force-push since the draft was
 written produces **zero** mutation rather than a best guess: the drafts that can
 no longer be placed are reported individually with the reason, and nothing is
-posted to a line or a revision the reviewer did not name. There is no blind
-replay — a submission that failed after the request left is not retried
-automatically, because a duplicate review is a comment the reviewer never wrote.
+posted to a line or a revision the reviewer did not name. One stale draft holds
+the whole review rather than being left out of it, so a submit never succeeds
+with a comment quietly dropped.
+
+The comparison the diff was rendered from travels with the submission and is
+checked against a fresh read before the anchors are resolved. A comment whose
+text still matches after a force-push has usually just moved, and adopting that
+would approve a revision nobody opened, so a changed head, base, or base branch
+refuses the review outright and names the commit to look at instead.
+
+There is no blind replay. A submission that failed after the request left is not
+retried automatically, because a duplicate review is a comment the reviewer never
+wrote — and an error message is not enough to prevent one, since it vanishes on
+reload and hands the same words back to a live button. The attempt is journalled
+instead, and the next identical write is refused until GitHub's own state has
+been read. Changing the wording clears the block; pressing Submit again with the
+same words does not. Replies are guarded the same way, and the record is scoped
+by account as well as by pull request, so one account's unresolved write never
+blocks another's review.
 
 Threads are read through GraphQL, which is the only source for a thread's
 replies, resolved state, and per-comment outdated state; the REST comments
 endpoint cannot see any of it. Reply, resolve, and unresolve round-trip through
-GraphQL mutations. The read is bounded and paged like every other read in the
-app, and resolved and outdated threads are shown as such rather than hidden.
+GraphQL mutations. Each thread's own comment pages are followed as well as the
+outer thread pages, and a thread whose replies run past the bound says so rather
+than showing a partial conversation as the whole one. Resolved and outdated are
+independent facts and both appear. Files and threads are read separately, so
+their revisions are compared before a thread is allowed to jump to a line or
+compose a comment; a mismatch is shown with a reload rather than resolved by
+guessing.
 

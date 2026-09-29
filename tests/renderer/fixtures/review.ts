@@ -288,6 +288,8 @@ export function reviewThreadSet(
         viewerCanReply: true,
         viewerCanResolve: true,
         viewerCanUnresolve: true,
+        commentCount: 2,
+        commentsTruncated: false,
         comments: [
           {
             id: 'IC_1',
@@ -321,6 +323,8 @@ export function reviewThreadSet(
         viewerCanReply: true,
         viewerCanResolve: false,
         viewerCanUnresolve: true,
+        commentCount: 1,
+        commentsTruncated: false,
         comments: [
           {
             id: 'IC_3',

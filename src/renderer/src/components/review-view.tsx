@@ -42,6 +42,7 @@ import { checkLabel, checksVariant, reviewLabel, reviewVariant } from '../lib/pu
 import { createRequestGate } from '../lib/request-gate'
 import { cn } from '../lib/utils'
 import { ReviewConversation, type ReviewSelection } from './review-conversation'
+import { sameReviewComparison } from '../../../shared/review'
 import { withReviewDraft } from '../../../shared/review-threads'
 import type {
   ReviewDraft,
@@ -255,8 +256,14 @@ export function ReviewView({
       // not yet read there is no comparison to bind them to, so nothing is
       // journalled rather than journalled against an identity nobody can check.
       if (!headline || !files) return
+      // The repository and the account are left empty on purpose: the main
+      // process stamps both from Git and GitHub, which are the only sources that
+      // can be trusted to name them. A renderer-supplied owner would let a
+      // record be filed under somebody else's account.
       const record: ReviewDraftRecord = {
         number: headline.pullRequest.number,
+        repo: '',
+        viewer: '',
         comparison: files.comparison,
         drafts,
         updatedAt: new Date().toISOString(),
@@ -273,10 +280,39 @@ export function ReviewView({
     [desktop, files, headline],
   )
 
-  const selectLines = React.useCallback((next: ReviewSelection) => {
-    setSelection(next)
-    setSelectedPath(next.path)
-  }, [])
+  /**
+   * Whether the threads on screen were read at the same revision as the diff.
+   *
+   * Files and threads are two independent reads, each pinned to its own
+   * comparison, and a force-push between them lets both succeed while
+   * describing different revisions. A thread's `line` is an address in the diff
+   * it was read at, so "show in diff" and "comment here" would navigate to a
+   * line of a revision that is no longer the one on screen. Rather than compose
+   * a comment onto whatever happens to sit at that number, the two are compared
+   * and the mismatch is shown with a way back to a single truth.
+   */
+  const threadsDisagree =
+    files !== null &&
+    threadRead !== null &&
+    !sameReviewComparison(files.comparison, threadRead.threads.comparison)
+
+  // Composition follows the diff the reviewer is reading, and a thread from a
+  // different revision is not allowed to steer it.
+  const selectLines = React.useCallback(
+    (next: ReviewSelection) => {
+      setSelection(next)
+      setSelectedPath(next.path)
+    },
+    [],
+  )
+
+  const selectThreadLine = React.useCallback(
+    (next: ReviewSelection) => {
+      if (threadsDisagree) return
+      selectLines(next)
+    },
+    [selectLines, threadsDisagree],
+  )
 
   React.useEffect(() => {
     if (!headline || desktop?.reviewCommits === undefined) return
@@ -681,6 +717,27 @@ export function ReviewView({
               number={headline.pullRequest.number}
             />
 
+            {threadsDisagree ? (
+              <InlineAlert
+                className="review-comparison-alert"
+                role="status"
+                tone="warning"
+              >
+                The conversation was read at{' '}
+                {shortOid(threadRead?.threads.comparison.headOid ?? null)}, but the diff on
+                screen is {shortOid(files?.comparison.headOid ?? null)}. Reload to read both at
+                the same revision; until then a thread's line cannot be shown or commented on.
+                <Button
+                  className="review-comparison-reload"
+                  size="sm"
+                  variant="secondary"
+                  onClick={() => setReloadToken((value) => value + 1)}
+                >
+                  Reload
+                </Button>
+              </InlineAlert>
+            ) : null}
+
             <ReviewConversation
               desktop={desktop}
               number={headline.pullRequest.number}
@@ -694,7 +751,7 @@ export function ReviewView({
               onClearSelection={() => setSelection(null)}
               onDraftChange={saveDrafts}
               onReload={() => setReloadToken((value) => value + 1)}
-              onSelect={selectLines}
+              onSelect={selectThreadLine}
             />
           </div>
         </>
@@ -896,4 +953,9 @@ function ReviewCommits({
       </ul>
     </section>
   )
+}
+
+/** A commit named the way a reviewer would say it aloud, or "an unknown commit". */
+function shortOid(oid: string | null): string {
+  return oid === null || oid === '' ? 'an unknown commit' : oid.slice(0, 7)
 }

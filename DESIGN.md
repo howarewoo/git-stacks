@@ -421,15 +421,67 @@ force-push since the draft was taken means some anchors name a revision that no
 longer exists, and the result is **no mutation at all** plus a per-draft reason —
 never a comment that landed on a neighbouring line or on a different revision
 than the one reviewed. Silence about a dropped comment is indistinguishable from
-success; an explicit stale report is the only safe outcome. A write whose
-response is lost is not replayed automatically, because the replay's most likely
-outcome is a duplicate review carrying a comment the reviewer never wrote twice.
+success; an explicit stale report is the only safe outcome.
+
+A surviving anchor is not evidence that the reviewer agreed to a new revision. A
+comment's text often still matches after a force-push, having merely moved to a
+different line, and adopting that silently would approve a commit nobody opened.
+The comparison the diff was rendered from therefore travels with the submission
+and is checked against a fresh read **before** the anchors are resolved; a
+mismatch on the head, the base, or the base branch name refuses the whole review
+and names the revision to look at. Approving is the case this protects most, but
+the refusal applies to every decision.
+
+A write whose response is lost is not replayed automatically, because the replay's
+most likely outcome is a duplicate review carrying a comment the reviewer never
+wrote twice. An error message alone does not enforce that: it disappears on
+reload and hands the same words back to a live button. So the attempt itself is
+journalled beside the repository, keyed by its words and its head, and the next
+identical write is refused until GitHub's own state has been read. A reviewer who
+changes the wording after an uncertain outcome is not blocked — they have plainly
+abandoned that attempt — while pressing Submit again with the same words is.
+Replies are guarded the same way, because a repeated reply is a second comment.
+That record holds the reviewer's own words, so it is scoped by account as well as
+by pull request: the journal is shared by every worktree of a repository, and one
+account's unresolved attempt must not hold a different account's button shut.
 
 Thread topology, replies, and resolved and outdated state come from GraphQL,
 which is the only place that knows them; REST review comments are flat and cannot
 report a resolved thread. Resolved threads stay visible and marked rather than
 disappearing, because a reviewer coming back to a thread needs to see it was
-resolved rather than assume it was deleted.
+resolved rather than assume it was deleted. Resolved and outdated are independent
+facts and both are shown: a later push can produce a thread that is both, and
+collapsing them to one word would hide a conversation nobody has answered.
+
+A thread's comments are a connection **inside** the thread, so exhausting the
+outer page of threads says nothing about whether a long conversation was read
+whole. Each thread's later comment pages are followed, bounded like every other
+read, and a thread that runs past the bound says so instead of presenting a
+partial reply history as the whole one. That matters beyond display: a
+lost-write reconciliation looks for the posted reply in exactly these pages, so
+reading only the first is what makes a successful reply look lost.
+
+Files and threads are read independently, and each is pinned to its own
+comparison. Both can succeed while describing different revisions, so the two are
+compared before a thread is allowed to steer anything: a thread's line number is
+an address in the diff it was read at, and following it into a newer diff would
+compose a comment onto whatever now sits at that number. A mismatch is shown with
+a reload, not resolved by picking a side.
+
+Pending drafts are journalled in the repository's Git directory, so they follow
+the repository across worktrees and workspaces. That makes the file a shared
+resource and not a boundary: the **record** carries the repository and the signed-in
+account, and lookup, replacement, and clearing are all scoped by them. A pull
+request number is only unique inside one repository, and a draft is one person's
+unsent words — so a record belonging to another repository, or to another
+account, stays on disk and is not offered. The owner is stamped by the main
+process from Git and GitHub, never taken from the caller's payload.
+
+The permissions query asks for `viewer` at the query root. GitHub's schema has no
+`Repository.viewer`, and a selection that nests it there fails the whole query
+with `undefinedField` before any review is written — which is exactly the kind of
+error a fixture double accepts happily and a live server rejects. Query shapes
+are therefore checked against the live schema, not only against fixtures.
 
 The four review commands — next file, previous file, next layer, previous layer — are remappable like every other command and are dispatched by the shell through a ref the view publishes. The view registers no key listener of its own, so two surfaces never compete for the same keystroke.
 

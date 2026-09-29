@@ -26,10 +26,16 @@ import {
 } from './stacks'
 import { previewReconciliationRepair } from './reconciliation'
 import { getPullRequestIssueLinks, previewIssueLink, searchGitHubIssues } from './issue-links'
-import { readReviewCommits, readReviewFiles, readReviewHeadline } from './review'
+import {
+  originRemote,
+  readReviewCommits,
+  readReviewFiles,
+  readReviewHeadline,
+} from './review'
 import { readViewedRecord, writeViewedRecord } from './review-viewed'
 import { readReviewDrafts, writeReviewDrafts } from './review-drafts'
 import {
+  readReviewPermissions,
   readReviewThreads,
   replyToThread,
   resolveReviewDraftsAt,
@@ -387,8 +393,20 @@ function requireDraftRecord(value: unknown): ReviewDraftRecord {
   ) {
     throw new Error('Invalid review draft record.')
   }
+  // The repository and the account own the record, and the journal is shared
+  // across repositories and accounts, so both are required rather than
+  // defaulted. Defaulting them would let a record from elsewhere in the file be
+  // claimed by whichever pull request happens to be open.
+  if (typeof record.repo !== 'string' || record.repo === '' || record.repo.length > 512) {
+    throw new Error('Invalid review draft record.')
+  }
+  if (typeof record.viewer !== 'string' || record.viewer.length > 128) {
+    throw new Error('Invalid review draft record.')
+  }
   return {
     number: record.number,
+    repo: record.repo,
+    viewer: record.viewer,
     // The whole comparison, because a draft's line numbers mean nothing outside
     // the diff they were read from.
     comparison: requireComparison(record.comparison),
@@ -411,7 +429,18 @@ function requireSubmission(value: unknown): ReviewSubmission {
   if (!Array.isArray(submission.drafts) || submission.drafts.length > 200) {
     throw new Error('Invalid review submission.')
   }
-  return { event: event as ReviewEvent, body: submission.body, drafts: submission.drafts.map(requireDraft) }
+  if (typeof submission.comparison !== 'object' || submission.comparison === null) {
+    throw new Error('Invalid review submission.')
+  }
+  return {
+    event: event as ReviewEvent,
+    body: submission.body,
+    drafts: submission.drafts.map(requireDraft),
+    // The comparison the diff was rendered from. Without it the backend cannot
+    // tell a review of what the reviewer read from a review of whatever the head
+    // has become, so it is required rather than assumed.
+    comparison: requireComparison(submission.comparison),
+  }
 }
 
 function requireThreadId(value: unknown): string {
@@ -672,15 +701,38 @@ function installHandlers() {
   })
   ipcMain.handle('repository:review-drafts', (event, number: unknown) => {
     validateSender(event)
-    return readRepository((root, signal) =>
-      readReviewDrafts(root, requirePullRequestNumber(number), signal),
-    )
+    return readRepository(async (root, signal) => {
+      const remote = await originRemote(root, signal)
+      // The journal is shared by every worktree of the repository, so the record
+      // is what says whose drafts these are. Reading them without naming the
+      // account and the repository would hand one account another's unsent
+      // words to submit.
+      const permissions = await readReviewPermissions(root, requirePullRequestNumber(number), signal)
+      return readReviewDrafts(
+        root,
+        `${remote.owner}/${remote.name}`,
+        permissions.viewer,
+        requirePullRequestNumber(number),
+        signal,
+      )
+    })
   })
   ipcMain.handle('repository:review-set-drafts', (event, value: unknown) => {
     validateSender(event)
-    return readRepository((root, signal) =>
-      writeReviewDrafts(root, requireDraftRecord(value), signal),
-    )
+    return readRepository(async (root, signal) => {
+      const incoming = requireDraftRecord(value)
+      const remote = await originRemote(root, signal)
+      // The repository and the account are stamped here, from the ones Git and
+      // GitHub name, rather than taken from the renderer. The renderer does not
+      // know either, and a record that adopted a caller-supplied owner would be
+      // exactly the record that could be planted under the wrong one.
+      const permissions = await readReviewPermissions(root, incoming.number, signal)
+      return writeReviewDrafts(
+        root,
+        { ...incoming, repo: `${remote.owner}/${remote.name}`, viewer: permissions.viewer },
+        signal,
+      )
+    })
   })
   ipcMain.handle('repository:review-submit', (event, number: unknown, value: unknown) => {
     validateSender(event)
@@ -698,6 +750,7 @@ function installHandlers() {
       return withGitRuntime(runtime, () =>
         replyToThread(
           repository(),
+          requirePullRequestNumber(number),
           requireThreadId(threadId),
           requireCommentBody(body),
         ),

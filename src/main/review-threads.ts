@@ -1,4 +1,6 @@
-import type { ReviewFileSet, ReviewSide } from '../shared/review'
+import { createHash } from 'node:crypto'
+
+import type { ReviewComparison, ReviewFileSet, ReviewSide } from '../shared/review'
 import type {
   ReviewDraft,
   ReviewDraftResolution,
@@ -9,10 +11,16 @@ import type {
   ReviewThread,
   ReviewThreadComment,
   ReviewThreadRead,
+  ReviewUncertainWrite,
   ReviewThreadSet,
 } from '../shared/review-threads'
 import { reviewDraftSpan, reviewDraftStart, REVIEW_EVENTS } from '../shared/review-threads'
 import { isRecord, type ParsedRemote } from './git-core'
+import {
+  clearUncertainWrite,
+  readUncertainWrites,
+  recordUncertainWrite,
+} from './review-drafts'
 import { GitHubTransportError, githubTransport } from './github-transport'
 import {
   originRemote,
@@ -33,6 +41,18 @@ const REVIEW_THREAD_PAGE_SIZE = 50
  */
 const REVIEW_THREAD_PAGE_LIMIT = 20
 
+/**
+ * Ceiling on the extra pages fetched for one thread whose conversation runs past
+ * the first page. GitHub groups a thread's comments in their own connection, so
+ * paging only the outer connection leaves the tail of a long thread unseen — and
+ * unseen replies are exactly what a lost-write reconciliation has to find.
+ */
+const REVIEW_COMMENT_PAGE_SIZE = 50
+const REVIEW_COMMENT_PAGE_LIMIT = 20
+
+/** How many threads may be followed for their later comment pages in one read. */
+const REVIEW_COMMENT_FOLLOW_LIMIT = 20
+
 const EVENT_NAMES: Record<ReviewEvent, string> = {
   COMMENT: 'COMMENT',
   APPROVE: 'APPROVE',
@@ -52,8 +72,9 @@ const THREAD_FIELDS = `id
         viewerCanReply
         viewerCanResolve
         viewerCanUnresolve
-        comments(first: 50) {
+        comments(first: ${REVIEW_COMMENT_PAGE_SIZE}) {
           totalCount
+          pageInfo { hasNextPage endCursor }
           nodes { id body createdAt url viewerDidAuthor author { login } }
         }`
 
@@ -72,10 +93,19 @@ const THREADS_QUERY = `query ReviewThreads($owner: String!, $name: String!, $num
   }
 }`
 
+/**
+ * The signed-in account, and what it may do here.
+ *
+ * `viewer` is a field of the query root, not of `Repository`: GitHub's schema
+ * has no `Repository.viewer`, and asking for one fails the whole query with
+ * `undefinedField` before any review is written. Every reader of permissions
+ * goes through this one, so the shape is asserted against the live schema
+ * rather than only against fixtures that would have accepted the mistake.
+ */
 const PERMISSIONS_QUERY = `query ReviewPermissions($owner: String!, $name: String!, $number: Int!) {
+  viewer { login }
   repository(owner: $owner, name: $name) {
     viewerPermission
-    viewer { login }
     pullRequest(number: $number) { state viewerDidAuthor }
   }
 }`
@@ -100,10 +130,21 @@ const UNRESOLVE_MUTATION = `mutation UnresolveReviewThread($threadId: ID!) {
   }
 }`
 
-const THREAD_COMMENTS_QUERY = `query ReviewThreadComments($threadId: ID!) {
+/**
+ * The later pages of one thread's comments. A thread owns a connection of its
+ * own with its own cursor, so the tail of a long conversation is reached by
+ * asking for that thread's node again rather than by re-reading the outer list.
+ * Reading only the first page is what hides a reply the reviewer just sent, and
+ * what makes a lost write impossible to reconcile.
+ */
+const THREAD_COMMENTS_QUERY = `query ReviewThreadComments($threadId: ID!, $after: String) {
   node(id: $threadId) {
     ... on PullRequestReviewThread {
-      comments(first: 50) { nodes { id body url } }
+      comments(first: ${REVIEW_COMMENT_PAGE_SIZE}, after: $after) {
+        totalCount
+        pageInfo { hasNextPage endCursor }
+        nodes { id body createdAt url viewerDidAuthor author { login } }
+      }
     }
   }
 }`
@@ -131,6 +172,62 @@ export class ReviewAnchorStaleError extends Error {
     )
     this.name = 'ReviewAnchorStaleError'
     this.resolutions = resolutions
+  }
+}
+
+/**
+ * Raised when the pull request moved out from under the review being submitted.
+ *
+ * Anchors that survive a force-push are not evidence the reviewer agreed to the
+ * new revision: text often matches at a new line, and the review would then be
+ * pinned to a commit that was never on screen. Approving that revision is the
+ * worst case, so the refusal is about the comparison itself rather than about
+ * any one comment, and it names the revision to look at before trying again.
+ */
+export class ReviewComparisonMovedError extends Error {
+  readonly reviewed: ReviewComparison
+  readonly current: ReviewComparison
+
+  constructor(number: number, reviewed: ReviewComparison, current: ReviewComparison) {
+    super(
+      `Nothing was sent for #${number}: this pull request changed since you read the diff` +
+        `${shortOid(reviewed.headOid)} to ${shortOid(current.headOid)}. Reload to read the new revision, then review what is there.`,
+    )
+    this.name = 'ReviewComparisonMovedError'
+    this.reviewed = reviewed
+    this.current = current
+  }
+}
+
+/** A commit named the way a reviewer would say it aloud, or "an unknown commit". */
+function shortOid(oid: string | null): string {
+  return oid === null || oid === '' ? 'an unknown commit' : oid.slice(0, 7)
+}
+
+/**
+ * Raised when the same write is attempted again while its last outcome is
+ * unknown.
+ *
+ * The message is the second half of the guard; the first half is the
+ * journalled attempt, which is what stops the button after a reload. Nothing is
+ * sent in this state, so the reviewer's words are still theirs to re-send after
+ * they have seen what GitHub holds.
+ */
+export class ReviewWriteUncertainError extends Error {
+  readonly write: ReviewUncertainWrite
+
+  constructor(write: ReviewUncertainWrite) {
+    const what =
+      write.kind === 'review'
+        ? 'This review'
+        : write.kind === 'reply'
+          ? 'This reply'
+          : 'This resolution'
+    super(
+      `${what} was sent but Git Stacks never heard back, so it is not sent again automatically. Reload the pull request to see whether GitHub recorded it, then submit once more if it did not.`,
+    )
+    this.name = 'ReviewWriteUncertainError'
+    this.write = write
   }
 }
 
@@ -203,7 +300,21 @@ function parseThreadComment(value: unknown): ReviewThreadComment | null {
   }
 }
 
-function parseThread(value: unknown): ReviewThread | null {
+/**
+ * One thread, plus the cursor its own comment connection ended on.
+ *
+ * A thread's comments are a connection inside the thread, so paging the outer
+ * list says nothing about whether a long conversation was read whole. The
+ * cursor is taken from the connection GitHub actually sent rather than derived
+ * from a node id, because GitHub's cursors are opaque.
+ */
+interface ParsedThread {
+  thread: ReviewThread
+  commentCursor: string | null
+  commentTotal: number
+}
+
+function parseThread(value: unknown): ParsedThread | null {
   if (!isRecord(value) || typeof value.id !== 'string' || typeof value.path !== 'string') {
     return null
   }
@@ -213,21 +324,36 @@ function parseThread(value: unknown): ReviewThread | null {
         .map(parseThreadComment)
         .filter((entry): entry is ReviewThreadComment => entry !== null)
     : []
+  const total =
+    connection && typeof connection.totalCount === 'number'
+      ? connection.totalCount
+      : comments.length
+  const pageInfo = connection && isRecord(connection.pageInfo) ? connection.pageInfo : null
+  const cursor =
+    pageInfo && pageInfo.hasNextPage === true && typeof pageInfo.endCursor === 'string'
+      ? pageInfo.endCursor
+      : null
   return {
-    id: value.id,
-    path: value.path,
-    side: sideOf(value.diffSide),
-    line: typeof value.line === 'number' ? value.line : null,
-    startLine: typeof value.startLine === 'number' ? value.startLine : null,
-    startSide: sideOf(value.startDiffSide),
-    fileLevel: value.subjectType === 'FILE',
-    resolved: value.isResolved === true,
-    collapsed: value.isCollapsed === true,
-    outdated: value.isOutdated === true,
-    viewerCanReply: value.viewerCanReply === true,
-    viewerCanResolve: value.viewerCanResolve === true,
-    viewerCanUnresolve: value.viewerCanUnresolve === true,
-    comments,
+    thread: {
+      id: value.id,
+      path: value.path,
+      side: sideOf(value.diffSide),
+      line: typeof value.line === 'number' ? value.line : null,
+      startLine: typeof value.startLine === 'number' ? value.startLine : null,
+      startSide: sideOf(value.startDiffSide),
+      fileLevel: value.subjectType === 'FILE',
+      resolved: value.isResolved === true,
+      collapsed: value.isCollapsed === true,
+      outdated: value.isOutdated === true,
+      viewerCanReply: value.viewerCanReply === true,
+      viewerCanResolve: value.viewerCanResolve === true,
+      viewerCanUnresolve: value.viewerCanUnresolve === true,
+      comments,
+      commentCount: total,
+      commentsTruncated: cursor !== null,
+    },
+    commentCursor: cursor,
+    commentTotal: total,
   }
 }
 
@@ -280,6 +406,9 @@ export async function readReviewThreads(
   const remote = await originRemote(repoPath, signal)
   const { comparison: before } = await readReviewIdentity(remote, number, signal)
   const threads: ReviewThread[] = []
+  // Threads whose own comment connection still had another page, followed once
+  // the outer pages are done.
+  const continued: Array<{ thread: ReviewThread; cursor: string; total: number }> = []
   let totalCount = 0
   let permission = 'UNKNOWN'
   let isAuthor = false
@@ -319,8 +448,16 @@ export async function readReviewThreads(
     if (!connection) break
     if (typeof connection.totalCount === 'number') totalCount = connection.totalCount
     for (const node of Array.isArray(connection.nodes) ? connection.nodes : []) {
-      const thread = parseThread(node)
-      if (thread) threads.push(thread)
+      const parsed = parseThread(node)
+      if (!parsed) continue
+      threads.push(parsed.thread)
+      if (parsed.commentCursor !== null) {
+        continued.push({
+          thread: parsed.thread,
+          cursor: parsed.commentCursor,
+          total: parsed.commentTotal,
+        })
+      }
     }
     const pageInfo: Record<string, unknown> | null = isRecord(connection.pageInfo)
       ? connection.pageInfo
@@ -335,6 +472,25 @@ export async function readReviewThreads(
       after = hasNext ? cursor : null
     }
   } while (after !== null)
+
+  // A thread's comments are a connection of their own, with their own cursor, so
+  // the outer pages being exhausted says nothing about whether a long
+  // conversation was read whole. These are followed here, bounded like the
+  // outer read: past the ceiling the thread keeps its truncation mark, which is
+  // what stops a partial reply history from being drawn as the whole one.
+  for (const pending of continued.slice(0, REVIEW_COMMENT_FOLLOW_LIMIT)) {
+    let cursor: string | null = pending.cursor
+    let commentPage = 0
+    while (cursor !== null && commentPage < REVIEW_COMMENT_PAGE_LIMIT) {
+      const more: { comments: ReviewThreadComment[]; cursor: string | null } =
+        await readThreadCommentPage(remote, pending.thread.id, cursor, signal)
+      pending.thread.comments.push(...more.comments)
+      cursor = more.cursor
+      commentPage += 1
+    }
+    pending.thread.commentCount = pending.total
+    pending.thread.commentsTruncated = pending.thread.comments.length < pending.total
+  }
 
   const { comparison: confirmed } = await readReviewIdentity(remote, number, signal)
   if (
@@ -379,7 +535,7 @@ export async function readReviewPermissions(
   const raw = pullRequest.state
   const state: 'OPEN' | 'CLOSED' | 'MERGED' =
     raw === 'CLOSED' || raw === 'MERGED' || raw === 'OPEN' ? raw : 'OPEN'
-  const viewer = isRecord(repository?.viewer) ? repository?.viewer.login : null
+  const viewer = isRecord(data.viewer) ? data.viewer.login : null
   const permissions = reviewPermissions(
     typeof repository?.viewerPermission === 'string' ? repository.viewerPermission : 'UNKNOWN',
     pullRequest.viewerDidAuthor === true,
@@ -530,6 +686,13 @@ export async function submitReview(
   const blocked = permissions.blocked[submission.event]
   if (blocked) throw new Error(blocked)
 
+  // A previous attempt whose result never arrived blocks this one, whatever the
+  // words say. Re-sending because the network looked idle is how a review gets
+  // posted twice, and the record survives a reload, so the guard is still here
+  // after the workspace reopens.
+  const pending = await pendingReviewWrite(repoPath, number, permissions.viewer, submission, signal)
+  if (pending) throw new ReviewWriteUncertainError(pending)
+
   const sendable = submission.drafts.filter((draft) => draft.body.trim() !== '')
   if (sendable.length === 0) throw new Error('Write at least one comment before submitting.')
   if (submission.event === 'REQUEST_CHANGES' && submission.body.trim() === '') {
@@ -542,6 +705,17 @@ export async function submitReview(
       `The head of #${number} could not be read, so a review cannot be pinned to a commit. Reload the pull request.`,
     )
   }
+  // The comparison the reviewer was shown, not one inferred from what still
+  // matches. This is checked before the anchors are resolved on purpose: a
+  // comment can survive a force-push by landing on the same text at a new line,
+  // and adopting that silently would approve a revision nobody opened.
+  if (
+    submission.comparison.headOid !== files.comparison.headOid ||
+    submission.comparison.baseOid !== files.comparison.baseOid ||
+    submission.comparison.baseRef !== files.comparison.baseRef
+  ) {
+    throw new ReviewComparisonMovedError(number, submission.comparison, files.comparison)
+  }
   const resolutions = resolveReviewDrafts(files, sendable)
   if (resolutions.some((entry) => entry.match === 'unresolved')) {
     throw new ReviewAnchorStaleError(number, resolutions)
@@ -551,6 +725,7 @@ export async function submitReview(
   const comments = sendable.map((draft) =>
     wireComment(byId.get(draft.id)!, draft, reviewDraftStart(draft).path),
   )
+  const attempt = reviewAttemptId(submission, files.comparison.headOid)
 
   try {
     const response = await githubTransport().rest<unknown>({
@@ -565,15 +740,86 @@ export async function submitReview(
       signal,
     })
     const record = isRecord(response.data) ? response.data : {}
+    // GitHub answered, so whatever the status word is, this attempt is settled
+    // and the next one is allowed to proceed.
+    await clearUncertainWrite(repoPath, number, permissions.viewer, attempt, signal)
     return {
       id: typeof record.id === 'string' ? record.id : '',
       state: typeof record.state === 'string' ? record.state : '',
       url: typeof record.html_url === 'string' ? record.html_url : null,
     }
   } catch (error) {
-    if (outcomeUnknown(error)) throw new ReviewOutcomeUnknownError(transportDetail(error))
+    if (outcomeUnknown(error)) {
+      // The attempt is journalled as it is raised, so the guard outlives this
+      // call, the message, and the process.
+      await recordUncertainWrite(
+        repoPath,
+        {
+          id: attempt,
+          number,
+          kind: 'review',
+          summary: reviewAttemptSummary(submission),
+          threadId: null,
+          headOid: files.comparison.headOid,
+          event: submission.event,
+          at: new Date().toISOString(),
+          viewer: permissions.viewer,
+        },
+        signal,
+      )
+      throw new ReviewOutcomeUnknownError(transportDetail(error))
+    }
+    await clearUncertainWrite(repoPath, number, permissions.viewer, attempt, signal)
     throw error
   }
+}
+
+/** The words that would let a reconciliation recognise this review on GitHub. */
+function reviewAttemptSummary(submission: ReviewSubmission): string {
+  const bodies = submission.drafts
+    .map((draft) => draft.body.trim())
+    .filter((body) => body !== '')
+    .join(' ')
+  return `${submission.event} ${submission.body.trim()} ${bodies}`
+}
+
+/**
+ * One identifier for one review attempt, so the record and the check that guards
+ * it are about the same write. The words and the revision are both in it: a
+ * different summary is a different review, and the same words against a new
+ * head are a review of something the reviewer has not read.
+ */
+function reviewAttemptId(submission: ReviewSubmission, headOid: string | null): string {
+  return shortHash(`${headOid ?? ''} ${reviewAttemptSummary(submission)}`)
+}
+
+/** A stable short identifier for a write, so the guard can name it across reloads. */
+function shortHash(value: string): string {
+  return createHash('sha256').update(value, 'utf8').digest('hex').slice(0, 16)
+}
+
+/**
+ * The unresolved review attempt this submission would repeat, or null.
+ *
+ * It is matched on the words and the revision rather than on the whole record,
+ * so a reviewer who changes their summary after an uncertain outcome is not
+ * blocked by an attempt they have plainly abandoned, and one who presses Submit
+ * again with the same words is.
+ */
+async function pendingReviewWrite(
+  repoPath: string,
+  number: number,
+  viewer: string,
+  submission: ReviewSubmission,
+  signal?: AbortSignal,
+): Promise<ReviewUncertainWrite | null> {
+  const writes = await readUncertainWrites(repoPath, number, viewer, signal)
+  const wanted = reviewAttemptSummary(submission)
+  return (
+    writes.find(
+      (entry) => entry.kind === 'review' && entry.summary === wanted,
+    ) ?? null
+  )
 }
 
 async function readReviewPermissionsFrom(
@@ -592,7 +838,7 @@ async function readReviewPermissionsFrom(
   const raw = pullRequest.state
   const state: 'OPEN' | 'CLOSED' | 'MERGED' =
     raw === 'CLOSED' || raw === 'MERGED' || raw === 'OPEN' ? raw : 'OPEN'
-  const login = isRecord(repository?.viewer) ? repository?.viewer.login : null
+  const login = isRecord(data.viewer) ? data.viewer.login : null
   const permissions = reviewPermissions(
     typeof repository?.viewerPermission === 'string' ? repository.viewerPermission : 'UNKNOWN',
     pullRequest.viewerDidAuthor === true,
@@ -615,13 +861,38 @@ async function readReviewPermissionsFrom(
  */
 export async function replyToThread(
   repoPath: string,
+  number: number,
   threadId: string,
   body: string,
   signal?: AbortSignal,
 ): Promise<ReviewMutationResult> {
   if (body.trim() === '') throw new Error('Write a reply before sending it.')
   const remote = await originRemote(repoPath, signal)
+  // The journal is per repository, so the account is read to scope the guard to
+  // whoever is actually replying: another account's unresolved reply must not
+  // block this one.
+  const permissions = await readReviewPermissionsFrom(remote, number, signal)
+  const attempt = shortHash(`reply ${threadId} ${body.trim()}`)
   const before = await readThreadCommentIds(remote, threadId, signal)
+
+  // A reply that was sent and never confirmed blocks the same reply, by the
+  // same thread and the same words. The record is on disk, so this still holds
+  // after the workspace is reopened.
+  const writes = await readUncertainWrites(repoPath, number, permissions.viewer, signal)
+  if (writes.some((entry) => entry.id === attempt)) {
+    throw new ReviewWriteUncertainError({
+      id: attempt,
+      number,
+      kind: 'reply',
+      summary: body.trim(),
+      threadId,
+      headOid: null,
+      event: null,
+      at: '',
+      viewer: permissions.viewer,
+    })
+  }
+
   try {
     const data = await githubTransport().graphql<Record<string, unknown>>(
       REPLY_MUTATION,
@@ -632,6 +903,7 @@ export async function replyToThread(
       ? data.addPullRequestReviewThreadReply
       : null
     const comment = payload && isRecord(payload.comment) ? payload.comment : null
+    await clearUncertainWrite(repoPath, number, permissions.viewer, attempt, signal)
     return {
       id: comment && typeof comment.id === 'string' ? comment.id : '',
       state: 'created',
@@ -645,7 +917,25 @@ export async function replyToThread(
     const landed = after.find(
       (entry) => !before.includes(entry.id) && entry.body.trim() === body.trim(),
     )
-    if (landed) return { id: landed.id, state: 'created', url: landed.url }
+    if (landed) {
+      await clearUncertainWrite(repoPath, number, permissions.viewer, attempt, signal)
+      return { id: landed.id, state: 'created', url: landed.url }
+    }
+    await recordUncertainWrite(
+      repoPath,
+      {
+        id: attempt,
+        number,
+        kind: 'reply',
+        summary: body.trim(),
+        threadId,
+        headOid: null,
+        event: null,
+        at: new Date().toISOString(),
+        viewer: permissions.viewer,
+      },
+      signal,
+    )
     throw new ReviewOutcomeUnknownError(transportDetail(error))
   }
 }
@@ -688,28 +978,59 @@ export async function setThreadResolved(
   }
 }
 
-async function readThreadComments(
+/** One page of a thread's comments, and the cursor the next page starts at. */
+async function readThreadCommentPage(
   remote: ParsedRemote,
   threadId: string,
+  after: string | null,
   signal?: AbortSignal,
-): Promise<Array<{ id: string; body: string; url: string }>> {
+): Promise<{ comments: ReviewThreadComment[]; cursor: string | null }> {
   const data = await githubTransport().graphql<Record<string, unknown>>(
     THREAD_COMMENTS_QUERY,
-    { threadId },
+    { threadId, after },
     { signal },
   )
   const node = isRecord(data.node) ? data.node : null
   const connection = node && isRecord(node.comments) ? node.comments : null
-  const comments: Array<{ id: string; body: string; url: string }> = []
-  for (const entry of connection && Array.isArray(connection.nodes) ? connection.nodes : []) {
-    if (!isRecord(entry) || typeof entry.id !== 'string') continue
-    comments.push({
-      id: entry.id,
-      body: typeof entry.body === 'string' ? entry.body : '',
-      url: typeof entry.url === 'string' ? entry.url : '',
-    })
-  }
-  return comments
+  const comments = (connection && Array.isArray(connection.nodes) ? connection.nodes : [])
+    .map(parseThreadComment)
+    .filter((entry): entry is ReviewThreadComment => entry !== null)
+  const pageInfo = connection && isRecord(connection.pageInfo) ? connection.pageInfo : null
+  const cursor =
+    pageInfo && pageInfo.hasNextPage === true && typeof pageInfo.endCursor === 'string'
+      ? pageInfo.endCursor
+      : null
+  return { comments, cursor }
+}
+
+/**
+ * Every comment of one thread, across its pages.
+ *
+ * Both callers depend on this being the whole conversation: the display must not
+ * end mid-thread, and a lost-write reconciliation has to be able to find a
+ * reply that landed on a later page. Reading one page and calling it the thread
+ * is what made a posted reply invisible to both.
+ */
+async function readThreadComments(
+  remote: ParsedRemote,
+  threadId: string,
+  signal?: AbortSignal,
+): Promise<ReviewThreadComment[]> {
+  const all: ReviewThreadComment[] = []
+  let cursor: string | null = null
+  let page = 0
+  do {
+    const { comments, cursor: next } = await readThreadCommentPage(
+      remote,
+      threadId,
+      cursor,
+      signal,
+    )
+    all.push(...comments)
+    cursor = next
+    page += 1
+  } while (cursor !== null && page < REVIEW_COMMENT_PAGE_LIMIT)
+  return all
 }
 
 async function readThreadCommentIds(
