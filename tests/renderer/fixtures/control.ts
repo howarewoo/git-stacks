@@ -1,12 +1,20 @@
 import type {
   ActionResult,
+  ConflictFile,
   DesktopAPI,
   GitAction,
+  GitRuntimeInfo,
+  GitRuntimeStatus,
   HistoryPage,
   PushPreview,
   StackKind,
   StackPreview,
 } from '../../../src/shared/types'
+import {
+  conflictLabels,
+  conflictRegions,
+  parseConflictSegments,
+} from '../../../src/shared/conflict'
 import {
   fileViewFixtures,
   historyCommits,
@@ -33,6 +41,33 @@ const stackPreviewsByKind: Record<StackKind, StackPreview> = {
   publish: publishPreview,
   merge: mergePreview,
 }
+
+const bundledRuntime: GitRuntimeInfo = {
+  source: 'bundled',
+  executable: '/Applications/Git Stacks.app/Contents/Resources/git/bin/git',
+  platform: 'darwin',
+  version: '2.51.0',
+  versionOutput: 'git version 2.51.0',
+  minimumVersion: '2.40.0',
+  meetsMinimum: true,
+  useSystemGit: false,
+  packaged: true,
+  capabilities: { referenceTransactions: true, rebaseUpdateRefs: true },
+  bundled: {
+    gitVersion: '2.51.0',
+    sha256: 'b'.repeat(64),
+    source: 'https://github.com/git/git/releases/download/v2.51.0/git-v2.51.0.tar.xz',
+  },
+  preservedEnvironment: ['GIT_EXEC_PATH', 'GIT_TEMPLATE_DIR'],
+  preservedConfiguration: [],
+}
+
+const runtimeStatus = (useSystemGit: boolean): GitRuntimeStatus => ({
+  runtime: { ...bundledRuntime, useSystemGit, source: useSystemGit ? 'system' : 'bundled' },
+  error: null,
+  minimumVersion: bundledRuntime.minimumVersion,
+  useSystemGit,
+})
 
 /** Deterministic status message per action, so success notices are screenshot-stable. */
 function actionMessage(action: GitAction): string {
@@ -93,8 +128,14 @@ function actionMessage(action: GitAction): string {
       return 'Aborted the operation and restored the previous state'
     case 'discardFile':
       return `Discarded unstaged changes in ${action.path}`
-    case 'resolveFile':
-      return `Staged the ${action.strategy} resolution for ${action.path}`
+    case 'resolveConflict':
+      return `Resolved and staged ${action.path}`
+    case 'stageHunk':
+      return `Staged the selected hunk in ${action.path}`
+    case 'unstageHunk':
+      return `Unstaged the selected hunk in ${action.path}`
+    case 'conflictMergeTool':
+      return `Opened the merge tool for ${action.path}`
     case 'setParent':
       return `Recorded ${action.branch} on ${action.parent}`
     case 'executeStack':
@@ -109,6 +150,12 @@ function actionMessage(action: GitAction): string {
       return `Closed pull request #${action.number}`
     case 'reopenPr':
       return `Reopened pull request #${action.number}`
+    case 'createNativeStack':
+      return `Stacked pull requests ${action.pullRequests.map((n) => `#${n}`).join(', ')}`
+    case 'addPullRequestsToNativeStack':
+      return `Added pull requests ${action.pullRequests.map((n) => `#${n}`).join(', ')} to stack #${action.stackNumber}`
+    case 'unstackNativeStack':
+      return `Removed pull requests from stack #${action.stackNumber}`
   }
 }
 
@@ -206,6 +253,44 @@ export function installFixtureControl(options: {
         return { ...(known ?? fileViewFixtures.bothSides), path }
       })
     },
+    conflictView: (path) => {
+      record('conflictView', [path])
+      return answer<ConflictFile>('conflictView', () => {
+        const view = fileViewFixtures.conflicted
+        if (
+          path !== view.path ||
+          view.content === null ||
+          !scenario.snapshot?.files.some((file) => file.path === path && file.conflicted)
+        ) {
+          throw new Error(`No conflict fixture exists for ${path}.`)
+        }
+        return {
+          path,
+          kind: 'content',
+          stages: [1, 2, 3],
+          stagePreviewTruncated: [],
+          binary: false,
+          labels: conflictLabels({
+            operation: scenario.snapshot.operation,
+            currentBranch: scenario.snapshot.currentBranch,
+            incomingSubject: null,
+            incomingRef: null,
+            stash: null,
+            stashAvailable: false,
+          }),
+          base: 'export const value = 0\n',
+          current: 'export const value = 1\n',
+          incoming: 'export const value = 2\n',
+          worktree: view.content,
+          worktreePresent: true,
+          regions: conflictRegions(parseConflictSegments(view.content)),
+          moves: [],
+          truncated: false,
+          fingerprint: view.fingerprint,
+          mergeTool: { available: false, tool: null, reason: 'No merge tool configured.' },
+        }
+      })
+    },
     history: (ref, skip) => {
       record('history', [ref, skip])
       return answer<HistoryPage>('history', () => {
@@ -247,6 +332,18 @@ export function installFixtureControl(options: {
       record('openExternal', [url])
       externalUrls.push(url)
       return answer('openExternal', () => undefined)
+    },
+    gitRuntimeStatus: () => {
+      record('gitRuntimeStatus', [])
+      return answer('gitRuntimeStatus', () => runtimeStatus(false))
+    },
+    setSystemGit: (enabled) => {
+      record('setSystemGit', [enabled])
+      return answer('setSystemGit', () => runtimeStatus(enabled))
+    },
+    cancel: (requestId) => {
+      record('cancel', [requestId])
+      return answer('cancel', () => undefined)
     },
   }
 

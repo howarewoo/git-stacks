@@ -39,10 +39,15 @@ import type {
   Branch,
   DesktopAPI,
   GitAction,
+  GitRuntimeStatus,
   PullRequest,
   RecentRepository,
   RepositorySnapshot,
 } from '../../shared/types'
+import { LIST_PAGE_SIZE } from '../../shared/performance'
+import { ListWindowMore } from './components/list-window'
+import { useListWindow } from './lib/list-window'
+import { createRequestGate } from './lib/request-gate'
 import { Badge } from './components/ui/badge'
 import { Button, IconButton } from './components/ui/button'
 import { Checkbox } from './components/ui/checkbox'
@@ -70,9 +75,12 @@ import {
 } from './lib/branches'
 import { WorkflowDialog, type WorkflowRequest } from './components/workflow-dialog'
 import { WorkspaceNavigation } from './components/workspace-navigation'
+import { ConflictResolver } from './components/conflict-resolver'
 import { HistoryView, OperationBanner, StackView } from './components/repository-views'
+import { GitRuntimeDialog } from './components/git-runtime-dialog'
 import {
   ChangesView,
+  DiagnosticsView,
   PullRequestListView,
   StashesView,
   changeGroups,
@@ -87,8 +95,31 @@ import {
   WorkflowFrame,
 } from './components/workflow-composition'
 import { CLOSE_INTENT_MESSAGES, closeIntent } from './components/workflow-policy'
+import {
+  actionBlockReason,
+  capabilityAttentionCount,
+  capabilityReport,
+  stashRemovalBlockReason,
+} from '../../shared/capabilities'
 
-type WorkspaceView = 'branches' | 'stacks' | 'history' | 'changes' | 'pullRequests' | 'stashes'
+type WorkspaceView =
+  'branches' | 'stacks' | 'history' | 'changes' | 'pullRequests' | 'stashes' | 'diagnostics'
+
+import { CommandPalette } from './components/command-palette'
+import { ShortcutSettings } from './components/shortcut-settings'
+import { DirtyCheckoutGuard } from './components/dirty-checkout-guard'
+import { buildPaletteItems, type PaletteItem } from './lib/command-palette'
+import {
+  ariaKeyShortcuts,
+  formatChord,
+  isComposingKeyEvent,
+  isEditableTarget,
+  isMacPlatform,
+  loadShortcuts,
+  matchesChord,
+  type ShortcutId,
+} from './lib/keyboard-shortcuts'
+import { resolveStackNavigation } from './lib/stack-navigation'
 type BranchFilter = 'all' | 'local' | 'remote' | 'prs'
 
 type BranchTreeInfo = {
@@ -262,20 +293,39 @@ function App() {
   const [commitMessage, setCommitMessage] = React.useState('')
   const [commitAmend, setCommitAmend] = React.useState(false)
   const [inspectedPath, setInspectedPath] = React.useState<string | null>(null)
+  const [conflictPath, setConflictPath] = React.useState<string | null>(null)
   const [workflow, setWorkflow] = React.useState<{
     id: number
     repoPath: string
     request: WorkflowRequest
   } | null>(null)
+  const [gitRuntimeOpen, setGitRuntimeOpen] = React.useState(false)
+  const [gitRuntimeStatus, setGitRuntimeStatus] = React.useState<GitRuntimeStatus | null>(null)
+  const [gitRuntimeBusy, setGitRuntimeBusy] = React.useState(false)
   const workflowSequence = React.useRef(0)
 
+  const [paletteOpen, setPaletteOpen] = React.useState(false)
+  const [shortcutSettingsOpen, setShortcutSettingsOpen] = React.useState(false)
+  const [shortcutBindings, setShortcutBindings] = React.useState<Record<ShortcutId, string>>(() =>
+    loadShortcuts(),
+  )
+  const [checkoutGuardTarget, setCheckoutGuardTarget] = React.useState<{
+    ref: string
+    name: string
+  } | null>(null)
+  const isMac = React.useMemo(() => isMacPlatform(), [])
   const [showDetails, setShowDetails] = React.useState(true)
-  const refreshSequence = React.useRef(0)
   const busyRef = React.useRef<string | null>(null)
   const openingRef = React.useRef(false)
   const searchRef = React.useRef<HTMLInputElement>(null)
   const deleteCancelRef = React.useRef<HTMLButtonElement>(null)
+  const paletteHandoffFocusRef = React.useRef<HTMLElement | null>(null)
+  const paletteDeleteHandoffRef = React.useRef(false)
   const deleteTriggerRef = React.useRef<HTMLButtonElement>(null)
+  // One gate covers every read that can paint the repository: an open, a
+  // refresh, or the snapshot either returns. Switching repositories resets it
+  // so no result computed for the previous repository is ever applied.
+  const repositoryGate = React.useRef(createRequestGate()).current
 
   const setSnapshotAndSelection = React.useCallback((next: RepositorySnapshot) => {
     setSnapshot(next)
@@ -288,21 +338,20 @@ function App() {
 
   const refreshSnapshot = React.useCallback(async (): Promise<RepositorySnapshot | null> => {
     if (!desktop) return null
-    const sequence = ++refreshSequence.current
+    const claim = repositoryGate.claim()
     setRefreshing(true)
     try {
       const next = await desktop.refresh()
-      if (sequence !== refreshSequence.current) return null
+      if (!repositoryGate.current(claim)) return null
       setSnapshotAndSelection(next)
-
       return next
     } catch (value) {
-      if (sequence === refreshSequence.current) setError(readableError(value))
+      if (repositoryGate.current(claim)) setError(readableError(value))
       return null
     } finally {
-      if (sequence === refreshSequence.current) setRefreshing(false)
+      if (repositoryGate.current(claim)) setRefreshing(false)
     }
-  }, [desktop, setSnapshotAndSelection])
+  }, [desktop, repositoryGate, setSnapshotAndSelection])
 
   React.useEffect(() => {
     let cancelled = false
@@ -331,28 +380,21 @@ function App() {
     }
   }, [desktop])
 
-  React.useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => {
-      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
-        event.preventDefault()
-        searchRef.current?.focus()
-      }
-    }
-    window.addEventListener('keydown', onKeyDown)
-    return () => window.removeEventListener('keydown', onKeyDown)
-  }, [])
-
   const openRepository = React.useCallback(
     async (path?: string) => {
       if (!desktop || openingRef.current || busyRef.current) return
       openingRef.current = true
+      // Resetting the gate before awaiting retires every in-flight refresh, so
+      // a snapshot taken from the previous repository cannot land here.
+      repositoryGate.reset()
+      const claim = repositoryGate.claim()
       setOpening(true)
       setError(null)
       setActionError(null)
       setNotice(null)
       try {
         const next = await desktop.openRepository(path)
-        if (next) {
+        if (next && repositoryGate.current(claim)) {
           setSnapshotAndSelection(next)
           setDeleteTarget(null)
           setWorkflow(null)
@@ -360,17 +402,44 @@ function App() {
           setCommitAmend(false)
           setCommitMessage('')
           setWorkspaceView('branches')
-          const repositories = await desktop.recentRepositories().catch(() => null)
-          if (repositories) setRecentRepositories(repositories)
         }
+        const repositories = await desktop.recentRepositories().catch(() => null)
+        if (repositories) setRecentRepositories(repositories)
+      } catch (value) {
+        if (repositoryGate.current(claim)) setError(readableError(value))
+      } finally {
+        if (repositoryGate.current(claim)) setOpening(false)
+        openingRef.current = false
+      }
+    },
+    [desktop, repositoryGate, setSnapshotAndSelection],
+  )
+
+  const isBusy = Boolean(busyAction || opening || refreshing)
+  const operationActive = Boolean(snapshot?.operation || snapshot?.stackOperation)
+
+  const openGitRuntime = React.useCallback(() => {
+    if (!desktop || isBusy || operationActive) return
+    setGitRuntimeOpen(true)
+    desktop
+      .gitRuntimeStatus()
+      .then(setGitRuntimeStatus)
+      .catch((value) => setError(readableError(value)))
+  }, [desktop, isBusy, operationActive])
+
+  const selectGitRuntime = React.useCallback(
+    async (useSystemGit: boolean) => {
+      if (!desktop || isBusy || operationActive) return
+      setGitRuntimeBusy(true)
+      try {
+        setGitRuntimeStatus(await desktop.setSystemGit(useSystemGit))
       } catch (value) {
         setError(readableError(value))
       } finally {
-        openingRef.current = false
-        setOpening(false)
+        setGitRuntimeBusy(false)
       }
     },
-    [desktop, setSnapshotAndSelection],
+    [desktop, isBusy, operationActive],
   )
 
   const runAction = React.useCallback(
@@ -474,25 +543,49 @@ function App() {
     () => getBranchTreeGeometry(visibleBranches, branchByName),
     [branchByName, visibleBranches],
   )
+  const branchWindow = useListWindow(visibleBranches, LIST_PAGE_SIZE)
 
   const changeState = React.useMemo(
     () => changeGroups(snapshot?.files ?? [], search),
     [snapshot, search],
   )
+  const visiblePullRequests = React.useMemo(
+    () => (snapshot?.pullRequests ?? []).filter((pr) => matchesPullRequest(pr, search)),
+    [search, snapshot],
+  )
   const stagedFiles = changeState.staged
   const conflictedFiles = changeState.conflicted
-  const isBusy = Boolean(busyAction || opening || refreshing)
   const currentBranch = snapshot?.currentBranch ?? null
   const allBranches = snapshot?.branches ?? []
   const branchCount = combinedBranches.length
   const pullRequestCount = snapshot?.pullRequests.length ?? 0
   const stashCount = snapshot?.stashes.length ?? 0
+  const capabilityAttention = React.useMemo(
+    () => (snapshot ? capabilityAttentionCount(capabilityReport(snapshot.capabilities)) : 0),
+    [snapshot],
+  )
   const detailsVisible = showDetails && (workspaceView === 'branches' || workspaceView === 'stacks')
-  const operationActive = Boolean(snapshot?.operation || snapshot?.stackOperation)
   const openWorkflow = (request: WorkflowRequest) => {
     if (!snapshot || isBusy) return
     setActionError(null)
     setWorkflow({ id: ++workflowSequence.current, repoPath: snapshot.path, request })
+  }
+  const shapeReason = React.useCallback(
+    (type: GitAction['type']) => {
+      if (!snapshot) return null
+      return (
+        actionBlockReason(snapshot.capabilities, type) ??
+        (type === 'stashPop' || type === 'stashDrop'
+          ? stashRemovalBlockReason(snapshot.capabilities)
+          : null)
+      )
+    },
+    [snapshot],
+  )
+  const openConflictResolver = (path: string) => {
+    if (!snapshot || isBusy) return
+    setActionError(null)
+    setConflictPath(path)
   }
   const deleteChildren = deleteTarget
     ? allBranches.filter(
@@ -641,6 +734,337 @@ function App() {
       await runAction(action, 'Commit staged changes')
     }
   }
+  const requestCheckoutBranch = React.useCallback(
+    async (ref: string, name: string) => {
+      if (!snapshot || isBusy || operationActive) return
+      setSelectedBranchRef(ref)
+
+      // Dirty-working-tree checkout routes through existing carry/stash/commit/cancel safeguards
+      if (snapshot.files.length > 0) {
+        setCheckoutGuardTarget({ ref, name })
+        return
+      }
+
+      await runAction({ type: 'switch', ref }, 'Switch branch')
+    },
+    [isBusy, operationActive, runAction, snapshot],
+  )
+  const carryCheckoutBranch = React.useCallback(() => {
+    if (!checkoutGuardTarget || !snapshot || isBusy || operationActive) return
+    const target = checkoutGuardTarget
+    setCheckoutGuardTarget(null)
+    void runAction(
+      { type: 'switch', ref: target.ref, carry: true },
+      'Carry changes and switch branch',
+    )
+  }, [checkoutGuardTarget, snapshot, isBusy, operationActive, runAction])
+
+  const paletteItems = React.useMemo(() => {
+    return buildPaletteItems({
+      snapshot,
+      selectedBranch,
+      recentRepositories,
+      isBusy,
+      operationActive,
+      shortcutMap: shortcutBindings,
+      isMac,
+    })
+  }, [
+    snapshot,
+    selectedBranch,
+    recentRepositories,
+    isBusy,
+    operationActive,
+    shortcutBindings,
+    isMac,
+  ])
+
+  const handlePaletteExecute = React.useCallback(
+    (item: PaletteItem, opener: HTMLElement | null) => {
+      const intent = item.intent
+      if (
+        intent.kind === 'newBranch' ||
+        intent.kind === 'createPr' ||
+        intent.kind === 'workflow' ||
+        intent.kind === 'deleteBranch' ||
+        intent.kind === 'openShortcutsSettings' ||
+        (intent.kind === 'checkoutBranch' && Boolean(snapshot?.files.length))
+      ) {
+        paletteHandoffFocusRef.current = opener
+        paletteDeleteHandoffRef.current = intent.kind === 'deleteBranch'
+      }
+      switch (intent.kind) {
+        case 'view':
+          setWorkspaceView(intent.view)
+          break
+        case 'refresh':
+          void refreshSnapshot()
+          break
+        case 'toggleDetails':
+          setShowDetails((prev) => !prev)
+          break
+        case 'openRepo':
+          void openRepository(intent.path)
+          break
+        case 'newBranch':
+          openBranchDialog()
+          break
+        case 'createPr':
+          openPrDialog()
+          break
+        case 'openPrUrl':
+          if (desktop) {
+            desktop.openExternal(intent.url).catch((err) => setError(readableError(err)))
+          }
+          break
+        case 'selectBranch':
+          setSelectedBranchRef(intent.ref)
+          break
+        case 'checkoutBranch':
+          void requestCheckoutBranch(intent.ref, intent.name)
+          break
+        case 'navigateStack': {
+          if (!snapshot) break
+          const target = resolveStackNavigation(selectedBranch, snapshot.branches, intent.relation)
+          if (target) {
+            setSelectedBranchRef(target.ref)
+          }
+          break
+        }
+        case 'workflow':
+          openWorkflow(intent.request)
+          break
+        case 'deleteBranch':
+          openDeleteDialog()
+          break
+        case 'action':
+          void runAction(intent.action, intent.label)
+          break
+        case 'openShortcutsSettings':
+          setShortcutSettingsOpen(true)
+          break
+      }
+    },
+    [
+      desktop,
+      openBranchDialog,
+      openDeleteDialog,
+      openPrDialog,
+      openRepository,
+      openWorkflow,
+      refreshSnapshot,
+      requestCheckoutBranch,
+      runAction,
+      selectedBranch,
+      snapshot,
+    ],
+  )
+
+  React.useEffect(() => {
+    if (
+      !paletteHandoffFocusRef.current ||
+      paletteDeleteHandoffRef.current ||
+      paletteOpen ||
+      shortcutSettingsOpen ||
+      checkoutGuardTarget ||
+      deleteTarget ||
+      newBranchOpen ||
+      prOpen ||
+      workflow
+    )
+      return
+    const target = paletteHandoffFocusRef.current
+    paletteHandoffFocusRef.current = null
+    const frame = requestAnimationFrame(() => {
+      if (target.isConnected && !('disabled' in target && target.disabled)) target.focus()
+      else searchRef.current?.focus()
+    })
+    return () => cancelAnimationFrame(frame)
+  }, [
+    paletteOpen,
+    shortcutSettingsOpen,
+    checkoutGuardTarget,
+    deleteTarget,
+    newBranchOpen,
+    prOpen,
+    workflow,
+  ])
+
+  React.useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      // A focused control that already handled the key owns it: the palette's
+      // search input consumes navigation and confirmation keys before this
+      // window listener sees the same bubbling event.
+      if (event.defaultPrevented) return
+      if (isComposingKeyEvent(event)) return
+
+      // If any modal dialog is currently open, don't execute global hotkeys underneath
+      const anyModalOpen =
+        paletteOpen ||
+        shortcutSettingsOpen ||
+        checkoutGuardTarget !== null ||
+        deleteTarget !== null ||
+        newBranchOpen ||
+        prOpen ||
+        workflow !== null
+
+      // A bare printable remap must not steal text from either search field.
+      // Modified openers such as Cmd/Ctrl+K still work while editing.
+      if (matchesChord(event, shortcutBindings['palette.open'], isMac)) {
+        if (anyModalOpen && !paletteOpen) return
+        if (
+          isEditableTarget(event.target) &&
+          event.key.length === 1 &&
+          !event.metaKey &&
+          !event.ctrlKey
+        )
+          return
+        event.preventDefault()
+        if (!event.repeat) setPaletteOpen((prev) => !prev)
+        return
+      }
+
+      if (anyModalOpen) return
+
+      // Search/filter fields keep their own focused shortcuts and are not conflated with global command search
+      if (matchesChord(event, shortcutBindings['search.focus'], isMac)) {
+        if (!isEditableTarget(event.target)) {
+          event.preventDefault()
+          searchRef.current?.focus()
+          searchRef.current?.select()
+          return
+        }
+      }
+
+      if (isEditableTarget(event.target)) {
+        return
+      }
+
+      // View navigation shortcuts
+      if (matchesChord(event, shortcutBindings['view.branches'], isMac)) {
+        event.preventDefault()
+        setWorkspaceView('branches')
+        return
+      }
+      if (matchesChord(event, shortcutBindings['view.stacks'], isMac)) {
+        event.preventDefault()
+        setWorkspaceView('stacks')
+        return
+      }
+      if (matchesChord(event, shortcutBindings['view.history'], isMac)) {
+        event.preventDefault()
+        setWorkspaceView('history')
+        return
+      }
+      if (matchesChord(event, shortcutBindings['view.changes'], isMac)) {
+        event.preventDefault()
+        setWorkspaceView('changes')
+        return
+      }
+      if (matchesChord(event, shortcutBindings['view.pullRequests'], isMac)) {
+        event.preventDefault()
+        setWorkspaceView('pullRequests')
+        return
+      }
+      if (matchesChord(event, shortcutBindings['view.stashes'], isMac)) {
+        event.preventDefault()
+        setWorkspaceView('stashes')
+        return
+      }
+
+      // Stack navigation commands
+      if (matchesChord(event, shortcutBindings['stack.selectParent'], isMac)) {
+        event.preventDefault()
+        if (snapshot) {
+          const target = resolveStackNavigation(selectedBranch, snapshot.branches, 'parent')
+          if (target) setSelectedBranchRef(target.ref)
+        }
+        return
+      }
+      if (matchesChord(event, shortcutBindings['stack.selectChild'], isMac)) {
+        event.preventDefault()
+        if (snapshot) {
+          const target = resolveStackNavigation(selectedBranch, snapshot.branches, 'child')
+          if (target) setSelectedBranchRef(target.ref)
+        }
+        return
+      }
+      if (matchesChord(event, shortcutBindings['stack.selectTop'], isMac)) {
+        event.preventDefault()
+        if (snapshot) {
+          const target = resolveStackNavigation(selectedBranch, snapshot.branches, 'top')
+          if (target) setSelectedBranchRef(target.ref)
+        }
+        return
+      }
+      if (matchesChord(event, shortcutBindings['stack.selectBottom'], isMac)) {
+        event.preventDefault()
+        if (snapshot) {
+          const target = resolveStackNavigation(selectedBranch, snapshot.branches, 'bottom')
+          if (target) setSelectedBranchRef(target.ref)
+        }
+        return
+      }
+      if (matchesChord(event, shortcutBindings['stack.checkout'], isMac)) {
+        event.preventDefault()
+        if (selectedBranch && !selectedBranch.current) {
+          void requestCheckoutBranch(selectedBranch.ref, selectedBranch.name)
+        }
+        return
+      }
+      if (matchesChord(event, shortcutBindings['stack.restack'], isMac)) {
+        event.preventDefault()
+        if (
+          selectedBranch &&
+          !selectedBranch.remote &&
+          selectedBranch.name !== snapshot?.defaultBranch &&
+          !isBusy &&
+          !operationActive
+        ) {
+          openWorkflow({ kind: 'stack', operation: 'restack', branch: selectedBranch.name })
+        }
+        return
+      }
+      if (matchesChord(event, shortcutBindings['stack.sync'], isMac)) {
+        event.preventDefault()
+        if (snapshot && !isBusy && !operationActive) {
+          void runAction({ type: 'fetch' }, 'Fetch')
+        }
+        return
+      }
+      if (matchesChord(event, shortcutBindings['stack.openPr'], isMac)) {
+        event.preventDefault()
+        if (selectedBranch?.pr) {
+          desktop?.openExternal(selectedBranch.pr.url).catch((err) => setError(readableError(err)))
+        } else if (selectedBranch?.current && snapshot?.github.available && !isBusy) {
+          openPrDialog()
+        }
+        return
+      }
+    }
+
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [
+    checkoutGuardTarget,
+    deleteTarget,
+    desktop,
+    isBusy,
+    isMac,
+    newBranchOpen,
+    openPrDialog,
+    openWorkflow,
+    operationActive,
+    paletteOpen,
+    prOpen,
+    requestCheckoutBranch,
+    runAction,
+    selectedBranch,
+    shortcutBindings,
+    shortcutSettingsOpen,
+    snapshot,
+    workflow,
+  ])
 
   const renderSidebar = () => (
     <aside className="sidebar" aria-label="Repository navigation">
@@ -668,6 +1092,7 @@ function App() {
           <span className="nav-label">Workspace</span>
           <WorkspaceNavigation
             activeView={workspaceView}
+            attentionCount={capabilityAttention}
             branchCount={branchCount}
             changeCount={snapshot?.files.length ?? 0}
             onSelect={setWorkspaceView}
@@ -747,7 +1172,18 @@ function App() {
           />
           <span>{desktop ? 'Desktop connected' : 'Desktop integration unavailable'}</span>
         </div>
-        <span className="version-label">Git Stacks</span>
+        <div className="sidebar-footer-actions">
+          <button
+            className="version-label version-label-action"
+            disabled={!desktop || isBusy || operationActive}
+            onClick={openGitRuntime}
+            title="Git runtime diagnostics"
+            type="button"
+          >
+            Git runtime
+          </button>
+          <span className="version-label">Git Stacks</span>
+        </div>
       </div>
     </aside>
   )
@@ -773,9 +1209,11 @@ function App() {
             Fetch
           </Button>
           <Button
-            disabled={!snapshot || isBusy || operationActive}
+            disabled={!snapshot || isBusy || operationActive || Boolean(shapeReason('pull'))}
             onClick={() => openWorkflow({ kind: 'pull' })}
-            tooltip="Choose how to integrate updates from this branch’s upstream."
+            tooltip={
+              shapeReason('pull') ?? 'Choose how to integrate updates from this branch’s upstream.'
+            }
             size="sm"
             variant="secondary"
           >
@@ -787,9 +1225,11 @@ function App() {
             Pull
           </Button>
           <Button
-            disabled={!snapshot || isBusy || operationActive}
+            disabled={!snapshot || isBusy || operationActive || Boolean(shapeReason('push'))}
             onClick={() => runAction({ type: 'push' }, 'Push')}
-            tooltip="Push the current branch without rewriting remote history."
+            tooltip={
+              shapeReason('push') ?? 'Push the current branch without rewriting remote history.'
+            }
             size="sm"
             variant="secondary"
           >
@@ -804,8 +1244,13 @@ function App() {
         <span className="toolbar-divider" aria-hidden="true" />
         <div className="toolbar-action-group" role="group" aria-label="Branch and Git actions">
           <Button
-            disabled={!snapshot || isBusy || operationActive}
-            tooltip="Create a local branch from an existing branch and switch to it. Records its stack parent; nothing is pushed."
+            disabled={
+              !snapshot || isBusy || operationActive || Boolean(shapeReason('createBranch'))
+            }
+            tooltip={
+              shapeReason('createBranch') ??
+              'Create a local branch from an existing branch and switch to it. Records its stack parent; nothing is pushed.'
+            }
             onClick={openBranchDialog}
             size="sm"
           >
@@ -827,25 +1272,44 @@ function App() {
             <DropdownMenu.Portal>
               <DropdownMenu.Content className="workflow-menu" align="start" sideOffset={6}>
                 <DropdownMenu.Item
-                  disabled={operationActive || !currentBranch}
+                  disabled={operationActive || !currentBranch || Boolean(shapeReason('merge'))}
                   onSelect={() => openWorkflow({ kind: 'merge' })}
                 >
                   Merge into current branch…
                 </DropdownMenu.Item>
                 <DropdownMenu.Item
                   disabled={
-                    operationActive || !currentBranch || currentBranch === snapshot?.defaultBranch
+                    operationActive ||
+                    !currentBranch ||
+                    currentBranch === snapshot?.defaultBranch ||
+                    Boolean(shapeReason('forcePush'))
                   }
                   onSelect={() => openWorkflow({ kind: 'forcePush' })}
                 >
                   Force push with lease…
                 </DropdownMenu.Item>
                 <DropdownMenu.Item
-                  disabled={operationActive || !snapshot?.files.length}
+                  disabled={
+                    operationActive ||
+                    !snapshot?.files.length ||
+                    snapshot.limits.filesTruncated ||
+                    Boolean(shapeReason('stash'))
+                  }
                   onSelect={() => openWorkflow({ kind: 'stash' })}
                 >
                   Stash changes…
                 </DropdownMenu.Item>
+                {shapeReason('merge') ||
+                shapeReason('forcePush') ||
+                shapeReason('stash') ||
+                snapshot?.limits.filesTruncated ? (
+                  <p className="workflow-note" role="status">
+                    {shapeReason('merge') ??
+                      shapeReason('forcePush') ??
+                      shapeReason('stash') ??
+                      'Stash unavailable while the changed-file listing is incomplete.'}
+                  </p>
+                ) : null}
                 <DropdownMenu.Separator className="workflow-menu-separator" />
                 <DropdownMenu.Item onSelect={() => setWorkspaceView('history')}>
                   Browse commit history
@@ -856,17 +1320,32 @@ function App() {
         </div>
       </div>
       <div className="toolbar-spacer" />
+      <Button
+        className="toolbar-control"
+        size="sm"
+        variant="secondary"
+        onClick={() => setPaletteOpen(true)}
+        aria-keyshortcuts={ariaKeyShortcuts(shortcutBindings['palette.open'], isMac)}
+        aria-label="Open command palette"
+        tooltip="Search actions, repositories, branches, PRs, issues, and settings"
+      >
+        <Search className="size-3.5" />
+        Palette
+        <kbd className="ml-1 rounded border border-[var(--gs-semantic-border-essential)] px-1 font-mono text-[10px] opacity-75">
+          {formatChord(shortcutBindings['palette.open'], isMac)}
+        </kbd>
+      </Button>
       <div className="toolbar-search">
         <Search className="size-3.5" />
         <Input
-          aria-keyshortcuts="Meta+K Control+K"
-          aria-label="Search branches, files, and pull requests"
+          aria-keyshortcuts={ariaKeyShortcuts(shortcutBindings['search.focus'], isMac)}
+          aria-label="Filter current view branches, files, and pull requests"
           onChange={(event) => setSearch(event.target.value)}
-          placeholder="Search"
+          placeholder="Filter view"
           ref={searchRef}
           value={search}
         />
-        <kbd>{shortcutModifier} K</kbd>
+        <kbd>{formatChord(shortcutBindings['search.focus'], isMac)}</kbd>
       </div>
       <div className="toolbar-control-slot">
         <IconButton
@@ -920,6 +1399,20 @@ function App() {
     </div>
   )
 
+  // Extreme repositories are reported, never silently truncated: the reader
+  // learns which per-branch analysis the budget left out and what that means.
+  const renderBranchBudgetNote = () => {
+    const skipped = snapshot?.limits.branchesSkipped ?? 0
+    if (!skipped) return null
+    return (
+      <p className="workflow-note" role="status">
+        {skipped} branch{skipped === 1 ? ' has' : 'es have'} incomplete parent or behind analysis
+        under the snapshot budget. Recorded parents remain available; inspect omitted branches with
+        Git when an exact comparison is needed.
+      </p>
+    )
+  }
+
   const renderBranchList = () => {
     if (!snapshot) return null
     if (visibleBranches.length === 0) {
@@ -934,10 +1427,14 @@ function App() {
           </p>
           {!search ? (
             <Button
+              disabled={Boolean(shapeReason('createBranch'))}
               onClick={openBranchDialog}
               size="sm"
               variant="accent"
-              tooltip="Create a local branch to start a stack. Switches to it; nothing is pushed."
+              tooltip={
+                shapeReason('createBranch') ??
+                'Create a local branch to start a stack. Switches to it; nothing is pushed.'
+              }
             >
               <Plus className="size-3.5" />
               New branch
@@ -948,124 +1445,134 @@ function App() {
     }
 
     return (
-      <div className="branch-list" role="group" aria-label="Repository branches">
-        {visibleBranches.map((branch, branchIndex) => {
-          const tree = branchTree.rows[branchIndex]
-          const pullRequest = branch.pr
-          const selected = branch.ref === selectedBranch?.ref
-          return (
-            <div
-              className={cn('branch-row', selected && 'branch-row-selected')}
-              key={branch.ref}
-              style={{ '--branch-depth': tree.depth } as React.CSSProperties}
-            >
-              <BranchHoverCard branch={branch}>
-                <button
-                  aria-current={selected ? 'true' : undefined}
-                  aria-label={`${branch.name}${branch.remote ? ', remote branch' : ''}${branch.current ? ', current branch' : ''}`}
-                  className="branch-select"
-                  onClick={() => setSelectedBranchRef(branch.ref)}
-                  type="button"
-                />
-              </BranchHoverCard>
-              {tree.trunks.map((trunk, segmentIndex) => (
-                <span
-                  aria-hidden="true"
-                  className={cn('branch-tree-trunk', `branch-tree-trunk-${trunk.kind}`)}
-                  key={`trunk-${segmentIndex}`}
-                  style={{ '--branch-lane': trunk.lane } as React.CSSProperties}
-                />
-              ))}
-              {tree.elbows.map((elbow, segmentIndex) => (
-                <span
-                  aria-hidden="true"
-                  className="branch-tree-elbow"
-                  key={`elbow-${segmentIndex}`}
-                  style={{ '--branch-lane': elbow.lane } as React.CSSProperties}
-                />
-              ))}
-              <span className={cn('branch-icon', branch.current && 'branch-icon-current')}>
-                {branch.remote ? (
-                  <Cloud className="size-3.5" />
-                ) : (
-                  <GitBranch className="size-3.5" />
-                )}
-              </span>
-              <span className="branch-copy">
-                <span className="branch-name-line">
-                  <strong>{branch.name}</strong>
-                  {branch.current ? <Badge variant="accent">current</Badge> : null}
-                  {branch.remote ? <Badge variant="outline">remote</Badge> : null}
-                  {tree.cycle ? <Badge variant="warning">cycle</Badge> : null}
-                  {tree.missingParent ? <Badge variant="warning">parent missing</Badge> : null}
-                  {branch.needsRestack || (branch.parentBehind ?? 0) > 0 ? (
-                    <Badge variant="warning">Requires restack</Badge>
-                  ) : null}
+      <>
+        {renderBranchBudgetNote()}
+        <div className="branch-list" role="group" aria-label="Repository branches">
+          {branchWindow.visible.map((branch, branchIndex) => {
+            const tree = branchTree.rows[branchWindow.start + branchIndex]
+            const pullRequest = branch.pr
+            const selected = branch.ref === selectedBranch?.ref
+            return (
+              <div
+                className={cn('branch-row', selected && 'branch-row-selected')}
+                key={branch.ref}
+                style={{ '--branch-depth': tree.depth } as React.CSSProperties}
+              >
+                <BranchHoverCard branch={branch}>
+                  <button
+                    aria-current={selected ? 'true' : undefined}
+                    aria-label={`${branch.name}${branch.remote ? ', remote branch' : ''}${branch.current ? ', current branch' : ''}`}
+                    className="branch-select"
+                    onClick={() => setSelectedBranchRef(branch.ref)}
+                    type="button"
+                  />
+                </BranchHoverCard>
+                {tree.trunks.map((trunk, segmentIndex) => (
+                  <span
+                    aria-hidden="true"
+                    className={cn('branch-tree-trunk', `branch-tree-trunk-${trunk.kind}`)}
+                    key={`trunk-${segmentIndex}`}
+                    style={{ '--branch-lane': trunk.lane } as React.CSSProperties}
+                  />
+                ))}
+                {tree.elbows.map((elbow, segmentIndex) => (
+                  <span
+                    aria-hidden="true"
+                    className="branch-tree-elbow"
+                    key={`elbow-${segmentIndex}`}
+                    style={{ '--branch-lane': elbow.lane } as React.CSSProperties}
+                  />
+                ))}
+                <span className={cn('branch-icon', branch.current && 'branch-icon-current')}>
+                  {branch.remote ? (
+                    <Cloud className="size-3.5" />
+                  ) : (
+                    <GitBranch className="size-3.5" />
+                  )}
                 </span>
-                <span className="branch-summary">
+                <span className="branch-copy">
+                  <span className="branch-name-line">
+                    <strong>{branch.name}</strong>
+                    {branch.current ? <Badge variant="accent">current</Badge> : null}
+                    {branch.remote ? <Badge variant="outline">remote</Badge> : null}
+                    {tree.cycle ? <Badge variant="warning">cycle</Badge> : null}
+                    {tree.missingParent ? <Badge variant="warning">parent missing</Badge> : null}
+                    {branch.needsRestack || (branch.parentBehind ?? 0) > 0 ? (
+                      <Badge variant="warning">Requires restack</Badge>
+                    ) : null}
+                  </span>
+                  <span className="branch-summary">
+                    {pullRequest ? (
+                      <PullRequestHoverCard pr={pullRequest}>
+                        <a
+                          className="branch-pr-link"
+                          href={pullRequest.url}
+                          aria-label={`Open pull request #${pullRequest.number} on GitHub`}
+                          onClick={(event) => {
+                            event.preventDefault()
+                            desktop
+                              ?.openExternal(pullRequest.url)
+                              .catch((value) => setError(readableError(value)))
+                          }}
+                        >
+                          #{pullRequest.number}
+                          <ExternalLink className="size-3" aria-hidden="true" />
+                        </a>
+                      </PullRequestHoverCard>
+                    ) : null}
+                    <span className="branch-subject">{branch.subject || 'No commit subject'}</span>
+                  </span>
+                </span>
+                <span className="branch-metrics">
                   {pullRequest ? (
-                    <PullRequestHoverCard pr={pullRequest}>
-                      <a
-                        className="branch-pr-link"
-                        href={pullRequest.url}
-                        aria-label={`Open pull request #${pullRequest.number} on GitHub`}
-                        onClick={(event) => {
-                          event.preventDefault()
-                          desktop
-                            ?.openExternal(pullRequest.url)
-                            .catch((value) => setError(readableError(value)))
-                        }}
-                      >
-                        #{pullRequest.number}
-                        <ExternalLink className="size-3" aria-hidden="true" />
-                      </a>
-                    </PullRequestHoverCard>
+                    <Badge variant={checksVariant(pullRequest.checks)}>
+                      <ShieldCheck className="size-3" />
+                      {checkLabel(pullRequest.checks)}
+                    </Badge>
                   ) : null}
-                  <span className="branch-subject">{branch.subject || 'No commit subject'}</span>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <span
+                        className="ahead-behind relative z-[2] rounded-sm outline-none focus-visible:ring-2 focus-visible:ring-[var(--ring)]"
+                        tabIndex={0}
+                        aria-label={
+                          branch.upstream
+                            ? `${branch.ahead} ahead, ${branch.behind} behind ${branch.upstream}`
+                            : 'No upstream configured'
+                        }
+                      >
+                        <span className={branch.ahead > 0 ? 'metric-positive' : 'metric-muted'}>
+                          <ArrowUp className="size-3" />
+                          {branch.ahead}
+                        </span>
+                        <span className={branch.behind > 0 ? 'metric-negative' : 'metric-muted'}>
+                          <ArrowDown className="size-3" />
+                          {branch.behind}
+                        </span>
+                      </span>
+                    </TooltipTrigger>
+                    <TooltipContent>
+                      {branch.upstream
+                        ? `${branch.ahead} commits ahead and ${branch.behind} behind ${branch.upstream}`
+                        : 'Set an upstream to compare this branch with its remote.'}
+                    </TooltipContent>
+                  </Tooltip>
+                  <span className="branch-updated">{formatBranchDate(branch.updatedAt)}</span>
                 </span>
-              </span>
-              <span className="branch-metrics">
-                {pullRequest ? (
-                  <Badge variant={checksVariant(pullRequest.checks)}>
-                    <ShieldCheck className="size-3" />
-                    {checkLabel(pullRequest.checks)}
-                  </Badge>
-                ) : null}
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <span
-                      role="img"
-                      className="ahead-behind relative z-[2] rounded-sm outline-none focus-visible:ring-2 focus-visible:ring-[var(--ring)]"
-                      tabIndex={0}
-                      aria-label={
-                        branch.upstream
-                          ? `${branch.ahead} ahead, ${branch.behind} behind ${branch.upstream}`
-                          : 'No upstream configured'
-                      }
-                    >
-                      <span className={branch.ahead > 0 ? 'metric-positive' : 'metric-muted'}>
-                        <ArrowUp className="size-3" />
-                        {branch.ahead}
-                      </span>
-                      <span className={branch.behind > 0 ? 'metric-negative' : 'metric-muted'}>
-                        <ArrowDown className="size-3" />
-                        {branch.behind}
-                      </span>
-                    </span>
-                  </TooltipTrigger>
-                  <TooltipContent>
-                    {branch.upstream
-                      ? `${branch.ahead} commits ahead and ${branch.behind} behind ${branch.upstream}`
-                      : 'Set an upstream to compare this branch with its remote.'}
-                  </TooltipContent>
-                </Tooltip>
-                <span className="branch-updated">{formatBranchDate(branch.updatedAt)}</span>
-              </span>
-              <ChevronRight className="branch-chevron size-4" />
-            </div>
-          )
-        })}
-      </div>
+                <ChevronRight className="branch-chevron size-4" />
+              </div>
+            )
+          })}
+          <ListWindowMore
+            pageSize={LIST_PAGE_SIZE}
+            remaining={branchWindow.remaining}
+            previous={branchWindow.hasPrevious}
+            noun="branches"
+            onReveal={branchWindow.reveal}
+            onPrevious={branchWindow.retreat}
+          />
+        </div>
+      </>
     )
   }
 
@@ -1086,6 +1593,7 @@ function App() {
           setActionError(null)
           setInspectedPath(path)
         }}
+        onResolveConflict={openConflictResolver}
         onStash={() => openWorkflow({ kind: 'stash' })}
         onSubmitCommit={submitCommit}
         operationActive={operationActive}
@@ -1100,18 +1608,24 @@ function App() {
     return (
       <PullRequestListView
         busy={isBusy}
-        canCreate={Boolean(selectedBranch?.current) && snapshot.github.available && !isBusy}
+        canCreate={
+          Boolean(selectedBranch?.current) &&
+          snapshot.github.available &&
+          !isBusy &&
+          !shapeReason('createPr')
+        }
         createTooltip={
-          !snapshot.github.available
+          shapeReason('createPr') ??
+          (!snapshot.github.available
             ? snapshot.github.message ||
               'Connect an authenticated GitHub repository to create pull requests.'
             : !selectedBranch?.current
               ? 'Switch to a local branch to open its pull request on GitHub.'
-              : 'Review creating a PR from this branch’s published upstream. Unpushed commits are not included.'
+              : 'Review creating a PR from this branch’s published upstream. Unpushed commits are not included.')
         }
         onCreate={openPrDialog}
         onRequest={openWorkflow}
-        pullRequests={snapshot.pullRequests.filter((pr) => matchesPullRequest(pr, search))}
+        pullRequests={visiblePullRequests}
         snapshot={snapshot}
       />
     )
@@ -1137,6 +1651,7 @@ function App() {
     if (workspaceView === 'changes') return renderChanges()
     if (workspaceView === 'pullRequests') return renderPullRequests()
     if (workspaceView === 'stashes') return renderStashes()
+    if (workspaceView === 'diagnostics') return <DiagnosticsView snapshot={snapshot} />
     if (workspaceView === 'history')
       return (
         <HistoryView snapshot={snapshot} busy={isBusy} onRequest={openWorkflow} search={search} />
@@ -1250,6 +1765,11 @@ function App() {
                     : `${selectedBranch.parent} has ${selectedBranch.parentBehind ?? 0} commits not in this branch. Preview a restack before publishing.`}
                 </p>
               </div>
+            ) : selectedBranch.parent && selectedBranch.parentBehind === null ? (
+              <div className="restack-notice">
+                <strong>Parent comparison unavailable</strong>
+                <p>Parent ancestry was not measured. Check the stack before publishing.</p>
+              </div>
             ) : null}
           </section>
           {!selectedBranch.remote && selectedBranch.name !== snapshot.defaultBranch ? (
@@ -1257,8 +1777,11 @@ function App() {
               <h3>Stack workflow</h3>
               <Button
                 variant="accent"
-                disabled={isBusy || operationActive}
-                tooltip="Preview rebasing this stack onto updated parents locally, branch by branch. Remotes stay unchanged until published."
+                disabled={isBusy || operationActive || Boolean(shapeReason('executeStack'))}
+                tooltip={
+                  shapeReason('executeStack') ??
+                  'Preview rebasing this stack onto updated parents locally, branch by branch. Remotes stay unchanged until published.'
+                }
                 onClick={() =>
                   openWorkflow({ kind: 'stack', operation: 'restack', branch: selectedBranch.name })
                 }
@@ -1268,12 +1791,18 @@ function App() {
               </Button>
               <Button
                 variant="secondary"
-                disabled={isBusy || operationActive || !snapshot.github.available}
+                disabled={
+                  isBusy ||
+                  operationActive ||
+                  !snapshot.github.available ||
+                  Boolean(shapeReason('executeStack'))
+                }
                 tooltip={
-                  !snapshot.github.available
+                  shapeReason('executeStack') ??
+                  (!snapshot.github.available
                     ? snapshot.github.message ||
                       'Connect an authenticated GitHub repository to publish stacks.'
-                    : 'Push reviewed stack tips and update their pull requests without rebasing. Requires a clean, restacked stack.'
+                    : 'Push reviewed stack tips and update their pull requests without rebasing. Requires a clean, restacked stack.')
                 }
                 onClick={() =>
                   openWorkflow({ kind: 'stack', operation: 'publish', branch: selectedBranch.name })
@@ -1284,8 +1813,11 @@ function App() {
               </Button>
               <Button
                 variant="ghost"
-                disabled={isBusy || operationActive}
-                tooltip="Record a different local parent without rewriting commits. Preview Restack next to move this branch and descendants."
+                disabled={isBusy || operationActive || Boolean(shapeReason('setParent'))}
+                tooltip={
+                  shapeReason('setParent') ??
+                  'Record a different local parent without rewriting commits. Preview Restack next to move this branch and descendants.'
+                }
                 onClick={() => openWorkflow({ kind: 'parent', branch: selectedBranch })}
               >
                 Set stack parent…
@@ -1293,8 +1825,11 @@ function App() {
               {selectedPullRequest?.state === 'OPEN' ? (
                 <Button
                   variant="secondary"
-                  disabled={isBusy || operationActive}
-                  tooltip="Preview merging this open pull request into the default branch. Nothing merges until confirmed; remaining branches still need restack."
+                  disabled={isBusy || operationActive || Boolean(shapeReason('executeStack'))}
+                  tooltip={
+                    shapeReason('executeStack') ??
+                    'Preview merging this open pull request into the default branch. Nothing merges until confirmed; remaining branches still need restack.'
+                  }
                   onClick={() =>
                     openWorkflow({ kind: 'stack', operation: 'merge', branch: selectedBranch.name })
                   }
@@ -1368,14 +1903,20 @@ function App() {
               <h3>Pull request</h3>
               <p>No pull request for this branch.</p>
               <Button
-                disabled={!selectedBranch.current || !snapshot.github.available || isBusy}
+                disabled={
+                  !selectedBranch.current ||
+                  !snapshot.github.available ||
+                  isBusy ||
+                  Boolean(shapeReason('createPr'))
+                }
                 tooltip={
-                  !snapshot.github.available
+                  shapeReason('createPr') ??
+                  (!snapshot.github.available
                     ? snapshot.github.message ||
                       'Connect an authenticated GitHub repository to create pull requests.'
                     : !selectedBranch.current
                       ? 'Switch to this branch to open its pull request on GitHub.'
-                      : 'Review creating a PR from this branch’s published upstream. Unpushed commits are not included.'
+                      : 'Review creating a PR from this branch’s published upstream. Unpushed commits are not included.')
                 }
                 onClick={openPrDialog}
                 size="sm"
@@ -1394,23 +1935,30 @@ function App() {
           <section className="detail-section detail-actions">
             <h3>Branch actions</h3>
             <Button
-              disabled={selectedBranch.current || isBusy || operationActive}
+              disabled={
+                selectedBranch.current ||
+                isBusy ||
+                operationActive ||
+                Boolean(shapeReason('switch'))
+              }
               tooltip={
-                selectedBranch.current
+                shapeReason('switch') ??
+                (selectedBranch.current
                   ? 'This is already the checked-out branch.'
-                  : 'Switch the working tree to this branch. Requires a clean tree; remotes create a local tracking copy.'
+                  : 'Switch the working tree to this branch. Requires a clean tree; remotes create a local tracking copy.')
               }
-              onClick={() =>
-                runAction({ type: 'switch', ref: selectedBranch.ref }, 'Switch branch')
-              }
+              onClick={() => requestCheckoutBranch(selectedBranch.ref, selectedBranch.name)}
               variant="accent"
             >
               <ArrowLeftRight className="size-3.5" />
               Switch to this branch
             </Button>
             <Button
-              disabled={!canRebase || isBusy}
-              tooltip="Rebase only the current branch onto its recorded parent locally. Rewrites its history; use Restack to move descendants together."
+              disabled={!canRebase || isBusy || Boolean(shapeReason('rebase'))}
+              tooltip={
+                shapeReason('rebase') ??
+                'Rebase only the current branch onto its recorded parent locally. Rewrites its history; use Restack to move descendants together.'
+              }
               onClick={() =>
                 openWorkflow({
                   kind: 'confirm',
@@ -1438,12 +1986,16 @@ function App() {
                 <Button
                   variant="secondary"
                   disabled={
-                    isBusy || operationActive || selectedBranch.name === snapshot.defaultBranch
+                    isBusy ||
+                    operationActive ||
+                    selectedBranch.name === snapshot.defaultBranch ||
+                    Boolean(shapeReason('renameBranch'))
                   }
                   tooltip={
-                    selectedBranch.name === snapshot.defaultBranch
+                    shapeReason('renameBranch') ??
+                    (selectedBranch.name === snapshot.defaultBranch
                       ? 'The default branch cannot be renamed here.'
-                      : 'Rename this local branch. Remote tracking and open pull requests may need updating.'
+                      : 'Rename this local branch. Remote tracking and open pull requests may need updating.')
                   }
                   onClick={() => openWorkflow({ kind: 'rename', branch: selectedBranch })}
                 >
@@ -1451,8 +2003,11 @@ function App() {
                 </Button>
                 <Button
                   variant="secondary"
-                  disabled={isBusy || operationActive}
-                  tooltip="Choose which remote branch this branch pushes to and pulls from. Local config only; no commits move."
+                  disabled={isBusy || operationActive || Boolean(shapeReason('setUpstream'))}
+                  tooltip={
+                    shapeReason('setUpstream') ??
+                    'Choose which remote branch this branch pushes to and pulls from. Local config only; no commits move.'
+                  }
                   onClick={() => openWorkflow({ kind: 'upstream', branch: selectedBranch })}
                 >
                   Set upstream…
@@ -1463,15 +2018,17 @@ function App() {
                     selectedBranch.current ||
                     selectedBranch.name === snapshot.defaultBranch ||
                     isBusy ||
-                    operationActive
+                    operationActive ||
+                    Boolean(shapeReason('deleteBranch'))
                   }
                   onClick={openDeleteDialog}
                   tooltip={
-                    selectedBranch.name === snapshot.defaultBranch
+                    shapeReason('deleteBranch') ??
+                    (selectedBranch.name === snapshot.defaultBranch
                       ? 'The default branch cannot be deleted.'
                       : selectedBranch.current
                         ? 'Cannot delete the checked-out branch — switch away first. Remotes and pull requests are kept.'
-                        : 'Delete this local branch. Remotes and pull requests are kept; unmerged work needs force and can orphan commits.'
+                        : 'Delete this local branch. Remotes and pull requests are kept; unmerged work needs force and can orphan commits.')
                   }
                   variant="danger"
                 >
@@ -1494,10 +2051,14 @@ function App() {
                   isBusy ||
                   operationActive ||
                   !selectedBranch.oid ||
-                  selectedBranch.name.endsWith(`/${snapshot.defaultBranch}`)
+                  selectedBranch.name.endsWith(`/${snapshot.defaultBranch}`) ||
+                  Boolean(shapeReason('deleteRemoteBranch'))
                 }
                 onClick={() => openWorkflow({ kind: 'deleteRemote', branch: selectedBranch })}
-                tooltip="Preview removing this branch from its remote. Local copies remain; open PRs may close and collaborators must prune."
+                tooltip={
+                  shapeReason('deleteRemoteBranch') ??
+                  'Preview removing this branch from its remote. Local copies remain; open PRs may close and collaborators must prune.'
+                }
               >
                 <Trash2 className="size-3.5" />
                 Delete remote branch…
@@ -1630,6 +2191,7 @@ function App() {
           busy={isBusy}
           runAction={runAction}
           onRequest={openWorkflow}
+          onResolveConflict={openConflictResolver}
           onShowChanges={() => setWorkspaceView('changes')}
         />
       ) : null}
@@ -1649,6 +2211,26 @@ function App() {
           runAction={runAction}
           onClose={() => setWorkflow(null)}
           onRequest={openWorkflow}
+        />
+      ) : null}
+      <GitRuntimeDialog
+        busy={gitRuntimeBusy || isBusy || operationActive}
+        onOpenChange={setGitRuntimeOpen}
+        onSelectSystemGit={selectGitRuntime}
+        open={gitRuntimeOpen}
+        status={gitRuntimeStatus}
+      />
+      {conflictPath && snapshot ? (
+        <ConflictResolver
+          key={conflictPath}
+          busy={isBusy}
+          actionError={actionError}
+          path={conflictPath}
+          conflictPresent={snapshot.files.some(
+            (file) => file.conflicted && file.path === conflictPath,
+          )}
+          runAction={runAction}
+          onClose={() => setConflictPath(null)}
         />
       ) : null}
       <Dialog
@@ -1674,6 +2256,14 @@ function App() {
           }}
           onCloseAutoFocus={(event) => {
             event.preventDefault()
+            if (paletteDeleteHandoffRef.current) {
+              paletteDeleteHandoffRef.current = false
+              const target = paletteHandoffFocusRef.current
+              paletteHandoffFocusRef.current = null
+              if (target?.isConnected && !('disabled' in target && target.disabled)) target.focus()
+              else searchRef.current?.focus()
+              return
+            }
             const trigger = deleteTriggerRef.current
             if (trigger && !trigger.disabled) trigger.focus()
             else searchRef.current?.focus()
@@ -1755,15 +2345,18 @@ function App() {
                 </Button>
                 <Button
                   disabled={
-                    isBusy || (deleteForce && deleteConfirmation !== deleteTarget?.branch.name)
+                    isBusy ||
+                    Boolean(shapeReason('deleteBranch')) ||
+                    (deleteForce && deleteConfirmation !== deleteTarget?.branch.name)
                   }
                   type="submit"
                   variant="danger"
                   loading={busyAction === 'Delete branch'}
                   tooltip={
-                    deleteForce && deleteConfirmation !== deleteTarget?.branch.name
+                    shapeReason('deleteBranch') ??
+                    (deleteForce && deleteConfirmation !== deleteTarget?.branch.name
                       ? 'Type the branch name to enable force deletion. Unmerged commits can become unreachable.'
-                      : 'Delete this local branch now. Remotes and pull requests are kept.'
+                      : 'Delete this local branch now. Remotes and pull requests are kept.')
                   }
                 >
                   <Trash2 aria-hidden="true" className="size-3.5" />
@@ -1843,14 +2436,20 @@ function App() {
                   Cancel
                 </Button>
                 <Button
-                  disabled={isBusy || !newBranchName.trim() || !newBranchParent}
+                  disabled={
+                    isBusy ||
+                    Boolean(shapeReason('createBranch')) ||
+                    !newBranchName.trim() ||
+                    !newBranchParent
+                  }
                   type="submit"
                   variant="accent"
                   loading={busyAction === 'Create branch'}
                   tooltip={
-                    !newBranchName.trim() || !newBranchParent
+                    shapeReason('createBranch') ??
+                    (!newBranchName.trim() || !newBranchParent
                       ? 'Enter a branch name and choose a parent branch first.'
-                      : 'Create the local branch, record its stack parent, and switch to it. Nothing is pushed.'
+                      : 'Create the local branch, record its stack parent, and switch to it. Nothing is pushed.')
                   }
                 >
                   <Plus aria-hidden="true" className="size-3.5" />
@@ -1979,18 +2578,20 @@ function App() {
                     !snapshot?.github.available ||
                     !selectedBranch?.current ||
                     isBusy ||
-                    !prBase.trim()
+                    !prBase.trim() ||
+                    Boolean(shapeReason('createPr'))
                   }
                   loading={busyAction === 'Create pull request'}
                   tooltip={
-                    !snapshot?.github.available
+                    shapeReason('createPr') ??
+                    (!snapshot?.github.available
                       ? snapshot?.github.message ||
                         'Connect an authenticated GitHub repository to create pull requests.'
                       : !selectedBranch?.current
                         ? 'Switch to a local branch to create its pull request.'
                         : !prBase.trim()
                           ? 'Choose the base branch this pull request targets.'
-                          : 'Create the PR using this branch’s published upstream. This does not push newer local commits.'
+                          : 'Create the PR using this branch’s published upstream. This does not push newer local commits.')
                   }
                   type="submit"
                   variant="accent"
@@ -2003,6 +2604,27 @@ function App() {
           </form>
         </DialogContent>
       </Dialog>
+      <CommandPalette
+        open={paletteOpen}
+        onOpenChange={setPaletteOpen}
+        items={paletteItems}
+        onExecute={handlePaletteExecute}
+        searchFallbackRef={searchRef}
+      />
+      <ShortcutSettings
+        open={shortcutSettingsOpen}
+        onOpenChange={setShortcutSettingsOpen}
+        bindings={shortcutBindings}
+        onBindingsChange={setShortcutBindings}
+      />
+      <DirtyCheckoutGuard
+        target={checkoutGuardTarget}
+        snapshot={snapshot}
+        onCarry={carryCheckoutBranch}
+        onClose={() => setCheckoutGuardTarget(null)}
+        onStash={() => openWorkflow({ kind: 'stash' })}
+        onReviewChanges={() => setWorkspaceView('changes')}
+      />
       {!desktop ? (
         <div className="browser-disclaimer">
           <Info className="size-3.5" />

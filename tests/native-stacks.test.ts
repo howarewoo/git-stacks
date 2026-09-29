@@ -1,10 +1,23 @@
 import assert from 'node:assert/strict'
-import { execFileSync } from 'node:child_process'
 import { test } from 'node:test'
-import { getSnapshot } from '../src/main/git'
-import { getGitHubData, getPullRequest } from '../src/main/github'
-import { DirectGitHubTransport, setGitHubTransport } from '../src/main/github-transport'
 import {
+  createGitHubHarness,
+  type GitHubFixtureState,
+  type GitHubHarness,
+} from './fixtures/github-harness'
+import type { NativeStack, PullRequest } from '../src/shared/types'
+
+// Git Stacks captures Node's spawn API when its own modules load, and the GitHub
+// harness answers `git` and `gh` on that API, so Git Stacks is loaded here.
+// Nothing may reach `node:child_process` through an ESM import before the harness
+// module body runs: the builtin facade keeps the export it first sees, so a
+// static import above would hand Git Stacks the unpatched `execFile`.
+const { execFileSync } = await import('node:child_process')
+const { createGitHubApiDouble } = await import('./fixtures/github-api-double')
+const { getSnapshot } = await import('../src/main/git')
+const { getGitHubData, getPullRequest } = await import('../src/main/github')
+const { DirectGitHubTransport, setGitHubTransport } = await import('../src/main/github-transport')
+const {
   addPullRequestsToStack,
   createPullRequestStack,
   NativeStackError,
@@ -12,18 +25,12 @@ import {
   getPullRequestStack,
   listPullRequestStacks,
   revalidatePublishedStackRegistration,
+  retireLegacyStackComments,
   unstackPullRequests,
   validateNativeStackChain,
   validatePublishedStackRegistration,
-} from '../src/main/native-stacks'
-import { previewStack, runStackAction } from '../src/main/stacks'
-import type { NativeStack, PullRequest } from '../src/shared/types'
-import { createGitHubApiDouble } from './fixtures/github-api-double'
-import {
-  createGitHubHarness,
-  type GitHubFixtureState,
-  type GitHubHarness,
-} from './fixtures/github-harness'
+} = await import('../src/main/native-stacks')
+const { previewStack, runStackAction } = await import('../src/main/stacks')
 
 function git(harness: GitHubHarness, args: string[]): string {
   return execFileSync(harness.env.GIT_STACKS_REAL_GIT || 'git', ['-C', harness.repo, ...args], {
@@ -787,6 +794,15 @@ test('publishStack accepts an unchanged already-registered stack without creatin
   await withHarness(async (harness) => {
     await setupThreeBranches(harness)
     await registerOpenStack(harness)
+    const prior = await harness.readState()
+    prior.comments['101'] = [
+      {
+        id: 50,
+        body: '<!-- git-stacks:stack-links:v1 -->\nStack navigation:\n- old: #101\n<!-- /git-stacks:stack-links:v1 -->',
+        author: prior.currentUser,
+      },
+    ]
+    await harness.writeState(prior)
 
     const snapshot = await getSnapshot(harness.repo)
     const preview = await previewStack(harness.repo, snapshot, 'publish', 'feature/step-2')
@@ -813,6 +829,90 @@ test('publishStack accepts an unchanged already-registered stack without creatin
     const published = await runStackAction(harness.repo, publishAction(preview.token))
     assert.match(published.message, /Published 3 stack pull requests/u)
     assert.deepEqual(stackWrites, [])
+    assert.match((await harness.readState()).comments['101'][0].body, /Stack navigation retired/u)
+  })
+})
+
+test('registration rejects a selected publication that omits a middle native member', async () => {
+  await withHarness(async (harness) => {
+    await setupThreeBranches(harness)
+    await registerOpenStack(harness)
+    const stack = (await listPullRequestStacks('acme', 'widgets'))[0]
+    const selected = await Promise.all(
+      [101, 103].map((number) => getPullRequest(harness.repo, number)),
+    )
+    const result = validatePublishedStackRegistration(stack, selected)
+    assert.equal(result.valid, false)
+    assert.match(result.message ?? '', /not contiguous/u)
+  })
+})
+
+test('native stack merge uses merge-async and confirms the completed request', async () => {
+  await withHarness(async (harness) => {
+    await setupThreeBranches(harness)
+    await registerOpenStack(harness)
+    const state = await harness.readState()
+    state.prs[0].checks = 'passing'
+    state.prs[0].reviewDecision = 'APPROVED'
+    await harness.writeState(state)
+    const preview = await previewStack(
+      harness.repo,
+      await getSnapshot(harness.repo),
+      'merge',
+      'feature/step-1',
+    )
+    assert.deepEqual(preview.blockers, [])
+    const inner = createGitHubApiDouble()
+    const mergeRequests: string[] = []
+    setGitHubTransport(
+      new DirectGitHubTransport({
+        token: 'fixture-token',
+        fetch: ((input: RequestInfo | URL, init?: RequestInit) => {
+          const url = String(input instanceof Request ? input.url : (input as string))
+          if (url.includes('/merge')) mergeRequests.push(`${init?.method ?? 'GET'} ${url}`)
+          return inner(input, init)
+        }) as typeof globalThis.fetch,
+      }),
+    )
+    const result = await runStackAction(harness.repo, publishAction(preview.token))
+    assert.match(result.message, /Merged pull request #101/u)
+    const after = await harness.readState()
+    assert.equal(after.prs[0].state, 'MERGED')
+    assert.ok(after.prs[0].mergeOid)
+    assert.equal(after.asyncMerge, undefined)
+    assert.deepEqual(mergeRequests, [
+      'PUT https://api.github.com/repos/acme/widgets/pulls/101/merge-async',
+      'GET https://api.github.com/repos/acme/widgets/pulls/101/merge-async/fixture-101',
+    ])
+  })
+})
+
+test('retiring legacy comments preserves human text and other authors comments', async () => {
+  await withHarness(async (harness) => {
+    const marker = '<!-- git-stacks:stack-links:v1 -->'
+    const state = await harness.readState()
+    state.comments['101'] = [
+      {
+        id: 50,
+        body: `${marker}\nStack navigation:\n- old: #101\n<!-- /git-stacks:stack-links:v1 -->\nHuman note`,
+        author: state.currentUser,
+      },
+      {
+        id: 51,
+        body: `${marker}\nOther author's navigation\n<!-- /git-stacks:stack-links:v1 -->`,
+        author: 'someone-else',
+      },
+    ]
+    await harness.writeState(state)
+    await retireLegacyStackComments('acme/widgets', [101])
+    const after = await harness.readState()
+    assert.equal(
+      after.comments['101'][0].body,
+      "Stack navigation retired; use GitHub's native stack view.\nHuman note",
+    )
+    assert.equal(after.comments['101'][1].body, state.comments['101'][1].body)
+    await retireLegacyStackComments('acme/widgets', [101])
+    assert.equal((await harness.readState()).comments['101'][0].body, after.comments['101'][0].body)
   })
 })
 

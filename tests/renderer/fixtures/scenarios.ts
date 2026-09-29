@@ -3,6 +3,8 @@ import type {
   FileView,
   RecentRepository,
   RepositorySnapshot,
+  FileHunks,
+  HunkSide,
   Stash,
 } from '../../../src/shared/types'
 import {
@@ -10,6 +12,7 @@ import {
   openPullRequest,
   pausedRestackProgress,
   restackPreview,
+  standardCapabilities,
 } from '../../fixtures/workflow-scenarios'
 import {
   changedFile,
@@ -22,6 +25,7 @@ import {
   stagedOnlyChanges,
   unstagedOnlyChanges,
 } from '../../../src/renderer/src/design-system/data-fixtures'
+import { EMPTY_SNAPSHOT_LIMITS } from '../../../src/shared/performance'
 import type { FixtureScenario } from './types'
 import type { ScenarioName } from './manifest'
 
@@ -151,6 +155,8 @@ function repository(overrides: Partial<RepositorySnapshot> = {}): RepositorySnap
     stackOperation: null,
     headOid: checkoutBranch.oid ?? null,
     github: { available: true, message: 'GitHub metadata available; 1 pull request' },
+    capabilities: standardCapabilities,
+    limits: EMPTY_SNAPSHOT_LIMITS,
     ...overrides,
   }
 }
@@ -330,6 +336,68 @@ const truncatedPath = 'src/renderer/src/components/big-file.tsx'
 const longLinePath = 'src/renderer/src/components/data-views-with-long-lines.tsx'
 const bulkPath = 'src/renderer/src/components/bulk-generated-surface.tsx'
 
+const nothingStaged: HunkSide = { hunks: [], unavailable: 'Nothing is staged in this file yet.' }
+const untrackedHunks: FileHunks = {
+  staged: {
+    hunks: [],
+    unavailable:
+      'An untracked file is staged as a whole file; there is no index hunk to apply yet.',
+  },
+  unstaged: {
+    hunks: [],
+    unavailable:
+      'An untracked file is staged as a whole file; there is no index hunk to apply yet.',
+  },
+}
+const unreadableDiff: HunkSide = {
+  hunks: [],
+  unavailable: 'This diff could not be read safely; stage or unstage the whole file instead.',
+}
+/** The hunks `longDiffText` parses into, so the inspector renders the real shape. */
+const longDiffHunks: HunkSide = {
+  hunks: [
+    {
+      id: 'long-line-hunk-1',
+      header: '@@ -120,6 +120,7 @@ .changes-columns {',
+      oldStart: 120,
+      oldLines: 6,
+      newStart: 120,
+      newLines: 7,
+      lines: [
+        { kind: 'context', text: '   display: grid;', oldLine: 120, newLine: 120 },
+        { kind: 'remove', text: '-  gap: 15px;', oldLine: 121, newLine: null },
+        { kind: 'add', text: '+  gap: 16px;', oldLine: null, newLine: 121 },
+        {
+          kind: 'add',
+          text: '+  border: 1px solid var(--gs-semantic-border-essential);',
+          oldLine: null,
+          newLine: 122,
+        },
+        { kind: 'context', text: '   overflow: auto;', oldLine: 122, newLine: 123 },
+        { kind: 'add', text: `+${'x'.repeat(400)}`, oldLine: null, newLine: 124 },
+      ],
+    },
+    {
+      id: 'long-line-hunk-2',
+      header: '@@ -240,3 +241,3 @@ .code-diff {',
+      oldStart: 240,
+      oldLines: 3,
+      newStart: 241,
+      newLines: 3,
+      lines: [
+        { kind: 'remove', text: '-  background: #fafbfc;', oldLine: 240, newLine: null },
+        {
+          kind: 'add',
+          text: '+  background: var(--gs-semantic-surface-inset);',
+          oldLine: null,
+          newLine: 241,
+        },
+      ],
+    },
+  ],
+  unavailable: null,
+}
+
 const longContentViews: Record<string, FileView> = {
   [longLinePath]: {
     path: longLinePath,
@@ -340,6 +408,7 @@ const longContentViews: Record<string, FileView> = {
     fingerprint: 'fingerprint-long-line',
     conflicted: false,
     truncated: false,
+    hunks: { staged: nothingStaged, unstaged: longDiffHunks },
   },
   [bulkPath]: {
     path: bulkPath,
@@ -350,6 +419,7 @@ const longContentViews: Record<string, FileView> = {
     fingerprint: 'fingerprint-bulk',
     conflicted: false,
     truncated: false,
+    hunks: { staged: nothingStaged, unstaged: unreadableDiff },
   },
 }
 
@@ -534,6 +604,7 @@ export const scenarios: Record<ScenarioName, FixtureScenario> = {
         fingerprint: 'fingerprint-untracked',
         conflicted: false,
         truncated: false,
+        hunks: untrackedHunks,
       },
     },
   },

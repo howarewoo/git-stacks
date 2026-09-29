@@ -6,29 +6,53 @@ import type { Stats } from 'node:fs'
 import type { FileHandle } from 'node:fs/promises'
 import { createHash, randomUUID } from 'node:crypto'
 import { tmpdir } from 'node:os'
+import { fileURLToPath } from 'node:url'
 
 import type {
   ActionResult,
   Branch,
   ChangedFile,
+  ConflictChoice,
+  ConflictFile,
+  ConflictMove,
+  ConflictResolution,
+  GitOperation,
   Commit,
+  DiffHunk,
   FileView,
   GitAction,
   HistoryPage,
+  HunkSide,
+  HunkSideName,
   PullRequest,
   PushPreview,
   RepositorySnapshot,
+  Stash,
 } from '../shared/types'
 import {
+  GIT_CONCURRENCY,
+  MAX_DIFF_BYTES,
+  MAX_FILE_BYTES,
+  MAX_HISTORY_BYTES,
+  SNAPSHOT_BRANCH_BUDGET,
+  type SnapshotLimits,
+} from '../shared/performance'
+import {
+  CommandCancelled,
+  MAX_BUFFER,
   MAX_BRANCH_LENGTH,
   MAX_MESSAGE_LENGTH,
   MAX_PATH_LENGTH,
   branchUpstream,
   commandDetail,
+  commandEnvironment,
   ensureClean,
   ensureNoBusyOperation,
   ensureNotCheckedOutElsewhere,
   execute,
+  executeCapped,
+  getBranchConfigs,
+  execFile,
   getBranchParent,
   getConfigValue,
   getCurrentBranch,
@@ -40,8 +64,11 @@ import {
   getRemotes,
   getStashes,
   getStatus,
+  isCancelled,
   isExitCode,
   isRecord,
+  listStatus,
+  mapWithConcurrency,
   parseRemote,
   parseTrack,
   refExists,
@@ -49,13 +76,44 @@ import {
   requireString,
   resolveParentRef,
   runGit,
+  runGitCapped,
+  runGitWithInput,
   statusPathCandidates,
   stripTrailingNewline,
   tryGit,
   validateBranchName,
 } from './git-core'
 import type { RefRecord } from './git-core'
-import { getGitHubData } from './github'
+import { buildHunkPatch, hunkSideUnavailable, parseHunkBlock } from './hunks'
+import {
+  gitCommandEnvironment,
+  requireGitCapability,
+  resolveGitRuntime,
+  withGitRuntime,
+} from './git-runtime'
+import {
+  getHeadGitlinks,
+  getIndexEntries,
+  getRepositoryCapabilities,
+  getRepositoryShapeFacts,
+  detectGitLfs,
+  parseLfsPointer,
+} from './capabilities'
+import type { IndexPathEntry } from './capabilities'
+import {
+  LFS_PUSH_NOTE,
+  actionBlockReason,
+  sparsePathReason,
+  submodulePathReason,
+} from '../shared/capabilities'
+import {
+  conflictKind,
+  conflictLabels,
+  conflictRegions,
+  hasConflictMarkers,
+  parseConflictSegments,
+} from '../shared/conflict'
+import { getGitHubData, getGitHubIssues } from './github'
 import { githubTransport } from './github-transport'
 import {
   getStackProgress,
@@ -138,7 +196,13 @@ function validateAction(value: unknown): GitAction {
 
   switch (value.type) {
     case 'switch':
-      return { type: 'switch', ref: requireRefInput(value.ref, 'branch ref') }
+      if (value.carry !== undefined && typeof value.carry !== 'boolean')
+        throw new Error('carry must be a boolean')
+      return {
+        type: 'switch',
+        ref: requireRefInput(value.ref, 'branch ref'),
+        carry: value.carry === true,
+      }
     case 'createBranch':
       return {
         type: 'createBranch',
@@ -290,30 +354,105 @@ function validateAction(value: unknown): GitAction {
         path: requirePathInput(value.path, 'path'),
         fingerprint: requireString(value.fingerprint, 'fingerprint', 1024),
       }
-    case 'resolveFile':
-      if (value.strategy !== 'ours' && value.strategy !== 'theirs' && value.strategy !== 'manual') {
-        throw new Error('resolve strategy must be ours, theirs, or manual')
+    case 'resolveConflict': {
+      if (!isRecord(value.resolution) || typeof value.resolution.kind !== 'string') {
+        throw new Error('resolveConflict requires a resolution')
+      }
+      if (value.resolution.kind === 'choice') {
+        if (
+          value.resolution.choice !== 'current' &&
+          value.resolution.choice !== 'incoming' &&
+          value.resolution.choice !== 'both' &&
+          value.resolution.choice !== 'delete'
+        ) {
+          throw new Error('resolution choice must be current, incoming, both, or delete')
+        }
+        return {
+          type: 'resolveConflict',
+          path: requirePathInput(value.path, 'path'),
+          fingerprint: requireString(value.fingerprint, 'fingerprint', 1024),
+          resolution: { kind: 'choice', choice: value.resolution.choice },
+        }
+      }
+      if (value.resolution.kind === 'worktree') {
+        return {
+          type: 'resolveConflict',
+          path: requirePathInput(value.path, 'path'),
+          fingerprint: requireString(value.fingerprint, 'fingerprint', 1024),
+          resolution: { kind: 'worktree' },
+        }
+      }
+      if (value.resolution.kind !== 'content') {
+        throw new Error('resolution kind must be content, choice, or worktree')
       }
       if (
-        typeof value.content !== 'string' ||
-        Buffer.byteLength(value.content, 'utf8') > MAX_FILE_BYTES ||
-        value.content.includes('\0')
+        typeof value.resolution.content !== 'string' ||
+        Buffer.byteLength(value.resolution.content, 'utf8') > MAX_FILE_BYTES ||
+        value.resolution.content.includes('\0')
       ) {
         throw new Error('content must be a UTF-8 string without NUL bytes')
       }
       return {
-        type: 'resolveFile',
+        type: 'resolveConflict',
         path: requirePathInput(value.path, 'path'),
         fingerprint: requireString(value.fingerprint, 'fingerprint', 1024),
-        strategy: value.strategy,
-        content: value.content,
+        resolution: { kind: 'content', content: value.resolution.content },
       }
+    }
+    case 'conflictMergeTool':
+      return {
+        type: 'conflictMergeTool',
+        path: requirePathInput(value.path, 'path'),
+        fingerprint: requireString(value.fingerprint, 'fingerprint', 1024),
+      }
+    case 'stageHunk':
+    case 'unstageHunk': {
+      const hunkId = requireString(value.hunkId, 'hunkId', 64)
+      if (!/^[0-9a-f]{16}$/u.test(hunkId)) {
+        throw new Error('hunkId must be a hunk identity from the current file view')
+      }
+      if (value.lineIndexes !== undefined) {
+        if (
+          !Array.isArray(value.lineIndexes) ||
+          value.lineIndexes.length === 0 ||
+          value.lineIndexes.length > 10_000
+        ) {
+          throw new Error('lineIndexes must list the changed lines to apply')
+        }
+        const indexes = value.lineIndexes.map((entry) => {
+          if (
+            !Number.isInteger(entry) ||
+            (entry as number) < 0 ||
+            (entry as number) > MAX_DIFF_LINES
+          ) {
+            throw new Error('lineIndexes must be non-negative line positions')
+          }
+          return entry as number
+        })
+        if (new Set(indexes).size !== indexes.length) {
+          throw new Error('lineIndexes must not contain duplicates')
+        }
+        return {
+          type: value.type,
+          path: requirePathInput(value.path, 'path'),
+          hunkId,
+          fingerprint: requireString(value.fingerprint, 'fingerprint', 1024),
+          lineIndexes: indexes,
+        }
+      }
+      return {
+        type: value.type,
+        path: requirePathInput(value.path, 'path'),
+        hunkId,
+        fingerprint: requireString(value.fingerprint, 'fingerprint', 1024),
+      }
+    }
     default:
       throw new Error(`Unsupported Git action: ${value.type}`)
   }
 }
 
-export async function resolveRepository(inputPath: string): Promise<string> {
+export async function resolveRepository(inputPath: string, signal?: AbortSignal): Promise<string> {
   if (typeof inputPath !== 'string' || inputPath.length === 0 || inputPath.includes('\0')) {
     throw new Error('Repository path must be a non-empty path')
   }
@@ -328,19 +467,30 @@ export async function resolveRepository(inputPath: string): Promise<string> {
   let isBare: string
   try {
     isBare = stripTrailingNewline(
-      await runGit(candidate, ['rev-parse', '--is-bare-repository']),
+      await runGit(candidate, ['rev-parse', '--is-bare-repository'], undefined, signal),
     ).trim()
   } catch (error) {
+    if (isCancelled(error)) throw error
     throw new Error(`Not a Git repository: ${commandDetail(error)}`)
   }
   if (isBare === 'true') {
-    throw new Error('Bare Git repositories are not supported; choose a working tree')
+    // A bare repository is opened read-only; the capability matrix disables worktree actions.
+    try {
+      return await fs.realpath(
+        stripTrailingNewline(await runGit(candidate, ['rev-parse', '--absolute-git-dir'])),
+      )
+    } catch {
+      return candidate
+    }
   }
 
   let topLevel: string
   try {
-    topLevel = stripTrailingNewline(await runGit(candidate, ['rev-parse', '--show-toplevel']))
+    topLevel = stripTrailingNewline(
+      await runGit(candidate, ['rev-parse', '--show-toplevel'], undefined, signal),
+    )
   } catch (error) {
+    if (isCancelled(error)) throw error
     throw new Error(`Not a Git repository: ${commandDetail(error)}`)
   }
   if (!topLevel) {
@@ -360,6 +510,11 @@ async function runStage(
   requestedPaths: string[],
 ): Promise<ActionResult> {
   const files = await getStatus(repoPath)
+  // Staging a path that sparse checkout left unmaterialized would record a deletion.
+  const index = await getIndexEntries(repoPath, requestedPaths)
+  for (const requested of requestedPaths) {
+    if (index.get(requested)?.sparseExcluded) throw new Error(sparsePathReason(requested))
+  }
   const paths = statusPathCandidates(files, requestedPaths, action)
   if (paths.length === 0) {
     throw new Error('No changed paths were selected')
@@ -376,13 +531,12 @@ async function runStage(
   return { message: `Unstaged ${paths.length} path${paths.length === 1 ? '' : 's'}` }
 }
 
-async function currentHeadOid(repoPath: string): Promise<string | null> {
-  const value = await tryGit(repoPath, [
-    'rev-parse',
-    '--verify',
-    '--end-of-options',
-    'HEAD^{commit}',
-  ])
+async function currentHeadOid(repoPath: string, signal?: AbortSignal): Promise<string | null> {
+  const value = await tryGit(
+    repoPath,
+    ['rev-parse', '--verify', '--end-of-options', 'HEAD^{commit}'],
+    signal,
+  )
   return value ? stripTrailingNewline(value) : null
 }
 
@@ -542,6 +696,7 @@ async function runGitWithExpectedHead(
   operation: string,
   env?: NodeJS.ProcessEnv,
 ): Promise<string> {
+  await requireGitCapability('referenceTransactions', operation)
   const hooks = await installReferenceTransactionGuard(repoPath)
   const verifiedPath = path.join(hooks.hooksPath, 'expected-head-verified')
   try {
@@ -771,6 +926,11 @@ async function getPushTarget(repoPath: string, requireExplicit: boolean): Promis
   }
 }
 
+/** The Git LFS client owns any object upload triggered by Git's push hooks. */
+async function lfsPushSuffix(repoPath: string): Promise<string> {
+  return (await detectGitLfs(repoPath)) ? ` ${LFS_PUSH_NOTE}` : ''
+}
+
 async function runPush(repoPath: string): Promise<ActionResult> {
   await ensureNoBusyOperation(repoPath, 'push')
   const target = await getPushTarget(repoPath, false)
@@ -787,7 +947,7 @@ async function runPush(repoPath: string): Promise<ActionResult> {
   ]
   await runGit(repoPath, args)
   return {
-    message: `Pushed ${target.branch} to ${target.remote}/${target.destination.slice('refs/heads/'.length)}`,
+    message: `Pushed ${target.branch} to ${target.remote}/${target.destination.slice('refs/heads/'.length)}${await lfsPushSuffix(repoPath)}`,
   }
 }
 
@@ -848,7 +1008,7 @@ async function runForcePush(repoPath: string, preview: PushPreview): Promise<Act
     `${preview.localOid}:${target.destination}`,
   ])
   return {
-    message: `Force pushed ${target.branch} to ${target.remote}/${target.destination.slice('refs/heads/'.length)}`,
+    message: `Force pushed ${target.branch} to ${target.remote}/${target.destination.slice('refs/heads/'.length)}${await lfsPushSuffix(repoPath)}`,
   }
 }
 
@@ -1325,14 +1485,16 @@ function localFilesUriPath(value: string): string {
   }
   let decodedPath: string
   try {
-    decodedPath = decodeURIComponent(uri.pathname)
+    // Git's `files:` scheme carries a file URL path, including a Windows drive.
+    // path.resolve('/', '/C:/...') would turn C: into a directory on Windows.
+    decodedPath = fileURLToPath(uri.href.replace(/^files:/u, 'file:'))
   } catch {
     throw new Error('Invalid local files reference-storage URI')
   }
   if (decodedPath.includes('\0')) {
     throw new Error('Invalid local files reference-storage URI')
   }
-  return path.resolve('/', decodedPath)
+  return decodedPath
 }
 
 function assertFilesRefStorage(refStorage: string | null, ref: string): string | null {
@@ -1868,9 +2030,9 @@ async function runStashAction(
   }
 }
 
-async function runSwitch(repoPath: string, ref: string): Promise<ActionResult> {
+async function runSwitch(repoPath: string, ref: string, carry = false): Promise<ActionResult> {
   await ensureNoBusyOperation(repoPath, 'switch branches')
-  await ensureClean(repoPath, 'switch branches')
+  if (!carry) await ensureClean(repoPath, 'switch branches')
   if (
     (!ref.startsWith('refs/heads/') && !ref.startsWith('refs/remotes/')) ||
     !(await refExists(repoPath, ref))
@@ -2151,15 +2313,8 @@ async function runCreatePr(
   }
 }
 
-const MAX_FILE_BYTES = 2 * 1024 * 1024
-const MAX_DIFF_BYTES = 4 * 1024 * 1024
 const MAX_HISTORY_SKIP = 1_000_000
-
-function boundedText(value: string, maxBytes: number): { text: string; truncated: boolean } {
-  const bytes = Buffer.from(value, 'utf8')
-  if (bytes.length <= maxBytes) return { text: value, truncated: false }
-  return { text: bytes.subarray(0, maxBytes).toString('utf8'), truncated: true }
-}
+const MAX_DIFF_LINES = 4 * 1024 * 1024
 
 async function safeRepositoryPath(repoPath: string, relativePath: string): Promise<string> {
   const candidate = path.resolve(repoPath, relativePath)
@@ -2278,21 +2433,22 @@ async function fileFingerprintAt(
   repoPath: string,
   relativePath: string,
   absolutePath: string,
+  signal?: AbortSignal,
 ): Promise<FileIdentity> {
-  const index = await runGit(repoPath, [
-    '--literal-pathspecs',
-    'ls-files',
-    '--stage',
-    '-z',
-    '--',
-    relativePath,
-  ])
+  if (signal?.aborted) throw new CommandCancelled()
+  const index = await runGit(
+    repoPath,
+    ['--literal-pathspecs', 'ls-files', '--stage', '-z', '--', relativePath],
+    undefined,
+    signal,
+  )
   const indexFingerprint = createHash('sha256').update(index).digest('hex')
   let stat: Stats | null = null
   let preview: Buffer | null = null
   let binary = false
   let truncated = false
   try {
+    if (signal?.aborted) throw new CommandCancelled()
     stat = await fs.lstat(absolutePath)
     if (!stat.isFile()) throw new Error('Changed path is not a regular file')
     const hash = createHash('sha256')
@@ -2316,6 +2472,7 @@ async function fileFingerprintAt(
     const buffer = Buffer.allocUnsafe(64 * 1024)
     try {
       while (true) {
+        if (signal?.aborted) throw new CommandCancelled()
         const result = await handle.read(buffer, 0, buffer.length, null)
         if (result.bytesRead === 0) break
         const chunk = buffer.subarray(0, result.bytesRead)
@@ -2335,6 +2492,7 @@ async function fileFingerprintAt(
         }
         if (totalBytes > MAX_FILE_BYTES) truncated = true
       }
+      if (signal?.aborted) throw new CommandCancelled()
       try {
         decoder.decode()
       } catch {
@@ -2353,7 +2511,9 @@ async function fileFingerprintAt(
     } finally {
       await handle.close()
     }
+    if (signal?.aborted) throw new CommandCancelled()
     const currentStat = await fs.lstat(absolutePath)
+    if (signal?.aborted) throw new CommandCancelled()
     if (currentStat.dev !== stat.dev || currentStat.ino !== stat.ino) {
       throw new Error('The file changed while it was being read; refresh and retry')
     }
@@ -2370,6 +2530,7 @@ async function fileFingerprintAt(
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
   }
+  if (signal?.aborted) throw new CommandCancelled()
   const contentFingerprint = createHash('sha256').update('missing').digest('hex')
   const hash = createHash('sha256')
   hash.update(index)
@@ -2385,9 +2546,15 @@ async function fileFingerprintAt(
   }
 }
 
-async function fileFingerprint(repoPath: string, relativePath: string): Promise<FileIdentity> {
+async function fileFingerprint(
+  repoPath: string,
+  relativePath: string,
+  signal?: AbortSignal,
+): Promise<FileIdentity> {
+  if (signal?.aborted) throw new CommandCancelled()
   const absolute = await safeRepositoryPath(repoPath, relativePath)
-  return fileFingerprintAt(repoPath, relativePath, absolute)
+  if (signal?.aborted) throw new CommandCancelled()
+  return fileFingerprintAt(repoPath, relativePath, absolute, signal)
 }
 
 function sameFileMutationIdentity(expected: FileIdentity, actual: FileIdentity): boolean {
@@ -2410,8 +2577,11 @@ async function changedDiff(
   repoPath: string,
   mode: 'cached' | 'worktree',
   relativePath: string,
+  signal?: AbortSignal,
 ): Promise<{ text: string; truncated: boolean }> {
   const args = [
+    '-c',
+    'core.quotePath=false',
     '--literal-pathspecs',
     'diff',
     '--no-ext-diff',
@@ -2420,19 +2590,90 @@ async function changedDiff(
     '--',
     relativePath,
   ]
-  return boundedText(await runGit(repoPath, args), MAX_DIFF_BYTES)
+  // Cap the stream itself rather than buffering an arbitrarily large diff, and
+  // abandon it when the caller navigates away from the file.
+  return runGitCapped(repoPath, args, {
+    maxBytes: MAX_DIFF_BYTES,
+    signal,
+    env: { GIT_OPTIONAL_LOCKS: '0' },
+  })
 }
 
-export async function getFileView(repoPath: string, requestedPath: string): Promise<FileView> {
-  const root = await resolveRepository(repoPath)
+/**
+ * Resolves one side of a file's diff into hunks Git can apply, or the reason it
+ * cannot. The same resolution backs the inspector view and the action, so a
+ * refusal the user reads is the refusal that stops the write.
+ */
+function resolveHunkSide(
+  entry: ChangedFile,
+  identity: FileIdentity,
+  side: HunkSideName,
+  diff: { text: string; truncated: boolean },
+): HunkSide {
+  const block = parseHunkBlock(diff.text, {
+    path: entry.path,
+    originalPath: entry.originalPath ?? null,
+  })
+  const worktreeChanged = entry.worktree !== ' ' && entry.worktree !== ''
+  const unavailable = hunkSideUnavailable(side, block, {
+    binary: identity.binary,
+    truncated: diff.truncated,
+    conflicted: entry.conflicted,
+    untracked: entry.index === '?' || entry.worktree === '?',
+    renamed: side === 'staged' && entry.originalPath !== undefined,
+    changed: side === 'staged' ? diff.text.length > 0 : worktreeChanged,
+  })
+  return { hunks: block.hunks, unavailable }
+}
+
+export async function getFileView(
+  repoPath: string,
+  requestedPath: string,
+  signal?: AbortSignal,
+): Promise<FileView> {
+  const root = await resolveRepository(repoPath, signal)
   const filePath = requirePathInput(requestedPath, 'path')
-  const entry = changedEntry(await getStatus(root), filePath)
+  // Sparse-excluded paths never reach the status list, so check the index first.
+  const indexEntry = (await getIndexEntries(root, [filePath])).get(filePath)
+  if (indexEntry?.sparseExcluded) throw new Error(sparsePathReason(filePath))
+  const entry = changedEntry(await getStatus(root, signal), filePath)
   const actualPath = entry.path
-  const [stagedDiff, unstagedDiff, identity] = await Promise.all([
-    changedDiff(root, 'cached', actualPath),
-    changedDiff(root, 'worktree', actualPath),
-    fileFingerprint(root, actualPath),
-  ])
+  // One cancelled file view must not leave a sibling diff or the gitlink lookup
+  // running, so every read is awaited before the rejection escapes. The
+  // fingerprint is deliberately not in this batch: a gitlink is a directory, so
+  // it has no readable file to scan.
+  const reads = [
+    changedDiff(root, 'cached', actualPath, signal),
+    changedDiff(root, 'worktree', actualPath, signal),
+    getHeadGitlinks(root, [actualPath]),
+  ] as const
+  const [stagedDiff, unstagedDiff, gitlinks] = await Promise.all(reads).catch(
+    async (error: unknown) => {
+      await Promise.allSettled(reads)
+      throw error
+    },
+  )
+  const headGitlink = gitlinks.get(actualPath)
+  if (indexEntry?.submodule || headGitlink) {
+    // A gitlink has no readable file: show the recorded-commit diff and nothing else.
+    return {
+      path: filePath,
+      stagedDiff: stagedDiff.text,
+      unstagedDiff: unstagedDiff.text,
+      content: null,
+      binary: false,
+      fingerprint: indexEntry?.fingerprint ?? headGitlink!,
+      conflicted: entry.conflicted,
+      truncated: stagedDiff.truncated || unstagedDiff.truncated,
+      submodule: true,
+      lfs: null,
+      hunks: {
+        staged: { hunks: [], unavailable: submodulePathReason(filePath) },
+        unstaged: { hunks: [], unavailable: submodulePathReason(filePath) },
+      },
+    }
+  }
+  const identity = await fileFingerprint(root, actualPath, signal)
   const contentResult = identity.preview
     ? {
         text: identity.binary ? '' : identity.preview.toString('utf8'),
@@ -2449,20 +2690,43 @@ export async function getFileView(repoPath: string, requestedPath: string): Prom
     fingerprint: identity.fingerprint,
     conflicted: entry.conflicted,
     truncated: stagedDiff.truncated || unstagedDiff.truncated || contentResult.truncated,
+    hunks: {
+      staged: resolveHunkSide(entry, identity, 'staged', stagedDiff),
+      unstaged: resolveHunkSide(entry, identity, 'unstaged', unstagedDiff),
+    },
+    lfs: identity.preview ? parseLfsPointer(contentResult.text) : null,
   }
 }
 
+/**
+ * Sparse-excluded and submodule paths are refused before any worktree or index
+ * write: one is not a change, and the other is a commit this app does not own.
+ */
 async function checkFileFingerprint(
   repoPath: string,
   filePath: string,
   expected: string,
 ): Promise<{ entry: ChangedFile; identity: FileIdentity }> {
   const entry = changedEntry(await getStatus(repoPath), filePath)
+  const index = await getIndexEntries(repoPath, [entry.path])
+  const headGitlink = (await getHeadGitlinks(repoPath, [entry.path])).has(entry.path)
+  const blocked = pathActionBlockReason(index.get(entry.path), entry.path, headGitlink)
+  if (blocked) throw new Error(blocked)
   const identity = await fileFingerprint(repoPath, entry.path)
   if (identity.fingerprint !== expected) {
     throw new Error('The file changed since it was opened; refresh before applying this action')
   }
   return { entry, identity }
+}
+
+function pathActionBlockReason(
+  entry: IndexPathEntry | undefined,
+  filePath: string,
+  headGitlink: boolean,
+): string | null {
+  if (entry?.sparseExcluded) return sparsePathReason(filePath)
+  if (entry?.submodule || headGitlink) return submodulePathReason(filePath)
+  return null
 }
 
 async function materializeGitWorktreePath(
@@ -3281,12 +3545,21 @@ export async function runDiscardFile(
   return { message: `Discarded unstaged changes in ${entry.path}` }
 }
 
-async function hasConflictStage(
-  repoPath: string,
+interface ConflictStageEntry {
+  stage: number
+  oid: string
+}
+/** Index stage number (1 base, 2 current, 3 incoming) to the content Git holds. */
+interface ConflictSides {
+  [stage: number]: { text: string | null; binary: boolean; truncated: boolean }
+}
+
+/** Keep the exact staged index bytes with the entries used to render a conflict. */
+async function conflictIndex(
+  root: string,
   relativePath: string,
-  stage: number,
-): Promise<boolean> {
-  const output = await runGit(repoPath, [
+): Promise<{ stages: ConflictStageEntry[]; fingerprint: string }> {
+  const output = await runGit(root, [
     '--literal-pathspecs',
     'ls-files',
     '-u',
@@ -3294,50 +3567,803 @@ async function hasConflictStage(
     '--',
     relativePath,
   ])
-  return output.split('\0').some((token) => token.split(/\s+/u)[2] === String(stage))
+  const stages: ConflictStageEntry[] = []
+  for (const token of output.split('\0')) {
+    if (!token) continue
+    const separator = token.indexOf('\t')
+    if (separator < 0) throw new Error('Git returned an unmerged entry without a path')
+    const [mode, oid, stage] = token.slice(0, separator).split(/\s+/u)
+    if (!/^1[0-9]{5}$/u.test(mode) || !/^[0-9a-f]{40,64}$/u.test(oid) || !/^[123]$/u.test(stage)) {
+      throw new Error('Git returned a malformed unmerged index entry')
+    }
+    stages.push({ stage: Number(stage), oid })
+  }
+  return { stages, fingerprint: createHash('sha256').update(output).digest('hex') }
 }
 
-export async function runResolveFile(
+async function conflictStages(root: string, relativePath: string): Promise<ConflictStageEntry[]> {
+  return (await conflictIndex(root, relativePath)).stages
+}
+
+/** Read every byte to classify a stage, but retain only a bounded text preview. */
+async function readConflictBlob(
+  root: string,
+  oid: string,
+): Promise<{ text: string | null; binary: boolean; truncated: boolean }> {
+  const runtime = await resolveGitRuntime()
+  // ES2022's Promise typings do not expose withResolvers; Git streams settle
+  // this promise from child-process events.
+  return new Promise((resolve, reject) => {
+    const child = spawn(runtime.executable, ['cat-file', 'blob', oid], {
+      cwd: root,
+      env: gitCommandEnvironment(runtime, commandEnvironment()),
+      stdio: ['ignore', 'pipe', 'pipe'],
+      shell: false,
+    })
+    const decoder = new TextDecoder('utf-8', { fatal: true })
+    const chunks: Buffer[] = []
+    let retained = 0
+    let totalBytes = 0
+    let binary = false
+    let failure = ''
+    child.stdout.on('data', (chunk: Buffer) => {
+      totalBytes += chunk.length
+      if (chunk.includes(0)) binary = true
+      if (!binary) {
+        try {
+          decoder.decode(chunk, { stream: true })
+        } catch {
+          binary = true
+        }
+      }
+      if (retained < MAX_FILE_BYTES) {
+        const take = Math.min(MAX_FILE_BYTES - retained, chunk.length)
+        chunks.push(Buffer.from(chunk.subarray(0, take)))
+        retained += take
+      }
+    })
+    child.stderr.setEncoding('utf8')
+    child.stderr.on('data', (chunk: string) => {
+      failure = (failure + chunk).slice(-4096)
+    })
+    child.once('error', reject)
+    child.once('close', (code) => {
+      if (code !== 0) {
+        reject(new Error(failure.trim() || `git cat-file failed for ${oid}`))
+        return
+      }
+      if (!binary) {
+        try {
+          decoder.decode()
+        } catch {
+          binary = true
+        }
+      }
+      const truncated = totalBytes > MAX_FILE_BYTES
+      const preview = Buffer.concat(chunks)
+      resolve({
+        text: binary
+          ? null
+          : new TextDecoder('utf-8', { fatal: true }).decode(preview, { stream: truncated }),
+        binary,
+        truncated,
+      })
+    })
+  })
+}
+
+/**
+ * A revision read from Git. Command output keeps the trailing newline, and a
+ * revision argument carrying one is not a revision, so it is dropped here once
+ * instead of at every use.
+ */
+async function gitRevision(root: string, args: string[]): Promise<string | null> {
+  const output = await tryGit(root, args)
+  return output ? stripTrailingNewline(output) : null
+}
+
+function commitSummary(root: string, ref: string): Promise<string | null> {
+  return tryGit(root, ['show', '-s', '--format=%h %s', '--end-of-options', ref])
+}
+
+interface ConflictContext {
+  operation: GitOperation | null
+  incomingRef: string | null
+  incomingSubject: string | null
+  /** What each side changed against this base, for rename evidence. */
+  sides: { side: 'current' | 'incoming'; base: string; target: string }[]
+  stash: { ref: string; message: string } | null
+  stashAvailable: boolean
+}
+
+/**
+ * What Git itself recorded for the operation in progress. A stash apply leaves
+ * no state file, so its side is only claimed when stage 3 is found in a stash
+ * entry; otherwise the resolver says the operation is unknown instead of
+ * guessing from the worktree.
+ */
+async function conflictContext(
+  root: string,
+  relativePath: string,
+  stages: ConflictStageEntry[],
+): Promise<ConflictContext> {
+  const state = await getOperationState(root)
+  const incomingRef =
+    (state.rebase
+      ? await gitRevision(root, [
+          'rev-parse',
+          '--verify',
+          '--end-of-options',
+          'REBASE_HEAD^{commit}',
+        ])
+      : null) ??
+    (state.operation === 'merge'
+      ? await gitRevision(root, [
+          'rev-parse',
+          '--verify',
+          '--end-of-options',
+          'MERGE_HEAD^{commit}',
+        ])
+      : null) ??
+    (state.operation === 'cherryPick'
+      ? await gitRevision(root, [
+          'rev-parse',
+          '--verify',
+          '--end-of-options',
+          'CHERRY_PICK_HEAD^{commit}',
+        ])
+      : null) ??
+    (state.operation === 'revert'
+      ? await gitRevision(root, [
+          'rev-parse',
+          '--verify',
+          '--end-of-options',
+          'REVERT_HEAD^{commit}',
+        ])
+      : null)
+  const incomingSubject = incomingRef ? await commitSummary(root, incomingRef) : null
+  const sides: ConflictContext['sides'] = []
+  if (incomingRef) {
+    if (state.operation === 'merge') {
+      const base = await gitRevision(root, ['merge-base', 'HEAD', incomingRef])
+      if (base) {
+        sides.push({ side: 'current', base, target: 'HEAD' })
+        sides.push({ side: 'incoming', base, target: incomingRef })
+      }
+    } else {
+      sides.push({ side: 'incoming', base: `${incomingRef}^`, target: incomingRef })
+    }
+  }
+  const incomingStage = stages.find((stage) => stage.stage === 3)
+  const stashes = (await getStashes(root)).map((entry) => ({
+    ref: entry.ref,
+    message: entry.message.replace(/^[^:]*:\s*/u, ''),
+    oid: entry.oid,
+  }))
+  let stash: ConflictContext['stash'] = null
+  if (!state.operation && incomingStage) {
+    for (const entry of stashes) {
+      const listing = await tryGit(root, [
+        '--literal-pathspecs',
+        'ls-tree',
+        '-z',
+        '--end-of-options',
+        entry.oid,
+        '--',
+        relativePath,
+      ])
+      const matched = listing
+        ?.split('\0')
+        .some((token) => token.split('\t')[0]?.split(/\s+/u)[2] === incomingStage.oid)
+      if (matched) {
+        stash = { ref: entry.ref, message: entry.message }
+        break
+      }
+    }
+  }
+  return {
+    operation: state.operation,
+    incomingRef,
+    incomingSubject: incomingSubject ? stripTrailingNewline(incomingSubject) : null,
+    sides,
+    stash,
+    stashAvailable: stashes.length > 0,
+  }
+}
+
+/** Report only renames that Git's similarity detection actually identified. */
+async function conflictMoves(
+  root: string,
+  relativePath: string,
+  context: ConflictContext,
+): Promise<ConflictMove[]> {
+  const moves: ConflictMove[] = []
+  for (const side of context.sides) {
+    const listing = await tryGit(root, [
+      'diff',
+      '--name-status',
+      '-z',
+      '-M',
+      '--no-ext-diff',
+      '--end-of-options',
+      side.base,
+      side.target,
+    ])
+    if (!listing) continue
+    const fields = listing.split('\0')
+    for (let index = 0; index < fields.length - 1;) {
+      const status = fields[index++]
+      const from = fields[index++]
+      if (status.startsWith('R')) {
+        const to = fields[index++]
+        if (from === relativePath || to === relativePath) {
+          moves.push({ from, to, side: side.side })
+        }
+      }
+    }
+  }
+  return moves
+}
+
+export async function getConflictView(
+  repoPath: string,
+  requestedPath: string,
+): Promise<ConflictFile> {
+  const root = await resolveRepository(repoPath)
+  await recoverFileActionJournals(root)
+  const entry = changedEntry(await getStatus(root), requirePathInput(requestedPath, 'path'))
+  if (!entry.conflicted) throw new Error('The selected file has no unresolved conflict')
+  const relativePath = entry.path
+  await safeRepositoryPath(root, relativePath)
+  const captured = await conflictIndex(root, relativePath)
+  const stages = captured.stages
+  if (!stages.length) throw new Error('The selected file has no unresolved conflict')
+  const context = await conflictContext(root, relativePath, stages)
+  const [identity, currentBranch, moves] = await Promise.all([
+    fileFingerprint(root, relativePath),
+    getCurrentBranch(root),
+    conflictMoves(root, relativePath, context),
+  ])
+  const sides: ConflictSides = {}
+  await Promise.all(
+    stages.map(async (stage) => {
+      sides[stage.stage] = await readConflictBlob(root, stage.oid)
+    }),
+  )
+  if (captured.fingerprint !== identity.indexFingerprint) {
+    throw new Error('The index changed while the conflict was being read; refresh and retry')
+  }
+  const worktree = identity.binary || !identity.preview ? null : identity.preview.toString('utf8')
+  const segments = worktree && !identity.truncated ? parseConflictSegments(worktree) : []
+  const stageNumbers = stages.map((stage) => stage.stage)
+  const tool = process.env.GIT_MERGE_TOOL || (await getConfigValue(root, 'merge.tool'))
+  const binary = identity.binary || Object.values(sides).some((side) => side.binary)
+  const stagePreviewTruncated = stages
+    .filter((stage) => sides[stage.stage].truncated)
+    .map((stage) => stage.stage)
+  return {
+    path: relativePath,
+    kind: conflictKind(stageNumbers, moves.length > 0),
+    stages: stageNumbers,
+    binary,
+    labels: conflictLabels({
+      operation: context.operation,
+      currentBranch,
+      incomingSubject: context.incomingSubject,
+      incomingRef: context.incomingRef,
+      stash: context.stash,
+      stashAvailable: context.stashAvailable,
+    }),
+    base: sides[1]?.text ?? null,
+    current: sides[2]?.text ?? null,
+    incoming: sides[3]?.text ?? null,
+    worktree,
+    worktreePresent: identity.stat !== null,
+    regions: conflictRegions(segments),
+    moves,
+    truncated: identity.truncated || stagePreviewTruncated.length > 0,
+    stagePreviewTruncated,
+    fingerprint: identity.fingerprint,
+    mergeTool: tool
+      ? { available: true, tool, reason: `Runs the configured merge tool ${tool} on this file.` }
+      : {
+          available: false,
+          tool: null,
+          reason: 'No merge tool is configured. Set merge.tool or GIT_MERGE_TOOL in Git.',
+        },
+  }
+}
+
+/**
+ * Put the chosen side, both sides, or nothing in the worktree. Ordinary side
+ * selection goes through Git's index so file modes and binary content survive.
+ * For divergent renames Git may instead put a synthesized, marker-bearing
+ * merge result in both index stages; recover the actual selected side from
+ * its recorded rename destination in the corresponding commit.
+ * Nothing is staged here.
+ */
+async function writeConflictChoice(
+  root: string,
+  relativePath: string,
+  choice: ConflictChoice,
+  sides: ConflictSides,
+  identity: FileIdentity,
+): Promise<void> {
+  if (choice === 'delete') {
+    await replaceCheckedFile(root, relativePath, identity, null)
+    return
+  }
+  if (choice === 'both') {
+    const current = sides[2]?.text
+    const incoming = sides[3]?.text
+    if (current === null || current === undefined || incoming === null || incoming === undefined) {
+      throw new Error('Keeping both copies needs a version of the file on each side')
+    }
+    if (hasConflictMarkers(current) || hasConflictMarkers(incoming)) {
+      throw new Error('A chosen side still contains conflict markers; resolve its regions first')
+    }
+    await replaceCheckedFile(root, relativePath, identity, null, current + incoming)
+    return
+  }
+  const selected = sides[choice === 'current' ? 2 : 3]
+  if (!selected) {
+    throw new Error('That side of the conflict has no content; accept the deletion instead')
+  }
+  let sourcePath = relativePath
+  let renamedSource = false
+  let args = [
+    '--literal-pathspecs',
+    'checkout',
+    choice === 'current' ? '--ours' : '--theirs',
+    '--',
+    relativePath,
+  ]
+  if (selected.text !== null && hasConflictMarkers(selected.text)) {
+    const context = await conflictContext(
+      root,
+      relativePath,
+      await conflictStages(root, relativePath),
+    )
+    const destination = (await conflictMoves(root, relativePath, context)).find(
+      (move) => move.to === relativePath,
+    )
+    const move =
+      destination &&
+      (await conflictMoves(root, destination.from, context)).find((item) => item.side === choice)
+    const revision = context.sides.find((side) => side.side === choice)?.target
+    if (!move || !revision) {
+      throw new Error('A chosen side still contains conflict markers; resolve its regions first')
+    }
+    sourcePath = requirePathInput(move.to, 'path')
+    args = ['--literal-pathspecs', 'restore', '--source', revision, '--worktree', '--', sourcePath]
+    renamedSource = true
+  }
+  const materialized = await materializeGitWorktreePath(root, sourcePath, args)
+  try {
+    if (!materialized.path) throw new Error('The selected side could not be restored')
+    if (renamedSource) {
+      const original = await fileFingerprintAt(root, sourcePath, materialized.path)
+      if (
+        original.preview &&
+        !original.binary &&
+        !original.truncated &&
+        hasConflictMarkers(original.preview.toString('utf8'))
+      ) {
+        throw new Error('A chosen side still contains conflict markers; resolve its regions first')
+      }
+    }
+
+    await replaceCheckedFile(root, relativePath, identity, materialized.path)
+  } finally {
+    await fs.rm(materialized.root, { recursive: true, force: true })
+  }
+}
+
+/** Stage only the checked path through a private index. The live index is
+ * replaced under its lock only if no entry or selected worktree byte changed.
+ */
+async function stageCheckedConflict(
+  root: string,
+  relativePath: string,
+  expected: FileIdentity,
+): Promise<void> {
+  const indexPath = await repositoryGitPath(root, 'index', null)
+  const indexMode = (await fs.stat(indexPath)).mode & 0o7777
+  const original = await fs.readFile(indexPath)
+  const temporary = await fs.mkdtemp(path.join(tmpdir(), 'git-stacks-stage-'))
+  const privateIndex = path.join(temporary, 'index')
+  const lockPath = `${indexPath}.lock`
+  let lock: FileHandle | null = null
+  let ownsLock = false
+  try {
+    await fs.writeFile(privateIndex, original)
+    if ((await fileFingerprint(root, relativePath)).fingerprint !== expected.fingerprint) {
+      throw new Error('The file changed before staging; refresh and retry')
+    }
+    await runGit(root, ['--literal-pathspecs', 'add', '-A', '--', relativePath], {
+      GIT_INDEX_FILE: privateIndex,
+    })
+    const unresolved = await runGit(
+      root,
+      ['--literal-pathspecs', 'ls-files', '-u', '--', relativePath],
+      { GIT_INDEX_FILE: privateIndex },
+    )
+    if (unresolved) throw new Error('Git still reports this path as unmerged')
+    lock = await fs.open(lockPath, 'wx')
+    ownsLock = true
+    await lock.chmod(indexMode)
+    if (
+      !(await fs.readFile(indexPath)).equals(original) ||
+      (await fileFingerprint(root, relativePath)).fingerprint !== expected.fingerprint
+    ) {
+      throw new Error('The file or index changed before staging; refresh and retry')
+    }
+    await lock.writeFile(await fs.readFile(privateIndex))
+    await lock.sync()
+    await lock.close()
+    lock = null
+    await fs.rename(lockPath, indexPath)
+    ownsLock = false
+  } finally {
+    if (lock) await lock.close()
+    if (ownsLock) await fs.rm(lockPath, { force: true })
+    await fs.rm(temporary, { recursive: true, force: true })
+  }
+}
+
+/**
+ * Mark one conflicted path resolved. The worktree and index identity the
+ * decision was made under is revalidated first, so an edit made elsewhere while
+ * the resolver was open is refused instead of overwritten.
+ */
+export async function runResolveConflict(
   repoPath: string,
   filePath: string,
   fingerprint: string,
-  strategy: 'ours' | 'theirs' | 'manual',
-  content: string,
+  resolution: ConflictResolution,
 ): Promise<ActionResult> {
   const root = await resolveRepository(repoPath)
   await recoverFileActionJournals(root)
   const { entry, identity } = await checkFileFingerprint(root, filePath, fingerprint)
   if (!entry.conflicted) throw new Error('The selected file has no unresolved conflict')
-  const actualPath = entry.path
-  await safeRepositoryPath(root, actualPath)
-  let materializedRoot: string | null = null
-  let sourcePath: string | null = null
-  try {
-    if (strategy === 'manual') {
-      await replaceCheckedFile(root, actualPath, identity, null, content)
-    } else {
-      const stage = strategy === 'ours' ? 2 : 3
-      if (await hasConflictStage(root, actualPath, stage)) {
-        const materialized = await materializeGitWorktreePath(root, actualPath, [
-          '--literal-pathspecs',
-          'checkout',
-          `--${strategy}`,
-          '--',
-          actualPath,
-        ])
-        materializedRoot = materialized.root
-        sourcePath = materialized.path
-      }
-      await replaceCheckedFile(root, actualPath, identity, sourcePath)
+  const relativePath = entry.path
+  await safeRepositoryPath(root, relativePath)
+  if (resolution.kind === 'worktree') {
+    if (!identity.stat) throw new Error('No worktree file exists to mark resolved')
+    if (
+      !identity.binary &&
+      !identity.truncated &&
+      identity.preview &&
+      hasConflictMarkers(identity.preview.toString('utf8'))
+    ) {
+      throw new Error('Conflict markers are still present; resolve every region before staging')
     }
+  } else if (resolution.kind === 'content') {
+    if (identity.binary) {
+      throw new Error(
+        'This conflict is a binary file, so it cannot be resolved by editing text. ' +
+          'Accept one side, open the external merge tool, or resolve it outside Git Stacks.',
+      )
+    }
+    if (hasConflictMarkers(resolution.content)) {
+      throw new Error('Conflict markers are still present; resolve every region before staging')
+    }
+    await replaceCheckedFile(root, relativePath, identity, null, resolution.content)
+  } else {
+    const captured = await conflictIndex(root, relativePath)
+    if (captured.fingerprint !== identity.indexFingerprint) {
+      throw new Error(
+        'The index changed since the conflict was opened; refresh before applying this action',
+      )
+    }
+    const selectedStage = resolution.choice === 'current' ? 2 : 3
+    const sides: ConflictSides = {}
+    if (resolution.choice !== 'delete') {
+      await Promise.all(
+        captured.stages
+          .filter((stage) =>
+            resolution.choice === 'both' ? stage.stage !== 1 : stage.stage === selectedStage,
+          )
+          .map(async (stage) => {
+            sides[stage.stage] = await readConflictBlob(root, stage.oid)
+          }),
+      )
+    }
+    if (
+      resolution.choice === 'both' &&
+      [sides[2], sides[3]].some((side) => side?.binary || side?.truncated)
+    ) {
+      throw new Error('Keeping both copies requires complete text versions of both sides')
+    }
+    await writeConflictChoice(root, relativePath, resolution.choice, sides, identity)
+  }
+  await safeRepositoryPath(root, relativePath)
+  const stagedIdentity =
+    resolution.kind === 'worktree' ? identity : await fileFingerprint(root, relativePath)
+  if (stagedIdentity.indexFingerprint !== identity.indexFingerprint) {
+    throw new Error('The index changed during resolution; refresh and retry')
+  }
+  await stageCheckedConflict(root, relativePath, stagedIdentity)
+  return { message: `Resolved and staged ${relativePath}` }
+}
+
+/**
+ * `git mergetool` for one path, with its stdin closed. Git controls invocation
+ * and failure; the tool selected for this view is passed explicitly so an
+ * environment override cannot silently run the configured fallback instead.
+ */
+async function runMergeTool(
+  gitDirectory: string,
+  relativePath: string,
+  indexPath: string,
+  worktree: string,
+  tool: string,
+): Promise<string> {
+  const runtime = await resolveGitRuntime()
+  return new Promise((resolve, reject) => {
+    const child = spawn(
+      runtime.executable,
+      ['mergetool', '--no-prompt', '--no-gui', `--tool=${tool}`, '--', relativePath],
+      {
+        cwd: worktree,
+        env: gitCommandEnvironment(
+          runtime,
+          commandEnvironment({
+            GIT_DIR: gitDirectory,
+            GIT_INDEX_FILE: indexPath,
+            GIT_WORK_TREE: worktree,
+          }),
+        ),
+        stdio: ['ignore', 'pipe', 'pipe'],
+        shell: false,
+      },
+    )
+    let output = ''
+    let failure = ''
+    child.stdout.setEncoding('utf8')
+    child.stderr.setEncoding('utf8')
+    child.stdout.on('data', (chunk: string) => {
+      output += chunk
+    })
+    child.stderr.on('data', (chunk: string) => {
+      output += chunk
+      failure += chunk
+    })
+    child.once('error', reject)
+    child.once('close', (code) => {
+      if (code === 0) resolve(output)
+      else {
+        reject(
+          new Error(
+            (failure || output).trim() ||
+              `git mergetool exited with status ${code} for ${relativePath}`,
+          ),
+        )
+      }
+    })
+  })
+}
+
+/**
+ * Git runs the external tool in a private worktree and index. Only a result
+ * bound to the originally captured live identity is installed in the live
+ * worktree; the live index stays unmerged until an explicit checked stage.
+ */
+export async function runConflictMergeTool(
+  repoPath: string,
+  filePath: string,
+  fingerprint: string,
+): Promise<ActionResult> {
+  const root = await resolveRepository(repoPath)
+  await recoverFileActionJournals(root)
+  const { entry, identity } = await checkFileFingerprint(root, filePath, fingerprint)
+  if (!entry.conflicted) throw new Error('The selected file has no unresolved conflict')
+  const relativePath = entry.path
+  await safeRepositoryPath(root, relativePath)
+  const tool = process.env.GIT_MERGE_TOOL || (await getConfigValue(root, 'merge.tool'))
+  if (!tool) {
+    throw new Error('No merge tool is configured. Set merge.tool or GIT_MERGE_TOOL in Git.')
+  }
+  const temporary = await fs.mkdtemp(path.join(tmpdir(), 'git-stacks-mergetool-'))
+  try {
+    const indexPath = path.join(temporary, 'index')
+    const worktree = path.join(temporary, 'worktree')
+    const isolatedPath = path.join(worktree, relativePath)
+    await fs.mkdir(path.dirname(isolatedPath), { recursive: true })
+    await fs.copyFile(await repositoryGitPath(root, 'index', null), indexPath)
+    if (identity.stat) {
+      await fs.copyFile(await safeRepositoryPath(root, relativePath), isolatedPath)
+      await fs.chmod(isolatedPath, identity.stat.mode & 0o777)
+    }
+    if ((await fileFingerprint(root, relativePath)).fingerprint !== identity.fingerprint) {
+      throw new Error('The file changed while preparing the merge tool; refresh and retry')
+    }
+    await runMergeTool(
+      stripTrailingNewline(await runGit(root, ['rev-parse', '--absolute-git-dir'])),
+      relativePath,
+      indexPath,
+      worktree,
+      tool,
+    )
+    let result: string | null = isolatedPath
+    try {
+      const info = await fs.lstat(isolatedPath)
+      if (!info.isFile()) throw new Error('The merge tool produced a non-file result')
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+      result = null
+    }
+    if (!result) {
+      throw new Error(
+        'The merge tool removed this file; use Accept the deletion to stage its removal',
+      )
+    }
+    await replaceCheckedFile(root, relativePath, identity, result)
   } finally {
-    if (materializedRoot) {
-      await fs.rm(materializedRoot, { recursive: true, force: true })
+    await fs.rm(temporary, { recursive: true, force: true })
+  }
+  const after = await fileFingerprint(root, relativePath)
+  const markers =
+    after.preview && !after.binary && !after.truncated
+      ? hasConflictMarkers(after.preview.toString('utf8'))
+      : false
+  return {
+    message: markers
+      ? `${tool} left unresolved markers in ${relativePath}. Nothing was staged.`
+      : `${tool} finished with ${relativePath}. Review the result, then mark it resolved to stage it.`,
+  }
+}
+
+/**
+ * Applies one hunk, or a subset of its changed lines, to the index only. The
+ * working tree is never written: `git apply --cached` rebuilds the index entry
+ * from the preimage it verifies, so unstaged edits elsewhere in the file, in this
+ * file's other hunks, and in other files are left exactly as they are.
+ */
+export async function runStageHunk(
+  repoPath: string,
+  action: 'stageHunk' | 'unstageHunk',
+  filePath: string,
+  hunkId: string,
+  fingerprint: string,
+  lineIndexes?: number[],
+): Promise<ActionResult> {
+  const root = await resolveRepository(repoPath)
+  await recoverFileActionJournals(root)
+  const { entry, identity } = await checkFileFingerprint(root, filePath, fingerprint)
+  const side: HunkSideName = action === 'unstageHunk' ? 'staged' : 'unstaged'
+  const diff = await changedDiff(root, side === 'staged' ? 'cached' : 'worktree', entry.path)
+  const resolved = resolveHunkSide(entry, identity, side, diff)
+  if (resolved.unavailable) throw new Error(resolved.unavailable)
+  const block = parseHunkBlock(diff.text, {
+    path: entry.path,
+    originalPath: entry.originalPath ?? null,
+  })
+  const hunk = resolved.hunks.find((candidate) => candidate.id === hunkId)
+  if (!hunk) {
+    throw new Error(
+      `That hunk is no longer part of the ${side} diff of ${entry.path}; refresh the file and try again`,
+    )
+  }
+  const selected = validateHunkSelection(hunk, lineIndexes)
+  const patch = buildHunkPatch(block, hunk, side, selected)
+  await safeRepositoryPath(root, entry.path)
+  // Building the patch takes time; do not apply it against a file or index that
+  // changed since the diff and hunk identity were resolved.
+  await checkFileFingerprint(root, filePath, fingerprint)
+  const initialHead = (await tryGit(root, ['rev-parse', 'HEAD']))?.trim() ?? ''
+  const relativeIndex = (await runGit(root, ['rev-parse', '--git-path', 'index'])).trim()
+  const realIndexPath = path.resolve(root, relativeIndex)
+  const lockPath = `${realIndexPath}.lock`
+  const tempIndexPath = `${realIndexPath}.stage-${randomUUID()}`
+
+  let lockHandle: FileHandle | null = null
+  let lockAcquired = false
+  try {
+    try {
+      lockHandle = await fs.open(lockPath, 'wx', 0o666)
+      lockAcquired = true
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
+        throw new Error('Another Git process is modifying the index; retry after it completes')
+      }
+      throw error
+    }
+
+    // A Git writer can change ANY entry while this action resolves the diff.
+    // Take the complete snapshot only after owning Git's index lock, otherwise
+    // publishing the temporary index could discard a different file's staging.
+    const indexExists = await fs
+      .access(realIndexPath, fsConstants.F_OK)
+      .then(() => true)
+      .catch(() => false)
+    const indexMode = indexExists ? (await fs.stat(realIndexPath)).mode & 0o777 : null
+    if (indexExists) {
+      await fs.copyFile(realIndexPath, tempIndexPath)
+    }
+
+    try {
+      await runGitWithInput(
+        root,
+        [
+          '--literal-pathspecs',
+          'apply',
+          '--cached',
+          '--unidiff-zero',
+          '--whitespace=nowarn',
+          ...(side === 'staged' ? ['--reverse'] : []),
+          '-',
+        ],
+        patch,
+        { GIT_INDEX_FILE: tempIndexPath },
+      )
+    } catch (error) {
+      throw new Error(
+        `Git refused the hunk patch for ${entry.path}: ${commandDetail(error)}. Nothing was changed.`,
+      )
+    }
+
+    const tempStage = await runGit(
+      root,
+      ['--literal-pathspecs', 'ls-files', '--stage', '-z', '--', entry.path],
+      { GIT_INDEX_FILE: tempIndexPath },
+    )
+    const tempIndexFingerprint = createHash('sha256').update(tempStage).digest('hex')
+    if (tempIndexFingerprint === identity.indexFingerprint) {
+      throw new Error('The patch did not change the index; refresh and try again')
+    }
+
+    const currentHead = (await tryGit(root, ['rev-parse', 'HEAD']))?.trim() ?? ''
+    if (currentHead !== initialHead) {
+      throw new Error('The repository HEAD changed while staging; refresh and review the file')
+    }
+    const currentIdentity = await fileFingerprint(root, entry.path)
+    if (currentIdentity.contentFingerprint !== identity.contentFingerprint) {
+      throw new Error(
+        'The working tree changed while the patch was applied; refresh and review the file',
+      )
+    }
+    if (currentIdentity.indexFingerprint !== identity.indexFingerprint) {
+      throw new Error('The index changed while the patch was applied; refresh and review the file')
+    }
+
+    if (indexMode !== null) await fs.chmod(tempIndexPath, indexMode)
+    await lockHandle.close()
+    lockHandle = null
+    await fs.rename(tempIndexPath, realIndexPath)
+  } finally {
+    if (lockHandle) {
+      await lockHandle.close().catch(() => {})
+    }
+    if (lockAcquired) {
+      await fs.unlink(lockPath).catch(() => {})
+    }
+    await fs.rm(tempIndexPath, { force: true }).catch(() => {})
+  }
+  const position = resolved.hunks.indexOf(hunk) + 1
+  const count = selected
+    ? selected.length
+    : hunk.lines.filter((l) => l.kind === 'add' || l.kind === 'remove').length
+  const scope = selected
+    ? `${count} line${count === 1 ? '' : 's'}`
+    : `hunk ${position} of ${resolved.hunks.length}`
+  return {
+    message: `${side === 'staged' ? 'Unstaged' : 'Staged'} ${scope} in ${entry.path}`,
+  }
+}
+
+function validateHunkSelection(
+  hunk: DiffHunk,
+  lineIndexes: number[] | undefined,
+): number[] | undefined {
+  if (!lineIndexes) return undefined
+  for (const index of lineIndexes) {
+    const line = hunk.lines[index]
+    if (!line || (line.kind !== 'add' && line.kind !== 'remove')) {
+      throw new Error('Only changed lines of the selected hunk can be applied')
     }
   }
-  await safeRepositoryPath(root, actualPath)
-  await runGit(root, ['--literal-pathspecs', 'add', '--', actualPath])
-  return { message: `Resolved ${actualPath} using ${strategy}` }
+  return [...lineIndexes].sort((left, right) => left - right)
 }
 
 function requireHistorySkip(value: unknown): number {
@@ -3351,18 +4377,18 @@ export async function getHistory(
   repoPath: string,
   ref: string,
   skip: number,
+  signal?: AbortSignal,
 ): Promise<HistoryPage> {
-  const root = await resolveRepository(repoPath)
+  const root = await resolveRepository(repoPath, signal)
   const requestedRef = requireRefInput(ref, 'history ref')
   const offset = requireHistorySkip(skip)
-  const resolved = await tryGit(root, [
-    'rev-parse',
-    '--verify',
-    '--end-of-options',
-    `${requestedRef}^{commit}`,
-  ])
+  const resolved = await tryGit(
+    root,
+    ['rev-parse', '--verify', '--end-of-options', `${requestedRef}^{commit}`],
+    signal,
+  )
   if (!resolved) {
-    const current = await getCurrentBranch(root)
+    const current = await getCurrentBranch(root, signal)
     if (
       requestedRef !== 'HEAD' &&
       requestedRef !== current &&
@@ -3372,20 +4398,26 @@ export async function getHistory(
     }
     return { commits: [], hasMore: false }
   }
-  const output = await runGit(root, [
-    'log',
-    '--no-ext-diff',
-    '--skip',
-    String(offset),
-    '-n',
-    '51',
-    '--format=%H%x00%P%x00%s%x00%an%x00%cI%x00',
-    '--end-of-options',
-    requestedRef,
-  ])
+  const { text: output, truncated } = await runGitCapped(
+    root,
+    [
+      'log',
+      '--no-ext-diff',
+      '--skip',
+      String(offset),
+      '-n',
+      '51',
+      '--format=%H%x00%P%x00%s%x00%an%x00%cI%x00',
+      '--end-of-options',
+      requestedRef,
+    ],
+    { maxBytes: MAX_HISTORY_BYTES, boundary: '\0', signal },
+  )
   const values = output.split('\0')
   const commits: Commit[] = []
-  for (let index = 0; index + 4 < values.length; index += 5) {
+  // A NUL terminates a field, not a commit: a capped author field must not
+  // become a fabricated row whose missing date shifts subsequent skip values.
+  for (let index = 0; index + 5 < values.length; index += 5) {
     const oid = stripTrailingNewline(values[index])
     if (!oid) continue
     const parents = stripTrailingNewline(values[index + 1])
@@ -3399,33 +4431,39 @@ export async function getHistory(
       date: stripTrailingNewline(values[index + 4]),
     })
   }
-  return { commits: commits.slice(0, 50), hasMore: commits.length > 50 }
+  if (truncated && commits.length === 0) {
+    throw new Error('History entry exceeds the 1 MiB preview limit.')
+  }
+  return { commits: commits.slice(0, 50), hasMore: truncated || commits.length > 50 }
 }
 
 export async function getCommitDiff(
   repoPath: string,
   oid: string,
+  signal?: AbortSignal,
 ): Promise<{ text: string; truncated: boolean }> {
-  const root = await resolveRepository(repoPath)
+  const root = await resolveRepository(repoPath, signal)
   const commitOid = requireOid(oid, 'commit oid')!
-  const resolved = await tryGit(root, [
-    'rev-parse',
-    '--verify',
-    '--end-of-options',
-    `${commitOid}^{commit}`,
-  ])
+  const resolved = await tryGit(
+    root,
+    ['rev-parse', '--verify', '--end-of-options', `${commitOid}^{commit}`],
+    signal,
+  )
   if (!resolved) throw new Error(`Commit "${commitOid}" does not exist`)
-  const output = await runGit(root, [
-    'show',
-    '--format=',
-    '--no-ext-diff',
-    '--no-textconv',
-    '--binary',
-    '--patch',
-    '--end-of-options',
-    commitOid,
-  ])
-  return boundedText(output, MAX_DIFF_BYTES)
+  return runGitCapped(
+    root,
+    [
+      'show',
+      '--format=',
+      '--no-ext-diff',
+      '--no-textconv',
+      '--binary',
+      '--patch',
+      '--end-of-options',
+      commitOid,
+    ],
+    { maxBytes: MAX_DIFF_BYTES, signal },
+  )
 }
 
 export async function getPushPreview(repoPath: string): Promise<PushPreview> {
@@ -3467,22 +4505,86 @@ function branchFromRef(ref: RefRecord, currentBranch: string | null, remote: boo
     needsRestack: false,
   }
 }
-export async function getSnapshot(repoPath: string): Promise<RepositorySnapshot> {
-  const root = await resolveRepository(repoPath)
+export async function getSnapshot(
+  repoPath: string,
+  signal?: AbortSignal,
+  // Overridable so a test can exercise the budget with a handful of branches
+  // instead of materialising SNAPSHOT_BRANCH_BUDGET of them.
+  branchBudget = SNAPSHOT_BRANCH_BUDGET,
+): Promise<RepositorySnapshot> {
+  const root = await resolveRepository(repoPath, signal)
   await recoverStashDropForRepository(root)
   await recoverFileActionJournals(root)
   await recoverStaleBranchLocks(root)
-  const [refs, currentBranch, files, stashes, originUrl, operationState, stackOperation, headOid] =
-    await Promise.all([
-      getRefs(root),
-      getCurrentBranch(root),
-      getStatus(root),
-      getStashes(root),
-      getOriginUrl(root),
-      getOperationState(root),
-      getStackProgress(root),
-      currentHeadOid(root),
-    ])
+  const capabilities = await getRepositoryCapabilities(root)
+  // A bare repository has no index to compare against a worktree.
+  const noWorkingTree = { files: [] as ChangedFile[], truncated: false }
+  const reads = [
+    getRefs(root, signal),
+    getCurrentBranch(root, signal),
+    capabilities.bare ? Promise.resolve(noWorkingTree) : listStatus(root, signal),
+    capabilities.bare ? Promise.resolve([] as Stash[]) : getStashes(root, signal),
+    getOriginUrl(root, signal),
+    getOperationState(root, signal),
+    getStackProgress(root, signal),
+    currentHeadOid(root, signal),
+    getBranchConfigs(root, signal),
+  ] as const
+  const [
+    refs,
+    currentBranch,
+    workingTree,
+    stashes,
+    originUrl,
+    operationState,
+    stackOperation,
+    headOid,
+    configParents,
+  ] = await Promise.all(reads).catch(async (error: unknown) => {
+    await Promise.allSettled(reads)
+    throw error
+  })
+  const files = workingTree.files
+  const limits: SnapshotLimits = {
+    branchesAnalyzed: 0,
+    branchesSkipped: 0,
+    filesListed: files.length,
+    filesTruncated: workingTree.truncated,
+  }
+  // Budget per-branch Git work while reporting each branch only once, even
+  // when it needs both parent inference and a behind-count.
+  let remaining = branchBudget
+  const analyzed = new Set<Branch>()
+  const skipped = new Set<Branch>()
+  const takeBudget = (candidates: Branch[]): Branch[] => {
+    const allowed: Branch[] = []
+    for (const branch of candidates) {
+      if (analyzed.has(branch)) {
+        allowed.push(branch)
+      } else if (remaining > 0) {
+        remaining -= 1
+        analyzed.add(branch)
+        allowed.push(branch)
+      } else {
+        skipped.add(branch)
+      }
+    }
+    return allowed
+  }
+
+  const indexEntries = await getIndexEntries(
+    root,
+    files.flatMap((file) => (file.originalPath ? [file.path, file.originalPath] : [file.path])),
+  )
+  const headGitlinks = await getHeadGitlinks(
+    root,
+    files.map((file) => file.path),
+  )
+  for (const file of files) {
+    const entry = indexEntries.get(file.path)
+    if (entry?.submodule || headGitlinks.has(file.path)) file.submodule = true
+    if (entry?.sparseExcluded) file.sparseExcluded = true
+  }
 
   const localRefs = refs.filter((ref) => ref.refname.startsWith('refs/heads/') && !ref.symref)
   const remoteRefs = refs.filter((ref) => ref.refname.startsWith('refs/remotes/') && !ref.symref)
@@ -3494,7 +4596,7 @@ export async function getSnapshot(repoPath: string): Promise<RepositorySnapshot>
     currentBranch &&
     !branches.some((branch) => !branch.remote && branch.name === currentBranch)
   ) {
-    const upstream = await branchUpstream(root, currentBranch)
+    const upstream = await branchUpstream(root, currentBranch, signal)
     branches.unshift({
       ref: `refs/heads/${currentBranch}`,
       name: currentBranch,
@@ -3516,23 +4618,11 @@ export async function getSnapshot(repoPath: string): Promise<RepositorySnapshot>
     })
   }
 
-  const defaultBranch = await getDefaultBranch(root, refs, currentBranch)
-  const github = await getGitHubData(root, originUrl)
-  const parentConfigs = await Promise.all(
-    branches
-      .filter((branch) => !branch.remote)
-      .map(async (branch) => ({
-        name: branch.name,
-        parent: await getBranchParent(root, branch.name),
-        parentTip: await getConfigValue(root, `branch.${branch.name}.parentTip`),
-      })),
-  )
-  const configParents = new Map(
-    parentConfigs.map((entry) => [
-      entry.name,
-      { parent: entry.parent, parentTip: entry.parentTip },
-    ]),
-  )
+  const defaultBranch = await getDefaultBranch(root, refs, currentBranch, signal)
+  const [github, issueData] = await Promise.all([
+    getGitHubData(root, originUrl, signal),
+    getGitHubIssues(root, originUrl),
+  ])
   const localPullRequests = new Map<string, PullRequest>()
   github.pullRequests.forEach((pullRequest, index) => {
     if (github.sameRepository(index) && !localPullRequests.has(pullRequest.head)) {
@@ -3566,60 +4656,139 @@ export async function getSnapshot(repoPath: string): Promise<RepositorySnapshot>
     refsByName.get(`refs/heads/${defaultBranch}`) ??
     refsByName.get(`refs/remotes/origin/${defaultBranch}`)
   if (defaultRef) {
-    await Promise.all(
-      branches.map(async (branch) => {
-        if (branch.parent) return
-        const child = refsByName.get(branch.ref)
-        const local = !branch.remote
-        const originRemote = branch.remote && branch.ref.startsWith('refs/remotes/origin/')
-        if (
-          !child ||
-          (!local && !originRemote) ||
-          branch.ref === `refs/heads/${defaultBranch}` ||
-          branch.ref === `refs/remotes/origin/${defaultBranch}` ||
-          branch.ref === defaultRef.refname
-        ) {
-          return
-        }
-        if (
-          (await tryGit(root, ['merge-base', child.objectName, defaultRef.objectName])) !== null
-        ) {
-          branch.parent = defaultBranch
-          branch.parentSource = 'inferred'
-        }
-      }),
+    const defaultRefs = new Set([
+      `refs/heads/${defaultBranch}`,
+      `refs/remotes/origin/${defaultBranch}`,
+      defaultRef.refname,
+    ])
+    const analyzable = takeBudget(
+      branches
+        .filter((branch) => {
+          if (branch.parent) return false
+          if (!refsByName.get(branch.ref)) return false
+          const originRemote = branch.ref.startsWith('refs/remotes/origin/')
+          if (branch.remote && !originRemote) return false
+          return !defaultRefs.has(branch.ref)
+        })
+        .sort((left, right) => Number(right.current) - Number(left.current)),
     )
+    // Inspect the tips in batches: a branch one commit above the default is
+    // already known to descend from it. Avoid forking merge-base once per
+    // branch for the common case, while retaining that probe for deeper DAGs.
+    const divergent = [
+      ...new Set(
+        analyzable
+          .map((branch) => (refsByName.get(branch.ref) as RefRecord).objectName)
+          .filter((oid) => oid !== defaultRef.objectName),
+      ),
+    ]
+    const directParents = new Map<string, string[]>()
+    for (let start = 0; start < divergent.length; start += 200) {
+      const output = await tryGit(
+        root,
+        ['log', '--no-walk=unsorted', '--format=%H:%P', ...divergent.slice(start, start + 200)],
+        signal,
+      )
+      for (const line of (output ?? '').split('\n')) {
+        const separator = line.indexOf(':')
+        if (separator < 0) continue
+        directParents.set(
+          line.slice(0, separator),
+          line
+            .slice(separator + 1)
+            .trim()
+            .split(' '),
+        )
+      }
+    }
+    await mapWithConcurrency(analyzable, GIT_CONCURRENCY, async (branch) => {
+      const child = refsByName.get(branch.ref) as RefRecord
+      if (child.objectName === defaultRef.objectName) {
+        branch.parent = defaultBranch
+        branch.parentSource = 'inferred'
+        return
+      }
+      if (directParents.get(child.objectName)?.includes(defaultRef.objectName)) {
+        branch.parent = defaultBranch
+        branch.parentSource = 'inferred'
+        return
+      }
+      try {
+        await runGitCapped(root, ['merge-base', child.objectName, defaultRef.objectName], {
+          maxBytes: 4096,
+          signal,
+        })
+        branch.parent = defaultBranch
+        branch.parentSource = 'inferred'
+      } catch (error) {
+        if (
+          !isCancelled(error) &&
+          !isExitCode(error, 1) &&
+          !isExitCode(error, 2) &&
+          !isExitCode(error, 128)
+        ) {
+          throw error
+        }
+        if (isCancelled(error)) throw error
+      }
+    })
   }
+  if (signal?.aborted) throw new CommandCancelled()
 
-  const effectiveDefault = await parentTarget(root, defaultBranch, defaultBranch, false)
-  await Promise.all(
-    branches.map(async (branch) => {
-      if (!branch.parent) return
-      const child = refsByName.get(branch.ref)
-      const parent =
-        (branch.parent === defaultBranch && effectiveDefault
+  const effectiveDefault = await parentTarget(root, defaultBranch, defaultBranch, false, signal)
+  const parentOf = (branch: Branch): RefRecord | undefined =>
+    branch.parent
+      ? ((branch.parent === defaultBranch && effectiveDefault
           ? refsByName.get(effectiveDefault.ref)
           : null) ??
         refsByName.get(`refs/heads/${branch.parent}`) ??
         refsByName.get(`refs/remotes/${branch.parent}`) ??
-        refsByName.get(`refs/remotes/origin/${branch.parent}`)
-      if (!child || !parent || child.refname === parent.refname) {
-        branch.needsRestack = Boolean(branch.parentTip && !parent)
-        return
-      }
-      branch.parentBehind = Number(
-        await runGit(root, [
-          'rev-list',
-          '--count',
-          `${child.objectName}..${parent.objectName}`,
-          '--',
-        ]),
-      )
-      branch.needsRestack =
-        (branch.parentBehind ?? 0) > 0 ||
-        Boolean(branch.parentTip && branch.parentTip !== parent.objectName)
-    }),
-  )
+        refsByName.get(`refs/remotes/origin/${branch.parent}`))
+      : undefined
+  const comparable = branches.filter((branch) => {
+    const child = refsByName.get(branch.ref)
+    const parent = parentOf(branch)
+    if (!child || !parent) return false
+    if (child.refname === parent.refname) {
+      branch.needsRestack = Boolean(branch.parentTip)
+      return false
+    }
+    return true
+  })
+  for (const branch of branches) {
+    if (branch.parent && !parentOf(branch)) branch.needsRestack = Boolean(branch.parentTip)
+  }
+  const behind = takeBudget(comparable)
+  await mapWithConcurrency(behind, GIT_CONCURRENCY, async (branch) => {
+    const child = refsByName.get(branch.ref) as RefRecord
+    const parent = parentOf(branch) as RefRecord
+    if (child.objectName === parent.objectName) {
+      branch.parentBehind = 0
+      branch.needsRestack = Boolean(branch.parentTip && branch.parentTip !== parent.objectName)
+      return
+    }
+    const { text } = await runGitCapped(
+      root,
+      ['rev-list', '--count', `${child.objectName}..${parent.objectName}`, '--'],
+      { maxBytes: 1024, signal },
+    )
+    branch.parentBehind = Number(text)
+    branch.needsRestack =
+      (branch.parentBehind ?? 0) > 0 ||
+      Boolean(branch.parentTip && branch.parentTip !== parent.objectName)
+  })
+  const measured = new Set(behind)
+  for (const branch of comparable) {
+    if (measured.has(branch)) continue
+    const parent = parentOf(branch) as RefRecord
+    // Behind remains unknown outside the budget; a recorded tip is only
+    // evidence of drift when it differs from the resolved parent object.
+    branch.needsRestack = Boolean(branch.parentTip && branch.parentTip !== parent.objectName)
+  }
+
+  limits.branchesAnalyzed = analyzed.size
+  limits.branchesSkipped = skipped.size
+
   const snapshot: RepositorySnapshot = {
     path: root,
     name: path.basename(root) || root,
@@ -3628,6 +4797,8 @@ export async function getSnapshot(repoPath: string): Promise<RepositorySnapshot>
     remoteUrl: originUrl,
     branches,
     pullRequests: github.pullRequests,
+    issues: issueData.issues,
+    issuesMessage: issueData.message,
     files,
     stashes,
     rebaseInProgress: operationState.rebase,
@@ -3638,6 +4809,8 @@ export async function getSnapshot(repoPath: string): Promise<RepositorySnapshot>
     nativeStacks: github.nativeStacks ?? [],
     nativeStackPreviewAvailable: github.nativeStackPreviewAvailable ?? false,
     nativeStackMessage: github.nativeStackMessage,
+    limits,
+    capabilities,
   }
   // Read-only: the report compares submitted membership with the local graph
   // and never rewrites a branch, a local hint, or a pull-request base.
@@ -3857,7 +5030,10 @@ async function ensureStackWriteAllowed(repoPath: string, action: GitAction): Pro
   if (
     action.type === 'stage' ||
     action.type === 'unstage' ||
-    action.type === 'resolveFile' ||
+    action.type === 'stageHunk' ||
+    action.type === 'unstageHunk' ||
+    action.type === 'resolveConflict' ||
+    action.type === 'conflictMergeTool' ||
     action.type === 'stackContinue' ||
     action.type === 'stackAbort'
   ) {
@@ -3926,14 +5102,10 @@ async function withAbsentRefLock(
   ref: string,
   operation: () => Promise<void>,
 ): Promise<void> {
-  const child = spawn('git', ['update-ref', '--stdin'], {
+  const runtime = await resolveGitRuntime()
+  const child = spawn(runtime.executable, ['update-ref', '--stdin'], {
     cwd: repoPath,
-    env: {
-      ...process.env,
-      GIT_TERMINAL_PROMPT: '0',
-      GH_PROMPT_DISABLED: '1',
-      GCM_INTERACTIVE: 'Never',
-    },
+    env: gitCommandEnvironment(runtime, commandEnvironment()),
     stdio: ['pipe', 'pipe', 'pipe'],
   })
   let pendingOutput = ''
@@ -4024,14 +5196,10 @@ async function deleteLocalBranchRef(
   expectedOid: string,
   cleanupConfig: () => Promise<void>,
 ): Promise<void> {
-  const child = spawn('git', ['update-ref', '--stdin'], {
+  const runtime = await requireGitCapability('referenceTransactions', `delete ${branchName}`)
+  const child = spawn(runtime.executable, ['update-ref', '--stdin'], {
     cwd: repoPath,
-    env: {
-      ...process.env,
-      GIT_TERMINAL_PROMPT: '0',
-      GH_PROMPT_DISABLED: '1',
-      GCM_INTERACTIVE: 'Never',
-    },
+    env: gitCommandEnvironment(runtime, commandEnvironment()),
     stdio: ['pipe', 'pipe', 'pipe'],
   })
   let pendingOutput = ''
@@ -4179,79 +5347,96 @@ async function runDeleteBranch(
 }
 
 export async function runAction(repoPath: string, value: GitAction): Promise<ActionResult> {
-  const root = await resolveRepository(repoPath)
-  const action = validateAction(value)
-  if (isStackAction(action)) {
-    return runStackAction(root, action)
-  }
-  await ensureStackWriteAllowed(root, action)
-  switch (action.type) {
-    case 'stage':
-    case 'unstage':
-      return runStage(root, action.type, action.paths)
-    case 'commit':
-      return runCommit(
-        root,
-        action.message,
-        action.amend,
-        action.expectedHead,
-        action.expectedHeadRef,
-      )
-    case 'forcePush':
-      return runForcePush(root, action.preview)
-    case 'fetch':
-      return runFetch(root)
-    case 'pull':
-      return runPull(root, action.strategy)
-    case 'push':
-      return runPush(root)
-    case 'stash':
-      return runStash(root, action.message, action.includeUntracked)
-    case 'stashPop':
-    case 'stashApply':
-    case 'stashDrop':
-      return runStashAction(root, action.type, action.ref, action.oid)
-    case 'switch':
-      return runSwitch(root, action.ref)
-    case 'createBranch':
-      return runCreateBranch(root, action.name, action.parent)
-    case 'deleteBranch':
-      return runDeleteBranch(root, action.ref, action.force, action.expectedOid)
-    case 'deleteRemoteBranch':
-      return runDeleteRemoteBranch(root, action.ref, action.expectedOid)
-    case 'renameBranch':
-      return runRenameBranch(root, action.ref, action.name)
-    case 'setUpstream':
-      return runSetUpstream(root, action.ref, action.upstream)
-    case 'rebase':
-      return runRebase(root, action.parent)
-    case 'rebaseContinue':
-      return runRebaseContinue(root)
-    case 'rebaseAbort':
-      return runRebaseAbort(root)
-    case 'merge':
-      return runMerge(root, action.ref, action.expectedHead, action.expectedHeadRef)
-    case 'cherryPick':
-    case 'revert':
-      return runCherryPickOrRevert(
-        root,
-        action.type,
-        action.oid,
-        action.expectedHead,
-        action.expectedHeadRef,
-        action.mainline,
-      )
-    case 'operationContinue':
-      return runOperation(root, 'continue')
-    case 'operationSkip':
-      return runOperation(root, 'skip')
-    case 'operationAbort':
-      return runOperation(root, 'abort')
-    case 'discardFile':
-      return runDiscardFile(root, action.path, action.fingerprint)
-    case 'resolveFile':
-      return runResolveFile(root, action.path, action.fingerprint, action.strategy, action.content)
-    case 'createPr':
-      return runCreatePr(root, action.title, action.body, action.base, action.draft)
-  }
+  const runtime = await resolveGitRuntime()
+  return withGitRuntime(runtime, async () => {
+    const root = await resolveRepository(repoPath)
+    const action = validateAction(value)
+    const blocked = actionBlockReason(await getRepositoryShapeFacts(root), action.type)
+    if (blocked) throw new Error(blocked)
+    if (isStackAction(action)) {
+      return runStackAction(root, action)
+    }
+    await ensureStackWriteAllowed(root, action)
+    switch (action.type) {
+      case 'stage':
+      case 'unstage':
+        return runStage(root, action.type, action.paths)
+      case 'commit':
+        return runCommit(
+          root,
+          action.message,
+          action.amend,
+          action.expectedHead,
+          action.expectedHeadRef,
+        )
+      case 'forcePush':
+        return runForcePush(root, action.preview)
+      case 'fetch':
+        return runFetch(root)
+      case 'pull':
+        return runPull(root, action.strategy)
+      case 'push':
+        return runPush(root)
+      case 'stash':
+        return runStash(root, action.message, action.includeUntracked)
+      case 'stashPop':
+      case 'stashApply':
+      case 'stashDrop':
+        return runStashAction(root, action.type, action.ref, action.oid)
+      case 'switch':
+        return runSwitch(root, action.ref, action.carry)
+      case 'createBranch':
+        return runCreateBranch(root, action.name, action.parent)
+      case 'deleteBranch':
+        return runDeleteBranch(root, action.ref, action.force, action.expectedOid)
+      case 'deleteRemoteBranch':
+        return runDeleteRemoteBranch(root, action.ref, action.expectedOid)
+      case 'renameBranch':
+        return runRenameBranch(root, action.ref, action.name)
+      case 'setUpstream':
+        return runSetUpstream(root, action.ref, action.upstream)
+      case 'rebase':
+        return runRebase(root, action.parent)
+      case 'rebaseContinue':
+        return runRebaseContinue(root)
+      case 'rebaseAbort':
+        return runRebaseAbort(root)
+      case 'merge':
+        return runMerge(root, action.ref, action.expectedHead, action.expectedHeadRef)
+      case 'cherryPick':
+      case 'revert':
+        return runCherryPickOrRevert(
+          root,
+          action.type,
+          action.oid,
+          action.expectedHead,
+          action.expectedHeadRef,
+          action.mainline,
+        )
+      case 'operationContinue':
+        return runOperation(root, 'continue')
+      case 'operationSkip':
+        return runOperation(root, 'skip')
+      case 'operationAbort':
+        return runOperation(root, 'abort')
+      case 'discardFile':
+        return runDiscardFile(root, action.path, action.fingerprint)
+      case 'resolveConflict':
+        return runResolveConflict(root, action.path, action.fingerprint, action.resolution)
+      case 'conflictMergeTool':
+        return runConflictMergeTool(root, action.path, action.fingerprint)
+      case 'stageHunk':
+      case 'unstageHunk':
+        return runStageHunk(
+          root,
+          action.type,
+          action.path,
+          action.hunkId,
+          action.fingerprint,
+          action.lineIndexes,
+        )
+      case 'createPr':
+        return runCreatePr(root, action.title, action.body, action.base, action.draft)
+    }
+  })
 }
