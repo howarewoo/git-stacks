@@ -32,6 +32,7 @@ import {
   deriveCheckRollup,
   summariseChecks,
   type PullRequestCheckDetail,
+  type PullRequestCheckState,
   type PullRequestChecksReport,
 } from '../../../src/shared/pull-request-checks'
 import type { FixtureScenario } from './types'
@@ -585,6 +586,38 @@ function checksReport(
     truncated: false,
     ...overrides,
   }
+}
+
+/**
+ * The report a scenario gives a pull request that names no checks of its own.
+ * Every branch row and pull request list the app renders already declares the
+ * state it is showing, so the read that follows has to answer with that same
+ * state. Returning nothing instead makes a background refresh of every ordinary
+ * scenario fail, which is a statement about the fixture and not about the code
+ * under test.
+ */
+export function checksReportFor(
+  scenario: FixtureScenario,
+  number: number,
+): PullRequestChecksReport | null {
+  const stated = scenario.pullRequestChecks?.[number]
+  if (stated) return stated
+  const pullRequest = [
+    ...(scenario.snapshot?.pullRequests ?? []),
+    ...(scenario.snapshot?.branches ?? []).flatMap((branch) => (branch.pr ? [branch.pr] : [])),
+  ].find((entry) => entry.number === number)
+  if (!pullRequest) return null
+  const state: PullRequestCheckState =
+    pullRequest.checks === 'failing'
+      ? 'failure'
+      : pullRequest.checks === 'pending'
+        ? 'in-progress'
+        : 'success'
+  return checksReport([check({ key: 'check-run:default', name: 'ci', state })], {
+    number,
+    headSha: pullRequest.headOid ?? '',
+    base: pullRequest.base ?? 'main',
+  })
 }
 
 function check(

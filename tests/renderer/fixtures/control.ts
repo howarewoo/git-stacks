@@ -38,14 +38,22 @@ import {
   restackPreview,
   syncPreview,
 } from '../../fixtures/workflow-scenarios'
-import { reviewCommits, reviewFileSet, reviewPermissions, reviewRail, reviewThreadSet, stackMember, textFile } from './review'
+import {
+  reviewCommits,
+  reviewFileSet,
+  reviewPermissions,
+  reviewRail,
+  reviewThreadSet,
+  stackMember,
+  textFile,
+} from './review'
 import type { ReviewFile, ReviewLine, ReviewSide } from '../../../src/shared/review'
 import type {
   ReviewDraftRecord,
   ReviewDraftResolution,
   ReviewEvent,
 } from '../../../src/shared/review-threads'
-import { scenarios } from './scenarios'
+import { checksReportFor, scenarios } from './scenarios'
 import { DEFAULT_SCENARIO, type ScenarioName } from './manifest'
 import type { PullRequestChecksReport } from '../../../src/shared/pull-request-checks'
 import type { FixtureCall, FixtureCallRecord, FixtureControl, FixtureScenario } from './types'
@@ -732,13 +740,22 @@ export function installFixtureControl(options: {
           const start = draft.startRef ?? null
           const startLine = start ? lineAt(files.files, start.path, start.side, start.line) : null
           if (start && (start.side !== draft.ref.side || start.line > draft.ref.line)) {
-            return unresolved(draft.id, 'The two ends of this comment are not one range on the same side of the diff.')
+            return unresolved(
+              draft.id,
+              'The two ends of this comment are not one range on the same side of the diff.',
+            )
           }
           if (!line) {
-            return unresolved(draft.id, `${draft.ref.path} no longer holds line ${draft.ref.line} on the ${draft.ref.side}.`)
+            return unresolved(
+              draft.id,
+              `${draft.ref.path} no longer holds line ${draft.ref.line} on the ${draft.ref.side}.`,
+            )
           }
           if (start && !startLine) {
-            return unresolved(draft.id, `${start.path} no longer holds the first line of this comment.`)
+            return unresolved(
+              draft.id,
+              `${start.path} no longer holds the first line of this comment.`,
+            )
           }
           return {
             id: draft.id,
@@ -746,7 +763,9 @@ export function installFixtureControl(options: {
             side: draft.ref.side,
             line: draft.ref.side === 'base' ? line.oldLine : line.newLine,
             startLine:
-              startLine && draft.startRef?.side === 'base' ? startLine.oldLine : (startLine?.newLine ?? null),
+              startLine && draft.startRef?.side === 'base'
+                ? startLine.oldLine
+                : (startLine?.newLine ?? null),
             reason: '',
           }
         })
@@ -760,16 +779,16 @@ export function installFixtureControl(options: {
     pullRequestChecks: (number, options) => {
       record('pullRequestChecks', [number, options])
       return answer<PullRequestChecksReport>('pullRequestChecks', () => {
-        const report = scenario.pullRequestChecks?.[number]
-        if (!report) throw new Error(`Pull request #${number} has no checks fixture.`)
+        const report = checksReportFor(scenario, number)
+        if (!report) throw new Error(`Pull request #${number} is not in this scenario.`)
         return report
       })
     },
     rerunPullRequestCheck: (number, runId) => {
       record('rerunPullRequestCheck', [number, runId])
       return answer<PullRequestChecksReport>('rerunPullRequestCheck', () => {
-        const report = scenario.pullRequestChecks?.[number]
-        if (!report) throw new Error(`Pull request #${number} has no checks fixture.`)
+        const report = checksReportFor(scenario, number)
+        if (!report) throw new Error(`Pull request #${number} is not in this scenario.`)
         if (!report.checks.some((check) => check.workflowRunId === runId)) {
           throw new Error('That workflow run no longer belongs to this pull request head.')
         }
