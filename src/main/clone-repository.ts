@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { lstat, mkdir, rename, rm, rmdir } from 'node:fs/promises'
 import { homedir } from 'node:os'
-import { isAbsolute, join } from 'node:path'
+import { basename, isAbsolute, join } from 'node:path'
 import {
   CommandCancelled,
   commandCode,
@@ -340,6 +340,43 @@ async function probeSsh(): Promise<{ available: boolean; version: string | null 
   }
 }
 
+const ALLOWED_HELPERS = new Set([
+  'osxkeychain',
+  'manager',
+  'manager-core',
+  'libsecret',
+  'cache',
+  'store',
+  'wincred',
+])
+
+/**
+ * Projects a raw Git credential helper configuration into a safe allowlisted name
+ * or generic status.
+ *
+ * A Git configuration may contain inline shell scripts (`!f() ...`), arbitrary
+ * command flags with secret tokens, or absolute local paths. These must NEVER be
+ * forwarded to the renderer or exposed in the UI.
+ */
+export function sanitizeCredentialHelper(raw: string | null | undefined): string | null {
+  if (!raw) return null
+  const trimmed = raw.trim()
+  if (!trimmed) return null
+
+  // Inline shell scripts or expressions starting with '!' are never safe helper names.
+  if (trimmed.startsWith('!')) return 'custom'
+
+  // Extract the executable or first argument token
+  const firstToken = trimmed.split(/\s+/)[0]
+  // Extract basename to safely strip any absolute/relative filesystem paths
+  const name = basename(firstToken).replace(/^git-credential-/, '').toLowerCase()
+
+  if (ALLOWED_HELPERS.has(name)) {
+    return name
+  }
+  return 'custom'
+}
+
 /**
  * What this machine can already do with Git. Every value here is read, never
  * written: Git Stacks invents no commit identity, installs no credential helper,
@@ -355,10 +392,11 @@ export async function readGitEnvironment(signal?: AbortSignal): Promise<GitEnvir
     configValue(runtime, 'credential.helper', true),
     probeSsh(),
   ])
+  const helper = helpers.length > 0 ? (sanitizeCredentialHelper(helpers[0]) ?? 'custom') : null
   return {
     identity: { name: name[0] ?? null, email: email[0] ?? null },
     defaultBranch: defaultBranch[0] ?? null,
-    httpsCredentials: { configured: helpers.length > 0, helper: helpers[0] ?? null },
+    httpsCredentials: { configured: helpers.length > 0, helper },
     ssh,
   }
 }

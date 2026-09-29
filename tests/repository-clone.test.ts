@@ -17,7 +17,13 @@ import { basename, join } from 'node:path'
 import { test } from 'node:test'
 import { pathToFileURL } from 'node:url'
 import { runRealGit } from './fixtures/git-race-shim'
-import { CloneError, cloneRepository, classifyCloneFailure } from '../src/main/clone-repository'
+import {
+  CloneError,
+  cloneRepository,
+  classifyCloneFailure,
+  readGitEnvironment,
+  sanitizeCredentialHelper,
+} from '../src/main/clone-repository'
 import { getSnapshot, resolveRepository } from '../src/main/git'
 import { summarizeRepository } from '../src/main/github-repositories'
 
@@ -479,4 +485,75 @@ test('cancelling after the git process completes but before promotion leaves no 
   } finally {
     await rm(root, { recursive: true, force: true })
   }
+})
+
+test('readGitEnvironment redacts secret tokens, shell commands, and absolute paths in credential.helper', async () => {
+  const root = await temporary()
+  try {
+    const sentinelToken = 'ghp_SUPER_SECRET_SENTINEL_TOKEN_12345'
+    const sentinelPath = join(root, 'custom-credential-helper')
+    const configContent = `[credential]\n\thelper = !${sentinelPath} --token=${sentinelToken}\n`
+    const configFile = join(root, 'sentinel.gitconfig')
+    await writeFile(configFile, configContent, 'utf8')
+
+    const beforeHash = createHash('sha256').update(await readFile(configFile)).digest('hex')
+
+    const prevGlobal = process.env.GIT_CONFIG_GLOBAL
+    const prevNoSystem = process.env.GIT_CONFIG_NOSYSTEM
+    process.env.GIT_CONFIG_GLOBAL = configFile
+    process.env.GIT_CONFIG_NOSYSTEM = '1'
+
+    try {
+      const env = await readGitEnvironment()
+      assert.equal(env.httpsCredentials.configured, true)
+      // Sanitized status must be a safe allowlisted name or 'custom'
+      assert.equal(env.httpsCredentials.helper, 'custom')
+
+      const serialized = JSON.stringify(env)
+      // Neither the sentinel token nor the sensitive path must appear anywhere in returned data
+      assert.equal(serialized.includes(sentinelToken), false)
+      assert.equal(serialized.includes(sentinelPath), false)
+      assert.equal(serialized.includes('custom-credential-helper'), false)
+
+      // The git configuration file itself remains completely unchanged (read-only)
+      const afterHash = createHash('sha256').update(await readFile(configFile)).digest('hex')
+      assert.equal(afterHash, beforeHash)
+      assert.equal(await readFile(configFile, 'utf8'), configContent)
+    } finally {
+      if (prevGlobal === undefined) delete process.env.GIT_CONFIG_GLOBAL
+      else process.env.GIT_CONFIG_GLOBAL = prevGlobal
+      if (prevNoSystem === undefined) delete process.env.GIT_CONFIG_NOSYSTEM
+      else process.env.GIT_CONFIG_NOSYSTEM = prevNoSystem
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('sanitizeCredentialHelper projects known helpers and redacts custom commands/paths', () => {
+  assert.equal(sanitizeCredentialHelper(null), null)
+  assert.equal(sanitizeCredentialHelper(''), null)
+  assert.equal(sanitizeCredentialHelper('   '), null)
+  assert.equal(sanitizeCredentialHelper('osxkeychain'), 'osxkeychain')
+  assert.equal(sanitizeCredentialHelper('manager'), 'manager')
+  assert.equal(sanitizeCredentialHelper('manager-core'), 'manager-core')
+  assert.equal(sanitizeCredentialHelper('libsecret'), 'libsecret')
+  assert.equal(sanitizeCredentialHelper('cache'), 'cache')
+  assert.equal(sanitizeCredentialHelper('store'), 'store')
+  assert.equal(sanitizeCredentialHelper('wincred'), 'wincred')
+  // Path to known helper without arguments resolves to safe name
+  assert.equal(sanitizeCredentialHelper('/usr/local/bin/git-credential-osxkeychain'), 'osxkeychain')
+  assert.equal(sanitizeCredentialHelper('/opt/homebrew/bin/git-credential-manager'), 'manager')
+  // Known helper with flags or tokens resolves to safe name without exposing flags
+  assert.equal(sanitizeCredentialHelper('cache --timeout=3600'), 'cache')
+  // Shell snippets, commands with secrets, or unknown binaries project to 'custom'
+  assert.equal(
+    sanitizeCredentialHelper('!f() { echo password=SECRET_TOKEN; }; f'),
+    'custom',
+  )
+  assert.equal(
+    sanitizeCredentialHelper('/usr/bin/custom-helper --secret=XYZ'),
+    'custom',
+  )
+  assert.equal(sanitizeCredentialHelper('unknown-binary'), 'custom')
 })
