@@ -4539,7 +4539,6 @@ function knownAncestor(
   }
   return false
 }
-
 /**
  * How a snapshot obtains its GitHub half. `live` always asks GitHub, `reuse`
  * renders this repository's last confirmed payload without a request, and
@@ -4829,11 +4828,11 @@ export async function getSnapshot(
   }
 
   const refsByName = new Map(refs.filter((ref) => !ref.symref).map((ref) => [ref.refname, ref]))
+  const directParents = new Map<string, string[]>()
   const defaultRef =
     refsByName.get(`refs/heads/${defaultBranch}`) ??
     refsByName.get(`refs/remotes/origin/${defaultBranch}`)
   /** Parents of every divergent tip the batched probe below could read. */
-  const directParents = new Map<string, string[]>()
   if (defaultRef) {
     const defaultRefs = new Set([
       `refs/heads/${defaultBranch}`,

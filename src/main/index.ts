@@ -87,7 +87,7 @@ import {
   ghCloneCommandText,
 } from './github-repositories'
 import { CloneError, cloneRepository, readGitEnvironment } from './clone-repository'
-import { CommandCancelled, isCancelled as isCommandCancelled } from './git-core'
+import { isCancelled as isCommandCancelled } from './git-core'
 import type {
   CloneCommandPreview,
   CloneProtocol,
