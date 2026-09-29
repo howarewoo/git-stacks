@@ -183,15 +183,19 @@ function PrLinkedIssuesSection({
   }, [pr.number, stackApi])
 
   const previewLink = React.useCallback(
-    async (issue: RepositoryIssue) => {
+    async (issue: RepositoryIssue): Promise<IssueLinkPreview | null> => {
       setActionBusy(true)
       try {
-        setLinkPreview(
-          (await stackApi.previewIssueLink?.(pr.number, issue.number, 'closing', 'link')) ?? null,
-        )
+        const preview =
+          (await stackApi.previewIssueLink?.(pr.number, issue.number, 'closing', 'link')) ?? null
+        setLinkPreview(preview)
+        return preview
       } catch {
         setLinkPreview(null)
-        setStatusMessage('Could not preview this description change; reload the pull request.')
+        setStatusMessage(
+          'Could not read the pull request description, so the change cannot be previewed. Reload and try again.',
+        )
+        return null
       } finally {
         setActionBusy(false)
       }
@@ -200,15 +204,19 @@ function PrLinkedIssuesSection({
   )
 
   const previewUnlink = React.useCallback(
-    async (issue: LinkedIssue) => {
+    async (issue: LinkedIssue): Promise<IssueLinkPreview | null> => {
       setActionBusy(true)
       try {
-        setUnlinkPreview(
-          (await stackApi.previewIssueLink?.(pr.number, issue.number, 'closing', 'unlink')) ?? null,
-        )
+        const preview =
+          (await stackApi.previewIssueLink?.(pr.number, issue.number, 'closing', 'unlink')) ?? null
+        setUnlinkPreview(preview)
+        return preview
       } catch {
         setUnlinkPreview(null)
-        setStatusMessage('Could not preview this description change; reload the pull request.')
+        setStatusMessage(
+          'Could not read the pull request description, so the change cannot be previewed. Reload and try again.',
+        )
+        return null
       } finally {
         setActionBusy(false)
       }
@@ -267,6 +275,7 @@ function PrLinkedIssuesSection({
   }
 
   const handleConfirmCloseWhenMerged = async (issue: RepositoryIssue) => {
+    if (!linkPreview || linkPreview.prNumber !== pr.number || linkPreview.action !== 'link') return
     setActionBusy(true)
     setStatusMessage(null)
     try {
@@ -277,7 +286,7 @@ function PrLinkedIssuesSection({
           issueNumber: issue.number,
           relation: 'closing',
           // Revalidate against the exact body the user previewed and confirmed.
-          expectedBody: linkPreview?.currentBody ?? pr.body,
+          expectedBody: linkPreview.currentBody,
         },
         `Add closing link for issue #${issue.number}`,
       )
@@ -295,13 +304,14 @@ function PrLinkedIssuesSection({
   }
 
   const handleRequestClosingLink = async (issue: RepositoryIssue) => {
-    await previewLink(issue)
+    // No preview, no confirmation: the write must never proceed unseen.
+    if (!(await previewLink(issue))) return
     setPendingClosingLink(issue)
   }
 
   const handleUnlink = async (issue: LinkedIssue) => {
     if (issue.relation === 'closing') {
-      await previewUnlink(issue)
+      if (!(await previewUnlink(issue))) return
       setPendingUnlink(issue)
       return
     }
@@ -326,6 +336,13 @@ function PrLinkedIssuesSection({
   }
 
   const handleConfirmUnlinkClosing = async (issue: LinkedIssue) => {
+    if (
+      !unlinkPreview ||
+      unlinkPreview.prNumber !== pr.number ||
+      unlinkPreview.action !== 'unlink'
+    ) {
+      return
+    }
     setActionBusy(true)
     setStatusMessage(null)
     try {
@@ -336,7 +353,7 @@ function PrLinkedIssuesSection({
           issueNumber: issue.number,
           relation: 'closing',
           // Revalidate against the exact body shown in the removal preview.
-          expectedBody: unlinkPreview?.currentBody ?? pr.body,
+          expectedBody: unlinkPreview.currentBody,
         },
         `Remove closing reference for issue #${issue.number}`,
       )

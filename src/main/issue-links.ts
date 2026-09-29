@@ -46,8 +46,18 @@ function closingReference(
   originFullName?: string,
 ): ExtractedClosingReference | null {
   const groups = match.groups ?? {}
-  const issueNumber = Number(groups.number ?? /\/issues\/(\d+)/u.exec(groups.url ?? '')?.[1])
-  const repository = groups.owner && groups.repo ? `${groups.owner}/${groups.repo}` : null
+  const url = groups.url ?? ''
+  const issueNumber = Number(groups.number ?? /\/issues\/(\d+)/u.exec(url)?.[1])
+  // A URL reference carries its own repository; enforce origin ownership for it
+  // exactly as for the `owner/repo#n` form.
+  const urlRepository =
+    /^(?:https?:\/\/github\.com\/)(?<urlOwner>[^/]+)\/(?<urlRepo>[^/]+)\/issues\/\d+$/iu.exec(url)
+  const repository =
+    groups.owner && groups.repo
+      ? `${groups.owner}/${groups.repo}`
+      : urlRepository?.groups
+        ? `${urlRepository.groups.urlOwner}/${urlRepository.groups.urlRepo}`
+        : null
   const normalized = originFullName?.toLowerCase()
   if (repository && normalized && repository.toLowerCase() !== normalized) {
     // A foreign repository's reference never closes an issue in this repository.
@@ -153,26 +163,46 @@ export function removeClosingReference(
     .map((ref) => deletionSpan(body, ref.startIndex, ref.endIndex))
     .sort((a, b) => b.start - a.start)
 
-  let result = body
+  // Edits are applied per line so only the clause's own line and the blank lines
+  // it leaves behind are touched. Every other byte of the author's description
+  // — including deliberate runs of blank lines — is preserved.
+  const lines = body.split('\n')
+  const dropped = new Set<number>()
   for (const span of spans) {
-    const lineStart = result.lastIndexOf('\n', span.start - 1) + 1
-    const lineEndIndex = result.indexOf('\n', span.end)
-    const lineEnd = lineEndIndex === -1 ? result.length : lineEndIndex
-    const remainder = `${result.slice(lineStart, span.start)}${result.slice(span.end, lineEnd)}`
-    if (remainder.trim()) {
-      result = `${result.slice(0, span.start)}${result.slice(span.end)}`
+    const lineStart = body.lastIndexOf('\n', span.start - 1) + 1
+    const lineEndIndex = body.indexOf('\n', span.end)
+    const lineEnd = lineEndIndex === -1 ? body.length : lineEndIndex
+    const lineIndex = body.slice(0, lineStart).split('\n').length - 1
+    const kept = `${body.slice(lineStart, span.start)}${body.slice(span.end, lineEnd)}`
+    if (kept.trim()) {
+      lines[lineIndex] = kept
     } else {
-      // The line carried only this closing clause; drop the whole line.
-      const after = lineEndIndex === -1 ? '' : result.slice(lineEndIndex + 1)
-      const before = result.slice(0, lineStart).replace(/\n$/u, '')
-      result = before ? `${before}\n${after}` : after
+      dropped.add(lineIndex)
     }
   }
-  const collapsed = result
-    .replace(/^\n+/u, '')
-    .replace(/\n{3,}/gu, '\n\n')
-    .trimEnd()
-  return collapsed ? `${collapsed}\n` : ''
+
+  const keptLines: string[] = []
+  let skippingLeadingBlank = false
+  for (const [index, line] of lines.entries()) {
+    if (dropped.has(index)) {
+      if (keptLines.length === 0) skippingLeadingBlank = true
+      // Close a gap the removed clause opened, without touching any other run.
+      while (
+        keptLines.length > 0 &&
+        keptLines[keptLines.length - 1].trim() === '' &&
+        (lines[index + 1]?.trim() ?? '') === ''
+      ) {
+        keptLines.pop()
+      }
+      continue
+    }
+    if (skippingLeadingBlank && keptLines.length === 0 && line.trim() === '') continue
+    skippingLeadingBlank = false
+    keptLines.push(line)
+  }
+
+  const result = keptLines.join('\n').trimEnd()
+  return result ? `${result}\n` : ''
 }
 
 const CONFIG_PREFIX = 'gitstacks.pr.'

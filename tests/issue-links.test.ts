@@ -137,6 +137,57 @@ test('a shared keyword does not make every following number a closing reference'
   assert.equal(insertClosingReference('Closes: #12', 12, 'acme/widgets'), 'Closes: #12')
 })
 
+test('a foreign URL closing reference never closes a local issue', () => {
+  // GitHub resolves the URL's own repository; a foreign one must not be treated
+  // as closing this repository's issue of the same number.
+  const foreign = 'Closes https://github.com/other/project/issues/12\n'
+  assert.equal(isIssueClosedInBody(foreign, 12, 'acme/widgets'), false)
+  assert.equal(extractClosingReferences(foreign, 'acme/widgets').length, 0)
+  // So a real local clause is still inserted, and the foreign URL is untouched.
+  const inserted = insertClosingReference(foreign, 12, 'acme/widgets')
+  assert.equal(inserted, 'Closes https://github.com/other/project/issues/12\n\nCloses #12\n')
+  // Removing the local clause leaves the foreign URL exactly as written.
+  assert.equal(
+    removeClosingReference(inserted, 12, 'acme/widgets'),
+    'Closes https://github.com/other/project/issues/12\n',
+  )
+  // The same URL in origin is recognised and removable.
+  const local = 'Closes https://github.com/acme/widgets/issues/12\n'
+  assert.equal(isIssueClosedInBody(local, 12, 'acme/widgets'), true)
+  assert.equal(removeClosingReference(local, 12, 'acme/widgets'), '')
+})
+
+test('removeClosingReference preserves unrelated body bytes exactly', () => {
+  // A deliberate run of blank lines and fenced output elsewhere in the author's
+  // description must survive the removal untouched.
+  const body = [
+    '# Title',
+    '',
+    '',
+    '',
+    '```',
+    '',
+    '',
+    'sample output',
+    '',
+    '```',
+    '',
+    'Closes #12',
+    '',
+  ].join('\n')
+  const removed = removeClosingReference(body, 12, 'acme/widgets')
+  assert.equal(
+    removed,
+    ['# Title', '', '', '', '```', '', '', 'sample output', '', '```', ''].join('\n'),
+  )
+  // Nothing but the clause line (and the single trailing newline bodies
+  // conventionally end with) changed.
+  assert.equal(
+    `${removed.replace(/Closes #12\n/u, '').trimEnd()}\n`,
+    `${body.replace(/Closes #12\n/u, '').trimEnd()}\n`,
+  )
+})
+
 test('isIssueClosedInBody accurately detects whether an issue is closed in body', () => {
   const body = 'Fixes #42\nResolves #55'
   assert.equal(isIssueClosedInBody(body, 42, 'acme/widgets'), true)
