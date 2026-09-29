@@ -174,6 +174,7 @@ test('the guarded publish specimen is ready only when the builder produces a sub
     ...liveGuardBase,
     kind: 'stack',
     allowForce: true,
+    requiresLeaseApproval: false,
     name: '',
     requiresName: false,
     previewToken: `stack:${specimenPublishPreview.token}`,

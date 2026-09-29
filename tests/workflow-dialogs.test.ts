@@ -54,6 +54,7 @@ function guard(overrides: Partial<WorkflowGuardInput> = {}): WorkflowGuardInput 
   return {
     kind: 'rename',
     allowForce: false,
+    requiresLeaseApproval: false,
     busy: false,
     loading: false,
     loaded: true,

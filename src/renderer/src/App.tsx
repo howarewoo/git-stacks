@@ -1027,8 +1027,14 @@ function App() {
       }
       if (matchesChord(event, shortcutBindings['stack.sync'], isMac)) {
         event.preventDefault()
-        if (snapshot && !isBusy && !operationActive) {
-          void runAction({ type: 'fetch' }, 'Fetch')
+        if (
+          selectedBranch &&
+          !selectedBranch.remote &&
+          selectedBranch.name !== snapshot?.defaultBranch &&
+          !isBusy &&
+          !operationActive
+        ) {
+          openWorkflow({ kind: 'stack', operation: 'sync', branch: selectedBranch.name })
         }
         return
       }

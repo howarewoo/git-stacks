@@ -94,6 +94,7 @@ export type WorkflowBlockerCode =
   | 'publish-title-required'
   | 'remote-tip-unavailable'
   | 'completed'
+  | 'lease-approval-required'
 
 export interface WorkflowBlocker {
   code: WorkflowBlockerCode
@@ -125,6 +126,8 @@ export const WORKFLOW_BLOCKER_MESSAGES: Record<WorkflowBlockerCode, string> = {
     'Every branch without an existing pull request needs a title before publishing.',
   'remote-tip-unavailable':
     'The remote tip is unknown, so deletion cannot be verified. Fetch and try again.',
+  'lease-approval-required':
+    'Approve replacing published history with the exact remote tips listed below. Nothing is force pushed without that approval.',
   completed: 'This step already completed. Review the result, then choose the next operation.',
 }
 
@@ -154,6 +157,8 @@ export interface WorkflowGuardInput {
   mergeMethod: string
   /** Branches that need a PR title before a publish can run. */
   untitledBranches: readonly string[]
+  /** True when a reviewed stack sync would replace published remote history. */
+  requiresLeaseApproval: boolean
   /** True when a stack publication may replace remote history. */
   allowForce: boolean
   pullRequestMissing: boolean
@@ -234,6 +239,7 @@ export function workflowBlocker(input: WorkflowGuardInput): WorkflowBlocker | nu
   if (input.kind === 'stack') {
     if (input.requiresMergeMethod && !input.mergeMethod) return block('merge-method-required')
     if (input.untitledBranches.length > 0) return block('publish-title-required')
+    if (input.requiresLeaseApproval && !input.allowForce) return block('lease-approval-required')
   }
 
   return null

@@ -554,7 +554,12 @@ test('palette exposes PR workflows, rebase guards, sync target and issue entitie
     request: { kind: 'stack', operation: 'merge', branch: 'feature-1' },
   })
   assert.equal(items.find((item) => item.id === 'stack.rebaseCurrent')?.disabled, true)
-  assert.equal(items.find((item) => item.id === 'command.fetch')?.shortcutId, 'stack.sync')
+  assert.equal(items.find((item) => item.id === 'command.fetch')?.shortcutId, undefined)
+  assert.equal(items.find((item) => item.id === 'stack.sync')?.shortcutId, 'stack.sync')
+  assert.deepEqual(items.find((item) => item.id === 'stack.sync')?.intent, {
+    kind: 'workflow',
+    request: { kind: 'stack', operation: 'sync', branch: 'feature-1' },
+  })
   assert.equal(items.find((item) => item.id === 'stack.publish')?.shortcutId, undefined)
   assert.deepEqual(items.find((item) => item.id === 'issue.17')?.intent, {
     kind: 'openPrUrl',

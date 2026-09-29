@@ -424,7 +424,7 @@ export interface PushPreview {
   localOid: string
   remoteOid: string | null
 }
-export type StackKind = 'restack' | 'publish' | 'merge'
+export type StackKind = 'restack' | 'publish' | 'merge' | 'sync'
 export interface StackStep {
   branch: string
   parent: string
@@ -444,6 +444,74 @@ export interface StackPreview {
   mergeMethods: ('merge' | 'squash' | 'rebase')[]
   /** Present only for a publish preview: the resumable submission plan. */
   publish: PublishPreview | null
+  /** Present only for a sync preview: the trunk and per-layer classification. */
+  sync: SyncPreview | null
+}
+
+/**
+ * How one stack layer stands against the parent it will be replayed onto and
+ * against the branch the same layer published on the remote. The order is the
+ * precedence a preview reports it in: a layer that cannot be synced is never
+ * described as anything else.
+ */
+export type SyncLayerState =
+  | 'merged'
+  | 'retargeted'
+  | 'needs-force'
+  | 'needs-rebase'
+  | 'needs-push'
+  | 'up-to-date'
+  | 'blocked'
+
+/** What syncing a layer does to the remote branch of the same name. */
+export type SyncPushKind = 'none' | 'create' | 'fast-forward' | 'force'
+
+export interface SyncLayer {
+  branch: string
+  /** The parent this layer is replayed onto, already skipping merged layers. */
+  base: string
+  baseOid: string
+  state: SyncLayerState
+  /** The local tip captured when the preview was taken. */
+  oid: string
+  /** The remote tip captured when the preview was taken, and the lease a force push names. */
+  remoteOid: string | null
+  commits: number
+  pullRequest: number | null
+  /** The base GitHub recorded for the pull request when the preview was taken. */
+  pullRequestBase: string | null
+  /** The merged lower pull request that moves this layer onto a different base. */
+  retargetedFrom: string | null
+  rebase: boolean
+  push: SyncPushKind
+  note: string
+  blockers: string[]
+}
+
+/** The branch the whole stack hangs from, and how far it has moved on the remote. */
+export interface SyncTrunk {
+  branch: string
+  remote: string
+  localOid: string | null
+  remoteOid: string | null
+  /** Commits the local trunk holds that the fetched remote tip does not. */
+  ahead: number
+  /** Commits the fetched remote tip holds that the local trunk does not. */
+  behind: number
+  /** True when neither tip contains the other, so the remote trunk was rewritten. */
+  diverged: boolean
+  blockers: string[]
+}
+
+export interface SyncPreview {
+  branch: string
+  trunk: SyncTrunk
+  /** Every layer of the stack in bottom-to-top order, including merged ones. */
+  layers: SyncLayer[]
+  /** Layers whose replay replaces published remote history and needs a lease approval. */
+  forcePushes: string[]
+  blockers: string[]
+  warnings: string[]
 }
 
 /** One resumable unit of Submit Stack work, in bottom-to-top order. */
@@ -543,7 +611,7 @@ export type SubmitStackAction =
   | { type: 'submitStackDismiss' }
 
 export interface StackProgress {
-  kind: 'restack'
+  kind: 'restack' | 'sync'
   originalBranch: string
   currentBranch: string | null
   completed: string[]
