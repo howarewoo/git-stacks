@@ -190,8 +190,12 @@ integration already used for tracked pull request numbers.
 **A concurrency ceiling instead of one process per branch.** Parent inference
 probes distinct tips in batches; direct descendants of the default branch need
 no individual merge-base process, while deeper histories use the existing
-merge-base fallback. Behind-counts run through `mapWithConcurrency` at
-`GIT_CONCURRENCY`, rather than forking one process per branch at once.
+merge-base fallback. The same batched parent list answers the behind-count:
+a branch whose recorded parent commit is one of its tip's parents already
+contains that commit's whole history, so it reports zero commits behind with no
+`rev-list` process at all. Every other branch still measures its behind-count
+through `mapWithConcurrency` at `GIT_CONCURRENCY`, rather than forking one
+process per branch at once.
 
 **Behind counts answered from the parent edges already read.** The same batched
 `log --no-walk` pass that infers a parent records each tip's direct parents, so

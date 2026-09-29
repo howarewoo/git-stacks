@@ -4819,10 +4819,11 @@ export async function getSnapshot(
   }
 
   const refsByName = new Map(refs.filter((ref) => !ref.symref).map((ref) => [ref.refname, ref]))
-  const directParents = new Map<string, string[]>()
   const defaultRef =
     refsByName.get(`refs/heads/${defaultBranch}`) ??
     refsByName.get(`refs/remotes/origin/${defaultBranch}`)
+  /** Parents of every divergent tip the batched probe below could read. */
+  const directParents = new Map<string, string[]>()
   if (defaultRef) {
     const defaultRefs = new Set([
       `refs/heads/${defaultBranch}`,
@@ -4860,7 +4861,7 @@ export async function getSnapshot(
         branch.parentSource = 'inferred'
         return
       }
-      if (directParents.get(child.objectName)?.includes(defaultRef.objectName)) {
+      if (directParents.get(child.objectName)?.includes(defaultRef.objectName) === true) {
         branch.parent = defaultBranch
         branch.parentSource = 'inferred'
         return
