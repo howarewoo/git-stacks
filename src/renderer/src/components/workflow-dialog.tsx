@@ -25,6 +25,7 @@ import type {
   LinkedIssue,
   RepositoryIssue,
 } from '../../../shared/types'
+import type { AppSettings } from '../../../shared/settings'
 import { actionBlockReason, stashRemovalBlockReason } from '../../../shared/capabilities'
 import { Button } from './ui/button'
 import { InlineAlert } from './ui/surface'
@@ -748,6 +749,7 @@ export function WorkflowDialog({
   onClose,
   onRequest,
   stackApi = window.desktop,
+  defaults,
 }: {
   request: WorkflowRequest
   snapshot: RepositorySnapshot
@@ -759,6 +761,8 @@ export function WorkflowDialog({
   onClose: () => void
   onRequest: (request: WorkflowRequest) => void
   stackApi?: WorkflowStackAPI
+  /** Stored defaults, used to seed the pull strategy and merge method. */
+  defaults?: AppSettings | null
 }) {
   const [name, setName] = React.useState(
     'branch' in request
@@ -775,13 +779,19 @@ export function WorkflowDialog({
   )
   const [message, setMessage] = React.useState('')
   const [includeUntracked, setIncludeUntracked] = React.useState(true)
-  const [strategy, setStrategy] = React.useState<'ff-only' | 'merge' | 'rebase'>('ff-only')
+  // Seeded from the app's stored defaults; the user can still change either
+  // before the operation runs.
+  const [strategy, setStrategy] = React.useState<'ff-only' | 'merge' | 'rebase'>(
+    defaults?.git.defaultPullStrategy ?? 'ff-only',
+  )
   const [mainline, setMainline] = React.useState('')
   const [confirmation, setConfirmation] = React.useState('')
   const [allowForce, setAllowForce] = React.useState(false)
   const [layerChoices, setLayerChoices] = React.useState<Record<string, PublishLayerChoice>>({})
   const [progress, setProgress] = React.useState<PublishProgress | null>(null)
-  const [mergeMethod, setMergeMethod] = React.useState<'' | 'merge' | 'squash' | 'rebase'>('')
+  const [mergeMethod, setMergeMethod] = React.useState<'' | 'merge' | 'squash' | 'rebase'>(
+    defaults?.git.defaultMergeMethod ?? '',
+  )
   const [mergeAction, setMergeAction] = React.useState<MergeAction>('default')
   const [mergeProgress, setMergeProgress] = React.useState<MergeProgress | null>(null)
   const [mergeStatus, setMergeStatus] = React.useState<MergeStatus | null>(null)

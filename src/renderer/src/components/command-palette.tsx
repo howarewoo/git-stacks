@@ -34,7 +34,7 @@ import {
   resolveFocusRestoreTarget,
   shouldDismissPaletteOnEscape,
 } from '../lib/command-palette'
-import { isComposingKeyEvent } from '../lib/keyboard-shortcuts'
+import { isComposingKeyEvent } from '../../../shared/shortcuts'
 
 export interface CommandPaletteProps {
   open: boolean

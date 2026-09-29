@@ -12,7 +12,7 @@ import {
 } from 'lucide-react'
 import { cn } from '../lib/utils'
 import { claimsRovingKey, rovingAction, rovingTarget } from '../lib/tree-navigation'
-import type { ShortcutId } from '../lib/keyboard-shortcuts'
+import type { ShortcutId } from '../../../shared/shortcuts'
 
 export type WorkspaceView =
   | 'branches'

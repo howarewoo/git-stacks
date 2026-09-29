@@ -11,6 +11,7 @@ import type {
   GitRuntimeStatus,
 } from '../shared/types'
 
+import { applyPatch, readSettingsFile, writeSettingsFile } from './settings'
 const execFileAsync = promisify(execFileCallback)
 
 /** Oldest Git the guarded ref transactions can run on (`rev-parse --show-object-format`). */
@@ -602,27 +603,25 @@ export async function requireGitCapability(
   return record
 }
 
+/**
+ * The runtime preference is one field of the settings document rather than a
+ * file of its own, so it is validated and policy-locked the same way as every
+ * other setting.
+ */
 export async function readGitRuntimePreference(
   settingsFile: string,
 ): Promise<{ useSystemGit: boolean } | null> {
-  try {
-    const stored: unknown = JSON.parse(await fs.readFile(settingsFile, 'utf8'))
-    const value = (stored as { useSystemGit?: unknown } | null)?.useSystemGit
-    return typeof value === 'boolean' ? { useSystemGit: value } : null
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null
-    throw error
-  }
+  const { settings } = await readSettingsFile(settingsFile)
+  return { useSystemGit: settings.git.useSystemGit }
 }
 
 export async function writeGitRuntimePreference(
   settingsFile: string,
   value: { useSystemGit: boolean },
 ): Promise<void> {
-  await fs.mkdir(dirname(settingsFile), { recursive: true })
-  const temporaryPath = `${settingsFile}.tmp`
-  await fs.writeFile(temporaryPath, JSON.stringify(value), { mode: 0o600 })
-  await fs.rename(temporaryPath, settingsFile)
+  const current = await readSettingsFile(settingsFile)
+  const merged = applyPatch(current.settings, { git: { useSystemGit: value.useSystemGit } })
+  await writeSettingsFile(settingsFile, merged.settings)
 }
 
 /** Diagnostics retain the configured preference even if its selected executable cannot start. */

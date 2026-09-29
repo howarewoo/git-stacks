@@ -127,6 +127,7 @@ export function ChangesView({
   actionError,
   onStash,
   onResolveConflict,
+  onOpenInEditor,
 }: {
   snapshot: RepositorySnapshot
   groups: ChangeGroups
@@ -144,6 +145,8 @@ export function ChangesView({
   onStash: () => void
   onResolveConflict: (path: string) => void
   actionError: string | null
+  /** Opens a file in the editor configured in Settings. */
+  onOpenInEditor?: (relativePath: string) => void
 }) {
   const stagedWindow = useListWindow(groups.visibleStaged)
   const unstagedWindow = useListWindow(groups.visibleUnstaged)
@@ -381,6 +384,7 @@ export function ChangesView({
           onClose={() => onInspect(null)}
           onResolveConflict={onResolveConflict}
           actionError={actionError}
+          onOpenInEditor={onOpenInEditor}
         />
       ) : null}
       <form className="commit-panel" onSubmit={onSubmitCommit}>

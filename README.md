@@ -157,6 +157,60 @@ late device-code response cannot reopen it. If saving the account record fails
 after its new credential was stored, that staged credential is removed and the
 previous account remains selected.
 
+## Settings
+
+Settings is reachable from the command palette (**Settings…**). Preferences are
+stored in `settings.json` under the app's user-data directory, which main owns
+and validates; the renderer never chooses or writes that path.
+
+| Setting                              | Effect                                                                                                                                |
+| ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------- |
+| Git to run                           | Chooses the bundled runtime or the system `git` for every Git operation.                                                              |
+| Editor                               | Program used by **Open in editor** in the file inspector. Empty means the platform default.                                           |
+| Merge tool                           | Program Git runs to resolve a conflict. Takes precedence over `GIT_MERGE_TOOL` and `merge.tool`. Empty means Git's own configuration. |
+| Default pull strategy / merge method | Seeds the workflow dialog; still changeable per operation.                                                                            |
+| Background refresh                   | Seconds between automatic refreshes of an open repository. `Off` refreshes only on request.                                           |
+| Theme                                | `Match system`, `Light`, or `Dark`.                                                                                                   |
+| Reduce motion                        | Removes non-essential transitions regardless of the system setting.                                                                   |
+| Include local paths                  | Lets a support bundle name the Git executable path. Nothing else widens.                                                              |
+| Shortcuts                            | Chord editing with conflict detection.                                                                                                |
+
+A value is validated before use. An unreadable field falls back to its default
+and is reported on the Settings surface; the rest of the file still applies. A
+file that is not valid JSON is replaced by defaults on the next save.
+
+This build collects nothing and sends nothing: there is no telemetry endpoint
+and no crash upload, and no setting enables one. The only artifact is the
+support bundle you create yourself.
+
+### Settings policy
+
+`GIT_STACKS_SETTINGS_POLICY` names a JSON file whose `locks` object fixes
+settings for a managed computer:
+
+```json
+{ "locks": { "git.useSystemGit": "Managed machines use the system Git" } }
+```
+
+A locked setting is disabled in the surface and cannot be written, including
+through a direct file edit. Re-saving the value the lock already fixes is
+allowed, so an unrelated edit is never blocked. A policy file that cannot be
+read or that names a setting this build does not know holds **every** managed
+setting at its current value and reports the reason, rather than reading as
+"nothing is locked".
+
+```sh
+GIT_STACKS_SETTINGS_POLICY=/etc/git-stacks-policy.json npm run dev
+```
+
+### Support bundle
+
+**Create support bundle** previews first: every section is listed with whether it
+is included and why. The bundle is assembled from named fields and never
+contains access tokens, source contents, diffs, branch or pull-request text, or
+raw GitHub API bodies — not even when local paths are included. It is written
+where you choose in a save dialog opened by the main process.
+
 ## Onboarding
 
 With no repository open, the window offers three ways in, and all of them end
@@ -233,6 +287,7 @@ dropped.
 Discovery sends one `Authorization` header to `api.github.com` and nothing
 else. Access tokens never reach a command line, a log, the renderer, or a
 remote URL: the app-signed transport is used directly from the main process.
+
 ## Performance budgets
 
 Git Stacks is used on repositories far larger than the ones it was built

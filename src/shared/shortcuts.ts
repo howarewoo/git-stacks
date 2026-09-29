@@ -183,6 +183,7 @@ export const SHORTCUT_DEFINITIONS: readonly ShortcutMetadata[] = [
     id: 'view.diagnostics',
     label: 'Go to Diagnostics',
     group: 'Views',
+    // `Mod+7` already opens Review, so the diagnostics report takes the next free view chord.
     defaultChord: 'Mod+8',
     description: 'Switch to the repository diagnostics and compatibility report.',
   },
@@ -550,14 +551,6 @@ export function assignShortcut(
   }
 }
 
-export const SHORTCUT_STORAGE_KEY = 'git-stacks.shortcuts.v1'
-
-export interface StorageLike {
-  getItem(key: string): string | null
-  setItem(key: string, value: string): void
-  removeItem(key: string): void
-}
-
 /**
  * Resets conflicting bindings to their defaults until no chord has two owners.
  * The action listed first keeps the contested chord; when the default the later
@@ -572,6 +565,9 @@ function resolveShortcutCollisions(bindings: Record<ShortcutId, string>): void {
     if (conflicts.length === 0) return
     let changed = false
     for (const { idA, idB } of conflicts) {
+      // The later action loses the contested chord, unless it is already on its
+      // own default — in which case the earlier owner is the one reset, so a
+      // restored default can never leave a duplicate behind.
       const loser = bindings[idB] === DEFAULT_SHORTCUTS[idB] ? idA : idB
       if (bindings[loser] === DEFAULT_SHORTCUTS[loser]) continue
       bindings[loser] = DEFAULT_SHORTCUTS[loser]
@@ -581,68 +577,33 @@ function resolveShortcutCollisions(bindings: Record<ShortcutId, string>): void {
   }
 }
 
-export function loadShortcuts(
-  storage: StorageLike | null = getStorage(),
-): Record<ShortcutId, string> {
-  if (!storage) return { ...DEFAULT_SHORTCUTS }
-  try {
-    const raw = storage.getItem(SHORTCUT_STORAGE_KEY)
-    if (!raw) return { ...DEFAULT_SHORTCUTS }
-    const parsed = JSON.parse(raw) as Record<string, unknown>
-    if (!parsed || typeof parsed !== 'object') return { ...DEFAULT_SHORTCUTS }
-
-    const sanitized: Partial<Record<ShortcutId, string>> = {}
-    for (const def of SHORTCUT_DEFINITIONS) {
-      const val = parsed[def.id]
-      if (typeof val === 'string' && canonicalChord(val)) {
-        sanitized[def.id] = canonicalChord(val)!
-      }
-    }
-    const withDefaults: Record<ShortcutId, string> = { ...DEFAULT_SHORTCUTS, ...sanitized }
-    // A stored opener on a palette-local key cannot be honored, because the
-    // open palette consumes that keystroke itself. Fall back to the default
-    // before conflicts are resolved, so a chord that fallback hands out is
-    // detected like any other instead of quietly doubling up.
-    if (reservedPaletteKeyRole(withDefaults['palette.open'])) {
-      withDefaults['palette.open'] = DEFAULT_SHORTCUTS['palette.open']
-    }
-    resolveShortcutCollisions(withDefaults)
-    return withDefaults
-  } catch {
-    return { ...DEFAULT_SHORTCUTS }
+/**
+ * Turns an untrusted bindings object into one every action can dispatch. Each
+ * value must be a chord this module can canonicalize; anything else falls back
+ * to that action's default. A stored opener on a key the open palette handles
+ * itself cannot be honored, so it falls back before conflicts are resolved —
+ * that fallback then competes for its chord like any other assignment instead
+ * of quietly doubling up.
+ */
+export function sanitizeShortcutBindings(value: unknown): Record<ShortcutId, string> {
+  const source =
+    typeof value === 'object' && value !== null && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : {}
+  const bindings: Record<ShortcutId, string> = { ...DEFAULT_SHORTCUTS }
+  for (const def of SHORTCUT_DEFINITIONS) {
+    const raw = source[def.id]
+    if (typeof raw !== 'string') continue
+    const canonical = canonicalChord(raw)
+    if (canonical) bindings[def.id] = canonical
   }
+  if (reservedPaletteKeyRole(bindings['palette.open'])) {
+    bindings['palette.open'] = DEFAULT_SHORTCUTS['palette.open']
+  }
+  resolveShortcutCollisions(bindings)
+  return bindings
 }
 
-export function saveShortcuts(
-  bindings: Record<ShortcutId, string>,
-  storage: StorageLike | null = getStorage(),
-): void {
-  if (!storage) return
-  try {
-    storage.setItem(SHORTCUT_STORAGE_KEY, JSON.stringify(bindings))
-  } catch {
-    // Ignore storage quota or disabled storage
-  }
-}
-
-export function resetShortcuts(
-  storage: StorageLike | null = getStorage(),
-): Record<ShortcutId, string> {
-  if (storage) {
-    try {
-      storage.removeItem(SHORTCUT_STORAGE_KEY)
-    } catch {
-      // ignore
-    }
-  }
+export function defaultShortcutBindings(): Record<ShortcutId, string> {
   return { ...DEFAULT_SHORTCUTS }
-}
-
-function getStorage(): StorageLike | null {
-  if (typeof window === 'undefined') return null
-  try {
-    return window.localStorage
-  } catch {
-    return null
-  }
 }

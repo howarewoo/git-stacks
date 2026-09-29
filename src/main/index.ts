@@ -96,6 +96,21 @@ import type {
   OnboardingFailure,
   RepositoryCloneResult,
 } from '../shared/types'
+import { readSettingsFile, readSettingsSnapshot, resetSettings, updateSettings } from './settings'
+import { loadSettingsPolicy } from './settings-service'
+import { detectRefFormat, runDiagnostics } from './diagnostics'
+import { buildBundle, renderBundle } from './support-bundle'
+import { locateTool, openInEditor } from './editor'
+import { recordFailure, recordedFailures } from './failure-log'
+import type {
+  AppSettings,
+  SettingsLock,
+  SettingsPatch,
+  SettingsSnapshot,
+  SettingsTools,
+} from '../shared/settings'
+
+import type { GitEnvironmentStatus } from '../shared/types'
 
 const readKeys = new RequestRegistry()
 const onboardingKeys = new RequestRegistry()
@@ -227,6 +242,15 @@ const trustedOrigin = devUrl ? new URL(devUrl).origin : productionOrigin
 const settingsPath = () => join(app.getPath('userData'), 'repositories.json')
 const settingsFile = () => join(app.getPath('userData'), 'settings.json')
 let account: GitHubAccount | null = null
+/**
+ * Settings this computer's policy has fixed, resolved at startup and applied
+ * to every read and write. A policy file that could not be read contributes a
+ * lock on every managed key rather than none, so a broken policy cannot widen
+ * what the app does.
+ */
+let settingsLocks: SettingsLock[] = []
+let settingsPolicyError: string | null = null
+let gitEnvironment: GitEnvironmentStatus | null = null
 
 /**
  * The signed-in GitHub account. Its credential is sealed by the operating
@@ -605,6 +629,47 @@ function validatedClone(request: unknown): ValidatedClone {
     shallow: asked.shallow === true,
   }
 }
+
+/**
+ * Names the tools a stored preference points at and whether this machine has
+ * them, so a missing editor or merge tool is reported where the setting is
+ * edited instead of at the moment an action fails.
+ */
+async function withToolAvailability(
+  snapshot: SettingsSnapshot,
+): Promise<SettingsSnapshot & { tools: SettingsTools }> {
+  const [editor, mergeTool] = await Promise.all([
+    locateTool(snapshot.settings.git.editor, null),
+    locateTool(snapshot.settings.git.mergeTool, null),
+  ])
+  return {
+    ...snapshot,
+    // A policy problem is surfaced with the settings it affects, so the reason
+    // a control is disabled is on the same screen as the control.
+    issues: settingsPolicyError
+      ? [...snapshot.issues, { key: 'policy', message: settingsPolicyError }]
+      : snapshot.issues,
+    tools: { editor, mergeTool },
+  }
+}
+
+/** One capability report, built from the same sources the Diagnostics view shows. */
+async function currentDiagnostics(settings: AppSettings) {
+  return runDiagnostics({
+    runtime: await gitRuntimeStatus(settingsFile()),
+    account: await Promise.resolve(githubAccount().status()).catch(() => null),
+    environment: gitEnvironment,
+    host: {
+      platform: process.platform,
+      release: typeof process.getSystemVersion === 'function' ? process.getSystemVersion() : '',
+      arch: process.arch,
+      electron: process.versions.electron,
+    },
+    filesystem: await detectRefFormat(activeRepository),
+    appVersion: app.getVersion(),
+    settings,
+  })
+}
 function installHandlers() {
   // The clone destination is chosen with the platform folder picker, so the
   // renderer never composes a filesystem path of its own.
@@ -756,7 +821,10 @@ function installHandlers() {
         // action must never apply to the repository the window already left.
         operations.write(async () => {
           const runtime = await resolveGitRuntime()
-          return withGitRuntime(runtime, () => runAction(root, action))
+          // The merge tool configured in Settings wins over Git's own
+          // configuration for the one action that consults it.
+          const settings = (await readSettingsFile(settingsFile())).settings
+          return withGitRuntime(runtime, () => runAction(root, action, settings.git.mergeTool))
         }, root),
       )
     } catch (error) {
@@ -766,13 +834,12 @@ function installHandlers() {
       throw error
     }
   })
-  ipcMain.handle('repository:file', (event, filePath: string) => {
+  ipcMain.handle('repository:conflict', async (event, filePath: string) => {
     validateSender(event)
-    return readRepository((root, signal) => getFileView(root, filePath, signal), `file:${filePath}`)
-  })
-  ipcMain.handle('repository:conflict', (event, filePath: string) => {
-    validateSender(event)
-    return readRepository((root) => getConflictView(root, filePath))
+    // The conflict view reports the tool it would use, so the configured value
+    // the merge action honours is the one the resolver shows.
+    const settings = (await readSettingsFile(settingsFile())).settings
+    return readRepository((root) => getConflictView(root, filePath, settings.git.mergeTool))
   })
   ipcMain.handle('repository:history', (event, ref: string, skip: number, requestId?: string) => {
     validateSender(event)
@@ -1081,6 +1148,76 @@ function installHandlers() {
       return gitRuntimeStatus(settingsFile())
     })
   })
+  // Settings never take the repository gate: a preference can be corrected
+  // while a repository is mid-operation, and locking the user out of Settings
+  // to change an unrelated preference is not a safety property.
+  ipcMain.handle('settings', async (event) => {
+    validateSender(event)
+    return withToolAvailability(await readSettingsSnapshot(settingsFile(), settingsLocks))
+  })
+  ipcMain.handle('settings:update', async (event, patch: unknown) => {
+    validateSender(event)
+    if (typeof patch !== 'object' || patch === null || Array.isArray(patch)) {
+      throw new Error('Settings changes must be an object of setting groups.')
+    }
+    return withToolAvailability(
+      await updateSettings(settingsFile(), patch as SettingsPatch, settingsLocks),
+    )
+  })
+  ipcMain.handle('settings:reset', async (event) => {
+    validateSender(event)
+    // Restoring defaults rewrites the settings file and nothing else: no
+    // repository, ref, or working tree is read or written.
+    return withToolAvailability(await resetSettings(settingsFile(), settingsLocks))
+  })
+  // The capability report takes no argument, so the window cannot ask main to
+  // run a command of its choosing. Main runs its own fixed allowlist.
+  ipcMain.handle('diagnostics', async (event) => {
+    validateSender(event)
+    const settings = (await readSettingsFile(settingsFile())).settings
+    return operations.read(() => currentDiagnostics(settings))
+  })
+  ipcMain.handle('support-bundle:preview', async (event) => {
+    validateSender(event)
+    const settings = (await readSettingsFile(settingsFile())).settings
+    const report = await operations.read(() => currentDiagnostics(settings))
+    return buildBundle(report, settings, recordedFailures())
+  })
+  ipcMain.handle('support-bundle:export', async (event) => {
+    validateSender(event)
+    if (!window) throw new Error('There is no window to export from.')
+    const settings = (await readSettingsFile(settingsFile())).settings
+    const preview = buildBundle(
+      await operations.read(() => currentDiagnostics(settings)),
+      settings,
+      recordedFailures(),
+    )
+    // Main chooses the destination: the renderer never supplies a path.
+    const target = await dialog.showSaveDialog(window, {
+      title: 'Export support bundle',
+      defaultPath: join(app.getPath('downloads'), 'git-stacks-support.txt'),
+      filters: [{ name: 'Text', extensions: ['txt'] }],
+    })
+    if (target.canceled || !target.filePath) return { path: '', bytes: 0, includedPaths: 0 }
+    const body = renderBundle(preview, settings.privacy.includeLocalPaths)
+    await writeFile(target.filePath, body, { mode: 0o600 })
+    return {
+      path: target.filePath,
+      bytes: Buffer.byteLength(body),
+      includedPaths: settings.privacy.includeLocalPaths ? preview.pathCount : 0,
+    }
+  })
+  // Main resolves the editor from settings and checks the path is inside the
+  // repository. The renderer supplies neither a command nor an absolute path.
+  ipcMain.handle('editor:open', async (event, relativePath: unknown) => {
+    validateSender(event)
+    if (typeof relativePath !== 'string' || relativePath.length === 0) {
+      throw new Error('A file path is required.')
+    }
+    if (!activeRepository) return { opened: false, reason: 'No repository is open.' }
+    const settings = (await readSettingsFile(settingsFile())).settings
+    return openInEditor(settings.git.editor, activeRepository, relativePath)
+  })
   // Account status only. No handler here can return, log, or accept a credential.
   ipcMain.handle('github-account', async (event) => {
     validateSender(event)
@@ -1178,6 +1315,12 @@ app
       recents = [{ path, name: basename(path) }, ...recents.filter((item) => item.path !== path)]
     }
     const resourcesRoot = app.isPackaged ? process.resourcesPath : resolve(bundleDir, '../../resources')
+    // Policy is read before the first settings read, so a locked key is already
+    // fixed by the time the window can ask for anything.
+    const policy = await loadSettingsPolicy(process.env.GIT_STACKS_SETTINGS_POLICY)
+    settingsLocks = policy.locks
+    settingsPolicyError = policy.error
+    if (policy.error) console.warn(policy.error)
     const preference = await readGitRuntimePreference(settingsFile()).catch(() => null)
     configureGitRuntime({
       appVersion: app.getVersion(),

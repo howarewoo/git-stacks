@@ -3812,9 +3812,15 @@ async function conflictMoves(
   return moves
 }
 
+/**
+ * `toolOverride` is the merge tool the Settings surface configured. It takes
+ * precedence over the environment and over Git's own configuration, because it
+ * is the answer the user gave in this app.
+ */
 export async function getConflictView(
   repoPath: string,
   requestedPath: string,
+  toolOverride?: string | null,
 ): Promise<ConflictFile> {
   const root = await resolveRepository(repoPath)
   await recoverFileActionJournals(root)
@@ -3843,7 +3849,8 @@ export async function getConflictView(
   const worktree = identity.binary || !identity.preview ? null : identity.preview.toString('utf8')
   const segments = worktree && !identity.truncated ? parseConflictSegments(worktree) : []
   const stageNumbers = stages.map((stage) => stage.stage)
-  const tool = process.env.GIT_MERGE_TOOL || (await getConfigValue(root, 'merge.tool'))
+  const tool =
+    toolOverride || process.env.GIT_MERGE_TOOL || (await getConfigValue(root, 'merge.tool'))
   const binary = identity.binary || Object.values(sides).some((side) => side.binary)
   const stagePreviewTruncated = stages
     .filter((stage) => sides[stage.stage].truncated)
@@ -4160,6 +4167,8 @@ export async function runConflictMergeTool(
   repoPath: string,
   filePath: string,
   fingerprint: string,
+  /** The merge tool the Settings surface configured; it wins over Git's own. */
+  toolOverride?: string | null,
 ): Promise<ActionResult> {
   const root = await resolveRepository(repoPath)
   await recoverFileActionJournals(root)
@@ -4167,9 +4176,12 @@ export async function runConflictMergeTool(
   if (!entry.conflicted) throw new Error('The selected file has no unresolved conflict')
   const relativePath = entry.path
   await safeRepositoryPath(root, relativePath)
-  const tool = process.env.GIT_MERGE_TOOL || (await getConfigValue(root, 'merge.tool'))
+  const tool =
+    toolOverride || process.env.GIT_MERGE_TOOL || (await getConfigValue(root, 'merge.tool'))
   if (!tool) {
-    throw new Error('No merge tool is configured. Set merge.tool or GIT_MERGE_TOOL in Git.')
+    throw new Error(
+      'No merge tool is configured. Choose one in Settings, or set merge.tool or GIT_MERGE_TOOL in Git.',
+    )
   }
   const temporary = await fs.mkdtemp(path.join(tmpdir(), 'git-stacks-mergetool-'))
   try {
@@ -5533,7 +5545,12 @@ async function runDeleteBranch(
   return { message: `Deleted local branch ${name}. Remote branches were not changed.` }
 }
 
-export async function runAction(repoPath: string, value: GitAction): Promise<ActionResult> {
+export async function runAction(
+  repoPath: string,
+  value: GitAction,
+  /** The merge tool configured in Settings, which wins over Git's own. */
+  mergeToolOverride?: string | null,
+): Promise<ActionResult> {
   const runtime = await resolveGitRuntime()
   return withGitRuntime(runtime, async () => {
     const root = await resolveRepository(repoPath)
@@ -5611,7 +5628,7 @@ export async function runAction(repoPath: string, value: GitAction): Promise<Act
       case 'resolveConflict':
         return runResolveConflict(root, action.path, action.fingerprint, action.resolution)
       case 'conflictMergeTool':
-        return runConflictMergeTool(root, action.path, action.fingerprint)
+        return runConflictMergeTool(root, action.path, action.fingerprint, mergeToolOverride)
       case 'stageHunk':
       case 'unstageHunk':
         return runStageHunk(

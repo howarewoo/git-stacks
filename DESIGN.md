@@ -717,6 +717,22 @@ Display the active source, version, executable path, minimum-version result, and
 
 Both runtime choices use the same Git operation guards. Custom `files:` reference-storage paths are decoded as native absolute file paths, including Windows drive letters; a remote host, credentials, query, fragment, malformed escape, or NUL is refused instead of treated as a local lock path. Passing local runtime tests does not establish that a signed Windows or macOS release artifact was produced; signing and shipment remain release-workflow gates.
 
+### Settings, theming, and privacy
+
+Settings is a sectioned dialog: a left rail names the sections (Account, Git, Appearance, Shortcuts, Privacy, Diagnostics) and the right pane shows one at a time. Every control is a two-way control, a single-value field, or a text input; there are no controls that store a value nothing reads.
+
+Every setting carries a sentence saying what it changes and who reads it. A setting that names an external program (editor, merge tool) shows whether that program exists on this computer at the point it is typed, so a missing tool is a fact on screen rather than a failure at use. A tool value is one program name: a value carrying a space, a quote, a path separator, or a control character is refused, because such a value would reach a process launcher as more than one argument.
+
+A control fixed by this computer's policy is disabled and shows the policy's reason beside it. A policy file that cannot be read or understood holds **every** managed setting at its current value and says why, rather than reading as "nothing is locked". Never present an unavailable setting as editable-but-ignored.
+
+Theming is a token-level concern, never per-component styling. `tokens.css` emits a light block, a dark block, and a `system` block that follows the operating system in a media query, so `data-gs-theme` on the document root is the only place a theme is expressed. A theme token that no palette supplies must not be offered as a choice. Reduce motion has the same shape: the operating-system media query and the stored `data-motion` attribute are siblings, so a stored choice holds on a machine that did not ask for reduced motion.
+
+The capability report states what was measured and what was not. Every line carries a status — confirmed, unavailable, or not applicable — and a line the app could not establish is shown as unavailable rather than filled in from what this build usually finds. A capability served by a network call is `not applicable` here, not `confirmed`.
+
+A support bundle is assembled from named fields, never from a log that was filtered afterwards. The bundle preview shows each section, whether it is included, and why. Text that names a location on this machine is withheld until the user opts in, and the opt-in widens that one category only: access tokens, source contents, diffs, branch and pull-request text, and raw GitHub bodies are never collected, so no opt-in can reveal them.
+
+Telemetry and crash reporting are stated as facts about the build, not as toggles. This build has no endpoint and sends nothing; presenting a checkbox for a setting with no effect would be an inert control. Privacy controls govern what the user chooses to write on this computer.
+
 ## Do's and Don'ts
 
 Concrete guardrails for the existing system and the user-confirmed Quiet Workbench direction:

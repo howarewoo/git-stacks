@@ -103,6 +103,8 @@ import { ReviewView, type ReviewCommands } from './components/review-view'
 import { ConflictResolver } from './components/conflict-resolver'
 import { HistoryView, OperationBanner, StackView } from './components/repository-views'
 import { GitRuntimeDialog } from './components/git-runtime-dialog'
+import { SettingsDialog } from './components/settings-dialog'
+import type { AppSettings } from '../../shared/settings'
 import { GitHubAccountDialog } from './components/github-account-dialog'
 import {
   ChangesView,
@@ -153,10 +155,10 @@ import {
   isComposingKeyEvent,
   isEditableTarget,
   isMacPlatform,
-  loadShortcuts,
+  defaultShortcutBindings,
   matchesChord,
   type ShortcutId,
-} from './lib/keyboard-shortcuts'
+} from '../../shared/shortcuts'
 import { resolveStackNavigation } from './lib/stack-navigation'
 type BranchFilter = 'all' | 'local' | 'remote' | 'prs'
 
@@ -409,8 +411,10 @@ function App() {
   const [paletteOpen, setPaletteOpen] = React.useState(false)
   const [shortcutSettingsOpen, setShortcutSettingsOpen] = React.useState(false)
   const [shortcutBindings, setShortcutBindings] = React.useState<Record<ShortcutId, string>>(() =>
-    loadShortcuts(),
+    defaultShortcutBindings(),
   )
+  const [settings, setSettings] = React.useState<AppSettings | null>(null)
+  const [settingsOpen, setSettingsOpen] = React.useState(false)
   const [checkoutGuardTarget, setCheckoutGuardTarget] = React.useState<{
     ref: string
     name: string
@@ -545,6 +549,53 @@ function App() {
     }
   }, [desktop])
 
+
+  // Settings are read once at startup so the window opens in the appearance and
+  // with the shortcuts the user last chose. Main owns the file.
+  React.useEffect(() => {
+    if (!desktop?.settings) return
+    let cancelled = false
+    desktop
+      .settings()
+      .then((snapshot) => {
+        if (cancelled) return
+        setSettings(snapshot.settings)
+        setShortcutBindings(snapshot.settings.shortcuts)
+      })
+      .catch((value) => {
+        if (!cancelled) setError(readableError(value))
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [desktop])
+
+  // The theme attribute is the only place the preference takes effect: the
+  // generated token sheet switches on it, and "system" defers to the operating
+  // system in CSS so a later change is followed with no script involved.
+  React.useEffect(() => {
+    const root = document.documentElement
+    root.dataset.gsTheme = settings?.appearance.theme ?? 'system'
+    // The reduced-motion sheet reads this attribute as well as the media
+    // query, so the choice holds on a computer that did not ask for it.
+    if (settings?.appearance.reduceMotion) {
+      root.dataset.motion = 'reduced'
+    } else {
+      delete root.dataset.motion
+    }
+  }, [settings?.appearance.theme, settings?.appearance.reduceMotion])
+
+  // Background refresh follows the stored interval and stops while an operation
+  // is running, so it can never race a change the user is making.
+  React.useEffect(() => {
+    const seconds = settings?.git.fetchIntervalSeconds ?? 0
+    if (!desktop || seconds <= 0 || !snapshot) return
+    const timer = setInterval(() => {
+      if (busyRef.current || openingRef.current) return
+      void refreshSnapshot()
+    }, seconds * 1000)
+    return () => clearInterval(timer)
+  }, [desktop, refreshSnapshot, settings?.git.fetchIntervalSeconds, snapshot])
   /**
    * Adopts a repository the main process just opened, whether it came from the
    * recents list, the folder dialog, a dropped folder, or a finished clone.
@@ -612,6 +663,21 @@ function App() {
       }
     },
     [desktop, isBusy, operationActive],
+  )
+
+  // Main resolves the editor from settings and checks the path is inside the
+  // open repository, so the window sends only a path it is already showing.
+  const openInEditor = React.useCallback(
+    async (relativePath: string) => {
+      if (!desktop?.openInEditor) return
+      try {
+        const result = await desktop.openInEditor(relativePath)
+        setNotice(result.opened ? result.reason : result.reason)
+      } catch (value) {
+        setError(readableError(value))
+      }
+    },
+    [desktop],
   )
 
   const openAccount = React.useCallback(() => {
@@ -1309,6 +1375,9 @@ function App() {
           break
         case 'openShortcutsSettings':
           setShortcutSettingsOpen(true)
+          break
+        case 'openSettings':
+          setSettingsOpen(true)
           break
       }
     },
@@ -2149,6 +2218,7 @@ function App() {
           setActionError(null)
           setInspectedPath(path)
         }}
+        onOpenInEditor={openInEditor}
         onResolveConflict={openConflictResolver}
         onStash={() => openWorkflow({ kind: 'stash' })}
         onSubmitCommit={submitCommit}
@@ -2992,8 +3062,20 @@ function App() {
           runAction={runAction}
           onClose={() => setWorkflow(null)}
           onRequest={openWorkflow}
+          defaults={settings}
         />
       ) : null}
+      <SettingsDialog
+        account={account}
+        desktop={desktop}
+        onAccountChange={setAccount}
+        onError={setError}
+        onSettingsChange={setSettings}
+        onShortcutBindingsChange={setShortcutBindings}
+        open={settingsOpen}
+        onOpenChange={setSettingsOpen}
+        shortcutBindings={shortcutBindings}
+      />
       <GitRuntimeDialog
         busy={gitRuntimeBusy || isBusy || operationActive}
         onOpenChange={setGitRuntimeOpen}

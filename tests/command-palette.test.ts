@@ -9,11 +9,10 @@ import {
   detectShortcutConflicts,
   formatChord,
   matchesChord,
-  loadShortcuts,
-  resetShortcuts,
-  saveShortcuts,
+  defaultShortcutBindings,
+  sanitizeShortcutBindings,
   type ShortcutId,
-} from '../src/renderer/src/lib/keyboard-shortcuts'
+} from '../src/shared/shortcuts'
 import {
   buildPaletteItems,
   groupPaletteItems,
@@ -234,7 +233,7 @@ test('symbol keys requiring Shift match and collide as printable characters, unl
   }
 })
 
-test('recording preserves key identity through conflicts, storage and reset on either platform', () => {
+test('recording preserves key identity through conflicts, rehydration and reset on either platform', () => {
   for (const isMac of [true, false]) {
     const nonPrimary = { key: 'k', ctrlKey: isMac, metaKey: !isMac }
     assert.equal(chordFromEvent(nonPrimary, isMac), null)
@@ -257,31 +256,24 @@ test('recording preserves key identity through conflicts, storage and reset on e
       'palette.open',
     )
 
-    let stored: string | null = null
-    const storage = {
-      getItem: () => stored,
-      setItem: (_key: string, value: string) => {
-        stored = value
-      },
-      removeItem: () => {
-        stored = null
-      },
-    }
-    saveShortcuts(assigned.bindings, storage)
-    assert.equal(loadShortcuts(storage)['palette.open'], recorded)
-    assert.equal(matchesChord(plus, loadShortcuts(storage)['palette.open'], isMac), true)
-    const reset = resetShortcuts(storage)
+    // What a settings save writes and a later launch reads back. The round trip
+    // is JSON, so hydration has to survive exactly what the file contains.
+    const stored = sanitizeShortcutBindings(JSON.parse(JSON.stringify(assigned.bindings)))
+    assert.equal(stored['palette.open'], recorded)
+    assert.equal(matchesChord(plus, stored['palette.open'], isMac), true)
+    const reset = defaultShortcutBindings()
     assert.equal(matchesChord(plus, reset['palette.open'], isMac), false)
     assert.equal(
       matchesChord({ key: 'k', metaKey: isMac, ctrlKey: !isMac }, reset['palette.open'], isMac),
       true,
     )
-    assert.equal(stored, null)
-    assert.equal(matchesChord(plus, loadShortcuts(storage)['palette.open'], isMac), false)
+    // With no stored overrides every action is back on its own default.
+    const cleared = sanitizeShortcutBindings({})
+    assert.equal(matchesChord(plus, cleared['palette.open'], isMac), false)
   }
 })
 
-test('the palette opener refuses the keys the open palette handles, and storage drops them', () => {
+test('the palette opener refuses the keys the open palette handles, and hydration drops them', () => {
   for (const key of ['Enter', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'Escape']) {
     const result = assignShortcut(DEFAULT_SHORTCUTS, 'palette.open', key)
     assert.equal(result.reserved?.chord, key)
@@ -297,43 +289,24 @@ test('the palette opener refuses the keys the open palette handles, and storage 
   // Local keys stay bindable for shortcuts that are inert while the palette is open.
   assert.equal(assignShortcut(DEFAULT_SHORTCUTS, 'view.stacks', 'Enter').reserved, null)
 
-  let stored: string | null = JSON.stringify({
+  // A file written before named keys were canonicalized can still hold these,
+  // so the same refusal has to hold when settings are read back.
+  const loaded = sanitizeShortcutBindings({
     'palette.open': 'ArrowDown',
     'view.stacks': 'Enter',
   })
-  const storage = {
-    getItem: () => stored,
-    setItem: (_key: string, value: string) => {
-      stored = value
-    },
-    removeItem: () => {
-      stored = null
-    },
-  }
-  const loaded = loadShortcuts(storage)
   assert.equal(loaded['palette.open'], DEFAULT_SHORTCUTS['palette.open'])
   assert.equal(loaded['view.stacks'], 'Enter')
 })
 
 test('rehydrating a reserved opener leaves collision-free bindings that dispatch apart', () => {
-  // Both settings were accepted when they were stored: the opener on a key the
-  // open palette handles itself, and the filter on the chord that opener falls
-  // back to.
-  let stored: string | null = JSON.stringify({
+  // Both were accepted into the file before named keys were canonicalized, so
+  // hydration has to settle them: the opener on a key the open palette handles
+  // itself, and the filter on the chord that opener falls back to.
+  const loaded = sanitizeShortcutBindings({
     'palette.open': 'ArrowDown',
     'search.focus': 'Mod+k',
   })
-  const storage = {
-    getItem: () => stored,
-    setItem: (_key: string, value: string) => {
-      stored = value
-    },
-    removeItem: () => {
-      stored = null
-    },
-  }
-
-  const loaded = loadShortcuts(storage)
   assert.deepEqual(detectShortcutConflicts(loaded), [])
   assert.equal(loaded['palette.open'], DEFAULT_SHORTCUTS['palette.open'])
   assert.equal(loaded['search.focus'], DEFAULT_SHORTCUTS['search.focus'])
@@ -355,35 +328,19 @@ test('rehydrating a reserved opener leaves collision-free bindings that dispatch
 
   // A chord two actions were stored on is settled even when the later action's
   // own default is the contested chord.
-  stored = JSON.stringify({ 'view.branches': 'Mod+2', 'view.stacks': 'Mod+2' })
-  const shared = loadShortcuts(storage)
+  const shared = sanitizeShortcutBindings({ 'view.branches': 'Mod+2', 'view.stacks': 'Mod+2' })
   assert.deepEqual(detectShortcutConflicts(shared), [])
   assert.equal(shared['view.stacks'], 'Mod+2')
   assert.equal(shared['view.branches'], DEFAULT_SHORTCUTS['view.branches'])
 })
 
 test('stored bindings that only differ in key case hydrate into one dispatchable owner', () => {
-  // Both values were accepted into storage before named keys were canonicalized,
-  // so rehydration has to see the Home keydown as one contested chord.
-  let stored: string | null = null
-  const storage = {
-    getItem: () => stored,
-    setItem: (_key: string, value: string) => {
-      stored = value
-    },
-    removeItem: () => {
-      stored = null
-    },
-  }
-  saveShortcuts(
-    { ...DEFAULT_SHORTCUTS, 'view.branches': 'Home', 'view.stacks': 'home' } as Record<
-      ShortcutId,
-      string
-    >,
-    storage,
-  )
-
-  const loaded = loadShortcuts(storage)
+  // Both values reached the file before named keys were canonicalized, so
+  // hydration has to see the Home keydown as one contested chord.
+  const loaded = sanitizeShortcutBindings({
+    'view.branches': 'Home',
+    'view.stacks': 'home',
+  })
   assert.deepEqual(detectShortcutConflicts(loaded), [])
   assert.equal(loaded['view.branches'], 'Home')
   assert.equal(loaded['view.stacks'], DEFAULT_SHORTCUTS['view.stacks'])
@@ -403,37 +360,21 @@ test('stored bindings that only differ in key case hydrate into one dispatchable
   assert.equal(reassigned.conflict?.conflictingId, 'view.branches')
   assert.equal(reassigned.bindings['view.branches'], 'Home')
 
-  // A stored opener on the palette-local Home key is refused in either spelling.
-  saveShortcuts({ ...DEFAULT_SHORTCUTS, 'palette.open': 'home' }, storage)
-  assert.equal(loadShortcuts(storage)['palette.open'], DEFAULT_SHORTCUTS['palette.open'])
+  // An opener on the palette-local Home key is refused in either spelling.
+  const refused = sanitizeShortcutBindings({ 'palette.open': 'home' })
+  assert.equal(refused['palette.open'], DEFAULT_SHORTCUTS['palette.open'])
 })
 
 test('named keys outside the canonical table collide by case, not just the table entries', () => {
   // `Clear` and `Help` reach the same keystroke as their lower-case spelling,
   // so two actions stored on both spellings are one contested chord even
   // though neither name is in the canonical table.
-  let stored: string | null = null
-  const storage = {
-    getItem: () => stored,
-    setItem: (_key: string, value: string) => {
-      stored = value
-    },
-    removeItem: () => {
-      stored = null
-    },
-  }
-  saveShortcuts(
-    {
-      ...DEFAULT_SHORTCUTS,
-      'view.branches': 'Clear',
-      'view.stacks': 'clear',
-      'view.history': 'Help',
-      'view.changes': 'HELP',
-    } as Record<ShortcutId, string>,
-    storage,
-  )
-
-  const loaded = loadShortcuts(storage)
+  const loaded = sanitizeShortcutBindings({
+    'view.branches': 'Clear',
+    'view.stacks': 'clear',
+    'view.history': 'Help',
+    'view.changes': 'HELP',
+  })
   assert.deepEqual(detectShortcutConflicts(loaded), [])
   assert.equal(loaded['view.branches'], 'clear')
   assert.equal(loaded['view.stacks'], DEFAULT_SHORTCUTS['view.stacks'])

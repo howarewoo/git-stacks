@@ -11,6 +11,13 @@ import type {
   ReviewSubmission,
   ReviewThreadRead,
 } from './review-threads'
+import type {
+  DiagnosticReport,
+  SettingsPatch,
+  SettingsSnapshot,
+  SupportBundleExport,
+  SupportBundlePreview,
+} from './settings'
 
 export type NativeStackValidationStatus =
   | 'valid'
@@ -1307,6 +1314,35 @@ export interface DesktopAPI {
    * unsubscribe. The renderer reads status rather than polling a long sign-in.
    */
   onGitHubAccount?: (listener: (status: GitHubAccountStatus) => void) => () => void
+  /**
+   * The validated settings this computer is running with, plus the keys policy
+   * has locked and any value that was refused. Main owns the file; the renderer
+   * never chooses a path or writes one.
+   */
+  settings?(): Promise<SettingsSnapshot>
+  /** Applies a partial change. Refuses a locked key before writing anything. */
+  updateSettings?(patch: SettingsPatch): Promise<SettingsSnapshot>
+  /** Restores every setting to its default. Touches no repository. */
+  resetSettings?(): Promise<SettingsSnapshot>
+  /**
+   * The advanced capability report. Main runs a fixed allowlist of commands and
+   * stamps each result, so the window states what was measured and not what it
+   * assumes. It takes no argument and accepts none.
+   */
+  diagnostics?(): Promise<DiagnosticReport>
+  /** What a support bundle would contain, and what redaction removed. */
+  supportBundlePreview?(): Promise<SupportBundlePreview>
+  /**
+   * Writes the bundle where the user chose. The path comes from the save
+   * dialog main opened, never from the renderer.
+   */
+  exportSupportBundle?(): Promise<SupportBundleExport>
+  /**
+   * Opens a file in the configured editor. Main resolves the tool from settings
+   * and checks the path is inside the active repository; the renderer supplies
+   * neither a command nor an absolute path.
+   */
+  openInEditor?(relativePath: string): Promise<{ opened: boolean; reason: string }>
 }
 
 export type GitCapability = 'referenceTransactions' | 'rebaseUpdateRefs'

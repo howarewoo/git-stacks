@@ -826,11 +826,14 @@ testOnRuntimes('a clean and smudge filter configured like Git LFS still runs', a
 
 test('the system Git override is stored as a reversible preference', async () => {
   const settings = join(await temporaryRoot('git-stacks-settings-'), 'settings.json')
-  assert.equal(await readGitRuntimePreference(settings), null)
+  // With no stored preference the bundled runtime is the answer.
+  assert.deepEqual(await readGitRuntimePreference(settings), { useSystemGit: false })
   await writeGitRuntimePreference(settings, { useSystemGit: true })
   assert.deepEqual(await readGitRuntimePreference(settings), { useSystemGit: true })
+  // A stored value that is not a boolean must never resolve to "use system
+  // Git": the default is the only safe reading of a value that means nothing.
   await writeFile(settings, JSON.stringify({ useSystemGit: 'yes' }))
-  assert.equal(await readGitRuntimePreference(settings), null)
+  assert.deepEqual(await readGitRuntimePreference(settings), { useSystemGit: false })
   await writeGitRuntimePreference(settings, { useSystemGit: false })
   assert.deepEqual(await readGitRuntimePreference(settings), { useSystemGit: false })
 })

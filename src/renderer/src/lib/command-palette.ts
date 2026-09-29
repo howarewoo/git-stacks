@@ -12,7 +12,7 @@ import {
   isComposingKeyEvent,
   isMacPlatform,
   type ShortcutId,
-} from './keyboard-shortcuts'
+} from '../../../shared/shortcuts'
 import { indexBranchesByParentName } from './branches'
 import { resolveStackNavigation, type StackRelation } from './stack-navigation'
 
@@ -60,6 +60,7 @@ export type PaletteIntent =
   | { kind: 'deleteBranch' }
   | { kind: 'action'; action: GitAction; label: string }
   | { kind: 'openShortcutsSettings' }
+  | { kind: 'openSettings' }
 
 export interface PaletteItem {
   id: string
@@ -810,6 +811,15 @@ export function buildPaletteItems(context: BuildPaletteContext): PaletteItem[] {
   }
 
   // --- Settings ---
+  items.push({
+    id: 'settings.open',
+    label: 'Settings…',
+    detail: 'Account, Git, editor, merge tool, refresh, appearance, privacy, and diagnostics',
+    group: 'Settings',
+    keywords:
+      'settings preferences configuration account git editor merge tool theme privacy diagnostics support bundle',
+    intent: { kind: 'openSettings' },
+  })
   items.push({
     id: 'settings.shortcuts',
     label: 'Keyboard shortcuts…',

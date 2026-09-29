@@ -148,6 +148,13 @@ const desktop: DesktopAPI = {
       ipcRenderer.removeListener('github-account', handler)
     }
   },
+  settings: () => ipcRenderer.invoke('settings'),
+  updateSettings: (patch) => ipcRenderer.invoke('settings:update', patch),
+  resetSettings: () => ipcRenderer.invoke('settings:reset'),
+  diagnostics: () => ipcRenderer.invoke('diagnostics'),
+  supportBundlePreview: () => ipcRenderer.invoke('support-bundle:preview'),
+  exportSupportBundle: () => ipcRenderer.invoke('support-bundle:export'),
+  openInEditor: (relativePath) => ipcRenderer.invoke('editor:open', relativePath),
 }
 
 contextBridge.exposeInMainWorld('desktop', desktop)

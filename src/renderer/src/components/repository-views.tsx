@@ -4,6 +4,7 @@ import {
   GitBranch,
   GitCommitHorizontal,
   GitMerge,
+  ExternalLink,
   Layers,
   LoaderCircle,
   RefreshCw,
@@ -289,11 +290,14 @@ export function FileInspector({
   onClose,
   onResolveConflict,
   actionError,
+  onOpenInEditor,
 }: Omit<CommonProps, 'onRequest'> & {
   path: string
   onClose: () => void
   onResolveConflict: (path: string) => void
   actionError: string | null
+  /** Opens the file in the editor configured in Settings. */
+  onOpenInEditor?: (relativePath: string) => void
 }) {
   const [file, setFile] = React.useState<FileView | null>(null)
   const [loading, setLoading] = React.useState(true)
@@ -365,6 +369,22 @@ export function FileInspector({
           </small>
         </div>
         <div className="workflow-row">
+          {onOpenInEditor ? (
+            <Button
+              aria-label="Open in editor"
+              size="icon-sm"
+              variant="ghost"
+              disabled={busy || loading || Boolean(file?.lfs)}
+              title={
+                file?.lfs
+                  ? 'This is an LFS pointer, not the file contents'
+                  : 'Open this file in the editor configured in Settings'
+              }
+              onClick={() => onOpenInEditor(path)}
+            >
+              <ExternalLink className="size-3.5" />
+            </Button>
+          ) : null}
           <Button
             aria-label="Reload file"
             size="icon-sm"

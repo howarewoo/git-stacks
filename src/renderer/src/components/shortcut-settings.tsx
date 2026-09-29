@@ -7,12 +7,11 @@ import {
   SHORTCUT_DEFINITIONS,
   assignShortcut,
   chordFromEvent,
+  defaultShortcutBindings,
   formatChord,
   isMacPlatform,
-  resetShortcuts,
-  saveShortcuts,
   type ShortcutId,
-} from '../lib/keyboard-shortcuts'
+} from '../../../shared/shortcuts'
 
 export interface ShortcutSettingsProps {
   open: boolean
@@ -80,7 +79,6 @@ export function ShortcutSettings({
         setSuccessMessage(null)
       } else {
         onBindingsChange(result.bindings)
-        saveShortcuts(result.bindings)
         const def = SHORTCUT_DEFINITIONS.find((d) => d.id === recordingId)
         setSuccessMessage(
           `Updated shortcut for "${def?.label ?? recordingId}" to ${formatChord(chord, isMac)}.`,
@@ -95,7 +93,7 @@ export function ShortcutSettings({
   }, [bindings, isMac, onBindingsChange, recordingId])
 
   const handleResetAll = () => {
-    const fresh = resetShortcuts()
+    const fresh = defaultShortcutBindings()
     onBindingsChange(fresh)
     setConflictMessage(null)
     setSuccessMessage('Reset all keyboard shortcuts to their default bindings.')

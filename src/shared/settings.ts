@@ -1,0 +1,164 @@
+import { DEFAULT_SHORTCUTS, type ShortcutId } from './shortcuts'
+
+export const SETTINGS_VERSION = 1
+/** Long enough that a closed app still refreshes, short enough to stay useful. */
+export const MAX_FETCH_INTERVAL_SECONDS = 3600
+/** A program name, not a command line. Kept well under any platform's limit. */
+export const MAX_TOOL_NAME_LENGTH = 64
+
+export const PULL_STRATEGIES = ['ff-only', 'merge', 'rebase'] as const
+export const MERGE_METHODS = ['merge', 'squash', 'rebase'] as const
+export const THEMES = ['system', 'light', 'dark'] as const
+
+export type PullStrategy = (typeof PULL_STRATEGIES)[number]
+export type MergeMethod = (typeof MERGE_METHODS)[number]
+export type ThemePreference = (typeof THEMES)[number]
+
+export interface GitSettings {
+  /**
+   * Runs the Git the operating system provides instead of the copy bundled with
+   * this app. The bundled copy is the default because it is the version Git
+   * Stacks was tested against.
+   */
+  useSystemGit: boolean
+  /** Program to open a file in, or null for the platform default. */
+  editor: string | null
+  /** Program to resolve a conflict with, or null for whatever Git is configured with. */
+  mergeTool: string | null
+  /** How the pull/pull-request flow advances a stack by default. */
+  defaultPullStrategy: PullStrategy
+  /** How a completed pull request is folded into its parent by default. */
+  defaultMergeMethod: MergeMethod
+  /** Seconds between background refreshes, or 0 to refresh only on request. */
+  fetchIntervalSeconds: number
+}
+
+export interface AppearanceSettings {
+  theme: ThemePreference
+  reduceMotion: boolean
+}
+
+export interface PrivacySettings {
+  /**
+   * Whether a support bundle may name local paths. Off by default: a path
+   * reveals a username and a directory layout, which is more than a bug report
+   * needs to be useful.
+   */
+  includeLocalPaths: boolean
+}
+
+export interface AppSettings {
+  version: number
+  git: GitSettings
+  appearance: AppearanceSettings
+  privacy: PrivacySettings
+  shortcuts: Record<ShortcutId, string>
+}
+
+export const DEFAULT_SETTINGS: AppSettings = {
+  version: SETTINGS_VERSION,
+  git: {
+    useSystemGit: false,
+    editor: null,
+    mergeTool: null,
+    defaultPullStrategy: 'merge',
+    defaultMergeMethod: 'merge',
+    fetchIntervalSeconds: 120,
+  },
+  appearance: { theme: 'system', reduceMotion: false },
+  privacy: { includeLocalPaths: false },
+  shortcuts: { ...DEFAULT_SHORTCUTS },
+}
+
+/** A partial change. An omitted group or field keeps its stored value. */
+export interface SettingsPatch {
+  git?: Partial<GitSettings>
+  appearance?: Partial<AppearanceSettings>
+  privacy?: Partial<PrivacySettings>
+  shortcuts?: Record<string, string>
+}
+
+/** Why a stored value was refused, named by the key the surface shows. */
+export interface SettingsIssue {
+  key: string
+  message: string
+}
+
+/** A key this computer's policy fixes, with the reason shown beside it. */
+export interface SettingsLock {
+  key: string
+  reason: string
+}
+
+export interface SettingsSnapshot {
+  settings: AppSettings
+  locks: SettingsLock[]
+  issues: SettingsIssue[]
+  /** True when the stored file could not be read and defaults are in use. */
+  recovered: boolean
+  /** The settings file's own path. The renderer never chooses this. */
+  file: string
+  /** Whether the programs the Git settings name exist on this machine. */
+  tools?: SettingsTools
+}
+
+/** A program a setting names, and whether this machine has it. */
+export interface ToolAvailability {
+  available: boolean
+  /** The program name looked for, or the text explaining that none is set. */
+  label: string
+}
+
+export interface SettingsTools {
+  editor: ToolAvailability
+  mergeTool: ToolAvailability
+}
+
+/** One line of the advanced capability report. */
+export interface DiagnosticEntry {
+  /** The fixed command or internal probe this line came from. */
+  source: 'git' | 'runtime' | 'host' | 'github' | 'credentials' | 'filesystem' | 'app'
+  label: string
+  value: string
+  /**
+   * What the app actually established. A probe that could not run says so
+   * rather than reporting an assumption as a fact.
+   */
+  status: 'confirmed' | 'unavailable' | 'not-applicable'
+  detail?: string
+  /**
+   * True when this value names a location on this machine. Such a value is
+   * withheld from a support bundle unless the user has opted into paths.
+   */
+  locational?: boolean
+}
+
+export interface DiagnosticReport {
+  entries: DiagnosticEntry[]
+  generatedAt: string
+  appVersion: string
+}
+
+/** A category the bundle may contain, decided by what the settings allow. */
+export interface BundleSection {
+  id: string
+  title: string
+  included: boolean
+  /** Why this section is in or out, shown in the preview. */
+  reason: string
+  content: string
+}
+
+export interface SupportBundlePreview {
+  sections: BundleSection[]
+  /** Everything a section would contribute that is not redacted, counted. */
+  redacted: number
+  pathCount: number
+}
+
+export interface SupportBundleExport {
+  /** Where main wrote the file. Empty when the save was cancelled. */
+  path: string
+  bytes: number
+  includedPaths: number
+}
