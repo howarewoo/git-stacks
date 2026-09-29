@@ -40,6 +40,11 @@ export interface PullRequestCheckDetail {
   source: PullRequestCheckSource
   /** The reporting app or status creator, when GitHub named one. */
   app: string | null
+  /**
+   * The reporting app's numeric id, which is what a required context is bound to. It is
+   * the only way to tell one app's `build` from another's.
+   */
+  appId: number | null
   state: PullRequestCheckState
   requirement: PullRequestCheckRequirement
   /** GitHub's own one-line result, shown under the name rather than replacing it. */

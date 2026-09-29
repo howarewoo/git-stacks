@@ -48,9 +48,10 @@ const MAX_STATUSES = 100
 const ACTIONS_APP_ID = 15368
 
 interface CachedReport {
+  /** One validator per resource page, so a later page is asked about its own change. */
   etags: Map<string, string>
-  /** The raw entries per resource, kept so one 304 does not discard the others. */
-  sources: { checkRuns: unknown[]; statuses: unknown[]; workflowRuns: unknown[] }
+  /** The raw entries per resource page, kept so one 304 does not discard another page. */
+  sources: { checkRuns: unknown[][]; statuses: unknown[][]; workflowRuns: unknown[][] }
   rateLimit: PullRequestChecksReport['rateLimit']
   checks: PullRequestCheckDetail[]
   rollup: PullRequestCheckRollup
@@ -151,9 +152,11 @@ async function conditionalRead(request: CheckRequest): Promise<CheckRead> {
 const MAX_PAGES = 10
 
 interface PagedResult {
-  entries: unknown[]
+  /** The entries, page by page, so one confirmed page never discards another. */
+  pages: unknown[][]
+  /** True only when every page this read asked about answered 304. */
   notModified: boolean
-  etag: string | null
+  etags: Map<string, string>
   rateLimit: GitHubRateLimitLike
   truncated: boolean
 }
@@ -164,61 +167,77 @@ interface GitHubRateLimitLike {
 }
 
 /**
- * Follow a REST list to its end, one bounded page at a time.
+ * Follow a REST list to its end, one bounded page at a time, with a validator per page.
  *
  * A first page short of `perPage` is the whole list, so an ordinary read costs one
  * request. A full page means there may be more, and the read follows until GitHub
  * returns a short page or the page bound is reached. Reaching the bound is reported as
- * truncation rather than passed off as a complete list: a head with thousands of
- * check runs is unusual, and a silent cut would be a lie about what was inspected.
+ * truncation rather than passed off as a complete list: a head with thousands of check
+ * runs is unusual, and a silent cut would be a lie about what was inspected.
  *
- * The conditional validator belongs to the first page. A later page answering 304 is
- * not a question GitHub answers, so it is read unconditionally rather than treated as
- * proof that the remaining pages are current.
+ * Each page carries its own ETag, because a collection's first page says nothing about
+ * the pages behind it: a second page can gain a failing check while the first page's
+ * validator is unchanged. So every page is asked conditionally, a 304 on a page reuses
+ * that page's remembered entries, and the collection counts as unchanged only when every
+ * page asked about confirmed itself.
  */
 async function readAllPages(
   path: string,
   options: {
+    key: string
     perPage: number
-    etag?: string | null
+    etags: Map<string, string>
+    remembered: unknown[][]
     pick: (data: unknown) => unknown[]
     signal?: AbortSignal
   },
 ): Promise<PagedResult> {
   const separator = path.includes('?') ? '&' : '?'
-  const entries: unknown[] = []
+  const pages: unknown[][] = []
+  const etags = new Map<string, string>()
   let first: CheckRead | null = null
+  let confirmed = true
   let truncated = false
   for (let page = 1; page <= MAX_PAGES; page += 1) {
+    const etag = options.etags.get(pageKey(options.key, page)) ?? null
     const read = await conditionalRead({
       path: `${path}${separator}per_page=${options.perPage}&page=${page}`,
-      ...(page === 1 ? { etag: options.etag ?? null } : {}),
+      ...(etag ? { etag } : {}),
       ...(options.signal ? { signal: options.signal } : {}),
     })
-    if (page === 1) {
-      first = read
-      if (read.notModified) {
-        return {
-          entries: [],
-          notModified: true,
-          etag: read.etag,
-          rateLimit: read.rateLimit,
-          truncated: false,
-        }
+    if (page === 1) first = read
+    if (read.notModified) {
+      const remembered = options.remembered[page - 1]
+      if (!remembered) {
+        // A page GitHub says is unchanged that was never remembered cannot be reused.
+        confirmed = false
+        break
       }
+      pages.push(remembered)
+      if (etag) etags.set(pageKey(options.key, page), etag)
+      // Every page this head was last read with has now confirmed itself, so there is
+      // nothing further to ask about.
+      if (options.remembered.length <= page) break
+      continue
     }
+    confirmed = false
+    if (read.etag) etags.set(pageKey(options.key, page), read.etag)
     const pageEntries = options.pick(read.data)
-    entries.push(...pageEntries)
+    pages.push(pageEntries)
     if (pageEntries.length < options.perPage) break
     if (page === MAX_PAGES) truncated = true
   }
   return {
-    entries,
-    notModified: false,
-    etag: first?.etag ?? null,
+    pages,
+    notModified: confirmed && pages.length > 0,
+    etags,
     rateLimit: first?.rateLimit ?? { remaining: null, reset: null },
     truncated,
   }
+}
+
+function pageKey(resource: string, page: number): string {
+  return `${resource}:${page}`
 }
 
 /**
@@ -260,26 +279,47 @@ function workflowRunEntries(data: unknown): unknown[] {
 }
 
 /**
- * The checks a repository requires, and whether that answer is complete.
+ * One required context, and the apps that may satisfy it. A repository and an
+ * organisation can both require the same context name, bound to different integrations,
+ * so a context is a set rather than a single app. `null` means any app satisfies it.
+ */
+type RequiredContexts = Map<string, Set<number> | null>
+
+function addRequired(contexts: RequiredContexts, name: string, appId: number | null): void {
+  const key = name.trim().toLowerCase()
+  if (!contexts.has(key)) {
+    contexts.set(key, appId === null ? null : new Set([appId]))
+    return
+  }
+  const existing = contexts.get(key) ?? null
+  // Two rules naming the same context, one of them unbound, together accept any app.
+  if (existing === null || appId === null) {
+    contexts.set(key, null)
+    return
+  }
+  existing.add(appId)
+}
+
+/**
+ * The checks a repository requires on its base branch, and whether that answer is
+ * complete.
  *
- * Two APIs can make a check required, and a read that ignores the second one is not
- * evidence that a check is optional. Legacy branch protection reports required
- * contexts, each optionally bound to a reporting app; repository rulesets can require
- * checks that appear nowhere in branch protection. So both are read, a ruleset
- * requirement is only claimed when the ruleset that declares it is the base branch's
- * own, and any read that does not succeed leaves the whole answer `unknown` rather
- * than presenting the checks it did read as the complete required set.
+ * Two APIs make a check required, and reading only one is not evidence that a check is
+ * optional. Legacy branch protection reports the contexts it requires. Rulesets, from
+ * the repository and from its organisation, require checks that appear nowhere in
+ * branch protection; GitHub answers "which active rules apply to this exact branch"
+ * through `GET /repos/{o}/{r}/rules/branches/{branch}`, so which rulesets those come
+ * from and which branches they match is GitHub's own evaluation rather than a pattern
+ * match reimplemented here. Any read that does not succeed leaves the whole answer
+ * `unknown` rather than presenting what was read as the complete required set.
  */
 async function requiredContexts(
   fullName: string,
   base: string | null,
   signal?: AbortSignal,
-): Promise<{ known: boolean; contexts: Map<string, number | null> }> {
+): Promise<{ known: boolean; contexts: RequiredContexts }> {
   if (!base) return { known: false, contexts: new Map() }
-  let legacy: { known: boolean; contexts: Map<string, number | null> } = {
-    known: false,
-    contexts: new Map(),
-  }
+  const contexts: RequiredContexts = new Map()
   try {
     const response = await githubTransport().rest({
       path: `repos/${fullName}/branches/${encodeURIComponent(base)}/protection/required_status_checks`,
@@ -287,99 +327,74 @@ async function requiredContexts(
     })
     const data = response.data
     if (!isRecord(data)) return { known: false, contexts: new Map() }
-    const contexts = new Map<string, number | null>()
-    if (Array.isArray(data.contexts)) {
-      for (const context of data.contexts) {
-        if (typeof context === 'string' && context) contexts.set(context.toLowerCase(), null)
-      }
-    }
-    if (Array.isArray(data.checks)) {
+    // `checks` carries the app each required context is bound to; the deprecated
+    // `contexts` list carries the same names with no app identity at all. Reading both
+    // would make every context unbound, so `checks` is authoritative whenever GitHub
+    // sends it and `contexts` is only the fallback for a response without it.
+    if (Array.isArray(data.checks) && data.checks.length > 0) {
       for (const entry of data.checks) {
         if (!isRecord(entry) || typeof entry.context !== 'string' || !entry.context) continue
-        // A context bound to an app is only that app's check; the app id is what keeps
-        // another app's identically named check from being read as required.
+        addRequired(contexts, entry.context, typeof entry.app_id === 'number' ? entry.app_id : null)
+      }
+    } else if (Array.isArray(data.contexts)) {
+      for (const context of data.contexts) {
+        if (typeof context === 'string' && context) addRequired(contexts, context, null)
+      }
+    }
+  } catch (error) {
+    if (error instanceof GitHubTransportError && error.kind === 'cancelled') throw error
+    return { known: false, contexts: new Map() }
+  }
+
+  const rules = await effectiveBranchRules(fullName, base, signal)
+  if (!rules.known) return { known: false, contexts: new Map() }
+  for (const [name, appId] of rules.contexts) addRequired(contexts, name, appId)
+  return { known: true, contexts }
+}
+
+/**
+ * Every active rule that applies to this exact branch, from the repository's own
+ * rulesets and its organisation's. Rules this account cannot read, or a list longer than
+ * the bounded read followed, are the reason the required set stays unknown: a check no
+ * readable rule mentions may still gate the merge.
+ */
+async function effectiveBranchRules(
+  fullName: string,
+  base: string,
+  signal?: AbortSignal,
+): Promise<{ known: boolean; contexts: Map<string, number | null> }> {
+  const contexts = new Map<string, number | null>()
+  for (let page = 1; page <= MAX_PAGES; page += 1) {
+    let rules: unknown
+    try {
+      const response = await githubTransport().rest({
+        path: `repos/${fullName}/rules/branches/${encodeURIComponent(base)}?per_page=100&page=${page}`,
+        ...(signal ? { signal } : {}),
+      })
+      rules = response.data
+    } catch (error) {
+      if (error instanceof GitHubTransportError && error.kind === 'cancelled') throw error
+      return { known: false, contexts: new Map() }
+    }
+    if (!Array.isArray(rules)) return { known: false, contexts: new Map() }
+    for (const rule of rules) {
+      if (!isRecord(rule) || rule.type !== 'required_status_checks') continue
+      const parameters = isRecord(rule.parameters) ? rule.parameters : null
+      const entries =
+        parameters && Array.isArray(parameters.required_status_checks)
+          ? parameters.required_status_checks
+          : []
+      for (const entry of entries) {
+        if (!isRecord(entry) || typeof entry.context !== 'string' || !entry.context) continue
         contexts.set(
           entry.context.toLowerCase(),
-          typeof entry.app_id === 'number' ? entry.app_id : null,
+          typeof entry.integration_id === 'number' ? entry.integration_id : null,
         )
       }
     }
-    legacy = { known: true, contexts }
-  } catch (error) {
-    if (error instanceof GitHubTransportError && error.kind === 'cancelled') throw error
-    return { known: false, contexts: new Map() }
+    if (rules.length < 100) return { known: true, contexts }
   }
-
-  const rulesets = await requiredRulesetContexts(fullName, base, signal)
-  if (!rulesets.known) return { known: false, contexts: new Map() }
-  for (const [context, appId] of rulesets.contexts) {
-    if (!legacy.contexts.has(context)) legacy.contexts.set(context, appId)
-  }
-  return legacy
-}
-
-/**
- * Required checks declared by repository rulesets that target the base branch. A
- * ruleset GitHub will not let this account read is the reason the whole required set
- * stays unknown: a check no readable API mentions may still gate the merge.
- */
-async function requiredRulesetContexts(
-  fullName: string,
-  base: string | null,
-  signal?: AbortSignal,
-): Promise<{ known: boolean; contexts: Map<string, number | null> }> {
-  try {
-    const response = await githubTransport().rest({
-      path: `repos/${fullName}/rulesets?includes_parents=true&per_page=100`,
-      ...(signal ? { signal } : {}),
-    })
-    const data = response.data
-    if (!Array.isArray(data)) return { known: false, contexts: new Map() }
-    const contexts = new Map<string, number | null>()
-    for (const ruleset of data) {
-      if (!isRecord(ruleset) || ruleset.target !== 'branch' || ruleset.enforcement !== 'active') {
-        continue
-      }
-      if (!rulesetTargetsBranch(ruleset, base)) continue
-      if (!Array.isArray(ruleset.rules)) continue
-      for (const rule of ruleset.rules) {
-        if (!isRecord(rule) || rule.type !== 'required_status_checks') continue
-        const parameters = isRecord(rule.parameters) ? rule.parameters : null
-        const entries =
-          parameters && Array.isArray(parameters.required_status_checks)
-            ? parameters.required_status_checks
-            : []
-        for (const entry of entries) {
-          if (!isRecord(entry) || typeof entry.context !== 'string' || !entry.context) continue
-          contexts.set(
-            entry.context.toLowerCase(),
-            typeof entry.integration_id === 'number' ? entry.integration_id : null,
-          )
-        }
-      }
-    }
-    return { known: true, contexts }
-  } catch (error) {
-    if (error instanceof GitHubTransportError && error.kind === 'cancelled') throw error
-    return { known: false, contexts: new Map() }
-  }
-}
-
-/**
- * Whether a branch ruleset applies to the base branch. GitHub returns the patterns under
- * `conditions.ref_name.include`, where `~DEFAULT_BRANCH` is its token for the repository's
- * own default branch; the literal base ref is accepted as well. A ruleset that names
- * neither the base nor the default branch is about other branches and proves nothing here.
- */
-function rulesetTargetsBranch(ruleset: Record<string, unknown>, base: string | null): boolean {
-  if (!base) return false
-  const conditions = ruleset.conditions
-  if (!isRecord(conditions)) return false
-  const refName = conditions.ref_name
-  const include = isRecord(refName) && Array.isArray(refName.include) ? refName.include : []
-  return include.some(
-    (value) => typeof value === 'string' && (value === '~DEFAULT_BRANCH' || value === base),
-  )
+  return { known: false, contexts: new Map() }
 }
 
 /**
@@ -469,27 +484,32 @@ interface BuiltReport {
  * run only becomes its own entry when GitHub reported no check run for it.
  */
 function buildReport(
-  checkRuns: unknown[],
-  statuses: unknown[],
-  workflowRuns: unknown[],
+  checkRuns: unknown[][],
+  statuses: unknown[][],
+  workflowRuns: unknown[][],
   requirementKnown: boolean,
-  required: Map<string, number | null>,
+  required: RequiredContexts,
 ): BuiltReport {
   const checks: PullRequestCheckDetail[] = []
+  const checkRunEntriesFlat = checkRuns.flat()
+  const statusEntriesFlat = statuses.flat()
+  const workflowRunEntriesFlat = workflowRuns.flat()
   // An Actions run and the check run it creates are one piece of work, joined by the
   // run URL GitHub puts in the check run's details link.
   const runIdByUrl = new Map<string, number>()
-  for (const entry of workflowRuns) {
+  for (const entry of workflowRunEntriesFlat) {
     if (!isRecord(entry) || typeof entry.id !== 'number') continue
     const details = safeGitHubUrl(entry.html_url)
     if (details) runIdByUrl.set(details, entry.id)
   }
 
-  for (const entry of workflowRuns) {
+  for (const entry of workflowRunEntriesFlat) {
     if (!isRecord(entry) || typeof entry.id !== 'number') continue
     const details = safeGitHubUrl(entry.html_url)
     if (!details) continue
-    const reportedByCheckRun = checkRuns.some((run) => isRecord(run) && run.details_url === details)
+    const reportedByCheckRun = checkRunEntriesFlat.some(
+      (run) => isRecord(run) && run.details_url === details,
+    )
     // A run GitHub already reported as a check run is that run, not a second check.
     if (reportedByCheckRun) continue
     const name = typeof entry.name === 'string' && entry.name ? entry.name : 'Workflow run'
@@ -498,6 +518,7 @@ function buildReport(
       name,
       source: 'workflow-run',
       app: 'github-actions',
+      appId: ACTIONS_APP_ID,
       state: classifyCheckRun(entry.status, entry.conclusion),
       requirement: requirementKnown
         ? classifyRequirement(name, required, ACTIONS_APP_ID)
@@ -511,7 +532,7 @@ function buildReport(
     })
   }
 
-  for (const entry of checkRuns) {
+  for (const entry of checkRunEntriesFlat) {
     if (!isRecord(entry) || typeof entry.name !== 'string' || !entry.name) continue
     const app = isRecord(entry.app) && typeof entry.app.slug === 'string' ? entry.app.slug : null
     const details = safeGitHubUrl(entry.details_url)
@@ -521,6 +542,7 @@ function buildReport(
       name: entry.name,
       source: 'check-run',
       app,
+      appId: checkRunAppId(entry),
       state: classifyCheckRun(entry.status, entry.conclusion),
       requirement: requirementKnown
         ? classifyRequirement(entry.name, required, checkRunAppId(entry))
@@ -537,7 +559,7 @@ function buildReport(
     })
   }
 
-  for (const entry of statuses) {
+  for (const entry of statusEntriesFlat) {
     if (!isRecord(entry) || typeof entry.context !== 'string' || !entry.context) continue
     const state = classifyCommitStatus(entry.state)
     checks.push({
@@ -545,6 +567,7 @@ function buildReport(
       name: entry.context,
       source: 'commit-status',
       app: null,
+      appId: null,
       state,
       requirement: requirementKnown
         ? classifyRequirement(entry.context, required, null)
@@ -560,8 +583,10 @@ function buildReport(
   }
 
   if (requirementKnown) {
-    for (const [context, appId] of required) {
-      if (checks.some((check) => check.name.toLowerCase() === context && matchesApp(check, appId)))
+    for (const [context, appIds] of required) {
+      // Only a check the required apps could have reported satisfies the context, so a
+      // same-named check from another app never hides a context that is still outstanding.
+      if (checks.some((check) => check.name.toLowerCase() === context && satisfies(check, appIds)))
         continue
       // GitHub lists this context as required but has reported nothing for it yet.
       checks.push({
@@ -569,6 +594,7 @@ function buildReport(
         name: context,
         source: 'expected',
         app: null,
+        appId: appIds ? ([...appIds][0] ?? null) : null,
         state: 'waiting',
         requirement: 'required',
         summary: 'Expected: waiting for this check to report',
@@ -588,10 +614,6 @@ function buildReport(
   }
 }
 
-function checkRunAppId(entry: Record<string, unknown>): number | null {
-  return isRecord(entry.app) && typeof entry.app.id === 'number' ? entry.app.id : null
-}
-
 /**
  * Whether a reported check is the one the repository requires. A required context that
  * names an app is that app's check only, so an identically named check from another app
@@ -599,13 +621,13 @@ function checkRunAppId(entry: Record<string, unknown>): number | null {
  */
 function classifyRequirement(
   name: string,
-  required: Map<string, number | null>,
+  required: RequiredContexts,
   appId: number | null,
 ): PullRequestCheckRequirement {
-  const key = name.trim().toLowerCase()
-  if (!required.has(key)) return 'informational'
-  const requiredAppId = required.get(key) ?? null
-  return requiredAppId === null || appId === requiredAppId ? 'required' : 'informational'
+  const appIds = required.get(name.trim().toLowerCase())
+  if (appIds === undefined) return 'informational'
+  if (appIds === null) return 'required'
+  return appId !== null && appIds.has(appId) ? 'required' : 'informational'
 }
 
 function failureReport(
@@ -680,21 +702,25 @@ function describeFailure(error: unknown): string {
 }
 
 /**
- * Whether a reported check is the app-bound context the repository requires. A context
- * bound to an app counts as reported when that app reported it, even when another app
- * reported a check of the same name.
+ * Whether a reported check satisfies a required context. `null` accepts any app; a set
+ * accepts only the integrations the requiring rules named.
  */
+function satisfies(check: PullRequestCheckDetail, appIds: Set<number> | null): boolean {
+  if (appIds === null) return true
+  if (check.source === 'workflow-run') return appIds.has(ACTIONS_APP_ID)
+  return check.appId !== null && appIds.has(check.appId)
+}
+
+/** The app that reported a check, which is what a required context is bound to. */
+function checkRunAppId(entry: Record<string, unknown>): number | null {
+  return isRecord(entry.app) && typeof entry.app.id === 'number' ? entry.app.id : null
+}
+
 function withoutRerun(
   permissions: PullRequestChecksPermissions,
   reason: string,
 ): PullRequestChecksPermissions {
   return permissions.canRerun ? { ...permissions, canRerun: false, reason } : permissions
-}
-
-function matchesApp(check: PullRequestCheckDetail, appId: number | null): boolean {
-  if (appId === null) return true
-  if (check.source === 'workflow-run') return appId === ACTIONS_APP_ID
-  return check.app === 'github-actions' && appId === ACTIONS_APP_ID
 }
 
 /**
@@ -782,22 +808,28 @@ export async function getPullRequestChecks(
   try {
     const commitPath = `repos/${fullName}/commits/${encodeURIComponent(headSha)}`
     const checkRuns = await readAllPages(`${commitPath}/check-runs`, {
+      key: 'check-runs',
       perPage: MAX_CHECK_RUNS,
-      etag: remembered?.etags.get('check-runs'),
+      etags: new Map(remembered?.etags ?? []),
+      remembered: remembered?.sources.checkRuns ?? [],
       pick: checkRunEntries,
       ...(options.signal ? { signal: options.signal } : {}),
     })
     const status = await readAllPages(`${commitPath}/status`, {
+      key: 'status',
       perPage: MAX_STATUSES,
-      etag: remembered?.etags.get('status'),
+      etags: new Map(remembered?.etags ?? []),
+      remembered: remembered?.sources.statuses ?? [],
       pick: statusEntries,
       ...(options.signal ? { signal: options.signal } : {}),
     })
     const workflowRuns = await readAllPages(
       `repos/${fullName}/actions/runs?head_sha=${encodeURIComponent(headSha)}`,
       {
+        key: 'workflow-runs',
         perPage: MAX_WORKFLOW_RUNS,
-        etag: remembered?.etags.get('workflow-runs'),
+        etags: new Map(remembered?.etags ?? []),
+        remembered: remembered?.sources.workflowRuns ?? [],
         pick: workflowRunEntries,
         ...(options.signal ? { signal: options.signal } : {}),
       },
@@ -847,13 +879,12 @@ export async function getPullRequestChecks(
         : reportFrom(confirmed, number, base, 'not-modified', null)
     }
 
-    // A resource that answered 304 keeps the entries this head was last seen with.
+    // Each resource keeps the pages this read actually saw: a page GitHub confirmed is
+    // the page it remembered, and a page GitHub re-sent is the page it sent.
     const sources = {
-      checkRuns: checkRuns.notModified ? (remembered?.sources.checkRuns ?? []) : checkRuns.entries,
-      statuses: status.notModified ? (remembered?.sources.statuses ?? []) : status.entries,
-      workflowRuns: workflowRuns.notModified
-        ? (remembered?.sources.workflowRuns ?? [])
-        : workflowRuns.entries,
+      checkRuns: checkRuns.pages,
+      statuses: status.pages,
+      workflowRuns: workflowRuns.pages,
     }
     const built = buildReport(
       sources.checkRuns,
@@ -862,10 +893,12 @@ export async function getPullRequestChecks(
       requirement.known,
       requirement.contexts,
     )
+    // Validators accumulate across resources rather than replacing each other, so a
+    // confirmed page keeps the validator that proved it.
     const etags = new Map(remembered?.etags ?? [])
-    if (checkRuns.etag) etags.set('check-runs', checkRuns.etag)
-    if (status.etag) etags.set('status', status.etag)
-    if (workflowRuns.etag) etags.set('workflow-runs', workflowRuns.etag)
+    for (const [key, value] of checkRuns.etags) etags.set(key, value)
+    for (const [key, value] of status.etags) etags.set(key, value)
+    for (const [key, value] of workflowRuns.etags) etags.set(key, value)
     const entry: CachedReport = {
       etags,
       sources,

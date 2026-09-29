@@ -821,7 +821,7 @@ test('an unreadable rulesets read leaves every requirement unknown rather than o
       // Branch protection is readable and requires nothing this head reported, so only
       // the ruleset read can tell a required check from an optional one here.
       requiredStatusChecks: { branch: 'main', contexts: [] },
-      rulesets: { forbidden: true },
+      branchRules: { branch: 'main', forbidden: true },
       checkRuns: [{ id: 1, headSha, name: 'build', status: 'completed', conclusion: 'success' }],
     }))
     const report = await getPullRequestChecks(harness.repo, PR_NUMBER, {
@@ -837,7 +837,7 @@ test('a ruleset-required check no readable API reported is still shown as requir
   await withHarness(async (harness) => {
     const head = await setup(harness, (headSha) => ({
       requiredStatusChecks: { branch: 'main', contexts: [] },
-      rulesets: { contexts: [{ context: 'audit', branch: 'main' }] },
+      branchRules: { branch: 'main', required: [{ context: 'audit' }] },
       checkRuns: [{ id: 1, headSha, name: 'build', status: 'completed', conclusion: 'success' }],
     }))
     const report = await getPullRequestChecks(harness.repo, PR_NUMBER, {
@@ -857,7 +857,7 @@ test('a required context bound to one app is not satisfied by another app check 
     const head = await setup(harness, (headSha) => ({
       // Branch protection binds the required context to one app, id 1.
       requiredStatusChecks: { branch: 'main', contexts: ['build'], appIds: { build: 1 } },
-      rulesets: { contexts: [] },
+      branchRules: { branch: 'main', required: [] },
       checkRuns: [
         {
           id: 1,
@@ -926,5 +926,87 @@ test('a report the page bound cut short says so instead of claiming to be the wh
     })
     assert.equal(report.checks.length, 1000)
     assert.equal(report.truncated, true)
+  })
+})
+
+test('a change on a later page is read even when the first page validator is unchanged', async () => {
+  await withHarness(async (harness) => {
+    const head = await setup(harness, (headSha) => {
+      const firstPage = Array.from({ length: 100 }, (_unused, index) => ({
+        id: 3000 + index,
+        headSha,
+        name: `check ${index}`,
+        status: 'completed',
+        conclusion: 'success',
+      }))
+      return { conditional: true, checkRuns: firstPage }
+    })
+    const first = await getPullRequestChecks(harness.repo, PR_NUMBER, {
+      headSha: head,
+      base: 'main',
+    })
+    assert.equal(first.freshness, 'live')
+    assert.equal(first.checks.length, 100)
+
+    // Only the second page changes. A reader that treated the first page's 304 as proof
+    // about the whole collection would keep reporting a head with no failure.
+    const state = await harness.readState()
+    state.checks = {
+      ...state.checks,
+      checkRuns: [
+        ...(state.checks?.checkRuns ?? []),
+        {
+          id: 4000,
+          headSha: head,
+          name: 'check on page two',
+          status: 'completed',
+          conclusion: 'failure',
+        },
+      ],
+    }
+    await harness.writeState(state)
+
+    const second = await getPullRequestChecks(harness.repo, PR_NUMBER, {
+      headSha: head,
+      base: 'main',
+      force: true,
+    })
+    assert.equal(second.freshness, 'live')
+    assert.equal(second.checks.length, 101)
+    const found = second.checks.find((check) => check.name === 'check on page two')
+    assert.equal(found?.state, 'failure')
+    assert.equal(second.rollup.failing, 1)
+  })
+})
+
+test('a report and an org rule that both name one context accept either required app', async () => {
+  await withHarness(async (harness) => {
+    const head = await setup(harness, (headSha) => ({
+      // Branch protection requires `build` from app 1; the effective branch rules report
+      // an organisation rule requiring the same context from app 2. Either satisfies it.
+      requiredStatusChecks: { branch: 'main', contexts: ['build'], appIds: { build: 1 } },
+      branchRules: { branch: 'main', required: [{ context: 'build', integrationId: 2 }] },
+      checkRuns: [
+        {
+          id: 1,
+          headSha,
+          name: 'build',
+          status: 'completed',
+          conclusion: 'success',
+          appSlug: 'org-bot',
+          appId: 2,
+        },
+      ],
+    }))
+    const report = await getPullRequestChecks(harness.repo, PR_NUMBER, {
+      headSha: head,
+      base: 'main',
+    })
+    const reported = report.checks.find((check) => check.name === 'build')
+    assert.equal(reported?.requirement, 'required')
+    assert.equal(
+      report.checks.some((check) => check.expected),
+      false,
+    )
   })
 })

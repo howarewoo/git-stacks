@@ -182,11 +182,15 @@ export interface GitHubFixtureChecks {
     contexts: string[]
     appIds?: Record<string, number>
   } | null
-  /** Branch rulesets that make a check required, independent of branch protection. */
-  rulesets?: {
-    /** Refuses the rulesets read, which leaves the required set unknown. */
+  /**
+   * The active rules GitHub reports for one exact branch, repository and organisation
+   * rulesets already matched. `forbidden` models the read GitHub refuses without
+   * administration access, which leaves the required set unknown.
+   */
+  branchRules?: {
+    branch: string
     forbidden?: boolean
-    contexts?: { context: string; integrationId?: number | null; branch?: string }[]
+    required?: { context: string; integrationId?: number | null }[]
   }
   actionsEnabled?: boolean
   /** The viewer's repository role, as `GET /repos/{o}/{r}` reports it. */

@@ -734,37 +734,36 @@ function handleRest(state: GitHubFixtureState, request: GitHubApiDoubleRequest):
       },
     }
   }
-  if (rawPath === `${prefix}/rulesets` && method === 'GET') {
-    // A ruleset read needs administration access, and GitHub refuses it without it. A
-    // refusal is not "no rules": it means the required set cannot be read at all.
-    if (state.checks?.rulesets?.forbidden) {
+  const branchRules = new RegExp(`^${prefix}/rules/branches/([^/]+)$`, 'u').exec(rawPath)
+  if (branchRules) {
+    // GitHub's effective-rules endpoint: every active rule that applies to this exact
+    // branch, from repository and organisation rulesets, already matched. Reading it is
+    // how a caller avoids reimplementing GitHub's branch-pattern evaluation.
+    const branch = decodeURIComponent(branchRules[1])
+    const rules = state.checks?.branchRules
+    if (rules?.forbidden) {
       throw new HttpError(403, 'Forbidden', 'Resource not accessible by integration')
     }
-    const contexts = state.checks?.rulesets?.contexts ?? []
-    if (contexts.length === 0) return { status: 200, body: [] }
-    const branches = [...new Set(contexts.map((entry) => entry.branch ?? 'main'))]
+    if (!rules || rules.branch !== branch) return { status: 200, body: [] }
+    const entries = (rules.required ?? []).map((entry) => ({
+      context: entry.context,
+      integration_id: entry.integrationId ?? null,
+    }))
+    if (entries.length === 0) return { status: 200, body: [] }
     return {
       status: 200,
-      body: branches.map((branch, index) => ({
-        id: 9000 + index,
-        name: `protect ${branch}`,
-        target: 'branch',
-        enforcement: 'active',
-        conditions: { ref_name: { include: [branch], exclude: [] } },
-        rules: [
+      body: page(
+        [
           {
             type: 'required_status_checks',
-            parameters: {
-              required_status_checks: contexts
-                .filter((entry) => (entry.branch ?? 'main') === branch)
-                .map((entry) => ({
-                  context: entry.context,
-                  integration_id: entry.integrationId ?? null,
-                })),
-            },
+            ruleset_id: 9100,
+            ruleset_source: 'Repository',
+            ruleset_source_type: 'Repository',
+            parameters: { required_status_checks: entries },
           },
         ],
-      })),
+        rawQuery,
+      ),
     }
   }
   const pull = new RegExp(`^${prefix}/pulls/(\\d+)$`, 'u').exec(path)
