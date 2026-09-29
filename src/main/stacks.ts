@@ -15,6 +15,7 @@ import type {
   StackStep,
 } from '../shared/types'
 import {
+  CommandCancelled,
   MAX_MESSAGE_LENGTH,
   branchUpstream,
   commandCode,
@@ -298,31 +299,36 @@ export function isStackAction(value: unknown): value is StackAction {
   }
 }
 
-async function repositoryPath(repoPath: string): Promise<string> {
-  const workTree = await tryGit(repoPath, ['rev-parse', '--show-toplevel'])
+async function repositoryPath(repoPath: string, signal?: AbortSignal): Promise<string> {
+  const workTree = await tryGit(repoPath, ['rev-parse', '--show-toplevel'], signal)
   if (workTree) return path.resolve(stripTrailingNewline(workTree))
+  // A bare repository has no worktree, so the journal lives in the Git directory.
   return path.resolve(
-    stripTrailingNewline(await runGit(repoPath, ['rev-parse', '--absolute-git-dir'])),
+    stripTrailingNewline(
+      await runGit(repoPath, ['rev-parse', '--absolute-git-dir'], undefined, signal),
+    ),
   )
 }
 
-async function gitDirectory(repoPath: string): Promise<string> {
-  const output = stripTrailingNewline(await runGit(repoPath, ['rev-parse', '--git-dir']))
+async function gitDirectory(repoPath: string, signal?: AbortSignal): Promise<string> {
+  const output = stripTrailingNewline(
+    await runGit(repoPath, ['rev-parse', '--git-dir'], undefined, signal),
+  )
   return path.resolve(repoPath, output)
 }
 
-async function journalPath(repoPath: string): Promise<string> {
-  return path.join(await gitDirectory(repoPath), 'git-stacks-stack.json')
+async function journalPath(repoPath: string, signal?: AbortSignal): Promise<string> {
+  return path.join(await gitDirectory(repoPath, signal), 'git-stacks-stack.json')
 }
 
 function isOid(value: unknown): value is string {
   return typeof value === 'string' && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u.test(value)
 }
 
-async function readJournal(repoPath: string): Promise<StackJournal | null> {
+async function readJournal(repoPath: string, signal?: AbortSignal): Promise<StackJournal | null> {
   let value: string
   try {
-    const target = await journalPath(repoPath)
+    const target = await journalPath(repoPath, signal)
     if ((await fs.stat(target)).size > 8 * 1024 * 1024)
       throw new Error('Stack journal is too large')
     value = await fs.readFile(target, 'utf8')
@@ -412,13 +418,16 @@ async function removeJournal(repoPath: string): Promise<void> {
   }
 }
 
-async function resolveCommit(repoPath: string, ref: string): Promise<string | null> {
-  const output = await tryGit(repoPath, [
-    'rev-parse',
-    '--verify',
-    '--end-of-options',
-    `${ref}^{commit}`,
-  ])
+async function resolveCommit(
+  repoPath: string,
+  ref: string,
+  signal?: AbortSignal,
+): Promise<string | null> {
+  const output = await tryGit(
+    repoPath,
+    ['rev-parse', '--verify', '--end-of-options', `${ref}^{commit}`],
+    signal,
+  )
   return output ? stripTrailingNewline(output) : null
 }
 
@@ -426,9 +435,10 @@ async function isAncestor(
   repoPath: string,
   ancestor: string,
   descendant: string,
+  signal?: AbortSignal,
 ): Promise<boolean> {
   try {
-    await runGit(repoPath, ['merge-base', '--is-ancestor', ancestor, descendant])
+    await runGit(repoPath, ['merge-base', '--is-ancestor', ancestor, descendant], undefined, signal)
     return true
   } catch (error) {
     if (commandCode(error) === 1) return false
@@ -593,11 +603,16 @@ function localFilesRefStoragePath(value: string): string {
   ) {
     throw new Error('The configured files ref-storage URI cannot be locked safely')
   }
-  const decodedPath = decodeURIComponent(uri.pathname)
+  let decodedPath: string
+  try {
+    decodedPath = fileURLToPath(uri.href.replace(/^files:/u, 'file:'))
+  } catch {
+    throw new Error('The configured files ref-storage URI cannot be locked safely')
+  }
   if (decodedPath.includes('\0')) {
     throw new Error('The configured files ref-storage URI cannot be locked safely')
   }
-  return path.resolve('/', decodedPath)
+  return decodedPath
 }
 
 function gitPathOnDisk(repoPath: string, value: string, refRoot: string | null): string {
@@ -944,15 +959,18 @@ export async function parentTarget(
   parent: string,
   defaultBranch: string,
   preferRemoteDefault: boolean,
+  signal?: AbortSignal,
 ): Promise<ParentTarget | null> {
   if (parent === defaultBranch) {
     const localRef = `refs/heads/${defaultBranch}`
     const remoteRef = `refs/remotes/origin/${defaultBranch}`
-    const localOid = await resolveCommit(repoPath, localRef)
-    const remoteOidValue = await resolveCommit(repoPath, remoteRef)
+    const localOid = await resolveCommit(repoPath, localRef, signal)
+    const remoteOidValue = await resolveCommit(repoPath, remoteRef, signal)
     if (
       remoteOidValue &&
-      (preferRemoteDefault || !localOid || (await isAncestor(repoPath, localOid, remoteOidValue)))
+      (preferRemoteDefault ||
+        !localOid ||
+        (await isAncestor(repoPath, localOid, remoteOidValue, signal)))
     ) {
       return { ref: remoteRef, oid: remoteOidValue }
     }
@@ -960,10 +978,10 @@ export async function parentTarget(
     return null
   }
   const localRef = `refs/heads/${parent}`
-  const localOid = await resolveCommit(repoPath, localRef)
+  const localOid = await resolveCommit(repoPath, localRef, signal)
   if (localOid) return { ref: localRef, oid: localOid }
   const resolved = await resolveParentRef(repoPath, parent)
-  const oid = await resolveCommit(repoPath, resolved)
+  const oid = await resolveCommit(repoPath, resolved, signal)
   return oid ? { ref: resolved, oid } : null
 }
 
@@ -2919,9 +2937,13 @@ async function setParentAction(
   return { message: `Adopted ${branch} under ${parent}; preserved ${count} commits from ${source}` }
 }
 
-export async function getStackProgress(repoPath: string): Promise<StackProgress | null> {
-  const root = await repositoryPath(repoPath)
-  const journal = await readJournal(root)
+export async function getStackProgress(
+  repoPath: string,
+  signal?: AbortSignal,
+): Promise<StackProgress | null> {
+  const root = await repositoryPath(repoPath, signal)
+  const journal = await readJournal(root, signal)
+  if (signal?.aborted) throw new CommandCancelled()
   if (!journal) return null
   const completed = journal.entries
     .filter((entry) => entry.status === 'completed')

@@ -20,9 +20,9 @@ export const Checkbox = React.forwardRef<HTMLInputElement, CheckboxProps>(
     const inputRef = React.useRef<HTMLInputElement>(null)
 
     React.useImperativeHandle(ref, () => inputRef.current as HTMLInputElement)
-    React.useEffect(() => {
+    React.useLayoutEffect(() => {
       if (inputRef.current) inputRef.current.indeterminate = indeterminate
-    }, [indeterminate])
+    })
 
     return (
       <div className={cn('gs-checkbox grid min-h-9 gap-1.5', className)}>

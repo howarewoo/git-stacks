@@ -1,10 +1,23 @@
 import assert from 'node:assert/strict'
-import { execFileSync } from 'node:child_process'
 import { test } from 'node:test'
-import { getSnapshot } from '../src/main/git'
-import { getGitHubData, getPullRequest } from '../src/main/github'
-import { DirectGitHubTransport, setGitHubTransport } from '../src/main/github-transport'
 import {
+  createGitHubHarness,
+  type GitHubFixtureState,
+  type GitHubHarness,
+} from './fixtures/github-harness'
+import type { NativeStack, PullRequest } from '../src/shared/types'
+
+// Git Stacks captures Node's spawn API when its own modules load, and the GitHub
+// harness answers `git` and `gh` on that API, so Git Stacks is loaded here.
+// Nothing may reach `node:child_process` through an ESM import before the harness
+// module body runs: the builtin facade keeps the export it first sees, so a
+// static import above would hand Git Stacks the unpatched `execFile`.
+const { execFileSync } = await import('node:child_process')
+const { createGitHubApiDouble } = await import('./fixtures/github-api-double')
+const { getSnapshot } = await import('../src/main/git')
+const { getGitHubData, getPullRequest } = await import('../src/main/github')
+const { DirectGitHubTransport, setGitHubTransport } = await import('../src/main/github-transport')
+const {
   addPullRequestsToStack,
   createPullRequestStack,
   NativeStackError,
@@ -15,15 +28,8 @@ import {
   unstackPullRequests,
   validateNativeStackChain,
   validatePublishedStackRegistration,
-} from '../src/main/native-stacks'
-import { previewStack, runStackAction } from '../src/main/stacks'
-import type { NativeStack, PullRequest } from '../src/shared/types'
-import { createGitHubApiDouble } from './fixtures/github-api-double'
-import {
-  createGitHubHarness,
-  type GitHubFixtureState,
-  type GitHubHarness,
-} from './fixtures/github-harness'
+} = await import('../src/main/native-stacks')
+const { previewStack, runStackAction } = await import('../src/main/stacks')
 
 function git(harness: GitHubHarness, args: string[]): string {
   return execFileSync(harness.env.GIT_STACKS_REAL_GIT || 'git', ['-C', harness.repo, ...args], {

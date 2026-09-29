@@ -16,12 +16,16 @@ export type FixtureCall =
   | 'refresh'
   | 'runAction'
   | 'fileView'
+  | 'conflictView'
   | 'history'
   | 'commitDiff'
   | 'pushPreview'
   | 'stackPreview'
   | 'pullRequest'
   | 'openExternal'
+  | 'gitRuntimeStatus'
+  | 'setSystemGit'
+  | 'cancel'
 
 /** One entry of the ordered {@link FixtureControl.calls} log. */
 export interface FixtureCallRecord {

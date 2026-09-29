@@ -297,34 +297,33 @@ test.describe('Safety and mutation dispatch invariants', () => {
           exact: true,
         })
         .click()
+      await page.getByRole('button', { name: 'Open conflict resolver', exact: true }).click()
 
-      const fileInspector = page.getByRole('region', {
-        name: 'Inspect src/renderer/src/components/conflicted.tsx',
-        exact: true,
-      })
-      await expect(fileInspector).toBeVisible()
+      const resolver = page.getByRole('dialog', { name: 'Resolve conflict', exact: true })
+      await expect(resolver).toBeVisible()
 
-      // Choosing a side must not dispatch: the file is replaced and staged only on confirmation.
-      await fileInspector.getByRole('button', { name: 'Use theirs…', exact: true }).click()
+      // Choosing a side edits only the draft; staging requires explicit confirmation.
+      await resolver
+        .getByRole('button', {
+          name: 'Accept Stage 3 — content being applied for every conflict',
+          exact: true,
+        })
+        .click()
       await expect(
-        fileInspector.getByText(
-          'Replace this conflicted file with the theirs version and stage it? Manual edits to the file will be replaced.',
-          { exact: true },
-        ),
-      ).toBeVisible()
+        resolver.getByRole('textbox', { name: 'Resolved file', exact: true }),
+      ).toHaveValue('export const value = 2\n')
       expect(await getDispatchedActions(page)).toEqual([])
 
-      await fileInspector.getByRole('button', { name: 'Confirm resolution', exact: true }).click()
+      await resolver.getByRole('button', { name: 'Mark resolved and stage', exact: true }).click()
       await settle(page)
 
       const actions = await getDispatchedActions(page)
-      expect(actions.filter((action) => action.type === 'resolveFile')).toEqual([
+      expect(actions.filter((action) => action.type === 'resolveConflict')).toEqual([
         {
-          type: 'resolveFile',
+          type: 'resolveConflict',
           path: 'src/renderer/src/components/conflicted.tsx',
           fingerprint: 'fingerprint-conflict',
-          strategy: 'theirs',
-          content: '',
+          resolution: { kind: 'content', content: 'export const value = 2\n' },
         },
       ])
     })

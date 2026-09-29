@@ -6,14 +6,7 @@ import type {
   RepositoryShapeFacts,
 } from '../shared/capabilities'
 import type { LfsPointer } from '../shared/types'
-import {
-  execute,
-  getConfigValue,
-  getOperationState,
-  runGit,
-  stripTrailingNewline,
-  tryGit,
-} from './git-core'
+import { getConfigValue, getOperationState, runGit, stripTrailingNewline, tryGit } from './git-core'
 
 const LFS_POINTER_VERSION = 'version https://git-lfs.github.com/spec/v1'
 const TRUTHY = /^(true|yes|on|1)$/iu
@@ -51,21 +44,41 @@ export function parseIndexEntries(output: string): Map<string, IndexPathEntry> {
   return entries
 }
 
+function* pathBatches(paths: readonly string[]): Generator<string[]> {
+  let batch: string[] = []
+  let bytes = 0
+  for (const filePath of paths) {
+    const size = Buffer.byteLength(filePath) + 1
+    if (batch.length && (batch.length >= 1024 || bytes + size > 32_000)) {
+      yield batch
+      batch = []
+      bytes = 0
+    }
+    batch.push(filePath)
+    bytes += size
+  }
+  if (batch.length) yield batch
+}
+
 export async function getIndexEntries(
   repoPath: string,
   paths: readonly string[],
 ): Promise<Map<string, IndexPathEntry>> {
   if (paths.length === 0) return new Map()
-  const output = await runGit(repoPath, [
-    '--literal-pathspecs',
-    'ls-files',
-    '-v',
-    '--stage',
-    '-z',
-    '--',
-    ...paths,
-  ])
-  return parseIndexEntries(output)
+  const entries = new Map<string, IndexPathEntry>()
+  for (const batch of pathBatches(paths)) {
+    const output = await runGit(repoPath, [
+      '--literal-pathspecs',
+      'ls-files',
+      '-v',
+      '--stage',
+      '-z',
+      '--',
+      ...batch,
+    ])
+    for (const [filePath, entry] of parseIndexEntries(output)) entries.set(filePath, entry)
+  }
+  return entries
 }
 
 export async function getHeadGitlinks(
@@ -74,19 +87,21 @@ export async function getHeadGitlinks(
 ): Promise<Map<string, string>> {
   const gitlinks = new Map<string, string>()
   if (paths.length === 0) return gitlinks
-  const output = await tryGit(repoPath, [
-    '--literal-pathspecs',
-    'ls-tree',
-    '-r',
-    '-z',
-    'HEAD',
-    '--',
-    ...paths,
-  ])
-  for (const record of (output ?? '').split('\0')) {
-    const tab = record.indexOf('\t')
-    if (tab < 0 || !record.startsWith('160000 ')) continue
-    gitlinks.set(record.slice(tab + 1), createHash('sha256').update(record).digest('hex'))
+  for (const batch of pathBatches(paths)) {
+    const output = await tryGit(repoPath, [
+      '--literal-pathspecs',
+      'ls-tree',
+      '-r',
+      '-z',
+      'HEAD',
+      '--',
+      ...batch,
+    ])
+    for (const record of (output ?? '').split('\0')) {
+      const tab = record.indexOf('\t')
+      if (tab < 0 || !record.startsWith('160000 ')) continue
+      gitlinks.set(record.slice(tab + 1), createHash('sha256').update(record).digest('hex'))
+    }
   }
   return gitlinks
 }
@@ -185,7 +200,7 @@ export async function getRepositoryCapabilities(repoPath: string): Promise<Repos
     detectGitLfs(repoPath),
     getConfigValue(repoPath, 'extensions.worktreeConfig'),
     tryGit(repoPath, ['rev-parse', '--show-object-format']),
-    execute('git', ['--version'], repoPath),
+    runGit(repoPath, ['--version']),
   ])
   return {
     ...shape,

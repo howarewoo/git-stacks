@@ -1,3 +1,4 @@
+import type { SnapshotLimits } from './performance'
 import type { RepositoryCapabilities } from './capabilities'
 
 export type NativeStackValidationStatus =
@@ -57,6 +58,12 @@ export interface PullRequest {
   mergeState?: string
   stack?: PullRequestStackMembership | null
 }
+export interface RepositoryIssue {
+  number: number
+  title: string
+  url: string
+}
+
 export interface Branch {
   ref: string
   name: string
@@ -97,6 +104,8 @@ export interface RepositorySnapshot {
   remoteUrl: string | null
   branches: Branch[]
   pullRequests: PullRequest[]
+  issues?: RepositoryIssue[]
+  issuesMessage?: string
   files: ChangedFile[]
   stashes: Stash[]
   rebaseInProgress: boolean
@@ -107,6 +116,8 @@ export interface RepositorySnapshot {
   nativeStacks?: NativeStack[]
   nativeStackPreviewAvailable?: boolean
   nativeStackMessage?: string
+  /** What an extreme repository forced this snapshot to leave out. */
+  limits: SnapshotLimits
   capabilities: RepositoryCapabilities
 }
 export interface RecentRepository {
@@ -139,10 +150,42 @@ export interface FileView {
   fingerprint: string
   conflicted: boolean
   truncated: boolean
+  hunks: FileHunks
   /** Set when the path is a submodule gitlink: only the recorded commit is shown. */
   submodule?: boolean
   /** Present when the working-tree file is a Git LFS pointer rather than the object. */
   lfs?: LfsPointer | null
+}
+
+export type HunkSideName = 'staged' | 'unstaged'
+export type DiffHunkLineKind = 'context' | 'add' | 'remove' | 'marker'
+export interface DiffHunkLine {
+  kind: DiffHunkLineKind
+  /** The literal diff text, including its leading marker and any trailing CR. */
+  text: string
+  /** The preimage line this line occupies, or the one an addition follows. */
+  oldLine: number | null
+  /** The postimage line this line occupies, or the one a removal precedes. */
+  newLine: number | null
+}
+export interface DiffHunk {
+  /** Stable for as long as this hunk stays at this position with this content. */
+  id: string
+  header: string
+  oldStart: number
+  oldLines: number
+  newStart: number
+  newLines: number
+  lines: DiffHunkLine[]
+}
+export interface HunkSide {
+  hunks: DiffHunk[]
+  /** Why this side cannot be patched hunk by hunk, or null when it can. */
+  unavailable: string | null
+}
+export interface FileHunks {
+  staged: HunkSide
+  unstaged: HunkSide
 }
 /** A Git LFS pointer file carries the object identity instead of the object. */
 export interface LfsPointer {
@@ -251,7 +294,7 @@ export type StackAction =
   | { type: 'addPullRequestsToNativeStack'; stackNumber: number; pullRequests: number[] }
   | { type: 'unstackNativeStack'; stackNumber: number }
 export type GitAction =
-  | { type: 'switch'; ref: string }
+  | { type: 'switch'; ref: string; carry?: boolean }
   | { type: 'createBranch'; name: string; parent: string }
   | { type: 'deleteBranch'; ref: string; force: boolean; expectedOid: string }
   | { type: 'stage' | 'unstage'; paths: string[] }
@@ -288,6 +331,13 @@ export type GitAction =
       fingerprint: string
       resolution: ConflictResolution
     }
+  | {
+      type: 'stageHunk' | 'unstageHunk'
+      path: string
+      hunkId: string
+      fingerprint: string
+      lineIndexes?: number[]
+    }
   | { type: 'conflictMergeTool'; path: string; fingerprint: string }
   | StackAction
 export interface ActionResult {
@@ -301,8 +351,8 @@ export interface DesktopAPI {
   runAction(action: GitAction): Promise<ActionResult>
   fileView(path: string): Promise<FileView>
   conflictView(path: string): Promise<ConflictFile>
-  history(ref: string, skip: number): Promise<HistoryPage>
-  commitDiff(oid: string): Promise<{ text: string; truncated: boolean }>
+  history(ref: string, skip: number, requestId?: string): Promise<HistoryPage>
+  commitDiff(oid: string, requestId?: string): Promise<{ text: string; truncated: boolean }>
   pushPreview(): Promise<PushPreview>
   stackPreview(kind: StackKind, branch: string): Promise<StackPreview>
   pullRequest(number: number): Promise<PullRequest & { body: string }>
@@ -316,6 +366,42 @@ export interface DesktopAPI {
     stackNumber: number,
   ) => Promise<{ dissolved: boolean; stack: NativeStack | null }>
   openExternal(url: string): Promise<void>
+  /** Cancel an in-flight read by the request id the caller supplied. */
+  cancel(requestId: string): Promise<void>
+  gitRuntimeStatus(): Promise<GitRuntimeStatus>
+  setSystemGit(enabled: boolean): Promise<GitRuntimeStatus>
+}
+
+export type GitCapability = 'referenceTransactions' | 'rebaseUpdateRefs'
+
+export interface BundledRuntimeInfo {
+  gitVersion: string
+  sha256: string
+  source: string
+  files?: Record<string, string>
+}
+
+export interface GitRuntimeInfo {
+  source: 'bundled' | 'system'
+  executable: string
+  platform: string
+  version: string
+  versionOutput: string
+  minimumVersion: string
+  meetsMinimum: boolean
+  useSystemGit: boolean
+  packaged: boolean
+  capabilities: Record<GitCapability, boolean>
+  bundled: BundledRuntimeInfo | null
+  preservedEnvironment: readonly string[]
+  preservedConfiguration: readonly string[]
+}
+
+export interface GitRuntimeStatus {
+  runtime: GitRuntimeInfo | null
+  error: string | null
+  minimumVersion: string
+  useSystemGit: boolean
 }
 declare global {
   interface Window {

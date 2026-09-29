@@ -8,6 +8,7 @@ import type {
   StackPreview,
   StackProgress,
 } from '../../src/shared/types'
+import { EMPTY_SNAPSHOT_LIMITS } from '../../src/shared/performance'
 import type { RepositoryCapabilities } from '../../src/shared/capabilities'
 
 /**
@@ -119,6 +120,7 @@ export const baseSnapshot: RepositorySnapshot = {
   stackOperation: null,
   headOid: featureBranch.oid ?? null,
   github: { available: true, message: '' },
+  limits: EMPTY_SNAPSHOT_LIMITS,
   capabilities: standardCapabilities,
 }
 
