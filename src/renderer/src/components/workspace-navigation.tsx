@@ -6,13 +6,21 @@ import {
   GitPullRequest,
   History,
   Layers,
+  MessageSquareDiff,
   SlidersHorizontal,
   type LucideIcon,
 } from 'lucide-react'
 import { cn } from '../lib/utils'
 
 export type WorkspaceView =
-  'branches' | 'stacks' | 'history' | 'changes' | 'pullRequests' | 'stashes' | 'diagnostics'
+  | 'branches'
+  | 'stacks'
+  | 'history'
+  | 'changes'
+  | 'pullRequests'
+  | 'review'
+  | 'stashes'
+  | 'diagnostics'
 
 type WorkspaceDestination = {
   id: WorkspaceView
@@ -26,6 +34,7 @@ const workspaceDestinations: readonly WorkspaceDestination[] = [
   { id: 'history', label: 'History', icon: History },
   { id: 'changes', label: 'Working changes', icon: Files },
   { id: 'pullRequests', label: 'Pull requests', icon: GitPullRequest },
+  { id: 'review', label: 'Review', icon: MessageSquareDiff },
   { id: 'stashes', label: 'Stashes', icon: Archive },
   { id: 'diagnostics', label: 'Diagnostics', icon: SlidersHorizontal },
 ]

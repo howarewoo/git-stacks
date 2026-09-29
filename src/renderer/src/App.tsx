@@ -25,6 +25,7 @@ import {
   PanelRightClose,
   PanelRightOpen,
   Plus,
+  MessageSquareDiff,
   RefreshCw,
   RotateCcw,
   Search,
@@ -79,6 +80,7 @@ import {
 } from './lib/branches'
 import { WorkflowDialog, type WorkflowRequest } from './components/workflow-dialog'
 import { WorkspaceNavigation } from './components/workspace-navigation'
+import { ReviewView, type ReviewCommands } from './components/review-view'
 import { ConflictResolver } from './components/conflict-resolver'
 import { HistoryView, OperationBanner, StackView } from './components/repository-views'
 import { GitRuntimeDialog } from './components/git-runtime-dialog'
@@ -107,7 +109,14 @@ import {
 } from '../../shared/capabilities'
 
 type WorkspaceView =
-  'branches' | 'stacks' | 'history' | 'changes' | 'pullRequests' | 'stashes' | 'diagnostics'
+  | 'branches'
+  | 'stacks'
+  | 'history'
+  | 'changes'
+  | 'pullRequests'
+  | 'review'
+  | 'stashes'
+  | 'diagnostics'
 
 import { CommandPalette } from './components/command-palette'
 import { ShortcutSettings } from './components/shortcut-settings'
@@ -297,6 +306,7 @@ function App() {
   const [commitMessage, setCommitMessage] = React.useState('')
   const [commitAmend, setCommitAmend] = React.useState(false)
   const [inspectedPath, setInspectedPath] = React.useState<string | null>(null)
+  const [reviewNumber, setReviewNumber] = React.useState<number | null>(null)
   const [conflictPath, setConflictPath] = React.useState<string | null>(null)
   const [workflow, setWorkflow] = React.useState<{
     id: number
@@ -322,6 +332,7 @@ function App() {
   const busyRef = React.useRef<string | null>(null)
   const openingRef = React.useRef(false)
   const searchRef = React.useRef<HTMLInputElement>(null)
+  const reviewCommands = React.useRef<ReviewCommands | null>(null)
   const deleteCancelRef = React.useRef<HTMLButtonElement>(null)
   const paletteHandoffFocusRef = React.useRef<HTMLElement | null>(null)
   const paletteDeleteHandoffRef = React.useRef(false)
@@ -915,6 +926,18 @@ function App() {
           }
           break
         }
+        case 'reviewPullRequest':
+          setReviewNumber(intent.number)
+          setWorkspaceView('review')
+          break
+        case 'reviewFile':
+          if (intent.direction === 1) reviewCommands.current?.nextFile()
+          else reviewCommands.current?.previousFile()
+          break
+        case 'reviewLayer':
+          if (intent.direction === 1) reviewCommands.current?.nextLayer()
+          else reviewCommands.current?.previousLayer()
+          break
         case 'workflow':
           openWorkflow(intent.request)
           break
@@ -1048,6 +1071,26 @@ function App() {
       if (matchesChord(event, shortcutBindings['view.pullRequests'], isMac)) {
         event.preventDefault()
         setWorkspaceView('pullRequests')
+        return
+      }
+      if (matchesChord(event, shortcutBindings['view.review'], isMac)) {
+        event.preventDefault()
+        setWorkspaceView('review')
+        return
+      }
+      // The review workspace publishes its file and layer steps through a ref.
+      // The shell keeps every remappable key, and a key pressed while no pull
+      // request is open stays a no-op rather than reaching into the view.
+      const reviewChords: Array<[ShortcutId, () => void]> = [
+        ['review.nextFile', () => reviewCommands.current?.nextFile()],
+        ['review.previousFile', () => reviewCommands.current?.previousFile()],
+        ['review.nextLayer', () => reviewCommands.current?.nextLayer()],
+        ['review.previousLayer', () => reviewCommands.current?.previousLayer()],
+      ]
+      for (const [id, run] of reviewChords) {
+        if (!matchesChord(event, shortcutBindings[id], isMac)) continue
+        event.preventDefault()
+        if (workspaceView === 'review') run()
         return
       }
       if (matchesChord(event, shortcutBindings['view.stashes'], isMac)) {
@@ -1741,6 +1784,16 @@ function App() {
     if (!snapshot) return null
     if (workspaceView === 'changes') return renderChanges()
     if (workspaceView === 'pullRequests') return renderPullRequests()
+    if (workspaceView === 'review')
+      return (
+        <ReviewView
+          commands={reviewCommands}
+          desktop={desktop ?? undefined}
+          number={reviewNumber ?? selectedPullRequest?.number ?? null}
+          onSelectNumber={setReviewNumber}
+          pullRequests={visiblePullRequests}
+        />
+      )
     if (workspaceView === 'stashes') return renderStashes()
     if (workspaceView === 'diagnostics') return <DiagnosticsView snapshot={snapshot} />
     if (workspaceView === 'history')
@@ -2111,6 +2164,18 @@ function App() {
                 >
                   <ExternalLink className="size-3.5" />
                   Open on GitHub
+                </Button>
+                <Button
+                  onClick={() => {
+                    setReviewNumber(selectedPullRequest.number)
+                    setWorkspaceView('review')
+                  }}
+                  size="sm"
+                  variant="secondary"
+                  tooltip="Read this pull request's files, commits, and stack position in Git Stacks. Nothing is checked out and nothing changes on GitHub."
+                >
+                  <MessageSquareDiff className="size-3.5" />
+                  Review changes
                 </Button>
                 <Button
                   disabled={isBusy}

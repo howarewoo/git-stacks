@@ -42,7 +42,7 @@ export type CommandGroup =
 export type PaletteIntent =
   | {
       kind: 'view'
-      view: 'branches' | 'stacks' | 'history' | 'changes' | 'pullRequests' | 'stashes'
+      view: 'branches' | 'stacks' | 'history' | 'changes' | 'pullRequests' | 'review' | 'stashes'
     }
   | { kind: 'refresh' }
   | { kind: 'toggleDetails' }
@@ -53,6 +53,9 @@ export type PaletteIntent =
   | { kind: 'selectBranch'; ref: string }
   | { kind: 'checkoutBranch'; ref: string; name: string }
   | { kind: 'navigateStack'; relation: StackRelation }
+  | { kind: 'reviewPullRequest'; number: number }
+  | { kind: 'reviewFile'; direction: 1 | -1 }
+  | { kind: 'reviewLayer'; direction: 1 | -1 }
   | { kind: 'workflow'; request: WorkflowRequest }
   | { kind: 'deleteBranch' }
   | { kind: 'action'; action: GitAction; label: string }
@@ -143,7 +146,7 @@ export function buildPaletteItems(context: BuildPaletteContext): PaletteItem[] {
 
   // --- Views ---
   const views: Array<{
-    view: 'branches' | 'stacks' | 'history' | 'changes' | 'pullRequests' | 'stashes'
+    view: 'branches' | 'stacks' | 'history' | 'changes' | 'pullRequests' | 'review' | 'stashes'
     label: string
     shortcutId: ShortcutId
   }> = [
@@ -152,6 +155,7 @@ export function buildPaletteItems(context: BuildPaletteContext): PaletteItem[] {
     { view: 'history', label: 'Go to History', shortcutId: 'view.history' },
     { view: 'changes', label: 'Go to Working changes', shortcutId: 'view.changes' },
     { view: 'pullRequests', label: 'Go to Pull requests', shortcutId: 'view.pullRequests' },
+    { view: 'review', label: 'Go to Review', shortcutId: 'view.review' },
     { view: 'stashes', label: 'Go to Stashes', shortcutId: 'view.stashes' },
   ]
 
@@ -855,6 +859,18 @@ export function buildPaletteItems(context: BuildPaletteContext): PaletteItem[] {
         disabled: isBusy,
         disabledReason: isBusy ? 'App is busy' : undefined,
         intent: { kind: 'workflow', request: { kind: 'pr', number: pr.number } },
+      })
+      items.push({
+        id: `pr.review.${pr.number}`,
+        label: `Review PR #${pr.number}…`,
+        detail: `Files, commits, and stack context for ${pr.head} → ${pr.base}`,
+        group: 'Pull requests',
+        keywords: `review diff files commits ${pr.number} ${pr.title} changes inspect`,
+        disabled: !snapshot?.github.available,
+        disabledReason: snapshot?.github.available
+          ? undefined
+          : 'GitHub data is unavailable, so a pull request cannot be reviewed.',
+        intent: { kind: 'reviewPullRequest', number: pr.number },
       })
     }
   }

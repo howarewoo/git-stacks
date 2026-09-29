@@ -1,5 +1,6 @@
 import type { SnapshotLimits } from './performance'
 import type { RepositoryCapabilities } from './capabilities'
+import type { ReviewCommit, ReviewFileSet, ReviewHeadline, ReviewViewedRecord } from './review'
 
 export type NativeStackValidationStatus =
   | 'valid'
@@ -1005,6 +1006,14 @@ export interface DesktopAPI {
   mergeStatus?: () => Promise<MergeStatus | null>
   reconciliationPreview?: (stackKey: string) => Promise<ReconciliationPreview>
   pullRequest(number: number): Promise<PullRequest & { body: string }>
+  /** The review workspace headline: one pull request plus the stack layers around it. */
+  reviewHeadline?(number: number, requestId?: string): Promise<ReviewHeadline>
+  /** Every file of one pull request, read from GitHub rather than the working tree. */
+  reviewFiles?(number: number, requestId?: string): Promise<ReviewFileSet>
+  reviewCommits?(number: number, requestId?: string): Promise<ReviewCommit[]>
+  /** Locally recorded viewed files, bound to the head they were read at. */
+  reviewViewed?(number: number): Promise<ReviewViewedRecord | null>
+  reviewSetViewed?(record: ReviewViewedRecord): Promise<ReviewViewedRecord>
   listNativeStacks?: () => Promise<NativeStack[]>
   createNativeStack?: (pullRequests: number[]) => Promise<NativeStack>
   addPullRequestsToNativeStack?: (

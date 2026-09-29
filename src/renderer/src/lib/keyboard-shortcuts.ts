@@ -15,6 +15,11 @@ export type ShortcutId =
   | 'view.pullRequests'
   | 'view.stashes'
   | 'view.history'
+  | 'view.review'
+  | 'review.nextFile'
+  | 'review.previousFile'
+  | 'review.nextLayer'
+  | 'review.previousLayer'
 
 export interface ShortcutMetadata {
   id: ShortcutId
@@ -137,6 +142,41 @@ export const SHORTCUT_DEFINITIONS: readonly ShortcutMetadata[] = [
     group: 'Views',
     defaultChord: 'Mod+6',
     description: 'Switch to the Stashes view.',
+  },
+  {
+    id: 'view.review',
+    label: 'Go to Review',
+    group: 'Views',
+    defaultChord: 'Mod+7',
+    description: 'Switch to the pull request review workspace.',
+  },
+  {
+    id: 'review.nextFile',
+    label: 'Next file in review',
+    group: 'Stack navigation',
+    defaultChord: 'Alt+ArrowRight',
+    description: 'Open the next changed file without checking out its branch.',
+  },
+  {
+    id: 'review.previousFile',
+    label: 'Previous file in review',
+    group: 'Stack navigation',
+    defaultChord: 'Alt+ArrowLeft',
+    description: 'Open the previous changed file without checking out its branch.',
+  },
+  {
+    id: 'review.nextLayer',
+    label: 'Next layer in native stack',
+    group: 'Stack navigation',
+    defaultChord: 'Mod+Alt+ArrowDown',
+    description: 'Review the pull request stacked directly above this one.',
+  },
+  {
+    id: 'review.previousLayer',
+    label: 'Previous layer in native stack',
+    group: 'Stack navigation',
+    defaultChord: 'Mod+Alt+ArrowUp',
+    description: 'Review the pull request stacked directly below this one.',
   },
 ]
 

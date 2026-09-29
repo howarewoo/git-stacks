@@ -129,6 +129,11 @@ test('assignShortcut rejects reassigning to an in-use shortcut and reports confl
     'view.changes': 'Mod+4',
     'view.pullRequests': 'Mod+5',
     'view.stashes': 'Mod+6',
+    'view.review': 'Mod+7',
+    'review.nextFile': 'Alt+ArrowRight',
+    'review.previousFile': 'Alt+ArrowLeft',
+    'review.nextLayer': 'Mod+Alt+ArrowDown',
+    'review.previousLayer': 'Mod+Alt+ArrowUp',
   }
 
   // Attempt to assign 'Mod+1' (already view.branches) to view.stacks
@@ -158,6 +163,11 @@ test('assignShortcut succeeds and updates bindings when chord is available', () 
     'view.changes': 'Mod+4',
     'view.pullRequests': 'Mod+5',
     'view.stashes': 'Mod+6',
+    'view.review': 'Mod+7',
+    'review.nextFile': 'Alt+ArrowRight',
+    'review.previousFile': 'Alt+ArrowLeft',
+    'review.nextLayer': 'Mod+Alt+ArrowDown',
+    'review.previousLayer': 'Mod+Alt+ArrowUp',
   }
 
   const result = assignShortcut(current, 'palette.open', 'Mod+Shift+P')
@@ -664,6 +674,11 @@ test('buildPaletteItems disables commands when no repository is open', () => {
       'view.changes': 'Mod+4',
       'view.pullRequests': 'Mod+5',
       'view.stashes': 'Mod+6',
+      'view.review': 'Mod+7',
+      'review.nextFile': 'Alt+ArrowRight',
+      'review.previousFile': 'Alt+ArrowLeft',
+      'review.nextLayer': 'Mod+Alt+ArrowDown',
+      'review.previousLayer': 'Mod+Alt+ArrowUp',
     },
   })
 
@@ -707,6 +722,11 @@ test('buildPaletteItems disables GitHub operations when GitHub CLI is unavailabl
       'view.changes': 'Mod+4',
       'view.pullRequests': 'Mod+5',
       'view.stashes': 'Mod+6',
+      'view.review': 'Mod+7',
+      'review.nextFile': 'Alt+ArrowRight',
+      'review.previousFile': 'Alt+ArrowLeft',
+      'review.nextLayer': 'Mod+Alt+ArrowDown',
+      'review.previousLayer': 'Mod+Alt+ArrowUp',
     },
   })
 
@@ -743,6 +763,11 @@ test('buildPaletteItems disables checkout when branch is already checked out', (
       'view.changes': 'Mod+4',
       'view.pullRequests': 'Mod+5',
       'view.stashes': 'Mod+6',
+      'view.review': 'Mod+7',
+      'review.nextFile': 'Alt+ArrowRight',
+      'review.previousFile': 'Alt+ArrowLeft',
+      'review.nextLayer': 'Mod+Alt+ArrowDown',
+      'review.previousLayer': 'Mod+Alt+ArrowUp',
     },
   })
 

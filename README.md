@@ -524,3 +524,51 @@ request, so a change landing between that read and the write can still be lost;
 this is a property of the API, not something the app can close. A refresh that
 follows a link change never overwrites description text the user typed while the
 refresh was in flight.
+
+## Review workspace
+
+Open **Review** from the workspace navigation, the command palette, or the
+**Review changes** button on a branch's pull request. The workspace reads one pull
+request from GitHub without checking out its branch: the headline, its changed
+files, its commits, and its stack position are four separate reads, each with its
+own cancellation id. The headline answers first; a stage that has not arrived yet
+shows a loading state rather than an empty list.
+
+The file tree groups changed files by directory, shows each file's status, size,
+and generated/binary/too-large state, and searches both the new path and the path
+a rename came from. Arrow keys move between rows and Enter or Space opens one; the
+rows are plain buttons, so nothing here depends on a custom widget role.
+
+The diff has unified and split layouts and a **Hide whitespace** toggle. The
+toggle is a filter over the text GitHub already sent — the pull request files API
+has no whitespace option — and it hides only a removed/added pair that is
+identical once spaces and tabs are removed, reporting the hidden count against
+Git's own hunk header. Line endings are left alone so a CRLF conversion stays
+visible. Both layouts render through the same paged window, so a large diff stays
+bounded and the rows keep the same identity across pages.
+
+**Next/previous file** and **next/previous layer** are remappable in Shortcut
+settings and dispatched by the app shell through a ref the view publishes, so the
+view never registers a competing key listener. Layer navigation reads the native
+stack only: choosing an adjacent layer changes what is being read and never
+dispatches a checkout.
+
+Opening a file records it as viewed locally, bound to the head commit it was read
+at. A force-push changes that content, so the marks are dropped rather than
+carried onto a diff nobody looked at. Nothing is written to GitHub.
+
+### Line identity contract
+
+`ReviewLine` in `src/shared/review.ts` is the contract other review work anchors
+to. A line carries its `side` (`base`, `head`, or `null` for a marker), its number
+on that side, an `anchor` (the file path plus the line's text with its diff marker
+removed), and a `context` (the anchor plus up to two neighbouring lines of the
+same hunk each side). A hunk reuses the local staging surface's `hunkId` scheme.
+
+A line number is an address, not an identity. `resolveReviewAnchor` in
+`src/main/review.ts` re-resolves a stored `ReviewLineRef` against a freshly read
+file set: **exact** when the anchor and the neighbourhood are both intact,
+**moved** when the line's own text survives once but its neighbourhood changed (the
+reason says where it went), and **unresolved** with a reason a reviewer can act on
+for edited text, a duplicated line, a file the pull request no longer touches, or
+a diff that is not available as text.

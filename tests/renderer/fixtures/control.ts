@@ -21,6 +21,7 @@ import {
   conflictRegions,
   parseConflictSegments,
 } from '../../../src/shared/conflict'
+import type { ReviewHeadline, ReviewViewedRecord } from '../../../src/shared/review'
 import {
   fileViewFixtures,
   historyCommits,
@@ -36,6 +37,7 @@ import {
   restackPreview,
   syncPreview,
 } from '../../fixtures/workflow-scenarios'
+import { reviewCommits, reviewFileSet, reviewRail, stackMember } from './review'
 import { scenarios } from './scenarios'
 import { DEFAULT_SCENARIO, type ScenarioName } from './manifest'
 import type { FixtureCall, FixtureCallRecord, FixtureControl, FixtureScenario } from './types'
@@ -422,6 +424,50 @@ export function installFixtureControl(options: {
       return () => {
         mergeListeners.delete(listener)
       }
+    },
+    reviewHeadline: (number) => {
+      record('reviewHeadline', [number])
+      return answer('reviewHeadline', () => {
+        const found = scenario.snapshot?.pullRequests.find((pr) => pr.number === number)
+        if (!found) throw new Error(`Pull request #${number} is not in this fixture snapshot.`)
+        // A pull request carries only its own position; the layer list comes
+        // from every pull request in the snapshot that names the same stack.
+        const membership = found.stack
+          ? (scenario.snapshot?.pullRequests
+              .filter((pr) => pr.stack?.stackNumber === found.stack?.stackNumber)
+              .map((pr) =>
+                stackMember(pr.stack?.position ?? 1, pr.number, found.stack?.size ?? 1),
+              ) ?? null)
+          : null
+        const value: ReviewHeadline = {
+          pullRequest: {
+            ...found,
+            body: `${found.title}\n\nDeterministic fixture body for pull request #${number}.`,
+          },
+          rail: reviewRail(found, membership),
+        }
+        return value
+      })
+    },
+    reviewFiles: (number) => {
+      record('reviewFiles', [number])
+      return answer('reviewFiles', () => {
+        const found = scenario.snapshot?.pullRequests.find((pr) => pr.number === number)
+        if (!found) throw new Error(`Pull request #${number} is not in this fixture snapshot.`)
+        return reviewFileSet(number, found.headOid ?? `head-${number}`)
+      })
+    },
+    reviewCommits: (number) => {
+      record('reviewCommits', [number])
+      return answer('reviewCommits', () => reviewCommits(number))
+    },
+    reviewViewed: () => {
+      record('reviewViewed', [])
+      return answer('reviewViewed', () => null)
+    },
+    reviewSetViewed: (record_) => {
+      record('reviewSetViewed', [record_])
+      return answer('reviewSetViewed', () => record_ as ReviewViewedRecord)
     },
     openExternal: (url) => {
       record('openExternal', [url])

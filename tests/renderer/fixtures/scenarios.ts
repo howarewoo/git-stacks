@@ -1,5 +1,6 @@
 import type {
   Branch,
+  PullRequest,
   FileView,
   RecentRepository,
   RepositorySnapshot,
@@ -138,6 +139,73 @@ const recentRepositories: RecentRepository[] = [
     name: 'git-stacks-workbench-fixture-with-a-long-directory-name',
   },
 ]
+
+/** A three-layer native stack whose pull requests the review rail can order. */
+const reviewStackPullRequests: PullRequest[] = [
+  {
+    number: 41,
+    title: 'Read pull request files over the transport',
+    url: 'https://github.com/howarewoo/git-stacks/pull/41',
+    head: 'feature/review-41',
+    base: 'main',
+    state: 'OPEN',
+    draft: false,
+    checks: 'passing',
+    headOid: '4141414141414141414141414141414141414141',
+    reviewDecision: 'APPROVED',
+    stack: {
+      stackNumber: 42,
+      position: 1,
+      size: 3,
+      base: 'main',
+      open: true,
+      url: 'https://github.com/howarewoo/git-stacks/stacks/42',
+    },
+  },
+  {
+    number: 42,
+    title: 'Give the review workspace its own cancellation ids',
+    url: 'https://github.com/howarewoo/git-stacks/pull/42',
+    head: 'feature/review-42',
+    base: 'feature/review-41',
+    state: 'OPEN',
+    draft: false,
+    checks: 'pending',
+    headOid: '4242424242424242424242424242424242424242',
+    reviewDecision: 'REVIEW_REQUIRED',
+    stack: {
+      stackNumber: 42,
+      position: 2,
+      size: 3,
+      base: 'feature/review-41',
+      open: true,
+      url: 'https://github.com/howarewoo/git-stacks/stacks/42',
+    },
+  },
+  {
+    number: 43,
+    title: 'Keep the review line anchors stable across a force-push',
+    url: 'https://github.com/howarewoo/git-stacks/pull/43',
+    head: 'feature/review-43',
+    base: 'feature/review-42',
+    state: 'OPEN',
+    draft: true,
+    checks: 'failing',
+    headOid: '4343434343434343434343434343434343434343',
+    stack: {
+      stackNumber: 42,
+      position: 3,
+      size: 3,
+      base: 'feature/review-42',
+      open: true,
+      url: 'https://github.com/howarewoo/git-stacks/stacks/42',
+    },
+  },
+]
+
+const reviewStackBranches: Branch[] = reviewStackPullRequests.map((pr) =>
+  local({ name: pr.head, parent: pr.base, parentTip: oid(`local:${pr.base}`), pr }),
+)
 
 /** Repository with the connected branch set; scenarios override only what they exercise. */
 function repository(overrides: Partial<RepositorySnapshot> = {}): RepositorySnapshot {
@@ -650,6 +718,27 @@ export const scenarios: Record<ScenarioName, FixtureScenario> = {
     failures: { history: 'The commit history could not be read from this repository.' },
   },
 
+  'review-stacked': {
+    name: 'review-stacked',
+    summary:
+      'Three pull requests in one native stack, so the rail shows a position and both layers.',
+    snapshot: repository({
+      branches: [mainBranch, ...reviewStackBranches],
+      currentBranch: 'feature/review-42',
+      pullRequests: reviewStackPullRequests,
+    }),
+    recentRepositories,
+  },
+  'review-unstacked': {
+    name: 'review-unstacked',
+    summary: 'One pull request GitHub reports no stack membership for.',
+    snapshot: repository({
+      branches: [mainBranch, checkoutBranch, { ...checkoutTestsBranch, pr: checkoutPr }],
+      currentBranch: 'feature/checkout',
+      pullRequests: [checkoutPr],
+    }),
+    recentRepositories,
+  },
   'pull-requests-lifecycle': {
     name: 'pull-requests-lifecycle',
     summary: 'Draft, open, closed, and merged pull requests on their own branches.',

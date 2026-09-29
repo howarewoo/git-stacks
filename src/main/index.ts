@@ -26,6 +26,9 @@ import {
 } from './stacks'
 import { previewReconciliationRepair } from './reconciliation'
 import { getPullRequestIssueLinks, previewIssueLink, searchGitHubIssues } from './issue-links'
+import { readReviewCommits, readReviewFiles, readReviewHeadline } from './review'
+import { readViewedRecord, writeViewedRecord } from './review-viewed'
+import type { ReviewViewedRecord } from '../shared/review'
 import type {
   GitAction,
   MergeProgress,
@@ -228,6 +231,43 @@ async function remember(path: string) {
   recents = next
 }
 
+function requirePullRequestNumber(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isInteger(value) || value <= 0) {
+    throw new Error('Choose a pull request to review.')
+  }
+  return value
+}
+
+function requestIdClaim(value: unknown, fallback: string): string {
+  return typeof value === 'string' && value ? value : fallback
+}
+
+function requireViewedRecord(value: unknown): ReviewViewedRecord {
+  if (typeof value !== 'object' || value === null) {
+    throw new Error('Invalid viewed-file record.')
+  }
+  const record = value as Record<string, unknown>
+  const paths = record.paths
+  if (
+    typeof record.number !== 'number' ||
+    !Number.isInteger(record.number) ||
+    record.number <= 0 ||
+    !Array.isArray(paths) ||
+    paths.length > 5000 ||
+    !paths.every((entry) => typeof entry === 'string' && entry.length > 0 && entry.length < 4096) ||
+    (record.headOid !== null && typeof record.headOid !== 'string') ||
+    typeof record.updatedAt !== 'string'
+  ) {
+    throw new Error('Invalid viewed-file record.')
+  }
+  return {
+    number: record.number,
+    headOid: typeof record.headOid === 'string' ? record.headOid : null,
+    paths: [...new Set(paths as string[])],
+    updatedAt: record.updatedAt,
+  }
+}
+
 function installHandlers() {
   ipcMain.handle('repositories:recent', (event) => {
     validateSender(event)
@@ -422,6 +462,45 @@ function installHandlers() {
       )
     },
   )
+
+  // The review workspace loads in stages: the headline answers first so the
+  // title, lifecycle, and stack position are readable while the file list is
+  // still being fetched. Each stage claims its own request id, so moving to
+  // another pull request cancels the read that is now obsolete instead of
+  // letting it answer for a pull request nobody is looking at.
+  ipcMain.handle('repository:review-headline', (event, number: unknown, requestId?: unknown) => {
+    validateSender(event)
+    return readRepository(
+      (root, signal) => readReviewHeadline(root, requirePullRequestNumber(number), signal),
+      requestIdClaim(requestId, 'review-headline'),
+    )
+  })
+  ipcMain.handle('repository:review-files', (event, number: unknown, requestId?: unknown) => {
+    validateSender(event)
+    return readRepository(
+      (root, signal) => readReviewFiles(root, requirePullRequestNumber(number), signal),
+      requestIdClaim(requestId, 'review-files'),
+    )
+  })
+  ipcMain.handle('repository:review-commits', (event, number: unknown, requestId?: unknown) => {
+    validateSender(event)
+    return readRepository(
+      (root, signal) => readReviewCommits(root, requirePullRequestNumber(number), signal),
+      requestIdClaim(requestId, 'review-commits'),
+    )
+  })
+  ipcMain.handle('repository:review-viewed', (event, number: unknown) => {
+    validateSender(event)
+    return readRepository((root, signal) =>
+      readViewedRecord(root, requirePullRequestNumber(number), signal),
+    )
+  })
+  ipcMain.handle('repository:review-set-viewed', (event, value: unknown) => {
+    validateSender(event)
+    return readRepository((root, signal) =>
+      writeViewedRecord(root, requireViewedRecord(value), signal),
+    )
+  })
   ipcMain.handle('operation:cancel', (event, requestId: unknown) => {
     validateSender(event)
     if (typeof requestId !== 'string' || !requestId || !activeRepository) return

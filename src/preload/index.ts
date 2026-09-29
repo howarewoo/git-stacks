@@ -45,6 +45,14 @@ const desktop: DesktopAPI = {
     ipcRenderer.invoke('repository:pull-request-issue-links', number),
   previewIssueLink: (prNumber, issueNumber, relation, action) =>
     ipcRenderer.invoke('repository:preview-issue-link', prNumber, issueNumber, relation, action),
+  reviewHeadline: (number, requestId) =>
+    ipcRenderer.invoke('repository:review-headline', number, requestId),
+  reviewFiles: (number, requestId) =>
+    ipcRenderer.invoke('repository:review-files', number, requestId),
+  reviewCommits: (number, requestId) =>
+    ipcRenderer.invoke('repository:review-commits', number, requestId),
+  reviewViewed: (number) => ipcRenderer.invoke('repository:review-viewed', number),
+  reviewSetViewed: (record) => ipcRenderer.invoke('repository:review-set-viewed', record),
   openExternal: (url) => ipcRenderer.invoke('external:open', url),
   cancel: (requestId) => ipcRenderer.invoke('operation:cancel', requestId),
   gitRuntimeStatus: () => ipcRenderer.invoke('git-runtime'),

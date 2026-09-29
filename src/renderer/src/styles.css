@@ -2851,3 +2851,412 @@ textarea.conflict-content {
   width: min(calc(100% - 2rem), 620px);
   animation: dialog-in 140ms cubic-bezier(0.2, 0, 0, 1) both;
 }
+
+/* Review workspace.
+   Four regions read as one page: the headline and stack rail never scroll, and
+   the file tree, the diff, and the commit list each scroll on their own. Only
+   the diff region grows, so a long commit list cannot push the patch off the
+   screen and a long patch cannot squeeze the tree out of reach. */
+.review-view {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+  overflow: hidden;
+  /* The workspace sits beside a repository sidebar, so its width is not the
+     window width. Every breakpoint below reads this container, not the viewport,
+     or a wide window still squeezes the three regions into one column. */
+  container-name: review;
+  container-type: inline-size;
+}
+
+/* The shared list toolbar is a fixed 66px strip sized for a filter and a
+   count. The review toolbar carries the diff mode, the whitespace filter, a
+   refresh, and an external link, so it has to be allowed to wrap and grow
+   instead of painting over the headline beneath it. */
+.review-toolbar {
+  min-height: 0;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  row-gap: 8px;
+}
+
+.review-loading {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  color: var(--gs-semantic-text-muted);
+}
+
+.review-chooser {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0;
+  padding: 0 18px 12px;
+  list-style: none;
+}
+
+.review-headline {
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  gap: 6px;
+  padding: 16px 18px 12px;
+  border-bottom: 1px solid var(--gs-semantic-border-decorative);
+}
+
+.review-headline-title {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px 10px;
+  color: var(--gs-semantic-text-primary);
+}
+
+.review-headline-refs {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  color: var(--gs-semantic-text-muted);
+  font-size: var(--gs-semantic-type-metadata-size);
+}
+
+.review-headline-refs code {
+  color: var(--gs-semantic-text-secondary);
+  font-family: var(--gs-semantic-font-mono);
+}
+
+.review-headline-oid {
+  color: var(--gs-semantic-text-muted);
+  font-family: var(--gs-semantic-font-mono);
+}
+
+/* The rail states the position first, then offers the two adjacent layers. The
+   note is what keeps the rail honest when GitHub has no stack to read. */
+.review-rail {
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 18px;
+  border-bottom: 1px solid var(--gs-semantic-border-decorative);
+  background: var(--gs-semantic-surface-inset);
+}
+
+.review-rail-position {
+  color: var(--gs-semantic-text-secondary);
+  font-size: var(--gs-semantic-type-metadata-size);
+}
+
+.review-rail-note {
+  color: var(--gs-semantic-text-muted);
+  font-size: var(--gs-semantic-type-metadata-size);
+}
+
+.review-body {
+  display: grid;
+  min-height: 0;
+  flex: 1;
+  grid-template-areas: 'tree diff commits';
+  grid-template-columns: minmax(200px, 260px) minmax(0, 1fr) minmax(220px, 300px);
+  overflow: hidden;
+}
+
+.review-tree {
+  grid-area: tree;
+}
+
+.review-diff {
+  grid-area: diff;
+}
+
+.review-commits {
+  grid-area: commits;
+}
+
+.review-tree {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  border-inline-end: 1px solid var(--gs-semantic-border-decorative);
+}
+
+.review-tree-header {
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 12px 10px;
+  border-bottom: 1px solid var(--gs-semantic-border-decorative);
+}
+
+.review-tree-search {
+  width: 100%;
+}
+
+.review-tree-rows {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 1px;
+  overflow: auto;
+  padding: 6px;
+}
+
+.review-tree-row {
+  display: flex;
+  width: 100%;
+  min-height: 28px;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid transparent;
+  border-radius: var(--gs-semantic-radius-control);
+  background: transparent;
+  color: var(--gs-semantic-text-secondary);
+  padding: 4px 8px;
+  text-align: left;
+}
+
+.review-tree-row:hover {
+  background: var(--gs-semantic-surface-hover);
+}
+
+.review-tree-row:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--gs-semantic-focus-ring);
+}
+
+.review-tree-row-selected,
+.review-tree-row-selected:hover {
+  border-color: var(--gs-semantic-border-focus);
+  background: var(--gs-semantic-selection-background);
+  color: var(--gs-semantic-text-primary);
+}
+
+.review-tree-directory {
+  color: var(--gs-semantic-text-muted);
+  font-size: var(--gs-semantic-type-metadata-size);
+  font-weight: 600;
+}
+
+.review-tree-name {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  font-size: var(--gs-semantic-type-body-size);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.review-tree-count {
+  flex: 0 0 auto;
+  color: var(--gs-semantic-text-muted);
+  font-size: var(--gs-semantic-type-metadata-size);
+  font-variant-numeric: tabular-nums;
+}
+
+.review-tree-flag,
+.review-viewed-mark {
+  flex: 0 0 auto;
+  border: 1px solid var(--gs-component-badge-neutral-border);
+  border-radius: var(--gs-semantic-radius-pill);
+  background: var(--gs-component-badge-neutral-background);
+  color: var(--gs-component-badge-neutral-text);
+  padding: 0 6px;
+  font-size: var(--gs-semantic-type-metadata-size);
+}
+
+.review-status {
+  display: grid;
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
+  place-items: center;
+  border-radius: 3px;
+  background: var(--gs-semantic-surface-inset);
+  color: var(--gs-semantic-text-muted);
+  font-family: var(--gs-semantic-font-mono);
+  font-size: 10px;
+}
+
+.review-diff {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+}
+
+.review-diff-toolbar {
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--gs-semantic-border-decorative);
+}
+
+.review-diff-position {
+  color: var(--gs-semantic-text-muted);
+  font-size: var(--gs-semantic-type-metadata-size);
+  font-variant-numeric: tabular-nums;
+}
+
+.review-diff-region {
+  min-height: 0;
+  flex: 1;
+  overflow: hidden;
+}
+
+.review-diff-region .code-diff {
+  max-height: none;
+  height: 100%;
+}
+
+.review-unified {
+  display: block;
+}
+
+.review-line-number {
+  display: inline-block;
+  min-width: 4ch;
+  color: var(--gs-semantic-text-muted);
+  text-align: right;
+  user-select: none;
+}
+
+/* Split mode is a two-column grid rather than two preformatted columns so that
+   a line wraps inside its own cell instead of pushing the other side across. */
+.review-split {
+  display: flex;
+  min-height: 0;
+  height: 100%;
+  flex-direction: column;
+  overflow: auto;
+  border: 1px solid var(--gs-semantic-border-decorative);
+  border-radius: var(--gs-semantic-radius-control);
+  background: var(--gs-semantic-surface-inset);
+  font-family: var(--gs-semantic-font-mono);
+  font-size: 12px;
+  line-height: 1.6;
+  tab-size: 4;
+}
+
+.review-split:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--gs-semantic-focus-ring);
+}
+
+.review-split-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+}
+
+.review-split-cell {
+  display: block;
+  min-width: 0;
+  padding: 0 10px 0 6px;
+  white-space: pre-wrap;
+}
+
+.review-split-cell + .review-split-cell {
+  border-inline-start: 1px solid var(--gs-semantic-border-decorative);
+}
+
+.review-split-gutter {
+  display: inline-block;
+  min-width: 4ch;
+  color: var(--gs-semantic-text-muted);
+  text-align: right;
+  user-select: none;
+}
+
+.review-split-hunk {
+  display: block;
+  padding: 2px 10px;
+}
+
+.review-commits {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  border-inline-start: 1px solid var(--gs-semantic-border-decorative);
+}
+
+.review-commit-list {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 1px;
+  overflow: auto;
+  margin: 0;
+  padding: 6px;
+  list-style: none;
+}
+
+.review-commit-copy {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px 8px;
+}
+
+.review-commit-copy strong {
+  color: var(--gs-semantic-text-primary);
+  font-size: var(--gs-semantic-type-body-size);
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+
+.review-commit-copy small {
+  color: var(--gs-semantic-text-muted);
+  font-size: var(--gs-semantic-type-metadata-size);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Too narrow for three columns: the commit list moves under the diff rather
+   than disappearing, so the pull request's commits stay reachable. */
+@container review (max-width: 1320px) {
+  .review-body {
+    grid-template-areas:
+      'tree diff'
+      'tree commits';
+    grid-template-columns: minmax(180px, 220px) minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr) minmax(0, 30%);
+  }
+
+  .review-commits {
+    border-block-start: 1px solid var(--gs-semantic-border-decorative);
+    border-inline-start: 0;
+  }
+}
+
+/* Too narrow even for that: one region at a time, tree first. */
+@container review (max-width: 720px) {
+  .review-body {
+    grid-template-areas:
+      'tree'
+      'diff'
+      'commits';
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 26%) minmax(0, 1fr) minmax(0, 26%);
+  }
+
+  .review-tree {
+    border-block-end: 1px solid var(--gs-semantic-border-decorative);
+    border-inline-end: 0;
+  }
+}
