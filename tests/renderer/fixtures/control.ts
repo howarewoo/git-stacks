@@ -150,6 +150,12 @@ function actionMessage(action: GitAction): string {
       return `Closed pull request #${action.number}`
     case 'reopenPr':
       return `Reopened pull request #${action.number}`
+    case 'createNativeStack':
+      return `Stacked pull requests ${action.pullRequests.map((n) => `#${n}`).join(', ')}`
+    case 'addPullRequestsToNativeStack':
+      return `Added pull requests ${action.pullRequests.map((n) => `#${n}`).join(', ')} to stack #${action.stackNumber}`
+    case 'unstackNativeStack':
+      return `Removed pull requests from stack #${action.stackNumber}`
   }
 }
 

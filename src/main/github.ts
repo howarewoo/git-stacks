@@ -1,4 +1,4 @@
-import type { PullRequest, RepositoryIssue } from '../shared/types'
+import type { NativeStack, PullRequest, RepositoryIssue } from '../shared/types'
 import {
   commandCode,
   commandDetail,
@@ -9,6 +9,11 @@ import {
   runGit,
 } from './git-core'
 import { GitHubTransportError, githubTransport } from './github-transport'
+import {
+  listPullRequestStacks,
+  loadRepositoryNativeStacks,
+  toPullRequestStackMembership,
+} from './native-stacks'
 
 export interface GitHubResult {
   pullRequests: PullRequest[]
@@ -16,6 +21,9 @@ export interface GitHubResult {
   message: string
   /** True when a pull request's head repository is this repository's origin. */
   sameRepository: (value: unknown) => boolean
+  nativeStacks?: NativeStack[]
+  nativeStackPreviewAvailable?: boolean
+  nativeStackMessage?: string
 }
 
 type PullRequestWithRepository = {
@@ -155,7 +163,15 @@ function githubErrorMessage(error: unknown): string {
 }
 
 function unavailable(message: string): GitHubResult {
-  return { pullRequests: [], available: false, message, sameRepository: () => false }
+  return {
+    pullRequests: [],
+    available: false,
+    message,
+    sameRepository: () => false,
+    nativeStacks: [],
+    nativeStackPreviewAvailable: false,
+    nativeStackMessage: message,
+  }
 }
 
 /** Read open issues separately from PR workflows; paging one connection never truncates the other. */
@@ -322,6 +338,7 @@ export async function getGitHubData(
       if (typeof value !== 'number' || !Number.isInteger(value)) return false
       return headRepositories[value]?.toLowerCase() === originFullName
     }
+    const nativeStacksResult = await loadRepositoryNativeStacks(originUrl, pullRequests)
     return {
       pullRequests,
       available: true,
@@ -330,6 +347,9 @@ export async function getGitHubData(
           ? 'GitHub metadata available; no open or tracked pull requests'
           : `GitHub metadata available; ${pullRequests.length} pull request${pullRequests.length === 1 ? '' : 's'}`,
       sameRepository,
+      nativeStacks: nativeStacksResult.nativeStacks,
+      nativeStackPreviewAvailable: nativeStacksResult.available,
+      nativeStackMessage: nativeStacksResult.message,
     }
   } catch (error) {
     if (isCancelled(error)) throw error
@@ -382,6 +402,17 @@ export async function getPullRequest(
     ) {
       throw new Error('GitHub returned incomplete pull request metadata')
     }
+    try {
+      const stacks = await listPullRequestStacks(remote.owner, remote.name, { pullRequest: number })
+      if (stacks.length > 0) {
+        const membership = toPullRequestStackMembership(stacks[0], number)
+        if (membership) {
+          parsed.pullRequest.stack = membership
+        }
+      }
+    } catch {
+      // Preview unavailable or failed; keep stack null
+    }
     return { ...parsed.pullRequest, body: node.body }
   } catch (error) {
     if (isCancelled(error)) throw error
@@ -397,3 +428,5 @@ export function canonicalRemoteName(originUrl: string | null): string | null {
 export function pullRequestRepository(value: PullRequest): string | null {
   return typeof value.headRepository === 'string' ? value.headRepository.toLowerCase() : null
 }
+
+export * from './native-stacks'

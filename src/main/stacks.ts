@@ -43,13 +43,24 @@ import {
   tryGit,
   validateBranchName,
 } from './git-core'
+import {
+  addPullRequestsToNativeStackAction,
+  addPullRequestsToStack,
+  createNativeStackAction,
+  createPullRequestStack,
+  detectNativeStacksCapability,
+  listPullRequestStacks,
+  revalidatePublishedStackRegistration,
+  retireLegacyStackComments,
+  unstackNativeStackAction,
+  validatePublishedStackRegistration,
+} from './native-stacks'
 import { canonicalRemoteName, getGitHubData, getPullRequest, pullRequestRepository } from './github'
 import { githubTransport } from './github-transport'
 import type { GitHubResult } from './github'
 
 const PLAN_TTL_MS = 5 * 60_000
 const JOURNAL_VERSION = 1
-const STACK_MARKER = '<!-- git-stacks:stack-links:v1 -->'
 
 interface BranchRecord {
   name: string
@@ -57,7 +68,7 @@ interface BranchRecord {
   parent: string | null
   parentTip: string | null
   invalidParentTip: boolean
-  parentSource: 'recorded' | 'pullRequest' | 'inferred' | null
+  parentSource: 'recorded' | 'pullRequest' | 'stack' | 'inferred' | null
   pr: PullRequest | null
   mergedHeadPr: string | null
   mergedHeadOid: string | null
@@ -235,6 +246,46 @@ export function validateStackAction(value: unknown): StackAction {
         stackActionError('Pull request number must be a positive integer')
       }
       return { type: value.type, number: value.number }
+    case 'createNativeStack':
+      if (!hasOnlyKeys(value, ['type', 'pullRequests']) || !Array.isArray(value.pullRequests)) {
+        stackActionError('Invalid createNativeStack action')
+      }
+      for (const pr of value.pullRequests) {
+        if (typeof pr !== 'number' || !Number.isInteger(pr) || pr <= 0) {
+          stackActionError('Pull request numbers must be positive integers')
+        }
+      }
+      return { type: 'createNativeStack', pullRequests: value.pullRequests as number[] }
+    case 'addPullRequestsToNativeStack':
+      if (
+        !hasOnlyKeys(value, ['type', 'stackNumber', 'pullRequests']) ||
+        typeof value.stackNumber !== 'number' ||
+        !Number.isInteger(value.stackNumber) ||
+        value.stackNumber <= 0 ||
+        !Array.isArray(value.pullRequests)
+      ) {
+        stackActionError('Invalid addPullRequestsToNativeStack action')
+      }
+      for (const pr of value.pullRequests) {
+        if (typeof pr !== 'number' || !Number.isInteger(pr) || pr <= 0) {
+          stackActionError('Pull request numbers must be positive integers')
+        }
+      }
+      return {
+        type: 'addPullRequestsToNativeStack',
+        stackNumber: value.stackNumber,
+        pullRequests: value.pullRequests as number[],
+      }
+    case 'unstackNativeStack':
+      if (
+        !hasOnlyKeys(value, ['type', 'stackNumber']) ||
+        typeof value.stackNumber !== 'number' ||
+        !Number.isInteger(value.stackNumber) ||
+        value.stackNumber <= 0
+      ) {
+        stackActionError('Invalid unstackNativeStack action')
+      }
+      return { type: 'unstackNativeStack', stackNumber: value.stackNumber }
     default:
       stackActionError(`Unsupported stack action: ${String(value.type)}`)
   }
@@ -2441,7 +2492,7 @@ async function createPullRequest(
         title,
         head: branch,
         base,
-        body: `${title}\n\n${STACK_MARKER}\nGit Stacks branch: ${branch}\nBase: ${base}`,
+        body: `${title}\n\nGit Stacks branch: ${branch}\nBase: ${base}`,
         draft,
       },
     })
@@ -2486,83 +2537,6 @@ async function changePullRequestDraft(
   const updated = isRecord(payload) ? payload.pullRequest : null
   if (!isRecord(updated) || updated.id !== pullRequest.id || updated.isDraft !== draft)
     throw new Error(`Pull request #${number} did not change readiness`)
-}
-
-async function linkStackComments(
-  fullName: string,
-  pullRequests: Array<{ branch: string; pr: PullRequest }>,
-): Promise<void> {
-  const transport = githubTransport()
-  const { data: viewer } = await transport.rest<Record<string, unknown>>({ path: 'user' })
-  if (!isRecord(viewer) || typeof viewer.id !== 'number')
-    throw new Error('Could not verify the authenticated GitHub comment author')
-  const endMarker = '<!-- /git-stacks:stack-links:v1 -->'
-  const links = pullRequests
-    .map((entry) => `- ${entry.branch}: #${entry.pr.number} (${entry.pr.url})`)
-    .join('\n')
-  const managed = `${STACK_MARKER}\nStack navigation:\n${links}\n${endMarker}`
-  const owned = (comment: unknown): comment is Record<string, unknown> =>
-    isRecord(comment) &&
-    isRecord(comment.user) &&
-    comment.user.id === viewer.id &&
-    typeof comment.id === 'number' &&
-    typeof comment.body === 'string' &&
-    comment.body.startsWith(`${STACK_MARKER}\n`)
-  for (const entry of pullRequests) {
-    const endpoint = `repos/${fullName}/issues/${entry.pr.number}/comments`
-    const comments = await transport.paginate<unknown>({ path: endpoint })
-    const candidates = comments.filter(owned)
-    if (candidates.length > 1)
-      throw new Error(
-        `Multiple owned stack comments exist on PR #${entry.pr.number}; reconcile them on GitHub before publishing`,
-      )
-    let id: number
-    let body = managed
-    const existing = candidates[0]
-    if (existing) {
-      const { data } = await transport.rest<Record<string, unknown>>({
-        path: `repos/${fullName}/issues/comments/${existing.id}`,
-      })
-      if (!owned(data)) throw new Error(`Stack comment ownership changed on PR #${entry.pr.number}`)
-      const previous = data.body as string
-      const end = previous.indexOf(endMarker)
-      if (
-        end < 0 ||
-        previous.indexOf(STACK_MARKER, STACK_MARKER.length) >= 0 ||
-        previous.indexOf(endMarker, end + endMarker.length) >= 0
-      ) {
-        throw new Error(
-          `The owned stack comment on PR #${entry.pr.number} has ambiguous boundaries; preserve and reconcile it on GitHub`,
-        )
-      }
-      id = data.id as number
-      body += previous.slice(end + endMarker.length)
-      if (body !== previous)
-        await transport.rest({
-          method: 'PATCH',
-          path: `repos/${fullName}/issues/comments/${id}`,
-          body: { body },
-        })
-    } else {
-      const { data: created } = await transport.rest<Record<string, unknown>>({
-        method: 'POST',
-        path: endpoint,
-        body: { body },
-      })
-      if (!owned(created))
-        throw new Error(
-          `Stack comment creation for PR #${entry.pr.number} is unconfirmed; inspect GitHub before retrying`,
-        )
-      id = created.id as number
-    }
-    const { data: readBack } = await transport.rest<Record<string, unknown>>({
-      path: `repos/${fullName}/issues/comments/${id}`,
-    })
-    if (!owned(readBack) || readBack.body !== body)
-      throw new Error(
-        `Stack navigation for PR #${entry.pr.number} did not match its confirmed content`,
-      )
-  }
 }
 
 async function publishStack(
@@ -2663,7 +2637,49 @@ async function publishStack(
     }
     published.push({ branch: entry.branch, pr: readBack })
   }
-  await linkStackComments(canonical.fullName, published)
+  const [owner, name] = canonical.fullName.split('/')
+  const capability = await detectNativeStacksCapability(owner, name)
+  if (capability.available) {
+    const existingStacks = await listPullRequestStacks(owner, name)
+    const publishedNumbers = published.map((entry) => entry.pr.number)
+    const matched = existingStacks.find((stack) =>
+      stack.pullRequests.some((member) => publishedNumbers.includes(member.number)),
+    )
+    if (matched) {
+      const existingNumbers = new Set(matched.pullRequests.map((member) => member.number))
+      const registered = published.filter((entry) => existingNumbers.has(entry.pr.number))
+      const toAdd = publishedNumbers.filter((num) => !existingNumbers.has(num))
+      // The already-registered pull requests were read back before the stack listing, so a
+      // force-push, retarget, or unstack that lands while the registration target is chosen
+      // would otherwise extend the stack from a base that no longer exists.
+      const registration = await revalidatePublishedStackRegistration(
+        owner,
+        name,
+        matched,
+        registered.map((entry) => entry.pr),
+      )
+      if (!registration.valid) {
+        throw new Error(registration.message ?? 'Published pull requests are not registered')
+      }
+      if (toAdd.length > 0) {
+        await addPullRequestsToStack(owner, name, matched.number, toAdd, {
+          existingStack: matched,
+          knownPullRequests: published.map((entry) => entry.pr),
+        })
+      }
+    } else if (published.length >= 1) {
+      await createPullRequestStack(owner, name, publishedNumbers, {
+        knownPullRequests: published.map((entry) => entry.pr),
+        defaultBranch: plan.defaultBranch,
+      })
+    }
+    await retireLegacyStackComments(
+      canonical.fullName,
+      matched
+        ? matched.pullRequests.map((member) => member.number).concat(publishedNumbers)
+        : publishedNumbers,
+    )
+  }
   return {
     message: `Published ${published.length} stack pull request${published.length === 1 ? '' : 's'}`,
   }
@@ -2724,11 +2740,45 @@ async function mergeStack(
   await setPullRequestNumber(repoPath, entry.branch, entry.pr.number)
   let mergeError: unknown
   try {
-    await githubTransport().rest({
+    const native = Boolean(currentPr.stack || canonical.stack)
+    const endpoint = `repos/${plan.originFullName}/pulls/${entry.pr.number}/merge${native ? '-async' : ''}`
+    const response = await githubTransport().rest<unknown>({
       method: 'PUT',
-      path: `repos/${plan.originFullName}/pulls/${entry.pr.number}/merge`,
-      body: { sha: entry.pr.headOid, merge_method: action.mergeMethod },
+      path: endpoint,
+      ...(native ? { headers: { 'X-GitHub-Api-Version': '2026-03-10' } } : {}),
+      body: {
+        sha: entry.pr.headOid,
+        merge_method: action.mergeMethod,
+        ...(native ? { merge_action: 'direct_merge' } : {}),
+      },
     })
+    if (native) {
+      let result = response.data
+      for (let attempt = 0; attempt < 10; attempt++) {
+        if (!isRecord(result))
+          throw new Error('GitHub returned an invalid asynchronous merge result')
+        if (result.status === 'merged') break
+        if (result.status === 'failed' || result.status === 'enqueued') {
+          throw new Error(
+            `GitHub asynchronous merge ${result.status}: ${isRecord(result.details) && typeof result.details.message === 'string' ? result.details.message : 'inspect GitHub before retrying'}`,
+          )
+        }
+        const details = result.details
+        if (result.status !== 'pending' || !isRecord(details) || typeof details.uuid !== 'string')
+          throw new Error('GitHub returned an invalid asynchronous merge result')
+        await new Promise((resolve) => setTimeout(resolve, 300 * (attempt + 1)))
+        result = (
+          await githubTransport().rest<unknown>({
+            path: `${endpoint}/${encodeURIComponent(details.uuid)}`,
+            headers: { 'X-GitHub-Api-Version': '2026-03-10' },
+          })
+        ).data
+      }
+      if (!isRecord(result) || result.status !== 'merged')
+        throw new Error(
+          `Merge of PR #${entry.pr.number} is still pending; inspect GitHub before retrying`,
+        )
+    }
   } catch (error) {
     mergeError = error
   }
@@ -2988,6 +3038,37 @@ export async function runStackAction(
       if (plan.kind === 'restack') return beginRestack(root, plan)
       if (plan.kind === 'publish') return publishStack(root, plan, action)
       return mergeStack(root, plan, action)
+    }
+    case 'createNativeStack': {
+      const origin = await currentOrigin(root)
+      const data = await getGitHubData(root, origin.url)
+      const defaultBranch = await getDefaultBranch(
+        root,
+        await getRefs(root),
+        await getCurrentBranch(root),
+      )
+      return createNativeStackAction(
+        root,
+        origin.fullName,
+        action.pullRequests,
+        data.pullRequests,
+        defaultBranch,
+      )
+    }
+    case 'addPullRequestsToNativeStack': {
+      const origin = await currentOrigin(root)
+      const data = await getGitHubData(root, origin.url)
+      return addPullRequestsToNativeStackAction(
+        root,
+        origin.fullName,
+        action.stackNumber,
+        action.pullRequests,
+        data.pullRequests,
+      )
+    }
+    case 'unstackNativeStack': {
+      const origin = await currentOrigin(root)
+      return unstackNativeStackAction(root, origin.fullName, action.stackNumber)
     }
   }
 }

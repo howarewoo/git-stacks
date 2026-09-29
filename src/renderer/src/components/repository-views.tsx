@@ -879,6 +879,9 @@ export function StackView({
           <h1>Stacks</h1>
           <span className="list-subtitle">
             {groups.size} local stack{groups.size === 1 ? '' : 's'}
+            {snapshot.nativeStacks && snapshot.nativeStacks.length > 0
+              ? ` · ${snapshot.nativeStacks.length} GitHub native stack${snapshot.nativeStacks.length === 1 ? '' : 's'}`
+              : ''}
           </span>
         </div>
         <Button
@@ -990,6 +993,12 @@ export function StackView({
             <p className="workflow-note stack-github-note">
               {snapshot.github.message} Local parent management and restacking remain available.
             </p>
+          ) : snapshot.nativeStackPreviewAvailable === false ? (
+            <p className="workflow-note stack-github-note">
+              {snapshot.nativeStackMessage ??
+                'GitHub native stacked pull requests preview API is unavailable; degraded to chained PRs.'}{' '}
+              Local parent management and restacking remain available.
+            </p>
           ) : null}
           <div
             className="stack-members"
@@ -1020,9 +1029,11 @@ export function StackView({
                   <span>
                     {branch.parentSource === 'recorded'
                       ? 'Recorded parent'
-                      : branch.parentSource === 'pullRequest'
-                        ? 'From PR base'
-                        : 'Inferred — confirm before publishing'}
+                      : branch.parentSource === 'stack'
+                        ? 'GitHub native stack'
+                        : branch.parentSource === 'pullRequest'
+                          ? 'From PR base'
+                          : 'Inferred — confirm before publishing'}
                   </span>
                   <Button
                     size="sm"
@@ -1052,6 +1063,12 @@ export function StackView({
                       </Button>
                     </PullRequestHoverCard>
                     <div className="workflow-row">
+                      {branch.pr.stack ? (
+                        <Badge variant="accent">
+                          Stack #{branch.pr.stack.stackNumber} ({branch.pr.stack.position}/
+                          {branch.pr.stack.size})
+                        </Badge>
+                      ) : null}
                       <Badge variant={branch.pr.state === 'MERGED' ? 'accent' : 'secondary'}>
                         {branch.pr.draft ? 'draft' : branch.pr.state.toLowerCase()}
                       </Badge>

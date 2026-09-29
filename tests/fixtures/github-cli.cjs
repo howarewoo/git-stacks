@@ -103,8 +103,23 @@ function graphPullRequest(pr, withBody, fixture) {
   return value
 }
 
-function restPullRequest(pr, fixture) {
+function restPullRequest(state, pr, fixture) {
   const merged = pr.state === 'MERGED'
+  const stack = (state.stacks || []).find((s) =>
+    s.pull_requests.some((p) => p.number === pr.number),
+  )
+  let stackObj = null
+  if (stack) {
+    const position = stack.pull_requests.findIndex((p) => p.number === pr.number) + 1
+    stackObj = {
+      id: stack.id,
+      number: stack.number,
+      url: stack.url,
+      size: stack.pull_requests.length,
+      position,
+      base: position === 1 ? stack.base.ref : stack.pull_requests[position - 2].head.ref,
+    }
+  }
   return {
     number: pr.number,
     title: pr.title,
@@ -118,6 +133,32 @@ function restPullRequest(pr, fixture) {
     mergeable_state: String(pr.mergeState || 'clean').toLowerCase(),
     merge_commit_sha: pr.mergeOid || null,
     reviewDecision: pr.reviewDecision || null,
+    ...(stackObj ? { stack: stackObj } : {}),
+  }
+}
+
+function formatStack(state, stack, fixture) {
+  return {
+    id: stack.id,
+    number: stack.number,
+    node_id: stack.node_id,
+    url: stack.url,
+    base: { ref: stack.base.ref },
+    open: stack.open,
+    created_at: stack.created_at,
+    pull_requests: stack.pull_requests.map((p) => {
+      const pr = state.prs.find((entry) => entry.number === p.number)
+      return {
+        number: p.number,
+        state: p.state,
+        draft: p.draft,
+        merged_at: p.merged_at,
+        head: {
+          ref: p.head.ref,
+          sha: pr ? currentHead(pr, fixture) : p.head.sha,
+        },
+      }
+    }),
   }
 }
 
@@ -221,6 +262,93 @@ function handleApi(state, args, fixture) {
   if (!endpoint) fail(`unknown gh api endpoint: ${args.join(' ')}`)
   const repository = `${state.repository.owner}/${state.repository.name}`
   const prefix = `repos/${repository}`
+  const [rawEndpoint, rawQuery] = endpoint.split('?')
+  const queryParams = new URLSearchParams(rawQuery || '')
+  if (rawEndpoint.startsWith(`${prefix}/stacks`)) {
+    if (state.stacksPreviewDisabled) {
+      fail(`404: Not Found: preview API unavailable for ${endpoint}`)
+    }
+    if (rawEndpoint === `${prefix}/stacks`) {
+      if (method === 'GET') {
+        let stacks = state.stacks || []
+        if (queryParams.has('pull_request')) {
+          const prNum = Number(queryParams.get('pull_request'))
+          stacks = stacks.filter((s) => s.pull_requests.some((p) => p.number === prNum))
+        }
+        const perPage = Number(queryParams.get('per_page')) || 30
+        const page = Number(queryParams.get('page')) || 1
+        const start = (page - 1) * perPage
+        return stacks.slice(start, start + perPage).map((s) => formatStack(state, s, fixture))
+      }
+      if (method === 'POST') {
+        const body = jsonValues(args, fixture.input)
+        const pullRequestsInput = body.pull_requests || forms.get('pull_requests')
+        if (!Array.isArray(pullRequestsInput) || pullRequestsInput.length === 0) {
+          fail('422: pull_requests must be a non-empty array')
+        }
+        const prs = pullRequestsInput.map((num) => findPr(state, Number(num)))
+        const stackNumber = Number.isInteger(state.nextStackNumber) ? state.nextStackNumber++ : 1
+        const newStack = {
+          id: stackNumber * 1000,
+          number: stackNumber,
+          node_id: `STACK_${stackNumber}`,
+          url: `https://api.github.com/${prefix}/stacks/${stackNumber}`,
+          base: { ref: prs[0].base },
+          open: true,
+          created_at: new Date().toISOString(),
+          pull_requests: prs.map((pr) => ({
+            number: pr.number,
+            state: pr.state === 'MERGED' || pr.state === 'CLOSED' ? 'closed' : 'open',
+            draft: pr.draft === true,
+            merged_at: pr.mergedAt,
+            head: { ref: pr.head, sha: currentHead(pr, fixture) },
+          })),
+        }
+        state.stacks = state.stacks || []
+        state.stacks.push(newStack)
+        return formatStack(state, newStack, fixture)
+      }
+    }
+    const stackNumber = parseNumberFromEndpoint(rawEndpoint, `${prefix}/stacks`)
+    if (stackNumber !== null && rawEndpoint.endsWith(`/stacks/${stackNumber}`)) {
+      const stack = (state.stacks || []).find((s) => s.number === stackNumber)
+      if (!stack) fail(`404: stack #${stackNumber} not found`)
+      if (method === 'GET') return formatStack(state, stack, fixture)
+    }
+    if (stackNumber !== null && rawEndpoint.endsWith(`/stacks/${stackNumber}/pull_requests`)) {
+      const stack = (state.stacks || []).find((s) => s.number === stackNumber)
+      if (!stack) fail(`404: stack #${stackNumber} not found`)
+      if (method !== 'POST') fail(`unsupported method ${method}`)
+      const body = jsonValues(args, fixture.input)
+      const pullRequestsInput = body.pull_requests || forms.get('pull_requests')
+      const prs = pullRequestsInput.map((num) => findPr(state, Number(num)))
+      for (const pr of prs) {
+        stack.pull_requests.push({
+          number: pr.number,
+          state: pr.state === 'MERGED' || pr.state === 'CLOSED' ? 'closed' : 'open',
+          draft: pr.draft === true,
+          merged_at: pr.mergedAt,
+          head: { ref: pr.head, sha: currentHead(pr, fixture) },
+        })
+      }
+      return formatStack(state, stack, fixture)
+    }
+    if (stackNumber !== null && rawEndpoint.endsWith(`/stacks/${stackNumber}/unstack`)) {
+      const stackIdx = (state.stacks || []).findIndex((s) => s.number === stackNumber)
+      if (stackIdx === -1) fail(`404: stack #${stackNumber} not found`)
+      const stack = state.stacks[stackIdx]
+      const remaining = stack.pull_requests.filter(
+        (p) => p.merged_at != null || p.state === 'closed',
+      )
+      if (remaining.length === 0) {
+        state.stacks.splice(stackIdx, 1)
+        return {}
+      } else {
+        stack.pull_requests = remaining
+        return formatStack(state, stack, fixture)
+      }
+    }
+  }
   if (endpoint === prefix && method === 'GET') {
     return {
       full_name: repository,
@@ -232,12 +360,12 @@ function handleApi(state, args, fixture) {
   }
   if (endpoint === `${prefix}/pulls` && method === 'POST') {
     const pr = createPullRequest(state, forms, fixture)
-    return { ...restPullRequest(pr), html_url: pr.url }
+    return { ...restPullRequest(state, pr, fixture), html_url: pr.url }
   }
   const prNumber = parseNumberFromEndpoint(endpoint, `${prefix}/pulls`)
   if (prNumber !== null && endpoint.endsWith(`/pulls/${prNumber}`)) {
     const pr = findPr(state, prNumber)
-    if (method === 'GET') return restPullRequest(pr, fixture)
+    if (method === 'GET') return restPullRequest(state, pr, fixture)
     if (method !== 'PATCH') fail(`unsupported pull request method ${method}`)
     if (forms.has('draft')) fail('draft cannot be updated through REST')
     if (forms.has('title')) pr.title = forms.get('title')
@@ -248,7 +376,7 @@ function handleApi(state, args, fixture) {
       if (requested === 'open' && pr.state !== 'MERGED') pr.state = 'OPEN'
       else if (requested === 'closed' && pr.state !== 'MERGED') pr.state = 'CLOSED'
     }
-    return restPullRequest(pr, fixture)
+    return restPullRequest(state, pr, fixture)
   }
   const mergeNumber = parseNumberFromEndpoint(endpoint, `${prefix}/pulls`)
   if (mergeNumber !== null && endpoint.endsWith(`/pulls/${mergeNumber}/merge`)) {
