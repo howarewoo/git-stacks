@@ -112,8 +112,35 @@ test('a manifest that is not newer than this build is a refusal, never a downgra
   if (!outcome.ok) assert.equal(outcome.failure.reason, 'not-newer')
 })
 
-test('a release sequence already seen on this computer is refused as a replay', () => {
-  const outcome = evaluateUpdateManifest(parse({ sequence: 4 }), expectations({ seenSequence: 4 }))
+test('a signed release that names what it rolls back may be older, and one that does not may not', () => {
+  const installed = { currentVersion: '0.3.0' }
+  const authorised = evaluateUpdateManifest(
+    parse({ version: '0.2.0', rollbackOf: '0.3.0', sequence: 9 }),
+    expectations(installed),
+  )
+  assert.equal(authorised.ok, true)
+  if (authorised.ok) {
+    assert.equal(
+      toUpdateOffer(parse({ version: '0.2.0', rollbackOf: '0.3.0' }), authorised.value).rollbackOf,
+      '0.3.0',
+    )
+  }
+  for (const rollbackOf of [null, '0.4.0', '0.2.0']) {
+    const outcome = evaluateUpdateManifest(
+      parse({ version: '0.2.0', rollbackOf, sequence: 9 }),
+      expectations(installed),
+    )
+    assert.equal(
+      outcome.ok,
+      false,
+      `rollbackOf ${String(rollbackOf)} must not authorise a downgrade`,
+    )
+    if (!outcome.ok) assert.equal(outcome.failure.reason, 'not-newer')
+  }
+})
+
+test('a release sequence older than one already seen is refused as a replay', () => {
+  const outcome = evaluateUpdateManifest(parse({ sequence: 3 }), expectations({ seenSequence: 4 }))
   assert.equal(outcome.ok, false)
   if (!outcome.ok) assert.equal(outcome.failure.reason, 'replayed')
 })
@@ -199,7 +226,12 @@ test('a signature made by another key, or outside the key’s window, is refused
   }
   const bytes = manifestBytes()
   assert.equal(
-    verifyDetachedSignature(key, bytes, signBytes(null, bytes, other.privateKey).toString('base64'), NOW),
+    verifyDetachedSignature(
+      key,
+      bytes,
+      signBytes(null, bytes, other.privateKey).toString('base64'),
+      NOW,
+    ),
     false,
     'another key’s signature must not verify',
   )
@@ -257,13 +289,24 @@ test('the feed is the pinned release location, and a packaged build cannot be po
     production.value.manifestUrl,
     `${RELEASE_LOCATION_ORIGIN}${RELEASE_LOCATION_PATH_PREFIX}updates-stable/update-stable.json`,
   )
-  assert.equal(
-    resolveUpdateFeed('stable', { GIT_STACKS_UPDATE_FEED_BASE: 'https://elsewhere.invalid/feed' }, true)
-      .value?.origin,
-    RELEASE_LOCATION_ORIGIN,
-    'a packaged build keeps the compiled-in location whatever the environment says',
+  const repointed = resolveUpdateFeed(
+    'stable',
+    { GIT_STACKS_UPDATE_FEED_BASE: 'https://elsewhere.invalid/feed' },
+    true,
   )
-  const fixture = resolveUpdateFeed('beta', { GIT_STACKS_UPDATE_FEED_BASE: 'https://127.0.0.1:8443/feed' }, false)
+  assert.equal(repointed.ok, true)
+  if (repointed.ok) {
+    assert.equal(
+      repointed.value.origin,
+      RELEASE_LOCATION_ORIGIN,
+      'a packaged build keeps the compiled-in location whatever the environment says',
+    )
+  }
+  const fixture = resolveUpdateFeed(
+    'beta',
+    { GIT_STACKS_UPDATE_FEED_BASE: 'https://127.0.0.1:8443/feed' },
+    false,
+  )
   assert.equal(fixture.ok, true)
   if (!fixture.ok) return
   assert.equal(fixture.value.trust, 'development')

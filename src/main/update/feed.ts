@@ -2,6 +2,7 @@ import { Agent, request as httpsRequest } from 'node:https'
 import { readFileSync } from 'node:fs'
 import {
   MAX_UPDATE_REDIRECTS,
+  RELEASE_ASSET_HOSTS,
   RELEASE_LOCATION_ORIGIN,
   RELEASE_LOCATION_PATH_PREFIX,
   type UpdateChannel,
@@ -108,6 +109,22 @@ export function insideFeed(feed: UpdateFeed, candidate: URL): boolean {
   )
 }
 
+/**
+ * Where a pinned release address may lead. The first request must be inside
+ * the feed. A redirect may only go to a release asset host this updater names,
+ * over HTTPS, with no credentials attached; anything else is refused before a
+ * second request is made.
+ *
+ * Both the manifest fetch and the artifact download use this one rule, so a
+ * signed manifest can send an installer nowhere the manifest itself could not
+ * have been fetched from.
+ */
+export function redirectIsAllowed(feed: UpdateFeed, to: URL): boolean {
+  if (to.protocol !== 'https:' || to.username || to.password || to.hash) return false
+  if (insideFeed(feed, to)) return true
+  return (RELEASE_ASSET_HOSTS as readonly string[]).includes(to.hostname)
+}
+
 export interface FetchOptions {
   feed: UpdateFeed
   signal?: AbortSignal
@@ -124,80 +141,91 @@ export interface FetchOptions {
 export function fetchFeedBytes(
   url: URL,
   options: FetchOptions,
-  redirectsLeft = MAX_UPDATE_REDIRECTS,
+  hops = 0,
+  deadline = Date.now() + options.timeoutMs,
 ): Promise<{ url: URL; body: Buffer }> {
-  if (!insideFeed(options.feed, url)) {
+  if (options.signal?.aborted) {
+    return Promise.reject(new Error('The update request was cancelled before it started.'))
+  }
+  if (hops === 0 && !insideFeed(options.feed, url)) {
     return Promise.reject(
       new Error('The update feed answered with an address outside the pinned release location.'),
     )
   }
   const { promise, resolve, reject } = Promise.withResolvers<{ url: URL; body: Buffer }>()
-    const request = httpsRequest(
-      url,
-      {
-        method: 'GET',
-        agent: new Agent(
-          options.feed.ca.length > 0
-            ? { ca: options.feed.ca, minVersion: 'TLSv1.2' }
-            : { minVersion: 'TLSv1.2' },
-        ),
-        headers: { accept: 'application/octet-stream' },
-      },
-      (response) => {
-        const status = response.statusCode ?? 0
-        const location = response.headers.location
-        if (status >= 300 && status < 400 && typeof location === 'string') {
-          response.resume()
-          if (redirectsLeft <= 0) {
-            reject(new Error('The update feed redirected too many times.'))
-            return
-          }
-          let next: URL
-          try {
-            next = new URL(location, url)
-          } catch {
-            reject(new Error('The update feed redirected to an address that could not be read.'))
-            return
-          }
-          fetchFeedBytes(next, options, redirectsLeft - 1).then(resolve, reject)
+  const request = httpsRequest(
+    url,
+    {
+      method: 'GET',
+      agent: new Agent(
+        options.feed.ca.length > 0
+          ? { ca: options.feed.ca, minVersion: 'TLSv1.2' }
+          : { minVersion: 'TLSv1.2' },
+      ),
+      // Nothing this updater fetches is sent with a token, so nothing can be
+      // handed to a host the feed did not already name.
+      headers: { accept: 'application/octet-stream' },
+    },
+    (response) => {
+      const status = response.statusCode ?? 0
+      const location = response.headers.location
+      if (status >= 300 && status < 400 && typeof location === 'string') {
+        response.resume()
+        if (hops >= MAX_UPDATE_REDIRECTS) {
+          reject(new Error('The update feed redirected too many times.'))
           return
         }
-        if (status !== 200) {
-          response.resume()
-          reject(new Error(`The update feed answered ${status}.`))
+        let next: URL
+        try {
+          next = new URL(location, url)
+        } catch {
+          reject(new Error('The update feed redirected to an address that could not be read.'))
           return
         }
-        const declared = Number(response.headers['content-length'] ?? '')
-        if (Number.isFinite(declared) && declared > options.maxBytes) {
-          response.destroy()
+        if (!redirectIsAllowed(options.feed, next)) {
+          reject(new Error('The update feed redirected outside the pinned release location.'))
+          return
+        }
+        fetchFeedBytes(next, options, hops + 1, deadline).then(resolve, reject)
+        return
+      }
+      if (status !== 200) {
+        response.resume()
+        reject(new Error(`The update feed answered ${status}.`))
+        return
+      }
+      const declared = Number(response.headers['content-length'] ?? '')
+      if (Number.isFinite(declared) && declared > options.maxBytes) {
+        response.destroy()
+        reject(new Error('The update feed offered more bytes than this update may be.'))
+        return
+      }
+      const chunks: Buffer[] = []
+      let size = 0
+      response.on('data', (chunk: Buffer) => {
+        size += chunk.length
+        if (size > options.maxBytes) {
+          request.destroy()
           reject(new Error('The update feed offered more bytes than this update may be.'))
           return
         }
-        const chunks: Buffer[] = []
-        let size = 0
-        response.on('data', (chunk: Buffer) => {
-          size += chunk.length
-          if (size > options.maxBytes) {
-            request.destroy()
-            reject(new Error('The update feed offered more bytes than this update may be.'))
-            return
-          }
-          chunks.push(chunk)
-        })
-        response.on('end', () => resolve({ url, body: Buffer.concat(chunks) }))
-        response.on('error', reject)
-      },
-    )
-    request.setTimeout(options.timeoutMs, () => {
-      request.destroy(new Error('The update feed did not answer in time.'))
-    })
-    const onAbort = (): void => {
-      request.destroy(new Error('The update request was cancelled.'))
-    }
-    options.signal?.addEventListener('abort', onAbort, { once: true })
-    request.on('close', () => options.signal?.removeEventListener('abort', onAbort))
-    request.on('error', reject)
+        chunks.push(chunk)
+      })
+      response.on('end', () => resolve({ url, body: Buffer.concat(chunks) }))
+      response.on('error', reject)
+    },
+  )
+  // A slow answer that keeps the socket open must not hold the check open
+  // either: the whole attempt, redirects included, has one deadline.
+  request.setTimeout(Math.max(1, deadline - Date.now()), () => {
+    request.destroy(new Error('The update feed did not answer in time.'))
+  })
+  const onAbort = (): void => {
+    request.destroy(new Error('The update request was cancelled.'))
+  }
+  options.signal?.addEventListener('abort', onAbort, { once: true })
+  request.on('close', () => options.signal?.removeEventListener('abort', onAbort))
+  request.on('error', reject)
   request.end()
   return promise
 }
-

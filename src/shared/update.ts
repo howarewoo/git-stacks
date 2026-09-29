@@ -9,7 +9,6 @@
  */
 import { isRecord } from './guards'
 
-
 export const UPDATE_CHANNELS = ['stable', 'beta'] as const
 export type UpdateChannel = (typeof UPDATE_CHANNELS)[number]
 
@@ -50,6 +49,15 @@ export const RELEASE_LOCATION_ORIGIN = 'https://github.com'
 export const RELEASE_LOCATION_PATH_PREFIX = '/howarewoo/git-stacks/releases/download/'
 
 /**
+ * The only hosts a release download may be redirected to. GitHub serves a
+ * release asset from its own asset host, and the updater names that host
+ * exactly rather than following any HTTPS address: a redirect is not
+ * permission to fetch from somewhere else, and the signed digest is what
+ * makes the bytes themselves safe.
+ */
+export const RELEASE_ASSET_HOSTS = ['release-assets.githubusercontent.com'] as const
+
+/**
  * A release manifest as published. Every field is required: a field the app
  * does not understand is a field it cannot check, so an unexpected key is a
  * refusal rather than something to ignore.
@@ -69,7 +77,12 @@ export interface UpdateManifest {
   /** ISO-8601 UTC. A manifest past this instant is not offered. */
   expiresAt: string
   /** The release this one supersedes, when it is an authorised rollback. */
-  rollbackOf?: string
+  /**
+   * The newer release this one is an authorised replacement for. Absent, or
+   * null, means this release is not a rollback and must be newer than the
+   * running build.
+   */
+  rollbackOf?: string | null
   notes: string
   artifacts: UpdateManifestArtifact[]
 }
@@ -128,8 +141,7 @@ export class UpdateRefusal extends Error {
 }
 
 export type UpdateOutcome<T> =
-  | { ok: true; value: T }
-  | { ok: false; failure: UpdateRejectionReport }
+  { ok: true; value: T } | { ok: false; failure: UpdateRejectionReport }
 
 /** What the updater is doing, and what it last concluded. */
 export type UpdatePhase =
@@ -194,7 +206,6 @@ export interface UpdateStatus {
 function closedKeys(value: Record<string, unknown>, allowed: readonly string[]): boolean {
   return Object.keys(value).every((key) => allowed.includes(key))
 }
-
 
 const HEX_256 = /^[0-9a-f]{64}$/
 
@@ -306,7 +317,6 @@ const MANIFEST_KEYS = [
   'artifacts',
 ]
 
-
 /**
  * Turns published bytes into a manifest, or names why they were refused. The
  * shape is closed: an unknown field is refused rather than ignored, because a
@@ -364,7 +374,11 @@ export function parseUpdateManifest(bytes: Uint8Array): UpdateOutcome<UpdateMani
       failure: { reason: 'malformed', message: 'The update manifest names no usable version.' },
     }
   }
-  if (typeof value.sequence !== 'number' || !Number.isSafeInteger(value.sequence) || value.sequence < 1) {
+  if (
+    typeof value.sequence !== 'number' ||
+    !Number.isSafeInteger(value.sequence) ||
+    value.sequence < 1
+  ) {
     return {
       ok: false,
       failure: { reason: 'malformed', message: 'The update manifest carries no release sequence.' },
@@ -387,22 +401,41 @@ export function parseUpdateManifest(bytes: Uint8Array): UpdateOutcome<UpdateMani
   if (expiresAt <= issuedAt) {
     return {
       ok: false,
-      failure: { reason: 'malformed', message: 'The update manifest expires before it was issued.' },
+      failure: {
+        reason: 'malformed',
+        message: 'The update manifest expires before it was issued.',
+      },
     }
   }
-  if (value.rollbackOf !== undefined && !parseVersion(value.rollbackOf)) {
+  // `null` says outright that this release is not a rollback; any other value
+  // has to be a version this build can read.
+  if (
+    value.rollbackOf !== undefined &&
+    value.rollbackOf !== null &&
+    !parseVersion(value.rollbackOf)
+  ) {
     return {
       ok: false,
-      failure: { reason: 'malformed', message: 'The update manifest names no usable rollback version.' },
+      failure: {
+        reason: 'malformed',
+        message: 'The update manifest names no usable rollback version.',
+      },
     }
   }
   if (typeof value.notes !== 'string' || value.notes.length > 4000) {
     return {
       ok: false,
-      failure: { reason: 'malformed', message: 'The update manifest carries no usable release notes.' },
+      failure: {
+        reason: 'malformed',
+        message: 'The update manifest carries no usable release notes.',
+      },
     }
   }
-  if (!Array.isArray(value.artifacts) || value.artifacts.length === 0 || value.artifacts.length > 32) {
+  if (
+    !Array.isArray(value.artifacts) ||
+    value.artifacts.length === 0 ||
+    value.artifacts.length > 32
+  ) {
     return {
       ok: false,
       failure: { reason: 'malformed', message: 'The update manifest lists no installable builds.' },
@@ -437,7 +470,7 @@ export function parseUpdateManifest(bytes: Uint8Array): UpdateOutcome<UpdateMani
       sequence: value.sequence,
       issuedAt: new Date(issuedAt).toISOString(),
       expiresAt: new Date(expiresAt).toISOString(),
-      ...(value.rollbackOf === undefined ? {} : { rollbackOf: value.rollbackOf as string }),
+      ...(typeof value.rollbackOf === 'string' ? { rollbackOf: value.rollbackOf } : {}),
       notes: value.notes,
       artifacts,
     },
@@ -491,7 +524,12 @@ export interface UpdateEnvironment {
   platform: UpdatePlatform
   arch: UpdateArchitecture
   currentVersion: string
-  /** The highest release sequence already considered on this channel. */
+  /**
+   * The highest release sequence already offered on this channel. A manifest
+   * at that sequence is the same release this computer has already seen, so it
+   * is offered again rather than refused: an offer that was never taken must
+   * not become impossible. Anything below it is refused.
+   */
   seenSequence: number
   now?: number
 }
@@ -541,12 +579,13 @@ export function evaluateUpdateManifest(
       failure: { reason: 'expired', message: 'This update offer is too old to be trusted.' },
     }
   }
-  if (manifest.sequence <= expectations.seenSequence) {
+  if (manifest.sequence < expectations.seenSequence) {
     return {
       ok: false,
       failure: {
         reason: 'replayed',
-        message: 'This update offer has already been considered on this computer.',
+        message:
+          'This offer is older than one already considered here. A rollback is a new signed release with a higher sequence.',
       },
     }
   }
@@ -563,12 +602,24 @@ export function evaluateUpdateManifest(
     }
   }
   if (compareVersions(manifest.version, expectations.currentVersion) <= 0) {
-    return {
-      ok: false,
-      failure: {
-        reason: 'not-newer',
-        message: `Version ${manifest.version} is not newer than the installed ${expectations.currentVersion}.`,
-      },
+    // A rollback is allowed to be older, and only when the signed release names
+    // the exact build this computer is running as the one it replaces, and is
+    // older than that. A manifest that merely happens to be older is a
+    // downgrade, and one that names a release this build is not running is not
+    // a rollback this build has any business taking.
+    const replaces = manifest.rollbackOf
+    if (
+      replaces === null ||
+      compareVersions(replaces, expectations.currentVersion) !== 0 ||
+      compareVersions(manifest.version, replaces) >= 0
+    ) {
+      return {
+        ok: false,
+        failure: {
+          reason: 'not-newer',
+          message: `Version ${manifest.version} is not newer than the installed ${expectations.currentVersion}, and no signed release authorises rolling back to it.`,
+        },
+      }
     }
   }
   let url: URL

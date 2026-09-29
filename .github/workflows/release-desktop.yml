@@ -1,5 +1,9 @@
 name: Signed desktop release
 
+# One trigger, and it is the only publication path: a GitHub release being
+# published. There is no workflow_dispatch, no schedule, no canary and no
+# publish-from-branch trigger, so nothing in this file can mint a release or a
+# signed manifest that a person did not publish a release for.
 on:
   release:
     types: [published]
@@ -15,22 +19,26 @@ jobs:
         include:
           - os: macos-15
             platform: darwin
+            arch: arm64
           - os: macos-15-intel
             platform: darwin
+            arch: x64
           - os: windows-2025
             platform: win32
+            arch: x64
           - os: ubuntu-24.04
             platform: linux
+            arch: x64
     runs-on: ${{ matrix.os }}
     permissions:
       contents: write
       id-token: write
       attestations: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           persist-credentials: false
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '22'
           cache: npm
@@ -43,6 +51,8 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
+          UPDATE_SIGNING_PUBLIC_KEY: ${{ secrets.UPDATE_SIGNING_PUBLIC_KEY }}
         run: |
           test "$RELEASE_TAG" = "v$(node -p 'require("./package.json").version')"
           if [[ '${{ matrix.platform }}' != linux ]]; then
@@ -51,6 +61,11 @@ jobs:
           if [[ '${{ matrix.platform }}' == darwin ]]; then
             test -n "$APPLE_ID" && test -n "$APPLE_APP_SPECIFIC_PASSWORD" && test -n "$APPLE_TEAM_ID"
           fi
+          # The update feed is signed with a key this repository holds, not with
+          # one this run makes up. Both halves are named here so a repository
+          # that has not been given them says so before anything is built.
+          test -n "$UPDATE_SIGNING_KEY" || { echo '::error::the UPDATE_SIGNING_KEY repository secret is missing; this release can package the app but cannot sign an update manifest'; exit 1; }
+          test -n "$UPDATE_SIGNING_PUBLIC_KEY" || { echo '::error::the UPDATE_SIGNING_PUBLIC_KEY repository secret is missing; this build would ship with no release update key and could never verify a manifest'; exit 1; }
       - run: npm ci
       - name: Put the MSVC toolchain on PATH
         # The clone promotion helper is compiled from source at build time, and a
@@ -74,6 +89,33 @@ jobs:
             }
           }
           if (-not $toolchain) { throw 'The MSVC toolchain did not reach PATH' }
+      - name: Inject the release update key into this build
+        shell: bash
+        env:
+          UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
+          UPDATE_SIGNING_PUBLIC_KEY: ${{ secrets.UPDATE_SIGNING_PUBLIC_KEY }}
+          UPDATE_SIGNING_KEY_ID: ${{ secrets.UPDATE_SIGNING_KEY_ID }}
+          UPDATE_SIGNING_KEY_VALID_FROM: ${{ secrets.UPDATE_SIGNING_KEY_VALID_FROM }}
+          UPDATE_SIGNING_KEY_VALID_UNTIL: ${{ secrets.UPDATE_SIGNING_KEY_VALID_UNTIL }}
+        # Before `npm run dist`, because after it the key is inside the build.
+        # The committed key set stays empty: a build that is not made by a
+        # release trusts nothing and fetches nothing, which is the honest state
+        # of a repository with no release key. This step proves the two secrets
+        # are one keypair — it signs a fixed challenge with the private half and
+        # verifies it with the public half — and fails closed if either secret is
+        # missing, if they disagree, or if the key is not Ed25519. The private
+        # half is never written, printed, or uploaded.
+        run: npx tsx scripts/release-trusted-keys.ts inject
+      - name: Hand the injected key set to the publishing job
+        shell: bash
+        run: |
+          cp resources/update-trusted-keys.json "injected-key-set-${{ matrix.platform }}-${{ matrix.arch }}.json"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: update-key-set-${{ matrix.platform }}-${{ matrix.arch }}
+          path: injected-key-set-${{ matrix.platform }}-${{ matrix.arch }}.json
+          if-no-files-found: error
+          retention-days: 7
       - run: npm test
       - run: npm run dist
         env:
@@ -106,6 +148,13 @@ jobs:
               throw "Invalid Authenticode signature: $($artifact.Name)"
             }
           }
+      - name: Produce the dependency inventory for this packaged app
+        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+        with:
+          path: .
+          artifact-name: sbom-release-${{ matrix.platform }}-${{ matrix.arch }}
+          output-file: sbom-release-${{ matrix.platform }}-${{ matrix.arch }}.cdx.json
+          format: cyclonedx-json
       - name: Select distributable artifacts
         shell: bash
         run: |
@@ -114,8 +163,39 @@ jobs:
           artifacts=(release/*.dmg release/*.exe release/*.AppImage)
           test "${#artifacts[@]}" -gt 0
           cp "${artifacts[@]}" signed-release/
+      - name: Record what this runner packaged
+        shell: bash
+        # The publishing job needs to know which platform and architecture each
+        # file is for; it does not guess it from a file name, and it will not
+        # publish a manifest that is missing a build from this matrix.
+        run: |
+          npx tsx scripts/release-update-manifest.ts describe \
+            --platform '${{ matrix.platform }}' --arch '${{ matrix.arch }}' \
+            --dir signed-release --out "descriptors/${{ matrix.platform }}-${{ matrix.arch }}.json"
+      - name: State the Linux support policy this release ships
+        if: matrix.platform == 'linux'
+        shell: bash
+        run: |
+          # Checked-in policy line, printed on every Linux release:
+          #   linux: best-effort artifact — built, published and signed, never updated in place by the app
+          # The AppImage is published for someone to download and run from
+          # wherever they put it. It is not updated in place because the app has
+          # no way to: `installSupportFor()` in src/main/update/install.ts lists
+          # only darwin and win32, so a packaged Linux build reports `supported:
+          # false` and sits in the `unsupported` phase, and an install offer on
+          # Linux is a refusal rather than a half-finished replacement. This step
+          # fails if the code ever grows a Linux installer, so the line above can
+          # never quietly stop being true.
+          echo 'release policy — linux: best-effort artifact — built, published and signed, never updated in place by the app'
+          shopt -s nullglob
+          appimages=(signed-release/*.AppImage)
+          test "${#appimages[@]}" -gt 0
+          if grep -qE "^[[:space:]]+linux:" src/main/update/install.ts; then
+            echo '::error::src/main/update/install.ts now installs on Linux; rewrite the release policy line before the next release'
+            exit 1
+          fi
       - name: Attest the packaged release artifacts
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
         with:
           subject-path: signed-release/*
       - name: Upload only verified release artifacts
@@ -124,3 +204,222 @@ jobs:
           RELEASE_TAG: ${{ github.event.release.tag_name }}
         shell: bash
         run: gh release upload "$RELEASE_TAG" signed-release/*
+      - name: Hand the verified artifacts and their descriptors to the publishing job
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: signed-release-${{ matrix.platform }}-${{ matrix.arch }}
+          path: |
+            signed-release/*
+            descriptors/*.json
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    # Mints, signs and publishes one signed update manifest per channel. It runs
+    # after every platform has packaged and attested, and it publishes nothing at
+    # all unless the manifest verifies against the key the packaged builds carry
+    # and every installer it names re-hashes to the digest it published.
+    needs: package
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      attestations: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - name: Require the update signing key before anything is published
+        shell: bash
+        env:
+          UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
+          UPDATE_SIGNING_PUBLIC_KEY: ${{ secrets.UPDATE_SIGNING_PUBLIC_KEY }}
+        run: |
+          if [ -z "$UPDATE_SIGNING_KEY" ]; then
+            echo '::error::the UPDATE_SIGNING_KEY repository secret is missing, so this release cannot sign an update manifest. The installers are already published; the update feed is not moved.'
+            exit 1
+          fi
+          if [ -z "$UPDATE_SIGNING_PUBLIC_KEY" ]; then
+            echo '::error::the UPDATE_SIGNING_PUBLIC_KEY repository secret is missing, so this release cannot prove which key a manifest was signed with.'
+            exit 1
+          fi
+      - name: Collect the verified artifacts and their descriptors
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          pattern: signed-release-*
+          path: .
+          merge-multiple: true
+      - name: Collect the packaged key sets
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          pattern: update-key-set-*
+          path: injected-key-sets
+          merge-multiple: true
+      - name: Inject the release update key again, and prove it is the key the builds carry
+        shell: bash
+        env:
+          UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
+          UPDATE_SIGNING_PUBLIC_KEY: ${{ secrets.UPDATE_SIGNING_PUBLIC_KEY }}
+          UPDATE_SIGNING_KEY_ID: ${{ secrets.UPDATE_SIGNING_KEY_ID }}
+          UPDATE_SIGNING_KEY_VALID_FROM: ${{ secrets.UPDATE_SIGNING_KEY_VALID_FROM }}
+          UPDATE_SIGNING_KEY_VALID_UNTIL: ${{ secrets.UPDATE_SIGNING_KEY_VALID_UNTIL }}
+        run: |
+          npx tsx scripts/release-trusted-keys.ts inject
+          shopt -s nullglob
+          shipped=(injected-key-sets/*.json)
+          test "${#shipped[@]}" -gt 0
+          for keyset in "${shipped[@]}"; do
+            if ! cmp -s "$keyset" resources/update-trusted-keys.json; then
+              echo "::error::$keyset differs from the key set this job is signing with, so the packaged builds and the manifest disagree about which key to trust"
+              exit 1
+            fi
+          done
+          echo "the key set matches all ${#shipped[@]} packaged builds"
+      - name: Mint, sign and verify this channel's update manifest
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          PRERELEASE: ${{ github.event.release.prerelease }}
+          RELEASE_NOTES: ${{ github.event.release.body }}
+          UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
+          UPDATE_SIGNING_PUBLIC_KEY: ${{ secrets.UPDATE_SIGNING_PUBLIC_KEY }}
+          # Set this repository variable to the version a rollback replaces. A
+          # release of an older version without it is refused, so a downgrade is
+          # always an explicit, signed decision rather than a quiet one.
+          ROLLBACK_OF: ${{ vars.UPDATE_ROLLBACK_OF }}
+        # A published release carries one update channel: a prerelease goes to
+        # the beta channel, a full release to stable. The manifest names the
+        # installers this release produced, on the pinned release location, with
+        # their size and SHA-256, and carries a sequence one higher than any this
+        # channel has published — read back through the GitHub API, so a
+        # sequence is never reused and a manifest is never a replay of one an
+        # installation has already considered.
+        #
+        # A rollback is not a special case here: it is a release of an older
+        # version, published with --rollback-of naming the version it replaces
+        # and a sequence that is still higher than the one it replaces. The app
+        # refuses a silent downgrade (a version that is not newer than the
+        # running build, refused as `not-newer`) and refuses a manifest older
+        # than the newest one it has seen (refused as `replayed`), so a rollback
+        # has to be a new, higher-sequence, signed release that says what it is
+        # rolling back. The script refuses a lower version that does not name
+        # the version it replaces, so that can never be done by accident.
+        #
+        # Nothing is uploaded until the verifier has re-read the manifest and its
+        # signature from disk, re-verified the signature with the key this
+        # release injected, and re-hashed every installer.
+        run: |
+          if [ "$PRERELEASE" = "true" ]; then CHANNEL=beta; else CHANNEL=stable; fi
+          VERSION="${RELEASE_TAG#v}"
+          test "$VERSION" = "$(node -p 'require("./package.json").version')"
+          ROLLBACK=()
+          if [ -n "$ROLLBACK_OF" ]; then ROLLBACK=(--rollback-of "$ROLLBACK_OF"); fi
+          npx tsx scripts/release-update-manifest.ts build \
+            --channel "$CHANNEL" --version "$VERSION" \
+            --descriptors descriptors --artifact-dir signed-release \
+            --out-dir channel-feed --stage-dir channel-assets \
+            --repo "$REPOSITORY" --notes "${RELEASE_NOTES:-Git Stacks $VERSION ($CHANNEL).}" \
+            ${ROLLBACK[@]+"${ROLLBACK[@]}"}
+          npx tsx scripts/release-update-sign.ts --channel "$CHANNEL" --manifest "channel-feed/update-$CHANNEL.json"
+          npx tsx scripts/release-update-verify.ts --channel "$CHANNEL" --manifest "channel-feed/update-$CHANNEL.json" --artifact-dir channel-assets
+      - name: Verify the provenance of every artifact about to be published
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          shopt -s nullglob
+          staged=(channel-assets/*)
+          test "${#staged[@]}" -gt 0
+          for artifact in "${staged[@]}"; do
+            gh attestation verify "$artifact" --repo "$REPOSITORY"
+          done
+      - name: Publish the signed channel feed
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          PRERELEASE: ${{ github.event.release.prerelease }}
+        run: |
+          if [ "$PRERELEASE" = "true" ]; then CHANNEL=beta; else CHANNEL=stable; fi
+          # A moving release tag per channel, so the feed URL the app resolves
+          # (https://github.com/howarewoo/git-stacks/releases/download/<tag>/)
+          # never has to change. It is only ever moved forward along this
+          # repository's history: a tag that has been moved elsewhere stops the
+          # release rather than being overwritten.
+          TAG="updates-$CHANNEL"
+          COMMIT="$(gh api "repos/$REPOSITORY/commits/$RELEASE_TAG" --jq .sha)"
+          CURRENT="$(gh api "repos/$REPOSITORY/git/ref/tags/$TAG" --jq .object.sha 2>/dev/null || true)"
+          if [ -n "$CURRENT" ] && [ "$CURRENT" != "$COMMIT" ]; then
+            AHEAD="$(gh api "repos/$REPOSITORY/compare/$CURRENT...$COMMIT" --jq .status)"
+            if [ "$AHEAD" != ahead ] && [ "$AHEAD" != identical ]; then
+              echo "::error::the $TAG release tag is not an ancestor of $RELEASE_TAG; refusing to move it"
+              exit 1
+            fi
+            gh api -X PATCH "repos/$REPOSITORY/git/refs/tags/$TAG" -F force=true -f sha="$COMMIT" >/dev/null
+          elif [ -z "$CURRENT" ]; then
+            gh api -X POST "repos/$REPOSITORY/git/refs" -f ref="refs/tags/$TAG" -f sha="$COMMIT" >/dev/null
+          fi
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" --target "$COMMIT" \
+              --title "Git Stacks $CHANNEL update feed" \
+              --notes "Moving release for the $CHANNEL update channel. The current manifest is update-$CHANNEL.json, signed with the project release key; its installers are the assets beside it."
+          fi
+          # Installers first, then the manifest that names them, then the
+          # signature: the feed is only ever complete once all three are here.
+          gh release upload "$TAG" --clobber channel-assets/* "channel-feed/update-$CHANNEL.json" "channel-feed/update-$CHANNEL.json.sig"
+          echo "published https://github.com/$REPOSITORY/releases/download/$TAG/update-$CHANNEL.json"
+
+  supply-chain:
+    # The dependency inventory for the packaged app, and a stop on a known
+    # vulnerable dependency. Separate from packaging so a vulnerability is
+    # reported once, against the whole tree, rather than four times per runner.
+    needs: package
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - name: Refuse a known-vulnerable dependency
+        shell: bash
+        # High or critical, in any dependency the build and the app ship. A
+        # release stops here rather than shipping a known-vulnerable tree.
+        run: npm audit --audit-level=high
+      - name: Scan the dependency tree for known vulnerabilities
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          skip-dirs: node_modules
+          exit-code: '1'
+      - name: Publish the dependency inventory
+        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+        with:
+          path: .
+          artifact-name: sbom-release-dependency-tree
+          output-file: sbom-release-dependency-tree.cdx.json
+          format: cyclonedx-json
+      - name: Keep the inventory with the release run
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sbom-release-dependency-tree
+          path: sbom-release-dependency-tree.cdx.json
+          if-no-files-found: error
+          retention-days: 30

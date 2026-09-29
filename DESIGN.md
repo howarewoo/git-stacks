@@ -717,6 +717,15 @@ Display the active source, version, executable path, minimum-version result, and
 
 Both runtime choices use the same Git operation guards. Custom `files:` reference-storage paths are decoded as native absolute file paths, including Windows drive letters; a remote host, credentials, query, fragment, malformed escape, or NUL is refused instead of treated as a local lock path. Passing local runtime tests does not establish that a signed Windows or macOS release artifact was produced; signing and shipment remain release-workflow gates.
 
+### Updates
+
+The Updates section states what this build is before it offers anything to do: the installed version, the channel it follows, which key the updater verifies with, and whether this platform is updated in place. A refused build is a stated condition, not a failure to recover from, so it is presented the way the main process reported it.
+
+- **Facts before controls:** The installed version, the channel in use, the key the updater verifies with, and whether this platform is updated in place are read from the update status and are shown before the first control, never below it and never only after a check has run. They hold in every phase, including the phases where nothing can be done, and a control that changes one of them is additional to the fact rather than a substitute for it.
+- **Only the possible step:** Each step appears only when it is the step that can actually happen, so a build with no compiled release key, a platform with no install path, and a build with no authenticated offer present nothing to click. A control that is present but unreachable is a dead end with a reason attached; the step is withheld instead.
+- **The main process's own reason:** A refusal is shown as the reason main gave, in its terms, rather than softened into a suggestion to retry, refresh, or check the connection. `not-configured`, `unsupported`, `not-newer`, `replayed`, and `bad-signature` are different answers and are never merged into one failure message, and a phase with no outcome is not dressed as success.
+- **Progress is progress:** A download in progress reports how far it has got against the size the signed manifest recorded, and stays cancellable while it does. A control that is merely disabled, or a spinner with no state behind it, is not a progress state.
+
 ### Settings, theming, and privacy
 
 Settings is a sectioned dialog: a left rail names the sections (Account, Git, Appearance, Shortcuts, Privacy, Diagnostics) and the right pane shows one at a time. Every control is a two-way control, a single-value field, or a text input; there are no controls that store a value nothing reads.

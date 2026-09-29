@@ -196,6 +196,7 @@ test('a policy that cannot be read locks every managed setting instead of none',
     'github.host',
     'privacy.includeLocalPaths',
     'shortcuts',
+    'updates.channel',
   ])
 })
 
@@ -208,10 +209,7 @@ test('a policy that is not JSON locks everything rather than quietly unlocking i
     // Every managed key is locked, so the count is the key list rather than a
     // number this test would have to be edited for on every new setting.
     assert.equal(policy.locks.length, SETTING_KEYS.length)
-    assert.deepEqual(
-      policy.locks.map((lock) => lock.key).sort(),
-      [...SETTING_KEYS].sort(),
-    )
+    assert.deepEqual(policy.locks.map((lock) => lock.key).sort(), [...SETTING_KEYS].sort())
   })
 })
 
@@ -227,10 +225,7 @@ test('a policy naming a key this build does not know is held closed, not applied
     // Every managed key is locked, so the count is the key list rather than a
     // number this test would have to be edited for on every new setting.
     assert.equal(policy.locks.length, SETTING_KEYS.length)
-    assert.deepEqual(
-      policy.locks.map((lock) => lock.key).sort(),
-      [...SETTING_KEYS].sort(),
-    )
+    assert.deepEqual(policy.locks.map((lock) => lock.key).sort(), [...SETTING_KEYS].sort())
   })
 })
 
@@ -786,11 +781,7 @@ test('the GitHub host setting keeps a bare host name and refuses anything aimed 
       'not a host',
     ]) {
       const rejected = await updateSettings(file, { github: { host: refused } }, [])
-      assert.equal(
-        rejected.settings.github.host,
-        'ghe.example.com',
-        `${refused} was not refused`,
-      )
+      assert.equal(rejected.settings.github.host, 'ghe.example.com', `${refused} was not refused`)
       assert.ok(
         rejected.issues.some((issue) => issue.key === 'github.host'),
         `${refused} produced no issue`,

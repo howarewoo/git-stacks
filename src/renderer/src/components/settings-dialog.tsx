@@ -26,6 +26,7 @@ import {
 import type { ShortcutId } from '../../../shared/shortcuts'
 import type { GitHubAccountStatus } from '../../../shared/types'
 import { UPDATE_CHANNELS, type UpdateChannel, type UpdateStatus } from '../../../shared/update'
+import { UpdateSummary } from './update-summary'
 import { CAPABILITY_STATE_LABELS, type GitHubHostStatus } from '../../../shared/host'
 
 const MERGE_METHOD_LABELS: Record<MergeMethod, string> = {
@@ -85,14 +86,7 @@ export interface SettingsDialogProps {
 }
 
 type Section =
-  | 'account'
-  | 'github'
-  | 'git'
-  | 'appearance'
-  | 'privacy'
-  | 'shortcuts'
-  | 'updates'
-  | 'diagnostics'
+  'account' | 'github' | 'git' | 'appearance' | 'privacy' | 'shortcuts' | 'updates' | 'diagnostics'
 
 const SECTIONS: { id: Section; label: string }[] = [
   { id: 'account', label: 'Account' },
@@ -668,14 +662,16 @@ export function SettingsDialog({
                       }
                     />
                   </Field>
-                  <OperationFacts facts={updateFacts(updates, settings.updates.channel)} />
+                  <UpdateSummary status={updates} channel={settings.updates.channel} />
                 </WorkflowSection>
                 <WorkflowSection label="This build">
-                  {updateNotice(updates)}
+                  <UpdateSummary status={updates} channel={settings.updates.channel} />
                   <div className="flex flex-wrap items-center gap-2">
                     <Button
                       variant="secondary"
-                      disabled={busy || !desktop?.checkForUpdates || updates?.phase === 'not-configured'}
+                      disabled={
+                        busy || !desktop?.checkForUpdates || updates?.phase === 'not-configured'
+                      }
                       onClick={() => void runUpdate(() => desktop?.checkForUpdates?.(), true)}
                     >
                       Check for updates
@@ -851,69 +847,4 @@ function toolError(
   return tool.label === 'none configured'
     ? undefined
     : `${tool.label} is not installed on this computer.`
-}
-
-const UPDATE_TRUST_LABEL: Record<UpdateStatus['trust'], string> = {
-  release: 'Release signing key compiled into this build',
-  development: 'Development key from this machine’s environment',
-  none: 'No signing key in this build',
-}
-
-const UPDATE_PHASE_LABEL: Record<UpdateStatus['phase'], string> = {
-  idle: 'Not checked yet',
-  'not-configured': 'Updates are switched off in this build',
-  unsupported: 'This platform is not updated in place',
-  checking: 'Checking for a signed release…',
-  current: 'This is the newest signed release for this channel',
-  available: 'A signed release is ready to download',
-  downloading: 'Downloading and verifying the signed release…',
-  downloaded: 'The release is downloaded and verified. Install it when you are ready.',
-  installing: 'Installing and restarting…',
-  failed: 'The last attempt did not finish',
-  cancelled: 'Cancelled. Nothing was changed.',
-}
-
-/** The facts about the updater that are true regardless of what it is doing. */
-function updateFacts(status: UpdateStatus | null, channel: UpdateChannel): ContextFact[] {
-  return [
-    { label: 'Installed version', value: status?.currentVersion ?? 'Unknown', code: true },
-    { label: 'Channel', value: channel },
-    {
-      label: 'Signing key',
-      value: UPDATE_TRUST_LABEL[status?.trust ?? 'none'],
-    },
-    {
-      label: 'In-place updates',
-      value: status?.supported ? 'Supported on this platform' : 'Not supported on this platform',
-    },
-  ]
-}
-
-/**
- * What the updater is doing, in the terms it reported. A refusal is shown as
- * the reason main gave, never as a failure to connect that invites the reader
- * to retry something that will refuse again.
- */
-function updateNotice(status: UpdateStatus | null) {
-  if (!status) return <InlineAlert tone="info">Reading the update state…</InlineAlert>
-  const offer = status.offer
-  const headline = offer
-    ? `Version ${offer.version} on the ${offer.channel} channel${
-        offer.rollbackOf ? `, an authorised rollback of ${offer.rollbackOf}` : ''
-      } · ${Math.round(offer.size / (1024 * 1024))} MB for ${offer.platform} ${offer.arch}`
-    : UPDATE_PHASE_LABEL[status.phase]
-  const body = status.failure
-    ? `${status.failure.message} (${status.failure.reason})`
-    : offer?.notes
-  return (
-    <>
-      <InlineAlert tone={status.failure ? 'warning' : 'info'}>
-        {headline}
-        {body ? ` — ${body}` : ''}
-      </InlineAlert>
-      {status.restartRequired ? (
-        <InlineAlert tone="success">The update is installed. Restart to use it.</InlineAlert>
-      ) : null}
-    </>
-  )
 }

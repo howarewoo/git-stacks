@@ -1524,7 +1524,10 @@ function installHandlers() {
     // The probe belongs to the host selected when it started: a host change
     // aborts it and refuses its answer, so a retired host's late result cannot
     // recreate the record that was just forgotten or overwrite a newer status.
-    return forSelectedHost((signal) => probeGitHubHost(selected.context, { repository, signal }), selected)
+    return forSelectedHost(
+      (signal) => probeGitHubHost(selected.context, { repository, signal }),
+      selected,
+    )
   })
   ipcMain.handle('git-runtime', async (event) => {
     validateSender(event)
@@ -1837,6 +1840,11 @@ app
       arch: process.arch,
       relaunch: () => {
         app.relaunch()
+        app.quit()
+      },
+      quit: () => {
+        // The installer replaces files this app is running from, so Windows
+        // gets the app closed and the installer finishes on its own.
         app.quit()
       },
     })

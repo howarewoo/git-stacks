@@ -62,6 +62,11 @@ export type FixtureCall =
   | 'chooseDestinationDirectory'
   | 'cloneRepository'
   | 'addRepository'
+  | 'updateStatus'
+  | 'checkForUpdates'
+  | 'downloadUpdate'
+  | 'installUpdate'
+  | 'cancelUpdate'
 
 /** One entry of the ordered {@link FixtureControl.calls} log. */
 export interface FixtureCallRecord {

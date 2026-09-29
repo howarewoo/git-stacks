@@ -3,9 +3,9 @@
 A local-first desktop workbench for Git branches and stacked pull requests.
 
 Design rules live in [DESIGN.md](DESIGN.md). This guide covers how to run the app,
-how the large-repository work is measured, and how development and verification
-are performed; record run-specific evidence and outstanding acceptance checks in
-the associated pull request.
+how the large-repository work is measured, how development and verification are
+performed, and how a release is published and updated; record run-specific
+evidence and outstanding acceptance checks in the associated pull request.
 
 ## Commands
 
@@ -255,14 +255,14 @@ the CLI reads for that host — `GH_TOKEN` for github.com,
 credential exchange never follows a redirect, so a host cannot forward a
 refresh token somewhere else.
 
-| State             | Meaning                                                                   |
-| ----------------- | ------------------------------------------------------------------------- |
-| `supported`       | The host answered and offers the capability.                              |
-| `unsupported`     | The host answered and does not offer the capability.                      |
-| `unauthenticated` | The host answered, but no credential for that host is available.          |
-| `unreachable`     | The host did not answer.                                                  |
+| State             | Meaning                                                                                                              |
+| ----------------- | -------------------------------------------------------------------------------------------------------------------- |
+| `supported`       | The host answered and offers the capability.                                                                         |
+| `unsupported`     | The host answered and does not offer the capability.                                                                 |
+| `unauthenticated` | The host answered, but no credential for that host is available.                                                     |
+| `unreachable`     | The host did not answer.                                                                                             |
 | `not-configured`  | A prerequisite is missing, such as no GitHub App client id for that host, or no configured way to ask a host at all. |
-| `unknown`         | The capability has not been established, or the host answered something this build could not read. |
+| `unknown`         | The capability has not been established, or the host answered something this build could not read.                   |
 
 Repository discovery is reported from an actual discovery run, not from the
 API answering at all: a host that serves its API root and refuses a repository
@@ -300,18 +300,19 @@ Settings is reachable from the command palette (**Settings…**). Preferences ar
 stored in `settings.json` under the app's user-data directory, which main owns
 and validates; the renderer never chooses or writes that path.
 
-| Setting                              | Effect                                                                                                                                |
-| ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------- |
-| Git to run                           | Chooses the bundled runtime or the system `git` for every Git operation.                                                              |
-| GitHub host                          | The GitHub host every sign-in, discovery run, and API request addresses: `github.com` or an enterprise host name (an optional port). Each repository's own remote decides the host in use. |
-| Editor                               | Program used by **Open in editor** in the file inspector. Empty means the platform default.                                           |
-| Merge tool                           | Program Git runs to resolve a conflict. Takes precedence over `GIT_MERGE_TOOL` and `merge.tool`. Empty means Git's own configuration. |
-| Default pull strategy / merge method | Seeds the workflow dialog; still changeable per operation.                                                                            |
-| Background refresh                   | Seconds between automatic refreshes of an open repository. `Off` refreshes only on request.                                           |
-| Theme                                | `Match system`, `Light`, or `Dark`.                                                                                                   |
-| Reduce motion                        | Removes non-essential transitions regardless of the system setting.                                                                   |
-| Include local paths                  | Lets a support bundle name the Git executable path. Nothing else widens.                                                              |
-| Shortcuts                            | Chord editing with conflict detection.                                                                                                |
+| Setting                              | Effect                                                                                                                                                                                                                          |
+| ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Git to run                           | Chooses the bundled runtime or the system `git` for every Git operation.                                                                                                                                                        |
+| GitHub host                          | The GitHub host every sign-in, discovery run, and API request addresses: `github.com` or an enterprise host name (an optional port). Each repository's own remote decides the host in use.                                      |
+| Editor                               | Program used by **Open in editor** in the file inspector. Empty means the platform default.                                                                                                                                     |
+| Merge tool                           | Program Git runs to resolve a conflict. Takes precedence over `GIT_MERGE_TOOL` and `merge.tool`. Empty means Git's own configuration.                                                                                           |
+| Default pull strategy / merge method | Seeds the workflow dialog; still changeable per operation.                                                                                                                                                                      |
+| Background refresh                   | Seconds between automatic refreshes of an open repository. `Off` refreshes only on request.                                                                                                                                     |
+| Theme                                | `Match system`, `Light`, or `Dark`.                                                                                                                                                                                             |
+| Reduce motion                        | Removes non-essential transitions regardless of the system setting.                                                                                                                                                             |
+| Include local paths                  | Lets a support bundle name the Git executable path. Nothing else widens.                                                                                                                                                        |
+| Shortcuts                            | Chord editing with conflict detection.                                                                                                                                                                                          |
+| Update channel                       | The channel **Settings → Updates** follows: `stable` for signed releases for everyone, `beta` for the pre-release channel, which moves faster and changes more often. It defaults to `stable` and persists until it is changed. |
 
 The GitHub host accepts a bare host name (a pasted `https://` URL is normalized
 down to its host) and refuses a path, a query, a non-HTTPS scheme, or embedded
@@ -404,6 +405,206 @@ content is never readable under the permissions the file arrived with.
 Recent failures is included only when something was recorded. It carries the
 main-process failure summaries described under **Handled failures** above, and
 they pass through the same secret and path redaction as every other field.
+
+## Signed updates
+
+A release is a signed manifest plus the artifacts that manifest names. The app
+authenticates the manifest with a release public key compiled into the build
+before it fetches anything the manifest names, and then checks the downloaded
+artifact against that same manifest before it installs anything. No repository is
+read or written on any path through this.
+
+Checking for an update sends nothing about the person or their machine. It reads
+a published file from this project's release location, and there is no telemetry
+or crash upload behind it.
+
+### How a release is published
+
+Publishing a GitHub release runs
+[`.github/workflows/release-desktop.yml`](.github/workflows/release-desktop.yml)
+in three jobs. The packaging job refuses to start unless the release tag is `v`
+followed by the version in `package.json` and every signing prerequisite is
+present, injects the release update key into the build, runs the test suite, and
+packages macOS, Windows, and Linux. It uploads only what it verified: the macOS
+build must pass `codesign --verify` with a `Developer ID Application` authority, a
+`stapler`-validated notarisation ticket, and the expected team identifier, and
+the Windows installer is refused unless `Get-AuthenticodeSignature` reports
+`Valid`. Provenance is attested for the uploaded files, and a separate job
+refuses a known-vulnerable dependency and keeps a dependency inventory with the
+run.
+
+The publishing job then mints, signs, and re-verifies the channel's manifest and
+publishes it with its detached signature and the installers it names, on that
+channel's moving release tag, so a channel's feed address never has to be
+rebuilt:
+
+| Channel  | Moving release tag | Manifest             | Detached signature       |
+| -------- | ------------------ | -------------------- | ------------------------ |
+| `stable` | `updates-stable`   | `update-stable.json` | `update-stable.json.sig` |
+| `beta`   | `updates-beta`     | `update-beta.json`   | `update-beta.json.sig`   |
+
+A prerelease on GitHub publishes the `beta` channel; a full release publishes
+`stable`. The moving tag only ever moves forward along this repository's history,
+and a tag that has been moved elsewhere stops the release instead of being
+overwritten. The installers are uploaded before the manifest that names them and
+the signature, so the feed is complete or it is not moved. Before any of it is
+published, the manifest and its signature are read back from disk, the signature
+is verified again with the key this release injected, every installer is
+re-hashed, each packaged build's own key set is compared with the one being
+signed with, and each artifact's provenance is verified.
+
+A manifest is issued, never edited in place. Its signing key is the
+`UPDATE_SIGNING_KEY` repository secret, and the packaging job injects that key's
+public half into the app it builds, so a released build is the only build that
+carries one. Nothing in the workflow generates a key, and every step that needs
+one fails closed without it: a key this repository made up would verify against
+nothing an installed build trusts, and a manifest signed by a key no build
+carries could be installed by no one. The repository itself holds no key
+material — `resources/update-trusted-keys.json` is committed empty, because a
+public key committed here would be trusted by every packaged build built from
+it. Each channel's sequence is read back from the manifest that channel already
+publishes, so it only ever rises, and each installer is published under a plain
+asset name with no spaces, because the URL the manifest names has to end in
+exactly the file name it describes.
+
+Every field is required: `schema`, `channel`, `version`, `sequence`, `issuedAt`,
+`expiresAt`, `notes`, `rollbackOf`, and `artifacts`, where each artifact carries
+its `platform`, `arch`, `kind`, `fileName`, `url`, `sha256`, and `size`. A
+manifest carrying a field this build does not know is refused rather than
+parsed, because a field the code does not check is a field a forger could use.
+
+### What the app does with a release
+
+The order is the point, and it belongs to the app rather than to the feed:
+
+1. Nothing is fetched until the build has a key to verify with. A packaged build
+   takes its keys only from the key set compiled into its own bundle, and a
+   packaged build with no such key — every one not put together by the release
+   job — reports updates as not configured and never opens a socket.
+2. The manifest and its detached signature are read, and the signature is
+   verified against the manifest bytes exactly as they arrived. Only bytes a
+   trusted key actually signed are ever parsed, so a URL, a file name, or a
+   version taken from an unsigned manifest is not read.
+3. The rules the signature does not cover are applied: the manifest publishes the
+   channel this build follows, it is inside its 30-day lifetime, it is not older
+   than the newest release sequence already offered here, it names a build for
+   this platform and architecture, its version is newer than the running build or
+   is an authorised rollback, and every URL it names is HTTPS on this project's
+   release location and under the channel's release path, ending in the file name
+   the manifest describes.
+4. The offered artifact is downloaded, and the download is discarded unless its
+   byte count and SHA-256 match what the signed manifest recorded. The file is
+   written under a temporary name and only moved into place once both match, so
+   nothing downstream can read a partial or substituted file. A redirect is
+   followed only to this project's own release location or to the one release
+   asset host GitHub serves the file from, so a signed manifest cannot send the
+   download somewhere the manifest itself could not have been fetched from.
+5. Before anything is run, the download must carry the platform's own signature
+   and the identity of the app that is already installed. An installer signed by
+   anybody else is refused even when its digest matches the manifest exactly.
+   On macOS the installed bundle is moved aside rather than overwritten in
+   place, so a failure part-way through leaves a working app to go back to;
+   where the platform installer has to replace files this process is running
+   from, the app closes and the installer finishes on its own.
+
+The updater writes only to the app's own user-data directory, and on macOS to a
+staged and a moved-aside copy of the bundle beside the installed one, both
+carrying this app's own prefix. It never reads or writes a repository.
+
+### Channels
+
+`stable` follows signed releases for everyone. `beta` follows the pre-release
+channel, which moves faster and changes more often. The channel is chosen in
+**Settings → Updates** and stored as `updates.channel` in `settings.json`. It
+defaults to `stable` and only the person changes it, so a build keeps following
+the channel it was set to rather than drifting to whatever was published last;
+moving to `beta` is an explicit choice, not something a prerelease makes on your
+behalf. The newest release sequence offered on each channel is remembered
+separately, so returning to a channel cannot walk back to a manifest older than
+one this computer has already been offered there. Changing the channel starts a
+different feed with its own sequence history, and the previous offer is dropped
+rather than kept.
+
+### Rollback
+
+A rollback is a new signed release, not a reissued old one. It needs all three of:
+a release sequence higher than the newest this computer has been offered on that
+channel, a version lower than the release it replaces, and `rollbackOf` naming
+that newer release. The app then presents it as an authorised rollback of that
+version rather than as an ordinary upgrade. It is never a silent downgrade: a
+manifest whose version is not newer than the running build is refused as
+`not-newer` unless it carries exactly that authorisation, and a manifest older
+than the newest release sequence already offered on that channel is refused as
+`replayed` even when every other field matches. A manifest at the same sequence
+is offered again, so an offer that was never taken survives a restart and still
+cannot be replayed backwards. A rollback replaces the installed application and
+nothing else: it does not touch a user's repositories, working trees, branches,
+or uncommitted work.
+
+On the publishing side, a rollback is a release of an older version that names
+the version it replaces through the `UPDATE_ROLLBACK_OF` repository variable. A
+release of an older version without that variable is refused by the release job
+rather than published as a quiet downgrade, and the sequence still rises, so the
+rollback reaches the installations that have already seen what it withdraws.
+
+The release job enforces the same rule from its side: a version lower than the
+one that channel already publishes is refused unless `UPDATE_ROLLBACK_OF` names
+exactly that version, and a `rollbackOf` on a release that is not a downgrade is
+refused too. A downgrade can therefore never be published by accident, only
+chosen.
+
+### Platform support
+
+| Platform | Package                                              | Signing                                                                                              | Updated in place                                                                                                                                                                                                                                             |
+| -------- | ---------------------------------------------------- | ---------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| macOS    | `dmg`                                                | Developer ID Application, notarised and stapled                                                      | Yes. The download is checked against the installed app's own signing identity, team, bundle identifier, version, and architecture, staged beside the running bundle and proved again there, then moved into the bundle's place and the app restarts into it. |
+| Windows  | NSIS installer                                       | Authenticode, verified before it runs                                                                | Yes. The installer's Authenticode identity is compared with the installed app's own; the installer is then started, this app closes, and the update finishes on its own.                                                                                     |
+| Linux    | AppImage, also covered by the packaged desktop smoke | No platform signature exists to check; the release's own manifest signature is what authenticates it | No. An AppImage is a single file the person runs from wherever they put it, with no installed copy to replace and no signature to check before running it, so in-place updates are unsupported there and a download is offered to run instead.               |
+
+The release states the Linux policy in its own log on every Linux build — "linux:
+best-effort artifact — built, published and signed, never updated in place by the
+app" — and that step fails the release if `src/main/update/install.ts` ever grows
+a Linux entry, so the line cannot quietly stop being true.
+
+No signed macOS or Windows artifact has been produced, and none can be produced
+from this repository as it stands. Signing needs a code-signing certificate
+(`CSC_LINK`, `CSC_KEY_PASSWORD`), and macOS notarisation needs an Apple
+developer account (`APPLE_ID`, `APPLE_APP_SPECIFIC_PASSWORD`, `APPLE_TEAM_ID`).
+The release job fails closed when any of them is missing: it stops before
+packaging rather than publishing an unsigned artifact under a release name. No
+release has been published and no manifest has been signed, and this repository
+carries no release key, so no build of it can currently be offered a verified
+update at all.
+
+### An unsigned build is not a release
+
+`npm run dist` run locally packages the app without a certificate, so the output
+is a development package, not a release: it is not signed, not notarised, not
+attested, and not offered to anyone else. It also refuses to install updates. A
+packaged build takes its trusted keys from its own bundle and nowhere else, and a
+local package carries none because only the release job injects one, so it
+reports updates as not configured, and the app will not fetch a manifest or
+install anything. An unpackaged `npm run dev` build may instead take one key
+from `GIT_STACKS_UPDATE_KEY_ID` and `GIT_STACKS_UPDATE_PUBLIC_KEY` for fixtures,
+and **Settings → Updates** says so when it is running on such a key; that path
+does not exist in a packaged build, because whoever starts a process decides its
+environment.
+
+### Keeping the release key trusted
+
+A released build's trusted public key is compiled into the main bundle during
+packaging, so nothing on a user's machine can add, drop, or change it after
+installation. Rotating it is therefore a shipped change with an overlap window,
+not a switch someone can throw on an installed app. The new key is injected into
+the next release alongside the old one, and the old key stays trusted for as long
+as an artifact it signed can still be offered — a manifest stops being offered 30
+days after it was issued, so the window has to outlast the manifests in flight.
+Only then does the retiring key's `validUntil` pass, and a key outside its
+validity window is never consulted at all, so the old key stops verifying the
+moment it is retired rather than whenever someone notices. A private key is never
+compiled into a build, never committed to this repository, and never written to a
+CI log: the release job signs with a secret held by the repository owner, and a
+build only ever carries the public half of it.
 ## Onboarding
 
 With no repository open, the window offers three ways in, and all of them end

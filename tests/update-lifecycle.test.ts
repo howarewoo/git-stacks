@@ -1,0 +1,542 @@
+import assert from 'node:assert/strict'
+import { execFileSync } from 'node:child_process'
+import { EventEmitter } from 'node:events'
+import { createHash, generateKeyPairSync, sign } from 'node:crypto'
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
+import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { createServer as createTlsServer, type Server } from 'node:https'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { once } from 'node:events'
+import { test } from 'node:test'
+import { UpdateService } from '../src/main/update/service'
+import type { UpdateChannel } from '../src/shared/update'
+
+/**
+ * The real update path, over a real socket, against a real HTTPS release
+ * server. The certificate is generated for this run and handed to the updater
+ * the way a fixture hands it over, so a manifest that was edited after it was
+ * signed, a build that is not the one the manifest described, or a channel
+ * change that lands late is visible on the wire rather than in a mock.
+ */
+
+const TLS = (() => {
+  const dir = mkdtempSync(join(tmpdir(), 'git-stacks-update-'))
+  const key = join(dir, 'key.pem')
+  const certFile = join(dir, 'cert.pem')
+  execFileSync('openssl', [
+    'req',
+    '-x509',
+    '-newkey',
+    'rsa:2048',
+    '-nodes',
+    '-keyout',
+    key,
+    '-out',
+    certFile,
+    '-days',
+    '1',
+    '-subj',
+    '/CN=127.0.0.1',
+    // The updater verifies the certificate for real, so the fixture names the
+    // address it serves on rather than turning verification off.
+    '-addext',
+    'subjectAltName=IP:127.0.0.1',
+  ])
+  return { caFile: certFile, key: readFileSync(key), cert: readFileSync(certFile) }
+})()
+
+const RELEASE_KEY = generateKeyPairSync('ed25519')
+const KEY_ID = 'release-fixture'
+const PUBLIC_KEY = RELEASE_KEY.publicKey.export({ format: 'der', type: 'spki' }).toString('base64')
+const ARTIFACT = Buffer.from('a signed installer, as far as this fixture is concerned')
+
+interface Release {
+  version: string
+  sequence: number
+  bytes: Buffer
+  channel: UpdateChannel
+  /** The newer release this one is an authorised replacement for. */
+  rollbackOf?: string | null
+  /** Signs these exact bytes, or signs different ones to model a tamper. */
+  tamper?: boolean
+  /** Held open until the test releases it, so a check can be interrupted. */
+  hold?: Promise<void> | null
+}
+
+/** A response the test holds open and releases when it chooses. */
+function gate(): { wait: Promise<void>; open: () => void } {
+  let open = (): void => undefined
+  const wait = new Promise<void>((resolve) => {
+    open = resolve
+  })
+  return { wait, open }
+}
+
+function manifestFor(release: Release, base: string): Buffer {
+  return Buffer.from(
+    JSON.stringify({
+      schema: 1,
+      channel: release.channel,
+      version: release.version,
+      sequence: release.sequence,
+      issuedAt: new Date(Date.now() - 60_000).toISOString(),
+      expiresAt: new Date(Date.now() + 7 * 86_400_000).toISOString(),
+      notes: `Release ${release.version}`,
+      rollbackOf: release.rollbackOf ?? null,
+      artifacts: [
+        {
+          platform: 'darwin',
+          arch: 'arm64',
+          kind: 'dmg',
+          fileName: `Git-Stacks-${release.version}-arm64.dmg`,
+          url: `${base}/${release.channel}/Git-Stacks-${release.version}-arm64.dmg`,
+          sha256: createHash('sha256').update(release.bytes).digest('hex'),
+          size: release.bytes.length,
+        },
+      ],
+    }),
+  )
+}
+
+interface Feed {
+  base: string
+  requests: string[]
+  set: (release: Release | null) => void
+  close: () => Promise<void>
+}
+
+async function startFeed(): Promise<Feed> {
+  let release: Release | null = null
+  const requests: string[] = []
+  // One manifest per published release, built once and served for both the
+  // manifest and its signature: a signature that covers different bytes than
+  // the ones served would model a bug, not a release.
+  let cached: { identity: string; bytes: Buffer; signature: string } | null = null
+  const published = (current: Release): { identity: string; bytes: Buffer; signature: string } => {
+    const identity = JSON.stringify([
+      current.version,
+      current.sequence,
+      current.channel,
+      current.rollbackOf ?? null,
+      current.bytes.length,
+    ])
+    if (!cached || cached.identity !== identity) {
+      const bytes = manifestFor(current, base)
+      cached = {
+        identity,
+        bytes,
+        signature: sign(null, bytes, RELEASE_KEY.privateKey).toString('base64'),
+      }
+    }
+    return cached
+  }
+  const server: Server = createTlsServer({ key: TLS.key, cert: TLS.cert }, (request, response) => {
+    const url = new URL(request.url ?? '/', 'https://placeholder')
+    requests.push(url.pathname)
+    const current = release
+    const settle = (): void => {
+      if (!current) {
+        response.writeHead(404).end('no release')
+        return
+      }
+      const release = published(current)
+      if (url.pathname === `/update-${current.channel}.json`) {
+        response
+          .writeHead(200, { 'content-type': 'application/json' })
+          .end(current.tamper ? Buffer.from(`${release.bytes.toString()} `) : release.bytes)
+        return
+      }
+      if (url.pathname === `/update-${current.channel}.json.sig`) {
+        response
+          .writeHead(200, { 'content-type': 'application/json' })
+          .end(JSON.stringify({ schema: 1, keyId: KEY_ID, signature: release.signature }))
+        return
+      }
+      if (url.pathname === `/${current.channel}/Git-Stacks-${current.version}-arm64.dmg`) {
+        response.writeHead(200, { 'content-type': 'application/octet-stream' }).end(current.bytes)
+        return
+      }
+      response.writeHead(404).end('not found')
+    }
+    // A held response is released by the test, never by a timer: the race
+    // being exercised is decided by when the test says so.
+    if (current?.hold) void current.hold.then(settle)
+    else settle()
+  })
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const address = server.address()
+  if (address === null || typeof address === 'string') throw new Error('the feed has no port')
+  const base = `https://127.0.0.1:${address.port}`
+  return {
+    base,
+    requests,
+    set: (next) => {
+      release = next
+      cached = null
+    },
+    close: () =>
+      new Promise<void>((resolve) => {
+        server.closeAllConnections()
+        server.close(() => resolve())
+      }),
+  }
+}
+
+interface Harness {
+  service: UpdateService
+  userDataPath: string
+  staged: () => string[]
+  until: (phase: 'checking' | 'downloading') => Promise<void>
+}
+
+/** A bundle-shaped path that exists but carries no signature. */
+function unsignedBundle(): string {
+  const root = mkdtempSync(join(tmpdir(), 'git-stacks-bundle-'))
+  const executable = join(root, 'Git Stacks.app', 'Contents', 'MacOS', 'Git Stacks')
+  mkdirSync(join(root, 'Git Stacks.app', 'Contents', 'MacOS'), { recursive: true })
+  writeFileSync(executable, '#!/bin/sh\n')
+  return executable
+}
+
+function harnessFor(base: string): Harness {
+  const userDataPath = mkdtempSync(join(tmpdir(), 'git-stacks-update-data-'))
+  const service = new UpdateService({
+    packaged: false,
+    currentVersion: '0.1.0',
+    appPath: unsignedBundle(),
+    userDataPath,
+    platform: 'darwin',
+    arch: 'arm64',
+    env: {
+      GIT_STACKS_UPDATE_KEY_ID: KEY_ID,
+      GIT_STACKS_UPDATE_PUBLIC_KEY: PUBLIC_KEY,
+      GIT_STACKS_UPDATE_FEED_BASE: base,
+      GIT_STACKS_UPDATE_CA_FILE: TLS.caFile,
+    },
+    relaunch: () => undefined,
+  })
+  const phases = new EventEmitter()
+  service.onChange((status) => {
+    if (status.phase === 'checking' || status.phase === 'downloading') {
+      phases.emit(status.phase)
+    }
+  })
+  /** Resolves once the service is actually in the named phase. */
+  const until = (phase: 'checking' | 'downloading'): Promise<void> =>
+    service.status().phase === phase ? Promise.resolve() : once(phases, phase).then(() => undefined)
+  return {
+    service,
+    userDataPath,
+    until,
+    staged: () => {
+      try {
+        return readdirSync(join(userDataPath, 'updates'))
+      } catch {
+        return []
+      }
+    },
+  }
+}
+
+test('a signed release is offered, downloaded, and its bytes are proved before anything is installed', async (t) => {
+  const feed = await startFeed()
+  t.after(() => feed.close())
+  feed.set({ version: '0.2.0', sequence: 1, bytes: ARTIFACT, channel: 'stable' })
+  const app = harnessFor(feed.base)
+  await app.service.start('stable')
+
+  const offered = await app.service.check()
+  assert.equal(offered.phase, 'available', offered.failure?.message ?? '')
+  assert.equal(offered.offer?.version, '0.2.0')
+  assert.equal(offered.trust, 'development')
+  assert.equal(offered.readyToInstall, false)
+
+  const downloaded = await app.service.download()
+  assert.equal(downloaded.phase, 'downloaded')
+  assert.equal(downloaded.progress, 100)
+  assert.equal(downloaded.readyToInstall, true)
+  assert.deepEqual(app.staged(), [
+    `${createHash('sha256').update(ARTIFACT).digest('hex').slice(0, 16)}-Git-Stacks-0.2.0-arm64.dmg`,
+  ])
+
+  // Nothing was run: this build is not signed, so there is no identity to
+  // match the download against and it is refused rather than installed.
+  const installed = await app.service.install()
+  assert.equal(installed.phase, 'failed')
+  assert.match(installed.failure?.message ?? '', /not signed/u)
+  assert.equal(installed.readyToInstall, false)
+  assert.equal(installed.restartRequired, false)
+  assert.deepEqual(
+    feed.requests,
+    ['/update-stable.json', '/update-stable.json.sig', '/stable/Git-Stacks-0.2.0-arm64.dmg'],
+    'only the manifest, its signature, and the artifact the manifest named were fetched',
+  )
+})
+
+test('a manifest edited after it was signed is refused and no artifact is fetched', async (t) => {
+  const feed = await startFeed()
+  t.after(() => feed.close())
+  feed.set({ version: '0.2.0', sequence: 1, bytes: ARTIFACT, channel: 'stable', tamper: true })
+  const app = harnessFor(feed.base)
+  await app.service.start('stable')
+
+  const status = await app.service.check()
+  assert.equal(status.phase, 'failed')
+  assert.equal(status.failure?.reason, 'bad-signature')
+  assert.equal(status.offer, null)
+  assert.equal(feed.requests.includes('/stable/Git-Stacks-0.2.0-arm64.dmg'), false)
+})
+
+test('a build that is not the one the signed manifest described is refused and nothing is left behind', async (t) => {
+  const feed = await startFeed()
+  t.after(() => feed.close())
+  const release: Release = { version: '0.2.0', sequence: 1, bytes: ARTIFACT, channel: 'stable' }
+  feed.set(release)
+  const app = harnessFor(feed.base)
+  await app.service.start('stable')
+  await app.service.check()
+  // The feed is asked for one thing and answers with another: the digest the
+  // manifest recorded is the only thing that can catch it.
+  release.bytes = Buffer.from('a different build with the same name')
+  const status = await app.service.download()
+  assert.equal(status.phase, 'failed')
+  assert.equal(status.readyToInstall, false)
+  assert.deepEqual(app.staged(), [], 'nothing half-verified is left on disk')
+})
+
+test('a staged installer that changes on disk after the download is never installed', async (t) => {
+  const feed = await startFeed()
+  t.after(() => feed.close())
+  feed.set({ version: '0.2.0', sequence: 1, bytes: ARTIFACT, channel: 'stable' })
+  const app = harnessFor(feed.base)
+  await app.service.start('stable')
+  await app.service.check()
+  await app.service.download()
+  const [staged] = app.staged()
+  assert.ok(staged, 'the verified download is staged')
+  await writeFile(join(app.userDataPath, 'updates', staged), 'a different installer entirely')
+
+  const status = await app.service.install()
+  assert.equal(status.phase, 'failed')
+  assert.equal(status.failure?.reason, 'bad-signature')
+  assert.match(status.failure?.message ?? '', /no longer matches the signed release/u)
+})
+
+test('the same release is offered again after a restart, and an older one is refused as a replay', async (t) => {
+  const feed = await startFeed()
+  t.after(() => feed.close())
+  feed.set({ version: '0.2.0', sequence: 4, bytes: ARTIFACT, channel: 'stable' })
+  const first = harnessFor(feed.base)
+  await first.service.start('stable')
+  await first.service.check()
+
+  // A second run over the same data directory is the same computer: the offer
+  // it never took must still be there.
+  const restarted = new UpdateService({
+    packaged: false,
+    currentVersion: '0.1.0',
+    appPath: unsignedBundle(),
+    userDataPath: first.userDataPath,
+    platform: 'darwin',
+    arch: 'arm64',
+    env: {
+      GIT_STACKS_UPDATE_KEY_ID: KEY_ID,
+      GIT_STACKS_UPDATE_PUBLIC_KEY: PUBLIC_KEY,
+      GIT_STACKS_UPDATE_FEED_BASE: feed.base,
+      GIT_STACKS_UPDATE_CA_FILE: TLS.caFile,
+    },
+    relaunch: () => undefined,
+  })
+  await restarted.start('stable')
+  const again = await restarted.check()
+  assert.equal(again.phase, 'available', 'an offer that was never taken is still available')
+  assert.equal(again.offer?.sequence, 4)
+
+  // A manifest from before the one already seen is a replay, whatever it says.
+  feed.set({ version: '0.2.0', sequence: 3, bytes: ARTIFACT, channel: 'stable' })
+  const replayed = await restarted.check()
+  assert.equal(replayed.phase, 'failed')
+  assert.equal(replayed.failure?.reason, 'replayed')
+
+  // A build that has already moved on to 0.3.0 refuses a silent downgrade to
+  // 0.2.0, and accepts exactly that version as a rollback when the signed
+  // release says which newer release it replaces.
+  const movedOn = new UpdateService({
+    packaged: false,
+    currentVersion: '0.3.0',
+    appPath: unsignedBundle(),
+    userDataPath: first.userDataPath,
+    platform: 'darwin',
+    arch: 'arm64',
+    env: {
+      GIT_STACKS_UPDATE_KEY_ID: KEY_ID,
+      GIT_STACKS_UPDATE_PUBLIC_KEY: PUBLIC_KEY,
+      GIT_STACKS_UPDATE_FEED_BASE: feed.base,
+      GIT_STACKS_UPDATE_CA_FILE: TLS.caFile,
+    },
+    relaunch: () => undefined,
+  })
+  await movedOn.start('stable')
+  feed.set({ version: '0.2.0', sequence: 5, bytes: ARTIFACT, channel: 'stable' })
+  const silent = await movedOn.check()
+  assert.equal(silent.phase, 'failed')
+  assert.equal(silent.failure?.reason, 'not-newer')
+
+  feed.set({
+    version: '0.2.0',
+    sequence: 5,
+    bytes: ARTIFACT,
+    channel: 'stable',
+    rollbackOf: '0.3.0',
+  })
+  const rolledBack = await movedOn.check()
+  assert.equal(rolledBack.phase, 'available')
+  assert.equal(rolledBack.offer?.version, '0.2.0')
+  assert.equal(rolledBack.offer?.rollbackOf, '0.3.0')
+  assert.equal(rolledBack.offer?.sequence, 5)
+})
+
+test('a download that is cancelled leaves nothing, and the next one still works', async (t) => {
+  const feed = await startFeed()
+  t.after(() => feed.close())
+  const release: Release = { version: '0.2.0', sequence: 1, bytes: ARTIFACT, channel: 'stable' }
+  feed.set(release)
+  const app = harnessFor(feed.base)
+  await app.service.start('stable')
+  await app.service.check()
+  // The answer to the artifact request is held, so the download is genuinely in
+  // flight when it is cancelled rather than already finished.
+  const hold = gate()
+  release.hold = hold.wait
+  const pending = app.service.download()
+  // The request is on the wire and the answer is held, so the download is
+  // genuinely in flight when it is cancelled.
+  await app.until('downloading')
+  const cancelled = app.service.cancel()
+  assert.equal(cancelled.phase, 'cancelled')
+  hold.open()
+  await pending
+  assert.equal(app.service.status().readyToInstall, false)
+  assert.deepEqual(app.staged(), [])
+
+  release.hold = null
+  const retried = await app.service.download()
+  assert.equal(retried.phase, 'downloaded')
+  assert.equal(retried.readyToInstall, true)
+})
+
+test('a check that finishes after the channel changed is not recorded against the new channel', async (t) => {
+  const feed = await startFeed()
+  t.after(() => feed.close())
+  const hold = gate()
+  feed.set({ version: '0.2.0', sequence: 6, bytes: ARTIFACT, channel: 'stable', hold: hold.wait })
+  const app = harnessFor(feed.base)
+  await app.service.start('stable')
+  const checking = app.service.check()
+  // The stable manifest is on the wire and unanswered: switching channels now
+  // must not let it land in the beta channel's history.
+  await app.until('checking')
+  await app.service.setChannel('beta')
+  hold.open()
+  const afterSwitch = await checking
+  assert.equal(afterSwitch.channel, 'beta')
+  assert.notEqual(
+    afterSwitch.offer?.version,
+    '0.2.0',
+    'the old channel’s release is not offered here',
+  )
+
+  // The new channel can be checked straight away: the abandoned run left the
+  // slot free, and the stable sequence was not written into the beta history.
+  feed.set({ version: '0.3.0', sequence: 2, bytes: ARTIFACT, channel: 'beta' })
+  const beta = await app.service.check()
+  assert.equal(beta.phase, 'available')
+  assert.equal(beta.offer?.version, '0.3.0')
+  assert.equal(beta.offer?.channel, 'beta')
+})
+
+test('a re-check of the same release keeps its verified download, and a different one discards it', async (t) => {
+  const feed = await startFeed()
+  t.after(() => feed.close())
+  const release: Release = { version: '0.2.0', sequence: 1, bytes: ARTIFACT, channel: 'stable' }
+  feed.set(release)
+  const app = harnessFor(feed.base)
+  await app.service.start('stable')
+  await app.service.check()
+  await app.service.download()
+  const staged = app.staged()
+
+  const same = await app.service.check()
+  assert.equal(same.phase, 'downloaded')
+  assert.equal(same.readyToInstall, true, 'the same release is still downloaded and verified')
+  assert.deepEqual(app.staged(), staged)
+
+  release.version = '0.3.0'
+  release.sequence = 2
+  const different = await app.service.check()
+  assert.equal(different.offer?.version, '0.3.0')
+  assert.equal(different.readyToInstall, false, 'the previous release’s installer is gone')
+  assert.deepEqual(app.staged(), [])
+})
+
+test('a damaged update history stops updating instead of forgetting what was seen', async (t) => {
+  const feed = await startFeed()
+  t.after(() => feed.close())
+  feed.set({ version: '0.2.0', sequence: 1, bytes: ARTIFACT, channel: 'stable' })
+  const app = harnessFor(feed.base)
+  await app.service.start('stable')
+  await writeFile(join(app.userDataPath, 'updates.json'), '{ not the history')
+
+  const restarted = harnessFor(feed.base)
+  const broken = new UpdateService({
+    packaged: false,
+    currentVersion: '0.1.0',
+    appPath: unsignedBundle(),
+    userDataPath: app.userDataPath,
+    platform: 'darwin',
+    arch: 'arm64',
+    env: {
+      GIT_STACKS_UPDATE_KEY_ID: KEY_ID,
+      GIT_STACKS_UPDATE_PUBLIC_KEY: PUBLIC_KEY,
+      GIT_STACKS_UPDATE_FEED_BASE: feed.base,
+      GIT_STACKS_UPDATE_CA_FILE: TLS.caFile,
+    },
+    relaunch: () => undefined,
+  })
+  await broken.start('stable')
+  assert.equal(broken.status().phase, 'failed')
+  assert.match(broken.status().failure?.message ?? '', /damaged/u)
+  const attempted = await broken.check()
+  assert.equal(attempted.phase, 'failed')
+  assert.equal(attempted.offer, null)
+  assert.equal(restarted.staged().length, 0)
+})
+
+test('a packaged build ignores a fixture feed and key entirely', async (t) => {
+  const feed = await startFeed()
+  t.after(() => feed.close())
+  feed.set({ version: '0.2.0', sequence: 1, bytes: ARTIFACT, channel: 'stable' })
+  const userDataPath = mkdtempSync(join(tmpdir(), 'git-stacks-update-data-'))
+  const service = new UpdateService({
+    packaged: true,
+    currentVersion: '0.1.0',
+    appPath: unsignedBundle(),
+    userDataPath,
+    platform: 'darwin',
+    arch: 'arm64',
+    env: {
+      GIT_STACKS_UPDATE_KEY_ID: KEY_ID,
+      GIT_STACKS_UPDATE_PUBLIC_KEY: PUBLIC_KEY,
+      GIT_STACKS_UPDATE_FEED_BASE: feed.base,
+      GIT_STACKS_UPDATE_CA_FILE: TLS.caFile,
+    },
+    relaunch: () => undefined,
+  })
+  await service.start('stable')
+  const status = await service.check()
+  assert.equal(status.failure?.reason, 'not-configured')
+  assert.equal(status.trust, 'none')
+  assert.deepEqual(feed.requests, [], 'an installed app opened no socket')
+  await readFile(join(userDataPath, 'updates.json'), 'utf8').catch(() => undefined)
+})
