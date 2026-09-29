@@ -4829,6 +4829,7 @@ export async function getSnapshot(
   }
 
   const refsByName = new Map(refs.filter((ref) => !ref.symref).map((ref) => [ref.refname, ref]))
+  const directParents = new Map<string, string[]>()
   const defaultRef =
     refsByName.get(`refs/heads/${defaultBranch}`) ??
     refsByName.get(`refs/remotes/origin/${defaultBranch}`)
