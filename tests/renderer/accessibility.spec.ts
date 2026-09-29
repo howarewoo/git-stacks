@@ -331,9 +331,7 @@ test.describe('Automated accessibility audits and contrast', () => {
       for (const text of texts) {
         expect(text).toMatch(/(open|closed|merged|draft)/)
         expect(text).toMatch(/checks (passing|failing|pending)|no checks/)
-        expect(text).toMatch(
-          /review approved|changes requested|review required|no review decision/,
-        )
+        expect(text).toMatch(/review approved|changes requested|review required|no review decision/)
       }
     })
 

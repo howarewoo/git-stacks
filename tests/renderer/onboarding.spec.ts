@@ -8,7 +8,9 @@ test.describe('Onboarding and repository discovery', () => {
 
     // Standard Git explanation is clearly visible
     await expect(
-      page.getByText('A repository stays ordinary Git: clone it here, then keep using it in your terminal, your editor, or GitHub Desktop.'),
+      page.getByText(
+        'A repository stays ordinary Git: clone it here, then keep using it in your terminal, your editor, or GitHub Desktop.',
+      ),
     ).toBeVisible()
 
     // Environment detection facts are rendered
@@ -19,7 +21,9 @@ test.describe('Onboarding and repository discovery', () => {
 
     // Primary action buttons are available
     await expect(page.getByRole('button', { name: 'Search GitHub', exact: true })).toBeVisible()
-    await expect(page.getByRole('button', { name: 'Add local repository', exact: true })).toBeVisible()
+    await expect(
+      page.getByRole('button', { name: 'Add local repository', exact: true }),
+    ).toBeVisible()
 
     // Visual proof of the onboarding empty state pane
     await page.screenshot({ path: 'test-results/onboarding-pane.png' })
@@ -50,13 +54,17 @@ test.describe('Onboarding and repository discovery', () => {
     // Select the empty repository to view clone details
     await dialog.getByText('acme/empty-repo').click()
     await expect(
-      dialog.getByText('This repository has no commits yet. The clone succeeds and your first branch starts from nothing.'),
+      dialog.getByText(
+        'This repository has no commits yet. The clone succeeds and your first branch starts from nothing.',
+      ),
     ).toBeVisible()
     // Choose destination folder to enable clone and display command preview
     await dialog.getByRole('button', { name: 'Choose folder', exact: true }).click()
 
     // Verify command preview displays both git and gh commands
-    await expect(dialog.getByText('git clone https://github.com/acme/empty-repo.git', { exact: false })).toBeVisible()
+    await expect(
+      dialog.getByText('git clone https://github.com/acme/empty-repo.git', { exact: false }),
+    ).toBeVisible()
     await expect(dialog.getByText('gh repo clone acme/empty-repo', { exact: false })).toBeVisible()
 
     // Visual proof of the clone dialog with command previews and empty repo guidance
@@ -64,13 +72,17 @@ test.describe('Onboarding and repository discovery', () => {
 
     // Protocol switch updates commands
     await dialog.getByRole('button', { name: 'SSH', exact: true }).click()
-    await expect(dialog.getByText('git clone git@github.com:acme/empty-repo.git', { exact: false })).toBeVisible()
+    await expect(
+      dialog.getByText('git clone git@github.com:acme/empty-repo.git', { exact: false }),
+    ).toBeVisible()
 
     // Destination collision handling
     const folderInput = dialog.getByLabel('Folder', { exact: true })
     await folderInput.fill('collision')
     await dialog.getByRole('button', { name: 'Clone repository', exact: true }).click()
-    await expect(dialog.getByText('collision already exists in that folder. Choose another name.')).toBeVisible()
+    await expect(
+      dialog.getByText('collision already exists in that folder. Choose another name.'),
+    ).toBeVisible()
 
     // Search error handling (e.g. SSO denial)
     await searchInput.fill('sso-error')
@@ -82,7 +94,9 @@ test.describe('Onboarding and repository discovery', () => {
     await expect(dialog).not.toBeVisible()
   })
 
-  test('adding an existing repository and drag-and-drop triggers repository registration', async ({ page }) => {
+  test('adding an existing repository and drag-and-drop triggers repository registration', async ({
+    page,
+  }) => {
     await openGallery(page, { scenario: 'shell-no-repository' })
     await settle(page)
 

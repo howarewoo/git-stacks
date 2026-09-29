@@ -668,9 +668,7 @@ function ui(page) {
       page
         .getByRole('tree', { name: 'Repository branches' })
         .getByRole('treeitem', {
-          name: new RegExp(
-            `^${escapeForRegExp(name)}${current ? ', current branch' : ''}(,|$)`,
-          ),
+          name: new RegExp(`^${escapeForRegExp(name)}${current ? ', current branch' : ''}(,|$)`),
         })
         .first(),
     dialog: () => page.getByRole('dialog'),
@@ -1486,15 +1484,16 @@ async function run(options) {
       // A file with conflicting regions is decided one region at a time, then the
       // edited result is staged; the whole-file accept controls only exist for a
       // file with no regions.
-      await resolver
-        .getByRole('button', { name: `Accept ${incomingSide} for conflict 1` })
-        .click()
+      await resolver.getByRole('button', { name: `Accept ${incomingSide} for conflict 1` }).click()
       await withNotice(
         locators,
         () => resolver.getByRole('button', { name: 'Mark resolved and stage' }).click(),
         /^Resolved /,
       )
-      await locators.staged().getByRole('button', { name: `Inspect ${CONFLICT}` }).waitFor()
+      await locators
+        .staged()
+        .getByRole('button', { name: `Inspect ${CONFLICT}` })
+        .waitFor()
       const resolved = readFileSync(join(workspace.repo, CONFLICT), 'utf8')
       assert(
         !/^<{7}|^={7}|^>{7}/m.test(resolved),

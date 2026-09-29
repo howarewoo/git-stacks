@@ -245,7 +245,7 @@ test('a search walks its pages and keeps hits that name no permissions', async (
   const fixture = await githubFixture()
   try {
     const discovery = await discoverRepositories({
-  host: HOST,
+      host: HOST,
       transport: authenticated(fixture),
       query: 'repo',
     })
@@ -290,7 +290,8 @@ test('an empty repository is labelled so its first branch starts from nothing', 
     )
     // A repository with no default branch or zero size without a push is empty.
     assert.equal(
-      summarizeRepository(apiRepository(2, { size: 0, default_branch: null, pushed_at: null }))?.empty,
+      summarizeRepository(apiRepository(2, { size: 0, default_branch: null, pushed_at: null }))
+        ?.empty,
       true,
     )
   } finally {
@@ -302,7 +303,7 @@ test('a search with total_count > 1000 reports truncation and incomplete results
   const fixture = await githubFixture()
   try {
     const discovery = await discoverRepositories({
-  host: HOST,
+      host: HOST,
       transport: authenticated(fixture),
       query: 'overflow',
     })
@@ -362,7 +363,7 @@ test('a cancelled search stops the request instead of answering for it', async (
   try {
     const controller = new AbortController()
     const searching = discoverRepositories({
-  host: HOST,
+      host: HOST,
       transport: authenticated(fixture),
       signal: controller.signal,
     })

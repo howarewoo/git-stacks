@@ -481,7 +481,7 @@ journalled **before** the request leaves — a crash between the POST and its
 response is precisely the case with no failure to write a record on, so a record
 written only after a failure would be missing for the one case the guard exists
 for. The attempt records the whole payload — every comment's body and anchor, and
-the decision — because the comments *are* the write, and any one of them alone
+the decision — because the comments _are_ the write, and any one of them alone
 is shared with a review that has nothing to do with this one.
 
 The record is not a dead end. Before refusing, the next attempt asks GitHub what
@@ -508,7 +508,7 @@ A settled write is recorded, not deleted. The evidence that GitHub holds a
 comment is the only thing standing between a retry and a duplicate, and the
 submission that recognised the write is still free to fail afterwards, or to be
 interrupted before the view drops the draft. The record therefore keeps what was
-recognised, and it is a later *payload* that retires it: the view keeps a draft in
+recognised, and it is a later _payload_ that retires it: the view keeps a draft in
 its payload precisely while it has not been told the draft was delivered, so a
 record whose comments are absent from a later submission are comments the view has
 finished with. That makes resuming after a crash idempotent without depending on a
@@ -551,7 +551,7 @@ must not lock a reviewer out of a new revision.
 A draft is named by a minted identity, not by where it sits. The revision guard
 above separates a comment about a new head from one about the old, but a
 revision does not move for everything: the reviewer can read a line, write a
-comment, send it, and write the same words on the same line of the *same* head
+comment, send it, and write the same words on the same line of the _same_ head
 while approving instead of commenting. Nothing about that second comment is
 distinguishable from the first except that it is later, and both would be
 matched by every field the settlement compares — anchor, words, decision, head.
@@ -574,7 +574,7 @@ the range alone, or the range and a small whole number — remain opaque strings
 compared only with each other, so stored drafts stay readable and submit as
 themselves, and none of those names can be minted again.
 
-The guard covers an unresolved *comment*, not an attempt id. Changing the
+The guard covers an unresolved _comment_, not an attempt id. Changing the
 decision, or adding one more pending draft, produces a different attempt over
 the same comments, and matching on the whole payload would let those comments be
 posted a second time. So every attempt touching any line this payload writes is
@@ -597,7 +597,7 @@ review posted a different comment that happened to read identically, and the
 record of it is a record about a payload the reviewer has since replaced.
 Adopting it would report the whole payload delivered, post nothing, and lose a
 decision the reviewer made after the review they had already sent. Delivery is
-therefore matched on identity *and* on what the comment says and where, so a
+therefore matched on identity _and_ on what the comment says and where, so a
 draft reworded after it was composed sends the new words rather than being
 taken for the old ones, and a comment no composition can be named for is
 evidence about nothing.

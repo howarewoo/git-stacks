@@ -235,11 +235,17 @@ test('create, list, get, add, and unstack native pull request stacks', async () 
     assert.equal(listed.length, 1)
     assert.equal(listed[0].number, 1)
 
-    const filtered = await listPullRequestStacks('acme', 'widgets', { host: HOST, pullRequest: 102 })
+    const filtered = await listPullRequestStacks('acme', 'widgets', {
+      host: HOST,
+      pullRequest: 102,
+    })
     assert.equal(filtered.length, 1)
     assert.equal(filtered[0].number, 1)
 
-    const emptyFilter = await listPullRequestStacks('acme', 'widgets', { host: HOST, pullRequest: 999 })
+    const emptyFilter = await listPullRequestStacks('acme', 'widgets', {
+      host: HOST,
+      pullRequest: 999,
+    })
     assert.equal(emptyFilter.length, 0)
 
     // 4. Add PR 103 to the stack
@@ -312,7 +318,10 @@ test('missing snapshot models are preflighted against canonical PRs before stack
     await harness.writeState(state)
 
     await assert.rejects(
-      createPullRequestStack('acme', 'widgets', [101, 102], { host: HOST, knownPullRequests: [known] }),
+      createPullRequestStack('acme', 'widgets', [101, 102], {
+        host: HOST,
+        knownPullRequests: [known],
+      }),
       (error) =>
         error instanceof NativeStackError &&
         error.status === 'invalid-chain' &&
@@ -340,7 +349,10 @@ test('missing snapshot models are preflighted against canonical PRs before stack
 
     await createPullRequestStack('acme', 'widgets', [101], HOST_ONLY)
     await assert.rejects(
-      addPullRequestsToStack('acme', 'widgets', 1, [102], { host: HOST, knownPullRequests: [known] }),
+      addPullRequestsToStack('acme', 'widgets', 1, [102], {
+        host: HOST,
+        knownPullRequests: [known],
+      }),
       (error) => error instanceof NativeStackError && error.status === 'closed',
     )
     assert.deepEqual(
@@ -583,7 +595,10 @@ test('stack mutations re-read captured pull requests and reject concurrent drift
     retargeted.prs[0].base = 'release'
     await harness.writeState(retargeted)
     await assert.rejects(
-      createPullRequestStack('acme', 'widgets', [101, 102], { host: HOST, knownPullRequests: [captured] }),
+      createPullRequestStack('acme', 'widgets', [101, 102], {
+        host: HOST,
+        knownPullRequests: [captured],
+      }),
       (error) =>
         error instanceof NativeStackError &&
         error.status === 'invalid-chain' &&
@@ -599,7 +614,10 @@ test('stack mutations re-read captured pull requests and reject concurrent drift
     git(harness, ['commit', '--allow-empty', '-m', 'concurrent commit'])
     git(harness, ['push', harness.bare, 'feature/step-1:refs/heads/feature/step-1'])
     await assert.rejects(
-      createPullRequestStack('acme', 'widgets', [101, 102], { host: HOST, knownPullRequests: [captured] }),
+      createPullRequestStack('acme', 'widgets', [101, 102], {
+        host: HOST,
+        knownPullRequests: [captured],
+      }),
       (error) =>
         error instanceof NativeStackError &&
         error.status === 'invalid-chain' &&

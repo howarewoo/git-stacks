@@ -240,6 +240,7 @@ export function ReviewConversation({
       const delivered = new Set(result.delivered ?? [])
       onDraftChange(
         delivered.size === 0 ? [] : draftList.filter((draft) => !delivered.has(draft.id)),
+
       )
       onReload()
       setNotice(
@@ -471,12 +472,7 @@ function SubmitBar({
   // uncertain write blocks it because sending the same words twice is worse
   // than sending none. Both say why instead of just going dead.
   const disabled =
-    busy ||
-    intendedCount === 0 ||
-    blocked !== null ||
-    needsSummary ||
-    staleCount > 0 ||
-    uncertain
+    busy || intendedCount === 0 || blocked !== null || needsSummary || staleCount > 0 || uncertain
   const reason =
     blocked ??
     (uncertain
@@ -508,7 +504,10 @@ function SubmitBar({
           const candidateReason = reviewEventBlocked(permissions, candidate)
           return (
             <label
-              className={cn('review-submit-event', candidateReason && 'review-submit-event-blocked')}
+              className={cn(
+                'review-submit-event',
+                candidateReason && 'review-submit-event-blocked',
+              )}
               key={candidate}
               title={candidateReason ?? REVIEW_EVENT_LABELS[candidate]}
             >

@@ -159,7 +159,10 @@ test('a foreign URL closing reference never closes a local issue', () => {
   assert.equal(isIssueClosedInBody('Fixes GH-12', 12, 'acme/widgets'), false)
   assert.equal(removeClosingReference('Fixes GH-12', 12, 'acme/widgets'), 'Fixes GH-12')
   assert.equal(insertClosingReference(local, 12, 'acme/widgets'), `${local}\nCloses #12\n`)
-  assert.equal(insertClosingReference('Fixes GH-12', 12, 'acme/widgets'), 'Fixes GH-12\n\nCloses #12\n')
+  assert.equal(
+    insertClosingReference('Fixes GH-12', 12, 'acme/widgets'),
+    'Fixes GH-12\n\nCloses #12\n',
+  )
 })
 
 test('removeClosingReference preserves unrelated body bytes exactly', () => {

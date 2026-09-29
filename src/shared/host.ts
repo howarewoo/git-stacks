@@ -31,19 +31,10 @@ export function canonicalHostName(host: string): string {
  * the host supports. `unknown` means nothing has established it yet.
  */
 export type GitHubCapabilityState =
-  | 'supported'
-  | 'unsupported'
-  | 'unauthenticated'
-  | 'unreachable'
-  | 'not-configured'
-  | 'unknown'
+  'supported' | 'unsupported' | 'unauthenticated' | 'unreachable' | 'not-configured' | 'unknown'
 
 export type GitHubCapabilityId =
-  | 'rest'
-  | 'graphql'
-  | 'native-stacks'
-  | 'repository-discovery'
-  | 'device-sign-in'
+  'rest' | 'graphql' | 'native-stacks' | 'repository-discovery' | 'device-sign-in'
 
 export interface GitHubCapability {
   id: GitHubCapabilityId

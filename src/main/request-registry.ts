@@ -52,9 +52,7 @@ export async function performBackgroundRead<T>(
   requestId: string,
 ): Promise<T> {
   const controller = registry.claim(root, requestId)
-  const combined = signal
-    ? AbortSignal.any([signal, controller.signal])
-    : controller.signal
+  const combined = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal
   try {
     return await operation(combined)
   } finally {

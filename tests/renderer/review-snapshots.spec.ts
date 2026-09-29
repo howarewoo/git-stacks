@@ -70,7 +70,9 @@ test.describe('Review snapshot history and comparison', () => {
 
     // Direct action: Historical read-only mode verification in conversation
     const conversation = page.locator('.review-conversation')
-    await expect(conversation).toContainText(/Comments and reviews are disabled in historical comparison mode/u)
+    await expect(conversation).toContainText(
+      /Comments and reviews are disabled in historical comparison mode/u,
+    )
 
     // Capture visual proof of historical comparison with read-only conversation banner
     await page.screenshot({ path: 'test-results/changes-since-reviewed-readonly.png' })
@@ -83,9 +85,7 @@ test.describe('Review snapshot history and comparison', () => {
     await expect(toolbar.getByText(/Comparing/u)).not.toBeVisible()
   })
 
-  test('observation gap banner and clearing snapshot history', async ({
-    page,
-  }) => {
+  test('observation gap banner and clearing snapshot history', async ({ page }) => {
     const toolbar = page.getByRole('toolbar', { name: 'Review update history' })
 
     // Visual capture of toolbar with gap banner

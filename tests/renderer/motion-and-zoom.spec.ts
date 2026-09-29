@@ -43,7 +43,6 @@ test.describe('Responsive pane adaptation, compact reflow, and reduced motion', 
       }
     })
 
-
     // Every destination — not just the two the suite used to name — has to
     // survive the 200% reflow without pushing actions off-screen.
     for (const destination of DESTINATIONS) {

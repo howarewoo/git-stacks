@@ -280,8 +280,8 @@ test.describe('Keyboard routes and accessibility navigation', () => {
     expect(rowCount).toBeGreaterThan(2)
 
     // Exactly one row is in the tab order; the rest are reached with arrows.
-    const tabbable = await rows.evaluateAll((elements) =>
-      elements.filter((element) => element.getAttribute('tabindex') === '0').length,
+    const tabbable = await rows.evaluateAll(
+      (elements) => elements.filter((element) => element.getAttribute('tabindex') === '0').length,
     )
     expect(tabbable).toBe(1)
 
@@ -479,8 +479,8 @@ test.describe('Keyboard routes and accessibility navigation', () => {
     const rowCount = await rows.count()
     expect(rowCount).toBeGreaterThan(1)
 
-    const tabbable = await rows.evaluateAll((elements) =>
-      elements.filter((element) => element.getAttribute('tabindex') === '0').length,
+    const tabbable = await rows.evaluateAll(
+      (elements) => elements.filter((element) => element.getAttribute('tabindex') === '0').length,
     )
     expect(tabbable).toBe(1)
 
@@ -576,7 +576,9 @@ test.describe('Keyboard routes and accessibility navigation', () => {
     await expect(nav.getByRole('button', { name: /^Diagnostics/ })).toBeFocused()
   })
 
-  test('a keyboard destination change moves focus to the new workspace heading', async ({ page }) => {
+  test('a keyboard destination change moves focus to the new workspace heading', async ({
+    page,
+  }) => {
     await openGallery(page, { scenario: 'shell-connected' })
 
     const diagnostics = page
@@ -589,7 +591,9 @@ test.describe('Keyboard routes and accessibility navigation', () => {
     await expect(heading).toBeFocused()
     await expect(heading).toHaveText('Diagnostics')
     // The change is also announced politely for readers that track the live region.
-    await expect(page.locator('[aria-live="polite"]').filter({ hasText: 'Diagnostics workspace' })).toHaveCount(1)
+    await expect(
+      page.locator('[aria-live="polite"]').filter({ hasText: 'Diagnostics workspace' }),
+    ).toHaveCount(1)
   })
 
   test('the search field keeps every typed keystroke, including shortcut characters', async ({

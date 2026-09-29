@@ -243,7 +243,12 @@ function githubHostEntries(status: GitHubHostStatus | null): DiagnosticEntry[] {
       source: 'github',
       label: 'GitHub host',
       value: `${status.host} (${status.kind})`,
-      status: status.state === 'supported' ? 'confirmed' : status.state === 'unknown' ? 'not-applicable' : 'unavailable',
+      status:
+        status.state === 'supported'
+          ? 'confirmed'
+          : status.state === 'unknown'
+            ? 'not-applicable'
+            : 'unavailable',
       detail: status.message,
     },
     {

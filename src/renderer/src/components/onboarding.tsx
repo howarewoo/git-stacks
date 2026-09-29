@@ -329,7 +329,8 @@ export function RepositoryDiscoveryDialog({
 
           {discoveryMeta?.incompleteResults ? (
             <InlineAlert tone="warning">
-              GitHub returned partial results because the search timed out. Refine your query for more.
+              GitHub returned partial results because the search timed out. Refine your query for
+              more.
             </InlineAlert>
           ) : null}
 

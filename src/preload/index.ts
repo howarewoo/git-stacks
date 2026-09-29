@@ -104,8 +104,7 @@ const desktop: DesktopAPI = {
     ipcRenderer.invoke('repository:review-history', number, requestId),
   reviewHistoryDiff: (number, fromOid, requestId) =>
     ipcRenderer.invoke('repository:review-history-diff', number, fromOid, requestId),
-  reviewClearHistory: (number) =>
-    ipcRenderer.invoke('repository:review-clear-history', number),
+  reviewClearHistory: (number) => ipcRenderer.invoke('repository:review-clear-history', number),
   pullRequestChecks: (number, options) =>
     ipcRenderer.invoke('repository:pull-request-checks', number, options),
   rerunPullRequestCheck: (number, runId) =>
@@ -155,7 +154,8 @@ const desktop: DesktopAPI = {
   resetSettings: () => ipcRenderer.invoke('settings:reset'),
   diagnostics: () => ipcRenderer.invoke('diagnostics'),
   supportBundlePreview: () => ipcRenderer.invoke('support-bundle:preview'),
-  exportSupportBundle: (previewId: string) => ipcRenderer.invoke('support-bundle:export', previewId),
+  exportSupportBundle: (previewId: string) =>
+    ipcRenderer.invoke('support-bundle:export', previewId),
   openInEditor: (relativePath) => ipcRenderer.invoke('editor:open', relativePath),
   updateStatus: () => ipcRenderer.invoke('update:status'),
   checkForUpdates: () => ipcRenderer.invoke('update:check'),

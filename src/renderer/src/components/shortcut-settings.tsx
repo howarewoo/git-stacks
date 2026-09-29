@@ -139,97 +139,97 @@ export function ShortcutEditor({
       ) : null}
 
       {conflictMessage && (
-          <div
-            className="flex items-center gap-2 rounded-[var(--gs-semantic-radius-control)] border border-[var(--gs-semantic-feedback-error-text)] bg-[var(--gs-semantic-feedback-error-surface)] p-3 text-[13px] text-[var(--gs-semantic-feedback-error-text)]"
-            role="alert"
-          >
-            <AlertCircle className="size-4 shrink-0" aria-hidden="true" />
-            <span>{conflictMessage}</span>
-          </div>
-        )}
+        <div
+          className="flex items-center gap-2 rounded-[var(--gs-semantic-radius-control)] border border-[var(--gs-semantic-feedback-error-text)] bg-[var(--gs-semantic-feedback-error-surface)] p-3 text-[13px] text-[var(--gs-semantic-feedback-error-text)]"
+          role="alert"
+        >
+          <AlertCircle className="size-4 shrink-0" aria-hidden="true" />
+          <span>{conflictMessage}</span>
+        </div>
+      )}
 
-        {successMessage && (
-          <div
-            className="flex items-center gap-2 rounded-[var(--gs-semantic-radius-control)] border border-[var(--gs-semantic-feedback-success-text)] bg-[var(--gs-semantic-feedback-success-surface)] p-3 text-[13px] text-[var(--gs-semantic-feedback-success-text)]"
-            role="status"
-          >
-            <Check className="size-4 shrink-0" aria-hidden="true" />
-            <span>{successMessage}</span>
-          </div>
-        )}
+      {successMessage && (
+        <div
+          className="flex items-center gap-2 rounded-[var(--gs-semantic-radius-control)] border border-[var(--gs-semantic-feedback-success-text)] bg-[var(--gs-semantic-feedback-success-surface)] p-3 text-[13px] text-[var(--gs-semantic-feedback-success-text)]"
+          role="status"
+        >
+          <Check className="size-4 shrink-0" aria-hidden="true" />
+          <span>{successMessage}</span>
+        </div>
+      )}
 
-        <div className="max-h-[380px] space-y-4 overflow-y-auto pr-1">
-          {groups.map(([groupName, defs]) => (
-            <div key={groupName} className="space-y-1.5">
-              <h2 className="text-[11px] font-semibold uppercase tracking-wider text-[var(--gs-semantic-text-secondary)]">
-                {groupName}
-              </h2>
-              <div className="divide-y divide-[var(--gs-semantic-border-essential)] rounded-[var(--gs-semantic-radius-control)] border border-[var(--gs-semantic-border-essential)] bg-[var(--gs-semantic-surface-content)]">
-                {defs.map((def) => {
-                  const chord = bindings[def.id] ?? def.defaultChord
-                  const isRecording = recordingId === def.id
-                  return (
-                    <div
-                      key={def.id}
-                      className="flex items-center justify-between px-3 py-2 text-[13px]"
-                    >
-                      <div className="min-w-0 flex-1 pr-3">
-                        <div className="font-medium text-[var(--gs-component-overlay-text)]">
-                          {def.label}
-                        </div>
-                        <div className="text-[12px] text-[var(--gs-semantic-text-secondary)]">
-                          {def.description}
-                        </div>
+      <div className="max-h-[380px] space-y-4 overflow-y-auto pr-1">
+        {groups.map(([groupName, defs]) => (
+          <div key={groupName} className="space-y-1.5">
+            <h2 className="text-[11px] font-semibold uppercase tracking-wider text-[var(--gs-semantic-text-secondary)]">
+              {groupName}
+            </h2>
+            <div className="divide-y divide-[var(--gs-semantic-border-essential)] rounded-[var(--gs-semantic-radius-control)] border border-[var(--gs-semantic-border-essential)] bg-[var(--gs-semantic-surface-content)]">
+              {defs.map((def) => {
+                const chord = bindings[def.id] ?? def.defaultChord
+                const isRecording = recordingId === def.id
+                return (
+                  <div
+                    key={def.id}
+                    className="flex items-center justify-between px-3 py-2 text-[13px]"
+                  >
+                    <div className="min-w-0 flex-1 pr-3">
+                      <div className="font-medium text-[var(--gs-component-overlay-text)]">
+                        {def.label}
                       </div>
-
-                      <div className="flex shrink-0 items-center gap-2">
-                        {isRecording ? (
-                          <Badge variant="warning" className="animate-pulse">
-                            Press new keys… (Esc cancels)
-                          </Badge>
-                        ) : (
-                          <kbd className="rounded border border-[var(--gs-semantic-border-essential)] bg-[var(--gs-semantic-surface-inset)] px-2 py-0.5 font-mono text-[12px] text-[var(--gs-semantic-text-secondary)]">
-                            {formatChord(chord, isMac)}
-                          </kbd>
-                        )}
-                        <Button
-                          size="sm"
-                          variant={isRecording ? 'accent' : 'secondary'}
-                          disabled={Boolean(disabledReason)}
-                          onClick={() => {
-                            if (isRecording) {
-                              setRecordingId(null)
-                            } else {
-                              setRecordingId(def.id)
-                              setConflictMessage(null)
-                              setSuccessMessage(null)
-                            }
-                          }}
-                          aria-label={`Change shortcut for ${def.label}`}
-                        >
-                          {isRecording ? 'Cancel' : 'Change'}
-                        </Button>
+                      <div className="text-[12px] text-[var(--gs-semantic-text-secondary)]">
+                        {def.description}
                       </div>
                     </div>
-                  )
-                })}
-              </div>
-            </div>
-          ))}
-        </div>
 
-        <div className="flex items-center justify-end border-t border-[var(--gs-semantic-border-essential)] pt-3">
-          <Button
-            size="sm"
-            variant="ghost"
-            onClick={handleResetAll}
-            disabled={Boolean(disabledReason)}
-            tooltip="Restore all shortcuts to factory defaults"
-          >
-            <RotateCcw className="size-3.5 mr-1" aria-hidden="true" />
-            Reset all to defaults
-          </Button>
-        </div>
+                    <div className="flex shrink-0 items-center gap-2">
+                      {isRecording ? (
+                        <Badge variant="warning" className="animate-pulse">
+                          Press new keys… (Esc cancels)
+                        </Badge>
+                      ) : (
+                        <kbd className="rounded border border-[var(--gs-semantic-border-essential)] bg-[var(--gs-semantic-surface-inset)] px-2 py-0.5 font-mono text-[12px] text-[var(--gs-semantic-text-secondary)]">
+                          {formatChord(chord, isMac)}
+                        </kbd>
+                      )}
+                      <Button
+                        size="sm"
+                        variant={isRecording ? 'accent' : 'secondary'}
+                        disabled={Boolean(disabledReason)}
+                        onClick={() => {
+                          if (isRecording) {
+                            setRecordingId(null)
+                          } else {
+                            setRecordingId(def.id)
+                            setConflictMessage(null)
+                            setSuccessMessage(null)
+                          }
+                        }}
+                        aria-label={`Change shortcut for ${def.label}`}
+                      >
+                        {isRecording ? 'Cancel' : 'Change'}
+                      </Button>
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <div className="flex items-center justify-end border-t border-[var(--gs-semantic-border-essential)] pt-3">
+        <Button
+          size="sm"
+          variant="ghost"
+          onClick={handleResetAll}
+          disabled={Boolean(disabledReason)}
+          tooltip="Restore all shortcuts to factory defaults"
+        >
+          <RotateCcw className="size-3.5 mr-1" aria-hidden="true" />
+          Reset all to defaults
+        </Button>
+      </div>
     </div>
   )
 }
