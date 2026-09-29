@@ -4,8 +4,10 @@ import {
   GITHUB_DOTCOM_HOST,
   githubHostContext,
   hostTransport,
+  observeHostRequest,
   type GitHubHostContext,
 } from './github-host'
+import type { GitHubCapabilityState } from '../shared/host'
 import type {
   GitHubRepositorySummary,
   OnboardingFailure,
@@ -116,6 +118,7 @@ export function summarizeRepository(
     canPush:
       permissions !== null &&
       (permissions.push === true || permissions.admin === true || permissions.maintain === true),
+    host: host.host,
   }
 }
 
@@ -229,10 +232,15 @@ export function ghCloneCommandText(
   parentDirectory: string,
   directoryName: string,
   shallow: boolean,
+  host: string = GITHUB_DOTCOM_HOST,
 ): string {
   const destination = shellWord(cloneDestinationText(parentDirectory, directoryName))
   const gitFlags = shallow ? ' -- --depth 1' : ''
-  return `gh repo clone ${fullName} ${destination}${gitFlags}`
+  // `gh` is told which host owns the repository; without this it would resolve
+  // the name on github.com, which is a different repository on an enterprise host.
+  const hostname = host.trim().toLowerCase()
+  const hostFlag = hostname === GITHUB_DOTCOM_HOST ? '' : ` --hostname ${shellWord(hostname)}`
+  return `gh repo clone${hostFlag} ${fullName} ${destination}${gitFlags}`
 }
 
 export interface DiscoveryOptions {
@@ -255,11 +263,40 @@ export async function discoverRepositories(
 ): Promise<RepositoryDiscovery> {
   const transport = options.transport ?? hostTransport(options.host)
   const query = (options.query ?? '').trim()
-  if (query) {
-    return searchRepositories(transport, query, options, options.host)
+  try {
+    const value = query
+      ? await searchRepositories(transport, query, options, options.host)
+      : { repositories: await listAccessible(transport, options, options.host), query: '' }
+    // A discovery run is the only evidence that discovery works on this host, so
+    // it is what records that, against the host it actually ran on.
+    observeHostRequest(options.host.host, 'repository-discovery', {
+      state: 'supported',
+      detail: `${options.host.apiBase} answered a repository collection for this credential.`,
+    })
+    return value
+  } catch (error) {
+    if (options.signal?.aborted) throw error
+    observeHostRequest(options.host.host, 'repository-discovery', discoveryFailure(error))
+    throw error
   }
-  const repositories = await listAccessible(transport, options, options.host)
-  return { repositories, query: '' }
+}
+
+/** What a failed discovery run established, said as a capability state. */
+function discoveryFailure(error: unknown): { state: GitHubCapabilityState; detail: string } {
+  const kind = error instanceof GitHubTransportError ? error.kind : null
+  if (kind === 'unauthorized' || kind === 'forbidden') {
+    return {
+      state: 'unauthenticated',
+      detail: 'this host refused the credential for a repository collection',
+    }
+  }
+  if (kind === 'network' || kind === 'timeout') {
+    return { state: 'unreachable', detail: 'this host did not answer a repository collection' }
+  }
+  if (kind === 'not-configured') {
+    return { state: 'not-configured', detail: 'this machine has no way to ask for one' }
+  }
+  return { state: 'unknown', detail: 'a repository collection could not be read from this host' }
 }
 
 /**

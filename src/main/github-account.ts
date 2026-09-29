@@ -360,9 +360,23 @@ export class GitHubAccount implements GitHubCredentialSource {
     }
     const account = await readAccount(this.options.stateFile)
     if (!account) return this.setState(this.baseline())
+    // The saved account belongs to the host that issued it. This installation is
+    // pointed somewhere else — the setting changed while the app was closed, or
+    // a previous sign-out was interrupted — so nothing saved for that host is
+    // adopted, and nothing of this host's is either.
+    if (account.host !== this.host) {
+      this.account = null
+      this.live = null
+      return this.setState(this.baseline())
+    }
     this.account = account
     try {
-      const live = this.parse(await this.options.vault.open(account.reference), account.session)
+      // The vault is told which host the secret must belong to, so a stale
+      // reference cannot be decrypted and rebound to the host in use.
+      const live = this.parse(
+        await this.options.vault.open(account.reference, this.host),
+        account.session,
+      )
       this.live = live
       this.scheduleExpiry()
       const expired = live.expiresAt !== null && live.expiresAt <= this.now()

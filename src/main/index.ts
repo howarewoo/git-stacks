@@ -109,12 +109,16 @@ import {
 } from './settings'
 import { loadSettingsPolicy } from './settings-service'
 import {
+  configuredHostContext,
   forgetHost,
   githubHostContext,
   probeGitHubHost,
+  remoteHostContext,
   type GitHubHostContext,
   validateGitHubHostInput,
 } from './github-host'
+import { getConfigValue, parseRemote } from './git-core'
+import { GitHubTransportError } from './github-transport'
 import { GITHUB_DEFAULT_HOST } from '../shared/settings'
 import { detectRefFormat, runDiagnostics } from './diagnostics'
 import { buildBundle, renderBundle, writeOwnerOnlyBundle } from './support-bundle'
@@ -321,15 +325,65 @@ class UntrustedRequestError extends Error {}
  * sign-in, so a host change retires the previous host's account and forgets
  * what was learned about the host that is no longer selected.
  */
+let hostGeneration = 0
+/** Host-scoped work in flight, so a host change can cancel it. */
+const hostWork = new Set<AbortController>()
+
 function applySettings(settings: AppSettings): void {
   const previous = currentSettings?.github.host ?? null
   currentSettings = settings
   if (previous === settings.github.host) return
+  // Everything already in flight was addressed to the host that is no longer
+  // selected. It is aborted, and its generation is retired, so a response that
+  // arrives afterwards cannot repopulate the previous host's cache or the UI.
+  for (const controller of hostWork) controller.abort()
+  hostWork.clear()
+  hostGeneration += 1
   forgetHost(previous ?? undefined)
   if (account !== null && accountHost !== settings.github.host) {
     void account.signOut().catch(() => null)
     account = null
     accountHost = null
+  }
+}
+
+/**
+ * The owner/name of an open repository when that repository's own origin is on
+ * this host, and null otherwise.
+ */
+async function openRepositoryOnHost(
+  root: string,
+  context: GitHubHostContext,
+): Promise<{ owner: string; name: string } | null> {
+  try {
+    const remote = parseRemote(await getConfigValue(root, 'remote.origin.url'))
+    if (!remote || remoteHostContext(remote)?.host !== context.host) return null
+    return { owner: remote.owner, name: remote.name }
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Runs host-scoped work that belongs to the host selected when it started. A
+ * host change aborts it, and a late answer is refused rather than delivered, so
+ * nothing addressed to a retired host reaches this host's callers.
+ */
+async function forSelectedHost<T>(operation: (signal: AbortSignal) => Promise<T>): Promise<T> {
+  const generation = hostGeneration
+  const controller = new AbortController()
+  hostWork.add(controller)
+  try {
+    const value = await operation(controller.signal)
+    if (generation !== hostGeneration) {
+      throw new GitHubTransportError({
+        kind: 'cancelled',
+        detail: 'the selected GitHub host changed before this request finished',
+      })
+    }
+    return value
+  } finally {
+    hostWork.delete(controller)
   }
 }
 
@@ -341,7 +395,9 @@ function applySettings(settings: AppSettings): void {
 let currentSettings: AppSettings | null = null
 
 function configuredHost(): GitHubHostContext {
-  return githubHostContext(currentSettings?.github.host ?? GITHUB_DEFAULT_HOST)
+  // One resolver for every host question in the main process, so an absent host
+  // is always github.com rather than an empty one.
+  return configuredHostContext(currentSettings?.github.host)
 }
 
 /** A sign-in belongs to one host, so choosing another host drops the old one. */
@@ -695,6 +751,7 @@ function cloneProtocol(value: unknown): CloneProtocol {
   return value === 'ssh' ? 'ssh' : 'https'
 }
 
+
 /**
  * Validates a clone request before anything is written. The URL is rebuilt from
  * `owner/name` and the chosen protocol, never taken from the request, so a
@@ -705,16 +762,26 @@ function validatedClone(request: unknown): ValidatedClone {
   const repository = (asked.repository ?? {}) as Record<string, unknown>
   const fullName = assertFullName(repository.fullName)
   const protocol = cloneProtocol(asked.protocol)
+  // A clone is addressed to the host that owns the repository discovery read it
+  // from. The URLs are built from that host here rather than taken from the
+  // renderer, so a discovered enterprise repository never resolves on github.com
+  // and a chosen name never aims the clone at an unvalidated origin.
+  const parsedHost = validateGitHubHostInput(repository.host)
+  if (!parsedHost.ok || !parsedHost.host) {
+    throw new Error('A clone must name the GitHub host that owns the repository.')
+  }
+  const host = githubHostContext(parsedHost.host)
   return {
     fullName,
+    host: host.host,
     url:
       !app.isPackaged &&
       typeof repository.cloneUrl === 'string' &&
       repository.cloneUrl.startsWith('file://')
         ? repository.cloneUrl
         : protocol === 'ssh'
-          ? `git@github.com:${fullName}.git`
-          : `https://github.com/${fullName}.git`,
+          ? `git@${host.host}:${fullName}.git`
+          : `${host.webOrigin}/${fullName}.git`,
     directoryName: assertDirectoryName(asked.directoryName),
     parentDirectory: requireString(asked.parentDirectory, 'destination folder'),
     protocol,
@@ -916,8 +983,15 @@ function installHandlers() {
     const asked = (request ?? {}) as { query?: unknown; requestId?: unknown }
     const query = typeof asked.query === 'string' ? asked.query : ''
     try {
-      const value = await onboardingRequest(readRequestId(asked.requestId), (signal) =>
-        discoverRepositories({ host: configuredHost(), query, signal }),
+      const host = configuredHost()
+      const value = await forSelectedHost((hostSignal) =>
+        onboardingRequest(readRequestId(asked.requestId), (signal) =>
+          discoverRepositories({
+            host,
+            query,
+            signal: AbortSignal.any([signal, hostSignal]),
+          }),
+        ),
       )
       return { ok: true as const, value }
     } catch (error) {
@@ -963,6 +1037,7 @@ function installHandlers() {
             clone.parentDirectory,
             clone.directoryName,
             clone.shallow,
+            clone.host,
           ),
         } satisfies CloneCommandPreview,
       }
@@ -1326,13 +1401,13 @@ function installHandlers() {
     validateSender(event)
     if (typeof value !== 'string') throw new Error('Invalid GitHub URL.')
     const url = new URL(value)
-    if (
-      url.protocol !== 'https:' ||
-      !validateGitHubHostInput(url.hostname).ok ||
-      url.port ||
-      url.username ||
-      url.password
-    ) {
+    if (url.protocol !== 'https:' || url.username || url.password) {
+      throw new Error('Only HTTPS links on a configured GitHub host can be opened.')
+    }
+    // The host is validated as a whole, port included, so a link to a GitHub
+    // Enterprise Server host served from a custom port is opened on the port it
+    // was given, while a path, a query aimed elsewhere, or a bad host is refused.
+    if (!validateGitHubHostInput(url.host).ok) {
       throw new Error('Only HTTPS links on a configured GitHub host can be opened.')
     }
     await shell.openExternal(url.href)
@@ -1343,9 +1418,14 @@ function installHandlers() {
   ipcMain.handle('github:host-status', async (event) => {
     validateSender(event)
     const context = configuredHost()
-    const settings = (await readSettingsFile(settingsFile())).settings
-    void settings
-    return probeGitHubHost(context, { repository: null })
+    // The open repository is probed only when it lives on the host being
+    // reported, so a capability is never established from a repository that
+    // belongs to some other host.
+    const repository = activeRepository ? await openRepositoryOnHost(activeRepository, context) : null
+    // The probe belongs to the host selected when it started: a host change
+    // aborts it and refuses its answer, so a retired host's late result cannot
+    // recreate the record that was just forgotten or overwrite a newer status.
+    return forSelectedHost((signal) => probeGitHubHost(context, { repository, signal }))
   })
   ipcMain.handle('git-runtime', async (event) => {
     validateSender(event)

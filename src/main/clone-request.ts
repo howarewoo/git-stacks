@@ -6,6 +6,8 @@ import { cloneCommandText, ghCloneCommandText } from './github-repositories'
 export interface ValidatedClone {
   url: string
   fullName: string
+  /** The host that owns the repository, and therefore the clone. */
+  host: string
   parentDirectory: string
   directoryName: string
   protocol: CloneProtocol
@@ -57,6 +59,7 @@ export async function runCloneRequest(
       clone.parentDirectory,
       clone.directoryName,
       clone.shallow,
+      clone.host,
     ),
   }
 }

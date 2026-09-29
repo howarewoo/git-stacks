@@ -36,6 +36,13 @@ export interface OperationState {
 }
 
 export interface ParsedRemote {
+  /**
+   * The host that owns the remote, including an explicit port. A GitHub
+   * Enterprise Server host is commonly served from one, and dropping it would
+   * point every request for this repository at the default port of a host that
+   * does not answer there. An SSH remote's port is part of its host name and is
+   * likewise kept.
+   */
   host: string
   owner: string
   name: string
@@ -678,7 +685,8 @@ export function parseRemote(urlValue: string | null): ParsedRemote | null {
       remotePath = value.slice(separator + 1)
     } else {
       const parsed = new URL(value)
-      host = parsed.hostname
+      // `host` keeps an explicit port: it is the same host the user configured.
+      host = parsed.host
       remotePath = parsed.pathname
     }
   } catch {

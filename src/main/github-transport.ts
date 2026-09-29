@@ -21,6 +21,8 @@ const GITHUB_HOST = 'github.com'
 const MAX_PAGES = 100
 
 export type GitHubErrorKind =
+  /** This machine has no usable transport configured; no host was contacted. */
+  | 'not-configured'
   | 'unauthorized'
   | 'forbidden'
   | 'not-found'
@@ -178,7 +180,22 @@ export function githubApiUrl(env: NodeJS.ProcessEnv = process.env): string {
   return typeof value === 'string' && value.trim() ? value.replace(/\/+$/u, '') : GITHUB_API_URL
 }
 
-export function resolveGitHubToken(env: NodeJS.ProcessEnv = process.env): string | null {
+/** The environment variable that holds one host's own token. */
+export function environmentTokenName(host: string): string {
+  return `GIT_STACKS_GITHUB_TOKEN_${host.trim().toLowerCase().replace(/[^a-z0-9]+/gu, '_').toUpperCase()}`
+}
+
+export function resolveGitHubToken(
+  env: NodeJS.ProcessEnv = process.env,
+  host: string | null = null,
+): string | null {
+  if (host) {
+    const scoped = env[environmentTokenName(host)]
+    if (typeof scoped === 'string' && scoped.trim()) return scoped.trim()
+    // Only the default host's unscoped variables belong to it; a host-specific
+    // sign-in for any other host is this build's own account, not the ambient one.
+    if (host.trim().toLowerCase() !== GITHUB_HOST) return null
+  }
   for (const name of ['GIT_STACKS_GITHUB_TOKEN', 'GITHUB_TOKEN', 'GH_TOKEN']) {
     const value = env[name]
     if (typeof value === 'string' && value.trim()) return value.trim()
@@ -349,7 +366,12 @@ function toTransportError(error: unknown, signal?: AbortSignal): GitHubTransport
     return new GitHubTransportError({ kind: 'cancelled', detail: 'the request was cancelled' })
   const code = commandCode(error)
   if (code === 'ENOENT')
-    return new GitHubTransportError({ kind: 'unsupported', detail: 'the gh CLI is not installed' })
+    // A missing local tool is this machine's configuration, never evidence about
+    // what the host offers: no host was contacted at all.
+    return new GitHubTransportError({
+      kind: 'not-configured',
+      detail: 'the gh CLI is not installed',
+    })
   if (code === 'ETIMEDOUT')
     return new GitHubTransportError({ kind: 'timeout', detail: 'the gh request timed out' })
   if (code === 'ABORT_ERR' || (error instanceof Error && error.name === 'AbortError'))
@@ -372,6 +394,12 @@ export interface DirectGitHubTransportOptions {
   env?: NodeJS.ProcessEnv
   fetch?: typeof globalThis.fetch
   apiUrl?: string
+  /**
+   * The GraphQL endpoint for this host, when it is not the REST base plus
+   * `/graphql`. A GitHub Enterprise Server host serves REST from `/api/v3` and
+   * GraphQL from `/api/graphql`, so the endpoint is named, never derived.
+   */
+  graphqlUrl?: string
   apiVersion?: string
   timeoutMs?: number
   userAgent?: string
@@ -396,6 +424,23 @@ export class DirectGitHubTransport implements GitHubTransport {
 
   private get env(): NodeJS.ProcessEnv {
     return this.options.env ?? process.env
+  }
+
+  /**
+   * Whether the ambient environment token was issued for the host this
+   * transport serves. `GIT_STACKS_GITHUB_TOKEN_<HOST>` is that host's own; the
+   * unscoped `GIT_STACKS_GITHUB_TOKEN`/`GITHUB_TOKEN`/`GH_TOKEN` are github.com's,
+   * which is the only host they are ever sent to.
+   */
+  private get environmentCredentialIsOurs(): boolean {
+    if (!this.host) return true
+    const scoped = this.env[environmentTokenName(this.host)]
+    if (typeof scoped === 'string' && scoped.trim()) return true
+    return this.host === GITHUB_HOST
+  }
+
+  private get graphqlUrl(): string {
+    return this.options.graphqlUrl?.replace(/\/+$/u, '') ?? `${this.apiUrl}/graphql`
   }
 
   private get apiUrl(): string {
@@ -445,9 +490,19 @@ export class DirectGitHubTransport implements GitHubTransport {
     token: string
     credential: GitHubCredentialFailure
   } | null> {
-    const explicit = this.options.token ?? resolveGitHubToken(this.env)
-    if (explicit) {
-      return { token: explicit, credential: { origin: 'environment', session: null } }
+    // Nothing leaves this machine before the destination is known to be a host
+    // this transport is allowed to serve.
+    if (this.host && !this.servesGitHubOrigin) return null
+    // A token handed to this transport directly is the caller's own assertion
+    // that it belongs to this host; an ambient one is not, and is treated as the
+    // host's issue rather than this machine's.
+    const supplied = this.options.token
+    if (supplied) {
+      return { token: supplied, credential: { origin: 'environment', session: null } }
+    }
+    const ambient = resolveGitHubToken(this.env, this.host ?? null)
+    if (ambient && this.environmentCredentialIsOurs) {
+      return { token: ambient, credential: { origin: 'environment', session: null } }
     }
     const credential = this.options.credential
     if (!credential || !this.servesGitHubOrigin) return null
@@ -526,6 +581,10 @@ export class DirectGitHubTransport implements GitHubTransport {
         method,
         headers: access.headers,
         body: payload === undefined ? undefined : JSON.stringify(payload),
+        // The credential header rides on this request, so a redirect is refused
+        // rather than followed: a 307 to another origin would resend the body,
+        // and every origin but this host's is refused before the request leaves.
+        redirect: 'error',
         signal: controller.signal,
       })
       const rateLimit = parseRateLimit(response.headers)
@@ -665,7 +724,7 @@ export class DirectGitHubTransport implements GitHubTransport {
     options: GitHubGraphqlOptions = {},
   ): Promise<T> {
     const { status, body, rateLimit } = await this.send(
-      `${this.apiUrl}/graphql`,
+      this.graphqlUrl,
       'POST',
       { query, variables },
       options,
@@ -729,6 +788,8 @@ function includedResponse(output: string): { status: number; headers: Headers; b
 export interface GhGitHubTransportOptions {
   env?: NodeJS.ProcessEnv
   apiUrl?: string
+  /** The GraphQL endpoint for this host; `gh api` is given it as an absolute URL. */
+  graphqlUrl?: string
   /** The GitHub host this transport speaks for, passed to `gh api --hostname`. */
   host?: string
   run?: (args: string[], options: GitHubGraphqlOptions & { input?: string }) => Promise<string>
@@ -951,7 +1012,9 @@ export class GhGitHubTransport implements GitHubTransport {
   ): Promise<T> {
     const response = await this.request<unknown>({
       method: 'POST',
-      path: 'graphql',
+      // A host that serves GraphQL from its own path is given that path; the
+      // default host keeps `/graphql` under its API base.
+      path: this.options.graphqlUrl ?? 'graphql',
       body: { query, variables },
       ...options,
     })
@@ -1035,6 +1098,7 @@ export function githubTransportForHost(
   host: string,
   apiBase: string,
   env: NodeJS.ProcessEnv = process.env,
+  graphqlUrl?: string,
 ): GitHubTransport {
   const key = host.trim().toLowerCase()
   const hostTransport = installedByHost.get(key)
@@ -1043,9 +1107,12 @@ export function githubTransportForHost(
   const configured = env[GITHUB_TRANSPORT_ENV]
   const choice: GitHubTransportChoice =
     configured === 'direct' || configured === 'gh' ? configured : 'auto'
-  const token = resolveGitHubToken(env)
-  const available = credentialSource?.available() === true
-  const cacheKey = `${key}:${choice}:${apiBase}:${githubApiVersion(env)}:${token ?? ''}:${available}`
+  // A credential only counts for the host it was issued by. Signing in to one
+  // host therefore neither enables nor disables another host's own transport.
+  const token = resolveGitHubToken(env, key)
+  const source = credentialSource ?? null
+  const available = source !== null && source.available() === true && source.host === key
+  const cacheKey = `${key}:${choice}:${apiBase}:${graphqlUrl ?? ''}:${githubApiVersion(env)}:${token ?? ''}:${source?.host ?? ''}:${available}`
   if (cached?.key === cacheKey) return cached.transport
   const direct = choice === 'direct' || (choice === 'auto' && (token !== null || available))
   const transport: GitHubTransport = direct
@@ -1053,9 +1120,12 @@ export function githubTransportForHost(
         env,
         host: key,
         apiUrl: apiBase,
-        credential: credentialSource ?? undefined,
+        ...(graphqlUrl ? { graphqlUrl } : {}),
+        // Only a credential issued by this host is attached; another host's is
+        // never carried into a transport that would refuse it anyway.
+        ...(available && source !== null ? { credential: source } : {}),
       })
-    : new GhGitHubTransport({ env, host: key, apiUrl: apiBase })
+    : new GhGitHubTransport({ env, host: key, apiUrl: apiBase, ...(graphqlUrl ? { graphqlUrl } : {}) })
   cached = { key: cacheKey, transport }
   return transport
 }

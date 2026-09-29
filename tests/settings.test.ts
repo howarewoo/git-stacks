@@ -798,3 +798,21 @@ test('the GitHub host setting keeps a bare host name and refuses anything aimed 
     }
   })
 })
+
+test('a settings file written before the host existed keeps answering from github.com', async () => {
+  await withTempDir(async (dir) => {
+    const file = join(dir, 'settings.json')
+    // The shape the previous version wrote: no github group at all.
+    await writeFile(
+      file,
+      JSON.stringify({ git: { useSystemGit: true }, appearance: { theme: 'dark' } }),
+    )
+    const read = await readSettingsFile(file)
+    assert.equal(read.settings.github.host, 'github.com')
+    // An empty host is that same default, not a nameless enterprise host: every
+    // existing installation keeps addressing github.com.
+    const emptied = await updateSettings(file, { github: { host: '' } }, [])
+    assert.equal(emptied.settings.github.host, 'github.com')
+    assert.deepEqual(emptied.issues, [])
+  })
+})

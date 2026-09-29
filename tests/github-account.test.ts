@@ -1665,3 +1665,46 @@ test('a rejected account metadata write leaves no credential no account owns', a
   setGitHubCredentialSource(null)
   onGitHubFailure(null)
 })
+
+test('an account saved for one host is never restored or opened under another', async () => {
+  const harness = await accountUnder(
+    [{ body: DEVICE_CODE }, { body: session('ghu_first', 'ghr_first') }],
+    { login: 'ada' },
+  )
+  await harness.account.signIn()
+  await harness.settled.promise
+  assert.equal(harness.account.status().state, 'signed-in')
+  const saved = JSON.parse(await readFile(harness.stateFile, 'utf8')) as {
+    host: string
+    reference: string
+  }
+  assert.equal(saved.host, 'github.com')
+
+  const vault = new CredentialVault(harness.vaultFile, harness.protector)
+  // The secret opens for the host that issued it.
+  assert.ok((await vault.open(saved.reference, 'github.com')).length > 0)
+  // And is refused for any other host, before the protector is ever asked.
+  await assert.rejects(
+    vault.open(saved.reference, 'ghe.example.com'),
+    (error: unknown) => (error as { failure?: string }).failure === 'wrong-host',
+  )
+
+  // An account pointed at that other host finds nothing to adopt, and issues no
+  // request while deciding so.
+  let asked = 0
+  const other = new GitHubAccount({
+    vault: new CredentialVault(harness.vaultFile, harness.protector),
+    stateFile: harness.stateFile,
+    host: 'ghe.example.com',
+    env: { GIT_STACKS_GITHUB_APP_CLIENT_ID_GHE_EXAMPLE_COM: CLIENT_ID },
+    fetch: (async (input: string | URL | Request) => {
+      asked += 1
+      throw new Error(`unexpected request to ${String(input)}`)
+    }) as typeof globalThis.fetch,
+    identify: async () => 'ada',
+  })
+  const status = await other.restore()
+  assert.notEqual(status.state, 'signed-in')
+  assert.equal(status.reference ?? null, null)
+  assert.equal(asked, 0)
+})

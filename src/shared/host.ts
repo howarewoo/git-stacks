@@ -40,6 +40,15 @@ export interface GitHubCapability {
 }
 
 /** One capability matrix line, as the Settings surface and diagnostics show it. */
+/** Every capability the matrix carries, in the order the surface shows them. */
+export const CAPABILITY_IDS: readonly GitHubCapabilityId[] = [
+  'rest',
+  'graphql',
+  'native-stacks',
+  'repository-discovery',
+  'device-sign-in',
+]
+
 export const CAPABILITY_LABELS: Record<GitHubCapabilityId, string> = {
   rest: 'REST API',
   graphql: 'GraphQL API',

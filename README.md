@@ -167,8 +167,9 @@ mode. It is a host like any other, reached over HTTPS by its own host name.
 ### Choosing a host
 
 Settings carries the GitHub host name. The field takes a bare host name such as
-`ghe.example.com`, never a URL: no scheme, no path, and no port. A URL is
-refused rather than trimmed into a host name.
+`ghe.example.com`. A pasted `https://` URL is normalized down to that host name;
+anything else aimed elsewhere — a path, a query, another scheme, or embedded
+credentials — is refused and the previous value stands.
 
 A repository is answered by the host that owns it. A repository whose origin
 remote is on one host is never answered by another host, and there is no
@@ -214,7 +215,19 @@ that host actually answered:
 | GraphQL API                  | Whether the host serves GraphQL queries                                |
 | Native stacked pull requests | Whether the host serves the resource that groups stacked pull requests |
 | Repository discovery         | Whether the host can be asked which repositories are reachable         |
-| GitHub App sign-in           | Whether a device-flow sign-in can complete on the host                 |
+| GitHub App sign-in           | Whether this build has a device-flow registration for that host        |
+
+Every host has its own endpoints: a GitHub Enterprise Server host serves REST
+from `/api/v3` and GraphQL from `/api/graphql` on its own name, while
+`github.com` answers from `api.github.com`. Neither is derived from the other,
+and a request is never retried against a different path or a different host.
+
+Credentials are per host. A sign-in belongs to the host that issued it and is
+never sent to another, and an ambient `GIT_STACKS_GITHUB_TOKEN`, `GITHUB_TOKEN`,
+or `GH_TOKEN` is a `github.com` credential: another host only receives a token
+set in its own `GIT_STACKS_GITHUB_TOKEN_<HOST>`, where dots and hyphens in the
+host name are written as underscores. A credential exchange never follows a
+redirect, so a host cannot forward a refresh token somewhere else.
 
 | State             | Meaning                                                                   |
 | ----------------- | ------------------------------------------------------------------------- |
@@ -222,8 +235,13 @@ that host actually answered:
 | `unsupported`     | The host answered and does not offer the capability.                      |
 | `unauthenticated` | The host answered, but no credential for that host is available.          |
 | `unreachable`     | The host did not answer.                                                  |
-| `not-configured`  | A prerequisite is missing, such as no GitHub App client id for that host. |
-| `unknown`         | The capability has not been probed yet.                                   |
+| `not-configured`  | A prerequisite is missing, such as no GitHub App client id for that host, or no configured way to ask a host at all. |
+| `unknown`         | The capability has not been established, or the host answered something this build could not read. |
+
+Repository discovery is reported from an actual discovery run, not from the
+API answering at all: a host that serves its API root and refuses a repository
+collection reports discovery as it is. A capability this build never asks about
+is never reported as either.
 
 `unsupported` is only ever reported when the host answered. A host that does
 not answer is `unreachable`, never `unsupported`; a timeout is not evidence
@@ -259,6 +277,7 @@ and validates; the renderer never chooses or writes that path.
 | Setting                              | Effect                                                                                                                                |
 | ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------- |
 | Git to run                           | Chooses the bundled runtime or the system `git` for every Git operation.                                                              |
+| GitHub host                          | The GitHub host every sign-in, discovery run, and API request addresses: `github.com` or an enterprise host name (an optional port). Each repository's own remote decides the host in use. |
 | Editor                               | Program used by **Open in editor** in the file inspector. Empty means the platform default.                                           |
 | Merge tool                           | Program Git runs to resolve a conflict. Takes precedence over `GIT_MERGE_TOOL` and `merge.tool`. Empty means Git's own configuration. |
 | Default pull strategy / merge method | Seeds the workflow dialog; still changeable per operation.                                                                            |
@@ -267,6 +286,11 @@ and validates; the renderer never chooses or writes that path.
 | Reduce motion                        | Removes non-essential transitions regardless of the system setting.                                                                   |
 | Include local paths                  | Lets a support bundle name the Git executable path. Nothing else widens.                                                              |
 | Shortcuts                            | Chord editing with conflict detection.                                                                                                |
+
+The GitHub host accepts a bare host name (a pasted `https://` URL is normalized
+down to its host) and refuses a path, a query, a non-HTTPS scheme, or embedded
+credentials. Changing it retires the sign-in for the previous host and forgets
+what this build had learned about that host.
 
 A value is validated before use. Editors and merge tools are restricted to a supported program allowlist (`code`, `cursor`, `vim`, `nvim`, `kdiff3`, etc.); arbitrary shell interpreters or commands with arguments are refused. Editor launching enforces repository containment following symlinks. An unreadable field falls back to its default and is reported on the Settings surface; the rest of the file still applies. A file that is not valid JSON is replaced by defaults on the next save. All settings reads and modifications are serialized through an atomic transactional queue.
 

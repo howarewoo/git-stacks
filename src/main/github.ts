@@ -15,6 +15,7 @@ import {
   hostTransport,
   observeHostCapability,
   remoteHostContext,
+  type NativeStackCapabilityReason,
 } from './github-host'
 import { GitHubTransportError, type GitHubErrorKind } from './github-transport'
 import {
@@ -37,6 +38,12 @@ export interface GitHubResult {
   nativeStacks?: NativeStack[]
   nativeStackPreviewAvailable?: boolean
   nativeStackMessage?: string
+  /**
+   * What the native stacks probe established. Only `endpoint-missing` says the
+   * host does not serve the resource; anything else means this build could not
+   * find out, and no caller may turn that into an absence.
+   */
+  nativeStackPreviewReason?: NativeStackCapabilityReason | 'not-applicable'
 }
 
 type PullRequestWithRepository = {
@@ -178,6 +185,7 @@ export function unavailableGitHubResult(message: string, failure?: GitHubFailure
     sameRepository: () => false,
     nativeStacks: [],
     nativeStackPreviewAvailable: false,
+    nativeStackPreviewReason: 'unreachable',
     nativeStackMessage: message,
   }
 }
@@ -302,15 +310,11 @@ export async function getGitHubData(
   }
   const transport = hostTransport(host)
   try {
-    const query = `query($owner: String!, $name: String!, $endCursor: String) {
+    const query = (conservative: boolean) => `query($owner: String!, $name: String!, $endCursor: String) {
       repository(owner: $owner, name: $name) {
         pullRequests(first: 100, after: $endCursor, states: OPEN, orderBy: {field: UPDATED_AT, direction: DESC}) {
           nodes {
-            number title url headRefName headRefOid baseRefName isDraft state
-            reviewDecision mergeStateStatus
-            headRepository { nameWithOwner }
-            mergeCommit { oid }
-            commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
+            ${pullRequestFields(conservative)}
           }
           pageInfo { hasNextPage endCursor }
         }
@@ -320,17 +324,26 @@ export async function getGitHubData(
     const pullRequests: PullRequest[] = []
     const headRepositories: (string | null)[] = []
     let endCursor: string | null = null
+    // The first page is asked for in full and, if the host's schema refused one
+    // of the recent fields, every page after it is asked for the same narrower
+    // way: a host does not gain those fields halfway through a listing.
+    let conservative = false
     for (;;) {
       if (signal?.aborted) throw new CommandCancelled()
-      const page: Record<string, unknown> = await transport.graphql(
-        query,
-        {
-          owner: remote.owner,
-          name: remote.name,
-          endCursor,
-        },
-        { signal },
-      )
+      const variables = {
+        owner: remote.owner,
+        name: remote.name,
+        endCursor,
+      }
+      let page: Record<string, unknown>
+      try {
+        page = await transport.graphql(query(conservative), variables, { signal })
+      } catch (error) {
+        if (conservative || !isSchemaRefusal(error)) throw error
+        observeGraphqlFailure(host, error)
+        conservative = true
+        page = await transport.graphql(query(true), variables, { signal })
+      }
       const repository = isRecord(page) ? page.repository : null
       const connection = isRecord(repository) ? repository.pullRequests : null
       const nodes =
@@ -380,6 +393,7 @@ export async function getGitHubData(
       sameRepository,
       nativeStacks: nativeStacksResult.nativeStacks,
       nativeStackPreviewAvailable: nativeStacksResult.available,
+      nativeStackPreviewReason: nativeStacksResult.reason,
       nativeStackMessage: nativeStacksResult.message,
     }
   } catch (error) {
@@ -420,6 +434,35 @@ function observeGraphqlFailure(host: GitHubHostContext, error: unknown): void {
 }
 
 /**
+ * True when the host refused the shape of the query rather than its result: a
+ * field or argument its schema does not carry. This is a schema-version fact,
+ * not a credential, rate limit, or network failure, and it is the only refusal
+ * that makes a narrower query worth sending.
+ */
+function isSchemaRefusal(error: unknown): boolean {
+  const detail = error instanceof GitHubTransportError ? error.detail : String(error)
+  return /cannot query field|doesn't exist on type|could not resolve to|unknown argument|unknown field|is not defined by type/iu.test(
+    detail,
+  )
+}
+
+/**
+ * The pull request fields every GitHub host carries, plus the fields only a
+ * recent schema has. `reviewDecision`, `mergeStateStatus`, and a commit's
+ * `statusCheckRollup` are asked for first and dropped when the host refuses
+ * them, so an older Enterprise schema still answers the rest of the pull
+ * request with its merge and check state honestly unknown.
+ */
+function pullRequestFields(conservative: boolean, withBody = false): string {
+  const base = `number title url headRefName headRefOid baseRefName isDraft state headRepository { nameWithOwner } mergeCommit { oid }${withBody ? ' body' : ''}`
+  return conservative
+    ? base
+    : `${base}
+        reviewDecision mergeStateStatus
+        commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }`
+}
+
+/**
  * Load one canonical pull request, including its current body, from the host
  * that owns the origin. Only the fields every GitHub host answers are required;
  * a field a host's schema does not carry is reported as absent rather than
@@ -441,27 +484,32 @@ export async function getPullRequest(
     )
   }
   const transport = hostTransport(host)
-  const query = `query($owner: String!, $name: String!, $number: Int!) {
+  const query = (conservative: boolean) => `query($owner: String!, $name: String!, $number: Int!) {
     repository(owner: $owner, name: $name) {
       pullRequest(number: $number) {
-        number title url headRefName headRefOid baseRefName isDraft state body
-        reviewDecision mergeStateStatus
-        headRepository { nameWithOwner }
-        mergeCommit { oid }
-        commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
+        ${pullRequestFields(conservative, true)}
       }
     }
   }`
   try {
-    const value = await transport.graphql(
-      query,
-      {
-        owner: remote.owner,
-        name: remote.name,
-        number,
-      },
-      { signal },
-    )
+    const variables = {
+      owner: remote.owner,
+      name: remote.name,
+      number,
+    }
+    const ask = (conservative: boolean) =>
+      transport.graphql(query(conservative), variables, { signal })
+    let value: unknown
+    try {
+      value = await ask(false)
+    } catch (error) {
+      // The host refused a field its schema does not carry. The narrower query
+      // is the same read without the recent fields, so the pull request is
+      // returned with its merge and check state unknown rather than lost.
+      if (!isSchemaRefusal(error)) throw error
+      observeGraphqlFailure(host, error)
+      value = await ask(true)
+    }
     if (signal?.aborted) throw new CommandCancelled()
     const repository = isRecord(value) ? value.repository : null
     const node = isRecord(repository) ? repository.pullRequest : null

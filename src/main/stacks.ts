@@ -78,7 +78,12 @@ import {
   unstackNativeStackAction,
 } from './native-stacks'
 import { canonicalRemoteName, getGitHubData, getPullRequest, pullRequestRepository } from './github'
-import { type GitHubHostContext, hostTransport, remoteHostContext } from './github-host'
+import {
+  type GitHubHostContext,
+  hostTransport,
+  remoteHostContext,
+  type NativeStackCapabilityReason,
+} from './github-host'
 import { GitHubTransportError } from './github-transport'
 import type { GitHubResult } from './github'
 import { runReconciliationRepair } from './reconciliation'
@@ -176,6 +181,12 @@ interface StackPlan {
    * the pull requests publish as an ordinary chain; nothing claims otherwise.
    */
   nativeStacksAvailable: boolean
+  /**
+   * What the native stacks probe established for this repository. Only
+   * `endpoint-missing` is a confirmed absence; every other reason leaves the
+   * capability unestablished, and no step, label, or message is derived from it.
+   */
+  nativeStacksReason: NativeStackCapabilityReason | 'not-applicable'
   capturedMergedHeads: Record<
     string,
     { pr: string | null; oid: string | null; commit: string | null }
@@ -2287,6 +2298,7 @@ async function capturePlan(
     capturedMergedHeads,
     capturedPrs: prs,
     nativeStacksAvailable: githubData?.nativeStackPreviewAvailable === true,
+    nativeStacksReason: githubData?.nativeStackPreviewReason ?? 'not-applicable',
     capturedStacks: (snapshot.nativeStacks ?? []).map((stack) => ({
       number: stack.number,
       open: stack.open,
@@ -2401,7 +2413,11 @@ async function publishPreview(plan: StackPlan): Promise<PublishPreview> {
   // A host that does not serve native stacks never gets a registration step:
   // the pull requests still chain onto each other, and the stack stays local.
   const stackAction: PublishStackAction =
-    layers.length === 0 || !plan.nativeStacksAvailable
+    layers.length === 0 ||
+    !plan.nativeStacksAvailable ||
+    // An unestablished probe is not a licence to plan native membership: the
+    // only absence this build acts on is a resource the host refused.
+    plan.nativeStacksReason !== 'available'
       ? 'none'
       : stackNumber
         ? 'extend'
@@ -5965,6 +5981,11 @@ async function runPublishSteps(
   return { message: operation.message }
 }
 
+/** Whether the host answered that it does not serve the native stacks resource. */
+function confirmedNoNativeStacks(reason: NativeStackCapabilityReason | 'not-applicable'): boolean {
+  return reason === 'endpoint-missing' || reason === 'not-applicable'
+}
+
 /**
  * Proves the native stack the preview recorded still exists and still holds exactly the
  * pull requests it listed, before a single branch is pushed. A stack closed, unstacked, or
@@ -6054,7 +6075,15 @@ async function runSubmitStack(
     }
   }
   const operation = await buildPublishOperation(plan.repoPath, plan, action)
-  await proveCapturedStackMembership(plan, operation)
+  // Membership is only skipped where the host confirmed it has no such
+  // resource, or the repository is not a GitHub one at all. Every other case —
+  // a refused credential, an unanswered host, a rejected request — is
+  // unestablished, and the proof is still run: it either establishes the
+  // membership or reports the recoverable failure that stopped it, rather than
+  // this build assuming the host has no native stacks.
+  if (!confirmedNoNativeStacks(plan.nativeStacksReason) || operation.stackNumber !== null) {
+    await proveCapturedStackMembership(plan, operation)
+  }
   await writePublishOperation(plan.repoPath, operation)
   return runPublishSteps(plan.repoPath, operation)
 }

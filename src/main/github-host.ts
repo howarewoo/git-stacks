@@ -7,7 +7,13 @@ import {
   githubTransportForHost,
   type GitHubTransport,
 } from './github-transport'
-import { CAPABILITY_LABELS, type GitHubCapability, type GitHubHostStatus } from '../shared/host'
+import { githubAppClientId, githubAppClientIdEnvName } from './github-app'
+import {
+  CAPABILITY_IDS,
+  CAPABILITY_LABELS,
+  type GitHubCapability,
+  type GitHubHostStatus,
+} from '../shared/host'
 import type { GitHubCapabilityId, GitHubCapabilityState } from '../shared/host'
 
 /** The public host. It is the default, and it behaves exactly as it always has. */
@@ -115,7 +121,13 @@ export function hostTransport(
   context: GitHubHostContext,
   env: NodeJS.ProcessEnv = process.env,
 ): GitHubTransport {
-  return githubTransportForHost(context.host, context.apiBase, env)
+  // A host whose GraphQL endpoint is its REST base plus `/graphql` — github.com
+  // is the only one — is left to the transports' own default, so nothing about
+  // that host's requests changes. Only a host that serves GraphQL from a path
+  // of its own is named, and it is named by that path.
+  const graphqlUrl =
+    context.graphqlUrl === `${context.apiBase}/graphql` ? undefined : context.graphqlUrl
+  return githubTransportForHost(context.host, context.apiBase, env, graphqlUrl)
 }
 
 /** Where a GitHub host's web pages, REST API, and GraphQL endpoint live. */
@@ -124,7 +136,10 @@ export function githubHostContext(host: string): GitHubHostContext {
   const dotcom = name === GITHUB_DOTCOM_HOST
   const webOrigin = dotcom ? GITHUB_DOTCOM_WEB_ORIGIN : `https://${name}`
   const apiBase = dotcom ? GITHUB_DOTCOM_API_BASE : `${webOrigin}/api/v3`
-  return { host: name, dotcom, webOrigin, apiBase, graphqlUrl: `${apiBase}/graphql` }
+  // An enterprise host serves REST from `/api/v3` and GraphQL from `/api/graphql`;
+  // github.com serves both from its API subdomain. Neither is derived from the other.
+  const graphqlUrl = dotcom ? `${apiBase}/graphql` : `${webOrigin}/api/graphql`
+  return { host: name, dotcom, webOrigin, apiBase, graphqlUrl }
 }
 
 /**
@@ -164,6 +179,7 @@ export type NativeStackCapabilityReason =
   | 'unauthenticated'
   | 'unreachable'
   | 'rejected'
+  | 'not-configured'
 
 export interface NativeStackCapability {
   available: boolean
@@ -187,25 +203,49 @@ function outcomeFromError(error: unknown): ProbeOutcome {
     switch (error.kind) {
       case 'unauthorized':
       case 'forbidden':
-        return {
-          state: 'unauthenticated',
-          detail: `this host refused the credential (${error.detail})`,
-        }
+        return { state: 'unauthenticated', detail: 'this host refused the credential' }
       case 'network':
       case 'timeout':
-        return { state: 'unreachable', detail: `this host did not answer (${error.detail})` }
+        return { state: 'unreachable', detail: 'this host did not answer' }
+      case 'not-configured':
+        // A missing local tool or an absent transport is this machine's setup.
+        // No host was contacted, so nothing can be concluded about the host.
+        return {
+          state: 'not-configured',
+          detail: 'this machine has no configured way to ask a host',
+        }
       case 'not-found':
       case 'unsupported':
-        return { state: 'unsupported', detail: `this host does not offer it (${error.detail})` }
+        return { state: 'unsupported', detail: 'this host does not offer this resource' }
       case 'unprocessable':
-        return { state: 'unsupported', detail: `this host rejected the request (${error.detail})` }
+        return { state: 'unsupported', detail: 'this host rejected the request' }
       case 'rate-limited':
       case 'secondary-rate-limit':
-        return { state: 'unknown', detail: `rate limited (${error.detail})` }
+        return { state: 'unknown', detail: 'this host is rate limiting this credential' }
       case 'cancelled':
         return { state: 'unknown', detail: 'the request was cancelled' }
+      case 'invalid-response': {
+        // A schema that does not carry a field this build queries is a fact
+        // about the host worth naming, and the only part of the refusal that is
+        // copied out is the field's own identifier, read from a fixed pattern.
+        const field =
+          /cannot query field ["']([A-Za-z_][A-Za-z0-9_]{0,63})["']/iu.exec(error.detail)?.[1] ??
+          /field ["']?([A-Za-z_][A-Za-z0-9_]{0,63})["']? (?:is )?(?:not|doesn'?t) exist/iu.exec(
+            error.detail,
+          )?.[1]
+        return {
+          state: 'unknown',
+          detail: field
+            ? `this host's schema does not have a field this build queries (${field})`
+            : 'this host returned something this build could not read',
+        }
+      }
       default:
-        return { state: 'unknown', detail: error.detail }
+        // A response body can carry anything a server chose to return, so the
+        // transport's message is never copied into a capability, a diagnostic,
+        // or a support bundle. The kind of refusal is the fact; its wording is
+        // the server's.
+        return { state: 'unknown', detail: `the request was refused (${error.kind})` }
     }
   }
   return { state: 'unknown', detail: error instanceof Error ? error.message : String(error) }
@@ -241,7 +281,14 @@ export async function probeNativeStacksCapability(
     const outcome = outcomeFromError(error)
     return {
       available: false,
-      reason: outcome.state === 'unreachable' ? 'unreachable' : 'unauthenticated',
+      // No transport and no credential are both "this build could not ask", and
+      // neither is a statement about what the host offers.
+      reason:
+        outcome.state === 'unreachable'
+          ? 'unreachable'
+          : outcome.state === 'not-configured'
+            ? 'not-configured'
+            : 'unauthenticated',
       message: outcome.detail,
     }
   }
@@ -334,6 +381,29 @@ export function recordHostProbe(status: GitHubHostStatus): void {
   }
 }
 
+/**
+ * Records what a real request to this host established about one capability.
+ * This is the only way a capability becomes supported without a probe: a probe
+ * that could not ask leaves whatever the request actually saw.
+ */
+export function observeHostRequest(
+  host: string,
+  id: GitHubCapabilityId,
+  outcome: { state: GitHubCapabilityState; detail: string },
+): void {
+  record(host.toLowerCase()).capabilities.set(id, {
+    id,
+    label: CAPABILITY_LABELS[id],
+    state: outcome.state,
+    detail: outcome.detail,
+  })
+}
+
+/** What a real request to this host already established, if anything. */
+function observedCapability(host: string, id: GitHubCapabilityId): GitHubCapability | null {
+  return record(host.toLowerCase()).capabilities.get(id) ?? null
+}
+
 /** Drops everything remembered about one host, or about all of them. */
 export function forgetHost(host?: string): void {
   if (host) records.delete(host.toLowerCase())
@@ -396,22 +466,27 @@ function deviceSignInCapability(
   context: GitHubHostContext,
   env: NodeJS.ProcessEnv,
 ): GitHubCapability {
-  const detail = context.dotcom
-    ? 'GitHub App device sign-in is available for github.com in this build.'
-    : `This build signs in to github.com only. ${context.host} is used with a credential supplied by the environment or an authenticated gh session.`
-  if (!context.dotcom) {
-    return { id: 'device-sign-in', label: CAPABILITY_LABELS['device-sign-in'], state: 'unsupported', detail }
-  }
-  const clientId = env.GIT_STACKS_GITHUB_APP_CLIENT_ID
-  if (typeof clientId !== 'string' || !clientId.trim()) {
+  // Whether this build can sign a person in to *this* host, from that host's own
+  // registration. A host with no registered app is not configured, which is not
+  // the same as a host whose server refuses the flow: only a refusal is
+  // unsupported, and this build does not claim one before it is asked.
+  const clientId = githubAppClientId(env, context.host)
+  if (clientId === null) {
     return {
       id: 'device-sign-in',
       label: CAPABILITY_LABELS['device-sign-in'],
       state: 'not-configured',
-      detail: 'No GitHub App client id is configured for this build.',
+      detail: context.dotcom
+        ? 'No GitHub App client id is configured for this build.'
+        : `No GitHub App client id is registered for ${context.host}. Set ${githubAppClientIdEnvName(context.host)} to sign in to it, or use a credential this build already holds for it.`,
     }
   }
-  return { id: 'device-sign-in', label: CAPABILITY_LABELS['device-sign-in'], state: 'supported', detail }
+  return {
+    id: 'device-sign-in',
+    label: CAPABILITY_LABELS['device-sign-in'],
+    state: 'supported',
+    detail: `${context.host} has a GitHub App registration this build can sign in with.`,
+  }
 }
 
 export interface HostProbeOptions {
@@ -435,7 +510,10 @@ export async function probeGitHubHost(
   options: HostProbeOptions = {},
 ): Promise<GitHubHostStatus> {
   const env = options.env ?? process.env
-  const transport = options.transport ?? githubTransportForHost(context.host, context.apiBase, env)
+  // The probe asks the host it is about, through the same transport a repository
+  // on that host would use, so it never probes an endpoint this build would not
+  // actually call.
+  const transport = options.transport ?? hostTransport(context, env)
   const signal = options.signal ? { signal: options.signal } : {}
   const capabilities: GitHubCapability[] = []
   const set = (id: GitHubCapabilityId, outcome: ProbeOutcome) =>
@@ -448,16 +526,26 @@ export async function probeGitHubHost(
   try {
     await transport.rest({ path: GITHUB_ROOT_PATH, ...signal })
     set('rest', { state: 'supported', detail: `${context.apiBase} answered a REST request` })
-    set('repository-discovery', {
-      state: 'supported',
-      detail: 'Repository discovery uses this host’s REST base.',
-    })
+    // An API root answers for the API, not for the repository collection a
+    // discovery run reads. That line stays unknown until a discovery request
+    // establishes it, and keeps whatever a real run already observed.
+    set(
+      'repository-discovery',
+      observedCapability(context.host, 'repository-discovery') ?? {
+        state: 'unknown',
+        detail: 'No repository discovery request has run against this host yet.',
+      },
+    )
     state = 'supported'
     message = `${context.host} answered at ${context.apiBase}.`
   } catch (error) {
+    // An abort is this build's own doing, not a fact about the host: it is
+    // raised so a retired host's probe never reports a status of unknown for a
+    // request it was not allowed to finish.
+    if (options.signal?.aborted) throw error
     const outcome = outcomeFromError(error)
     set('rest', outcome)
-    set('repository-discovery', outcome)
+    set('repository-discovery', observedCapability(context.host, 'repository-discovery') ?? outcome)
     state = outcome.state
     message = outcome.detail
   }
@@ -473,6 +561,7 @@ export async function probeGitHubHost(
       detail: `${context.graphqlUrl} answered a GraphQL request`,
     })
   } catch (error) {
+    if (options.signal?.aborted) throw error
     set('graphql', outcomeFromError(error))
   }
 
@@ -504,8 +593,13 @@ export async function probeGitHubHost(
     message,
     serverVersion,
     probedAt: (options.now ?? (() => new Date()))().toISOString(),
-    capabilities: capabilities.map((capability) =>
-      capability.id === 'device-sign-in' ? deviceSignInCapability(context, env) : capability,
+    // The matrix is every capability id, always. Sign-in is a fact about this
+    // build's registration for this host, and a probe that could not reach the
+    // network does not make that line vanish.
+    capabilities: CAPABILITY_IDS.map(
+      (id) =>
+        capabilities.find((capability) => capability.id === id) ??
+        (id === 'device-sign-in' ? deviceSignInCapability(context, env) : unprobedCapability(id)),
     ),
   }
   recordHostProbe(status)
@@ -514,6 +608,7 @@ export async function probeGitHubHost(
 
 function stacksStateForReason(reason: NativeStackCapabilityReason): GitHubCapabilityState {
   if (reason === 'unreachable') return 'unreachable'
+  if (reason === 'not-configured') return 'not-configured'
   if (reason === 'unauthenticated') return 'unauthenticated'
   return 'unknown'
 }
@@ -529,8 +624,11 @@ async function readServerVersion(
 ): Promise<string | null> {
   try {
     const { data } = await transport.rest<unknown>({ path: 'meta', ...signal })
-    if (isRecord(data) && typeof data.installed_version === 'string' && data.installed_version) {
-      return data.installed_version
+    // A version is a number and dots. Whatever else a server put in that field
+    // is not a version and never reaches a diagnostic or a support bundle.
+    if (isRecord(data) && typeof data.installed_version === 'string') {
+      const version = data.installed_version.trim()
+      if (/^\d{1,4}(?:\.\d{1,4}){0,3}(?:[-+][A-Za-z0-9.]{1,16})?$/u.test(version)) return version
     }
   } catch {
     // A host that does not answer /meta has not told this build its version.

@@ -19,6 +19,7 @@ import {
 import {
   DirectGitHubTransport,
   GITHUB_STACKS_API_VERSION,
+  environmentTokenName,
   GitHubTransportError,
   githubTransportForHost,
   type GitHubCredentialSource,
@@ -118,6 +119,8 @@ function capability(status: GitHubHostStatus, id: GitHubCapabilityId): GitHubCap
 
 const ENTERPRISE = 'ghe.example.com'
 const ENTERPRISE_API = 'https://ghe.example.com/api/v3'
+/** A GitHub Enterprise Server host serves GraphQL from `/api/graphql`. */
+const ENTERPRISE_GRAPHQL = 'https://ghe.example.com/api/graphql'
 
 test('an enterprise origin remote routes every request to that host, never to github.com', async () => {
   forgetHost()
@@ -127,7 +130,7 @@ test('an enterprise origin remote routes every request to that host, never to gi
   assert.equal(https.host, ENTERPRISE)
   assert.equal(https.dotcom, false)
   assert.equal(https.apiBase, ENTERPRISE_API)
-  assert.equal(https.graphqlUrl, `${ENTERPRISE_API}/graphql`)
+  assert.equal(https.graphqlUrl, ENTERPRISE_GRAPHQL)
   assert.equal(ssh.host, ENTERPRISE)
   assert.equal(ssh.apiBase, ENTERPRISE_API)
 
@@ -135,7 +138,7 @@ test('an enterprise origin remote routes every request to that host, never to gi
     [`${ENTERPRISE_API}/repos/acme/widgets/stacks`, { body: [] }],
     [`${ENTERPRISE_API}/`, { body: { current_user_url: `${ENTERPRISE_API}/user` } }],
     [`${ENTERPRISE_API}/meta`, { body: { installed_version: '3.11.4' } }],
-    [`${ENTERPRISE_API}/graphql`, { body: { data: { __typename: 'Query' } } }],
+    [ENTERPRISE_GRAPHQL, { body: { data: { __typename: 'Query' } } }],
     [`${ENTERPRISE_API}/repos/acme/widgets`, { body: { full_name: 'acme/widgets' } }],
     [`${ENTERPRISE_API}/repos/acme/widgets/stacks?per_page=1`, { body: [] }],
   ])
@@ -144,7 +147,10 @@ test('an enterprise origin remote routes every request to that host, never to gi
     withEnv(
       {
         GIT_STACKS_GITHUB_TRANSPORT: 'direct',
-        GIT_STACKS_GITHUB_TOKEN: 'ghe-token',
+        // The token is set in the enterprise host's own variable. An ambient
+        // github.com token is never used for a host that did not issue it.
+        [environmentTokenName(ENTERPRISE)]: 'ghe-token',
+        GIT_STACKS_GITHUB_TOKEN: 'github-token',
         GITHUB_TOKEN: undefined,
         GH_TOKEN: undefined,
       },
@@ -172,7 +178,7 @@ test('an enterprise origin remote routes every request to that host, never to gi
       `${ENTERPRISE_API}/repos/acme/widgets/stacks`,
       `${ENTERPRISE_API}/`,
       `${ENTERPRISE_API}/meta`,
-      `${ENTERPRISE_API}/graphql`,
+      ENTERPRISE_GRAPHQL,
       `${ENTERPRISE_API}/repos/acme/widgets`,
       `${ENTERPRISE_API}/repos/acme/widgets/stacks?per_page=1`,
     ],
@@ -213,13 +219,11 @@ test('a host without the stacks endpoint reports a missing endpoint, and names t
   assert.equal(capability.reason, 'endpoint-missing')
   assert.notEqual(capability.reason, 'unauthenticated')
 
+  // Detection degrades to a state the publish path branches on rather than
+  // raising, because a resource the host refused is a fact about the host.
   const detected = await detectNativeStacksCapability('acme', 'widgets', { host: context, transport })
   assert.equal(detected.available, false)
   assert.equal(detected.state, 'preview-unavailable')
-  assert.ok(
-    detected.message.includes(ENTERPRISE),
-    `the degradation message named no host: ${detected.message}`,
-  )
 
   // The repository answered first, so the 404 belongs to the stacks resource.
   // Both probes above are the same request pair, in the same order.
@@ -244,7 +248,7 @@ test('a host that rejects this build’s GraphQL fields is reported as unknown w
     [`${api}/`, { body: { current_user_url: `${api}/user` } }],
     [`${api}/meta`, { body: { installed_version: '3.9.0' } }],
     [
-      `${api}/graphql`,
+      context.graphqlUrl,
       { body: { errors: [{ message: refusal }] } },
     ],
     [`${api}/repos/acme/widgets`, { body: { full_name: 'acme/widgets' } }],
@@ -253,6 +257,7 @@ test('a host that rejects this build’s GraphQL fields is reported as unknown w
   const transport = new DirectGitHubTransport({
     host: 'ghe-old.example.com',
     apiUrl: api,
+    graphqlUrl: context.graphqlUrl,
     token: 'ghe-token',
     env: {},
     fetch,
@@ -274,7 +279,7 @@ test('a host that rejects this build’s GraphQL fields is reported as unknown w
   // REST still answered, so only the GraphQL schema is in question.
   assert.equal(capability(status, 'rest').state, 'supported')
   assert.equal(capability(status, 'native-stacks').state, 'supported')
-  const graphqlRequest = recorded.find((entry) => entry.url === `${api}/graphql`)
+  const graphqlRequest = recorded.find((entry) => entry.url === context.graphqlUrl)
   assert.ok(graphqlRequest)
   assert.equal(graphqlRequest.method, 'POST')
 })
@@ -286,11 +291,12 @@ test('a GraphQL response with no data is reported as unknown rather than as an u
   const { fetch } = hostFetch([
     [`${api}/`, { body: { current_user_url: `${api}/user` } }],
     [`${api}/meta`, { body: { installed_version: '3.9.0' } }],
-    [`${api}/graphql`, { body: { data: null } }],
+    [context.graphqlUrl, { body: { data: null } }],
   ])
   const transport = new DirectGitHubTransport({
     host: 'ghe-dataless.example.com',
     apiUrl: api,
+    graphqlUrl: context.graphqlUrl,
     token: 'ghe-token',
     env: {},
     fetch,
@@ -300,7 +306,9 @@ test('a GraphQL response with no data is reported as unknown rather than as an u
   const graphql = capability(status, 'graphql')
   assert.equal(graphql.state, 'unknown')
   assert.notEqual(graphql.state, 'unsupported')
-  assert.match(graphql.detail, /data/iu)
+  // The response body is not copied into the capability: a server can put
+  // anything there, and this detail reaches diagnostics and support bundles.
+  assert.doesNotMatch(graphql.detail, /data/iu)
 })
 
 test('a 401 on the stacks resource is unauthenticated, never a host without the endpoint', async () => {
@@ -309,7 +317,7 @@ test('a 401 on the stacks resource is unauthenticated, never a host without the 
   const { fetch, recorded } = hostFetch([
     [`${ENTERPRISE_API}/`, { body: { current_user_url: `${ENTERPRISE_API}/user` } }],
     [`${ENTERPRISE_API}/meta`, { body: { installed_version: '3.11.4' } }],
-    [`${ENTERPRISE_API}/graphql`, { body: { data: { __typename: 'Query' } } }],
+    [ENTERPRISE_GRAPHQL, { body: { data: { __typename: 'Query' } } }],
     [`${ENTERPRISE_API}/repos/acme/widgets`, { body: { full_name: 'acme/widgets' } }],
     [
       `${ENTERPRISE_API}/repos/acme/widgets/stacks?per_page=1`,
@@ -365,6 +373,7 @@ test('a host that never answered is unreachable, never unsupported', async () =>
   const transport = new DirectGitHubTransport({
     host: 'ghe-offline.example.com',
     apiUrl: api,
+    graphqlUrl: context.graphqlUrl,
     token: 'ghe-token',
     env: {},
     fetch,
@@ -440,11 +449,11 @@ test('a credential for one host never reaches another host, and the transport ca
   // transport handed over from the other host would show up in the header.
   const ownEnv = {
     GIT_STACKS_GITHUB_TRANSPORT: 'direct',
-    GIT_STACKS_GITHUB_TOKEN: 'ghe-cache-token',
+    [environmentTokenName(ENTERPRISE)]: 'ghe-cache-token',
   }
   const foreignEnv = {
     GIT_STACKS_GITHUB_TRANSPORT: 'direct',
-    GIT_STACKS_GITHUB_TOKEN: 'other-cache-token',
+    [environmentTokenName('other.example.com')]: 'other-cache-token',
   }
   const cachedOwn = githubTransportForHost(ENTERPRISE, ENTERPRISE_API, ownEnv)
   const cachedForeign = githubTransportForHost(

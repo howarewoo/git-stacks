@@ -203,7 +203,9 @@ export function validateSettings(value: unknown): {
   if (askedHost !== undefined && !parsedHost.ok) {
     issues.push({ key: 'github.host', message: parsedHost.message })
   }
-  const githubHost = parsedHost.ok ? parsedHost.host : GITHUB_DEFAULT_HOST
+  // An absent or empty host is the default host: a settings file written before
+  // the host was configurable must keep answering from github.com.
+  const githubHost = parsedHost.ok && parsedHost.host ? parsedHost.host : GITHUB_DEFAULT_HOST
 
   const shortcuts = sanitizeShortcutBindings(value.shortcuts)
   const migratedField = booleanField(

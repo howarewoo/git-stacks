@@ -907,6 +907,7 @@ export function installFixtureControl(options: {
                   httpsUrl: 'https://github.com/acme/empty-repo.git',
                   sshUrl: 'git@github.com:acme/empty-repo.git',
                   canPush: true,
+                  host: 'github.com',
                 },
               ]
             : [
@@ -926,6 +927,7 @@ export function installFixtureControl(options: {
                   httpsUrl: 'https://github.com/howarewoo/git-stacks.git',
                   sshUrl: 'git@github.com:howarewoo/git-stacks.git',
                   canPush: true,
+                  host: 'github.com',
                 },
                 {
                   name: 'widgets',
@@ -943,6 +945,7 @@ export function installFixtureControl(options: {
                   httpsUrl: 'https://github.com/acme/widgets.git',
                   sshUrl: 'git@github.com:acme/widgets.git',
                   canPush: true,
+                  host: 'github.com',
                 },
               ]
         return {

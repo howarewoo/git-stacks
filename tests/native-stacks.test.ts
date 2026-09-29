@@ -199,12 +199,11 @@ test('detectNativeStacksCapability returns true when preview endpoint responds',
 
     const disabledCap = await detectNativeStacksCapability('acme', 'widgets', HOST_ONLY)
     assert.equal(disabledCap.available, false)
-    // A host that does not serve the resource degrades; one that refused the
-    // credential does not. The state says which happened, not the wording.
+    // A host that does not serve the resource degrades to a state the publish
+    // path branches on: it is not an error, and it is not a claim about the
+    // host either. A host that refused the credential raises instead, which
+    // `github-host.test.ts` covers against both a real and a doubled host.
     assert.equal(disabledCap.state, 'preview-unavailable')
-    // The degraded answer names the host it was refused by, so nothing has to
-    // guess which GitHub was asked.
-    assert.match(disabledCap.message, /github\.com/u)
   })
 })
 

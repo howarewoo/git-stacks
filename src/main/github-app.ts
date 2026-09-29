@@ -172,6 +172,11 @@ async function post(
         'user-agent': 'git-stacks',
       },
       body: new URLSearchParams(parameters).toString(),
+      // This body carries a client secret, a device code, or a refresh token. A
+      // redirect would resend it to whatever the response names, so redirects
+      // are refused here rather than followed: a host that redirects its own
+      // token endpoint is not one this build hands a credential to.
+      redirect: 'error',
       signal: controller.signal,
     })
     // An error status still carries GitHub's own explanation, and that

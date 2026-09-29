@@ -12,6 +12,7 @@ import {
   type GitHubHostContext,
   probeNativeStacksCapability,
   remoteHostContext,
+  type NativeStackCapabilityReason,
 } from './github-host'
 import {
   GITHUB_STACKS_API_VERSION,
@@ -937,6 +938,12 @@ export async function loadRepositoryNativeStacks(
   nativeStacks: NativeStack[]
   state: NativeStackValidationStatus
   message: string
+  /**
+   * What the probe established. `endpoint-missing` is the only reason that says
+   * the host does not serve the resource; every other reason is a question this
+   * build could not answer and is never reported as absence.
+   */
+  reason: NativeStackCapabilityReason | 'not-applicable'
 }> {
   const remote = parseRemote(originUrl)
   const host = remoteHostContext(remote)
@@ -945,6 +952,7 @@ export async function loadRepositoryNativeStacks(
       available: false,
       nativeStacks: [],
       state: 'preview-unavailable',
+      reason: 'not-applicable',
       message: `Native stacks require a GitHub origin remote; this repository's origin is on ${remote ? remote.host : 'no host'}`,
     }
   }
@@ -959,11 +967,19 @@ export async function loadRepositoryNativeStacks(
       ...(signal ? { signal } : {}),
     })
     if (!capability.available) {
+      // Only a resource the host actually refused establishes that the host does
+      // not serve it. A refused credential or an unanswered host leaves the
+      // capability unknown, and claiming otherwise would tell a person their host
+      // lacks a feature because this build could not reach it.
       return {
         available: false,
         nativeStacks: [],
         state: 'preview-unavailable',
-        message: `${host.host} does not serve native stacked pull requests for this repository: ${capability.message}`,
+        reason: capability.reason,
+        message:
+          capability.reason === 'endpoint-missing'
+            ? `${host.host} does not serve native stacked pull requests for this repository: ${capability.message}`
+            : `${host.host} was not established either way: ${capability.message}`,
       }
     }
     const stacks = await listPullRequestStacks(remote.owner, remote.name, { host, signal })
@@ -980,6 +996,7 @@ export async function loadRepositoryNativeStacks(
       available: true,
       nativeStacks: stacks,
       state: 'valid',
+      reason: 'available',
       message: `${host.host} serves native stacks; ${stacks.length} stack${stacks.length === 1 ? '' : 's'}`,
     }
   } catch (error) {
@@ -988,6 +1005,7 @@ export async function loadRepositoryNativeStacks(
       available: false,
       nativeStacks: [],
       state: 'preview-unavailable',
+      reason: 'unreachable',
       message: error instanceof Error ? error.message : String(error),
     }
   }

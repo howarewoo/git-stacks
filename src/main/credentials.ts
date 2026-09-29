@@ -23,7 +23,7 @@ export interface SecretProtector {
   open(sealed: Buffer): string
 }
 
-export type CredentialFailure = 'unreadable' | 'unavailable' | 'unsealed'
+export type CredentialFailure = 'unreadable' | 'unavailable' | 'unsealed' | 'wrong-host'
 
 /**
  * A credential store failure never carries the secret or the platform's own
@@ -193,11 +193,23 @@ export class CredentialVault {
     return reference
   }
 
-  /** Opens a sealed secret. Throws when the OS key cannot open it; never returns partial data. */
-  async open(reference: string): Promise<string> {
+  /**
+   * Opens a sealed secret. `expectedHost` is the GitHub host the saved secret
+   * was issued by; a secret saved for any other host is refused before it is
+   * decrypted, so a host change between save and restore cannot hand one host's
+   * credential to another. Throws when the OS key cannot open it, and never
+   * returns partial data.
+   */
+  async open(reference: string, expectedHost?: string | null): Promise<string> {
     this.requireStore()
     const entry = (await this.read()).get(reference)
     if (!entry) return ''
+    if (expectedHost !== undefined && entry.host !== expectedHost) {
+      throw new CredentialStoreError(
+        'wrong-host',
+        'The saved credential belongs to a different GitHub host and was not opened.',
+      )
+    }
     try {
       return this.protector.open(Buffer.from(entry.sealed, 'base64'))
     } catch {

@@ -1015,6 +1015,8 @@ export interface GitHubRepositorySummary {
   httpsUrl: string
   sshUrl: string
   canPush: boolean
+  /** The host discovery read this repository from, and the host that owns it. */
+  host: string
 }
 
 /**
