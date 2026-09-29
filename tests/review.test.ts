@@ -3343,6 +3343,119 @@ test('the counter for naming drafts survives being written and read back', async
   )
 })
 
+test('a comment edited after it was composed is sent again, not dropped as sent', async (t) => {
+  const workspace = await reviewWorkspace()
+  t.after(workspace.dispose)
+  const patch = '@@ -1,2 +1,3 @@\n keep\n+added\n tail'
+  const entry = file({ diff: { kind: 'text', hunks: hunks(patch) } })
+  const hunk = textHunk(entry, 0)
+  const added = hunk.lines.findIndex((line) => line.side === 'head' && line.newLine !== null)
+  const at = refFor(hunk, added)
+  const { transport, writes } = threadDouble({
+    files: [apiFile({ patch })],
+    failReviewOnce: { status: 502, message: 'Bad Gateway' },
+  })
+  setGitHubTransport(transport)
+  t.after(() => setGitHubTransport(null))
+
+  // The same draft, at the same line, said one way and left unacknowledged.
+  const one = draft({ id: 'src/app.ts:head:1-head:1#1', ref: at, body: 'wording' })
+  await assert.rejects(
+    () =>
+      submitReview(workspace.repo, 7, {
+        event: 'COMMENT' as const,
+        body: '',
+        comparison: comparison(),
+        drafts: [one],
+      }),
+    { name: 'ReviewOutcomeUnknownError' },
+  )
+  assert.equal(writes.length, 1)
+
+  // The reviewer rewords it before resubmitting. It is the same draft — the
+  // identity was not reminted by an edit — but it says something GitHub does
+  // not hold, and the words they typed are the ones they mean to publish.
+  const reworded = draft({ id: one.id, ref: at, body: 'wording, and a question' })
+  const sent = await submitReview(workspace.repo, 7, {
+    event: 'COMMENT' as const,
+    body: '',
+    comparison: comparison(),
+    drafts: [reworded],
+  })
+
+  assert.equal(writes.length, 2, 'the reworded comment is posted')
+  const posted = writes[1]?.body as { comments: Array<{ body: string }> }
+  assert.equal(
+    posted.comments[0]?.body,
+    'wording, and a question',
+    'carrying the words as they now stand, not the ones GitHub already has',
+  )
+  assert.deepEqual(sent.delivered, [one.id], 'and the draft is reported, so the view drops it')
+})
+
+test('a review that landed covers only the comments it actually posted', async (t) => {
+  const workspace = await reviewWorkspace()
+  t.after(workspace.dispose)
+  const patch = '@@ -1,2 +1,3 @@\n keep\n+added\n tail'
+  const entry = file({ diff: { kind: 'text', hunks: hunks(patch) } })
+  const hunk = textHunk(entry, 0)
+  const added = hunk.lines.findIndex((line) => line.side === 'head' && line.newLine !== null)
+  const at = refFor(hunk, added)
+  const { transport, writes } = threadDouble({
+    files: [apiFile({ patch })],
+    // GitHub takes the review and the response is lost, so the draft is never
+    // acknowledged and the next submission has to reconcile it.
+    failReviewOnce: { status: 502, message: 'Bad Gateway' },
+  })
+  setGitHubTransport(transport)
+  t.after(() => setGitHubTransport(null))
+
+  // Two comments go out together. The first is `A`, the second `B`.
+  const a = draft({ id: 'src/app.ts:head:1-head:1#1', ref: at, body: 'first' })
+  const b = draft({ id: 'src/app.ts:head:1-head:1#2', ref: at, body: 'second' })
+  await assert.rejects(
+    () =>
+      submitReview(workspace.repo, 7, {
+        event: 'COMMENT' as const,
+        body: 'two nits',
+        comparison: comparison(),
+        drafts: [a, b],
+      }),
+    { name: 'ReviewOutcomeUnknownError' },
+  )
+  assert.equal(writes.length, 1, 'one review carried both comments')
+
+  // The reviewer comes back. `A` is still the draft they composed, and it did
+  // land. `B` was cleared with the first submission and they have written the
+  // same words on the same line again, so it is a new comment that says exactly
+  // what the old one said — and this time they mean to approve.
+  const b2 = draft({ id: 'src/app.ts:head:1-head:1#3', ref: at, body: 'second' })
+  const settled = await submitReview(workspace.repo, 7, {
+    event: 'APPROVE' as const,
+    body: 'fine now',
+    comparison: comparison(),
+    drafts: [a, b2],
+  })
+
+  // The view is told the identity of every comment that is now on GitHub: the
+  // one that was already there, and the one this submission just posted. The
+  // name that is not in it is the old `B`, which the landed review posted under
+  // its own identity and which is nobody's draft now.
+  assert.deepEqual(
+    settled.delivered,
+    [a.id, b2.id],
+    'the comment that landed and the one just posted, each under its own identity',
+  )
+  assert.equal(writes.length, 2, 'and the new comment is posted as its own review')
+  const posted = writes[1]?.body as { event: string; comments: Array<{ body: string }> }
+  assert.equal(posted.event, 'APPROVE', 'the decision asked for now is the one GitHub records')
+  assert.deepEqual(
+    posted.comments.map((comment) => comment.body),
+    ['second'],
+    'carrying the comment that was not on GitHub, and not the one that was',
+  )
+})
+
 test('a draft that never left still recovers after the app is reopened', async (t) => {
   const workspace = await reviewWorkspace()
   t.after(workspace.dispose)

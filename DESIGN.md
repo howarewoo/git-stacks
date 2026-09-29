@@ -538,6 +538,22 @@ record describing something other than the write. When the write does go out, ev
 comment it confirms is named back, the adopted ones and the newly posted ones
 alike, so the view drops exactly those and keeps the drafts that were never sent.
 
+What a landed review delivers is exactly the comments it posted, each by the
+identity it was composed under — and the identity is recorded per comment, not
+only per attempt, because a review is only ever evidence about the comments it
+was made of. A batch of two that lands unacknowledged and is followed by a
+payload carrying one of those comments unchanged and a fresh one written on the
+same line with the same words is the case this decides: the first is delivered
+because GitHub holds it under that identity, the second is not, because the
+review posted a different comment that happened to read identically, and the
+record of it is a record about a payload the reviewer has since replaced.
+Adopting it would report the whole payload delivered, post nothing, and lose a
+decision the reviewer made after the review they had already sent. Delivery is
+therefore matched on identity *and* on what the comment says and where, so a
+draft reworded after it was composed sends the new words rather than being
+taken for the old ones, and a comment no composition can be named for is
+evidence about nothing.
+
 Replies reconcile against the thread's own comments by the same rules, with the
 comment ids the thread held when the attempt began as their boundary and this
 account as their author. Body equality alone is not enough in either direction:

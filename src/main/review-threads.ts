@@ -274,6 +274,9 @@ async function readRestReviews(
         startLine: comment.startLine,
         startSide: comment.startSide,
         body: comment.body.trim(),
+        // A comment GitHub holds names no composition: the draft it was written
+        // from is the app's, and it is compared against the attempt's own.
+        draftId: null,
       })
       commentsByReview.set(comment.reviewId, held)
     }
@@ -822,7 +825,10 @@ export async function resolveReviewDraftsAt(
  * is the difference between recovering a lost deletion comment and holding it
  * forever, so the conversion is done in one place for both ends of a range.
  */
-function recordableComment(comment: Record<string, unknown>): UncertainComment {
+function recordableComment(
+  comment: Record<string, unknown>,
+  draftId: string | null = null,
+): UncertainComment {
   const side = sideOf(comment.side) ?? 'head'
   return {
     path: String(comment.path ?? ''),
@@ -833,20 +839,15 @@ function recordableComment(comment: Record<string, unknown>): UncertainComment {
     // range, and a one-line comment is stored here as the null it arrived as.
     startSide: typeof comment.start_line === 'number' ? (sideOf(comment.start_side) ?? side) : null,
     body: String(comment.body ?? '').trim(),
+    // Which composition this comment is, so a later submission can deliver it by
+    // identity rather than by where it sits.
+    draftId,
   }
 }
 
-function recordableComments(
-  comments: readonly Record<string, unknown>[],
-): UncertainComment[] {
-  return comments.map((comment) => recordableComment(comment))
-}
 
-/**
- * One inline comment in the field names GitHub's create-review endpoint
- * documents: `side` is the side of the *last* line of a range, `start_side` the
- * side of its first, and `start_line` is present only for a real range.
- */
+
+/** One inline comment in the field names GitHub's create-review endpoint */
 function wireComment(
   resolution: ReviewDraftResolution,
   draft: ReviewDraft,
@@ -932,7 +933,11 @@ export async function submitReview(
   // words twice is two pieces of work, and a recovery has to be able to tell
   // them apart.
   const attempt = reviewAttemptId(comments, files.comparison, sendable.map((d) => d.id))
-  const recorded = recordableComments(comments)
+  // Each comment is recorded with the draft it came from. `comments` is built
+  // from `sendable` in order, so the two are index for index.
+  const recorded = comments.map((comment, index) =>
+    recordableComment(comment, sendable[index]?.id ?? null),
+  )
   const draftIds = sendable.map((draft) => draft.id)
 
   // A settled record the view has finished with is retired here, before this
@@ -970,25 +975,28 @@ export async function submitReview(
   )
   if (guard.unsettled) throw new ReviewWriteUncertainError(guard.unsettled)
   // Comments GitHub already holds are left out of what is sent now, so a
-  // recovery posts only what never arrived. They are named by draft id, because
-  // the caller has drafts and not anchors, and the ones left alone are its
-  // unsent work.
-  const draftOfAnchor = new Map(
-    comments.map((comment, index) => [anchorKey(recordableComment(comment)), sendable[index].id]),
-  )
+  // recovery posts only what never arrived. They are recognised by the draft
+  // each was composed under, which is what the caller has: `comments` is built
+  // from `sendable` in order, so the two are index for index. A draft the
+  // payload composes afresh is not among them however much it resembles one
+  // that landed, and is sent.
   const delivered = new Set<string>()
-  const undelivered: Record<string, unknown>[] = []
-  const postedIds: string[] = []
+  const undelivered: Array<{ comment: Record<string, unknown>; draftId: string | null }> = []
   comments.forEach((comment, index) => {
-    const anchor = anchorKey(recordableComment(comment))
-    const draftId = draftOfAnchor.get(anchor)
-    if (guard.delivered.has(`${anchor}\u0000${String(comment.body ?? '').trim()}`)) {
-      if (draftId !== undefined) delivered.add(draftId)
+    const draftId = sendable[index]?.id ?? null
+    if (draftId !== null && guard.delivered.has(draftId)) {
+      delivered.add(draftId)
       return
     }
-    undelivered.push(comment)
-    if (draftId !== undefined) postedIds.push(draftId)
+    undelivered.push({ comment, draftId })
   })
+  const postedIds = undelivered
+    .map((entry) => entry.draftId)
+    .filter((id): id is string => id !== null)
+  // The comments as GitHub is asked for them, and the same comments as the
+  // journal records them, each carrying the identity it was composed under.
+  const toSend = undelivered.map((entry) => entry.comment)
+  const toRecord = undelivered.map((entry) => recordableComment(entry.comment, entry.draftId))
   // Everything in this payload is already on GitHub, so the outcome GitHub
   // recorded for the review that carried them is what is reported. The
   // settled records stay where they are: the view has not necessarily dropped
@@ -1009,7 +1017,7 @@ export async function submitReview(
   const sentAt = new Date().toISOString()
   const boundary = await readReviewBoundary(remote, number, signal)
   const journalled = {
-    id: reviewAttemptId(undelivered, files.comparison, postedIds),
+    id: reviewAttemptId(toSend, files.comparison, postedIds),
     number,
     kind: 'review' as const,
     summary: reviewAttemptSummary(submission.body),
@@ -1027,7 +1035,7 @@ export async function submitReview(
     at: sentAt,
     repo: `${remote.owner}/${remote.name}`,
     viewer: permissions.viewer,
-    comments: undelivered.map((comment) => recordableComment(comment)),
+    comments: toRecord,
     // What GitHub already held when the attempt began, and whether that could
     // be established. A reconciliation stops when it reaches a complete
     // boundary's review, and does not search a history it could not bound.
@@ -1054,7 +1062,7 @@ export async function submitReview(
         // adopted from an earlier review — the duplicate the whole guard exists
         // to prevent — and would leave the record describing something other
         // than what GitHub was asked to write.
-        comments: undelivered,
+        comments: toSend,
       },
       signal,
     })
@@ -1239,21 +1247,22 @@ async function reconcileOverlappingAttempts(
       sameReviewComparison(entry.comparison, comparison) &&
       // The drafts, by their own identity. A draft's identity is minted rather
       // than derived from its line, so the same line carrying the same words a
-      // second time is a different draft. Without that distinction this record
-      // would be taken up as the new comment's own recovery, and the comment
-      // would be reported as sent without anything being sent.
+      // second time is a different draft. Sharing one identity is what makes a
+      // record about this submission rather than a stranger's: the record
+      // composed at least one of the comments being sent now, so it can prove
+      // that one landed. Where it cannot, the comment is sent.
       entry.draftIds.some((theirs) => draftIds.includes(theirs)) &&
-      entry.comments.length > 0 &&
-      entry.comments.some((comment) => comments.some((mine) => sameAnchor(comment, mine))),
+      entry.comments.length > 0,
   )
   for (const attempt of outstanding) {
     const landed =
       attempt.settled !== null
         ? { id: attempt.settled.reviewId, state: attempt.settled.state, url: attempt.settled.url }
         : await findSettledReview(remote, number, attempt, signal)
-    // GitHub holds exactly this review, so those comments are already posted.
-    // The record is kept and the lines are reported as delivered, so the payload
-    // that follows leaves them out instead of writing them again.
+    // GitHub holds exactly this review, so the comments it posted are already
+    // there. The record is kept and those comments are reported by the identity
+    // they were composed under, so the payload that follows leaves out those and
+    // nothing else.
     if (landed) {
       settled.push(landed)
       if (attempt.settled === null) {
@@ -1271,15 +1280,29 @@ async function reconcileOverlappingAttempts(
           signal,
         )
       }
-      // A comment counts as delivered only if this payload still says the same
-      // thing in the same place. A reviewer who rewrote the text on a line that
-      // did land is writing a new comment, and quietly dropping theirs because
-      // the line was already commented on would lose work they meant to send.
+      // One comment of that review, delivered, is one comment of this payload.
+      // It is matched by the identity it was composed under and then by what it
+      // says and where, because a draft can be edited after it is composed: a
+      // rewrite under the same identity is the reviewer's new words and is sent
+      // rather than dropped.
+      //
+      // The identity is what stops the record answering for a comment it never
+      // posted. A review of `A` and `B` that landed and was never acknowledged,
+      // followed by a payload carrying the same `A` and a fresh `B` written on
+      // the same line with the same words, is two comments sharing everything
+      // except their identity — and matching on the line would take the new `B`
+      // for the old one, report the whole payload delivered, and send no
+      // approval at all. Only the `A` is on GitHub, and only the `A` is
+      // reported.
       for (const comment of attempt.comments) {
+        if (comment.draftId === null || !draftIds.includes(comment.draftId)) continue
         const match = comments.find(
-          (mine) => sameAnchor(comment, mine) && mine.body.trim() === comment.body.trim(),
+          (mine) =>
+            mine.draftId === comment.draftId &&
+            sameAnchor(comment, mine) &&
+            mine.body.trim() === comment.body.trim(),
         )
-        if (match) delivered.add(`${anchorKey(match)}\u0000${match.body.trim()}`)
+        if (match) delivered.add(match.draftId as string)
       }
       continue
     }

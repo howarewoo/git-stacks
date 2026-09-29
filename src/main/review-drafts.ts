@@ -146,6 +146,10 @@ function parseUncertainComments(value: unknown): UncertainComment[] {
       startLine: typeof entry.startLine === 'number' ? entry.startLine : null,
       startSide: entry.startSide === 'base' || entry.startSide === 'head' ? entry.startSide : null,
       body: entry.body,
+      // The composition this comment was written from. A record that predates the
+      // association carries none, and a comment with none is evidence about no
+      // particular composition: it is not read as delivering anything.
+      draftId: typeof entry.draftId === 'string' && entry.draftId !== '' ? entry.draftId : null,
     })
   }
   return parsed

@@ -407,6 +407,19 @@ export interface UncertainComment {
   startLine: number | null
   startSide: 'base' | 'head' | null
   body: string
+  /**
+   * The draft this comment was composed from, recorded so a later submission
+   * can tell *which* comment of a line it is.
+   *
+   * A line and its words do not say that. A reviewer comments on a line, sends
+   * it, and writes the same words on that same line again: two comments that
+   * agree on path, side, line, and body, and which only the identity tells
+   * apart. Without it, the earlier comment's delivery answers for the later
+   * one, and work the reviewer composed after a review landed is reported as
+   * already on GitHub without anything being sent. A comment with no draft is
+   * one no composition can be named for, and it is evidence about nothing.
+   */
+  draftId: string | null
 }
 /** A stable local identifier for a draft, so a list keeps its key across edits. */
 export function reviewDraftKey(ref: ReviewLineRef, startRef: ReviewLineRef | null): string {

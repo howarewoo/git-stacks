@@ -723,6 +723,14 @@ is on, and a recovery only looks at records that name this payload's comments.
 The number is kept in the journal beside the comments and outlives them, so the
 comment written after a reopen is never given a name the account has already used.
 
+That name is recorded per comment, so a review is only ever evidence about the
+comments it was made of. Two comments sent together that land and go
+unacknowledged, followed by a payload carrying one of them unchanged and a fresh
+one written on the same line with the same words, deliver the first and send the
+second — the review posted a different comment that happened to read the same,
+and the decision made afterwards is still a decision to send. A comment reworded
+after it was composed sends the new words rather than being taken for the old.
+
 A settled write is kept rather than tidied away. The evidence that GitHub holds a
 comment is the only thing between a retry and a duplicate, and the submission that
 found it can still fail, or be killed before the view drops the draft. What retires
