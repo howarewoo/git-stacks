@@ -268,6 +268,13 @@ export interface ReviewUncertainWrite {
   /** When the attempt was made, so the oldest can be reasoned about. */
   at: string
   /**
+   * The GitHub repository the write went to, as `owner/name`. The journal sits
+   * in a Git common directory that every origin using it shares, and a pull
+   * request number is only unique inside one repository, so without this an
+   * unrelated repository's review is blocked by — and can clear — this guard.
+   */
+  repo: string
+  /**
    * The account that attempted the write. The record holds the words, so it is
    * scoped the way the drafts are: one account's unresolved attempt must not
    * hold another account's button shut.

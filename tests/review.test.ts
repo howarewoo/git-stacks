@@ -8,7 +8,7 @@
  */
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { mkdir, mkdtemp, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -612,8 +612,15 @@ function scriptedTransport(
   }
 }
 
-/** A workspace whose origin points at the repository the scripted transport answers for. */
-async function reviewWorkspace(): Promise<{ repo: string; dispose: () => Promise<void> }> {
+/**
+ * A workspace whose origin points at the repository the scripted transport
+ * answers for. The origin is named because the uncertain-write journal is
+ * shared by every repository using one Git common directory, so which
+ * repository a record belongs to is part of what it is.
+ */
+async function reviewWorkspace(
+  origin = 'https://github.com/acme/widgets.git',
+): Promise<{ repo: string; dispose: () => Promise<void> }> {
   const root = await mkdtemp(join(tmpdir(), 'git-stacks-review-'))
   const repo = join(root, 'workspace')
   await mkdir(repo)
@@ -625,7 +632,7 @@ async function reviewWorkspace(): Promise<{ repo: string; dispose: () => Promise
   git('init', '-b', 'main')
   git('config', 'user.name', 'Git Stacks test')
   git('config', 'user.email', 'test@example.invalid')
-  git('remote', 'add', 'origin', 'https://github.com/acme/widgets.git')
+  git('remote', 'add', 'origin', origin)
   return { repo, dispose: () => rm(root, { recursive: true, force: true }) }
 }
 
@@ -1003,24 +1010,6 @@ function reviewComments(write: Write): Array<Record<string, unknown>> {
   )
 }
 
-/**
- * The selection set a GraphQL document starts at or after `from`, with its
- * braces balanced. Enough to ask which fields a selection names without a
- * GraphQL parser, and enough to notice a field selected one level too deep.
- */
-function braceBlock(document: string, from: number): string {
-  const start = document.indexOf('{', from)
-  if (start === -1) return ''
-  let depth = 0
-  for (let index = start; index < document.length; index += 1) {
-    if (document[index] === '{') depth += 1
-    else if (document[index] === '}') {
-      depth -= 1
-      if (depth === 0) return document.slice(start + 1, index)
-    }
-  }
-  return ''
-}
 
 interface DoubleOptions {
   head?: string
@@ -1045,21 +1034,196 @@ interface DoubleOptions {
    * the thread and then by the cursor that asks for them.
    */
   commentPages?: Record<string, Array<{ after: string; nodes: ThreadComment[] }>>
+  /**
+   * The reviews GitHub already holds, as the `reviews` connection returns them.
+   * A reconciliation reads this to tell a write that landed from one that did
+   * not, so a test can put the landed review here and watch the record retire.
+   */
+  reviews?: Array<Record<string, unknown>>
 }
 
 function graphOperation(query: string): string {
   // A thread's own comments are a connection inside the thread, read through
   // an inline fragment on the node rather than through a named field.
   if (query.includes('on PullRequestReviewThread')) return 'threadComments'
+  // A mutation is recognised by the field it writes, because these mutations
+  // are sent without a name and the double answers by what they change.
   for (const name of [
     'addPullRequestReviewThreadReply',
     'unresolveReviewThread',
     'resolveReviewThread',
-    'reviewThreads',
   ]) {
     if (query.includes(name)) return name
   }
+  // Otherwise the operation's own name, matched as a word: the reviews read
+  // selects the field `reviews`, and matching that loosely would answer it with
+  // the threads response. A document sent without a name is told apart by the
+  // connection it selects.
+  const named = /\b(?:query|mutation)\s+(\w+)/.exec(query)
+  if (named) return named[1]
   return 'permissions'
+}
+
+/**
+ * The fields GitHub's schema actually has on the two types these queries name.
+ *
+ * GitHub has no `Repository.viewer` — the account is `Query.viewer` — and a
+ * document asking for a field the type does not have fails whole with
+ * `undefinedField` before the operation runs. The double answers this way so a
+ * query that names a field one level too deep is refused here exactly as it
+ * would be refused in production, instead of being handed a plausible answer.
+ */
+/**
+ * The fields GitHub's schema has on the types these queries name, and the type
+ * each returns.
+ *
+ * GitHub has no `Repository.viewer` — the account is `Query.viewer` — and a
+ * document asking for a field the type does not have fails whole with
+ * `undefinedField` before the operation runs. The double answers this way so a
+ * query that names a field one level too deep is refused here exactly as it
+ * would be refused in production, instead of being handed a plausible answer
+ * for a document that cannot execute.
+ */
+const GRAPHQL_SCHEMA: Record<
+  string,
+  { fields: readonly string[]; returns?: Record<string, string> }
+> = {
+  Query: {
+    fields: ['viewer', 'repository', 'node', 'addPullRequestReviewThreadReply',
+      'resolveReviewThread', 'unresolveReviewThread'],
+    // The type a field's own selection is made on. This is what the schema says
+    // the field returns, and it is the whole point: `repository` returns a
+    // Repository, so a field named on that Repository is checked against
+    // Repository rather than against the root.
+    returns: {
+      viewer: 'User',
+      repository: 'Repository',
+      node: 'Node',
+      addPullRequestReviewThreadReply: 'AddPullRequestReviewThreadPayload',
+      resolveReviewThread: 'ResolveReviewThreadPayload',
+      unresolveReviewThread: 'UnresolveReviewThreadPayload',
+    },
+  },
+  // A mutation's own root is a different type, and its payload is what the
+  // selection names, so a document is walked from the root the operation uses.
+  Mutation: {
+    fields: ['addPullRequestReviewThreadReply', 'resolveReviewThread', 'unresolveReviewThread'],
+  },
+  Repository: {
+    fields: ['viewerPermission', 'name', 'owner', 'pullRequest', 'url', 'id'],
+    // There is no `viewer` here, and that absence is the point.
+    returns: { pullRequest: 'PullRequest' },
+  },
+  PullRequest: {
+    fields: ['state', 'viewerDidAuthor', 'reviewThreads', 'reviews', 'number', 'title'],
+    returns: {
+      reviewThreads: 'PullRequestReviewThreadConnection',
+      reviews: 'PullRequestReviewConnection',
+    },
+  },
+  PullRequestReviewThread: {
+    fields: ['comments', 'id', 'isResolved', 'isOutdated'],
+    returns: { comments: 'PullRequestReviewCommentConnection' },
+  },
+  // A user or the signed-in viewer. `login` is on both, so the account field is
+  // what distinguishes the one that is wrong at the repository level.
+  User: { fields: ['login', 'id'] },
+  PullRequestReviewComment: { fields: ['id', 'url', 'body', 'viewerDidAuthor', 'createdAt', 'author'] },
+  PageInfo: { fields: ['hasNextPage', 'endCursor'] },
+  AddPullRequestReviewThreadReplyPayload: {
+    fields: ['comment'],
+    returns: { comment: 'PullRequestReviewComment' },
+  },
+  ResolveReviewThreadPayload: {
+    fields: ['thread'],
+    returns: { thread: 'PullRequestReviewThread' },
+  },
+  UnresolveReviewThreadPayload: {
+    fields: ['thread'],
+    returns: { thread: 'PullRequestReviewThread' },
+  },
+  // Connections carry a scalar `totalCount`, the page info, and the rows.
+  PullRequestReviewThreadConnection: {
+    fields: ['totalCount', 'pageInfo', 'nodes'],
+    returns: { nodes: 'PullRequestReviewThread' },
+  },
+  PullRequestReviewCommentConnection: {
+    fields: ['totalCount', 'pageInfo', 'nodes'],
+    returns: { nodes: 'PullRequestReviewComment' },
+  },
+  PullRequestReviewConnection: {
+    fields: ['totalCount', 'pageInfo', 'nodes'],
+    returns: { nodes: 'PullRequestReview' },
+  },
+  PullRequestReview: {
+    fields: ['id', 'state', 'body', 'submittedAt', 'author', 'commit'],
+    returns: { author: 'User', commit: 'Commit' },
+  },
+  Commit: { fields: ['oid', 'messageHeadline'] },
+  Node: { fields: ['id'], returns: { comments: 'PullRequestReviewCommentConnection' } },
+}
+
+/** One field of a selection, with the type it is selected from. */
+interface GraphQLSelection {
+  field: string
+  type: string
+}
+
+/**
+ * The fields a document selects on `type`, following the schema's own return
+ * types so a selection one level too deep is checked against the type it is
+ * actually made on. A fragment or an alias this does not model is simply not
+ * walked, which makes the check narrower than GitHub's and never stricter.
+ */
+function operationRoot(document: string): 'Query' | 'Mutation' {
+  return /\bmutation\b/.test(document.slice(0, document.indexOf('{'))) ? 'Mutation' : 'Query'
+}
+
+function selectionsOn(document: string, type: string, from = 0): GraphQLSelection[] {
+  const open = document.indexOf('{', from)
+  if (open === -1) return []
+  const found: GraphQLSelection[] = []
+  let depth = 0
+  let end = -1
+  for (let index = open; index < document.length; index += 1) {
+    if (document[index] === '{') depth += 1
+    else if (document[index] === '}') {
+      depth -= 1
+      if (depth === 0) {
+        end = index
+        break
+      }
+    }
+  }
+  if (end === -1) return []
+  const body = document.slice(open + 1, end)
+  let index = 0
+  while (index < body.length) {
+    const rest = body.slice(index)
+    const match = /^\s*(\w+)\s*(?:\([^)]*\))?\s*\{/.exec(rest)
+    if (!match) break
+    const field = match[1]
+    found.push({ field, type })
+    // What a field returns is what its own selection is made on, so this is
+    // where a selection one level too deep is caught rather than tolerated.
+    const child = GRAPHQL_SCHEMA[type]?.returns?.[field]
+    if (child && GRAPHQL_SCHEMA[child]) {
+      const childFrom = open + 1 + index + match[0].length - 1
+      found.push(...selectionsOn(document, child, childFrom))
+    }
+    // Step past this selection's own braces so siblings are not re-walked.
+    let inner = 0
+    let cursor = index + match[0].length - 1
+    for (; cursor < body.length; cursor += 1) {
+      if (body[cursor] === '{') inner += 1
+      else if (body[cursor] === '}') {
+        inner -= 1
+        if (inner === 0) break
+      }
+    }
+    index = cursor + 1
+  }
+  return found
 }
 
 function threadDouble(options: DoubleOptions = {}): {
@@ -1155,6 +1319,18 @@ function threadDouble(options: DoubleOptions = {}): {
         return ((request.path ?? '').includes('/files') ? (options.files ?? []) : []) as T[]
       },
       async graphql<T>(query: string, variables: Record<string, unknown>): Promise<T> {
+        // A field the schema does not have is refused before the operation runs,
+        // the way GitHub refuses it. A double that answered anyway would hand
+        // back a plausible value for a document that cannot execute at all.
+        for (const selection of selectionsOn(query, operationRoot(query))) {
+          if (!GRAPHQL_SCHEMA[selection.type]?.fields.includes(selection.field)) {
+            const error = new Error(
+              `Cannot query field "${selection.field}" on type "${selection.type}".`,
+            ) as Error & { type?: string }
+            error.type = 'undefinedField'
+            throw error
+          }
+        }
         const operation = graphOperation(query)
         queries.push(query)
         const failure = options.fail?.[operation]
@@ -1215,7 +1391,7 @@ function threadDouble(options: DoubleOptions = {}): {
             },
           } as T
         }
-        if (operation === 'reviewThreads') {
+        if (operation === 'ReviewThreads') {
           return {
             repository: {
               viewerPermission: permission,
@@ -1228,6 +1404,17 @@ function threadDouble(options: DoubleOptions = {}): {
                   pageInfo: { hasNextPage: false, endCursor: null },
                   nodes: threads,
                 },
+              },
+            },
+          } as T
+        }
+        if (operation === 'ReviewSubmitted') {
+          // What GitHub already holds for this pull request. The reconciliation
+          // reads this to decide whether a lost write landed.
+          return {
+            repository: {
+              pullRequest: {
+                reviews: { nodes: options.reviews ?? [] },
               },
             },
           } as T
@@ -1747,32 +1934,6 @@ test('the signed-in account is read from the query root, which is where GitHub h
   assert.equal(permissions.permission, 'WRITE')
 })
 
-test('the permissions query cannot be asking for a viewer the repository does not have', async (t) => {
-  const workspace = await reviewWorkspace()
-  t.after(workspace.dispose)
-  const { transport, queries } = threadDouble()
-  setGitHubTransport(transport)
-  t.after(() => setGitHubTransport(null))
-
-  await readReviewPermissions(workspace.repo, 7)
-
-  const document = queries.find((query) => query.includes('ReviewPermissions'))
-  assert.ok(document, 'the preflight must have asked GitHub what this account may do')
-  // GitHub's schema has no Repository.viewer, and a document asking for one
-  // fails whole with undefinedField before any review is written, so the place
-  // the field is selected is itself the contract.
-  assert.match(
-    braceBlock(document, 0),
-    /\bviewer\s*\{\s*login\s*\}/,
-    'the viewer is selected at the root of the document',
-  )
-  assert.doesNotMatch(
-    braceBlock(document, document.indexOf('repository(')),
-    /\bviewer\b/,
-    'the repository selection must not name a viewer',
-  )
-})
-
 test('a write whose outcome GitHub never confirms is not replayed into a duplicate', async (t) => {
   const workspace = await reviewWorkspace()
   t.after(workspace.dispose)
@@ -1872,43 +2033,126 @@ test('a review GitHub never confirmed is refused the second time, from the recor
   assert.equal(writes.length, 1, 'the review was attempted once and never again')
 })
 
-test('the uncertain-write guard covers that review only, so changed words still go out', async (t) => {
+test('a lost review is settled by asking GitHub, not by the words the reviewer kept', async (t) => {
   const workspace = await reviewWorkspace()
   t.after(workspace.dispose)
   const patch = '@@ -1,2 +1,3 @@\n keep\n+added\n tail'
   const entry = file({ diff: { kind: 'text', hunks: hunks(patch) } })
   const hunk = textHunk(entry, 0)
   const added = hunk.lines.findIndex((line) => line.side === 'head' && line.newLine !== null)
+  const at = refFor(hunk, added)
+  const review = (body: string) => ({
+    event: 'COMMENT' as const,
+    body: '',
+    comparison: comparison(),
+    drafts: [draft({ id: 'd1', ref: at, body })],
+  })
+
+  // GitHub accepted the review but the response was lost. The reviewer edits
+  // the words and presses Submit again; if the guard keyed on those words the
+  // second attempt would post the same comments onto the same line a second
+  // time. The inline comments are the write, so the guard covers them.
+  const landed = threadDouble({
+    files: [apiFile({ patch })],
+    failReviewOnce: { status: 502, message: 'Bad Gateway' },
+    reviews: [
+      {
+        id: 'R_1',
+        state: 'COMMENTED',
+        body: '',
+        author: { login: 'ada' },
+        commit: { oid: comparison().headOid },
+      },
+    ],
+  })
+  setGitHubTransport(landed.transport)
+  t.after(() => setGitHubTransport(null))
+
+  await assert.rejects(() => submitReview(workspace.repo, 7, review('needs a name')), {
+    name: 'ReviewOutcomeUnknownError',
+  })
+  const second = await submitReview(workspace.repo, 7, review('renamed the function'))
+
+  assert.equal(second.state, 'COMMENTED')
+  assert.equal(landed.writes.length, 1, 'a review GitHub already holds is not sent again')
+})
+
+test('a lost review GitHub does not hold still refuses the second send', async (t) => {
+  const workspace = await reviewWorkspace()
+  t.after(workspace.dispose)
+  const patch = '@@ -1,2 +1,3 @@\n keep\n+added\n tail'
+  const entry = file({ diff: { kind: 'text', hunks: hunks(patch) } })
+  const hunk = textHunk(entry, 0)
+  const added = hunk.lines.findIndex((line) => line.side === 'head' && line.newLine !== null)
+  const at = refFor(hunk, added)
+  const submission = {
+    event: 'COMMENT' as const,
+    body: '',
+    comparison: comparison(),
+    drafts: [draft({ id: 'd1', ref: at, body: 'needs a name' })],
+  }
+
+  // GitHub never received this one. The local record only says the app never
+  // heard back, which is also true of a request that never arrived, so absence
+  // is not proof and the second send is refused rather than guessed at.
   const { transport, writes } = threadDouble({
     files: [apiFile({ patch })],
     failReviewOnce: { status: 502, message: 'Bad Gateway' },
+    reviews: [],
   })
   setGitHubTransport(transport)
   t.after(() => setGitHubTransport(null))
-  const at = refFor(hunk, added)
 
+  await assert.rejects(() => submitReview(workspace.repo, 7, submission), {
+    name: 'ReviewOutcomeUnknownError',
+  })
   await assert.rejects(
-    () =>
-      submitReview(workspace.repo, 7, {
-        event: 'COMMENT',
-        body: '',
-        comparison: comparison(),
-        drafts: [draft({ id: 'd1', ref: at, body: 'needs a name' })],
-      }),
-    { name: 'ReviewOutcomeUnknownError' },
+    () => submitReview(workspace.repo, 7, { ...submission, body: 'a different summary' }),
+    { name: 'ReviewWriteUncertainError' },
   )
-  // The reviewer has plainly abandoned those words, so a guard that refused
-  // every review of the pull request would leave them unable to review at all.
-  const result = await submitReview(workspace.repo, 7, {
-    event: 'COMMENT',
+  assert.equal(writes.length, 1, 'nothing is sent while the outcome is unsettled')
+})
+
+test("another account's review of another revision does not retire the record", async (t) => {
+  const workspace = await reviewWorkspace()
+  t.after(workspace.dispose)
+  const patch = '@@ -1,2 +1,3 @@\n keep\n+added\n tail'
+  const entry = file({ diff: { kind: 'text', hunks: hunks(patch) } })
+  const hunk = textHunk(entry, 0)
+  const added = hunk.lines.findIndex((line) => line.side === 'head' && line.newLine !== null)
+  const at = refFor(hunk, added)
+  const submission = {
+    event: 'COMMENT' as const,
     body: '',
     comparison: comparison(),
-    drafts: [draft({ id: 'd1', ref: at, body: 'renamed the function' })],
-  })
+    drafts: [draft({ id: 'd1', ref: at, body: 'needs a name' })],
+  }
 
-  assert.equal(result.state, 'COMMENTED')
-  assert.equal(writes.length, 2, 'a different review is a different write, so it is sent')
-  assert.equal(reviewComments(writes[1])[0].body, 'renamed the function')
+  // Someone else's review of a different revision is not this write, so
+  // matching on it would retire the guard and permit the duplicate.
+  const { transport, writes } = threadDouble({
+    files: [apiFile({ patch })],
+    failReviewOnce: { status: 502, message: 'Bad Gateway' },
+    reviews: [
+      {
+        id: 'R_1',
+        state: 'COMMENTED',
+        body: '',
+        author: { login: 'grace' },
+        commit: { oid: 'other' },
+      },
+    ],
+  })
+  setGitHubTransport(transport)
+  t.after(() => setGitHubTransport(null))
+
+  await assert.rejects(() => submitReview(workspace.repo, 7, submission), {
+    name: 'ReviewOutcomeUnknownError',
+  })
+  await assert.rejects(() => submitReview(workspace.repo, 7, submission), {
+    name: 'ReviewWriteUncertainError',
+  })
+  assert.equal(writes.length, 1)
 })
 
 test("another account's unresolved write does not hold this one's button shut", async (t) => {
@@ -1954,6 +2198,106 @@ test("another account's unresolved write does not hold this one's button shut", 
   assert.equal(result.state, 'COMMENTED')
   assert.equal(second.writes.length, 1, "another account's review is its own write")
   assert.equal(reviewComments(second.writes[0])[0].body, body)
+})
+
+test("another account's attempt does not delete this one's guard", async (t) => {
+  const workspace = await reviewWorkspace()
+  t.after(workspace.dispose)
+  const patch = '@@ -1,2 +1,3 @@\n keep\n+added\n tail'
+  const entry = file({ diff: { kind: 'text', hunks: hunks(patch) } })
+  const hunk = textHunk(entry, 0)
+  const added = hunk.lines.findIndex((line) => line.side === 'head' && line.newLine !== null)
+  const at = refFor(hunk, added)
+  // The same words, the same line, the same revision, so both accounts compute
+  // the same attempt id. The journal has to tell them apart by owner.
+  const submission = {
+    event: 'COMMENT' as const,
+    body: '',
+    comparison: comparison(),
+    drafts: [draft({ id: 'd1', ref: at, body: 'the same words either account might write' })],
+  }
+
+  // Ada sends and never hears back. Grace then sends the same thing and also
+  // never hears back, so there are now two records to keep apart.
+  for (const viewer of ['ada', 'grace']) {
+    const attempt = threadDouble({
+      files: [apiFile({ patch })],
+      viewer,
+      failReviewOnce: { status: 502, message: 'Bad Gateway' },
+    })
+    setGitHubTransport(attempt.transport)
+    await assert.rejects(() => submitReview(workspace.repo, 7, submission), {
+      name: 'ReviewOutcomeUnknownError',
+    })
+  }
+
+  // Ada's own guard survived Grace's write. If it had been replaced, this
+  // second attempt would be sent and could duplicate what GitHub already holds.
+  for (const viewer of ['ada', 'grace']) {
+    const still = threadDouble({ files: [apiFile({ patch })], viewer })
+    setGitHubTransport(still.transport)
+    await assert.rejects(() => submitReview(workspace.repo, 7, submission), {
+      name: 'ReviewWriteUncertainError',
+    })
+    assert.equal(still.writes.length, 0, `${viewer}'s guard is still in force`)
+  }
+  t.after(() => setGitHubTransport(null))
+})
+
+test('an uncertain record of another repository does not block this pull request', async (t) => {
+  // One Git common directory with two origins, which is the case the journal
+  // has to survive: the file is shared by both, so a pull request number is
+  // only meaningful together with the repository it is a number in.
+  const acme = await reviewWorkspace()
+  t.after(acme.dispose)
+  const linked = join(acme.repo, '..', 'linked')
+  await writeFile(join(acme.repo, 'README.md'), 'acme\n')
+  execFileSync('git', ['-C', acme.repo, 'add', 'README.md'], { encoding: 'utf8' })
+  execFileSync('git', ['-C', acme.repo, 'commit', '-m', 'initial'], { encoding: 'utf8' })
+  execFileSync('git', ['-C', acme.repo, 'worktree', 'add', '--detach', linked], {
+    encoding: 'utf8',
+  })
+  // A linked worktree shares the repository's config, so the second origin is
+  // per-worktree; setting it globally would change the first one's origin too.
+  execFileSync('git', ['-C', linked, 'config', 'extensions.worktreeConfig', 'true'], {
+    encoding: 'utf8',
+  })
+  execFileSync(
+    'git',
+    ['-C', linked, 'config', '--worktree', 'remote.origin.url', 'https://github.com/other/place.git'],
+    { encoding: 'utf8' },
+  )
+
+  const patch = '@@ -1,2 +1,3 @@\n keep\n+added\n tail'
+  const entry = file({ diff: { kind: 'text', hunks: hunks(patch) } })
+  const hunk = textHunk(entry, 0)
+  const added = hunk.lines.findIndex((line) => line.side === 'head' && line.newLine !== null)
+  const at = refFor(hunk, added)
+  const submission = {
+    event: 'COMMENT' as const,
+    body: '',
+    comparison: comparison(),
+    drafts: [draft({ id: 'd1', ref: at, body: 'needs a name' })],
+  }
+
+  const first = threadDouble({
+    files: [apiFile({ patch })],
+    failReviewOnce: { status: 502, message: 'Bad Gateway' },
+  })
+  setGitHubTransport(first.transport)
+  await assert.rejects(() => submitReview(acme.repo, 7, submission), {
+    name: 'ReviewOutcomeUnknownError',
+  })
+
+  // The same pull request number and the same words against the other origin
+  // are a different review, and are not blocked by the first one's record.
+  const second = threadDouble({ files: [apiFile({ patch })] })
+  setGitHubTransport(second.transport)
+  t.after(() => setGitHubTransport(null))
+  const result = await submitReview(linked, 7, submission)
+
+  assert.equal(result.state, 'COMMENTED')
+  assert.equal(second.writes.length, 1)
 })
 
 test('a reply is posted through the documented mutation, naming its thread and body', async (t) => {

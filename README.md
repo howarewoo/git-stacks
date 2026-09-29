@@ -688,15 +688,26 @@ text still matches after a force-push has usually just moved, and adopting that
 would approve a revision nobody opened, so a changed head, base, or base branch
 refuses the review outright and names the commit to look at instead.
 
-There is no blind replay. A submission that failed after the request left is not
-retried automatically, because a duplicate review is a comment the reviewer never
-wrote — and an error message is not enough to prevent one, since it vanishes on
-reload and hands the same words back to a live button. The attempt is journalled
-instead, and the next identical write is refused until GitHub's own state has
-been read. Changing the wording clears the block; pressing Submit again with the
-same words does not. Replies are guarded the same way, and the record is scoped
-by account as well as by pull request, so one account's unresolved write never
-blocks another's review.
+There is no blind replay. A submission whose response was lost is not retried
+automatically, because a duplicate review is a comment the reviewer never wrote —
+and an error message is not enough to prevent one, since it vanishes on reload
+and hands the same words back to a live button. The attempt is journalled
+**before** the request leaves, so a crash between the POST and its response is
+covered rather than being the one case with no record. The attempt is identified
+by the inline comments and the head, not by the summary: a summary is free text
+that is lost on reload, and keying on it would let a one-sentence edit repost the
+same comments twice.
+
+The journal is not a dead end. Pressing Submit asks GitHub what it actually holds
+— this account's review of this revision, matched on author, commit, and summary.
+If it is there, the attempt did land: the record is retired and that outcome is
+reported instead of the review being sent a second time. If GitHub does not have
+it, the guard stands, because the record says only that the app never heard back,
+which is also true of a request that never arrived — absence is not proof, and is
+never taken as licence to post again automatically. Replies reconcile against the
+thread's own comments for the same reason. Each record is scoped by repository and
+by account as well as by pull request, so one account's or one repository's
+unresolved write never blocks another's review.
 
 Threads are read through GraphQL, which is the only source for a thread's
 replies, resolved state, and per-comment outdated state; the REST comments

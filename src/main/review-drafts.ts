@@ -63,6 +63,7 @@ function parseUncertain(value: unknown): ReviewUncertainWrite | null {
         ? value.event
         : null,
     at: typeof value.at === 'string' ? value.at : '',
+    repo: typeof value.repo === 'string' ? value.repo : '',
     viewer: typeof value.viewer === 'string' ? value.viewer : '',
   }
 }
@@ -303,11 +304,16 @@ export async function recordUncertainWrite(
 ): Promise<void> {
   const file = await uncertainPath(repoPath, signal)
   const existing = await readUncertain(file)
+  // Replacement is scoped by the same complete owner identity as lookup and
+  // clearing. An attempt id is not unique across accounts, so matching on it
+  // alone would let one account's record delete another's guard.
   const kept = existing.filter(
     (entry) =>
       entry.number !== write.number ||
       entry.kind !== write.kind ||
-      entry.id !== write.id,
+      entry.id !== write.id ||
+      entry.repo !== write.repo ||
+      entry.viewer !== write.viewer,
   )
   await writeUncertain(file, [write, ...kept].slice(0, REVIEW_UNCERTAIN_MAX), signal)
 }
@@ -315,19 +321,23 @@ export async function recordUncertainWrite(
 /** The unresolved writes of one pull request, oldest first. */
 export async function readUncertainWrites(
   repoPath: string,
+  repo: string,
   number: number,
   viewer: string,
   signal?: AbortSignal,
 ): Promise<ReviewUncertainWrite[]> {
   const entries = await readUncertain(await uncertainPath(repoPath, signal))
   return entries
-    .filter((entry) => entry.number === number && entry.viewer === viewer)
+    .filter(
+      (entry) => entry.number === number && entry.viewer === viewer && entry.repo === repo,
+    )
     .sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : 0))
 }
 
 /** Forgets one write once GitHub's own record has settled what happened to it. */
 export async function clearUncertainWrite(
   repoPath: string,
+  repo: string,
   number: number,
   viewer: string,
   id: string,
@@ -338,7 +348,13 @@ export async function clearUncertainWrite(
   await writeUncertain(
     file,
     existing.filter(
-      (entry) => !(entry.number === number && entry.id === id && entry.viewer === viewer),
+      (entry) =>
+        !(
+          entry.number === number &&
+          entry.id === id &&
+          entry.viewer === viewer &&
+          entry.repo === repo
+        ),
     ),
     signal,
   )

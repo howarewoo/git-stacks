@@ -53,6 +53,9 @@ const REVIEW_COMMENT_PAGE_LIMIT = 20
 /** How many threads may be followed for their later comment pages in one read. */
 const REVIEW_COMMENT_FOLLOW_LIMIT = 20
 
+/** Reviews read back when settling a write whose response was lost. */
+const REVIEW_RECONCILE_LIMIT = 50
+
 const EVENT_NAMES: Record<ReviewEvent, string> = {
   COMMENT: 'COMMENT',
   APPROVE: 'APPROVE',
@@ -150,6 +153,26 @@ const THREAD_COMMENTS_QUERY = `query ReviewThreadComments($threadId: ID!, $after
 }`
 
 /**
+ * The reviews GitHub already holds for a pull request.
+ *
+ * This is what settles a write whose response was lost: the local record only
+ * says the app never heard back, which is also true of a request GitHub dropped
+ * without applying. `commit.oid` ties a recorded review to the revision it was
+ * pinned to and `author` to the account that sent it, so a review that landed
+ * can be told from one that never did. Bounded, because it is a reconciliation
+ * of the most recent attempts rather than a history.
+ */
+const REVIEWS_QUERY = `query ReviewSubmitted($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      reviews(last: ${REVIEW_RECONCILE_LIMIT}) {
+        nodes { id state body author { login } commit { oid } }
+      }
+    }
+  }
+}`
+
+/**
  * Raised when a draft can no longer be written where the reviewer wrote it.
  *
  * The whole submission is refused rather than trimmed. Sending the comments that
@@ -224,7 +247,7 @@ export class ReviewWriteUncertainError extends Error {
           ? 'This reply'
           : 'This resolution'
     super(
-      `${what} was sent but Git Stacks never heard back, so it is not sent again automatically. Reload the pull request to see whether GitHub recorded it, then submit once more if it did not.`,
+      `${what} was sent but Git Stacks never heard back, and GitHub does not have it, so it is held rather than sent again. Pressing Submit checks GitHub again first, so nothing will be posted twice.`,
     )
     this.name = 'ReviewWriteUncertainError'
     this.write = write
@@ -682,16 +705,14 @@ export async function submitReview(
   signal?: AbortSignal,
 ): Promise<ReviewMutationResult> {
   const remote = await originRemote(repoPath, signal)
+  const repo = `${remote.owner}/${remote.name}`
   const permissions = await readReviewPermissionsFrom(remote, number, signal)
   const blocked = permissions.blocked[submission.event]
   if (blocked) throw new Error(blocked)
 
-  // A previous attempt whose result never arrived blocks this one, whatever the
-  // words say. Re-sending because the network looked idle is how a review gets
-  // posted twice, and the record survives a reload, so the guard is still here
-  // after the workspace reopens.
-  const pending = await pendingReviewWrite(repoPath, number, permissions.viewer, submission, signal)
-  if (pending) throw new ReviewWriteUncertainError(pending)
+  // A previous attempt whose result never arrived blocks this one. The check
+  // needs the identity of the write, so it runs once the comments are resolved —
+  // and before the request is journalled or sent, not after.
 
   const sendable = submission.drafts.filter((draft) => draft.body.trim() !== '')
   if (sendable.length === 0) throw new Error('Write at least one comment before submitting.')
@@ -725,7 +746,51 @@ export async function submitReview(
   const comments = sendable.map((draft) =>
     wireComment(byId.get(draft.id)!, draft, reviewDraftStart(draft).path),
   )
-  const attempt = reviewAttemptId(submission, files.comparison.headOid)
+  // The attempt is identified by the comments it would post and the revision it
+  // would post them on — not by the summary. A reviewer who edits only the
+  // summary has not written a different review, and keying on the summary would
+  // let them post the same comments twice by changing one sentence.
+  const attempt = reviewAttemptId(comments, submission.event, files.comparison.headOid)
+
+  // Re-sending because the network looked idle is how a review gets posted
+  // twice. The record survives a reload, so this still holds after the
+  // workspace is reopened, and it covers the crash case because the record was
+  // written before the request rather than after its failure.
+  const guard = await reconcileReviewWrite(
+    repoPath,
+    remote,
+    repo,
+    number,
+    permissions.viewer,
+    attempt,
+    submission,
+    files.comparison.headOid,
+    signal,
+  )
+  if (guard.unsettled) throw new ReviewWriteUncertainError(guard.unsettled)
+  if (guard.settled) return guard.settled
+
+  // The attempt is journalled BEFORE the request leaves, not after it fails. A
+  // crash, a kill, or a power cut between the POST and its response is the exact
+  // case this guard exists for, and a record written only on the failure path
+  // would be missing for precisely that one. So the journal is the first thing
+  // that happens, and only a definite answer from GitHub removes it.
+  await recordUncertainWrite(
+    repoPath,
+    {
+      id: attempt,
+      number,
+      kind: 'review',
+      summary: reviewAttemptSummary(submission.body),
+      threadId: null,
+      headOid: files.comparison.headOid,
+      event: submission.event,
+      at: new Date().toISOString(),
+      repo: `${remote.owner}/${remote.name}`,
+      viewer: permissions.viewer,
+    },
+    signal,
+  )
 
   try {
     const response = await githubTransport().rest<unknown>({
@@ -742,7 +807,14 @@ export async function submitReview(
     const record = isRecord(response.data) ? response.data : {}
     // GitHub answered, so whatever the status word is, this attempt is settled
     // and the next one is allowed to proceed.
-    await clearUncertainWrite(repoPath, number, permissions.viewer, attempt, signal)
+    await clearUncertainWrite(
+      repoPath,
+      repo,
+      number,
+      permissions.viewer,
+      attempt,
+      signal,
+    )
     return {
       id: typeof record.id === 'string' ? record.id : '',
       state: typeof record.state === 'string' ? record.state : '',
@@ -750,47 +822,57 @@ export async function submitReview(
     }
   } catch (error) {
     if (outcomeUnknown(error)) {
-      // The attempt is journalled as it is raised, so the guard outlives this
-      // call, the message, and the process.
-      await recordUncertainWrite(
-        repoPath,
-        {
-          id: attempt,
-          number,
-          kind: 'review',
-          summary: reviewAttemptSummary(submission),
-          threadId: null,
-          headOid: files.comparison.headOid,
-          event: submission.event,
-          at: new Date().toISOString(),
-          viewer: permissions.viewer,
-        },
-        signal,
-      )
+      // The record went on before the request, so the guard is in force for this
+      // failure, for a reload, and for a crash.
       throw new ReviewOutcomeUnknownError(transportDetail(error))
     }
-    await clearUncertainWrite(repoPath, number, permissions.viewer, attempt, signal)
+    // A refusal is GitHub's own decision and needs no record: nothing was
+    // applied, so the next attempt is a first attempt.
+    await clearUncertainWrite(
+      repoPath,
+      repo,
+      number,
+      permissions.viewer,
+      attempt,
+      signal,
+    )
     throw error
   }
 }
 
-/** The words that would let a reconciliation recognise this review on GitHub. */
-function reviewAttemptSummary(submission: ReviewSubmission): string {
-  const bodies = submission.drafts
-    .map((draft) => draft.body.trim())
-    .filter((body) => body !== '')
-    .join(' ')
-  return `${submission.event} ${submission.body.trim()} ${bodies}`
+/**
+ * The summary a review carries, as GitHub stores it. A reconciliation matches
+ * the review GitHub holds against this text, so it is the body on its own
+ * rather than the body packed together with the comment texts.
+ */
+function reviewAttemptSummary(body: string): string {
+  return body.trim()
 }
 
 /**
- * One identifier for one review attempt, so the record and the check that guards
- * it are about the same write. The words and the revision are both in it: a
- * different summary is a different review, and the same words against a new
- * head are a review of something the reviewer has not read.
+ * The comments of one review, as the identity of that review.
+ *
+ * This is deliberately the posted comments and the head, not the summary. The
+ * summary is free text the reviewer can edit at will, and keying on it would
+ * mean that changing one sentence is enough to slip past the guard and post the
+ * same comments a second time — which is the duplicate this exists to prevent.
+ * What makes a write the same write is what it says and where it says it, so
+ * that is the identity: same comments against the same revision is the same
+ * review, whatever the summary now reads.
  */
-function reviewAttemptId(submission: ReviewSubmission, headOid: string | null): string {
-  return shortHash(`${headOid ?? ''} ${reviewAttemptSummary(submission)}`)
+function reviewAttemptId(
+  comments: readonly Record<string, unknown>[],
+  event: ReviewEvent,
+  headOid: string | null,
+): string {
+  const positions = comments
+    .map((comment) =>
+      [comment.path, comment.side, comment.line, comment.start_line, comment.start_side]
+        .map((part) => String(part ?? ''))
+        .join(':'),
+    )
+    .join('|')
+  return shortHash(`${headOid ?? ''} ${event} ${positions}`)
 }
 
 /** A stable short identifier for a write, so the guard can name it across reloads. */
@@ -801,25 +883,93 @@ function shortHash(value: string): string {
 /**
  * The unresolved review attempt this submission would repeat, or null.
  *
- * It is matched on the words and the revision rather than on the whole record,
- * so a reviewer who changes their summary after an uncertain outcome is not
- * blocked by an attempt they have plainly abandoned, and one who presses Submit
- * again with the same words is.
+ * A blocked write is not a dead end, because a guard that can only refuse
+ * permanently would make a transient failure unrecoverable. Before refusing,
+ * the record is reconciled against what GitHub actually holds: if this
+ * account's review of this revision is there, the attempt did land, the record
+ * is retired, and the submission proceeds as a first attempt. If GitHub does not
+ * have it, the guard stands — the record says only that the app never heard
+ * back, which is also true of a request that never reached GitHub, so absence
+ * is not proof and is never treated as permission to post again automatically.
+ * The next attempt asks GitHub once more and is decided by what it says.
  */
-async function pendingReviewWrite(
+async function reconcileReviewWrite(
   repoPath: string,
+  remote: ParsedRemote,
+  repo: string,
   number: number,
   viewer: string,
+  attempt: string,
   submission: ReviewSubmission,
+  headOid: string | null,
   signal?: AbortSignal,
-): Promise<ReviewUncertainWrite | null> {
-  const writes = await readUncertainWrites(repoPath, number, viewer, signal)
-  const wanted = reviewAttemptSummary(submission)
-  return (
-    writes.find(
-      (entry) => entry.kind === 'review' && entry.summary === wanted,
-    ) ?? null
+): Promise<{ settled: ReviewMutationResult | null; unsettled: ReviewUncertainWrite | null }> {
+  const writes = await readUncertainWrites(repoPath, repo, number, viewer, signal)
+  const pending = writes.find((entry) => entry.kind === 'review' && entry.id === attempt)
+  if (!pending) return { settled: null, unsettled: null }
+  const settled = await reviewSettledOnGitHub(
+    remote,
+    number,
+    viewer,
+    reviewAttemptSummary(submission.body),
+    headOid,
+    signal,
   )
+  // GitHub holds this review, so the earlier attempt did land. The record is
+  // retired and that outcome is reported: sending again would post the same
+  // comments onto the same line a second time, which is the duplicate this
+  // guard exists to prevent.
+  if (settled) {
+    await clearUncertainWrite(repoPath, repo, number, viewer, attempt, signal)
+    return {
+      settled: { id: settled.id, state: 'COMMENTED', url: null },
+      unsettled: null,
+    }
+  }
+  return { settled: null, unsettled: pending }
+}
+
+/** The account's submitted review of this revision, as GitHub now reports it. */
+interface SettledReview {
+  id: string
+}
+
+/**
+ * The account's own review of this revision on GitHub, or null.
+ *
+ * The submitted reviews are the authority for whether a write landed. The
+ * author, the commit, and the summary are matched together, so a review
+ * somebody else left, on another revision, or with different words does not
+ * settle this one.
+ */
+async function reviewSettledOnGitHub(
+  remote: ParsedRemote,
+  number: number,
+  viewer: string,
+  summary: string,
+  headOid: string | null,
+  signal?: AbortSignal,
+): Promise<SettledReview | null> {
+  const data = await githubTransport().graphql<Record<string, unknown>>(
+    REVIEWS_QUERY,
+    { owner: remote.owner, name: remote.name, number },
+    { signal },
+  )
+  const repository = isRecord(data.repository) ? data.repository : null
+  const pullRequest =
+    repository && isRecord(repository.pullRequest) ? repository.pullRequest : null
+  const reviews = pullRequest && isRecord(pullRequest.reviews) ? pullRequest.reviews : null
+  const nodes = reviews && Array.isArray(reviews.nodes) ? reviews.nodes : []
+  for (const node of nodes) {
+    if (!isRecord(node)) continue
+    const author = isRecord(node.author) ? node.author.login : null
+    const commit = isRecord(node.commit) ? node.commit.oid : null
+    const body = typeof node.body === 'string' ? node.body.trim() : ''
+    if (author === viewer && commit === headOid && body === summary) {
+      return { id: typeof node.id === 'string' ? node.id : '' }
+    }
+  }
+  return null
 }
 
 async function readReviewPermissionsFrom(
@@ -871,16 +1021,38 @@ export async function replyToThread(
   // The journal is per repository, so the account is read to scope the guard to
   // whoever is actually replying: another account's unresolved reply must not
   // block this one.
+  const repo = `${remote.owner}/${remote.name}`
   const permissions = await readReviewPermissionsFrom(remote, number, signal)
   const attempt = shortHash(`reply ${threadId} ${body.trim()}`)
   const before = await readThreadCommentIds(remote, threadId, signal)
 
   // A reply that was sent and never confirmed blocks the same reply, by the
-  // same thread and the same words. The record is on disk, so this still holds
-  // after the workspace is reopened.
-  const writes = await readUncertainWrites(repoPath, number, permissions.viewer, signal)
-  if (writes.some((entry) => entry.id === attempt)) {
-    throw new ReviewWriteUncertainError({
+  // same thread and the same words, and the record is on disk so it still holds
+  // after the workspace is reopened. As with a review, the block is reconciled
+  // against GitHub first: a reply GitHub already holds means it landed, the
+  // record is retired, and the thread is re-read rather than written twice.
+  const writes = await readUncertainWrites(repoPath, repo, number, permissions.viewer, signal)
+  const earlier = writes.find((entry) => entry.kind === 'reply' && entry.id === attempt)
+  if (earlier) {
+    const landed = (await readThreadComments(remote, threadId, signal)).find(
+      (entry) => entry.body.trim() === body.trim(),
+    )
+    // GitHub holds these words in this thread, so the earlier attempt did land.
+    // Its outcome is reported and the record retired: sending again would be a
+    // second copy of the same reply, which is the duplicate this guard prevents.
+    if (landed) {
+      await clearUncertainWrite(repoPath, repo, number, permissions.viewer, attempt, signal)
+      return { id: landed.id, state: 'created', url: landed.url }
+    }
+    throw new ReviewWriteUncertainError(earlier)
+  }
+
+  // Journalled before the mutation leaves, for the same reason as a review: a
+  // crash between the request and its response is the case with no failure to
+  // hang the record on. Only GitHub's own answer removes it.
+  await recordUncertainWrite(
+    repoPath,
+    {
       id: attempt,
       number,
       kind: 'reply',
@@ -888,10 +1060,12 @@ export async function replyToThread(
       threadId,
       headOid: null,
       event: null,
-      at: '',
+      at: new Date().toISOString(),
+      repo,
       viewer: permissions.viewer,
-    })
-  }
+    },
+    signal,
+  )
 
   try {
     const data = await githubTransport().graphql<Record<string, unknown>>(
@@ -903,39 +1077,34 @@ export async function replyToThread(
       ? data.addPullRequestReviewThreadReply
       : null
     const comment = payload && isRecord(payload.comment) ? payload.comment : null
-    await clearUncertainWrite(repoPath, number, permissions.viewer, attempt, signal)
+    await clearUncertainWrite(repoPath, repo, number, permissions.viewer, attempt, signal)
     return {
       id: comment && typeof comment.id === 'string' ? comment.id : '',
       state: 'created',
       url: comment && typeof comment.url === 'string' ? comment.url : null,
     }
   } catch (error) {
-    if (!outcomeUnknown(error)) throw error
+    if (!outcomeUnknown(error)) {
+      // A refusal is GitHub's own decision; nothing was applied, so the record
+      // goes and the next attempt is a first attempt.
+      await clearUncertainWrite(repoPath, repo, number, permissions.viewer, attempt, signal)
+      throw error
+    }
     // The reply may already exist. Reading the thread is how that is found out
-    // without sending a second copy of the same words.
+    // without sending a second copy of the same words. If that read itself
+    // fails, the error propagates with the record — written before the request —
+    // still in force, so an unreadable reconciliation can never be mistaken for
+    // a settled outcome.
     const after = await readThreadComments(remote, threadId, signal)
     const landed = after.find(
       (entry) => !before.includes(entry.id) && entry.body.trim() === body.trim(),
     )
     if (landed) {
-      await clearUncertainWrite(repoPath, number, permissions.viewer, attempt, signal)
+      await clearUncertainWrite(repoPath, repo, number, permissions.viewer, attempt, signal)
       return { id: landed.id, state: 'created', url: landed.url }
     }
-    await recordUncertainWrite(
-      repoPath,
-      {
-        id: attempt,
-        number,
-        kind: 'reply',
-        summary: body.trim(),
-        threadId,
-        headOid: null,
-        event: null,
-        at: new Date().toISOString(),
-        viewer: permissions.viewer,
-      },
-      signal,
-    )
+    // Otherwise the record written before the request stands, and the next
+    // identical reply is refused until GitHub's own state has been read.
     throw new ReviewOutcomeUnknownError(transportDetail(error))
   }
 }

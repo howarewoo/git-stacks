@@ -444,7 +444,7 @@ function SubmitBar({
   const reason =
     blocked ??
     (uncertain
-      ? 'This review was sent but Git Stacks never heard back, so it is not sent again automatically. Reload to see whether GitHub recorded it.'
+      ? 'This review was sent but Git Stacks never heard back, and GitHub does not have it, so it is held rather than sent again. Submitting checks GitHub first, so nothing is posted twice.'
       : needsSummary
         ? 'Requesting changes needs a summary saying what must change.'
         : staleCount > 0
@@ -665,7 +665,7 @@ function ThreadList({
                       size="sm"
                       tooltip={
                         uncertain.has(thread.id)
-                          ? 'This reply was sent but Git Stacks never heard back, so it is not sent again automatically. Reload to see whether GitHub recorded it.'
+                          ? 'This reply was sent but Git Stacks never heard back, and GitHub does not have it, so it is held rather than sent again. Sending checks the thread first, so nothing is posted twice.'
                           : undefined
                       }
                       variant="accent"

@@ -436,14 +436,30 @@ A write whose response is lost is not replayed automatically, because the replay
 most likely outcome is a duplicate review carrying a comment the reviewer never
 wrote twice. An error message alone does not enforce that: it disappears on
 reload and hands the same words back to a live button. So the attempt itself is
-journalled beside the repository, keyed by its words and its head, and the next
-identical write is refused until GitHub's own state has been read. A reviewer who
-changes the wording after an uncertain outcome is not blocked — they have plainly
-abandoned that attempt — while pressing Submit again with the same words is.
-Replies are guarded the same way, because a repeated reply is a second comment.
-That record holds the reviewer's own words, so it is scoped by account as well as
-by pull request: the journal is shared by every worktree of a repository, and one
-account's unresolved attempt must not hold a different account's button shut.
+journalled **before** the request leaves — a crash between the POST and its
+response is precisely the case with no failure to write a record on, so a record
+written only after a failure would be missing for the one case the guard exists
+for. The attempt is identified by the inline comments and the head, because the
+comments *are* the write: a summary is free text the reviewer may edit, or lose
+on reload, and keying on it would let a one-sentence edit repost the same
+comments twice. Changing a comment is what makes it a different write.
+
+The record is not a dead end. Before refusing, the next attempt asks GitHub what
+it actually holds — this account's review of this revision, matched on author,
+commit, and summary. If that review is there the attempt did land, so the record
+is retired and the settled outcome is reported rather than the review being sent
+a second time. If GitHub does not have it, the guard stands: the record says only
+that the app never heard back, which is also true of a request that never
+arrived, so absence is not proof and is never taken as licence to post again
+automatically. Replies are reconciled the same way, against the thread's own
+comments, because a repeated reply is a second comment.
+
+That record holds the reviewer's own words, so it is scoped by repository and by
+account as well as by pull request: the journal lives in a Git common directory
+that every origin and worktree shares, a pull request number is only unique
+inside one repository, and an attempt id is not unique across accounts. Without
+all three, one account's record can block an unrelated review — or be cleared by
+one, leaving a duplicate waiting to happen.
 
 Thread topology, replies, and resolved and outdated state come from GraphQL,
 which is the only place that knows them; REST review comments are flat and cannot
