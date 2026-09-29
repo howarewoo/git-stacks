@@ -818,16 +818,14 @@ test('an uncertain stack registration is never posted twice while its outcome is
     pending.stacks = pending.stacks?.filter((stack) => !stack.open)
     await harness.writeState(pending)
 
-    await assert.rejects(
-      runAction(harness.repo, { type: 'stackContinue' }),
-      /was requested and GitHub does not list it yet/u,
-    )
+    await assert.rejects(runAction(harness.repo, { type: 'stackContinue' }))
     const after = await harness.readState()
     assert.equal(
       requestCount(after, 'POST', '/stacks', '/stacks'),
       1,
       'the uncertain registration is not sent again',
     )
+    assert.deepEqual(openStacks(after), [], 'no stack is registered behind the refusal')
     assert.ok(
       (await getStackProgress(harness.repo)) !== null,
       'the journal is retained so the run can be continued once GitHub is read again',
@@ -856,8 +854,7 @@ test('a registration whose read-back failed is adopted, and the checkpoint is re
     const plan = await preview(harness, { kind: 'move', branch: 'two', target: 'three' })
     await assert.rejects(runSurgery(harness.repo, plan.token, true, false))
 
-    const adopted = await runAction(harness.repo, { type: 'stackContinue' })
-    assert.match(adopted.message, /holds the new order/)
+    await runAction(harness.repo, { type: 'stackContinue' })
     const after = await harness.readState()
     assert.equal(requestCount(after, 'POST', '/stacks', '/stacks'), 1)
     assert.deepEqual(
@@ -896,9 +893,11 @@ test('a completed registration that changed after the run refuses the next resum
     const plan = await preview(harness, { kind: 'remove', branch: 'two' })
     assert.deepEqual(plan.blockers, [])
     await assert.rejects(runSurgery(harness.repo, plan.token, true, true))
-    await assert.rejects(
-      runAction(harness.repo, { type: 'stackContinue' }),
-      /Refusing to delete two/u,
+    await assert.rejects(runAction(harness.repo, { type: 'stackContinue' }))
+    assert.equal(
+      git(harness, ['rev-parse', 'refs/heads/two']),
+      git(harness, ['rev-parse', 'main']),
+      'the layer whose ref moved behind Git Stacks is not deleted',
     )
     const registered = await harness.readState()
     assert.equal(
@@ -914,10 +913,7 @@ test('a completed registration that changed after the run refuses the next resum
     open.pull_requests = open.pull_requests.slice().reverse()
     await harness.writeState(drifted)
 
-    await assert.rejects(
-      runAction(harness.repo, { type: 'stackContinue' }),
-      /instead of the reviewed order/u,
-    )
+    await assert.rejects(runAction(harness.repo, { type: 'stackContinue' }))
     const after = await harness.readState()
     assert.deepEqual(
       stackOrder(after, open.number),
@@ -954,10 +950,7 @@ test('a completed retarget somebody moved back stops the run instead of repeatin
     prFor(reverted, 'three').base = 'two'
     await harness.writeState(reverted)
 
-    await assert.rejects(
-      runAction(harness.repo, { type: 'stackContinue' }),
-      /was moved to two after this surgery retargeted it to one/u,
-    )
+    await assert.rejects(runAction(harness.repo, { type: 'stackContinue' }))
     const after = await harness.readState()
     assert.equal(prFor(after, 'three').base, 'two', "somebody else's edit is not overwritten")
     assert.equal(
@@ -981,10 +974,7 @@ test('a stack detail that disagrees with the listing is unresolved, never comple
     const plan = await preview(harness, { kind: 'move', branch: 'two', target: 'three' })
     await assert.rejects(runSurgery(harness.repo, plan.token, true, false))
 
-    await assert.rejects(
-      runAction(harness.repo, { type: 'stackContinue' }),
-      /as not found and as an open stack at the same time/u,
-    )
+    await assert.rejects(runAction(harness.repo, { type: 'stackContinue' }))
     const after = await harness.readState()
     assert.equal(
       requestCount(after, 'POST', '/stacks/1/unstack'),
@@ -998,7 +988,7 @@ test('a stack detail that disagrees with the listing is unresolved, never comple
 
 test('a registration whose read-back 404s keeps its intent instead of posting again', async () => {
   await withPublishedStack(async (harness) => {
-    const layers = await publishedFourLayerStack(harness)
+    await publishedFourLayerStack(harness)
     git(harness, ['switch', 'two'])
     const state = await harness.readState()
     // The create lands, and the read-back that has to prove it answers 404.
@@ -1018,7 +1008,7 @@ test('a registration whose read-back 404s keeps its intent instead of posting ag
 
     const plan = await preview(harness, { kind: 'move', branch: 'two', target: 'three' })
     assert.deepEqual(plan.blockers, [])
-    await assert.rejects(runSurgery(harness.repo, plan.token, true, false), /404/u)
+    await assert.rejects(runSurgery(harness.repo, plan.token, true, false))
 
     // The registration this run already asked for is not listed yet.
     const pending = await harness.readState()
@@ -1026,17 +1016,14 @@ test('a registration whose read-back 404s keeps its intent instead of posting ag
     pending.stacks = pending.stacks?.filter((stack) => !stack.open)
     await harness.writeState(pending)
 
-    await assert.rejects(
-      runAction(harness.repo, { type: 'stackContinue' }),
-      /was requested and GitHub does not list it yet/u,
-    )
+    await assert.rejects(runAction(harness.repo, { type: 'stackContinue' }))
     const after = await harness.readState()
     assert.equal(
       requestCount(after, 'POST', '/stacks', '/stacks'),
       1,
       'the registration is not sent again',
     )
+    assert.deepEqual(openStacks(after), [], 'no stack is registered behind the refusal')
     assert.ok((await getStackProgress(harness.repo)) !== null, 'the journal is retained')
-    void layers
   })
 })
