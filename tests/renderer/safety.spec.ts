@@ -297,24 +297,24 @@ test.describe('Safety and mutation dispatch invariants', () => {
           exact: true,
         })
         .click()
+      await page.getByRole('button', { name: 'Open conflict resolver', exact: true }).click()
 
-      const fileInspector = page.getByRole('region', {
-        name: 'Inspect src/renderer/src/components/conflicted.tsx',
-        exact: true,
-      })
-      await expect(fileInspector).toBeVisible()
+      const resolver = page.getByRole('dialog', { name: 'Resolve conflict', exact: true })
+      await expect(resolver).toBeVisible()
 
-      await fileInspector
-        .getByRole('button', { name: 'Open conflict resolver', exact: true })
+      // Choosing a side edits only the draft; staging requires explicit confirmation.
+      await resolver
+        .getByRole('button', {
+          name: 'Accept Stage 3 — content being applied for every conflict',
+          exact: true,
+        })
         .click()
-      const dialog = page.getByRole('dialog', { name: 'Resolve conflict', exact: true })
-      await expect(dialog).toBeVisible()
-      await dialog
-        .getByRole('button', { name: 'Accept Incoming side for every conflict', exact: true })
-        .click()
+      await expect(
+        resolver.getByRole('textbox', { name: 'Resolved file', exact: true }),
+      ).toHaveValue('export const value = 2\n')
       expect(await getDispatchedActions(page)).toEqual([])
 
-      await dialog.getByRole('button', { name: 'Mark resolved and stage', exact: true }).click()
+      await resolver.getByRole('button', { name: 'Mark resolved and stage', exact: true }).click()
       await settle(page)
 
       const actions = await getDispatchedActions(page)

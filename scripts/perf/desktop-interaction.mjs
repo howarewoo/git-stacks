@@ -210,7 +210,7 @@ export async function measureDesktop(repoRoot, fixture) {
     )
     const startupMs = performance.now() - started
 
-    const search = 'input[aria-label="Search branches, files, and pull requests"]'
+    const search = 'input[aria-label="Filter current view branches, files, and pull requests"]'
     await click(client, search)
     await evaluate(
       client,

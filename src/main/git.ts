@@ -113,7 +113,7 @@ import {
   hasConflictMarkers,
   parseConflictSegments,
 } from '../shared/conflict'
-import { getGitHubData } from './github'
+import { getGitHubData, getGitHubIssues } from './github'
 import { githubTransport } from './github-transport'
 import {
   getStackProgress,
@@ -195,7 +195,13 @@ function validateAction(value: unknown): GitAction {
 
   switch (value.type) {
     case 'switch':
-      return { type: 'switch', ref: requireRefInput(value.ref, 'branch ref') }
+      if (value.carry !== undefined && typeof value.carry !== 'boolean')
+        throw new Error('carry must be a boolean')
+      return {
+        type: 'switch',
+        ref: requireRefInput(value.ref, 'branch ref'),
+        carry: value.carry === true,
+      }
     case 'createBranch':
       return {
         type: 'createBranch',
@@ -2023,9 +2029,9 @@ async function runStashAction(
   }
 }
 
-async function runSwitch(repoPath: string, ref: string): Promise<ActionResult> {
+async function runSwitch(repoPath: string, ref: string, carry = false): Promise<ActionResult> {
   await ensureNoBusyOperation(repoPath, 'switch branches')
-  await ensureClean(repoPath, 'switch branches')
+  if (!carry) await ensureClean(repoPath, 'switch branches')
   if (
     (!ref.startsWith('refs/heads/') && !ref.startsWith('refs/remotes/')) ||
     !(await refExists(repoPath, ref))
@@ -4612,7 +4618,10 @@ export async function getSnapshot(
   }
 
   const defaultBranch = await getDefaultBranch(root, refs, currentBranch, signal)
-  const github = await getGitHubData(root, originUrl, signal)
+  const [github, issueData] = await Promise.all([
+    getGitHubData(root, originUrl, signal),
+    getGitHubIssues(root, originUrl),
+  ])
   const localPullRequests = new Map<string, PullRequest>()
   github.pullRequests.forEach((pullRequest, index) => {
     if (github.sameRepository(index) && !localPullRequests.has(pullRequest.head)) {
@@ -4776,6 +4785,8 @@ export async function getSnapshot(
     remoteUrl: originUrl,
     branches,
     pullRequests: github.pullRequests,
+    issues: issueData.issues,
+    issuesMessage: issueData.message,
     files,
     stashes,
     rebaseInProgress: operationState.rebase,
@@ -5354,7 +5365,7 @@ export async function runAction(repoPath: string, value: GitAction): Promise<Act
       case 'stashDrop':
         return runStashAction(root, action.type, action.ref, action.oid)
       case 'switch':
-        return runSwitch(root, action.ref)
+        return runSwitch(root, action.ref, action.carry)
       case 'createBranch':
         return runCreateBranch(root, action.name, action.parent)
       case 'deleteBranch':

@@ -312,6 +312,18 @@ function handleGraphql(state, args, fixture) {
     pr.draft = field === 'convertPullRequestToDraft'
     return { data: { [field]: { pullRequest: { id: `PR_${pr.number}`, isDraft: pr.draft } } } }
   }
+  if (query.includes('issues(first:')) {
+    return {
+      data: {
+        repository: {
+          issues: {
+            nodes: state.issues || [],
+            pageInfo: { hasNextPage: false, endCursor: null },
+          },
+        },
+      },
+    }
+  }
   if (query.includes('pullRequest(number:')) {
     const pr = findPr(state, Number(forms.get('number')))
     return { data: { repository: { pullRequest: graphPullRequest(pr, true, fixture) } } }

@@ -61,8 +61,9 @@ carried into the current trend.
 The `startup` measurement runs the built Electron app against the 3,000-ref
 fixture. It starts before process launch and ends after the automation clicks
 the pre-seeded recent repository and its first 200 branch rows complete two
-animation frames. The `interaction` measurement starts at an actual search input
-event in that window and ends after the filtered branch result completes two
+animation frames. The `interaction` measurement starts at an actual input event
+in the “Filter current view branches, files, and pull requests” field, not the
+command palette, and ends after the filtered branch result completes two
 animation frames. The separate `diff-render-ssr` measurement is server-side
 rendering cost for a 1,000-line diff preview; it is not an input-to-paint budget.
 CI installs `xvfb` and `xauth` on the self-hosted Linux ARM64 runner, builds the
@@ -176,9 +177,7 @@ Append `#/index` for the scenario directory. App scenarios use `/?scenario=shell
 
 The typed control surface is `window.fixture`: `actions` and `externalUrls` record dispatch; `calls` records reads and writes; `hold(method)` and `release(method)` control in-flight requests; `failNext(method, message)` rejects one request; `setScenario(name)` remounts the App against another deterministic snapshot. This API exists only in the gallery. `manifest.ts` lists all scenario names; `scenarios.ts` owns their typed data.
 
-The `files-conflicts` scenario supplies all three index stages through `conflictView`.
-Its safety check chooses incoming content in the resolver and verifies that only
-**Mark resolved and stage** dispatches the displayed fingerprint and resolved content.
+The conflict fixture implements `conflictView` with index stages and a captured fingerprint. The safety scenario verifies that choosing incoming content edits only the draft, then `resolveConflict` sends that content and fingerprint when the user explicitly stages it.
 History recovery coverage holds a commit diff while a repository refresh changes
 HEAD and fails the replacement history read; the branch picker and reload control
 must remain usable, and retrying must restore the commit list.

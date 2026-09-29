@@ -105,6 +105,21 @@ import {
 type WorkspaceView =
   'branches' | 'stacks' | 'history' | 'changes' | 'pullRequests' | 'stashes' | 'diagnostics'
 
+import { CommandPalette } from './components/command-palette'
+import { ShortcutSettings } from './components/shortcut-settings'
+import { DirtyCheckoutGuard } from './components/dirty-checkout-guard'
+import { buildPaletteItems, type PaletteItem } from './lib/command-palette'
+import {
+  ariaKeyShortcuts,
+  formatChord,
+  isComposingKeyEvent,
+  isEditableTarget,
+  isMacPlatform,
+  loadShortcuts,
+  matchesChord,
+  type ShortcutId,
+} from './lib/keyboard-shortcuts'
+import { resolveStackNavigation } from './lib/stack-navigation'
 type BranchFilter = 'all' | 'local' | 'remote' | 'prs'
 
 type BranchTreeInfo = {
@@ -289,11 +304,23 @@ function App() {
   const [gitRuntimeBusy, setGitRuntimeBusy] = React.useState(false)
   const workflowSequence = React.useRef(0)
 
+  const [paletteOpen, setPaletteOpen] = React.useState(false)
+  const [shortcutSettingsOpen, setShortcutSettingsOpen] = React.useState(false)
+  const [shortcutBindings, setShortcutBindings] = React.useState<Record<ShortcutId, string>>(() =>
+    loadShortcuts(),
+  )
+  const [checkoutGuardTarget, setCheckoutGuardTarget] = React.useState<{
+    ref: string
+    name: string
+  } | null>(null)
+  const isMac = React.useMemo(() => isMacPlatform(), [])
   const [showDetails, setShowDetails] = React.useState(true)
   const busyRef = React.useRef<string | null>(null)
   const openingRef = React.useRef(false)
   const searchRef = React.useRef<HTMLInputElement>(null)
   const deleteCancelRef = React.useRef<HTMLButtonElement>(null)
+  const paletteHandoffFocusRef = React.useRef<HTMLElement | null>(null)
+  const paletteDeleteHandoffRef = React.useRef(false)
   const deleteTriggerRef = React.useRef<HTMLButtonElement>(null)
   // One gate covers every read that can paint the repository: an open, a
   // refresh, or the snapshot either returns. Switching repositories resets it
@@ -352,17 +379,6 @@ function App() {
       cancelled = true
     }
   }, [desktop])
-
-  React.useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => {
-      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
-        event.preventDefault()
-        searchRef.current?.focus()
-      }
-    }
-    window.addEventListener('keydown', onKeyDown)
-    return () => window.removeEventListener('keydown', onKeyDown)
-  }, [])
 
   const openRepository = React.useCallback(
     async (path?: string) => {
@@ -718,6 +734,337 @@ function App() {
       await runAction(action, 'Commit staged changes')
     }
   }
+  const requestCheckoutBranch = React.useCallback(
+    async (ref: string, name: string) => {
+      if (!snapshot || isBusy || operationActive) return
+      setSelectedBranchRef(ref)
+
+      // Dirty-working-tree checkout routes through existing carry/stash/commit/cancel safeguards
+      if (snapshot.files.length > 0) {
+        setCheckoutGuardTarget({ ref, name })
+        return
+      }
+
+      await runAction({ type: 'switch', ref }, 'Switch branch')
+    },
+    [isBusy, operationActive, runAction, snapshot],
+  )
+  const carryCheckoutBranch = React.useCallback(() => {
+    if (!checkoutGuardTarget || !snapshot || isBusy || operationActive) return
+    const target = checkoutGuardTarget
+    setCheckoutGuardTarget(null)
+    void runAction(
+      { type: 'switch', ref: target.ref, carry: true },
+      'Carry changes and switch branch',
+    )
+  }, [checkoutGuardTarget, snapshot, isBusy, operationActive, runAction])
+
+  const paletteItems = React.useMemo(() => {
+    return buildPaletteItems({
+      snapshot,
+      selectedBranch,
+      recentRepositories,
+      isBusy,
+      operationActive,
+      shortcutMap: shortcutBindings,
+      isMac,
+    })
+  }, [
+    snapshot,
+    selectedBranch,
+    recentRepositories,
+    isBusy,
+    operationActive,
+    shortcutBindings,
+    isMac,
+  ])
+
+  const handlePaletteExecute = React.useCallback(
+    (item: PaletteItem, opener: HTMLElement | null) => {
+      const intent = item.intent
+      if (
+        intent.kind === 'newBranch' ||
+        intent.kind === 'createPr' ||
+        intent.kind === 'workflow' ||
+        intent.kind === 'deleteBranch' ||
+        intent.kind === 'openShortcutsSettings' ||
+        (intent.kind === 'checkoutBranch' && Boolean(snapshot?.files.length))
+      ) {
+        paletteHandoffFocusRef.current = opener
+        paletteDeleteHandoffRef.current = intent.kind === 'deleteBranch'
+      }
+      switch (intent.kind) {
+        case 'view':
+          setWorkspaceView(intent.view)
+          break
+        case 'refresh':
+          void refreshSnapshot()
+          break
+        case 'toggleDetails':
+          setShowDetails((prev) => !prev)
+          break
+        case 'openRepo':
+          void openRepository(intent.path)
+          break
+        case 'newBranch':
+          openBranchDialog()
+          break
+        case 'createPr':
+          openPrDialog()
+          break
+        case 'openPrUrl':
+          if (desktop) {
+            desktop.openExternal(intent.url).catch((err) => setError(readableError(err)))
+          }
+          break
+        case 'selectBranch':
+          setSelectedBranchRef(intent.ref)
+          break
+        case 'checkoutBranch':
+          void requestCheckoutBranch(intent.ref, intent.name)
+          break
+        case 'navigateStack': {
+          if (!snapshot) break
+          const target = resolveStackNavigation(selectedBranch, snapshot.branches, intent.relation)
+          if (target) {
+            setSelectedBranchRef(target.ref)
+          }
+          break
+        }
+        case 'workflow':
+          openWorkflow(intent.request)
+          break
+        case 'deleteBranch':
+          openDeleteDialog()
+          break
+        case 'action':
+          void runAction(intent.action, intent.label)
+          break
+        case 'openShortcutsSettings':
+          setShortcutSettingsOpen(true)
+          break
+      }
+    },
+    [
+      desktop,
+      openBranchDialog,
+      openDeleteDialog,
+      openPrDialog,
+      openRepository,
+      openWorkflow,
+      refreshSnapshot,
+      requestCheckoutBranch,
+      runAction,
+      selectedBranch,
+      snapshot,
+    ],
+  )
+
+  React.useEffect(() => {
+    if (
+      !paletteHandoffFocusRef.current ||
+      paletteDeleteHandoffRef.current ||
+      paletteOpen ||
+      shortcutSettingsOpen ||
+      checkoutGuardTarget ||
+      deleteTarget ||
+      newBranchOpen ||
+      prOpen ||
+      workflow
+    )
+      return
+    const target = paletteHandoffFocusRef.current
+    paletteHandoffFocusRef.current = null
+    const frame = requestAnimationFrame(() => {
+      if (target.isConnected && !('disabled' in target && target.disabled)) target.focus()
+      else searchRef.current?.focus()
+    })
+    return () => cancelAnimationFrame(frame)
+  }, [
+    paletteOpen,
+    shortcutSettingsOpen,
+    checkoutGuardTarget,
+    deleteTarget,
+    newBranchOpen,
+    prOpen,
+    workflow,
+  ])
+
+  React.useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      // A focused control that already handled the key owns it: the palette's
+      // search input consumes navigation and confirmation keys before this
+      // window listener sees the same bubbling event.
+      if (event.defaultPrevented) return
+      if (isComposingKeyEvent(event)) return
+
+      // If any modal dialog is currently open, don't execute global hotkeys underneath
+      const anyModalOpen =
+        paletteOpen ||
+        shortcutSettingsOpen ||
+        checkoutGuardTarget !== null ||
+        deleteTarget !== null ||
+        newBranchOpen ||
+        prOpen ||
+        workflow !== null
+
+      // A bare printable remap must not steal text from either search field.
+      // Modified openers such as Cmd/Ctrl+K still work while editing.
+      if (matchesChord(event, shortcutBindings['palette.open'], isMac)) {
+        if (anyModalOpen && !paletteOpen) return
+        if (
+          isEditableTarget(event.target) &&
+          event.key.length === 1 &&
+          !event.metaKey &&
+          !event.ctrlKey
+        )
+          return
+        event.preventDefault()
+        if (!event.repeat) setPaletteOpen((prev) => !prev)
+        return
+      }
+
+      if (anyModalOpen) return
+
+      // Search/filter fields keep their own focused shortcuts and are not conflated with global command search
+      if (matchesChord(event, shortcutBindings['search.focus'], isMac)) {
+        if (!isEditableTarget(event.target)) {
+          event.preventDefault()
+          searchRef.current?.focus()
+          searchRef.current?.select()
+          return
+        }
+      }
+
+      if (isEditableTarget(event.target)) {
+        return
+      }
+
+      // View navigation shortcuts
+      if (matchesChord(event, shortcutBindings['view.branches'], isMac)) {
+        event.preventDefault()
+        setWorkspaceView('branches')
+        return
+      }
+      if (matchesChord(event, shortcutBindings['view.stacks'], isMac)) {
+        event.preventDefault()
+        setWorkspaceView('stacks')
+        return
+      }
+      if (matchesChord(event, shortcutBindings['view.history'], isMac)) {
+        event.preventDefault()
+        setWorkspaceView('history')
+        return
+      }
+      if (matchesChord(event, shortcutBindings['view.changes'], isMac)) {
+        event.preventDefault()
+        setWorkspaceView('changes')
+        return
+      }
+      if (matchesChord(event, shortcutBindings['view.pullRequests'], isMac)) {
+        event.preventDefault()
+        setWorkspaceView('pullRequests')
+        return
+      }
+      if (matchesChord(event, shortcutBindings['view.stashes'], isMac)) {
+        event.preventDefault()
+        setWorkspaceView('stashes')
+        return
+      }
+
+      // Stack navigation commands
+      if (matchesChord(event, shortcutBindings['stack.selectParent'], isMac)) {
+        event.preventDefault()
+        if (snapshot) {
+          const target = resolveStackNavigation(selectedBranch, snapshot.branches, 'parent')
+          if (target) setSelectedBranchRef(target.ref)
+        }
+        return
+      }
+      if (matchesChord(event, shortcutBindings['stack.selectChild'], isMac)) {
+        event.preventDefault()
+        if (snapshot) {
+          const target = resolveStackNavigation(selectedBranch, snapshot.branches, 'child')
+          if (target) setSelectedBranchRef(target.ref)
+        }
+        return
+      }
+      if (matchesChord(event, shortcutBindings['stack.selectTop'], isMac)) {
+        event.preventDefault()
+        if (snapshot) {
+          const target = resolveStackNavigation(selectedBranch, snapshot.branches, 'top')
+          if (target) setSelectedBranchRef(target.ref)
+        }
+        return
+      }
+      if (matchesChord(event, shortcutBindings['stack.selectBottom'], isMac)) {
+        event.preventDefault()
+        if (snapshot) {
+          const target = resolveStackNavigation(selectedBranch, snapshot.branches, 'bottom')
+          if (target) setSelectedBranchRef(target.ref)
+        }
+        return
+      }
+      if (matchesChord(event, shortcutBindings['stack.checkout'], isMac)) {
+        event.preventDefault()
+        if (selectedBranch && !selectedBranch.current) {
+          void requestCheckoutBranch(selectedBranch.ref, selectedBranch.name)
+        }
+        return
+      }
+      if (matchesChord(event, shortcutBindings['stack.restack'], isMac)) {
+        event.preventDefault()
+        if (
+          selectedBranch &&
+          !selectedBranch.remote &&
+          selectedBranch.name !== snapshot?.defaultBranch &&
+          !isBusy &&
+          !operationActive
+        ) {
+          openWorkflow({ kind: 'stack', operation: 'restack', branch: selectedBranch.name })
+        }
+        return
+      }
+      if (matchesChord(event, shortcutBindings['stack.sync'], isMac)) {
+        event.preventDefault()
+        if (snapshot && !isBusy && !operationActive) {
+          void runAction({ type: 'fetch' }, 'Fetch')
+        }
+        return
+      }
+      if (matchesChord(event, shortcutBindings['stack.openPr'], isMac)) {
+        event.preventDefault()
+        if (selectedBranch?.pr) {
+          desktop?.openExternal(selectedBranch.pr.url).catch((err) => setError(readableError(err)))
+        } else if (selectedBranch?.current && snapshot?.github.available && !isBusy) {
+          openPrDialog()
+        }
+        return
+      }
+    }
+
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [
+    checkoutGuardTarget,
+    deleteTarget,
+    desktop,
+    isBusy,
+    isMac,
+    newBranchOpen,
+    openPrDialog,
+    openWorkflow,
+    operationActive,
+    paletteOpen,
+    prOpen,
+    requestCheckoutBranch,
+    runAction,
+    selectedBranch,
+    shortcutBindings,
+    shortcutSettingsOpen,
+    snapshot,
+    workflow,
+  ])
 
   const renderSidebar = () => (
     <aside className="sidebar" aria-label="Repository navigation">
@@ -973,17 +1320,32 @@ function App() {
         </div>
       </div>
       <div className="toolbar-spacer" />
+      <Button
+        className="toolbar-control"
+        size="sm"
+        variant="secondary"
+        onClick={() => setPaletteOpen(true)}
+        aria-keyshortcuts={ariaKeyShortcuts(shortcutBindings['palette.open'], isMac)}
+        aria-label="Open command palette"
+        tooltip="Search actions, repositories, branches, PRs, issues, and settings"
+      >
+        <Search className="size-3.5" />
+        Palette
+        <kbd className="ml-1 rounded border border-[var(--gs-semantic-border-essential)] px-1 font-mono text-[10px] opacity-75">
+          {formatChord(shortcutBindings['palette.open'], isMac)}
+        </kbd>
+      </Button>
       <div className="toolbar-search">
         <Search className="size-3.5" />
         <Input
-          aria-keyshortcuts="Meta+K Control+K"
-          aria-label="Search branches, files, and pull requests"
+          aria-keyshortcuts={ariaKeyShortcuts(shortcutBindings['search.focus'], isMac)}
+          aria-label="Filter current view branches, files, and pull requests"
           onChange={(event) => setSearch(event.target.value)}
-          placeholder="Search"
+          placeholder="Filter view"
           ref={searchRef}
           value={search}
         />
-        <kbd>{shortcutModifier} K</kbd>
+        <kbd>{formatChord(shortcutBindings['search.focus'], isMac)}</kbd>
       </div>
       <div className="toolbar-control-slot">
         <IconButton
@@ -1582,9 +1944,7 @@ function App() {
                   ? 'This is already the checked-out branch.'
                   : 'Switch the working tree to this branch. Requires a clean tree; remotes create a local tracking copy.')
               }
-              onClick={() =>
-                runAction({ type: 'switch', ref: selectedBranch.ref }, 'Switch branch')
-              }
+              onClick={() => requestCheckoutBranch(selectedBranch.ref, selectedBranch.name)}
               variant="accent"
             >
               <ArrowLeftRight className="size-3.5" />
@@ -1893,6 +2253,14 @@ function App() {
           }}
           onCloseAutoFocus={(event) => {
             event.preventDefault()
+            if (paletteDeleteHandoffRef.current) {
+              paletteDeleteHandoffRef.current = false
+              const target = paletteHandoffFocusRef.current
+              paletteHandoffFocusRef.current = null
+              if (target?.isConnected && !('disabled' in target && target.disabled)) target.focus()
+              else searchRef.current?.focus()
+              return
+            }
             const trigger = deleteTriggerRef.current
             if (trigger && !trigger.disabled) trigger.focus()
             else searchRef.current?.focus()
@@ -2233,6 +2601,27 @@ function App() {
           </form>
         </DialogContent>
       </Dialog>
+      <CommandPalette
+        open={paletteOpen}
+        onOpenChange={setPaletteOpen}
+        items={paletteItems}
+        onExecute={handlePaletteExecute}
+        searchFallbackRef={searchRef}
+      />
+      <ShortcutSettings
+        open={shortcutSettingsOpen}
+        onOpenChange={setShortcutSettingsOpen}
+        bindings={shortcutBindings}
+        onBindingsChange={setShortcutBindings}
+      />
+      <DirtyCheckoutGuard
+        target={checkoutGuardTarget}
+        snapshot={snapshot}
+        onCarry={carryCheckoutBranch}
+        onClose={() => setCheckoutGuardTarget(null)}
+        onStash={() => openWorkflow({ kind: 'stash' })}
+        onReviewChanges={() => setWorkspaceView('changes')}
+      />
       {!desktop ? (
         <div className="browser-disclaimer">
           <Info className="size-3.5" />

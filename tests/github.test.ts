@@ -4,12 +4,13 @@ import { execFileSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { delimiter, join } from 'node:path'
 import { test } from 'node:test'
-import { getGitHubData, getPullRequest } from '../src/main/github'
+import { getGitHubData, getGitHubIssues, getPullRequest } from '../src/main/github'
 
 /**
- * Fake `gh` answering the two GraphQL shapes Git Stacks sends: the paginated open
- * pull request listing and the single tracked pull request lookup. Anything else
- * fails loudly so a broken query no longer passes as an empty result.
+ * Fake `gh` answering the three GraphQL shapes Git Stacks sends: the paginated
+ * open pull request listing, the single tracked pull request lookup, and the
+ * open issue listing. Anything else fails loudly so a broken query no longer
+ * passes as an empty result.
  */
 const fakeGitHubCli = `'use strict'
 const { readFileSync, writeSync } = require('node:fs')
@@ -19,6 +20,9 @@ const open = [
   { number: 4, title: 'Fork feature', url: 'https://github.com/acme/widgets/pull/4', headRefName: 'feature', headRefOid: 'b'.repeat(40), baseRefName: 'main', isDraft: false, state: 'OPEN', headRepository: { nameWithOwner: 'evil/widgets' }, commits: { nodes: [{ commit: { statusCheckRollup: { state: 'SUCCESS' } } }] } }
 ]
 const tracked = { number: 7, title: 'Merged parent', url: 'https://github.com/acme/widgets/pull/7', body: 'body', state: 'MERGED', isDraft: false, headRefName: 'parent', headRefOid: 'c'.repeat(40), headRepository: { nameWithOwner: 'acme/widgets' }, baseRefName: 'main', mergeStateStatus: 'CLEAN', reviewDecision: 'APPROVED', mergeCommit: { oid: 'd'.repeat(40) }, commits: { nodes: [{ commit: { statusCheckRollup: { state: 'SUCCESS' } } }] } }
+const issues = [
+  { number: 17, title: 'Improve navigation', url: 'https://github.com/acme/widgets/issues/17' }
+]
 // The script is the executable on POSIX, where argv still holds every gh argument.
 // Windows runs the same script preloaded inside a copy of Node named gh.exe, which
 // treats 'api' as its entry script and reports it as a resolved absolute path.
@@ -28,8 +32,11 @@ const args = entry === -1 ? argv.slice(1) : argv.slice(entry)
 const input = args.includes('--input') ? JSON.parse(readFileSync(0, 'utf8')) : {}
 let response = null
 if (basename(args[0] || '') === 'api' && args.includes('graphql')) {
-  if (String(input.query || '').includes('pullRequest(number:') && input.variables?.number === 7) {
+  const text = String(input.query || '')
+  if (text.includes('pullRequest(number:') && input.variables?.number === 7) {
     response = { data: { repository: { pullRequest: tracked } } }
+  } else if (text.includes('issues(first:')) {
+    response = { data: { repository: { issues: { nodes: issues, pageInfo: { hasNextPage: false, endCursor: null } } } } }
   } else {
     response = { data: { repository: { pullRequests: { nodes: open, pageInfo: { hasNextPage: false, endCursor: null } } } } }
   }
@@ -137,6 +144,19 @@ test('GitHub fixture keeps fork heads separate and includes tracked closed paren
     assert.equal(result.pullRequests[local]?.headOid, 'a'.repeat(40))
     assert.equal(result.pullRequests[local]?.reviewDecision, 'APPROVED')
     assert.equal(result.pullRequests[local]?.mergeState, 'CLEAN')
+  })
+})
+test('GitHub issue discovery returns open issue identities from the repository', async () => {
+  await withGitHubFixture(async (repo) => {
+    const result = await getGitHubIssues(repo, 'https://github.com/acme/widgets.git')
+    assert.equal(result.message, '')
+    assert.deepEqual(result.issues, [
+      {
+        number: 17,
+        title: 'Improve navigation',
+        url: 'https://github.com/acme/widgets/issues/17',
+      },
+    ])
   })
 })
 

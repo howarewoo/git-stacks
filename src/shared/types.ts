@@ -16,6 +16,12 @@ export interface PullRequest {
   reviewDecision?: string
   mergeState?: string
 }
+export interface RepositoryIssue {
+  number: number
+  title: string
+  url: string
+}
+
 export interface Branch {
   ref: string
   name: string
@@ -56,6 +62,8 @@ export interface RepositorySnapshot {
   remoteUrl: string | null
   branches: Branch[]
   pullRequests: PullRequest[]
+  issues?: RepositoryIssue[]
+  issuesMessage?: string
   files: ChangedFile[]
   stashes: Stash[]
   rebaseInProgress: boolean
@@ -238,7 +246,7 @@ export type StackAction =
   | { type: 'updatePr'; number: number; title: string; body: string; draft: boolean }
   | { type: 'closePr' | 'reopenPr'; number: number }
 export type GitAction =
-  | { type: 'switch'; ref: string }
+  | { type: 'switch'; ref: string; carry?: boolean }
   | { type: 'createBranch'; name: string; parent: string }
   | { type: 'deleteBranch'; ref: string; force: boolean; expectedOid: string }
   | { type: 'stage' | 'unstage'; paths: string[] }

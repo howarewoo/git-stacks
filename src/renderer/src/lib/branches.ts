@@ -15,17 +15,30 @@ export function getCombinedBranches(branches: readonly Branch[]): Branch[] {
 }
 
 export function indexBranchesByParentName(branches: readonly Branch[]): Map<string, Branch> {
+  // A recorded parent may name the remote ref (`origin/main`) even when a local
+  // branch already tracks that same ref. Remote names resolve to the local
+  // representative so a qualified parent and its short name select the same
+  // branch instead of a deduplicated remote row.
+  const localByRepresentedRef = new Map<string, Branch>()
+  for (const branch of branches) {
+    if (branch.remote) continue
+    const ref = branch.upstreamRef
+    if (ref && !localByRepresentedRef.has(ref)) localByRepresentedRef.set(ref, branch)
+  }
+  const representative = (branch: Branch): Branch =>
+    branch.remote ? (localByRepresentedRef.get(branch.ref) ?? branch) : branch
+
   const index = new Map<string, Branch>()
   for (const branch of branches) {
     if (!branch.remote) index.set(branch.name, branch)
   }
   for (const branch of branches) {
-    if (branch.remote && !index.has(branch.name)) index.set(branch.name, branch)
+    if (branch.remote && !index.has(branch.name)) index.set(branch.name, representative(branch))
   }
   for (const branch of branches) {
     if (branch.remote && branch.name.startsWith('origin/')) {
       const name = branch.name.slice('origin/'.length)
-      if (!index.has(name)) index.set(name, branch)
+      if (!index.has(name)) index.set(name, representative(branch))
     }
   }
   return index

@@ -1,4 +1,4 @@
-import type { PullRequest } from '../shared/types'
+import type { PullRequest, RepositoryIssue } from '../shared/types'
 import {
   commandCode,
   commandDetail,
@@ -156,6 +156,66 @@ function githubErrorMessage(error: unknown): string {
 
 function unavailable(message: string): GitHubResult {
   return { pullRequests: [], available: false, message, sameRepository: () => false }
+}
+
+/** Read open issues separately from PR workflows; paging one connection never truncates the other. */
+export async function getGitHubIssues(
+  repoPath: string,
+  originUrl: string | null,
+): Promise<{ issues: RepositoryIssue[]; message: string }> {
+  const remote = parseRemote(originUrl)
+  if (!remote || remote.host !== 'github.com') {
+    return { issues: [], message: 'Issues unavailable: a github.com origin is required' }
+  }
+  const query = `query($owner: String!, $name: String!, $endCursor: String) {
+    repository(owner: $owner, name: $name) {
+      issues(first: 100, after: $endCursor, states: OPEN, orderBy: {field: UPDATED_AT, direction: DESC}) {
+        nodes { number title url }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  }`
+  try {
+    const issues: RepositoryIssue[] = []
+    let endCursor: string | null = null
+    for (;;) {
+      const page: Record<string, unknown> = await githubTransport().graphql(query, {
+        owner: remote.owner,
+        name: remote.name,
+        endCursor,
+      })
+      const repository = isRecord(page) ? page.repository : null
+      const connection = isRecord(repository) ? repository.issues : null
+      if (!isRecord(connection) || !Array.isArray(connection.nodes)) {
+        throw new Error('GitHub could not load issues')
+      }
+      for (const node of connection.nodes) {
+        if (
+          !isRecord(node) ||
+          typeof node.number !== 'number' ||
+          !Number.isInteger(node.number) ||
+          typeof node.title !== 'string' ||
+          typeof node.url !== 'string'
+        )
+          throw new Error('GitHub returned an invalid issue')
+        issues.push({ number: node.number, title: node.title, url: node.url })
+      }
+      const pageInfo = isRecord(connection) ? connection.pageInfo : null
+      const next = isRecord(pageInfo) ? pageInfo.endCursor : null
+      if (
+        !isRecord(pageInfo) ||
+        pageInfo.hasNextPage !== true ||
+        typeof next !== 'string' ||
+        !next ||
+        next === endCursor
+      )
+        break
+      endCursor = next
+    }
+    return { issues, message: '' }
+  } catch (error) {
+    return { issues: [], message: githubErrorMessage(error) }
+  }
 }
 
 async function trackedPullRequestNumbers(

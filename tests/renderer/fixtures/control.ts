@@ -11,6 +11,11 @@ import type {
   StackPreview,
 } from '../../../src/shared/types'
 import {
+  conflictLabels,
+  conflictRegions,
+  parseConflictSegments,
+} from '../../../src/shared/conflict'
+import {
   fileViewFixtures,
   historyCommits,
   longDiffText,
@@ -125,12 +130,12 @@ function actionMessage(action: GitAction): string {
       return `Discarded unstaged changes in ${action.path}`
     case 'resolveConflict':
       return `Resolved and staged ${action.path}`
+    case 'stageHunk':
+      return `Staged the selected hunk in ${action.path}`
+    case 'unstageHunk':
+      return `Unstaged the selected hunk in ${action.path}`
     case 'conflictMergeTool':
       return `Opened the merge tool for ${action.path}`
-    case 'stageHunk':
-      return `Staged selected changes in ${action.path}`
-    case 'unstageHunk':
-      return `Unstaged selected changes in ${action.path}`
     case 'setParent':
       return `Recorded ${action.branch} on ${action.parent}`
     case 'executeStack':
@@ -245,8 +250,13 @@ export function installFixtureControl(options: {
     conflictView: (path) => {
       record('conflictView', [path])
       return answer<ConflictFile>('conflictView', () => {
-        if (path !== fileViewFixtures.conflicted.path) {
-          throw new Error(`No conflict fixture for ${path}`)
+        const view = fileViewFixtures.conflicted
+        if (
+          path !== view.path ||
+          view.content === null ||
+          !scenario.snapshot?.files.some((file) => file.path === path && file.conflicted)
+        ) {
+          throw new Error(`No conflict fixture exists for ${path}.`)
         }
         return {
           path,
@@ -254,30 +264,23 @@ export function installFixtureControl(options: {
           stages: [1, 2, 3],
           stagePreviewTruncated: [],
           binary: false,
-          labels: {
-            operation: 'unknown',
-            title: 'Conflict',
-            base: 'Common ancestor',
-            current: 'Current side',
-            incoming: 'Incoming side',
-            explanation: 'Review both index stages before choosing the resolved content.',
-          },
+          labels: conflictLabels({
+            operation: scenario.snapshot.operation,
+            currentBranch: scenario.snapshot.currentBranch,
+            incomingSubject: null,
+            incomingRef: null,
+            stash: null,
+            stashAvailable: false,
+          }),
           base: 'export const value = 0\n',
           current: 'export const value = 1\n',
           incoming: 'export const value = 2\n',
-          worktree: fileViewFixtures.conflicted.content,
+          worktree: view.content,
           worktreePresent: true,
-          regions: [
-            {
-              index: 0,
-              startLine: 1,
-              current: 'export const value = 1\n',
-              incoming: 'export const value = 2\n',
-            },
-          ],
+          regions: conflictRegions(parseConflictSegments(view.content)),
           moves: [],
           truncated: false,
-          fingerprint: fileViewFixtures.conflicted.fingerprint,
+          fingerprint: view.fingerprint,
           mergeTool: { available: false, tool: null, reason: 'No merge tool configured.' },
         }
       })
