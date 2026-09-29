@@ -1504,3 +1504,155 @@ test('delayed network GitHub request is aborted by mutation; coordinator clears 
     resetGitHubRateLimit()
   }
 })
+test('tracked closed or merged PR detail stall is aborted by mutation and preserves coordinator freshness', async () => {
+  const { repo, cleanup } = await disposableRepository()
+  git(repo, 'remote', 'add', 'origin', 'https://github.com/acme/project-alpha.git')
+  git(repo, 'branch', 'feature-tracked')
+  git(repo, 'config', 'branch.feature-tracked.gitstackspr', '42')
+
+  class TrackedPrStallTransport implements GitHubTransport {
+    readonly kind = 'direct' as const
+    public openPrQueryReceived = 0
+    public trackedPrQueryReceived = 0
+    public aborted = 0
+
+    async rest<T = unknown>(): Promise<GitHubRestResponse<T>> {
+      return {
+        status: 200,
+        data: {} as T,
+        rateLimit: { limit: 5000, remaining: 4999, reset: null, resource: 'core', retryAfterSeconds: null },
+      }
+    }
+    async paginate<T = unknown>(): Promise<T[]> {
+      return []
+    }
+    async graphql<T = Record<string, unknown>>(
+      query: string,
+      variables: Record<string, unknown> = {},
+      options: GitHubGraphqlOptions = {},
+    ): Promise<T> {
+      if (query.includes('pullRequests(first: 100')) {
+        this.openPrQueryReceived++
+        // Open PRs list does not contain tracked PR #42 (it is closed or merged)
+        return {
+          repository: {
+            pullRequests: {
+              nodes: [],
+              pageInfo: { hasNextPage: false, endCursor: null },
+            },
+          },
+        } as T
+      }
+
+      if (query.includes('pullRequest(number: $number)')) {
+        this.trackedPrQueryReceived++
+        // The detail request for tracked PR #42 stalls until aborted by mutation
+        return new Promise<T>((_resolve, reject) => {
+          if (options.signal?.aborted) {
+            this.aborted++
+            reject(new CommandCancelled())
+            return
+          }
+          options.signal?.addEventListener(
+            'abort',
+            () => {
+              this.aborted++
+              reject(new CommandCancelled())
+            },
+            { once: true },
+          )
+        })
+      }
+
+      return { repository: { issues: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } } } } as T
+    }
+  }
+
+  const transport = new TrackedPrStallTransport()
+  setGitHubTransport(transport)
+  resetGitHubRateLimit()
+
+  const clock = new ManualClock()
+  const scheduler = new RepositoryScheduler()
+  const registry = new RequestRegistry()
+  const emittedSnapshots: RepositorySnapshot[] = []
+
+  const coordinator = new RepositorySyncCoordinator(
+    {
+      readSnapshot: (root, signal, request) =>
+        performBackgroundRead(
+          registry,
+          root,
+          signal,
+          (readSignal) => getSnapshot(root, readSignal, undefined, request.github.remote),
+          request.requestId,
+        ),
+      readIssues: async () => [],
+      scheduler,
+      clock,
+    },
+    { ...DEFAULT_INTERVALS, localSettleMs: 10 },
+  )
+
+  coordinator.onEvent((event) => {
+    if (event.kind === 'snapshot' && event.snapshot) emittedSnapshots.push(event.snapshot)
+  })
+
+  try {
+    const initial = snapshotFixture({ path: repo, github: { available: true, message: 'GitHub metadata available' } })
+    coordinator.attach(repo, initial)
+    const initialFreshness = coordinator.freshness()
+    assert.equal(initialFreshness.state, 'fresh')
+
+    // Trigger a remote refresh: getSnapshot will query open PRs, then query tracked PR #42 and stall
+    const refreshPromise = coordinator.refreshNow()
+
+    // Wait for the detail query to arrive and stall
+    for (let i = 0; i < 50 && transport.trackedPrQueryReceived === 0; i++) {
+      await new Promise((res) => setTimeout(res, 20))
+    }
+    assert.ok(transport.trackedPrQueryReceived >= 1, 'tracked PR detail query arrived at transport')
+
+    const coordinatorInternals = coordinator as unknown as {
+      running: Promise<unknown> | null
+      failures: number
+    }
+    assert.ok(coordinatorInternals.running !== null, 'coordinator is running background read')
+
+    // Now a local mutation runs (e.g. stage, commit, branch action)
+    let mutationRan = false
+    await scheduler.mutate(repo, async () => {
+      mutationRan = true
+    })
+    assert.equal(mutationRan, true)
+
+    // Await refreshPromise settling
+    try {
+      await refreshPromise
+    } catch {
+      // Refresh was aborted by mutation
+    }
+
+    // Verify:
+    // 1. Transport saw the abort signal for tracked PR detail query!
+    assert.ok(transport.aborted >= 1, 'tracked PR detail transport query was aborted')
+    // 2. coordinator.running was promptly cleared!
+    assert.equal(coordinatorInternals.running, null, 'coordinator.running is cleared')
+    // 3. Freshness was PRESERVED: failures not incremented, state not flipped to stale or cancelled!
+    assert.equal(coordinatorInternals.failures, 0, 'failures count must stay 0 on cancellation')
+    assert.equal(coordinator.freshness().state, initialFreshness.state, 'freshness state must be preserved')
+
+    // 4. Local change notified to coordinator runs immediately upon settle without being deferred
+    coordinator.notifyLocalChange()
+    await clock.advance(DEFAULT_INTERVALS.localSettleMs + 1)
+    for (let i = 0; i < 50 && emittedSnapshots.length === 0; i++) {
+      await new Promise((res) => setTimeout(res, 20))
+    }
+    assert.ok(emittedSnapshots.length >= 1, 'local refresh ran promptly after mutation')
+  } finally {
+    setGitHubTransport(null)
+    coordinator.detach()
+    await cleanup()
+    resetGitHubRateLimit()
+  }
+})

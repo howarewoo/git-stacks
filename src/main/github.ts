@@ -360,6 +360,7 @@ export async function getGitHubData(
     }
     const known = new Set(pullRequests.map((entry) => entry.number))
     for (const number of await trackedPullRequestNumbers(repoPath, signal)) {
+      if (signal?.aborted) throw new CommandCancelled()
       if (known.has(number)) continue
       const exact = await getPullRequest(repoPath, number, signal)
       pullRequests.push(exact)
@@ -385,7 +386,7 @@ export async function getGitHubData(
       nativeStackMessage: nativeStacksResult.message,
     }
   } catch (error) {
-    if (signal?.aborted || isCancelled(error)) throw error
+    if (signal?.aborted || isCancelled(error)) throw new CommandCancelled()
     return unavailable(githubErrorMessage(error), typedFailure(error))
   }
 }
@@ -398,7 +399,8 @@ export async function getPullRequest(
 ): Promise<PullRequest & { body: string }> {
   if (!Number.isInteger(number) || number <= 0)
     throw new Error('Pull request number must be a positive integer')
-  const remote = parseRemote(await getConfigValue(repoPath, 'remote.origin.url'))
+  const remote = parseRemote(await getConfigValue(repoPath, 'remote.origin.url', signal))
+  if (signal?.aborted) throw new CommandCancelled()
   if (!remote || remote.host !== 'github.com')
     throw new Error('Pull request integration requires a github.com origin remote.')
   const query = `query($owner: String!, $name: String!, $number: Int!) {
@@ -413,11 +415,16 @@ export async function getPullRequest(
     }
   }`
   try {
-    const value = await githubTransport().graphql(query, {
-      owner: remote.owner,
-      name: remote.name,
-      number,
-    })
+    const value = await githubTransport().graphql(
+      query,
+      {
+        owner: remote.owner,
+        name: remote.name,
+        number,
+      },
+      { signal },
+    )
+    if (signal?.aborted) throw new CommandCancelled()
     const repository = isRecord(value) ? value.repository : null
     const node = isRecord(repository) ? repository.pullRequest : null
     const parsed = parseGraphQlPullRequest(node)
@@ -436,19 +443,25 @@ export async function getPullRequest(
       throw new Error('GitHub returned incomplete pull request metadata')
     }
     try {
-      const stacks = await listPullRequestStacks(remote.owner, remote.name, { pullRequest: number })
+      const stacks = await listPullRequestStacks(remote.owner, remote.name, {
+        pullRequest: number,
+        signal,
+      })
       if (stacks.length > 0) {
         const membership = toPullRequestStackMembership(stacks[0], number)
         if (membership) {
           parsed.pullRequest.stack = membership
         }
       }
-    } catch {
+    } catch (stackError) {
+      if (signal?.aborted || isCancelled(stackError)) {
+        throw new CommandCancelled()
+      }
       // Preview unavailable or failed; keep stack null
     }
     return { ...parsed.pullRequest, body: node.body }
   } catch (error) {
-    if (isCancelled(error)) throw error
+    if (signal?.aborted || isCancelled(error)) throw new CommandCancelled()
     throw new Error(`Could not load pull request #${number}: ${githubErrorMessage(error)}`)
   }
 }

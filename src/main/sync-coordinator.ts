@@ -429,17 +429,33 @@ export class RepositorySyncCoordinator {
     }
 
     const live = options.manual === true
+    const previousState = this.state
+    const previousDetail = this.detail
     this.state = 'refreshing'
-    const snapshot = await this.deps.scheduler.read(repository, (signal) =>
-      this.deps.readSnapshot(repository, signal, {
-        requestId: options.requestId ?? 'sync-refresh',
-        github: { remote: live ? 'live' : 'on-failure' },
-      }),
-    )
+    let snapshot: RepositorySnapshot
+    try {
+      snapshot = await this.deps.scheduler.read(repository, (signal) =>
+        this.deps.readSnapshot(repository, signal, {
+          requestId: options.requestId ?? 'sync-refresh',
+          github: { remote: live ? 'live' : 'on-failure' },
+        }),
+      )
+    } catch (error) {
+      if (this.repository === repository && isCancelled(error)) {
+        this.state = previousState
+        this.detail = previousDetail
+      }
+      throw error
+    }
     if (this.repository !== repository) return null
     // A read that fell back to the last confirmed payload is still a failed
     // read: local Git is usable, but the backoff and the state must survive it.
     if (snapshot.githubFailure) {
+      if (snapshot.githubFailure.kind === 'cancelled') {
+        this.state = previousState
+        this.detail = previousDetail
+        return snapshot
+      }
       this.emit({ kind: 'snapshot', snapshot: { ...snapshot, remote: this.freshness() } })
       this.recordFailure(snapshot.githubFailure)
       return snapshot

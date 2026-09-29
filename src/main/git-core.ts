@@ -105,7 +105,12 @@ export class CommandCancelled extends Error {
 }
 
 export function isCancelled(error: unknown): boolean {
-  return error instanceof CommandCancelled
+  if (error instanceof CommandCancelled) return true
+  if (error && typeof error === 'object') {
+    if ('name' in error && error.name === 'AbortError') return true
+    if ('kind' in error && error.kind === 'cancelled') return true
+  }
+  return false
 }
 
 export interface CappedOptions {
