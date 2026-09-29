@@ -109,6 +109,7 @@ test('extractClosingReferences follows GitHub closing-keyword grammar', () => {
     'Fixes #10',
     'resolves GH-15',
     'Closes: https://github.com/acme/widgets/issues/20',
+    'Closes: acme/widgets#21',
     'Also closes other/repo#25',
     'See #99 for more context.',
   ].join('\n')
@@ -117,11 +118,11 @@ test('extractClosingReferences follows GitHub closing-keyword grammar', () => {
   // Each issue needs the full keyword syntax: `Closes #10, #12` closes only #10.
   assert.deepEqual(
     refs.map((r) => r.issueNumber),
-    [10, 15, 20],
+    [10, 21],
   )
   // A colon after the keyword is GitHub-recognised, and every clause is located precisely.
-  const colon = refs.find((r) => r.issueNumber === 20)
-  assert.equal(colon?.rawMatch, 'Closes: https://github.com/acme/widgets/issues/20')
+  const colon = refs.find((r) => r.issueNumber === 21)
+  assert.equal(colon?.rawMatch, 'Closes: acme/widgets#21')
   assert.equal(text.slice(colon?.startIndex, colon?.endIndex), colon?.rawMatch)
 })
 
@@ -151,10 +152,14 @@ test('a foreign URL closing reference never closes a local issue', () => {
     removeClosingReference(inserted, 12, 'acme/widgets'),
     'Closes https://github.com/other/project/issues/12\n',
   )
-  // The same URL in origin is recognised and removable.
+  // A URL, even in origin, is a mention rather than a closing keyword target.
   const local = 'Closes https://github.com/acme/widgets/issues/12\n'
-  assert.equal(isIssueClosedInBody(local, 12, 'acme/widgets'), true)
-  assert.equal(removeClosingReference(local, 12, 'acme/widgets'), '')
+  assert.equal(isIssueClosedInBody(local, 12, 'acme/widgets'), false)
+  assert.equal(removeClosingReference(local, 12, 'acme/widgets'), local)
+  assert.equal(isIssueClosedInBody('Fixes GH-12', 12, 'acme/widgets'), false)
+  assert.equal(removeClosingReference('Fixes GH-12', 12, 'acme/widgets'), 'Fixes GH-12')
+  assert.equal(insertClosingReference(local, 12, 'acme/widgets'), `${local}\nCloses #12\n`)
+  assert.equal(insertClosingReference('Fixes GH-12', 12, 'acme/widgets'), 'Fixes GH-12\n\nCloses #12\n')
 })
 
 test('removeClosingReference preserves unrelated body bytes exactly', () => {
@@ -244,7 +249,7 @@ test('removeClosingReference deletes only the parsed clause span', () => {
       12,
       'acme/widgets',
     ),
-    '## Notes\n',
+    '## Notes\n\nCloses https://github.com/acme/widgets/issues/12\n',
   )
 
   // Two separate clauses for the same issue are both removed; other issues stay.
@@ -453,6 +458,41 @@ test('separate contextual and closing issue links display with their titles and 
     assert.equal(contextualLink.relation, 'contextual')
     assert.equal(contextualLink.title, 'Related issue (contextual)')
     assert.equal(contextualLink.state, 'CLOSED')
+  })
+})
+
+test('non-default-base PRs do not promise closing on merge', async () => {
+  await withHarness(async (harness) => {
+    git(harness, ['checkout', '-b', 'stack-child'])
+    git(harness, ['commit', '--allow-empty', '-m', 'stack child'])
+    const headSha = pushBranchToFixture(harness, 'stack-child')
+    await mutateState(harness, (state) => {
+      state.prs.push(
+        makeFixturePr({
+          number: 1,
+          title: 'Stack child',
+          head: 'stack-child',
+          base: 'stack-parent',
+          headOid: headSha,
+          body: 'Closes #10\n',
+        }),
+      )
+    })
+    assert.deepEqual((await getPullRequestIssueLinks(harness.repo, 1)).links, [])
+    await assert.rejects(
+      previewIssueLink(harness.repo, 1, 11, 'closing', 'link'),
+      /only close issues.*default branch/i,
+    )
+    await assert.rejects(
+      runLinkIssueAction(harness.repo, {
+        prNumber: 1,
+        issueNumber: 11,
+        relation: 'closing',
+        expectedBody: 'Closes #10\n',
+      }),
+      /only close issues.*default branch/i,
+    )
+    assert.equal((await harness.readState()).prs[0].body, 'Closes #10\n')
   })
 })
 

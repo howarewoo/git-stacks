@@ -144,6 +144,9 @@ interface PrLinkedIssuesSectionProps {
   hasFormEdits: boolean
   runAction: (action: GitAction, label: string) => Promise<boolean>
   stackApi: WorkflowStackAPI
+  defaultBranch: string
+  onMutationBusy: (busy: boolean) => void
+  onBodyMutation: (preview: IssueLinkPreview) => void
 }
 
 function PrLinkedIssuesSection({
@@ -153,6 +156,9 @@ function PrLinkedIssuesSection({
   hasFormEdits,
   runAction,
   stackApi,
+  defaultBranch,
+  onMutationBusy,
+  onBodyMutation,
 }: PrLinkedIssuesSectionProps) {
   const [links, setLinks] = React.useState<LinkedIssue[]>([])
   const [loading, setLoading] = React.useState(false)
@@ -166,6 +172,7 @@ function PrLinkedIssuesSection({
   const [unlinkPreview, setUnlinkPreview] = React.useState<IssueLinkPreview | null>(null)
   const [actionBusy, setActionBusy] = React.useState(false)
   const [statusMessage, setStatusMessage] = React.useState<string | null>(null)
+  const closingAvailable = pr.base === defaultBranch
 
   const loadLinks = React.useCallback(async () => {
     setLoading(true)
@@ -277,6 +284,7 @@ function PrLinkedIssuesSection({
   const handleConfirmCloseWhenMerged = async (issue: RepositoryIssue) => {
     if (!linkPreview || linkPreview.prNumber !== pr.number || linkPreview.action !== 'link') return
     setActionBusy(true)
+    onMutationBusy(true)
     setStatusMessage(null)
     try {
       const ok = await runAction(
@@ -292,14 +300,21 @@ function PrLinkedIssuesSection({
       )
       if (ok) {
         setPendingClosingLink(null)
+        onBodyMutation(linkPreview)
         if (stackApi.pullRequest) {
-          const fresh = await stackApi.pullRequest(pr.number)
-          onPrUpdate(fresh)
+          try {
+            onPrUpdate(await stackApi.pullRequest(pr.number))
+          } catch {
+            setStatusMessage(
+              'Closing link saved, but the latest pull request could not be read. Reload before editing more links.',
+            )
+          }
         }
         await loadLinks()
       }
     } finally {
       setActionBusy(false)
+      onMutationBusy(false)
     }
   }
 
@@ -344,6 +359,7 @@ function PrLinkedIssuesSection({
       return
     }
     setActionBusy(true)
+    onMutationBusy(true)
     setStatusMessage(null)
     try {
       const ok = await runAction(
@@ -359,14 +375,21 @@ function PrLinkedIssuesSection({
       )
       if (ok) {
         setPendingUnlink(null)
+        onBodyMutation(unlinkPreview)
         if (stackApi.pullRequest) {
-          const fresh = await stackApi.pullRequest(pr.number)
-          onPrUpdate(fresh)
+          try {
+            onPrUpdate(await stackApi.pullRequest(pr.number))
+          } catch {
+            setStatusMessage(
+              'Closing link removed, but the latest pull request could not be read. Reload before editing more links.',
+            )
+          }
         }
         await loadLinks()
       }
     } finally {
       setActionBusy(false)
+      onMutationBusy(false)
     }
   }
 
@@ -389,6 +412,12 @@ function PrLinkedIssuesSection({
 
       {statusMessage ? (
         <p className="text-xs text-[var(--gs-semantic-text-secondary)] mb-2">{statusMessage}</p>
+      ) : null}
+      {!closingAvailable ? (
+        <p className="text-xs text-[var(--gs-semantic-text-secondary)] mb-2">
+          Closing keywords only close issues on pull requests targeting {defaultBranch}. This pull
+          request targets {pr.base}; use a related link instead.
+        </p>
       ) : null}
 
       {links.length > 0 ? (
@@ -597,15 +626,17 @@ function PrLinkedIssuesSection({
                         >
                           Link related
                         </Button>
-                        <Button
-                          size="sm"
-                          variant="accent"
-                          disabled={disabled || actionBusy}
-                          tooltip="Insert closing keyword into PR description to close this issue when PR is merged"
-                          onClick={() => void handleRequestClosingLink(issue)}
-                        >
-                          Close when merged
-                        </Button>
+                        {closingAvailable ? (
+                          <Button
+                            size="sm"
+                            variant="accent"
+                            disabled={disabled || actionBusy}
+                            tooltip="Insert closing keyword into PR description to close this issue when PR is merged"
+                            onClick={() => void handleRequestClosingLink(issue)}
+                          >
+                            Close when merged
+                          </Button>
+                        ) : null}
                       </>
                     )}
                   </div>
@@ -667,6 +698,7 @@ export function WorkflowDialog({
   const [prTitle, setPrTitle] = React.useState('')
   const [body, setBody] = React.useState('')
   const [prDraft, setPrDraft] = React.useState(true)
+  const [issueMutationBusy, setIssueMutationBusy] = React.useState(false)
   const [error, setError] = React.useState<string | null>(null)
   const [loading, setLoading] = React.useState(previewKinds.includes(request.kind))
   const [loaded, setLoaded] = React.useState(false)
@@ -689,7 +721,7 @@ export function WorkflowDialog({
     document.activeElement instanceof HTMLElement ? document.activeElement : null,
   )
   const dispatch = React.useRef(createDispatchLock()).current
-  const locked = busy || loading
+  const locked = busy || loading || issueMutationBusy
   const composition = workflowComposition(request)
   const shapeReason =
     actionBlockReason(snapshot.capabilities, requestActionType(request)) ??
@@ -1592,7 +1624,7 @@ export function WorkflowDialog({
                     <Textarea
                       rows={6}
                       value={body}
-                      disabled={pr.state === 'MERGED'}
+                      disabled={pr.state === 'MERGED' || issueMutationBusy}
                       onChange={(event) => {
                         markEdited()
                         setBody(event.target.value)
@@ -1612,17 +1644,17 @@ export function WorkflowDialog({
                   <PrLinkedIssuesSection
                     pr={pr}
                     onPrUpdate={(updated) => {
-                      // A post-mutation refresh must never discard text the user
-                      // typed while that read was in flight; their edit wins and
-                      // is applied by the normal save path.
-                      if (hasEditedRef.current) return
                       setPr(updated)
-                      setPrTitle(updated.title)
                       setBody(updated.body)
-                      setPrDraft(updated.draft)
-                      hasEditedRef.current = false
-                      setEdited(false)
                     }}
+                    onBodyMutation={(mutation) => {
+                      setPr((current) =>
+                        current ? { ...current, body: mutation.newBody } : current,
+                      )
+                      setBody(mutation.newBody)
+                    }}
+                    onMutationBusy={setIssueMutationBusy}
+                    defaultBranch={snapshot.defaultBranch}
                     disabled={busy || pr.state === 'MERGED'}
                     hasFormEdits={edited}
                     runAction={runAction}
@@ -1808,7 +1840,7 @@ export function WorkflowDialog({
                 <Button
                   type="submit"
                   variant={destructive ? 'danger' : 'accent'}
-                  disabled={Boolean(blocker || shapeReason)}
+                  disabled={Boolean(blocker || shapeReason || issueMutationBusy)}
                   loading={busy}
                   tooltip={shapeReason ?? (blocker ? blocker.message : description)}
                 >

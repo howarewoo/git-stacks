@@ -39,25 +39,15 @@ export interface ExtractedClosingReference {
  * See https://docs.github.com/en/issues/tracking-your-work-with-issues/using-issues/linking-a-pull-request-to-an-issue
  */
 const CLOSING_CLAUSE_REGEX =
-  /\b(clos(?:e|es|ed)|fix(?:es|ed)?|resolv(?:es|ed|e))\b:?[ \t]*(?:(?<owner>[A-Za-z0-9_.-]+)\/(?<repo>[A-Za-z0-9_.-]+))?(?:(?<prefix>#|GH-)(?<number>\d+)\b|(?<url>https?:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/issues\/\d+))/giu
+  /\b(clos(?:e|es|ed)|fix(?:es|ed)?|resolv(?:es|ed|e))\b:?[ \t]*(?:(?<owner>[A-Za-z0-9_.-]+)\/(?<repo>[A-Za-z0-9_.-]+))?#(?<number>\d+)\b/giu
 
 function closingReference(
   match: RegExpExecArray,
   originFullName?: string,
 ): ExtractedClosingReference | null {
   const groups = match.groups ?? {}
-  const url = groups.url ?? ''
-  const issueNumber = Number(groups.number ?? /\/issues\/(\d+)/u.exec(url)?.[1])
-  // A URL reference carries its own repository; enforce origin ownership for it
-  // exactly as for the `owner/repo#n` form.
-  const urlRepository =
-    /^(?:https?:\/\/github\.com\/)(?<urlOwner>[^/]+)\/(?<urlRepo>[^/]+)\/issues\/\d+$/iu.exec(url)
-  const repository =
-    groups.owner && groups.repo
-      ? `${groups.owner}/${groups.repo}`
-      : urlRepository?.groups
-        ? `${urlRepository.groups.urlOwner}/${urlRepository.groups.urlRepo}`
-        : null
+  const issueNumber = Number(groups.number)
+  const repository = groups.owner && groups.repo ? `${groups.owner}/${groups.repo}` : null
   const normalized = originFullName?.toLowerCase()
   if (repository && normalized && repository.toLowerCase() !== normalized) {
     // A foreign repository's reference never closes an issue in this repository.
@@ -452,7 +442,16 @@ export async function getPullRequestIssueLinks(
   }
 
   const closingNumbers: number[] = []
-  if (livePr) {
+  if (livePr && remote?.host === 'github.com') {
+    try {
+      if (livePr.base !== (await repositoryDefaultBranch(remote.fullName, signal))) livePr = null
+    } catch (error) {
+      if (isCancelled(error)) throw error
+      message = githubErrorMessage(error)
+      livePr = null
+    }
+  }
+  if (livePr && remote?.host === 'github.com') {
     const refs = extractClosingReferences(livePr.body, remote?.fullName)
     for (const ref of refs) {
       if (!closingNumbers.includes(ref.issueNumber)) {
@@ -534,6 +533,17 @@ export async function getPullRequestIssueLinks(
   return { prNumber, links, message }
 }
 
+async function repositoryDefaultBranch(fullName: string, signal?: AbortSignal): Promise<string> {
+  const { data } = await githubTransport().rest<{ default_branch?: unknown }>({
+    path: `repos/${fullName}`,
+    signal,
+  })
+  if (typeof data.default_branch !== 'string' || !data.default_branch) {
+    throw new Error('Could not determine the GitHub repository default branch.')
+  }
+  return data.default_branch
+}
+
 /**
  * Preview the changes that will be applied to the pull request description or local metadata.
  */
@@ -550,6 +560,17 @@ export async function previewIssueLink(
 
   if (relation === 'closing') {
     const livePr = await getPullRequest(repoPath, prNumber, signal)
+    if (action === 'link') {
+      if (
+        !remote ||
+        remote.host !== 'github.com' ||
+        livePr.base !== (await repositoryDefaultBranch(remote.fullName, signal))
+      ) {
+        throw new Error(
+          'Closing keywords only close issues when the pull request targets the repository default branch.',
+        )
+      }
+    }
     const newBody =
       action === 'link'
         ? insertClosingReference(livePr.body, issueNumber, remote?.fullName)
@@ -614,6 +635,11 @@ export async function runLinkIssueAction(
 
   // Revalidate body immediately before writing!
   const livePr = await getPullRequest(repoPath, action.prNumber)
+  if (livePr.base !== (await repositoryDefaultBranch(remote.fullName))) {
+    throw new Error(
+      'Closing keywords only close issues when the pull request targets the repository default branch.',
+    )
+  }
   if (action.expectedBody !== undefined && livePr.body !== action.expectedBody) {
     throw new Error(
       `External body modification detected: the pull request description on GitHub was modified after this action was previewed. Reload the pull request before modifying issue links.`,
