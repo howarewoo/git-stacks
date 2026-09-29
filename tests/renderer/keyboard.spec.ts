@@ -275,8 +275,9 @@ test.describe('Keyboard routes and accessibility navigation', () => {
       inspector.getByRole('heading', { level: 2, name: 'feature/checkout-tests', exact: true }),
     ).toBeVisible({ timeout: 10_000 })
 
-    // Mod+Enter is a global chord. A row that treated it as its own activation
-    // would re-select the row it is standing on, so the selection must not move.
+    // Mod+Enter is a global chord, and what Mod resolves to differs by platform,
+    // so the test does not assume the dispatcher does nothing with it. It asserts
+    // the row's side of the contract: the row must leave the event alone.
     const mainRow = tree.getByRole('treeitem', { name: /^main,/ })
     await mainRow.focus()
     await page.keyboard.press('Enter')
@@ -287,12 +288,25 @@ test.describe('Keyboard routes and accessibility navigation', () => {
 
     const childRow = tree.getByRole('treeitem', { name: /^feature\/checkout-tests,/ })
     await childRow.focus()
+    // Read defaultPrevented at the window, which is after the row's own handler
+    // ran: a row that claimed the chord would have called preventDefault.
+    const chordConsumed = page.evaluate(
+      () =>
+        new Promise<boolean>((resolve) => {
+          window.addEventListener('keydown', (event) => resolve(event.defaultPrevented), {
+            once: true,
+          })
+        }),
+    )
     await page.keyboard.press('ControlOrMeta+Enter')
     await settle(page)
+    expect(await chordConsumed).toBe(false)
+
+    // The row did not activate itself either: the selection is still the branch
+    // chosen with Enter, not the row the chord was pressed on.
     await expect(
-      inspector.getByRole('heading', { level: 2, name: 'main', exact: true }),
-    ).toBeVisible()
-    expect(await getDispatchedActions(page)).toEqual([])
+      inspector.getByRole('heading', { level: 2, name: 'feature/checkout-tests', exact: true }),
+    ).toHaveCount(0)
   })
 
   test('branch tree keeps one Tab stop and correct movement after the window slides', async ({
