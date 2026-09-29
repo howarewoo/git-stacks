@@ -1,6 +1,5 @@
 import * as React from 'react'
 import {
-  Check,
   ChevronRight,
   GitBranch,
   GitCommitHorizontal,
@@ -13,16 +12,22 @@ import {
   X,
 } from 'lucide-react'
 import type { Branch, Commit, FileView, RepositorySnapshot } from '../../../shared/types'
+import { DIFF_PAGE_SIZE, LIST_PAGE_SIZE } from '../../../shared/performance'
+import { useListWindow } from '../lib/list-window'
+import { createRequestGate } from '../lib/request-gate'
+import { ListWindowMore } from './list-window'
+import { actionBlockReason, submodulePathReason } from '../../../shared/capabilities'
 import { Badge } from './ui/badge'
 import { Button } from './ui/button'
 import { SegmentedControl } from './ui/segmented-control'
+import { InlineAlert } from './ui/surface'
 import { Select } from './ui/select'
-import { Textarea } from './ui/textarea'
 import { sortBranchesByUpdatedAt } from '../lib/branches'
 import { workflowError, type RunAction, type WorkflowRequest } from './workflow-dialog'
 import { PhaseStatus, WorkflowActions } from './workflow-composition'
 import { partialProgress, workflowPhase } from './workflow-policy'
 import { BranchHoverCard, PullRequestHoverCard } from './repository-hover-cards'
+import { HunkDiffView } from './hunk-diff'
 import { ReconciliationPanel } from './reconciliation-view'
 
 type CommonProps = {
@@ -44,10 +49,12 @@ export function OperationBanner({
   runAction,
   onRequest,
   onShowChanges,
-}: CommonProps & { onShowChanges: () => void }) {
+  onResolveConflict,
+}: CommonProps & { onShowChanges: () => void; onResolveConflict: (path: string) => void }) {
   const operation = snapshot.operation
   const stack = snapshot.stackOperation
   const conflicts = snapshot.files.filter((file) => file.conflicted).length
+  const firstConflict = snapshot.files.find((file) => file.conflicted)?.path ?? null
   if (!operation && !stack && !conflicts) return null
   const label = stack
     ? 'Stack restack'
@@ -91,6 +98,16 @@ export function OperationBanner({
         <Button size="sm" variant="secondary" onClick={onShowChanges}>
           View changes
         </Button>
+        {conflicts > 0 && firstConflict ? (
+          <Button
+            size="sm"
+            variant="secondary"
+            tooltip="Open the three-way resolver for the first conflicted file. It explains the operation, shows index stages 1, 2, and 3, and stages a result only after the file is revalidated."
+            onClick={() => onResolveConflict(firstConflict)}
+          >
+            Resolve conflicts
+          </Button>
+        ) : null}
         {resumable ? (
           <>
             <Button
@@ -185,9 +202,8 @@ export function DiffView({ text, truncated = false }: { text: string; truncated?
     if (previewText.endsWith('\n')) lines.pop()
     return { lines, clipped: text.length > 512 * 1024 }
   }, [text])
-  const [visibleLines, setVisibleLines] = React.useState(1000)
-  React.useEffect(() => setVisibleLines(1000), [text])
-  const shown = preview.lines.slice(0, visibleLines)
+  const window_ = useListWindow(preview.lines, DIFF_PAGE_SIZE)
+  const shown = window_.visible
   const counts = shown.reduce(
     (total, line) => {
       const kind = diffLineKind(line)
@@ -231,16 +247,28 @@ export function DiffView({ text, truncated = false }: { text: string; truncated?
             })
           : 'No textual diff in this view.'}
       </pre>
-      {preview.lines.length > visibleLines ? (
-        <Button
-          className="code-region-more"
-          variant="secondary"
-          size="sm"
-          onClick={() => setVisibleLines((value) => value + 1000)}
-        >
-          Show more diff lines ({preview.lines.length - visibleLines} remaining)
-        </Button>
-      ) : null}
+      <div className="list-window-controls">
+        {window_.hasPrevious ? (
+          <Button
+            className="code-region-more"
+            variant="secondary"
+            size="sm"
+            onClick={window_.retreat}
+          >
+            Show previous diff lines
+          </Button>
+        ) : null}
+        {window_.hasMore ? (
+          <Button
+            className="code-region-more"
+            variant="secondary"
+            size="sm"
+            onClick={window_.reveal}
+          >
+            Show more diff lines ({window_.remaining} remaining)
+          </Button>
+        ) : null}
+      </div>
     </div>
   )
 }
@@ -251,18 +279,19 @@ export function FileInspector({
   busy,
   runAction,
   onClose,
+  onResolveConflict,
   actionError,
 }: Omit<CommonProps, 'onRequest'> & {
   path: string
   onClose: () => void
+  onResolveConflict: (path: string) => void
   actionError: string | null
 }) {
   const [file, setFile] = React.useState<FileView | null>(null)
   const [loading, setLoading] = React.useState(true)
   const [error, setError] = React.useState<string | null>(null)
   const [tab, setTab] = React.useState<'working' | 'staged' | 'resolve'>('working')
-  const [content, setContent] = React.useState('')
-  const [pending, setPending] = React.useState<'discard' | 'ours' | 'theirs' | null>(null)
+  const [pending, setPending] = React.useState<'discard' | null>(null)
   const [revision, setRevision] = React.useState(0)
   React.useEffect(() => {
     let active = true
@@ -274,7 +303,6 @@ export function FileInspector({
       .then((next) => {
         if (!active) return
         setFile(next)
-        setContent(next.content ?? '')
         setTab(
           next.conflicted
             ? 'resolve'
@@ -291,24 +319,12 @@ export function FileInspector({
       })
     return () => {
       active = false
+      void window.desktop.cancel(`file:${path}`)
     }
   }, [path, snapshot, revision])
-  const resolve = async (strategy: 'ours' | 'theirs' | 'manual') => {
-    if (!file || busy || loading) return
-    const success = await runAction(
-      {
-        type: 'resolveFile',
-        path,
-        fingerprint: file.fingerprint,
-        strategy,
-        content: strategy === 'manual' ? content : '',
-      },
-      'Resolve and stage file',
-    )
-    if (success) setPending(null)
-  }
+
   const discard = async () => {
-    if (!file || busy || loading) return
+    if (!file || file.submodule || busy || loading) return
     if (
       await runAction(
         { type: 'discardFile', path, fingerprint: file.fingerprint },
@@ -319,7 +335,7 @@ export function FileInspector({
   }
   const state = snapshot.files.find((item) => item.path === path)
   const canDiscard = state && !state.conflicted && (state.worktree !== ' ' || state.index === '?')
-  const rebase = snapshot.operation === 'rebase'
+  const submoduleReason = file?.submodule ? submodulePathReason(path) : null
   const tabOptions = (
     [
       { value: 'working', label: 'Working tree' },
@@ -371,6 +387,12 @@ export function FileInspector({
         </p>
       ) : file ? (
         <>
+          {file.lfs ? (
+            <InlineAlert className="mx-4 mt-3" title="Git LFS pointer, not object content">
+              Object sha256:{file.lfs.oid} · {file.lfs.size.toLocaleString()} bytes. Git Stacks does
+              not check whether the object is available locally; use Git LFS to retrieve it.
+            </InlineAlert>
+          ) : null}
           <div className="inspector-tabs">
             <SegmentedControl
               className="inspector-tab-control"
@@ -383,68 +405,18 @@ export function FileInspector({
           {tab === 'resolve' ? (
             <div className="conflict-editor dialog-form">
               <p className="workflow-note">
-                {rebase
-                  ? 'During rebase, “ours” is the new base; “theirs” is the commit being replayed.'
-                  : '“Ours” is the current branch; “theirs” is the incoming version. A deleted side resolves by deleting the file.'}
+                The resolver reads index stages 1, 2, and 3 for this path, names both sides the way
+                the active Git operation means them, and stages a result only after the file it
+                showed is still the file on disk.
               </p>
-              <div className="workflow-row">
-                <Button
-                  size="sm"
-                  variant="secondary"
-                  disabled={busy}
-                  tooltip={
-                    rebase
-                      ? 'Keep the new-base (ours) version for this file. Confirming stages it and replaces manual edits.'
-                      : 'Keep the current-branch (ours) version for this file. Confirming stages it and replaces manual edits.'
-                  }
-                  onClick={() => setPending('ours')}
-                >
-                  {rebase ? 'Use new base (ours)…' : 'Use ours…'}
-                </Button>
-                <Button
-                  size="sm"
-                  variant="secondary"
-                  disabled={busy}
-                  tooltip={
-                    rebase
-                      ? 'Keep the replayed-commit (theirs) version for this file. Confirming stages it and replaces manual edits.'
-                      : 'Keep the incoming (theirs) version for this file. Confirming stages it and replaces manual edits.'
-                  }
-                  onClick={() => setPending('theirs')}
-                >
-                  {rebase ? 'Use replayed commit (theirs)…' : 'Use theirs…'}
-                </Button>
-              </div>
-              {file.content !== null && !file.binary && !file.truncated ? (
-                <>
-                  <label htmlFor="conflict-content">Edit the resolved file</label>
-                  <Textarea
-                    id="conflict-content"
-                    rows={12}
-                    spellCheck={false}
-                    value={content}
-                    disabled={busy}
-                    onChange={(event) => setContent(event.target.value)}
-                  />
-                  <p className="workflow-note">
-                    Remove conflict markers, keep the intended content, then save and stage.
-                  </p>
-                  <Button
-                    variant="accent"
-                    disabled={busy}
-                    onClick={() => resolve('manual')}
-                    tooltip="Save the edited content and stage it to mark this file resolved. Local working-tree change only; continue the operation afterwards."
-                  >
-                    <Check className="size-3.5" />
-                    Save and stage resolution
-                  </Button>
-                </>
-              ) : (
-                <p className="workflow-note">
-                  This file cannot be safely edited as text here. Choose a side, or resolve it in
-                  your editor and stage it.
-                </p>
-              )}
+              <Button
+                variant="accent"
+                disabled={busy}
+                tooltip="Open the three-way resolver for this file. Nothing is staged until you mark the conflict resolved there."
+                onClick={() => onResolveConflict(path)}
+              >
+                Open conflict resolver
+              </Button>
             </div>
           ) : tab === 'working' && state?.index === '?' ? (
             <div className="code-region">
@@ -471,34 +443,57 @@ export function FileInspector({
               </pre>
             </div>
           ) : (
-            <DiffView
-              text={tab === 'staged' ? file.stagedDiff : file.unstagedDiff}
-              truncated={file.truncated}
-            />
+            <>
+              <HunkDiffView
+                key={`${file.path}:${tab}`}
+                side={tab === 'staged' ? file.hunks.staged : file.hunks.unstaged}
+                sideName={tab === 'staged' ? 'staged' : 'unstaged'}
+                busy={busy || loading}
+                onApply={(selection) =>
+                  runAction(
+                    {
+                      type: tab === 'staged' ? 'unstageHunk' : 'stageHunk',
+                      path: file.path,
+                      fingerprint: file.fingerprint,
+                      ...selection,
+                    },
+                    tab === 'staged' ? 'Unstage hunk' : 'Stage hunk',
+                  )
+                }
+              />
+              {(tab === 'staged' ? file.hunks.staged : file.hunks.unstaged).unavailable &&
+              (tab === 'staged' ? file.stagedDiff : file.unstagedDiff) ? (
+                <DiffView
+                  text={tab === 'staged' ? file.stagedDiff : file.unstagedDiff}
+                  truncated={file.truncated}
+                />
+              ) : null}
+            </>
           )}
           {canDiscard && tab === 'working' ? (
             <div className="inspector-actions">
               <Button
                 size="sm"
                 variant="danger"
-                disabled={busy}
-                tooltip="Discard unstaged working-tree changes only; staged content is kept. Untracked files are deleted and cannot be recovered through Git."
+                disabled={busy || Boolean(submoduleReason)}
+                tooltip={
+                  submoduleReason ??
+                  'Discard unstaged working-tree changes only; staged content is kept. Untracked files are deleted and cannot be recovered through Git.'
+                }
                 onClick={() => setPending('discard')}
               >
                 Discard unstaged changes…
               </Button>
-              <span className="workflow-note">Staged content is preserved.</span>
+              <span className="workflow-note">
+                {submoduleReason ?? 'Staged content is preserved.'}
+              </span>
             </div>
           ) : null}
           {pending ? (
             <div className="inline-confirm" data-composition="destructive">
               <PhaseStatus
                 phase="blocked"
-                message={
-                  pending === 'discard'
-                    ? 'Discard the displayed unstaged changes? An untracked file will be deleted. This cannot be undone through Git.'
-                    : `Replace this conflicted file with the ${pending} version and stage it? Manual edits to the file will be replaced.`
-                }
+                message="Discard the displayed unstaged changes? An untracked file will be deleted. This cannot be undone through Git."
               />
               <WorkflowActions>
                 <Button
@@ -513,14 +508,10 @@ export function FileInspector({
                   variant="danger"
                   size="sm"
                   disabled={busy}
-                  tooltip={
-                    pending === 'discard'
-                      ? 'Confirm discarding the displayed unstaged changes. Untracked files are deleted and cannot be recovered through Git.'
-                      : `Confirm replacing this file with the ${pending} version and staging it. Manual edits are replaced.`
-                  }
-                  onClick={() => (pending === 'discard' ? discard() : resolve(pending))}
+                  tooltip="Confirm discarding the displayed unstaged changes. Untracked files are deleted and cannot be recovered through Git."
+                  onClick={discard}
                 >
-                  Confirm {pending === 'discard' ? 'discard' : 'resolution'}
+                  Confirm discard
                 </Button>
               </WorkflowActions>
             </div>
@@ -547,6 +538,7 @@ export function HistoryView({
   )
   const [commits, setCommits] = React.useState<Commit[]>([])
   const [hasMore, setHasMore] = React.useState(false)
+  const [offset, setOffset] = React.useState(0)
   const [loading, setLoading] = React.useState(true)
   const [error, setError] = React.useState<string | null>(null)
   const [selected, setSelected] = React.useState<Commit | null>(null)
@@ -554,71 +546,76 @@ export function HistoryView({
   const [diffLoading, setDiffLoading] = React.useState(false)
   const [diffError, setDiffError] = React.useState<string | null>(null)
   const [revision, setRevision] = React.useState(0)
-  const generation = React.useRef(0)
+  // Two independent streams: the page of commits, and the diff of the selected
+  // commit. Each gate retires its own superseded work, and each request is
+  // cancelled in the main process rather than left to finish into a dead view.
+  const historyGate = React.useRef(createRequestGate()).current
+  const diffGate = React.useRef(createRequestGate()).current
   React.useEffect(() => {
-    const current = ++generation.current
+    const claim = historyGate.claim()
+    const requestId = `history:${ref}`
     setLoading(true)
     setError(null)
     setSelected(null)
+    setCommits([])
     window.desktop
-      .history(ref, 0)
+      .history(ref, offset, requestId)
       .then((page) => {
-        if (generation.current !== current) return
+        if (!historyGate.current(claim)) return
         setCommits(page.commits)
         setHasMore(page.hasMore)
         setSelected(page.commits[0] ?? null)
       })
       .catch((value) => {
-        if (generation.current === current) setError(workflowError(value))
+        if (historyGate.current(claim)) setError(workflowError(value))
       })
       .finally(() => {
-        if (generation.current === current) setLoading(false)
+        if (historyGate.current(claim)) setLoading(false)
       })
     return () => {
-      generation.current++
+      historyGate.reset()
+      void window.desktop.cancel(requestId)
     }
-  }, [snapshot.path, snapshot.headOid, ref, revision])
+  }, [historyGate, snapshot.path, snapshot.headOid, ref, offset, revision])
+  const selectedOid = selected?.oid
   React.useEffect(() => {
-    let active = true
+    const claim = diffGate.claim()
     setDiff(null)
     setDiffError(null)
-    if (!selected) return
+    if (!selectedOid) {
+      setDiffLoading(false)
+      return
+    }
+    const requestId = `commit-diff:${selectedOid}`
     setDiffLoading(true)
     window.desktop
-      .commitDiff(selected.oid)
+      .commitDiff(selectedOid, requestId)
       .then((value) => {
-        if (active) setDiff(value)
+        if (diffGate.current(claim)) setDiff(value)
       })
       .catch((value) => {
-        if (active) setDiffError(workflowError(value))
+        if (diffGate.current(claim)) setDiffError(workflowError(value))
       })
       .finally(() => {
-        if (active) setDiffLoading(false)
+        if (diffGate.current(claim)) setDiffLoading(false)
       })
     return () => {
-      active = false
+      diffGate.reset()
+      void window.desktop.cancel(requestId)
     }
-  }, [snapshot.path, selected?.oid])
-  const loadMore = async () => {
-    if (loading || diffLoading || busy) return
-    const current = generation.current
-    setLoading(true)
-    setError(null)
-    try {
-      const page = await window.desktop.history(ref, commits.length)
-      if (generation.current !== current) return
-      setCommits((previous) => [...previous, ...page.commits])
-      setHasMore(page.hasMore)
-    } catch (value) {
-      if (generation.current === current) setError(workflowError(value))
-    } finally {
-      if (generation.current === current) setLoading(false)
-    }
+  }, [diffGate, snapshot.path, selectedOid])
+  const loadMore = () => {
+    if (loading || diffLoading || busy || commits.length === 0) return
+    setOffset((value) => value + commits.length)
   }
-  const visible = commits.filter((commit) =>
-    `${commit.subject} ${commit.author} ${commit.oid}`
-      .toLowerCase()
-      .includes(search.trim().toLowerCase()),
+  const visible = React.useMemo(
+    () =>
+      commits.filter((commit) =>
+        `${commit.subject} ${commit.author} ${commit.oid}`
+          .toLowerCase()
+          .includes(search.trim().toLowerCase()),
+      ),
+    [commits, search],
   )
   const actionable =
     !busy &&
@@ -634,7 +631,8 @@ export function HistoryView({
         <div className="list-title-group">
           <h1>History</h1>
           <span className="list-subtitle">
-            {refName} · {commits.length} loaded{hasMore ? ' (more available)' : ''}
+            {refName} · commits {offset + 1}–{offset + commits.length}
+            {hasMore ? ' (more available)' : ''}
           </span>
         </div>
         <div className="workflow-row">
@@ -647,7 +645,10 @@ export function HistoryView({
             controlSize="compact"
             disabled={busy || loading || diffLoading}
             value={ref}
-            onChange={(event) => setRef(event.target.value)}
+            onChange={(event) => {
+              setOffset(0)
+              setRef(event.target.value)
+            }}
           >
             {!snapshot.branches.some((branch) => branch.ref === ref) ? (
               <option value={ref}>{ref}</option>
@@ -674,7 +675,7 @@ export function HistoryView({
           {error}
         </p>
       ) : null}
-      <div className="history-list" aria-label="Commit history">
+      <div className="history-list" role="group" aria-label="Commit history">
         {visible.map((commit) => (
           <button
             className={`history-row ${selected?.oid === commit.oid ? 'history-row-selected' : ''}`}
@@ -705,6 +706,17 @@ export function HistoryView({
               : 'No commits in this history yet.'}
           </p>
         ) : null}
+        {offset > 0 ? (
+          <Button
+            className="history-more"
+            size="sm"
+            variant="ghost"
+            disabled={loading || busy || diffLoading}
+            onClick={() => setOffset((value) => Math.max(0, value - 50))}
+          >
+            Load newer commits
+          </Button>
+        ) : null}
         {hasMore ? (
           <Button
             className="history-more"
@@ -731,8 +743,15 @@ export function HistoryView({
               <Button
                 size="sm"
                 variant="secondary"
-                disabled={!actionable || diffLoading}
-                tooltip={`Copy this commit onto ${snapshot.currentBranch ?? 'the current branch'} locally as a new commit. Remote branches stay unchanged until pushed.`}
+                disabled={
+                  !actionable ||
+                  diffLoading ||
+                  Boolean(actionBlockReason(snapshot.capabilities, 'cherryPick'))
+                }
+                tooltip={
+                  actionBlockReason(snapshot.capabilities, 'cherryPick') ??
+                  `Copy this commit onto ${snapshot.currentBranch ?? 'the current branch'} locally as a new commit. Remote branches stay unchanged until pushed.`
+                }
                 onClick={() =>
                   onRequest({ kind: 'commitAction', commit: selected, mode: 'cherryPick' })
                 }
@@ -742,8 +761,15 @@ export function HistoryView({
               <Button
                 size="sm"
                 variant="secondary"
-                disabled={!actionable || diffLoading}
-                tooltip={`Create a new local commit on ${snapshot.currentBranch ?? 'the current branch'} that undoes this commit. Original history is kept; remote stays unchanged until pushed.`}
+                disabled={
+                  !actionable ||
+                  diffLoading ||
+                  Boolean(actionBlockReason(snapshot.capabilities, 'revert'))
+                }
+                tooltip={
+                  actionBlockReason(snapshot.capabilities, 'revert') ??
+                  `Create a new local commit on ${snapshot.currentBranch ?? 'the current branch'} that undoes this commit. Original history is kept; remote stays unchanged until pushed.`
+                }
                 onClick={() =>
                   onRequest({ kind: 'commitAction', commit: selected, mode: 'revert' })
                 }
@@ -810,17 +836,20 @@ export function StackView({
   onCreate: () => void
 }) {
   const [selection, setSelection] = React.useState<string | null>(null)
-  const local = snapshot.branches.filter(
-    (branch) => !branch.remote && branch.name !== snapshot.defaultBranch,
-  )
-  const byName = new Map(local.map((branch) => [branch.name, branch]))
-  const groups = new Map<string, Branch[]>()
-  for (const branch of local) {
-    const root = stackRoot(branch, byName, snapshot.defaultBranch)
-    const members = groups.get(root) ?? []
-    members.push(branch)
-    groups.set(root, members)
-  }
+  const { byName, groups } = React.useMemo(() => {
+    const local = snapshot.branches.filter(
+      (branch) => !branch.remote && branch.name !== snapshot.defaultBranch,
+    )
+    const byName = new Map(local.map((branch) => [branch.name, branch]))
+    const groups = new Map<string, Branch[]>()
+    for (const branch of local) {
+      const root = stackRoot(branch, byName, snapshot.defaultBranch)
+      const members = groups.get(root) ?? []
+      members.push(branch)
+      groups.set(root, members)
+    }
+    return { byName, groups }
+  }, [snapshot.branches, snapshot.defaultBranch])
   const current = snapshot.currentBranch ? byName.get(snapshot.currentBranch) : null
   const root =
     selection && groups.has(selection)
@@ -829,9 +858,24 @@ export function StackView({
         ? stackRoot(current, byName, snapshot.defaultBranch)
         : (groups.keys().next().value ?? null)
   const members = root ? (groups.get(root) ?? []) : []
-  const ordered = sortBranchesByUpdatedAt(members)
+  const ordered = React.useMemo(() => sortBranchesByUpdatedAt(members), [members])
+  const memberWindow = useListWindow(
+    React.useMemo(
+      () =>
+        ordered.filter((branch) =>
+          `${branch.name} ${branch.pr?.title ?? ''}`
+            .toLowerCase()
+            .includes(search.trim().toLowerCase()),
+        ),
+      [ordered, search],
+    ),
+    LIST_PAGE_SIZE,
+  )
   const stale = members.filter(
     (branch) => branch.needsRestack || (branch.parentBehind ?? 0) > 0,
+  ).length
+  const unknown = members.filter(
+    (branch) => branch.parent && branch.parentBehind === null && !branch.needsRestack,
   ).length
   const blocked = busy || !!snapshot.operation || !!snapshot.stackOperation
   return (
@@ -846,7 +890,16 @@ export function StackView({
               : ''}
           </span>
         </div>
-        <Button size="sm" variant="accent" disabled={blocked} onClick={onCreate}>
+        <Button
+          size="sm"
+          variant="accent"
+          disabled={blocked || Boolean(actionBlockReason(snapshot.capabilities, 'createBranch'))}
+          tooltip={
+            actionBlockReason(snapshot.capabilities, 'createBranch') ??
+            'Create a local branch and switch to it.'
+          }
+          onClick={onCreate}
+        >
           New branch
         </Button>
       </div>
@@ -865,7 +918,15 @@ export function StackView({
             Create a branch from your default branch, then add dependent branches. Existing branches
             can be adopted by setting their stack parent.
           </p>
-          <Button variant="accent" disabled={blocked} onClick={onCreate}>
+          <Button
+            variant="accent"
+            disabled={blocked || Boolean(actionBlockReason(snapshot.capabilities, 'createBranch'))}
+            tooltip={
+              actionBlockReason(snapshot.capabilities, 'createBranch') ??
+              'Create a local branch and switch to it.'
+            }
+            onClick={onCreate}
+          >
             Create a stack branch
           </Button>
         </div>
@@ -890,31 +951,50 @@ export function StackView({
               ))}
             </Select>
             <p>
-              {stale
-                ? `${stale} branch${stale === 1 ? ' requires' : 'es require'} restacking.`
+              {stale || unknown
+                ? [
+                    stale
+                      ? `${stale} branch${stale === 1 ? ' requires' : 'es require'} restacking.`
+                      : '',
+                    unknown
+                      ? `${unknown} parent comparison${unknown === 1 ? ' is' : 's are'} unavailable. Check ancestry before publishing.`
+                      : '',
+                  ]
+                    .filter(Boolean)
+                    .join(' ')
                 : 'Review the stack, publish its PRs, and merge from the base upward.'}
             </p>
             <div className="workflow-row">
               <Button
                 size="sm"
                 variant={stale ? 'accent' : 'secondary'}
-                disabled={blocked}
+                disabled={
+                  blocked || Boolean(actionBlockReason(snapshot.capabilities, 'executeStack'))
+                }
                 onClick={() => onRequest({ kind: 'stack', branch: root, operation: 'restack' })}
-                tooltip="Preview parent-first rebases of this stack. Publishing is a separate step."
+                tooltip={
+                  actionBlockReason(snapshot.capabilities, 'executeStack') ??
+                  'Preview parent-first rebases of this stack. Publishing is a separate step.'
+                }
               >
                 <RefreshCw className="size-3.5" />
                 Restack…
               </Button>
               <Button
                 size="sm"
-                variant={stale ? 'secondary' : 'accent'}
-                disabled={blocked || !snapshot.github.available}
+                variant={stale || unknown ? 'secondary' : 'accent'}
+                disabled={
+                  blocked ||
+                  !snapshot.github.available ||
+                  Boolean(actionBlockReason(snapshot.capabilities, 'executeStack'))
+                }
                 onClick={() => onRequest({ kind: 'stack', branch: root, operation: 'publish' })}
                 tooltip={
-                  snapshot.github.available
+                  actionBlockReason(snapshot.capabilities, 'executeStack') ??
+                  (snapshot.github.available
                     ? 'Push reviewed branches and update their pull requests without restacking.'
                     : snapshot.github.message ||
-                      'Connect an authenticated GitHub repository to publish.'
+                      'Connect an authenticated GitHub repository to publish.')
                 }
               >
                 <Upload className="size-3.5" />
@@ -933,120 +1013,136 @@ export function StackView({
               Local parent management and restacking remain available.
             </p>
           ) : null}
-          <div className="stack-members" aria-label="Stack branches, children above parents">
-            {ordered
-              .filter((branch) =>
-                `${branch.name} ${branch.pr?.title ?? ''}`
-                  .toLowerCase()
-                  .includes(search.trim().toLowerCase()),
-              )
-              .map((branch) => (
-                <article className="stack-member" key={branch.ref}>
-                  <div className="stack-member-heading">
-                    <BranchHoverCard branch={branch}>
-                      <button onClick={() => onSelect(branch)} className="stack-member-name">
-                        <GitBranch className="size-4" />
-                        <strong>{branch.name}</strong>
-                        <ChevronRight className="size-3.5" />
-                      </button>
-                    </BranchHoverCard>
-                    {branch.current ? <Badge variant="accent">current</Badge> : null}
-                    {branch.needsRestack || (branch.parentBehind ?? 0) > 0 ? (
-                      <Badge variant="warning">Requires restack</Badge>
-                    ) : null}
-                  </div>
-                  <div className="stack-member-meta">
-                    <span>
-                      Parent: <strong>{branch.parent ?? 'Not set'}</strong>
-                    </span>
-                    <span>
-                      {branch.parentSource === 'recorded'
-                        ? 'Recorded parent'
-                        : branch.parentSource === 'stack'
-                          ? 'GitHub native stack'
-                          : branch.parentSource === 'pullRequest'
-                            ? 'From PR base'
-                            : 'Inferred — confirm before publishing'}
-                    </span>
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      disabled={blocked}
-                      tooltip="Record the intended parent locally without rewriting commits. Preview Restack next to move this branch and its descendants."
-                      onClick={() => onRequest({ kind: 'parent', branch })}
-                    >
-                      Set parent…
-                    </Button>
-                  </div>
-                  {branch.pr ? (
-                    <div className="stack-pr-row">
-                      <PullRequestHoverCard pr={branch.pr}>
-                        <Button
-                          size="sm"
-                          variant="link"
-                          disabled={busy}
-                          onClick={() => onRequest({ kind: 'pr', number: branch.pr!.number })}
-                        >
-                          #{branch.pr.number} {branch.pr.title}
-                        </Button>
-                      </PullRequestHoverCard>
-                      <div className="workflow-row">
-                        {branch.pr.stack ? (
-                          <Badge variant="accent">
-                            Stack #{branch.pr.stack.stackNumber} ({branch.pr.stack.position}/
-                            {branch.pr.stack.size})
-                          </Badge>
-                        ) : null}
-                        <Badge variant={branch.pr.state === 'MERGED' ? 'accent' : 'secondary'}>
-                          {branch.pr.draft ? 'draft' : branch.pr.state.toLowerCase()}
+          <div
+            className="stack-members"
+            role="group"
+            aria-label="Stack branches, children above parents"
+          >
+            {memberWindow.visible.map((branch) => (
+              <article className="stack-member" key={branch.ref}>
+                <div className="stack-member-heading">
+                  <BranchHoverCard branch={branch}>
+                    <button onClick={() => onSelect(branch)} className="stack-member-name">
+                      <GitBranch className="size-4" />
+                      <strong>{branch.name}</strong>
+                      <ChevronRight className="size-3.5" />
+                    </button>
+                  </BranchHoverCard>
+                  {branch.current ? <Badge variant="accent">current</Badge> : null}
+                  {branch.needsRestack || (branch.parentBehind ?? 0) > 0 ? (
+                    <Badge variant="warning">Requires restack</Badge>
+                  ) : branch.parent && branch.parentBehind === null ? (
+                    <Badge variant="secondary">Parent comparison unavailable</Badge>
+                  ) : null}
+                </div>
+                <div className="stack-member-meta">
+                  <span>
+                    Parent: <strong>{branch.parent ?? 'Not set'}</strong>
+                  </span>
+                  <span>
+                    {branch.parentSource === 'recorded'
+                      ? 'Recorded parent'
+                      : branch.parentSource === 'stack'
+                        ? 'GitHub native stack'
+                        : branch.parentSource === 'pullRequest'
+                          ? 'From PR base'
+                          : 'Inferred — confirm before publishing'}
+                  </span>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    disabled={
+                      blocked || Boolean(actionBlockReason(snapshot.capabilities, 'setParent'))
+                    }
+                    tooltip={
+                      actionBlockReason(snapshot.capabilities, 'setParent') ??
+                      'Record the intended parent locally without rewriting commits. Preview Restack next to move this branch and descendants.'
+                    }
+                    onClick={() => onRequest({ kind: 'parent', branch })}
+                  >
+                    Set parent…
+                  </Button>
+                </div>
+                {branch.pr ? (
+                  <div className="stack-pr-row">
+                    <PullRequestHoverCard pr={branch.pr}>
+                      <Button
+                        size="sm"
+                        variant="link"
+                        disabled={busy}
+                        onClick={() => onRequest({ kind: 'pr', number: branch.pr!.number })}
+                      >
+                        #{branch.pr.number} {branch.pr.title}
+                      </Button>
+                    </PullRequestHoverCard>
+                    <div className="workflow-row">
+                      {branch.pr.stack ? (
+                        <Badge variant="accent">
+                          Stack #{branch.pr.stack.stackNumber} ({branch.pr.stack.position}/
+                          {branch.pr.stack.size})
                         </Badge>
-                        <Badge
-                          variant={
-                            branch.pr.checks === 'failing'
-                              ? 'danger'
-                              : branch.pr.checks === 'passing'
-                                ? 'success'
-                                : 'secondary'
-                          }
-                        >
-                          {branch.pr.checks === 'none' ? 'No checks' : `Checks ${branch.pr.checks}`}
-                        </Badge>
-                        <span className="workflow-note">
-                          {branch.pr.reviewDecision?.replaceAll('_', ' ').toLowerCase() ||
-                            'No review decision'}
-                        </span>
-                      </div>
-                      {branch.pr.state === 'OPEN' && branch.pr.base === snapshot.defaultBranch ? (
-                        <Button
-                          size="sm"
-                          variant="secondary"
-                          disabled={blocked}
-                          tooltip="Preview merging this pull request into the default branch. Nothing is merged until confirmed; remaining branches still need restack and publish."
-                          onClick={() =>
-                            onRequest({ kind: 'stack', branch: branch.name, operation: 'merge' })
-                          }
-                        >
-                          <GitMerge className="size-3.5" />
-                          Preview merge
-                        </Button>
-                      ) : branch.pr.state === 'MERGED' ? (
-                        <p className="workflow-note">
-                          Merged parent: restack remaining branches, then publish their updated
-                          bases.
-                        </p>
-                      ) : (
-                        <p className="workflow-note">
-                          Merge the parent PR first, then restack and publish this branch.
-                        </p>
-                      )}
+                      ) : null}
+                      <Badge variant={branch.pr.state === 'MERGED' ? 'accent' : 'secondary'}>
+                        {branch.pr.draft ? 'draft' : branch.pr.state.toLowerCase()}
+                      </Badge>
+                      <Badge
+                        variant={
+                          branch.pr.checks === 'failing'
+                            ? 'danger'
+                            : branch.pr.checks === 'passing'
+                              ? 'success'
+                              : 'secondary'
+                        }
+                      >
+                        {branch.pr.checks === 'none' ? 'No checks' : `Checks ${branch.pr.checks}`}
+                      </Badge>
+                      <span className="workflow-note">
+                        {branch.pr.reviewDecision?.replaceAll('_', ' ').toLowerCase() ||
+                          'No review decision'}
+                      </span>
                     </div>
-                  ) : (
-                    <p className="workflow-note">
-                      No pull request. Publish the stack to create one.
-                    </p>
-                  )}
-                </article>
-              ))}
+                    {branch.pr.state === 'OPEN' && branch.pr.base === snapshot.defaultBranch ? (
+                      <Button
+                        size="sm"
+                        variant="secondary"
+                        disabled={
+                          blocked ||
+                          Boolean(actionBlockReason(snapshot.capabilities, 'executeStack'))
+                        }
+                        tooltip={
+                          actionBlockReason(snapshot.capabilities, 'executeStack') ??
+                          'Preview merging this pull request into the default branch. Nothing is merged until confirmed; remaining branches still need restack and publish.'
+                        }
+                        onClick={() =>
+                          onRequest({ kind: 'stack', branch: branch.name, operation: 'merge' })
+                        }
+                      >
+                        <GitMerge className="size-3.5" />
+                        Preview merge
+                      </Button>
+                    ) : branch.pr.state === 'MERGED' ? (
+                      <p className="workflow-note">
+                        Merged parent: restack remaining branches, then publish their updated bases.
+                      </p>
+                    ) : (
+                      <p className="workflow-note">
+                        Merge the parent PR first, then restack and publish this branch.
+                      </p>
+                    )}
+                  </div>
+                ) : (
+                  <p className="workflow-note">No pull request. Publish the stack to create one.</p>
+                )}
+              </article>
+            ))}
+            <ListWindowMore
+              pageSize={LIST_PAGE_SIZE}
+              remaining={memberWindow.remaining}
+              previous={memberWindow.hasPrevious}
+              noun="stack branches"
+              onReveal={memberWindow.reveal}
+              onPrevious={memberWindow.retreat}
+            />
           </div>
         </>
       )}

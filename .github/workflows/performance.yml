@@ -1,0 +1,38 @@
+name: Performance budgets
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  budgets:
+    runs-on: [self-hosted, linux, arm64]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install virtual display dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends xvfb xauth
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - name: Measure real desktop startup and interaction with bounded fixtures
+        # Xvfb provides an actual Chromium paint surface on the Linux runner.
+        # Fixtures use the runner's own git; no clone, token, or private repository.
+        run: xvfb-run -a npm run bench:performance
+      - name: Upload trend data
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: performance-trend
+          path: benchmarks/
+          if-no-files-found: warn

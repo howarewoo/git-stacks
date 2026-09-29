@@ -25,6 +25,7 @@ import type {
   SubmitStackAction,
 } from '../shared/types'
 import {
+  CommandCancelled,
   MAX_MESSAGE_LENGTH,
   branchUpstream,
   commandCode,
@@ -62,6 +63,7 @@ import {
   listPullRequestStacks,
   NativeStackError,
   revalidatePublishedStackRegistration,
+  retireLegacyStackComments,
   unstackNativeStackAction,
 } from './native-stacks'
 import { canonicalRemoteName, getGitHubData, getPullRequest, pullRequestRepository } from './github'
@@ -427,28 +429,36 @@ export function isStackAction(value: unknown): value is StackAction {
   }
 }
 
-async function repositoryPath(repoPath: string): Promise<string> {
-  const output = await runGit(repoPath, ['rev-parse', '--show-toplevel'])
-  return path.resolve(stripTrailingNewline(output))
+async function repositoryPath(repoPath: string, signal?: AbortSignal): Promise<string> {
+  const workTree = await tryGit(repoPath, ['rev-parse', '--show-toplevel'], signal)
+  if (workTree) return path.resolve(stripTrailingNewline(workTree))
+  // A bare repository has no worktree, so the journal lives in the Git directory.
+  return path.resolve(
+    stripTrailingNewline(
+      await runGit(repoPath, ['rev-parse', '--absolute-git-dir'], undefined, signal),
+    ),
+  )
 }
 
-async function gitDirectory(repoPath: string): Promise<string> {
-  const output = stripTrailingNewline(await runGit(repoPath, ['rev-parse', '--git-dir']))
+async function gitDirectory(repoPath: string, signal?: AbortSignal): Promise<string> {
+  const output = stripTrailingNewline(
+    await runGit(repoPath, ['rev-parse', '--git-dir'], undefined, signal),
+  )
   return path.resolve(repoPath, output)
 }
 
-async function journalPath(repoPath: string): Promise<string> {
-  return path.join(await gitDirectory(repoPath), 'git-stacks-stack.json')
+async function journalPath(repoPath: string, signal?: AbortSignal): Promise<string> {
+  return path.join(await gitDirectory(repoPath, signal), 'git-stacks-stack.json')
 }
 
 function isOid(value: unknown): value is string {
   return typeof value === 'string' && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u.test(value)
 }
 
-async function readJournal(repoPath: string): Promise<StackJournal | null> {
+async function readJournal(repoPath: string, signal?: AbortSignal): Promise<StackJournal | null> {
   let value: string
   try {
-    const target = await journalPath(repoPath)
+    const target = await journalPath(repoPath, signal)
     if ((await fs.stat(target)).size > 8 * 1024 * 1024)
       throw new Error('Stack journal is too large')
     value = await fs.readFile(target, 'utf8')
@@ -538,13 +548,16 @@ async function removeJournal(repoPath: string): Promise<void> {
   }
 }
 
-async function resolveCommit(repoPath: string, ref: string): Promise<string | null> {
-  const output = await tryGit(repoPath, [
-    'rev-parse',
-    '--verify',
-    '--end-of-options',
-    `${ref}^{commit}`,
-  ])
+async function resolveCommit(
+  repoPath: string,
+  ref: string,
+  signal?: AbortSignal,
+): Promise<string | null> {
+  const output = await tryGit(
+    repoPath,
+    ['rev-parse', '--verify', '--end-of-options', `${ref}^{commit}`],
+    signal,
+  )
   return output ? stripTrailingNewline(output) : null
 }
 
@@ -552,9 +565,10 @@ async function isAncestor(
   repoPath: string,
   ancestor: string,
   descendant: string,
+  signal?: AbortSignal,
 ): Promise<boolean> {
   try {
-    await runGit(repoPath, ['merge-base', '--is-ancestor', ancestor, descendant])
+    await runGit(repoPath, ['merge-base', '--is-ancestor', ancestor, descendant], undefined, signal)
     return true
   } catch (error) {
     if (commandCode(error) === 1) return false
@@ -719,11 +733,16 @@ function localFilesRefStoragePath(value: string): string {
   ) {
     throw new Error('The configured files ref-storage URI cannot be locked safely')
   }
-  const decodedPath = decodeURIComponent(uri.pathname)
+  let decodedPath: string
+  try {
+    decodedPath = fileURLToPath(uri.href.replace(/^files:/u, 'file:'))
+  } catch {
+    throw new Error('The configured files ref-storage URI cannot be locked safely')
+  }
   if (decodedPath.includes('\0')) {
     throw new Error('The configured files ref-storage URI cannot be locked safely')
   }
-  return path.resolve('/', decodedPath)
+  return decodedPath
 }
 
 function gitPathOnDisk(repoPath: string, value: string, refRoot: string | null): string {
@@ -1070,15 +1089,18 @@ export async function parentTarget(
   parent: string,
   defaultBranch: string,
   preferRemoteDefault: boolean,
+  signal?: AbortSignal,
 ): Promise<ParentTarget | null> {
   if (parent === defaultBranch) {
     const localRef = `refs/heads/${defaultBranch}`
     const remoteRef = `refs/remotes/origin/${defaultBranch}`
-    const localOid = await resolveCommit(repoPath, localRef)
-    const remoteOidValue = await resolveCommit(repoPath, remoteRef)
+    const localOid = await resolveCommit(repoPath, localRef, signal)
+    const remoteOidValue = await resolveCommit(repoPath, remoteRef, signal)
     if (
       remoteOidValue &&
-      (preferRemoteDefault || !localOid || (await isAncestor(repoPath, localOid, remoteOidValue)))
+      (preferRemoteDefault ||
+        !localOid ||
+        (await isAncestor(repoPath, localOid, remoteOidValue, signal)))
     ) {
       return { ref: remoteRef, oid: remoteOidValue }
     }
@@ -1086,10 +1108,10 @@ export async function parentTarget(
     return null
   }
   const localRef = `refs/heads/${parent}`
-  const localOid = await resolveCommit(repoPath, localRef)
+  const localOid = await resolveCommit(repoPath, localRef, signal)
   if (localOid) return { ref: localRef, oid: localOid }
   const resolved = await resolveParentRef(repoPath, parent)
-  const oid = await resolveCommit(repoPath, resolved)
+  const oid = await resolveCommit(repoPath, resolved, signal)
   return oid ? { ref: resolved, oid } : null
 }
 
@@ -3476,6 +3498,13 @@ async function runPublishStep(
     await writePublishOperation(repoPath, operation)
     return `Recovered native stack #${matched.number} from a lost response`
   }
+  // The legacy comment metadata is only retired once the native stack really holds these pull
+  // requests, so every successful registration path below retires it before returning.
+  const retireLegacyComments = (): Promise<void> =>
+    retireLegacyStackComments(
+      operation.fullName,
+      matched ? matched.pullRequests.map((member) => member.number).concat(numbers) : numbers,
+    )
   const known = await Promise.all(
     published.map((layer) => getPullRequest(repoPath, layer.pullRequest as number)),
   )
@@ -3557,12 +3586,14 @@ async function runPublishStep(
     )
     proveJournalledHeads(operation, published, atBoundary)
     if (toAdd.length === 0) {
+      await retireLegacyComments()
       return `Stack #${matched.number} already holds all ${numbers.length} pull requests`
     }
     await addPullRequestsToStack(owner, name, matched.number, toAdd, {
       existingStack: matched,
       knownPullRequests: atBoundary,
     })
+    await retireLegacyComments()
     return `Extended stack #${matched.number} with pull requests ${toAdd.join(', ')}`
   }
   if (step.kind !== 'create-stack') {
@@ -3591,6 +3622,7 @@ async function runPublishStep(
     }
     throw error
   }
+  await retireLegacyComments()
   return `Registered native stack for pull requests ${numbers.join(', ')}`
 }
 
@@ -3904,11 +3936,45 @@ async function mergeStack(
   await setPullRequestNumber(repoPath, entry.branch, entry.pr.number)
   let mergeError: unknown
   try {
-    await githubTransport().rest({
+    const native = Boolean(currentPr.stack || canonical.stack)
+    const endpoint = `repos/${plan.originFullName}/pulls/${entry.pr.number}/merge${native ? '-async' : ''}`
+    const response = await githubTransport().rest<unknown>({
       method: 'PUT',
-      path: `repos/${plan.originFullName}/pulls/${entry.pr.number}/merge`,
-      body: { sha: entry.pr.headOid, merge_method: action.mergeMethod },
+      path: endpoint,
+      ...(native ? { headers: { 'X-GitHub-Api-Version': '2026-03-10' } } : {}),
+      body: {
+        sha: entry.pr.headOid,
+        merge_method: action.mergeMethod,
+        ...(native ? { merge_action: 'direct_merge' } : {}),
+      },
     })
+    if (native) {
+      let result = response.data
+      for (let attempt = 0; attempt < 10; attempt++) {
+        if (!isRecord(result))
+          throw new Error('GitHub returned an invalid asynchronous merge result')
+        if (result.status === 'merged') break
+        if (result.status === 'failed' || result.status === 'enqueued') {
+          throw new Error(
+            `GitHub asynchronous merge ${result.status}: ${isRecord(result.details) && typeof result.details.message === 'string' ? result.details.message : 'inspect GitHub before retrying'}`,
+          )
+        }
+        const details = result.details
+        if (result.status !== 'pending' || !isRecord(details) || typeof details.uuid !== 'string')
+          throw new Error('GitHub returned an invalid asynchronous merge result')
+        await new Promise((resolve) => setTimeout(resolve, 300 * (attempt + 1)))
+        result = (
+          await githubTransport().rest<unknown>({
+            path: `${endpoint}/${encodeURIComponent(details.uuid)}`,
+            headers: { 'X-GitHub-Api-Version': '2026-03-10' },
+          })
+        ).data
+      }
+      if (!isRecord(result) || result.status !== 'merged')
+        throw new Error(
+          `Merge of PR #${entry.pr.number} is still pending; inspect GitHub before retrying`,
+        )
+    }
   } catch (error) {
     mergeError = error
   }
@@ -4108,9 +4174,13 @@ async function setParentAction(
   return { message: `Adopted ${branch} under ${parent}; preserved ${count} commits from ${source}` }
 }
 
-export async function getStackProgress(repoPath: string): Promise<StackProgress | null> {
-  const root = await repositoryPath(repoPath)
-  const journal = await readJournal(root)
+export async function getStackProgress(
+  repoPath: string,
+  signal?: AbortSignal,
+): Promise<StackProgress | null> {
+  const root = await repositoryPath(repoPath, signal)
+  const journal = await readJournal(root, signal)
+  if (signal?.aborted) throw new CommandCancelled()
   if (!journal) return null
   const completed = journal.entries
     .filter((entry) => entry.status === 'completed')

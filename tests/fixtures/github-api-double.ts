@@ -522,7 +522,42 @@ function handleRest(
   const merge = new RegExp(`^${prefix}/pulls/(\\d+)/merge$`, 'u').exec(path)
   if (merge) {
     if (method !== 'PUT') throw new HttpError(405, 'Method Not Allowed', 'merge requires PUT')
+    if (
+      (state.stacks ?? []).some((stack) =>
+        stack.pull_requests.some((pr) => pr.number === Number(merge[1])),
+      )
+    )
+      throw new HttpError(405, 'Method Not Allowed', 'stacked pull requests require merge-async')
     return { status: 200, body: mergePullRequest(state, findPr(state, Number(merge[1])), body) }
+  }
+  const asyncMerge = new RegExp(`^${prefix}/pulls/(\\d+)/merge-async(?:/([^/]+))?$`, 'u').exec(path)
+  if (asyncMerge) {
+    const number = Number(asyncMerge[1])
+    if (!asyncMerge[2] && method === 'PUT') {
+      if (body.merge_action !== 'direct_merge')
+        throw new HttpError(422, 'Unprocessable Entity', 'direct merge required')
+      state.asyncMerge = { number, sha: String(body.sha), method: String(body.merge_method) }
+      return {
+        status: 202,
+        body: { status: 'pending', details: { uuid: `fixture-${number}`, message: 'pending' } },
+      }
+    }
+    if (asyncMerge[2] === `fixture-${number}` && method === 'GET') {
+      if (state.asyncMerge?.number !== number)
+        throw new HttpError(404, 'Not Found', 'Unknown merge request')
+      const result = mergePullRequest(state, findPr(state, number), {
+        sha: state.asyncMerge.sha,
+        merge_method: state.asyncMerge.method,
+      })
+      delete state.asyncMerge
+      return {
+        status: 200,
+        body: result.merged
+          ? { status: 'merged', details: { sha: result.sha } }
+          : { status: 'failed', details: { message: result.message } },
+      }
+    }
+    throw new HttpError(404, 'Not Found', 'Unknown merge request')
   }
   const comments = new RegExp(`^${prefix}/issues/(\\d+)/comments$`, 'u').exec(path)
   if (comments) {

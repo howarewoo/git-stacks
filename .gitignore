@@ -1,6 +1,7 @@
 node_modules/
 out/
 release/
+resources/git/
 .DS_Store
 *.log
 .env*
@@ -12,3 +13,6 @@ release/
 !.impeccable/
 .impeccable/*
 !.impeccable/design.json
+benchmarks/
+test-results/
+playwright-report/

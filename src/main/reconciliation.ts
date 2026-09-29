@@ -24,6 +24,7 @@ import {
   commandCode,
   ensureNoBusyOperation,
   ensureNotCheckedOutElsewhere,
+  getBranchConfigs,
   getBranchParent,
   getConfigValue,
   getCurrentBranch,
@@ -36,6 +37,7 @@ import {
   stripTrailingNewline,
   tryGit,
   validateBranchName,
+  type BranchConfig,
 } from './git-core'
 import { canonicalRemoteName, getGitHubData, getPullRequest, pullRequestRepository } from './github'
 import { githubTransport } from './github-transport'
@@ -44,6 +46,7 @@ const PLAN_TTL_MS = 5 * 60_000
 const JOURNAL_LIMIT = 10
 const BACKUP_ROOT = 'refs/git-stacks/reconciliation'
 const STALE_PREFIX = 'Reconciliation repair is stale:'
+const RECONCILIATION_BRANCH_BUDGET = 32
 
 const stateLabels: Record<ReconciliationState, string> = {
   'local-only': 'Local only',
@@ -653,10 +656,11 @@ async function collectMemberFacts(
   expectedParent: string | null,
   submittedOid: string | null,
   remoteOid: string | null,
+  hint: BranchConfig,
 ): Promise<MemberFacts> {
   const localOid = await resolveOid(repoPath, `refs/heads/${branch}`)
-  const recordedParent = await getBranchParent(repoPath, branch)
-  const recordedParentTip = await getConfigValue(repoPath, `branch.${branch}.parentTip`)
+  const recordedParent = hint.parent
+  const recordedParentTip = hint.parentTip
   let parentRef: string | null = null
   if (expectedParent) {
     try {
@@ -723,7 +727,8 @@ function nativeStackHeadShas(stack: NativeStack): Record<string, string | null> 
 async function collectStackInputs(
   repoPath: string,
   snapshot: RepositorySnapshot,
-): Promise<{ inputs: ReconciliationStackInput[]; blockers: string[] }> {
+  configs?: ReadonlyMap<string, BranchConfig>,
+): Promise<{ inputs: ReconciliationStackInput[]; blockers: string[]; budgetExceeded: boolean }> {
   const blockers: string[] = []
   const defaultBranch = snapshot.defaultBranch
   const originUrl = snapshot.remoteUrl
@@ -745,16 +750,12 @@ async function collectStackInputs(
     if (originFullName && pullRequestRepository(pullRequest) !== originFullName) continue
     if (!pullRequests.has(pullRequest.head)) pullRequests.set(pullRequest.head, pullRequest)
   }
-  const hints = new Map<string, { parent: string | null; tip: string | null }>()
-  await Promise.all(
-    localBranches.map(async (branch) => {
-      const [parent, tip] = await Promise.all([
-        getBranchParent(repoPath, branch.name),
-        getConfigValue(repoPath, `branch.${branch.name}.parentTip`),
-      ])
-      hints.set(branch.name, { parent, tip })
-    }),
-  )
+  const branchConfigs = configs ?? (await getBranchConfigs(repoPath))
+  const hints = new Map<string, BranchConfig>()
+  for (const branch of localBranches) {
+    const hint = branchConfigs.get(branch.name)
+    if (hint) hints.set(branch.name, hint)
+  }
   const localNames = new Set(localBranches.map((branch) => branch.name))
   const children = new Map<string, string[]>()
   for (const [branch, hint] of hints) {
@@ -765,11 +766,12 @@ async function collectStackInputs(
   }
   const nativeStacks = (snapshot.nativeStacks ?? []).filter((stack) => stack.open)
   if (nativeStacks.length === 0 && hints.size === 0 && pullRequests.size === 0) {
-    return { inputs: [], blockers }
+    return { inputs: [], blockers, budgetExceeded: false }
   }
 
   const claimed = new Set<string>()
   const inputs: ReconciliationStackInput[] = []
+  let analyzed = 0
   for (const stack of nativeStacks) {
     const order = stack.pullRequests
       .map((member) => member.head)
@@ -822,8 +824,12 @@ async function collectStackInputs(
     )
     const identityConflicts: string[] = []
     const members: ReconciliationMemberInput[] = []
+    if (analyzed + groupNames.size > RECONCILIATION_BRANCH_BUDGET) {
+      return { inputs: [], blockers, budgetExceeded: true }
+    }
+    analyzed += groupNames.size
     for (const name of [...groupNames].sort()) {
-      const hint = hints.get(name) ?? { parent: null, tip: null }
+      const hint = hints.get(name) ?? { parent: null, parentTip: null }
       const submittedOid = shas[name] ?? null
       const expectedParent = parentMap.get(name) ?? hint.parent
       const facts = await collectMemberFacts(
@@ -832,6 +838,7 @@ async function collectStackInputs(
         expectedParent,
         submittedOid,
         remoteOids.get(name) ?? null,
+        hint,
       )
       // A submitted member that the open-pull-request query no longer returns
       // (a closed or merged one) still carries its identity in the stack
@@ -866,7 +873,7 @@ async function collectStackInputs(
         localOid: facts.localOid,
         remoteOid: facts.remoteOid,
         recordedParent: hint.parent,
-        recordedParentTip: hint.tip,
+        recordedParentTip: hint.parentTip,
         ancestry: facts.ancestry,
         pullRequest: toReconciliationPullRequest(pullRequest),
         adoptTargetOid: facts.adoptTargetOid,
@@ -922,21 +929,26 @@ async function collectStackInputs(
       }
     }
     const members: ReconciliationMemberInput[] = []
+    if (analyzed + chain.length > RECONCILIATION_BRANCH_BUDGET) {
+      return { inputs: [], blockers, budgetExceeded: true }
+    }
+    analyzed += chain.length
     for (const name of chain) {
-      const hint = hints.get(name) ?? { parent: null, tip: null }
+      const hint = hints.get(name) ?? { parent: null, parentTip: null }
       const facts = await collectMemberFacts(
         repoPath,
         name,
         hint.parent,
         null,
         remoteOids.get(name) ?? null,
+        hint,
       )
       members.push({
         branch: name,
         localOid: facts.localOid,
         remoteOid: facts.remoteOid,
         recordedParent: hint.parent,
-        recordedParentTip: hint.tip,
+        recordedParentTip: hint.parentTip,
         ancestry: facts.ancestry,
         pullRequest: toReconciliationPullRequest(pullRequests.get(name) ?? null),
         adoptTargetOid: facts.adoptTargetOid,
@@ -955,7 +967,7 @@ async function collectStackInputs(
       members,
     })
   }
-  return { inputs, blockers }
+  return { inputs, blockers, budgetExceeded: false }
 }
 
 // ---------------------------------------------------------------------------
@@ -1019,10 +1031,20 @@ async function writeEvidence(repoPath: string, record: ReconciliationRepairRecor
 export async function buildReconciliationReport(
   repoPath: string,
   snapshot: RepositorySnapshot,
+  configs?: ReadonlyMap<string, BranchConfig>,
 ): Promise<ReconciliationReport> {
   const evidence = (await readEvidence(repoPath))[0] ?? null
-  const collected = await collectStackInputs(repoPath, snapshot)
+  const collected = await collectStackInputs(repoPath, snapshot, configs)
   const stacks = collected.inputs.map(reconcileStack)
+  if (collected.budgetExceeded) {
+    return {
+      available: false,
+      message: `Reconciliation exceeds the ${RECONCILIATION_BRANCH_BUDGET}-branch refresh budget; narrow the stack before retrying.`,
+      stacks: [],
+      blockers: collected.blockers,
+      evidence,
+    }
+  }
   if (!snapshot.github.available) {
     return {
       available: false,
@@ -1257,6 +1279,10 @@ async function captureOperation(
         return null
       }
       replayBoundary = recorded
+    } else if (replayBoundary !== parentOid || replayBoundary === member.localOid) {
+      // A merge base with an unrecorded parent cannot establish which commits
+      // belonged to this branch before the submitted order changed.
+      return null
     }
     return {
       ...operation,

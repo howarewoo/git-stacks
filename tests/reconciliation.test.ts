@@ -1642,6 +1642,48 @@ test('reordered member with a missing recorded boundary cannot infer commit owne
   })
 })
 
+test('hintless reordered ancestor cannot adopt its descendant as its replay boundary', async () => {
+  await withHarness(async (harness) => {
+    const heads = await setupStack(harness)
+    const state = await harness.readState()
+    state.prs[0].base = 'feature/step-2'
+    state.prs[1].base = 'main'
+    state.prs[2].base = 'feature/step-1'
+    await harness.writeState(state)
+    const created = await createPullRequestStack('acme', 'widgets', [102, 101, 103])
+    const preview = await previewReconciliationRepair(
+      harness.repo,
+      await getSnapshot(harness.repo),
+      `native:${created.number}`,
+    )
+    assert.equal(git(harness, ['merge-base', 'feature/step-2', 'feature/step-1']), heads[0])
+    assert.equal(
+      preview.repairs.find(
+        (repair) => repair.kind === 'adopt-remote-order' && repair.branch === 'feature/step-1',
+      ),
+      undefined,
+    )
+    assert.equal(recordedParent(harness, 'feature/step-1'), null)
+    assert.equal(optionalGit(harness, ['config', '--get', 'branch.feature/step-1.parentTip']), null)
+    assert.equal(git(harness, ['rev-list', '--count', 'main..feature/step-1']), '1')
+  })
+})
+
+test('reconciliation does not probe unbounded local parent chains during snapshot refresh', async () => {
+  await withHarness(async (harness) => {
+    const tip = git(harness, ['rev-parse', 'main'])
+    for (let index = 0; index < 33; index++) {
+      const name = `feature/budget-${index}`
+      git(harness, ['update-ref', `refs/heads/${name}`, tip])
+      recordParent(harness, name, index === 0 ? 'main' : `feature/budget-${index - 1}`, tip)
+    }
+    const snapshot = await getSnapshot(harness.repo, undefined, 0)
+    assert.equal(snapshot.reconciliation?.available, false)
+    assert.match(snapshot.reconciliation?.message ?? '', /32-branch refresh budget/)
+    assert.deepEqual(snapshot.reconciliation?.stacks, [])
+  })
+})
+
 test('a force-pushed remote branch leaves the local branch behind its submitted head', async () => {
   await withHarness(async (harness) => {
     const heads = await setupStack(harness)

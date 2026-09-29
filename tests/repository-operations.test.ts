@@ -76,3 +76,31 @@ test('writes are rejected, not queued, while reads or other writes are pending',
   await write
   assert.equal(changed, false)
 })
+
+test('runtime preference changes are serialized through repository operations and cannot disrupt an in-flight write', async () => {
+  const operations = new RepositoryOperations()
+  const started = gate()
+  const finish = gate()
+  let actionCompleted = false
+
+  const inFlightWrite = operations.write(async () => {
+    started.release()
+    await finish.promise
+    actionCompleted = true
+  })
+
+  await started.promise
+
+  let preferenceChanged = false
+  await assert.rejects(
+    operations.write(async () => {
+      preferenceChanged = true
+    }),
+    /Another repository operation is still running/u,
+  )
+
+  assert.equal(preferenceChanged, false)
+  finish.release()
+  await inFlightWrite
+  assert.equal(actionCompleted, true)
+})

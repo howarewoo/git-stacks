@@ -1,6 +1,8 @@
 import React from 'react'
+import { EMPTY_SNAPSHOT_LIMITS } from '../../../shared/performance'
 import type { PublishProgress, RepositorySnapshot, StackPreview } from '../../../shared/types'
 import { WorkflowDialog, type WorkflowStackAPI } from '../components/workflow-dialog'
+import { standardCapabilities } from './data-fixtures'
 import { publishPreview } from './DialogSpecimenData'
 
 /**
@@ -128,6 +130,8 @@ const snapshot: RepositorySnapshot = {
   stackOperation: null,
   headOid: 'b'.repeat(40),
   github: { available: true, message: '' },
+  limits: EMPTY_SNAPSHOT_LIMITS,
+  capabilities: standardCapabilities,
 }
 
 const noop = () => undefined

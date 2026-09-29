@@ -539,11 +539,11 @@ export function validatePublishedStackRegistration(
         message: `Pull request #${pr.number} is ${member.state.toLowerCase()} in native stack #${stack.number}`,
       }
     }
-    if (member.position <= previous) {
+    if (previous && member.position !== previous + 1) {
       return {
         status: 'invalid-chain',
         valid: false,
-        message: `Pull request #${pr.number} is out of order in native stack #${stack.number}`,
+        message: `Pull request #${pr.number} is not contiguous with the published members in native stack #${stack.number}`,
       }
     }
     previous = member.position
@@ -858,6 +858,52 @@ export async function unstackPullRequestStack(
 
 export { unstackPullRequestStack as unstackPullRequests }
 
+/** Retire legacy navigation only when it is still owned by this account and structurally intact. */
+export async function retireLegacyStackComments(
+  fullName: string,
+  numbers: readonly number[],
+): Promise<void> {
+  const transport = githubTransport()
+  const marker = '<!-- git-stacks:stack-links:v1 -->'
+  const endMarker = '<!-- /git-stacks:stack-links:v1 -->'
+  const { data: viewer } = await transport.rest<unknown>({ path: 'user' })
+  if (!isRecord(viewer) || typeof viewer.id !== 'number')
+    throw new Error('Could not verify the authenticated GitHub comment author')
+  const owned = (value: unknown): value is Record<string, unknown> =>
+    isRecord(value) &&
+    isRecord(value.user) &&
+    value.user.id === viewer.id &&
+    typeof value.id === 'number' &&
+    typeof value.body === 'string' &&
+    value.body.startsWith(`${marker}\n`)
+  for (const number of new Set(numbers)) {
+    const comments = await transport.paginate<unknown>({
+      path: `repos/${fullName}/issues/${number}/comments`,
+    })
+    for (const candidate of comments.filter(owned)) {
+      const { data } = await transport.rest<unknown>({
+        path: `repos/${fullName}/issues/comments/${candidate.id}`,
+      })
+      if (!owned(data)) throw new Error(`Stack comment ownership changed on PR #${number}`)
+      const body = data.body as string
+      const end = body.indexOf(endMarker)
+      if (
+        end < 0 ||
+        body.indexOf(marker, marker.length) >= 0 ||
+        body.indexOf(endMarker, end + endMarker.length) >= 0
+      ) {
+        throw new Error(`The owned stack comment on PR #${number} has ambiguous boundaries`)
+      }
+      const retired = `Stack navigation retired; use GitHub's native stack view.${body.slice(end + endMarker.length)}`
+      await transport.rest({
+        method: 'PATCH',
+        path: `repos/${fullName}/issues/comments/${data.id}`,
+        body: { body: retired },
+      })
+    }
+  }
+}
+
 /** Loads native stacks for the origin remote and attaches stack memberships to pullRequests. */
 export async function loadRepositoryNativeStacks(
   originUrl: string | null,
@@ -928,6 +974,7 @@ export async function createNativeStackAction(
     knownPullRequests,
     defaultBranch,
   })
+  await retireLegacyStackComments(originFullName, pullRequests)
   return {
     message: `Created GitHub native stack #${stack.number} with ${stack.size} pull requests`,
     url: stack.url,
@@ -947,6 +994,10 @@ export async function addPullRequestsToNativeStackAction(
     existingStack: existing,
     knownPullRequests,
   })
+  await retireLegacyStackComments(
+    originFullName,
+    stack.pullRequests.map((member) => member.number),
+  )
   return {
     message: `Added ${pullRequests.length} pull request${pullRequests.length === 1 ? '' : 's'} to native stack #${stack.number}`,
     url: stack.url,
@@ -959,7 +1010,12 @@ export async function unstackNativeStackAction(
   stackNumber: number,
 ): Promise<ActionResult> {
   const [owner, name] = originFullName.split('/')
+  const before = await getPullRequestStack(owner, name, stackNumber)
   const result = await unstackPullRequestStack(owner, name, stackNumber)
+  await retireLegacyStackComments(
+    originFullName,
+    before.pullRequests.map((member) => member.number),
+  )
   if (result.dissolved) {
     return { message: `Dissolved native stack #${stackNumber}` }
   }

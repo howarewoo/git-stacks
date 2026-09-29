@@ -4,8 +4,12 @@ const { join } = require('node:path')
 const { pathToFileURL } = require('node:url')
 const { app, BrowserWindow, ipcMain } = require('electron')
 
-const rendererPath = join(__dirname, '..', 'out', 'renderer', 'index.html')
+const rendererPath = join(__dirname, '..', 'out', 'renderer-fixtures', 'index.html')
 const preloadPath = join(__dirname, '..', 'out', 'preload', 'index.cjs')
+// The recovery specimen is reached through the packaged renderer, not the gallery: it has to run
+// both without a preload and against the frozen production bridge, and the gallery installs its
+// own mutable `window.desktop` double that the frozen bridge would refuse.
+const recoveryPath = join(__dirname, '..', 'out', 'renderer', 'index.html')
 const pageHelpers = `
   function buttonNamed(label) {
     return Array.from(document.querySelectorAll('button')).find(
@@ -51,7 +55,10 @@ async function waitFor(description, expression, timeout = 3000) {
 
 async function main() {
   if (!existsSync(rendererPath)) {
-    throw new Error(`Missing production renderer at ${rendererPath}; run the build first.`)
+    throw new Error(`Missing fixture renderer at ${rendererPath}; run npm run build:gallery first.`)
+  }
+  if (!existsSync(recoveryPath)) {
+    throw new Error(`Missing packaged renderer at ${recoveryPath}; run npm run build first.`)
   }
 
   await app.whenReady()
@@ -277,7 +284,7 @@ async function recoverySmoke() {
   // must not relabel what Resume will run.
   await window.loadURL('about:blank')
   await window.loadURL(
-    `${pathToFileURL(rendererPath).href}#/design-system-recovery-specimen?mode=mismatch`,
+    `${pathToFileURL(recoveryPath).href}#/design-system-recovery-specimen?mode=mismatch`,
   )
   await waitFor('the recovered submit dialog', `document.querySelector('.workflow-dialog')`)
   await waitFor(
@@ -322,7 +329,7 @@ async function recoverySmoke() {
   // so the steps and the consent it will run under have to stay on screen.
   await window.loadURL('about:blank')
   await window.loadURL(
-    `${pathToFileURL(rendererPath).href}#/design-system-recovery-specimen?mode=preview-failure`,
+    `${pathToFileURL(recoveryPath).href}#/design-system-recovery-specimen?mode=preview-failure`,
   )
   await waitFor(
     'the recovered submit dialog without a fresh preview',
@@ -356,7 +363,7 @@ async function recoverySmoke() {
   assert.equal(await evaluateInPage(`buttonNamed('Dismiss submission')?.disabled === false`), true)
   await window.loadURL('about:blank')
   await window.loadURL(
-    `${pathToFileURL(rendererPath).href}#/design-system-recovery-specimen?mode=non-retryable`,
+    `${pathToFileURL(recoveryPath).href}#/design-system-recovery-specimen?mode=non-retryable`,
   )
   await waitFor(
     'the rejected native submission',
