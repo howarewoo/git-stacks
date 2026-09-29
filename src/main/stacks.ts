@@ -1819,10 +1819,19 @@ async function capturePlan(
   }
   const warnings: string[] = []
   if (kind !== 'restack' && githubData && !githubData.nativeStackPreviewAvailable) {
-    warnings.push(
-      githubData.nativeStackMessage ??
-        'This host does not serve native stacks; pull requests publish as an ordinary chain',
-    )
+    // Only a resource the host refused is evidence that it has none. Every other
+    // reason is a question this build could not answer, and it holds the publish
+    // rather than planning an ordinary chain on the assumption of an answer.
+    if (githubData.nativeStackPreviewReason === 'endpoint-missing') {
+      warnings.push(
+        githubData.nativeStackMessage ??
+          'This host does not serve native stacks; pull requests publish as an ordinary chain',
+      )
+    } else {
+      blockers.push(
+        `Native stacked pull requests could not be established for this repository: ${githubData.nativeStackMessage ?? 'this host was not established either way'}. Nothing is published on an assumption; establish the capability and review this preview again.`,
+      )
+    }
   }
   if (kind !== 'restack') {
     if (!githubData || !githubData.available)
@@ -5986,6 +5995,14 @@ function confirmedNoNativeStacks(reason: NativeStackCapabilityReason | 'not-appl
   return reason === 'endpoint-missing' || reason === 'not-applicable'
 }
 
+/** Whether this failure is the host refusing the stacks resource itself. */
+function stacksResourceAbsent(error: unknown): boolean {
+  return (
+    error instanceof GitHubTransportError &&
+    (error.status === 404 || error.kind === 'not-found' || error.kind === 'unsupported')
+  )
+}
+
 /**
  * Proves the native stack the preview recorded still exists and still holds exactly the
  * pull requests it listed, before a single branch is pushed. A stack closed, unstacked, or
@@ -6000,10 +6017,29 @@ async function proveCapturedStackMembership(
     .map((layer) => layer.pullRequest)
     .filter((number): number is number => number !== null)
   const [owner, name] = operation.fullName.split('/')
-  const stacks = await listPullRequestStacks(owner, name, {
-    host: await repositoryHost(plan.repoPath),
-  })
+  let stacks: NativeStack[]
+  try {
+    stacks = await listPullRequestStacks(owner, name, {
+      host: await repositoryHost(plan.repoPath),
+    })
+  } catch (error) {
+    // A preview made against a host that refused the resource is still current
+    // when that host refuses it again, so an ordinary chain proceeds. Every
+    // other failure is this build's own answer not having arrived, and it is
+    // raised rather than read as confirmation.
+    if (confirmedNoNativeStacks(plan.nativeStacksReason) && stacksResourceAbsent(error)) return
+    throw error
+  }
   if (operation.stackNumber === null) {
+    // The listing just answered, so the host serves native stacked pull requests
+    // for this repository now. A preview that planned an ordinary chain was made
+    // before anything established that, and executing it would publish pull
+    // requests this host expects to be registered in a stack.
+    if (!plan.nativeStacksAvailable) {
+      throw new Error(
+        `Stack preview is stale: this host now answers for native stacks on this repository, so the preview must be reviewed again`,
+      )
+    }
     const owned = stacks.find((stack) =>
       stack.pullRequests.some((member) => numbers.includes(member.number)),
     )
@@ -6075,13 +6111,12 @@ async function runSubmitStack(
     }
   }
   const operation = await buildPublishOperation(plan.repoPath, plan, action)
-  // Membership is only skipped where the host confirmed it has no such
-  // resource, or the repository is not a GitHub one at all. Every other case —
-  // a refused credential, an unanswered host, a rejected request — is
-  // unestablished, and the proof is still run: it either establishes the
-  // membership or reports the recoverable failure that stopped it, rather than
-  // this build assuming the host has no native stacks.
-  if (!confirmedNoNativeStacks(plan.nativeStacksReason) || operation.stackNumber !== null) {
+  // The proof runs for every repository this build recognises as a GitHub one,
+  // including a host that refused the stacks resource when the preview was made:
+  // a host that started serving it since then must be caught before anything is
+  // published. A repository whose origin is not a GitHub host has nothing to
+  // prove, and its publish is already blocked for that reason.
+  if (plan.nativeStacksReason !== 'not-applicable') {
     await proveCapturedStackMembership(plan, operation)
   }
   await writePublishOperation(plan.repoPath, operation)

@@ -111,6 +111,7 @@ import { loadSettingsPolicy } from './settings-service'
 import {
   configuredHostContext,
   forgetHost,
+  GITHUB_DOTCOM_HOST,
   githubHostContext,
   probeGitHubHost,
   remoteHostContext,
@@ -365,12 +366,32 @@ async function openRepositoryOnHost(
 }
 
 /**
+ * The host and the generation it was selected in, read in one step.
+ *
+ * A host operation has to take both before it awaits anything: reading the host
+ * now and its generation after an await would let a host change in between pair
+ * an old host with a new generation, and the fence would then wave through a
+ * result that belongs to the host that is no longer selected.
+ */
+interface SelectedHost {
+  context: GitHubHostContext
+  generation: number
+}
+
+function captureSelectedHost(): SelectedHost {
+  return { context: configuredHost(), generation: hostGeneration }
+}
+
+/**
  * Runs host-scoped work that belongs to the host selected when it started. A
  * host change aborts it, and a late answer is refused rather than delivered, so
  * nothing addressed to a retired host reaches this host's callers.
  */
-async function forSelectedHost<T>(operation: (signal: AbortSignal) => Promise<T>): Promise<T> {
-  const generation = hostGeneration
+async function forSelectedHost<T>(
+  operation: (signal: AbortSignal) => Promise<T>,
+  selected: SelectedHost = captureSelectedHost(),
+): Promise<T> {
+  const { generation } = selected
   const controller = new AbortController()
   hostWork.add(controller)
   try {
@@ -875,9 +896,17 @@ async function changeSettings(
 async function currentDiagnostics(settings: AppSettings) {
   // A diagnostics report is the one place a person is told what the host does,
   // so the host is asked here rather than assumed from the build.
-  const githubHost = await probeGitHubHost(configuredHost(), { repository: null }).catch(
-    () => null,
-  )
+  // The same host, the same generation, and the same open repository the host
+  // report uses, so both surfaces describe one host the same way and a report
+  // that outlives a host change is refused rather than published.
+  const selected = captureSelectedHost()
+  const repository = activeRepository
+    ? await openRepositoryOnHost(activeRepository, selected.context)
+    : null
+  const githubHost = await forSelectedHost(
+    (signal) => probeGitHubHost(selected.context, { repository, signal }),
+    selected,
+  ).catch(() => null)
   return runDiagnostics({
     runtime: await gitRuntimeStatus(settingsFile()),
     account: await Promise.resolve(accountForConfiguredHost().status()).catch(() => null),
@@ -1037,7 +1066,7 @@ function installHandlers() {
             clone.parentDirectory,
             clone.directoryName,
             clone.shallow,
-            clone.host,
+            clone.host === GITHUB_DOTCOM_HOST ? undefined : clone.url,
           ),
         } satisfies CloneCommandPreview,
       }
@@ -1417,15 +1446,19 @@ function installHandlers() {
   // unknown rather than anything it was not shown to do.
   ipcMain.handle('github:host-status', async (event) => {
     validateSender(event)
-    const context = configuredHost()
+    // The host and its generation are taken before the origin is read, so a host
+    // change during that read cannot leave this answering with the retired host.
+    const selected = captureSelectedHost()
     // The open repository is probed only when it lives on the host being
     // reported, so a capability is never established from a repository that
     // belongs to some other host.
-    const repository = activeRepository ? await openRepositoryOnHost(activeRepository, context) : null
+    const repository = activeRepository
+      ? await openRepositoryOnHost(activeRepository, selected.context)
+      : null
     // The probe belongs to the host selected when it started: a host change
     // aborts it and refuses its answer, so a retired host's late result cannot
     // recreate the record that was just forgotten or overwrite a newer status.
-    return forSelectedHost((signal) => probeGitHubHost(context, { repository, signal }))
+    return forSelectedHost((signal) => probeGitHubHost(selected.context, { repository, signal }), selected)
   })
   ipcMain.handle('git-runtime', async (event) => {
     validateSender(event)

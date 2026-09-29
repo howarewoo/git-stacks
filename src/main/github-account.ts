@@ -157,6 +157,11 @@ export interface GitHubAccountOptions {
 
 function defaultSleep(milliseconds: number, signal?: AbortSignal): Promise<void> {
   const { promise, resolve } = Promise.withResolvers<void>()
+  // A signal that is already aborted has no event left to listen for, so the
+  // wait ends now rather than after the full interval. A caller that slept
+  // through a cancellation would go on to make a request for the host that was
+  // retired while it slept.
+  if (signal?.aborted) return promise
   const timer = setTimeout(resolve, milliseconds)
   signal?.addEventListener(
     'abort',

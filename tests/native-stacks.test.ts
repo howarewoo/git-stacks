@@ -12,6 +12,7 @@ import type { NativeStack, PublishLayerChoice, PullRequest } from '../src/shared
  * `git-core` (and the real `execFile`) in before this file's harness patches it. */
 const DOTCOM = {
   host: 'github.com',
+  sshHost: 'github.com',
   dotcom: true,
   webOrigin: 'https://github.com',
   apiBase: 'https://api.github.com',
@@ -1333,7 +1334,7 @@ test('publishStack propagates native stack probe failures instead of reporting c
   }
 })
 
-test('publishStack propagates a native stack probe timeout', async () => {
+test('a native stack probe timeout holds the publish instead of planning an ordinary chain', async () => {
   await withHarness(async (harness) => {
     await setupThreeBranches(harness)
     const inner = createGitHubApiDouble()
@@ -1352,7 +1353,10 @@ test('publishStack propagates a native stack probe timeout', async () => {
 
     const snapshot = await getSnapshot(harness.repo)
     const preview = await previewStack(harness.repo, snapshot, 'publish', 'feature/step-2')
-    assert.deepEqual(preview.blockers, [])
+    // A host that did not answer is not a host without native stacks, so nothing
+    // is planned as an ordinary chain and the preview names what is unestablished.
+    assert.match(preview.blockers.join('\n'), /could not be established/iu)
+    assert.doesNotMatch(preview.warnings.join('\n'), /does not serve native stacks/iu)
     await assert.rejects(
       runStackAction(harness.repo, {
         type: 'submitStack',
@@ -1364,7 +1368,7 @@ test('publishStack propagates a native stack probe timeout', async () => {
           'feature/step-3': { title: 'Step 3 PR', body: '', draft: false, updateBase: true },
         },
       }),
-      /did not complete within/iu,
+      /could not be established/iu,
     )
   })
 })

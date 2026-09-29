@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { mkdtempSync, readFileSync } from 'node:fs'
 import { createServer as createTlsServer, type Server } from 'node:https'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { delimiter as pathDelimiter, join } from 'node:path'
 import { test } from 'node:test'
 import {
   forgetHost,
@@ -15,6 +16,7 @@ import {
 import {
   DirectGitHubTransport,
   environmentTokenName,
+  GhGitHubTransport,
   type GitHubTransport,
 } from '../src/main/github-transport'
 import type { GitHubCredentialSource } from '../src/main/github-transport'
@@ -292,5 +294,56 @@ test('a probe that answers after its host was retired records nothing', async ()
   } finally {
     delete process.env.NODE_TLS_REJECT_UNAUTHORIZED
     await slow.close()
+  }
+})
+
+test('a real gh child is given this host’s token and no other credential', async () => {
+  // A real executable on PATH, spawned by the real transport. The script reports
+  // the environment it was actually started with, so what the child can see is
+  // observed rather than assumed.
+  const root = await mkdtemp(join(tmpdir(), 'git-stacks-gh-'))
+  const bin = join(root, 'bin')
+  await mkdir(bin)
+  const report = join(root, 'env.json')
+  await writeFile(
+    join(bin, 'gh'),
+    `#!/bin/sh\nenv > "${report}"\nprintf 'HTTP/2 200 OK\\r\\nx-ratelimit-limit: 5000\\r\\nx-ratelimit-remaining: 4998\\r\\nx-ratelimit-reset: 1800000000\\r\\nx-ratelimit-resource: core\\r\\n\\r\\n{}\n'\n`,
+    'utf8',
+  )
+  await chmod(join(bin, 'gh'), 0o755)
+  const original = process.env.PATH
+  process.env.PATH = `${bin}${pathDelimiter}${original ?? ''}`
+  try {
+    const transport = new GhGitHubTransport({
+      host: 'ghe.example.com',
+      apiUrl: 'https://ghe.example.com/api/v3',
+      env: {
+        GH_TOKEN: 'ambient-secret',
+        GITHUB_TOKEN: 'ambient-secret-two',
+        GH_ENTERPRISE_TOKEN: 'enterprise-secret',
+        GITHUB_ENTERPRISE_TOKEN: 'enterprise-secret-two',
+        GIT_STACKS_GITHUB_TOKEN: 'this-build-secret',
+        [environmentTokenName('ghe.example.com')]: 'ghe-secret',
+      },
+    })
+    await transport.rest({ path: 'meta' })
+    const seen: Record<string, string> = {}
+    for (const line of (await readFile(report, 'utf8')).split('\n')) {
+      const equals = line.indexOf('=')
+      if (equals > 0) seen[line.slice(0, equals)] = line.slice(equals + 1)
+    }
+    assert.equal(seen.GH_TOKEN, 'ghe-secret', 'the child is given this host’s own token')
+    for (const name of [
+      'GITHUB_TOKEN',
+      'GH_ENTERPRISE_TOKEN',
+      'GITHUB_ENTERPRISE_TOKEN',
+      'GIT_STACKS_GITHUB_TOKEN',
+      environmentTokenName('ghe.other.example.com'),
+    ]) {
+      assert.equal(seen[name], undefined, `${name} reached the child`)
+    }
+  } finally {
+    process.env.PATH = original
+    await rm(root, { recursive: true, force: true })
   }
 })

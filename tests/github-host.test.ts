@@ -2,6 +2,10 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { parseRemote } from '../src/main/git-core'
 import {
+  ghCloneCommandText,
+  summarizeRepository,
+} from '../src/main/github-repositories'
+import {
   forgetHost,
   GITHUB_DOTCOM_API_BASE,
   GITHUB_DOTCOM_WEB_ORIGIN,
@@ -9,6 +13,8 @@ import {
   probeGitHubHost,
   probeNativeStacksCapability,
   remoteHostContext,
+  validateGitHubHostInput,
+  configuredHostContext,
 } from '../src/main/github-host'
 import {
   GITHUB_DEVICE_VERIFICATION_URI,
@@ -22,6 +28,9 @@ import {
   environmentTokenName,
   GitHubTransportError,
   githubTransportForHost,
+  hostScopedEnvironment,
+  resolveGitHubToken,
+  setGitHubCredentialSource,
   type GitHubCredentialSource,
 } from '../src/main/github-transport'
 import {
@@ -243,7 +252,8 @@ test('a host that rejects this build’s GraphQL fields is reported as unknown w
   forgetHost()
   const context = githubHostContext('ghe-old.example.com')
   const api = 'https://ghe-old.example.com/api/v3'
-  const refusal = "Field 'bodyHTML' doesn't exist on type 'PullRequest'."
+  // A field this build actually sends, so naming it is a fact about the schema.
+  const refusal = "Field 'statusCheckRollup' doesn't exist on type 'PullRequest'."
   const { fetch, recorded } = hostFetch([
     [`${api}/`, { body: { current_user_url: `${api}/user` } }],
     [`${api}/meta`, { body: { installed_version: '3.9.0' } }],
@@ -273,7 +283,7 @@ test('a host that rejects this build’s GraphQL fields is reported as unknown w
   assert.notEqual(graphql.state, 'supported')
   assert.notEqual(graphql.state, 'unsupported')
   assert.ok(
-    graphql.detail.includes('bodyHTML'),
+    graphql.detail.includes('statusCheckRollup'),
     `the refusal lost the field it named: ${graphql.detail}`,
   )
   // REST still answered, so only the GraphQL schema is in question.
@@ -529,4 +539,161 @@ test('github.com keeps its own API origin and its own device-flow paths', async 
     assert.equal(entry.method, 'POST')
     assert.ok(entry.body?.includes('client_id=Iv1.dotcom'))
   }
+})
+
+test('the gh clone command names a host with a qualified URL, because gh has no host flag', () => {
+  // `gh repo clone` accepts a repository argument or a URL; a bare `owner/name`
+  // is resolved on github.com. Verified against the installed CLI: `--hostname`
+  // is rejected as an unknown flag, and the URL form is accepted.
+  const enterprise = ghCloneCommandText('acme/widgets', '/tmp/clone', 'widgets', false, 'https://ghe.example.com/acme/widgets.git')
+  assert.equal(enterprise, 'gh repo clone https://ghe.example.com/acme/widgets.git /tmp/clone/widgets')
+  assert.doesNotMatch(enterprise, /--hostname/u)
+
+  const dotcom = ghCloneCommandText('howarewoo/git-stacks', '/tmp/clone', 'git-stacks', true)
+  assert.equal(
+    dotcom,
+    'gh repo clone howarewoo/git-stacks /tmp/clone/git-stacks -- --depth 1',
+    'github.com keeps the bare name and the exact command it has always shown',
+  )
+})
+
+test('an SSH port is never read as a web port, and a web port never reaches SSH', () => {
+  // Git answers SSH on its own port; its web API is served from the web port.
+  // Reading one as the other aims requests at a port where nothing answers.
+  const ssh = parseRemote('ssh://git@ghe.example.com:2222/acme/widgets.git')
+  assert.equal(ssh?.host, 'ghe.example.com', 'the SSH port is not the web authority')
+  assert.equal(ssh?.sshHost, 'ghe.example.com')
+  assert.equal(githubHostContext(ssh!.host).apiBase, 'https://ghe.example.com/api/v3')
+
+  const scp = parseRemote('git@github.com:howarewoo/git-stacks.git')
+  assert.equal(scp?.host, 'github.com')
+  assert.equal(githubHostContext(scp!.host).apiBase, 'https://api.github.com')
+
+  const https = parseRemote('https://ghe.example.com:8443/acme/widgets.git')
+  assert.equal(https?.host, 'ghe.example.com:8443', 'a web port is kept for requests')
+  assert.equal(https?.sshHost, 'ghe.example.com', 'and is not written into an SSH remote')
+  const context = githubHostContext(https!.host)
+  assert.equal(context.apiBase, 'https://ghe.example.com:8443/api/v3')
+  assert.equal(context.graphqlUrl, 'https://ghe.example.com:8443/api/graphql')
+  assert.equal(
+    summarizeRepository(
+      { full_name: 'acme/widgets', name: 'widgets', owner: { login: 'acme' }, permissions: {} },
+      context,
+    )?.sshUrl,
+    'git@ghe.example.com:acme/widgets.git',
+    'the SSH clone URL carries no web port, which would name a path that does not exist',
+  )
+})
+
+test('a refusal that names a field this build does not query is not repeated anywhere', async () => {
+  forgetHost()
+  const context = githubHostContext('ghe-verbose.example.com')
+  const api = 'https://ghe-verbose.example.com/api/v3'
+  // A server chooses its own wording, and a name in that wording can be
+  // anything at all. It is this build's own field names that may be reported.
+  const refusal = "Field 'ghs_ABCDEFsecret' doesn't exist on type 'PullRequest'."
+  const { fetch } = hostFetch([
+    [`${api}/`, { body: { current_user_url: `${api}/user` } }],
+    [`${api}/meta`, { body: { installed_version: '3.9.0' } }],
+    [context.graphqlUrl, { body: { errors: [{ message: refusal }] } }],
+  ])
+  const status = await probeGitHubHost(context, {
+    transport: new DirectGitHubTransport({
+      host: context.host,
+      apiUrl: api,
+      graphqlUrl: context.graphqlUrl,
+      token: 'ghe-token',
+      env: {},
+      fetch,
+    }),
+  })
+  const graphql = capability(status, 'graphql')
+  assert.equal(graphql.state, 'unknown')
+  assert.doesNotMatch(graphql.detail, /ghs_ABCDEFsecret/u)
+  assert.doesNotMatch(graphql.detail, /doesn't exist/u)
+})
+
+test('two different hosts can never share one scoped token name', () => {
+  // Collapsing every separator to one underscore would give these two hosts the
+  // same name, and a token set for one would then be sent to the other.
+  const dotted = environmentTokenName('ghe.internal.example.com')
+  const dashed = environmentTokenName('ghe.internal-example.com')
+  assert.notEqual(dotted, dashed)
+  assert.notEqual(dotted, environmentTokenName('ghe-internal.example.com'))
+  // github.com keeps its own unscoped names and never a scoped one of its own.
+  assert.equal(environmentTokenName('github.com'), 'GIT_STACKS_GITHUB_TOKEN_GITHUB-DOT-COM')
+  // A token in one host's scope is invisible to every other host.
+  const env: NodeJS.ProcessEnv = { [dotted]: 'dotted-secret', [dashed]: 'dashed-secret' }
+  assert.equal(resolveGitHubToken(env, 'ghe.internal.example.com'), 'dotted-secret')
+  assert.equal(resolveGitHubToken(env, 'ghe.internal-example.com'), 'dashed-secret')
+  assert.equal(resolveGitHubToken(env, 'ghe.internal_example.com'), null)
+})
+
+test('a child process is given only the host its own credential came from', () => {
+  const scoped = hostScopedEnvironment(
+    {
+      PATH: '/usr/bin',
+      GH_TOKEN: 'ambient-secret',
+      GITHUB_TOKEN: 'ambient-secret-two',
+      GH_ENTERPRISE_TOKEN: 'enterprise-secret',
+      GITHUB_ENTERPRISE_TOKEN: 'enterprise-secret-two',
+      GIT_STACKS_GITHUB_TOKEN: 'this-build-secret',
+      [environmentTokenName('ghe.example.com')]: 'ghe-secret',
+      [environmentTokenName('ghe.other.example.com')]: 'other-secret',
+    },
+    'ghe.example.com',
+  )
+  assert.equal(scoped.PATH, '/usr/bin')
+  assert.equal(scoped.GH_TOKEN, 'ghe-secret', 'the child is given this host’s own token')
+  for (const name of [
+    'GITHUB_TOKEN',
+    'GH_ENTERPRISE_TOKEN',
+    'GITHUB_ENTERPRISE_TOKEN',
+    'GIT_STACKS_GITHUB_TOKEN',
+    environmentTokenName('ghe.other.example.com'),
+  ]) {
+    assert.equal(scoped[name], undefined, `${name} must not reach a child`)
+  }
+})
+
+test('a host on the default HTTPS port is one host, not two', () => {
+  assert.deepEqual(validateGitHubHostInput('ghe.example.com:443'), {
+    ok: true,
+    host: 'ghe.example.com',
+  })
+  assert.deepEqual(validateGitHubHostInput('github.com:443'), { ok: true, host: 'github.com' })
+  assert.equal(configuredHostContext('ghe.example.com:443').host, 'ghe.example.com')
+  assert.equal(configuredHostContext('ghe.example.com').host, 'ghe.example.com')
+  assert.equal(configuredHostContext('github.com:443').dotcom, true)
+  assert.equal(githubHostContext('ghe.example.com:443').apiBase, 'https://ghe.example.com/api/v3')
+})
+
+test('a host that signs in again is not handed the transport of the sign-in it retired', () => {
+  forgetHost()
+  const first: GitHubCredentialSource = {
+    host: 'ghe.example.com',
+    available: () => true,
+    current: async () => ({ origin: 'account', session: 's1', token: 'first' }),
+  }
+  const second: GitHubCredentialSource = {
+    host: 'ghe.example.com',
+    available: () => true,
+    current: async () => ({ origin: 'account', session: 's2', token: 'second' }),
+  }
+  setGitHubCredentialSource(first)
+  const a = githubTransportForHost('ghe.example.com', 'https://ghe.example.com/api/v3', {})
+  setGitHubCredentialSource(null)
+  setGitHubCredentialSource(second)
+  const b = githubTransportForHost('ghe.example.com', 'https://ghe.example.com/api/v3', {})
+  assert.notEqual(
+    a,
+    b,
+    'the transport cached for a retired sign-in is handed out again for the next one',
+  )
+  assert.equal(
+    githubTransportForHost('ghe.example.com', 'https://ghe.example.com/api/v3', {}),
+    b,
+    'a repeated call within one sign-in still reuses the transport',
+  )
+  setGitHubCredentialSource(null)
 })

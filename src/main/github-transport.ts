@@ -182,7 +182,32 @@ export function githubApiUrl(env: NodeJS.ProcessEnv = process.env): string {
 
 /** The environment variable that holds one host's own token. */
 export function environmentTokenName(host: string): string {
-  return `GIT_STACKS_GITHUB_TOKEN_${host.trim().toLowerCase().replace(/[^a-z0-9]+/gu, '_').toUpperCase()}`
+  return `GIT_STACKS_GITHUB_TOKEN_${encodeAuthority(host)}`
+}
+
+/**
+ * The host name as a suffix for an environment variable, in a way two different
+ * hosts can never share.
+ *
+ * Collapsing every separator to one underscore is not enough: `ghe.a.b.example`
+ * and `ghe.a-b.example` would both collapse to the same name, and a token set
+ * for one host would then be sent to the other. A host name is lower-case
+ * letters, digits, hyphens, dots, and at most one port, so the dot and the port
+ * are spelled in markers that a host name can never contain — a host name has no
+ * upper-case letters and no underscores — and each of them maps to exactly one
+ * host. Anything outside that alphabet is encoded so no two inputs can collide.
+ */
+function encodeAuthority(host: string): string {
+  const name = host.trim().toLowerCase()
+  let encoded = ''
+  for (const character of name) {
+    if (/[a-z0-9]/u.test(character)) encoded += character
+    else if (character === '-') encoded += '-'
+    else if (character === '.') encoded += '-DOT-'
+    else if (character === ':') encoded += '_PORT_'
+    else encoded += `_${character.codePointAt(0)!.toString(16).toUpperCase()}_`
+  }
+  return encoded.toUpperCase()
 }
 
 export function resolveGitHubToken(
@@ -238,9 +263,18 @@ export interface GitHubCredentialSource {
 }
 
 let credentialSource: GitHubCredentialSource | null = null
+/**
+ * Counts every credential this process has been given. A transport built for one
+ * sign-in is not the transport for the next, and a host that signs in, signs
+ * out, and signs in again must not be handed the transport that belonged to the
+ * sign-in it retired. The count is part of the cache key, so a returning host is
+ * given a new transport rather than the one it had before.
+ */
+let credentialGeneration = 0
 
 /** Installs the account credential for the process, or clears it on sign-out. */
 export function setGitHubCredentialSource(source: GitHubCredentialSource | null): void {
+  credentialGeneration += 1
   credentialSource = source
 }
 
@@ -798,6 +832,41 @@ export interface GhGitHubTransportOptions {
 }
 
 /** Optional fallback/diagnostic path: `gh api --include` supplies JSON and HTTP metadata. */
+/**
+ * The environment a host-scoped child process runs with: every unscoped GitHub
+ * credential removed, and only this host's own token put back under a name that
+ * says which host issued it.
+ */
+export function hostScopedEnvironment(
+  env: NodeJS.ProcessEnv,
+  host: string | null,
+): Record<string, string> {
+  const scoped: Record<string, string> = {}
+  for (const [name, value] of Object.entries(env)) {
+    if (typeof value !== 'string') continue
+    if (/^GIT_STACKS_GITHUB_TOKEN_/u.test(name)) {
+      if (host && name === environmentTokenName(host)) scoped[name] = value
+      continue
+    }
+    if (UNSCOPED_CREDENTIAL_ENV.has(name)) continue
+    scoped[name] = value
+  }
+  const token = host ? resolveGitHubToken(env, host) : null
+  // `gh` reads one of these two names. The token is this host's own, or the
+  // child is left with none rather than with someone else's.
+  if (token !== null) scoped.GH_TOKEN = token
+  return scoped
+}
+
+/** Credential variables that belong to no particular host and are never forwarded. */
+const UNSCOPED_CREDENTIAL_ENV = new Set([
+  'GH_TOKEN',
+  'GITHUB_TOKEN',
+  'GH_ENTERPRISE_TOKEN',
+  'GITHUB_ENTERPRISE_TOKEN',
+  'GIT_STACKS_GITHUB_TOKEN',
+])
+
 export class GhGitHubTransport implements GitHubTransport {
   readonly kind = 'gh' as const
   private readonly options: GhGitHubTransportOptions
@@ -837,10 +906,20 @@ export class GhGitHubTransport implements GitHubTransport {
         const child = execFile('gh', argv, {
           cwd: process.cwd(),
           env: {
-            ...process.env,
-            ...this.options.env,
             GH_PROMPT_DISABLED: '1',
             GIT_TERMINAL_PROMPT: '0',
+            // `gh` is given this host's own credential and nothing else. Every
+            // unscoped variable is a credential for whichever host the person
+            // last signed in to, and `gh` would send it to whichever host it is
+            // asked about — so none of them reaches a child that may be pointed
+            // at a host they were never issued by.
+            // Merged first, then scrubbed: the child keeps what the machine
+            // needs to run at all, and loses every credential that belongs to no
+            // host in particular.
+            ...hostScopedEnvironment(
+              { ...process.env, ...this.options.env },
+              this.options.host ?? null,
+            ),
           },
           timeout: options.timeoutMs ?? GITHUB_TIMEOUT_MS,
           signal: options.signal,
@@ -1112,7 +1191,7 @@ export function githubTransportForHost(
   const token = resolveGitHubToken(env, key)
   const source = credentialSource ?? null
   const available = source !== null && source.available() === true && source.host === key
-  const cacheKey = `${key}:${choice}:${apiBase}:${graphqlUrl ?? ''}:${githubApiVersion(env)}:${token ?? ''}:${source?.host ?? ''}:${available}`
+  const cacheKey = `${key}:${choice}:${apiBase}:${graphqlUrl ?? ''}:${githubApiVersion(env)}:${token ?? ''}:${source?.host ?? ''}:${available}:${credentialGeneration}`
   if (cached?.key === cacheKey) return cached.transport
   const direct = choice === 'direct' || (choice === 'auto' && (token !== null || available))
   const transport: GitHubTransport = direct

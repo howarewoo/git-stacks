@@ -42,6 +42,12 @@ const MAX_LABEL_LENGTH = 63
 export interface GitHubHostContext {
   /** Host name as it is compared, including a port when the host has one. */
   host: string
+  /**
+   * The same host without its web port, for Git's SSH transport. A web port is
+   * not an SSH port: a host served from 8443 is not answered on 8443 over SSH,
+   * so no SSH remote this build writes carries one.
+   */
+  sshHost: string
   dotcom: boolean
   webOrigin: string
   apiBase: string
@@ -113,7 +119,10 @@ export function validateGitHubHostInput(value: unknown): GitHubHostInput {
   if (host === GITHUB_DOTCOM_HOST && port && port !== '443') {
     return REFUSE('github.com does not take a port; leave it empty')
   }
-  return { ok: true, host: port ? `${host}:${port}` : host }
+  // Every origin this app builds is HTTPS, and 443 is what it uses when no port
+  // is named. Keeping `:443` would make the same host two hosts: a different
+  // credential scope, a different cache key, and a different origin check.
+  return { ok: true, host: port && port !== '443' ? `${host}:${port}` : host }
 }
 
 /** The transport that speaks for one host, and for no other. */
@@ -130,16 +139,35 @@ export function hostTransport(
   return githubTransportForHost(context.host, context.apiBase, env, graphqlUrl)
 }
 
+/**
+ * The host name as one name. Every origin this app builds is HTTPS, so the port
+ * it uses when none is named is 443: a name that spells it out is the same host,
+ * and treating it as another would give one host two credential scopes, two
+ * cache entries, and two different answers to whether it is the same host.
+ */
+export function canonicalHostName(host: string): string {
+  const name = host.trim().toLowerCase().replace(/\.$/u, '')
+  return name.endsWith(':443') ? name.slice(0, -':443'.length) : name
+}
+
 /** Where a GitHub host's web pages, REST API, and GraphQL endpoint live. */
 export function githubHostContext(host: string): GitHubHostContext {
-  const name = host.trim().toLowerCase()
+  const name = canonicalHostName(host)
   const dotcom = name === GITHUB_DOTCOM_HOST
   const webOrigin = dotcom ? GITHUB_DOTCOM_WEB_ORIGIN : `https://${name}`
   const apiBase = dotcom ? GITHUB_DOTCOM_API_BASE : `${webOrigin}/api/v3`
   // An enterprise host serves REST from `/api/v3` and GraphQL from `/api/graphql`;
   // github.com serves both from its API subdomain. Neither is derived from the other.
   const graphqlUrl = dotcom ? `${apiBase}/graphql` : `${webOrigin}/api/graphql`
-  return { host: name, dotcom, webOrigin, apiBase, graphqlUrl }
+  const colon = name.lastIndexOf(':')
+  return {
+    host: name,
+    sshHost: colon === -1 ? name : name.slice(0, colon),
+    dotcom,
+    webOrigin,
+    apiBase,
+    graphqlUrl,
+  }
 }
 
 /**
@@ -194,6 +222,41 @@ interface ProbeOutcome {
 }
 
 /**
+ * The GraphQL fields this build sends. A refusal that names one of these is a
+ * fact about the host's schema; a refusal that names anything else is a
+ * sentence this build did not write, and is not repeated anywhere it is stored.
+ */
+const QUERIED_FIELD_NAMES = new Set([
+  'assignees',
+  'author',
+  'baseRefName',
+  'body',
+  'changedFilesIfAvailable',
+  'closed',
+  'commits',
+  'createdAt',
+  'databaseId',
+  'headRefName',
+  'headRefOid',
+  'isCrossRepository',
+  'isDraft',
+  'labels',
+  'mergeable',
+  'mergeStateStatus',
+  'merged',
+  'mergedAt',
+  'number',
+  'oid',
+  'repository',
+  'reviewDecision',
+  'state',
+  'statusCheckRollup',
+  'title',
+  'updatedAt',
+  'url',
+])
+
+/**
  * Turns a refusal into what it actually was. A credential this build cannot
  * supply, and a host that never answered, are both reported as what they are:
  * neither is evidence that the host lacks the capability.
@@ -226,17 +289,29 @@ function outcomeFromError(error: unknown): ProbeOutcome {
         return { state: 'unknown', detail: 'the request was cancelled' }
       case 'invalid-response': {
         // A schema that does not carry a field this build queries is a fact
-        // about the host worth naming, and the only part of the refusal that is
-        // copied out is the field's own identifier, read from a fixed pattern.
-        const field =
+        // about the host worth naming — but the identifier is only ever
+        // reported when it is one this build actually sends. A server that
+        // answers with any wording at all can put anything in that position, so
+        // an unrecognised name is dropped rather than copied into a
+        // diagnostic, a capability, or a support bundle.
+        const named = QUERIED_FIELD_NAMES.has(
           /cannot query field ["']([A-Za-z_][A-Za-z0-9_]{0,63})["']/iu.exec(error.detail)?.[1] ??
-          /field ["']?([A-Za-z_][A-Za-z0-9_]{0,63})["']? (?:is )?(?:not|doesn'?t) exist/iu.exec(
-            error.detail,
-          )?.[1]
+            '',
+        )
+          ? /cannot query field ["']([A-Za-z_][A-Za-z0-9_]{0,63})["']/iu.exec(error.detail)?.[1]
+          : QUERIED_FIELD_NAMES.has(
+                /field ["']?([A-Za-z_][A-Za-z0-9_]{0,63})["']? (?:is )?(?:not|doesn'?t) exist/iu.exec(
+                  error.detail,
+                )?.[1] ?? '',
+              )
+            ? /field ["']?([A-Za-z_][A-Za-z0-9_]{0,63})["']? (?:is )?(?:not|doesn'?t) exist/iu.exec(
+                error.detail,
+              )?.[1]
+            : null
         return {
           state: 'unknown',
-          detail: field
-            ? `this host's schema does not have a field this build queries (${field})`
+          detail: named
+            ? `this host's schema does not have a field this build queries (${named})`
             : 'this host returned something this build could not read',
         }
       }
@@ -581,10 +656,16 @@ export async function probeGitHubHost(
             : stacksStateForReason(stacks.reason)
     set('native-stacks', { state: stacksState, detail: stacks.message })
   } else {
-    set('native-stacks', {
-      state: 'unknown',
-      detail: 'Open a repository on this host to establish native stack support.',
-    })
+    // A report built without a repository cannot speak for one, so it keeps
+    // whatever a repository on this host already established rather than
+    // replacing it with a question this report did not ask.
+    set(
+      'native-stacks',
+      observedCapability(context.host, 'native-stacks') ?? {
+        state: 'unknown',
+        detail: 'Open a repository on this host to establish native stack support.',
+      },
+    )
   }
 
   const status: GitHubHostStatus = {

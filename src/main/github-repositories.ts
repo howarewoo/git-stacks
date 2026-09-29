@@ -60,7 +60,7 @@ function cloneUrl(
   if (!candidate) return null
   if (kind === 'ssh') {
     return new RegExp(
-      `^(?:ssh://)?git@${host.host.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')}:[A-Za-z0-9._-]+/[A-Za-z0-9._-]+(?:\\.git)?$`,
+      `^(?:ssh://)?git@${host.sshHost.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')}:[A-Za-z0-9._-]+/[A-Za-z0-9._-]+(?:\\.git)?$`,
       'u',
     ).test(candidate)
       ? candidate
@@ -114,7 +114,7 @@ export function summarizeRepository(
     pushedAt: stringField(value.pushed_at),
     url: cloneUrl(value.html_url, 'https', host) ?? `${host.webOrigin}/${fullName}`,
     httpsUrl: cloneUrl(value.clone_url, 'https', host) ?? `${host.webOrigin}/${fullName}.git`,
-    sshUrl: cloneUrl(value.ssh_url, 'ssh', host) ?? `git@${host.host}:${fullName}.git`,
+    sshUrl: cloneUrl(value.ssh_url, 'ssh', host) ?? `git@${host.sshHost}:${fullName}.git`,
     canPush:
       permissions !== null &&
       (permissions.push === true || permissions.admin === true || permissions.maintain === true),
@@ -232,15 +232,17 @@ export function ghCloneCommandText(
   parentDirectory: string,
   directoryName: string,
   shallow: boolean,
-  host: string = GITHUB_DOTCOM_HOST,
+  url?: string,
 ): string {
   const destination = shellWord(cloneDestinationText(parentDirectory, directoryName))
   const gitFlags = shallow ? ' -- --depth 1' : ''
-  // `gh` is told which host owns the repository; without this it would resolve
-  // the name on github.com, which is a different repository on an enterprise host.
-  const hostname = host.trim().toLowerCase()
-  const hostFlag = hostname === GITHUB_DOTCOM_HOST ? '' : ` --hostname ${shellWord(hostname)}`
-  return `gh repo clone${hostFlag} ${fullName} ${destination}${gitFlags}`
+  // `gh repo clone` has no host flag: a bare `owner/name` is resolved on
+  // github.com, which on another host is a different repository. Its documented
+  // way to name a host is a qualified repository argument, so a clone off the
+  // default host is shown with that host's own URL. On github.com the bare name
+  // is kept, exactly as it has always been shown.
+  const target = url ? shellWord(url) : fullName
+  return `gh repo clone ${target} ${destination}${gitFlags}`
 }
 
 export interface DiscoveryOptions {

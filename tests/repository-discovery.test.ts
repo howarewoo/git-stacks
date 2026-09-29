@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
  * `git-core` (and the real `execFile`) in before this file's harness patches it. */
 const DOTCOM = {
   host: 'github.com',
+  sshHost: 'github.com',
   dotcom: true,
   webOrigin: 'https://github.com',
   apiBase: 'https://api.github.com',

@@ -313,7 +313,12 @@ export async function waitForDeviceAuthorization(
     if (request.signal?.aborted) throw new GitHubAppError('cancelled')
     if (request.now() >= request.expiresAt) throw new GitHubAppError('expired_token')
     await request.sleep(intervalSeconds * 1000, request.signal)
+    // A cancellation during the wait ends the poll. Without this the loop would
+    // go on to ask the host that was retired while it slept, and hand the answer
+    // to whoever is signing in now.
+    if (request.signal?.aborted) throw new GitHubAppError('cancelled')
     const result = await pollDeviceAuthorization(request)
+    if (request.signal?.aborted) throw new GitHubAppError('cancelled')
     if (result.status === 'authorized') return result.session
     // `slow_down` adds five seconds to the interval GitHub last required.
     if (result.status === 'slow-down') intervalSeconds += SLOW_DOWN_SECONDS

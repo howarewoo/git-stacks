@@ -225,8 +225,11 @@ and a request is never retried against a different path or a different host.
 Credentials are per host. A sign-in belongs to the host that issued it and is
 never sent to another, and an ambient `GIT_STACKS_GITHUB_TOKEN`, `GITHUB_TOKEN`,
 or `GH_TOKEN` is a `github.com` credential: another host only receives a token
-set in its own `GIT_STACKS_GITHUB_TOKEN_<HOST>`, where dots and hyphens in the
-host name are written as underscores. A credential exchange never follows a
+set in its own `GIT_STACKS_GITHUB_TOKEN_<HOST>`. The host name is spelled so
+that two different hosts can never produce the same variable: `github.com` is
+`GITHUB-DOT-COM`, and `ghe.example.com:8443` is
+`GHE-DOT-EXAMPLE-DOT-COM_PORT_8443`. A `gh` child process is given that host's
+own token and none of the unscoped ones. A credential exchange never follows a
 redirect, so a host cannot forward a refresh token somewhere else.
 
 | State             | Meaning                                                                   |

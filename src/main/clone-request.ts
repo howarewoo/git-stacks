@@ -59,7 +59,7 @@ export async function runCloneRequest(
       clone.parentDirectory,
       clone.directoryName,
       clone.shallow,
-      clone.host,
+      clone.host === 'github.com' ? undefined : clone.url,
     ),
   }
 }

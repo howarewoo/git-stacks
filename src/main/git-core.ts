@@ -35,15 +35,27 @@ export interface OperationState {
   operation: GitOperation | null
 }
 
+/** The host name an SSH remote is written with: a web port is not an SSH port. */
+function sshHostName(host: string): string {
+  const colon = host.lastIndexOf(':')
+  return colon === -1 ? host : host.slice(0, colon)
+}
+
 export interface ParsedRemote {
   /**
-   * The host that owns the remote, including an explicit port. A GitHub
-   * Enterprise Server host is commonly served from one, and dropping it would
-   * point every request for this repository at the default port of a host that
-   * does not answer there. An SSH remote's port is part of its host name and is
-   * likewise kept.
+   * The web authority that owns the remote: a host name, plus a port only when
+   * the remote is a web URL and named one. A GitHub Enterprise Server host is
+   * commonly served from a port, and dropping it would point every request for
+   * this repository at a port that does not answer. An SSH port is never part
+   * of it, because an SSH port is not a web port.
    */
   host: string
+  /**
+   * The host name for Git's own SSH transport, with no web port on it. A host
+   * served from port 8443 is not served from port 8443 over SSH, and writing
+   * that port into an SSH remote would name a path that does not exist.
+   */
+  sshHost: string
   owner: string
   name: string
   fullName: string
@@ -685,8 +697,16 @@ export function parseRemote(urlValue: string | null): ParsedRemote | null {
       remotePath = value.slice(separator + 1)
     } else {
       const parsed = new URL(value)
-      // `host` keeps an explicit port: it is the same host the user configured.
-      host = parsed.host
+      if (parsed.protocol === 'ssh:') {
+        // An SSH port is the port Git answers on, never the port its web API is
+        // served from. Keeping it in the host would point every API request for
+        // this repository at a port where nothing serves one.
+        host = parsed.hostname
+      } else {
+        // A web remote keeps its explicit port: that is the same authority the
+        // user configured, and dropping it would aim requests at another port.
+        host = parsed.host
+      }
       remotePath = parsed.pathname
     }
   } catch {
@@ -699,7 +719,13 @@ export function parseRemote(urlValue: string | null): ParsedRemote | null {
   }
   const owner = segments[segments.length - 2]
   const name = segments[segments.length - 1]
-  return { host: host.toLowerCase(), owner, name, fullName: `${owner}/${name}` }
+  return {
+    host: host.toLowerCase(),
+    sshHost: sshHostName(host.toLowerCase()),
+    owner,
+    name,
+    fullName: `${owner}/${name}`,
+  }
 }
 
 export async function getConfigValue(

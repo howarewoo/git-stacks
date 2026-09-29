@@ -1000,6 +1000,8 @@ export async function loadRepositoryNativeStacks(
       message: `${host.host} serves native stacks; ${stacks.length} stack${stacks.length === 1 ? '' : 's'}`,
     }
   } catch (error) {
+    // A cancellation is this build stopping, not a fact about the host, and it
+    // is raised rather than recorded as a host that did not answer.
     if (signal?.aborted || isCancelled(error)) throw error
     return {
       available: false,
