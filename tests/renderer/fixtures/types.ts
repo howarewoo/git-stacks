@@ -26,6 +26,9 @@ export type FixtureCall =
   | 'gitRuntimeStatus'
   | 'setSystemGit'
   | 'cancel'
+  | 'searchIssues'
+  | 'pullRequestIssueLinks'
+  | 'previewIssueLink'
 
 /** One entry of the ordered {@link FixtureControl.calls} log. */
 export interface FixtureCallRecord {

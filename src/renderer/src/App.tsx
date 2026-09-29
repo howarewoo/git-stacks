@@ -40,6 +40,7 @@ import type {
   DesktopAPI,
   GitAction,
   GitRuntimeStatus,
+  LinkedIssue,
   PullRequest,
   RecentRepository,
   RepositorySnapshot,
@@ -507,6 +508,33 @@ function App() {
     if (!snapshot || !selectedBranch) return null
     return selectedBranch.pr
   }, [selectedBranch, snapshot])
+  const [selectedPrIssueLinks, setSelectedPrIssueLinks] = React.useState<LinkedIssue[]>([])
+  const [selectedPrIssueLinksLoading, setSelectedPrIssueLinksLoading] = React.useState(false)
+
+  React.useEffect(() => {
+    if (!selectedPullRequest) {
+      setSelectedPrIssueLinks([])
+      setSelectedPrIssueLinksLoading(false)
+      return
+    }
+    let active = true
+    setSelectedPrIssueLinksLoading(true)
+    desktop
+      ?.pullRequestIssueLinks?.(selectedPullRequest.number)
+      .then((res) => {
+        if (!active) return
+        setSelectedPrIssueLinks(res?.links ?? [])
+        setSelectedPrIssueLinksLoading(false)
+      })
+      .catch(() => {
+        if (!active) return
+        setSelectedPrIssueLinks([])
+        setSelectedPrIssueLinksLoading(false)
+      })
+    return () => {
+      active = false
+    }
+  }, [selectedPullRequest?.number, snapshot])
 
   const branchByName = React.useMemo(
     () => indexBranchesByParentName(snapshot?.branches ?? []),
@@ -1873,6 +1901,41 @@ function App() {
                   <span>
                     {selectedPullRequest.head} → {selectedPullRequest.base}
                   </span>
+                </div>
+                <div className="pr-linked-issues-detail py-1">
+                  <div className="flex items-center justify-between text-xs text-[var(--gs-semantic-text-secondary)] font-medium mb-1">
+                    <span>Linked issues</span>
+                    {selectedPrIssueLinksLoading ? <span>Loading…</span> : null}
+                  </div>
+                  {selectedPrIssueLinks.length > 0 ? (
+                    <div className="flex flex-col gap-1.5">
+                      {selectedPrIssueLinks.map((issue) => (
+                        <div
+                          key={issue.number}
+                          className="flex items-center justify-between gap-2 p-1.5 rounded bg-[var(--gs-semantic-surface-raised)] border border-[var(--gs-semantic-border-subtle)] text-xs"
+                        >
+                          <div className="flex items-center gap-1.5 min-w-0">
+                            <Badge variant={issue.state === 'OPEN' ? 'success' : 'secondary'}>
+                              {issue.state.toLowerCase()}
+                            </Badge>
+                            <Badge variant={issue.relation === 'closing' ? 'accent' : 'outline'}>
+                              {issue.relation === 'closing' ? 'closes on merge' : 'related'}
+                            </Badge>
+                            <button
+                              type="button"
+                              className="truncate font-medium text-[var(--gs-semantic-text-primary)] hover:underline text-left bg-transparent border-none p-0 cursor-pointer"
+                              title={issue.title}
+                              onClick={() => issue.url && desktop?.openExternal(issue.url)}
+                            >
+                              #{issue.number} {issue.title}
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : !selectedPrIssueLinksLoading ? (
+                    <p className="text-xs text-[var(--gs-semantic-text-muted)] m-0">No linked issues.</p>
+                  ) : null}
                 </div>
                 <Button
                   onClick={() =>

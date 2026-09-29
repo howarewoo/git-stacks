@@ -1,5 +1,5 @@
 import * as React from 'react'
-import { ExternalLink, LoaderCircle } from 'lucide-react'
+import { ExternalLink, Link2, LoaderCircle, Search, Trash2 } from 'lucide-react'
 import type {
   Branch,
   Commit,
@@ -12,6 +12,9 @@ import type {
   RepositorySnapshot,
   StackKind,
   StackPreview,
+  IssueLinkRelation,
+  LinkedIssue,
+  RepositoryIssue,
 } from '../../../shared/types'
 import { actionBlockReason, stashRemovalBlockReason } from '../../../shared/capabilities'
 import { Button } from './ui/button'
@@ -128,7 +131,427 @@ export function previewIdentity(data: WorkflowData): string | null {
 export type WorkflowStackAPI = Pick<
   DesktopAPI,
   'stackPreview' | 'submitStackProgress' | 'onSubmitStackProgress'
->
+> &
+  Partial<
+    Pick<
+      DesktopAPI,
+      'searchIssues' | 'pullRequestIssueLinks' | 'previewIssueLink' | 'pullRequest'
+    >
+  >
+
+interface PrLinkedIssuesSectionProps {
+  pr: PullRequest & { body: string }
+  onPrUpdate: (updated: PullRequest & { body: string }) => void
+  disabled: boolean
+  hasFormEdits: boolean
+  runAction: (action: GitAction, label: string) => Promise<boolean>
+  stackApi: WorkflowStackAPI
+}
+
+function PrLinkedIssuesSection({
+  pr,
+  onPrUpdate,
+  disabled,
+  hasFormEdits,
+  runAction,
+  stackApi,
+}: PrLinkedIssuesSectionProps) {
+  const [links, setLinks] = React.useState<LinkedIssue[]>([])
+  const [loading, setLoading] = React.useState(false)
+  const [query, setQuery] = React.useState('')
+  const [searching, setSearching] = React.useState(false)
+  const [searchResults, setSearchResults] = React.useState<RepositoryIssue[]>([])
+  const [searchMessage, setSearchMessage] = React.useState<string | null>(null)
+  const [pendingUnlink, setPendingUnlink] = React.useState<LinkedIssue | null>(null)
+  const [pendingClosingLink, setPendingClosingLink] = React.useState<RepositoryIssue | null>(null)
+  const [actionBusy, setActionBusy] = React.useState(false)
+  const [statusMessage, setStatusMessage] = React.useState<string | null>(null)
+
+  const loadLinks = React.useCallback(async () => {
+    setLoading(true)
+    try {
+      const res = await stackApi.pullRequestIssueLinks?.(pr.number)
+      setLinks(res?.links ?? [])
+      if (res?.message) {
+        setStatusMessage(res.message)
+      }
+    } catch {
+      setLinks([])
+    } finally {
+      setLoading(false)
+    }
+  }, [pr.number, stackApi])
+
+  React.useEffect(() => {
+    void loadLinks()
+  }, [loadLinks])
+
+  const handleSearch = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault()
+    if (!query.trim()) {
+      setSearchResults([])
+      setSearchMessage(null)
+      return
+    }
+    setSearching(true)
+    setSearchMessage(null)
+    try {
+      const res = await stackApi.searchIssues?.(query.trim())
+      setSearchResults(res?.issues ?? [])
+      if (res?.message) {
+        setSearchMessage(res.message)
+      } else if (res?.issues && res.issues.length === 0) {
+        setSearchMessage('No accessible issues found matching this query.')
+      }
+    } catch {
+      setSearchResults([])
+      setSearchMessage('Failed to search issues.')
+    } finally {
+      setSearching(false)
+    }
+  }
+
+  const handleLinkContextual = async (issue: RepositoryIssue) => {
+    setActionBusy(true)
+    setStatusMessage(null)
+    try {
+      const ok = await runAction(
+        {
+          type: 'linkIssue',
+          prNumber: pr.number,
+          issueNumber: issue.number,
+          relation: 'contextual',
+        },
+        `Link issue #${issue.number} as related`,
+      )
+      if (ok) {
+        await loadLinks()
+      }
+    } finally {
+      setActionBusy(false)
+    }
+  }
+
+  const handleConfirmCloseWhenMerged = async (issue: RepositoryIssue) => {
+    setActionBusy(true)
+    setStatusMessage(null)
+    try {
+      const ok = await runAction(
+        {
+          type: 'linkIssue',
+          prNumber: pr.number,
+          issueNumber: issue.number,
+          relation: 'closing',
+          expectedBody: pr.body,
+        },
+        `Add closing link for issue #${issue.number}`,
+      )
+      if (ok) {
+        setPendingClosingLink(null)
+        if (stackApi.pullRequest) {
+          const fresh = await stackApi.pullRequest(pr.number)
+          onPrUpdate(fresh)
+        }
+        await loadLinks()
+      }
+    } finally {
+      setActionBusy(false)
+    }
+  }
+
+  const handleUnlink = async (issue: LinkedIssue) => {
+    if (issue.relation === 'closing') {
+      setPendingUnlink(issue)
+      return
+    }
+    setActionBusy(true)
+    setStatusMessage(null)
+    try {
+      const ok = await runAction(
+        {
+          type: 'unlinkIssue',
+          prNumber: pr.number,
+          issueNumber: issue.number,
+          relation: 'contextual',
+        },
+        `Remove local link to issue #${issue.number}`,
+      )
+      if (ok) {
+        await loadLinks()
+      }
+    } finally {
+      setActionBusy(false)
+    }
+  }
+
+  const handleConfirmUnlinkClosing = async (issue: LinkedIssue) => {
+    setActionBusy(true)
+    setStatusMessage(null)
+    try {
+      const ok = await runAction(
+        {
+          type: 'unlinkIssue',
+          prNumber: pr.number,
+          issueNumber: issue.number,
+          relation: 'closing',
+          expectedBody: pr.body,
+        },
+        `Remove closing reference for issue #${issue.number}`,
+      )
+      if (ok) {
+        setPendingUnlink(null)
+        if (stackApi.pullRequest) {
+          const fresh = await stackApi.pullRequest(pr.number)
+          onPrUpdate(fresh)
+        }
+        await loadLinks()
+      }
+    } finally {
+      setActionBusy(false)
+    }
+  }
+
+  const linkedNumbers = new Set(links.map((l) => l.number))
+
+  return (
+    <div className="workflow-section border-t border-[var(--gs-semantic-border-subtle)] pt-3 mt-3">
+      <div className="flex items-center justify-between mb-2">
+        <div className="flex items-center gap-2">
+          <Link2 className="size-4 text-[var(--gs-semantic-text-secondary)]" />
+          <strong className="text-sm font-semibold">Linked issues</strong>
+          {links.length > 0 ? (
+            <Badge variant="secondary">
+              {links.length}
+            </Badge>
+          ) : null}
+        </div>
+        {loading ? (
+          <span className="text-xs text-[var(--gs-semantic-text-muted)] flex items-center gap-1">
+            <LoaderCircle className="size-3 animate-spin" /> Loading…
+          </span>
+        ) : null}
+      </div>
+
+      {statusMessage ? (
+        <p className="text-xs text-[var(--gs-semantic-text-secondary)] mb-2">{statusMessage}</p>
+      ) : null}
+
+      {links.length > 0 ? (
+        <div className="flex flex-col gap-1.5 mb-3">
+          {links.map((link) => (
+            <div
+              key={link.number}
+              className="flex items-center justify-between gap-2 p-2 rounded bg-[var(--gs-semantic-surface-raised)] border border-[var(--gs-semantic-border-subtle)] text-xs"
+            >
+              <div className="flex items-center gap-1.5 min-w-0">
+                <Badge variant={link.state === 'OPEN' ? 'success' : 'secondary'}>
+                  {link.state.toLowerCase()}
+                </Badge>
+                <Badge variant={link.relation === 'closing' ? 'accent' : 'outline'}>
+                  {link.relation === 'closing' ? 'closes on merge' : 'related'}
+                </Badge>
+                <span className="font-medium truncate" title={link.title}>
+                  #{link.number} {link.title}
+                </span>
+              </div>
+              <Button
+                size="sm"
+                variant="ghost"
+                disabled={disabled || actionBusy}
+                tooltip={`Remove ${link.relation === 'closing' ? 'closing keyword from PR description' : 'local related link'}`}
+                onClick={() => handleUnlink(link)}
+              >
+                <Trash2 className="size-3 text-[var(--gs-semantic-text-muted)] hover:text-[var(--gs-semantic-color-danger-fg)]" />
+              </Button>
+            </div>
+          ))}
+        </div>
+      ) : !loading ? (
+        <p className="text-xs text-[var(--gs-semantic-text-muted)] mb-3">
+          No issues linked to this pull request.
+        </p>
+      ) : null}
+
+      {pendingUnlink ? (
+        <div className="p-3 mb-3 rounded bg-[var(--gs-semantic-surface-raised)] border border-[var(--gs-semantic-border-essential)] text-xs">
+          <p className="font-medium text-[var(--gs-semantic-text-primary)] mb-1">
+            Remove closing reference for issue #{pendingUnlink.number}?
+          </p>
+          <p className="text-[var(--gs-semantic-text-secondary)] mb-2">
+            This will update the pull request description to remove{' '}
+            <code className="px-1 py-0.5 rounded bg-[var(--gs-semantic-surface-sunken)]">
+              Closes #{pendingUnlink.number}
+            </code>
+            .
+          </p>
+          {hasFormEdits ? (
+            <div className="p-2 mb-2 rounded bg-[var(--gs-semantic-surface-sunken)] text-[var(--gs-semantic-color-warning-fg)] text-xs">
+              You have unsaved edits in the pull request description above. Save your description before removing closing issue links.
+            </div>
+          ) : null}
+          <div className="flex items-center gap-2">
+            <Button
+              size="sm"
+              variant="secondary"
+              disabled={actionBusy}
+              onClick={() => setPendingUnlink(null)}
+            >
+              Cancel
+            </Button>
+            <Button
+              size="sm"
+              variant="danger"
+              disabled={disabled || actionBusy || hasFormEdits}
+              onClick={() => handleConfirmUnlinkClosing(pendingUnlink)}
+            >
+              {actionBusy ? (
+                <>
+                  <LoaderCircle className="size-3 animate-spin mr-1" />
+                  Removing…
+                </>
+              ) : (
+                'Confirm removal'
+              )}
+            </Button>
+          </div>
+        </div>
+      ) : null}
+
+      {pendingClosingLink ? (
+        <div className="p-3 mb-3 rounded bg-[var(--gs-semantic-surface-raised)] border border-[var(--gs-semantic-border-essential)] text-xs">
+          <p className="font-medium text-[var(--gs-semantic-text-primary)] mb-1">
+            Close #{pendingClosingLink.number} when pull request is merged?
+          </p>
+          <p className="text-[var(--gs-semantic-text-secondary)] mb-2">
+            This will append{' '}
+            <code className="px-1 py-0.5 rounded bg-[var(--gs-semantic-surface-sunken)]">
+              Closes #{pendingClosingLink.number}
+            </code>{' '}
+            to the pull request description on GitHub.
+          </p>
+          {hasFormEdits ? (
+            <div className="p-2 mb-2 rounded bg-[var(--gs-semantic-surface-sunken)] text-[var(--gs-semantic-color-warning-fg)] text-xs">
+              You have unsaved edits in the pull request description above. Save your description before adding closing issue links.
+            </div>
+          ) : null}
+          <div className="flex items-center gap-2">
+            <Button
+              size="sm"
+              variant="secondary"
+              disabled={actionBusy}
+              onClick={() => setPendingClosingLink(null)}
+            >
+              Cancel
+            </Button>
+            <Button
+              size="sm"
+              variant="accent"
+              disabled={disabled || actionBusy || hasFormEdits}
+              onClick={() => handleConfirmCloseWhenMerged(pendingClosingLink)}
+            >
+              {actionBusy ? (
+                <>
+                  <LoaderCircle className="size-3 animate-spin mr-1" />
+                  Updating PR…
+                </>
+              ) : (
+                'Confirm close when merged'
+              )}
+            </Button>
+          </div>
+        </div>
+      ) : null}
+
+      <div className="space-y-2">
+        <span className="text-xs font-medium text-[var(--gs-semantic-text-secondary)]">
+          Search and link issues
+        </span>
+        <div className="flex items-center gap-2">
+          <Input
+            value={query}
+            placeholder="Search issues by number or title…"
+            disabled={disabled || actionBusy}
+            onChange={(e) => setQuery(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                e.preventDefault()
+                void handleSearch()
+              }
+            }}
+          />
+          <Button
+            size="sm"
+            variant="secondary"
+            disabled={disabled || searching || actionBusy || !query.trim()}
+            onClick={() => void handleSearch()}
+          >
+            {searching ? (
+              <LoaderCircle className="size-3.5 animate-spin" />
+            ) : (
+              <Search className="size-3.5" />
+            )}
+            Search
+          </Button>
+        </div>
+
+        {searchMessage ? (
+          <p className="text-xs text-[var(--gs-semantic-text-muted)] m-0">{searchMessage}</p>
+        ) : null}
+
+        {searchResults.length > 0 ? (
+          <div className="flex flex-col gap-1.5 max-h-48 overflow-y-auto p-1.5 rounded border border-[var(--gs-semantic-border-subtle)] bg-[var(--gs-semantic-surface-sunken)]">
+            {searchResults.map((issue) => {
+              const isAlreadyLinked = linkedNumbers.has(issue.number)
+              return (
+                <div
+                  key={issue.number}
+                  className="flex items-center justify-between gap-2 p-1.5 rounded bg-[var(--gs-semantic-surface-raised)] border border-[var(--gs-semantic-border-subtle)] text-xs"
+                >
+                  <div className="flex items-center gap-1.5 min-w-0">
+                    <Badge variant={issue.state === 'OPEN' ? 'success' : 'secondary'}>
+                      {issue.state?.toLowerCase() ?? 'open'}
+                    </Badge>
+                    <span className="font-medium truncate" title={issue.title}>
+                      #{issue.number} {issue.title}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-1 flex-shrink-0">
+                    {isAlreadyLinked ? (
+                      <Badge variant="outline">
+                        Linked
+                      </Badge>
+                    ) : (
+                      <>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          disabled={disabled || actionBusy}
+                          tooltip="Link locally as related without modifying the pull request description"
+                          onClick={() => handleLinkContextual(issue)}
+                        >
+                          Link related
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="accent"
+                          disabled={disabled || actionBusy}
+                          tooltip="Insert closing keyword into PR description to close this issue when PR is merged"
+                          onClick={() => setPendingClosingLink(issue)}
+                        >
+                          Close when merged
+                        </Button>
+                      </>
+                    )}
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        ) : null}
+      </div>
+    </div>
+  )
+}
 
 export function WorkflowDialog({
   request,
@@ -1119,6 +1542,21 @@ export function WorkflowDialog({
                       markEdited()
                       setPrDraft(event.target.checked)
                     }}
+                  />
+                  <PrLinkedIssuesSection
+                    pr={pr}
+                    onPrUpdate={(updated) => {
+                      setPr(updated)
+                      setPrTitle(updated.title)
+                      setBody(updated.body)
+                      setPrDraft(updated.draft)
+                      hasEditedRef.current = false
+                      setEdited(false)
+                    }}
+                    disabled={busy || pr.state === 'MERGED'}
+                    hasFormEdits={edited}
+                    runAction={runAction}
+                    stackApi={stackApi}
                   />
                   {pr.state === 'OPEN' &&
                   localBranches.some(
