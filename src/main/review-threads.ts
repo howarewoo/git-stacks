@@ -31,6 +31,7 @@ import {
   recordUncertainWrite,
   retireSettledWrites,
 } from './review-drafts'
+import { markReviewSnapshotReviewed } from './review-snapshots'
 import { GitHubTransportError, githubTransport } from './github-transport'
 import {
   originRemote,
@@ -1002,10 +1003,21 @@ export async function submitReview(
   // settled records stay where they are: the view has not necessarily dropped
   // these drafts yet, and a crash before it does must not cost the evidence.
   if (undelivered.length === 0) {
+    const settledReview = guard.settled[0]
+    if (files.comparison.headOid) {
+      await markReviewSnapshotReviewed(
+        repoPath,
+        repo,
+        permissions.viewer,
+        number,
+        files.comparison.headOid,
+        settledReview?.id ?? null,
+      ).catch(() => {})
+    }
     return {
-      id: guard.settled[0]?.id ?? attempt,
-      state: guard.settled[0]?.state ?? '',
-      url: guard.settled[0]?.url ?? null,
+      id: settledReview?.id ?? attempt,
+      state: settledReview?.state ?? '',
+      url: settledReview?.url ?? null,
       delivered: [...delivered],
     }
   }
@@ -1093,6 +1105,16 @@ export async function submitReview(
     // would leave the newly posted comments in the view, and submitting again
     // would post them a second time.
     for (const id of postedIds) delivered.add(id)
+    if (files.comparison.headOid) {
+      await markReviewSnapshotReviewed(
+        repoPath,
+        repo,
+        permissions.viewer,
+        number,
+        files.comparison.headOid,
+        settledId,
+      ).catch(() => {})
+    }
     return {
       id: settledId,
       state: settledState,

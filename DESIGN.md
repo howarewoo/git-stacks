@@ -533,6 +533,20 @@ the range alone, or the range and a small whole number — remain opaque strings
 compared only with each other, so stored drafts stay readable and submit as
 themselves, and none of those names can be minted again.
 
+
+### Review update snapshots and historical comparison
+
+A pull request's versions on GitHub are not a complete version control history: GitHub does not maintain permanent version objects for arbitrary force-pushes, and an app that was not running cannot know what commits previously occupied a pull request branch. The review workspace therefore persists observed PR head snapshots with timestamps, observation counts, and review associations, without claiming a complete version history the app never saw.
+
+A snapshot record is scoped strictly by repository identity (`owner/name`), pull request number, and authenticated viewer login. One account's review must never become another account's anchor. Identical heads observed across repeated reads deduplicate into a single snapshot entry, updating the observation count and last-seen timestamp rather than appending duplicate entries. A force-push or rebase moves the head SHA and creates a new snapshot entry.
+
+When the workspace first opens a pull request that already has multiple commits, it detects that earlier updates occurred before the app ever saw the branch and presents an explicit gap banner stating that earlier revisions were never observed and cannot be compared.
+
+Any observed historical snapshot can be compared against the current pull request head. The "Changes since reviewed" shortcut selects the most recent head the current user actually reviewed or had an adopted review settled for. The comparison faithfully uses GitHub's two-endpoint compare API. When in historical comparison mode, the workspace offers a "Hide unchanged files" filter that excludes files whose contents did not change between the historical snapshot and the current head, allowing reviewers to focus exclusively on what changed since their last review.
+
+Missing historical commits (garbage-collected after force-push or deleted remote branches) and lost merge bases (unrelated histories after an external rebase) produce an explicit unavailable state naming the exact failure reason, with no fabricated fallback diff. In historical comparison mode, draft commenting and review submission are disabled with an explanatory banner, preventing accidental comments on historical revisions.
+
+Snapshot metadata contains strictly object IDs, branch names, timestamps, counts, and review confirmation IDs — zero source code, diffs, or comments. Clearing local history wipes the journal beside the repository with zero GitHub mutations.
 The guard covers an unresolved *comment*, not an attempt id. Changing the
 decision, or adding one more pending draft, produces a different attempt over
 the same comments, and matching on the whole payload would let those comments be

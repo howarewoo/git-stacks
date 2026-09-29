@@ -33,6 +33,7 @@ import {
   readReviewHeadline,
 } from './review'
 import { readViewedRecord, writeViewedRecord } from './review-viewed'
+import { clearReviewHistory, readReviewHistory, readReviewHistoryDiff } from './review-history'
 import { readReviewDrafts, writeReviewDrafts } from './review-drafts'
 import {
   readReviewPermissions,
@@ -350,6 +351,13 @@ function requireLineRef(value: unknown): ReviewLineRef {
     context: ref.context,
   }
 }
+function requireCommitOid(value: unknown): string {
+  if (typeof value !== 'string' || !/^[0-9a-f]{4,64}$/i.test(value)) {
+    throw new Error('Invalid commit identifier.')
+  }
+  return value
+}
+
 
 function requireDraft(value: unknown): ReviewDraft {
   if (typeof value !== 'object' || value === null) throw new Error('Invalid review comment draft.')
@@ -776,6 +784,35 @@ function installHandlers() {
         Array.isArray(value) ? value.map(requireDraft) : [],
         signal,
       ),
+    )
+  })
+  ipcMain.handle('repository:review-history', (event, number: unknown, requestId?: unknown) => {
+    validateSender(event)
+    return readRepository(
+      (root, signal) => readReviewHistory(root, requirePullRequestNumber(number), signal),
+      requestIdClaim(requestId, 'review-history'),
+    )
+  })
+  ipcMain.handle(
+    'repository:review-history-diff',
+    (event, number: unknown, fromOid: unknown, requestId?: unknown) => {
+      validateSender(event)
+      return readRepository(
+        (root, signal) =>
+          readReviewHistoryDiff(
+            root,
+            requirePullRequestNumber(number),
+            requireCommitOid(fromOid),
+            signal,
+          ),
+        requestIdClaim(requestId, 'review-history-diff'),
+      )
+    },
+  )
+  ipcMain.handle('repository:review-clear-history', (event, number: unknown) => {
+    validateSender(event)
+    return readRepository((root, signal) =>
+      clearReviewHistory(root, requirePullRequestNumber(number), signal),
     )
   })
 

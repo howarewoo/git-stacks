@@ -2961,6 +2961,49 @@ textarea.conflict-content {
   font-size: var(--gs-semantic-type-metadata-size);
 }
 
+/* The snapshot history strip provides the shortcut to compare against
+   reviewed heads and choose any observed revision without leaving the workspace. */
+.review-history {
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  padding: 8px 18px;
+  border-bottom: 1px solid var(--gs-semantic-border-decorative);
+  background: var(--gs-semantic-surface-content);
+}
+
+.review-history-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.review-history-select-label {
+  display: block;
+  min-width: 220px;
+}
+
+.review-history-comparing {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.review-history-unchanged-note {
+  color: var(--gs-semantic-text-muted);
+  font-size: var(--gs-semantic-type-metadata-size);
+}
+
+.review-history-gap {
+  flex: 1 1 100%;
+  margin: 4px 0 0;
+  font-size: var(--gs-semantic-type-metadata-size);
+}
+
 .review-body {
   display: grid;
   min-height: 0;

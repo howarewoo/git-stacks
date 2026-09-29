@@ -21,6 +21,7 @@ import {
   conflictRegions,
   parseConflictSegments,
 } from '../../../src/shared/conflict'
+import type { ReviewHistoryDiff } from '../../../src/shared/review-snapshots'
 import type { ReviewHeadline, ReviewViewedRecord } from '../../../src/shared/review'
 import {
   fileViewFixtures,
@@ -37,7 +38,7 @@ import {
   restackPreview,
   syncPreview,
 } from '../../fixtures/workflow-scenarios'
-import { reviewCommits, reviewFileSet, reviewPermissions, reviewRail, reviewThreadSet, stackMember } from './review'
+import { reviewCommits, reviewFileSet, reviewPermissions, reviewRail, reviewThreadSet, stackMember, textFile } from './review'
 import type { ReviewFile, ReviewLine, ReviewSide } from '../../../src/shared/review'
 import type {
   ReviewDraftRecord,
@@ -552,6 +553,167 @@ export function installFixtureControl(options: {
         state: resolved ? 'RESOLVED' : 'UNRESOLVED',
         url: null,
       }))
+    },
+    reviewHistory: (number) => {
+      record('reviewHistory', [number])
+      return answer('reviewHistory', () => {
+        if (scenario.reviewHistory) {
+          return typeof scenario.reviewHistory === 'function'
+            ? scenario.reviewHistory(number)
+            : scenario.reviewHistory
+        }
+        const found = scenario.snapshot?.pullRequests.find((pr) => pr.number === number)
+        const currentHead = scenario.reviewHeadOid ?? found?.headOid ?? `head-${number}`
+        const historicalHead = '1111222233334444555566667777888899990000'
+        return {
+          number,
+          current: {
+            headOid: currentHead,
+            baseOid: 'b'.repeat(40),
+            baseRef: 'main',
+          },
+          latest: {
+            headOid: currentHead,
+            baseOid: 'b'.repeat(40),
+            baseRef: 'main',
+            firstSeenAt: '2026-09-24T10:00:00.000Z',
+            lastSeenAt: '2026-09-25T12:00:00.000Z',
+            observations: 2,
+            reviewed: false,
+            reviewedAt: null,
+            reviewId: null,
+          },
+          reviewed: {
+            headOid: historicalHead,
+            baseOid: 'b'.repeat(40),
+            baseRef: 'main',
+            firstSeenAt: '2026-09-22T08:00:00.000Z',
+            lastSeenAt: '2026-09-23T09:00:00.000Z',
+            observations: 3,
+            reviewed: true,
+            reviewedAt: '2026-09-23T09:00:00.000Z',
+            reviewId: 'PRR_reviewed_1',
+          },
+          snapshots: [
+            {
+              headOid: historicalHead,
+              baseOid: 'b'.repeat(40),
+              baseRef: 'main',
+              firstSeenAt: '2026-09-22T08:00:00.000Z',
+              lastSeenAt: '2026-09-23T09:00:00.000Z',
+              observations: 3,
+              reviewed: true,
+              reviewedAt: '2026-09-23T09:00:00.000Z',
+              reviewId: 'PRR_reviewed_1',
+            },
+            {
+              headOid: currentHead,
+              baseOid: 'b'.repeat(40),
+              baseRef: 'main',
+              firstSeenAt: '2026-09-24T10:00:00.000Z',
+              lastSeenAt: '2026-09-25T12:00:00.000Z',
+              observations: 2,
+              reviewed: false,
+              reviewedAt: null,
+              reviewId: null,
+            },
+          ],
+          gap: null,
+        }
+      })
+    },
+    reviewHistoryDiff: (number, fromOid) => {
+      record('reviewHistoryDiff', [number, fromOid])
+      return answer('reviewHistoryDiff', () => {
+        if (scenario.reviewHistoryDiff) {
+          return typeof scenario.reviewHistoryDiff === 'function'
+            ? scenario.reviewHistoryDiff(number, fromOid)
+            : scenario.reviewHistoryDiff
+        }
+        const found = scenario.snapshot?.pullRequests.find((pr) => pr.number === number)
+        const currentHead = scenario.reviewHeadOid ?? found?.headOid ?? `head-${number}`
+        const fromSnapshot = {
+          headOid: fromOid,
+          baseOid: 'b'.repeat(40),
+          baseRef: 'main',
+          firstSeenAt: '2026-09-22T08:00:00.000Z',
+          lastSeenAt: '2026-09-23T09:00:00.000Z',
+          observations: 1,
+          reviewed: true,
+          reviewedAt: '2026-09-23T09:00:00.000Z',
+          reviewId: 'PRR_reviewed_1',
+        }
+        if (fromOid.startsWith('missing') || fromOid === 'deadbeef'.padEnd(40, '0')) {
+          const diff: ReviewHistoryDiff = {
+            number,
+            state: 'unavailable',
+            reason: `Historical commit ${fromOid.slice(0, 7)} is no longer in this repository (it may have been garbage-collected after a force-push).`,
+            from: fromSnapshot,
+            to: { headOid: currentHead, baseOid: 'b'.repeat(40), baseRef: 'main' },
+            mergeBaseOid: null,
+            files: [],
+            additions: 0,
+            deletions: 0,
+            truncated: false,
+          }
+          return diff
+        }
+        const diff: ReviewHistoryDiff = {
+          number,
+          state: 'files',
+          reason: '',
+          from: fromSnapshot,
+          to: { headOid: currentHead, baseOid: 'b'.repeat(40), baseRef: 'main' },
+          mergeBaseOid: 'b'.repeat(40),
+          files: [
+            textFile('src/main/review.ts', '@@ -2,2 +2,2 @@', [
+              ['-  return stagedDiff()', 2, null],
+              ['+  return transportDiff()', null, 2],
+            ]),
+          ],
+          additions: 1,
+          deletions: 1,
+          truncated: false,
+        }
+        return diff
+      })
+    },
+    reviewClearHistory: (number) => {
+      record('reviewClearHistory', [number])
+      return answer('reviewClearHistory', () => {
+        const found = scenario.snapshot?.pullRequests.find((pr) => pr.number === number)
+        const currentHead = scenario.reviewHeadOid ?? found?.headOid ?? `head-${number}`
+        return {
+          number,
+          current: { headOid: currentHead, baseOid: 'b'.repeat(40), baseRef: 'main' },
+          latest: {
+            headOid: currentHead,
+            baseOid: 'b'.repeat(40),
+            baseRef: 'main',
+            firstSeenAt: '2026-09-25T12:00:00.000Z',
+            lastSeenAt: '2026-09-25T12:00:00.000Z',
+            observations: 1,
+            reviewed: false,
+            reviewedAt: null,
+            reviewId: null,
+          },
+          reviewed: null,
+          snapshots: [
+            {
+              headOid: currentHead,
+              baseOid: 'b'.repeat(40),
+              baseRef: 'main',
+              firstSeenAt: '2026-09-25T12:00:00.000Z',
+              lastSeenAt: '2026-09-25T12:00:00.000Z',
+              observations: 1,
+              reviewed: false,
+              reviewedAt: null,
+              reviewId: null,
+            },
+          ],
+          gap: null,
+        }
+      })
     },
     reviewResolveDrafts: (number, drafts) => {
       record('reviewResolveDrafts', [number, drafts])

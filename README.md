@@ -847,3 +847,22 @@ and threads are read separately, so their revisions are compared before a thread
 allowed to jump to a line or compose a comment; a mismatch is shown with a reload
 rather than resolved by guessing.
 
+### Review update snapshots and historical comparison
+
+GitHub pull requests do not retain complete version history for arbitrary force-pushes. The review workspace approximates PR versions from observed head SHAs without claiming a complete history the app never saw:
+
+- **Observed head snapshots**: Persists observed head SHAs, timestamps, observation counts, and confirmed review associations in a journal beside the repository Git directory (`git-stacks-review-snapshots.json`). Identical heads deduplicate rather than append; a force-push or rebase creates a new snapshot entry.
+- **Changes since reviewed shortcut**: One-click comparison between the newest head the current user confirmed/settled a review for and the current pull request head.
+- **Arbitrary snapshot comparison**: Compares any observed historical snapshot to the current head using GitHub's two-endpoint compare API.
+- **Hide unchanged files**: In comparison mode, files whose contents did not change between the two compared endpoints can be hidden to focus exclusively on updates since the last review.
+- **Explicit history gaps**: When opening a pull request for the first time that already has multiple commits on GitHub, the workspace displays an informational gap banner explaining that earlier heads were not observed by the app and comparisons from them are unavailable.
+- **Missing commits and merge-base loss**: If a historical commit was garbage-collected after a force-push or its remote branch was deleted, or if an external rebase caused merge-base loss (unrelated histories), the workspace renders an explicit unavailable alert naming the exact cause, never a fabricated fallback diff.
+- **Bounded pruning**: Snapshot records are capped (maximum 40 entries) while strictly retaining user-visible reviewed anchors.
+- **Zero GitHub mutation**: Snapshot metadata contains no source text, diffs, or comment bodies, and clearing local history wipes only the local journal.
+
+Run snapshot unit and integration tests with:
+```sh
+npx tsx --test tests/review-snapshots.test.ts
+npx playwright test tests/renderer/review-snapshots.spec.ts
+```
+

@@ -1,6 +1,7 @@
 import type { SnapshotLimits } from './performance'
 import type { RepositoryCapabilities } from './capabilities'
 import type { ReviewCommitSet, ReviewFileSet, ReviewHeadline, ReviewViewedRecord } from './review'
+import type { ReviewHistory, ReviewHistoryDiff } from './review-snapshots'
 import type {
   ReviewDraft,
   ReviewDraftRecord,
@@ -1046,6 +1047,13 @@ export interface DesktopAPI {
   reviewSubmit?(number: number, submission: ReviewSubmission): Promise<ReviewMutationResult>
   reviewReply?(number: number, threadId: string, body: string): Promise<ReviewMutationResult>
   reviewSetResolved?(number: number, threadId: string, resolved: boolean): Promise<ReviewMutationResult>
+  reviewHistory?(number: number, requestId?: string): Promise<ReviewHistory>
+  reviewHistoryDiff?(
+    number: number,
+    fromOid: string,
+    requestId?: string,
+  ): Promise<ReviewHistoryDiff>
+  reviewClearHistory?(number: number): Promise<ReviewHistory>
   listNativeStacks?: () => Promise<NativeStack[]>
   createNativeStack?: (pullRequests: number[]) => Promise<NativeStack>
   addPullRequestsToNativeStack?: (

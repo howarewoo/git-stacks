@@ -34,6 +34,7 @@ import {
 import type { DesktopAPI, PullRequest, PullRequestStackMember } from '../../../shared/types'
 import { LIST_PAGE_SIZE } from '../../../shared/performance'
 import { Badge } from './ui/badge'
+import { Select } from './ui/select'
 import { Button, IconButton } from './ui/button'
 import { Checkbox } from './ui/checkbox'
 import { SegmentedControl } from './ui/segmented-control'
@@ -51,6 +52,15 @@ import type {
   ReviewThreadRead,
 } from '../../../shared/review-threads'
 import { ReviewDiff } from './review-diff'
+import type {
+  ReviewHistory,
+  ReviewHistoryDiff,
+  ReviewSnapshot,
+} from '../../../shared/review-snapshots'
+import {
+  reviewHistoryUnchangedPaths,
+  reviewSnapshotLabel,
+} from '../../../shared/review-snapshots'
 
 /**
  * The four review commands the shell's global shortcuts dispatch. They are
@@ -106,6 +116,13 @@ export function ReviewView({
   const [commitsState, setCommitsState] = React.useState<Stage>('idle')
   const [error, setError] = React.useState<string | null>(null)
   const [reloadToken, setReloadToken] = React.useState(0)
+  const [history, setHistory] = React.useState<ReviewHistory | null>(null)
+  const [historyState, setHistoryState] = React.useState<Stage>('idle')
+  const [activeSnapshotOid, setActiveSnapshotOid] = React.useState<string | null>(null)
+  const [historyDiff, setHistoryDiff] = React.useState<ReviewHistoryDiff | null>(null)
+  const [historyDiffState, setHistoryDiffState] = React.useState<Stage>('idle')
+  const [hideUnchanged, setHideUnchanged] = React.useState(true)
+  const [clearingHistory, setClearingHistory] = React.useState(false)
 
   const headlineGate = React.useRef(createRequestGate())
   const filesGate = React.useRef(createRequestGate())
@@ -118,6 +135,8 @@ export function ReviewView({
    * learns it is no longer the newest thing to have happened to them.
    */
   const draftEdits = React.useRef(0)
+  const historyGate = React.useRef(createRequestGate())
+  const historyDiffGate = React.useRef(createRequestGate())
 
   // Progressive loading: the headline answers first, and only then are the files
   // and commits requested. Each stage carries its own request id so leaving for
@@ -129,7 +148,9 @@ export function ReviewView({
     setFiles(null)
     setCommits(null)
     setSelectedPath(null)
-    setError(null)
+    setHistory(null)
+    setActiveSnapshotOid(null)
+    setHistoryDiff(null)
     if (desktop?.reviewHeadline === undefined || number === null) {
       setHeadlineState('idle')
       return
@@ -176,6 +197,70 @@ export function ReviewView({
       void desktop.cancel?.('review-files')
     }
   }, [desktop, headline, reloadToken])
+
+  React.useEffect(() => {
+    if (!headline || desktop?.reviewHistory === undefined) return
+    const claim = historyGate.current
+    claim.reset()
+    setHistoryState('loading')
+    const ticket = claim.claim()
+    void desktop
+      .reviewHistory?.(headline.pullRequest.number, 'review-history')
+      .then((value) => {
+        if (!claim.current(ticket)) return
+        setHistory(value)
+        setHistoryState('ready')
+      })
+      .catch(() => {
+        if (!claim.current(ticket)) return
+        setHistory(null)
+        setHistoryState('failed')
+      })
+    return () => {
+      void desktop.cancel?.('review-history')
+    }
+  }, [desktop, headline, reloadToken])
+
+  React.useEffect(() => {
+    if (!headline || !activeSnapshotOid || desktop?.reviewHistoryDiff === undefined) {
+      setHistoryDiff(null)
+      setHistoryDiffState('idle')
+      return
+    }
+    const claim = historyDiffGate.current
+    claim.reset()
+    setHistoryDiffState('loading')
+    const ticket = claim.claim()
+    void desktop
+      .reviewHistoryDiff?.(headline.pullRequest.number, activeSnapshotOid, 'review-history-diff')
+      .then((value) => {
+        if (!claim.current(ticket)) return
+        setHistoryDiff(value)
+        setHistoryDiffState('ready')
+      })
+      .catch((cause) => {
+        if (!claim.current(ticket)) return
+        setHistoryDiff(null)
+        setHistoryDiffState('failed')
+        setError(readableError(cause))
+      })
+    return () => {
+      void desktop.cancel?.('review-history-diff')
+    }
+  }, [activeSnapshotOid, desktop, headline, reloadToken])
+
+  const handleClearHistory = React.useCallback(async () => {
+    if (!headline || !desktop?.reviewClearHistory) return
+    setClearingHistory(true)
+    try {
+      const reset = await desktop.reviewClearHistory(headline.pullRequest.number)
+      setHistory(reset)
+      setActiveSnapshotOid(null)
+      setHistoryDiff(null)
+    } finally {
+      setClearingHistory(false)
+    }
+  }, [desktop, headline])
 
   // The conversation is a fifth independent read with its own request id, so
   // moving to another pull request cancels the thread read that is now obsolete
@@ -376,11 +461,32 @@ export function ReviewView({
     }
   }, [desktop, headline, reloadToken])
 
+  const isComparing = activeSnapshotOid !== null
+  const activeSnapshot = history?.snapshots.find((s) => s.headOid === activeSnapshotOid) ?? null
+
+  const unchangedPaths = React.useMemo(
+    () => (isComparing ? reviewHistoryUnchangedPaths(files, historyDiff) : []),
+    [files, historyDiff, isComparing],
+  )
+  const unchangedPathSet = React.useMemo(() => new Set(unchangedPaths), [unchangedPaths])
+
+  const eligibleFiles = React.useMemo(() => {
+    const list = files?.files ?? []
+    if (!isComparing || !hideUnchanged) return list
+    return list.filter((file) => !unchangedPathSet.has(file.path))
+  }, [files, hideUnchanged, isComparing, unchangedPathSet])
+
   const filePaths = React.useMemo(
     () =>
-      reviewFileRows(files?.files ?? []).flatMap((row) => (row.kind === 'file' ? [row.path] : [])),
-    [files],
+      reviewFileRows(eligibleFiles).flatMap((row) => (row.kind === 'file' ? [row.path] : [])),
+    [eligibleFiles],
   )
+
+  React.useEffect(() => {
+    if (filePaths.length > 0 && (!selectedPath || !filePaths.includes(selectedPath))) {
+      setSelectedPath(filePaths[0])
+    }
+  }, [filePaths, selectedPath])
 
   const markViewed = React.useCallback(
     (path: string) => {
@@ -441,13 +547,13 @@ export function ReviewView({
 
   const searched = React.useMemo(() => {
     const needle = search.trim().toLowerCase()
-    if (needle === '') return files?.files ?? []
-    return (files?.files ?? []).filter(
+    if (needle === '') return eligibleFiles
+    return eligibleFiles.filter(
       (file) =>
         file.path.toLowerCase().includes(needle) ||
         (file.previousPath ?? '').toLowerCase().includes(needle),
     )
-  }, [files, search])
+  }, [eligibleFiles, search])
 
   const rows = React.useMemo(
     () =>
@@ -456,11 +562,20 @@ export function ReviewView({
         search.trim() === '' ? collapsed : new Set<string>(),
         new Set(viewedPaths(viewed, headline?.pullRequest.number ?? 0, files?.comparison ?? null)),
       ),
-    [collapsed, files, headline, searched, viewed],
+    [collapsed, eligibleFiles, files, headline, searched, viewed],
   )
 
-  const selected = files?.files.find((file) => file.path === selectedPath) ?? null
-  const summary = React.useMemo(() => summarizeReviewFiles(files?.files ?? []), [files])
+  const selected = eligibleFiles.find((file) => file.path === selectedPath) ?? null
+  const summary = React.useMemo(() => summarizeReviewFiles(eligibleFiles), [eligibleFiles])
+
+  const historicalFile = React.useMemo(() => {
+    if (!isComparing || historyDiff?.state !== 'files') return null
+    return historyDiff.files.find((file) => file.path === selectedPath) ?? null
+  }, [historyDiff, isComparing, selectedPath])
+
+  const frozenReason = isComparing
+    ? `Viewing changes since ${activeSnapshot?.headOid.slice(0, 7) ?? 'a previous head'}. Comments and reviews are disabled in historical comparison mode; return to the current diff to comment.`
+    : null
 
   const select = (path: string) => {
     setSelectedPath(path)
@@ -582,6 +697,19 @@ export function ReviewView({
             onSelect={onSelectNumber}
           />
 
+          <ReviewHistoryBar
+            history={history}
+            state={historyState}
+            currentHeadOid={files?.comparison.headOid ?? headline.pullRequest.headOid ?? null}
+            activeSnapshotOid={activeSnapshotOid}
+            hideUnchanged={hideUnchanged}
+            unchangedCount={unchangedPaths.length}
+            clearing={clearingHistory}
+            onSelectSnapshot={(oid) => setActiveSnapshotOid(oid)}
+            onToggleHideUnchanged={(checked) => setHideUnchanged(checked)}
+            onClearHistory={handleClearHistory}
+          />
+
           <div className="review-body">
             <section className="review-tree" aria-label="Changed files">
               <div className="review-tree-header">
@@ -610,7 +738,9 @@ export function ReviewView({
                 <p className="section-empty">
                   {files?.files.length === 0
                     ? 'This pull request changes no files.'
-                    : 'No file matches this filter.'}
+                    : isComparing && hideUnchanged && unchangedPaths.length > 0
+                      ? 'All files are unchanged since the selected snapshot.'
+                      : 'No file matches this filter.'}
                 </p>
               ) : (
                 <div
@@ -714,18 +844,59 @@ export function ReviewView({
                   Next file
                 </Button>
               </div>
-              {filesState === 'loading' ? (
+              {filesState === 'loading' || (isComparing && historyDiffState === 'loading') ? (
                 <p className="section-empty" role="status">
-                  Loading diff…
+                  {isComparing ? 'Loading historical comparison…' : 'Loading diff…'}
                 </p>
+              ) : isComparing && historyDiff?.state === 'unavailable' ? (
+                <div style={{ padding: '16px' }}>
+                  <InlineAlert
+                    tone="warning"
+                    role="status"
+                  >
+                    <div>
+                      <strong>Historical comparison unavailable</strong>
+                      <p style={{ marginTop: '4px', marginBottom: '8px' }}>{historyDiff.reason}</p>
+                      <Button
+                        size="sm"
+                        variant="secondary"
+                        onClick={() => setActiveSnapshotOid(null)}
+                      >
+                        Return to current diff
+                      </Button>
+                    </div>
+                  </InlineAlert>
+                </div>
               ) : selected ? (
-                <ReviewDiff
-                  file={selected}
-                  mode={mode}
-                  hideWhitespace={hideWhitespace}
-                  selection={selection}
-                  onSelect={selectLines}
-                />
+                isComparing ? (
+                  historicalFile ? (
+                    <ReviewDiff
+                      file={historicalFile}
+                      mode={mode}
+                      hideWhitespace={hideWhitespace}
+                      selection={null}
+                      onSelect={() => {}}
+                    />
+                  ) : (
+                    <EmptyState className="compact-empty">
+                      <FileQuestion className="empty-icon" />
+                      <h2>File unchanged since snapshot</h2>
+                      <p>
+                        <code>{selected.path}</code> was not modified between{' '}
+                        <code>{shortOid(activeSnapshot?.headOid ?? null)}</code> and the
+                        current head.
+                      </p>
+                    </EmptyState>
+                  )
+                ) : (
+                  <ReviewDiff
+                    file={selected}
+                    mode={mode}
+                    hideWhitespace={hideWhitespace}
+                    selection={selection}
+                    onSelect={selectLines}
+                  />
+                )
               ) : (
                 <EmptyState className="compact-empty">
                   <FileQuestion className="empty-icon" />
@@ -762,6 +933,29 @@ export function ReviewView({
               </InlineAlert>
             ) : null}
 
+            {isComparing &&
+            historyDiff?.state === 'files' &&
+            files?.comparison.headOid &&
+            historyDiff.to.headOid !== files.comparison.headOid ? (
+              <InlineAlert
+                className="review-comparison-alert"
+                role="status"
+                tone="warning"
+              >
+                The pull request moved to {shortOid(files.comparison.headOid)} after this
+                comparison was taken against {shortOid(historyDiff.to.headOid)}. Reload to
+                compare against the latest head.
+                <Button
+                  className="review-comparison-reload"
+                  size="sm"
+                  variant="secondary"
+                  onClick={() => setReloadToken((value) => value + 1)}
+                >
+                  Reload
+                </Button>
+              </InlineAlert>
+            ) : null}
+
             <ReviewConversation
               desktop={desktop}
               number={headline.pullRequest.number}
@@ -776,6 +970,7 @@ export function ReviewView({
               onDraftChange={saveDrafts}
               onReload={() => setReloadToken((value) => value + 1)}
               onSelect={selectThreadLine}
+              frozenReason={frozenReason}
             />
           </div>
         </>
@@ -979,6 +1174,127 @@ function ReviewCommits({
   )
 }
 
+function ReviewHistoryBar({
+  history,
+  state: _state,
+  currentHeadOid,
+  activeSnapshotOid,
+  hideUnchanged,
+  unchangedCount,
+  clearing,
+  onSelectSnapshot,
+  onToggleHideUnchanged,
+  onClearHistory,
+}: {
+  history: ReviewHistory | null
+  state: Stage
+  currentHeadOid: string | null
+  activeSnapshotOid: string | null
+  hideUnchanged: boolean
+  unchangedCount: number
+  clearing: boolean
+  onSelectSnapshot: (oid: string | null) => void
+  onToggleHideUnchanged: (checked: boolean) => void
+  onClearHistory: () => void
+}) {
+  const snapshots = history?.snapshots ?? []
+  const reviewed = history?.reviewed ?? null
+  const currentShort = shortOid(currentHeadOid)
+  const isComparing = activeSnapshotOid !== null
+  const activeSnapshot = snapshots.find((s) => s.headOid === activeSnapshotOid) ?? null
+  const activeShort = shortOid(activeSnapshot?.headOid ?? null)
+
+  const canCompareReviewed =
+    reviewed !== null && currentHeadOid !== null && reviewed.headOid !== currentHeadOid
+
+  const reviewedTooltip =
+    reviewed === null
+      ? 'No review of an earlier head was submitted from this app.'
+      : reviewed.headOid === currentHeadOid
+        ? `The current head (${currentShort}) is already the reviewed head.`
+        : `Compare ${shortOid(reviewed.headOid)} (reviewed) → ${currentShort}`
+
+  return (
+    <div className="review-history" role="toolbar" aria-label="Review update history">
+      <div className="review-history-controls">
+        <label className="review-history-select-label">
+          <span className="sr-only">Choose snapshot</span>
+          <Select
+            aria-label="Choose snapshot to compare against current head"
+            controlSize="compact"
+            className="review-history-select"
+            value={activeSnapshotOid ?? ''}
+            onChange={(event) =>
+              onSelectSnapshot(event.target.value === '' ? null : event.target.value)
+            }
+          >
+            <option value="">Current diff (head {currentShort})</option>
+            {snapshots
+              .slice()
+              .reverse()
+              .map((snapshot) => (
+                <option key={snapshot.headOid} value={snapshot.headOid}>
+                  {reviewSnapshotLabel(snapshot)}
+                </option>
+              ))}
+          </Select>
+        </label>
+
+        <Button
+          size="sm"
+          variant={
+            isComparing && activeSnapshotOid === reviewed?.headOid ? 'default' : 'secondary'
+          }
+          disabled={!canCompareReviewed}
+          tooltip={reviewedTooltip}
+          onClick={() => {
+            if (reviewed) onSelectSnapshot(reviewed.headOid)
+          }}
+        >
+          Changes since reviewed
+        </Button>
+
+        {isComparing ? (
+          <div className="review-history-comparing">
+            <Badge variant="outline">
+              Comparing {activeShort} → {currentShort}
+            </Badge>
+            <Checkbox
+              checked={hideUnchanged}
+              label="Hide unchanged files"
+              onChange={(event) => onToggleHideUnchanged(event.target.checked)}
+              title="Hide files whose contents did not change between the chosen snapshot and the current head."
+            />
+            {hideUnchanged && unchangedCount > 0 ? (
+              <span className="review-history-unchanged-note">
+                {unchangedCount} unchanged file{unchangedCount === 1 ? '' : 's'} hidden
+              </span>
+            ) : null}
+            <Button size="sm" variant="ghost" onClick={() => onSelectSnapshot(null)}>
+              Return to current diff
+            </Button>
+          </div>
+        ) : null}
+
+        <Button
+          size="sm"
+          variant="ghost"
+          disabled={clearing || snapshots.length === 0}
+          tooltip="Clear locally observed snapshots for this pull request under the current account"
+          onClick={onClearHistory}
+        >
+          {clearing ? 'Clearing…' : 'Clear snapshot history'}
+        </Button>
+      </div>
+
+      {history?.gap ? (
+        <InlineAlert className="review-history-gap" tone="info" role="status">
+          {history.gap.message}
+        </InlineAlert>
+      ) : null}
+    </div>
+  )
+}
 /** A commit named the way a reviewer would say it aloud, or "an unknown commit". */
 function shortOid(oid: string | null): string {
   return oid === null || oid === '' ? 'an unknown commit' : oid.slice(0, 7)

@@ -65,6 +65,12 @@ const desktop: DesktopAPI = {
     ipcRenderer.invoke('repository:review-reply', number, threadId, body),
   reviewSetResolved: (number, threadId, resolved) =>
     ipcRenderer.invoke('repository:review-resolve', number, threadId, resolved),
+  reviewHistory: (number, requestId) =>
+    ipcRenderer.invoke('repository:review-history', number, requestId),
+  reviewHistoryDiff: (number, fromOid, requestId) =>
+    ipcRenderer.invoke('repository:review-history-diff', number, fromOid, requestId),
+  reviewClearHistory: (number) =>
+    ipcRenderer.invoke('repository:review-clear-history', number),
   openExternal: (url) => ipcRenderer.invoke('external:open', url),
   cancel: (requestId) => ipcRenderer.invoke('operation:cancel', requestId),
   gitRuntimeStatus: () => ipcRenderer.invoke('git-runtime'),

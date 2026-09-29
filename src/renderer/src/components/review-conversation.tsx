@@ -125,6 +125,7 @@ export interface ReviewConversationProps {
   onClearSelection: () => void
   onDraftChange: (drafts: ReviewDraft[]) => void
   onReload: () => void
+  frozenReason?: string | null
 }
 
 export function ReviewConversation({
@@ -141,6 +142,7 @@ export function ReviewConversation({
   onClearSelection,
   onDraftChange,
   onReload,
+  frozenReason = null,
 }: ReviewConversationProps) {
   const [summary, setSummary] = React.useState('')
   const [event, setEvent] = React.useState<ReviewEvent>('COMMENT')
@@ -163,7 +165,16 @@ export function ReviewConversation({
   // A draft that cannot be sent where it was written blocks the whole review, and
   // says so, rather than being quietly left behind by a successful submit.
   const blockedByStale = stale.length > 0
-  const permissions: ReviewPermissions | null = read?.permissions ?? null
+  const rawPermissions: ReviewPermissions | null = read?.permissions ?? null
+  const permissions: ReviewPermissions | null = frozenReason
+    ? {
+        viewer: rawPermissions?.viewer ?? '',
+        isAuthor: rawPermissions?.isAuthor ?? false,
+        state: rawPermissions?.state ?? 'OPEN',
+        permission: rawPermissions?.permission ?? 'WRITE',
+        blocked: { COMMENT: frozenReason, APPROVE: frozenReason, REQUEST_CHANGES: frozenReason },
+      }
+    : rawPermissions
   // An uncertain outcome outlives the message that reported it, so the guard is
   // this component's own state as well as the backend's: while it is set, the
   // button stays dead even though the drafts and the error are still here.
@@ -202,7 +213,7 @@ export function ReviewConversation({
 
   const submit = async () => {
     if (!desktop?.reviewSubmit || intended.length === 0) return
-    if (blockedByStale || uncertain) return
+    if (blockedByStale || uncertain || Boolean(frozenReason)) return
     if (!files) {
       setError('The diff has to be loaded before a review can be sent.')
       return
@@ -256,9 +267,15 @@ export function ReviewConversation({
         </span>
       </div>
 
+      {frozenReason ? (
+        <InlineAlert className="review-conversation-alert" tone="info" role="status">
+          {frozenReason}
+        </InlineAlert>
+      ) : null}
+
       <SelectionComposer
         selection={selection}
-        disabled={sending}
+        disabled={sending || Boolean(frozenReason)}
         onAdd={addDraft}
         onClear={onClearSelection}
       />
@@ -267,7 +284,7 @@ export function ReviewConversation({
         drafts={draftList}
         byId={byId}
         staleCount={stale.length}
-        disabled={sending}
+        disabled={sending || Boolean(frozenReason)}
         onChangeBody={(id, body) =>
           onDraftChange(draftList.map((draft) => (draft.id === id ? { ...draft, body } : draft)))
         }

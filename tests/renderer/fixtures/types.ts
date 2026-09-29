@@ -13,6 +13,7 @@ import type {
   SurgeryPreview,
 } from '../../../src/shared/types'
 import type { ReviewEvent } from '../../../src/shared/review-threads'
+import type { ReviewHistory, ReviewHistoryDiff } from '../../../src/shared/review-snapshots'
 
 /** Every promise-returning `DesktopAPI` method the fixture double can intercept. */
 export type FixtureCall =
@@ -41,6 +42,9 @@ export type FixtureCall =
   | 'reviewSubmit'
   | 'reviewReply'
   | 'reviewSetResolved'
+  | 'reviewHistory'
+  | 'reviewHistoryDiff'
+  | 'reviewClearHistory'
   | 'openExternal'
   | 'gitRuntimeStatus'
   | 'setSystemGit'
@@ -90,6 +94,10 @@ export interface FixtureScenario {
    */
   readonly reviewPermissions?: { isAuthor?: boolean; blocked?: ReviewEvent }
   readonly pushPreview?: PushPreview
+  readonly reviewHistory?: ReviewHistory | ((number: number) => ReviewHistory)
+  readonly reviewHistoryDiff?:
+    | ReviewHistoryDiff
+    | ((number: number, fromOid: string) => ReviewHistoryDiff)
   readonly stackPreviews?: Readonly<Partial<Record<StackKind, StackPreview>>>
   /** The surgery preview a scenario answers; insert between two layers by default. */
   readonly surgeryPreview?: SurgeryPreview
