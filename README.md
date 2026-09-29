@@ -53,7 +53,6 @@ confirmed data, and says when local Git still works. Cached responses are
 display only: review submission, publish, and force-push always re-read GitHub
 live. A high-impact mutation that lost its answer is never replayed on
 reconnect — it is listed with its reason until dismissed.
->>>>>>> 797be92 (feat(sync): keep the open repository fresh without a manual refresh)
 
 Renderer checks distinguish the `/` in-view filter from the `Mod+K` command
 palette. The safety suite advances pending hover timers after opening a

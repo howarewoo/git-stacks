@@ -39,6 +39,11 @@ export function RemoteFreshnessBadge({
           // or a screen reader, so the badge itself is focusable and named.
           tabIndex={0}
           title={description.detail}
+          // A bare span is the generic role, which forbids an accessible name, so
+          // the sentence above reached nobody. `img` names one node as a single
+          // described thing, which is what this badge is, and it announces no
+          // state change on its own the way a live region would.
+          role="img"
         >
           <Icon aria-hidden="true" className="size-3" />
           {description.label}

@@ -4581,32 +4581,6 @@ export function confirmedGitHubPayload(
   return cached
 }
 
-/**
- * True when the parent edges a snapshot has already read prove that `parent`
- * is an ancestor of `child`. Such a base is behind by nothing the branch does
- * not already contain, so its behind count is exactly zero. The walk follows
- * only commits that were read and stops at the first one whose parents are
- * unknown, so an unproved pair still gets its own `rev-list` count.
- */
-function knownAncestor(
-  child: string,
-  parent: string,
-  directParents: Map<string, string[]>,
-): boolean {
-  const seen = new Set([child])
-  const frontier = [child]
-  for (let head = 0; head < frontier.length; head += 1) {
-    const parents = directParents.get(frontier[head])
-    if (!parents) continue
-    for (const candidate of parents) {
-      if (candidate === parent) return true
-      if (seen.has(candidate)) continue
-      seen.add(candidate)
-      frontier.push(candidate)
-    }
-  }
-  return false
-}
 export async function getSnapshot(
   repoPath: string,
   signal?: AbortSignal,
