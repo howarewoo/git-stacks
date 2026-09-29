@@ -153,6 +153,7 @@ test('every workspace destination has a distinct keyboard route and a spoken lab
     'pullRequests',
     'stashes',
     'diagnostics',
+    'review',
   ]
   const routed = new Set(WORKSPACE_VIEW_SHORTCUTS.map(([, view]) => view))
   assert.deepEqual([...routed].sort(), [...views].sort())
