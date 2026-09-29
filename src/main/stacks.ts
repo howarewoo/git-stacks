@@ -6592,8 +6592,12 @@ async function mergeStack(
   }
   const observations = await readMergeObservations(repoPath)
   for (const result of results) {
+    const observation = observations.get(result.pullRequest)
     const live = await getPullRequest(repoPath, result.pullRequest).catch(() => null)
-    result.queue = mergeQueueState(observations.get(result.pullRequest), live?.state ?? '')
+    result.queue = mergeQueueState(
+      observation && observation.enqueuedAt !== null ? observation : undefined,
+      live?.state ?? '',
+    )
   }
   let fetchMessage = ''
   try {
