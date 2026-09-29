@@ -566,6 +566,21 @@ async function main() {
     if (child.exitCode === null) child.kill('SIGKILL')
   }
 
+  // An interrupted run must not leave a real Electron process behind holding a
+  // user data directory and a debugging port. A signal or an early exit takes
+  // the child down immediately; SIGKILL is used because the app is being
+  // abandoned rather than asked, and nothing of this run's survives it.
+  const abandon = () => {
+    if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
+  }
+  for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
+    process.on(signal, () => {
+      abandon()
+      process.exit(1)
+    })
+  }
+  process.on('exit', abandon)
+
   // The window is still loading at this point; its bridge is not there yet.
   const bridgeDeadline = Date.now() + TIMEOUT_MS
   while (Date.now() < bridgeDeadline) {
