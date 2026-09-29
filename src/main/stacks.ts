@@ -99,7 +99,6 @@ import {
   type SurgeryPullRequestPlan,
   type SurgeryRequest,
 } from './stack-surgery'
-import { runLinkIssueAction, runUnlinkIssueAction } from './issue-links'
 import {
   pollAsyncMerge,
   readMergeObservations,

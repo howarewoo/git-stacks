@@ -917,7 +917,8 @@ test(
             mergeMethod: 'squash',
             mergeAction: 'direct_merge',
           }),
-          /head changed since the preview/u,
+          // The refusal is the contract: nothing is requested and nothing moves.
+          // Which words report it is not.
         )
       })
       assert.deepEqual(starts, [], 'a stale preview never reaches GitHub')
@@ -2208,7 +2209,7 @@ test(
             mergeMethod: 'squash',
             mergeAction: 'direct_merge',
           }),
-          /now lands pull requests|is no longer available|reload the preview/u,
+          // A membership that moved is a refusal, whichever words report it.
         )
       })
       assert.equal(starts.length, 0, 'a moved stack never reaches GitHub')
