@@ -112,6 +112,35 @@ test.describe('Leaving a review', () => {
     await expect(page.locator('.review-draft')).toHaveCount(0)
   })
 
+  test('a recovery that adopted some drafts keeps the ones GitHub never took', async ({ page }) => {
+    await page.getByRole('button', { name: RANGE_SECOND }).click()
+    await addPendingComment(page, 'Comment on src/main/review.ts:2 (head)', 'Already on GitHub.')
+    await page.getByRole('button', { name: 'Comment on src/main/review.ts line 3 on the head' }).click()
+    await addPendingComment(page, 'Comment on src/main/review.ts:3 (head)', 'Never sent.')
+    await page.getByRole('textbox', { name: 'Review summary' }).fill('Two nits.')
+
+    // The backend reconciles a lost attempt against GitHub and reports which of
+    // the drafts that outcome already delivered, by the ids the view gave them.
+    // Only those may be dropped: clearing the whole list would throw away a
+    // comment the reviewer is still owed, which is the one thing a recovery must
+    // not do.
+    await page.evaluate(() => {
+      const bridge = window.desktop
+      const original = bridge.reviewSubmit
+      if (!original) throw new Error('the review submit bridge is not installed')
+      bridge.reviewSubmit = async (number, submission) => {
+        const result = await original(number, submission)
+        return { ...result, delivered: [submission.drafts[0]?.id] }
+      }
+    })
+    await page.getByRole('button', { name: 'Submit 2 comments as one review' }).click()
+    await settle(page)
+
+    const remaining = page.locator('.review-draft')
+    await expect(remaining).toHaveCount(1)
+    await expect(remaining).toContainText('Never sent.')
+  })
+
   test('a pending comment survives leaving the workspace and comes back unsent', async ({ page }) => {
     await page.getByRole('button', { name: RANGE_FIRST }).click()
     await addPendingComment(page, 'Comment on src/main/review.ts:1 (head)', 'Unfinished thought.')

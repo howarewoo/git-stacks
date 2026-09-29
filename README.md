@@ -693,20 +693,38 @@ automatically, because a duplicate review is a comment the reviewer never wrote 
 and an error message is not enough to prevent one, since it vanishes on reload
 and hands the same words back to a live button. The attempt is journalled
 **before** the request leaves, so a crash between the POST and its response is
-covered rather than being the one case with no record. The attempt is identified
-by the inline comments and the head, not by the summary: a summary is free text
-that is lost on reload, and keying on it would let a one-sentence edit repost the
-same comments twice.
+covered rather than being the one case with no record. It records the whole
+payload: every comment's body and anchor, the decision, and the newest review
+the pull request already held when the attempt began.
 
-The journal is not a dead end. Pressing Submit asks GitHub what it actually holds
-— this account's review of this revision, matched on author, commit, and summary.
-If it is there, the attempt did land: the record is retired and that outcome is
-reported instead of the review being sent a second time. If GitHub does not have
-it, the guard stands, because the record says only that the app never heard back,
-which is also true of a request that never arrived — absence is not proof, and is
-never taken as licence to post again automatically. Replies reconcile against the
-thread's own comments for the same reason. Each record is scoped by repository and
-by account as well as by pull request, so one account's or one repository's
+The journal is not a dead end. Pressing Submit asks GitHub what it actually
+holds, and every part of the attempt is checked — the review is newer than the
+recorded boundary, is this account's, is on this revision, records the decision
+that was asked for, and carries the same comments. A matching summary on its own
+proves nothing and is not what is matched on. If that review is there the
+attempt did land: the record is retired, the outcome GitHub recorded is
+reported, and those comments are left out of what is sent, so a recovery posts
+only what never arrived. The drafts that were never sent stay pending rather than
+being cleared by a recovery.
+
+The search is not limited to recent history. An attempt outlives any window, so
+the reviews are walked backwards from newest to oldest until the recorded
+boundary is reached, and running out of pages before then is a hold rather than
+a "not there" — the search gave up, which is not the same as concluding. If
+GitHub does not hold the review once the search is exhaustive, the guard stands:
+the record says only that the app never heard back, which is also true of a
+request that never arrived, so absence is never taken as licence to post again
+automatically.
+
+The guard covers an unresolved *comment*, not an attempt. Changing the decision
+or adding one more pending draft changes the attempt but not the comments, so
+every attempt touching any line this payload writes is reconciled first.
+
+Replies reconcile against the thread's own comments by the same rules, with the
+comment ids the thread held when the attempt began as their boundary and this
+account as their author — an older identical reply, this account's own or a
+collaborator's, is not this attempt. Each record is scoped by repository and by
+account as well as by pull request, so one account's or one repository's
 unresolved write never blocks another's review.
 
 Threads are read through GraphQL, which is the only source for a thread's

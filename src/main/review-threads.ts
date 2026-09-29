@@ -12,6 +12,7 @@ import type {
   ReviewThreadComment,
   ReviewThreadRead,
   ReviewUncertainWrite,
+  UncertainComment,
   ReviewThreadSet,
 } from '../shared/review-threads'
 import { reviewDraftSpan, reviewDraftStart, REVIEW_EVENTS } from '../shared/review-threads'
@@ -53,8 +54,23 @@ const REVIEW_COMMENT_PAGE_LIMIT = 20
 /** How many threads may be followed for their later comment pages in one read. */
 const REVIEW_COMMENT_FOLLOW_LIMIT = 20
 
-/** Reviews read back when settling a write whose response was lost. */
-const REVIEW_RECONCILE_LIMIT = 50
+/** Reviews read per page when settling a write whose response was lost. */
+const REVIEW_RECONCILE_PAGE = 50
+
+/**
+ * Inline comments read per review. A review that carried more than this is not
+ * matched: adopting a review whose comments were only partly read would claim a
+ * success that was not checked, so the guard holds instead.
+ */
+const REVIEW_INLINE_PAGE_SIZE = 100
+
+/**
+ * Pages walked back looking for the attempt's review before giving up. Bounded
+ * so a pathological pull request cannot make a retry unbounded, and the bound
+ * is a hold rather than a false success: not looking far enough back is never
+ * evidence that the review is not there.
+ */
+const REVIEW_RECONCILE_PAGES = 10
 
 const EVENT_NAMES: Record<ReviewEvent, string> = {
   COMMENT: 'COMMENT',
@@ -153,20 +169,47 @@ const THREAD_COMMENTS_QUERY = `query ReviewThreadComments($threadId: ID!, $after
 }`
 
 /**
- * The reviews GitHub already holds for a pull request.
+ * The reviews GitHub holds for a pull request, newest first, one page at a time.
  *
- * This is what settles a write whose response was lost: the local record only
- * says the app never heard back, which is also true of a request GitHub dropped
- * without applying. `commit.oid` ties a recorded review to the revision it was
- * pinned to and `author` to the account that sent it, so a review that landed
- * can be told from one that never did. Bounded, because it is a reconciliation
- * of the most recent attempts rather than a history.
+ * This is what settles a write whose response was lost. A review carries its
+ * inline comments, so the attempt's own comments can be matched against the
+ * ones GitHub holds instead of against a summary any earlier review could
+ * match. The page is walked backwards from the newest review until the attempt's
+ * recorded boundary is reached, because an attempt outlives any single window:
+ * a review that landed can be pushed out of a recent page by everything that
+ * happened afterwards, and reporting "not found" for it would hold a write
+ * GitHub had already settled, with no way out.
+ *
+ * `before` walks backwards through the connection, which is why this is `last`.
  */
-const REVIEWS_QUERY = `query ReviewSubmitted($owner: String!, $name: String!, $number: Int!) {
+const REVIEWS_QUERY = `query ReviewSubmitted(
+  $owner: String!, $name: String!, $number: Int!, $last: Int!, $before: String
+) {
   repository(owner: $owner, name: $name) {
     pullRequest(number: $number) {
-      reviews(last: ${REVIEW_RECONCILE_LIMIT}) {
-        nodes { id state body author { login } commit { oid } }
+      reviews(last: $last, before: $before) {
+        pageInfo { hasPreviousPage startCursor }
+        nodes {
+          id
+          state
+          body
+          url
+          author { login }
+          commit { oid }
+          comments(first: ${REVIEW_INLINE_PAGE_SIZE}) {
+            totalCount
+            nodes {
+              id
+              path
+              line
+              startLine
+              side
+              startSide
+              body
+              author { login }
+            }
+          }
+        }
       }
     }
   }
@@ -666,6 +709,32 @@ export async function resolveReviewDraftsAt(
 }
 
 /**
+ * One comment of an attempt, in the shape the record stores it.
+ *
+ * The recorded form is deliberately the same for every write, so a
+ * reconciliation can compare what was attempted against what GitHub holds
+ * without caring which way round the two came.
+ */
+function recordableComment(comment: Record<string, unknown>): UncertainComment {
+  return {
+    path: String(comment.path ?? ''),
+    side: comment.side === 'base' ? 'base' : 'head',
+    line: Number(comment.line ?? 0),
+    startLine: typeof comment.start_line === 'number' ? comment.start_line : null,
+    startSide: comment.start_side === 'base' || comment.start_side === 'head'
+      ? comment.start_side
+      : null,
+    body: String(comment.body ?? '').trim(),
+  }
+}
+
+function recordableComments(
+  comments: readonly Record<string, unknown>[],
+): UncertainComment[] {
+  return comments.map((comment) => recordableComment(comment))
+}
+
+/**
  * One inline comment in the field names GitHub's create-review endpoint
  * documents: `side` is the side of the *last* line of a range, `start_side` the
  * side of its first, and `start_line` is present only for a real range.
@@ -750,25 +819,60 @@ export async function submitReview(
   // would post them on — not by the summary. A reviewer who edits only the
   // summary has not written a different review, and keying on the summary would
   // let them post the same comments twice by changing one sentence.
-  const attempt = reviewAttemptId(comments, submission.event, files.comparison.headOid)
+  const attempt = reviewAttemptId(comments, files.comparison.headOid)
+  const recorded = recordableComments(comments)
 
   // Re-sending because the network looked idle is how a review gets posted
   // twice. The record survives a reload, so this still holds after the
   // workspace is reopened, and it covers the crash case because the record was
-  // written before the request rather than after its failure.
-  const guard = await reconcileReviewWrite(
+  // written before the request rather than after its failure. Every attempt
+  // whose comments this payload would write again is reconciled first, whatever
+  // decision or batch size is being sent now.
+  const guard = await reconcileOverlappingAttempts(
     repoPath,
     remote,
     repo,
     number,
     permissions.viewer,
-    attempt,
-    submission,
-    files.comparison.headOid,
+    recorded,
     signal,
   )
   if (guard.unsettled) throw new ReviewWriteUncertainError(guard.unsettled)
-  if (guard.settled) return guard.settled
+  // Comments GitHub already holds are left out of what is sent now, so a
+  // recovery posts only what never arrived.
+  // Comments GitHub already holds are named by draft id, because the caller has
+  // drafts and not anchors, and the ones left alone are its unsent work.
+  const draftOfAnchor = new Map(
+    comments.map((comment, index) => [anchorKey(recordableComment(comment)), sendable[index].id]),
+  )
+  const deliveredIds = comments
+    .filter(
+      (comment) =>
+        guard.delivered.has(
+          `${anchorKey(recordableComment(comment))}\u0000${String(comment.body ?? '').trim()}`,
+        ),
+    )
+    .map((comment) => draftOfAnchor.get(anchorKey(recordableComment(comment))))
+    .filter((id): id is string => id !== undefined)
+  const undelivered = comments.filter(
+    (comment) =>
+      !guard.delivered.has(
+        `${anchorKey(recordableComment(comment))}\u0000${String(comment.body ?? '').trim()}`,
+      ),
+  )
+  // Everything in this payload was already on GitHub. There is nothing to send,
+  // and the reviewer's own unsent drafts are reported as delivered rather than
+  // quietly posted a second time.
+  // Everything in this payload is already on GitHub, so the outcome GitHub
+  // recorded for the review that carried them is what is reported.
+  if (undelivered.length === 0) {
+    return {
+      id: guard.settled[0]?.id ?? attempt,
+      state: guard.settled[0]?.state ?? '',
+      url: guard.settled[0]?.url ?? null,
+      delivered: deliveredIds,
+    }
+  }
 
   // The attempt is journalled BEFORE the request leaves, not after it fails. A
   // crash, a kill, or a power cut between the POST and its response is the exact
@@ -788,6 +892,12 @@ export async function submitReview(
       at: new Date().toISOString(),
       repo: `${remote.owner}/${remote.name}`,
       viewer: permissions.viewer,
+      comments: undelivered.map((comment) => recordableComment(comment)),
+      // Everything GitHub already held when the attempt began. A reconciliation
+      // stops when it reaches this review, so an older one can never be adopted
+      // for this attempt however much its wording matches.
+      beforeReviewId: await newestReviewId(remote, number, signal),
+      threadCommentIds: [],
     },
     signal,
   )
@@ -819,6 +929,7 @@ export async function submitReview(
       id: typeof record.id === 'string' ? record.id : '',
       state: typeof record.state === 'string' ? record.state : '',
       url: typeof record.html_url === 'string' ? record.html_url : null,
+      delivered: deliveredIds,
     }
   } catch (error) {
     if (outcomeUnknown(error)) {
@@ -862,7 +973,6 @@ function reviewAttemptSummary(body: string): string {
  */
 function reviewAttemptId(
   comments: readonly Record<string, unknown>[],
-  event: ReviewEvent,
   headOid: string | null,
 ): string {
   const positions = comments
@@ -872,7 +982,30 @@ function reviewAttemptId(
         .join(':'),
     )
     .join('|')
-  return shortHash(`${headOid ?? ''} ${event} ${positions}`)
+  return shortHash(`${headOid ?? ''}${positions}`)
+}
+
+/**
+ * The comment in a thread that a lost reply turned out to be, or null.
+ *
+ * Body equality alone is not enough, in either direction. The comment must not
+ * have been there when the attempt began, or an older identical reply — this
+ * account's own or somebody else's — would be adopted as this one. And it must
+ * be this account's, because a collaborator who happened to write the same
+ * words did not write this reviewer's reply.
+ */
+function findLandedReply(
+  comments: readonly ReviewThreadComment[],
+  attempt: { threadCommentIds: readonly string[]; viewer?: string },
+  body: string,
+): { id: string; url: string | null } | null {
+  for (const entry of comments) {
+    if (attempt.threadCommentIds.includes(entry.id)) continue
+    if (attempt.viewer !== undefined && entry.author !== attempt.viewer) continue
+    if (entry.body.trim() !== body.trim()) continue
+    return { id: entry.id, url: entry.url }
+  }
+  return null
 }
 
 /** A stable short identifier for a write, so the guard can name it across reloads. */
@@ -881,94 +1014,255 @@ function shortHash(value: string): string {
 }
 
 /**
- * The unresolved review attempt this submission would repeat, or null.
+ * Every outstanding attempt whose unresolved comments this submission would
+ * write again, and what GitHub turns out to hold for them.
  *
- * A blocked write is not a dead end, because a guard that can only refuse
- * permanently would make a transient failure unrecoverable. Before refusing,
- * the record is reconciled against what GitHub actually holds: if this
- * account's review of this revision is there, the attempt did land, the record
- * is retired, and the submission proceeds as a first attempt. If GitHub does not
- * have it, the guard stands — the record says only that the app never heard
- * back, which is also true of a request that never reached GitHub, so absence
- * is not proof and is never treated as permission to post again automatically.
- * The next attempt asks GitHub once more and is decided by what it says.
+ * The overlap is on the comment anchors, not on the whole attempt. A decision
+ * change or one more pending draft produces a different attempt for the same
+ * unresolved comments, and matching on the full payload would let those comments
+ * be posted a second time — which is the duplicate this exists to prevent. So
+ * every attempt touching any line this payload writes is reconciled first.
  */
-async function reconcileReviewWrite(
+async function reconcileOverlappingAttempts(
   repoPath: string,
   remote: ParsedRemote,
   repo: string,
   number: number,
   viewer: string,
-  attempt: string,
-  submission: ReviewSubmission,
-  headOid: string | null,
+  comments: readonly UncertainComment[],
   signal?: AbortSignal,
-): Promise<{ settled: ReviewMutationResult | null; unsettled: ReviewUncertainWrite | null }> {
+): Promise<{
+  delivered: Set<string>
+  unsettled: ReviewUncertainWrite | null
+  settled: SettledReview[]
+}> {
+  const delivered = new Set<string>()
+  const settled: SettledReview[] = []
   const writes = await readUncertainWrites(repoPath, repo, number, viewer, signal)
-  const pending = writes.find((entry) => entry.kind === 'review' && entry.id === attempt)
-  if (!pending) return { settled: null, unsettled: null }
-  const settled = await reviewSettledOnGitHub(
-    remote,
-    number,
-    viewer,
-    reviewAttemptSummary(submission.body),
-    headOid,
-    signal,
+  const outstanding = writes.filter(
+    (entry) =>
+      entry.kind === 'review' &&
+      entry.comments.length > 0 &&
+      entry.comments.some((comment) => comments.some((mine) => sameAnchor(comment, mine))),
   )
-  // GitHub holds this review, so the earlier attempt did land. The record is
-  // retired and that outcome is reported: sending again would post the same
-  // comments onto the same line a second time, which is the duplicate this
-  // guard exists to prevent.
-  if (settled) {
-    await clearUncertainWrite(repoPath, repo, number, viewer, attempt, signal)
-    return {
-      settled: { id: settled.id, state: 'COMMENTED', url: null },
-      unsettled: null,
+  for (const attempt of outstanding) {
+    const landed = await findSettledReview(remote, number, attempt, signal)
+    // GitHub holds exactly this review, so those comments are already posted.
+    // The record is retired and the lines are reported as delivered, so the
+    // payload that follows leaves them out instead of writing them again.
+    if (landed) {
+      settled.push(landed)
+      await clearUncertainWrite(repoPath, repo, number, viewer, attempt.id, signal)
+      // A comment counts as delivered only if this payload still says the same
+      // thing in the same place. A reviewer who rewrote the text on a line that
+      // did land is writing a new comment, and quietly dropping theirs because
+      // the line was already commented on would lose work they meant to send.
+      for (const comment of attempt.comments) {
+        const match = comments.find(
+          (mine) => sameAnchor(comment, mine) && mine.body.trim() === comment.body.trim(),
+        )
+        if (match) delivered.add(`${anchorKey(match)}\u0000${match.body.trim()}`)
+      }
+      continue
     }
+    // The record says only that the app never heard back, which is also true of
+    // a request that never reached GitHub, so absence is not proof and the whole
+    // submission waits rather than posting the same comments a second time.
+    return { delivered, unsettled: attempt, settled }
   }
-  return { settled: null, unsettled: pending }
+  return { delivered, unsettled: null, settled }
 }
 
-/** The account's submitted review of this revision, as GitHub now reports it. */
-interface SettledReview {
-  id: string
+/** Whether two comments name the same line in the same file. */
+function sameAnchor(one: UncertainComment, other: UncertainComment): boolean {
+  return anchorKey(one) === anchorKey(other)
+}
+
+/** A comment's identity as a place in the diff, which is what an overlap is. */
+function anchorKey(comment: UncertainComment): string {
+  return [comment.path, comment.side, comment.line, comment.startLine ?? '', comment.startSide ?? '']
+    .map(String)
+    .join(':')
 }
 
 /**
- * The account's own review of this revision on GitHub, or null.
+ * The newest review the pull request already holds, or null when it has none.
  *
- * The submitted reviews are the authority for whether a write landed. The
- * author, the commit, and the summary are matched together, so a review
- * somebody else left, on another revision, or with different words does not
- * settle this one.
+ * Read immediately before the request so the record carries the boundary as it
+ * was at the moment of the attempt, not as it is whenever a reconciliation runs
+ * later. A failure to read it does not block the write: the reviewer's own
+ * decision to submit is not withheld because a boundary could not be noted, and
+ * a null boundary makes the reconciliation hold rather than adopt wrongly.
  */
-async function reviewSettledOnGitHub(
+async function newestReviewId(
   remote: ParsedRemote,
   number: number,
-  viewer: string,
-  summary: string,
-  headOid: string | null,
   signal?: AbortSignal,
-): Promise<SettledReview | null> {
-  const data = await githubTransport().graphql<Record<string, unknown>>(
+): Promise<string | null> {
+  const data: Record<string, unknown> = await githubTransport().graphql<Record<string, unknown>>(
     REVIEWS_QUERY,
-    { owner: remote.owner, name: remote.name, number },
+    { owner: remote.owner, name: remote.name, number, last: 1, before: null },
     { signal },
   )
   const repository = isRecord(data.repository) ? data.repository : null
-  const pullRequest =
-    repository && isRecord(repository.pullRequest) ? repository.pullRequest : null
+  const pullRequest = repository && isRecord(repository.pullRequest) ? repository.pullRequest : null
   const reviews = pullRequest && isRecord(pullRequest.reviews) ? pullRequest.reviews : null
-  const nodes = reviews && Array.isArray(reviews.nodes) ? reviews.nodes : []
-  for (const node of nodes) {
-    if (!isRecord(node)) continue
-    const author = isRecord(node.author) ? node.author.login : null
-    const commit = isRecord(node.commit) ? node.commit.oid : null
-    const body = typeof node.body === 'string' ? node.body.trim() : ''
-    if (author === viewer && commit === headOid && body === summary) {
-      return { id: typeof node.id === 'string' ? node.id : '' }
+  const nodes = reviews ? connectionNodes(reviews) : []
+  const first = nodes[nodes.length - 1]
+  return isRecord(first) && typeof first.id === 'string' ? first.id : null
+}
+
+/** A review on GitHub that a lost attempt turned out to be. */
+interface SettledReview {
+  id: string
+  state: string
+  url: string | null
+}
+
+/**
+ * The review a lost attempt turned out to be, or null when GitHub does not hold
+ * one this could recognise.
+ *
+ * Every part of the attempt is checked, because any one of them alone is shared
+ * with a review that has nothing to do with this one:
+ *
+ * - **newer than the attempt's boundary**, so an older review cannot be adopted
+ *   however much its wording matches;
+ * - **this account's**, because a collaborator's review is not this write;
+ * - **this revision**, because a review of an earlier commit approved something
+ *   nobody is approving now;
+ * - **the same decision**, matched on the state GitHub recorded rather than the
+ *   event that was asked for, so a COMMENT never adopts an APPROVE;
+ * - **the same comments**, matched as a set on body and anchor, because the
+ *   comments are the review and a matching summary proves nothing.
+ *
+ * The walk stops at the boundary rather than at the end of a window, so an
+ * attempt that landed long ago is still found. Running out of pages before the
+ * boundary is a hold, not a "not there": the search gave up rather than
+ * concluding.
+ */
+async function findSettledReview(
+  remote: ParsedRemote,
+  number: number,
+  attempt: ReviewUncertainWrite,
+  signal?: AbortSignal,
+): Promise<SettledReview | null> {
+  let before: string | null = null
+  for (let page = 0; page < REVIEW_RECONCILE_PAGES; page += 1) {
+    const data: Record<string, unknown> = await githubTransport().graphql<Record<string, unknown>>(
+      REVIEWS_QUERY,
+      { owner: remote.owner, name: remote.name, number, last: REVIEW_RECONCILE_PAGE, before },
+      { signal },
+    )
+    const repository = isRecord(data.repository) ? data.repository : null
+    const pullRequest =
+      repository && isRecord(repository.pullRequest) ? repository.pullRequest : null
+    const reviews = pullRequest && isRecord(pullRequest.reviews) ? pullRequest.reviews : null
+    const nodes = reviews && Array.isArray(reviews.nodes) ? reviews.nodes : []
+    // GitHub returns a review connection oldest first and `last` takes the
+    // newest page, so the newest review is walked first: everything reached
+    // after it is older and cannot be this attempt.
+    for (const node of [...nodes].reverse()) {
+      if (!isRecord(node)) continue
+      // The boundary marks everything at or below it as pre-existing.
+      if (typeof node.id === 'string' && node.id === attempt.beforeReviewId) return null
+      const settled = matchAttemptReview(node, attempt)
+      if (settled) return settled
     }
+    const pageInfo = reviews && isRecord(reviews.pageInfo) ? reviews.pageInfo : null
+    if (!pageInfo || pageInfo.hasPreviousPage !== true) return null
+    const cursor = pageInfo.startCursor
+    if (typeof cursor !== 'string' || cursor === '') return null
+    before = cursor
   }
+  return null
+}
+
+/** Whether one review on GitHub is exactly the review a lost attempt tried to post. */
+function matchAttemptReview(
+  node: Record<string, unknown>,
+  attempt: ReviewUncertainWrite,
+): SettledReview | null {
+  if (attempt.comments.length === 0) return null
+  const author = isRecord(node.author) ? node.author.login : null
+  if (author !== attempt.viewer) return null
+  const commit = isRecord(node.commit) ? node.commit.oid : null
+  if (commit !== attempt.headOid) return null
+  if (typeof node.state !== 'string' || node.state !== stateForEvent(attempt.event)) return null
+  if (typeof node.body === 'string' && node.body.trim() !== attempt.summary.trim()) return null
+  if (typeof node.body !== 'string') return null
+  const connection = isRecord(node.comments) ? node.comments : null
+  if (!connection) return null
+  // A review whose comments were not read whole cannot be compared whole, and a
+  // partial comparison would claim a match that was never made.
+  if (connection.totalCount !== connectionNodes(connection).length) return null
+
+  if (!sameCommentSet(reviewCommentsOnGitHub(node), attempt.comments)) return null
+  return {
+    id: typeof node.id === 'string' ? node.id : '',
+    state: node.state,
+    url: typeof node.url === 'string' ? node.url : null,
+  }
+}
+
+function connectionNodes(connection: Record<string, unknown>): unknown[] {
+  return Array.isArray(connection.nodes) ? connection.nodes : []
+}
+
+/** The inline comments of a review on GitHub, in this app's own shape. */
+function reviewCommentsOnGitHub(node: Record<string, unknown>): UncertainComment[] {
+  const connection = isRecord(node.comments) ? node.comments : null
+  if (!connection) return []
+  const comments: UncertainComment[] = []
+  for (const entry of connectionNodes(connection)) {
+    if (!isRecord(entry)) continue
+    if (typeof entry.path !== 'string' || typeof entry.line !== 'number') continue
+    comments.push({
+      path: entry.path,
+      side: entry.side === 'LEFT' ? 'base' : 'head',
+      line: entry.line,
+      startLine: typeof entry.startLine === 'number' ? entry.startLine : null,
+      startSide: entry.startSide === 'LEFT' ? 'base' : entry.startSide === 'RIGHT' ? 'head' : null,
+      body: typeof entry.body === 'string' ? entry.body.trim() : '',
+    })
+  }
+  return comments
+}
+
+/**
+ * Whether two sets of inline comments are the same comments.
+ *
+ * A multiset, not a sequence: GitHub returns a review's comments in the order
+ * they were posted, which is the order they were sent, but comparing sorted
+ * keys makes the match independent of that ordering rather than depending on it
+ * holding.
+ */
+function sameCommentSet(
+  actual: readonly UncertainComment[],
+  expected: readonly UncertainComment[],
+): boolean {
+  if (actual.length !== expected.length) return false
+  const key = (comment: UncertainComment) =>
+    [comment.path, comment.side, comment.line, comment.startLine ?? '', comment.startSide ?? '']
+      .map(String)
+      .join(':') +
+    '\u0000' +
+    comment.body.trim()
+  const count = new Map<string, number>()
+  for (const comment of expected) count.set(key(comment), (count.get(key(comment)) ?? 0) + 1)
+  for (const comment of actual) {
+    const seen = count.get(key(comment))
+    if (seen === undefined || seen === 0) return false
+    count.set(key(comment), seen - 1)
+  }
+  return true
+}
+
+/** The state GitHub records for a decision, which is what a reconciliation matches. */
+function stateForEvent(event: ReviewEvent | null): string | null {
+  if (event === 'APPROVE') return 'APPROVED'
+  if (event === 'REQUEST_CHANGES') return 'CHANGES_REQUESTED'
+  if (event === 'COMMENT') return 'COMMENTED'
   return null
 }
 
@@ -1034,12 +1328,15 @@ export async function replyToThread(
   const writes = await readUncertainWrites(repoPath, repo, number, permissions.viewer, signal)
   const earlier = writes.find((entry) => entry.kind === 'reply' && entry.id === attempt)
   if (earlier) {
-    const landed = (await readThreadComments(remote, threadId, signal)).find(
-      (entry) => entry.body.trim() === body.trim(),
+    const landed = findLandedReply(
+      await readThreadComments(remote, threadId, signal),
+      { threadCommentIds: earlier.threadCommentIds, viewer: earlier.viewer },
+      body,
     )
-    // GitHub holds these words in this thread, so the earlier attempt did land.
-    // Its outcome is reported and the record retired: sending again would be a
-    // second copy of the same reply, which is the duplicate this guard prevents.
+    // GitHub holds these words in this thread, written by this account after the
+    // attempt began, so the earlier attempt did land. Its outcome is reported
+    // and the record retired: sending again would be a second copy of the same
+    // reply, which is the duplicate this guard prevents.
     if (landed) {
       await clearUncertainWrite(repoPath, repo, number, permissions.viewer, attempt, signal)
       return { id: landed.id, state: 'created', url: landed.url }
@@ -1063,6 +1360,12 @@ export async function replyToThread(
       at: new Date().toISOString(),
       repo,
       viewer: permissions.viewer,
+      comments: [],
+      beforeReviewId: null,
+      // The comments the thread already held, so a reconciliation can tell this
+      // account's new words from another participant's identical ones and from
+      // an older identical reply of its own.
+      threadCommentIds: before,
     },
     signal,
   )
@@ -1096,8 +1399,13 @@ export async function replyToThread(
     // still in force, so an unreadable reconciliation can never be mistaken for
     // a settled outcome.
     const after = await readThreadComments(remote, threadId, signal)
-    const landed = after.find(
-      (entry) => !before.includes(entry.id) && entry.body.trim() === body.trim(),
+    // The same two checks as a resumed attempt: not one of the comments the
+    // thread already held, and written by this account. A collaborator's
+    // identical words are not this reviewer's reply.
+    const landed = findLandedReply(
+      after,
+      { threadCommentIds: before, viewer: permissions.viewer },
+      body,
     )
     if (landed) {
       await clearUncertainWrite(repoPath, repo, number, permissions.viewer, attempt, signal)

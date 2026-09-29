@@ -439,20 +439,41 @@ reload and hands the same words back to a live button. So the attempt itself is
 journalled **before** the request leaves — a crash between the POST and its
 response is precisely the case with no failure to write a record on, so a record
 written only after a failure would be missing for the one case the guard exists
-for. The attempt is identified by the inline comments and the head, because the
-comments *are* the write: a summary is free text the reviewer may edit, or lose
-on reload, and keying on it would let a one-sentence edit repost the same
-comments twice. Changing a comment is what makes it a different write.
+for. The attempt records the whole payload — every comment's body and anchor, and
+the decision — because the comments *are* the write, and any one of them alone
+is shared with a review that has nothing to do with this one.
 
 The record is not a dead end. Before refusing, the next attempt asks GitHub what
-it actually holds — this account's review of this revision, matched on author,
-commit, and summary. If that review is there the attempt did land, so the record
-is retired and the settled outcome is reported rather than the review being sent
-a second time. If GitHub does not have it, the guard stands: the record says only
-that the app never heard back, which is also true of a request that never
-arrived, so absence is not proof and is never taken as licence to post again
-automatically. Replies are reconciled the same way, against the thread's own
-comments, because a repeated reply is a second comment.
+it actually holds, and every part of the attempt is checked: the review must be
+**newer than the boundary the attempt recorded** (the newest review the pull
+request held when it began), **this account's**, **on this revision**, recording
+**the decision that was asked for**, and carrying **the same comments** compared
+as a set on body and anchor. A matching summary proves nothing, so it is not
+what is matched on. If that review is there the attempt did land, so the record
+is retired and the outcome GitHub recorded is reported — the rest of the
+payload is left out of what is sent, and the drafts that were never sent stay
+pending rather than being cleared by a recovery.
+
+The boundary is what makes the search honest rather than recent. An attempt
+outlives any window, so the reviews connection is walked backwards from newest
+to oldest until the boundary is reached, and running out of pages before it is a
+hold rather than a "not there": the search gave up, which is not the same as
+concluding. If GitHub does not hold the review once the search is exhaustive,
+the guard stands — the record says only that the app never heard back, which is
+also true of a request that never arrived, so absence is never taken as licence
+to post again automatically.
+
+The guard covers an unresolved *comment*, not an attempt id. Changing the
+decision, or adding one more pending draft, produces a different attempt over
+the same comments, and matching on the whole payload would let those comments be
+posted a second time. So every attempt touching any line this payload writes is
+reconciled first, whatever decision or batch size is being sent now.
+
+Replies reconcile against the thread's own comments by the same rules, with the
+comment ids the thread held when the attempt began as their boundary and this
+account as their author. Body equality alone is not enough in either direction:
+an older identical reply — this account's own or a collaborator's — is not this
+attempt, and adopting it would report a success that never happened.
 
 That record holds the reviewer's own words, so it is scoped by repository and by
 account as well as by pull request: the journal lives in a Git common directory

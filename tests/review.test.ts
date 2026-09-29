@@ -1040,6 +1040,14 @@ interface DoubleOptions {
    * not, so a test can put the landed review here and watch the record retire.
    */
   reviews?: Array<Record<string, unknown>>
+  /** The reviews GitHub held before any attempt was made. */
+  reviewsBefore?: Array<Record<string, unknown>>
+  /**
+   * A comment another account leaves in the thread once a reply is attempted,
+   * so a test can put somebody else's identical words inside the attempt's own
+   * window, where a boundary check alone would not catch them.
+   */
+  collaboratorReply?: ThreadComment
 }
 
 function graphOperation(query: string): string {
@@ -1128,8 +1136,12 @@ const GRAPHQL_SCHEMA: Record<
   // A user or the signed-in viewer. `login` is on both, so the account field is
   // what distinguishes the one that is wrong at the repository level.
   User: { fields: ['login', 'id'] },
-  PullRequestReviewComment: { fields: ['id', 'url', 'body', 'viewerDidAuthor', 'createdAt', 'author'] },
-  PageInfo: { fields: ['hasNextPage', 'endCursor'] },
+  PullRequestReviewComment: {
+    fields: ['id', 'url', 'body', 'viewerDidAuthor', 'createdAt', 'path', 'line',
+      'startLine', 'side', 'startSide', 'author'],
+    returns: { author: 'User' },
+  },
+  PageInfo: { fields: ['hasNextPage', 'endCursor', 'hasPreviousPage', 'startCursor'] },
   AddPullRequestReviewThreadReplyPayload: {
     fields: ['comment'],
     returns: { comment: 'PullRequestReviewComment' },
@@ -1156,8 +1168,8 @@ const GRAPHQL_SCHEMA: Record<
     returns: { nodes: 'PullRequestReview' },
   },
   PullRequestReview: {
-    fields: ['id', 'state', 'body', 'submittedAt', 'author', 'commit'],
-    returns: { author: 'User', commit: 'Commit' },
+    fields: ['id', 'state', 'body', 'submittedAt', 'url', 'author', 'commit', 'comments'],
+    returns: { author: 'User', commit: 'Commit', comments: 'PullRequestReviewCommentConnection' },
   },
   Commit: { fields: ['oid', 'messageHeadline'] },
   Node: { fields: ['id'], returns: { comments: 'PullRequestReviewCommentConnection' } },
@@ -1240,6 +1252,8 @@ function threadDouble(options: DoubleOptions = {}): {
   const isAuthor = options.isAuthor === true
   const state = options.state ?? 'OPEN'
   const viewer = options.viewer ?? 'ada'
+  // The reviews GitHub holds once a review has actually been attempted.
+  let landedReview: Array<Record<string, unknown>> | null = null
   const threads = options.threads ?? []
   // The comparison identity, in the shape the pull request resource returns:
   // a base branch has both an object and a name, and the name is part of it.
@@ -1286,6 +1300,11 @@ function threadDouble(options: DoubleOptions = {}): {
             threadId: null,
             text: '',
           })
+          // The request left, so from here on GitHub holds whatever the
+          // fixture says it took. That is modelled even for a lost response,
+          // because a lost response is precisely the case where the write may
+          // have been applied without the app hearing about it.
+          landedReview = options.reviews ?? []
           if (options.failReviewOnce && !reviewFailed) {
             reviewFailed = true
             throw new GitHubTransportError({
@@ -1333,6 +1352,20 @@ function threadDouble(options: DoubleOptions = {}): {
         }
         const operation = graphOperation(query)
         queries.push(query)
+        // Somebody else saying the same words in the thread once the reply has
+        // gone out, whether or not the response comes back. A reconciliation
+        // must not take that for this account's own reply landing.
+        if (operation === 'addPullRequestReviewThreadReply' && options.collaboratorReply) {
+          const id = typeof variables.threadId === 'string' ? variables.threadId : null
+          const page = id ? commentPages.get(id) : null
+          if (page) {
+            page[0] = {
+              ...page[0],
+              total: page[0].total + 1,
+              nodes: [...page[0].nodes, commentNode(options.collaboratorReply)],
+            }
+          }
+        }
         const failure = options.fail?.[operation]
         if (failure) {
           // A failed mutation is still an attempt, and counting it is how a test
@@ -1409,12 +1442,40 @@ function threadDouble(options: DoubleOptions = {}): {
           } as T
         }
         if (operation === 'ReviewSubmitted') {
-          // What GitHub already holds for this pull request. The reconciliation
-          // reads this to decide whether a lost write landed.
+          // What GitHub already holds for this pull request, newest first, as
+          // the reconciliation walks it: it stops when it reaches the review the
+          // attempt recorded as the newest one before it began.
+          // Reviews GitHub held when the attempt began, and the ones that
+          // appeared once the request was made. A reconciliation may only adopt
+          // the latter, so a test that wants a landed review has to say when it
+          // landed rather than only that it exists.
+          // Before the request, GitHub holds whatever the fixture says it held;
+          // after it, the reviews the attempt is meant to have produced. A
+          // reconciliation may only adopt the latter, so a test that wants a
+          // landed review has to say when it landed rather than only that it
+          // exists.
+          // GitHub returns a review connection oldest first, and `last` takes
+          // the newest page of it, with `before` walking further back. Modelling
+          // that order is what makes a reconciliation that pages actually able
+          // to reach a review buried under everything that came after it.
+          // The reviews GitHub held before the attempt stay held, and whatever
+          // the attempt produced joins them, oldest first as GitHub orders them.
+          const all = [...(options.reviewsBefore ?? []), ...(landedReview ?? [])]
+          const last = typeof variables.last === 'number' ? variables.last : all.length
+          const before = typeof variables.before === 'string' ? variables.before : null
+          const end = before === null ? all.length : Math.max(0, all.findIndex((r) => r.id === before))
+          const start = Math.max(0, end - last)
+          const nodes = all.slice(start, end)
           return {
             repository: {
               pullRequest: {
-                reviews: { nodes: options.reviews ?? [] },
+                reviews: {
+                  pageInfo: {
+                    hasPreviousPage: start > 0,
+                    startCursor: nodes[0]?.id ?? null,
+                  },
+                  nodes,
+                },
               },
             },
           } as T
@@ -2033,7 +2094,7 @@ test('a review GitHub never confirmed is refused the second time, from the recor
   assert.equal(writes.length, 1, 'the review was attempted once and never again')
 })
 
-test('a lost review is settled by asking GitHub, not by the words the reviewer kept', async (t) => {
+test('a lost review is settled by asking GitHub what it holds, not by the summary', async (t) => {
   const workspace = await reviewWorkspace()
   t.after(workspace.dispose)
   const patch = '@@ -1,2 +1,3 @@\n keep\n+added\n tail'
@@ -2041,17 +2102,17 @@ test('a lost review is settled by asking GitHub, not by the words the reviewer k
   const hunk = textHunk(entry, 0)
   const added = hunk.lines.findIndex((line) => line.side === 'head' && line.newLine !== null)
   const at = refFor(hunk, added)
-  const review = (body: string) => ({
+  const review = (body: string, text = 'needs a name') => ({
     event: 'COMMENT' as const,
-    body: '',
+    body,
     comparison: comparison(),
-    drafts: [draft({ id: 'd1', ref: at, body })],
+    drafts: [draft({ id: 'd1', ref: at, body: text })],
   })
 
-  // GitHub accepted the review but the response was lost. The reviewer edits
-  // the words and presses Submit again; if the guard keyed on those words the
-  // second attempt would post the same comments onto the same line a second
-  // time. The inline comments are the write, so the guard covers them.
+  // GitHub accepted the review and the response was lost. The summary is
+  // component-local state, so reopening the workspace or editing a sentence
+  // must not change what the attempt was — and the record, not the composer, is
+  // what a reconciliation compares against.
   const landed = threadDouble({
     files: [apiFile({ patch })],
     failReviewOnce: { status: 502, message: 'Bad Gateway' },
@@ -2060,21 +2121,346 @@ test('a lost review is settled by asking GitHub, not by the words the reviewer k
         id: 'R_1',
         state: 'COMMENTED',
         body: '',
+        url: 'https://github.com/acme/widgets/pull/7#pullrequestreview-1',
         author: { login: 'ada' },
         commit: { oid: comparison().headOid },
+        comments: {
+          totalCount: 1,
+          nodes: [
+            {
+              id: 'C_1',
+              path: 'src/app.ts',
+              line: 1,
+              startLine: null,
+              side: 'RIGHT',
+              startSide: null,
+              body: 'needs a name',
+              author: { login: 'ada' },
+            },
+          ],
+        },
       },
     ],
   })
   setGitHubTransport(landed.transport)
   t.after(() => setGitHubTransport(null))
 
-  await assert.rejects(() => submitReview(workspace.repo, 7, review('needs a name')), {
+  await assert.rejects(() => submitReview(workspace.repo, 7, review('')), {
     name: 'ReviewOutcomeUnknownError',
   })
-  const second = await submitReview(workspace.repo, 7, review('renamed the function'))
+  const second = await submitReview(workspace.repo, 7, review('a different summary'))
 
   assert.equal(second.state, 'COMMENTED')
-  assert.equal(landed.writes.length, 1, 'a review GitHub already holds is not sent again')
+  assert.equal(landed.writes.length, 1, 'the review GitHub holds is not sent again')
+})
+
+test('an older review of the same commit is not adopted for a later attempt', async (t) => {
+  const workspace = await reviewWorkspace()
+  t.after(workspace.dispose)
+  const patch = '@@ -1,2 +1,3 @@\n keep\n+added\n tail'
+  const entry = file({ diff: { kind: 'text', hunks: hunks(patch) } })
+  const hunk = textHunk(entry, 0)
+  const added = hunk.lines.findIndex((line) => line.side === 'head' && line.newLine !== null)
+  const at = refFor(hunk, added)
+  const submission = {
+    event: 'COMMENT' as const,
+    body: '',
+    comparison: comparison(),
+    drafts: [draft({ id: 'd1', ref: at, body: 'needs a name' })],
+  }
+  const comment = (id: string) => ({
+    id,
+    path: 'src/app.ts',
+    line: 1,
+    startLine: null,
+    side: 'RIGHT',
+    startSide: null,
+    body: 'needs a name',
+    author: { login: 'ada' },
+  })
+  const older = {
+    id: 'R_0',
+    state: 'COMMENTED',
+    body: '',
+    author: { login: 'ada' },
+    commit: { oid: comparison().headOid },
+    comments: { totalCount: 1, nodes: [comment('C_0')] },
+  }
+
+  // The reviewer wrote the same comment on the same line before, and GitHub
+  // took it. This attempt is the second one and its review never arrived, so
+  // adopting the first review would report a success this attempt never had and
+  // clear a draft the reviewer is still owed.
+  const { transport, writes } = threadDouble({
+    files: [apiFile({ patch })],
+    failReviewOnce: { status: 502, message: 'Bad Gateway' },
+    reviewsBefore: [older],
+    reviews: [],
+  })
+  setGitHubTransport(transport)
+  t.after(() => setGitHubTransport(null))
+
+  await assert.rejects(() => submitReview(workspace.repo, 7, submission), {
+    name: 'ReviewOutcomeUnknownError',
+  })
+  await assert.rejects(() => submitReview(workspace.repo, 7, submission), {
+    name: 'ReviewWriteUncertainError',
+  })
+  assert.equal(writes.length, 1, 'the earlier review is not mistaken for this attempt')
+})
+
+test('a review of the same commit with a different decision is not adopted', async (t) => {
+  const workspace = await reviewWorkspace()
+  t.after(workspace.dispose)
+  const patch = '@@ -1,2 +1,3 @@\n keep\n+added\n tail'
+  const entry = file({ diff: { kind: 'text', hunks: hunks(patch) } })
+  const hunk = textHunk(entry, 0)
+  const added = hunk.lines.findIndex((line) => line.side === 'head' && line.newLine !== null)
+  const at = refFor(hunk, added)
+
+  // An approval of the same comment on the same commit. The attempt was a plain
+  // comment, and GitHub records what it was told; an approval is not the thing
+  // that was sent, so it cannot stand in for it.
+  const approval = {
+    id: 'R_1',
+    state: 'APPROVED',
+    body: '',
+    author: { login: 'ada' },
+    commit: { oid: comparison().headOid },
+    comments: {
+      totalCount: 1,
+      nodes: [
+        {
+          id: 'C_1',
+          path: 'src/app.ts',
+          line: 1,
+          startLine: null,
+          side: 'RIGHT',
+          startSide: null,
+          body: 'needs a name',
+          author: { login: 'ada' },
+        },
+      ],
+    },
+  }
+  const submission = {
+    event: 'COMMENT' as const,
+    body: '',
+    comparison: comparison(),
+    drafts: [draft({ id: 'd1', ref: at, body: 'needs a name' })],
+  }
+  const { transport, writes } = threadDouble({
+    files: [apiFile({ patch })],
+    failReviewOnce: { status: 502, message: 'Bad Gateway' },
+    reviews: [approval],
+  })
+  setGitHubTransport(transport)
+  t.after(() => setGitHubTransport(null))
+
+  await assert.rejects(() => submitReview(workspace.repo, 7, submission), {
+    name: 'ReviewOutcomeUnknownError',
+  })
+  await assert.rejects(() => submitReview(workspace.repo, 7, submission), {
+    name: 'ReviewWriteUncertainError',
+  })
+  assert.equal(writes.length, 1, 'an approval is not adopted for a comment review')
+})
+
+test('a review carrying different comments is not adopted for this attempt', async (t) => {
+  const workspace = await reviewWorkspace()
+  t.after(workspace.dispose)
+  const patch = '@@ -1,2 +1,3 @@\n keep\n+added\n tail'
+  const entry = file({ diff: { kind: 'text', hunks: hunks(patch) } })
+  const hunk = textHunk(entry, 0)
+  const added = hunk.lines.findIndex((line) => line.side === 'head' && line.newLine !== null)
+  const at = refFor(hunk, added)
+  // Same author, same commit, same decision, same empty summary — and a
+  // different comment. The comments are the review; a matching summary says
+  // nothing about whether this attempt's words reached GitHub.
+  const other = {
+    id: 'R_1',
+    state: 'COMMENTED',
+    body: '',
+    author: { login: 'ada' },
+    commit: { oid: comparison().headOid },
+    comments: {
+      totalCount: 1,
+      nodes: [
+        {
+          id: 'C_1',
+          path: 'src/app.ts',
+          line: 1,
+          startLine: null,
+          side: 'RIGHT',
+          startSide: null,
+          body: 'an entirely different remark',
+          author: { login: 'ada' },
+        },
+      ],
+    },
+  }
+  const submission = {
+    event: 'COMMENT' as const,
+    body: '',
+    comparison: comparison(),
+    drafts: [draft({ id: 'd1', ref: at, body: 'needs a name' })],
+  }
+  const { transport, writes } = threadDouble({
+    files: [apiFile({ patch })],
+    failReviewOnce: { status: 502, message: 'Bad Gateway' },
+    reviews: [other],
+  })
+  setGitHubTransport(transport)
+  t.after(() => setGitHubTransport(null))
+
+  await assert.rejects(() => submitReview(workspace.repo, 7, submission), {
+    name: 'ReviewOutcomeUnknownError',
+  })
+  await assert.rejects(() => submitReview(workspace.repo, 7, submission), {
+    name: 'ReviewWriteUncertainError',
+  })
+  assert.equal(writes.length, 1, 'a review of other comments is not this attempt')
+})
+
+test("a collaborator's identical review is not adopted for this account", async (t) => {
+  const workspace = await reviewWorkspace()
+  t.after(workspace.dispose)
+  const patch = '@@ -1,2 +1,3 @@\n keep\n+added\n tail'
+  const entry = file({ diff: { kind: 'text', hunks: hunks(patch) } })
+  const hunk = textHunk(entry, 0)
+  const added = hunk.lines.findIndex((line) => line.side === 'head' && line.newLine !== null)
+  const at = refFor(hunk, added)
+  // Byte for byte what this account was trying to write, except that somebody
+  // else wrote it. A collaborator's review is not this reviewer's write.
+  const collaborators = {
+    id: 'R_1',
+    state: 'COMMENTED',
+    body: '',
+    author: { login: 'grace' },
+    commit: { oid: comparison().headOid },
+    comments: {
+      totalCount: 1,
+      nodes: [
+        {
+          id: 'C_1',
+          path: 'src/app.ts',
+          line: 1,
+          startLine: null,
+          side: 'RIGHT',
+          startSide: null,
+          body: 'needs a name',
+          author: { login: 'grace' },
+        },
+      ],
+    },
+  }
+  const submission = {
+    event: 'COMMENT' as const,
+    body: '',
+    comparison: comparison(),
+    drafts: [draft({ id: 'd1', ref: at, body: 'needs a name' })],
+  }
+  const { transport, writes } = threadDouble({
+    files: [apiFile({ patch })],
+    failReviewOnce: { status: 502, message: 'Bad Gateway' },
+    reviews: [collaborators],
+  })
+  setGitHubTransport(transport)
+  t.after(() => setGitHubTransport(null))
+
+  await assert.rejects(() => submitReview(workspace.repo, 7, submission), {
+    name: 'ReviewOutcomeUnknownError',
+  })
+  await assert.rejects(() => submitReview(workspace.repo, 7, submission), {
+    name: 'ReviewWriteUncertainError',
+  })
+  assert.equal(writes.length, 1, "somebody else's review is not this account's write")
+})
+
+test('the same unresolved comments stay guarded when the decision changes', async (t) => {
+  const workspace = await reviewWorkspace()
+  t.after(workspace.dispose)
+  const patch = '@@ -1,2 +1,3 @@\n keep\n+added\n tail'
+  const entry = file({ diff: { kind: 'text', hunks: hunks(patch) } })
+  const hunk = textHunk(entry, 0)
+  const added = hunk.lines.findIndex((line) => line.side === 'head' && line.newLine !== null)
+  const at = refFor(hunk, added)
+  const drafts = [draft({ id: 'd1', ref: at, body: 'needs a name' })]
+
+  // The comment review landed and lost its response. Approving instead is a
+  // different event, but it is the same comment on the same line, and posting
+  // it again would be the same comment twice.
+  const { transport, writes } = threadDouble({
+    files: [apiFile({ patch })],
+    failReviewOnce: { status: 502, message: 'Bad Gateway' },
+  })
+  setGitHubTransport(transport)
+  t.after(() => setGitHubTransport(null))
+
+  await assert.rejects(
+    () =>
+      submitReview(workspace.repo, 7, {
+        event: 'COMMENT',
+        body: '',
+        comparison: comparison(),
+        drafts,
+      }),
+    { name: 'ReviewOutcomeUnknownError' },
+  )
+  await assert.rejects(
+    () =>
+      submitReview(workspace.repo, 7, {
+        event: 'APPROVE',
+        body: '',
+        comparison: comparison(),
+        drafts,
+      }),
+    { name: 'ReviewWriteUncertainError' },
+  )
+  assert.equal(writes.length, 1, 'the same comment is not posted under a new decision')
+})
+
+test('an unresolved comment stays guarded when a second draft joins the batch', async (t) => {
+  const workspace = await reviewWorkspace()
+  t.after(workspace.dispose)
+  const patch = '@@ -1,2 +1,3 @@\n keep\n+added\n tail'
+  const entry = file({ diff: { kind: 'text', hunks: hunks(patch) } })
+  const hunk = textHunk(entry, 0)
+  const added = hunk.lines.findIndex((line) => line.side === 'head' && line.newLine !== null)
+  const at = refFor(hunk, added)
+  const first = draft({ id: 'd1', ref: at, body: 'needs a name' })
+  const second = draft({ id: 'd2', ref: at, body: 'and a second thought' })
+
+  // A larger batch is a different attempt id, but the first comment is the same
+  // unresolved comment, so it is still guarded.
+  const { transport, writes } = threadDouble({
+    files: [apiFile({ patch })],
+    failReviewOnce: { status: 502, message: 'Bad Gateway' },
+  })
+  setGitHubTransport(transport)
+  t.after(() => setGitHubTransport(null))
+
+  await assert.rejects(
+    () =>
+      submitReview(workspace.repo, 7, {
+        event: 'COMMENT',
+        body: '',
+        comparison: comparison(),
+        drafts: [first],
+      }),
+    { name: 'ReviewOutcomeUnknownError' },
+  )
+  await assert.rejects(
+    () =>
+      submitReview(workspace.repo, 7, {
+        event: 'COMMENT',
+        body: '',
+        comparison: comparison(),
+        drafts: [first, second],
+      }),
+    { name: 'ReviewWriteUncertainError' },
+  )
+  assert.equal(writes.length, 1, 'the unresolved comment is not posted again in a larger batch')
 })
 
 test('a lost review GitHub does not hold still refuses the second send', async (t) => {
@@ -2244,6 +2630,73 @@ test("another account's attempt does not delete this one's guard", async (t) => 
   t.after(() => setGitHubTransport(null))
 })
 
+test('a lost review is found however many reviews came after it', async (t) => {
+  const workspace = await reviewWorkspace()
+  t.after(workspace.dispose)
+  const patch = '@@ -1,2 +1,3 @@\n keep\n+added\n tail'
+  const entry = file({ diff: { kind: 'text', hunks: hunks(patch) } })
+  const hunk = textHunk(entry, 0)
+  const added = hunk.lines.findIndex((line) => line.side === 'head' && line.newLine !== null)
+  const at = refFor(hunk, added)
+  const submission = {
+    event: 'COMMENT' as const,
+    body: '',
+    comparison: comparison(),
+    drafts: [draft({ id: 'd1', ref: at, body: 'needs a name' })],
+  }
+  const landed = {
+    id: 'R_1',
+    state: 'COMMENTED',
+    body: '',
+    author: { login: 'ada' },
+    commit: { oid: comparison().headOid },
+    comments: {
+      totalCount: 1,
+      nodes: [
+        {
+          id: 'C_1',
+          path: 'src/app.ts',
+          line: 1,
+          startLine: null,
+          side: 'RIGHT',
+          startSide: null,
+          body: 'needs a name',
+          author: { login: 'ada' },
+        },
+      ],
+    },
+  }
+  // An attempt outlives any recent window: the review it made is now buried
+  // under more reviews than one page holds. Reading only the newest page would
+  // report "not found" and hold a write GitHub had already settled, with no
+  // way out of the hold.
+  const review = (index: number) => ({
+    id: `R_${index}`,
+    state: 'COMMENTED',
+    body: `unrelated ${index}`,
+    author: { login: 'grace' },
+    commit: { oid: comparison().headOid },
+    comments: { totalCount: 0, nodes: [] },
+  })
+  const { transport, writes } = threadDouble({
+    files: [apiFile({ patch })],
+    failReviewOnce: { status: 502, message: 'Bad Gateway' },
+    // Oldest first, as GitHub returns a review connection, with the landed
+    // review underneath every review that came after it.
+    reviews: [landed, ...Array.from({ length: 60 }, (_, i) => review(100 - i))],
+  })
+  setGitHubTransport(transport)
+  t.after(() => setGitHubTransport(null))
+
+  await assert.rejects(() => submitReview(workspace.repo, 7, submission), {
+    name: 'ReviewOutcomeUnknownError',
+  })
+  const second = await submitReview(workspace.repo, 7, submission)
+
+  assert.equal(second.state, 'COMMENTED')
+  assert.equal(writes.length, 1, 'the review is found by paging back, not by giving up')
+})
+
 test('an uncertain record of another repository does not block this pull request', async (t) => {
   // One Git common directory with two origins, which is the case the journal
   // has to survive: the file is shared by both, so a pull request number is
@@ -2337,6 +2790,86 @@ test('a reply GitHub never confirmed is not sent again to the same thread', asyn
     name: 'ReviewWriteUncertainError',
   })
   assert.equal(writes.length, 1, 'the reply was attempted once and never again')
+})
+
+test("somebody else's identical words are not adopted as this account's reply", async (t) => {
+  const workspace = await reviewWorkspace()
+  t.after(workspace.dispose)
+  // A collaborator has already written "Thanks" in this thread, so the body the
+  // reviewer is about to send already appears in the conversation.
+  const { transport, writes } = threadDouble({
+    threads: [
+      threadNode({
+        id: 'PRRT_1',
+        line: 12,
+        comments: [{ id: 'C_0', author: 'grace', body: 'Thanks' }],
+      }),
+    ],
+    fail: { addPullRequestReviewThreadReply: { status: 502, message: 'Bad Gateway' } },
+  })
+  setGitHubTransport(transport)
+  t.after(() => setGitHubTransport(null))
+
+  await assert.rejects(() => replyToThread(workspace.repo, 7, 'PRRT_1', 'Thanks'), {
+    name: 'ReviewOutcomeUnknownError',
+  })
+  // Grace's comment is not this account's reply, and it predates the attempt in
+  // any case, so the guard stands rather than reporting a success that never was.
+  await assert.rejects(() => replyToThread(workspace.repo, 7, 'PRRT_1', 'Thanks'), {
+    name: 'ReviewWriteUncertainError',
+  })
+  assert.equal(writes.length, 1, 'the reply was attempted once and never again')
+})
+
+test("a collaborator's identical reply inside the attempt window is not this account's", async (t) => {
+  const workspace = await reviewWorkspace()
+  t.after(workspace.dispose)
+  // The thread is empty, so the attempt's boundary contains nothing. After the
+  // reply goes out, somebody else writes the same words — which is the only
+  // thing in the thread that matches them, and it is not this account's reply.
+  const { transport, writes } = threadDouble({
+    threads: [threadNode({ id: 'PRRT_1', line: 12 })],
+    collaboratorReply: { id: 'C_1', author: 'grace', body: 'Thanks' },
+    fail: { addPullRequestReviewThreadReply: { status: 502, message: 'Bad Gateway' } },
+  })
+  setGitHubTransport(transport)
+  t.after(() => setGitHubTransport(null))
+
+  await assert.rejects(() => replyToThread(workspace.repo, 7, 'PRRT_1', 'Thanks'), {
+    name: 'ReviewOutcomeUnknownError',
+  })
+  await assert.rejects(() => replyToThread(workspace.repo, 7, 'PRRT_1', 'Thanks'), {
+    name: 'ReviewWriteUncertainError',
+  })
+  assert.equal(writes.length, 1, "somebody else's words are not this account's reply")
+})
+
+test('an older reply of this account is not adopted for a later attempt', async (t) => {
+  const workspace = await reviewWorkspace()
+  t.after(workspace.dispose)
+  // This account said the same words earlier in the thread, before the attempt
+  // that was lost. Adopting the old one would report a success the later
+  // attempt never had and clear the composer for a reply nobody can see.
+  const { transport, writes } = threadDouble({
+    threads: [
+      threadNode({
+        id: 'PRRT_1',
+        line: 12,
+        comments: [{ id: 'C_0', author: 'ada', body: 'Thanks' }],
+      }),
+    ],
+    fail: { addPullRequestReviewThreadReply: { status: 502, message: 'Bad Gateway' } },
+  })
+  setGitHubTransport(transport)
+  t.after(() => setGitHubTransport(null))
+
+  await assert.rejects(() => replyToThread(workspace.repo, 7, 'PRRT_1', 'Thanks'), {
+    name: 'ReviewOutcomeUnknownError',
+  })
+  await assert.rejects(() => replyToThread(workspace.repo, 7, 'PRRT_1', 'Thanks'), {
+    name: 'ReviewWriteUncertainError',
+  })
+  assert.equal(writes.length, 1)
 })
 
 test('resolve and unresolve are opposite mutations on the same thread', async (t) => {

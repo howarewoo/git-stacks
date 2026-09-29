@@ -7,6 +7,7 @@ import type {
   ReviewDraft,
   ReviewDraftRecord,
   ReviewUncertainWrite,
+  UncertainComment,
 } from '../shared/review-threads'
 import { REVIEW_DRAFTS_MAX, REVIEW_UNCERTAIN_MAX } from '../shared/review-threads'
 import { isRecord, runGit, stripTrailingNewline } from './git-core'
@@ -65,7 +66,36 @@ function parseUncertain(value: unknown): ReviewUncertainWrite | null {
     at: typeof value.at === 'string' ? value.at : '',
     repo: typeof value.repo === 'string' ? value.repo : '',
     viewer: typeof value.viewer === 'string' ? value.viewer : '',
+    comments: parseUncertainComments(value.comments),
+    beforeReviewId: typeof value.beforeReviewId === 'string' ? value.beforeReviewId : null,
+    threadCommentIds: Array.isArray(value.threadCommentIds)
+      ? value.threadCommentIds.filter((entry): entry is string => typeof entry === 'string')
+      : [],
   }
+}
+
+/**
+ * The comment payload an attempt recorded. A record written before this field
+ * existed reads as no comments, which cannot settle a review — an unidentifiable
+ * attempt is one that is held, not one that is adopted.
+ */
+function parseUncertainComments(value: unknown): UncertainComment[] {
+  if (!Array.isArray(value)) return []
+  const parsed: UncertainComment[] = []
+  for (const entry of value) {
+    if (!isRecord(entry)) continue
+    if (typeof entry.path !== 'string' || typeof entry.body !== 'string') continue
+    if (typeof entry.line !== 'number') continue
+    parsed.push({
+      path: entry.path,
+      side: entry.side === 'base' ? 'base' : 'head',
+      line: entry.line,
+      startLine: typeof entry.startLine === 'number' ? entry.startLine : null,
+      startSide: entry.startSide === 'base' || entry.startSide === 'head' ? entry.startSide : null,
+      body: entry.body,
+    })
+  }
+  return parsed
 }
 
 async function readUncertain(file: string): Promise<ReviewUncertainWrite[]> {

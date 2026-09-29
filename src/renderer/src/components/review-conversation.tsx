@@ -210,7 +210,15 @@ export function ReviewConversation({
       })
       setUncertain(false)
       setSummary('')
-      onDraftChange([])
+      // A recovery adopts what GitHub already holds, and reports which drafts
+      // that was. Only those are dropped: the drafts that never went anywhere
+      // are still the reviewer's unsent work and stay pending.
+      const delivered = new Set(result.delivered ?? [])
+      onDraftChange(
+        delivered.size === 0
+          ? []
+          : draftList.filter((draft) => !delivered.has(draft.id)),
+      )
       onReload()
       setNotice(
         `Sent one ${REVIEW_EVENT_LABELS[event].toLowerCase()} review with ${intended.length} comment${

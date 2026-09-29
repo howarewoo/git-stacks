@@ -184,6 +184,15 @@ export interface ReviewMutationResult {
   id: string
   state: string
   url: string | null
+  /**
+   * The drafts an adopted outcome already delivered, by draft id.
+   *
+   * When an earlier attempt turns out to have landed, some of the comments in
+   * the current payload are on GitHub already and must not be sent again. The
+   * drafts that are not in this list were never sent and stay pending, so the
+   * reviewer's own unsent work is not thrown away by a recovery.
+   */
+  delivered?: string[]
 }
 
 const SIDE_NAMES: Record<ReviewSide, string> = { base: 'base', head: 'head' }
@@ -280,6 +289,38 @@ export interface ReviewUncertainWrite {
    * hold another account's button shut.
    */
   viewer: string
+  /**
+   * Every comment the attempt would post, with the body and the anchor it would
+   * be written at. The decision alone cannot identify a review: an older
+   * approval of the same commit with an empty summary looks identical to a new
+   * one, and adopting it would clear comments GitHub never received.
+   */
+  comments: UncertainComment[]
+  /**
+   * The newest review the pull request already held when the attempt began.
+   *
+   * This is the attempt's boundary. A review older than it cannot be this
+   * attempt whatever it happens to say, and a review newer than it can only be
+   * this one or something later. Reading a bounded recent page without it is
+   * how an old review gets mistaken for the lost one.
+   */
+  beforeReviewId: string | null
+  /**
+   * The comment ids a thread already held when the attempt began, for the same
+   * reason: an older "Thanks" is somebody else's, and this account's older
+   * "Thanks" is not this attempt.
+   */
+  threadCommentIds: string[]
+}
+
+/** One inline comment as an attempt recorded it, so a reconciliation can match it. */
+export interface UncertainComment {
+  path: string
+  side: 'base' | 'head'
+  line: number
+  startLine: number | null
+  startSide: 'base' | 'head' | null
+  body: string
 }
 /** A stable local identifier for a draft, so a list keeps its key across edits. */
 export function reviewDraftKey(ref: ReviewLineRef, startRef: ReviewLineRef | null): string {
