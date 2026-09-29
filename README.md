@@ -404,6 +404,14 @@ those edges do not prove is still counted by Git, one process per branch under
 `mapWithConcurrency`, so the number a branch reports is always the number
 `git rev-list --count <branch>..<base>` returns.
 
+**Behind counts answered from the parent edges already read.** The same batched
+`log --no-walk` pass that infers a parent records each tip's direct parents, so
+a base a branch already contains — a stack one commit down, or a whole recorded
+stack — is behind by exactly zero and needs no `rev-list` of its own. A base
+those edges do not prove is still counted by Git, one process per branch under
+`mapWithConcurrency`, so the number a branch reports is always the number
+`git rev-list --count <branch>..<base>` returns.
+
 **A branch-analysis budget.** `SNAPSHOT_BRANCH_BUDGET` caps per-branch
 merge-base and behind probes. A branch consumes one budget slot across both
 phases: admission for parent inference also reserves its behind comparison.
