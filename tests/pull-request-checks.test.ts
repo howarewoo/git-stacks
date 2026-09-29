@@ -1373,3 +1373,142 @@ test('a refresh the caller abandons stops instead of finishing work nobody is wa
     assert.equal(after.headSha, head)
   })
 })
+
+test('a rate-limited identity read stops the call and leaves the deadline behind', async () => {
+  await withHarness(async (harness) => {
+    // No report has ever been read, so the pull request itself is the first request.
+    const head = await setup(harness, (headSha) => ({
+      checkRuns: [{ id: 1, headSha, name: 'build', status: 'completed', conclusion: 'success' }],
+    }))
+    const state = await harness.readState()
+    state.lostResponses = [
+      {
+        method: 'GET',
+        pathIncludes: `/pulls/${PR_NUMBER}`,
+        status: 429,
+        message: 'You have exceeded a secondary rate limit.',
+      },
+    ]
+    await harness.writeState(state)
+
+    const before = Date.now()
+    const refused = await getPullRequestChecks(harness.repo, PR_NUMBER, {
+      headSha: head,
+      base: 'main',
+    })
+    assert.equal(refused.available, false)
+    assert.equal(refused.checks.length, 0)
+    const deadline = Date.parse(refused.nextAttemptAt ?? '')
+    assert.ok(deadline - before >= 60_000, `next attempt at ${refused.nextAttemptAt}`)
+
+    // The call stops at the refusal: nothing is asked about the commit's checks.
+    const askedAboutChecks = (await harness.readState()).requests.some((entry) =>
+      entry.argv.some((part) => String(part).includes('/check-runs')),
+    )
+    assert.equal(askedAboutChecks, false)
+
+    // And the next refresh inside the deadline is served from it, not from GitHub.
+    const requestsBefore = (await harness.readState()).requests.length
+    const again = await getPullRequestChecks(harness.repo, PR_NUMBER, {
+      headSha: head,
+      base: 'main',
+      force: true,
+    })
+    assert.equal(again.available, false)
+    assert.equal(again.nextAttemptAt, refused.nextAttemptAt)
+    assert.equal((await harness.readState()).requests.length, requestsBefore)
+  })
+})
+
+test('a rate-limited identity read serves the last report stale and asks nothing else', async () => {
+  await withHarness(async (harness) => {
+    const head = await setup(harness, (headSha) => ({
+      checkRuns: [{ id: 1, headSha, name: 'build', status: 'completed', conclusion: 'success' }],
+    }))
+    const first = await getPullRequestChecks(harness.repo, PR_NUMBER, {
+      headSha: head,
+      base: 'main',
+    })
+    assert.equal(first.freshness, 'live')
+
+    const state = await harness.readState()
+    const requestsAtRefusal = state.requests.length
+    state.lostResponses = [
+      {
+        method: 'GET',
+        pathIncludes: `/pulls/${PR_NUMBER}`,
+        status: 429,
+        message: 'You have exceeded a secondary rate limit.',
+      },
+    ]
+    await harness.writeState(state)
+
+    const before = Date.now()
+    const refused = await getPullRequestChecks(harness.repo, PR_NUMBER, {
+      headSha: head,
+      base: 'main',
+      force: true,
+    })
+    assert.equal(refused.freshness, 'stale')
+    assert.deepEqual(
+      refused.checks.map((check) => check.name),
+      ['build'],
+    )
+    assert.match(refused.staleReason ?? '', /could not be re-read from GitHub/)
+    // A head nobody confirmed cannot authorise a rerun.
+    assert.equal(refused.permissions.canRerun, false)
+    assert.match(refused.permissions.reason, /could not be re-read/)
+    const deadline = Date.parse(refused.nextAttemptAt ?? '')
+    assert.ok(deadline - before >= 60_000, `next attempt at ${refused.nextAttemptAt}`)
+
+    // The refusal is the only thing asked after it: no check runs, no commit status, no
+    // workflow runs, even though the report could have kept going.
+    const after = await harness.readState()
+    const asked = after.requests.slice(requestsAtRefusal).map((entry) => entry.argv.join(' '))
+    assert.equal(asked.length, 1)
+    assert.match(asked[0] ?? '', new RegExp(`/pulls/${PR_NUMBER} GET$`))
+    const requestsBefore = after.requests.length
+    const again = await getPullRequestChecks(harness.repo, PR_NUMBER, {
+      headSha: head,
+      base: 'main',
+      force: true,
+    })
+    assert.equal(again.freshness, 'stale')
+    assert.equal(again.nextAttemptAt, refused.nextAttemptAt)
+    assert.equal((await harness.readState()).requests.length, requestsBefore)
+  })
+})
+
+test('a complete list that ends before the page bound is not called truncated', async () => {
+  await withHarness(async (harness) => {
+    // 901 entries fill nine pages and leave one on the tenth, so every entry was read
+    // even though the read walked to the tenth page.
+    const head = await setup(harness, (headSha) => ({
+      conditional: true,
+      checkRuns: Array.from({ length: 901 }, (_unused, index) => ({
+        id: 8_000 + index,
+        headSha,
+        name: `check ${index}`,
+        status: 'completed',
+        conclusion: 'success',
+      })),
+    }))
+    const first = await getPullRequestChecks(harness.repo, PR_NUMBER, {
+      headSha: head,
+      base: 'main',
+    })
+    assert.equal(first.checks.length, 901)
+    assert.equal(first.truncated, false)
+
+    // Nothing changed, so the tenth page answers 304 as well. Its cached body is one
+    // entry short of a full page, which is still the whole list.
+    const confirmed = await getPullRequestChecks(harness.repo, PR_NUMBER, {
+      headSha: head,
+      base: 'main',
+      force: true,
+    })
+    assert.equal(confirmed.freshness, 'not-modified')
+    assert.equal(confirmed.checks.length, 901)
+    assert.equal(confirmed.truncated, false)
+  })
+})

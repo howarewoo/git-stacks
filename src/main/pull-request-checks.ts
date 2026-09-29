@@ -242,12 +242,10 @@ async function readAllPages(
         pages.push(remembered)
         // GitHub's validator when it sends one, otherwise the one it just confirmed.
         etags.set(pageKey(options.key, page), read.etag ?? sent ?? '')
-        // Every page this head was last read with has confirmed itself, so there is
-        // nothing further to ask about. A full page at the bound is still the bound.
-        if (options.remembered.length <= page) {
-          if (page === MAX_PAGES) truncated = true
-          break
-        }
+        // Every page this head was last read with has now confirmed itself, so there is
+        // nothing further to ask about. Whether that was the bound is decided by the
+        // remembered page's length below, not by the page number.
+        if (options.remembered.length <= page) break
         continue
       }
       // GitHub confirmed a page whose body is no longer cached, which happens after the
@@ -843,10 +841,6 @@ export async function getPullRequestChecks(
 
   let headSha = options.headSha ?? null
   let base = options.base ?? null
-  // Identity is either proved in this call or reported as unproved. A read that could
-  // not confirm which head the pull request has may still show the last good report,
-  // but it is not current, and it cannot authorise a mutation.
-  let identityReason: string | null = null
   // The renderer's head and base are what its list showed a moment ago, not what the
   // pull request has now, so a call that will read from GitHub proves the current
   // identity itself. Only a call that reads nothing (served cache, waited-out backoff)
@@ -876,11 +870,28 @@ export async function getPullRequestChecks(
       base = identity.base ?? base
     } catch (error) {
       if (error instanceof GitHubTransportError && error.kind === 'cancelled') throw error
-      if (!remembered?.headSha) throw error
-      identityReason =
+      // The identity read is a request like any other: when GitHub refuses it, this call
+      // stops here rather than going on to ask for check runs it has already said no to.
+      // The refusal is recorded the same way a payload refusal is, deadline included.
+      if (!remembered?.headSha) {
+        return recordFailure(error, { number, headSha, base, remembered, cacheKey, backoffKey })
+      }
+      // An unproved head cannot authorise a write, so the last good report is shown with
+      // the rerun held back and said to be unproved.
+      const reason =
         'This pull request could not be re-read from GitHub, so these checks are the last ones Git Stacks read.'
-      headSha = remembered.headSha
-      base = base ?? remembered.base
+      return recordFailure(
+        error,
+        {
+          number,
+          headSha: remembered.headSha,
+          base: base ?? remembered.base,
+          remembered: { ...remembered, permissions: withoutRerun(remembered.permissions, reason) },
+          cacheKey,
+          backoffKey,
+        },
+        reason,
+      )
     }
   }
   // A report for a head that has since moved describes work that is no longer current.
@@ -889,19 +900,10 @@ export async function getPullRequestChecks(
     return getPullRequestChecks(repoPath, number, { ...options, headSha, base, force: true })
   }
 
-  // Backoff outranks a forced refresh, and it is honoured above, before anything is
-  // read. A report served without asking GitHub anything is only as current as the
-  // identity behind it, so an unproved head is labelled here too.
+  // Backoff outranks a forced refresh, and it is honoured above, before anything is read.
+  // A report served without asking GitHub anything is only as current as the identity
+  // behind it, and `cached` says exactly that.
   if (remembered && withinInterval) {
-    if (identityReason) {
-      return reportFrom(
-        { ...remembered, permissions: withoutRerun(remembered.permissions, identityReason) },
-        number,
-        base ?? remembered.base,
-        'stale',
-        identityReason,
-      )
-    }
     return reportFrom(remembered, number, base ?? remembered.base, 'cached', null)
   }
 
@@ -952,11 +954,9 @@ export async function getPullRequestChecks(
       readPermissions.isAdmin,
       options.signal,
     )
-    // An unproved head cannot authorise a mutation: the run behind the button may belong
-    // to a commit Git Stacks never confirmed this pull request has.
-    const permissions = identityReason
-      ? withoutRerun(readPermissions, identityReason)
-      : readPermissions
+    // Every path that reaches here proved the head in this call, so the permissions read
+    // beside it are about the commit the report is for.
+    const permissions = readPermissions
 
     if (checkRuns.notModified && status.notModified && workflowRuns.notModified && remembered) {
       // The payloads are still current, but they are rebuilt against the policy read
@@ -984,9 +984,7 @@ export async function getPullRequestChecks(
         lastReason: null,
       }
       cache.set(cacheKey, confirmed)
-      return identityReason
-        ? reportFrom(confirmed, number, base, 'stale', identityReason)
-        : reportFrom(confirmed, number, base, 'not-modified', null)
+      return reportFrom(confirmed, number, base, 'not-modified', null)
     }
 
     // Each resource keeps the pages this read actually saw: a page GitHub confirmed is
@@ -1028,36 +1026,67 @@ export async function getPullRequestChecks(
     }
     cache.set(cacheKey, entry)
     backoffs.delete(backoffKey)
-    return identityReason
-      ? reportFrom(entry, number, base, 'stale', identityReason)
-      : reportFrom(entry, number, base, 'live', null)
+    return reportFrom(entry, number, base, 'live', null)
   } catch (error) {
     if (error instanceof GitHubTransportError && error.kind === 'cancelled') throw error
-    if (!remembered) {
-      // An initial read that failed still has to leave a deadline behind, or the next
-      // refresh - and every watch tick after it - asks a server that just said no.
-      const deadline = Math.max(
-        Date.now() + backoffDelay(1),
-        serverRetryDeadline(error, Date.now()),
-      )
-      backoffs.set(backoffKey, { nextAttemptAt: deadline, reason: describeFailure(error) })
-      return failureReport(number, headSha, base, error, null, deadline)
-    }
-    // The last good report is kept and dated, not thrown away: a refresh that failed
-    // is not evidence that the checks stopped existing. It is served as stale with the
-    // delay before the next attempt, so a caller cannot turn a failure into a poll.
-    const failed: CachedReport = {
-      ...remembered,
-      failures: remembered.failures + 1,
-      nextAttemptAt: Math.max(
-        Date.now() + backoffDelay(remembered.failures + 1),
-        serverRetryDeadline(error, Date.now()),
-      ),
-      lastReason: describeFailure(error),
-    }
-    cache.set(cacheKey, failed)
-    return failureReport(number, remembered.headSha, remembered.base, error, failed)
+    return recordFailure(error, { number, headSha, base, remembered, cacheKey, backoffKey })
   }
+}
+
+/**
+ * One place where a refused read becomes a report. Whether the refusal came from the
+ * identity read or from a payload, the last good report is kept and dated rather than
+ * thrown away - a failed read is not evidence that the checks stopped existing - and the
+ * wait before the next attempt is at least the deadline GitHub gave, so a caller cannot
+ * turn a failure into a poll.
+ */
+function recordFailure(
+  error: unknown,
+  context: {
+    number: number
+    headSha: string | null
+    base: string | null
+    remembered: CachedReport | null
+    cacheKey: string
+    backoffKey: string
+  },
+  reason: string = describeFailure(error),
+): PullRequestChecksReport {
+  const now = Date.now()
+  if (!context.remembered) {
+    // A first read that failed still has to leave a deadline behind, or the next refresh
+    // - and every watch tick after it - asks a server that just said no.
+    const deadline = Math.max(now + backoffDelay(1), serverRetryDeadline(error, now))
+    backoffs.set(context.backoffKey, { nextAttemptAt: deadline, reason })
+    return failureReport(
+      context.number,
+      context.headSha,
+      context.base,
+      error,
+      null,
+      deadline,
+      reason,
+    )
+  }
+  const failed: CachedReport = {
+    ...context.remembered,
+    failures: context.remembered.failures + 1,
+    nextAttemptAt: Math.max(
+      now + backoffDelay(context.remembered.failures + 1),
+      serverRetryDeadline(error, now),
+    ),
+    lastReason: reason,
+  }
+  cache.set(context.cacheKey, failed)
+  return failureReport(
+    context.number,
+    context.remembered.headSha,
+    context.remembered.base,
+    error,
+    failed,
+    null,
+    reason,
+  )
 }
 
 function reportFrom(
