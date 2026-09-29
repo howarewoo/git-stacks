@@ -24,6 +24,7 @@ import {
 } from '../shared/review'
 import type { DiffHunk, DiffHunkLine, NativeStack } from '../shared/types'
 import { getConfigValue, isRecord, parseRemote, type ParsedRemote } from './git-core'
+import { remoteHostContext } from './github-host'
 import { GitHubTransportError, githubTransport } from './github-transport'
 import { getPullRequest } from './github'
 import { listPullRequestStacks } from './native-stacks'
@@ -278,8 +279,15 @@ export async function readReviewHeadline(
 ): Promise<ReviewHeadline> {
   const pullRequest = await getPullRequest(repoPath, number, signal)
   const remote = await originRemote(repoPath, signal)
+  const host = remoteHostContext(remote)
+  if (!host) {
+    throw new Error(
+      `Review needs a GitHub origin remote; this repository's origin is on ${remote.host}.`,
+    )
+  }
   try {
     const stacks = await listPullRequestStacks(remote.owner, remote.name, {
+      host,
       pullRequest: number,
       signal,
     })

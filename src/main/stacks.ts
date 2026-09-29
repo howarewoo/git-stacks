@@ -4097,8 +4097,12 @@ async function captureSurgery(
     blockers: [...new Set([...plan.preview.blockers, ...blockers])],
     mergeMethods: [],
     sync: null,
+    nativeStacksAvailable: githubData?.nativeStackPreviewAvailable === true,
+    nativeStacksReason: githubData?.nativeStackPreviewReason ?? 'not-applicable',
+    // A restack moves no pull request; it only proves the local shape GitHub
+    // will read, and a surgery never merges, so either way there is no merge
+    // preview to revalidate.
     revalidateRemote: true,
-    // A restack moves no pull request; it only proves the local shape GitHub will read.
     merge: null,
     mergeStackNumber: null,
   }
@@ -4229,6 +4233,9 @@ async function runSurgeryRemote(root: string, journal: StackJournal): Promise<st
   // A local-only surgery has no published half: nothing to retarget, close, or register.
   if (!surgery || !surgery.fullName) return ''
   const [owner, name] = surgery.fullName.split('/')
+  // Every remote step of one surgery speaks to the host that owns its
+  // repository, resolved once so a run cannot straddle two hosts.
+  const host = await repositoryHost(root)
   const parts: string[] = []
   for (const step of surgery.pullRequests) {
     const current = await getPullRequest(root, step.number)
@@ -4263,7 +4270,7 @@ async function runSurgeryRemote(root: string, journal: StackJournal): Promise<st
           `Pull request #${step.number} changed from ${step.fromBase} to ${current.base} on GitHub`,
         )
       }
-      await patchPullRequest(surgery.fullName, step.number, { base: step.toBase })
+      await patchPullRequest(surgery.fullName, step.number, { base: step.toBase }, host)
       const readBack = await getPullRequest(root, step.number)
       assertPullRequestIdentity(step, readBack, expectedPullRequestHead(journal, step))
       if (readBack.state !== 'OPEN' || readBack.base !== step.toBase) {
@@ -4285,7 +4292,7 @@ async function runSurgeryRemote(root: string, journal: StackJournal): Promise<st
       if (step.status === 'completed') {
         throw new Error(`Pull request #${step.number} was reopened after this surgery closed it`)
       }
-      await patchPullRequest(surgery.fullName, step.number, { state: 'closed' })
+      await patchPullRequest(surgery.fullName, step.number, { state: 'closed' }, host)
       const readBack = await getPullRequest(root, step.number)
       assertPullRequestIdentity(step, readBack, expectedPullRequestHead(journal, step))
       if (readBack.state !== 'CLOSED') {
@@ -4299,8 +4306,8 @@ async function runSurgeryRemote(root: string, journal: StackJournal): Promise<st
   const stack = surgery.stack
   if (!stack) return parts.length > 0 ? parts.join('. ') : ''
   if (stack.unstackStatus !== 'completed') {
-    const observed = await readNativeStackMembers(owner, name, stack.stackNumber)
-    if (observed === null && (await nativeStackStillListed(owner, name, stack.stackNumber))) {
+    const observed = await readNativeStackMembers(owner, name, stack.stackNumber, host)
+    if (observed === null && (await nativeStackStillListed(owner, name, stack.stackNumber, host))) {
       // GitHub answered the detail read and the listing differently, so this run
       // cannot tell whether the stack is gone. The journal stays: an unstack it
       // cannot prove must never be recorded as done.
@@ -4328,7 +4335,7 @@ async function runSurgeryRemote(root: string, journal: StackJournal): Promise<st
       // GitHub either empties the stack or dissolves it, and only a merged pull
       // request survives an unstack, so the proof is that no stack still holds an
       // open member of the membership this run unstacked.
-      const stacks = await listPullRequestStacks(owner, name)
+      const stacks = await listPullRequestStacks(owner, name, { host })
       const holding = stacks.find((candidate) =>
         candidate.pullRequests.some(
           (member) => stack.membersBefore.includes(member.number) && member.state !== 'MERGED',
@@ -4353,13 +4360,13 @@ async function runSurgeryRemote(root: string, journal: StackJournal): Promise<st
       if (stack.stackNumberAfter === null) {
         throw new Error('The journal records a completed stack registration without a stack number')
       }
-      const verified = await getPullRequestStack(owner, name, stack.stackNumberAfter)
+      const verified = await getPullRequestStack(owner, name, stack.stackNumberAfter, { host })
       assertRegisteredStack(stack, surgery.trunk, verified, stack.stackNumberAfter)
       parts.push(`Native stack #${stack.stackNumberAfter} holds the new order`)
     } else {
       // A create whose response was lost already registered the stack. Looking it
       // up first is what keeps a resumed run from posting the same membership twice.
-      const existing = await findNativeStack(owner, name, surgery.trunk, stack.members)
+      const existing = await findNativeStack(owner, name, surgery.trunk, stack.members, host)
       if (existing.conflict) {
         throw new Error(
           `Another native stack now holds ${existing.conflict
@@ -4385,7 +4392,7 @@ async function runSurgeryRemote(root: string, journal: StackJournal): Promise<st
             )} was requested and GitHub does not list it yet, so it is not sent again; the first request may still be completing. Check GitHub, then continue.`,
         )
       } else {
-        const capability = await detectNativeStacksCapability(owner, name)
+        const capability = await detectNativeStacksCapability(owner, name, { host })
         if (!capability.available) {
           throw new Error(
             `GitHub cannot create native stacks for ${surgery.fullName}: ${capability.message}`,
@@ -4395,6 +4402,7 @@ async function runSurgeryRemote(root: string, journal: StackJournal): Promise<st
         let created: Awaited<ReturnType<typeof createPullRequestStack>>
         try {
           created = await createPullRequestStack(owner, name, stack.members, {
+            host,
             defaultBranch: surgery.trunk,
             knownPullRequests: await Promise.all(
               stack.members.map((member) => getPullRequest(root, member)),
@@ -4418,7 +4426,7 @@ async function runSurgeryRemote(root: string, journal: StackJournal): Promise<st
         }
         // The checkpoint follows the proof, never the other way round: a journal
         // that claims a registration nobody verified is worse than no journal.
-        const readBack = await getPullRequestStack(owner, name, created.number)
+        const readBack = await getPullRequestStack(owner, name, created.number, { host })
         assertRegisteredStack(stack, surgery.trunk, readBack, created.number)
         stack.createStatus = 'completed'
         stack.stackNumberAfter = created.number
@@ -4468,8 +4476,9 @@ async function nativeStackStillListed(
   owner: string,
   repo: string,
   stackNumber: number,
+  host: GitHubHostContext,
 ): Promise<boolean> {
-  const stacks = await listPullRequestStacks(owner, repo)
+  const stacks = await listPullRequestStacks(owner, repo, { host })
   return stacks.some((stack) => stack.number === stackNumber && stack.open)
 }
 
@@ -4482,9 +4491,10 @@ async function readNativeStackMembers(
   owner: string,
   repo: string,
   stackNumber: number,
+  host: GitHubHostContext,
 ): Promise<number[] | null> {
   try {
-    const stack = await getPullRequestStack(owner, repo, stackNumber)
+    const stack = await getPullRequestStack(owner, repo, stackNumber, { host })
     return stack.pullRequests.map((member) => member.number)
   } catch (error) {
     if (error instanceof NativeStackError && error.httpStatus === 404) return null
@@ -4502,8 +4512,9 @@ async function findNativeStack(
   repo: string,
   trunk: string,
   members: readonly number[],
+  host: GitHubHostContext,
 ): Promise<{ stack: NativeStack | null; conflict: number[] | null }> {
-  const stacks = await listPullRequestStacks(owner, repo)
+  const stacks = await listPullRequestStacks(owner, repo, { host })
   let conflict: number[] | null = null
   for (const stack of stacks) {
     // A closed stack holds nothing: only an open one can be this surgery's result.
@@ -6473,6 +6484,7 @@ async function mergeStack(
   await ensureClean(repoPath, 'merge the pull request')
   await revalidatePlan(repoPath, plan)
   if (!plan.originFullName) throw new Error('A github.com origin remote is required')
+  const host = await repositoryHost(repoPath)
   const requestedAction: MergeAction | undefined = action.mergeAction
   if (
     requestedAction !== 'default' &&
@@ -6488,7 +6500,7 @@ async function mergeStack(
     )
   }
   if (mergeAction === 'direct_merge') {
-    const allowedMethods = await repositoryMergeMethods(plan.originFullName)
+    const allowedMethods = await repositoryMergeMethods(plan.originFullName, host)
     if (
       !plan.mergeMethods.includes(action.mergeMethod) ||
       !allowedMethods ||

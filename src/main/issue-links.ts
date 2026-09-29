@@ -10,7 +10,7 @@ import type {
 } from '../shared/types'
 import { getConfigValue, isCancelled, isRecord, parseRemote, runGit } from './git-core'
 import { getPullRequest, githubErrorMessage } from './github'
-import { githubTransport } from './github-transport'
+import { hostTransport, remoteHostContext, type GitHubHostContext } from './github-host'
 import { patchPullRequest } from './stacks'
 
 /**
@@ -291,10 +291,11 @@ export async function searchGitHubIssues(
   if (!originUrl) {
     return { issues: [], message: 'Issues unavailable: no origin remote is configured' }
   }
-  if (!remote || remote.host !== 'github.com') {
+  const host = remoteHostContext(remote)
+  if (!remote || !host) {
     return {
       issues: [],
-      message: 'Issues unavailable: a github.com origin is required',
+      message: `Issues unavailable: a GitHub origin is required; this origin is on ${remote ? remote.host : 'no host'}`,
     }
   }
 
@@ -312,7 +313,7 @@ export async function searchGitHubIssues(
   const issueNumber = isNumberQuery ? Number(terms) : null
 
   try {
-    const transport = githubTransport()
+    const transport = hostTransport(host)
     const issuesMap = new Map<number, RepositoryIssue>()
 
     // If query is an exact issue number, try direct issue lookup first
@@ -429,6 +430,7 @@ export async function getPullRequestIssueLinks(
 ): Promise<PullRequestIssueLinks> {
   const originUrl = await getConfigValue(repoPath, 'remote.origin.url')
   const remote = parseRemote(originUrl)
+  const host = remoteHostContext(remote)
 
   const localNumbers = await readLocalContextualIssueLinks(repoPath, prNumber)
   let livePr: (PullRequest & { body: string }) | null = null
@@ -442,16 +444,16 @@ export async function getPullRequestIssueLinks(
   }
 
   const closingNumbers: number[] = []
-  if (livePr && remote?.host === 'github.com') {
+  if (livePr && remote && host) {
     try {
-      if (livePr.base !== (await repositoryDefaultBranch(remote.fullName, signal))) livePr = null
+      if (livePr.base !== (await repositoryDefaultBranch(remote.fullName, host, signal))) livePr = null
     } catch (error) {
       if (isCancelled(error)) throw error
       message = githubErrorMessage(error)
       livePr = null
     }
   }
-  if (livePr && remote?.host === 'github.com') {
+  if (livePr && remote && host) {
     const refs = extractClosingReferences(livePr.body, remote?.fullName)
     for (const ref of refs) {
       if (!closingNumbers.includes(ref.issueNumber)) {
@@ -468,9 +470,9 @@ export async function getPullRequestIssueLinks(
 
   // Attempt to resolve issue metadata from GitHub
   const issueDetails = new Map<number, RepositoryIssue>()
-  if (remote && remote.host === 'github.com') {
+  if (remote && host) {
     try {
-      const transport = githubTransport()
+      const transport = hostTransport(host)
       await Promise.all(
         allNumbers.map(async (num) => {
           try {
@@ -533,8 +535,12 @@ export async function getPullRequestIssueLinks(
   return { prNumber, links, message }
 }
 
-async function repositoryDefaultBranch(fullName: string, signal?: AbortSignal): Promise<string> {
-  const { data } = await githubTransport().rest<{ default_branch?: unknown }>({
+async function repositoryDefaultBranch(
+  fullName: string,
+  host: GitHubHostContext,
+  signal?: AbortSignal,
+): Promise<string> {
+  const { data } = await hostTransport(host).rest<{ default_branch?: unknown }>({
     path: `repos/${fullName}`,
     signal,
   })
@@ -557,14 +563,15 @@ export async function previewIssueLink(
 ): Promise<IssueLinkPreview> {
   const originUrl = await getConfigValue(repoPath, 'remote.origin.url')
   const remote = parseRemote(originUrl)
+  const host = remoteHostContext(remote)
 
   if (relation === 'closing') {
     const livePr = await getPullRequest(repoPath, prNumber, signal)
     if (action === 'link') {
       if (
         !remote ||
-        remote.host !== 'github.com' ||
-        livePr.base !== (await repositoryDefaultBranch(remote.fullName, signal))
+        !host ||
+        livePr.base !== (await repositoryDefaultBranch(remote.fullName, host, signal))
       ) {
         throw new Error(
           'Closing keywords only close issues when the pull request targets the repository default branch.',
@@ -629,13 +636,16 @@ export async function runLinkIssueAction(
   // Closing relation: mutates PR body
   const originUrl = await getConfigValue(repoPath, 'remote.origin.url')
   const remote = parseRemote(originUrl)
-  if (!remote || remote.host !== 'github.com') {
-    throw new Error('Pull request integration requires a github.com origin remote.')
+  const host = remoteHostContext(remote)
+  if (!remote || !host) {
+    throw new Error(
+      `Pull request integration requires a GitHub origin remote; this repository's origin is on ${remote ? remote.host : 'no host'}.`,
+    )
   }
 
   // Revalidate body immediately before writing!
   const livePr = await getPullRequest(repoPath, action.prNumber)
-  if (livePr.base !== (await repositoryDefaultBranch(remote.fullName))) {
+  if (livePr.base !== (await repositoryDefaultBranch(remote.fullName, host))) {
     throw new Error(
       'Closing keywords only close issues when the pull request targets the repository default branch.',
     )
@@ -653,7 +663,7 @@ export async function runLinkIssueAction(
     }
   }
 
-  await patchPullRequest(remote.fullName, action.prNumber, { body: updatedBody })
+  await patchPullRequest(remote.fullName, action.prNumber, { body: updatedBody }, host)
 
   const readBack = await getPullRequest(repoPath, action.prNumber)
   if (readBack.body !== updatedBody) {
@@ -694,8 +704,11 @@ export async function runUnlinkIssueAction(
   // Closing relation: mutates PR body
   const originUrl = await getConfigValue(repoPath, 'remote.origin.url')
   const remote = parseRemote(originUrl)
-  if (!remote || remote.host !== 'github.com') {
-    throw new Error('Pull request integration requires a github.com origin remote.')
+  const host = remoteHostContext(remote)
+  if (!remote || !host) {
+    throw new Error(
+      `Pull request integration requires a GitHub origin remote; this repository's origin is on ${remote ? remote.host : 'no host'}.`,
+    )
   }
 
   // Revalidate body immediately before writing!
@@ -713,7 +726,7 @@ export async function runUnlinkIssueAction(
     }
   }
 
-  await patchPullRequest(remote.fullName, action.prNumber, { body: updatedBody })
+  await patchPullRequest(remote.fullName, action.prNumber, { body: updatedBody }, host)
 
   const readBack = await getPullRequest(repoPath, action.prNumber)
   if (readBack.body !== updatedBody) {
