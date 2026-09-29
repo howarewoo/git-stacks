@@ -43,6 +43,8 @@ import {
   setThreadResolved,
   submitReview,
 } from './review-threads'
+import { getPullRequestChecks, rerunPullRequestCheck } from './pull-request-checks'
+import type { PullRequestChecksOptions } from './pull-request-checks'
 import type {
   ReviewDraft,
   ReviewDraftRecord,
@@ -814,6 +816,26 @@ function installHandlers() {
     return readRepository((root, signal) =>
       clearReviewHistory(root, requirePullRequestNumber(number), signal),
     )
+  })
+
+  ipcMain.handle(
+    'repository:pull-request-checks',
+    (event, number: number, options?: PullRequestChecksOptions) => {
+      validateSender(event)
+      if (!Number.isInteger(number) || number <= 0) {
+        throw new Error('Pull request number must be a positive integer.')
+      }
+      return readRepository(
+        (root, signal) => getPullRequestChecks(root, number, { ...options, signal }),
+        `pull-request-checks:${number}`,
+      )
+    },
+  )
+  // Rerunning a workflow mutates GitHub, so it is a write: it is refused while any
+  // other repository operation is in flight rather than interleaving with one.
+  ipcMain.handle('repository:pull-request-check-rerun', (event, number: number, runId: number) => {
+    validateSender(event)
+    return operations.write(() => rerunPullRequestCheck(repository(), number, runId))
   })
 
   ipcMain.handle('operation:cancel', (event, requestId: unknown) => {

@@ -333,6 +333,17 @@ Append `#/index` for the scenario directory. App scenarios use `/?scenario=shell
 
 The typed control surface is `window.fixture`: `actions` and `externalUrls` record dispatch; `calls` records reads and writes; `hold(method)` and `release(method)` control in-flight requests; `failNext(method, message)` rejects one request; `setScenario(name)` remounts the App against another deterministic snapshot. This API exists only in the gallery. `manifest.ts` lists all scenario names; `scenarios.ts` owns their typed data.
 
+`pull-requests-checks-detail` and `pull-requests-checks-stale` are the checks
+drill-down: the panel behind the row badge lists every check GitHub reported for
+the pull request head with its source (check run, commit status, workflow run,
+or expected), its own state, and whether the repository requires it, in separate
+Required / Informational / Unproven groups. It also states its own currency, so a
+report last read before a refused or rate-limited refresh reads as stale with the
+reason rather than as the current state. `Refresh checks` forces a re-read,
+`Watch checks` re-reads on an interval while the panel is open, and `Rerun`
+appears only where the read proves the account may run workflows. The fixture
+records `pullRequestChecks` and `rerunPullRequestCheck` in `window.fixture.calls`.
+
 The conflict fixture implements `conflictView` with index stages and a captured fingerprint. The safety scenario verifies that choosing incoming content edits only the draft, then `resolveConflict` sends that content and fingerprint when the user explicitly stages it.
 History recovery coverage holds a commit diff while a repository refresh changes
 HEAD and fails the replacement history read; the branch picker and reload control
@@ -344,7 +355,7 @@ must remain usable, and retrying must restore the commit list.
 | Ancestry  | `ancestry-linear`, `ancestry-branching`, `ancestry-deep`, `ancestry-remote-consolidated`, `ancestry-missing-parent`, `ancestry-cycle`, `ancestry-requires-restack`                                                                                                                                                                                                   |
 | Changes   | `files-clean`, `files-staged`, `files-unstaged`, `files-renamed`, `files-untracked`, `files-conflicts`, `files-truncated`, `files-long-content`                                                                                                                                                                                                                      |
 | History   | `history-loading` (`release('history')` to finish), `history-error`                                                                                                                                                                                                                                                                                                  |
-| PRs       | `pull-requests-lifecycle`, `pull-requests-checks`, `pull-requests-empty`, `pull-requests-unavailable`, `pull-requests-issue-links` (a closing-keyword link and a local contextual link on one PR)                                                                                                                                                                    |
+| PRs       | `pull-requests-lifecycle`, `pull-requests-checks`, `pull-requests-checks-detail` (required failure, optional failure, running workflow, required context not yet reported), `pull-requests-checks-stale` (visibly stale report with rerun unavailable), `pull-requests-empty`, `pull-requests-unavailable`, `pull-requests-issue-links` (a closing-keyword link and a local contextual link on one PR) |
 | Stashes   | `stash-stable-oid`, `stash-empty`, `stash-index-shift`                                                                                                                                                                                                                                                                                                               |
 | Workflows | `workflow-preview-ready`, `workflow-preview-loading` (`release('stackPreview')`), `workflow-preview-blocked`, `workflow-preview-stale`, `workflow-action-error`, `workflow-partial-restack`, `workflow-conflict-recovery`, `workflow-operation-recovery`, `workflow-external-operation`; form validation, typed confirmation, and `hold('runAction')` for busy state |
 

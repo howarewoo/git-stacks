@@ -92,7 +92,12 @@ import {
   changeGroups,
   matchesPullRequest,
 } from './components/data-views'
+import { PullRequestChecksPanel } from './components/check-details'
 import { checkLabel, checksVariant } from './lib/pull-request-state'
+import type {
+  PullRequestCheckDetail,
+  PullRequestChecksReport,
+} from '../../shared/pull-request-checks'
 import {
   OperationContext,
   PhaseStatus,
@@ -602,6 +607,96 @@ function App() {
       active = false
     }
   }, [selectedPullRequest?.number, snapshot])
+
+  // The checks report is per pull request and carries its own freshness, so it is
+  // never folded into the repository snapshot: a remembered report has to be able to
+  // say it was not re-read without making the whole snapshot look stale.
+  const [checksReport, setChecksReport] = React.useState<PullRequestChecksReport | null>(null)
+  const [checksLoading, setChecksLoading] = React.useState(false)
+  const [checksWatching, setChecksWatching] = React.useState(false)
+  const [rerunningRunId, setRerunningRunId] = React.useState<number | null>(null)
+  const checksGate = React.useRef(createRequestGate()).current
+  const checksNumber = selectedPullRequest?.number ?? null
+  const checksRepository = snapshot?.path ?? null
+  // The head commit and base travel with the read, so the loader reads them from a ref:
+  // depending on the snapshot itself would re-read every pull request's checks on each
+  // ordinary repository refresh, which is not what refreshing the list asked for.
+  const pullRequestsRef = React.useRef(snapshot?.pullRequests)
+  pullRequestsRef.current = snapshot?.pullRequests
+
+  const loadChecks = React.useCallback(
+    async (number: number, force: boolean): Promise<void> => {
+      if (!desktop?.pullRequestChecks) return
+      const pr = pullRequestsRef.current?.find((entry) => entry.number === number) ?? null
+      const claim = checksGate.claim()
+      setChecksLoading(true)
+      try {
+        const report = await desktop.pullRequestChecks(number, {
+          headSha: pr?.headOid ?? null,
+          base: pr?.base ?? null,
+          force,
+        })
+        if (checksGate.current(claim)) setChecksReport(report)
+      } catch (value) {
+        if (checksGate.current(claim)) setError(readableError(value))
+      } finally {
+        if (checksGate.current(claim)) setChecksLoading(false)
+      }
+    },
+    [checksGate, desktop],
+  )
+
+  // Changing what is selected retires the previous report: a checks drill-down for
+  // one pull request must never be read as the state of another.
+  React.useEffect(() => {
+    checksGate.reset()
+    setChecksReport(null)
+    setChecksWatching(false)
+  }, [checksGate, checksNumber, checksRepository])
+
+  React.useEffect(() => {
+    if (checksNumber === null) return
+    void loadChecks(checksNumber, false)
+  }, [checksNumber, loadChecks])
+
+  // Watching re-reads only while the panel is open; the interval belongs to this view,
+  // and the main process still decides whether a read is due or is backing off.
+  React.useEffect(() => {
+    if (!checksWatching || checksNumber === null) return
+    const timer = setInterval(() => void loadChecks(checksNumber, true), 10_000)
+    return () => clearInterval(timer)
+  }, [checksNumber, checksWatching, loadChecks])
+
+  const rerunCheck = React.useCallback(
+    async (check: PullRequestCheckDetail): Promise<void> => {
+      if (!desktop?.rerunPullRequestCheck || check.workflowRunId === null) return
+      const claim = checksGate.claim()
+      setRerunningRunId(check.workflowRunId)
+      try {
+        const report = await desktop.rerunPullRequestCheck(checksNumber ?? 0, check.workflowRunId)
+        if (checksGate.current(claim)) setChecksReport(report)
+      } catch (value) {
+        if (checksGate.current(claim)) setError(readableError(value))
+      } finally {
+        setRerunningRunId(null)
+      }
+    },
+    [checksGate, checksNumber, desktop],
+  )
+
+  const openCheckDetails = React.useCallback(
+    (url: string): void => {
+      desktop?.openExternal(url).catch((value) => setError(readableError(value)))
+    },
+    [desktop],
+  )
+
+  // The inspector badge follows the detailed report once it is loaded, so the badge
+  // and the drill-down below it can never disagree about the same head.
+  const inspectorChecks: PullRequest['checks'] =
+    checksReport && checksReport.number === checksNumber
+      ? checksReport.summary
+      : (selectedPullRequest?.checks ?? 'none')
 
   const branchByName = React.useMemo(
     () => indexBranchesByParentName(snapshot?.branches ?? []),
@@ -1882,9 +1977,9 @@ function App() {
               <Badge variant="secondary">{selectedBranch.remote ? 'Remote' : 'Local'}</Badge>
             )}
             {selectedPullRequest ? (
-              <Badge variant={checksVariant(selectedPullRequest.checks)}>
+              <Badge variant={checksVariant(inspectorChecks)}>
                 <ShieldCheck className="size-3" />
-                {checkLabel(selectedPullRequest.checks)}
+                {checkLabel(inspectorChecks)}
               </Badge>
             ) : null}
           </div>
@@ -2188,6 +2283,18 @@ function App() {
                 </Button>
               </div>
             </section>
+          ) : null}
+          {selectedPullRequest ? (
+            <PullRequestChecksPanel
+              loading={checksLoading}
+              report={checksReport}
+              rerunningRunId={rerunningRunId}
+              watching={checksWatching}
+              onOpenDetails={openCheckDetails}
+              onRefresh={() => void loadChecks(selectedPullRequest.number, true)}
+              onRerun={(check) => void rerunCheck(check)}
+              onToggleWatch={() => setChecksWatching((current) => !current)}
+            />
           ) : (
             <section className="detail-section detail-section-muted">
               <h3>Pull request</h3>

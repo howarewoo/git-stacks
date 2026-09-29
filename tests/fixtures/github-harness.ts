@@ -127,6 +127,67 @@ export interface GitHubFixtureStack {
     head: { ref: string; sha: string }
   }>
 }
+
+/**
+ * The three vocabularies GitHub reports a pull request's CI in, plus the two reads that
+ * decide whether a check is required and whether this account may rerun it. Every field
+ * is optional so a case states only the part of the answer it is proving.
+ */
+export interface GitHubFixtureCheckRun {
+  id: number
+  headSha: string
+  name: string
+  status: string
+  conclusion: string | null
+  appSlug?: string | null
+  title?: string | null
+  detailsUrl?: string | null
+  startedAt?: string | null
+  completedAt?: string | null
+}
+
+export interface GitHubFixtureCommitStatus {
+  headSha: string
+  context: string
+  state: string
+  description?: string | null
+  targetUrl?: string | null
+}
+
+export interface GitHubFixtureWorkflowRun {
+  id: number
+  headSha: string
+  name: string
+  status: string
+  conclusion: string | null
+  runNumber?: number
+  startedAt?: string | null
+  updatedAt?: string | null
+  htmlUrl?: string | null
+}
+
+export interface GitHubFixtureChecks {
+  checkRuns?: GitHubFixtureCheckRun[]
+  commitStatuses?: GitHubFixtureCommitStatus[]
+  workflowRuns?: GitHubFixtureWorkflowRun[]
+  /** The contexts branch protection requires on `branch`; null means no rule is readable. */
+  requiredStatusChecks?: { branch: string; contexts: string[] } | null
+  actionsEnabled?: boolean
+  /** The viewer's repository role, as `GET /repos/{o}/{r}` reports it. */
+  viewerPermissions?: {
+    admin: boolean
+    maintain: boolean
+    push: boolean
+    triage: boolean
+    pull: boolean
+  } | null
+  /** Refuses every workflow rerun, which is what a read-only viewer is answered with. */
+  rerunForbidden?: boolean
+  /** Workflow run ids the double was asked to rerun, oldest first. */
+  reruns?: number[]
+  /** Serve ETags and honour `if-none-match`, so conditional reads can be observed. */
+  conditional?: boolean
+}
 export interface GitHubFixtureState {
   version: 1
   repository: {
@@ -245,6 +306,7 @@ export interface GitHubFixtureState {
     action: 'default' | 'direct_merge' | 'merge_queue'
     uuid: string
   }
+  checks?: GitHubFixtureChecks
   requests: Array<{ argv: string[]; cwd: string; at: string; body?: Record<string, unknown> }>
 }
 

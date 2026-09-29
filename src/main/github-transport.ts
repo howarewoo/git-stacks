@@ -124,12 +124,15 @@ export interface GitHubRestRequest {
    */
   cache?: boolean
 }
-
 export interface GitHubRestResponse<T> {
   status: number
   data: T
   rateLimit: GitHubRateLimit
-  /** The response headers, so a caller can reuse ETag and Last-Modified validators. */
+  /**
+   * The response headers, when the transport parses them. A conditional read needs the
+   * `etag` it is given back, so a transport that cannot surface headers must leave this
+   * undefined and its callers stay unconditional rather than reading a wrong validator.
+   */
   headers?: Headers
   /** True when a conditional request was answered 304 and `data` came from the cache. */
   notModified?: boolean
@@ -402,6 +405,17 @@ export class DirectGitHubTransport implements GitHubTransport {
       clearTimeout(timer)
       request.signal?.removeEventListener('abort', forward)
     }
+  }
+
+  /** One REST call answered from GitHub, with its headers surfaced for validators. */
+  private async result<T>(
+    url: string,
+    method: GitHubRestMethod,
+    payload: unknown,
+    request: Pick<GitHubRestRequest, 'signal' | 'timeoutMs' | 'headers'>,
+  ): Promise<GitHubRestResponse<T>> {
+    const { status, body, headers, rateLimit } = await this.send(url, method, payload, request)
+    return { status, data: body as T, rateLimit, headers }
   }
 
   /**

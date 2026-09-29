@@ -47,6 +47,7 @@ import type {
 } from '../../../src/shared/review-threads'
 import { scenarios } from './scenarios'
 import { DEFAULT_SCENARIO, type ScenarioName } from './manifest'
+import type { PullRequestChecksReport } from '../../../src/shared/pull-request-checks'
 import type { FixtureCall, FixtureCallRecord, FixtureControl, FixtureScenario } from './types'
 
 /** The review state GitHub reports back for each submitted event. */
@@ -755,6 +756,31 @@ export function installFixtureControl(options: {
       record('openExternal', [url])
       externalUrls.push(url)
       return answer('openExternal', () => undefined)
+    },
+    pullRequestChecks: (number, options) => {
+      record('pullRequestChecks', [number, options])
+      return answer<PullRequestChecksReport>('pullRequestChecks', () => {
+        const report = scenario.pullRequestChecks?.[number]
+        if (!report) throw new Error(`Pull request #${number} has no checks fixture.`)
+        return report
+      })
+    },
+    rerunPullRequestCheck: (number, runId) => {
+      record('rerunPullRequestCheck', [number, runId])
+      return answer<PullRequestChecksReport>('rerunPullRequestCheck', () => {
+        const report = scenario.pullRequestChecks?.[number]
+        if (!report) throw new Error(`Pull request #${number} has no checks fixture.`)
+        if (!report.checks.some((check) => check.workflowRunId === runId)) {
+          throw new Error('That workflow run no longer belongs to this pull request head.')
+        }
+        return {
+          ...report,
+          freshness: 'live',
+          staleReason: null,
+          message: `Rerun requested for workflow run ${runId}.`,
+          checkedAt: report.checkedAt ?? report.fetchedAt,
+        }
+      })
     },
     gitRuntimeStatus: () => {
       record('gitRuntimeStatus', [])

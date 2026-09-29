@@ -71,6 +71,10 @@ const desktop: DesktopAPI = {
     ipcRenderer.invoke('repository:review-history-diff', number, fromOid, requestId),
   reviewClearHistory: (number) =>
     ipcRenderer.invoke('repository:review-clear-history', number),
+  pullRequestChecks: (number, options) =>
+    ipcRenderer.invoke('repository:pull-request-checks', number, options),
+  rerunPullRequestCheck: (number, runId) =>
+    ipcRenderer.invoke('repository:pull-request-check-rerun', number, runId),
   openExternal: (url) => ipcRenderer.invoke('external:open', url),
   cancel: (requestId) => ipcRenderer.invoke('operation:cancel', requestId),
   gitRuntimeStatus: () => ipcRenderer.invoke('git-runtime'),

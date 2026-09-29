@@ -15,6 +15,8 @@ import type {
 import type { ReviewEvent } from '../../../src/shared/review-threads'
 import type { ReviewHistory, ReviewHistoryDiff } from '../../../src/shared/review-snapshots'
 
+import type { PullRequestChecksReport } from '../../../src/shared/pull-request-checks'
+
 /** Every promise-returning `DesktopAPI` method the fixture double can intercept. */
 export type FixtureCall =
   | 'recentRepositories'
@@ -45,6 +47,8 @@ export type FixtureCall =
   | 'reviewHistory'
   | 'reviewHistoryDiff'
   | 'reviewClearHistory'
+  | 'pullRequestChecks'
+  | 'rerunPullRequestCheck'
   | 'openExternal'
   | 'gitRuntimeStatus'
   | 'setSystemGit'
@@ -107,6 +111,12 @@ export interface FixtureScenario {
   readonly actionFailures?: Readonly<Partial<Record<GitAction['type'], string>>>
   /** Linked issues per pull request number, covering both contextual and closing relations. */
   readonly issueLinks?: Readonly<Record<number, readonly LinkedIssue[]>>
+  /**
+   * Detailed checks per pull request number, keyed by `PullRequest.number`. A scenario
+   * that omits a number makes the read reject, the way a repository GitHub cannot
+   * describe would.
+   */
+  readonly pullRequestChecks?: Readonly<Record<number, PullRequestChecksReport>>
 }
 
 /** Typed gallery control surface. Every field is plain serializable data. */

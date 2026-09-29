@@ -50,6 +50,8 @@ export const SCENARIO_NAMES = [
   // Pull requests
   'pull-requests-lifecycle',
   'pull-requests-checks',
+  'pull-requests-checks-detail',
+  'pull-requests-checks-stale',
   'pull-requests-empty',
   'pull-requests-unavailable',
   'pull-requests-issue-links',
@@ -116,6 +118,8 @@ export const SCENARIO_GROUPS = {
   pullRequests: [
     'pull-requests-lifecycle',
     'pull-requests-checks',
+    'pull-requests-checks-detail',
+    'pull-requests-checks-stale',
     'pull-requests-empty',
     'pull-requests-unavailable',
     'pull-requests-issue-links',

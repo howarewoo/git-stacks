@@ -1,7 +1,12 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
+import { fileURLToPath } from 'node:url'
 import { resolve } from 'node:path'
+
+/** This file's own directory, so the config does not depend on the shell's cwd. */
+const testsDir = fileURLToPath(new URL('.', import.meta.url))
+const repoRoot = resolve(testsDir, '../..')
 
 /**
  * Standalone build of the development/test fixture gallery. It is deliberately separate from
@@ -14,13 +19,13 @@ import { resolve } from 'node:path'
  * what the packaged Electron smoke script uses.
  */
 export default defineConfig({
-  root: resolve('tests/renderer/gallery'),
+  root: resolve(testsDir, 'gallery'),
   base: './',
   plugins: [react(), tailwindcss()],
-  resolve: { alias: { '@': resolve('src/renderer/src') } },
-  server: { fs: { allow: [resolve('.')] } },
+  resolve: { alias: { '@': resolve(repoRoot, 'src/renderer/src') } },
+  server: { fs: { allow: [repoRoot] } },
   build: {
-    outDir: resolve('out/renderer-fixtures'),
+    outDir: resolve(repoRoot, 'out/renderer-fixtures'),
     emptyOutDir: true,
   },
 })

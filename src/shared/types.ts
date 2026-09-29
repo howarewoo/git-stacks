@@ -2,6 +2,7 @@ import type { SnapshotLimits } from './performance'
 import type { RepositoryCapabilities } from './capabilities'
 import type { ReviewCommitSet, ReviewFileSet, ReviewHeadline, ReviewViewedRecord } from './review'
 import type { ReviewHistory, ReviewHistoryDiff } from './review-snapshots'
+import type { PullRequestChecksReport } from './pull-request-checks'
 import type {
   ReviewDraft,
   ReviewDraftRecord,
@@ -1054,6 +1055,13 @@ export interface DesktopAPI {
     requestId?: string,
   ): Promise<ReviewHistoryDiff>
   reviewClearHistory?(number: number): Promise<ReviewHistory>
+  /** The detailed checks behind one pull request, with its own freshness and permissions. */
+  pullRequestChecks?: (
+    number: number,
+    options?: { headSha?: string | null; base?: string | null; force?: boolean },
+  ) => Promise<PullRequestChecksReport>
+  /** Reruns one Actions workflow run behind a pull request's checks. */
+  rerunPullRequestCheck?: (number: number, runId: number) => Promise<PullRequestChecksReport>
   listNativeStacks?: () => Promise<NativeStack[]>
   createNativeStack?: (pullRequests: number[]) => Promise<NativeStack>
   addPullRequestsToNativeStack?: (

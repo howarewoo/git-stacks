@@ -1,4 +1,5 @@
 import type { NativeStack, PullRequest, RepositoryIssue } from '../shared/types'
+import { summariseCheckRollupState } from '../shared/pull-request-checks'
 import {
   CommandCancelled,
   commandCode,
@@ -37,39 +38,21 @@ type PullRequestWithRepository = {
   headRepository: string | null
 }
 
+/**
+ * The compact badge the list rows carry. GitHub's own `statusCheckRollup` aggregate
+ * is read through the same state vocabulary the detailed drill-down uses, so a row can
+ * never claim a cleaner result than the checks behind it. Unreported stays pending.
+ */
 function pullRequestChecks(value: unknown): PullRequest['checks'] {
   const entries = Array.isArray(value) ? value : value == null ? [] : [value]
   if (entries.length === 0) return 'none'
-  let pending = false
-  let failing = false
-  for (const entry of entries) {
-    if (!isRecord(entry)) {
-      pending = true
-      continue
-    }
-    const raw = entry.conclusion ?? entry.state ?? entry.status
-    const state = typeof raw === 'string' ? raw.toUpperCase() : ''
-    if (
-      !state ||
-      ['PENDING', 'QUEUED', 'IN_PROGRESS', 'WAITING', 'REQUESTED', 'EXPECTED'].includes(state)
-    ) {
-      pending = true
-    } else if (
-      [
-        'FAILURE',
-        'ERROR',
-        'CANCELLED',
-        'TIMED_OUT',
-        'ACTION_REQUIRED',
-        'STARTUP_FAILURE',
-        'STALE',
-      ].includes(state)
-    ) {
-      failing = true
-    }
-  }
-  if (failing) return 'failing'
-  if (pending) return 'pending'
+  const summaries = entries.map((entry) =>
+    isRecord(entry)
+      ? summariseCheckRollupState(entry.state ?? entry.conclusion ?? entry.status)
+      : ('pending' as const),
+  )
+  if (summaries.includes('failing')) return 'failing'
+  if (summaries.includes('pending')) return 'pending'
   return 'passing'
 }
 
