@@ -22,7 +22,7 @@ export function indexBranchesByParentName(branches: readonly Branch[]): Map<stri
   const localByRepresentedRef = new Map<string, Branch>()
   for (const branch of branches) {
     if (branch.remote) continue
-    const ref = getRepresentedRemoteRef(branch)
+    const ref = branch.upstreamRef
     if (ref && !localByRepresentedRef.has(ref)) localByRepresentedRef.set(ref, branch)
   }
   const representative = (branch: Branch): Branch =>

@@ -787,7 +787,8 @@ test('remote-only parent aliases preserve child and top navigation without check
 })
 
 test('stack navigation resolves a qualified remote parent to the local branch tracking it', () => {
-  const main = makeMockBranch('main', {
+  const unrelatedMain = makeMockBranch('main')
+  const main = makeMockBranch('tracked-main', {
     upstream: 'origin/main',
     upstreamRef: 'refs/remotes/origin/main',
   })
@@ -797,7 +798,7 @@ test('stack navigation resolves a qualified remote parent to the local branch tr
   })
   const topic = makeMockBranch('topic', { current: true, parent: 'origin/main' })
   const child = makeMockBranch('child', { parent: 'topic' })
-  const branches = [main, remoteMain, topic, child]
+  const branches = [unrelatedMain, main, remoteMain, topic, child]
 
   assert.equal(resolveStackNavigation(topic, branches, 'parent')?.ref, main.ref)
   assert.equal(resolveStackNavigation(topic, branches, 'bottom')?.ref, main.ref)
@@ -818,8 +819,24 @@ test('stack navigation resolves a qualified remote parent to the local branch tr
   assert.equal(navigationItems.find((item) => item.id === 'stack.bottom')?.disabled, false)
   assert.match(
     navigationItems.find((item) => item.id === 'stack.parent')?.detail ?? '',
-    /Target: main/,
+    /Target: tracked-main/,
   )
+})
+
+test('qualified remote parents stay remote when the same-name local branch does not track them', () => {
+  const main = makeMockBranch('main')
+  const remoteMain = makeMockBranch('origin/main', {
+    ref: 'refs/remotes/origin/main',
+    remote: true,
+  })
+  const topic = makeMockBranch('topic', { parent: 'origin/main' })
+  const branches = [main, remoteMain, topic]
+
+  assert.equal(resolveStackNavigation(topic, branches, 'parent')?.ref, remoteMain.ref)
+  assert.equal(resolveStackNavigation(topic, branches, 'bottom')?.ref, remoteMain.ref)
+  assert.equal(resolveStackNavigation(remoteMain, branches, 'child')?.ref, topic.ref)
+  assert.equal(resolveStackNavigation(remoteMain, branches, 'top')?.ref, topic.ref)
+  assert.equal(resolveStackNavigation(main, branches, 'child'), null)
 })
 
 test('stack children follow the recorded local parent, not a shared upstream ref', () => {
