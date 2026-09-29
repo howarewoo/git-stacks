@@ -1297,3 +1297,219 @@ test('a renewal that lands while a replacement is being authorized does not hide
   setGitHubCredentialSource(null)
   onGitHubFailure(null)
 })
+
+test('a finished replacement publishes every step of the flow, not only state changes', async () => {
+  const harness = await signedIn([])
+  const { account, protector, stateFile, vaultFile } = harness
+  // Only the replacement's own pushes are of interest here.
+  const changes: GitHubAccountStatus[] = []
+  const first = account.status()
+  // The code is held back so the "a flow is in progress" push is observable on
+  // its own, before there is a code to show.
+  const code = Promise.withResolvers<Response>()
+  const { fetch: fetchDouble } = fetchReturning([{ body: session('ghu_second', 'ghr_second') }])
+  const delayed: typeof globalThis.fetch = (async (
+    input: string | URL | Request,
+    init?: RequestInit,
+  ) => {
+    if (String(input).endsWith('/login/device/code')) return await code.promise
+    return await fetchDouble(input, init)
+  }) as typeof globalThis.fetch
+  const replacing = new GitHubAccount({
+    vault: new CredentialVault(vaultFile, protector),
+    stateFile,
+    env: { GIT_STACKS_GITHUB_APP_CLIENT_ID: CLIENT_ID },
+    identify: async () => 'grace',
+    fetch: delayed,
+    now: () => harness.clock.now,
+    sleep: async () => {},
+    onChange: (status) => changes.push(status),
+  })
+  await replacing.restore()
+  assert.equal(replacing.status().state, 'signed-in')
+
+  // The sign-in is not awaited: it is still asking GitHub for a code, and the
+  // renderer has to hear that a flow is in progress while that is true.
+  const signingIn = replacing.signIn()
+  // What the renderer is told, in order: the flow started, the code arrived, the
+  // flow ended with the new account named. A panel that only watched the state
+  // would have heard nothing at all, because it stayed "signed-in" throughout.
+  const started = changes.find((status) => status.signingIn)
+  assert.ok(started, 'the renderer was told a sign-in is in progress')
+  assert.equal(started.challenge, null, 'the flow is reported before its code exists')
+  code.resolve(
+    new Response(JSON.stringify(DEVICE_CODE), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    }),
+  )
+  await signingIn
+  const withCode = changes.find((status) => status.challenge)
+  assert.ok(withCode, 'the one-time code was published')
+  assert.equal(withCode.challenge?.userCode, 'WDJB-MJHT')
+  assert.equal(withCode.state, 'signed-in', 'the account being replaced is still described')
+  assert.equal(withCode.login, 'ada', 'the account being replaced is still the one named')
+  // The last step carries the identity the new token established, which is only
+  // known once the lookup has come back.
+  const done = await waitFor(() => {
+    const status = changes.at(-1)
+    return status?.signingIn === false &&
+      status.reference !== first.reference &&
+      status.login === 'grace'
+      ? status
+      : false
+  })
+  assert.equal(
+    changes.filter((status) => status.signingIn).length >= 2,
+    true,
+    'both the start and the code were published as flow changes',
+  )
+  assert.equal(done.login, 'grace', 'the account now names who the new token belongs to')
+  assert.equal(done.challenge, null)
+  assert.equal(
+    (await replacing.current())?.token,
+    'ghu_second',
+    'the account serves the token that replaced the retired one',
+  )
+
+  setGitHubCredentialSource(null)
+  onGitHubFailure(null)
+})
+
+test('cancelling after a replacement commits still identifies the new account', async () => {
+  const harness = await signedIn([])
+  const { protector, stateFile, vaultFile } = harness
+  const before = JSON.parse(await readFile(stateFile, 'utf8')) as {
+    reference: string
+    login: string
+  }
+  assert.equal(before.login, 'ada', 'the account being replaced is ada')
+  const barrier = retireBarrier(before.reference)
+  const vault = barrier.vault(new CredentialVault(vaultFile, protector))
+  const { fetch: fetchDouble } = fetchReturning([
+    { body: DEVICE_CODE },
+    { body: session('ghu_bob', 'ghr_bob') },
+  ])
+  let identifyCalls = 0
+  const account = new GitHubAccount({
+    vault,
+    stateFile,
+    env: { GIT_STACKS_GITHUB_APP_CLIENT_ID: CLIENT_ID },
+    identify: async () => {
+      identifyCalls += 1
+      return 'bob'
+    },
+    fetch: fetchDouble,
+    now: () => harness.clock.now,
+    sleep: async () => {},
+  })
+  await account.restore()
+  await account.signIn()
+  await waitUntil(barrier.isHeld)
+
+  // The user cancels after the replacement is already the committed account.
+  await account.cancelSignIn()
+  barrier.release()
+  const settled = await waitFor(() => {
+    const status = account.status()
+    return status.login === 'bob' ? status : false
+  })
+
+  assert.equal(identifyCalls, 1, 'the committed credential is identified, not dropped')
+  assert.notEqual(settled.reference, before.reference)
+  assert.equal((await account.current())?.token, 'ghu_bob', 'the token is bob’s')
+  // The login reaches the account before the file that records it, so the
+  // assertion waits for the file rather than racing it.
+  const stored = await waitFor(async () => {
+    const value = JSON.parse(await readFile(stateFile, 'utf8')) as {
+      login: string
+      reference: string
+    }
+    return value.login === 'bob' ? value : false
+  })
+  assert.notEqual(stored.login, 'ada', 'ada is not persisted as the identity of bob’s token')
+  assert.equal(stored.reference, settled.reference)
+
+  // And a restart agrees.
+  const restarted = new GitHubAccount({
+    vault: new CredentialVault(vaultFile, protector),
+    stateFile,
+    env: { GIT_STACKS_GITHUB_APP_CLIENT_ID: CLIENT_ID },
+    now: () => harness.clock.now,
+    identify: async () => 'bob',
+  })
+  assert.equal((await restarted.restore()).state, 'signed-in')
+  assert.equal(restarted.status().login, 'bob')
+  assert.equal((await restarted.current())?.token, 'ghu_bob')
+
+  setGitHubCredentialSource(null)
+  onGitHubFailure(null)
+})
+
+test('a superseded poll cannot clear the sign-in that replaced it', async () => {
+  const harness = await signedIn([])
+  const { protector, stateFile, vaultFile } = harness
+  const before = JSON.parse(await readFile(stateFile, 'utf8')) as { reference: string }
+  const barrier = retireBarrier(before.reference)
+  const vault = barrier.vault(new CredentialVault(vaultFile, protector))
+  const codes: string[] = []
+  const account = new GitHubAccount({
+    vault,
+    stateFile,
+    env: { GIT_STACKS_GITHUB_APP_CLIENT_ID: CLIENT_ID },
+    identify: async () => 'ada',
+    now: () => harness.clock.now,
+    // The first flow is answered at once; the second parks until it is cancelled,
+    // so the two overlap for as long as the test needs.
+    fetch: (async (input: string | URL | Request, init?: RequestInit) => {
+      const body = new URLSearchParams(String(init?.body ?? ''))
+      if (String(input).endsWith('/login/device/code')) {
+        const userCode = `CODE-${codes.length + 1}`
+        codes.push(userCode)
+        return new Response(
+          JSON.stringify({ ...DEVICE_CODE, user_code: userCode, device_code: userCode }),
+          { status: 200 },
+        )
+      }
+      if (body.get('device_code') === 'CODE-1') {
+        return new Response(JSON.stringify(session('ghu_b', 'ghr_b')), { status: 200 })
+      }
+      await new Promise(() => {})
+      return new Response(JSON.stringify({ error: 'access_denied' }), { status: 200 })
+    }) as typeof globalThis.fetch,
+    sleep: async () => {},
+  })
+  await account.restore()
+  await account.signIn()
+  await waitUntil(barrier.isHeld)
+
+  // Cancel the committed flow and start another while the first is still retiring.
+  await account.cancelSignIn()
+  await account.signIn()
+  assert.equal(account.status().signingIn, true)
+  assert.equal(account.status().challenge?.userCode, 'CODE-2')
+
+  // The stale continuation of the first flow now finishes.
+  barrier.release()
+  await new Promise((resolve) => setTimeout(resolve, 20))
+
+  const still = account.status()
+  assert.equal(still.signingIn, true, 'the newer sign-in is still in progress')
+  assert.equal(
+    still.challenge?.userCode,
+    'CODE-2',
+    'the newer one-time code was not cleared by the older flow',
+  )
+  assert.equal(still.state, 'signed-in', 'the committed replacement is the account')
+
+  // And cancelling it is still possible, which is what clearing its controller
+  // would have prevented.
+  const cancelled = await account.cancelSignIn()
+  assert.equal(cancelled.signingIn, false)
+  assert.equal(cancelled.challenge, null)
+  assert.equal(cancelled.state, 'signed-in')
+  assert.equal((await account.current())?.token, 'ghu_b')
+
+  setGitHubCredentialSource(null)
+  onGitHubFailure(null)
+})

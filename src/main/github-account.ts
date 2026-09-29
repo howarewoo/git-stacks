@@ -212,6 +212,8 @@ export class GitHubAccount implements GitHubCredentialSource {
    * refresh already in flight can never resurrect a sign-out.
    */
   private generation = 0
+  /** The last status handed to the renderer, so only real changes are sent. */
+  private published: GitHubAccountStatus | null = null
   /**
    * Counts every published credential. A sign-out reads it before it clears the
    * store so it can tell "nothing ran while I was cleaning" from "a sign-in the
@@ -302,12 +304,25 @@ export class GitHubAccount implements GitHubCredentialSource {
   }
 
   private setState(state: GitHubAccountState, message: string | null = null): GitHubAccountStatus {
-    if (this.state !== state || this.message !== message) {
-      this.state = state
-      this.message = message
-      this.options.onChange?.(this.status())
+    this.state = state
+    this.message = message
+    return this.publish()
+  }
+
+  /**
+   * Sends the status to the renderer whenever anything in it has changed. The
+   * account state is not the whole of it: a device flow, its one-time code, the
+   * login, the reference and the expiries each move on their own, and a panel
+   * that only heard about state transitions would keep showing a sign-in that
+   * has already finished.
+   */
+  private publish(): GitHubAccountStatus {
+    const status = this.status()
+    if (this.published === null || JSON.stringify(this.published) !== JSON.stringify(status)) {
+      this.published = status
+      this.options.onChange?.(status)
     }
-    return this.status()
+    return status
   }
 
   private failureState(error: GitHubAppError): GitHubAccountState {
@@ -392,9 +407,16 @@ export class GitHubAccount implements GitHubCredentialSource {
    * abandoned and the previous account is left exactly as it was — and nothing
    * at all is left when there was no previous account. After it, the previous
    * credential is retired, because from that moment the replacement is the truth
-   * and no rollback can need the old one back.
+   * and no rollback can need the old one back. `login` is the identity the
+   * caller can already vouch for: a rotation passes the login it holds, and a
+   * replacement passes nothing rather than inheriting the identity of the
+   * account it displaces.
    */
-  private adopt(session: GitHubAppSession, fence: () => boolean): Promise<LiveCredential | null> {
+  private adopt(
+    session: GitHubAppSession,
+    fence: () => boolean,
+    login: string | null,
+  ): Promise<LiveCredential | null> {
     return this.commit(async () => {
       const previousAccount = this.account
       const issuedAt = this.now()
@@ -427,7 +449,7 @@ export class GitHubAccount implements GitHubCredentialSource {
       const account: StoredAccount = {
         reference,
         host: GITHUB_ACCOUNT_HOST,
-        login: previousAccount?.login ?? null,
+        login,
         createdAt: issuedAt,
         expiresAt: live.expiresAt,
         refreshExpiresAt: live.refreshExpiresAt,
@@ -450,6 +472,7 @@ export class GitHubAccount implements GitHubCredentialSource {
       this.account = account
       this.epoch += 1
       this.scheduleExpiry()
+      this.publish()
       // The credential this one replaces is retired only after the replacement
       // is published, so no rollback can ever need it back and a cancel that
       // arrives here has nothing to undo.
@@ -464,6 +487,7 @@ export class GitHubAccount implements GitHubCredentialSource {
     this.generation += 1
     const reference = this.account?.reference ?? null
     this.forget()
+    this.publish()
     await this.commit(async () => {
       if (reference) await this.options.vault.remove(reference)
       await rm(this.options.stateFile, { force: true })
@@ -544,7 +568,13 @@ export class GitHubAccount implements GitHubCredentialSource {
       // A sign-out or a replacement that landed meanwhile owns the state now;
       // this response belongs to a session that no longer exists.
       if (this.live === null || this.live.session !== session) return null
-      const committed = await this.adopt(refreshed, () => this.live?.session === session)
+      // A rotation is the same user on a new token, so the login it already
+      // established is kept; a replacement has to be identified afresh.
+      const committed = await this.adopt(
+        refreshed,
+        () => this.live?.session === session,
+        this.account?.login ?? null,
+      )
       if (committed === null) return null
       // The commit is published, but a sign-out or a discard may have landed
       // while the credential it replaced was being retired. The token is then
@@ -662,20 +692,30 @@ export class GitHubAccount implements GitHubCredentialSource {
         now: this.now,
       })
       if (controller.signal.aborted) return
-      const committed = await this.adopt(session, current)
+      // The identity that comes with this token belongs to the credential that
+      // was committed, not to the device flow that may since have been
+      // abandoned: a cancel after the commit says nothing about who this token
+      // is, while a later replacement or a sign-out still ends it.
+      const committed = await this.adopt(session, current, null)
       if (committed === null) return
-      this.pending = null
-      this.challenge = null
-      // A sign-out may have landed while the credential this replaced was being
-      // retired. The token is gone, so it is not spent on an identity lookup.
+      // A newer sign-in owns the flow fields now, so this poll must not end
+      // somebody else's code.
+      if (this.pending === controller) {
+        this.pending = null
+        this.challenge = null
+        this.publish()
+      }
       if (this.live?.session !== committed.session) return
-      const identified = await this.identify(committed.accessToken, committed.session, current)
-      if (!current()) return
+      const owned = () => this.live?.session === committed.session
+      const identified = await this.identify(committed.accessToken, committed.session, owned)
+      if (!owned()) return
       this.setState(identified.state, identified.message)
     } catch (error) {
       if (controller.signal.aborted) return
-      this.pending = null
-      this.challenge = null
+      if (this.pending === controller) {
+        this.pending = null
+        this.challenge = null
+      }
       const code = error instanceof GitHubAppError ? error : null
       this.setState(
         code ? this.failureState(code) : this.baseline(),
@@ -709,6 +749,9 @@ export class GitHubAccount implements GitHubCredentialSource {
           this.account = { ...this.account, login }
           await this.options.beforeStateWrite?.()
           await writeAccount(this.options.stateFile, this.account)
+          // The panel names the account it is showing, so the login it now
+          // carries is published even if the caller settles the state later.
+          this.publish()
         })
       }
       return { state: 'signed-in', message: null }
@@ -743,6 +786,7 @@ export class GitHubAccount implements GitHubCredentialSource {
     // The credential stops being usable at once, so nothing can be handed out
     // from the moment the user asks for it.
     this.forget()
+    this.publish()
     const epoch = this.epoch
     await this.commit(async () => {
       await this.options.vault.clear()
