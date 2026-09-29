@@ -337,21 +337,31 @@ jobs:
           # — and that is the moment the policy line above has to be rewritten,
           # rather than something that has to be remembered.
           #
-          # Only that one test runs here. The rest of the file is about the
-          # release key, and by this point in the job the key set has been
-          # injected, so a suite-wide run would be testing the checkout this
-          # release is building rather than the policy it is stating. The run is
-          # required to report one passing test, because a pattern that matches
-          # nothing passes trivially and a renamed test would otherwise turn this
-          # step into a silence.
-          npx tsx --test --test-reporter=tap \
-            --test-name-pattern 'a Linux build refuses an update outright' \
-            tests/update-security.test.ts | tee "$RUNNER_TEMP/linux-policy.log"
-          grep -q '^1\.\.1$' "$RUNNER_TEMP/linux-policy.log" &&
-            grep -q '^ok 1 - a Linux build refuses' "$RUNNER_TEMP/linux-policy.log" || {
-            echo "::error::the Linux policy check did not run the installer refusal test, so this step proved nothing"
+          # Only that policy file runs here, and it is invoked by name. The rest
+          # of the update tests are about the release key, and by this point in
+          # the job the key set has been injected, so a suite-wide run would be
+          # testing the checkout this release is building rather than the policy
+          # it is stating.
+          #
+          # The step is required to be handed a proof, not to print a word that
+          # looks like one. Selecting a test by name out of a file and reading a
+          # test report for the count was the earlier way to do this, and it is
+          # fragile in a way that fails open: on this job's Node 22, a name
+          # pattern that matches nothing exits 0 and reports one passing test,
+          # because the file that matched nothing is itself a passing test. The
+          # report is also worded differently between versions, and the report
+          # line for the file and the line for the test inside it differ only by
+          # a name. So the test records what it proved into the file this job
+          # names, and the job requires that file: a renamed test, a deleted
+          # test, or a runner that skipped it all leave no proof, and the step
+          # fails rather than passing on silence.
+          GIT_STACKS_POLICY_PROOF="$RUNNER_TEMP/linux-policy.proved" \
+            npx tsx --test tests/update-linux-policy.test.ts
+          test -s "$RUNNER_TEMP/linux-policy.proved" || {
+            echo "::error::the Linux policy check left no proof, so this step proved nothing"
             exit 1
           }
+          cat "$RUNNER_TEMP/linux-policy.proved"
           echo 'release policy — linux: best-effort artifact — built, published and signed, never updated in place by the app'
           shopt -s nullglob
           appimages=(signed-release/*.AppImage)

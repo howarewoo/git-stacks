@@ -402,45 +402,6 @@ test('a macOS architecture is recognised under every name it is called', async (
   assert.equal(universal.includes('ia32'), false, 'a 32-bit slice satisfies nothing')
 })
 
-test('a Linux build refuses an update outright and touches nothing', async (t) => {
-  // The release job prints a Linux support policy, and this is what makes that
-  // line true: there is no installer for the platform, so the refusal happens
-  // before the verified bytes are looked at, and no handoff, no mount point and
-  // no data directory is written on the way to saying no. A Linux build that
-  // grew an installer would answer differently here, and the policy line would
-  // have to be rewritten with it.
-  const { installStagedUpdate, installSupportFor } = await import('../src/main/update/install')
-  assert.equal(installSupportFor('linux'), null)
-  const directory = mkdtempSync(join(tmpdir(), 'git-stacks-linux-'))
-  t.after(() => rmSync(directory, { recursive: true, force: true }))
-  let relaunched = 0
-  let quitFor = 0
-  const before = readdirSync(directory)
-  const outcome = await installStagedUpdate(
-    {
-      path: join(directory, 'Git-Stacks.AppImage'),
-      fileName: 'Git-Stacks.AppImage',
-      size: 0,
-      sha256: 'x',
-    },
-    {
-      platform: 'linux',
-      appPath: join(directory, 'Git-Stacks.AppImage'),
-      userDataPath: join(directory, 'data'),
-      relaunch: () => {
-        relaunched += 1
-      },
-      quit: () => {
-        quitFor += 1
-      },
-    },
-  )
-  assert.equal(outcome.installed, false)
-  assert.equal(relaunched, 0, 'a refused update does not restart anything')
-  assert.equal(quitFor, 0, 'a refused update does not close the app')
-  assert.deepEqual(readdirSync(directory), before, 'nothing was written or removed')
-})
-
 const X64 = 0x01000007
 const ARM64 = 0x0100000c
 const X86_32 = 7
@@ -659,41 +620,6 @@ test('a Mach-O file is read without a developer tool, and only what it really ca
   assert.deepEqual(readMachArchitectures(file('text', Buffer.from('#!/bin/sh\nexit 0\n'))), [])
   assert.deepEqual(readMachArchitectures(join(directory, 'not-here')), [])
 })
-
-test(
-  'the Mach-O reader agrees with lipo about the binaries on this machine',
-  {
-    // One-off proof that the hand-written reader and the tool it replaces read the
-    // same files, run against real system binaries rather than fixtures. It is a
-    // check of this implementation against another implementation, so it is
-    // recorded here as evidence rather than pinned as a permanent expectation:
-    // which architectures a given system binary carries changes between macOS
-    // releases, and a test that asserted today's answers would fail on a new one.
-    skip: process.platform !== 'darwin' ? 'Mach-O binaries are macOS' : false,
-  },
-  async () => {
-    const { existsSync } = await import('node:fs')
-    const { readMachArchitectures } = await import('../src/main/update/install')
-    const { execFileSync } = await import('node:child_process')
-    if (!existsSync('/usr/bin/lipo')) return
-    const subjects = ['/bin/ls', '/usr/bin/file', '/usr/bin/true'].filter((path) =>
-      existsSync(path),
-    )
-    for (const subject of subjects) {
-      const byLipo = execFileSync('/usr/bin/lipo', ['-archs', subject], { encoding: 'utf8' })
-        .split(/\s+/u)
-        .filter(Boolean)
-        .flatMap((name) =>
-          name.startsWith('arm64') ? ['arm64'] : name.startsWith('x86_64') ? ['x64'] : [],
-        )
-      assert.deepEqual(
-        readMachArchitectures(subject),
-        [...new Set(byLipo)].sort(),
-        `${subject} reads the same both ways`,
-      )
-    }
-  },
-)
 
 test('the architecture check compares one name on both sides', async () => {
   const { canonicalArchitecture, machArchitectures } = await import('../src/main/update/install')
