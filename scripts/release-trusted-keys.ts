@@ -17,6 +17,11 @@
  * build whose own updater could never trust the manifests published beside it.
  *
  *   UPDATE_SIGNING_KEY=… UPDATE_SIGNING_PUBLIC_KEY=… npx tsx scripts/release-trusted-keys.ts inject
+ *   UPDATE_SIGNING_PUBLIC_KEY=… npx tsx scripts/release-trusted-keys.ts check-injected
+ *
+ * `check-injected` is the other half of the release: it reads the key set back
+ * the way a packaged build reads it and refuses a build that would ship with
+ * nothing, or with a key that is not the one this release is signing with.
  *
  * Optional: UPDATE_SIGNING_KEY_ID (defaults to a name derived from the key
  * itself, so there is no second value to keep in step), UPDATE_SIGNING_KEY_VALID_FROM
@@ -72,13 +77,65 @@ function publicKeyFromSecret(): Buffer {
   }
 }
 
-if (process.argv[2] !== 'inject') {
-  fail(
-    'usage: release-trusted-keys.ts inject [--out <path>]. Run this before `npm run dist` so the packaged build carries the key it will verify releases with.',
-  )
-}
 const flags = parseFlags(process.argv.slice(3))
 const out = flag(flags, 'out', 'resources/update-trusted-keys.json')
+
+/**
+ * What a build of this release would actually trust. An empty set is the state
+ * of the repository as committed, and it is a refused build, not a warning:
+ * such a build reports its updates as not configured and can never verify a
+ * manifest, so publishing beside it would ship installers no client of this
+ * release could update from.
+ */
+function requireShippableKeySet(path: string): string {
+  const keys = readInjectedKeys(path)
+  if (keys.length === 0) {
+    fail(
+      `${path} names no key, so a build of this release would never verify a manifest. Injection did not run, or it wrote nothing this app can read.`,
+    )
+  }
+  return keys
+}
+
+if (process.argv[2] === 'check-injected') {
+  const shipped = requireShippableKeySet(out)
+  const expected = publicKeyFromSecret()
+  const named = process.env.UPDATE_SIGNING_KEY_ID?.trim()
+  const matches = shipped.filter(
+    (key) =>
+      Buffer.from(key.publicKey, 'base64').equals(expected) &&
+      (named === undefined || key.keyId === named),
+  )
+  if (matches.length !== 1) {
+    fail(
+      named === undefined
+        ? `${out} does not carry the release key this job is signing with, so a build of it would refuse every manifest this release publishes.`
+        : `${out} does not carry ${named}, the key this release signs with.`,
+    )
+  }
+  const [key] = matches
+  const trustedNow = Date.parse(key.validFrom) <= Date.now()
+  if (!trustedNow) {
+    fail(
+      `${out} only trusts ${key.keyId} from ${key.validFrom}, so no build of this release could verify a manifest yet.`,
+    )
+  }
+  if (key.validUntil !== null && Date.parse(key.validUntil) <= Date.now()) {
+    fail(
+      `${out} stopped trusting ${key.keyId} at ${key.validUntil}, which has passed. A release cannot ship a key its own builds will refuse.`,
+    )
+  }
+  console.log(
+    `release-update: ${out} carries ${key.keyId}, trusted from ${key.validFrom}${key.validUntil ? ` until ${key.validUntil}` : ' with no end date'}, and it is the key this release signs with.`,
+  )
+  process.exit(0)
+}
+
+if (process.argv[2] !== 'inject') {
+  fail(
+    'usage: release-trusted-keys.ts inject [--out <path>] | check-injected [--out <path>]. `inject` runs before `npm run dist` so the packaged build carries the key it will verify releases with; `check-injected` refuses a build that would ship without it.',
+  )
+}
 
 const privateKey = createPrivateKey(secret('UPDATE_SIGNING_KEY', 'proving the release key pair'))
 if (privateKey.asymmetricKeyType !== 'ed25519') {
@@ -132,7 +189,7 @@ writeFileSync(out, `${JSON.stringify(registry, null, 2)}\n`)
 
 // Read the file back the way a packaged build reads it, so a key set this app
 // would ignore never reaches a build.
-const written = readInjectedKeys(out)
+const written = requireShippableKeySet(out)
 if (written.length !== 1 || written[0].keyId !== keyId) {
   fail(
     `${out} was written but the app would not read ${keyId} out of it, so no build of this release could verify a manifest.`,

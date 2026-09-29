@@ -89,6 +89,11 @@ jobs:
             }
           }
           if (-not $toolchain) { throw 'The MSVC toolchain did not reach PATH' }
+      - name: Prove the checkout on its own, before a release key is in it
+        # The suite is run against the repository as committed, with the key set
+        # empty, so a release can never make a test pass or fail by the key it
+        # happens to inject. Everything after this is about the key.
+        run: npm test
       - name: Inject the release update key into this build
         shell: bash
         env:
@@ -106,6 +111,15 @@ jobs:
         # missing, if they disagree, or if the key is not Ed25519. The private
         # half is never written, printed, or uploaded.
         run: npx tsx scripts/release-trusted-keys.ts inject
+      - name: Refuse a build that would ship with no release key
+        shell: bash
+        env:
+          UPDATE_SIGNING_PUBLIC_KEY: ${{ secrets.UPDATE_SIGNING_PUBLIC_KEY }}
+          UPDATE_SIGNING_KEY_ID: ${{ secrets.UPDATE_SIGNING_KEY_ID }}
+        # The key is inside the build from here on, so an empty or wrong key set
+        # is a build that can never verify any manifest. This reads the injected
+        # set back and fails rather than shipping that build.
+        run: npx tsx scripts/release-trusted-keys.ts check-injected
       - name: Hand the injected key set to the publishing job
         shell: bash
         run: |
@@ -116,7 +130,6 @@ jobs:
           path: injected-key-set-${{ matrix.platform }}-${{ matrix.arch }}.json
           if-no-files-found: error
           retention-days: 7
-      - run: npm test
       - run: npm run dist
         env:
           CSC_LINK: ${{ secrets.CSC_LINK }}
@@ -148,6 +161,31 @@ jobs:
               throw "Invalid Authenticode signature: $($artifact.Name)"
             }
           }
+      - name: Sign and notarise the disk image itself
+        if: matrix.platform == 'darwin'
+        shell: bash
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        # The application inside the image is signed by the packager, and the
+        # image is signed again over it. The updater refuses a disk image whose
+        # own signature or team is not this app's, before it mounts anything, so
+        # an image that is only signed inside is a release that cannot be
+        # installed. The image is stapled and assessed as an image here, which is
+        # the same question the app asks when it opens one.
+        run: |
+          shopt -s nullglob
+          images=(release/*.dmg)
+          test "${#images[@]}" -eq 1
+          codesign --force --sign "$APPLE_TEAM_ID" --timestamp --options runtime "${images[0]}"
+          codesign --verify --strict --verbose=2 "${images[0]}"
+          codesign -dv --verbose=4 "${images[0]}" 2>&1 | grep -Fq 'Authority=Developer ID Application:'
+          test "$(codesign -dv --verbose=2 "${images[0]}" 2>&1 | sed -n 's/^TeamIdentifier=//p')" = "$APPLE_TEAM_ID"
+          xcrun notarytool submit "${images[0]}" --wait
+          xcrun stapler staple "${images[0]}"
+          xcrun stapler validate "${images[0]}"
+          spctl --assess --type open --context context:primary-signature -v "${images[0]}"
       - name: Produce the dependency inventory for this packaged app
         uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
         with:
@@ -198,12 +236,6 @@ jobs:
         uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
         with:
           subject-path: signed-release/*
-      - name: Upload only verified release artifacts
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
-        shell: bash
-        run: gh release upload "$RELEASE_TAG" signed-release/*
       - name: Hand the verified artifacts and their descriptors to the publishing job
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -214,12 +246,55 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  release-assets:
+    # Puts the verified installers on the release, and only after the
+    # dependency checks have passed. A known-vulnerable tree stops here: the
+    # artifacts stay in the run and nothing is published.
+    needs: [package, supply-chain]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      attestations: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+      - name: Collect the verified artifacts
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          pattern: signed-release-*
+          path: .
+          merge-multiple: true
+      - name: Prove every artifact is the one this repository's runner attested
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          shopt -s nullglob
+          artifacts=(signed-release/*)
+          test "${#artifacts[@]}" -gt 0
+          for artifact in "${artifacts[@]}"; do
+            gh attestation verify "$artifact" --repo "$REPOSITORY"
+          done
+      - name: Upload only verified release artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        shell: bash
+        run: gh release upload "$RELEASE_TAG" signed-release/*
+
   publish:
     # Mints, signs and publishes one signed update manifest per channel. It runs
-    # after every platform has packaged and attested, and it publishes nothing at
-    # all unless the manifest verifies against the key the packaged builds carry
-    # and every installer it names re-hashes to the digest it published.
-    needs: package
+    # after every platform has packaged and attested, after the dependency checks
+    # have passed, and after the installers are on the release, and it publishes
+    # nothing at all unless the manifest verifies against the key the packaged
+    # builds carry and every installer it names re-hashes to the digest it
+    # published.
+    needs: [supply-chain, release-assets]
     runs-on: ubuntu-24.04
     permissions:
       contents: write

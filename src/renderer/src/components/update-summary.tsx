@@ -23,11 +23,26 @@ const PHASE_LABEL: Record<UpdateStatus['phase'], string> = {
   cancelled: 'Cancelled. Nothing was changed.',
 }
 
+/** Phases that say something an available offer does not. */
+const OUTCOME_PHASES = new Set<UpdateStatus['phase']>([
+  'checking',
+  'current',
+  'downloading',
+  'downloaded',
+  'installing',
+  'failed',
+  'cancelled',
+])
+
 /**
  * What the updater is true about on this machine, before any control is
  * offered. Everything here comes from the main process, including the release
  * notes, which are signed release text from the network and are therefore shown
  * as text and never as markup.
+ *
+ * The facts and the notice are separate so each can sit with the part of the
+ * settings surface it belongs to: the facts describe this build, and the
+ * notice describes what the last thing it did resulted in.
  */
 export function UpdateSummary({
   status,
@@ -38,10 +53,26 @@ export function UpdateSummary({
 }) {
   return (
     <>
-      <OperationFacts facts={updateFacts(status, channel)} />
-      {notice(status)}
+      <UpdateFacts status={status} channel={channel} />
+      <UpdateNotice status={status} />
     </>
   )
+}
+
+/** What is true about this build, shown beside the channel it follows. */
+export function UpdateFacts({
+  status,
+  channel,
+}: {
+  status: UpdateStatus | null
+  channel: UpdateChannel
+}) {
+  return <OperationFacts facts={updateFacts(status, channel)} />
+}
+
+/** What the updater is doing right now, in the terms it reported. */
+export function UpdateNotice({ status }: { status: UpdateStatus | null }) {
+  return notice(status)
 }
 
 /** The facts about the updater that are true regardless of what it is doing. */
@@ -65,14 +96,21 @@ export function updateFacts(status: UpdateStatus | null, channel: UpdateChannel)
 function notice(status: UpdateStatus | null) {
   if (!status) return <InlineAlert tone="info">Reading the update state…</InlineAlert>
   const offer = status.offer
-  const headline = offer
+  const offered = offer
     ? `Version ${offer.version} on the ${offer.channel} channel${
         offer.rollbackOf ? `, an authorised rollback of ${offer.rollbackOf}` : ''
       } · ${Math.round(offer.size / (1024 * 1024))} MB for ${offer.platform} ${offer.arch}`
-    : PHASE_LABEL[status.phase]
+    : null
+  // The phase leads whenever it says something the offer does not: a person
+  // still holding a valid offer must be able to read that the download
+  // finished, that an install is running, or that the last attempt was refused.
+  const leads = offered === null || OUTCOME_PHASES.has(status.phase)
+  const headline = leads ? PHASE_LABEL[status.phase] : (offered as string)
   const body = status.failure
     ? `${status.failure.message} (${status.failure.reason})`
-    : offer?.notes
+    : leads && offered !== null
+      ? `${offered}${offer?.notes ? ` — ${offer.notes}` : ''}`
+      : offer?.notes
   return (
     <>
       <InlineAlert tone={status.failure ? 'warning' : 'info'}>

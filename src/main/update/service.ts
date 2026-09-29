@@ -14,6 +14,7 @@ import {
   discardStagedUpdate,
   downloadUpdateArtifact,
   hashStagedUpdate,
+  privateInstallHandoff,
   type StagedUpdate,
 } from './artifact'
 import {
@@ -90,6 +91,10 @@ export class UpdateService {
   private restartRequired = false
   private running: Run | null = null
   private generation = 0
+  /** State writes take their turn, so two runs never write through one file. */
+  private writing: Promise<void> = Promise.resolve()
+  /** True once the platform installer owns the files this app runs from. */
+  private cutover = false
   private channel: UpdateChannel = 'stable'
 
   constructor(options: UpdateServiceOptions) {
@@ -133,6 +138,17 @@ export class UpdateService {
    */
   async setChannel(channel: UpdateChannel): Promise<void> {
     if (!UPDATE_CHANNELS.includes(channel) || channel === this.channel) return
+    if (this.cutover) {
+      // The platform installer is already replacing this app's files. A channel
+      // change now would report a state the installer is about to contradict.
+      this.failure = {
+        reason: 'unreachable',
+        message:
+          'The update is already being installed; the channel changes when the app restarts.',
+      }
+      this.publish()
+      return
+    }
     this.abandon()
     this.channel = channel
     await this.discardCandidate()
@@ -205,6 +221,10 @@ export class UpdateService {
         // a channel's feed that cannot be trusted must not leave the previous
         // release staged and one click from being installed.
         await this.discardCandidate()
+        // The cleanup above awaited, and a cancel or a channel change during it
+        // retires this run. Whatever that run did next belongs to it, not to
+        // this answer, so nothing here is applied to a service it no longer owns.
+        if (!this.current(run)) return this.status()
         this.offer = null
         this.authenticated = null
         if (
@@ -226,6 +246,7 @@ export class UpdateService {
       // installed as something other than what it is.
       const kept = this.sameAsCandidate(offered)
       if (!kept) await this.discardCandidate()
+      if (!this.current(run)) return this.status()
       this.authenticated = result.value
       this.offer = offered
       this.state.seenSequences[offered.channel] = Math.max(
@@ -243,12 +264,15 @@ export class UpdateService {
             error instanceof Error ? error.message : String(error)
           }`,
         }
+        if (!this.current(run)) return this.status()
         this.phase = 'failed'
         this.failure = this.stateFailure
         this.authenticated = null
         this.offer = null
         return this.publish()
       }
+      // The write awaited, and this run may have been retired while it did.
+      if (!this.current(run)) return this.status()
       this.phase = kept ? 'downloaded' : 'available'
       this.failure = null
       return this.publish()
@@ -344,20 +368,43 @@ export class UpdateService {
         }
         return this.publish()
       }
+      // The verified build is copied into owner-private handoff storage and the
+      // installer is handed that path. This reduces interference with the
+      // download between the digest check and the install; it does not bind the
+      // check to an immutable object, and it is not a claim about anything
+      // already running as this user.
+      const handoff = await privateInstallHandoff(
+        candidate.staged,
+        join(this.options.userDataPath, 'handoff'),
+      )
+      if (!this.current(run)) {
+        await rm(handoff.path, { force: true }).catch(() => undefined)
+        return this.status()
+      }
       this.phase = 'installing'
+      this.cutover = true
       this.publish()
-      const outcome = await installStagedUpdate(candidate.staged, {
+      const outcome = await installStagedUpdate(handoff, {
         platform: this.options.platform,
         appPath: this.options.appPath,
         version: candidate.version,
         arch: candidate.arch,
         userDataPath: this.options.userDataPath,
+        // Everything before the platform installer takes the update is stopped
+        // by this signal; after that boundary the installer owns the files and
+        // the only honest answer to a cancel is that it is too late.
+        signal: run.controller.signal,
         quit: this.options.quit,
         relaunch: () => {
           this.restartRequired = true
           this.options.relaunch()
         },
       })
+      this.cutover = false
+      await rm(join(this.options.userDataPath, 'handoff'), {
+        recursive: true,
+        force: true,
+      }).catch(() => undefined)
       if (!outcome.installed) {
         this.phase = 'failed'
         this.failure = { reason: 'bad-signature', message: outcome.reason }
@@ -451,12 +498,23 @@ export class UpdateService {
     if (candidate) await discardStagedUpdate(candidate.staged)
   }
 
+  /**
+   * A refusal a person can act on: the reason is what kind of refusal it was,
+   * not a single catch-all. A build that is not the one signed is a different
+   * answer from a feed that could not be read, and the surface shows the reason
+   * beside the message.
+   */
   private refuse(error: unknown): UpdateStatus {
     this.phase = 'failed'
-    this.failure = {
-      reason: 'unreachable',
-      message: error instanceof Error ? error.message : String(error),
-    }
+    const message = error instanceof Error ? error.message : String(error)
+    const reason = /does not match the signed manifest|not the size the signed manifest/u.test(
+      message,
+    )
+      ? 'bad-signature'
+      : /outside the release location|redirected|outside this project|cancelled/iu.test(message)
+        ? 'malformed'
+        : 'unreachable'
+    this.failure = { reason, message }
     return this.publish()
   }
 
@@ -496,10 +554,17 @@ export class UpdateService {
         throw new Error('not an update history')
       const seenSequences: Partial<Record<UpdateChannel, number>> = {}
       for (const channel of UPDATE_CHANNELS) {
+        if (!(channel in parsed.seenSequences)) continue
         const value = parsed.seenSequences[channel]
-        if (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0) {
-          seenSequences[channel] = value
+        // A channel that is present but unreadable is not an absent channel. It
+        // is the one piece of evidence that a sequence has already been seen, so
+        // dropping it would let a manifest with a lower sequence be accepted as
+        // if the channel were new — and no install of that build could ever
+        // update again. A history that cannot be read is a history refused.
+        if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) {
+          throw new Error(`the ${channel} replay counter is not a number this app can read`)
         }
+        seenSequences[channel] = value
       }
       return { seenSequences }
     } catch (error) {
@@ -513,13 +578,32 @@ export class UpdateService {
     }
   }
 
-  /** Written whole or not at all, so a crash cannot leave half a history. */
+  /**
+   * Written whole or not at all, so a crash cannot leave half a history.
+   *
+   * Each write gets its own temporary name and its own turn: two runs that
+   * overlap cannot write through one file, and the last rename wins with a whole
+   * history rather than a blend of two. The history only ever grows, so the
+   * newest value is the one that carries every sequence either run had seen.
+   */
   private async writeState(): Promise<void> {
-    await mkdir(this.options.userDataPath, { recursive: true })
-    const target = this.statePath()
-    const temporary = `${target}.next`
-    await writeFile(temporary, `${JSON.stringify(this.state, null, 2)}\n`, { mode: 0o600 })
-    await rename(temporary, target)
+    const previous = this.writing
+    let release = (): void => {}
+    const mine = new Promise<void>((done) => {
+      release = done
+    })
+    this.writing = previous.then(() => mine)
+    await previous.catch(() => undefined)
+    try {
+      await mkdir(this.options.userDataPath, { recursive: true })
+      const target = this.statePath()
+      const temporary = `${target}.${process.pid}.${this.generation}.next`
+      await writeFile(temporary, `${JSON.stringify(this.state, null, 2)}\n`, { mode: 0o600 })
+      await rename(temporary, target)
+    } finally {
+      release()
+      if (this.writing === mine) this.writing = Promise.resolve()
+    }
   }
 
   /** Removes any staged installer this app left behind. */

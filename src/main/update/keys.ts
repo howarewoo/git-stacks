@@ -34,7 +34,6 @@ const BASE64 = /^[A-Za-z0-9+/]+={0,2}$/
 /** The committed file's fields are checked below, not trusted from its literal type. */
 const registry: { schema: unknown; keys: unknown } = committed
 
-
 function readCommittedKeys(): TrustedUpdateKey[] {
   if (registry.schema !== 1 || !Array.isArray(registry.keys)) return []
   const keys: TrustedUpdateKey[] = []

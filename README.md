@@ -418,6 +418,26 @@ Checking for an update sends nothing about the person or their machine. It reads
 a published file from this project's release location, and there is no telemetry
 or crash upload behind it.
 
+### What a release reads before it publishes
+
+The next manifest in a channel is minted from the manifest that channel already
+publishes, and that one is read as a signed fact or not at all: the producer
+downloads the manifest _and_ its detached signature and verifies the signature
+over the exact bytes against the release keys it trusts. An unsigned asset, a
+signature from another key, or a manifest that does not match its signature
+stops the release. It is not treated as an empty channel, because a sequence
+minted from a rewritten feed can sit below the high-water mark installations
+have already seen, and those installations could then never update again.
+
+A published manifest that has since expired is still read for its sequence and
+version. Expiry says a feed should be refreshed; it does not say the sequence it
+used never happened. Only the absence of the whole pair — a channel with no
+manifest and no signature — means the channel is new.
+
+A release that cannot read its channel does not publish. A network failure, an
+expired token, or a rate limit is not evidence that a channel is empty, and
+restarting a sequence at one would be a replay the app is right to refuse.
+
 ### How a release is published
 
 Publishing a GitHub release runs
@@ -499,17 +519,45 @@ The order is the point, and it belongs to the app rather than to the feed:
    followed only to this project's own release location or to the one release
    asset host GitHub serves the file from, so a signed manifest cannot send the
    download somewhere the manifest itself could not have been fetched from.
-5. Before anything is run, the download must carry the platform's own signature
+5. The download is proved once more, and the build handed to the platform
+   installer is copied into owner-private handoff storage: a directory in this
+   app's own state entered by its owner alone on a POSIX system, and a file
+   created exclusively, so an existing destination is refused rather than
+   written through. That reduces interference with the download between the
+   digest check and the install, and it catches a file that changed on disk in
+   that window. It is not a lock, it does not bind the check to an immutable
+   object, and it says nothing about a process running as this same user — a
+   backup or sync agent commonly is one.
+6. Before anything is run, the download must carry the platform's own signature
    and the identity of the app that is already installed. An installer signed by
-   anybody else is refused even when its digest matches the manifest exactly.
-   On macOS the installed bundle is moved aside rather than overwritten in
+   anybody else is refused even when its digest matches the manifest exactly. A
+   macOS disk image is checked for its own signature and team, and assessed by
+   Gatekeeper, before it is mounted; the application inside it is checked again
+   separately, and the copied bundle is checked a third time before it replaces
+   the running one. An installer that cannot be started is a refusal, not an
+   install: this app stays open rather than closing with nothing to finish the
+   work. On macOS the installed bundle is moved aside rather than overwritten in
    place, so a failure part-way through leaves a working app to go back to;
    where the platform installer has to replace files this process is running
    from, the app closes and the installer finishes on its own.
 
+Once the platform installer owns the files, the update cannot be stopped: a
+cancel or a channel change at that point is reported as too late rather than
+pretending to have taken effect.
+
 The updater writes only to the app's own user-data directory, and on macOS to a
 staged and a moved-aside copy of the bundle beside the installed one, both
 carrying this app's own prefix. It never reads or writes a repository.
+
+**What has not been observed here.** No signed macOS or Windows installer has
+been installed by this work: that needs an Apple Developer ID and a Windows
+signing certificate, neither of which this repository holds. The digest re-check
+in step 5, the native signature checks in step 6, the handoff, and the
+Gatekeeper assessment of a disk image are all code paths that only run on a
+platform with a real signature, so their behaviour against a real signed
+installer is unproven and is not claimed. The handoff's directory and file modes
+describe POSIX protection; the equivalent Windows isolation has not been
+independently verified here either.
 
 ### Channels
 

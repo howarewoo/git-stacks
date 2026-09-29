@@ -346,3 +346,18 @@ test('a fixture manifest is the one this suite signs and offers', () => {
   assert.equal(manifest.artifacts.length, 1)
   assert.equal(manifest.channel, 'stable')
 })
+
+test('a macOS architecture is recognised under every name it is called', async () => {
+  // The signed manifest says `x64`; lipo reports the Mach-O name `x86_64`. A
+  // comparison of the two strings refuses every valid Intel or universal build
+  // on an Intel Mac, so both names have to reach the same conclusion.
+  const { machArchitectures } = await import('../src/main/update/install')
+  assert.deepEqual([...machArchitectures('x64')].sort(), ['x64', 'x86_64'])
+  assert.deepEqual([...machArchitectures('x86_64')].sort(), ['x64', 'x86_64'])
+  assert.deepEqual([...machArchitectures('arm64')].sort(), ['aarch64', 'arm64'])
+  // A universal binary reports both slices, and either satisfies a machine.
+  const universal = 'x86_64 arm64'.split(/\s+/u).flatMap(machArchitectures)
+  assert.ok(universal.includes('x64'), 'an Intel slice satisfies an x64 update')
+  assert.ok(universal.includes('arm64'), 'an Apple Silicon slice satisfies an arm64 update')
+  assert.equal(universal.includes('ia32'), false, 'a 32-bit slice satisfies nothing')
+})

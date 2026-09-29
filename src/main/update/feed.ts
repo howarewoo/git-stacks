@@ -153,6 +153,22 @@ export function fetchFeedBytes(
     )
   }
   const { promise, resolve, reject } = Promise.withResolvers<{ url: URL; body: Buffer }>()
+  // A wall clock, not a socket timer. A socket timer measures inactivity, so a
+  // feed that answers with a byte often enough never trips one; this bounds the
+  // whole attempt — connecting, following redirects, and streaming the body —
+  // from the moment it starts, and destroys whatever is still open when it ends.
+  const live = new Set<{ destroy: (error: Error) => void }>()
+  const clock = setTimeout(
+    () => {
+      for (const stream of live)
+        stream?.destroy(new Error('The update feed did not answer in time.'))
+      reject(new Error('The update feed did not answer in time.'))
+    },
+    Math.max(1, deadline - Date.now()),
+  )
+  clock.unref()
+  const settle = (): void => clearTimeout(clock)
+  promise.then(settle, settle)
   const request = httpsRequest(
     url,
     {
@@ -211,20 +227,21 @@ export function fetchFeedBytes(
         }
         chunks.push(chunk)
       })
+      live.add(response)
+      response.on('close', () => live.delete(response))
       response.on('end', () => resolve({ url, body: Buffer.concat(chunks) }))
       response.on('error', reject)
     },
   )
-  // A slow answer that keeps the socket open must not hold the check open
-  // either: the whole attempt, redirects included, has one deadline.
-  request.setTimeout(Math.max(1, deadline - Date.now()), () => {
-    request.destroy(new Error('The update feed did not answer in time.'))
-  })
+  live.add(request)
   const onAbort = (): void => {
     request.destroy(new Error('The update request was cancelled.'))
   }
   options.signal?.addEventListener('abort', onAbort, { once: true })
-  request.on('close', () => options.signal?.removeEventListener('abort', onAbort))
+  request.on('close', () => {
+    options.signal?.removeEventListener('abort', onAbort)
+    live.delete(request)
+  })
   request.on('error', reject)
   request.end()
   return promise

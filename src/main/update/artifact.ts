@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
-import { createReadStream, createWriteStream } from 'node:fs'
-import { mkdir, rename, rm } from 'node:fs/promises'
+import { constants, createReadStream, createWriteStream } from 'node:fs'
+import { chmod, mkdir, open, rename, rm, stat } from 'node:fs/promises'
 import { join } from 'node:path'
 import { Agent, request as httpsRequest } from 'node:https'
 import type { IncomingMessage } from 'node:http'
@@ -73,12 +73,28 @@ export async function downloadUpdateArtifact(options: DownloadOptions): Promise<
   })
 
   const deadline = Date.now() + options.timeoutMs
-  const response = await openArtifact(url, 0)
+  // A wall clock, not a socket timer. `setTimeout` on a request measures
+  // inactivity, so a peer that sends a byte often enough keeps a connection open
+  // indefinitely; this bounds the whole operation — connecting, following
+  // redirects, and streaming the body — from the moment it starts.
+  const exceeded = 'The update download did not finish in time.'
+  const timer = setTimeout(
+    () => {
+      for (const stream of live) stream?.destroy(new Error(exceeded))
+    },
+    Math.max(1, deadline - Date.now()),
+  )
+  timer.unref()
+  const live = new Set<{ destroy: (error: Error) => void }>()
+
+  const opened = await openArtifact(url, 0).finally(() => clearTimeout(timer))
   try {
-    await pipeline(response, meter, createWriteStream(partialPath, { mode: 0o600 }))
+    await pipeline(opened, meter, createWriteStream(partialPath, { mode: 0o600 }))
   } catch (error) {
     await rm(partialPath, { force: true }).catch(() => undefined)
     throw error
+  } finally {
+    clearTimeout(timer)
   }
 
   const digest = hash.digest('hex')
@@ -86,7 +102,7 @@ export async function downloadUpdateArtifact(options: DownloadOptions): Promise<
     await rm(partialPath, { force: true })
     throw new Error(
       received !== artifact.size
-        ? 'The downloaded build is not the size the signed manifest described.'
+        ? 'The downloaded build is not the size the signed manifest allowed.'
         : 'The downloaded build does not match the signed manifest’s digest.',
     )
   }
@@ -146,6 +162,7 @@ export async function downloadUpdateArtifact(options: DownloadOptions): Promise<
               )
               return
             }
+            live.delete(answer)
             openArtifact(next, hops + 1).then(resolveResponse, rejectResponse)
             return
           }
@@ -157,14 +174,15 @@ export async function downloadUpdateArtifact(options: DownloadOptions): Promise<
           resolveResponse(answer)
         },
       )
-      request.setTimeout(Math.max(1, deadline - Date.now()), () => {
-        request.destroy(new Error('The update download did not finish in time.'))
-      })
+      live.add(request)
       const onAbort = (): void => {
         request.destroy(new Error('The update download was cancelled.'))
       }
       options.signal?.addEventListener('abort', onAbort, { once: true })
-      request.on('close', () => options.signal?.removeEventListener('abort', onAbort))
+      request.on('close', () => {
+        options.signal?.removeEventListener('abort', onAbort)
+        live.delete(request)
+      })
       request.on('error', rejectResponse)
       request.end()
     })
@@ -174,6 +192,54 @@ export async function downloadUpdateArtifact(options: DownloadOptions): Promise<
 /** Removes a staged artifact, so a cancelled or replaced update leaves nothing. */
 export async function discardStagedUpdate(staged: StagedUpdate): Promise<void> {
   await rm(staged.path, { force: true }).catch(() => undefined)
+}
+
+/**
+ * Copies the already-verified download into owner-private handoff storage, and
+ * hands the installer that one path.
+ *
+ * The file is created exclusively, so an existing destination — a regular file
+ * or a link — is refused rather than written through, and the source is opened
+ * without following a link. The directory is this app's own state, entered by
+ * its owner alone on a POSIX system.
+ *
+ * What this is, exactly: it reduces accidental interference with the download
+ * and refuses a destination something else already holds. It does not bind the
+ * earlier digest check to an immutable executable object, and it does not
+ * defend against a process running as this same user — a backup or sync agent
+ * commonly does. Anyone who wants a stronger claim than that needs the platform
+ * to hold the file, not this code.
+ */
+export async function privateInstallHandoff(
+  staged: StagedUpdate,
+  parent: string,
+): Promise<StagedUpdate> {
+  await mkdir(parent, { recursive: true, mode: 0o700 })
+  // chmod rather than trusting the mode argument: an existing directory keeps
+  // whatever mode it had, and this one must not be readable by anyone else.
+  await chmod(parent, 0o700)
+  const target = join(parent, staged.fileName)
+  const handle = await open(
+    target,
+    constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL,
+    0o600,
+  )
+  try {
+    const source = await open(staged.path, constants.O_RDONLY | constants.O_NOFOLLOW)
+    try {
+      await pipeline(source.createReadStream(), handle.createWriteStream(), { end: false })
+    } finally {
+      await source.close()
+    }
+  } finally {
+    await handle.close()
+  }
+  const { size } = await stat(target)
+  if (size !== staged.size) {
+    await rm(target, { force: true }).catch(() => undefined)
+    throw new Error('The verified build could not be handed to the installer unchanged.')
+  }
+  return { ...staged, path: target }
 }
 
 /**

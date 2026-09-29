@@ -540,3 +540,94 @@ test('a packaged build ignores a fixture feed and key entirely', async (t) => {
   assert.deepEqual(feed.requests, [], 'an installed app opened no socket')
   await readFile(join(userDataPath, 'updates.json'), 'utf8').catch(() => undefined)
 })
+
+test('a replay counter that is present but unreadable stops the updater', async () => {
+  // A channel that is present but damaged is not an absent channel: dropping it
+  // would let a manifest with a lower sequence be accepted as if the channel
+  // were new, and no install could ever update from it again.
+  const { mkdtemp } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+  const home = await mkdtemp(join(tmpdir(), 'git-stacks-damaged-history-'))
+  const { UpdateService } = await import('../src/main/update/service')
+  const options = {
+    platform: 'darwin',
+    arch: 'arm64',
+    currentVersion: '1.0.0',
+    appPath: unsignedBundle(),
+    userDataPath: home,
+    packaged: false,
+    env: {
+      GIT_STACKS_UPDATE_KEY_ID: KEY_ID,
+      GIT_STACKS_UPDATE_PUBLIC_KEY: PUBLIC_KEY,
+      GIT_STACKS_UPDATE_FEED_BASE: 'https://127.0.0.1:1/',
+      GIT_STACKS_UPDATE_CA_FILE: TLS.caFile,
+    },
+    relaunch: () => undefined,
+  }
+  for (const damaged of ['"12"', '-1', 'null', '1.5', '9007199254740993']) {
+    const { writeFile, mkdir } = await import('node:fs/promises')
+    const { join } = await import('node:path')
+    await mkdir(home, { recursive: true })
+    await writeFile(
+      join(home, 'updates.json'),
+      JSON.stringify({ schema: 1, seenSequences: { stable: 12 }, last: {} }, null, 2),
+    )
+    await writeFile(
+      join(home, 'updates.json'),
+      JSON.stringify(
+        { schema: 1, seenSequences: { stable: JSON.parse(damaged) }, last: {} },
+        null,
+        2,
+      ),
+    )
+    const service = new UpdateService(options)
+    await service.start('stable')
+    const status = await service.check()
+    assert.equal(status.phase, 'failed', `a ${damaged} counter is refused rather than read as zero`)
+    assert.match(status.failure?.message ?? '', /damaged|cannot be trusted/u)
+  }
+})
+
+test('a staged build is handed to the installer through a file only this app can write', async () => {
+  const { privateInstallHandoff } = await import('../src/main/update/artifact')
+  const { mkdtemp, writeFile, stat, mkdir, symlink, readFile } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+  const parent = await mkdtemp(join(tmpdir(), 'git-stacks-handoff-'))
+  const source = join(parent, 'Git-Stacks.dmg')
+  const bytes = Buffer.from('a verified installer')
+  await writeFile(source, bytes)
+  const handoff = await privateInstallHandoff(
+    { path: source, sha256: 'a'.repeat(64), size: bytes.length, fileName: 'Git-Stacks.dmg' },
+    join(parent, 'private'),
+  )
+  assert.deepEqual(await readFile(handoff.path), bytes, 'the handed-over file is the verified one')
+  // The directory is entered by its owner alone, and the file is a regular file
+  // rather than a link to something that can be swapped underneath it.
+  const directory = await stat(join(parent, 'private'))
+  assert.equal(directory.mode & 0o077, 0, 'the handoff directory is not readable by anyone else')
+  const file = await stat(handoff.path)
+  assert.equal(file.isFile(), true)
+  assert.equal(file.mode & 0o077, 0, 'the handed-over file is not readable by anyone else')
+
+  // A name already taken by something else is refused rather than written
+  // through, so a link planted in the handoff cannot be followed.
+  const contested = join(parent, 'contested')
+  await mkdir(contested, { mode: 0o700 })
+  const victim = join(parent, 'victim')
+  await writeFile(victim, 'not this file')
+  await symlink(victim, join(contested, 'Git-Stacks.dmg'))
+  await assert.rejects(
+    privateInstallHandoff(
+      { path: source, sha256: 'a'.repeat(64), size: bytes.length, fileName: 'Git-Stacks.dmg' },
+      contested,
+    ),
+    /EEXIST/u,
+  )
+  assert.equal(
+    await readFile(victim, 'utf8'),
+    'not this file',
+    'the link was never written through',
+  )
+})

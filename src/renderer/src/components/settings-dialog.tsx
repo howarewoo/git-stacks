@@ -26,7 +26,7 @@ import {
 import type { ShortcutId } from '../../../shared/shortcuts'
 import type { GitHubAccountStatus } from '../../../shared/types'
 import { UPDATE_CHANNELS, type UpdateChannel, type UpdateStatus } from '../../../shared/update'
-import { UpdateSummary } from './update-summary'
+import { UpdateFacts, UpdateNotice } from './update-summary'
 import { CAPABILITY_STATE_LABELS, type GitHubHostStatus } from '../../../shared/host'
 
 const MERGE_METHOD_LABELS: Record<MergeMethod, string> = {
@@ -662,10 +662,10 @@ export function SettingsDialog({
                       }
                     />
                   </Field>
-                  <UpdateSummary status={updates} channel={settings.updates.channel} />
+                  <UpdateFacts status={updates} channel={settings.updates.channel} />
                 </WorkflowSection>
                 <WorkflowSection label="This build">
-                  <UpdateSummary status={updates} channel={settings.updates.channel} />
+                  <UpdateNotice status={updates} />
                   <div className="flex flex-wrap items-center gap-2">
                     <Button
                       variant="secondary"

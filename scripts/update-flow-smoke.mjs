@@ -261,6 +261,8 @@ async function startRelease() {
     caFile: tls.caFile,
     base,
     requests,
+    /** What the signed manifest says, so the run can report what it proved. */
+    manifest: () => JSON.parse(published().manifest.toString('utf8')),
     /**
      * The signed manifest is left exactly as it was, and the bytes served under
      * the name it signed are replaced.
@@ -359,6 +361,162 @@ async function main() {
     }
     return evaluated.result.value
   }
+  /**
+   * The window as a person uses it: real mouse events on real controls, real
+   * typing, and a screenshot of what the screen actually says at each step.
+   */
+  const shotDirectory = join(ROOT, 'test-results', 'update-ui')
+  mkdirSync(shotDirectory, { recursive: true })
+  const ui = {
+    shots: [],
+    /**
+     * Clicks a real control by what it says. A control that contains the text
+     * as well counts, and the smallest such control wins, so a label inside a
+     * button is the button rather than the panel around it.
+     */
+    async clickText(label) {
+      // A control that is still on its way onto the screen is not a missing
+      // control, so this waits for one rather than failing on the race.
+      const deadline = Date.now() + TIMEOUT_MS
+      let last = null
+      while (Date.now() < deadline) {
+        try {
+          return await ui.click(finder, label)
+        } catch (error) {
+          last = error
+          await new Promise((settle) => setTimeout(settle, 150))
+        }
+      }
+      throw last ?? new Error(`no control on screen says "${label}"`)
+    },
+    async click(find, wanted) {
+      const point = await evaluate(find, wanted)
+      if (!point) {
+        const visible = await evaluate(() => document.body.innerText)
+        throw new Error(`no control on screen says "${wanted}". The screen says:\n${visible}`)
+      }
+      for (const type of ['mouseMoved', 'mousePressed', 'mouseReleased']) {
+        await cdp.send(
+          'Input.dispatchMouseEvent',
+          {
+            type,
+            x: Math.round(point.x),
+            y: Math.round(point.y),
+            button: 'left',
+            buttons: type === 'mouseReleased' ? 0 : 1,
+            clickCount: type === 'mouseMoved' ? 0 : 1,
+          },
+          session,
+        )
+      }
+      // A click is not a state change until the app has had a frame to react.
+      await new Promise((settle) => setTimeout(settle, 120))
+    },
+    /** Types into whatever has the keyboard focus, as a person would. */
+    async type(text) {
+      await cdp.send('Input.insertText', { text }, session)
+      await new Promise((settle) => setTimeout(settle, 200))
+    },
+    /**
+     * A window that is not in front renders nothing Chromium will measure, and
+     * an unlaid-out window reports no text. This is what a person does when
+     * they look at the app, so it is done before every reading.
+     */
+    async foreground() {
+      await cdp.send('Page.bringToFront', {}, session).catch(() => undefined)
+    },
+    /**
+     * Clicks a control and keeps clicking until the window says what that
+     * click was supposed to cause. A control that is still disabled when the
+     * click lands is not a failure, it is a control that was not ready yet.
+     */
+    async clickUntil(label, expected) {
+      const deadline = Date.now() + TIMEOUT_MS
+      let last = ''
+      while (Date.now() < deadline) {
+        await ui.clickText(label)
+        // The click is given time to land and the window to say what it caused
+        // before it is tried again, because a control that was not ready yet is
+        // not a control that failed.
+        const until = Math.min(deadline, Date.now() + 3000)
+        while (Date.now() < until) {
+          await new Promise((settle) => setTimeout(settle, 200))
+          await ui.foreground()
+          const current = await evaluate(() => document.body.innerText)
+          if (current.length > 0) last = current
+          if (last.includes(expected)) return
+        }
+      }
+      throw new Error(`clicking "${label}" never produced "${expected}". The window says:\n${last}`)
+    },
+    async text() {
+      await ui.foreground()
+      return evaluate(() => document.body.innerText)
+    },
+    /** Waits until the window has rendered something to read and click. */
+    async waitForText(timeoutMs = TIMEOUT_MS) {
+      const deadline = Date.now() + timeoutMs
+      while (Date.now() < deadline) {
+        await ui.foreground()
+        const current = await evaluate(() => document.body.innerText)
+        if (current.trim().length > 0) return current
+        await new Promise((settle) => setTimeout(settle, 150))
+      }
+      throw new Error('the window never rendered anything to read')
+    },
+    /** Waits for the window to say something, so nothing is asserted on a race. */
+    async waitFor(fragment, timeoutMs = TIMEOUT_MS) {
+      const deadline = Date.now() + timeoutMs
+      let seen = ''
+      while (Date.now() < deadline) {
+        await ui.foreground()
+        const current = await evaluate(() => document.body.innerText)
+        if (current.length > 0) seen = current
+        if (seen.includes(fragment)) return
+        await new Promise((settle) => setTimeout(settle, 150))
+      }
+      throw new Error(`the window never said "${fragment}". It says:\n${seen}`)
+    },
+  }
+  /**
+   * The smallest control on screen that says the wanted text, and where its
+   * centre is. A label inside a button is the button rather than the panel
+   * around it, which is why the smallest match wins.
+   */
+  const finder = (wanted) => {
+    const controls = document.querySelectorAll(
+      'button, [role="button"], [role="tab"], [role="radio"], [role="option"], [role="menuitem"], a, label',
+    )
+    const hits = []
+    for (const control of controls) {
+      const text = (control.textContent ?? '').trim()
+      const named = control.getAttribute('aria-label')
+      if (!text.includes(wanted) && named !== wanted) continue
+      // Scrolled into view first, and only then measured: a rectangle taken
+      // before the scroll points somewhere the control is not, and a click
+      // outside the dialog closes it.
+      control.scrollIntoView({ block: 'center' })
+      const box = control.getBoundingClientRect()
+      if (box.width === 0 || box.height === 0) continue
+      hits.push({ control, box, area: box.width * box.height })
+    }
+    if (hits.length === 0) return null
+    const smallest = hits.sort((a, b) => a.area - b.area)[0]
+    return {
+      x: smallest.box.x + smallest.box.width / 2,
+      y: smallest.box.y + smallest.box.height / 2,
+      text: (smallest.control.textContent ?? '').trim(),
+    }
+  }
+
+  const shot = async (name) => {
+    const { data } = await cdp.send('Page.captureScreenshot', { format: 'png' }, session)
+    const file = join(shotDirectory, `${name}.png`)
+    await writeFile(file, Buffer.from(data, 'base64'))
+    ui.shots.push(`${name}.png`)
+    log(`  shot  ${file}`)
+  }
+
   const stop = async () => {
     cdp.close()
     child.kill('SIGTERM')
@@ -366,6 +524,15 @@ async function main() {
     if (child.exitCode === null) child.kill('SIGKILL')
   }
 
+  // The window is still loading at this point; its bridge is not there yet.
+  const bridgeDeadline = Date.now() + TIMEOUT_MS
+  while (Date.now() < bridgeDeadline) {
+    const ready = await evaluate(
+      () => typeof window.desktop === 'object' && window.desktop !== null,
+    )
+    if (ready) break
+    await new Promise((settle) => setTimeout(settle, 100))
+  }
   const bridge = await evaluate(() => Object.keys(window.desktop).sort())
   log(`bridge: ${bridge.join(', ')}`)
   for (const forbidden of [
@@ -380,17 +547,9 @@ async function main() {
   ]) {
     assert(!bridge.includes(forbidden), `the bridge exposes no ${forbidden} escape hatch`)
   }
-  for (const method of [
-    'checkForUpdates',
-    'downloadUpdate',
-    'installUpdate',
-    'cancelUpdate',
-    'updateStatus',
-    'onUpdateStatus',
-  ]) {
-    assert(bridge.includes(method), `the bridge offers ${method}`)
-  }
 
+  // Boundary refusals have no Settings control behind them, so they are asked of
+  // the bridge directly and the answer that comes back is main's own.
   const refused = await evaluate(async () => {
     const answers = {}
     for (const [name, call] of [
@@ -412,68 +571,114 @@ async function main() {
     assert(answer !== 'accepted', `${name} is refused at the boundary (${answer})`)
   }
 
-  const first = await evaluate(() => window.desktop.updateStatus())
-  assert(first.channel === 'stable', `the build follows the stable channel (${first.channel})`)
-  assert(
-    first.trust === 'development',
-    `the fixture key is named as the trusted one (${first.trust})`,
-  )
-
-  const offered = await evaluate(() => window.desktop.checkForUpdates())
-  assert(
-    offered.phase === 'available' && offered.offer?.version === OFFERED_VERSION,
-    `the signed release is offered (${offered.phase}${offered.failure ? `: ${offered.failure.message}` : ''})`,
-  )
-
-  const downloaded = await evaluate(() => window.desktop.downloadUpdate())
-  assert(
-    downloaded.phase === 'downloaded' && downloaded.readyToInstall === true,
-    `the build is downloaded and verified (${downloaded.phase})`,
-  )
+  // The rest of the run is a person using the app: the palette, the settings
+  // dialog, the Updates section, and the buttons in it. Each step is a real
+  // mouse click on the real control, and what the window then says is read out
+  // of the rendered page.
   const stagedDirectory = join(userData, 'updates')
-  const staged = existsSync(stagedDirectory) ? readdirSync(stagedDirectory) : []
+  const stagedFiles = () => (existsSync(stagedDirectory) ? readdirSync(stagedDirectory).sort() : [])
+
+  // The window is brought forward and given a layout before anything is clicked
+  // at, because a window that has not been laid out reports no text and no
+  // positions.
+  await ui.waitForText()
+  // A repository has to be open before the window offers its toolbar, and a
+  // person opens one by clicking it on the start screen.
+  await ui.clickText('workspace')
+  await ui.waitForText()
+  await ui.clickText('Open command palette')
+  await ui.waitFor('esc Dismiss')
+  await ui.type('Settings')
+  await shot('01-command-palette')
+  await ui.clickText('Settings…')
+  await ui.clickText('Updates')
+  await ui.waitFor('Channel')
+  await shot('02-updates-idle')
+
+  await ui.clickUntil('Check for updates', `Version ${OFFERED_VERSION} on the ${CHANNEL} channel`)
+  await ui.waitFor(`Version ${OFFERED_VERSION} on the ${CHANNEL} channel`)
+  await shot('03-update-offered')
+
+  await ui.clickUntil('Download update', 'The release is downloaded and verified')
+  await ui.waitFor('The release is downloaded and verified')
+  await shot('04-update-downloaded')
+  const staged = stagedFiles()
   assert(
     staged.length === 1,
     `exactly one verified file is staged (${staged.join(', ') || 'none'})`,
   )
+  const stagedPath = join(stagedDirectory, staged[0])
+  const signed = release.manifest().artifacts[0]
+  assert(
+    createHash('sha256').update(readFileSync(stagedPath)).digest('hex') === signed.sha256,
+    'the staged file is the build the signed manifest described',
+  )
+  log(
+    `the signed manifest named version ${OFFERED_VERSION} on ${CHANNEL}: ${signed.sha256.slice(0, 16)}…, ${signed.size} bytes, ${signed.platform} ${signed.arch}`,
+  )
 
   // The staged file is replaced on disk, as a local attacker or a stray sync
-  // tool could, and the install must refuse it rather than run it.
-  await writeFile(join(stagedDirectory, staged[0]), 'a different installer entirely')
-  const tampered = await evaluate(() => window.desktop.installUpdate())
+  // tool could, and the install must refuse it rather than run it — and must
+  // not leave the file it refused behind.
+  await writeFile(stagedPath, 'a different installer entirely')
+  await ui.clickUntil('Install and restart', 'The last attempt did not finish')
+  await ui.waitFor('The last attempt did not finish')
+  await shot('05-install-refused')
+  const afterRefusal = await ui.text()
   assert(
-    tampered.phase === 'failed' && tampered.restartRequired === false,
-    `a changed installer is refused, not run (${tampered.failure?.reason ?? tampered.phase})`,
+    afterRefusal.includes('The downloaded installer no longer matches the signed release'),
+    `the window shows why the install was refused (${afterRefusal.slice(0, 120)}…)`,
   )
-  const alive = await evaluate(() => Boolean(window.desktop) && document.readyState)
-  assert(alive !== undefined && alive !== '', 'the app is still running after the refusal')
+  assert(
+    !stagedFiles().includes(staged[0]),
+    `the refused installer is gone from disk (${stagedFiles().join(', ') || 'nothing staged'})`,
+  )
+  const stillRunning = await evaluate(() => Boolean(window.desktop) && document.readyState)
+  assert(
+    stillRunning !== undefined && stillRunning !== '',
+    'the app is still running after the refusal',
+  )
 
-  const switched = await evaluate(() =>
-    window.desktop.updateSettings({ updates: { channel: 'beta' } }),
-  )
-  assert(switched.settings.updates.channel === 'beta', 'settings write the channel through to disk')
+  // The channel control in Settings is the same one a person uses, and the
+  // running updater follows what was written.
+  await ui.clickText('Beta')
+  await ui.waitFor('Following the beta channel')
+  await shot('06-beta-channel')
   const afterSwitch = await evaluate(() => window.desktop.updateStatus())
   assert(
     afterSwitch.channel === 'beta',
     `the running updater follows the new channel (${afterSwitch.channel})`,
   )
 
-  // A feed that answers with a build the manifest never described is caught by
-  // the digest, before anything is staged.
+  // The manifest is still the one that was signed, but the build served under
+  // the name it signed is a different one. The digest catches that before
+  // anything is staged, and the window says so.
+  await ui.clickText('Stable')
+  await ui.waitFor('Following the stable channel')
   release.corrupt()
-  await evaluate(() => window.desktop.updateSettings({ updates: { channel: 'stable' } }))
-  const fresh = await evaluate(async () => {
-    await window.desktop.checkForUpdates()
-    return window.desktop.downloadUpdate()
-  })
+  await ui.clickUntil('Check for updates', `Version ${OFFERED_VERSION} on the ${CHANNEL} channel`)
+  await ui.clickUntil('Download update', 'The last attempt did not finish')
+  await ui.waitFor('The last attempt did not finish')
+  await shot('07-tampered-build-refused')
+  const afterTamper = await ui.text()
   assert(
-    fresh.phase === 'failed' && fresh.readyToInstall === false,
-    `a build that is not the signed one is refused (${fresh.failure?.message ?? fresh.phase})`,
+    afterTamper.includes('not the size the signed manifest allowed') ||
+      afterTamper.includes('does not match the signed manifest'),
+    `the window shows why the build was refused (${afterTamper.slice(0, 160)}…)`,
   )
-  const afterCorrupt = existsSync(stagedDirectory) ? readdirSync(stagedDirectory) : []
+  const leftover = stagedFiles()
+  for (const name of leftover) {
+    const digest = createHash('sha256')
+      .update(readFileSync(join(stagedDirectory, name)))
+      .digest('hex')
+    assert(
+      digest === signed.sha256,
+      `nothing unverified is left staged (${name} does not match the signed digest)`,
+    )
+  }
   assert(
-    afterCorrupt.every((name) => name === staged[0]),
-    'nothing unverified is left staged',
+    !leftover.includes(staged[0]),
+    `the replaced installer is not left staged (${leftover.join(', ')})`,
   )
 
   const fetched = release.requests
@@ -482,6 +687,7 @@ async function main() {
     'the manifest and its signature were fetched from the release location',
   )
   log(`requests: ${fetched.join(', ')}`)
+  log(`screenshots: ${ui.shots.join(', ')}`)
 
   await stop()
   await release.close()

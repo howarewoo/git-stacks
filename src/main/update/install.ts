@@ -159,6 +159,48 @@ async function plistValue(bundle: string, key: string): Promise<string | null> {
  * strictly, the team must be the team that signed this app, and the bundle
  * identifier, version, and architecture must be the ones this build asked for.
  */
+/**
+ * Every name one architecture is called in, on the two sides of this check.
+ * Node and the signed manifest say `x64`; `lipo` reports the Mach-O name,
+ * `x86_64`. A universal binary reports both slices, and either one satisfies
+ * an Intel or Apple Silicon machine.
+ */
+export function machArchitectures(name: string): string[] {
+  if (name === 'x64') return ['x64', 'x86_64']
+  if (name === 'x86_64') return ['x64', 'x86_64']
+  if (name === 'arm64') return ['arm64', 'aarch64']
+  if (name === 'aarch64') return ['arm64', 'aarch64']
+  return [name]
+}
+
+/**
+ * Proves the disk image itself is the one this release signed, before it is
+ * mounted. The application inside is checked separately and cannot stand in for
+ * the image: an image can be unsigned, or signed by another team, and still
+ * contain a correctly signed application.
+ */
+async function verifyDiskImage(image: string, expectedTeam: string): Promise<void> {
+  await execFile('codesign', ['--verify', '--strict', '--verbose=2', image], { maxBuffer: 1 << 20 })
+  const { stderr } = await execFile('codesign', ['-dv', '--verbose=4', image], {
+    maxBuffer: 1 << 20,
+  })
+  const team = /TeamIdentifier=([A-Z0-9]+)/u.exec(stderr)?.[1] ?? null
+  if (team !== expectedTeam) {
+    throw new Error(
+      'The downloaded disk image is signed by a different team than this app, so it was not opened.',
+    )
+  }
+  // The image is assessed as a disk image, which is what macOS will act on when
+  // it is opened; the application inside is assessed again once it is mounted.
+  await execFile(
+    'spctl',
+    ['--assess', '--type', 'open', '--context', 'context:primary-signature', '-v', image],
+    {
+      maxBuffer: 1 << 20,
+    },
+  )
+}
+
 async function verifyAppBundle(bundle: string, expected: Expectations): Promise<void> {
   await execFile('codesign', ['--verify', '--strict', '--verbose=2', bundle], {
     maxBuffer: 1 << 20,
@@ -189,9 +231,10 @@ async function verifyAppBundle(bundle: string, expected: Expectations): Promise<
     ['-archs', join(bundle, 'Contents', 'MacOS', executable)],
     { maxBuffer: 1 << 20 },
   )
-  if (!archs.split(/\s+/u).includes(expected.arch)) {
+  const built = new Set(archs.split(/\s+/u).filter(Boolean).flatMap(machArchitectures))
+  if (!built.has(expected.arch)) {
     throw new Error(
-      `The downloaded app has no ${expected.arch} build, which is the one this computer needs.`,
+      `The downloaded app has no ${expected.arch} build, which is the one this computer needs. It has ${[...built].join(', ') || 'none'}.`,
     )
   }
   await execFile('spctl', ['--assess', '--type', 'execute', '-v', bundle], { maxBuffer: 1 << 20 })
@@ -233,6 +276,12 @@ export interface InstallOptions {
   arch?: string
   /** Where a leftover from a previous cut-over is recorded. */
   userDataPath?: string
+  /**
+   * Aborted by a cancel or a channel change. Everything the installer does
+   * before the platform installer takes the files is stopped by it; after that
+   * the installer owns them and this signal is not consulted.
+   */
+  signal?: AbortSignal
   /** Called once the platform installer has taken the update. */
   relaunch: () => void
   /** Called when this app must close for the platform installer to finish. */
@@ -271,7 +320,7 @@ export async function installStagedUpdate(
       return await installDmg(staged, { ...options, target: target.target, team: identity })
     }
     await verifyNsisIdentity(staged, identity)
-    return installNsis(staged, options)
+    return await installNsis(staged, options)
   } catch (error) {
     return { installed: false, reason: error instanceof Error ? error.message : String(error) }
   }
@@ -290,6 +339,8 @@ async function installDmg(staged: StagedUpdate, options: DmgOptions): Promise<In
   const backup = join(target.parent, `${BACKUP_PREFIX}${transaction}.app`)
   let mounted = false
   try {
+    options.onProgress?.('Checking the disk image against this release')
+    await verifyDiskImage(staged.path, team)
     options.onProgress?.('Opening the downloaded disk image')
     await execFile(
       'hdiutil',
@@ -369,12 +420,44 @@ async function installDmg(staged: StagedUpdate, options: DmgOptions): Promise<In
   }
 }
 
-function installNsis(staged: StagedUpdate, options: InstallOptions): InstallOutcome {
+/**
+ * Starts the Windows installer, and only reports an install once the installer
+ * is actually running.
+ *
+ * A launch failure is not delivered by the call that starts it: Node reports it
+ * on the child, after this function would already have returned. So the launch
+ * is awaited, and this app is closed only once the installer owns the update. A
+ * signature-verified file that the operating system refuses to run — an
+ * application-control policy, an antivirus that removed it, a file that was
+ * taken away in between — leaves this app running and reports the refusal,
+ * rather than closing with no installer to finish the work.
+ */
+async function installNsis(staged: StagedUpdate, options: InstallOptions): Promise<InstallOutcome> {
   options.onProgress?.('Starting the installer and closing this app')
+  const child = spawn(staged.path, ['/S'], {
+    detached: true,
+    stdio: 'ignore',
+    windowsHide: true,
+  })
+  const started = await new Promise<{ ok: true } | { ok: false; reason: string }>(
+    (resolveLaunch) => {
+      const settle = (outcome: { ok: true } | { ok: false; reason: string }) =>
+        resolveLaunch(outcome)
+      child.once('spawn', () => settle({ ok: true }))
+      child.once('error', (error) =>
+        settle({
+          ok: false,
+          reason: `The installer could not be started, so the update did not happen: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        }),
+      )
+    },
+  )
+  if (!started.ok) return { installed: false, reason: started.reason }
   // The installer replaces files this app is running from, so it cannot finish
-  // while this process holds them open. It is started detached, this app then
-  // closes, and the installer completes on its own.
-  const child = spawn(staged.path, ['/S'], { detached: true, stdio: 'ignore' })
+  // while this process holds them open. It is detached, this app then closes,
+  // and the installer completes on its own.
   child.unref()
   options.quit?.()
   return {

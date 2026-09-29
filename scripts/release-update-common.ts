@@ -9,8 +9,8 @@
  * file reads them instead.
  */
 import { execFileSync } from 'node:child_process'
-import { createHash } from 'node:crypto'
-import { existsSync, mkdtempSync, readFileSync, statSync } from 'node:fs'
+import { createHash, createPublicKey, verify } from 'node:crypto'
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { resolveUpdateFeed, type UpdateFeed } from '../src/main/update/feed'
@@ -193,58 +193,195 @@ export interface PublishedManifest {
  */
 export function publishedManifest(channel: UpdateChannel, repo: string): PublishedManifest | null {
   const fileName = manifestFileName(channel)
+  const signatureName = signatureFileName(channel)
+  const tag = channelTagOf(channel)
   const directory = mkdtempSync(join(tmpdir(), 'git-stacks-published-feed-'))
-  try {
-    execFileSync(
-      'gh',
-      [
-        'release',
-        'download',
-        channelTagOf(channel),
-        '--repo',
-        repo,
-        '--pattern',
-        fileName,
-        '--dir',
-        directory,
-        '--clobber',
-      ],
-      { stdio: 'pipe' },
-    )
-  } catch {
-    console.log(`release-update: ${channel} has no published ${fileName} yet.`)
-    return null
+  const fetch = (name: string): Buffer | null => {
+    try {
+      execFileSync(
+        'gh',
+        [
+          'release',
+          'download',
+          tag,
+          '--repo',
+          repo,
+          '--pattern',
+          name,
+          '--dir',
+          directory,
+          '--clobber',
+        ],
+        { stdio: 'pipe' },
+      )
+    } catch (error) {
+      if (absentFromRelease(error, name, tag)) return null
+      fail(
+        `the ${channel} feed on ${tag} could not be read, so the sequence this channel has already issued is unknown and no manifest can be minted safely. This release publishes nothing. The reader said: ${readFailure(error)}`,
+      )
+    }
+    return readFileSync(join(directory, name))
   }
-  const bytes = readFileSync(join(directory, fileName))
+  try {
+    const bytes = fetch(fileName)
+    if (bytes === null) {
+      // Absent, and only absent: anything that failed to be read stopped the
+      // release above rather than arriving here.
+      if (fetch(signatureName) !== null) {
+        fail(
+          `the ${channel} feed on ${tag} publishes a signature with no manifest beside it. Repair the channel by hand before releasing; this run will not mint a sequence over an unknown history.`,
+        )
+      }
+      console.log(`release-update: ${channel} has no published ${fileName} yet.`)
+      return null
+    }
+    const detached = fetch(signatureName)
+    if (detached === null) {
+      fail(
+        `the ${channel} feed on ${tag} publishes ${fileName} with no signature beside it, so its sequence and version cannot be believed. A release that cannot read its own history does not publish.`,
+      )
+    }
+    // The history is only read from bytes this release's own key proves. An
+    // unsigned asset on the channel is not evidence of anything: believing it
+    // would let a rewritten feed push the next signed sequence below what
+    // installations have already seen, which no install could ever accept
+    // again, or hold a release as an unauthorised downgrade.
+    //
+    // A manifest that has since expired is still the truth about what this
+    // channel issued: expiry says a feed should be refreshed, not that the
+    // sequence it used never happened. What matters here is that the signature
+    // over these exact bytes verifies against a key this release trusts.
+    verifyDetachedSignature(bytes, detached, channel, tag)
+    return readPublishedManifest(bytes, channel, tag)
+  } finally {
+    rmSync(directory, { recursive: true, force: true })
+  }
+}
+
+/**
+ * Proves a published manifest is the one a trusted release key signed, before
+ * any of it is used. A key whose own validity window has passed is still
+ * honoured for history it signed while it was valid: a key is retired by
+ * rotating forward, not by making the releases it already made unreadable.
+ */
+function verifyDetachedSignature(
+  bytes: Buffer,
+  detached: Buffer,
+  channel: UpdateChannel,
+  tag: string,
+): void {
+  let envelope: unknown
+  try {
+    envelope = JSON.parse(detached.toString('utf8'))
+  } catch {
+    fail(
+      `the ${channel} signature on ${tag} is not JSON, so the manifest beside it cannot be believed.`,
+    )
+  }
+  if (
+    !isRecord(envelope) ||
+    typeof envelope.signature !== 'string' ||
+    typeof envelope.keyId !== 'string'
+  ) {
+    fail(
+      `the ${channel} signature on ${tag} names no key, so the manifest beside it cannot be believed.`,
+    )
+  }
+  let key: string
+  try {
+    key = Buffer.from(envelope.signature, 'base64').toString('base64')
+  } catch {
+    fail(`the ${channel} signature on ${tag} is not a signature this app can read.`)
+  }
+  const trusted = readInjectedKeys()
+  const named = trusted.find((candidate) => candidate.keyId === envelope.keyId)
+  if (!named) {
+    fail(
+      `the ${channel} feed on ${tag} was signed by ${envelope.keyId}, which this release does not trust, so its history is not read. Trusting it would let a rewritten feed move the channel's sequence backwards.`,
+    )
+  }
+  const publicKey = createPublicKey({
+    key: Buffer.from(named.publicKey, 'base64'),
+    format: 'der',
+    type: 'spki',
+  })
+  const ok = verify(null, bytes, createPublicKey(publicKey), Buffer.from(key, 'base64'))
+  if (!ok) {
+    fail(
+      `the ${channel} manifest on ${tag} does not match the signature beside it, so the history this release would build on is not the history that was published.`,
+    )
+  }
+  const issuedAt = named.validFrom
+  if (Date.parse(issuedAt) > Date.now()) {
+    fail(
+      `${named.keyId} is not trusted until ${issuedAt}, so it cannot have signed what ${tag} publishes.`,
+    )
+  }
+  console.log(`release-update: ${tag} publishes a manifest signed by ${named.keyId}.`)
+}
+
+/** The sequence and version a signed, published manifest recorded. */
+function readPublishedManifest(
+  bytes: Buffer,
+  channel: UpdateChannel,
+  tag: string,
+): PublishedManifest {
+  const fileName = manifestFileName(channel)
   let published: unknown
   try {
     published = JSON.parse(bytes.toString('utf8'))
   } catch {
     fail(
-      `the ${channel} feed on ${channelTagOf(channel)} holds a ${fileName} that is not JSON, so the sequence it used cannot be known. Repair or remove that asset by hand before releasing.`,
+      `the ${channel} feed on ${tag} holds a ${fileName} that is not JSON, so the sequence it used cannot be known. Repair or remove that asset by hand before releasing.`,
     )
   }
   if (typeof published !== 'object' || published === null) {
-    fail(
-      `the ${channel} feed on ${channelTagOf(channel)} holds a ${fileName} that is not an object.`,
-    )
+    fail(`the ${channel} feed on ${tag} holds a ${fileName} that is not an object.`)
   }
   const fields = published as Record<string, unknown>
   const sequence = fields.sequence
   const version = fields.version
   if (typeof sequence !== 'number' || !Number.isSafeInteger(sequence) || sequence < 1) {
     fail(
-      `the ${channel} feed on ${channelTagOf(channel)} holds a ${fileName} with no usable sequence, so the next one cannot be issued safely. Repair or remove that asset by hand before releasing.`,
+      `the ${channel} feed on ${tag} holds a ${fileName} with no usable sequence, so the next one cannot be issued safely. Repair or remove that asset by hand before releasing.`,
     )
   }
   if (typeof version !== 'string') {
-    fail(`the ${channel} feed on ${channelTagOf(channel)} holds a ${fileName} with no version.`)
+    fail(`the ${channel} feed on ${tag} holds a ${fileName} with no version.`)
   }
   console.log(
     `release-update: ${channel} currently publishes version ${version} at sequence ${sequence}.`,
   )
   return { sequence, version }
 }
+
+export function absentFromRelease(error: unknown, fileName: string, tag: string): boolean {
+  const said = readFailure(error)
+  return (
+    /release not found/iu.test(said) ||
+    new RegExp(`no release assets? (?:found )?matching|failed to find release asset`, 'iu').test(
+      said,
+    ) ||
+    new RegExp(`(?:no|not) .*(?:asset|file).*(?:${escapeRegExp(fileName)})`, 'iu').test(said) ||
+    (new RegExp(`404|not found`, 'iu').test(said) && said.includes(tag))
+  )
+}
+
+/** What a failing process said, however it failed. */
+function readFailure(error: unknown): string {
+  if (typeof error === 'object' && error !== null) {
+    const failure = error as { stderr?: unknown; message?: unknown; stdout?: unknown }
+    return [failure.stderr, failure.stdout, failure.message]
+      .map((part) =>
+        typeof part === 'string' ? part : Buffer.isBuffer(part) ? part.toString('utf8') : '',
+      )
+      .join(' ')
+      .trim()
+  }
+  return String(error)
+}
+
+const escapeRegExp = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')
 
 /** Parses `--name value`, `--name=value` and bare `--name` flags. */
 export function parseFlags(argv: string[]): Map<string, string> {
