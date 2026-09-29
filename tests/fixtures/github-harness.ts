@@ -152,6 +152,7 @@ export interface GitHubFixtureState {
   prs: GitHubFixturePullRequest[]
   comments: Record<string, GitHubFixtureComment[]>
   stacks?: GitHubFixtureStack[]
+  asyncMerge?: { number: number; sha: string; method: string }
   requests: Array<{ argv: string[]; cwd: string; at: string; body?: Record<string, unknown> }>
 }
 

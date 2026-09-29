@@ -785,6 +785,19 @@ test(
       const headBeforeMerge = parent.headOid
       preview = await previewStack(harness.repo, await getSnapshot(harness.repo), 'merge', 'parent')
       assert.deepEqual(preview.blockers, [])
+      const inner = createGitHubApiDouble()
+      const mergeRequests: Array<{ url: string; body: Record<string, unknown> }> = []
+      setGitHubTransport(
+        new DirectGitHubTransport({
+          token: 'fixture-token',
+          fetch: ((input: RequestInfo | URL, init?: RequestInit) => {
+            const url = String(input instanceof Request ? input.url : input)
+            if (url.endsWith('/merge-async') && init?.method === 'PUT')
+              mergeRequests.push({ url, body: JSON.parse(String(init.body)) })
+            return inner(input, init)
+          }) as typeof globalThis.fetch,
+        }),
+      )
       await runAction(harness.repo, {
         type: 'executeStack',
         token: preview.token,
@@ -800,16 +813,12 @@ test(
       assert.equal(mergedParent.mergeOid, remoteOid(harness, 'main'))
       assert.notEqual(mergedParent.mergeOid, headBeforeMerge)
       assert.equal(prFor(state, 'child').state, 'OPEN')
-      assert.equal(
-        state.requests.some(
-          (request) =>
-            request.argv[0] === 'repos/acme/widgets/pulls/1/merge' &&
-            request.argv[1] === 'PUT' &&
-            request.body?.sha === headBeforeMerge &&
-            request.body?.merge_method === 'squash',
-        ),
-        true,
-      )
+      assert.deepEqual(mergeRequests, [
+        {
+          url: 'https://api.github.com/repos/acme/widgets/pulls/1/merge-async',
+          body: { sha: headBeforeMerge, merge_method: 'squash', merge_action: 'direct_merge' },
+        },
+      ])
       assert.equal(bareGit(harness, ['cat-file', '-t', mergedParent.mergeOid]), 'commit')
     })
   },

@@ -51,6 +51,7 @@ import {
   detectNativeStacksCapability,
   listPullRequestStacks,
   revalidatePublishedStackRegistration,
+  retireLegacyStackComments,
   unstackNativeStackAction,
   validatePublishedStackRegistration,
 } from './native-stacks'
@@ -2672,6 +2673,12 @@ async function publishStack(
         defaultBranch: plan.defaultBranch,
       })
     }
+    await retireLegacyStackComments(
+      canonical.fullName,
+      matched
+        ? matched.pullRequests.map((member) => member.number).concat(publishedNumbers)
+        : publishedNumbers,
+    )
   }
   return {
     message: `Published ${published.length} stack pull request${published.length === 1 ? '' : 's'}`,
@@ -2733,11 +2740,45 @@ async function mergeStack(
   await setPullRequestNumber(repoPath, entry.branch, entry.pr.number)
   let mergeError: unknown
   try {
-    await githubTransport().rest({
+    const native = Boolean(currentPr.stack || canonical.stack)
+    const endpoint = `repos/${plan.originFullName}/pulls/${entry.pr.number}/merge${native ? '-async' : ''}`
+    const response = await githubTransport().rest<unknown>({
       method: 'PUT',
-      path: `repos/${plan.originFullName}/pulls/${entry.pr.number}/merge`,
-      body: { sha: entry.pr.headOid, merge_method: action.mergeMethod },
+      path: endpoint,
+      ...(native ? { headers: { 'X-GitHub-Api-Version': '2026-03-10' } } : {}),
+      body: {
+        sha: entry.pr.headOid,
+        merge_method: action.mergeMethod,
+        ...(native ? { merge_action: 'direct_merge' } : {}),
+      },
     })
+    if (native) {
+      let result = response.data
+      for (let attempt = 0; attempt < 10; attempt++) {
+        if (!isRecord(result))
+          throw new Error('GitHub returned an invalid asynchronous merge result')
+        if (result.status === 'merged') break
+        if (result.status === 'failed' || result.status === 'enqueued') {
+          throw new Error(
+            `GitHub asynchronous merge ${result.status}: ${isRecord(result.details) && typeof result.details.message === 'string' ? result.details.message : 'inspect GitHub before retrying'}`,
+          )
+        }
+        const details = result.details
+        if (result.status !== 'pending' || !isRecord(details) || typeof details.uuid !== 'string')
+          throw new Error('GitHub returned an invalid asynchronous merge result')
+        await new Promise((resolve) => setTimeout(resolve, 300 * (attempt + 1)))
+        result = (
+          await githubTransport().rest<unknown>({
+            path: `${endpoint}/${encodeURIComponent(details.uuid)}`,
+            headers: { 'X-GitHub-Api-Version': '2026-03-10' },
+          })
+        ).data
+      }
+      if (!isRecord(result) || result.status !== 'merged')
+        throw new Error(
+          `Merge of PR #${entry.pr.number} is still pending; inspect GitHub before retrying`,
+        )
+    }
   } catch (error) {
     mergeError = error
   }
