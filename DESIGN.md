@@ -478,14 +478,34 @@ a write for good.
 The boundary is what makes the search honest rather than recent, and it is a
 number. REST review ids increase, so the boundary is the greatest id the pull
 request held when the attempt began, and a reconciliation walks reviews newest
-first and stops at the boundary: everything at or below it pre-existed. Both
-collections are paged in full, because a review may carry up to 200 inline
-comments while a page holds 100, and a review whose tail was never read cannot be
-compared whole — comparing part of it would claim a match that was not made.
-Running out of pages is a hold rather than a "not there". If GitHub does not hold
-the review once the search is exhaustive, the guard stands: the record says only
-that the app never heard back, which is also true of a request that never arrived,
-so absence is never taken as licence to post again automatically.
+first and stops at the boundary: everything at or below it pre-existed. The list
+of reviews is **chronological**, so that number has to be read off the last page
+and not the first: on a pull request with more than a hundred reviews, the
+greatest id on page one is the hundredth review ever written, and a review that
+already existed — matching the attempt in every field — would sit above that line
+and be adopted as a write that never arrived. Both collections are paged in full,
+because a review may carry up to 200 inline comments while a page holds 100, and
+a review whose tail was never read cannot be compared whole — comparing part of
+it would claim a match that was not made. A boundary walk that cannot reach the
+end of the list records **no** boundary rather than a low one, and a null boundary
+holds: a wrong boundary is worse than an absent one, because it errs in exactly
+the direction that adopts somebody else's review. Running out of pages is a hold
+rather than a "not there". If GitHub does not hold the review once the search is
+exhaustive, the guard stands: the record says only that the app never heard back,
+which is also true of a request that never arrived, so absence is never taken as
+licence to post again automatically.
+
+The guard is bound to the revision it was written against. A record carries the
+head its attempt named, and a record about a different commit is not this
+submission's recovery: it is neither delivered nor a hold, and it is retired. A
+settled record proves GitHub took that write, and it proves it about that commit.
+Review H1 says nothing about H2, and the same line carrying the same words on the
+new head is a new comment about a new commit — so adopting across that boundary
+would clear the reviewer's unsent work and return a decision they asked for
+without ever sending it, silently suppressing an approval of the revision in
+front of them. An uncertain record about an older head is left alone for the same
+reason: a question GitHub may never answer is a question about that head, and it
+must not lock a reviewer out of a new revision.
 
 The guard covers an unresolved *comment*, not an attempt id. Changing the
 decision, or adding one more pending draft, produces a different attempt over

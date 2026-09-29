@@ -408,19 +408,24 @@ export async function clearUncertainWrite(
 }
 
 /**
- * Retires the settled records a payload no longer mentions, keeping the rest.
+ * Retires the settled records this payload no longer vouches for, keeping the rest.
  *
- * A settled record is evidence that GitHub holds comments, and it is only safe
- * to drop that evidence once a later submission has demonstrably moved on: the
- * view keeps a draft in its payload precisely while it has not been told that
- * draft was delivered, so a record whose comments are absent from the payload
- * are comments the view has finished with. That is the acknowledgement, and it
- * is read off the payload rather than waited for from a callback the view may
- * never send — which is what makes resuming after a crash idempotent instead of
- * a race.
+ * A settled record is evidence that GitHub holds comments, and it is only safe to
+ * drop that evidence once a later submission has demonstrably moved on: the view
+ * keeps a draft in its payload precisely while it has not been told that draft was
+ * delivered, so a record whose comments are absent from the payload are comments
+ * the view has finished with. That is the acknowledgement, and it is read off the
+ * payload rather than waited for from a callback the view may never send — which is
+ * what makes resuming after a crash idempotent instead of a race.
  *
- * Records that are still uncertain, and settled records this payload does still
- * mention, are left exactly as they are.
+ * A record is also retired when it names a different revision. It was already
+ * answered — GitHub took that write, about that commit — and the same line
+ * carrying the same words on the new head is a different comment that nobody has
+ * sent. A payload about H2 must not keep the evidence for H1 alive by naming the
+ * same anchor, or the record outlives every submission that could retire it.
+ *
+ * Records that are still uncertain, and settled records about this revision that
+ * this payload does still mention, are left exactly as they are.
  */
 export async function retireSettledWrites(
   repoPath: string,
@@ -428,6 +433,7 @@ export async function retireSettledWrites(
   number: number,
   viewer: string,
   comments: readonly UncertainComment[],
+  headOid: string,
   signal?: AbortSignal,
 ): Promise<void> {
   const file = await uncertainPath(repoPath, signal)
@@ -441,6 +447,7 @@ export async function retireSettledWrites(
     ) {
       return true
     }
+    if (entry.headOid !== headOid) return false
     return entry.comments.some((theirs) => comments.some((mine) => sameCommentAnchor(theirs, mine)))
   })
   if (kept.length === existing.length) return

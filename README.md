@@ -743,17 +743,36 @@ Replies reconcile against the thread's own comments by the same rules, with the
 comment ids the thread held when the attempt began as their boundary and this
 account as their author — an older identical reply, this account's own or a
 collaborator's, is not this attempt. Each record is scoped by repository and by
-account as well as by pull request, so one account's or one repository's
-unresolved write never blocks another's review.
+pull request, and by account, so one account's or one repository's unresolved
+write never blocks another's review.
 
-Threads are read through GraphQL, which is the only source for a thread's
-replies, resolved state, and per-comment outdated state; the REST comments
-endpoint cannot see any of it. Reply, resolve, and unresolve round-trip through
-GraphQL mutations. Each thread's own comment pages are followed as well as the
-outer thread pages, and a thread whose replies run past the bound says so rather
-than showing a partial conversation as the whole one. Resolved and outdated are
-independent facts and both appear. Files and threads are read separately, so
-their revisions are compared before a thread is allowed to jump to a line or
-compose a comment; a mismatch is shown with a reload rather than resolved by
-guessing.
+The search is not limited to recent history. An attempt outlives any window, so
+the reviews are walked newest first until the recorded boundary is reached, and
+running out of pages before then is a hold rather than a "not there" — the search
+gave up, which is not the same as concluding. Both collections are paged in full:
+a review may carry 200 inline comments and a page holds 100, and a review whose
+tail was never read cannot be compared whole. GitHub lists reviews in
+chronological order, so the boundary is read off the last page and not the first —
+on a busy pull request the greatest id on page one is nowhere near the newest, and
+a review that already existed would sit above that line and be taken for a write
+that never arrived. A boundary walk that cannot reach the end records none rather
+than a low one, because a wrong boundary is worse than an absent one: it errs
+toward adopting somebody else's review. If GitHub does not hold the review once
+the search is exhaustive, the guard stands: the record says only that the app
+never heard back, which is also true of a request that never arrived, so absence is
+never taken as licence to post again automatically.
+
+The guard is bound to the revision it was written against. A record about a
+different commit is not this submission's recovery: it is neither delivered nor a
+hold, and it is retired. A settled record proves GitHub took that write, and it
+proves it about that commit — reviewing H1 says nothing about H2, and the same
+line carrying the same words on the new head is a new comment about a new commit.
+Without that, approving the same line again after a push would clear the draft,
+send nothing, and report an approval GitHub never received.
+
+Exhausting a thread's comment pages is reported rather than presented as the whole
+conversation. Resolved and outdated are independent facts and both appear. Files
+and threads are read separately, so their revisions are compared before a thread is
+allowed to jump to a line or compose a comment; a mismatch is shown with a reload
+rather than resolved by guessing.
 

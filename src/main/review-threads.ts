@@ -927,8 +927,18 @@ export async function submitReview(
   // submission reconciles anything. The payload is the acknowledgement: a
   // comment the view has dropped is not in it, so the evidence that GitHub holds
   // it is no longer what is stopping a duplicate. Anything still in the payload
-  // is still being held on for, and is left alone.
-  await retireSettledWrites(repoPath, repo, number, permissions.viewer, recorded, signal)
+  // is still being held on for, and is left alone — as is any record about a
+  // revision other than the one being submitted, which this payload cannot speak
+  // for.
+  await retireSettledWrites(
+    repoPath,
+    repo,
+    number,
+    permissions.viewer,
+    recorded,
+    files.comparison.headOid,
+    signal,
+  )
 
   // Re-sending because the network looked idle is how a review gets posted
   // twice. The record survives a reload, so this still holds after the
@@ -943,6 +953,7 @@ export async function submitReview(
     number,
     permissions.viewer,
     recorded,
+    files.comparison.headOid,
     signal,
   )
   if (guard.unsettled) throw new ReviewWriteUncertainError(guard.unsettled)
@@ -1162,6 +1173,15 @@ function shortHash(value: string): string {
  * later payload that no longer mentions them. A record settled here is written
  * back for the same reason. Retiring either one as soon as it settles would drop
  * the evidence while the submission that found it is still free to fail.
+ *
+ * A record made against a different revision is not this submission's recovery
+ * and is skipped entirely. A settled record proves GitHub took that write, and it
+ * proves it about the commit it names: review H1 says nothing about what happened
+ * on H2, and the same line carrying the same words on the new head is a new
+ * comment about a new commit. Adopting across the boundary would drop the
+ * reviewer's unsent work and return a decision they asked for without ever
+ * sending it. It is neither delivered nor a hold — a request for H1 is GitHub's
+ * to answer, and it cannot be this write about H2.
  */
 async function reconcileOverlappingAttempts(
   repoPath: string,
@@ -1170,6 +1190,7 @@ async function reconcileOverlappingAttempts(
   number: number,
   viewer: string,
   comments: readonly UncertainComment[],
+  headOid: string,
   signal?: AbortSignal,
 ): Promise<{
   delivered: Set<string>
@@ -1182,6 +1203,7 @@ async function reconcileOverlappingAttempts(
   const outstanding = writes.filter(
     (entry) =>
       entry.kind === 'review' &&
+      entry.headOid === headOid &&
       entry.comments.length > 0 &&
       entry.comments.some((comment) => comments.some((mine) => sameAnchor(comment, mine))),
   )
@@ -1250,27 +1272,42 @@ function anchorKey(comment: UncertainComment): string {
  * later. A failure to read it does not block the write: the reviewer's own
  * decision to submit is not withheld because a boundary could not be noted, and
  * a null boundary makes the reconciliation hold rather than adopt wrongly.
+ *
+ * A boundary that stops short of the end of the list is worse than none at all,
+ * so a pull request with more reviews than the page ceiling are read across
+ * pages leaves it null rather than low: a null boundary holds, and a low one
+ * adopts somebody else's review.
  */
 async function newestReviewId(
   remote: ParsedRemote,
   number: number,
   signal?: AbortSignal,
 ): Promise<string | null> {
-  const rows = await restList(
-    remote,
-    `repos/${remote.owner}/${remote.name}/pulls/${number}/reviews`,
-    1,
-    signal,
-  )
-  // The newest page, and the highest id on it: GitHub returns reviews in id
-  // order, and the id is what a settlement compares against, so the boundary is
-  // the greatest id seen rather than whichever row happened to come last.
   let newest: number | null = null
-  for (const row of rows) {
-    if (!isRecord(row) || typeof row.id !== 'number') continue
-    if (newest === null || row.id > newest) newest = row.id
+  let complete = false
+  for (let page = 1; page <= REVIEW_REST_REVIEW_PAGES; page += 1) {
+    const rows = await restList(
+      remote,
+      `repos/${remote.owner}/${remote.name}/pulls/${number}/reviews`,
+      page,
+      signal,
+    )
+    for (const row of rows) {
+      if (!isRecord(row) || typeof row.id !== 'number') continue
+      if (newest === null || row.id > newest) newest = row.id
+    }
+    if (rows.length < REVIEW_REST_PAGE_SIZE) {
+      complete = true
+      break
+    }
   }
-  return newest === null ? null : String(newest)
+  // The list is chronological, so page one is the *oldest* hundred reviews and
+  // the boundary has to be read off the last one. A partial walk cannot name the
+  // newest review at all, and a boundary below it would put reviews that already
+  // existed above the line — so an older review matching this attempt exactly
+  // would be adopted as the write that never arrived. Null holds; a low boundary
+  // would not.
+  return complete && newest !== null ? String(newest) : null
 }
 
 /** A review on GitHub that a lost attempt turned out to be. */
