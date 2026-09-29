@@ -995,3 +995,48 @@ test('a stack detail that disagrees with the listing is unresolved, never comple
     assert.ok((await getStackProgress(harness.repo)) !== null, 'the journal is retained')
   })
 })
+
+test('a registration whose read-back 404s keeps its intent instead of posting again', async () => {
+  await withPublishedStack(async (harness) => {
+    const layers = await publishedFourLayerStack(harness)
+    git(harness, ['switch', 'two'])
+    const state = await harness.readState()
+    // The create lands, and the read-back that has to prove it answers 404.
+    state.lostResponses = [
+      {
+        method: 'GET',
+        pathIncludes: '/stacks/1',
+        pathEndsWith: '/stacks/1',
+        // The read-back of the registration is the third read of that stack: the
+        // preview, the unstack verification, and the proof of the create.
+        after: 2,
+        status: 404,
+        message: 'Not Found',
+      },
+    ]
+    await harness.writeState(state)
+
+    const plan = await preview(harness, { kind: 'move', branch: 'two', target: 'three' })
+    assert.deepEqual(plan.blockers, [])
+    await assert.rejects(runSurgery(harness.repo, plan.token, true, false), /404/u)
+
+    // The registration this run already asked for is not listed yet.
+    const pending = await harness.readState()
+    assert.equal(requestCount(pending, 'POST', '/stacks', '/stacks'), 1)
+    pending.stacks = pending.stacks?.filter((stack) => !stack.open)
+    await harness.writeState(pending)
+
+    await assert.rejects(
+      runAction(harness.repo, { type: 'stackContinue' }),
+      /was requested and GitHub does not list it yet/u,
+    )
+    const after = await harness.readState()
+    assert.equal(
+      requestCount(after, 'POST', '/stacks', '/stacks'),
+      1,
+      'the registration is not sent again',
+    )
+    assert.ok((await getStackProgress(harness.repo)) !== null, 'the journal is retained')
+    void layers
+  })
+})

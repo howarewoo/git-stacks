@@ -180,6 +180,11 @@ export interface GitHubFixtureState {
      * `POST /repos/o/r/stacks/1/unstack`.
      */
     pathEndsWith?: string
+    /**
+     * Zero-based occurrence of the matching request, for a path one run reads more
+     * than once: the first read that matches is zero.
+     */
+    after?: number
     status: number
     message: string
   }>

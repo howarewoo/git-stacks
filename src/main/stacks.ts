@@ -2572,14 +2572,27 @@ async function buildPublishOperation(
 }
 
 function definitivelyRejectedCreation(error: unknown): boolean {
-  const status =
-    error instanceof GitHubTransportError
-      ? error.status
-      : error instanceof NativeStackError
-        ? error.httpStatus
-        : null
-  // Timeouts and server/transport failures can hide an accepted mutation.
-  return status !== null && status >= 400 && status < 500 && status !== 408
+  // Only the create request itself can reject a registration, so only the errors
+  // that request produces count. An error of ambiguous provenance keeps the
+  // recorded intent instead of clearing it, because a cleared intent lets a
+  // resume register the same membership a second time.
+  if (error instanceof NativeStackError) {
+    // The wrappers the create request translates its own 404 and 422 into. The
+    // same class carries the local chain check, which runs before the intent is
+    // recorded, so it can never reach this with a recorded create.
+    return (
+      (error.status === 'preview-unavailable' || error.status === 'invalid-chain') &&
+      error.httpStatus !== null &&
+      error.httpStatus >= 400 &&
+      error.httpStatus < 500
+    )
+  }
+  if (error instanceof GitHubTransportError) {
+    // Timeouts and server/transport failures can hide an accepted mutation.
+    const status = error.status
+    return status !== null && status >= 400 && status < 500 && status !== 408
+  }
+  return false
 }
 
 /**
@@ -4219,8 +4232,9 @@ async function runSurgeryRemote(root: string, journal: StackJournal): Promise<st
           )
         }
         let requested = false
+        let created: Awaited<ReturnType<typeof createPullRequestStack>>
         try {
-          const created = await createPullRequestStack(owner, name, stack.members, {
+          created = await createPullRequestStack(owner, name, stack.members, {
             defaultBranch: surgery.trunk,
             knownPullRequests: await Promise.all(
               stack.members.map((member) => getPullRequest(root, member)),
@@ -4231,21 +4245,25 @@ async function runSurgeryRemote(root: string, journal: StackJournal): Promise<st
               requested = true
             },
           })
-          // The checkpoint follows the proof, never the other way round: a journal
-          // that claims a registration nobody verified is worse than no journal.
-          const readBack = await getPullRequestStack(owner, name, created.number)
-          assertRegisteredStack(stack, surgery.trunk, readBack, created.number)
-          stack.createStatus = 'completed'
-          stack.stackNumberAfter = created.number
-          await writeJournal(root, journal)
-          parts.push(`Registered native stack #${created.number} for the new order`)
         } catch (error) {
+          // Only GitHub's own answer to the create can say the request was
+          // refused. A later failure says nothing about whether the create
+          // landed, and clearing the intent on one would let a resume register
+          // the same membership a second time.
           if (requested && definitivelyRejectedCreation(error)) {
             stack.createRequested = false
             await writeJournal(root, journal)
           }
           throw error
         }
+        // The checkpoint follows the proof, never the other way round: a journal
+        // that claims a registration nobody verified is worse than no journal.
+        const readBack = await getPullRequestStack(owner, name, created.number)
+        assertRegisteredStack(stack, surgery.trunk, readBack, created.number)
+        stack.createStatus = 'completed'
+        stack.stackNumberAfter = created.number
+        await writeJournal(root, journal)
+        parts.push(`Registered native stack #${created.number} for the new order`)
       }
     }
   }

@@ -783,12 +783,21 @@ export function createGitHubApiDouble(): typeof globalThis.fetch {
       ...(Object.keys(body).length > 0 ? { body } : {}),
     })
     const request: GitHubApiDoubleRequest = { method, path, body, headers }
-    const lost = (state.lostResponses ?? []).findIndex(
-      (rule) =>
-        rule.method === method &&
-        request.path.includes(rule.pathIncludes) &&
-        (rule.pathEndsWith === undefined || request.path.endsWith(rule.pathEndsWith)),
-    )
+    const lost = (state.lostResponses ?? []).findIndex((rule) => {
+      if (rule.method !== method || !request.path.includes(rule.pathIncludes)) return false
+      if (rule.pathEndsWith !== undefined && !request.path.endsWith(rule.pathEndsWith)) return false
+      if (rule.after === undefined) return true
+      // A run can read the same path more than once, so a rule names which
+      // occurrence it answers: zero is the first request that matches. The count
+      // uses the rule's own path match, so a `POST /stacks/1/unstack` never
+      // counts as a read of `/stacks/1`.
+      const seen = (state.requests ?? []).filter((entry) => {
+        const path = entry.argv?.[0] ?? ''
+        if (!path.includes(rule.pathIncludes)) return false
+        return rule.pathEndsWith === undefined || path.endsWith(rule.pathEndsWith)
+      }).length
+      return seen - 1 === rule.after
+    })
     try {
       const result =
         request.path === 'graphql' ? handleGraphql(state, body) : handleRest(state, request)
