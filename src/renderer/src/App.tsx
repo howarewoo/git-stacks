@@ -1934,7 +1934,9 @@ function App() {
                       ))}
                     </div>
                   ) : !selectedPrIssueLinksLoading ? (
-                    <p className="text-xs text-[var(--gs-semantic-text-muted)] m-0">No linked issues.</p>
+                    <p className="text-xs text-[var(--gs-semantic-text-muted)] m-0">
+                      No linked issues.
+                    </p>
                   ) : null}
                 </div>
                 <Button

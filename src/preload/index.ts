@@ -28,13 +28,7 @@ const desktop: DesktopAPI = {
   pullRequestIssueLinks: (number) =>
     ipcRenderer.invoke('repository:pull-request-issue-links', number),
   previewIssueLink: (prNumber, issueNumber, relation, action) =>
-    ipcRenderer.invoke(
-      'repository:preview-issue-link',
-      prNumber,
-      issueNumber,
-      relation,
-      action,
-    ),
+    ipcRenderer.invoke('repository:preview-issue-link', prNumber, issueNumber, relation, action),
   openExternal: (url) => ipcRenderer.invoke('external:open', url),
   cancel: (requestId) => ipcRenderer.invoke('operation:cancel', requestId),
   gitRuntimeStatus: () => ipcRenderer.invoke('git-runtime'),

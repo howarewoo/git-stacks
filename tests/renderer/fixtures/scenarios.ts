@@ -687,6 +687,52 @@ export const scenarios: Record<ScenarioName, FixtureScenario> = {
     recentRepositories,
   },
 
+  'pull-requests-issue-links': {
+    name: 'pull-requests-issue-links',
+    summary: 'One closing keyword reference and one local contextual link on the same PR.',
+    snapshot: repository({
+      issues: [
+        {
+          number: 42,
+          title: 'Checkout fails when the parent branch was renamed',
+          url: 'https://github.com/howarewoo/git-stacks/issues/42',
+          state: 'OPEN',
+        },
+        {
+          number: 51,
+          title: 'Add a keyboard shortcut for the command palette',
+          url: 'https://github.com/howarewoo/git-stacks/issues/51',
+          state: 'OPEN',
+        },
+        {
+          number: 58,
+          title: 'Stack rail loses the position of a collapsed layer',
+          url: 'https://github.com/howarewoo/git-stacks/issues/58',
+          state: 'CLOSED',
+        },
+      ],
+    }),
+    recentRepositories,
+    issueLinks: {
+      [checkoutPr.number]: [
+        {
+          number: 42,
+          title: 'Checkout fails when the parent branch was renamed',
+          url: 'https://github.com/howarewoo/git-stacks/issues/42',
+          state: 'OPEN',
+          relation: 'closing',
+        },
+        {
+          number: 58,
+          title: 'Stack rail loses the position of a collapsed layer',
+          url: 'https://github.com/howarewoo/git-stacks/issues/58',
+          state: 'CLOSED',
+          relation: 'contextual',
+        },
+      ],
+    },
+  },
+
   'stash-stable-oid': {
     name: 'stash-stable-oid',
     summary: 'Two stashes with stable OIDs for drop and apply dispatch checks.',

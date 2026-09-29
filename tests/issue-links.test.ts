@@ -103,20 +103,38 @@ async function withHarness(run: (harness: GitHubHarness) => Promise<void>): Prom
 // Unit tests: Syntax parsing and manipulation
 // ---------------------------------------------------------------------------
 
-test('extractClosingReferences finds bare numbers, GH- prefix, URLs, and multiple references', () => {
-  const text = `
-    Initial user description.
-    Fixes #10, #12 and resolves GH-15.
-    Closes https://github.com/acme/widgets/issues/20.
-    Also closes other/repo#25.
-    See #99 for more context.
-  `
+test('extractClosingReferences follows GitHub closing-keyword grammar', () => {
+  const text = [
+    'Initial user description.',
+    'Fixes #10',
+    'resolves GH-15',
+    'Closes: https://github.com/acme/widgets/issues/20',
+    'Also closes other/repo#25',
+    'See #99 for more context.',
+  ].join('\n')
   const refs = extractClosingReferences(text, 'acme/widgets')
-  const numbers = refs.map((r) => r.issueNumber)
 
-  // Should include 10, 12, 15, 20
-  // Should NOT include 25 (different repo) or 99 ("See" is not a closing keyword)
-  assert.deepEqual(numbers, [10, 12, 15, 20])
+  // Each issue needs the full keyword syntax: `Closes #10, #12` closes only #10.
+  assert.deepEqual(
+    refs.map((r) => r.issueNumber),
+    [10, 15, 20],
+  )
+  // A colon after the keyword is GitHub-recognised, and every clause is located precisely.
+  const colon = refs.find((r) => r.issueNumber === 20)
+  assert.equal(colon?.rawMatch, 'Closes: https://github.com/acme/widgets/issues/20')
+  assert.equal(text.slice(colon?.startIndex, colon?.endIndex), colon?.rawMatch)
+})
+
+test('a shared keyword does not make every following number a closing reference', () => {
+  // GitHub requires full syntax per issue, so #12 is not closed here.
+  const body = 'Closes #10, #12'
+  assert.equal(isIssueClosedInBody(body, 10, 'acme/widgets'), true)
+  assert.equal(isIssueClosedInBody(body, 12, 'acme/widgets'), false)
+  // A second full clause is recognised, so insertion stays idempotent.
+  const inserted = insertClosingReference(body, 12, 'acme/widgets')
+  assert.equal(inserted, 'Closes #10, #12\n\nCloses #12\n')
+  assert.equal(insertClosingReference(inserted, 12, 'acme/widgets'), inserted)
+  assert.equal(insertClosingReference('Closes: #12', 12, 'acme/widgets'), 'Closes: #12')
 })
 
 test('isIssueClosedInBody accurately detects whether an issue is closed in body', () => {
@@ -147,19 +165,40 @@ test('insertClosingReference is idempotent and preserves user-authored body text
   assert.equal(insertedSecond, `${userText}\n\nCloses #12\n\nCloses #15\n`)
 })
 
-test('removeClosingReference removes only the exact closing syntax and preserves user body', () => {
+test('removeClosingReference deletes only the parsed clause span', () => {
   const userText = '## Summary\nImportant changes here.\n\nCloses #12\n'
   const removed = removeClosingReference(userText, 12, 'acme/widgets')
   assert.equal(removed, '## Summary\nImportant changes here.\n')
 
-  // Idempotency: removing non-existent reference returns body unchanged
-  const noop = removeClosingReference(removed, 12, 'acme/widgets')
-  assert.equal(noop, removed)
+  // Idempotent: removing a reference that is not there leaves the body untouched
+  assert.equal(removeClosingReference(removed, 12, 'acme/widgets'), removed)
 
-  // Multi-issue on one line: Closes #10, #12
-  const multiLine = 'Features\n\nCloses #10, #12\n'
-  const removedOne = removeClosingReference(multiLine, 12, 'acme/widgets')
-  assert.equal(removedOne, 'Features\n\nCloses #10\n')
+  // A foreign repository's reference for the same number is left intact.
+  const mixed = 'Fixes other/repo#12; closes #12\n'
+  assert.equal(removeClosingReference(mixed, 12, 'acme/widgets'), 'Fixes other/repo#12\n')
+
+  // An unrelated longer number keeps its own digits.
+  const unrelated = 'See #123; closes #12\n'
+  assert.equal(removeClosingReference(unrelated, 12, 'acme/widgets'), 'See #123\n')
+
+  // The clause is removed in the author's own syntax, not an assumed one.
+  assert.equal(removeClosingReference('Fixes #12\n', 12, 'acme/widgets'), '')
+  assert.equal(
+    removeClosingReference('## Notes\n\nFixes acme/widgets#12\n', 12, 'acme/widgets'),
+    '## Notes\n',
+  )
+  assert.equal(
+    removeClosingReference(
+      '## Notes\n\nCloses https://github.com/acme/widgets/issues/12\n',
+      12,
+      'acme/widgets',
+    ),
+    '## Notes\n',
+  )
+
+  // Two separate clauses for the same issue are both removed; other issues stay.
+  const twoClauses = 'Closes #12\n\nFixes #12\n\nCloses #30\n'
+  assert.equal(removeClosingReference(twoClauses, 12, 'acme/widgets'), 'Closes #30\n')
 })
 
 // ---------------------------------------------------------------------------
@@ -246,6 +285,36 @@ test('searchGitHubIssues searches issues by title and number, including closed i
     assert.equal(numResult2.issues.length, 1)
     assert.equal(numResult2.issues[0].number, 12)
     assert.equal(numResult2.issues[0].state, 'CLOSED')
+  })
+})
+
+test('searchGitHubIssues refuses to search outside the origin repository', async () => {
+  await withHarness(async (harness) => {
+    await mutateState(harness, (state) => {
+      state.issues = [
+        {
+          number: 12,
+          title: 'Foreign palette shortcut issue',
+          url: 'https://github.com/other/project/issues/12',
+          state: 'OPEN',
+          repository: 'other/project',
+        },
+        {
+          number: 12 + 1,
+          title: 'Origin palette shortcut issue',
+          url: 'https://github.com/acme/widgets/issues/13',
+          state: 'OPEN',
+        },
+      ]
+    })
+
+    // A qualifier in the typed query must not widen the search beyond origin.
+    const result = await searchGitHubIssues(harness.repo, 'palette repo:other/project')
+    assert.deepEqual(
+      result.issues.map((i) => i.url),
+      ['https://github.com/acme/widgets/issues/13'],
+    )
+    assert.equal(result.message, '')
   })
 })
 

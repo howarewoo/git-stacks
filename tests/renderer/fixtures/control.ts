@@ -372,26 +372,38 @@ export function installFixtureControl(options: {
       record('pullRequestIssueLinks', [prNumber])
       return answer('pullRequestIssueLinks', () => ({
         prNumber,
-        links: (scenario.snapshot?.issues ?? []).map((iss) => ({
-          number: iss.number,
-          title: iss.title,
-          url: iss.url,
-          state: 'OPEN' as const,
-          relation: 'contextual' as const,
-        })),
+        links: [...(scenario.issueLinks?.[prNumber] ?? [])],
       }))
     },
     previewIssueLink: (prNumber, issueNumber, relation, action) => {
       record('previewIssueLink', [prNumber, issueNumber, relation, action])
-      return answer('previewIssueLink', () => ({
-        prNumber,
-        issueNumber,
-        relation,
-        action,
-        currentBody: '',
-        newBody: `Preview body for PR #${prNumber} with issue #${issueNumber}`,
-        changed: true,
-      }))
+      return answer('previewIssueLink', () => {
+        const found = scenario.snapshot?.pullRequests.find((pr) => pr.number === prNumber)
+        const closing = (scenario.issueLinks?.[prNumber] ?? []).find(
+          (link) => link.relation === 'closing',
+        )
+        const existingClause = closing ? `\n\nCloses #${closing.number}\n` : '\n'
+        const currentBody = found
+          ? `${found.title}\n\nDeterministic fixture body for pull request #${prNumber}.${existingClause}`
+          : ''
+        const closingSyntax = `Closes #${issueNumber}`
+        const newBody =
+          action === 'link'
+            ? `${currentBody.trimEnd()}\n\n${closingSyntax}\n`
+            : closing
+              ? currentBody.replace(`\n\nCloses #${closing.number}\n`, '\n')
+              : currentBody
+        return {
+          prNumber,
+          issueNumber,
+          relation,
+          action,
+          currentBody,
+          newBody,
+          changed: newBody !== currentBody,
+          ...(relation === 'closing' ? { closingSyntax } : {}),
+        }
+      })
     },
   }
 

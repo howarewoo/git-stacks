@@ -652,6 +652,7 @@ function handleGraphql(
               title: iss.title,
               url: iss.url,
               state: iss.state,
+              repository: { nameWithOwner: iss.repository ?? 'acme/widgets' },
             })),
             pageInfo: { hasNextPage: false, endCursor: null },
           },

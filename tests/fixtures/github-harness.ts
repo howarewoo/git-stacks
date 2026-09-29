@@ -199,6 +199,8 @@ export interface GitHubFixtureState {
     title: string
     url: string
     state: 'OPEN' | 'CLOSED'
+    /** Repository that owns the issue; search results expose it so foreign issues are rejected. */
+    repository?: string
   }>
   asyncMerge?: { number: number; sha: string; method: string }
   requests: Array<{ argv: string[]; cwd: string; at: string; body?: Record<string, unknown> }>

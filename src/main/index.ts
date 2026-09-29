@@ -226,10 +226,7 @@ function installHandlers() {
     validateSender(event)
     const q = typeof query === 'string' ? query : ''
     const reqId = typeof requestId === 'string' ? requestId : 'search-issues'
-    return readRepository(
-      (root, signal) => searchGitHubIssues(root, q, signal),
-      reqId,
-    )
+    return readRepository((root, signal) => searchGitHubIssues(root, q, signal), reqId)
   })
   ipcMain.handle('repository:pull-request-issue-links', (event, number: unknown) => {
     validateSender(event)
@@ -243,13 +240,7 @@ function installHandlers() {
   })
   ipcMain.handle(
     'repository:preview-issue-link',
-    (
-      event,
-      prNumber: unknown,
-      issueNumber: unknown,
-      relation: unknown,
-      action: unknown,
-    ) => {
+    (event, prNumber: unknown, issueNumber: unknown, relation: unknown, action: unknown) => {
       validateSender(event)
       if (typeof prNumber !== 'number' || !Number.isInteger(prNumber) || prNumber <= 0) {
         throw new Error('Pull request number must be a positive integer')

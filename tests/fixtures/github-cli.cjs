@@ -458,7 +458,9 @@ function handleGraphql(state, args, fixture) {
     if (terms) {
       matched = issues.filter((iss) => {
         if (String(iss.number) === terms || `#${iss.number}` === terms) return true
-        return String(iss.title || '').toLowerCase().includes(terms)
+        return String(iss.title || '')
+          .toLowerCase()
+          .includes(terms)
       })
     }
     return {

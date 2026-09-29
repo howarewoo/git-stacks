@@ -323,9 +323,7 @@ export function validateStackAction(value: unknown): StackAction {
       return { type: value.type, number: value.number }
     case 'linkIssue':
     case 'unlinkIssue':
-      if (
-        !hasOnlyKeys(value, ['type', 'prNumber', 'issueNumber', 'relation', 'expectedBody'])
-      ) {
+      if (!hasOnlyKeys(value, ['type', 'prNumber', 'issueNumber', 'relation', 'expectedBody'])) {
         stackActionError(`Invalid ${value.type} action`)
       }
       if (

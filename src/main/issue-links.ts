@@ -8,13 +8,7 @@ import type {
   RepositoryIssue,
   StackAction,
 } from '../shared/types'
-import {
-  getConfigValue,
-  isCancelled,
-  isRecord,
-  parseRemote,
-  runGit,
-} from './git-core'
+import { getConfigValue, isCancelled, isRecord, parseRemote, runGit } from './git-core'
 import { getPullRequest, githubErrorMessage } from './github'
 import { githubTransport } from './github-transport'
 import { patchPullRequest } from './stacks'
@@ -38,16 +32,39 @@ export interface ExtractedClosingReference {
   endIndex: number
 }
 
-const CLOSING_KEYWORD_REGEX =
-  /\b(close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b/gi
+/**
+ * One closing clause exactly as GitHub documents it: a closing keyword, an
+ * optional colon, and a single issue reference. GitHub requires the full
+ * keyword syntax for every issue, so `Closes #10, #12` closes only #10.
+ * See https://docs.github.com/en/issues/tracking-your-work-with-issues/using-issues/linking-a-pull-request-to-an-issue
+ */
+const CLOSING_CLAUSE_REGEX =
+  /\b(clos(?:e|es|ed)|fix(?:es|ed)?|resolv(?:es|ed|e))\b:?[ \t]*(?:(?<owner>[A-Za-z0-9_.-]+)\/(?<repo>[A-Za-z0-9_.-]+))?(?:(?<prefix>#|GH-)(?<number>\d+)\b|(?<url>https?:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/issues\/\d+))/giu
+
+function closingReference(
+  match: RegExpExecArray,
+  originFullName?: string,
+): ExtractedClosingReference | null {
+  const groups = match.groups ?? {}
+  const issueNumber = Number(groups.number ?? /\/issues\/(\d+)/u.exec(groups.url ?? '')?.[1])
+  const repository = groups.owner && groups.repo ? `${groups.owner}/${groups.repo}` : null
+  const normalized = originFullName?.toLowerCase()
+  if (repository && normalized && repository.toLowerCase() !== normalized) {
+    // A foreign repository's reference never closes an issue in this repository.
+    return null
+  }
+  return {
+    issueNumber,
+    keyword: match[1],
+    rawMatch: match[0],
+    startIndex: match.index,
+    endIndex: match.index + match[0].length,
+  }
+}
 
 /**
- * Extract all GitHub-recognized closing issue references from a PR body.
- * Supports:
- * - Closes #123, Fixes GH-123
- * - Multiple issues: Closes #1, #2 and fixes #3
- * - Fully qualified or URL forms matching the target origin:
- *   closes https://github.com/owner/repo/issues/123 or fixes owner/repo#123
+ * Extract every GitHub-recognised closing clause from a PR body, with the exact
+ * source span of each clause so removal can delete precisely what was detected.
  */
 export function extractClosingReferences(
   body: string,
@@ -55,96 +72,12 @@ export function extractClosingReferences(
 ): ExtractedClosingReference[] {
   if (!body) return []
   const results: ExtractedClosingReference[] = []
-  const normalizedOrigin = originFullName?.toLowerCase()
-
-  // Match each closing keyword
-  let keywordMatch: RegExpExecArray | null
-  CLOSING_KEYWORD_REGEX.lastIndex = 0
-
-  while ((keywordMatch = CLOSING_KEYWORD_REGEX.exec(body)) !== null) {
-    const keyword = keywordMatch[1]
-    let cursor = keywordMatch.index + keywordMatch[0].length
-
-    // Scan following tokens for issue references (e.g. #12, GH-12, owner/repo#12, or URLs)
-    // Separators like ',', 'and', '&', and whitespace continue the chain for the same keyword
-    while (cursor < body.length) {
-      // Skip whitespace
-      const wsMatch = /^\s+/u.exec(body.slice(cursor))
-      if (wsMatch) {
-        cursor += wsMatch[0].length
-      }
-
-      const rest = body.slice(cursor)
-      if (!rest) break
-
-      // Check for chain connectors like "and", ",", "&"
-      const connectorMatch = /^(?:,|and|&)\s*/iu.exec(rest)
-      if (connectorMatch) {
-        cursor += connectorMatch[0].length
-        continue
-      }
-
-      // Check for issue reference patterns
-      // 1. URL pattern: https://github.com/owner/repo/issues/123
-      const urlMatch =
-        /^(?:https?:\/\/github\.com\/([a-zA-Z0-9_.-]+)\/([a-zA-Z0-9_.-]+)\/issues\/(\d+))\b/u.exec(
-          rest,
-        )
-      if (urlMatch) {
-        const repo = `${urlMatch[1]}/${urlMatch[2]}`.toLowerCase()
-        const issueNum = Number(urlMatch[3])
-        if (!normalizedOrigin || repo === normalizedOrigin) {
-          results.push({
-            issueNumber: issueNum,
-            keyword,
-            rawMatch: urlMatch[0],
-            startIndex: cursor,
-            endIndex: cursor + urlMatch[0].length,
-          })
-        }
-        cursor += urlMatch[0].length
-        continue
-      }
-
-      // 2. Qualified pattern: owner/repo#123
-      const qualifiedMatch =
-        /^([a-zA-Z0-9_.-]+)\/([a-zA-Z0-9_.-]+)#(\d+)\b/u.exec(rest)
-      if (qualifiedMatch) {
-        const repo = `${qualifiedMatch[1]}/${qualifiedMatch[2]}`.toLowerCase()
-        const issueNum = Number(qualifiedMatch[3])
-        if (!normalizedOrigin || repo === normalizedOrigin) {
-          results.push({
-            issueNumber: issueNum,
-            keyword,
-            rawMatch: qualifiedMatch[0],
-            startIndex: cursor,
-            endIndex: cursor + qualifiedMatch[0].length,
-          })
-        }
-        cursor += qualifiedMatch[0].length
-        continue
-      }
-
-      // 3. Short pattern: #123 or GH-123
-      const shortMatch = /^(?:#|GH-)(\d+)\b/iu.exec(rest)
-      if (shortMatch) {
-        const issueNum = Number(shortMatch[1])
-        results.push({
-          issueNumber: issueNum,
-          keyword,
-          rawMatch: shortMatch[0],
-          startIndex: cursor,
-          endIndex: cursor + shortMatch[0].length,
-        })
-        cursor += shortMatch[0].length
-        continue
-      }
-
-      // If token is neither a connector nor an issue reference, this closing clause ends
-      break
-    }
+  CLOSING_CLAUSE_REGEX.lastIndex = 0
+  let match: RegExpExecArray | null
+  while ((match = CLOSING_CLAUSE_REGEX.exec(body)) !== null) {
+    const reference = closingReference(match, originFullName)
+    if (reference) results.push(reference)
   }
-
   return results
 }
 
@@ -181,9 +114,30 @@ export function insertClosingReference(
   return `${trimmed}\n\n${closingLine}\n`
 }
 
+/** Widen a deleted clause over an adjacent list separator so no dangling `,` or `;` survives. */
+function deletionSpan(
+  body: string,
+  startIndex: number,
+  endIndex: number,
+): { start: number; end: number } {
+  let start = startIndex
+  let end = endIndex
+  let lead = start
+  while (lead > 0 && (body[lead - 1] === ' ' || body[lead - 1] === '\t')) lead--
+  let trail = end
+  while (trail < body.length && (body[trail] === ' ' || body[trail] === '\t')) trail++
+  const before = lead > 0 ? body[lead - 1] : null
+  const after = trail < body.length ? body[trail] : null
+  const isSeparator = (value: string | null): boolean => value === ',' || value === ';'
+  if (isSeparator(before) && (!after || isSeparator(after) || after === '\n')) start = lead - 1
+  if (isSeparator(after) && (!before || isSeparator(before) || before === '\n')) end = trail + 1
+  return { start, end }
+}
+
 /**
- * Removes the exact closing reference for the specified issue from the PR body,
- * preserving all user-authored text and surrounding content.
+ * Removes the exact closing clauses that close the given issue, using the spans
+ * the parser detected. Foreign references, unrelated numbers such as #123, and
+ * every other word of the author's description are left untouched.
  */
 export function removeClosingReference(
   body: string,
@@ -194,49 +148,31 @@ export function removeClosingReference(
     return body
   }
 
-  const lines = body.split('\n')
-  const remainingLines: string[] = []
+  const spans = extractClosingReferences(body, originFullName)
+    .filter((ref) => ref.issueNumber === issueNumber)
+    .map((ref) => deletionSpan(body, ref.startIndex, ref.endIndex))
+    .sort((a, b) => b.start - a.start)
 
-  for (const line of lines) {
-    const refs = extractClosingReferences(line, originFullName)
-    const matchesTarget = refs.some((r) => r.issueNumber === issueNumber)
-
-    if (!matchesTarget) {
-      remainingLines.push(line)
-      continue
-    }
-
-    // If the line only contains the closing reference for this issue (e.g. "Closes #12" or "- Closes #12"), drop the line
-    const cleanedLine = line
-      .replace(new RegExp(`\\b(close[sd]?|fix(?:e[sd])?|resolve[sd]?)\\s+(?:#|GH-)${issueNumber}\\b`, 'iu'), '')
-      .replace(/^[\s*-]+/u, '')
-      .trim()
-
-    if (!cleanedLine || cleanedLine === ',' || cleanedLine === 'and') {
-      // Entire line was this closing reference
-      continue
-    }
-
-    // Line has other content or other issues, e.g. "Closes #10, #12" -> replace just this issue
-    let modified = line
-    // Try removing ", #<num>" or "#<num>, " or just "#<num>"
-    modified = modified.replace(new RegExp(`,\\s*(?:#|GH-)${issueNumber}\\b`, 'iu'), '')
-    modified = modified.replace(new RegExp(`(?:#|GH-)${issueNumber}\\s*,?`, 'iu'), '')
-    // Also clean up any lingering keyword if left empty
-    modified = modified.replace(/\b(close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*(?:and)?\s*$/iu, '')
-    if (modified.trim()) {
-      remainingLines.push(modified)
+  let result = body
+  for (const span of spans) {
+    const lineStart = result.lastIndexOf('\n', span.start - 1) + 1
+    const lineEndIndex = result.indexOf('\n', span.end)
+    const lineEnd = lineEndIndex === -1 ? result.length : lineEndIndex
+    const remainder = `${result.slice(lineStart, span.start)}${result.slice(span.end, lineEnd)}`
+    if (remainder.trim()) {
+      result = `${result.slice(0, span.start)}${result.slice(span.end)}`
+    } else {
+      // The line carried only this closing clause; drop the whole line.
+      const after = lineEndIndex === -1 ? '' : result.slice(lineEndIndex + 1)
+      const before = result.slice(0, lineStart).replace(/\n$/u, '')
+      result = before ? `${before}\n${after}` : after
     }
   }
-
-  let result = remainingLines.join('\n')
-  // Ensure cleanly formatted trailing newline
-  if (result.trim()) {
-    result = `${result.trimEnd()}\n`
-  } else {
-    result = ''
-  }
-  return result
+  const collapsed = result
+    .replace(/^\n+/u, '')
+    .replace(/\n{3,}/gu, '\n\n')
+    .trimEnd()
+  return collapsed ? `${collapsed}\n` : ''
 }
 
 const CONFIG_PREFIX = 'gitstacks.pr.'
@@ -317,7 +253,16 @@ export async function searchGitHubIssues(
     }
   }
 
-  const terms = query.trim().replace(/^#+/u, '')
+  // The query is a literal title/number search inside origin. Qualifier tokens
+  // (`repo:`, `org:`, `is:`, …) are stripped so user input cannot widen the
+  // search past this repository and close an unrelated issue with a shared number.
+  const terms = query
+    .trim()
+    .replace(/^#+/u, '')
+    .replace(/"[^"]*"/gu, (quoted) => quoted.slice(1, -1))
+    .split(/\s+/u)
+    .filter((token) => token.length > 0 && !token.includes(':'))
+    .join(' ')
   const isNumberQuery = /^\d+$/u.test(terms)
   const issueNumber = isNumberQuery ? Number(terms) : null
 
@@ -348,7 +293,11 @@ export async function searchGitHubIssues(
           isRecord(directLookup.repository.issue)
         ) {
           const iss = directLookup.repository.issue
-          if (typeof iss.number === 'number' && typeof iss.title === 'string' && typeof iss.url === 'string') {
+          if (
+            typeof iss.number === 'number' &&
+            typeof iss.title === 'string' &&
+            typeof iss.url === 'string'
+          ) {
             issuesMap.set(iss.number, {
               number: iss.number,
               title: iss.title,
@@ -378,6 +327,7 @@ export async function searchGitHubIssues(
               title
               url
               state
+              repository { nameWithOwner }
             }
           }
         }
@@ -386,13 +336,22 @@ export async function searchGitHubIssues(
       { signal },
     )
 
-    if (isRecord(searchResult) && isRecord(searchResult.search) && Array.isArray(searchResult.search.nodes)) {
+    if (
+      isRecord(searchResult) &&
+      isRecord(searchResult.search) &&
+      Array.isArray(searchResult.search.nodes)
+    ) {
+      const originFullName = remote.fullName.toLowerCase()
       for (const node of searchResult.search.nodes) {
         if (
           isRecord(node) &&
           typeof node.number === 'number' &&
           typeof node.title === 'string' &&
-          typeof node.url === 'string'
+          typeof node.url === 'string' &&
+          isRecord(node.repository) &&
+          typeof node.repository.nameWithOwner === 'string' &&
+          // Defence in depth: a foreign result is never offered as a link target.
+          node.repository.nameWithOwner.toLowerCase() === originFullName
         ) {
           issuesMap.set(node.number, {
             number: node.number,
@@ -510,7 +469,8 @@ export async function getPullRequestIssueLinks(
     return {
       number: num,
       title: resolved?.title ?? `Issue #${num}`,
-      url: resolved?.url ?? (remote ? `https://${remote.host}/${remote.fullName}/issues/${num}` : ''),
+      url:
+        resolved?.url ?? (remote ? `https://${remote.host}/${remote.fullName}/issues/${num}` : ''),
       state: resolved?.state ?? 'OPEN',
       relation: isClosing ? 'closing' : 'contextual',
     }
@@ -638,7 +598,11 @@ export async function runUnlinkIssueAction(
   },
 ): Promise<ActionResult> {
   if (action.relation === 'contextual') {
-    const removed = await removeLocalContextualIssueLink(repoPath, action.prNumber, action.issueNumber)
+    const removed = await removeLocalContextualIssueLink(
+      repoPath,
+      action.prNumber,
+      action.issueNumber,
+    )
     return {
       message: removed
         ? `Removed local link to issue #${action.issueNumber}`

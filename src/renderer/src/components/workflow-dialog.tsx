@@ -12,6 +12,7 @@ import type {
   RepositorySnapshot,
   StackKind,
   StackPreview,
+  IssueLinkPreview,
   IssueLinkRelation,
   LinkedIssue,
   RepositoryIssue,
@@ -133,10 +134,7 @@ export type WorkflowStackAPI = Pick<
   'stackPreview' | 'submitStackProgress' | 'onSubmitStackProgress'
 > &
   Partial<
-    Pick<
-      DesktopAPI,
-      'searchIssues' | 'pullRequestIssueLinks' | 'previewIssueLink' | 'pullRequest'
-    >
+    Pick<DesktopAPI, 'searchIssues' | 'pullRequestIssueLinks' | 'previewIssueLink' | 'pullRequest'>
   >
 
 interface PrLinkedIssuesSectionProps {
@@ -164,6 +162,8 @@ function PrLinkedIssuesSection({
   const [searchMessage, setSearchMessage] = React.useState<string | null>(null)
   const [pendingUnlink, setPendingUnlink] = React.useState<LinkedIssue | null>(null)
   const [pendingClosingLink, setPendingClosingLink] = React.useState<RepositoryIssue | null>(null)
+  const [linkPreview, setLinkPreview] = React.useState<IssueLinkPreview | null>(null)
+  const [unlinkPreview, setUnlinkPreview] = React.useState<IssueLinkPreview | null>(null)
   const [actionBusy, setActionBusy] = React.useState(false)
   const [statusMessage, setStatusMessage] = React.useState<string | null>(null)
 
@@ -181,6 +181,40 @@ function PrLinkedIssuesSection({
       setLoading(false)
     }
   }, [pr.number, stackApi])
+
+  const previewLink = React.useCallback(
+    async (issue: RepositoryIssue) => {
+      setActionBusy(true)
+      try {
+        setLinkPreview(
+          (await stackApi.previewIssueLink?.(pr.number, issue.number, 'closing', 'link')) ?? null,
+        )
+      } catch {
+        setLinkPreview(null)
+        setStatusMessage('Could not preview this description change; reload the pull request.')
+      } finally {
+        setActionBusy(false)
+      }
+    },
+    [pr.number, stackApi],
+  )
+
+  const previewUnlink = React.useCallback(
+    async (issue: LinkedIssue) => {
+      setActionBusy(true)
+      try {
+        setUnlinkPreview(
+          (await stackApi.previewIssueLink?.(pr.number, issue.number, 'closing', 'unlink')) ?? null,
+        )
+      } catch {
+        setUnlinkPreview(null)
+        setStatusMessage('Could not preview this description change; reload the pull request.')
+      } finally {
+        setActionBusy(false)
+      }
+    },
+    [pr.number, stackApi],
+  )
 
   React.useEffect(() => {
     void loadLinks()
@@ -242,7 +276,8 @@ function PrLinkedIssuesSection({
           prNumber: pr.number,
           issueNumber: issue.number,
           relation: 'closing',
-          expectedBody: pr.body,
+          // Revalidate against the exact body the user previewed and confirmed.
+          expectedBody: linkPreview?.currentBody ?? pr.body,
         },
         `Add closing link for issue #${issue.number}`,
       )
@@ -259,8 +294,14 @@ function PrLinkedIssuesSection({
     }
   }
 
+  const handleRequestClosingLink = async (issue: RepositoryIssue) => {
+    await previewLink(issue)
+    setPendingClosingLink(issue)
+  }
+
   const handleUnlink = async (issue: LinkedIssue) => {
     if (issue.relation === 'closing') {
+      await previewUnlink(issue)
       setPendingUnlink(issue)
       return
     }
@@ -294,7 +335,8 @@ function PrLinkedIssuesSection({
           prNumber: pr.number,
           issueNumber: issue.number,
           relation: 'closing',
-          expectedBody: pr.body,
+          // Revalidate against the exact body shown in the removal preview.
+          expectedBody: unlinkPreview?.currentBody ?? pr.body,
         },
         `Remove closing reference for issue #${issue.number}`,
       )
@@ -319,11 +361,7 @@ function PrLinkedIssuesSection({
         <div className="flex items-center gap-2">
           <Link2 className="size-4 text-[var(--gs-semantic-text-secondary)]" />
           <strong className="text-sm font-semibold">Linked issues</strong>
-          {links.length > 0 ? (
-            <Badge variant="secondary">
-              {links.length}
-            </Badge>
-          ) : null}
+          {links.length > 0 ? <Badge variant="secondary">{links.length}</Badge> : null}
         </div>
         {loading ? (
           <span className="text-xs text-[var(--gs-semantic-text-muted)] flex items-center gap-1">
@@ -358,8 +396,9 @@ function PrLinkedIssuesSection({
                 size="sm"
                 variant="ghost"
                 disabled={disabled || actionBusy}
+                aria-label={`Remove link to issue #${link.number} from this pull request`}
                 tooltip={`Remove ${link.relation === 'closing' ? 'closing keyword from PR description' : 'local related link'}`}
-                onClick={() => handleUnlink(link)}
+                onClick={() => void handleUnlink(link)}
               >
                 <Trash2 className="size-3 text-[var(--gs-semantic-text-muted)] hover:text-[var(--gs-semantic-color-danger-fg)]" />
               </Button>
@@ -380,13 +419,19 @@ function PrLinkedIssuesSection({
           <p className="text-[var(--gs-semantic-text-secondary)] mb-2">
             This will update the pull request description to remove{' '}
             <code className="px-1 py-0.5 rounded bg-[var(--gs-semantic-surface-sunken)]">
-              Closes #{pendingUnlink.number}
+              {unlinkPreview?.closingSyntax ?? `Closes #${pendingUnlink.number}`}
             </code>
             .
           </p>
+          {unlinkPreview?.changed ? (
+            <pre className="p-2 mb-2 max-h-32 overflow-auto whitespace-pre-wrap rounded bg-[var(--gs-semantic-surface-sunken)] text-[var(--gs-semantic-text-secondary)]">
+              {unlinkPreview.newBody}
+            </pre>
+          ) : null}
           {hasFormEdits ? (
             <div className="p-2 mb-2 rounded bg-[var(--gs-semantic-surface-sunken)] text-[var(--gs-semantic-color-warning-fg)] text-xs">
-              You have unsaved edits in the pull request description above. Save your description before removing closing issue links.
+              You have unsaved edits in the pull request description above. Save your description
+              before removing closing issue links.
             </div>
           ) : null}
           <div className="flex items-center gap-2">
@@ -425,13 +470,19 @@ function PrLinkedIssuesSection({
           <p className="text-[var(--gs-semantic-text-secondary)] mb-2">
             This will append{' '}
             <code className="px-1 py-0.5 rounded bg-[var(--gs-semantic-surface-sunken)]">
-              Closes #{pendingClosingLink.number}
+              {linkPreview?.closingSyntax ?? `Closes #${pendingClosingLink.number}`}
             </code>{' '}
             to the pull request description on GitHub.
           </p>
+          {linkPreview?.changed ? (
+            <pre className="p-2 mb-2 max-h-32 overflow-auto whitespace-pre-wrap rounded bg-[var(--gs-semantic-surface-sunken)] text-[var(--gs-semantic-text-secondary)]">
+              {linkPreview.newBody}
+            </pre>
+          ) : null}
           {hasFormEdits ? (
             <div className="p-2 mb-2 rounded bg-[var(--gs-semantic-surface-sunken)] text-[var(--gs-semantic-color-warning-fg)] text-xs">
-              You have unsaved edits in the pull request description above. Save your description before adding closing issue links.
+              You have unsaved edits in the pull request description above. Save your description
+              before adding closing issue links.
             </div>
           ) : null}
           <div className="flex items-center gap-2">
@@ -517,9 +568,7 @@ function PrLinkedIssuesSection({
                   </div>
                   <div className="flex items-center gap-1 flex-shrink-0">
                     {isAlreadyLinked ? (
-                      <Badge variant="outline">
-                        Linked
-                      </Badge>
+                      <Badge variant="outline">Linked</Badge>
                     ) : (
                       <>
                         <Button
@@ -536,7 +585,7 @@ function PrLinkedIssuesSection({
                           variant="accent"
                           disabled={disabled || actionBusy}
                           tooltip="Insert closing keyword into PR description to close this issue when PR is merged"
-                          onClick={() => setPendingClosingLink(issue)}
+                          onClick={() => void handleRequestClosingLink(issue)}
                         >
                           Close when merged
                         </Button>
@@ -1546,6 +1595,10 @@ export function WorkflowDialog({
                   <PrLinkedIssuesSection
                     pr={pr}
                     onPrUpdate={(updated) => {
+                      // A post-mutation refresh must never discard text the user
+                      // typed while that read was in flight; their edit wins and
+                      // is applied by the normal save path.
+                      if (hasEditedRef.current) return
                       setPr(updated)
                       setPrTitle(updated.title)
                       setBody(updated.body)
