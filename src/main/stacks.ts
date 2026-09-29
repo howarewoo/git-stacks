@@ -2943,30 +2943,32 @@ async function revalidatePlan(repoPath: string, plan: StackPlan): Promise<void> 
   }
   // A sync re-reads every layer's pull request before it replays a descendant,
   // so a merge, a retarget, or a push somebody else made lands as a refusal
-  // rather than as a replay onto a base that no longer describes the stack. A
-  // merge is the exception: landing a layer is what moves those pull requests,
-  // and a run that finds a lower layer already merged reads it back and reports
-  // the partial outcome rather than refusing the run that discovered it. Its
-  // submitted membership is still checked below.
-  if (plan.kind !== 'merge')
-    for (const [branch, captured] of Object.entries(plan.capturedPrs)) {
-      if (!captured) continue
-      const current = data.pullRequests.find((pr) => pr.number === captured.number)
-      if (!current) {
-        throw new Error(
-          `Stack preview is stale: pull request #${captured.number} for ${branch} is no longer readable`,
-        )
-      }
-      if (
-        current.state !== captured.state ||
-        current.base !== captured.base ||
-        current.headOid !== captured.headOid
-      ) {
-        throw new Error(
-          `Stack preview is stale: pull request #${captured.number} for ${branch} changed on GitHub after this preview was taken`,
-        )
-      }
+  // rather than as a replay onto a base that no longer describes the stack.
+  // A merge is the one action whose own answer is a landing, so a pull request
+  // that is no longer open is not by itself staleness: a lower layer GitHub
+  // already merged is read back and reported as the partial outcome it caused.
+  // What still refuses the merge is the pull request that is no longer readable,
+  // or whose reviewed head or base somebody else moved.
+  for (const [branch, captured] of Object.entries(plan.capturedPrs)) {
+    if (!captured) continue
+    const current = data.pullRequests.find((pr) => pr.number === captured.number)
+    if (!current) {
+      throw new Error(
+        `Stack preview is stale: pull request #${captured.number} for ${branch} is no longer readable`,
+      )
     }
+    const landed = plan.kind === 'merge' && captured.state === 'OPEN' && current.state !== 'OPEN'
+    if (landed) continue
+    if (
+      current.state !== captured.state ||
+      current.base !== captured.base ||
+      current.headOid !== captured.headOid
+    ) {
+      throw new Error(
+        `Stack preview is stale: pull request #${captured.number} for ${branch} changed on GitHub after this preview was taken`,
+      )
+    }
+  }
   for (const captured of plan.capturedStacks) {
     const current = (data.nativeStacks ?? []).find((stack) => stack.number === captured.number)
     if (
