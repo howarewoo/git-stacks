@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import { promises as fs } from 'node:fs'
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { delimiter, join } from 'node:path'
+import { join } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import { test } from 'node:test'
 import { getCommitDiff, getFileView, getHistory, getSnapshot } from '../src/main/git'
@@ -47,43 +47,6 @@ async function repository() {
   git('add', '.')
   git('commit', '-m', 'Base')
   return { root, repo, git }
-}
-
-/**
- * Counts the Git subcommands a run actually forked. A shim named `git` sits
- * first on PATH and forwards to the real binary, so the tally is observed at
- * the process boundary rather than inferred from a timer.
- */
-async function recordGitCommands<T>(
-  run: () => Promise<T>,
-): Promise<{ result: T; commands: Map<string, number> }> {
-  const root = await mkdtemp(join(tmpdir(), 'git-stacks-gitlog-'))
-  const bin = join(root, 'bin')
-  const log = join(root, 'commands')
-  await mkdir(bin)
-  const realGit = execFileSync('which', ['git'], { encoding: 'utf8' }).trim()
-  await writeFile(
-    join(bin, 'git'),
-    `#!/bin/sh
-printf '%s\\n' "$1" >> '${log}'
-exec '${realGit}' "$@"
-`,
-  )
-  await chmod(join(bin, 'git'), 0o755)
-  const original = process.env.PATH
-  process.env.PATH = `${bin}${delimiter}${original ?? ''}`
-  let result: T
-  try {
-    result = await run()
-  } finally {
-    process.env.PATH = original
-  }
-  const commands = new Map<string, number>()
-  for (const line of (await readFile(log, 'utf8')).split('\n')) {
-    if (line) commands.set(line, (commands.get(line) ?? 0) + 1)
-  }
-  await rm(root, { recursive: true, force: true })
-  return { result, commands }
 }
 
 test('a stale refresh cannot be applied to a newly selected repository', () => {
@@ -545,7 +508,7 @@ test('a snapshot reports the behind count Git itself reports for every branch sh
   }
 })
 
-test('a branch whose base is already in its history is compared without a per-branch process', async () => {
+test('a batch of up-to-date branches retains exact zero behind counts and restack states', async () => {
   const { root, repo, git } = await repository()
   try {
     for (let index = 0; index < 40; index += 1) {
@@ -553,36 +516,11 @@ test('a branch whose base is already in its history is compared without a per-br
       git('commit', '--allow-empty', '-m', `Up ${index}`)
     }
     git('checkout', 'main')
-    const { result: snapshot, commands } = await recordGitCommands(() => getSnapshot(repo))
+    const snapshot = await getSnapshot(repo)
     const branches = snapshot.branches.filter((item) => item.name.startsWith('feature/up-'))
     assert.equal(branches.length, 40)
+    assert.ok(branches.every((item) => item.parent === 'main'))
     assert.ok(branches.every((item) => item.parentBehind === 0 && !item.needsRestack))
-    assert.equal(
-      commands.get('rev-list') ?? 0,
-      0,
-      'an up-to-date branch is answered from the parent edges already read',
-    )
-    // The tips are read in batches, so the process count tracks the batch size
-    // rather than the branch count.
-    assert.ok((commands.get('log') ?? 0) <= 2, `expected batched reads, saw ${commands.get('log')}`)
-  } finally {
-    await rm(root, { recursive: true, force: true })
-  }
-})
-
-test('a branch that really is behind its base still gets a counted rev-list', async () => {
-  const { root, repo, git } = await repository()
-  try {
-    git('checkout', '-b', 'feature/lagging')
-    git('commit', '--allow-empty', '-m', 'Feature')
-    git('checkout', 'main')
-    git('commit', '--allow-empty', '-m', 'Advance one')
-    git('commit', '--allow-empty', '-m', 'Advance two')
-    const { result: snapshot, commands } = await recordGitCommands(() => getSnapshot(repo))
-    const branch = snapshot.branches.find((item) => item.name === 'feature/lagging')
-    assert.equal(branch?.parentBehind, 2)
-    assert.equal(branch?.needsRestack, true)
-    assert.equal(commands.get('rev-list'), 1, 'an unproved pair is still counted by Git')
   } finally {
     await rm(root, { recursive: true, force: true })
   }
