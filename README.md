@@ -1318,49 +1318,6 @@ it and the original tips stay recoverable.
   head, base, or state, or whose native stack membership, differs from both the reviewed
   pre-state and the reviewed result stops the run instead of overwriting it.
 
-## Linked issues
-
-A pull request inspector and the pull request workflow dialog both list the issues
-linked to that pull request, with each issue's current state and whether the
-relationship is **closes on merge** or **related**.
-
-**Search.** The dialog searches the origin repository's issues by number or
-title. The typed text is a literal search: qualifier tokens such as `repo:` are
-stripped, and results from any other repository are rejected, so a number that
-exists in several repositories can only ever link the one this remote owns. A
-closed issue can be selected — GitHub will not close it again, and the link stays
-readable. When the transport fails or the machine is offline, the section reports
-that issues are unavailable and the rest of the pull request workflow still works.
-
-**Two kinds of link, deliberately separate.**
-
-- _Related_ is app-owned local metadata (`gitstacks.pr.<number>.relatedissue` in local
-  `git config`). It never changes anything on GitHub and is never claimed to be a
-  relationship GitHub can interpret.
-- _Closes on merge_ writes a real closing keyword (`Closes #12`) into the pull
-  request description, which is the only form GitHub acts on. Detection and
-  insertion follow GitHub's documented grammar: the keyword may be followed by a
-  colon, and every issue needs its own full keyword, so `Closes #10, #12` closes
-  only #10 and Git Stacks will still insert a complete clause for #12. Insertion
-  is idempotent: an existing recognised clause is never duplicated.
-
-**Preview, confirmation, and removal.** Both directions that touch the pull
-request description are previewed first: the dialog asks the main process for the
-resulting description and shows it, with the exact keyword that will be inserted
-or removed, and only then dispatches. Removal deletes the exact clause that was
-detected — a foreign `other/repo#12`, an unrelated `#123`, and every other word of
-the author's description survive untouched. Removing a _related_ link needs no
-confirmation because it only edits local metadata.
-
-**External edits.** Every description mutation carries the body that was previewed.
-The main process re-reads the pull request immediately before writing and refuses
-the write if the body changed in the meantime, leaving the newer text intact.
-GitHub's pull request update endpoint offers no conditional (ETag/`If-Match`)
-request, so a change landing between that read and the write can still be lost;
-this is a property of the API, not something the app can close. A refresh that
-follows a link change never overwrites description text the user typed while the
-refresh was in flight.
-
 ## Review workspace
 
 Open **Review** from the workspace navigation, the command palette, or the
