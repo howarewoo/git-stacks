@@ -759,7 +759,9 @@ export function WorkflowDialog({
           : request.kind === 'upstream'
             ? (request.branch.upstreamRef ?? '')
             : (request.branch.parent ?? snapshot.defaultBranch)
-      : '',
+      : request.kind === 'surgery' && request.request.kind === 'insert'
+        ? request.request.name
+        : '',
   )
   const [message, setMessage] = React.useState('')
   const [includeUntracked, setIncludeUntracked] = React.useState(true)
@@ -839,6 +841,8 @@ export function WorkflowDialog({
 
   React.useEffect(() => {
     let active = true
+    const requestedName =
+      request.kind === 'surgery' && request.request.kind === 'insert' ? nameRef.current : null
     setError(null)
     setIdentity(null)
     setLoading(previewKinds.includes(request.kind))
@@ -858,7 +862,9 @@ export function WorkflowDialog({
         if (request.kind === 'surgery') {
           return {
             kind: 'surgery',
-            value: await window.desktop.surgeryPreview(surgeryRequestFor(request, nameRef.current)),
+            value: await window.desktop.surgeryPreview(
+              surgeryRequestFor(request, requestedName ?? ''),
+            ),
           }
         }
         if (request.kind === 'forcePush') {
@@ -894,7 +900,7 @@ export function WorkflowDialog({
             ),
           )
         } else if (data.kind === 'surgery') {
-          setSurgery(data.value)
+          if (requestedName === null || requestedName === nameRef.current) setSurgery(data.value)
         } else if (data.kind === 'forcePush') {
           setPush(data.value)
         } else if (data.kind === 'pr') {
@@ -907,7 +913,11 @@ export function WorkflowDialog({
         }
         setLoaded(true)
         setLoading(false)
-        setIdentity(previewIdentity(data))
+        setIdentity(
+          data.kind === 'surgery' && requestedName !== null && requestedName !== nameRef.current
+            ? null
+            : previewIdentity(data),
+        )
       },
       (value) => {
         if (!active) return
@@ -1180,7 +1190,8 @@ export function WorkflowDialog({
     currentPath: snapshot.path,
     previewToken: identity,
     rejectedTokens: rejectedIdentities,
-    previewBlockers: preview?.blockers ?? [],
+    previewBlockers:
+      request.kind === 'surgery' ? (surgery?.blockers ?? []) : (preview?.blockers ?? []),
     confirmationTarget,
     confirmation,
     allowForce,
@@ -1526,7 +1537,10 @@ export function WorkflowDialog({
                       value={name}
                       onChange={(event) => {
                         markEdited()
+                        nameRef.current = event.target.value
                         setName(event.target.value)
+                        setSurgery(null)
+                        setIdentity(null)
                       }}
                       autoComplete="off"
                       spellCheck={false}
@@ -2140,7 +2154,9 @@ export function WorkflowDialog({
                 </>
               ) : null}
             </fieldset>
-            {!loading && (error || actionError) && previewKinds.includes(request.kind) ? (
+            {!loading &&
+            (((error || actionError) && previewKinds.includes(request.kind)) ||
+              (request.kind === 'surgery' && !surgery)) ? (
               <Button
                 variant="secondary"
                 disabled={busy}

@@ -3618,19 +3618,13 @@ export function validateSurgeryRequest(value: unknown): SurgeryRequest {
     throw new Error('Surgery request must name one of insert, move, or remove')
   }
   const kind = value.kind
+  const branch = requireRefInput(value.branch, 'branch')
   if (kind === 'move') {
     if (value.target === value.branch) throw new Error('A layer cannot be moved below itself')
-    requireRefInput(value.target, 'target')
-  } else {
-    requireRefInput(value.name, 'name')
+    return { kind, branch, target: requireRefInput(value.target, 'target') }
   }
-  return {
-    stackId: requireRefInput(value.stackId, 'stackId'),
-    branch: requireRefInput(value.branch, 'branch'),
-    kind,
-    name: isRecord(value) && typeof value.name === 'string' ? value.name : undefined,
-    target: isRecord(value) && typeof value.target === 'string' ? value.target : undefined,
-  } as SurgeryRequest
+  if (kind === 'insert') return { kind, branch, name: requireRefInput(value.name, 'name') }
+  return { kind, branch }
 }
 
 function branchDepth(records: Map<string, BranchRecord>, name: string, limit = 64): number {
@@ -4281,6 +4275,11 @@ function assertRegisteredStack(
   observed: NativeStack,
   stackNumber: number,
 ): void {
+  if (!observed.open) {
+    throw new Error(
+      `Native stack #${stackNumber} is closed instead of holding the registered order`,
+    )
+  }
   const held = observed.pullRequests.map((member) => member.number)
   if (observed.base !== trunk) {
     throw new Error(

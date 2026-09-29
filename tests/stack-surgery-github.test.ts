@@ -924,6 +924,34 @@ test('a completed registration that changed after the run refuses the next resum
   })
 })
 
+test('a completed registration that closed before resumption keeps the recovery journal', async () => {
+  await withPublishedStack(async (harness) => {
+    await publishedFourLayerStack(harness)
+    git(harness, ['switch', 'two'])
+    harness.hookGitPush({
+      branch: 'three',
+      armed: true,
+      after() {
+        git(harness, ['update-ref', 'refs/heads/two', git(harness, ['rev-parse', 'main'])])
+      },
+    })
+
+    const plan = await preview(harness, { kind: 'remove', branch: 'two' })
+    assert.deepEqual(plan.blockers, [])
+    await assert.rejects(runSurgery(harness.repo, plan.token, true, true))
+    const registered = await harness.readState()
+    const current = openStacks(registered)[0]!
+    current.open = false
+    await harness.writeState(registered)
+
+    await assert.rejects(
+      runAction(harness.repo, { type: 'stackContinue' }),
+      /closed instead of holding the registered order/,
+    )
+    assert.ok(await getStackProgress(harness.repo), 'the journal remains for recovery')
+  })
+})
+
 test('a completed retarget somebody moved back stops the run instead of repeating it', async () => {
   await withPublishedStack(async (harness) => {
     const layers = await publishedFourLayerStack(harness)

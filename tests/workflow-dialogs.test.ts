@@ -298,6 +298,34 @@ test('a blocked preview and a missing preview each name a recoverable next step'
   assert.match(workflowBlocker(stack)?.message ?? '', /Reload the preview/)
 })
 
+test('surgery needs its current preview, resolved blockers, and consent for remote rewrites', () => {
+  const surgery = guard({ kind: 'surgery', requiresName: true, name: 'new-layer' })
+  assert.equal(workflowBlocker(surgery)?.code, 'preview-missing')
+  const ready = { ...surgery, previewToken: 'surgery:reviewed' }
+  assert.equal(workflowBlocker(ready), null)
+  assert.equal(workflowBlocker({ ...ready, name: '' })?.code, 'name-required')
+  assert.equal(
+    workflowBlocker({ ...ready, previewBlockers: ['unprovable boundary'] })?.code,
+    'preview-blocked',
+  )
+  assert.equal(
+    workflowBlocker({ ...ready, rejectedTokens: ['surgery:reviewed'] })?.code,
+    'preview-stale',
+  )
+  assert.equal(
+    workflowBlocker({ ...ready, requiresLeaseApproval: true })?.code,
+    'lease-approval-required',
+  )
+  const forced = {
+    ...ready,
+    requiresLeaseApproval: true,
+    allowForce: true,
+    confirmationTarget: 'top',
+  }
+  assert.equal(workflowBlocker(forced)?.code, 'confirmation-incomplete')
+  assert.equal(workflowBlocker({ ...forced, confirmation: 'top' }), null)
+})
+
 test('restack, publish, and merge keep their own requirements', () => {
   const publish = guard({
     kind: 'stack',

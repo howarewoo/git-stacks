@@ -9,7 +9,21 @@ import type { SurgeryRequest } from '../src/shared/types'
 // The modules under test resolve the GitHub transport when they load, so they are
 // imported after the harness installs its double rather than at the top of the file.
 const { getSnapshot, runAction } = await import('../src/main/git')
-const { getStackProgress, previewSurgery, runSurgery } = await import('../src/main/stacks')
+const { getStackProgress, previewSurgery, runSurgery, validateSurgeryRequest } =
+  await import('../src/main/stacks')
+
+test('IPC accepts each surgery request shape and rejects missing kind-specific fields', () => {
+  for (const request of [
+    { kind: 'insert', branch: 'base', name: 'new-layer' },
+    { kind: 'move', branch: 'top', target: 'base' },
+    { kind: 'remove', branch: 'middle' },
+  ]) {
+    assert.deepEqual(validateSurgeryRequest(request), request)
+  }
+  assert.throws(() => validateSurgeryRequest({ kind: 'insert', branch: 'base' }), /name/)
+  assert.throws(() => validateSurgeryRequest({ kind: 'move', branch: 'top' }), /target/)
+  assert.throws(() => validateSurgeryRequest({ kind: 'remove' }), /branch/)
+})
 
 function git(harness: GitHubHarness, args: string[]): string {
   return harness.runGit(['-C', harness.repo, ...args])
