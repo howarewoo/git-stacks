@@ -53,7 +53,6 @@ import {
   getRefs,
   getRemotePushUrl,
   getStatus,
-  isRecord,
   parseRemote,
   refExists,
   requireRefInput,
@@ -64,6 +63,7 @@ import {
   tryGit,
   validateBranchName,
 } from './git-core'
+import { isRecord } from '../shared/guards'
 import {
   addPullRequestsToNativeStackAction,
   addPullRequestsToStack,

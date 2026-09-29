@@ -8,6 +8,7 @@ import {
   SETTINGS_VERSION,
   SUPPORTED_EDITORS,
   SUPPORTED_MERGE_TOOLS,
+  UPDATE_CHANNELS,
   type AppSettings,
   type SettingsIssue,
   type SettingsMigrations,
@@ -16,7 +17,7 @@ import {
   type SettingsSnapshot,
 } from '../shared/settings'
 import { sanitizeShortcutBindings, type ShortcutId } from '../shared/shortcuts'
-import { isRecord } from './git-core'
+import { isRecord } from '../shared/guards'
 import { validateGitHubHostInput } from './github-host'
 
 /**
@@ -39,14 +40,15 @@ export const SETTING_KEYS = [
   'appearance.theme',
   'appearance.reduceMotion',
   'privacy.includeLocalPaths',
+  'updates.channel',
   'shortcuts',
 ] as const
 
 export type SettingKey = (typeof SETTING_KEYS)[number]
 
-const PULL_STRATEGIES: Record<string, true> = { 'ff-only': true, merge: true, rebase: true }
-const MERGE_METHODS: Record<string, true> = { merge: true, squash: true, rebase: true }
-const THEMES: Record<string, true> = { system: true, light: true, dark: true }
+const PULL_STRATEGIES: readonly string[] = ['ff-only', 'merge', 'rebase']
+const MERGE_METHODS: readonly string[] = ['merge', 'squash', 'rebase']
+const THEMES: readonly string[] = ['system', 'light', 'dark']
 
 /**
  * Locks an administrator's policy places on this computer, keyed by the same
@@ -85,20 +87,14 @@ function toolName(
 }
 
 /**
- * One validated enum or boolean field. `allowed` is a static membership table,
- * so the refusal names every value the field accepts rather than a type.
+ * One validated enum field. `allowed` is a static list, so the refusal names
+ * every value the field accepts rather than a type.
  */
-function oneOf<T>(
-  value: unknown,
-  allowed: Record<string, true>,
-  fallback: T,
-): { value: T; issue: string | null } {
-  if (typeof value === 'string' && allowed[value] === true)
-    return { value: value as T, issue: null }
-  if (typeof value === 'boolean' && allowed[String(value)] === true) {
+function oneOf<T>(value: unknown, allowed: readonly string[], fallback: T): { value: T; issue: string | null } {
+  if (typeof value === 'string' && allowed.includes(value)) {
     return { value: value as T, issue: null }
   }
-  return { value: fallback, issue: `must be ${Object.keys(allowed).join(' or ')}` }
+  return { value: fallback, issue: `must be ${allowed.join(' or ')}` }
 }
 
 /**
@@ -133,6 +129,7 @@ export function validateSettings(value: unknown): {
   const git = isRecord(value.git) ? value.git : {}
   const appearance = isRecord(value.appearance) ? value.appearance : {}
   const privacy = isRecord(value.privacy) ? value.privacy : {}
+  const updates = isRecord(value.updates) ? value.updates : {}
 
   // A field the file did not supply is absent, not invalid: only a value that is
   // present and wrong is reported, so a sparse file does not report every default.
@@ -166,6 +163,10 @@ export function validateSettings(value: unknown): {
       privacy.includeLocalPaths,
       booleanField(privacy.includeLocalPaths, DEFAULT_SETTINGS.privacy.includeLocalPaths),
     ] as const,
+    'updates.channel': [
+      updates.channel,
+      oneOf(updates.channel, UPDATE_CHANNELS, DEFAULT_SETTINGS.updates.channel),
+    ] as const,
   }
   for (const [key, [raw, result]] of Object.entries(fields)) {
     if (raw !== undefined && result.issue) issues.push({ key, message: result.issue })
@@ -177,6 +178,7 @@ export function validateSettings(value: unknown): {
   const theme = fields['appearance.theme'][1].value
   const reduceMotion = fields['appearance.reduceMotion'][1].value
   const includeLocalPaths = fields['privacy.includeLocalPaths'][1].value
+  const updateChannel = fields['updates.channel'][1].value
 
   let fetchInterval = DEFAULT_SETTINGS.git.fetchIntervalSeconds
   if (git.fetchIntervalSeconds !== undefined) {
@@ -234,6 +236,7 @@ export function validateSettings(value: unknown): {
       github: { host: githubHost },
       appearance: { theme, reduceMotion },
       privacy: { includeLocalPaths },
+      updates: { channel: updateChannel },
       shortcuts,
       migrated,
     },
@@ -309,6 +312,7 @@ export function applyPatch(
     git: { ...current.git, ...(isRecord(patch.git) ? patch.git : {}) },
     appearance: { ...current.appearance, ...(isRecord(patch.appearance) ? patch.appearance : {}) },
     privacy: { ...current.privacy, ...(isRecord(patch.privacy) ? patch.privacy : {}) },
+    updates: { ...current.updates, ...(isRecord(patch.updates) ? patch.updates : {}) },
     shortcuts,
     migrated: { legacyShortcutStorage },
   }

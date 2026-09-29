@@ -25,6 +25,7 @@ import {
 } from '../../../shared/settings'
 import type { ShortcutId } from '../../../shared/shortcuts'
 import type { GitHubAccountStatus } from '../../../shared/types'
+import { UPDATE_CHANNELS, type UpdateChannel, type UpdateStatus } from '../../../shared/update'
 import { CAPABILITY_STATE_LABELS, type GitHubHostStatus } from '../../../shared/host'
 
 const MERGE_METHOD_LABELS: Record<MergeMethod, string> = {
@@ -64,9 +65,15 @@ export interface SettingsDialogProps {
     diagnostics?: () => Promise<DiagnosticReport>
     supportBundlePreview?: () => Promise<SupportBundlePreview>
     exportSupportBundle?: (previewId: string) => Promise<{ path: string; bytes: number }>
-    signOutOfGitHub?: () => Promise<GitHubAccountStatus>
-    githubAccountStatus?: () => Promise<GitHubAccountStatus>
     githubHostStatus?: () => Promise<GitHubHostStatus>
+    githubAccountStatus?: () => Promise<GitHubAccountStatus>
+    signOutOfGitHub?: () => Promise<GitHubAccountStatus>
+    updateStatus?: () => Promise<UpdateStatus>
+    checkForUpdates?: () => Promise<UpdateStatus>
+    downloadUpdate?: () => Promise<UpdateStatus>
+    installUpdate?: () => Promise<UpdateStatus>
+    cancelUpdate?: () => Promise<UpdateStatus>
+    onUpdateStatus?: (listener: (status: UpdateStatus) => void) => () => void
   } | null
   account: GitHubAccountStatus | null
   onAccountChange: (status: GitHubAccountStatus) => void
@@ -84,6 +91,7 @@ type Section =
   | 'appearance'
   | 'privacy'
   | 'shortcuts'
+  | 'updates'
   | 'diagnostics'
 
 const SECTIONS: { id: Section; label: string }[] = [
@@ -91,6 +99,7 @@ const SECTIONS: { id: Section; label: string }[] = [
   { id: 'github', label: 'GitHub' },
   { id: 'git', label: 'Git' },
   { id: 'appearance', label: 'Appearance' },
+  { id: 'updates', label: 'Updates' },
   { id: 'shortcuts', label: 'Shortcuts' },
   { id: 'privacy', label: 'Privacy' },
   { id: 'diagnostics', label: 'Diagnostics' },
@@ -117,6 +126,34 @@ export function SettingsDialog({
   const [editorDraft, setEditorDraft] = React.useState('')
   const [mergeToolDraft, setMergeToolDraft] = React.useState('')
   const [message, setMessage] = React.useState<string | null>(null)
+  const [updates, setUpdates] = React.useState<UpdateStatus | null>(null)
+
+  /**
+   * Every update step goes through main and the answer main gives back is what
+   * is shown. The window never decides that a download finished or that an
+   * install may run.
+   */
+  const runUpdate = React.useCallback(
+    async (step: () => Promise<UpdateStatus | undefined> | undefined, busyWhile: boolean) => {
+      if (!step) return
+      if (busyWhile) setBusy(true)
+      try {
+        const next = await step()
+        if (next) setUpdates(next)
+      } catch (value) {
+        onError(value instanceof Error ? value.message : String(value))
+      } finally {
+        if (busyWhile) setBusy(false)
+      }
+    },
+    [onError],
+  )
+
+  React.useEffect(() => {
+    if (!open || section !== 'updates') return
+    if (desktop?.updateStatus) void runUpdate(() => desktop.updateStatus?.(), false)
+    return desktop?.onUpdateStatus?.((status) => setUpdates(status))
+  }, [desktop, open, runUpdate, section])
 
   const refresh = React.useCallback(async () => {
     if (!desktop?.settings) return
@@ -606,6 +643,71 @@ export function SettingsDialog({
               </WorkflowSection>
             ) : null}
 
+            {section === 'updates' && settings ? (
+              <>
+                <WorkflowSection label="Updates">
+                  <Field
+                    id="settings-update-channel"
+                    label="Channel"
+                    description="Stable follows signed releases for everyone. Beta follows the pre-release channel, which moves faster and changes more often."
+                    error={problemFor('updates.channel')}
+                  >
+                    <SegmentedControl
+                      label="Channel"
+                      value={settings.updates.channel}
+                      disabled={busy || locked('updates.channel')}
+                      options={UPDATE_CHANNELS.map((value) => ({
+                        value,
+                        label: value === 'stable' ? 'Stable' : 'Beta',
+                      }))}
+                      onValueChange={(value) =>
+                        void save(
+                          { updates: { channel: value as UpdateChannel } },
+                          `Following the ${value} channel.`,
+                        )
+                      }
+                    />
+                  </Field>
+                  <OperationFacts facts={updateFacts(updates, settings.updates.channel)} />
+                </WorkflowSection>
+                <WorkflowSection label="This build">
+                  {updateNotice(updates)}
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Button
+                      variant="secondary"
+                      disabled={busy || !desktop?.checkForUpdates || updates?.phase === 'not-configured'}
+                      onClick={() => void runUpdate(() => desktop?.checkForUpdates?.(), true)}
+                    >
+                      Check for updates
+                    </Button>
+                    <Button
+                      disabled={busy || updates?.phase !== 'available' || !desktop?.downloadUpdate}
+                      onClick={() => void runUpdate(() => desktop?.downloadUpdate?.(), false)}
+                    >
+                      {updates?.phase === 'downloading'
+                        ? `Downloading ${updates.progress ?? 0}%`
+                        : 'Download update'}
+                    </Button>
+                    <Button
+                      disabled={busy || !updates?.readyToInstall || !desktop?.installUpdate}
+                      onClick={() => void runUpdate(() => desktop?.installUpdate?.(), true)}
+                    >
+                      Install and restart
+                    </Button>
+                    {(updates?.phase === 'checking' || updates?.phase === 'downloading') &&
+                    desktop?.cancelUpdate ? (
+                      <Button
+                        variant="secondary"
+                        onClick={() => void runUpdate(() => desktop?.cancelUpdate?.(), false)}
+                      >
+                        Cancel
+                      </Button>
+                    ) : null}
+                  </div>
+                </WorkflowSection>
+              </>
+            ) : null}
+
             {section === 'shortcuts' ? (
               <WorkflowSection label="Keyboard shortcuts">
                 <ShortcutEditor
@@ -749,4 +851,69 @@ function toolError(
   return tool.label === 'none configured'
     ? undefined
     : `${tool.label} is not installed on this computer.`
+}
+
+const UPDATE_TRUST_LABEL: Record<UpdateStatus['trust'], string> = {
+  release: 'Release signing key compiled into this build',
+  development: 'Development key from this machine’s environment',
+  none: 'No signing key in this build',
+}
+
+const UPDATE_PHASE_LABEL: Record<UpdateStatus['phase'], string> = {
+  idle: 'Not checked yet',
+  'not-configured': 'Updates are switched off in this build',
+  unsupported: 'This platform is not updated in place',
+  checking: 'Checking for a signed release…',
+  current: 'This is the newest signed release for this channel',
+  available: 'A signed release is ready to download',
+  downloading: 'Downloading and verifying the signed release…',
+  downloaded: 'The release is downloaded and verified. Install it when you are ready.',
+  installing: 'Installing and restarting…',
+  failed: 'The last attempt did not finish',
+  cancelled: 'Cancelled. Nothing was changed.',
+}
+
+/** The facts about the updater that are true regardless of what it is doing. */
+function updateFacts(status: UpdateStatus | null, channel: UpdateChannel): ContextFact[] {
+  return [
+    { label: 'Installed version', value: status?.currentVersion ?? 'Unknown', code: true },
+    { label: 'Channel', value: channel },
+    {
+      label: 'Signing key',
+      value: UPDATE_TRUST_LABEL[status?.trust ?? 'none'],
+    },
+    {
+      label: 'In-place updates',
+      value: status?.supported ? 'Supported on this platform' : 'Not supported on this platform',
+    },
+  ]
+}
+
+/**
+ * What the updater is doing, in the terms it reported. A refusal is shown as
+ * the reason main gave, never as a failure to connect that invites the reader
+ * to retry something that will refuse again.
+ */
+function updateNotice(status: UpdateStatus | null) {
+  if (!status) return <InlineAlert tone="info">Reading the update state…</InlineAlert>
+  const offer = status.offer
+  const headline = offer
+    ? `Version ${offer.version} on the ${offer.channel} channel${
+        offer.rollbackOf ? `, an authorised rollback of ${offer.rollbackOf}` : ''
+      } · ${Math.round(offer.size / (1024 * 1024))} MB for ${offer.platform} ${offer.arch}`
+    : UPDATE_PHASE_LABEL[status.phase]
+  const body = status.failure
+    ? `${status.failure.message} (${status.failure.reason})`
+    : offer?.notes
+  return (
+    <>
+      <InlineAlert tone={status.failure ? 'warning' : 'info'}>
+        {headline}
+        {body ? ` — ${body}` : ''}
+      </InlineAlert>
+      {status.restartRequired ? (
+        <InlineAlert tone="success">The update is installed. Restart to use it.</InlineAlert>
+      ) : null}
+    </>
+  )
 }

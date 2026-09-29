@@ -6,7 +6,8 @@ import type {
   PullRequestStackMember,
   PullRequestStackMembership,
 } from '../shared/types'
-import { getOriginUrl, isCancelled, isRecord, parseRemote } from './git-core'
+import { getOriginUrl, isCancelled, parseRemote } from './git-core'
+import { isRecord } from '../shared/guards'
 import {
   hostTransport,
   type GitHubHostContext,

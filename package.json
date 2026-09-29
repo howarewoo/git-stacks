@@ -112,5 +112,10 @@
     "tsx": "4.23.15",
     "typescript": "7.0.2",
     "vite": "7.3.6"
+  },
+  "allowScripts": {
+    "electron@44.4.3": true,
+    "esbuild@0.25.12": true,
+    "esbuild@0.28.2": true
   }
 }

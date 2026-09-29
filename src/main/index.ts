@@ -136,6 +136,7 @@ import type {
 } from '../shared/settings'
 
 import type { GitEnvironmentStatus } from '../shared/types'
+import { UpdateService } from './update/service'
 
 const readKeys = new RequestRegistry()
 const onboardingKeys = new RequestRegistry()
@@ -313,6 +314,13 @@ function credentialVault(): CredentialVault {
 }
 
 /**
+ * The update lifecycle. It runs in main because every decision about what to
+ * fetch, what to verify, and what to run happens here; the window only asks for
+ * a step and shows what happened.
+ */
+let updateService: UpdateService | null = null
+
+/**
  * The signed-in GitHub account. Its credential is sealed by the operating
  * system and never reaches the renderer: the bridge carries status only.
  */
@@ -344,16 +352,17 @@ let hostGeneration = 0
 const hostWork = new Set<AbortController>()
 
 function applySettings(settings: AppSettings): void {
-  const previous = currentSettings?.github.host ?? null
+  const previousHost = currentSettings?.github.host ?? null
   currentSettings = settings
-  if (previous === settings.github.host) return
+  void updateService?.setChannel(settings.updates.channel)
+  if (previousHost === settings.github.host) return
   // Everything already in flight was addressed to the host that is no longer
   // selected. It is aborted, and its generation is retired, so a response that
   // arrives afterwards cannot repopulate the previous host's cache or the UI.
   for (const controller of hostWork) controller.abort()
   hostWork.clear()
   hostGeneration += 1
-  forgetHost(previous ?? undefined)
+  forgetHost(previousHost ?? undefined)
   if (account !== null && accountHost !== settings.github.host) {
     // The sign-out is not awaited, and it does not need to be: the account
     // removes only the identity the shared files hold for its own host, and
@@ -1010,6 +1019,10 @@ const ipcMain = {
   },
 }
 
+function requireUpdateService(): UpdateService {
+  if (!updateService) throw new Error('Updates are not available in this session.')
+  return updateService
+}
 function installHandlers() {
   // The clone destination is chosen with the platform folder picker, so the
   // renderer never composes a filesystem path of its own.
@@ -1668,6 +1681,31 @@ function installHandlers() {
     validateSender(event)
     return accountForConfiguredHost().signOut()
   })
+
+  // The update lifecycle. Each handler takes no argument at all: the channel
+  // comes from settings main already owns, and the step comes from main's own
+  // state machine. Nothing the window can send chooses a URL, a file, or a
+  // command.
+  ipcMain.handle('update:status', (event) => {
+    validateSender(event)
+    return requireUpdateService().status()
+  })
+  ipcMain.handle('update:check', async (event) => {
+    validateSender(event)
+    return await requireUpdateService().check()
+  })
+  ipcMain.handle('update:download', async (event) => {
+    validateSender(event)
+    return await requireUpdateService().download()
+  })
+  ipcMain.handle('update:install', async (event) => {
+    validateSender(event)
+    return await requireUpdateService().install()
+  })
+  ipcMain.handle('update:cancel', (event) => {
+    validateSender(event)
+    return requireUpdateService().cancel()
+  })
 }
 
 async function createWindow() {
@@ -1684,13 +1722,27 @@ async function createWindow() {
       preload: join(bundleDir, '../preload/index.cjs'),
       contextIsolation: true,
       nodeIntegration: false,
+      nodeIntegrationInWorker: false,
+      nodeIntegrationInSubFrames: false,
       sandbox: true,
       webSecurity: true,
+      allowRunningInsecureContent: false,
+      // A dropped folder is a path the preload resolves, not a navigation, and
+      // an in-place reload of a file URL would leave the app origin entirely.
+      navigateOnDragDrop: false,
+      webviewTag: false,
+      enableBlinkFeatures: '',
+      spellcheck: false,
     },
   })
+  // Nothing in this app opens a second window or embeds a document. Both are
+  // refused rather than handed to the renderer, so a link or a payload cannot
+  // create a page that main's sender check was never written for.
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
   window.webContents.on('will-navigate', (event) => event.preventDefault())
+  window.webContents.on('will-redirect', (event) => event.preventDefault())
   window.webContents.on('will-attach-webview', (event) => event.preventDefault())
+  window.webContents.on('will-frame-navigate', (event) => event.preventDefault())
   window.on('closed', () => {
     window = null
     // Nothing watches or polls for a window that no longer exists.
@@ -1707,21 +1759,40 @@ app
       callback(false),
     )
     session.defaultSession.setPermissionCheckHandler(() => false)
+    // Every window this app creates is the app itself. A second one, a
+    // permission request from anything that did not ask through main, or a
+    // device the renderer never declared is refused here rather than left to
+    // each surface.
+    app.on('web-contents-created', (_event, contents) => {
+      contents.setWindowOpenHandler(() => ({ action: 'deny' }))
+      contents.on('will-navigate', (event) => event.preventDefault())
+      contents.on('will-attach-webview', (event) => event.preventDefault())
+    })
     session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
       callback({
         responseHeaders: {
           ...details.responseHeaders,
           'Content-Security-Policy': [
-            `default-src 'self'; script-src 'self'${devUrl ? " 'unsafe-inline'" : ''}; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'${devUrl ? ` ws://${new URL(devUrl).host}` : ''}; object-src 'none'; base-uri 'none'; frame-src 'none'`,
+            `default-src 'self'; script-src 'self'${devUrl ? " 'unsafe-inline'" : ''}; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'${devUrl ? ` ws://${new URL(devUrl).host}` : ''}; object-src 'none'; base-uri 'none'; frame-src 'none'; form-action 'none'; frame-ancestors 'none'`,
           ],
+          'X-Content-Type-Options': ['nosniff'],
+          'Referrer-Policy': ['no-referrer'],
         },
       })
     })
     const rendererRoot = resolve(bundleDir, '../renderer')
     protocol.handle('app', (request) => {
       const url = new URL(request.url)
+      // Only the bundled renderer is served, only over the one host this app
+      // registers, and only when the decoded path stays inside it: a traversal,
+      // an encoded separator, or another host is a 404 rather than a file.
       const path = resolve(rendererRoot, `.${decodeURIComponent(url.pathname)}`)
-      if (url.host !== 'git-stacks' || !path.startsWith(`${rendererRoot}${sep}`)) {
+      if (
+        url.host !== 'git-stacks' ||
+        !path.startsWith(`${rendererRoot}${sep}`) ||
+        url.pathname.includes('%2f') ||
+        url.pathname.includes('%5c')
+      ) {
         return new Response('Not found', { status: 404 })
       }
       return net.fetch(pathToFileURL(path).href)
@@ -1754,6 +1825,25 @@ app
     // The selected host is applied before anything can ask for it, so sign-in,
     // discovery, and clone commands address the host the person chose.
     applySettings((await readSettingsFile(settingsFile())).settings)
+    // The updater is started before the window exists, so the first thing the
+    // surface can ask about is already the truth: whether this build is signed,
+    // which channel it follows, and whether a staged installer is waiting.
+    updateService = new UpdateService({
+      packaged: app.isPackaged,
+      currentVersion: app.getVersion(),
+      appPath: app.getPath('exe'),
+      userDataPath: app.getPath('userData'),
+      platform: process.platform,
+      arch: process.arch,
+      relaunch: () => {
+        app.relaunch()
+        app.quit()
+      },
+    })
+    updateService.onChange((status) => {
+      window?.webContents.send('update:status', status)
+    })
+    await updateService.start(currentSettings?.updates.channel ?? 'stable')
     const preference = await readGitRuntimePreference(settingsFile()).catch(() => false)
     configureGitRuntime({
       appVersion: app.getVersion(),

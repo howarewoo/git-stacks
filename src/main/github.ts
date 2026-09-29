@@ -6,10 +6,10 @@ import {
   commandDetail,
   getConfigValue,
   isCancelled,
-  isRecord,
   parseRemote,
   runGit,
 } from './git-core'
+import { isRecord } from '../shared/guards'
 import {
   type GitHubHostContext,
   hostTransport,

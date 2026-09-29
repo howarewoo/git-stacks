@@ -1,4 +1,4 @@
-import { isRecord } from './git-core'
+import { isRecord } from '../shared/guards'
 import { GitHubTransportError, type GitHubTransport } from './github-transport'
 import {
   GITHUB_DOTCOM_HOST,

@@ -8,6 +8,7 @@ import type {
   RepositoryIssue,
   RepositorySnapshot,
 } from '../shared/types'
+import type { UpdateStatus } from '../shared/update'
 
 /**
  * Dropped folders never cross the bridge as `File` objects. The preload resolves
@@ -156,6 +157,18 @@ const desktop: DesktopAPI = {
   supportBundlePreview: () => ipcRenderer.invoke('support-bundle:preview'),
   exportSupportBundle: (previewId: string) => ipcRenderer.invoke('support-bundle:export', previewId),
   openInEditor: (relativePath) => ipcRenderer.invoke('editor:open', relativePath),
+  updateStatus: () => ipcRenderer.invoke('update:status'),
+  checkForUpdates: () => ipcRenderer.invoke('update:check'),
+  downloadUpdate: () => ipcRenderer.invoke('update:download'),
+  installUpdate: () => ipcRenderer.invoke('update:install'),
+  cancelUpdate: () => ipcRenderer.invoke('update:cancel'),
+  onUpdateStatus: (listener: (status: UpdateStatus) => void) => {
+    const handler = (_event: unknown, status: UpdateStatus): void => listener(status)
+    ipcRenderer.on('update:status', handler)
+    return () => {
+      ipcRenderer.removeListener('update:status', handler)
+    }
+  },
 }
 
 contextBridge.exposeInMainWorld('desktop', desktop)

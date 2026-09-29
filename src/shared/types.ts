@@ -20,6 +20,7 @@ import type {
   SupportBundleExport,
   SupportBundlePreview,
 } from './settings'
+import type { UpdateStatus } from './update'
 
 export type NativeStackValidationStatus =
   | 'valid'
@@ -1352,6 +1353,23 @@ export interface DesktopAPI {
    * neither a command nor an absolute path.
    */
   openInEditor?(relativePath: string): Promise<{ opened: boolean; reason: string }>
+
+  /**
+   * Where the updater is and what it last concluded. Main owns the lifecycle:
+   * the renderer asks for a step and reports what main says happened, so no
+   * decision about what to fetch or install is ever made in the window.
+   */
+  updateStatus?(): Promise<UpdateStatus>
+  /** Authenticates the channel's manifest and offers it, if it applies here. */
+  checkForUpdates?(): Promise<UpdateStatus>
+  /** Downloads the offered build and verifies it against the signed manifest. */
+  downloadUpdate?(): Promise<UpdateStatus>
+  /** Applies a downloaded build and restarts into it. */
+  installUpdate?(): Promise<UpdateStatus>
+  /** Ends a check or download in progress. */
+  cancelUpdate?(): Promise<UpdateStatus>
+  /** Subscribes to status pushed as a download progresses. */
+  onUpdateStatus?(listener: (status: UpdateStatus) => void): () => void
 }
 
 export type GitCapability = 'referenceTransactions' | 'rebaseUpdateRefs'
