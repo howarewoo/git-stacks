@@ -27,28 +27,19 @@ DialogOverlay.displayName = DialogPrimitive.Overlay.displayName
 const DialogContent = React.forwardRef<
   React.ElementRef<typeof DialogPrimitive.Content>,
   React.ComponentPropsWithoutRef<typeof DialogPrimitive.Content>
->(({ className, children, onCloseAutoFocus, ...props }, ref) => {
+>(({ className, children, onOpenAutoFocus, onCloseAutoFocus, ...props }, ref) => {
   const opener = React.useRef<HTMLElement | null>(null)
-  // Ref callbacks run in the commit phase, before the focus scope claims focus,
-  // so this is the last moment the initiating control is still known.
-  const attach = React.useCallback(
-    (node: HTMLDivElement | null) => {
-      if (node) {
-        const active = document.activeElement
-        if (active instanceof HTMLElement && active !== document.body) {
-          opener.current = active
-        }
-      }
-      if (typeof ref === 'function') ref(node)
-      else if (ref) (ref as React.MutableRefObject<HTMLDivElement | null>).current = node
-    },
-    [ref],
-  )
   return (
     <DialogPortal>
       <DialogOverlay />
       <DialogPrimitive.Content
-        ref={attach}
+        ref={ref}
+        onOpenAutoFocus={(event) => {
+          // Radix dispatches this before moving focus; composed ref callbacks may run later.
+          const active = document.activeElement
+          opener.current = active instanceof HTMLElement && active !== document.body ? active : null
+          onOpenAutoFocus?.(event)
+        }}
         onCloseAutoFocus={(event) => {
           onCloseAutoFocus?.(event)
           if (event.defaultPrevented) return

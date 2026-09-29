@@ -674,7 +674,7 @@ export function HistoryView({
           {error}
         </p>
       ) : null}
-      <div className="history-list" aria-label="Commit history">
+      <div className="history-list" role="group" aria-label="Commit history">
         {visible.map((commit) => (
           <button
             className={`history-row ${selected?.oid === commit.oid ? 'history-row-selected' : ''}`}
@@ -933,7 +933,11 @@ export function StackView({
               Local parent management and restacking remain available.
             </p>
           ) : null}
-          <div className="stack-members" aria-label="Stack branches, children above parents">
+          <div
+            className="stack-members"
+            role="group"
+            aria-label="Stack branches, children above parents"
+          >
             {ordered
               .filter((branch) =>
                 `${branch.name} ${branch.pr?.title ?? ''}`

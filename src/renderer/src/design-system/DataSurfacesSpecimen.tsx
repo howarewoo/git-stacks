@@ -11,14 +11,7 @@ import {
 import { HistoryView } from '../components/repository-views'
 import type { GitAction, RepositorySnapshot } from '../../../shared/types'
 import type { WorkflowRequest } from '../components/workflow-dialog'
-import {
-  changesSnapshots,
-  fileViewFixtures,
-  historyCommits,
-  longDiffText,
-  pullRequestSnapshots,
-  stashSnapshots,
-} from './data-fixtures'
+import { changesSnapshots, pullRequestSnapshots, stashSnapshots } from './data-fixtures'
 import { RepositoryHoverCardProvider } from '../components/repository-hover-cards'
 import { TooltipProvider } from '../components/ui/tooltip'
 
@@ -38,18 +31,6 @@ const pullRequestOptions = [
   { value: 'unavailable', label: 'GitHub unavailable' },
 ] as const
 
-const fixtureDesktop = {
-  fileView: async (path: string) =>
-    Object.values(fileViewFixtures).find((view) => view.path === path) ??
-    fileViewFixtures.bothSides,
-  history: async (ref: string, skip: number) => ({
-    commits: historyCommits.slice(skip, skip + 2),
-    hasMore: skip + 2 < historyCommits.length,
-  }),
-  commitDiff: async () => ({ text: longDiffText, truncated: false }),
-  openExternal: async () => undefined,
-} as unknown as NonNullable<Window['desktop']>
-
 export function DataSurfacesSpecimen() {
   const [view, setView] = React.useState<'changes' | 'history' | 'prs' | 'stashes'>('changes')
   const [scenario, setScenario] = React.useState<(typeof scenarioOptions)[number]['value']>('mixed')
@@ -61,10 +42,6 @@ export function DataSurfacesSpecimen() {
   const [commitAmend, setCommitAmend] = React.useState(false)
   const [inspectedPath, setInspectedPath] = React.useState<string | null>(null)
   const [dispatches, setDispatches] = React.useState<Dispatch[]>([])
-
-  React.useEffect(() => {
-    window.desktop = fixtureDesktop
-  }, [])
 
   const record = React.useCallback((label: string, payload: unknown) => {
     setDispatches((previous) => [{ label, payload }, ...previous].slice(0, 6))

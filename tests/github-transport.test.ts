@@ -588,7 +588,7 @@ test('pagination handles prefixed API base without next link and with next link'
     assert.deepEqual(serverRequests, ['/api/v3/multi', '/api/v3/multi?page=2'])
 
     serverRequests.length = 0
-    const gh = new GhGitHubTransport({ apiUrl })
+    const gh = new GhGitHubTransport({ apiUrl, env: { GH_TOKEN: 'local-test-token' } })
     const ghSingle = await gh.paginate<{ id: number }>({ path: 'single' })
     assert.deepEqual(ghSingle, [{ id: 1 }])
     assert.deepEqual(serverRequests, ['/api/v3/single'])
@@ -597,6 +597,56 @@ test('pagination handles prefixed API base without next link and with next link'
     const ghMulti = await gh.paginate<{ id: number }>({ path: 'multi' })
     assert.deepEqual(ghMulti, [{ id: 1 }, { id: 2 }])
     assert.deepEqual(serverRequests, ['/api/v3/multi', '/api/v3/multi?page=2'])
+  } finally {
+    server.closeAllConnections()
+    await new Promise<void>((resolve, reject) =>
+      server.close((error) => (error ? reject(error) : resolve())),
+    )
+  }
+})
+
+test('native gh sends JSON content type for REST and GraphQL bodies', async () => {
+  let hasGh = false
+  try {
+    execFileSync('gh', ['--version'], { stdio: 'ignore' })
+    hasGh = true
+  } catch {
+    hasGh = false
+  }
+  if (!hasGh) return
+
+  const requests: Array<{ path: string; contentType: string | undefined; body: unknown }> = []
+  const server = createServer(async (request, response) => {
+    const chunks: Buffer[] = []
+    for await (const chunk of request) chunks.push(chunk)
+    requests.push({
+      path: request.url ?? '',
+      contentType: request.headers['content-type'],
+      body: JSON.parse(Buffer.concat(chunks).toString('utf8')),
+    })
+    response.setHeader('content-type', 'application/json')
+    response.end(request.url === '/graphql' ? '{"data":{"ok":true}}' : '{"ok":true}')
+  })
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  try {
+    const address = server.address()
+    assert.ok(address && typeof address !== 'string')
+    const gh = new GhGitHubTransport({
+      apiUrl: `http://127.0.0.1:${address.port}`,
+      env: { GH_TOKEN: 'local-test-token' },
+    })
+    const body = { title: 'Next', nested: { labels: ['one', 'two'] } }
+    await gh.rest({ method: 'PATCH', path: 'pulls/3', body })
+    const query = 'query { viewer { login } }'
+    assert.deepEqual(await gh.graphql(query, { count: 2 }), { ok: true })
+    assert.deepEqual(requests, [
+      { path: '/pulls/3', contentType: 'application/json', body },
+      {
+        path: '/graphql',
+        contentType: 'application/json',
+        body: { query, variables: { count: 2 } },
+      },
+    ])
   } finally {
     server.closeAllConnections()
     await new Promise<void>((resolve, reject) =>
@@ -623,7 +673,10 @@ test('native gh cancellation and deadline cleanup apply to subprocesses on a loc
   try {
     const address = server.address()
     assert.ok(address && typeof address !== 'string')
-    const gh = new GhGitHubTransport({ apiUrl: `http://127.0.0.1:${address.port}` })
+    const gh = new GhGitHubTransport({
+      apiUrl: `http://127.0.0.1:${address.port}`,
+      env: { GH_TOKEN: 'local-test-token' },
+    })
 
     const pre = new AbortController()
     pre.abort()
