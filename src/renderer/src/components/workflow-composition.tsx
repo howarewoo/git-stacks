@@ -5,7 +5,7 @@ import { Badge } from './ui/badge'
 import { Field } from './ui/field'
 import { Input } from './ui/input'
 import { InlineAlert } from './ui/surface'
-import type { StackStep } from '../../../shared/types'
+import type { PublishProgress, PublishStepStatus, StackStep } from '../../../shared/types'
 import { PHASE_PRESENTATION, type WorkflowComposition, type WorkflowPhase } from './workflow-policy'
 
 /**
@@ -266,6 +266,19 @@ export function BlockerList({
 export function WarningNote({ children }: { children: React.ReactNode }) {
   return <InlineAlert tone="warning">{children}</InlineAlert>
 }
+/**
+ * A recorded approval, shown because it cannot be changed here. A control that looks
+ * editable while the saved value is what actually runs would let a person read a choice
+ * they never made; fixed text cannot drift from the journalled decision.
+ */
+export function ImmutableApproval({ label, summary }: { label: string; summary: string }) {
+  return (
+    <InlineAlert tone="info">
+      <span className="font-medium">{label}</span>
+      <span className="block">{summary}</span>
+    </InlineAlert>
+  )
+}
 
 /**
  * A typed confirmation. The input never enables its action by itself: the caller
@@ -326,5 +339,77 @@ export function WorkflowActions({
     >
       {children}
     </div>
+  )
+}
+
+const stepStatusLabel: Record<PublishStepStatus, string> = {
+  pending: 'waiting',
+  running: 'running',
+  completed: 'done',
+  failed: 'stopped',
+}
+
+/**
+ * What a submission has actually finished. The rows are the persisted steps, so
+ * a resume shows real completed work rather than a re-run of the whole plan, and
+ * a stopped step carries the recovery that unblocks it.
+ */
+export function PublishProgressPanel({
+  progress,
+  className,
+}: {
+  progress: PublishProgress | null
+  className?: string
+}) {
+  if (!progress) return null
+  const stopped = progress.steps.find((step) => step.status === 'failed')
+  const done = progress.steps.filter((step) => step.status === 'completed').length
+  return (
+    <WorkflowSection
+      className={className}
+      label={`Submission progress — ${done} of ${progress.steps.length} steps done`}
+    >
+      {progress.status === 'completed' ? (
+        <InlineAlert tone="success">{progress.message}</InlineAlert>
+      ) : stopped?.failure ? (
+        <InlineAlert tone="error">
+          <strong className="block">{stopped.failure.summary}</strong>
+          {stopped.failure.recovery}
+        </InlineAlert>
+      ) : (
+        <InlineAlert tone="info">{progress.message}</InlineAlert>
+      )}
+      <ol aria-label="Submission steps" className="m-0 grid list-none gap-1.5 p-0">
+        {progress.steps.map((step, index) => (
+          <li
+            key={`${step.kind}-${step.branch ?? 'stack'}-${index}`}
+            className="grid grid-cols-[auto_minmax(0,1fr)_auto] items-start gap-2 rounded-[var(--gs-semantic-radius-item)] border border-[var(--gs-semantic-border-essential)] bg-[var(--gs-semantic-surface-content)] px-3 py-2"
+          >
+            <Badge
+              variant={step.status === 'failed' ? 'danger' : 'secondary'}
+              className="mt-0.5 shrink-0"
+            >
+              {stepStatusLabel[step.status]}
+            </Badge>
+            <div className="grid min-w-0 gap-0.5">
+              <strong className="break-words text-[length:var(--gs-semantic-type-label-size)] text-[var(--gs-semantic-text-primary)]">
+                {step.label}
+              </strong>
+              <span className="text-[length:var(--gs-semantic-type-metadata-size)] text-[var(--gs-semantic-text-secondary)]">
+                {step.detail}
+                {step.pullRequest === null ? '' : ` · #${step.pullRequest}`}
+              </span>
+            </div>
+            {progress.resumeAt === index && step.status === 'failed' ? (
+              <span className="col-span-2 col-start-2 text-[length:var(--gs-semantic-type-metadata-size)] text-[var(--gs-semantic-text-secondary)]">
+                {step.failure?.retryable
+                  ? 'Retry continues from this step without repeating the finished ones.'
+                  : 'This step cannot be retried; dismiss the submission and take a fresh preview.'}
+              </span>
+            ) : null}
+          </li>
+        ))}
+      </ol>
+    </WorkflowSection>
   )
 }

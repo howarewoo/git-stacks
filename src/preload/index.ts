@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron'
-import type { DesktopAPI } from '../shared/types'
+import type { DesktopAPI, PublishProgress } from '../shared/types'
 
 const desktop: DesktopAPI = {
   recentRepositories: () => ipcRenderer.invoke('repositories:recent'),
@@ -12,6 +12,14 @@ const desktop: DesktopAPI = {
   commitDiff: (oid, requestId) => ipcRenderer.invoke('repository:commit-diff', oid, requestId),
   pushPreview: () => ipcRenderer.invoke('repository:push-preview'),
   stackPreview: (kind, branch) => ipcRenderer.invoke('repository:stack-preview', kind, branch),
+  submitStackProgress: () => ipcRenderer.invoke('repository:submit-stack-progress'),
+  onSubmitStackProgress: (listener: (progress: PublishProgress | null) => void) => {
+    const handler = (_event: unknown, progress: PublishProgress | null): void => listener(progress)
+    ipcRenderer.on('submit-stack-progress', handler)
+    return () => {
+      ipcRenderer.removeListener('submit-stack-progress', handler)
+    }
+  },
   reconciliationPreview: (stackKey) =>
     ipcRenderer.invoke('repository:reconciliation-preview', stackKey),
   pullRequest: (number) => ipcRenderer.invoke('repository:pull-request', number),

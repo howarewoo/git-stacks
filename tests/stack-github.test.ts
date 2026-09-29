@@ -110,12 +110,17 @@ async function publishStack(
   const preview = await previewStack(harness.repo, snapshot, 'publish', 'child')
   assert.deepEqual(preview.blockers, [])
   await runAction(harness.repo, {
-    type: 'executeStack',
+    type: 'submitStack',
     token: preview.token,
     allowForce: options.allowForce ?? false,
-    draft: options.draft ?? false,
-    titles: options.titles ?? { parent: 'Parent title', child: 'Child title' },
-    mergeMethod: 'squash',
+    layers: Object.fromEntries(
+      Object.entries(options.titles ?? { parent: 'Parent title', child: 'Child title' }).map(
+        ([branch, title]) => [
+          branch,
+          { title, body: '', draft: options.draft ?? false, updateBase: true },
+        ],
+      ),
+    ),
   })
 }
 
@@ -251,6 +256,11 @@ async function assertPublicationRejectsConcurrentRefDeletion(allowForce: boolean
     assert.equal(localOid(harness, 'child'), capturedTip)
     assert.equal(remoteOid(harness, 'child'), remoteBefore)
     assert.equal((await pushedGitTransports(harness)).length, pushesBefore.length)
+    // The refused submission stays on record until it is dismissed, so the retry that
+    // succeeds is the explicit next action a person takes. Dismissing also clears the recorded
+    // operation, which a fresh publish would otherwise refuse to start alongside.
+    await runAction(harness.repo, { type: 'submitStackDismiss' })
+    // The deletion race only applies to the refused attempt; the retry must push normally.
     hook.armed = false
     await publishStack(harness, { allowForce })
     assert.equal(remoteOid(harness, 'child'), capturedTip)
@@ -288,12 +298,13 @@ test(
 
       await assert.rejects(
         runAction(harness.repo, {
-          type: 'executeStack',
+          type: 'submitStack',
           token: preview.token,
           allowForce: false,
-          draft: false,
-          titles: { parent: 'Parent title', child: 'Child title' },
-          mergeMethod: 'squash',
+          layers: {
+            parent: { title: 'Parent title', body: '', draft: false, updateBase: true },
+            child: { title: 'Child title', body: '', draft: false, updateBase: true },
+          },
         }),
         /Pull request for parent changed during publication/u,
       )
@@ -341,12 +352,13 @@ test(
       const pushesBefore = await pushedGitTransports(harness)
       await assert.rejects(
         runAction(harness.repo, {
-          type: 'executeStack',
+          type: 'submitStack',
           token: preview.token,
           allowForce: false,
-          draft: false,
-          titles: { parent: 'Parent title', child: 'Child title' },
-          mergeMethod: 'squash',
+          layers: {
+            parent: { title: 'Parent title', body: '', draft: false, updateBase: true },
+            child: { title: 'Child title', body: '', draft: false, updateBase: true },
+          },
         }),
         /pull request for child changed/u,
       )
@@ -393,8 +405,6 @@ test(
         type: 'executeStack',
         token: restack.token,
         allowForce: false,
-        draft: false,
-        titles: {},
         mergeMethod: 'squash',
       })
       const childTip = localOid(harness, 'child')
@@ -416,12 +426,13 @@ test(
       assert.deepEqual(preview.blockers, [])
       await assert.rejects(
         runAction(harness.repo, {
-          type: 'executeStack',
+          type: 'submitStack',
           token: preview.token,
           allowForce: true,
-          draft: false,
-          titles: { parent: 'Parent title', child: 'Child title' },
-          mergeMethod: 'squash',
+          layers: {
+            parent: { title: 'Parent title', body: '', draft: false, updateBase: true },
+            child: { title: 'Child title', body: '', draft: false, updateBase: true },
+          },
         }),
         /Pull request for child changed during publication/u,
       )
@@ -545,12 +556,13 @@ test(
       assert.match(publishBeforeRestack.blockers.join('\n'), /needs an explicit Restack/u)
       await assert.rejects(
         runAction(harness.repo, {
-          type: 'executeStack',
+          type: 'submitStack',
           token: publishBeforeRestack.token,
           allowForce: true,
-          draft: false,
-          titles: { parent: 'Parent title', child: 'Child title' },
-          mergeMethod: 'squash',
+          layers: {
+            parent: { title: 'Parent title', body: '', draft: false, updateBase: true },
+            child: { title: 'Child title', body: '', draft: false, updateBase: true },
+          },
         }),
         /needs an explicit Restack/u,
       )
@@ -568,8 +580,6 @@ test(
         type: 'executeStack',
         token: restackPreview.token,
         allowForce: false,
-        draft: false,
-        titles: {},
         mergeMethod: 'squash',
       })
       const rebasedParent = localOid(harness, 'parent')
@@ -587,12 +597,13 @@ test(
       assert.deepEqual(forcePreview.blockers, [])
       await assert.rejects(
         runAction(harness.repo, {
-          type: 'executeStack',
+          type: 'submitStack',
           token: forcePreview.token,
           allowForce: false,
-          draft: false,
-          titles: { parent: 'Parent title', child: 'Child title' },
-          mergeMethod: 'squash',
+          layers: {
+            parent: { title: 'Parent title', body: '', draft: false, updateBase: true },
+            child: { title: 'Child title', body: '', draft: false, updateBase: true },
+          },
         }),
         /requires explicit force-with-lease permission/u,
       )
@@ -612,12 +623,13 @@ test(
       await harness.writeState(staleState)
       await assert.rejects(
         runAction(harness.repo, {
-          type: 'executeStack',
+          type: 'submitStack',
           token: staleBasePreview.token,
           allowForce: true,
-          draft: false,
-          titles: { parent: 'Parent title', child: 'Child title' },
-          mergeMethod: 'squash',
+          layers: {
+            parent: { title: 'Parent title', body: '', draft: false, updateBase: true },
+            child: { title: 'Child title', body: '', draft: false, updateBase: true },
+          },
         }),
         /pull request for child changed/u,
       )
@@ -634,12 +646,13 @@ test(
       const staleRemoteChild = await makeRemoteDivergence(harness, 'child')
       await assert.rejects(
         runAction(harness.repo, {
-          type: 'executeStack',
+          type: 'submitStack',
           token: stalePreview.token,
           allowForce: true,
-          draft: false,
-          titles: { parent: 'Parent title', child: 'Child title' },
-          mergeMethod: 'squash',
+          layers: {
+            parent: { title: 'Parent title', body: '', draft: false, updateBase: true },
+            child: { title: 'Child title', body: '', draft: false, updateBase: true },
+          },
         }),
         /remote child changed/u,
       )
@@ -772,8 +785,6 @@ test(
           type: 'executeStack',
           token: preview.token,
           allowForce: false,
-          draft: false,
-          titles: {},
           mergeMethod: 'squash',
         }),
         /not allowed by the repository/u,
@@ -802,8 +813,6 @@ test(
         type: 'executeStack',
         token: preview.token,
         allowForce: false,
-        draft: false,
-        titles: {},
         mergeMethod: 'squash',
       })
       state = await harness.readState()
@@ -855,8 +864,6 @@ test(
         type: 'executeStack',
         token: mergePreview.token,
         allowForce: false,
-        draft: false,
-        titles: {},
         mergeMethod: 'squash',
       })
 
@@ -880,8 +887,6 @@ test(
         type: 'executeStack',
         token: restackPreview.token,
         allowForce: false,
-        draft: false,
-        titles: {},
         mergeMethod: 'squash',
       })
       assert.equal(git(harness, ['config', '--get', 'branch.child.parent']), 'main')
@@ -906,12 +911,10 @@ test(
       )
       await assert.rejects(
         runAction(harness.repo, {
-          type: 'executeStack',
+          type: 'submitStack',
           token: mergedRootPreview.token,
           allowForce: true,
-          draft: false,
-          titles: {},
-          mergeMethod: 'squash',
+          layers: {},
         }),
       )
 
@@ -922,13 +925,13 @@ test(
         'child',
       )
       assert.deepEqual(publishPreview.blockers, [])
+      // The child pull request now has to move onto the merged root, and a base change is
+      // only ever applied when the submission approved it for that layer.
       await runAction(harness.repo, {
-        type: 'executeStack',
+        type: 'submitStack',
         token: publishPreview.token,
         allowForce: true,
-        draft: false,
-        titles: {},
-        mergeMethod: 'squash',
+        layers: { child: { title: 'Child', body: '', draft: false, updateBase: true } },
       })
       state = await harness.readState()
       assert.equal(prFor(state, 'child').base, 'main')
@@ -965,8 +968,6 @@ test(
         type: 'executeStack',
         token: mergePreview.token,
         allowForce: false,
-        draft: false,
-        titles: {},
         mergeMethod: 'squash',
       })
       state = await harness.readState()
@@ -1001,8 +1002,6 @@ test(
         type: 'executeStack',
         token: preview.token,
         allowForce: false,
-        draft: false,
-        titles: {},
         mergeMethod: 'squash',
       })
       assert.notEqual(localOid(harness, 'child'), childTip)
@@ -1042,8 +1041,6 @@ test(
         type: 'executeStack',
         token: mergePreview.token,
         allowForce: false,
-        draft: false,
-        titles: {},
         mergeMethod: 'squash',
       })
       state = await harness.readState()
@@ -1087,8 +1084,6 @@ test(
           type: 'executeStack',
           token: preview.token,
           allowForce: false,
-          draft: false,
-          titles: {},
           mergeMethod: 'squash',
         }),
         /merged pull request boundary for parent changed/u,
@@ -1106,8 +1101,6 @@ test(
         type: 'executeStack',
         token: freshPreview.token,
         allowForce: false,
-        draft: false,
-        titles: {},
         mergeMethod: 'squash',
       })
 
@@ -1142,8 +1135,6 @@ test(
         type: 'executeStack',
         token: mergePreview.token,
         allowForce: false,
-        draft: false,
-        titles: {},
         mergeMethod: 'squash',
       })
       state = await harness.readState()
@@ -1662,8 +1653,6 @@ test(
         type: 'executeStack',
         token: mergePreview.token,
         allowForce: false,
-        draft: false,
-        titles: {},
         mergeMethod: 'squash',
       })
       state = await harness.readState()

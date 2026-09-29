@@ -442,7 +442,106 @@ export interface StackPreview {
   warnings: string[]
   blockers: string[]
   mergeMethods: ('merge' | 'squash' | 'rebase')[]
+  /** Present only for a publish preview: the resumable submission plan. */
+  publish: PublishPreview | null
 }
+
+/** One resumable unit of Submit Stack work, in bottom-to-top order. */
+export type PublishStepKind = 'push' | 'create-pr' | 'retarget-pr' | 'create-stack' | 'extend-stack'
+
+export type PublishStepStatus = 'pending' | 'running' | 'completed' | 'failed'
+
+/** What a person can do about a step that stopped, without a new preview. */
+export interface PublishStepFailure {
+  summary: string
+  recovery: string
+  retryable: boolean
+}
+
+export interface PublishStep {
+  kind: PublishStepKind
+  /** Null for the stack registration step, which spans every layer. */
+  branch: string | null
+  label: string
+  status: PublishStepStatus
+  pullRequest: number | null
+  detail: string
+  failure: PublishStepFailure | null
+}
+
+/** The reviewable choice for one layer, fixed before the first push happens. */
+export interface PublishLayer {
+  branch: string
+  base: string
+  title: string
+  body: string
+  draft: boolean
+  /** True when the base changes an existing pull request and was explicitly previewed. */
+  updateBase: boolean
+  /** False when a captured pull request already sits on the correct base. */
+  create: boolean
+  /** The push replaces remote history and needs the captured-OID lease consent. */
+  force: boolean
+  pullRequest: number | null
+  /**
+   * True once this operation has asked GitHub to open the pull request. Journalled before the
+   * request leaves, so a lost response is recovered instead of being read as somebody else's
+   * pull request.
+   */
+  createIntent: boolean
+}
+
+export type PublishStackAction = 'create' | 'extend' | 'none'
+
+export interface PublishPreview {
+  branch: string
+  layers: PublishLayer[]
+  steps: PublishStep[]
+  stackNumber: number | null
+  stackAction: PublishStackAction
+  /** Layers whose base must change on an existing pull request to be submitted. */
+  baseChanges: string[]
+  capturedAt: string
+}
+
+export interface PublishProgress {
+  operationId: string
+  status: 'running' | 'failed' | 'completed'
+  steps: PublishStep[]
+  message: string
+  /** Index of the first step a retry resumes at; null once every step completed. */
+  resumeAt: number | null
+  /**
+   * The per-layer choices the saved submission will use, which is what a retry actually
+   * publishes. They are shown read-only during recovery: changing them requires dismissing the
+   * submission and taking a fresh preview.
+   */
+  layers: PublishLayer[]
+  /**
+   * The consent to replace remote history that the saved submission was given. A retry force
+   * pushes under exactly this value, so the dialog has to show it rather than an unchecked
+   * box that would send the person into a push they never agreed to.
+   */
+  allowForce: boolean
+}
+
+/** The per-layer choices a reviewed submission carries to the main process. */
+export interface PublishLayerChoice {
+  title: string
+  body: string
+  draft: boolean
+  updateBase: boolean
+}
+export type SubmitStackAction =
+  | {
+      type: 'submitStack'
+      token: string
+      allowForce: boolean
+      layers: Record<string, PublishLayerChoice>
+    }
+  | { type: 'submitStackRetry' }
+  | { type: 'submitStackDismiss' }
+
 export interface StackProgress {
   kind: 'restack'
   originalBranch: string
@@ -457,10 +556,9 @@ export type StackAction =
       type: 'executeStack'
       token: string
       allowForce: boolean
-      draft: boolean
-      titles: Record<string, string>
       mergeMethod: 'merge' | 'squash' | 'rebase'
     }
+  | SubmitStackAction
   | { type: 'stackContinue' | 'stackAbort' }
   | { type: 'updatePr'; number: number; title: string; body: string; draft: boolean }
   | { type: 'closePr' | 'reopenPr'; number: number }
@@ -536,6 +634,14 @@ export interface DesktopAPI {
   commitDiff(oid: string, requestId?: string): Promise<{ text: string; truncated: boolean }>
   pushPreview(): Promise<PushPreview>
   stackPreview(kind: StackKind, branch: string): Promise<StackPreview>
+  /** Resumable Submit Stack progress left on disk, or null when nothing is pending. */
+  submitStackProgress?: () => Promise<PublishProgress | null>
+  /**
+   * Subscribes to progress pushed by a running submission, and returns the unsubscribe. The
+   * dialog uses this rather than polling, because a read queues behind the action that is
+   * producing the steps.
+   */
+  onSubmitStackProgress?: (listener: (progress: PublishProgress | null) => void) => () => void
   reconciliationPreview?: (stackKey: string) => Promise<ReconciliationPreview>
   pullRequest(number: number): Promise<PullRequest & { body: string }>
   listNativeStacks?: () => Promise<NativeStack[]>

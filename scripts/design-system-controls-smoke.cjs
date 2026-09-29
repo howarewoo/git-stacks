@@ -2,9 +2,14 @@ const assert = require('node:assert/strict')
 const { existsSync } = require('node:fs')
 const { join } = require('node:path')
 const { pathToFileURL } = require('node:url')
-const { app, BrowserWindow } = require('electron')
+const { app, BrowserWindow, ipcMain } = require('electron')
 
 const rendererPath = join(__dirname, '..', 'out', 'renderer-fixtures', 'index.html')
+const preloadPath = join(__dirname, '..', 'out', 'preload', 'index.cjs')
+// The recovery specimen is reached through the packaged renderer, not the gallery: it has to run
+// both without a preload and against the frozen production bridge, and the gallery installs its
+// own mutable `window.desktop` double that the frozen bridge would refuse.
+const recoveryPath = join(__dirname, '..', 'out', 'renderer', 'index.html')
 const pageHelpers = `
   function buttonNamed(label) {
     return Array.from(document.querySelectorAll('button')).find(
@@ -51,6 +56,9 @@ async function waitFor(description, expression, timeout = 3000) {
 async function main() {
   if (!existsSync(rendererPath)) {
     throw new Error(`Missing fixture renderer at ${rendererPath}; run npm run build:gallery first.`)
+  }
+  if (!existsSync(recoveryPath)) {
+    throw new Error(`Missing packaged renderer at ${recoveryPath}; run npm run build first.`)
   }
 
   await app.whenReady()
@@ -193,6 +201,196 @@ async function main() {
     ),
     true,
     'reduced motion should shorten dialog animation',
+  )
+
+  // The guarded publish card claims to be wired to the real guard and the real builder. A
+  // ready button that dispatches nothing is a false confirmation, so the smoke types the
+  // exact branch name and asserts the payload the real builder produces.
+  await window.loadURL('about:blank')
+  await window.loadURL(`${pathToFileURL(rendererPath).href}#/design-system-dialog-specimen`)
+  const publishCard = `document.querySelector('[data-operation="publish"]')`
+  await waitFor('the guarded publish card', publishCard)
+  assert.equal(
+    await evaluateInPage(
+      `${publishCard}.querySelector('[data-role="blocker"]').textContent.trim()`,
+    ),
+    'confirmation-incomplete',
+    'the guarded publish card should refuse before the exact branch name is typed',
+  )
+  await runInPage(`
+    const input = document.querySelector('[data-operation="publish"] input')
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set
+    setter.call(input, 'feature/checkout')
+    input.dispatchEvent(new Event('input', { bubbles: true }))
+  `)
+  await waitFor(
+    'the publish card to become ready',
+    `${publishCard}.querySelector('[data-role="blocker"]').textContent.trim() === 'ready'`,
+  )
+  const dispatched = await runInPage(`
+    const card = document.querySelector('[data-operation="publish"]')
+    card.querySelector('button').click()
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))
+    return document.querySelector('[data-operation="dispatched"] [data-role="dispatched"]').textContent.trim()
+  `)
+  const payload = /^(\{.*\})$/su.exec(dispatched)
+  assert.ok(payload, 'pressing the ready publish card should show the dispatched action')
+  const action = JSON.parse(payload[1])
+  assert.equal(action.type, 'submitStack', 'the ready card should dispatch a real submission')
+  assert.equal(action.allowForce, true, 'the consent the card shows is the consent it dispatches')
+  assert.equal(
+    action.layers['feature/checkout'].title,
+    'Checkout validation',
+    'the dispatched submission should carry the reviewed layer choice',
+  )
+
+  await recoverySmoke()
+  if (debuggerAttached) {
+    window.webContents.debugger.detach()
+    debuggerAttached = false
+  }
+  const noPreloadWindow = window
+  assert.ok(existsSync(preloadPath), 'the production preload must be built')
+  const unexpectedReads = []
+  for (const channel of ['repository:stack-preview', 'repository:submit-stack-progress']) {
+    ipcMain.handle(channel, () => {
+      unexpectedReads.push(channel)
+      throw new Error(`Recovery specimen leaked into production IPC: ${channel}`)
+    })
+  }
+  window = new BrowserWindow({
+    show: true,
+    width: 1280,
+    height: 900,
+    webPreferences: { contextIsolation: true, sandbox: true, preload: preloadPath },
+  })
+  noPreloadWindow.destroy()
+  window.webContents.on('console-message', (details) => {
+    if (details.level === 'error') console.error(details.message)
+  })
+  await window.loadURL('about:blank')
+  assert.equal(await evaluateInPage('Object.isFrozen(window.desktop)'), true)
+  await recoverySmoke()
+  assert.equal(await evaluateInPage('Object.isFrozen(window.desktop)'), true)
+  assert.deepEqual(unexpectedReads, [], 'fixtures must never call the production repository API')
+  console.log(
+    'Production preload: frozen desktop bridge preserved; all three recovery modes passed without repository IPC.',
+  )
+}
+
+async function recoverySmoke() {
+  // A recovered submission is resumed from its journal, so what the dialog says about each
+  // layer has to come from the journal too. A fresh preview that describes a different base
+  // must not relabel what Resume will run.
+  await window.loadURL('about:blank')
+  await window.loadURL(
+    `${pathToFileURL(recoveryPath).href}#/design-system-recovery-specimen?mode=mismatch`,
+  )
+  await waitFor('the recovered submit dialog', `document.querySelector('.workflow-dialog')`)
+  await waitFor(
+    'the saved consent to render',
+    `document.querySelector('.workflow-dialog').textContent.includes('Saved approval for rewritten branches')`,
+  )
+  const mismatched = await evaluateInPage(
+    `document.querySelector('.workflow-dialog').textContent.replace(/\\s+/g, ' ')`,
+  )
+  assert.match(
+    mismatched,
+    /feature\/checkout-orders → feature\/checkoutPull request #102 keeps its title/,
+    'a recovered layer should be described by the journalled base and pull request',
+  )
+  assert.equal(
+    await evaluateInPage(
+      `Array.from(document.querySelectorAll('label')).some((label) => label.textContent.startsWith('Change the base of pull request'))`,
+    ),
+    false,
+    'a recovered base change must be shown as saved, not offered as an unchecked control',
+  )
+  assert.equal(
+    await evaluateInPage(
+      `document.querySelector('[role="dialog"] input[type="checkbox"]:not(:disabled)') === null`,
+    ),
+    true,
+    'a recovered submission should offer no editable consent checkbox',
+  )
+  assert.equal(
+    await evaluateInPage(`buttonNamed('Resume submission')?.disabled === false`),
+    true,
+    'the recovered submission should still be resumable',
+  )
+  assert.doesNotMatch(mismatched, /feature\/moved-parent|#902|Planned stack operations/)
+  assert.equal(
+    await evaluateInPage(`document.getElementById('title-feature%2Fcheckout')?.value`),
+    'Checkout validation',
+  )
+  assert.equal(await evaluateInPage(`buttonNamed('Dismiss submission')?.disabled === false`), true)
+
+  // A fresh read that fails must not take the saved operation with it: Resume stays enabled,
+  // so the steps and the consent it will run under have to stay on screen.
+  await window.loadURL('about:blank')
+  await window.loadURL(
+    `${pathToFileURL(recoveryPath).href}#/design-system-recovery-specimen?mode=preview-failure`,
+  )
+  await waitFor(
+    'the recovered submit dialog without a fresh preview',
+    `document.querySelector('.workflow-dialog')`,
+  )
+  await waitFor(
+    'the saved consent to survive a failed fresh read',
+    `document.querySelector('.workflow-dialog').textContent.includes('Saved approval for rewritten branches')`,
+  )
+  const withoutPreview = await evaluateInPage(
+    `document.querySelector('.workflow-dialog').textContent.replace(/\\s+/g, ' ')`,
+  )
+  assert.match(
+    withoutPreview,
+    /Push feature\/checkout-orders/,
+    'the saved steps should remain visible when the fresh preview fails',
+  )
+  assert.match(
+    withoutPreview,
+    /feature\/checkout-orders → feature\/checkoutPull request #102 keeps its title/,
+    'the saved layer should remain visible when the fresh preview fails',
+  )
+  assert.match(
+    withoutPreview,
+    /Recorded: branches with a rewritten history are pushed with exact leases\./,
+    'the recorded force consent must remain visible when the fresh preview fails',
+  )
+  assert.match(withoutPreview, /Remote refused the update/)
+  assert.match(withoutPreview, /Fetch the remote, confirm nobody pushed/)
+  assert.equal(await evaluateInPage(`buttonNamed('Resume submission')?.disabled === false`), true)
+  assert.equal(await evaluateInPage(`buttonNamed('Dismiss submission')?.disabled === false`), true)
+  await window.loadURL('about:blank')
+  await window.loadURL(
+    `${pathToFileURL(recoveryPath).href}#/design-system-recovery-specimen?mode=non-retryable`,
+  )
+  await waitFor(
+    'the rejected native submission',
+    `document.querySelector('.workflow-dialog')?.textContent.includes('Invalid chain (422)')`,
+  )
+  assert.equal(
+    await evaluateInPage(`buttonNamed('Resume submission')?.disabled`),
+    true,
+    'a non-retryable rejection must disable Resume',
+  )
+  assert.equal(await evaluateInPage(`buttonNamed('Dismiss submission')?.disabled`), false)
+  assert.match(
+    await evaluateInPage(`document.querySelector('.workflow-dialog').textContent`),
+    /dismiss this submission and take a fresh preview/i,
+  )
+  await runInPage(`buttonNamed('Resume submission').click()`)
+  assert.equal(
+    await evaluateInPage(`document.querySelector('[data-role="recovery-actions"]').textContent`),
+    '',
+  )
+  await runInPage(`buttonNamed('Dismiss submission').click()`)
+  await waitFor(
+    'Dismiss to dispatch without a retry',
+    `document.querySelector('[data-role="recovery-actions"]').textContent === 'submitStackDismiss'`,
+  )
+  console.log(
+    'Electron controls: guarded submitStack dispatch; saved recovery identity and approvals; retryable Resume/Dismiss; non-retryable Resume disabled with actionable Dismiss.',
   )
 }
 

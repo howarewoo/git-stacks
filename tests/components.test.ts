@@ -10,6 +10,13 @@ import { SegmentedControl } from '../src/renderer/src/components/ui/segmented-co
 import { Textarea } from '../src/renderer/src/components/ui/textarea'
 import { TooltipProvider } from '../src/renderer/src/components/ui/tooltip'
 import { ShellSpecimen } from '../src/renderer/src/design-system/ShellSpecimen'
+import { ImmutableApproval } from '../src/renderer/src/components/workflow-composition'
+import {
+  liveGuardBase,
+  publishPreview as specimenPublishPreview,
+} from '../src/renderer/src/design-system/DialogSpecimenData'
+import { workflowAction } from '../src/renderer/src/components/workflow-action'
+import { workflowBlocker } from '../src/renderer/src/components/workflow-policy'
 test('loading buttons retain their label, busy state, and disabled lock', () => {
   const markup = renderToStaticMarkup(
     React.createElement(
@@ -125,4 +132,87 @@ test('shell specimen captions are not rendered as labels without controls', () =
   assert.match(markup, /<label for="shell-fixture-draft">In-progress commit message<\/label>/)
   assert.match(markup, /id="shell-fixture-draft"/)
   assert.doesNotMatch(markup, /for="shell-fixture-search-result"/)
+})
+
+test('a recovered submission shows its saved consent as fixed text, not an unchecked box', () => {
+  const granted = renderToStaticMarkup(
+    React.createElement(ImmutableApproval, {
+      label: 'Saved approval for rewritten branches',
+      summary: 'Recorded: branches with a rewritten history are pushed with exact leases.',
+    }),
+  )
+  assert.match(granted, /Saved approval for rewritten branches/)
+  assert.match(granted, /exact leases/)
+  // No control is offered, so the person cannot read the value as something they can change.
+  assert.doesNotMatch(granted, /type="checkbox"/u)
+
+  const withheld = renderToStaticMarkup(
+    React.createElement(ImmutableApproval, {
+      label: 'Saved approval for rewritten branches',
+      summary: 'Not given: no branch is pushed by replacing remote history.',
+    }),
+  )
+  assert.match(withheld, /Not given/u)
+  assert.doesNotMatch(withheld, /Recorded:/u)
+})
+
+test('the guarded publish specimen is ready only when the builder produces a submission', () => {
+  const context = {
+    headOid: '1111111111111111111111111111111111111111',
+    currentBranch: 'feature/checkout',
+  }
+  const layers = {
+    'feature/checkout': {
+      title: 'Checkout validation',
+      body: 'Fixture layer for the guarded publish specimen.',
+      draft: true,
+      updateBase: false,
+    },
+  }
+  // What the specimen shows when the name has not been typed.
+  const beforeName = workflowBlocker({
+    ...liveGuardBase,
+    kind: 'stack',
+    allowForce: true,
+    name: '',
+    requiresName: false,
+    previewToken: `stack:${specimenPublishPreview.token}`,
+    confirmationTarget: 'feature/checkout',
+    confirmation: '',
+    untitledBranches: [],
+  })
+  assert.equal(beforeName?.code, 'confirmation-incomplete')
+
+  // With the exact name the real builder produces the real submission, so ready is truthful.
+  const action = workflowAction(
+    {
+      kind: 'submit',
+      preview: specimenPublishPreview,
+      allowForce: true,
+      confirmation: 'feature/checkout',
+      confirmationTarget: 'feature/checkout',
+      layers,
+    },
+    context,
+  )
+  assert.deepEqual(action, {
+    type: 'submitStack',
+    token: specimenPublishPreview.token,
+    allowForce: true,
+    layers,
+  })
+
+  // A specimen preview with no offer cannot dispatch anything, so it must not read as ready.
+  const noOffer = workflowAction(
+    {
+      kind: 'submit',
+      preview: { ...specimenPublishPreview, publish: null },
+      allowForce: true,
+      confirmation: 'feature/checkout',
+      confirmationTarget: 'feature/checkout',
+      layers,
+    },
+    context,
+  )
+  assert.equal(noOffer, null)
 })

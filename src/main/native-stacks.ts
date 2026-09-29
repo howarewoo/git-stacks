@@ -680,6 +680,8 @@ export async function createPullRequestStack(
     knownPullRequests?: readonly PullRequest[]
     defaultBranch?: string
     signal?: AbortSignal
+    /** Persist recovery intent after validation, immediately before the create request. */
+    beforeCreate?: () => Promise<void>
   } = {},
 ): Promise<NativeStack> {
   if (!Array.isArray(pullRequests) || pullRequests.length === 0) {
@@ -703,6 +705,7 @@ export async function createPullRequestStack(
 
   const transport = githubTransport()
   try {
+    await options.beforeCreate?.()
     const response = await transport.rest<unknown>({
       method: 'POST',
       path: `repos/${owner}/${repo}/stacks`,

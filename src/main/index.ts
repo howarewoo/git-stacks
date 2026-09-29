@@ -13,10 +13,10 @@ import {
   getCommitDiff,
   getPushPreview,
 } from './git'
-import { previewStack } from './stacks'
+import { getSubmitStackProgress, onPublishProgress, previewStack } from './stacks'
 import { previewReconciliationRepair } from './reconciliation'
 import { getPullRequest } from './github'
-import type { GitAction, RecentRepository, StackKind } from '../shared/types'
+import type { GitAction, PublishProgress, RecentRepository, StackKind } from '../shared/types'
 import { RepositoryOperations } from './repository-operations'
 import { RequestRegistry } from './request-registry'
 import {
@@ -203,6 +203,16 @@ function installHandlers() {
     return readRepository(async (root) =>
       previewReconciliationRepair(root, await getSnapshot(root), stackKey),
     )
+  })
+  ipcMain.handle('repository:submit-stack-progress', (event) => {
+    validateSender(event)
+    return readRepository((root) => getSubmitStackProgress(root))
+  })
+  // A running submission pushes its own progress. The renderer cannot poll for it: the read
+  // queues behind the very action that is producing the steps, so it would only ever observe
+  // the finished state.
+  onPublishProgress((progress: PublishProgress | null) => {
+    window?.webContents.send('submit-stack-progress', progress)
   })
   ipcMain.handle('repository:pull-request', (event, number: number) => {
     validateSender(event)

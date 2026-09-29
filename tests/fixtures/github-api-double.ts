@@ -292,8 +292,12 @@ function handleRest(
     if (state.stacksPreviewDisabled) {
       throw new HttpError(404, 'Not Found', 'Not Found: stacks preview unavailable')
     }
-    const failure = stacksFailure(state)
-    if (failure) throw failure
+    // Reads still work: a chain write GitHub rejects is a submission failure, not a
+    // repository that cannot report anything.
+    if (method !== 'GET') {
+      const failure = stacksFailure(state)
+      if (failure) throw failure
+    }
     if (rawPath === `${prefix}/stacks`) {
       if (method === 'GET') {
         let stacks = state.stacks ?? []
@@ -682,10 +686,55 @@ export function createGitHubApiDouble(): typeof globalThis.fetch {
       ...(Object.keys(body).length > 0 ? { body } : {}),
     })
     const request: GitHubApiDoubleRequest = { method, path, body, headers }
+    const lost = (state.lostResponses ?? []).findIndex(
+      (rule) => rule.method === method && request.path.includes(rule.pathIncludes),
+    )
     try {
       const result =
         request.path === 'graphql' ? handleGraphql(state, body) : handleRest(state, request)
+      // Somebody else pushes and closes a pull request after the response above was built but
+      // before the caller sees it. The listing the caller is holding is now a stale snapshot,
+      // which is the window a single earlier read cannot cover.
+      const drift = (state.driftOnRequest ?? []).findIndex((rule) => {
+        if (!request.path.includes(rule.pathIncludes)) return false
+        const seen = (state.requests ?? []).filter((entry) =>
+          entry.argv[0]?.includes(rule.pathIncludes),
+        ).length
+        return seen - 1 === (rule.after ?? 0)
+      })
+      if (drift !== -1) {
+        const rule = (state.driftOnRequest ?? [])[drift]
+        state.driftOnRequest = (state.driftOnRequest ?? []).filter((_, index) => index !== drift)
+        saveState(state)
+        bareGit(['update-ref', rule.ref, rule.to])
+      }
+      const closeIndex = (state.closeOnRequest ?? []).findIndex((rule) => {
+        if (!request.path.includes(rule.pathIncludes)) return false
+        const seen = (state.requests ?? []).filter((entry) =>
+          entry.argv[0]?.includes(rule.pathIncludes),
+        ).length
+        return seen - 1 === (rule.after ?? 0)
+      })
+      if (closeIndex !== -1) {
+        const rule = (state.closeOnRequest ?? [])[closeIndex]
+        state.closeOnRequest = (state.closeOnRequest ?? []).filter((_, i) => i !== closeIndex)
+        const pr = state.prs.find((candidate) => candidate.number === rule.number)
+        if (pr) pr.state = 'CLOSED'
+        for (const stack of state.stacks ?? []) {
+          const member = stack.pull_requests.find((item) => item.number === rule.number)
+          if (member) member.state = 'closed'
+        }
+        saveState(state)
+      }
       saveState(state)
+      if (lost !== -1) {
+        // GitHub took the change; the caller never hears about it, which is what a dropped
+        // connection mid-request looks like to the person waiting.
+        const rule = (state.lostResponses ?? [])[lost]
+        state.lostResponses = (state.lostResponses ?? []).filter((_, index) => index !== lost)
+        saveState(state)
+        return json(rule.status, { message: rule.message })
+      }
       return json(result.status, result.body)
     } catch (error) {
       saveState(state)

@@ -149,6 +149,38 @@ export interface GitHubFixtureState {
     message: string
     rateLimitRemaining?: number
   }
+  /**
+   * Mutations that succeed on GitHub but whose response never reaches the caller, which is
+   * what a dropped connection mid-request looks like to the person waiting. Each entry is
+   * consumed once, in order, by the first matching method and path.
+   */
+  lostResponses?: Array<{
+    method: string
+    pathIncludes: string
+    status: number
+    message: string
+  }>
+  /**
+   * Branch refs moved by somebody else while a request is in flight, applied by the double
+   * before it answers the first matching request. This is the window a client cannot close
+   * with one read: the value changes between two reads that both looked consistent.
+   */
+  /**
+   * Branch refs moved by somebody else while a request is in flight, applied by the double
+   * before it answers the `after`-th matching request. Zero is the first match, so the rule
+   * can target a later read rather than the one that opened the step.
+   */
+  driftOnRequest?: Array<{
+    pathIncludes: string
+    ref: string
+    to: string
+    after?: number
+  }>
+  /**
+   * Pull requests closed by somebody else while a request is in flight, so a change that
+   * lands after an earlier step is read still shows up in the next one.
+   */
+  closeOnRequest?: Array<{ pathIncludes: string; number: number; after?: number }>
   prs: GitHubFixturePullRequest[]
   comments: Record<string, GitHubFixtureComment[]>
   stacks?: GitHubFixtureStack[]

@@ -140,6 +140,12 @@ function actionMessage(action: GitAction): string {
       return `Recorded ${action.branch} on ${action.parent}`
     case 'executeStack':
       return `Ran the ${action.mergeMethod} ${action.token} stack operation`
+    case 'submitStack':
+      return 'Submitted the stack'
+    case 'submitStackRetry':
+      return 'Resumed the stack submission'
+    case 'submitStackDismiss':
+      return 'Dismissed the stack submission'
     case 'stackContinue':
       return 'Continued the stack restack'
     case 'stackAbort':

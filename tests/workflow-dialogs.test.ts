@@ -431,16 +431,12 @@ test('the representative flows produce their exact reviewed payloads', () => {
         confirmation: '',
         confirmationTarget: null,
         allowForce: false,
-        draft: true,
-        titles: { 'feature/checkout': 'Add checkout validation' },
         mergeMethod: '',
       },
       {
         type: 'executeStack',
         token: 'preview-restack-1',
         allowForce: false,
-        draft: true,
-        titles: { 'feature/checkout': 'Add checkout validation' },
         mergeMethod: 'squash',
       },
     ],
@@ -790,23 +786,48 @@ test('a forced publication still needs the exact branch name typed', () => {
   assert.equal(workflowBlocker(forced)?.code, 'confirmation-incomplete')
   const confirmed = { ...forced, confirmation: featureBranch.name }
   assert.equal(workflowBlocker(confirmed), null)
+  const layers = {
+    'feature/checkout': {
+      title: 'Checkout validation',
+      body: '',
+      draft: true,
+      updateBase: false,
+    },
+  }
   assert.equal(
     workflowAction(
       {
-        kind: 'stack',
-        operation: 'publish',
+        kind: 'submit',
         preview: publishPreview,
         allowForce: true,
+        layers,
         confirmation: '',
         confirmationTarget: featureBranch.name,
-        draft: true,
-        titles: { 'feature/checkout': 'Checkout validation' },
-        mergeMethod: 'squash',
       },
       context,
     ),
     null,
     'the builder refuses a forced publish with an unconfirmed name even if the guard is bypassed',
+  )
+  assert.deepEqual(
+    workflowAction(
+      {
+        kind: 'submit',
+        preview: publishPreview,
+        allowForce: true,
+        layers,
+        confirmation: featureBranch.name,
+        confirmationTarget: featureBranch.name,
+      },
+      context,
+    ),
+    {
+      type: 'submitStack',
+      token: publishPreview.token,
+      allowForce: true,
+      layers,
+    },
+    'the confirmed name produces the submission, so the refusal above is the confirmation and not a missing offer',
   )
 })
 

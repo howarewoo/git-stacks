@@ -6,6 +6,15 @@ import type { FileHandle } from 'node:fs/promises'
 import type {
   ActionResult,
   Branch,
+  NativeStack,
+  PublishLayer,
+  PublishLayerChoice,
+  PublishPreview,
+  PublishProgress,
+  PublishStackAction,
+  PublishStep,
+  PublishStepFailure,
+  PublishStepKind,
   PullRequest,
   RepositorySnapshot,
   StackAction,
@@ -13,6 +22,7 @@ import type {
   StackPreview,
   StackProgress,
   StackStep,
+  SubmitStackAction,
 } from '../shared/types'
 import {
   CommandCancelled,
@@ -49,14 +59,15 @@ import {
   createNativeStackAction,
   createPullRequestStack,
   detectNativeStacksCapability,
+  getPullRequestStack,
   listPullRequestStacks,
+  NativeStackError,
   revalidatePublishedStackRegistration,
   retireLegacyStackComments,
   unstackNativeStackAction,
-  validatePublishedStackRegistration,
 } from './native-stacks'
 import { canonicalRemoteName, getGitHubData, getPullRequest, pullRequestRepository } from './github'
-import { githubTransport } from './github-transport'
+import { GitHubTransportError, githubTransport } from './github-transport'
 import type { GitHubResult } from './github'
 import { runReconciliationRepair } from './reconciliation'
 
@@ -113,6 +124,8 @@ interface StackPlan {
   capturedTips: Record<string, string>
   capturedRemoteOids: Record<string, string | null>
   capturedPrs: Record<string, PullRequest | null>
+  /** Native stack membership, so a publish preview also detects an unstacked layer. */
+  capturedStacks: CapturedStack[]
   capturedMergedHeads: Record<
     string,
     { pr: string | null; oid: string | null; commit: string | null }
@@ -150,6 +163,69 @@ interface StackJournal {
   message: string
 }
 
+/** The native stack membership captured when a publish preview was taken. */
+interface CapturedStack {
+  number: number
+  open: boolean
+  base: string
+  status: NativeStack['status']
+  members: NativeStack['pullRequests']
+}
+
+/** The captured local tip and remote tip a push step may still act on. */
+interface PublishBranchFacts {
+  branch: string
+  oid: string
+  remoteOid: string | null
+  /** The existing PR base reviewed before approving a retarget, never refreshed on retry. */
+  pullRequestBase?: string | null
+}
+
+/**
+ * A Submit Stack run, persisted after every step so an interrupted publication
+ * resumes at the first unfinished step instead of duplicating pushed branches
+ * and pull requests.
+ */
+interface PublishOperation {
+  version: 1
+  id: string
+  repoPath: string
+  originUrl: string
+  fullName: string
+  pushUrl: string
+  defaultBranch: string
+  createdAt: string
+  allowForce: boolean
+  layers: PublishLayer[]
+  branches: PublishBranchFacts[]
+  steps: PublishStep[]
+  stackNumber: number | null
+  /**
+   * The stack creation this operation issued. Persisted before the API call so a retry can
+   * tell its own half-finished creation apart from a stack somebody else created.
+   */
+  stackCreateRequested?: boolean
+  /**
+   * The exact members native stack `stackNumber` held when the preview was taken, with the
+   * head they carried then. These are the immutable baseline every later re-read is proved
+   * against, so a push this submission made on purpose is the only thing that may differ.
+   */
+  capturedMembers: CapturedStackMember[]
+  stackAction: PublishStackAction
+  status: 'running' | 'failed' | 'completed'
+  message: string
+}
+
+interface CapturedStackMember {
+  number: number
+  headSha: string | undefined
+  head: string
+  base: string
+  state: string
+}
+
+const PUBLISH_VERSION = 1
+
 const plans = new Map<string, StackPlan>()
 
 function stackActionError(message: string): never {
@@ -185,9 +261,8 @@ export function validateStackAction(value: unknown): StackAction {
       }
     case 'executeStack':
       if (
-        !hasOnlyKeys(value, ['type', 'token', 'allowForce', 'draft', 'titles', 'mergeMethod']) ||
-        typeof value.allowForce !== 'boolean' ||
-        typeof value.draft !== 'boolean'
+        !hasOnlyKeys(value, ['type', 'token', 'allowForce', 'mergeMethod']) ||
+        typeof value.allowForce !== 'boolean'
       ) {
         stackActionError('Invalid executeStack action')
       }
@@ -202,8 +277,6 @@ export function validateStackAction(value: unknown): StackAction {
         type: 'executeStack',
         token: requireString(value.token, 'stack preview token', 512),
         allowForce: value.allowForce,
-        draft: value.draft,
-        titles: validateTitleMap(value.titles),
         mergeMethod: value.mergeMethod,
       }
     case 'stackContinue':
@@ -257,6 +330,45 @@ export function validateStackAction(value: unknown): StackAction {
         }
       }
       return { type: 'createNativeStack', pullRequests: value.pullRequests as number[] }
+    case 'submitStack': {
+      if (
+        !hasOnlyKeys(value, ['type', 'token', 'allowForce', 'layers']) ||
+        typeof value.allowForce !== 'boolean'
+      ) {
+        stackActionError('Invalid submitStack action')
+      }
+      if (!isRecord(value.layers)) stackActionError('layers must be an object')
+      const layers: Record<string, PublishLayerChoice> = {}
+      for (const [branch, choice] of Object.entries(value.layers)) {
+        if (
+          !isRecord(choice) ||
+          !hasOnlyKeys(choice, ['title', 'body', 'draft', 'updateBase']) ||
+          typeof choice.draft !== 'boolean' ||
+          typeof choice.updateBase !== 'boolean' ||
+          typeof choice.body !== 'string' ||
+          choice.body.length > MAX_MESSAGE_LENGTH ||
+          choice.body.includes('\0')
+        ) {
+          stackActionError(`Invalid layer choice for ${branch}`)
+        }
+        layers[requireRefInput(branch, 'layer branch')] = {
+          title: requireString(choice.title, `title for ${branch}`),
+          body: choice.body,
+          draft: choice.draft,
+          updateBase: choice.updateBase,
+        }
+      }
+      return {
+        type: 'submitStack',
+        token: requireString(value.token, 'stack preview token', 512),
+        allowForce: value.allowForce,
+        layers,
+      }
+    }
+    case 'submitStackRetry':
+    case 'submitStackDismiss':
+      if (!hasOnlyKeys(value, ['type'])) stackActionError(`Invalid ${value.type} action`)
+      return { type: value.type }
     case 'addPullRequestsToNativeStack':
       if (
         !hasOnlyKeys(value, ['type', 'stackNumber', 'pullRequests']) ||
@@ -1583,6 +1695,13 @@ async function capturePlan(
     capturedRemoteOids: remoteOids,
     capturedMergedHeads,
     capturedPrs: prs,
+    capturedStacks: (snapshot.nativeStacks ?? []).map((stack) => ({
+      number: stack.number,
+      open: stack.open,
+      base: stack.base,
+      status: stack.status,
+      members: stack.pullRequests.map((member) => ({ ...member })),
+    })),
     warnings,
     blockers,
     mergeMethods,
@@ -1598,6 +1717,7 @@ async function capturePlan(
       warnings,
       blockers,
       mergeMethods: plan.mergeMethods,
+      publish: kind === 'publish' ? await publishPreview(plan) : null,
     },
   }
 }
@@ -1619,6 +1739,525 @@ export async function previewStack(
   prunePlans()
   const result = await capturePlan(repoPath, snapshot, kind, branch)
   return result.preview
+}
+
+function shortOid(value: string | null): string {
+  return value ? value.slice(0, 12) : 'none'
+}
+
+/**
+ * The bottom-to-top offer a person reviews: one layer per branch with the pull
+ * request identity, the base it must land on, and whether the push replaces
+ * remote history. No choice is applied here; `buildPublishOperation` does that
+ * once the reviewed values are dispatched.
+ */
+async function publishPreview(plan: StackPlan): Promise<PublishPreview> {
+  const registered = new Map<number, number>()
+  for (const stack of plan.capturedStacks) {
+    for (const member of stack.members) {
+      if (!registered.has(member.number)) registered.set(member.number, stack.number)
+    }
+  }
+  const layers: PublishLayer[] = []
+  const baseChanges: string[] = []
+  let stackNumber: number | null = null
+  for (const entry of plan.entries) {
+    const pr = entry.pr
+    const open = pr?.state === 'OPEN' ? pr : null
+    const title = open?.title ?? entry.branch
+    const retarget = Boolean(open && open.base !== entry.parent)
+    if (open && registered.has(open.number)) stackNumber ??= registered.get(open.number) ?? null
+    // A layer whose pull request does not exist yet can still already belong to a native
+    // stack through a sibling layer's pull request head, and a submission must not silently
+    // create a second stack for branches GitHub already groups.
+    if (stackNumber === null) {
+      for (const stack of plan.capturedStacks) {
+        const owns = stack.members.some((member) => member.head === entry.branch)
+        if (owns) {
+          stackNumber = stack.number
+          break
+        }
+      }
+    }
+    if (retarget) baseChanges.push(entry.branch)
+    layers.push({
+      branch: entry.branch,
+      base: entry.parent,
+      title,
+      body: `${title}\n\nGit Stacks branch: ${entry.branch}\nBase: ${entry.parent}`,
+      draft: true,
+      updateBase: false,
+      create: !open,
+      createIntent: false,
+      // A push only needs a lease when the remote tip is not already an ancestor of the
+      // local tip. A branch that merely moved forward publishes as an ordinary fast-forward
+      // and must not demand force consent.
+      force:
+        entry.remoteOid !== null &&
+        !(await isAncestor(plan.repoPath, entry.remoteOid, entry.oldTip)),
+      pullRequest: open?.number ?? null,
+    })
+  }
+  const stackAction: PublishStackAction =
+    layers.length === 0 ? 'none' : stackNumber ? 'extend' : 'create'
+  return {
+    branch: plan.branch,
+    layers,
+    steps: publishSteps(layers, stackAction, stackNumber),
+    stackNumber,
+    stackAction,
+    baseChanges,
+    capturedAt: new Date().toISOString(),
+  }
+}
+
+function publishStep(
+  kind: PublishStep['kind'],
+  branch: string | null,
+  label: string,
+  detail: string,
+  pullRequest: number | null,
+): PublishStep {
+  return { kind, branch, label, status: 'pending', pullRequest, detail, failure: null }
+}
+
+function publishSteps(
+  layers: PublishLayer[],
+  stackAction: PublishStackAction,
+  stackNumber: number | null,
+): PublishStep[] {
+  const steps: PublishStep[] = []
+  for (const layer of layers) {
+    steps.push(
+      publishStep(
+        'push',
+        layer.branch,
+        `Push ${layer.branch}`,
+        layer.force
+          ? 'Replace the captured remote tip with an exact lease'
+          : 'Add the reviewed tip',
+        null,
+      ),
+    )
+    if (layer.create) {
+      steps.push(
+        publishStep(
+          'create-pr',
+          layer.branch,
+          `Create pull request for ${layer.branch} based on ${layer.base}`,
+          layer.draft ? 'Opened as a draft' : 'Opened ready for review',
+          null,
+        ),
+      )
+    } else if (layer.updateBase && layer.pullRequest !== null) {
+      steps.push(
+        publishStep(
+          'retarget-pr',
+          layer.branch,
+          `Rebase pull request #${layer.pullRequest} onto ${layer.base}`,
+          'Only this base changes; the title, body and review stay as written',
+          layer.pullRequest,
+        ),
+      )
+    }
+  }
+  if (stackAction !== 'none') {
+    steps.push(
+      publishStep(
+        stackAction === 'create' ? 'create-stack' : 'extend-stack',
+        null,
+        stackAction === 'create'
+          ? `Register the native stack on ${stackNumber === null ? 'the default branch' : `stack #${stackNumber}`}`
+          : `Extend native stack #${stackNumber} with the new pull requests`,
+        `${layers.length} pull request${layers.length === 1 ? '' : 's'}, bottom to top`,
+        null,
+      ),
+    )
+  }
+  return steps
+}
+
+async function publishPath(repoPath: string): Promise<string> {
+  return path.join(await gitDirectory(repoPath), 'git-stacks-publish.json')
+}
+
+function validPublishStep(value: unknown): value is PublishStep {
+  return (
+    isRecord(value) &&
+    ['push', 'create-pr', 'retarget-pr', 'create-stack', 'extend-stack'].includes(
+      String(value.kind),
+    ) &&
+    (value.branch === null || typeof value.branch === 'string') &&
+    typeof value.label === 'string' &&
+    ['pending', 'running', 'completed', 'failed'].includes(String(value.status)) &&
+    (value.pullRequest === null ||
+      (typeof value.pullRequest === 'number' && Number.isInteger(value.pullRequest))) &&
+    typeof value.detail === 'string' &&
+    (value.failure === null || isRecord(value.failure))
+  )
+}
+
+async function readPublishOperation(repoPath: string): Promise<PublishOperation | null> {
+  let value: string
+  try {
+    const target = await publishPath(repoPath)
+    if ((await fs.stat(target)).size > 1024 * 1024)
+      throw new Error('Submit Stack progress is too large')
+    value = await fs.readFile(target, 'utf8')
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null
+    throw error
+  }
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(value)
+  } catch {
+    throw new Error('The Git Stacks submit progress is corrupt; refusing to continue a submission')
+  }
+  const invalid = () =>
+    new Error('The Git Stacks submit progress is invalid; refusing to continue a submission')
+  if (
+    !isRecord(parsed) ||
+    parsed.version !== PUBLISH_VERSION ||
+    typeof parsed.id !== 'string' ||
+    /^[0-9a-f-]{36}$/u.test(parsed.id) === false ||
+    parsed.repoPath !== repoPath ||
+    typeof parsed.originUrl !== 'string' ||
+    typeof parsed.fullName !== 'string' ||
+    typeof parsed.pushUrl !== 'string' ||
+    typeof parsed.defaultBranch !== 'string' ||
+    typeof parsed.createdAt !== 'string' ||
+    typeof parsed.allowForce !== 'boolean' ||
+    typeof parsed.message !== 'string' ||
+    (parsed.stackNumber !== null && !Number.isInteger(parsed.stackNumber)) ||
+    (parsed.stackCreateRequested !== undefined &&
+      typeof parsed.stackCreateRequested !== 'boolean') ||
+    !['create', 'extend', 'none'].includes(String(parsed.stackAction)) ||
+    !['running', 'failed', 'completed'].includes(String(parsed.status)) ||
+    !Array.isArray(parsed.layers) ||
+    parsed.layers.length === 0 ||
+    parsed.layers.length > 2048 ||
+    !Array.isArray(parsed.branches) ||
+    parsed.branches.length !== parsed.layers.length ||
+    !parsed.branches.every(
+      (fact) =>
+        isRecord(fact) &&
+        typeof fact.branch === 'string' &&
+        isOid(fact.oid) &&
+        (fact.remoteOid === null || isOid(fact.remoteOid)) &&
+        (fact.pullRequestBase === undefined ||
+          fact.pullRequestBase === null ||
+          typeof fact.pullRequestBase === 'string'),
+    ) ||
+    !parsed.layers.every(
+      (layer) =>
+        isRecord(layer) &&
+        typeof layer.branch === 'string' &&
+        typeof layer.base === 'string' &&
+        typeof layer.title === 'string' &&
+        typeof layer.body === 'string' &&
+        typeof layer.draft === 'boolean' &&
+        typeof layer.updateBase === 'boolean' &&
+        typeof layer.create === 'boolean' &&
+        typeof layer.force === 'boolean' &&
+        (layer.pullRequest === null || Number.isInteger(layer.pullRequest)),
+    ) ||
+    !Array.isArray(parsed.steps) ||
+    parsed.steps.length === 0 ||
+    !parsed.steps.every(validPublishStep)
+  )
+    throw invalid()
+  const operation = parsed as unknown as PublishOperation
+  for (const fact of operation.branches) await validateBranchName(repoPath, fact.branch)
+  for (const layer of operation.layers) await validateBranchName(repoPath, layer.branch)
+  for (const step of operation.steps) {
+    if (step.branch) await validateBranchName(repoPath, step.branch)
+  }
+  return operation
+}
+
+type PublishProgressListener = (progress: PublishProgress | null) => void
+
+const publishProgressListeners = new Set<PublishProgressListener>()
+
+/**
+ * Subscribes to submission progress. The journal write is the only place a step can change, so
+ * it publishes there: a running multi-step submission reports itself without the renderer
+ * polling a read that would queue behind the action that is producing it.
+ */
+export function onPublishProgress(listener: PublishProgressListener): () => void {
+  publishProgressListeners.add(listener)
+  return () => {
+    publishProgressListeners.delete(listener)
+  }
+}
+
+export async function readPublishProgress(repoPath: string): Promise<PublishProgress | null> {
+  const operation = await readPublishOperation(await repositoryPath(repoPath))
+  return operation ? publishProgressOf(operation) : null
+}
+
+async function writePublishOperation(repoPath: string, operation: PublishOperation): Promise<void> {
+  const target = await publishPath(repoPath)
+  const temporary = `${target}.tmp-${process.pid}-${randomUUID()}`
+  await fs.writeFile(temporary, JSON.stringify(operation), { encoding: 'utf8', mode: 0o600 })
+  await fs.rename(temporary, target)
+  for (const listener of publishProgressListeners) listener(publishProgressOf(operation))
+}
+
+async function removePublishOperation(repoPath: string): Promise<void> {
+  for (const listener of publishProgressListeners) listener(null)
+  try {
+    await fs.unlink(await publishPath(repoPath))
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+  }
+}
+
+function publishProgressOf(operation: PublishOperation): PublishProgress {
+  const resumeAt = operation.steps.findIndex((step) => step.status !== 'completed')
+  return {
+    operationId: operation.id,
+    status: operation.status,
+    steps: operation.steps.map((step) => ({ ...step })),
+    message: operation.message,
+    resumeAt: resumeAt === -1 ? null : resumeAt,
+    layers: operation.layers.map((layer) => ({ ...layer })),
+    allowForce: operation.allowForce,
+  }
+}
+
+/**
+ * The pull requests the previewed native stack already held, so the submission can prove
+ * that stack still owns them before it appends anything to it.
+ */
+function capturedStackMembers(plan: StackPlan, stackNumber: number | null): CapturedStackMember[] {
+  if (stackNumber === null) return []
+  const stack = plan.capturedStacks.find((entry) => entry.number === stackNumber)
+  if (!stack) return []
+  return stack.members.map((member) => ({
+    number: member.number,
+    headSha: member.headSha,
+    head: member.head,
+    base: member.base,
+    state: member.state,
+  }))
+}
+
+async function buildPublishOperation(
+  repoPath: string,
+  plan: StackPlan,
+  action: Extract<SubmitStackAction, { type: 'submitStack' }>,
+): Promise<PublishOperation> {
+  const offer = await publishPreview(plan)
+  const layers = offer.layers.map((layer) => {
+    const choice = action.layers[layer.branch]
+    return choice ? { ...layer, ...choice } : layer
+  })
+  const blockers: string[] = []
+  for (const layer of layers) {
+    if (layer.create && !layer.title.trim()) {
+      blockers.push(`Layer ${layer.branch} needs a pull request title before it can be submitted`)
+    }
+    if (!layer.create && !layer.updateBase && offer.baseChanges.includes(layer.branch)) {
+      blockers.push(
+        `Pull request for ${layer.branch} is not based on ${layer.base}; approve the base change to submit it`,
+      )
+    }
+    if (layer.force && !action.allowForce) {
+      blockers.push(`Publishing ${layer.branch} requires explicit force-with-lease permission`)
+    }
+  }
+  if (blockers.length > 0) throw new Error(blockers.join('; '))
+  return {
+    version: PUBLISH_VERSION,
+    id: randomUUID(),
+    repoPath,
+    originUrl: plan.originUrl ?? '',
+    fullName: plan.originFullName ?? '',
+    pushUrl: plan.pushUrl ?? '',
+    defaultBranch: plan.defaultBranch,
+    createdAt: new Date().toISOString(),
+    allowForce: action.allowForce,
+    layers,
+    branches: plan.entries.map((entry) => ({
+      branch: entry.branch,
+      oid: entry.oldTip,
+      remoteOid: entry.remoteOid,
+      pullRequestBase: entry.pr?.state === 'OPEN' ? entry.pr.base : null,
+    })),
+    steps: publishSteps(layers, offer.stackAction, offer.stackNumber),
+    stackNumber: offer.stackNumber,
+    capturedMembers: capturedStackMembers(plan, offer.stackNumber),
+    stackAction: offer.stackAction,
+    stackCreateRequested: false,
+    status: 'running',
+    message: 'Submitting the stack',
+  }
+}
+
+function definitivelyRejectedCreation(error: unknown): boolean {
+  const status =
+    error instanceof GitHubTransportError
+      ? error.status
+      : error instanceof NativeStackError
+        ? error.httpStatus
+        : null
+  // Timeouts and server/transport failures can hide an accepted mutation.
+  return status !== null && status >= 400 && status < 500 && status !== 408
+}
+
+/**
+ * A GitHub 422 on a stack write is a rejected chain, not a transient fault: the
+ * person has to change a pull request on GitHub, so retrying the same operation
+ * would fail identically.
+ */
+function publishFailure(step: PublishStep, error: unknown): PublishStepFailure {
+  const summary = error instanceof Error ? error.message : String(error)
+  const status = error instanceof GitHubTransportError ? error.status : null
+  const kind = error instanceof GitHubTransportError ? error.kind : null
+  const stackStep = step.kind === 'create-stack' || step.kind === 'extend-stack'
+  // The native stack writes translate a GitHub 422 into a typed NativeStackError that keeps
+  // the HTTP status, so a rejected chain is recognised from either error surface. A progress
+  // record that calls it retryable would send the person back into the same rejection.
+  const nativeStatus = error instanceof NativeStackError ? error.httpStatus : null
+  const rejectedChain = stackStep && (status === 422 || nativeStatus === 422)
+  if (rejectedChain) {
+    return {
+      summary,
+      recovery:
+        'Fix the pull request bases or readiness on GitHub, then dismiss this submission and take a fresh preview.',
+      retryable: false,
+    }
+  }
+  const recovery =
+    kind === 'unauthorized' || kind === 'forbidden'
+      ? 'Check the GitHub credentials for this repository, then retry this step.'
+      : kind === 'rate-limited' || kind === 'secondary-rate-limit'
+        ? 'Wait for the GitHub rate limit to reset, then retry this step.'
+        : step.kind === 'push'
+          ? 'Fetch the remote, confirm nobody pushed to this branch, then retry this step.'
+          : stackStep
+            ? 'Check that every pull request is still open and stacked, then retry this step.'
+            : 'Open the pull request on GitHub to check its base and state, then retry this step.'
+  return { summary, recovery, retryable: true }
+}
+
+/**
+ * Proves a reading of the published pull requests against the immutable journal. The journal
+ * is the only record of what was reviewed, so it is the truth here: comparing a reading
+ * against itself would accept any head that landed after the proof ran.
+ */
+function proveJournalledHeads(
+  operation: PublishOperation,
+  published: readonly PublishLayer[],
+  reading: readonly PullRequest[],
+): void {
+  for (const layer of published) {
+    const intended = operation.branches.find((facts) => facts.branch === layer.branch)
+    if (!intended) continue
+    const pr = reading.find((candidate) => candidate.number === layer.pullRequest)
+    if (!pr) {
+      throw new NativeStackError(
+        'invalid-chain',
+        `Pull request #${layer.pullRequest} could not be read before the stack was written`,
+      )
+    }
+    if (pr.headOid !== intended.oid) {
+      throw new NativeStackError(
+        'invalid-chain',
+        `Pull request #${layer.pullRequest} head moved to ${pr.headOid ?? 'none'} since it was published at ${intended.oid}`,
+      )
+    }
+  }
+}
+
+async function provePublishedHead(
+  repoPath: string,
+  operation: PublishOperation,
+  layer: PublishLayer,
+  pr: PullRequest,
+  expectedNumber = layer.pullRequest,
+): Promise<void> {
+  const intended = factsOf(operation, layer.branch)
+  if (
+    pr.number !== expectedNumber ||
+    pr.head !== layer.branch ||
+    pr.headRepository?.toLowerCase() !== operation.fullName.toLowerCase() ||
+    pr.state !== 'OPEN'
+  ) {
+    throw new NativeStackError(
+      'invalid-chain',
+      `Pull request #${expectedNumber} no longer matches the published branch and repository or is no longer open`,
+    )
+  }
+  if (pr.headOid !== intended.oid) {
+    throw new NativeStackError(
+      'invalid-chain',
+      `Pull request #${expectedNumber} head moved to ${pr.headOid ?? 'none'} since it was published at ${intended.oid}`,
+    )
+  }
+  const local = await resolveCommit(repoPath, `refs/heads/${layer.branch}`)
+  if (local !== intended.oid) {
+    throw new Error(`Stack preview is stale: local ${layer.branch} changed`)
+  }
+  const remote = await remoteOid(repoPath, operation.pushUrl, layer.branch)
+  if (remote !== intended.oid) {
+    throw new Error(`Stack preview is stale: remote ${layer.branch} changed`)
+  }
+}
+
+/**
+ * Proves each published pull request still carries the commit this operation published, and
+ * that the branch still carries it locally and on the remote. This is the check that keeps a
+ * resumed submission honest: completed push steps are skipped, so without it an external
+ * force-push would be silently stacked as if it were the reviewed commit.
+ */
+async function provePublishedHeads(
+  repoPath: string,
+  operation: PublishOperation,
+  published: readonly PublishLayer[],
+): Promise<void> {
+  for (const layer of published) {
+    const pr = await getPullRequest(repoPath, layer.pullRequest as number)
+    if (pr.base !== layer.base) {
+      throw new Error(
+        `Pull request #${layer.pullRequest} for ${layer.branch} is now based on ${pr.base}, not ${layer.base}`,
+      )
+    }
+    await provePublishedHead(repoPath, operation, layer, pr)
+  }
+}
+
+/**
+ * True when `stack` holds exactly the pull requests this operation created, in the same
+ * order, each still on the head and base the operation published. Anything else is somebody
+ * else's membership change.
+ */
+function isOwnCreatedStack(
+  stack: NativeStack,
+  numbers: readonly number[],
+  published: readonly PublishLayer[],
+): boolean {
+  if (stack.pullRequests.length !== numbers.length) return false
+  return numbers.every((number, index) => {
+    const member = stack.pullRequests[index]
+    if (!member || member.number !== number) return false
+    const layer = published[index]
+    return Boolean(layer) && member.head === layer?.branch && member.base === layer?.base
+  })
+}
+
+function layerOf(operation: PublishOperation, branch: string): PublishLayer {
+  const layer = operation.layers.find((candidate) => candidate.branch === branch)
+  if (!layer) throw new Error(`Submit progress no longer describes branch ${branch}`)
+  return layer
+}
+
+function factsOf(operation: PublishOperation, branch: string): PublishBranchFacts {
+  const facts = operation.branches.find((candidate) => candidate.branch === branch)
+  if (!facts) throw new Error(`Submit progress no longer describes branch ${branch}`)
+  return facts
 }
 
 async function revalidatePlan(repoPath: string, plan: StackPlan): Promise<void> {
@@ -1682,6 +2321,36 @@ async function revalidatePlan(repoPath: string, plan: StackPlan): Promise<void> 
     }
     if ((await branchUpstream(repoPath, entry.branch)) !== entry.upstream) {
       throw new Error(`Stack preview is stale: upstream for ${entry.branch} changed`)
+    }
+  }
+  // A publish also writes native stack membership, so an unstack, a reorder, or a
+  // changed head invalidates the preview the same way a moved local tip does.
+  if (plan.kind !== 'publish' || plan.capturedStacks.length === 0) return
+  const data = await getGitHubData(repoPath, plan.originUrl)
+  if (!data.available) {
+    throw new Error(`Stack preview is stale: GitHub is no longer reachable (${data.message})`)
+  }
+  for (const captured of plan.capturedStacks) {
+    const current = (data.nativeStacks ?? []).find((stack) => stack.number === captured.number)
+    if (
+      !current ||
+      current.open !== captured.open ||
+      current.base !== captured.base ||
+      current.status !== captured.status ||
+      current.pullRequests.length !== captured.members.length ||
+      current.pullRequests.some((member, index) => {
+        const was = captured.members[index]
+        return (
+          member.number !== was.number ||
+          member.head !== was.head ||
+          member.headSha !== was.headSha ||
+          member.base !== was.base ||
+          member.state !== was.state ||
+          member.draft !== was.draft
+        )
+      })
+    ) {
+      throw new Error(`Stack preview is stale: native stack #${captured.number} changed on GitHub`)
     }
   }
 }
@@ -2441,41 +3110,42 @@ async function withLocalBranchRefLock<T>(
 
 async function pushBranch(
   repoPath: string,
-  entry: PlanEntry,
+  branch: string,
+  oid: string,
+  capturedRemoteOid: string | null,
   allowForce: boolean,
   pushUrl: string,
 ): Promise<string> {
-  return withLocalBranchRefLock(repoPath, entry.branch, async () => {
-    const upstream = await branchUpstream(repoPath, entry.branch)
-    if (upstream && upstream !== `origin/${entry.branch}`) {
-      throw new Error(`Branch ${entry.branch} has a non-origin or renamed upstream (${upstream})`)
+  return withLocalBranchRefLock(repoPath, branch, async () => {
+    const upstream = await branchUpstream(repoPath, branch)
+    if (upstream && upstream !== `origin/${branch}`) {
+      throw new Error(`Branch ${branch} has a non-origin or renamed upstream (${upstream})`)
     }
-    const local = await resolveCommit(repoPath, `refs/heads/${entry.branch}`)
-    if (!local) throw new Error(`Branch ${entry.branch} no longer exists`)
-    if (local !== entry.oldTip)
-      throw new Error(`Stack preview is stale: local ${entry.branch} changed`)
-    const remote = await remoteOid(repoPath, pushUrl, entry.branch)
-    if (remote !== entry.remoteOid)
-      throw new Error(`Stack preview is stale: remote ${entry.branch} changed`)
+    const local = await resolveCommit(repoPath, `refs/heads/${branch}`)
+    if (!local) throw new Error(`Branch ${branch} no longer exists`)
+    if (local !== oid) throw new Error(`Stack preview is stale: local ${branch} changed`)
+    const remote = await remoteOid(repoPath, pushUrl, branch)
+    if (remote !== capturedRemoteOid)
+      throw new Error(`Stack preview is stale: remote ${branch} changed`)
     if (remote === local) {
-      await setConfig(repoPath, `branch.${entry.branch}.remote`, 'origin')
-      await setConfig(repoPath, `branch.${entry.branch}.merge`, `refs/heads/${entry.branch}`)
+      await setConfig(repoPath, `branch.${branch}.remote`, 'origin')
+      await setConfig(repoPath, `branch.${branch}.merge`, `refs/heads/${branch}`)
       return local
     }
     const nonFastForward = remote !== null && !(await isAncestor(repoPath, remote, local))
     if (nonFastForward && !allowForce) {
-      throw new Error(`Publishing ${entry.branch} requires explicit force-with-lease permission`)
+      throw new Error(`Publishing ${branch} requires explicit force-with-lease permission`)
     }
     if (nonFastForward) {
-      if (!entry.remoteOid) throw new Error(`Remote ${entry.branch} changed; force lease refused`)
+      if (!capturedRemoteOid) throw new Error(`Remote ${branch} changed; force lease refused`)
       await runGit(repoPath, [
         '-c',
         'push.followTags=false',
         'push',
         '--no-mirror',
-        `--force-with-lease=refs/heads/${entry.branch}:${entry.remoteOid}`,
+        `--force-with-lease=refs/heads/${branch}:${capturedRemoteOid}`,
         'origin',
-        `${entry.oldTip}:refs/heads/${entry.branch}`,
+        `${oid}:refs/heads/${branch}`,
       ])
     } else {
       await runGit(repoPath, [
@@ -2485,37 +3155,34 @@ async function pushBranch(
         '--no-force',
         '--no-mirror',
         'origin',
-        `${entry.oldTip}:refs/heads/${entry.branch}`,
+        `${oid}:refs/heads/${branch}`,
       ])
     }
-    await setConfig(repoPath, `branch.${entry.branch}.remote`, 'origin')
-    await setConfig(repoPath, `branch.${entry.branch}.merge`, `refs/heads/${entry.branch}`)
+    await setConfig(repoPath, `branch.${branch}.remote`, 'origin')
+    await setConfig(repoPath, `branch.${branch}.merge`, `refs/heads/${branch}`)
     return local
   })
 }
 
-async function createPullRequest(
-  fullName: string,
-  branch: string,
-  base: string,
-  title: string,
-  draft: boolean,
-): Promise<void> {
-  try {
-    await githubTransport().rest({
-      method: 'POST',
-      path: `repos/${fullName}/pulls`,
-      body: {
-        title,
-        head: branch,
-        base,
-        body: `${title}\n\nGit Stacks branch: ${branch}\nBase: ${base}`,
-        draft,
-      },
-    })
-  } catch (error) {
-    throw new Error(`Could not create pull request for ${branch}: ${commandDetail(error)}`)
+/** Return the assigned identity without treating a rejected POST as evidence of ownership. */
+async function createPullRequest(fullName: string, layer: PublishLayer): Promise<number> {
+  const { data } = await githubTransport().rest<Record<string, unknown>>({
+    method: 'POST',
+    path: `repos/${fullName}/pulls`,
+    body: {
+      title: layer.title,
+      head: layer.branch,
+      base: layer.base,
+      body: layer.body,
+      draft: layer.draft,
+    },
+  })
+  if (isRecord(data) && typeof data.number === 'number' && Number.isInteger(data.number)) {
+    return data.number
   }
+  throw new Error(
+    `Creating the pull request for ${layer.branch} returned no number; retry this step`,
+  )
 }
 
 async function patchPullRequest(
@@ -2556,32 +3223,623 @@ async function changePullRequestDraft(
     throw new Error(`Pull request #${number} did not change readiness`)
 }
 
-async function publishStack(
+/**
+ * Runs one publish step. Every step verifies the live state it is about to
+ * change and treats the intended end state as its success condition, so a step
+ * that already ran — by an earlier attempt, or by hand on GitHub — completes
+ * without a second write.
+ */
+async function runPublishStep(
+  repoPath: string,
+  operation: PublishOperation,
+  step: PublishStep,
+): Promise<string> {
+  if (step.kind === 'push') {
+    const facts = factsOf(operation, step.branch as string)
+
+    const tracked = operation.layers.find((layer) => layer.branch === facts.branch)
+    if (tracked) {
+      const current = await exactPrForBranch(
+        facts.branch,
+        (await canonicalPullRequests(repoPath)).data,
+      )
+      if ((current?.number ?? null) !== tracked.pullRequest) {
+        throw new Error(
+          `Pull request for ${facts.branch} changed during publication; inspect the published branches before retrying`,
+        )
+      }
+      // Until retargeting, either the reviewed original base or the approved target is valid.
+      if (
+        current &&
+        (current.state !== 'OPEN' ||
+          (current.base !== tracked.base &&
+            (!tracked.updateBase || current.base !== facts.pullRequestBase)))
+      ) {
+        throw new Error(
+          `Pull request for ${facts.branch} changed during publication; inspect the published branches before retrying`,
+        )
+      }
+    }
+    const local = await resolveCommit(repoPath, `refs/heads/${facts.branch}`)
+    if (local !== facts.oid) {
+      throw new Error(`Stack preview is stale: local ${facts.branch} changed`)
+    }
+    const remote = await remoteOid(repoPath, operation.pushUrl, facts.branch)
+    if (remote === facts.oid) {
+      // Finish local tracking even if the remote push succeeded before an interruption.
+      // Reuse the locked no-push path so upstream conflicts and tip races still reject.
+      await pushBranch(
+        repoPath,
+        facts.branch,
+        facts.oid,
+        facts.oid,
+        operation.allowForce,
+        operation.pushUrl,
+      )
+      return `Already published at ${shortOid(facts.oid)}`
+    }
+    if (remote !== facts.remoteOid) {
+      throw new Error(`Stack preview is stale: remote ${facts.branch} changed`)
+    }
+    await pushBranch(
+      repoPath,
+      facts.branch,
+      facts.oid,
+      facts.remoteOid,
+      operation.allowForce,
+      operation.pushUrl,
+    )
+    // A racing close, retarget, or new pull request can land while this branch is pushed, so
+    // the pull request is read back before the next layer depends on it.
+    if (tracked) {
+      const current = await exactPrForBranch(
+        facts.branch,
+        (await canonicalPullRequests(repoPath)).data,
+      )
+      if (
+        (current?.number ?? null) !== tracked.pullRequest ||
+        (current !== null &&
+          (current.state !== 'OPEN' ||
+            (current.base !== tracked.base &&
+              (!tracked.updateBase || current.base !== facts.pullRequestBase))))
+      ) {
+        throw new Error(
+          `Pull request for ${facts.branch} changed during publication; inspect the published branches before retrying`,
+        )
+      }
+    }
+    return facts.remoteOid === null
+      ? `Created ${facts.branch} on the remote at ${shortOid(facts.oid)}`
+      : `Replaced ${facts.branch} on the remote with a lease on ${shortOid(facts.remoteOid)}`
+  }
+
+  if (step.kind === 'create-pr') {
+    const layer = layerOf(operation, step.branch as string)
+    const existing = await exactPrForBranch(
+      layer.branch,
+      await canonicalPullRequests(repoPath).then((result) => result.data),
+    )
+    if (layer.pullRequest !== null && existing?.number !== layer.pullRequest) {
+      throw new NativeStackError(
+        'invalid-chain',
+        `Recorded pull request #${layer.pullRequest} for ${layer.branch} is no longer the current pull request; take a fresh preview`,
+      )
+    }
+    if (existing && layer.pullRequest === null && !layer.createIntent) {
+      throw new Error(
+        `Pull request for ${layer.branch} changed during publication; inspect the published branches before retrying`,
+      )
+    }
+    if (existing) {
+      if (existing.state !== 'OPEN' || existing.base !== layer.base) {
+        throw new Error(
+          `Pull request for ${layer.branch} changed during publication; inspect the published branches before retrying`,
+        )
+      }
+      // An accepted creation is not permission to continue from a moved head. Prove
+      // the journalled commit and both tips before recording adoption or running later layers.
+      await provePublishedHead(
+        repoPath,
+        operation,
+        layer,
+        existing,
+        layer.pullRequest ?? existing.number,
+      )
+      if (layer.pullRequest === null) {
+        // GitHub accepted this operation's own creation and the response was lost.
+        step.detail = `Recovered pull request #${existing.number} from a lost response`
+      }
+      layer.pullRequest = existing.number
+      step.pullRequest = existing.number
+      await writePublishOperation(repoPath, operation)
+      await setPullRequestNumber(repoPath, layer.branch, existing.number)
+      return `Adopted existing pull request #${existing.number}`
+    }
+    // Creation uses a branch name, not an OID. A retry skips completed pushes, so
+    // prove that name still points to the reviewed commit before issuing a new request.
+    const facts = factsOf(operation, layer.branch)
+    const local = await resolveCommit(repoPath, `refs/heads/${facts.branch}`)
+    if (local !== facts.oid) {
+      throw new Error(`Stack preview is stale: local ${facts.branch} changed`)
+    }
+    const remote = await remoteOid(repoPath, operation.pushUrl, facts.branch)
+    if (remote !== facts.oid) {
+      throw new Error(`Stack preview is stale: remote ${facts.branch} changed`)
+    }
+    // The intent is journalled before the request leaves, so a lost response or an
+    // interruption between the POST and this assignment still lets a retry recognise the
+    // pull request it asked GitHub to create instead of calling it somebody else's.
+    if (!layer.createIntent) {
+      layer.createIntent = true
+      await writePublishOperation(repoPath, operation)
+    }
+    let number: number
+    try {
+      number = await createPullRequest(operation.fullName, layer)
+    } catch (error) {
+      if (definitivelyRejectedCreation(error)) {
+        layer.createIntent = false
+        await writePublishOperation(repoPath, operation)
+      }
+      throw error
+    }
+    layer.pullRequest = number
+    step.pullRequest = number
+    await writePublishOperation(repoPath, operation)
+    await setPullRequestNumber(repoPath, layer.branch, number)
+    const readBack = await getPullRequest(repoPath, number)
+    if (
+      readBack.state !== 'OPEN' ||
+      readBack.base !== layer.base ||
+      readBack.head !== layer.branch
+    ) {
+      throw new Error(
+        `Pull request #${number} does not point at ${layer.branch} based on ${layer.base}`,
+      )
+    }
+    await provePublishedHead(repoPath, operation, layer, readBack)
+    return `Opened pull request #${number}${layer.draft ? ' as a draft' : ''}`
+  }
+
+  if (step.kind === 'retarget-pr') {
+    const layer = layerOf(operation, step.branch as string)
+    const number = layer.pullRequest
+    if (number === null) throw new Error(`No pull request is recorded for ${layer.branch}`)
+    const before = await getPullRequest(repoPath, number)
+    if (before.state !== 'OPEN') {
+      throw new Error(`Pull request #${number} is no longer open`)
+    }
+    if (before.base === layer.base)
+      return `Pull request #${number} is already based on ${layer.base}`
+    const capturedBase = factsOf(operation, layer.branch).pullRequestBase
+    if (before.base !== capturedBase) {
+      throw new NativeStackError(
+        'invalid-chain',
+        `Pull request #${number} base changed from ${capturedBase ?? 'an unknown base'} to ${before.base}; take a fresh preview`,
+      )
+    }
+    await provePublishedHead(repoPath, operation, layer, before)
+    await patchPullRequest(operation.fullName, number, { base: layer.base })
+    const after = await getPullRequest(repoPath, number)
+    if (after.base !== layer.base) {
+      throw new Error(`Pull request #${number} did not accept base ${layer.base}`)
+    }
+    return `Rebased pull request #${number} onto ${layer.base}`
+  }
+
+  const [owner, name] = operation.fullName.split('/')
+  const capability = await detectNativeStacksCapability(owner, name)
+  if (!capability.available) {
+    throw new NativeStackError(
+      'preview-unavailable',
+      capability.message ?? 'This repository cannot use native pull request stacks',
+    )
+  }
+  const published = operation.layers.filter((layer) => layer.pullRequest !== null)
+  if (published.length === 0) throw new Error('No published pull request is available to stack')
+  // A resumed submission skips the push steps it already completed, so the journal is the only
+  // record of what was reviewed. Every published pull request is proved against the tip this
+  // operation intended to publish, which is what rejects an external force-push that landed
+  // after those steps finished.
+  await provePublishedHeads(repoPath, operation, published)
+  const numbers = published.map((layer) => layer.pullRequest as number)
+  const stacks = await listPullRequestStacks(owner, name)
+  // Extensions remain bound to the reviewed stack. Overlap can identify our own lost
+  // create response only when no stack number has been saved yet.
+  const matched = stacks.find((stack) =>
+    operation.stackNumber !== null
+      ? stack.number === operation.stackNumber
+      : stack.pullRequests.some((member) => numbers.includes(member.number)),
+  )
+  // The preview captured exactly which native stack these pull requests belonged to, so a
+  // stack created, unstack, or re-stack that lands while the layers are pushed invalidates
+  // the submission instead of silently binding it to whichever stack now owns a member.
+  if (operation.stackNumber !== null) {
+    const captured = matched
+    // A member that left the stack it was previewed in is a registration loss, whether the
+    // stack was unstacked outright or the member was moved somewhere else.
+    const registered = new Set(captured?.pullRequests.map((member) => member.number))
+    for (const member of operation.capturedMembers) {
+      if (numbers.includes(member.number) && !registered.has(member.number)) {
+        throw new NativeStackError(
+          'invalid-chain',
+          `Pull request #${member.number} is no longer registered in native stack #${operation.stackNumber}`,
+        )
+      }
+    }
+    if (!captured || !captured.open) {
+      throw new NativeStackError(
+        'invalid-chain',
+        `Stack preview is stale: native stack #${operation.stackNumber} was closed or removed`,
+      )
+    }
+    // A recovery that journalled its stack number can be interrupted again before the step is
+    // marked complete. The recorded stack is then this operation's own creation, and treating
+    // it as a matched stack below would call it a stale preview forever. The step is already
+    // done, so it stays done, but only once the native registration is proved: an open stack
+    // whose members are the same open pull requests this operation published, not a closed
+    // stack or one holding a pull request somebody closed in between.
+    if (
+      operation.stackCreateRequested === true &&
+      step.kind === 'create-stack' &&
+      isOwnCreatedStack(captured, numbers, published)
+    ) {
+      await proveRecoveredRegistration(repoPath, operation, published, captured)
+      return `Recovered native stack #${captured.number} from a lost response`
+    }
+  } else if (matched) {
+    // GitHub may have created this stack and lost the response, or the process may have stopped
+    // before the completed step was marked complete. A stack that holds exactly this operation's
+    // pull requests, in order, is its own work and is adopted rather than called stale.
+    if (!operation.stackCreateRequested || !isOwnCreatedStack(matched, numbers, published)) {
+      throw new Error(
+        `Stack preview is stale: these pull requests now belong to native stack #${matched.number}`,
+      )
+    }
+    await proveRecoveredRegistration(repoPath, operation, published, matched)
+    operation.stackNumber = matched.number
+    await writePublishOperation(repoPath, operation)
+    return `Recovered native stack #${matched.number} from a lost response`
+  }
+  // The legacy comment metadata is only retired once the native stack really holds these pull
+  // requests, so every successful registration path below retires it before returning.
+  const retireLegacyComments = (): Promise<void> =>
+    retireLegacyStackComments(
+      operation.fullName,
+      matched ? matched.pullRequests.map((member) => member.number).concat(numbers) : numbers,
+    )
+  const known = await Promise.all(
+    published.map((layer) => getPullRequest(repoPath, layer.pullRequest as number)),
+  )
+  if (matched) {
+    if (step.kind !== 'extend-stack') {
+      throw new Error(
+        `Stack preview is stale: these pull requests now belong to native stack #${matched.number}`,
+      )
+    }
+    const registered = new Set(matched.pullRequests.map((member) => member.number))
+    const toAdd = numbers.filter((number) => !registered.has(number))
+    // The already-registered pull requests were read back before the stack listing, so a
+    // force-push, retarget, or unstack landing while the target is chosen cannot extend
+    // the stack from a base that no longer exists.
+    const registration = await revalidatePublishedStackRegistration(
+      owner,
+      name,
+      matched,
+      known.filter((pr) => registered.has(pr.number)),
+    )
+    if (!registration.valid) {
+      // The typed status is carried through so callers branch on the failure, not its wording.
+      throw new NativeStackError(
+        registration.status,
+        registration.message ?? 'Published pull requests are not registered',
+      )
+    }
+    // The registration check re-reads the members concurrently, so a force-push, retarget, or
+    // unstack that lands part-way through that batch leaves at least one stale reading behind.
+    // Every already-registered member is therefore read once more, one at a time and only after
+    // every call that could expose drift, and compared to the head the stack still records.
+    // This runs even when there is nothing to append, because a drifted member invalidates the
+    // submission either way.
+    const baseline = new Map(operation.capturedMembers.map((member) => [member.number, member]))
+    for (const member of matched.pullRequests) {
+      if (!numbers.includes(member.number)) continue
+      const captured = baseline.get(member.number)
+      // A member this submission pushed is expected to have moved; every other member must
+      // still carry the exact head the preview recorded.
+      const fresh = await getPullRequest(repoPath, member.number)
+      if (fresh.state !== 'OPEN') {
+        throw new NativeStackError(
+          'invalid-chain',
+          `Pull request #${member.number} is no longer open`,
+        )
+      }
+      // A layer this submission approved for a base change legitimately differs from what the
+      // stack still records until its retarget step runs; any other base difference is drift.
+      const layer = operation.layers.find((item) => item.pullRequest === member.number)
+      if (layer && !layer.updateBase && fresh.base !== member.base) {
+        throw new NativeStackError(
+          'invalid-chain',
+          `Pull request #${member.number} base changed from ${member.base} to ${fresh.base}`,
+        )
+      }
+      // A branch this submission pushed on purpose has legitimately moved; only a member this
+      // submission did not touch has to still carry the head the preview recorded.
+      const pushedByThisSubmission = operation.branches.some(
+        (facts) => facts.branch === layer?.branch && facts.remoteOid !== facts.oid,
+      )
+      if (
+        !pushedByThisSubmission &&
+        captured?.headSha &&
+        fresh.headOid &&
+        captured.headSha !== fresh.headOid
+      ) {
+        throw new NativeStackError(
+          'invalid-chain',
+          `Pull request #${member.number} head moved to ${fresh.headOid} since it was captured; refresh the stack preview`,
+        )
+      }
+    }
+    // The heads are proved again here, against the journal rather than against the most
+    // recent reading, because the most recent reading is exactly what may have moved. This
+    // runs before the no-add return too: an already-registered stack is still this
+    // submission's result, so a member moved after the first proof still invalidates it.
+    const atBoundary = await Promise.all(
+      published.map((layer) => getPullRequest(repoPath, layer.pullRequest as number)),
+    )
+    proveJournalledHeads(operation, published, atBoundary)
+    if (toAdd.length === 0) {
+      await retireLegacyComments()
+      return `Stack #${matched.number} already holds all ${numbers.length} pull requests`
+    }
+    await addPullRequestsToStack(owner, name, matched.number, toAdd, {
+      existingStack: matched,
+      knownPullRequests: atBoundary,
+    })
+    await retireLegacyComments()
+    return `Extended stack #${matched.number} with pull requests ${toAdd.join(', ')}`
+  }
+  if (step.kind !== 'create-stack') {
+    throw new Error('Stack preview is stale: the native stack it extended is no longer registered')
+  }
+  // Same boundary proof as the extend path: the journal is the truth, not the most recent read.
+  const atBoundary = await Promise.all(
+    published.map((layer) => getPullRequest(repoPath, layer.pullRequest as number)),
+  )
+  proveJournalledHeads(operation, published, atBoundary)
+  let requested = false
+  try {
+    await createPullRequestStack(owner, name, numbers, {
+      knownPullRequests: atBoundary,
+      defaultBranch: operation.defaultBranch,
+      beforeCreate: async () => {
+        operation.stackCreateRequested = true
+        await writePublishOperation(repoPath, operation)
+        requested = true
+      },
+    })
+  } catch (error) {
+    if (requested && definitivelyRejectedCreation(error)) {
+      operation.stackCreateRequested = false
+      await writePublishOperation(repoPath, operation)
+    }
+    throw error
+  }
+  await retireLegacyComments()
+  return `Registered native stack for pull requests ${numbers.join(', ')}`
+}
+
+/**
+ * Proves a recovered stack is still this submission's usable result before it is called
+ * done. The stack listing is a snapshot, so three things are checked against the journal and
+ * against a fresh read rather than against the listing: the pull requests are still open,
+ * they still carry the commits and branches this operation published, and the stack still
+ * registers them. A listing that said open and a pull request that closed behind it, or a
+ * head that moved after the first proof, both pass every comparison inside the listing and
+ * fail here.
+ */
+async function proveRecoveredRegistration(
+  repoPath: string,
+  operation: PublishOperation,
+  published: readonly PublishLayer[],
+  stack: NativeStack,
+): Promise<void> {
+  const members = await Promise.all(
+    stack.pullRequests.map((member) => getPullRequest(repoPath, member.number)),
+  )
+  for (const pr of members) {
+    if (pr.state !== 'OPEN') {
+      throw new NativeStackError(
+        pr.state === 'MERGED' ? 'completed' : 'closed',
+        `Pull request #${pr.number} is ${pr.state.toLowerCase()}, so the recovered stack is not usable`,
+      )
+    }
+  }
+  // The journal is the only immutable record of what was reviewed, so it is what the fresh
+  // reading is compared against rather than the listing this same step just took.
+  for (const layer of published) {
+    const pr = members.find((candidate) => candidate.number === layer.pullRequest)
+    const intended = operation.branches.find((facts) => facts.branch === layer.branch)
+    if (
+      !pr ||
+      !intended ||
+      pr.headRepository?.toLowerCase() !== operation.fullName.toLowerCase() ||
+      pr.head !== layer.branch ||
+      pr.base !== layer.base ||
+      pr.headOid !== intended.oid
+    ) {
+      throw new NativeStackError(
+        'invalid-chain',
+        `Pull request #${layer.pullRequest} no longer matches what this submission published; refresh the stack preview`,
+      )
+    }
+  }
+  const [owner, name] = operation.fullName.split('/')
+  const currentStack = await getPullRequestStack(owner, name, stack.number)
+  if (
+    !isOwnCreatedStack(
+      currentStack,
+      published.map((layer) => layer.pullRequest as number),
+      published,
+    )
+  ) {
+    throw new NativeStackError('invalid-chain', 'Recovered native stack membership changed')
+  }
+  const registration = await revalidatePublishedStackRegistration(
+    owner,
+    name,
+    currentStack,
+    members,
+  )
+  if (!registration.valid) {
+    throw new NativeStackError(
+      registration.status,
+      registration.message ?? 'Recovered native stack is not a valid registration',
+    )
+  }
+  await provePublishedHeads(repoPath, operation, published)
+}
+
+/**
+ * Walks the ordered steps and persists after every transition, so an interrupted
+ * submission resumes at the first unfinished step instead of pushing a branch or
+ * opening a pull request twice.
+ */
+async function runPublishSteps(
+  repoPath: string,
+  operation: PublishOperation,
+): Promise<ActionResult> {
+  operation.status = 'running'
+  await writePublishOperation(repoPath, operation)
+  for (const step of operation.steps) {
+    if (step.status === 'completed') continue
+    step.status = 'running'
+    step.failure = null
+    await writePublishOperation(repoPath, operation)
+    try {
+      // A completed lower layer is not rerun on Resume. Prove its published identity and
+      // tips before any later step can mutate another branch or pull request.
+      for (const layer of operation.layers) {
+        if (layer.pullRequest === null || layer.branch === step.branch) continue
+        if (
+          !operation.steps.some(
+            (prior) =>
+              prior.branch === layer.branch &&
+              prior.kind === 'push' &&
+              prior.status === 'completed',
+          )
+        )
+          continue
+        const pr = await getPullRequest(repoPath, layer.pullRequest)
+        if (pr.base !== layer.base) {
+          throw new Error(`Pull request #${layer.pullRequest} for ${layer.branch} changed base`)
+        }
+        await provePublishedHead(repoPath, operation, layer, pr)
+      }
+      step.detail = await runPublishStep(repoPath, operation, step)
+      step.status = 'completed'
+      step.failure = null
+    } catch (error) {
+      step.status = 'failed'
+      step.failure = publishFailure(step, error)
+      operation.status = 'failed'
+      operation.message = step.failure.summary
+      await writePublishOperation(repoPath, operation)
+      // A typed failure keeps its class and status so callers can branch on it; its message
+      // already carries the recovery text for the reader.
+      if (error instanceof NativeStackError) throw error
+      throw new Error(`${step.failure.summary} ${step.failure.recovery}`)
+    }
+    await writePublishOperation(repoPath, operation)
+  }
+  const pullRequests = operation.layers.filter((layer) => layer.pullRequest !== null).length
+  operation.status = 'completed'
+  operation.message = `Submitted ${operation.layers.length} stack layer${
+    operation.layers.length === 1 ? '' : 's'
+  } with ${pullRequests} pull request${pullRequests === 1 ? '' : 's'}`
+  await writePublishOperation(repoPath, operation)
+  return { message: operation.message }
+}
+
+/**
+ * Proves the native stack the preview recorded still exists and still holds exactly the
+ * pull requests it listed, before a single branch is pushed. A stack closed, unstacked, or
+ * re-stacked between the preview and the submission invalidates it: the reviewed object
+ * set no longer matches what GitHub would be mutated with.
+ */
+async function proveCapturedStackMembership(
+  plan: StackPlan,
+  operation: PublishOperation,
+): Promise<void> {
+  const numbers = operation.layers
+    .map((layer) => layer.pullRequest)
+    .filter((number): number is number => number !== null)
+  const [owner, name] = operation.fullName.split('/')
+  const stacks = await listPullRequestStacks(owner, name)
+  if (operation.stackNumber === null) {
+    const owned = stacks.find((stack) =>
+      stack.pullRequests.some((member) => numbers.includes(member.number)),
+    )
+    if (owned) {
+      throw new Error(
+        `Stack preview is stale: these pull requests now belong to native stack #${owned.number}`,
+      )
+    }
+    return
+  }
+  const captured = plan.capturedStacks.find((stack) => stack.number === operation.stackNumber)
+  if (!captured) {
+    throw new Error(
+      `Stack preview is stale: native stack #${operation.stackNumber} is no longer available`,
+    )
+  }
+  const live = stacks.find((stack) => stack.number === operation.stackNumber)
+  if (!live) {
+    throw new Error(
+      `Stack preview is stale: native stack #${operation.stackNumber} was closed or removed`,
+    )
+  }
+  if (!live.open) {
+    throw new Error(
+      `Stack preview is stale: native stack #${live.number} is a closed stack #${live.number}`,
+    )
+  }
+  // Only the members the preview already recorded have to still be there. The layers this
+  // submission appends are expected to be absent.
+  const members = new Set(live.pullRequests.map((member) => member.number))
+  for (const member of captured.members) {
+    if (!numbers.includes(member.number)) continue
+    if (!members.has(member.number)) {
+      throw new Error(
+        `Stack preview is stale: pull request #${member.number} left native stack #${live.number}`,
+      )
+    }
+  }
+}
+
+async function runSubmitStack(
   repoPath: string,
   plan: StackPlan,
-  action: Extract<StackAction, { type: 'executeStack' }>,
+  action: Extract<SubmitStackAction, { type: 'submitStack' }>,
 ): Promise<ActionResult> {
   if (plan.blockers.length > 0) throw new Error(plan.blockers.join('; '))
   const origin = await currentOrigin(repoPath, true)
   if (origin.url !== plan.originUrl || origin.pushUrl !== plan.pushUrl) {
     throw new Error('Stack preview is stale: origin fetch or push URL changed')
   }
-  await ensureNoBusyOperation(repoPath, 'publish the stack')
-  await ensureClean(repoPath, 'publish the stack')
-  await revalidatePlan(repoPath, plan)
-  if (!plan.pushUrl) throw new Error('A single github.com origin push URL is required')
-  const pushUrl = plan.pushUrl
-  for (const entry of plan.entries) {
-    const local = await resolveCommit(repoPath, `refs/heads/${entry.branch}`)
-    const remote = await remoteOid(repoPath, pushUrl, entry.branch)
-    if (remote !== entry.remoteOid)
-      throw new Error(`Stack preview is stale: remote ${entry.branch} changed`)
-    const nonFastForward =
-      remote !== null && local !== null && !(await isAncestor(repoPath, remote, local))
-    if (nonFastForward && !action.allowForce) {
-      throw new Error(`Publishing ${entry.branch} requires explicit force-with-lease permission`)
-    }
+  if (!plan.pushUrl || !plan.originFullName) {
+    throw new Error('A single github.com origin push URL is required')
   }
+  await ensureNoBusyOperation(repoPath, 'submit the stack')
+  await ensureClean(repoPath, 'submit the stack')
+  await revalidatePlan(repoPath, plan)
+  const unfinished = await readPublishOperation(plan.repoPath)
+  if (unfinished && unfinished.status !== 'completed') {
+    throw new Error(
+      'Finish or dismiss the Submit Stack operation already in progress before starting another',
+    )
+  }
+  if (unfinished) await removePublishOperation(plan.repoPath)
   const preflight = await canonicalPullRequests(repoPath)
   for (const entry of plan.entries) {
     const currentPr = await exactPrForBranch(entry.branch, preflight.data)
@@ -2589,116 +3847,59 @@ async function publishStack(
       throw new Error(`Stack preview is stale: pull request for ${entry.branch} changed`)
     }
   }
-  const canonical = preflight
-  const published: Array<{ branch: string; pr: PullRequest }> = []
-  for (const entry of plan.entries) {
-    const beforePush = await getGitHubData(repoPath, origin.url)
-    if (!beforePush.available) throw new Error(beforePush.message)
-    const beforePushPr = await exactPrForBranch(entry.branch, beforePush)
-    if (!matchesCapturedPullRequest(entry, beforePushPr)) {
-      throw new Error(
-        `Pull request for ${entry.branch} changed during publication; inspect the published branches before retrying`,
-      )
-    }
-    const currentOid = await pushBranch(repoPath, entry, action.allowForce, pushUrl)
-    const currentData = await getGitHubData(repoPath, origin.url)
-    if (!currentData.available) throw new Error(currentData.message)
-    let pr = await exactPrForBranch(entry.branch, currentData)
-    const base = entry.parent
-    if (
-      (entry.pr &&
-        (!pr ||
-          pr.number !== entry.pr.number ||
-          pr.base !== entry.pr.base ||
-          pr.state !== 'OPEN')) ||
-      (!entry.pr && pr !== null)
-    ) {
-      throw new Error(
-        `Pull request for ${entry.branch} changed during publication; inspect the published branches before retrying`,
-      )
-    }
-    if (!pr) {
-      await createPullRequest(
-        canonical.fullName,
-        entry.branch,
-        base,
-        action.titles[entry.branch] ?? entry.branch,
-        action.draft,
-      )
-      const afterCreate = await getGitHubData(repoPath, origin.url)
-      if (!afterCreate.available) throw new Error(afterCreate.message)
-      pr = await exactPrForBranch(entry.branch, afterCreate)
-      if (!pr)
-        throw new Error(
-          `Pull request creation for ${entry.branch} returned no canonical head; retry only after a fresh preview`,
-        )
-    } else if (pr.base !== base) {
-      await patchPullRequest(canonical.fullName, pr.number, { base })
-      const afterPatch = await getPullRequest(repoPath, pr.number)
-      if (afterPatch.base !== base)
-        throw new Error(`Pull request #${pr.number} did not accept base ${base}`)
-      pr = afterPatch
-    }
-    await setPullRequestNumber(repoPath, entry.branch, pr.number)
-    const readBack = await getPullRequest(repoPath, pr.number)
-    if (
-      readBack.state !== 'OPEN' ||
-      readBack.base !== base ||
-      pullRequestRepository(readBack) !== canonical.fullName.toLowerCase() ||
-      readBack.head !== entry.branch ||
-      readBack.headOid !== currentOid
-    ) {
-      throw new Error(
-        `Pull request #${pr.number} no longer points at ${entry.branch}@${currentOid}`,
-      )
-    }
-    published.push({ branch: entry.branch, pr: readBack })
+  const operation = await buildPublishOperation(plan.repoPath, plan, action)
+  await proveCapturedStackMembership(plan, operation)
+  await writePublishOperation(plan.repoPath, operation)
+  return runPublishSteps(plan.repoPath, operation)
+}
+
+async function retrySubmitStack(repoPath: string): Promise<ActionResult> {
+  const root = await repositoryPath(repoPath)
+  const operation = await readPublishOperation(root)
+  if (!operation) throw new Error('There is no Submit Stack operation to resume')
+  if (operation.status === 'completed') {
+    throw new Error('That Submit Stack operation already finished every step')
   }
-  const [owner, name] = canonical.fullName.split('/')
-  const capability = await detectNativeStacksCapability(owner, name)
-  if (capability.available) {
-    const existingStacks = await listPullRequestStacks(owner, name)
-    const publishedNumbers = published.map((entry) => entry.pr.number)
-    const matched = existingStacks.find((stack) =>
-      stack.pullRequests.some((member) => publishedNumbers.includes(member.number)),
-    )
-    if (matched) {
-      const existingNumbers = new Set(matched.pullRequests.map((member) => member.number))
-      const registered = published.filter((entry) => existingNumbers.has(entry.pr.number))
-      const toAdd = publishedNumbers.filter((num) => !existingNumbers.has(num))
-      // The already-registered pull requests were read back before the stack listing, so a
-      // force-push, retarget, or unstack that lands while the registration target is chosen
-      // would otherwise extend the stack from a base that no longer exists.
-      const registration = await revalidatePublishedStackRegistration(
-        owner,
-        name,
-        matched,
-        registered.map((entry) => entry.pr),
-      )
-      if (!registration.valid) {
-        throw new Error(registration.message ?? 'Published pull requests are not registered')
-      }
-      if (toAdd.length > 0) {
-        await addPullRequestsToStack(owner, name, matched.number, toAdd, {
-          existingStack: matched,
-          knownPullRequests: published.map((entry) => entry.pr),
-        })
-      }
-    } else if (published.length >= 1) {
-      await createPullRequestStack(owner, name, publishedNumbers, {
-        knownPullRequests: published.map((entry) => entry.pr),
-        defaultBranch: plan.defaultBranch,
-      })
-    }
-    await retireLegacyStackComments(
-      canonical.fullName,
-      matched
-        ? matched.pullRequests.map((member) => member.number).concat(publishedNumbers)
-        : publishedNumbers,
+  const blocked = operation.steps.find(
+    (step) => step.status !== 'completed' && step.failure?.retryable === false,
+  )
+  if (blocked) {
+    throw new Error(
+      `${blocked.failure!.summary} This submission cannot be resumed; dismiss it and take a fresh preview. ${blocked.failure!.recovery}`,
     )
   }
+  const origin = await currentOrigin(root, true)
+  if (origin.url !== operation.originUrl || origin.pushUrl !== operation.pushUrl) {
+    throw new Error('Submit progress is stale: the origin remote changed')
+  }
+  await ensureNoBusyOperation(root, 'resume the stack submission')
+  await ensureClean(root, 'resume the stack submission')
+  // A step that stopped mid-write is retried from its beginning; every step treats
+  // its intended end state as success, so no push or pull request is applied twice.
+  for (const step of operation.steps) {
+    if (step.status === 'failed' || step.status === 'running') {
+      step.status = 'pending'
+      step.failure = null
+    }
+  }
+  return runPublishSteps(root, operation)
+}
+
+export async function getSubmitStackProgress(repoPath: string): Promise<PublishProgress | null> {
+  const root = await repositoryPath(repoPath)
+  const operation = await readPublishOperation(root)
+  return operation ? publishProgressOf(operation) : null
+}
+
+async function dismissSubmitStack(repoPath: string): Promise<ActionResult> {
+  const root = await repositoryPath(repoPath)
+  const operation = await readPublishOperation(root)
+  if (!operation) return { message: 'There is no Submit Stack operation to dismiss' }
+  await removePublishOperation(root)
   return {
-    message: `Published ${published.length} stack pull request${published.length === 1 ? '' : 's'}`,
+    message: `Dismissed the submission of ${operation.layers.length} layer${
+      operation.layers.length === 1 ? '' : 's'
+    }; published branches and pull requests stay on GitHub`,
   }
 }
 
@@ -3053,9 +4254,28 @@ export async function runStackAction(
       if (plan.repoPath !== root) throw new Error('Stack preview belongs to a different repository')
       plans.delete(action.token)
       if (plan.kind === 'restack') return beginRestack(root, plan)
-      if (plan.kind === 'publish') return publishStack(root, plan, action)
+      if (plan.kind === 'publish') {
+        throw new Error(
+          'Submit Stack replaced this preview action; take a fresh Submit Stack preview',
+        )
+      }
       return mergeStack(root, plan, action)
     }
+    case 'submitStack': {
+      prunePlans()
+      const plan = plans.get(action.token)
+      if (!plan || plan.expiresAt <= Date.now())
+        throw new Error('Stack preview token is missing or expired; refresh the preview')
+      if (plan.repoPath !== root) throw new Error('Stack preview belongs to a different repository')
+      if (plan.kind !== 'publish')
+        throw new Error('That preview does not describe a stack submission')
+      plans.delete(action.token)
+      return runSubmitStack(root, plan, action)
+    }
+    case 'submitStackRetry':
+      return retrySubmitStack(root)
+    case 'submitStackDismiss':
+      return dismissSubmitStack(root)
     case 'createNativeStack': {
       const origin = await currentOrigin(root)
       const data = await getGitHubData(root, origin.url)

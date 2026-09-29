@@ -43,6 +43,7 @@ export const restackPreview: StackPreview = {
   warnings: ['feature/checkout-tests has an open draft pull request; its base moves with it.'],
   blockers: [],
   mergeMethods: ['merge', 'squash', 'rebase'],
+  publish: null,
 }
 
 export const publishPreview: StackPreview = {
@@ -50,6 +51,58 @@ export const publishPreview: StackPreview = {
   token: 'preview-publish-1',
   kind: 'publish',
   steps: [restackPreview.steps[0], { ...restackPreview.steps[1], pr: null }],
+  // A real offer. Without one the builder cannot produce a submission, so a specimen that
+  // claimed to be wired to the real guard would show a ready button that dispatches nothing.
+  publish: {
+    branch: 'feature/checkout',
+    stackNumber: null,
+    stackAction: 'create',
+    baseChanges: [],
+    capturedAt: '2026-01-01T00:00:00.000Z',
+    steps: [
+      {
+        kind: 'push',
+        branch: 'feature/checkout',
+        label: 'Push feature/checkout',
+        status: 'pending',
+        pullRequest: null,
+        detail: '',
+        failure: null,
+      },
+      {
+        kind: 'create-pr',
+        branch: 'feature/checkout',
+        label: 'Open pull request for feature/checkout',
+        status: 'pending',
+        pullRequest: null,
+        detail: '',
+        failure: null,
+      },
+      {
+        kind: 'create-stack',
+        branch: null,
+        label: 'Register native stack',
+        status: 'pending',
+        pullRequest: null,
+        detail: '',
+        failure: null,
+      },
+    ],
+    layers: [
+      {
+        branch: 'feature/checkout',
+        base: 'main',
+        title: 'Add checkout validation',
+        body: 'Fixture layer for the guarded publish specimen.',
+        draft: true,
+        updateBase: false,
+        create: true,
+        force: true,
+        pullRequest: null,
+        createIntent: false,
+      },
+    ],
+  },
 }
 
 export const blockedRestackPreview: StackPreview = {
