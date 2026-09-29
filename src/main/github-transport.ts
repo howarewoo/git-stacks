@@ -442,6 +442,15 @@ export interface DirectGitHubTransportOptions {
 }
 
 /** Authenticated REST/GraphQL access to GitHub over HTTP; it never spawns `gh`. */
+/** The origin an API base resolves to, or null when the base is not a URL. */
+function originOf(apiUrl: string): string | null {
+  try {
+    return new URL(apiUrl).origin
+  } catch {
+    return null
+  }
+}
+
 export class DirectGitHubTransport implements GitHubTransport {
   readonly kind = 'direct' as const
   private readonly options: DirectGitHubTransportOptions
@@ -486,26 +495,31 @@ export class DirectGitHubTransport implements GitHubTransport {
   }
 
   /**
-   * Whether requests go to the API origin the host this transport serves owns.
+   * Whether requests go to an API origin the host this transport serves owns.
+   * A host owns the origin its name derives, and the public host additionally
+   * owns the base it is configured to serve, so pointing the public host at
+   * another API is a statement about that host rather than about a stranger.
    * A transport built without a host keeps the older rule: only
    * `https://api.github.com` is an origin an owned credential may reach.
    */
   private get servesGitHubOrigin(): boolean {
     const host = this.host
-    if (!host) {
+    const owned: string[] = [GITHUB_CREDENTIAL_ORIGIN]
+    if (host && host !== GITHUB_HOST) owned.length = 0
+    if (host) {
       try {
-        return new URL(this.apiUrl).origin === GITHUB_CREDENTIAL_ORIGIN
+        owned.push(githubApiOriginForHost(host))
       } catch {
         return false
       }
+      if (host === GITHUB_HOST) {
+        const configured = originOf(githubApiUrl(this.env))
+        if (configured) owned.push(configured)
+      }
     }
-    try {
-      return new URL(this.apiUrl).origin === githubApiOriginForHost(host)
-    } catch {
-      return false
-    }
+    const here = originOf(this.apiUrl)
+    return here !== null && owned.includes(here)
   }
-
 
   /**
    * An explicit environment credential always wins; otherwise the signed-in
@@ -1204,7 +1218,12 @@ export function githubTransportForHost(
         // never carried into a transport that would refuse it anyway.
         ...(available && source !== null ? { credential: source } : {}),
       })
-    : new GhGitHubTransport({ env, host: key, apiUrl: apiBase, ...(graphqlUrl ? { graphqlUrl } : {}) })
+    : new GhGitHubTransport({
+        env,
+        host: key,
+        apiUrl: apiBase,
+        ...(graphqlUrl ? { graphqlUrl } : {}),
+      })
   cached = { key: cacheKey, transport }
   return transport
 }

@@ -1482,12 +1482,16 @@ test('the freshness badge renders every state in words, not colour alone', async
 test('a live snapshot read that cannot reach GitHub never reuses the confirmed payload', async () => {
   const { repo, cleanup } = await disposableRepository()
   const previous = { ...process.env }
-  // Point the real transport at a closed port with credentials present, so the
-  // read fails in the transport rather than in a double.
-  process.env.GIT_STACKS_GITHUB_API_URL = 'http://127.0.0.1:9'
+  // A host that resolves to nothing, with that host's own credential present, so
+  // the read fails in the transport rather than in a double. The credential is
+  // scoped to the unreachable host because a credential is bound to the host
+  // that issued it and is never sent to an origin that host does not own.
   process.env.GIT_STACKS_GITHUB_TRANSPORT = 'direct'
-  process.env.GIT_STACKS_GITHUB_TOKEN = 'test-token'
-  git(repo, 'remote', 'add', 'origin', 'git@github.com:acme/widgets.git')
+  process.env[
+    `GIT_STACKS_GITHUB_TOKEN_${Buffer.from('github.invalid', 'utf8').toString('hex').toUpperCase()}`
+  ] = 'test-token'
+  delete process.env.GIT_STACKS_GITHUB_API_URL
+  git(repo, 'remote', 'add', 'origin', 'git@github.invalid:acme/widgets.git')
   try {
     const live = await getSnapshot(repo, undefined, undefined, 'live')
     assert.equal(live.github.available, false, 'a live read that failed is not available')

@@ -4,6 +4,7 @@ import {
   GITHUB_API_VERSION,
   GITHUB_STACKS_API_VERSION,
   GitHubTransportError,
+  githubApiUrl,
   githubApiVersion,
   githubTransportForHost,
   type GitHubTransport,
@@ -56,9 +57,7 @@ export interface GitHubHostContext {
 }
 
 /** The host a person configured, or the refusal naming why it was refused. */
-export type GitHubHostInput =
-  | { ok: true; host: string }
-  | { ok: false; message: string }
+export type GitHubHostInput = { ok: true; host: string } | { ok: false; message: string }
 
 const REFUSE = (message: string): GitHubHostInput => ({ ok: false, message })
 
@@ -114,7 +113,9 @@ export function validateGitHubHostInput(value: unknown): GitHubHostInput {
     return REFUSE(`must be at most ${MAX_HOST_LENGTH} characters`)
   }
   const labels = host.split('.')
-  if (labels.some((label) => !label || label.length > MAX_LABEL_LENGTH || !HOST_LABEL.test(label))) {
+  if (
+    labels.some((label) => !label || label.length > MAX_LABEL_LENGTH || !HOST_LABEL.test(label))
+  ) {
     return REFUSE('must be a host name such as github.com or ghe.example.com')
   }
   if (host === GITHUB_DOTCOM_HOST && port && port !== '443') {
@@ -135,11 +136,20 @@ export function hostTransport(
   // is the only one — is left to the transports' own default, so nothing about
   // that host's requests changes. Only a host that serves GraphQL from a path
   // of its own is named, and it is named by that path.
+  //
+  // The public host's base is also the one an operator can point elsewhere.
+  // Resolving it per host from the name alone discarded that setting and sent
+  // every request to the public API instead, so the base is read from the
+  // environment and GraphQL follows it, one path below the same base.
+  const apiBase = context.dotcom ? githubApiUrl(env) : context.apiBase
   const graphqlUrl =
-    context.graphqlUrl === `${context.apiBase}/graphql` ? undefined : context.graphqlUrl
-  return githubTransportForHost(context.host, context.apiBase, env, graphqlUrl)
+    context.dotcom && apiBase !== context.apiBase
+      ? `${apiBase}/graphql`
+      : context.graphqlUrl === `${context.apiBase}/graphql`
+        ? undefined
+        : context.graphqlUrl
+  return githubTransportForHost(context.host, apiBase, env, graphqlUrl)
 }
-
 
 /** Where a GitHub host's web pages, REST API, and GraphQL endpoint live. */
 export function githubHostContext(host: string): GitHubHostContext {
@@ -339,7 +349,10 @@ export async function probeNativeStacksCapability(
   } catch (error) {
     // A cancellation is this build stopping, not a fact about the host.
     if (options.signal?.aborted || isCancelled(error)) throw error
-    if (error instanceof GitHubTransportError && (error.status === 404 || error.kind === 'not-found')) {
+    if (
+      error instanceof GitHubTransportError &&
+      (error.status === 404 || error.kind === 'not-found')
+    ) {
       return {
         available: false,
         reason: 'repository-missing',
@@ -384,7 +397,10 @@ export async function probeNativeStacksCapability(
     // A cancellation is this build stopping, not a fact about the host, and is
     // raised here exactly as it is on the repository read above.
     if (options.signal?.aborted || isCancelled(error)) throw error
-    if (error instanceof GitHubTransportError && (error.status === 404 || error.kind === 'not-found')) {
+    if (
+      error instanceof GitHubTransportError &&
+      (error.status === 404 || error.kind === 'not-found')
+    ) {
       return {
         available: false,
         reason: 'endpoint-missing',
@@ -588,7 +604,12 @@ export async function probeGitHubHost(
   const signal = options.signal ? { signal: options.signal } : {}
   const capabilities: GitHubCapability[] = []
   const set = (id: GitHubCapabilityId, outcome: ProbeOutcome) =>
-    capabilities.push({ id, label: CAPABILITY_LABELS[id], state: outcome.state, detail: outcome.detail })
+    capabilities.push({
+      id,
+      label: CAPABILITY_LABELS[id],
+      state: outcome.state,
+      detail: outcome.detail,
+    })
 
   let state: GitHubCapabilityState = 'unknown'
   let message = 'This host has not answered a capability request yet.'
