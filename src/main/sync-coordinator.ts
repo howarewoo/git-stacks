@@ -60,7 +60,11 @@ export interface SyncCoordinatorDependencies {
 }
 
 export interface SyncIntervals {
-  /** Full pull-request, stack, and check refresh while the window is in use. */
+  /**
+   * Full pull-request, stack, and check refresh while the window is in use.
+   * Zero is the person's own choice that background refresh is off: no timer is
+   * armed, and only an explicit refresh reads the remote.
+   */
   visibleMs: number
   /** Inbox and repository refresh while the window is backgrounded. */
   secondaryMs: number
@@ -139,7 +143,7 @@ export function failureDelay(failures: number, intervals: SyncIntervals): number
  */
 export class RepositorySyncCoordinator {
   private readonly deps: SyncCoordinatorDependencies
-  private readonly intervals: SyncIntervals
+  private intervals: SyncIntervals
   private readonly clock: SyncClock
   private readonly ledgers = new Map<string, RemoteMutationLedger>()
   private ledger: RemoteMutationLedger = new RemoteMutationLedger()
@@ -183,6 +187,20 @@ export class RepositorySyncCoordinator {
 
   get attachedRepository(): string | null {
     return this.repository
+  }
+
+  /**
+   * The stored refresh interval, applied here rather than by a second timer in the
+   * window: this coordinator is the one automatic owner of remote reads, so a
+   * choice made in settings has to reach it to mean anything. Turning background
+   * refresh off disarms the timer; an explicit refresh still reads.
+   */
+  applyIntervals(intervals: Partial<SyncIntervals>): void {
+    this.intervals = { ...this.intervals, ...intervals }
+    this.clock.clearTimeout(this.remoteTimer)
+    this.remoteTimer = undefined
+    if (!this.repository) return
+    if (this.intervals.visibleMs > 0) this.scheduleRemote(this.intervalFor(this.currentTier()))
   }
 
   freshness(): RemoteFreshness {
@@ -254,6 +272,8 @@ export class RepositorySyncCoordinator {
     if (!changed || !this.repository) return
     // An unauthorized state stops polling until the person refreshes manually.
     if (this.state === 'unauthorized') return
+    // Background refresh is off, so returning to the window earns no automatic read.
+    if (this.intervals.visibleMs <= 0) return
     const due =
       this.fetchedAt === null || this.clock.now() - this.fetchedAt >= this.intervals.visibleMs
     // Returning to the window with due data earns an immediate read; hiding it
@@ -321,6 +341,9 @@ export class RepositorySyncCoordinator {
 
   private scheduleRemote(delayMs: number): void {
     if (!this.repository) return
+    // Background refresh is off: the person's own refresh still reads, but no
+    // timer is armed for anything else to trigger.
+    if (this.intervals.visibleMs <= 0) return
     this.clock.clearTimeout(this.remoteTimer)
     this.remoteTimer = this.clock.setTimeout(
       () => {

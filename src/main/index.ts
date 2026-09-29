@@ -65,7 +65,7 @@ import type {
 import { RepositoryOperations } from './repository-operations'
 import { RequestRegistry, performBackgroundRead } from './request-registry'
 import { RepositoryScheduler } from './repository-scheduler'
-import { RepositorySyncCoordinator } from './sync-coordinator'
+import { RepositorySyncCoordinator, type SyncIntervals } from './sync-coordinator'
 import { RepositoryWatcher } from './git-watcher'
 import {
   configureGitRuntime,
@@ -241,6 +241,16 @@ if (devUrl) {
 const trustedOrigin = devUrl ? new URL(devUrl).origin : productionOrigin
 const settingsPath = () => join(app.getPath('userData'), 'repositories.json')
 const settingsFile = () => join(app.getPath('userData'), 'settings.json')
+
+// The stored choice is applied before any repository is attached, so the first
+// open already polls on the interval the person chose rather than on the default
+// and then correcting itself.
+void readSettingsFile(settingsFile())
+  .then((file) => sync.applyIntervals(refreshIntervals(file.settings)))
+  .catch(() => {
+    // An unreadable settings file leaves the coordinator on its defaults; the
+    // settings view reports the problem where a person can see it.
+  })
 let account: GitHubAccount | null = null
 /**
  * Settings this computer's policy has fixed, resolved at startup and applied
@@ -489,8 +499,6 @@ function requireString(value: unknown, name: string, limit = 4096): string {
   return value
 }
 
-
-
 function requireDraft(value: unknown): ReviewDraft {
   if (typeof value !== 'object' || value === null) throw new Error('Invalid review comment draft.')
   const draft = value as Record<string, unknown>
@@ -555,7 +563,6 @@ function requireDraftRecord(value: unknown): ReviewDraftRecord {
   }
 }
 
-
 function requireSubmission(value: unknown): ReviewSubmission {
   if (typeof value !== 'object' || value === null) throw new Error('Invalid review submission.')
   const submission = value as Record<string, unknown>
@@ -596,8 +603,6 @@ function requireCommentBody(value: unknown): string {
   }
   return value
 }
-
-
 
 function cloneProtocol(value: unknown): CloneProtocol {
   return value === 'ssh' ? 'ssh' : 'https'
@@ -685,6 +690,18 @@ interface ActiveBundlePreview {
 }
 let activeBundlePreview: ActiveBundlePreview | null = null
 
+/**
+ * The stored background-refresh choice, as the coordinator's own intervals. The
+ * coordinator is the single automatic owner of remote reads, so a zero here means
+ * no timer is armed at all.
+ */
+function refreshIntervals(settings: AppSettings): Partial<SyncIntervals> {
+  const visibleMs = Math.max(0, Math.round(settings.git.fetchIntervalSeconds)) * 1000
+  return visibleMs > 0
+    ? { visibleMs, secondaryMs: Math.max(visibleMs, visibleMs * 5) }
+    : { visibleMs: 0 }
+}
+
 async function changeSettings(
   write: (file: string) => Promise<SettingsSnapshot>,
 ): Promise<SettingsSnapshot> {
@@ -694,6 +711,7 @@ async function changeSettings(
     // Any change to settings invalidates the cached support bundle preview
     activeBundlePreview = null
     configureGitRuntime({ useSystemGit: snapshot.settings.git.useSystemGit })
+    sync.applyIntervals(refreshIntervals(snapshot.settings))
     return snapshot
   })
 }
@@ -879,6 +897,10 @@ function installHandlers() {
       throw error
     }
   })
+  ipcMain.handle('repository:file', (event, filePath: string) => {
+    validateSender(event)
+    return readRepository((root, signal) => getFileView(root, filePath, signal), `file:${filePath}`)
+  })
   ipcMain.handle('repository:conflict', async (event, filePath: string) => {
     validateSender(event)
     // The conflict view reports the tool it would use, so the configured value
@@ -1037,7 +1059,11 @@ function installHandlers() {
       // is what says whose drafts these are. Reading them without naming the
       // account and the repository would hand one account another's unsent
       // words to submit.
-      const permissions = await readReviewPermissions(root, requirePullRequestNumber(number), signal)
+      const permissions = await readReviewPermissions(
+        root,
+        requirePullRequestNumber(number),
+        signal,
+      )
       return readReviewDrafts(
         root,
         `${remote.owner}/${remote.name}`,
@@ -1073,30 +1099,36 @@ function installHandlers() {
       )
     })
   })
-  ipcMain.handle('repository:review-reply', (event, number: unknown, threadId: unknown, body: unknown) => {
-    validateSender(event)
-    return operations.write(async () => {
-      const runtime = await resolveGitRuntime()
-      return withGitRuntime(runtime, () =>
-        replyToThread(
-          repository(),
-          requirePullRequestNumber(number),
-          requireThreadId(threadId),
-          requireCommentBody(body),
-        ),
-      )
-    })
-  })
-  ipcMain.handle('repository:review-resolve', (event, number: unknown, threadId: unknown, resolved: unknown) => {
-    validateSender(event)
-    if (typeof resolved !== 'boolean') throw new Error('Choose whether to resolve this thread.')
-    return operations.write(async () => {
-      const runtime = await resolveGitRuntime()
-      return withGitRuntime(runtime, () =>
-        setThreadResolved(repository(), requireThreadId(threadId), resolved),
-      )
-    })
-  })
+  ipcMain.handle(
+    'repository:review-reply',
+    (event, number: unknown, threadId: unknown, body: unknown) => {
+      validateSender(event)
+      return operations.write(async () => {
+        const runtime = await resolveGitRuntime()
+        return withGitRuntime(runtime, () =>
+          replyToThread(
+            repository(),
+            requirePullRequestNumber(number),
+            requireThreadId(threadId),
+            requireCommentBody(body),
+          ),
+        )
+      })
+    },
+  )
+  ipcMain.handle(
+    'repository:review-resolve',
+    (event, number: unknown, threadId: unknown, resolved: unknown) => {
+      validateSender(event)
+      if (typeof resolved !== 'boolean') throw new Error('Choose whether to resolve this thread.')
+      return operations.write(async () => {
+        const runtime = await resolveGitRuntime()
+        return withGitRuntime(runtime, () =>
+          setThreadResolved(repository(), requireThreadId(threadId), resolved),
+        )
+      })
+    },
+  )
   ipcMain.handle('repository:review-resolve-drafts', (event, number: unknown, value: unknown) => {
     validateSender(event)
     return readRepository((root, signal) =>
@@ -1217,9 +1249,7 @@ function installHandlers() {
     validateSender(event)
     // Restoring defaults rewrites the settings file and nothing else: no
     // repository, ref, or working tree is read or written.
-    return withToolAvailability(
-      await changeSettings((file) => resetSettings(file, settingsLocks)),
-    )
+    return withToolAvailability(await changeSettings((file) => resetSettings(file, settingsLocks)))
   })
   // The capability report takes no argument, so the window cannot ask main to
   // run a command of its choosing. Main runs its own fixed allowlist.
@@ -1236,7 +1266,8 @@ function installHandlers() {
     const report = await operations.read(() => currentDiagnostics(settings))
     const preview = buildBundle(report, settings, recordedFailures())
     const id = `preview-${Date.now()}-${Math.random().toString(36).slice(2)}`
-    const renderedBody = preview.renderedBody ?? renderBundle(preview, settings.privacy.includeLocalPaths)
+    const renderedBody =
+      preview.renderedBody ?? renderBundle(preview, settings.privacy.includeLocalPaths)
     const bytes = preview.bytes ?? Buffer.byteLength(renderedBody)
     const pathCount = settings.privacy.includeLocalPaths ? preview.pathCount : 0
 

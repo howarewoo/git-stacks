@@ -886,6 +886,31 @@ test('a display refresh reads the native stacks capability conditionally and a p
   }
 })
 
+test("the stored background-refresh interval is the coordinator's own, and off disarms it", async () => {
+  const coordinator = harness()
+  coordinator.coordinator.attach('/tmp/repository', snapshotFixture())
+  // The window used to arm its own timer, so the stored interval was a second
+  // schedule beside the coordinator's rather than the one in force.
+  coordinator.coordinator.applyIntervals({ visibleMs: 10_000, secondaryMs: 50_000 })
+  await coordinator.clock.advance(9_999)
+  assert.deepEqual(coordinator.reads, [], 'the stored interval, not the default, governs the read')
+  await coordinator.clock.advance(1)
+  assert.equal(coordinator.reads.length, 1, 'the read lands on the stored interval')
+
+  // Off means off: no timer is armed, and returning to the window earns nothing.
+  coordinator.coordinator.applyIntervals({ visibleMs: 0 })
+  const beforeOff = coordinator.reads.length
+  await coordinator.clock.advance(DEFAULT_INTERVALS.visibleMs * 4)
+  assert.equal(coordinator.reads.length, beforeOff, 'no automatic read happens while it is off')
+  coordinator.coordinator.reportActivity({ focused: true, visible: true })
+  await coordinator.clock.advance(1)
+  assert.equal(coordinator.reads.length, beforeOff, 'focus earns no read of its own')
+
+  // Asking still reads, which is the whole promise of turning it off.
+  await coordinator.coordinator.refreshNow()
+  assert.ok(coordinator.reads.length > beforeOff, 'an explicit refresh still reaches the remote')
+})
+
 test('a lost network backs off, then recovers without the person asking', async () => {
   const coordinator = harness()
   coordinator.coordinator.attach('/tmp/repository', snapshotFixture())

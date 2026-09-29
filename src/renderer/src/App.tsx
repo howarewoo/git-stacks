@@ -337,7 +337,6 @@ function getBranchTreeGeometry(visibleBranches: readonly Branch[], byName: Map<s
   return { rows }
 }
 
-
 function formatBranchDate(value: string): string {
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) return value
@@ -643,17 +642,11 @@ function App() {
     }
   }, [settings?.appearance.theme, settings?.appearance.reduceMotion])
 
-  // Background refresh follows the stored interval and stops while an operation
-  // is running, so it can never race a change the user is making.
-  React.useEffect(() => {
-    const seconds = settings?.git.fetchIntervalSeconds ?? 0
-    if (!desktop || seconds <= 0 || !snapshot) return
-    const timer = setInterval(() => {
-      if (busyRef.current || openingRef.current) return
-      void refreshSnapshot()
-    }, seconds * 1000)
-    return () => clearInterval(timer)
-  }, [desktop, refreshSnapshot, settings?.git.fetchIntervalSeconds, snapshot])
+  // Background refresh has no timer here on purpose. The main process's sync
+  // coordinator is the one automatic owner of remote reads and applies the
+  // stored interval itself, so a second timer in the window would read on a
+  // different schedule and bypass the coordinator's focus, backoff, and
+  // busy-state policy. An explicit refresh still reads on demand.
   /**
    * Adopts a repository the main process just opened, whether it came from the
    * recents list, the folder dialog, a dropped folder, or a finished clone.
@@ -2157,91 +2150,93 @@ function App() {
                   style={{ '--branch-depth': tree.depth } as React.CSSProperties}
                   tabIndex={rovingTabIndex(branchIndex, branchTreeActiveIndex)}
                 >
-                {tree.trunks.map((trunk, segmentIndex) => (
-                  <span
-                    aria-hidden="true"
-                    className={cn('branch-tree-trunk', `branch-tree-trunk-${trunk.kind}`)}
-                    key={`trunk-${segmentIndex}`}
-                    style={{ '--branch-lane': trunk.lane } as React.CSSProperties}
-                  />
-                ))}
-                {tree.elbows.map((elbow, segmentIndex) => (
-                  <span
-                    aria-hidden="true"
-                    className="branch-tree-elbow"
-                    key={`elbow-${segmentIndex}`}
-                    style={{ '--branch-lane': elbow.lane } as React.CSSProperties}
-                  />
-                ))}
-                <span className={cn('branch-icon', branch.current && 'branch-icon-current')}>
-                  {branch.remote ? (
-                    <Cloud className="size-3.5" />
-                  ) : (
-                    <GitBranch className="size-3.5" />
-                  )}
-                </span>
-                <span className="branch-copy">
-                  <span className="branch-name-line">
-                    <strong>{branch.name}</strong>
-                    {branch.current ? <Badge variant="accent">current</Badge> : null}
-                    {branch.remote ? <Badge variant="outline">remote</Badge> : null}
-                    {tree.cycle ? <Badge variant="warning">cycle</Badge> : null}
-                    {tree.missingParent ? <Badge variant="warning">parent missing</Badge> : null}
-                    {branch.needsRestack || (branch.parentBehind ?? 0) > 0 ? (
-                      <Badge variant="warning">Requires restack</Badge>
-                    ) : null}
+                  {tree.trunks.map((trunk, segmentIndex) => (
+                    <span
+                      aria-hidden="true"
+                      className={cn('branch-tree-trunk', `branch-tree-trunk-${trunk.kind}`)}
+                      key={`trunk-${segmentIndex}`}
+                      style={{ '--branch-lane': trunk.lane } as React.CSSProperties}
+                    />
+                  ))}
+                  {tree.elbows.map((elbow, segmentIndex) => (
+                    <span
+                      aria-hidden="true"
+                      className="branch-tree-elbow"
+                      key={`elbow-${segmentIndex}`}
+                      style={{ '--branch-lane': elbow.lane } as React.CSSProperties}
+                    />
+                  ))}
+                  <span className={cn('branch-icon', branch.current && 'branch-icon-current')}>
+                    {branch.remote ? (
+                      <Cloud className="size-3.5" />
+                    ) : (
+                      <GitBranch className="size-3.5" />
+                    )}
                   </span>
-                  <span className="branch-summary">
-                    {pullRequest ? (
-                      <PullRequestHoverCard pr={pullRequest}>
-                        <a
-                          className="branch-pr-link"
-                          href={pullRequest.url}
-                          aria-label={`Open pull request #${pullRequest.number} on GitHub`}
-                          onClick={(event) => {
-                            event.preventDefault()
-                            desktop
-                              ?.openExternal(pullRequest.url)
-                              .catch((value) => setError(readableError(value)))
-                          }}
-                        >
-                          #{pullRequest.number}
-                          <ExternalLink className="size-3" aria-hidden="true" />
-                        </a>
-                      </PullRequestHoverCard>
-                    ) : null}
-                    <span className="branch-subject">{branch.subject || 'No commit subject'}</span>
-                  </span>
-                </span>
-                <span className="branch-metrics">
-                  {pullRequest ? (
-                    <Badge variant={checksVariant(pullRequest.checks)}>
-                      <ShieldCheck className="size-3" />
-                      {checkLabel(pullRequest.checks)}
-                    </Badge>
-                  ) : null}
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <span aria-hidden="true" className="ahead-behind relative z-[2] rounded-sm">
-                        <span className={branch.ahead > 0 ? 'metric-positive' : 'metric-muted'}>
-                          <ArrowUp className="size-3" />
-                          {branch.ahead}
-                        </span>
-                        <span className={branch.behind > 0 ? 'metric-negative' : 'metric-muted'}>
-                          <ArrowDown className="size-3" />
-                          {branch.behind}
-                        </span>
+                  <span className="branch-copy">
+                    <span className="branch-name-line">
+                      <strong>{branch.name}</strong>
+                      {branch.current ? <Badge variant="accent">current</Badge> : null}
+                      {branch.remote ? <Badge variant="outline">remote</Badge> : null}
+                      {tree.cycle ? <Badge variant="warning">cycle</Badge> : null}
+                      {tree.missingParent ? <Badge variant="warning">parent missing</Badge> : null}
+                      {branch.needsRestack || (branch.parentBehind ?? 0) > 0 ? (
+                        <Badge variant="warning">Requires restack</Badge>
+                      ) : null}
+                    </span>
+                    <span className="branch-summary">
+                      {pullRequest ? (
+                        <PullRequestHoverCard pr={pullRequest}>
+                          <a
+                            className="branch-pr-link"
+                            href={pullRequest.url}
+                            aria-label={`Open pull request #${pullRequest.number} on GitHub`}
+                            onClick={(event) => {
+                              event.preventDefault()
+                              desktop
+                                ?.openExternal(pullRequest.url)
+                                .catch((value) => setError(readableError(value)))
+                            }}
+                          >
+                            #{pullRequest.number}
+                            <ExternalLink className="size-3" aria-hidden="true" />
+                          </a>
+                        </PullRequestHoverCard>
+                      ) : null}
+                      <span className="branch-subject">
+                        {branch.subject || 'No commit subject'}
                       </span>
-                    </TooltipTrigger>
-                    <TooltipContent>
-                      {branch.upstream
-                        ? `${branch.ahead} commits ahead and ${branch.behind} behind ${branch.upstream}`
-                        : 'Set an upstream to compare this branch with its remote.'}
-                    </TooltipContent>
-                  </Tooltip>
-                  <span className="branch-updated">{formatBranchDate(branch.updatedAt)}</span>
-                </span>
-                <ChevronRight className="branch-chevron size-4" />
+                    </span>
+                  </span>
+                  <span className="branch-metrics">
+                    {pullRequest ? (
+                      <Badge variant={checksVariant(pullRequest.checks)}>
+                        <ShieldCheck className="size-3" />
+                        {checkLabel(pullRequest.checks)}
+                      </Badge>
+                    ) : null}
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <span aria-hidden="true" className="ahead-behind relative z-[2] rounded-sm">
+                          <span className={branch.ahead > 0 ? 'metric-positive' : 'metric-muted'}>
+                            <ArrowUp className="size-3" />
+                            {branch.ahead}
+                          </span>
+                          <span className={branch.behind > 0 ? 'metric-negative' : 'metric-muted'}>
+                            <ArrowDown className="size-3" />
+                            {branch.behind}
+                          </span>
+                        </span>
+                      </TooltipTrigger>
+                      <TooltipContent>
+                        {branch.upstream
+                          ? `${branch.ahead} commits ahead and ${branch.behind} behind ${branch.upstream}`
+                          : 'Set an upstream to compare this branch with its remote.'}
+                      </TooltipContent>
+                    </Tooltip>
+                    <span className="branch-updated">{formatBranchDate(branch.updatedAt)}</span>
+                  </span>
+                  <ChevronRight className="branch-chevron size-4" />
                 </div>
               </BranchHoverCard>
             )
