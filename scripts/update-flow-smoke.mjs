@@ -429,6 +429,17 @@ async function main() {
       // A click is not a state change until the app has had a frame to react.
       await new Promise((settle) => setTimeout(settle, 120))
     },
+    /** Presses a key the way a person does, so a dialog can be dismissed. */
+    async press(key, code, keyCode) {
+      for (const type of ['rawKeyDown', 'keyUp']) {
+        await cdp.send(
+          'Input.dispatchKeyEvent',
+          { type, key, code, windowsVirtualKeyCode: keyCode, nativeVirtualKeyCode: keyCode },
+          session,
+        )
+      }
+      await new Promise((settle) => setTimeout(settle, 200))
+    },
     /** Types into whatever has the keyboard focus, as a person would. */
     async type(text) {
       await cdp.send('Input.insertText', { text }, session)
@@ -699,8 +710,10 @@ async function main() {
   )
 
   // What the person has to be able to read is the characters of a commit subject
-  // they did not write; what the DOM must not get is markup.
-  await ui.clickText('History')
+  // they did not write; what the DOM must not get is markup. The subject is on
+  // screen in the branch card this view opens with, so the run reads that
+  // surface and does not navigate somewhere else to make the point.
+  await ui.press('Escape', 'Escape', 27)
   await ui.waitFor(HOSTILE_TEXT)
   const probe = await evaluate((wanted) => {
     const every = [...document.querySelectorAll('*')]

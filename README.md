@@ -692,11 +692,14 @@ elements, and nothing writes one with `innerHTML`.
 
 `scripts/update-flow-smoke.mjs` proves that in the real window rather than
 asserting it about the source. It commits a subject that is
-`<img src=x onerror="…"> <script>…</script> <b>bold</b>`, opens **History**,
-and then reads the rendered document: the characters are present, the deepest
-element containing them has no element children at all, nothing in the window
-carries an inline `on*` handler, no `img`, `object`, `embed`, or `iframe`
-appeared, and nothing the payload says ran. Release notes and refusal messages
+`<img src=x onerror="…"> <script>…</script> <b>bold</b>`, opens the repository
+in the running app — where the branch card shows that subject as its commit
+preview — and then reads the rendered document: the characters are present, the
+deepest element containing them has no element children at all, nothing in the
+window carries an inline `on*` handler, no `img`, `object`, `embed`, or `iframe`
+appeared, and nothing the payload says ran. The commit list in **History** uses
+the same React child for the same value; that view is not exercised by this
+run, and the proof is of the surface in the screenshot. Release notes and refusal messages
 arriving over a release signature are held to the same rule, in
 `tests/release-boundary.test.ts`.
 ## Onboarding
