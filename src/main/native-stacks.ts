@@ -6,7 +6,7 @@ import type {
   PullRequestStackMember,
   PullRequestStackMembership,
 } from '../shared/types'
-import { isRecord, parseRemote } from './git-core'
+import { isCancelled, isRecord, parseRemote } from './git-core'
 import {
   GITHUB_STACKS_API_VERSION,
   GitHubTransportError,
@@ -303,6 +303,7 @@ export function validateTopAppend(
 export async function detectNativeStacksCapability(
   owner: string,
   repo: string,
+  options: { signal?: AbortSignal } = {},
 ): Promise<{ available: boolean; state: NativeStackValidationStatus; message: string }> {
   const transport = githubTransport()
   try {
@@ -310,6 +311,7 @@ export async function detectNativeStacksCapability(
       method: 'GET',
       path: `repos/${owner}/${repo}/stacks?per_page=1`,
       headers: STACK_HEADERS,
+      signal: options.signal,
     })
     if (response.status >= 200 && response.status < 300) {
       return {
@@ -328,6 +330,7 @@ export async function detectNativeStacksCapability(
         'GitHub native stacked pull requests preview API is not available on this repository',
     }
   } catch (error) {
+    if (options.signal?.aborted || isCancelled(error)) throw error
     if (error instanceof GitHubTransportError) {
       if (error.kind === 'not-found' || error.status === 404 || error.kind === 'unsupported') {
         return {
@@ -908,6 +911,7 @@ export async function retireLegacyStackComments(
 export async function loadRepositoryNativeStacks(
   originUrl: string | null,
   pullRequests: PullRequest[],
+  signal?: AbortSignal,
 ): Promise<{
   available: boolean
   nativeStacks: NativeStack[]
@@ -927,7 +931,7 @@ export async function loadRepositoryNativeStacks(
   try {
     // The read path reports an unconfirmed probe as an explicit unavailable state instead of
     // failing the whole repository snapshot; only mutations require a confirmed capability.
-    const capability = await detectNativeStacksCapability(remote.owner, remote.name)
+    const capability = await detectNativeStacksCapability(remote.owner, remote.name, { signal })
     if (!capability.available) {
       return {
         available: false,
@@ -936,7 +940,7 @@ export async function loadRepositoryNativeStacks(
         message: capability.message,
       }
     }
-    const stacks = await listPullRequestStacks(remote.owner, remote.name)
+    const stacks = await listPullRequestStacks(remote.owner, remote.name, { signal })
     const byNumber = new Map(pullRequests.map((pr) => [pr.number, pr]))
     for (const stack of stacks) {
       for (const member of stack.pullRequests) {
@@ -953,6 +957,7 @@ export async function loadRepositoryNativeStacks(
       message: `GitHub native stacks available; ${stacks.length} stack${stacks.length === 1 ? '' : 's'}`,
     }
   } catch (error) {
+    if (signal?.aborted || isCancelled(error)) throw error
     return {
       available: false,
       nativeStacks: [],

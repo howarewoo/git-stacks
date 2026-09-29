@@ -13,7 +13,7 @@ import {
   getCommitDiff,
   getPushPreview,
 } from './git'
-import { getOriginUrl } from './git-core'
+import { CommandCancelled, getOriginUrl } from './git-core'
 import { getGitHubIssues, getPullRequest } from './github'
 import {
   getSubmitStackProgress,
@@ -114,7 +114,8 @@ const sync = new RepositorySyncCoordinator({
       root,
       signal,
       async (path, readSignal) => {
-        const issues = await getGitHubIssues(path, await getOriginUrl(path, readSignal))
+        const issues = await getGitHubIssues(path, await getOriginUrl(path, readSignal), readSignal)
+        if (readSignal.aborted) throw new CommandCancelled()
         // The issues read reports a failure as text; a lost answer must not empty the inbox.
         if (issues.message) throw new Error(issues.message)
         return issues.issues

@@ -4,11 +4,18 @@ import { mkdtemp, mkdir, rename, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
+import { CommandCancelled } from '../src/main/git-core'
 import { getSnapshot } from '../src/main/git'
+import { getGitHubIssues, getGitHubData } from '../src/main/github'
 import {
   DirectGitHubTransport,
   GhGitHubTransport,
   GitHubTransportError,
+  resetGitHubRateLimit,
+  setGitHubTransport,
+  type GitHubTransport,
+  type GitHubGraphqlOptions,
+  type GitHubRestResponse,
 } from '../src/main/github-transport'
 import { GitHubResponseCacheStore } from '../src/main/github-response-cache'
 import { RepositoryWatcher } from '../src/main/git-watcher'
@@ -1277,6 +1284,7 @@ test('low remaining budget derives parking deadline from rate-limit reset and pa
   // Past reset: secondary tier can resume
   await h.clock.advance(150_000)
   assert.ok(h.issueReads() > initialIssueReads, 'secondary tier resumes once reset deadline passes')
+  resetGitHubRateLimit()
 })
 
 test('confirmed payload is bound to remote identity and invalidated when origin URL changes', async () => {
@@ -1304,5 +1312,195 @@ test('confirmed payload is bound to remote identity and invalidated when origin 
   } finally {
     Object.assign(process.env, previous)
     await cleanup()
+  }
+})
+test('start-stop during asynchronous arm does not attach watchers or leak timers or emit events', async () => {
+  const { repo, cleanup } = await disposableRepository()
+  let resolveArmPromise: (dirs: string[]) => void = () => {}
+  const armPending = new Promise<string[]>((res) => {
+    resolveArmPromise = res
+  })
+
+  const events: unknown[] = []
+  const watcher = new RepositoryWatcher(
+    repo,
+    (event) => events.push(event),
+    {
+      debounceMs: 20,
+      sweepMs: 100,
+      resolveGitDirectories: async () => armPending,
+    },
+  )
+
+  try {
+    // 1. Start the watcher: begins arm(), awaiting resolveGitDirectories
+    const startPromise = watcher.start()
+    assert.equal(watcher.watching, true)
+
+    // 2. Stop the watcher while arm is still awaiting
+    watcher.stop()
+    assert.equal(watcher.watching, false)
+
+    // 3. Resolve the arm promise
+    resolveArmPromise([join(repo, '.git')])
+    await startPromise
+
+    // Verify watcher remains completely stopped
+    assert.equal(watcher.watching, false)
+    const watcherInternals = watcher as unknown as {
+      watchers: unknown[]
+      sweepTimer?: unknown
+      presenceTimer?: unknown
+    }
+    assert.equal(watcherInternals.watchers.length, 0)
+    assert.equal(watcherInternals.sweepTimer, undefined)
+    assert.equal(watcherInternals.presenceTimer, undefined)
+    // 4. Modifying the repo does NOT trigger any events or local notifications
+    git(repo, 'commit', '--allow-empty', '-m', 'Commit while watcher stopped')
+    await new Promise((res) => setTimeout(res, 60))
+    assert.equal(events.length, 0, 'stopped watcher must not emit any events')
+  } finally {
+    watcher.stop()
+    await cleanup()
+  }
+})
+
+test('delayed network GitHub request is aborted by mutation; coordinator clears running and does not defer local refresh', async () => {
+  const { repo, cleanup } = await disposableRepository()
+  git(repo, 'remote', 'add', 'origin', 'https://github.com/acme/project-alpha.git')
+
+  class StalledTransport implements GitHubTransport {
+    readonly kind = 'direct' as const
+    public aborted = 0
+    public queryReceived = 0
+
+    async rest<T = unknown>(): Promise<GitHubRestResponse<T>> {
+      return {
+        status: 200,
+        data: {} as T,
+        rateLimit: { limit: 5000, remaining: 4999, reset: null, resource: 'core', retryAfterSeconds: null },
+      }
+    }
+    async paginate<T = unknown>(): Promise<T[]> {
+      return []
+    }
+    async graphql<T = Record<string, unknown>>(
+      _query: string,
+      _variables: Record<string, unknown> = {},
+      options: GitHubGraphqlOptions = {},
+    ): Promise<T> {
+      this.queryReceived++
+      return new Promise<T>((_resolve, reject) => {
+        if (options.signal?.aborted) {
+          this.aborted++
+          reject(new CommandCancelled())
+          return
+        }
+        options.signal?.addEventListener(
+          'abort',
+          () => {
+            this.aborted++
+            reject(new CommandCancelled())
+          },
+          { once: true },
+        )
+      })
+    }
+  }
+
+  const transport = new StalledTransport()
+  setGitHubTransport(transport)
+  resetGitHubRateLimit()
+
+  const clock = new ManualClock()
+  const scheduler = new RepositoryScheduler()
+  const registry = new RequestRegistry()
+
+  const emittedIssues: unknown[] = []
+  const emittedSnapshots: RepositorySnapshot[] = []
+
+  const coordinator = new RepositorySyncCoordinator(
+    {
+      readSnapshot: (root, signal, request) =>
+        performBackgroundRead(
+          registry,
+          root,
+          signal,
+          (readSignal) => getSnapshot(root, readSignal, undefined, request.github.remote),
+          request.requestId,
+        ),
+      readIssues: (root, signal) =>
+        performBackgroundRead(
+          registry,
+          root,
+          signal,
+          async (readSignal) => {
+            const issues = await getGitHubIssues(root, 'https://github.com/acme/project-alpha.git', readSignal)
+            if (readSignal.aborted) throw new CommandCancelled()
+            if (issues.message) throw new Error(issues.message)
+            return issues.issues
+          },
+          'sync-issues',
+        ),
+      scheduler,
+      clock,
+    },
+    { ...DEFAULT_INTERVALS, localSettleMs: 10 },
+  )
+
+  coordinator.onEvent((event) => {
+    if (event.kind === 'issues') emittedIssues.push(event.issues)
+    if (event.kind === 'snapshot' && event.snapshot) emittedSnapshots.push(event.snapshot)
+  })
+
+  try {
+    const initial = await getSnapshot(repo, undefined, undefined, 'reuse')
+    coordinator.attach(repo, initial)
+
+    // Trigger secondary inbox refresh (tier = 'secondary')
+    coordinator.reportActivity({ focused: false, visible: true })
+    const inboxPromise = clock.advance(DEFAULT_INTERVALS.secondaryMs + 1)
+    for (let i = 0; i < 50 && transport.queryReceived === 0; i++) {
+      await new Promise((res) => setImmediate(res))
+    }
+    // The GraphQL request is now in-flight and stalled waiting on the network
+    assert.ok(transport.queryReceived >= 1, 'GraphQL query arrived at transport')
+    const coordinatorInternals = coordinator as unknown as {
+      running: Promise<unknown> | null
+    }
+    assert.ok(coordinatorInternals.running !== null, 'coordinator is running background read')
+    // Now a mutation happens (e.g. stage, commit, or branch action)!
+    // scheduler.write claims the mutation queue and aborts the in-flight background read
+    let mutationRan = false
+    await scheduler.mutate(repo, async () => {
+      mutationRan = true
+    })
+    assert.equal(mutationRan, true)
+
+    // Await the inbox promise: it was aborted by the mutation!
+    await inboxPromise
+
+    // Verify:
+    // 1. The transport saw the abort signal!
+    assert.ok(transport.aborted >= 1, 'transport signal was aborted by mutation')
+    // 2. coordinator.running was promptly cleared to null!
+    assert.equal(coordinatorInternals.running, null, 'coordinator.running is cleared')
+    assert.equal(emittedIssues.length, 0, 'aborted inbox refresh must not emit issues')
+
+    // 4. Now a local watcher event arrives!
+    coordinator.notifyLocalChange()
+    // It should run immediately upon settle without being deferred by network
+    await clock.advance(DEFAULT_INTERVALS.localSettleMs + 1)
+    for (let i = 0; i < 50 && emittedSnapshots.length === 0; i++) {
+      await new Promise((res) => setTimeout(res, 20))
+    }
+
+    // Snapshot was taken and emitted without waiting on any stalled network!
+    assert.ok(emittedSnapshots.length >= 1, 'local refresh ran promptly after mutation')
+  } finally {
+    setGitHubTransport(null)
+    coordinator.detach()
+    await cleanup()
+    resetGitHubRateLimit()
   }
 })

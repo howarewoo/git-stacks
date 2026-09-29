@@ -7,6 +7,7 @@ import type {
   RepositorySnapshot,
   SyncActivity,
 } from '../shared/types'
+import { isCancelled } from './git-core'
 import { lastGitHubRateLimit } from './github-transport'
 import { RemoteMutationLedger } from './remote-mutations'
 import type { RepositoryScheduler } from './repository-scheduler'
@@ -399,7 +400,9 @@ export class RepositorySyncCoordinator {
     try {
       return await work
     } catch (error) {
-      if (this.repository === repository && tier !== 'local') this.recordFailure(error)
+      if (this.repository === repository && tier !== 'local' && !isCancelled(error)) {
+        this.recordFailure(error)
+      }
       return null
     }
   }

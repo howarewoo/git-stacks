@@ -1,5 +1,6 @@
 import type { NativeStack, PullRequest, RepositoryIssue } from '../shared/types'
 import {
+  CommandCancelled,
   commandCode,
   commandDetail,
   getConfigValue,
@@ -197,6 +198,7 @@ const unavailable = unavailableGitHubResult
 export async function getGitHubIssues(
   repoPath: string,
   originUrl: string | null,
+  signal?: AbortSignal,
 ): Promise<{ issues: RepositoryIssue[]; message: string }> {
   const remote = parseRemote(originUrl)
   if (!remote || remote.host !== 'github.com') {
@@ -214,11 +216,16 @@ export async function getGitHubIssues(
     const issues: RepositoryIssue[] = []
     let endCursor: string | null = null
     for (;;) {
-      const page: Record<string, unknown> = await githubTransport().graphql(query, {
-        owner: remote.owner,
-        name: remote.name,
-        endCursor,
-      })
+      if (signal?.aborted) throw new CommandCancelled()
+      const page: Record<string, unknown> = await githubTransport().graphql(
+        query,
+        {
+          owner: remote.owner,
+          name: remote.name,
+          endCursor,
+        },
+        { signal },
+      )
       const repository = isRecord(page) ? page.repository : null
       const connection = isRecord(repository) ? repository.issues : null
       if (!isRecord(connection) || !Array.isArray(connection.nodes)) {
@@ -247,8 +254,10 @@ export async function getGitHubIssues(
         break
       endCursor = next
     }
+    if (signal?.aborted) throw new CommandCancelled()
     return { issues, message: '' }
   } catch (error) {
+    if (signal?.aborted || isCancelled(error)) throw error
     return { issues: [], message: githubErrorMessage(error) }
   }
 }
@@ -316,11 +325,16 @@ export async function getGitHubData(
     const headRepositories: (string | null)[] = []
     let endCursor: string | null = null
     for (;;) {
-      const page: Record<string, unknown> = await githubTransport().graphql(query, {
-        owner: remote.owner,
-        name: remote.name,
-        endCursor,
-      })
+      if (signal?.aborted) throw new CommandCancelled()
+      const page: Record<string, unknown> = await githubTransport().graphql(
+        query,
+        {
+          owner: remote.owner,
+          name: remote.name,
+          endCursor,
+        },
+        { signal },
+      )
       const repository = isRecord(page) ? page.repository : null
       const connection = isRecord(repository) ? repository.pullRequests : null
       const nodes =
@@ -357,7 +371,7 @@ export async function getGitHubData(
       if (typeof value !== 'number' || !Number.isInteger(value)) return false
       return headRepositories[value]?.toLowerCase() === originFullName
     }
-    const nativeStacksResult = await loadRepositoryNativeStacks(originUrl, pullRequests)
+    const nativeStacksResult = await loadRepositoryNativeStacks(originUrl, pullRequests, signal)
     return {
       pullRequests,
       available: true,
@@ -371,7 +385,7 @@ export async function getGitHubData(
       nativeStackMessage: nativeStacksResult.message,
     }
   } catch (error) {
-    if (isCancelled(error)) throw error
+    if (signal?.aborted || isCancelled(error)) throw error
     return unavailable(githubErrorMessage(error), typedFailure(error))
   }
 }

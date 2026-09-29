@@ -122,6 +122,7 @@ export class RepositoryWatcher {
   private present = true
   private started = false
   private stopping = false
+  private generation = 0
   private presenceTimer: NodeJS.Timeout | undefined
   constructor(
     root: string,
@@ -145,12 +146,17 @@ export class RepositoryWatcher {
   async start(): Promise<void> {
     if (this.started || this.stopping) return
     this.started = true
-    this.present = await pathExists(this.root)
-    await this.arm()
+    const gen = ++this.generation
+    const exists = await pathExists(this.root)
+    if (!this.started || this.stopping || this.generation !== gen) return
+    this.present = exists
+    await this.arm(gen)
+    if (!this.started || this.stopping || this.generation !== gen) return
     this.scheduleSweep()
   }
 
   stop(): void {
+    this.generation++
     this.stopping = true
     this.started = false
     this.closeWatchers()
@@ -161,7 +167,8 @@ export class RepositoryWatcher {
     this.sweepTimer = undefined
     this.debounceTimer = undefined
     this.deadlineTimer = undefined
-    this.sweepTimer = undefined
+    this.presenceTimer = undefined
+    this.pendingPaths.clear()
   }
 
   private closeWatchers(): void {
@@ -175,10 +182,16 @@ export class RepositoryWatcher {
     this.watchers = []
   }
 
-  private async arm(): Promise<void> {
+  private async arm(expectedGen?: number): Promise<void> {
+    const gen = expectedGen ?? ++this.generation
     this.closeWatchers()
-    this.gitDirectories = await this.options.resolveGitDirectories(this.root)
-    this.signature = await gitStateSignature(this.gitDirectories)
+    if (!this.started || this.stopping || this.generation !== gen) return
+    const gitDirectories = await this.options.resolveGitDirectories(this.root)
+    if (!this.started || this.stopping || this.generation !== gen) return
+    this.gitDirectories = gitDirectories
+    const signature = await gitStateSignature(this.gitDirectories)
+    if (!this.started || this.stopping || this.generation !== gen) return
+    this.signature = signature
     const name = basename(this.root)
     // The repository's own directory can vanish; its parent is how a move is seen.
     this.attach(dirname(this.root), false, (changed) => {
@@ -208,8 +221,10 @@ export class RepositoryWatcher {
     recursive: boolean,
     onChanged?: (changed: string | null) => void,
   ): boolean {
+    if (!this.started || this.stopping) return false
     try {
       const watcher = watch(target, { recursive }, (_event, filename) => {
+        if (!this.started || this.stopping) return
         const changed = typeof filename === 'string' ? filename : null
         if (onChanged) {
           onChanged(changed)
@@ -222,6 +237,14 @@ export class RepositoryWatcher {
         if (!this.started || this.stopping) return
         void this.arm()
       })
+      if (!this.started || this.stopping) {
+        try {
+          watcher.close()
+        } catch {
+          // A watcher whose target was removed is already gone.
+        }
+        return false
+      }
       this.watchers.push(watcher)
       return true
     } catch {
@@ -230,10 +253,12 @@ export class RepositoryWatcher {
   }
 
   private noteChange(path: string): void {
+    if (!this.started || this.stopping) return
     this.pendingPaths.add(path)
     clearTimeout(this.debounceTimer)
     this.debounceTimer = setTimeout(() => {
       this.debounceTimer = undefined
+      if (!this.started || this.stopping) return
       void this.emit()
     }, this.options.debounceMs)
     if (this.deadlineTimer) return
@@ -242,17 +267,22 @@ export class RepositoryWatcher {
       this.deadlineTimer = undefined
       clearTimeout(this.debounceTimer)
       this.debounceTimer = undefined
+      if (!this.started || this.stopping) return
       void this.emit()
     }, this.options.maxDelayMs)
   }
 
   private async emit(): Promise<void> {
+    if (!this.started || this.stopping) return
+    const gen = this.generation
     const exists = await pathExists(this.root)
+    if (!this.started || this.stopping || this.generation !== gen) return
     this.deadlineTimer = undefined
     if (!exists) {
       this.present = false
       this.closeWatchers()
       this.pendingPaths.clear()
+      if (!this.started || this.stopping || this.generation !== gen) return
       this.onEvent({ reason: 'missing', root: this.root, paths: [] })
       // Nothing is watched now, including the parent that saw the move, so
       // nothing else would notice the repository coming back.
@@ -262,16 +292,24 @@ export class RepositoryWatcher {
     this.stopPollingForReturn()
     const restored = !this.present
     this.present = true
-    if (restored) await this.arm()
+    if (restored) {
+      await this.arm(gen)
+      if (!this.started || this.stopping || this.generation !== gen) return
+    }
     const paths = [...this.pendingPaths]
     this.pendingPaths.clear()
+    if (!this.started || this.stopping || this.generation !== gen) return
     this.onEvent({ reason: restored ? 'restored' : 'change', root: this.root, paths })
   }
 
   private pollForReturn(): void {
-    if (this.presenceTimer || this.stopping) return
+    if (this.presenceTimer || this.stopping || !this.started) return
     this.presenceTimer = setInterval(
       () => {
+        if (!this.started || this.stopping) {
+          this.stopPollingForReturn()
+          return
+        }
         void this.checkPresence()
       },
       Math.max(this.options.debounceMs, 250),
@@ -286,13 +324,21 @@ export class RepositoryWatcher {
   }
   private async checkPresence(): Promise<void> {
     if (!this.started || this.stopping) return
-    if ((await pathExists(this.root)) === this.present) return
+    const gen = this.generation
+    const exists = await pathExists(this.root)
+    if (!this.started || this.stopping || this.generation !== gen) return
+    if (exists === this.present) return
     await this.emit()
   }
 
   private scheduleSweep(): void {
-    if (this.options.sweepMs <= 0) return
+    if (this.options.sweepMs <= 0 || !this.started || this.stopping) return
     this.sweepTimer = setInterval(() => {
+      if (!this.started || this.stopping) {
+        clearInterval(this.sweepTimer)
+        this.sweepTimer = undefined
+        return
+      }
       void this.sweep()
     }, this.options.sweepMs)
     // A pending sweep must never hold the process open on quit.
@@ -301,11 +347,12 @@ export class RepositoryWatcher {
 
   private async sweep(): Promise<void> {
     if (!this.started || this.stopping) return
-    // A platform can drop the event for a directory that vanishes, so the sweep
-    // also asks whether the repository is still there.
+    const gen = this.generation
     await this.checkPresence()
+    if (!this.started || this.stopping || this.generation !== gen) return
     if (!this.present) return
     const next = await gitStateSignature(this.gitDirectories)
+    if (!this.started || this.stopping || this.generation !== gen) return
     if (next === this.signature) return
     this.signature = next
     this.noteChange(this.root)

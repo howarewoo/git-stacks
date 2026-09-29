@@ -95,6 +95,10 @@ export function lastGitHubRateLimit(): GitHubRateLimitReport {
   return latestRateLimit
 }
 
+export function resetGitHubRateLimit(): void {
+  latestRateLimit = { rateLimit: emptyRateLimit(), kind: null, at: 0 }
+}
+
 export type GitHubRestMethod = 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE'
 
 export interface GitHubRestRequest {

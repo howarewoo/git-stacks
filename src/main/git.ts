@@ -4713,7 +4713,7 @@ export async function getSnapshot(
       ? null
       : await Promise.all([
           getGitHubData(root, originUrl, signal),
-          getGitHubIssues(root, originUrl),
+          getGitHubIssues(root, originUrl, signal),
         ])
   const answered = live !== null && live[0].available
   if (answered) {
