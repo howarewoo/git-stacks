@@ -44,6 +44,8 @@ import type {
   PullRequest,
   RecentRepository,
   RepositorySnapshot,
+  RemoteFreshness,
+  RemoteFreshnessState,
 } from '../../shared/types'
 import { LIST_PAGE_SIZE } from '../../shared/performance'
 import { ListWindowMore } from './components/list-window'
@@ -68,6 +70,7 @@ import { BranchHoverCard, PullRequestHoverCard } from './components/repository-h
 import { Field } from './components/ui/field'
 import { cn } from './lib/utils'
 import { EmptyState, InlineAlert } from './components/ui/surface'
+import { RemoteFreshnessBadge } from './components/remote-freshness'
 import {
   getCombinedBranches,
   getRepresentedRemoteRef,
@@ -327,9 +330,15 @@ function App() {
   // refresh, or the snapshot either returns. Switching repositories resets it
   // so no result computed for the previous repository is ever applied.
   const repositoryGate = React.useRef(createRequestGate()).current
+  const [remoteStatus, setRemoteStatus] = React.useState<RemoteFreshness | null>(null)
+  // A background snapshot only applies to the repository the window still shows.
+  const snapshotPathRef = React.useRef<string | null>(null)
 
   const setSnapshotAndSelection = React.useCallback((next: RepositorySnapshot) => {
     setSnapshot(next)
+    snapshotPathRef.current = next.path
+    // A snapshot the main process produced already knows its own freshness.
+    setRemoteStatus((current) => next.remote ?? current)
     setSelectedBranchRef((current) => {
       if (current && next.branches.some((branch) => branch.ref === current)) return current
       if (next.currentBranch) return `refs/heads/${next.currentBranch}`
@@ -378,6 +387,53 @@ function App() {
 
     return () => {
       cancelled = true
+    }
+  }, [desktop])
+
+  // The main process pushes what its watcher and refresh timers find: local Git
+  // made outside this window, a newer pull-request state, or a change in how
+  // fresh the remote data is.
+  React.useEffect(() => {
+    if (!desktop) return
+    const offSnapshot = desktop.onBackgroundSnapshot?.((next) => {
+      if (next.path !== snapshotPathRef.current) return
+      setSnapshotAndSelection(next)
+    })
+    const offIssues = desktop.onBackgroundIssues?.((issues) => {
+      setSnapshot((current) => (current ? { ...current, issues } : current))
+    })
+    const offStatus = desktop.onRemoteStatus?.((freshness) => setRemoteStatus(freshness))
+    desktop
+      .remoteStatus?.()
+      .then((freshness) => setRemoteStatus(freshness))
+      .catch(() => {})
+    return () => {
+      offSnapshot?.()
+      offIssues?.()
+      offStatus?.()
+    }
+  }, [desktop, setSnapshotAndSelection])
+
+  // Focus and visibility decide how often GitHub is read; the main process
+  // cannot observe either on its own.
+  React.useEffect(() => {
+    if (!desktop?.reportActivity) return
+    const report = () => {
+      desktop
+        ?.reportActivity?.({
+          focused: document.hasFocus(),
+          visible: document.visibilityState === 'visible',
+        })
+        .catch(() => {})
+    }
+    window.addEventListener('focus', report)
+    window.addEventListener('blur', report)
+    document.addEventListener('visibilitychange', report)
+    report()
+    return () => {
+      window.removeEventListener('focus', report)
+      window.removeEventListener('blur', report)
+      document.removeEventListener('visibilitychange', report)
     }
   }, [desktop])
 
@@ -2321,6 +2377,7 @@ function App() {
             {snapshot?.stackOperation ? 'Stack operation in progress' : 'Git operation in progress'}
           </Badge>
         ) : null}
+        {snapshot ? <RemoteFreshnessBadge freshness={remoteStatus ?? snapshot.remote} /> : null}
         <span className="titlebar-build">Native Git workspace</span>
       </header>
       {error ? (
@@ -2353,6 +2410,33 @@ function App() {
           </span>
         </InlineAlert>
       ) : null}
+      {(remoteStatus?.pendingMutations ?? []).map((pending) => (
+        <InlineAlert key={pending.id} tone="error" className="global-banner" role="alert">
+          <span className="global-banner-row">
+            <span>
+              {`${pending.label} did not reach GitHub and will not be retried automatically. ${pending.reason}`}
+            </span>
+            <IconButton
+              label={`Dismiss ${pending.label}`}
+              onClick={() => {
+                void desktop?.dismissPendingMutation?.(pending.id)
+                setRemoteStatus((current) =>
+                  current
+                    ? {
+                        ...current,
+                        pendingMutations: current.pendingMutations.filter(
+                          (entry) => entry.id !== pending.id,
+                        ),
+                      }
+                    : current,
+                )
+              }}
+            >
+              <X aria-hidden="true" className="size-3.5" />
+            </IconButton>
+          </span>
+        </InlineAlert>
+      ))}
       {snapshot ? <section aria-label="Repository controls">{renderToolbar()}</section> : null}
       {snapshot ? (
         <OperationBanner

@@ -24,6 +24,26 @@ typechecks these test consumers as well as the application.
 
 Stale-preview publishing tests assert rejection and unchanged local and remote
 refs. Diagnostic wording is not part of that behavioral contract.
+## Live local and remote freshness
+
+The open repository updates itself. Local Git work done in a terminal — a
+commit, a branch switch, a fetch that moves refs — is picked up by a debounced
+filesystem watch, as is a deleted or moved repository and its return. Reads for
+one repository run concurrently while mutations serialize behind them.
+
+GitHub is read on a focus-aware cadence: a short interval while the window is
+focused and visible, a slow inbox and repository refresh otherwise. Responses
+are read conditionally where GitHub supports it, and failures back off
+exponentially. A secondary rate limit parks the nonessential tier, a low
+remaining budget parks it too, and rejected credentials stop polling until the
+person refreshes.
+
+The title bar states remote freshness in words, with the age of the last
+confirmed data, and says when local Git still works. Cached responses are
+display only: review submission, publish, and force-push always re-read GitHub
+live. A high-impact mutation that lost its answer is never replayed on
+reconnect — it is listed with its reason until dismissed.
+>>>>>>> 797be92 (feat(sync): keep the open repository fresh without a manual refresh)
 
 Renderer checks distinguish the `/` in-view filter from the `Mod+K` command
 palette. The safety suite advances pending hover timers after opening a

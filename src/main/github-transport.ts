@@ -1,6 +1,13 @@
 import { execFile as execFileCallback } from 'node:child_process'
 import { promisify } from 'node:util'
 import { commandCode, commandDetail, isRecord, MAX_BUFFER } from './git-core'
+import {
+  conditionalCacheKey,
+  conditionalHeaders,
+  GitHubResponseCacheStore,
+  type CachedGitHubResponse,
+  type GitHubResponseCache,
+} from './github-response-cache'
 
 const execFile = promisify(execFileCallback)
 export const GITHUB_API_VERSION = '2022-11-28'
@@ -61,7 +68,31 @@ export class GitHubTransportError extends Error {
     this.status = status
     this.detail = detail
     this.rateLimit = failure.rateLimit ?? emptyRateLimit()
+    publishRateLimit(this.rateLimit, failure.kind)
   }
+}
+
+let latestRateLimit: GitHubRateLimitReport = { rateLimit: emptyRateLimit(), kind: null, at: 0 }
+const rateLimitListeners = new Set<(report: GitHubRateLimitReport) => void>()
+
+function publishRateLimit(rateLimit: GitHubRateLimit, kind: GitHubErrorKind | null = null): void {
+  latestRateLimit = { rateLimit, kind, at: Date.now() }
+  for (const listener of rateLimitListeners) listener(latestRateLimit)
+}
+
+/**
+ * Every response and every typed failure records its rate-limit metadata, so a
+ * caller that only sees a rendered snapshot can still budget its next read.
+ */
+export function onGitHubRateLimit(listener: (report: GitHubRateLimitReport) => void): () => void {
+  rateLimitListeners.add(listener)
+  return () => {
+    rateLimitListeners.delete(listener)
+  }
+}
+
+export function lastGitHubRateLimit(): GitHubRateLimitReport {
+  return latestRateLimit
 }
 
 export type GitHubRestMethod = 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE'
@@ -80,6 +111,18 @@ export interface GitHubRestResponse<T> {
   status: number
   data: T
   rateLimit: GitHubRateLimit
+  /** The response headers, so a caller can reuse ETag and Last-Modified validators. */
+  headers?: Headers
+  /** True when a conditional request was answered 304 and `data` came from the cache. */
+  notModified?: boolean
+}
+
+/** The most recent GitHub rate-limit metadata either transport observed. */
+export interface GitHubRateLimitReport {
+  rateLimit: GitHubRateLimit
+  /** The failure kind when this report came from an error, otherwise null. */
+  kind: GitHubErrorKind | null
+  at: number
 }
 
 export interface GitHubGraphqlOptions {
@@ -230,6 +273,8 @@ export interface DirectGitHubTransportOptions {
   apiVersion?: string
   timeoutMs?: number
   userAgent?: string
+  /** Validators for conditional reads; omitted means every GET is a full read. */
+  cache?: GitHubResponseCache
 }
 
 /** Authenticated REST/GraphQL access to GitHub over HTTP; it never spawns `gh`. */
@@ -303,6 +348,12 @@ export class DirectGitHubTransport implements GitHubTransport {
         signal: controller.signal,
       })
       const rateLimit = parseRateLimit(response.headers)
+      publishRateLimit(rateLimit)
+      // A 304 is the answer to a conditional request, not a failure: the stored
+      // body stands, and `response.ok` would otherwise report it as unknown.
+      if (response.status === 304) {
+        return { status: 304, body: null, headers: response.headers, rateLimit }
+      }
       const body = parseJsonBody(await response.text())
       if (!response.ok) {
         throw new GitHubTransportError({
@@ -334,20 +385,42 @@ export class DirectGitHubTransport implements GitHubTransport {
     }
   }
 
-  private async result<T>(
-    url: string,
-    method: GitHubRestMethod,
-    payload: unknown,
-    request: Pick<GitHubRestRequest, 'signal' | 'timeoutMs' | 'headers'>,
-  ): Promise<GitHubRestResponse<T>> {
-    const { status, body, rateLimit } = await this.send(url, method, payload, request)
-    return { status, data: body as T, rateLimit }
-  }
-
+  /**
+   * One REST call, replaying a cached body when GitHub answers a conditional
+   * request with 304. Without a cache this is a plain full read.
+   */
   async rest<T = unknown>(request: GitHubRestRequest): Promise<GitHubRestResponse<T>> {
     const method = request.method ?? 'GET'
     const path = request.path.replace(/^\/+/u, '')
-    return this.result<T>(`${this.apiUrl}/${path}`, method, request.body, request)
+    const cache = this.options.cache
+    const key = cache ? conditionalCacheKey(request) : null
+    const cached: CachedGitHubResponse | null = cache && key ? cache.get(key) : null
+    const request$ =
+      key === null
+        ? request
+        : { ...request, headers: { ...request.headers, ...conditionalHeaders(cached) } }
+    const { status, body, headers, rateLimit } = await this.send(
+      `${this.apiUrl}/${path}`,
+      method,
+      request.body,
+      request$,
+    )
+    if (status === 304) {
+      if (!cached)
+        throw new GitHubTransportError({
+          status,
+          kind: 'invalid-response',
+          detail: 'GitHub answered 304 without a stored response',
+          rateLimit,
+        })
+      return { status, data: cached.body as T, headers, rateLimit, notModified: true }
+    }
+    const etag = headers.get('etag')
+    const lastModified = headers.get('last-modified')
+    if (cache && key && method === 'GET' && (etag || lastModified)) {
+      cache.set(key, { etag, lastModified, body, storedAt: new Date() })
+    }
+    return { status, data: body as T, headers, rateLimit }
   }
 
   async paginate<T = unknown>(request: GitHubRestRequest): Promise<T[]> {
@@ -460,6 +533,8 @@ export interface GhGitHubTransportOptions {
   env?: NodeJS.ProcessEnv
   apiUrl?: string
   run?: (args: string[], options: GitHubGraphqlOptions & { input?: string }) => Promise<string>
+  /** Validators for conditional reads; omitted means every GET is a full read. */
+  cache?: GitHubResponseCache
 }
 
 /** Optional fallback/diagnostic path: `gh api --include` supplies JSON and HTTP metadata. */
@@ -550,6 +625,12 @@ export class GhGitHubTransport implements GitHubTransport {
     }
     const response = includedResponse(output)
     const rateLimit = parseRateLimit(response.headers)
+    publishRateLimit(rateLimit)
+    // gh exits nonzero for HTTP errors but keeps a 304 conditional hit in the
+    // same place, and that answer is success rather than a failure.
+    if (response.status === 304) {
+      return { status: 304, headers: response.headers, body: null }
+    }
     if (response.status < 200 || response.status >= 300) {
       throw new GitHubTransportError({
         kind: statusKind(response.status, rateLimit, apiMessage(response.body)),
@@ -599,8 +680,30 @@ export class GhGitHubTransport implements GitHubTransport {
   }
 
   async rest<T = unknown>(request: GitHubRestRequest): Promise<GitHubRestResponse<T>> {
-    const { status, data, rateLimit } = await this.request<T>(request)
-    return { status, data, rateLimit }
+    const cache = this.options.cache
+    const key = cache ? conditionalCacheKey(request) : null
+    const cached: CachedGitHubResponse | null = cache && key ? cache.get(key) : null
+    const conditional =
+      key === null
+        ? request
+        : { ...request, headers: { ...request.headers, ...conditionalHeaders(cached) } }
+    const { status, data, headers, rateLimit } = await this.request<T>(conditional)
+    if (status === 304) {
+      if (!cached)
+        throw new GitHubTransportError({
+          status,
+          kind: 'invalid-response',
+          detail: 'GitHub answered 304 without a stored response',
+          rateLimit,
+        })
+      return { status, data: cached.body as T, headers, rateLimit, notModified: true }
+    }
+    const etag = headers.get('etag')
+    const lastModified = headers.get('last-modified')
+    if (cache && key && (request.method ?? 'GET') === 'GET' && (etag || lastModified)) {
+      cache.set(key, { etag, lastModified, body: data, storedAt: new Date() })
+    }
+    return { status, data, headers, rateLimit }
   }
 
   async paginate<T = unknown>(request: GitHubRestRequest): Promise<T[]> {
@@ -663,18 +766,28 @@ export function setGitHubTransport(transport: GitHubTransport | null): void {
   installed = transport
 }
 
+const responseCache = new GitHubResponseCacheStore()
+
+/** Conditional-read store shared by every transport this process installs. */
+export function githubResponseCache(): GitHubResponseCacheStore {
+  return responseCache
+}
+
 export function githubTransport(env: NodeJS.ProcessEnv = process.env): GitHubTransport {
   if (installed) return installed
   const configured = env[GITHUB_TRANSPORT_ENV]
   const choice: GitHubTransportChoice =
     configured === 'direct' || configured === 'gh' ? configured : 'auto'
   const token = resolveGitHubToken(env)
+  // A different token or API version changes what a stored body means, so the
+  // cache is dropped rather than reused across identities.
   const key = `${choice}:${githubApiUrl(env)}:${githubApiVersion(env)}:${token ?? ''}`
   if (cached?.key === key) return cached.transport
+  if (cached) responseCache.clear()
   const direct = choice === 'direct' || (choice === 'auto' && token !== null)
   const transport: GitHubTransport = direct
-    ? new DirectGitHubTransport({ env })
-    : new GhGitHubTransport({ env })
+    ? new DirectGitHubTransport({ env, cache: responseCache })
+    : new GhGitHubTransport({ env, cache: responseCache })
   cached = { key, transport }
   return transport
 }

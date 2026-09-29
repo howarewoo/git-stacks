@@ -321,6 +321,56 @@ export interface RepositorySnapshot {
   capabilities: RepositoryCapabilities
   /** GitHub-authoritative comparison of submitted stacks with the local graph. */
   reconciliation?: ReconciliationReport
+  /**
+   * GitHub freshness for the pull-request, stack, and issue data in this
+   * snapshot. Optional so hand-built fixtures stay valid; the main process
+   * always sets it, and its absence reads as unknown rather than fresh.
+   */
+  remote?: RemoteFreshness
+  /**
+   * Set when the GitHub data in this snapshot is the last confirmed payload
+   * rather than a live read, with the reason and the time it was confirmed.
+   */
+  githubStale?: { reason: string; fetchedAt: string } | null
+}
+
+/** A GitHub mutation whose outcome the app refuses to guess after a lost network. */
+export type RemoteMutationKind =
+  'merge' | 'review-submit' | 'force-push' | 'delete' | 'retarget' | 'create-pr' | 'publish'
+
+/**
+ * A high-impact GitHub mutation that did not complete. It is listed for the
+ * person who asked for it and never re-sent: a reconnect only ever resumes
+ * reads, because replaying a merge or a forced push could rewrite remote
+ * history nobody has seen since.
+ */
+export interface PendingRemoteMutation {
+  id: string
+  kind: RemoteMutationKind
+  label: string
+  reason: string
+  failedAt: string
+}
+
+export type RemoteFreshnessState =
+  'fresh' | 'refreshing' | 'stale' | 'offline' | 'rate-limited' | 'unauthorized'
+
+/** How far the GitHub data in a snapshot can be trusted, and when it was checked. */
+export interface RemoteFreshness {
+  state: RemoteFreshnessState
+  /** When GitHub last confirmed this data, including a 304 that changed nothing. */
+  fetchedAt: string | null
+  /** The last refresh attempt, successful or not. */
+  checkedAt: string | null
+  detail: string | null
+  /** When GitHub says rate-limited requests resume. */
+  rateLimitReset: string | null
+  pendingMutations: PendingRemoteMutation[]
+}
+
+export interface SyncActivity {
+  focused: boolean
+  visible: boolean
 }
 export interface RecentRepository {
   path: string
@@ -855,6 +905,18 @@ export interface DesktopAPI {
     relation: IssueLinkRelation,
     action: 'link' | 'unlink',
   ) => Promise<IssueLinkPreview>
+  /** GitHub freshness for the open repository; never performs a read. */
+  remoteStatus?(): Promise<RemoteFreshness>
+  /** Tells the main process whether the window is focused and visible. */
+  reportActivity?(activity: SyncActivity): Promise<void>
+  /** Snapshots pushed by the background watcher and refresh timers. */
+  onBackgroundSnapshot?(listener: (snapshot: RepositorySnapshot) => void): () => void
+  /** Open issues pushed by the low-frequency inbox refresh. */
+  onBackgroundIssues?(listener: (issues: RepositoryIssue[]) => void): () => void
+  /** Freshness transitions, including offline and rate-limit suspension. */
+  onRemoteStatus?(listener: (freshness: RemoteFreshness) => void): () => void
+  /** Retires a listed high-impact mutation the person has taken over. */
+  dismissPendingMutation?(id: string): Promise<void>
   openExternal(url: string): Promise<void>
   /** Cancel an in-flight read by the request id the caller supplied. */
   cancel(requestId: string): Promise<void>

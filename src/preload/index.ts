@@ -1,5 +1,11 @@
 import { contextBridge, ipcRenderer } from 'electron'
-import type { DesktopAPI, PublishProgress } from '../shared/types'
+import type {
+  DesktopAPI,
+  PublishProgress,
+  RemoteFreshness,
+  RepositoryIssue,
+  RepositorySnapshot,
+} from '../shared/types'
 
 const desktop: DesktopAPI = {
   recentRepositories: () => ipcRenderer.invoke('repositories:recent'),
@@ -34,6 +40,30 @@ const desktop: DesktopAPI = {
   cancel: (requestId) => ipcRenderer.invoke('operation:cancel', requestId),
   gitRuntimeStatus: () => ipcRenderer.invoke('git-runtime'),
   setSystemGit: (enabled) => ipcRenderer.invoke('git-runtime:system-git', enabled),
+  remoteStatus: () => ipcRenderer.invoke('repository:status'),
+  reportActivity: (activity) => ipcRenderer.invoke('repository:activity', activity),
+  onBackgroundSnapshot: (listener) => {
+    const handler = (_event: unknown, snapshot: RepositorySnapshot): void => listener(snapshot)
+    ipcRenderer.on('repository:background-snapshot', handler)
+    return () => {
+      ipcRenderer.removeListener('repository:background-snapshot', handler)
+    }
+  },
+  onBackgroundIssues: (listener) => {
+    const handler = (_event: unknown, issues: RepositoryIssue[]): void => listener(issues)
+    ipcRenderer.on('repository:background-issues', handler)
+    return () => {
+      ipcRenderer.removeListener('repository:background-issues', handler)
+    }
+  },
+  onRemoteStatus: (listener) => {
+    const handler = (_event: unknown, freshness: RemoteFreshness): void => listener(freshness)
+    ipcRenderer.on('repository:remote-status', handler)
+    return () => {
+      ipcRenderer.removeListener('repository:remote-status', handler)
+    }
+  },
+  dismissPendingMutation: (id) => ipcRenderer.invoke('repository:dismiss-pending-mutation', id),
 }
 
 contextBridge.exposeInMainWorld('desktop', desktop)

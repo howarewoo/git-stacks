@@ -27,6 +27,7 @@ import type {
   PullRequest,
   PushPreview,
   RepositorySnapshot,
+  RepositoryIssue,
   Stash,
 } from '../shared/types'
 import {
@@ -114,7 +115,7 @@ import {
   hasConflictMarkers,
   parseConflictSegments,
 } from '../shared/conflict'
-import { getGitHubData, getGitHubIssues } from './github'
+import { getGitHubData, getGitHubIssues, type GitHubResult } from './github'
 import { githubTransport } from './github-transport'
 import {
   getStackProgress,
@@ -4533,12 +4534,45 @@ function knownAncestor(
   }
   return false
 }
+
+/**
+ * How a snapshot obtains its GitHub half. `live` always asks GitHub, `reuse`
+ * renders this repository's last confirmed payload without a request, and
+ * `on-failure` asks GitHub but keeps that payload when the answer is lost.
+ */
+export type SnapshotGitHubRemote = 'live' | 'reuse' | 'on-failure'
+
+interface ConfirmedGitHubPayload {
+  data: GitHubResult
+  issues: { issues: RepositoryIssue[]; message: string }
+  fetchedAt: string
+}
+
+const MAX_CONFIRMED_PAYLOADS = 8
+const confirmedPayloads = new Map<string, ConfirmedGitHubPayload>()
+
+function rememberConfirmedPayload(root: string, payload: ConfirmedGitHubPayload): void {
+  confirmedPayloads.delete(root)
+  confirmedPayloads.set(root, payload)
+  while (confirmedPayloads.size > MAX_CONFIRMED_PAYLOADS) {
+    const oldest = confirmedPayloads.keys().next()
+    if (oldest.done) break
+    confirmedPayloads.delete(oldest.value)
+  }
+}
+
+/** The last GitHub payload this repository confirmed, if any. */
+export function confirmedGitHubPayload(root: string): ConfirmedGitHubPayload | null {
+  return confirmedPayloads.get(root) ?? null
+}
+
 export async function getSnapshot(
   repoPath: string,
   signal?: AbortSignal,
   // Overridable so a test can exercise the budget with a handful of branches
   // instead of materialising SNAPSHOT_BRANCH_BUDGET of them.
   branchBudget = SNAPSHOT_BRANCH_BUDGET,
+  remote: SnapshotGitHubRemote = 'live',
 ): Promise<RepositorySnapshot> {
   const root = await resolveRepository(repoPath, signal)
   await recoverStashDropForRepository(root)
@@ -4647,10 +4681,34 @@ export async function getSnapshot(
   }
 
   const defaultBranch = await getDefaultBranch(root, refs, currentBranch, signal)
-  const [github, issueData] = await Promise.all([
-    getGitHubData(root, originUrl, signal),
-    getGitHubIssues(root, originUrl),
-  ])
+  const confirmed = confirmedPayloads.get(root) ?? null
+  const confirmedAt = new Date().toISOString()
+  // A background refresh of local Git must not spend a GitHub request, and a
+  // refresh whose GitHub answer was lost must keep the last confirmed payload
+  // rather than emptying the pull-request and stack workspace.
+  const live =
+    remote === 'reuse' && confirmed
+      ? null
+      : await Promise.all([
+          getGitHubData(root, originUrl, signal),
+          getGitHubIssues(root, originUrl),
+        ])
+  const answered = live !== null && live[0].available
+  if (answered) {
+    rememberConfirmedPayload(root, { data: live[0], issues: live[1], fetchedAt: confirmedAt })
+  }
+  const github = answered ? live![0] : (confirmed?.data ?? live![0])
+  const issueData = answered ? live![1] : (confirmed?.issues ?? live![1])
+  const githubStale: RepositorySnapshot['githubStale'] = answered
+    ? null
+    : {
+        reason: confirmed
+          ? remote === 'reuse'
+            ? 'A GitHub refresh is not due yet; showing the last confirmed state'
+            : 'GitHub could not be read; showing the last confirmed state'
+          : github.message,
+        fetchedAt: confirmed?.fetchedAt ?? confirmedAt,
+      }
   const localPullRequests = new Map<string, PullRequest>()
   github.pullRequests.forEach((pullRequest, index) => {
     if (github.sameRepository(index) && !localPullRequests.has(pullRequest.head)) {
@@ -4847,6 +4905,7 @@ export async function getSnapshot(
     nativeStackMessage: github.nativeStackMessage,
     limits,
     capabilities,
+    githubStale,
   }
   // Read-only: the report compares submitted membership with the local graph
   // and never rewrites a branch, a local hint, or a pull-request base.

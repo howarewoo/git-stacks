@@ -1,0 +1,776 @@
+import assert from 'node:assert/strict'
+import { execFileSync } from 'node:child_process'
+import { mkdtemp, mkdir, rename, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { test } from 'node:test'
+import { getSnapshot } from '../src/main/git'
+import { DirectGitHubTransport, GitHubTransportError } from '../src/main/github-transport'
+import { GitHubResponseCacheStore } from '../src/main/github-response-cache'
+import { RepositoryWatcher } from '../src/main/git-watcher'
+import { RepositoryScheduler } from '../src/main/repository-scheduler'
+import {
+  classifyRemoteMutation,
+  RemoteMutationLedger,
+  unknownRemoteOutcome,
+} from '../src/main/remote-mutations'
+import {
+  classifyRemoteFailure,
+  DEFAULT_INTERVALS,
+  failureDelay,
+  RepositorySyncCoordinator,
+  type SyncClock,
+  type SyncTimer,
+} from '../src/main/sync-coordinator'
+import { describeFreshness } from '../src/renderer/src/lib/live-sync'
+import type {
+  GitAction,
+  PullRequest,
+  RemoteFreshness,
+  RepositorySnapshot,
+} from '../src/shared/types'
+
+function git(repo: string, ...args: string[]): string {
+  return execFileSync('git', args, {
+    cwd: repo,
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      GIT_AUTHOR_NAME: 'Git Stacks test',
+      GIT_AUTHOR_EMAIL: 'test@example.invalid',
+      GIT_COMMITTER_NAME: 'Git Stacks test',
+      GIT_COMMITTER_EMAIL: 'test@example.invalid',
+    },
+  })
+}
+
+async function disposableRepository(): Promise<{
+  root: string
+  repo: string
+  cleanup: () => Promise<void>
+}> {
+  const root = await mkdtemp(join(tmpdir(), 'git-stacks-live-sync-'))
+  const repo = join(root, 'workspace')
+  await mkdir(repo)
+  git(repo, 'init', '-b', 'main')
+  git(repo, 'config', 'user.name', 'Git Stacks test')
+  git(repo, 'config', 'user.email', 'test@example.invalid')
+  await writeFile(join(repo, 'shared.txt'), 'base\n')
+  git(repo, 'add', '.')
+  git(repo, 'commit', '-m', 'Initial commit')
+  return { root, repo, cleanup: () => rm(root, { recursive: true, force: true }) }
+}
+
+/**
+ * Watcher tests drive the real `fs.watch` and the real debounce timer: the
+ * property under test is how the platform delivers events, which no fake clock
+ * can stand in for. Waiting is still event-based, and the only wall-clock
+ * deadlines below are failure guards and the settle window that proves a burst
+ * produced exactly one refresh.
+ */
+class WatchLog {
+  readonly reasons: string[] = []
+  private waiters = new Map<
+    Promise<void>,
+    { match: (reason: string) => boolean; resolve: () => void }
+  >()
+
+  record = (reason: string): void => {
+    this.reasons.push(reason)
+    for (const [promise, waiter] of [...this.waiters]) {
+      if (!waiter.match(reason)) continue
+      this.waiters.delete(promise)
+      waiter.resolve()
+    }
+  }
+
+  waitFor(match: (reason: string) => boolean, guardMs = 10_000): Promise<void> {
+    if (this.reasons.some(match)) return Promise.resolve()
+    const { promise, resolve, reject } = Promise.withResolvers<void>()
+    this.waiters.set(promise, { match, resolve })
+    const guard = setTimeout(() => {
+      this.waiters.delete(promise)
+      reject(new Error(`No watcher event matched; saw ${JSON.stringify(this.reasons)}`))
+    }, guardMs)
+    promise.catch(() => {}).finally(() => clearTimeout(guard))
+    return promise
+  }
+}
+
+function pullRequest(number: number): PullRequest {
+  return {
+    number,
+    title: `Pull request ${number}`,
+    url: `https://github.com/acme/widgets/pull/${number}`,
+    head: `feature-${number}`,
+    base: 'main',
+    state: 'OPEN',
+    draft: false,
+    checks: 'passing',
+  }
+}
+
+function snapshotFixture(overrides: Partial<RepositorySnapshot> = {}): RepositorySnapshot {
+  return {
+    path: '/tmp/repository',
+    name: 'widgets',
+    currentBranch: 'main',
+    defaultBranch: 'main',
+    remoteUrl: 'git@github.com:acme/widgets.git',
+    branches: [],
+    pullRequests: [],
+    files: [],
+    stashes: [],
+    rebaseInProgress: false,
+    operation: null,
+    stackOperation: null,
+    headOid: 'a'.repeat(40),
+    github: { available: true, message: '' },
+    limits: { branchesAnalyzed: 0, branchesSkipped: 0, filesListed: 0, filesTruncated: false },
+    capabilities: {
+      bare: false,
+      detachedHead: false,
+      linkedWorktree: false,
+      worktreeCount: 1,
+      refStorage: 'files',
+      refStorageDetail: null,
+      sparseCheckout: false,
+      sparseCheckoutCone: false,
+      submodules: false,
+      gitLfs: false,
+      worktreeConfig: false,
+      objectFormat: 'sha1',
+      gitVersion: 'git version 2.52.0',
+    },
+    ...overrides,
+  }
+}
+
+class ManualClock implements SyncClock {
+  private current = 1_000_000
+  private sequence = 0
+  private timers = new Map<number, { at: number; run: () => void }>()
+
+  now(): number {
+    return this.current
+  }
+
+  setTimeout(run: () => void, ms: number): SyncTimer {
+    this.sequence += 1
+    this.timers.set(this.sequence, { at: this.current + ms, run })
+    return this.sequence
+  }
+
+  clearTimeout(handle: SyncTimer | undefined): void {
+    if (typeof handle === 'number') this.timers.delete(handle)
+  }
+
+  setInterval(): NodeJS.Timeout {
+    throw new Error('the coordinator schedules no intervals')
+  }
+
+  clearInterval(): void {}
+
+  /** Runs every timer due within `ms`, then drains the promises they started. */
+  async advance(ms: number): Promise<void> {
+    this.current += ms
+    for (;;) {
+      const due = [...this.timers.entries()]
+        .filter(([, timer]) => timer.at <= this.current)
+        .sort((left, right) => left[1].at - right[1].at)
+      if (due.length === 0) break
+      const [id, timer] = due[0]!
+      this.timers.delete(id)
+      timer.run()
+      for (let round = 0; round < 8; round += 1) {
+        await new Promise((resolve) => setImmediate(resolve))
+      }
+    }
+    for (let round = 0; round < 8; round += 1) {
+      await new Promise((resolve) => setImmediate(resolve))
+    }
+  }
+}
+
+interface Harness {
+  coordinator: RepositorySyncCoordinator
+  clock: ManualClock
+  reads: string[]
+  issueReads: () => number
+  failWith: (error: unknown) => void
+  pushed: {
+    snapshot?: RepositorySnapshot
+    issues?: RepositorySnapshot['issues']
+    status?: RemoteFreshness
+  }
+}
+
+function harness(snapshotFor?: (attempt: number) => RepositorySnapshot): Harness {
+  const clock = new ManualClock()
+  const reads: string[] = []
+  const pushed: Harness['pushed'] = {}
+  const state = { failure: null as unknown, attempts: 0, issueReads: 0 }
+  const scheduler = new RepositoryScheduler()
+  const reuseMarker = () => ({
+    reason: 'A GitHub refresh is not due yet',
+    fetchedAt: new Date(clock.now() - 10_000).toISOString(),
+  })
+  const coordinator = new RepositorySyncCoordinator(
+    {
+      readSnapshot: async (_repository, _signal, request) => {
+        reads.push(request.github.remote)
+        if (state.failure) throw state.failure
+        state.attempts += 1
+        return (
+          snapshotFor?.(state.attempts) ??
+          snapshotFixture({ githubStale: request.github.remote === 'reuse' ? reuseMarker() : null })
+        )
+      },
+      readIssues: async () => {
+        if (state.failure) throw state.failure
+        state.issueReads += 1
+        return [{ number: 7, title: 'Inbox item', url: 'https://github.com/acme/widgets/issues/7' }]
+      },
+      scheduler,
+      clock,
+    },
+    { ...DEFAULT_INTERVALS, localSettleMs: 100 },
+  )
+  coordinator.onEvent((event) => {
+    if (event.kind === 'snapshot' && event.snapshot) pushed.snapshot = event.snapshot
+    if (event.kind === 'issues' && event.issues) pushed.issues = event.issues
+    if (event.kind === 'status' && event.freshness) pushed.status = event.freshness
+  })
+  return {
+    coordinator,
+    clock,
+    reads,
+    pushed,
+    issueReads: () => state.issueReads,
+    failWith: (error: unknown) => {
+      state.failure = error
+    },
+  }
+}
+
+test('a terminal commit produces one refresh for the whole burst it causes', async () => {
+  const { repo, cleanup } = await disposableRepository()
+  const log = new WatchLog()
+  const watcher = new RepositoryWatcher(repo, (event) => log.record(event.reason), {
+    debounceMs: 150,
+    maxDelayMs: 1_500,
+    sweepMs: 0,
+  })
+  try {
+    await watcher.start()
+    await writeFile(join(repo, 'shared.txt'), 'edited\n')
+    git(repo, 'add', '.')
+    git(repo, 'commit', '-m', 'Terminal commit')
+    await log.waitFor((reason) => reason === 'change')
+    // A commit rewrites the index, HEAD, its ref, and the reflog in a burst.
+    // Asserting there is no second event is a claim about a window of quiet, so
+    // the window itself is the observation: a guessed sleep would hide it.
+    const quiet = Promise.withResolvers<void>()
+    setTimeout(quiet.resolve, 900)
+    await quiet.promise
+    assert.deepEqual(log.reasons, ['change'])
+  } finally {
+    watcher.stop()
+    await cleanup()
+  }
+})
+
+test('a branch switch made outside the window is reported', async () => {
+  const { repo, cleanup } = await disposableRepository()
+  git(repo, 'branch', 'feature/external')
+  const log = new WatchLog()
+  const watcher = new RepositoryWatcher(repo, (event) => log.record(event.reason), {
+    debounceMs: 120,
+    maxDelayMs: 1_200,
+    sweepMs: 0,
+  })
+  try {
+    await watcher.start()
+    git(repo, 'checkout', 'feature/external')
+    await log.waitFor((reason) => reason === 'change')
+    assert.ok(log.reasons.every((reason) => reason === 'change'))
+  } finally {
+    watcher.stop()
+    await cleanup()
+  }
+})
+
+test('a moved repository is reported missing and picked up again when it returns', async () => {
+  const { root, repo, cleanup } = await disposableRepository()
+  const moved = join(root, 'renamed-workspace')
+  const log = new WatchLog()
+  const watcher = new RepositoryWatcher(repo, (event) => log.record(event.reason), {
+    debounceMs: 100,
+    maxDelayMs: 800,
+    sweepMs: 0,
+  })
+  try {
+    await watcher.start()
+    await rename(repo, moved)
+    await log.waitFor((reason) => reason === 'missing')
+    await rename(moved, repo)
+    await log.waitFor((reason) => reason === 'restored')
+    git(repo, 'branch', 'feature/after-move')
+    git(repo, 'checkout', 'feature/after-move')
+    await log.waitFor((reason) => reason === 'change')
+    assert.deepEqual(log.reasons, ['missing', 'restored', 'change'])
+  } finally {
+    watcher.stop()
+    await cleanup()
+  }
+})
+
+test('background reads overlap, and a mutation ends a stalled one instead of waiting', async () => {
+  const scheduler = new RepositoryScheduler(2)
+  let started = 0
+  let settled = 0
+  const stalled = scheduler.read('/repo', async (signal) => {
+    started += 1
+    await new Promise<void>((resolve) => {
+      signal.addEventListener('abort', () => resolve(), { once: true })
+      setTimeout(resolve, 30_000)
+    })
+    settled += 1
+    return 'aborted'
+  })
+  const concurrent = scheduler.read('/repo', async () => {
+    started += 1
+    return 'concurrent'
+  })
+  assert.equal(await concurrent, 'concurrent')
+  assert.equal(await scheduler.mutate('/repo', async () => 'mutated'), 'mutated')
+  assert.equal(settled, 1, 'the stalled read was ended, not waited on')
+  assert.equal(started, 2)
+  assert.equal(await stalled, 'aborted')
+})
+
+test('mutations for one repository run in order, and reads wait for them', async () => {
+  const scheduler = new RepositoryScheduler(2)
+  const order: string[] = []
+  const first = scheduler.mutate('/repo', async () => {
+    order.push('first-start')
+    await new Promise((resolve) => setImmediate(resolve))
+    order.push('first-end')
+  })
+  const second = scheduler.mutate('/repo', async () => {
+    order.push('second')
+  })
+  const read = scheduler.read('/repo', async () => {
+    order.push('read')
+  })
+  await Promise.all([first, second, read])
+  assert.deepEqual(order, ['first-start', 'first-end', 'second', 'read'])
+})
+
+test('a conditional read stores a validator and a 304 replays the stored body', async () => {
+  const requested: (string | null)[] = []
+  const cache = new GitHubResponseCacheStore()
+  let calls = 0
+  const fetchDouble = (async (_url: string | URL | Request, init?: RequestInit) => {
+    requested.push(new Headers(init?.headers).get('if-none-match'))
+    calls += 1
+    if (calls === 1) {
+      return new Response(JSON.stringify({ number: 7, state: 'open' }), {
+        status: 200,
+        headers: {
+          etag: 'W/"v7"',
+          'x-ratelimit-remaining': '4999',
+          'content-type': 'application/json',
+        },
+      })
+    }
+    return new Response(null, {
+      status: 304,
+      headers: { etag: 'W/"v7"', 'x-ratelimit-remaining': '4998' },
+    })
+  }) as typeof globalThis.fetch
+  const transport = new DirectGitHubTransport({ token: 'token', fetch: fetchDouble, cache })
+  const first = await transport.rest<{ number: number; state: string }>({
+    path: 'repos/acme/pulls/7',
+  })
+  assert.equal(first.status, 200)
+  assert.equal(first.notModified, undefined)
+  const second = await transport.rest<{ number: number; state: string }>({
+    path: 'repos/acme/pulls/7',
+  })
+  assert.equal(requested[0], null, 'the first read had no validator to send')
+  assert.equal(requested[1], 'W/"v7"', 'the second read asked whether the resource changed')
+  assert.equal(second.status, 304)
+  assert.equal(second.notModified, true)
+  assert.deepEqual(second.data, { number: 7, state: 'open' })
+  assert.equal(cache.stats().hits, 1)
+})
+
+test('the response cache is bounded and never answers a different request shape', async () => {
+  const cache = new GitHubResponseCacheStore(2)
+  const entry = (body: unknown) => ({ etag: null, lastModified: null, body, storedAt: new Date(0) })
+  cache.set('a', entry(1))
+  cache.set('b', entry(2))
+  cache.set('c', entry(3))
+  assert.equal(cache.size(), 2)
+  assert.equal(cache.get('a'), null)
+  assert.deepEqual(cache.get('b')?.body, 2)
+})
+
+test('a lost network backs off, then recovers without the person asking', async () => {
+  const coordinator = harness()
+  coordinator.coordinator.attach('/tmp/repository', snapshotFixture())
+  await coordinator.clock.advance(DEFAULT_INTERVALS.visibleMs + 1)
+  assert.deepEqual(coordinator.reads, ['on-failure'])
+  coordinator.failWith(new GitHubTransportError({ kind: 'network', detail: 'fetch failed' }))
+  await coordinator.clock.advance(DEFAULT_INTERVALS.visibleMs + 1)
+  assert.equal(coordinator.pushed.status?.state, 'offline')
+  const beforeRetry = coordinator.reads.length
+  // The first failure backs off once; the retry must not come sooner.
+  await coordinator.clock.advance(failureDelay(1, DEFAULT_INTERVALS) - 1)
+  assert.equal(coordinator.reads.length, beforeRetry, 'the retry waits for its backoff')
+  coordinator.failWith(null)
+  await coordinator.clock.advance(1)
+  assert.equal(coordinator.pushed.status?.state, 'fresh')
+})
+
+test('a secondary rate limit parks the inbox refresh and recovers by itself', async () => {
+  const coordinator = harness()
+  coordinator.coordinator.attach('/tmp/repository', snapshotFixture())
+  coordinator.coordinator.reportActivity({ focused: false, visible: true })
+  coordinator.failWith(
+    new GitHubTransportError({
+      kind: 'secondary-rate-limit',
+      detail: 'You have exceeded a secondary rate limit',
+      rateLimit: {
+        limit: 5000,
+        remaining: 4980,
+        reset: null,
+        resource: 'core',
+        retryAfterSeconds: 60,
+      },
+    }),
+  )
+  await coordinator.clock.advance(DEFAULT_INTERVALS.secondaryMs + 1)
+  assert.equal(coordinator.pushed.status?.state, 'rate-limited')
+  const parked = coordinator.issueReads()
+  await coordinator.clock.advance(DEFAULT_INTERVALS.secondaryMs + 1)
+  assert.equal(coordinator.issueReads(), parked, 'the inbox refresh stays parked while limited')
+  coordinator.failWith(null)
+  // The parked tier rechecks on its own schedule, and an answer lifts it.
+  await coordinator.clock.advance(DEFAULT_INTERVALS.secondaryMs + 1)
+  assert.equal(coordinator.pushed.status?.state, 'fresh')
+})
+
+test('an expired token stops polling until the person refreshes', async () => {
+  const coordinator = harness()
+  coordinator.coordinator.attach('/tmp/repository', snapshotFixture())
+  coordinator.failWith(
+    new GitHubTransportError({ kind: 'unauthorized', detail: 'authentication is required' }),
+  )
+  await coordinator.clock.advance(DEFAULT_INTERVALS.visibleMs + 1)
+  assert.equal(coordinator.pushed.status?.state, 'unauthorized')
+  const attempts = coordinator.reads.length
+  await coordinator.clock.advance(DEFAULT_INTERVALS.visibleMs * 4)
+  assert.equal(coordinator.reads.length, attempts, 'polling does not continue without credentials')
+  coordinator.failWith(null)
+  const snapshot = await coordinator.coordinator.refreshNow()
+  assert.equal(snapshot.currentBranch, 'main')
+  assert.equal(coordinator.pushed.status?.state, 'fresh')
+})
+
+test('a filesystem change reads local Git without spending a GitHub request', async () => {
+  const coordinator = harness()
+  coordinator.coordinator.attach('/tmp/repository', snapshotFixture())
+  coordinator.reads.length = 0
+  coordinator.coordinator.notifyLocalChange()
+  await coordinator.clock.advance(200)
+  coordinator.coordinator.notifyLocalChange()
+  await coordinator.clock.advance(200)
+  assert.deepEqual(coordinator.reads, ['reuse', 'reuse'])
+})
+
+test('edits that arrive during a refresh collapse into one trailing refresh', async () => {
+  const clock = new ManualClock()
+  const gate = Promise.withResolvers<void>()
+  let attempts = 0
+  const coordinator = new RepositorySyncCoordinator(
+    {
+      readSnapshot: async () => {
+        attempts += 1
+        if (attempts === 1) await gate.promise
+        return snapshotFixture()
+      },
+      readIssues: async () => [],
+      scheduler: new RepositoryScheduler(),
+      clock,
+    },
+    { ...DEFAULT_INTERVALS, localSettleMs: 100 },
+  )
+  coordinator.attach('/tmp/repository', snapshotFixture())
+  coordinator.notifyLocalChange()
+  await clock.advance(200)
+  // Three more external edits land while the first read is still running.
+  coordinator.notifyLocalChange()
+  coordinator.notifyLocalChange()
+  coordinator.notifyLocalChange()
+  gate.resolve()
+  // The trailing refresh is scheduled once the in-flight read settles, so the
+  // window that contains it starts when the read finishes.
+  await clock.advance(200)
+  await clock.advance(200)
+  assert.equal(attempts, 2, 'the burst collapsed into one trailing refresh')
+})
+
+test('reconnecting never replays a high-impact mutation that lost its answer', async () => {
+  const coordinator = harness()
+  coordinator.coordinator.attach('/tmp/repository', snapshotFixture())
+  const merge: GitAction = {
+    type: 'merge',
+    ref: 'refs/heads/feature/one',
+    expectedHead: 'a'.repeat(40),
+    expectedHeadRef: 'refs/heads/feature/one',
+  }
+  assert.ok(
+    coordinator.coordinator.recordMutationFailure(
+      merge,
+      new GitHubTransportError({ kind: 'network', detail: 'fetch failed' }),
+    ),
+  )
+  coordinator.failWith(new GitHubTransportError({ kind: 'network', detail: 'fetch failed' }))
+  await coordinator.clock.advance(DEFAULT_INTERVALS.visibleMs + 1)
+  coordinator.failWith(null)
+  await coordinator.clock.advance(failureDelay(2, DEFAULT_INTERVALS))
+  const pending = coordinator.pushed.status?.pendingMutations ?? []
+  assert.equal(pending.length, 1)
+  assert.equal(pending[0]?.label, 'Merge feature/one')
+  // Every read since the failure was a read; nothing re-sent the mutation.
+  assert.deepEqual(coordinator.reads, ['on-failure', 'on-failure'])
+  assert.equal(coordinator.coordinator.dismissPendingMutation(pending[0]!.id), true)
+  assert.equal(coordinator.pushed.status?.pendingMutations.length, 0)
+})
+
+test('a request GitHub rejected proves the mutation did not apply and is not listed', () => {
+  const ledger = new RemoteMutationLedger()
+  const merge: GitAction = {
+    type: 'merge',
+    ref: 'refs/heads/x',
+    expectedHead: 'a'.repeat(40),
+    expectedHeadRef: 'refs/heads/x',
+  }
+  assert.equal(
+    ledger.recordFailure(
+      merge,
+      new GitHubTransportError({ kind: 'conflict', detail: 'not mergeable' }),
+    ),
+    null,
+  )
+  assert.equal(
+    ledger.recordFailure(
+      { type: 'createPr', title: 't', body: 'b', base: 'main', draft: false },
+      new GitHubTransportError({ kind: 'unauthorized', detail: 'authentication is required' }),
+    ),
+    null,
+  )
+  assert.equal(
+    ledger.recordFailure(
+      merge,
+      new GitHubTransportError({ kind: 'network', detail: 'fetch failed' }),
+    )?.kind,
+    'merge',
+  )
+  assert.equal(unknownRemoteOutcome(new Error('fatal: not a git repository')), null)
+})
+
+test('only actions that change remote state are treated as high impact', () => {
+  assert.equal(classifyRemoteMutation({ type: 'stage', paths: [] }), null)
+  assert.equal(
+    classifyRemoteMutation({
+      type: 'commit',
+      message: 'm',
+      amend: false,
+      expectedHead: null,
+      expectedHeadRef: 'r',
+    }),
+    null,
+  )
+  assert.equal(classifyRemoteMutation({ type: 'closePr', number: 3 }), null)
+  assert.equal(classifyRemoteMutation({ type: 'push' }), null)
+  assert.equal(
+    classifyRemoteMutation({ type: 'deleteRemoteBranch', ref: 'refs/heads/x', expectedOid: 'a' }),
+    'delete',
+  )
+  assert.equal(
+    classifyRemoteMutation({ type: 'updatePr', number: 4, title: 't', body: 'b', draft: false }),
+    'retarget',
+  )
+})
+
+test('a GitHub read that cannot answer is reported instead of shown as current', async () => {
+  const { repo, cleanup } = await disposableRepository()
+  git(repo, 'remote', 'add', 'origin', 'git@github.com:acme/widgets.git')
+  try {
+    const snapshot = await getSnapshot(repo)
+    assert.equal(snapshot.github.available, false)
+    assert.ok(snapshot.githubStale)
+    assert.equal(snapshot.pullRequests.length, 0)
+  } finally {
+    await cleanup()
+  }
+})
+
+test('refreshed pull requests reach the pushed snapshot with their freshness', async () => {
+  const coordinator = harness((attempt) =>
+    snapshotFixture({
+      pullRequests: [pullRequest(attempt)],
+      githubStale:
+        attempt > 1
+          ? {
+              reason: 'A GitHub refresh is not due yet',
+              fetchedAt: new Date(coordinator.clock.now() - 60_000).toISOString(),
+            }
+          : null,
+    }),
+  )
+  coordinator.coordinator.attach('/tmp/repository', snapshotFixture())
+  await coordinator.clock.advance(DEFAULT_INTERVALS.visibleMs + 1)
+  assert.equal(coordinator.pushed.snapshot?.pullRequests[0]?.number, 1)
+  assert.equal(coordinator.pushed.snapshot?.remote?.state, 'fresh')
+  await coordinator.clock.advance(DEFAULT_INTERVALS.visibleMs + 1)
+  assert.equal(coordinator.pushed.snapshot?.pullRequests[0]?.number, 2)
+})
+
+test('the freshness badge names its state and the age of the data', () => {
+  const now = Date.parse('2026-09-28T12:00:00.000Z')
+  const fresh = describeFreshness(
+    {
+      state: 'fresh',
+      fetchedAt: '2026-09-28T11:58:00.000Z',
+      checkedAt: '2026-09-28T11:58:00.000Z',
+      detail: null,
+      rateLimitReset: null,
+      pendingMutations: [],
+    },
+    now,
+  )
+  assert.equal(fresh.label, 'GitHub fresh')
+  assert.match(fresh.detail, /confirmed 2m ago/iu)
+
+  const offline = describeFreshness(
+    {
+      state: 'offline',
+      fetchedAt: '2026-09-28T11:00:00.000Z',
+      checkedAt: '2026-09-28T11:30:00.000Z',
+      detail: 'fetch failed',
+      rateLimitReset: null,
+      pendingMutations: [
+        {
+          id: '1',
+          kind: 'merge',
+          label: 'Merge feature/one',
+          reason: 'fetch failed',
+          failedAt: '2026-09-28T11:30:00.000Z',
+        },
+      ],
+    },
+    now,
+  )
+  assert.equal(offline.label, 'GitHub offline')
+  assert.match(offline.detail, /Local Git still works/iu)
+  assert.match(offline.detail, /will not be retried automatically/iu)
+
+  const limited = describeFreshness(
+    {
+      state: 'rate-limited',
+      fetchedAt: null,
+      checkedAt: null,
+      detail: null,
+      rateLimitReset: '2026-09-28T12:30:00.000Z',
+      pendingMutations: [],
+    },
+    now,
+  )
+  assert.match(limited.detail, /rate limited; polling resumes in 30 min/iu)
+  assert.equal(describeFreshness(undefined, now).label, 'GitHub unknown')
+})
+
+test('failures classify into the states the badge shows', () => {
+  const now = Date.parse('2026-09-28T12:00:00.000Z')
+  assert.deepEqual(
+    classifyRemoteFailure('You have exceeded a secondary rate limit', {
+      kind: 'secondary-rate-limit',
+      remaining: 4000,
+      reset: null,
+    }),
+    {
+      state: 'rate-limited',
+      detail: 'You have exceeded a secondary rate limit',
+      resumeAt: null,
+      secondaryOnly: true,
+    },
+  )
+  assert.equal(
+    classifyRemoteFailure('API rate limit exceeded', {
+      kind: 'rate-limited',
+      remaining: 0,
+      reset: new Date(now + 60_000),
+    }).resumeAt,
+    now + 60_000,
+  )
+  assert.equal(
+    classifyRemoteFailure('authentication is required', {
+      kind: 'unauthorized',
+      remaining: 4999,
+      reset: null,
+    }).state,
+    'unauthorized',
+  )
+  assert.equal(
+    classifyRemoteFailure('network request failed', {
+      kind: 'network',
+      remaining: null,
+      reset: null,
+    }).state,
+    'offline',
+  )
+  assert.equal(
+    classifyRemoteFailure('no origin remote is configured', {
+      kind: null,
+      remaining: null,
+      reset: null,
+    }).state,
+    'stale',
+  )
+})
+
+test('the freshness badge renders every state in words, not colour alone', async () => {
+  const { renderToStaticMarkup } = await import('react-dom/server')
+  const React = await import('react')
+  const { RemoteFreshnessBadge } = await import('../src/renderer/src/components/remote-freshness')
+  const { TooltipProvider } = await import('../src/renderer/src/components/ui/tooltip')
+  const at = (state: RemoteFreshness['state'], fetchedAt: string | null) =>
+    renderToStaticMarkup(
+      React.createElement(
+        TooltipProvider,
+        null,
+        React.createElement(RemoteFreshnessBadge, {
+          freshness: {
+            state,
+            fetchedAt,
+            checkedAt: fetchedAt,
+            detail: state === 'offline' ? 'fetch failed' : null,
+            rateLimitReset: null,
+            pendingMutations: [],
+          },
+          now: Date.parse('2026-09-28T12:00:00.000Z'),
+        }),
+      ),
+    )
+  assert.match(at('fresh', '2026-09-28T11:59:00.000Z'), /GitHub fresh/)
+  assert.match(at('offline', '2026-09-28T11:00:00.000Z'), /GitHub offline/)
+  assert.match(at('rate-limited', null), /GitHub rate limited/)
+  assert.match(at('unauthorized', null), /authentication failed/)
+  assert.match(at('stale', '2026-09-28T11:00:00.000Z'), /GitHub stale/)
+  // Colour never carries the state on its own: the sentence is in the markup.
+  assert.match(at('offline', '2026-09-28T11:00:00.000Z'), /Local Git still works/)
+})

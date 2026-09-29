@@ -13,6 +13,8 @@ import {
   getCommitDiff,
   getPushPreview,
 } from './git'
+import { getOriginUrl } from './git-core'
+import { getGitHubIssues, getPullRequest } from './github'
 import {
   getSubmitStackProgress,
   onPublishProgress,
@@ -21,11 +23,20 @@ import {
   validateSurgeryRequest,
 } from './stacks'
 import { previewReconciliationRepair } from './reconciliation'
-import { getPullRequest } from './github'
 import { getPullRequestIssueLinks, previewIssueLink, searchGitHubIssues } from './issue-links'
-import type { GitAction, PublishProgress, RecentRepository, StackKind } from '../shared/types'
+import type {
+  GitAction,
+  PublishProgress,
+  RecentRepository,
+  RepositorySnapshot,
+  StackKind,
+  SyncActivity,
+} from '../shared/types'
 import { RepositoryOperations } from './repository-operations'
 import { RequestRegistry } from './request-registry'
+import { RepositoryScheduler } from './repository-scheduler'
+import { RepositorySyncCoordinator } from './sync-coordinator'
+import { RepositoryWatcher } from './git-watcher'
 import {
   configureGitRuntime,
   gitRuntimeStatus,
@@ -62,6 +73,88 @@ let window: BrowserWindow | null = null
 let activeRepository: string | null = null
 let recents: RecentRepository[] = []
 const operations = new RepositoryOperations()
+
+const scheduler = new RepositoryScheduler()
+let watcher: RepositoryWatcher | null = null
+
+/**
+ * Background refresh reads run on the scheduler rather than the foreground
+ * queue: a snapshot stuck on an unreachable network must never make a stage,
+ * commit, or branch switch look busy, and a Git operation must not wait for a
+ * refresh to finish.
+ */
+function backgroundRead<T>(
+  root: string,
+  operation: (root: string, signal: AbortSignal) => Promise<T>,
+  requestId: string,
+): Promise<T> {
+  const controller = readKeys.claim(root, requestId)
+  return scheduler
+    .read(
+      root,
+      async () => {
+        const runtime = await resolveGitRuntime()
+        return withGitRuntime(runtime, () => operation(root, controller.signal))
+      },
+      controller.signal,
+    )
+    .finally(() => readKeys.release(root, requestId, controller))
+}
+
+const sync = new RepositorySyncCoordinator({
+  readSnapshot: (root, signal, request) =>
+    backgroundRead(
+      root,
+      (path, readSignal) => getSnapshot(path, readSignal, undefined, request.github.remote),
+      request.requestId,
+    ),
+  readIssues: (root) =>
+    backgroundRead(
+      root,
+      async (path, readSignal) => {
+        const issues = await getGitHubIssues(path, await getOriginUrl(path, readSignal))
+        // The issues read reports a failure as text; a lost answer must not empty the inbox.
+        if (issues.message) throw new Error(issues.message)
+        return issues.issues
+      },
+      'sync-issues',
+    ),
+  scheduler,
+})
+
+sync.onEvent((event) => {
+  if (!window || window.isDestroyed()) return
+  if (event.kind === 'snapshot' && event.snapshot) {
+    if (event.snapshot.path !== activeRepository) return
+    const { githubStale, ...snapshot } = event.snapshot
+    window.webContents.send('repository:background-snapshot', snapshot)
+    return
+  }
+  if (event.kind === 'issues' && event.issues) {
+    window.webContents.send('repository:background-issues', event.issues)
+    return
+  }
+  if (event.kind === 'status' && event.freshness) {
+    window.webContents.send('repository:remote-status', event.freshness)
+  }
+})
+
+function startBackgroundSync(root: string, snapshot: RepositorySnapshot): void {
+  watcher?.stop()
+  watcher = new RepositoryWatcher(root, () => {
+    // A commit, a branch switch, or a ref update made outside this window — and
+    // the repository coming back after a move — all land the same way.
+    sync.notifyLocalChange()
+  })
+  void watcher.start()
+  sync.attach(root, snapshot)
+}
+
+function stopBackgroundSync(): void {
+  watcher?.stop()
+  watcher = null
+  sync.detach()
+}
 const productionOrigin = 'app://git-stacks'
 const devUrl = !app.isPackaged ? process.env.ELECTRON_RENDERER_URL : undefined
 if (devUrl) {
@@ -158,26 +251,63 @@ function installHandlers() {
     // Retire old reads before waiting for the operation queue; a long-running
     // history/diff must not delay switching to a newly selected repository.
     if (activeRepository) readKeys.cancelRoot(activeRepository)
+    stopBackgroundSync()
     return operations.switchRepository(async () => {
       const runtime = await resolveGitRuntime()
       return withGitRuntime(runtime, async () => {
         const snapshot = await getSnapshot(path)
         await remember(path)
         activeRepository = path
+        startBackgroundSync(path, snapshot)
         return snapshot
       })
     })
   })
   ipcMain.handle('repository:refresh', async (event) => {
     validateSender(event)
-    return readRepository((root, signal) => getSnapshot(root, signal), 'refresh')
+    repository()
+    // The person's own refresh always reads GitHub; it never reuses a payload.
+    return sync.refreshNow()
+  })
+  ipcMain.handle('repository:status', (event) => {
+    validateSender(event)
+    return sync.freshness()
+  })
+  ipcMain.handle('repository:activity', (event, activity: unknown) => {
+    validateSender(event)
+    if (
+      typeof activity !== 'object' ||
+      activity === null ||
+      typeof (activity as SyncActivity).focused !== 'boolean' ||
+      typeof (activity as SyncActivity).visible !== 'boolean'
+    ) {
+      throw new Error('Window activity must report focus and visibility.')
+    }
+    sync.reportActivity(activity as SyncActivity)
+  })
+  ipcMain.handle('repository:dismiss-pending-mutation', (event, id: unknown) => {
+    validateSender(event)
+    if (typeof id !== 'string' || !id) throw new Error('A pending mutation id is required.')
+    return sync.dismissPendingMutation(id)
   })
   ipcMain.handle('repository:action', async (event, action: GitAction) => {
     validateSender(event)
-    return operations.write(async () => {
-      const runtime = await resolveGitRuntime()
-      return withGitRuntime(runtime, () => runAction(repository(), action))
-    })
+    const root = repository()
+    try {
+      // A mutation claims the repository lane: background reads end first, so a
+      // stage or a commit never waits on a network that is not answering.
+      return await scheduler.mutate(root, () =>
+        operations.write(async () => {
+          const runtime = await resolveGitRuntime()
+          return withGitRuntime(runtime, () => runAction(root, action))
+        }),
+      )
+    } catch (error) {
+      // A high-impact remote mutation that lost its answer is listed, never
+      // re-sent: reconnecting resumes reads only.
+      sync.recordMutationFailure(action, error)
+      throw error
+    }
   })
   ipcMain.handle('repository:file', (event, filePath: string) => {
     validateSender(event)
@@ -330,6 +460,8 @@ async function createWindow() {
   window.webContents.on('will-attach-webview', (event) => event.preventDefault())
   window.on('closed', () => {
     window = null
+    // Nothing watches or polls for a window that no longer exists.
+    stopBackgroundSync()
   })
   if (devUrl) await window.loadURL(devUrl)
   else await window.loadURL(`${productionOrigin}/index.html`)
