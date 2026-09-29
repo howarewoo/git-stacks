@@ -7,6 +7,7 @@ import { test } from 'node:test'
 import { CommandCancelled } from '../src/main/git-core'
 import { getSnapshot } from '../src/main/git'
 import { getGitHubIssues, getGitHubData } from '../src/main/github'
+import { githubHostContext } from '../src/main/github-host'
 import {
   DirectGitHubTransport,
   GhGitHubTransport,
@@ -877,7 +878,7 @@ test('a display refresh reads the native stacks capability conditionally and a p
     )
 
     // A mutation's preflight reads GitHub itself: nothing is replayed to it.
-    await detectNativeStacksCapability('acme', 'widgets')
+    await detectNativeStacksCapability('acme', 'widgets', { host: githubHostContext('github.com') })
     assert.equal(validators.at(-1), null, 'an identity read never sends a stored validator')
   } finally {
     setGitHubTransport(null)

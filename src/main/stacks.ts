@@ -78,7 +78,8 @@ import {
   unstackNativeStackAction,
 } from './native-stacks'
 import { canonicalRemoteName, getGitHubData, getPullRequest, pullRequestRepository } from './github'
-import { GitHubTransportError, githubTransport } from './github-transport'
+import { type GitHubHostContext, hostTransport, remoteHostContext } from './github-host'
+import { GitHubTransportError } from './github-transport'
 import type { GitHubResult } from './github'
 import { runReconciliationRepair } from './reconciliation'
 import {
@@ -169,6 +170,12 @@ interface StackPlan {
   capturedPrs: Record<string, CapturedPullRequest | null>
   /** Native stack membership, so a publish preview also detects an unstacked layer. */
   capturedStacks: CapturedStack[]
+  /**
+   * Whether the host serving this repository was observed to expose the native
+   * stacks resource for it. False means the stack is local to this machine and
+   * the pull requests publish as an ordinary chain; nothing claims otherwise.
+   */
+  nativeStacksAvailable: boolean
   capturedMergedHeads: Record<
     string,
     { pr: string | null; oid: string | null; commit: string | null }
@@ -1778,13 +1785,15 @@ async function capturePlan(
     try {
       pushUrl = await getRemotePushUrl(root, 'origin')
       const pushRemote = parseRemote(pushUrl)
-      if (!pushRemote || pushRemote.host !== 'github.com') {
+      const pushHost = remoteHostContext(pushRemote)
+      const fetchHost = remoteHostContext(parseRemote(originUrl))
+      if (!pushHost || (fetchHost && pushHost.host !== fetchHost.host)) {
         blockers.push(
-          `${kind === 'sync' ? 'Syncing' : 'Publishing'} requires a github.com origin push URL`,
+          `${kind === 'sync' ? 'Syncing' : 'Publishing'} requires an origin push URL on the same GitHub host as the fetch URL`,
         )
       } else if (
         originFullName &&
-        pushRemote.fullName.toLowerCase() !== originFullName.toLowerCase()
+        pushRemote!.fullName.toLowerCase() !== originFullName.toLowerCase()
       ) {
         blockers.push('Origin fetch and push URLs target different GitHub repositories')
       }
@@ -1793,19 +1802,25 @@ async function capturePlan(
     }
   }
   if (kind === 'merge' && originFullName) {
-    const allowed = await repositoryMergeMethods(originFullName)
+    const allowed = await repositoryMergeMethods(originFullName, await repositoryHost(root))
     if (!allowed) blockers.push('Repository merge-method policy is unavailable; merge is blocked')
     else mergeMethods = allowed
   }
   const warnings: string[] = []
+  if (kind !== 'restack' && githubData && !githubData.nativeStackPreviewAvailable) {
+    warnings.push(
+      githubData.nativeStackMessage ??
+        'This host does not serve native stacks; pull requests publish as an ordinary chain',
+    )
+  }
   if (kind !== 'restack') {
     if (!githubData || !githubData.available)
       blockers.push(githubData?.message ?? 'GitHub metadata is unavailable')
     if (!originFullName)
       blockers.push(
         kind === 'sync'
-          ? 'Syncing requires a github.com origin remote'
-          : 'Publishing requires a github.com origin remote',
+          ? 'Syncing requires a GitHub origin remote'
+          : 'Publishing requires a GitHub origin remote',
       )
   }
   const operation = await getOperationState(root)
@@ -2271,6 +2286,7 @@ async function capturePlan(
     capturedRemoteOids: remoteOids,
     capturedMergedHeads,
     capturedPrs: prs,
+    nativeStacksAvailable: githubData?.nativeStackPreviewAvailable === true,
     capturedStacks: (snapshot.nativeStacks ?? []).map((stack) => ({
       number: stack.number,
       open: stack.open,
@@ -2382,8 +2398,14 @@ async function publishPreview(plan: StackPlan): Promise<PublishPreview> {
       pullRequest: open?.number ?? null,
     })
   }
+  // A host that does not serve native stacks never gets a registration step:
+  // the pull requests still chain onto each other, and the stack stays local.
   const stackAction: PublishStackAction =
-    layers.length === 0 ? 'none' : stackNumber ? 'extend' : 'create'
+    layers.length === 0 || !plan.nativeStacksAvailable
+      ? 'none'
+      : stackNumber
+        ? 'extend'
+        : 'create'
   return {
     branch: plan.branch,
     layers,
@@ -2874,7 +2896,7 @@ async function revalidatePlan(repoPath: string, plan: StackPlan): Promise<void> 
       pushUrl !== plan.pushUrl ||
       !pushRemote ||
       !originRemote ||
-      pushRemote.host !== 'github.com' ||
+      remoteHostContext(pushRemote)?.host !== remoteHostContext(originRemote)?.host ||
       pushRemote.fullName.toLowerCase() !== originRemote.fullName.toLowerCase()
     ) {
       throw new Error('Stack preview is stale: the origin push URL changed')
@@ -4814,20 +4836,49 @@ async function restoreRemovedMetadata(
 async function currentOrigin(
   repoPath: string,
   includePushUrl = false,
-): Promise<{ url: string; fullName: string; pushUrl: string | null }> {
+): Promise<{
+  url: string
+  fullName: string
+  pushUrl: string | null
+  /** The host that owns this repository; every request for it goes there. */
+  host: GitHubHostContext
+}> {
   const url = await getOriginUrl(repoPath)
   const remote = parseRemote(url)
-  if (!url || !remote || remote.host !== 'github.com')
-    throw new Error('A github.com origin remote is required')
+  const host = remoteHostContext(remote)
+  if (!url || !remote || !host) {
+    throw new Error(
+      `A GitHub origin remote is required; this repository's origin is on ${remote ? remote.host : 'no host'}`,
+    )
+  }
   let pushUrl: string | null = null
   if (includePushUrl) pushUrl = await getRemotePushUrl(repoPath, 'origin')
-  return { url, fullName: remote.fullName, pushUrl }
+  return { url, fullName: remote.fullName, pushUrl, host }
 }
+
+/**
+ * The host that owns the repository being operated on. Every GitHub request a
+ * stack operation makes is addressed to this host, so a repository on another
+ * GitHub host is never answered by github.com and the reverse never happens.
+ */
+async function repositoryHost(repoPath: string): Promise<GitHubHostContext> {
+  const remote = parseRemote(await getOriginUrl(repoPath))
+  const host = remoteHostContext(remote)
+  if (!host) {
+    throw new NativeStackError(
+      'preview-unavailable',
+      `This operation requires a GitHub origin remote; the origin is on ${remote ? remote.host : 'no host'}`,
+    )
+  }
+  return host
+}
+
 async function repositoryMergeMethods(
   fullName: string,
+  host: GitHubHostContext,
 ): Promise<('merge' | 'squash' | 'rebase')[] | null> {
   try {
-    const { data } = await githubTransport().rest<Record<string, unknown>>({
+    const { data } = await hostTransport(host).rest<Record<string, unknown>>({
       path: `repos/${fullName}`,
     })
     if (!isRecord(data)) return null
@@ -5298,8 +5349,12 @@ export async function pushBranch(
 }
 
 /** Return the assigned identity without treating a rejected POST as evidence of ownership. */
-async function createPullRequest(fullName: string, layer: PublishLayer): Promise<number> {
-  const { data } = await githubTransport().rest<Record<string, unknown>>({
+async function createPullRequest(
+  fullName: string,
+  layer: PublishLayer,
+  host: GitHubHostContext,
+): Promise<number> {
+  const { data } = await hostTransport(host).rest<Record<string, unknown>>({
     method: 'POST',
     path: `repos/${fullName}/pulls`,
     body: {
@@ -5322,8 +5377,9 @@ export async function patchPullRequest(
   fullName: string,
   number: number,
   body: Record<string, unknown>,
+  host: GitHubHostContext,
 ): Promise<void> {
-  await githubTransport().rest({
+  await hostTransport(host).rest({
     method: 'PATCH',
     path: `repos/${fullName}/pulls/${number}`,
     body,
@@ -5334,9 +5390,10 @@ async function changePullRequestDraft(
   fullName: string,
   number: number,
   draft: boolean,
+  host: GitHubHostContext,
 ): Promise<void> {
   const [owner, name] = fullName.split('/')
-  const transport = githubTransport()
+  const transport = hostTransport(host)
   const lookup = await transport.graphql<unknown>(
     'query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { id } } }',
     { owner, name, number },
@@ -5508,7 +5565,7 @@ async function runPublishStep(
     }
     let number: number
     try {
-      number = await createPullRequest(operation.fullName, layer)
+      number = await createPullRequest(operation.fullName, layer, await repositoryHost(repoPath))
     } catch (error) {
       if (definitivelyRejectedCreation(error)) {
         layer.createIntent = false
@@ -5552,7 +5609,12 @@ async function runPublishStep(
       )
     }
     await provePublishedHead(repoPath, operation, layer, before)
-    await patchPullRequest(operation.fullName, number, { base: layer.base })
+    await patchPullRequest(
+      operation.fullName,
+      number,
+      { base: layer.base },
+      await repositoryHost(repoPath),
+    )
     const after = await getPullRequest(repoPath, number)
     if (after.base !== layer.base) {
       throw new Error(`Pull request #${number} did not accept base ${layer.base}`)
@@ -5561,12 +5623,14 @@ async function runPublishStep(
   }
 
   const [owner, name] = operation.fullName.split('/')
-  const capability = await detectNativeStacksCapability(owner, name)
+  const host = await repositoryHost(repoPath)
+  const capability = await detectNativeStacksCapability(owner, name, { host })
   if (!capability.available) {
-    throw new NativeStackError(
-      'preview-unavailable',
-      capability.message ?? 'This repository cannot use native pull request stacks',
-    )
+    // The host does not serve native stacks. Every pull request was already
+    // pushed and, where needed, retargeted onto the layer below it, so the
+    // chain is ordinary GitHub work that this submission has completed. Nothing
+    // here registers a stack or claims GitHub grouped these pull requests.
+    return `Published ordinary chained pull requests; ${host.host} does not serve native stacks`
   }
   const published = operation.layers.filter((layer) => layer.pullRequest !== null)
   if (published.length === 0) throw new Error('No published pull request is available to stack')
@@ -5576,7 +5640,7 @@ async function runPublishStep(
   // after those steps finished.
   await provePublishedHeads(repoPath, operation, published)
   const numbers = published.map((layer) => layer.pullRequest as number)
-  const stacks = await listPullRequestStacks(owner, name)
+  const stacks = await listPullRequestStacks(owner, name, { host })
   // Extensions remain bound to the reviewed stack. Overlap can identify our own lost
   // create response only when no stack number has been saved yet.
   const matched = stacks.find((stack) =>
@@ -5640,6 +5704,7 @@ async function runPublishStep(
     retireLegacyStackComments(
       operation.fullName,
       matched ? matched.pullRequests.map((member) => member.number).concat(numbers) : numbers,
+      { host },
     )
   const known = await Promise.all(
     published.map((layer) => getPullRequest(repoPath, layer.pullRequest as number)),
@@ -5660,6 +5725,7 @@ async function runPublishStep(
       name,
       matched,
       known.filter((pr) => registered.has(pr.number)),
+      { host },
     )
     if (!registration.valid) {
       // The typed status is carried through so callers branch on the failure, not its wording.
@@ -5726,6 +5792,7 @@ async function runPublishStep(
       return `Stack #${matched.number} already holds all ${numbers.length} pull requests`
     }
     await addPullRequestsToStack(owner, name, matched.number, toAdd, {
+      host,
       existingStack: matched,
       knownPullRequests: atBoundary,
     })
@@ -5743,6 +5810,7 @@ async function runPublishStep(
   let requested = false
   try {
     await createPullRequestStack(owner, name, numbers, {
+      host,
       knownPullRequests: atBoundary,
       defaultBranch: operation.defaultBranch,
       beforeCreate: async () => {
@@ -5808,7 +5876,9 @@ async function proveRecoveredRegistration(
     }
   }
   const [owner, name] = operation.fullName.split('/')
-  const currentStack = await getPullRequestStack(owner, name, stack.number)
+  const currentStack = await getPullRequestStack(owner, name, stack.number, {
+    host: await repositoryHost(repoPath),
+  })
   if (
     !isOwnCreatedStack(
       currentStack,
@@ -5823,6 +5893,7 @@ async function proveRecoveredRegistration(
     name,
     currentStack,
     members,
+    { host: await repositoryHost(repoPath) },
   )
   if (!registration.valid) {
     throw new NativeStackError(
@@ -5908,7 +5979,9 @@ async function proveCapturedStackMembership(
     .map((layer) => layer.pullRequest)
     .filter((number): number is number => number !== null)
   const [owner, name] = operation.fullName.split('/')
-  const stacks = await listPullRequestStacks(owner, name)
+  const stacks = await listPullRequestStacks(owner, name, {
+    host: await repositoryHost(plan.repoPath),
+  })
   if (operation.stackNumber === null) {
     const owned = stacks.find((stack) =>
       stack.pullRequests.some((member) => numbers.includes(member.number)),
@@ -5961,7 +6034,7 @@ async function runSubmitStack(
     throw new Error('Stack preview is stale: origin fetch or push URL changed')
   }
   if (!plan.pushUrl || !plan.originFullName) {
-    throw new Error('A single github.com origin push URL is required')
+    throw new Error('A single origin push URL on the repository GitHub host is required')
   }
   await ensureNoBusyOperation(repoPath, 'submit the stack')
   await ensureClean(repoPath, 'submit the stack')
@@ -6740,8 +6813,10 @@ async function updatePullRequest(
   const origin = await currentOrigin(repoPath)
   const current = await getPullRequest(repoPath, number)
   if (current.state === 'MERGED') throw new Error(`Pull request #${number} is already merged`)
-  await patchPullRequest(origin.fullName, number, { title, body })
-  if (current.draft !== draft) await changePullRequestDraft(origin.fullName, number, draft)
+  await patchPullRequest(origin.fullName, number, { title, body }, origin.host)
+  if (current.draft !== draft) {
+    await changePullRequestDraft(origin.fullName, number, draft, origin.host)
+  }
   const readBack = await getPullRequest(repoPath, number)
   if (readBack.title !== title || readBack.body !== body || readBack.draft !== draft) {
     throw new Error(`Pull request #${number} did not match the requested update`)
@@ -6758,7 +6833,7 @@ async function changePullRequestState(
   const current = await getPullRequest(repoPath, number)
   if (state === 'open' && current.state === 'MERGED')
     throw new Error(`Pull request #${number} cannot be reopened after merge`)
-  await patchPullRequest(origin.fullName, number, { state })
+  await patchPullRequest(origin.fullName, number, { state }, origin.host)
   const readBack = await getPullRequest(repoPath, number)
   const expected = state === 'open' ? 'OPEN' : 'CLOSED'
   if (readBack.state !== expected)

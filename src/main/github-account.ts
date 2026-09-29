@@ -14,7 +14,6 @@ import {
 import {
   DirectGitHubTransport,
   GitHubTransportError,
-  GITHUB_CREDENTIAL_ORIGIN,
   onGitHubFailure,
   resolveGitHubToken,
   setGitHubCredentialSource,
@@ -22,10 +21,16 @@ import {
   type GitHubCredentialFailure,
   type GitHubCredentialSource,
 } from './github-transport'
+import {
+  GITHUB_DOTCOM_HOST,
+  githubHostContext,
+  remoteHostContext,
+  type GitHubHostContext,
+} from './github-host'
 import type { GitHubAccountState, GitHubAccountStatus, GitHubAppPermission } from '../shared/types'
 
-/** The account signs in to github.com; a GitHub Enterprise host has no registration yet. */
-export const GITHUB_ACCOUNT_HOST = 'github.com'
+/** The host this build signs in to when nothing else is configured: github.com. */
+export const GITHUB_ACCOUNT_HOST = GITHUB_DOTCOM_HOST
 
 /**
  * The fine-grained permissions the registered GitHub App asks for, each tied to
@@ -124,6 +129,12 @@ export interface GitHubAccountOptions {
   vault: CredentialVault
   /** Application state: the opaque reference and its non-secret facts. */
   stateFile: string
+  /**
+   * The GitHub host this account signs in to. github.com stays the default, so
+   * nothing changes until a host is named; an enterprise host is used with its
+   * own GitHub App client id and its own endpoints, or not at all.
+   */
+  host?: string
   env?: NodeJS.ProcessEnv
   fetch?: typeof globalThis.fetch
   /**
@@ -173,15 +184,17 @@ function defaultSleep(milliseconds: number, signal?: AbortSignal): Promise<void>
 async function identifyWithToken(
   accessToken: string,
   session: string,
-  fetch?: typeof globalThis.fetch,
+  fetch: typeof globalThis.fetch | undefined,
+  host: GitHubHostContext,
 ): Promise<string | null> {
   const pinned: GitHubCredentialSource = {
-    host: GITHUB_ACCOUNT_HOST,
+    host: host.host,
     available: () => true,
     current: async () => ({ token: accessToken, session, origin: 'account' as const }),
   }
   const transport = new DirectGitHubTransport({
-    apiUrl: GITHUB_CREDENTIAL_ORIGIN,
+    apiUrl: host.apiBase,
+    host: host.host,
     credential: pinned,
     env: {},
     ...(fetch ? { fetch } : {}),
@@ -192,7 +205,8 @@ async function identifyWithToken(
 
 export class GitHubAccount implements GitHubCredentialSource {
   /** The host this credential was issued for; it is never sent anywhere else. */
-  readonly host = GITHUB_ACCOUNT_HOST
+  readonly hostContext: GitHubHostContext
+  readonly host: string
 
   private readonly options: GitHubAccountOptions
   private readonly env: NodeJS.ProcessEnv
@@ -241,17 +255,19 @@ export class GitHubAccount implements GitHubCredentialSource {
     this.env = options.env ?? process.env
     this.now = options.now ?? (() => Date.now())
     this.sleep = options.sleep ?? defaultSleep
-    this.state = githubAppClientId(this.env) ? 'signed-out' : 'not-configured'
+    this.hostContext = githubHostContext(options.host ?? GITHUB_DOTCOM_HOST)
+    this.host = this.hostContext.host
+    this.state = githubAppClientId(this.env, this.host) ? 'signed-out' : 'not-configured'
     this.message =
       this.state === 'not-configured'
-        ? 'This build has no GitHub App client id configured, so it cannot sign in.'
+        ? `This build has no GitHub App client id configured for ${this.host}, so it cannot sign in.`
         : null
     setGitHubCredentialSource(this)
     onGitHubFailure((error, credential) => this.reportFailure(error, credential))
   }
 
   private get clientId(): string | null {
-    return githubAppClientId(this.env)
+    return githubAppClientId(this.env, this.host)
   }
 
   /**
@@ -286,7 +302,7 @@ export class GitHubAccount implements GitHubCredentialSource {
     return {
       state: this.state,
       reference: this.account?.reference ?? null,
-      host: GITHUB_ACCOUNT_HOST,
+      host: this.host,
       login: this.account?.login ?? null,
       permissions: GITHUB_APP_PERMISSIONS,
       expiresAt: this.account?.expiresAt ?? null,
@@ -431,7 +447,7 @@ export class GitHubAccount implements GitHubCredentialSource {
         session: randomUUID(),
       }
       const reference = await this.options.vault.stage(
-        GITHUB_ACCOUNT_HOST,
+        this.host,
         JSON.stringify(live),
         issuedAt,
       )
@@ -448,7 +464,7 @@ export class GitHubAccount implements GitHubCredentialSource {
       }
       const account: StoredAccount = {
         reference,
-        host: GITHUB_ACCOUNT_HOST,
+        host: this.host,
         login,
         createdAt: issuedAt,
         expiresAt: live.expiresAt,
@@ -572,6 +588,7 @@ export class GitHubAccount implements GitHubCredentialSource {
       const refreshed = await refreshUserAccessToken({
         clientId: this.clientId ?? '',
         refreshToken: live.refreshToken,
+        host: this.host,
         fetch: this.options.fetch,
         signal,
       })
@@ -657,6 +674,7 @@ export class GitHubAccount implements GitHubCredentialSource {
     try {
       challenge = await requestDeviceCode({
         clientId,
+        host: this.host,
         fetch: this.options.fetch,
         signal: controller.signal,
       })
@@ -705,6 +723,7 @@ export class GitHubAccount implements GitHubCredentialSource {
       const session = await waitForDeviceAuthorization({
         clientId: this.clientId ?? '',
         deviceCode: challenge.deviceCode,
+        host: this.host,
         fetch: this.options.fetch,
         signal: controller.signal,
         intervalSeconds: challenge.interval,
@@ -761,6 +780,7 @@ export class GitHubAccount implements GitHubCredentialSource {
         accessToken,
         session,
         this.options.fetch,
+        this.hostContext,
       )
       if (!current()) return { state: 'signed-in', message: null }
       if (login) {

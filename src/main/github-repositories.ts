@@ -1,5 +1,11 @@
 import { isRecord } from './git-core'
-import { GitHubTransportError, githubTransport, type GitHubTransport } from './github-transport'
+import { GitHubTransportError, type GitHubTransport } from './github-transport'
+import {
+  GITHUB_DOTCOM_HOST,
+  githubHostContext,
+  hostTransport,
+  type GitHubHostContext,
+} from './github-host'
 import type {
   GitHubRepositorySummary,
   OnboardingFailure,
@@ -24,10 +30,11 @@ const FULL_NAME =
   /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9_])?\/[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9_])?$/u
 const SEGMENT = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9_])?$/u
 
+/** The host discovery falls back to when a caller only wants a summary: github.com. */
+const GITHUB_DOTCOM_CONTEXT = githubHostContext(GITHUB_DOTCOM_HOST)
+
 /** GitHub reports an unapproved organization authorization on the failure message. */
 const ORGANIZATION_AUTHORIZATION = /saml|sso|protected by organization/iu
-
-const GITHUB_HTTPS = 'https://github.com'
 
 /**
  * A trimmed non-empty string, or null. GitHub's payload is `unknown` all the way
@@ -42,13 +49,18 @@ function stringField(value: unknown): string | null {
  * HTTPS or in the SSH form. A response naming another host is not followed:
  * discovery must never be able to redirect a clone somewhere else.
  */
-function cloneUrl(value: unknown, kind: 'https' | 'ssh'): string | null {
+function cloneUrl(
+  value: unknown,
+  kind: 'https' | 'ssh',
+  host: GitHubHostContext,
+): string | null {
   const candidate = stringField(value)
   if (!candidate) return null
   if (kind === 'ssh') {
-    return /^(?:ssh:\/\/)?git@github\.com:[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+(?:\.git)?$/u.test(
-      candidate,
-    )
+    return new RegExp(
+      `^(?:ssh://)?git@${host.host.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')}:[A-Za-z0-9._-]+/[A-Za-z0-9._-]+(?:\\.git)?$`,
+      'u',
+    ).test(candidate)
       ? candidate
       : null
   }
@@ -58,7 +70,7 @@ function cloneUrl(value: unknown, kind: 'https' | 'ssh'): string | null {
   } catch {
     return null
   }
-  if (url.protocol !== 'https:' || url.hostname !== 'github.com') return null
+  if (url.protocol !== 'https:' || url.hostname !== host.host) return null
   return url.username || url.password || url.port ? null : candidate
 }
 
@@ -68,7 +80,10 @@ function cloneUrl(value: unknown, kind: 'https' | 'ssh'): string | null {
  * `GET /user/repos` nor search reports a repository this credential cannot
  * read, so a well-formed hit is a clone target by construction.
  */
-export function summarizeRepository(value: unknown): GitHubRepositorySummary | null {
+export function summarizeRepository(
+  value: unknown,
+  host: GitHubHostContext = GITHUB_DOTCOM_CONTEXT,
+): GitHubRepositorySummary | null {
   if (!isRecord(value)) return null
   const owner = isRecord(value.owner) ? stringField(value.owner.login) : null
   const name = stringField(value.name)
@@ -95,9 +110,9 @@ export function summarizeRepository(value: unknown): GitHubRepositorySummary | n
     language: stringField(value.language),
     defaultBranch: stringField(value.default_branch) ?? 'main',
     pushedAt: stringField(value.pushed_at),
-    url: cloneUrl(value.html_url, 'https') ?? `${GITHUB_HTTPS}/${fullName}`,
-    httpsUrl: cloneUrl(value.clone_url, 'https') ?? `${GITHUB_HTTPS}/${fullName}.git`,
-    sshUrl: cloneUrl(value.ssh_url, 'ssh') ?? `git@github.com:${fullName}.git`,
+    url: cloneUrl(value.html_url, 'https', host) ?? `${host.webOrigin}/${fullName}`,
+    httpsUrl: cloneUrl(value.clone_url, 'https', host) ?? `${host.webOrigin}/${fullName}.git`,
+    sshUrl: cloneUrl(value.ssh_url, 'ssh', host) ?? `git@${host.host}:${fullName}.git`,
     canPush:
       permissions !== null &&
       (permissions.push === true || permissions.admin === true || permissions.maintain === true),
@@ -109,11 +124,14 @@ export function summarizeRepository(value: unknown): GitHubRepositorySummary | n
  * repeat of one already listed. Both endpoints are already scoped to the
  * credential, so this filters malformed entries and duplicates, nothing else.
  */
-function accessible(values: readonly unknown[]): GitHubRepositorySummary[] {
+function accessible(
+  values: readonly unknown[],
+  host: GitHubHostContext,
+): GitHubRepositorySummary[] {
   const repositories: GitHubRepositorySummary[] = []
   const seen = new Set<string>()
   for (const value of values) {
-    const repository = summarizeRepository(value)
+    const repository = summarizeRepository(value, host)
     if (!repository) continue
     const key = repository.fullName.toLowerCase()
     if (seen.has(key)) continue
@@ -218,6 +236,8 @@ export function ghCloneCommandText(
 }
 
 export interface DiscoveryOptions {
+  /** The host being browsed. It owns every request and every clone URL built. */
+  host: GitHubHostContext
   query?: string
   signal?: AbortSignal
   transport?: GitHubTransport
@@ -231,14 +251,14 @@ export interface DiscoveryOptions {
  * the repositories this credential can read.
  */
 export async function discoverRepositories(
-  options: DiscoveryOptions = {},
+  options: DiscoveryOptions,
 ): Promise<RepositoryDiscovery> {
-  const transport = options.transport ?? githubTransport()
+  const transport = options.transport ?? hostTransport(options.host)
   const query = (options.query ?? '').trim()
   if (query) {
-    return searchRepositories(transport, query, options)
+    return searchRepositories(transport, query, options, options.host)
   }
-  const repositories = await listAccessible(transport, options)
+  const repositories = await listAccessible(transport, options, options.host)
   return { repositories, query: '' }
 }
 
@@ -250,6 +270,7 @@ export async function discoverRepositories(
 async function listAccessible(
   transport: GitHubTransport,
   options: DiscoveryOptions,
+  host: GitHubHostContext,
 ): Promise<GitHubRepositorySummary[]> {
   const search = new URLSearchParams({
     affiliation: 'owner,collaborator,organization_member',
@@ -262,7 +283,7 @@ async function listAccessible(
     path: `user/repos?${search}`,
     ...(options.signal ? { signal: options.signal } : {}),
   })
-  return accessible(items)
+  return accessible(items, host)
 }
 
 /**
@@ -274,6 +295,7 @@ async function searchRepositories(
   transport: GitHubTransport,
   query: string,
   options: DiscoveryOptions,
+  host: GitHubHostContext,
 ): Promise<RepositoryDiscovery> {
   const maxPages = Math.max(1, Math.min(options.maxPages ?? SEARCH_PAGE_CAP, SEARCH_PAGE_CAP))
   const collected: unknown[] = []
@@ -309,7 +331,7 @@ async function searchRepositories(
     collected.push(...response.data.items)
     if (response.data.items.length < REPOSITORY_PAGE_SIZE) break
   }
-  const repositories = accessible(collected)
+  const repositories = accessible(collected, host)
   const truncated =
     (totalCount !== undefined && totalCount > repositories.length) ||
     collected.length >= GITHUB_SEARCH_RESULT_CAP

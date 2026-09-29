@@ -2,6 +2,7 @@ import { execFile } from 'node:child_process'
 import { promises as fs } from 'node:fs'
 import { promisify } from 'node:util'
 import type { AppSettings } from '../shared/settings'
+import type { GitHubHostStatus } from '../shared/host'
 import type { DiagnosticEntry, DiagnosticReport } from '../shared/settings'
 import type { GitEnvironmentStatus, GitRuntimeStatus, GitHubAccountStatus } from '../shared/types'
 
@@ -92,6 +93,12 @@ export interface DiagnosticSources {
   filesystem: { refFormat: string | null; error: string | null }
   appVersion: string
   settings: AppSettings
+  /**
+   * What the host this app is pointed at was observed to support. It is
+   * omitted until something has actually established it, and every line keeps
+   * the state it was observed in rather than a guess.
+   */
+  githubHost?: GitHubHostStatus | null
 }
 
 function runtimeEntries(runtime: GitRuntimeStatus): DiagnosticEntry[] {
@@ -224,24 +231,54 @@ function safeHelperIdentifier(helper: string): string {
   return trimmed.slice(0, 32)
 }
 
+/**
+ * The host, its API base, and each capability a probe or a real request
+ * established. A host nothing has probed is reported as unknown, never as a
+ * host without the feature.
+ */
+function githubHostEntries(status: GitHubHostStatus | null): DiagnosticEntry[] {
+  if (!status) return []
+  const entries: DiagnosticEntry[] = [
+    {
+      source: 'github',
+      label: 'GitHub host',
+      value: `${status.host} (${status.kind})`,
+      status: status.state === 'supported' ? 'confirmed' : status.state === 'unknown' ? 'not-applicable' : 'unavailable',
+      detail: status.message,
+    },
+    {
+      source: 'github',
+      label: 'GitHub REST base',
+      value: status.apiBase,
+      status: 'confirmed',
+    },
+    {
+      source: 'github',
+      label: 'GitHub server version',
+      value: status.serverVersion ?? 'not reported by the host',
+      status: status.serverVersion ? 'confirmed' : 'not-applicable',
+    },
+  ]
+  for (const capability of status.capabilities) {
+    entries.push({
+      source: 'github',
+      label: capability.label,
+      value: capability.state,
+      status:
+        capability.state === 'supported'
+          ? 'confirmed'
+          : capability.state === 'unsupported'
+            ? 'unavailable'
+            : 'not-applicable',
+      detail: capability.detail,
+    })
+  }
+  return entries
+}
+
 function stackEntries(environment: GitEnvironmentStatus | null): DiagnosticEntry[] {
   const credentials = environment?.httpsCredentials
   return [
-    {
-      source: 'github',
-      label: 'GitHub stack support',
-      value: 'the GitHub App requests the stacked-PR permission this build uses',
-      status: 'not-applicable',
-      detail:
-        'stacks are served by the API, so this report does not assert the feature from local state',
-    },
-    {
-      source: 'github',
-      label: 'Native stacked PRs',
-      value: 'supported by this build (the stacks API ships with the GitHub App)',
-      status: 'not-applicable',
-      detail: 'requires a network call, so it is not asserted from this report',
-    },
     {
       source: 'credentials',
       label: 'Git HTTPS helper',
@@ -314,6 +351,7 @@ export async function runDiagnostics(sources: DiagnosticSources): Promise<Diagno
     ...runtimeEntries(sources.runtime),
     ...accountEntries(sources.account),
     ...stackEntries(sources.environment),
+    ...githubHostEntries(sources.githubHost ?? null),
     ...filesystemEntries(sources.filesystem),
   ]
 

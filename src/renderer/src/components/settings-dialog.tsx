@@ -23,6 +23,7 @@ import {
 } from '../../../shared/settings'
 import type { ShortcutId } from '../../../shared/shortcuts'
 import type { GitHubAccountStatus } from '../../../shared/types'
+import { CAPABILITY_STATE_LABELS, type GitHubHostStatus } from '../../../shared/host'
 
 const MERGE_METHOD_LABELS: Record<MergeMethod, string> = {
   merge: 'Merge commit',
@@ -63,6 +64,7 @@ export interface SettingsDialogProps {
     exportSupportBundle?: (previewId: string) => Promise<{ path: string; bytes: number }>
     signOutOfGitHub?: () => Promise<GitHubAccountStatus>
     githubAccountStatus?: () => Promise<GitHubAccountStatus>
+    githubHostStatus?: () => Promise<GitHubHostStatus>
   } | null
   account: GitHubAccountStatus | null
   onAccountChange: (status: GitHubAccountStatus) => void
@@ -73,10 +75,18 @@ export interface SettingsDialogProps {
   onError: (message: string) => void
 }
 
-type Section = 'account' | 'git' | 'appearance' | 'privacy' | 'shortcuts' | 'diagnostics'
+type Section =
+  | 'account'
+  | 'github'
+  | 'git'
+  | 'appearance'
+  | 'privacy'
+  | 'shortcuts'
+  | 'diagnostics'
 
 const SECTIONS: { id: Section; label: string }[] = [
   { id: 'account', label: 'Account' },
+  { id: 'github', label: 'GitHub' },
   { id: 'git', label: 'Git' },
   { id: 'appearance', label: 'Appearance' },
   { id: 'shortcuts', label: 'Shortcuts' },
@@ -100,6 +110,8 @@ export function SettingsDialog({
   const [busy, setBusy] = React.useState(false)
   const [report, setReport] = React.useState<DiagnosticReport | null>(null)
   const [bundle, setBundle] = React.useState<SupportBundlePreview | null>(null)
+  const [hostStatus, setHostStatus] = React.useState<GitHubHostStatus | null>(null)
+  const [hostDraft, setHostDraft] = React.useState('')
   const [editorDraft, setEditorDraft] = React.useState('')
   const [mergeToolDraft, setMergeToolDraft] = React.useState('')
   const [message, setMessage] = React.useState<string | null>(null)
@@ -163,6 +175,24 @@ export function SettingsDialog({
       issueFor(key)?.message ?? toolErrorMessage ?? lockFor(key)?.reason ?? undefined,
     [issueFor, lockFor],
   )
+
+  /**
+   * What the host this installation points at actually supports. It is asked
+   * for, not assumed: a host that has not answered is shown as unknown.
+   */
+  const refreshHostStatus = React.useCallback(async () => {
+    if (!desktop?.githubHostStatus) return
+    try {
+      setHostStatus(await desktop.githubHostStatus())
+    } catch {
+      setHostStatus(null)
+    }
+  }, [desktop])
+
+  React.useEffect(() => {
+    if (!open || section !== 'github') return
+    void refreshHostStatus()
+  }, [open, section, refreshHostStatus])
 
   const openDiagnostics = React.useCallback(async () => {
     if (!desktop?.diagnostics) return
@@ -300,6 +330,66 @@ export function SettingsDialog({
                 <Button variant="secondary" disabled={busy || !account} onClick={signOut}>
                   Sign out
                 </Button>
+              </WorkflowSection>
+            ) : null}
+
+            {section === 'github' && settings ? (
+              <WorkflowSection label="GitHub host">
+                <Field
+                  id="settings-github-host"
+                  label="Host"
+                  description="The GitHub host this app works against. Leave it as github.com, or name your GitHub Enterprise Server host. Every request, clone URL, and sign-in follows it."
+                  error={problemFor('github.host')}
+                >
+                  <input
+                    id="settings-github-host"
+                    className="w-full rounded-[length:var(--gs-semantic-radius-control)] border border-[var(--gs-semantic-border-default)] bg-[var(--gs-semantic-surface-raised)] px-3 py-2"
+                    value={hostDraft}
+                    placeholder="github.com"
+                    disabled={busy || locked('github.host')}
+                    onChange={(event) => setHostDraft(event.target.value)}
+                  />
+                </Field>
+                <Button
+                  variant="secondary"
+                  disabled={busy || locked('github.host')}
+                  onClick={async () => {
+                    setBusy(true)
+                    try {
+                      await save(
+                        { github: { host: hostDraft.trim() || 'github.com' } },
+                        `GitHub host set to ${hostDraft.trim() || 'github.com'}.`,
+                      )
+                      setHostDraft('')
+                      await refreshHostStatus()
+                    } finally {
+                      setBusy(false)
+                    }
+                  }}
+                >
+                  Use this host
+                </Button>
+                {hostStatus ? (
+                  <OperationFacts
+                    facts={[
+                      { label: 'Host', value: `${hostStatus.host} (${hostStatus.kind})` },
+                      { label: 'REST base', value: hostStatus.apiBase },
+                      {
+                        label: 'Server version',
+                        value: hostStatus.serverVersion ?? 'not reported by the host',
+                      },
+                      ...hostStatus.capabilities.map((capability) => ({
+                        label: capability.label,
+                        value: CAPABILITY_STATE_LABELS[capability.state],
+                        detail: capability.detail,
+                      })),
+                    ]}
+                  />
+                ) : (
+                  <p className="text-[length:var(--gs-semantic-type-body-size)] text-[var(--gs-semantic-text-secondary)]">
+                    This host has not answered yet, so nothing is claimed about what it supports.
+                  </p>
+                )}
               </WorkflowSection>
             ) : null}
 

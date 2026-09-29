@@ -1,4 +1,17 @@
 import assert from 'node:assert/strict'
+/** github.com's own context, written out so importing the host module cannot pull
+ * `git-core` (and the real `execFile`) in before this file's harness patches it. */
+const DOTCOM = {
+  host: 'github.com',
+  dotcom: true,
+  webOrigin: 'https://github.com',
+  apiBase: 'https://api.github.com',
+  graphqlUrl: 'https://api.github.com/graphql',
+} as const
+
+/** Discovery in this file browses github.com. */
+const HOST = DOTCOM
+
 import { once } from 'node:events'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { test } from 'node:test'
@@ -196,7 +209,7 @@ function authenticated(fixture: Fixture): DirectGitHubTransport {
 test('every page of the accessible list is walked, keeping hits without permissions', async () => {
   const fixture = await githubFixture()
   try {
-    const discovery = await discoverRepositories({ transport: authenticated(fixture) })
+    const discovery = await discoverRepositories({ host: HOST, transport: authenticated(fixture) })
 
     assert.equal(discovery.query, '')
     // Page one holds one malformed entry and one hit without permissions; page two adds two.
@@ -231,6 +244,7 @@ test('a search walks its pages and keeps hits that name no permissions', async (
   const fixture = await githubFixture()
   try {
     const discovery = await discoverRepositories({
+  host: HOST,
       transport: authenticated(fixture),
       query: 'repo',
     })
@@ -264,7 +278,7 @@ test('a search walks its pages and keeps hits that name no permissions', async (
 test('an empty repository is labelled so its first branch starts from nothing', async () => {
   const fixture = await githubFixture()
   try {
-    const discovery = await discoverRepositories({ transport: authenticated(fixture) })
+    const discovery = await discoverRepositories({ host: HOST, transport: authenticated(fixture) })
     assert.equal(discovery.repositories.find((entry) => entry.name === 'repo-3')?.empty, false)
     // A small repository whose size rounds to 0 KB is NOT marked empty when it has commits pushed to it.
     assert.equal(
@@ -287,6 +301,7 @@ test('a search with total_count > 1000 reports truncation and incomplete results
   const fixture = await githubFixture()
   try {
     const discovery = await discoverRepositories({
+  host: HOST,
       transport: authenticated(fixture),
       query: 'overflow',
     })
@@ -333,7 +348,7 @@ test('an unauthenticated search says sign in rather than returning no repositori
     })
 
     await assert.rejects(
-      discoverRepositories({ transport }),
+      discoverRepositories({ host: HOST, transport }),
       (error: unknown) => classifyTransportFailure(error).reason === 'signed-out',
     )
   } finally {
@@ -346,6 +361,7 @@ test('a cancelled search stops the request instead of answering for it', async (
   try {
     const controller = new AbortController()
     const searching = discoverRepositories({
+  host: HOST,
       transport: authenticated(fixture),
       signal: controller.signal,
     })

@@ -157,6 +157,99 @@ late device-code response cannot reopen it. If saving the account record fails
 after its new credential was stored, that staged credential is removed and the
 previous account remains selected.
 
+## GitHub hosts
+
+Git Stacks addresses one GitHub host at a time. `github.com` is the default, and
+until a different host is chosen nothing changes: a github.com repository is
+still answered by github.com. A GitHub Enterprise Server host is not a separate
+mode. It is a host like any other, reached over HTTPS by its own host name.
+
+### Choosing a host
+
+Settings carries the GitHub host name. The field takes a bare host name such as
+`ghe.example.com`, never a URL: no scheme, no path, and no port. A URL is
+refused rather than trimmed into a host name.
+
+A repository is answered by the host that owns it. A repository whose origin
+remote is on one host is never answered by another host, and there is no
+fallback to `github.com` or to any other service. A host that does not answer
+is reported as unanswered, not quietly served by the default host.
+
+### What is host-aware
+
+Sign-in, repository discovery, clone URLs in both HTTPS and SSH form,
+pull-request reads and writes, native stacks, and diagnostics all address the
+host that owns the repository or the host that is configured. github.com is not
+a separate code path; it is the same path with a different name.
+
+### Authentication
+
+Each host needs its own credential. Sign-in uses the GitHub App device flow, and
+the public client id is read per host:
+
+| Host         | Client id environment variable                                                    |
+| ------------ | --------------------------------------------------------------------------------- |
+| `github.com` | `GIT_STACKS_GITHUB_APP_CLIENT_ID`                                                 |
+| Any other    | `GIT_STACKS_GITHUB_APP_CLIENT_ID_<HOST>`, dots and hyphens written as underscores |
+
+`ghe.example.com` therefore reads `GIT_STACKS_GITHUB_APP_CLIENT_ID_GHE_EXAMPLE_COM`.
+A host with no client id configured reports "not configured" and nothing else
+changes. Whether a host can complete a device-flow sign-in depends on that
+host's configuration: a GitHub Enterprise Server instance must have the device
+flow enabled under the app's optional features, or no sign-in is possible.
+
+`GIT_STACKS_GITHUB_TOKEN`, `GITHUB_TOKEN`, `GH_TOKEN`, and an authenticated
+`gh` session are used when they are present. `gh` is optional and is never
+required. A credential belongs to the host it was issued for and is never sent
+to another host, so signing in to one host leaves the others unauthenticated.
+
+### Capability matrix
+
+This build reports the same five capabilities for every host, each from what
+that host actually answered:
+
+| Capability                   | What the host is asked                                                 |
+| ---------------------------- | ---------------------------------------------------------------------- |
+| REST API                     | Whether the host serves REST requests for this repository              |
+| GraphQL API                  | Whether the host serves GraphQL queries                                |
+| Native stacked pull requests | Whether the host serves the resource that groups stacked pull requests |
+| Repository discovery         | Whether the host can be asked which repositories are reachable         |
+| GitHub App sign-in           | Whether a device-flow sign-in can complete on the host                 |
+
+| State             | Meaning                                                                   |
+| ----------------- | ------------------------------------------------------------------------- |
+| `supported`       | The host answered and offers the capability.                              |
+| `unsupported`     | The host answered and does not offer the capability.                      |
+| `unauthenticated` | The host answered, but no credential for that host is available.          |
+| `unreachable`     | The host did not answer.                                                  |
+| `not-configured`  | A prerequisite is missing, such as no GitHub App client id for that host. |
+| `unknown`         | The capability has not been probed yet.                                   |
+
+`unsupported` is only ever reported when the host answered. A host that does
+not answer is `unreachable`, never `unsupported`; a timeout is not evidence
+that a capability is missing.
+
+### Native stacks
+
+On a host whose stacks resource answered, stacks behave as they do on
+`github.com`. On a host that does not serve that resource, the local stack view
+and ordinary chained pull requests — each pull request based on the branch
+below it — keep working, and the app never labels such a stack a GitHub stack.
+Nothing in that state claims GitHub grouped those pull requests: the grouping
+is the local one, and the app says which of the two it is showing.
+
+### Rulesets, merge queue, and version-dependent behaviour
+
+This build does not detect or claim ruleset or merge-queue support on any host,
+including `github.com`. GitHub Enterprise Server versions differ from one
+another and from github.com, so the app reports what a host answered and never
+maps a version number to a feature. Whether a given instance offers a feature
+depends on that instance's version and its configuration, not on anything this
+build knows in advance.
+
+Per-host and per-repository capability state is visible in Settings and in
+Diagnostics.
+
 ## Settings
 
 Settings is reachable from the command palette (**Settings…**). Preferences are
@@ -261,7 +354,6 @@ content is never readable under the permissions the file arrived with.
 Recent failures is included only when something was recorded. It carries the
 main-process failure summaries described under **Handled failures** above, and
 they pass through the same secret and path redaction as every other field.
-
 ## Onboarding
 
 With no repository open, the window offers three ways in, and all of them end
@@ -335,7 +427,7 @@ response that omits the optional `permissions` object is a hit, not a refusal:
 it is listed, with its push access treated as unproven and the row marked read
 only. Only a malformed entry — one that names no clonable `owner/name` — is
 dropped.
-Discovery sends one `Authorization` header to `api.github.com` and nothing
+Discovery sends one `Authorization` header to the selected host's API base (`api.github.com` for github.com) and nothing
 else. Access tokens never reach a command line, a log, the renderer, or a
 remote URL: the app-signed transport is used directly from the main process.
 

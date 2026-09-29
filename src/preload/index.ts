@@ -148,6 +148,7 @@ const desktop: DesktopAPI = {
       ipcRenderer.removeListener('github-account', handler)
     }
   },
+  githubHostStatus: () => ipcRenderer.invoke('github:host-status'),
   settings: () => ipcRenderer.invoke('settings'),
   updateSettings: (patch) => ipcRenderer.invoke('settings:update', patch),
   resetSettings: () => ipcRenderer.invoke('settings:reset'),

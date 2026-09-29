@@ -108,6 +108,14 @@ import {
   updateSettings,
 } from './settings'
 import { loadSettingsPolicy } from './settings-service'
+import {
+  forgetHost,
+  githubHostContext,
+  probeGitHubHost,
+  type GitHubHostContext,
+  validateGitHubHostInput,
+} from './github-host'
+import { GITHUB_DEFAULT_HOST } from '../shared/settings'
 import { detectRefFormat, runDiagnostics } from './diagnostics'
 import { buildBundle, renderBundle, writeOwnerOnlyBundle } from './support-bundle'
 import { locateTool, openInEditor } from './editor'
@@ -263,6 +271,8 @@ void readSettingsFile(settingsFile())
     // settings view reports the problem where a person can see it.
   })
 let account: GitHubAccount | null = null
+/** The host the account above was created for; a host change replaces it. */
+let accountHost: string | null = null
 /**
  * Settings this computer's policy has fixed, resolved at startup and applied
  * to every read and write. A policy file that could not be read contributes a
@@ -287,6 +297,7 @@ let gitEnvironment: GitEnvironmentStatus | null = null
  */
 function githubAccount() {
   account ??= new GitHubAccount({
+    host: configuredHost().host,
     vault: new CredentialVault(
       join(app.getPath('userData'), 'credentials.vault.json'),
       safeStorageProtector,
@@ -294,6 +305,7 @@ function githubAccount() {
     stateFile: join(app.getPath('userData'), 'github-account.json'),
     onChange: (status) => window?.webContents.send('github-account', status),
   })
+  accountHost = account.host
   return account
 }
 
@@ -303,6 +315,44 @@ function githubAccount() {
  * fill with a page that is not this window probing every channel.
  */
 class UntrustedRequestError extends Error {}
+
+/**
+ * What the current settings select. The host drives onboarding, discovery, and
+ * sign-in, so a host change retires the previous host's account and forgets
+ * what was learned about the host that is no longer selected.
+ */
+function applySettings(settings: AppSettings): void {
+  const previous = currentSettings?.github.host ?? null
+  currentSettings = settings
+  if (previous === settings.github.host) return
+  forgetHost(previous ?? undefined)
+  if (account !== null && accountHost !== settings.github.host) {
+    void account.signOut().catch(() => null)
+    account = null
+    accountHost = null
+  }
+}
+
+/**
+ * The host the person chose in Settings, resolved on every use. It is the only
+ * host onboarding, discovery, and clone commands speak to, and a repository on
+ * any other host is read from that repository's own origin instead.
+ */
+let currentSettings: AppSettings | null = null
+
+function configuredHost(): GitHubHostContext {
+  return githubHostContext(currentSettings?.github.host ?? GITHUB_DEFAULT_HOST)
+}
+
+/** A sign-in belongs to one host, so choosing another host drops the old one. */
+function accountForConfiguredHost(): GitHubAccount {
+  if (account && accountHost !== configuredHost().host) {
+    void account.signOut().catch(() => null)
+    account = null
+    accountHost = null
+  }
+  return githubAccount()
+}
 
 function validateSender(event: IpcMainInvokeEvent) {
   if (
@@ -748,6 +798,7 @@ async function changeSettings(
     // Any change to settings invalidates the cached support bundle preview
     activeBundlePreview = null
     configureGitRuntime({ useSystemGit: snapshot.settings.git.useSystemGit })
+    applySettings(snapshot.settings)
     sync.applyIntervals(refreshIntervals(snapshot.settings))
     return snapshot
   })
@@ -755,9 +806,14 @@ async function changeSettings(
 
 /** One capability report, built from the same sources the Diagnostics view shows. */
 async function currentDiagnostics(settings: AppSettings) {
+  // A diagnostics report is the one place a person is told what the host does,
+  // so the host is asked here rather than assumed from the build.
+  const githubHost = await probeGitHubHost(configuredHost(), { repository: null }).catch(
+    () => null,
+  )
   return runDiagnostics({
     runtime: await gitRuntimeStatus(settingsFile()),
-    account: await Promise.resolve(githubAccount().status()).catch(() => null),
+    account: await Promise.resolve(accountForConfiguredHost().status()).catch(() => null),
     environment: gitEnvironment,
     host: {
       platform: process.platform,
@@ -768,6 +824,7 @@ async function currentDiagnostics(settings: AppSettings) {
     filesystem: await detectRefFormat(activeRepository),
     appVersion: app.getVersion(),
     settings,
+    githubHost,
   })
 }
 
@@ -860,7 +917,7 @@ function installHandlers() {
     const query = typeof asked.query === 'string' ? asked.query : ''
     try {
       const value = await onboardingRequest(readRequestId(asked.requestId), (signal) =>
-        discoverRepositories({ query, signal }),
+        discoverRepositories({ host: configuredHost(), query, signal }),
       )
       return { ok: true as const, value }
     } catch (error) {
@@ -1271,14 +1328,24 @@ function installHandlers() {
     const url = new URL(value)
     if (
       url.protocol !== 'https:' ||
-      url.hostname !== 'github.com' ||
+      !validateGitHubHostInput(url.hostname).ok ||
       url.port ||
       url.username ||
       url.password
     ) {
-      throw new Error('Only HTTPS links on github.com can be opened.')
+      throw new Error('Only HTTPS links on a configured GitHub host can be opened.')
     }
     await shell.openExternal(url.href)
+  })
+  // The capability matrix for the host this installation is pointed at. It is
+  // produced by probing that host, so a host that has never answered reports
+  // unknown rather than anything it was not shown to do.
+  ipcMain.handle('github:host-status', async (event) => {
+    validateSender(event)
+    const context = configuredHost()
+    const settings = (await readSettingsFile(settingsFile())).settings
+    void settings
+    return probeGitHubHost(context, { repository: null })
   })
   ipcMain.handle('git-runtime', async (event) => {
     validateSender(event)
@@ -1418,22 +1485,22 @@ function installHandlers() {
   // Account status only. No handler here can return, log, or accept a credential.
   ipcMain.handle('github-account', async (event) => {
     validateSender(event)
-    return githubAccount().status()
+    return accountForConfiguredHost().status()
   })
   // Authentication never touches a repository, so it never takes the repository
   // gate: a stalled GitHub endpoint must not block local Git work, and a cancel
   // must stay reachable while a sign-in is still in progress.
   ipcMain.handle('github-account:sign-in', async (event) => {
     validateSender(event)
-    return githubAccount().signIn()
+    return accountForConfiguredHost().signIn()
   })
   ipcMain.handle('github-account:cancel', async (event) => {
     validateSender(event)
-    return githubAccount().cancelSignIn()
+    return accountForConfiguredHost().cancelSignIn()
   })
   ipcMain.handle('github-account:sign-out', async (event) => {
     validateSender(event)
-    return githubAccount().signOut()
+    return accountForConfiguredHost().signOut()
   })
 }
 
@@ -1518,6 +1585,9 @@ app
     settingsLocks = policy.locks
     settingsPolicyError = policy.error
     if (policy.error) console.warn(policy.error)
+    // The selected host is applied before anything can ask for it, so sign-in,
+    // discovery, and clone commands address the host the person chose.
+    applySettings((await readSettingsFile(settingsFile())).settings)
     const preference = await readGitRuntimePreference(settingsFile()).catch(() => false)
     configureGitRuntime({
       appVersion: app.getVersion(),

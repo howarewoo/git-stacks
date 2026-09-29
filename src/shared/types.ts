@@ -1,4 +1,6 @@
 import type { SnapshotLimits } from './performance'
+
+import type { GitHubHostStatus } from './host'
 import type { RepositoryCapabilities } from './capabilities'
 import type { ReviewCommitSet, ReviewFileSet, ReviewHeadline, ReviewViewedRecord } from './review'
 import type { ReviewHistory, ReviewHistoryDiff } from './review-snapshots'
@@ -1163,6 +1165,11 @@ export interface GitHubAccountStatus {
 }
 
 export interface DesktopAPI {
+  /**
+   * What the configured GitHub host was observed to support. Every field is a
+   * fact a probe established or an explicit "not established".
+   */
+  githubHostStatus?(): Promise<GitHubHostStatus>
   recentRepositories(): Promise<RecentRepository[]>
   openRepository(path?: string): Promise<RepositorySnapshot | null>
   /** Adds an existing local repository by absolute path, for a folder dialog or a dropped folder. */

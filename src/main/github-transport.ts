@@ -357,6 +357,15 @@ function toTransportError(error: unknown, signal?: AbortSignal): GitHubTransport
   return new GitHubTransportError({ kind: 'network', detail: commandDetail(error) })
 }
 
+/**
+ * The one origin a GitHub host's REST API lives at. `github.com` answers on
+ * its own API subdomain; every other GitHub host — GitHub Enterprise Server
+ * included — serves its API from the host itself.
+ */
+export function githubApiOriginForHost(host: string): string {
+  return host.trim().toLowerCase() === GITHUB_HOST ? GITHUB_API_URL : `https://${host}`
+}
+
 export interface DirectGitHubTransportOptions {
   token?: string | null
   credential?: GitHubCredentialSource
@@ -366,6 +375,12 @@ export interface DirectGitHubTransportOptions {
   apiVersion?: string
   timeoutMs?: number
   userAgent?: string
+  /**
+   * The GitHub host this transport speaks for. Every request, credential, page
+   * link, and retry stays on the API origin this host owns; no other host is
+   * contacted while serving it.
+   */
+  host?: string
   /** Validators for conditional reads; omitted means every GET is a full read. */
   cache?: GitHubResponseCache
 }
@@ -391,20 +406,40 @@ export class DirectGitHubTransport implements GitHubTransport {
     return this.options.timeoutMs ?? GITHUB_TIMEOUT_MS
   }
 
-  /** Whether requests go to the origin the application-owned credential was issued for. */
+  /** The host this transport was built for, or null when only a URL was given. */
+  private get host(): string | null {
+    const host = this.options.host?.trim().toLowerCase()
+    return host ? host : null
+  }
+
+  /**
+   * Whether requests go to the API origin the host this transport serves owns.
+   * A transport built without a host keeps the older rule: only
+   * `https://api.github.com` is an origin an owned credential may reach.
+   */
   private get servesGitHubOrigin(): boolean {
+    const host = this.host
+    if (!host) {
+      try {
+        return new URL(this.apiUrl).origin === GITHUB_CREDENTIAL_ORIGIN
+      } catch {
+        return false
+      }
+    }
     try {
-      return new URL(this.apiUrl).origin === GITHUB_CREDENTIAL_ORIGIN
+      return new URL(this.apiUrl).origin === githubApiOriginForHost(host)
     } catch {
       return false
     }
   }
 
+
   /**
    * An explicit environment credential always wins; otherwise the signed-in
    * account's credential is asked for, which refreshes it when it has expired.
-   * That credential is bound to one origin, so a custom API endpoint never
-   * receives it; such an endpoint needs its own explicitly supplied credential.
+   * That credential is bound to one host, so another host's API — or any other
+   * origin — never receives it; such a host needs its own explicitly supplied
+   * credential.
    */
   private async accessCredential(): Promise<{
     token: string
@@ -416,6 +451,9 @@ export class DirectGitHubTransport implements GitHubTransport {
     }
     const credential = this.options.credential
     if (!credential || !this.servesGitHubOrigin) return null
+    // The credential is the one this host issued, and this transport serves that
+    // host. A host switch or a repository move on another host gets nothing.
+    if (this.host && credential.host.trim().toLowerCase() !== this.host) return null
     const held = await credential.current()
     return held === null
       ? null
@@ -691,6 +729,8 @@ function includedResponse(output: string): { status: number; headers: Headers; b
 export interface GhGitHubTransportOptions {
   env?: NodeJS.ProcessEnv
   apiUrl?: string
+  /** The GitHub host this transport speaks for, passed to `gh api --hostname`. */
+  host?: string
   run?: (args: string[], options: GitHubGraphqlOptions & { input?: string }) => Promise<string>
   /** Validators for conditional reads; omitted means every GET is a full read. */
   cache?: GitHubResponseCache
@@ -825,8 +865,11 @@ export class GhGitHubTransport implements GitHubTransport {
     }
     const customApi = this.apiUrl !== GITHUB_API_URL
     const isAbsolute = /^https?:\/\//u.test(request.path)
+    // `gh` is told which host it is talking to, so a session authenticated for
+    // github.com is never asked for a host this app is not serving.
+    const hostname = this.options.host?.trim().toLowerCase() || GITHUB_HOST
     if (!customApi && !isAbsolute) {
-      args.splice(1, 0, '--hostname', GITHUB_HOST)
+      args.splice(1, 0, '--hostname', hostname)
     }
     if (method !== 'GET') args.push('--method', method)
     const endpoint = isAbsolute
@@ -916,12 +959,17 @@ export class GhGitHubTransport implements GitHubTransport {
   }
 }
 
-/** The only origin an application-owned GitHub App credential may be sent to. */
-export const GITHUB_CREDENTIAL_ORIGIN = 'https://api.github.com'
+/**
+ * The only origin an application-owned GitHub App credential may be sent to.
+ * A credential this application holds was issued by github.com; another host
+ * needs its own explicitly supplied credential.
+ */
+export const GITHUB_CREDENTIAL_ORIGIN = githubApiOriginForHost(GITHUB_HOST)
 
 export type GitHubTransportChoice = 'auto' | 'direct' | 'gh'
 
 let installed: GitHubTransport | null = null
+const installedByHost = new Map<string, GitHubTransport>()
 let cached: { key: string; transport: GitHubTransport } | null = null
 
 /**
@@ -937,6 +985,17 @@ const responseCache = new GitHubResponseCacheStore()
 /** Conditional-read store shared by every transport this process installs. */
 export function githubResponseCache(): GitHubResponseCacheStore {
   return responseCache
+}
+
+/**
+ * Install the transport one host answers on. A host-specific install wins over
+ * the process-wide one, so a test can serve two hosts at once and prove that a
+ * request for one never reaches the other.
+ */
+export function setGitHubHostTransport(host: string, transport: GitHubTransport | null): void {
+  const key = host.trim().toLowerCase()
+  if (transport) installedByHost.set(key, transport)
+  else installedByHost.delete(key)
 }
 
 export function githubTransport(env: NodeJS.ProcessEnv = process.env): GitHubTransport {
@@ -963,5 +1022,40 @@ export function githubTransport(env: NodeJS.ProcessEnv = process.env): GitHubTra
       })
     : new GhGitHubTransport({ env, cache: responseCache })
   cached = { key, transport }
+  return transport
+}
+
+/**
+ * The transport for one GitHub host. Every call for a repository, a stack, or a
+ * discovery page resolves the host first and asks for that host's transport, so
+ * an enterprise host is never served a github.com endpoint and a github.com
+ * credential is never offered to another host.
+ */
+export function githubTransportForHost(
+  host: string,
+  apiBase: string,
+  env: NodeJS.ProcessEnv = process.env,
+): GitHubTransport {
+  const key = host.trim().toLowerCase()
+  const hostTransport = installedByHost.get(key)
+  if (hostTransport) return hostTransport
+  if (installed) return installed
+  const configured = env[GITHUB_TRANSPORT_ENV]
+  const choice: GitHubTransportChoice =
+    configured === 'direct' || configured === 'gh' ? configured : 'auto'
+  const token = resolveGitHubToken(env)
+  const available = credentialSource?.available() === true
+  const cacheKey = `${key}:${choice}:${apiBase}:${githubApiVersion(env)}:${token ?? ''}:${available}`
+  if (cached?.key === cacheKey) return cached.transport
+  const direct = choice === 'direct' || (choice === 'auto' && (token !== null || available))
+  const transport: GitHubTransport = direct
+    ? new DirectGitHubTransport({
+        env,
+        host: key,
+        apiUrl: apiBase,
+        credential: credentialSource ?? undefined,
+      })
+    : new GhGitHubTransport({ env, host: key, apiUrl: apiBase })
+  cached = { key: cacheKey, transport }
   return transport
 }

@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { githubHostContext } from '../src/main/github-host'
 import { execFileSync } from 'node:child_process'
 import { chmod, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -10,6 +11,7 @@ import {
   readSettingsSnapshot,
   resetSettings,
   settingsPatchToWrite,
+  SETTING_KEYS,
   updateSettings,
   validateSettings,
   writeSettingsFile,
@@ -191,6 +193,7 @@ test('a policy that cannot be read locks every managed setting instead of none',
     'git.fetchIntervalSeconds',
     'git.mergeTool',
     'git.useSystemGit',
+    'github.host',
     'privacy.includeLocalPaths',
     'shortcuts',
   ])
@@ -202,7 +205,13 @@ test('a policy that is not JSON locks everything rather than quietly unlocking i
     await writeFile(file, 'locks: {')
     const policy = await loadSettingsPolicy(file)
     assert.equal(policy.blocked, true)
-    assert.equal(policy.locks.length, 10)
+    // Every managed key is locked, so the count is the key list rather than a
+    // number this test would have to be edited for on every new setting.
+    assert.equal(policy.locks.length, SETTING_KEYS.length)
+    assert.deepEqual(
+      policy.locks.map((lock) => lock.key).sort(),
+      [...SETTING_KEYS].sort(),
+    )
   })
 })
 
@@ -215,7 +224,13 @@ test('a policy naming a key this build does not know is held closed, not applied
     )
     const policy = await loadSettingsPolicy(file)
     assert.equal(policy.blocked, true)
-    assert.equal(policy.locks.length, 10)
+    // Every managed key is locked, so the count is the key list rather than a
+    // number this test would have to be edited for on every new setting.
+    assert.equal(policy.locks.length, SETTING_KEYS.length)
+    assert.deepEqual(
+      policy.locks.map((lock) => lock.key).sort(),
+      [...SETTING_KEYS].sort(),
+    )
   })
 })
 
@@ -733,4 +748,53 @@ test('the capability report names the app permissions and the measured environme
   )
   assert.equal(statuses['Git HTTPS helper'], 'unavailable')
   assert.equal(statuses['SSH client'], 'unavailable')
+})
+
+test('the GitHub host setting keeps a bare host name and refuses anything aimed elsewhere', async () => {
+  await withTempDir(async (dir) => {
+    const file = join(dir, 'settings.json')
+    const default_ = await readSettingsFile(file)
+    assert.equal(default_.settings.github.host, 'github.com')
+
+    const enterprise = await updateSettings(file, { github: { host: 'ghe.example.com' } }, [])
+    assert.equal(enterprise.settings.github.host, 'ghe.example.com')
+    assert.deepEqual(enterprise.issues, [])
+    // It is stored, not just returned, so a later read keeps the choice.
+    assert.equal((await readSettingsFile(file)).settings.github.host, 'ghe.example.com')
+
+    // A pasted https URL is normalized down to the host it names, which is the
+    // one form of "aimed elsewhere" that is safe to accept.
+    const pasted = await updateSettings(file, { github: { host: 'https://other.example.com' } }, [])
+    assert.equal(pasted.settings.github.host, 'other.example.com')
+    await updateSettings(file, { github: { host: 'ghe.example.com' } }, [])
+
+    // An enterprise host on its own port is legitimate, and the API base is
+    // built from that host rather than from github.com's.
+    const ported = await updateSettings(file, { github: { host: 'ghe.example.com:8443' } }, [])
+    assert.equal(ported.settings.github.host, 'ghe.example.com:8443')
+    assert.equal(
+      githubHostContext(ported.settings.github.host).apiBase,
+      'https://ghe.example.com:8443/api/v3',
+    )
+    await updateSettings(file, { github: { host: 'ghe.example.com' } }, [])
+
+    for (const refused of [
+      'http://ghe.example.com',
+      'ssh://ghe.example.com',
+      'ghe.example.com/api/v3',
+      'ghe.example.com/../evil',
+      'not a host',
+    ]) {
+      const rejected = await updateSettings(file, { github: { host: refused } }, [])
+      assert.equal(
+        rejected.settings.github.host,
+        'ghe.example.com',
+        `${refused} was not refused`,
+      )
+      assert.ok(
+        rejected.issues.some((issue) => issue.key === 'github.host'),
+        `${refused} produced no issue`,
+      )
+    }
+  })
 })

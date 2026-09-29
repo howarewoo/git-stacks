@@ -126,7 +126,7 @@ import {
   unavailableGitHubResult,
   type GitHubResult,
 } from './github'
-import { githubTransport } from './github-transport'
+import { hostTransport, remoteHostContext } from './github-host'
 import {
   getStackProgress,
   isStackAction,
@@ -2297,8 +2297,12 @@ async function runCreatePr(
   const ghBase = await baseForGh(repoPath, base, checkedBase)
   const origin = parseRemote(await getOriginUrl(repoPath))
   const headRemote = parseRemote(await runGit(repoPath, ['remote', 'get-url', remote]))
-  if (!origin || origin.host !== 'github.com' || !headRemote || headRemote.host !== 'github.com') {
-    throw new Error('PR creation requires github.com origin and upstream remotes.')
+  const host = remoteHostContext(origin)
+  const headHost = remoteHostContext(headRemote)
+  if (!origin || !host || !headRemote || !headHost || headHost.host !== host.host) {
+    throw new Error(
+      `PR creation requires origin and upstream remotes on one GitHub host; this repository spans ${host?.host ?? 'no host'} and ${headRemote ? headRemote.host : 'no host'}.`,
+    )
   }
   if (ghBase === remoteBranch && origin.fullName === headRemote.fullName) {
     throw new Error('The pull request base must differ from its head branch.')
@@ -2309,7 +2313,7 @@ async function runCreatePr(
       : `${headRemote.owner}:${remoteBranch}`
   let created: Record<string, unknown>
   try {
-    const response = await githubTransport().rest<Record<string, unknown>>({
+    const response = await hostTransport(host).rest<Record<string, unknown>>({
       method: 'POST',
       path: `repos/${origin.fullName}/pulls`,
       body: { title, head, base: ghBase, body, draft },

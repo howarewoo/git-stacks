@@ -1,3 +1,6 @@
+import { GITHUB_DEFAULT_HOST } from './host'
+
+export { GITHUB_DEFAULT_HOST } from './host'
 import { DEFAULT_SHORTCUTS, type ShortcutId } from './shortcuts'
 
 export const SETTINGS_VERSION = 1
@@ -93,6 +96,16 @@ export interface GitSettings {
   fetchIntervalSeconds: number
 }
 
+export interface GitHubSettings {
+  /**
+   * The GitHub host this installation works against. It is a host name, not a
+   * URL, and it defaults to github.com; an enterprise host is named here and
+   * everything — sign-in, discovery, clone URLs, API requests, and the
+   * capability matrix — follows it.
+   */
+  host: string
+}
+
 export interface AppearanceSettings {
   theme: ThemePreference
   reduceMotion: boolean
@@ -110,6 +123,7 @@ export interface PrivacySettings {
 export interface AppSettings {
   version: number
   git: GitSettings
+  github: GitHubSettings
   appearance: AppearanceSettings
   privacy: PrivacySettings
   shortcuts: Record<ShortcutId, string>
@@ -136,6 +150,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
     defaultMergeMethod: 'merge',
     fetchIntervalSeconds: 120,
   },
+  github: { host: GITHUB_DEFAULT_HOST },
   appearance: { theme: 'system', reduceMotion: false },
   privacy: { includeLocalPaths: false },
   shortcuts: { ...DEFAULT_SHORTCUTS },
@@ -144,6 +159,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
 
 /** A partial change. An omitted group or field keeps its stored value. */
 export interface SettingsPatch {
+  github?: Partial<GitHubSettings>
   git?: Partial<GitSettings>
   appearance?: Partial<AppearanceSettings>
   privacy?: Partial<PrivacySettings>

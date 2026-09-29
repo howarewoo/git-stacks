@@ -4,6 +4,7 @@ import {
   DEFAULT_SETTINGS,
   MAX_FETCH_INTERVAL_SECONDS,
   MAX_TOOL_NAME_LENGTH,
+  GITHUB_DEFAULT_HOST,
   SETTINGS_VERSION,
   SUPPORTED_EDITORS,
   SUPPORTED_MERGE_TOOLS,
@@ -16,6 +17,7 @@ import {
 } from '../shared/settings'
 import { sanitizeShortcutBindings, type ShortcutId } from '../shared/shortcuts'
 import { isRecord } from './git-core'
+import { validateGitHubHostInput } from './github-host'
 
 /**
  * A tool name reaches a process launcher, so it is restricted to the characters
@@ -27,6 +29,7 @@ const TOOL_NAME = /^[A-Za-z0-9._\-+]+$/
 
 /** Every setting key, in the order the Settings surface presents them. */
 export const SETTING_KEYS = [
+  'github.host',
   'git.useSystemGit',
   'git.editor',
   'git.mergeTool',
@@ -126,6 +129,7 @@ export function validateSettings(value: unknown): {
     return { settings: structuredClone(DEFAULT_SETTINGS), issues: [], recovered: true }
   }
 
+  const github = isRecord(value.github) ? value.github : {}
   const git = isRecord(value.git) ? value.git : {}
   const appearance = isRecord(value.appearance) ? value.appearance : {}
   const privacy = isRecord(value.privacy) ? value.privacy : {}
@@ -192,6 +196,15 @@ export function validateSettings(value: unknown): {
     }
   }
 
+  // A host is a name, never a URL with a scheme, path, or port a request could
+  // be aimed at; anything else is refused and github.com is kept.
+  const askedHost = github.host
+  const parsedHost = validateGitHubHostInput(askedHost)
+  if (askedHost !== undefined && !parsedHost.ok) {
+    issues.push({ key: 'github.host', message: parsedHost.message })
+  }
+  const githubHost = parsedHost.ok ? parsedHost.host : GITHUB_DEFAULT_HOST
+
   const shortcuts = sanitizeShortcutBindings(value.shortcuts)
   const migratedField = booleanField(
     isRecord(value.migrated) ? value.migrated.legacyShortcutStorage : undefined,
@@ -216,6 +229,7 @@ export function validateSettings(value: unknown): {
         defaultMergeMethod: mergeMethod,
         fetchIntervalSeconds: fetchInterval,
       },
+      github: { host: githubHost },
       appearance: { theme, reduceMotion },
       privacy: { includeLocalPaths },
       shortcuts,
@@ -289,6 +303,7 @@ export function applyPatch(
     legacyShortcutStorage = true
   }
   const merged: Record<string, unknown> = {
+    github: { ...current.github, ...(isRecord(patch.github) ? patch.github : {}) },
     git: { ...current.git, ...(isRecord(patch.git) ? patch.git : {}) },
     appearance: { ...current.appearance, ...(isRecord(patch.appearance) ? patch.appearance : {}) },
     privacy: { ...current.privacy, ...(isRecord(patch.privacy) ? patch.privacy : {}) },
@@ -343,6 +358,7 @@ function touchedBy(key: string, patch: SettingsPatch): boolean {
   if (separator < 0) return false
   const group = key.slice(0, separator)
   const field = key.slice(separator + 1)
+  if (group === 'github') return isRecord(patch.github) && field in patch.github
   if (group === 'git') return isRecord(patch.git) && field in patch.git
   if (group === 'appearance') return isRecord(patch.appearance) && field in patch.appearance
   if (group === 'privacy') return isRecord(patch.privacy) && field in patch.privacy
@@ -351,6 +367,9 @@ function touchedBy(key: string, patch: SettingsPatch): boolean {
 
 function restore(settings: AppSettings, key: string, current: AppSettings): void {
   switch (key) {
+    case 'github.host':
+      settings.github.host = current.github.host
+      return
     case 'git.useSystemGit':
       settings.git.useSystemGit = current.git.useSystemGit
       return
@@ -562,6 +581,9 @@ export async function resetSettings(
 /** Puts back the value a lock fixed, so a reset cannot quietly clear it. */
 function preserveLocked(target: AppSettings, current: AppSettings, key: string): void {
   switch (key) {
+    case 'github.host':
+      target.github.host = current.github.host
+      return
     case 'git.useSystemGit':
       target.git.useSystemGit = current.git.useSystemGit
       return

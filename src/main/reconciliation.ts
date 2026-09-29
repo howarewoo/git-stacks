@@ -30,6 +30,7 @@ import {
   getCurrentBranch,
   getOriginUrl,
   isRecord,
+  parseRemote,
   refExists,
   requireRefInput,
   resolveParentRef,
@@ -40,7 +41,7 @@ import {
   type BranchConfig,
 } from './git-core'
 import { canonicalRemoteName, getGitHubData, getPullRequest, pullRequestRepository } from './github'
-import { githubTransport } from './github-transport'
+import { type GitHubHostContext, hostTransport, remoteHostContext } from './github-host'
 
 const PLAN_TTL_MS = 5 * 60_000
 const JOURNAL_LIMIT = 10
@@ -1563,10 +1564,11 @@ async function applyOperation(
   record: ReconciliationRepairRecord,
   id: string,
   originFullName: string | null,
+  host: GitHubHostContext | null,
   movedTips: ReadonlyMap<string, string>,
 ): Promise<boolean> {
   if (operation.kind === 'retarget-pull-request') {
-    if (operation.pullRequest === null || !originFullName || !operation.base) return false
+    if (operation.pullRequest === null || !originFullName || !host || !operation.base) return false
     record.evidence.push({
       branch: operation.branch ?? '',
       backupRef: null,
@@ -1576,7 +1578,7 @@ async function applyOperation(
       previousBase: operation.previous?.previousBase ?? null,
     })
     await writeEvidence(repoPath, record)
-    await githubTransport().rest({
+    await hostTransport(host).rest({
       method: 'PATCH',
       path: `repos/${originFullName}/pulls/${operation.pullRequest}`,
       body: { base: operation.base },
@@ -1852,6 +1854,7 @@ export async function runReconciliationRepair(
   }
   await writeEvidence(repoPath, record)
   const originFullName = canonicalRemoteName(plan.originUrl)
+  const originHost = remoteHostContext(parseRemote(plan.originUrl))
   const summaries: string[] = []
   const movedTips = new Map<string, string>()
   for (const kind of APPLY_ORDER) {
@@ -1862,6 +1865,7 @@ export async function runReconciliationRepair(
         record,
         id,
         originFullName,
+        originHost,
         movedTips,
       )
       if (!changed) continue

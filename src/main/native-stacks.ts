@@ -6,11 +6,17 @@ import type {
   PullRequestStackMember,
   PullRequestStackMembership,
 } from '../shared/types'
-import { isCancelled, isRecord, parseRemote } from './git-core'
+import { getOriginUrl, isCancelled, isRecord, parseRemote } from './git-core'
+import {
+  hostTransport,
+  type GitHubHostContext,
+  probeNativeStacksCapability,
+  remoteHostContext,
+} from './github-host'
 import {
   GITHUB_STACKS_API_VERSION,
   GitHubTransportError,
-  githubTransport,
+  type GitHubTransport,
 } from './github-transport'
 
 export class NativeStackError extends Error {
@@ -296,69 +302,62 @@ export function validateTopAppend(
 }
 
 /**
- * Capability-detect the native stacks REST preview API. Only a confirmed missing preview
- * endpoint degrades to chained pull requests; every other failure propagates so a mutation
- * path never reports success after an unconfirmed probe.
- *
- * `conditional` is for the display refresh, which asks this same question on
- * every interval and can be answered by the validator GitHub stored. A
- * mutation's preflight leaves it unset and reads GitHub itself.
+ * Every native stack request names the host that owns the repository. There is
+ * no default: a repository on an enterprise host is read from that host, never
+ * from github.com, and nothing here can pick a host for the caller.
+ */
+export interface NativeStackRequest {
+  /** The host that owns the repository being read or mutated. */
+  host: GitHubHostContext
+  /** A transport supplied instead of the host's own. Tests and diagnostics only. */
+  transport?: GitHubTransport
+  signal?: AbortSignal
+}
+
+/**
+ * Capability-detect the native stacks REST preview API for one repository. A
+ * host that answers the stacks resource is the only thing that reports native
+ * stacks available; a missing endpoint, a repository this credential cannot
+ * reach, and a host that never answered stay distinct states, so an unreachable
+ * host is never mistaken for one without the feature.
  */
 export async function detectNativeStacksCapability(
   owner: string,
   repo: string,
-  options: { signal?: AbortSignal; conditional?: boolean } = {},
+  options: NativeStackRequest,
 ): Promise<{ available: boolean; state: NativeStackValidationStatus; message: string }> {
-  const transport = githubTransport()
-  try {
-    const response = await transport.rest<unknown>({
-      method: 'GET',
-      path: `repos/${owner}/${repo}/stacks?per_page=1`,
-      headers: STACK_HEADERS,
-      signal: options.signal,
-      cache: options.conditional === true,
-    })
-    // A 304 means GitHub answered with the stored body, which only exists
-    // because this endpoint returned it once: the preview is still available.
-    if (response.notModified === true || (response.status >= 200 && response.status < 300)) {
-      return {
-        available: true,
-        state: 'valid',
-        message: 'Native stacked pull requests API preview is available',
-      }
-    }
-    if (response.status !== 404) {
-      throw new Error(`Native stacked pull requests API returned status ${response.status}`)
-    }
+  const capability = await probeNativeStacksCapability(owner, repo, {
+    transport: options.transport ?? hostTransport(options.host),
+    ...(options.signal ? { signal: options.signal } : {}),
+  })
+  if (capability.available) {
+    return { available: true, state: 'valid', message: capability.message }
+  }
+  // Every other failure propagates as an unconfirmed probe: only a missing
+  // endpoint degrades a mutation path to chained pull requests.
+  if (capability.reason === 'endpoint-missing') {
     return {
       available: false,
       state: 'preview-unavailable',
-      message:
-        'GitHub native stacked pull requests preview API is not available on this repository',
+      message: `${capability.message} (${options.host.host})`,
     }
-  } catch (error) {
-    if (options.signal?.aborted || isCancelled(error)) throw error
-    if (error instanceof GitHubTransportError) {
-      if (error.kind === 'not-found' || error.status === 404 || error.kind === 'unsupported') {
-        return {
-          available: false,
-          state: 'preview-unavailable',
-          message:
-            'GitHub native stacked pull requests preview API is not available on this repository',
-        }
-      }
-    }
-    throw error
+
   }
+  throw new NativeStackError('preview-unavailable', capability.message)
 }
 
-/** List pull request stacks in a repository. */
+/** List pull request stacks in a repository on the host that owns it. */
 export async function listPullRequestStacks(
   owner: string,
   repo: string,
-  options: { pullRequest?: number; perPage?: number; page?: number; signal?: AbortSignal } = {},
+  options: NativeStackRequest & {
+    pullRequest?: number
+    perPage?: number
+    page?: number
+    signal?: AbortSignal
+  },
 ): Promise<NativeStack[]> {
-  const transport = githubTransport()
+  const transport = options.transport ?? hostTransport(options.host)
   const params = new URLSearchParams()
   if (typeof options.pullRequest === 'number') {
     params.set('pull_request', String(options.pullRequest))
@@ -418,12 +417,12 @@ export async function getPullRequestStack(
   owner: string,
   repo: string,
   stackNumber: number,
-  options: { signal?: AbortSignal } = {},
+  options: NativeStackRequest,
 ): Promise<NativeStack> {
   if (!Number.isInteger(stackNumber) || stackNumber <= 0) {
     throw new Error('Stack number must be a positive integer')
   }
-  const transport = githubTransport()
+  const transport = options.transport ?? hostTransport(options.host)
   try {
     const response = await transport.rest<unknown>({
       method: 'GET',
@@ -573,13 +572,19 @@ export async function revalidatePublishedStackRegistration(
   repo: string,
   stack: NativeStack,
   published: readonly PullRequest[],
-  options: { signal?: AbortSignal } = {},
+  options: NativeStackRequest,
 ): Promise<NativeStackValidationResult> {
   const refreshed = await pullRequestsForValidation(
     owner,
     repo,
     published.map((pr) => pr.number),
-    { knownPullRequests: published, signal: options.signal, memberStackNumber: stack.number },
+    {
+      knownPullRequests: published,
+      signal: options.signal,
+      memberStackNumber: stack.number,
+      host: options.host,
+      transport: options.transport,
+    },
   )
   return validatePublishedStackRegistration(stack, refreshed)
 }
@@ -593,7 +598,7 @@ async function pullRequestsForValidation(
   owner: string,
   repo: string,
   numbers: readonly number[],
-  options: {
+  options: NativeStackRequest & {
     knownPullRequests?: readonly PullRequest[]
     signal?: AbortSignal
     /** Stack number whose membership each re-read pull request is expected to already carry. */
@@ -601,7 +606,7 @@ async function pullRequestsForValidation(
   },
 ): Promise<PullRequest[]> {
   const known = new Map(options.knownPullRequests?.map((pr) => [pr.number, pr]) ?? [])
-  const transport = githubTransport()
+  const transport = options.transport ?? hostTransport(options.host)
   return Promise.all(
     numbers.map(async (number) => {
       if (!Number.isInteger(number) || number <= 0) {
@@ -686,13 +691,12 @@ export async function createPullRequestStack(
   owner: string,
   repo: string,
   pullRequests: readonly number[],
-  options: {
+  options: NativeStackRequest & {
     knownPullRequests?: readonly PullRequest[]
     defaultBranch?: string
-    signal?: AbortSignal
     /** Persist recovery intent after validation, immediately before the create request. */
     beforeCreate?: () => Promise<void>
-  } = {},
+  },
 ): Promise<NativeStack> {
   if (!Array.isArray(pullRequests) || pullRequests.length === 0) {
     throw new NativeStackError(
@@ -704,6 +708,8 @@ export async function createPullRequestStack(
   const chain = await pullRequestsForValidation(owner, repo, pullRequests, {
     knownPullRequests: options.knownPullRequests,
     signal: options.signal,
+    host: options.host,
+    transport: options.transport,
   })
   const validation = validateNativeStackChain(chain, {
     targetRepository: `${owner}/${repo}`,
@@ -713,7 +719,7 @@ export async function createPullRequestStack(
     throw new NativeStackError(validation.status, validation.message ?? 'Invalid chain')
   }
 
-  const transport = githubTransport()
+  const transport = options.transport ?? hostTransport(options.host)
   try {
     await options.beforeCreate?.()
     const response = await transport.rest<unknown>({
@@ -751,11 +757,10 @@ export async function addPullRequestsToStack(
   repo: string,
   stackNumber: number,
   pullRequests: readonly number[],
-  options: {
+  options: NativeStackRequest & {
     existingStack?: NativeStack
     knownPullRequests?: readonly PullRequest[]
-    signal?: AbortSignal
-  } = {},
+  },
 ): Promise<NativeStack> {
   if (!Number.isInteger(stackNumber) || stackNumber <= 0) {
     throw new Error('Stack number must be a positive integer')
@@ -772,6 +777,8 @@ export async function addPullRequestsToStack(
   const chain = await pullRequestsForValidation(owner, repo, pullRequests, {
     knownPullRequests: options.knownPullRequests,
     signal: options.signal,
+    host: options.host,
+    transport: options.transport,
   })
   const validation = validateTopAppend(existing, chain, {
     targetRepository: `${owner}/${repo}`,
@@ -780,7 +787,7 @@ export async function addPullRequestsToStack(
     throw new NativeStackError(validation.status, validation.message ?? 'Invalid chain')
   }
 
-  const transport = githubTransport()
+  const transport = options.transport ?? hostTransport(options.host)
   try {
     const response = await transport.rest<unknown>({
       method: 'POST',
@@ -819,12 +826,12 @@ export async function unstackPullRequestStack(
   owner: string,
   repo: string,
   stackNumber: number,
-  options: { signal?: AbortSignal } = {},
+  options: NativeStackRequest,
 ): Promise<{ dissolved: boolean; stack: NativeStack | null }> {
   if (!Number.isInteger(stackNumber) || stackNumber <= 0) {
     throw new Error('Stack number must be a positive integer')
   }
-  const transport = githubTransport()
+  const transport = options.transport ?? hostTransport(options.host)
   try {
     const response = await transport.rest<unknown>({
       method: 'POST',
@@ -872,8 +879,9 @@ export { unstackPullRequestStack as unstackPullRequests }
 export async function retireLegacyStackComments(
   fullName: string,
   numbers: readonly number[],
+  options: NativeStackRequest,
 ): Promise<void> {
-  const transport = githubTransport()
+  const transport = options.transport ?? hostTransport(options.host)
   const marker = '<!-- git-stacks:stack-links:v1 -->'
   const endMarker = '<!-- /git-stacks:stack-links:v1 -->'
   const { data: viewer } = await transport.rest<unknown>({ path: 'user' })
@@ -914,7 +922,12 @@ export async function retireLegacyStackComments(
   }
 }
 
-/** Loads native stacks for the origin remote and attaches stack memberships to pullRequests. */
+/**
+ * Loads native stacks for the origin remote and attaches stack memberships to
+ * pullRequests. Membership is read from the host that owns the origin, and
+ * only a host that answers the stacks resource reports any; nothing here claims
+ * a GitHub stack for a host that does not serve one.
+ */
 export async function loadRepositoryNativeStacks(
   originUrl: string | null,
   pullRequests: PullRequest[],
@@ -926,33 +939,34 @@ export async function loadRepositoryNativeStacks(
   message: string
 }> {
   const remote = parseRemote(originUrl)
-  if (!originUrl || !remote || remote.host !== 'github.com') {
+  const host = remoteHostContext(remote)
+  if (!originUrl || !remote || !host) {
     return {
       available: false,
       nativeStacks: [],
       state: 'preview-unavailable',
-      message: 'Native stacks require a github.com origin remote',
+      message: `Native stacks require a GitHub origin remote; this repository's origin is on ${remote ? remote.host : 'no host'}`,
     }
   }
 
   try {
     // The read path reports an unconfirmed probe as an explicit unavailable state instead of
     // failing the whole repository snapshot; only mutations require a confirmed capability.
-    // Nothing here decides whether to mutate: the snapshot only displays the
-    // capability, and it asks this same question on every refresh interval.
-    const capability = await detectNativeStacksCapability(remote.owner, remote.name, {
-      signal,
+    // Display refreshes use validators; mutation preflights never do.
+    const capability = await probeNativeStacksCapability(remote.owner, remote.name, {
+      transport: hostTransport(host),
       conditional: true,
+      ...(signal ? { signal } : {}),
     })
     if (!capability.available) {
       return {
         available: false,
         nativeStacks: [],
-        state: capability.state,
-        message: capability.message,
+        state: 'preview-unavailable',
+        message: `${host.host} does not serve native stacked pull requests for this repository: ${capability.message}`,
       }
     }
-    const stacks = await listPullRequestStacks(remote.owner, remote.name, { signal })
+    const stacks = await listPullRequestStacks(remote.owner, remote.name, { host, signal })
     const byNumber = new Map(pullRequests.map((pr) => [pr.number, pr]))
     for (const stack of stacks) {
       for (const member of stack.pullRequests) {
@@ -966,7 +980,7 @@ export async function loadRepositoryNativeStacks(
       available: true,
       nativeStacks: stacks,
       state: 'valid',
-      message: `GitHub native stacks available; ${stacks.length} stack${stacks.length === 1 ? '' : 's'}`,
+      message: `${host.host} serves native stacks; ${stacks.length} stack${stacks.length === 1 ? '' : 's'}`,
     }
   } catch (error) {
     if (signal?.aborted || isCancelled(error)) throw error
@@ -979,6 +993,24 @@ export async function loadRepositoryNativeStacks(
   }
 }
 
+/**
+ * Native stack mutations are only ever run against the host that owns the
+ * origin, and only after that host answered the stacks resource for the
+ * repository; an unsupported host refuses here instead of being retried
+ * somewhere else.
+ */
+async function mutationHost(repoPath: string): Promise<GitHubHostContext> {
+  const remote = parseRemote(await getOriginUrl(repoPath))
+  const host = remoteHostContext(remote)
+  if (!host) {
+    throw new NativeStackError(
+      'preview-unavailable',
+      'Native stacks require a GitHub origin remote on the host that owns the repository',
+    )
+  }
+  return host
+}
+
 export async function createNativeStackAction(
   repoPath: string,
   originFullName: string,
@@ -987,13 +1019,15 @@ export async function createNativeStackAction(
   defaultBranch?: string,
 ): Promise<ActionResult> {
   const [owner, name] = originFullName.split('/')
+  const host = await mutationHost(repoPath)
   const stack = await createPullRequestStack(owner, name, pullRequests, {
     knownPullRequests,
     defaultBranch,
+    host,
   })
-  await retireLegacyStackComments(originFullName, pullRequests)
+  await retireLegacyStackComments(originFullName, pullRequests, { host })
   return {
-    message: `Created GitHub native stack #${stack.number} with ${stack.size} pull requests`,
+    message: `Created native stack #${stack.number} on ${host.host} with ${stack.size} pull requests`,
     url: stack.url,
   }
 }
@@ -1006,17 +1040,20 @@ export async function addPullRequestsToNativeStackAction(
   knownPullRequests: PullRequest[],
 ): Promise<ActionResult> {
   const [owner, name] = originFullName.split('/')
-  const existing = await getPullRequestStack(owner, name, stackNumber)
+  const host = await mutationHost(repoPath)
+  const existing = await getPullRequestStack(owner, name, stackNumber, { host })
   const stack = await addPullRequestsToStack(owner, name, stackNumber, pullRequests, {
     existingStack: existing,
     knownPullRequests,
+    host,
   })
   await retireLegacyStackComments(
     originFullName,
     stack.pullRequests.map((member) => member.number),
+    { host },
   )
   return {
-    message: `Added ${pullRequests.length} pull request${pullRequests.length === 1 ? '' : 's'} to native stack #${stack.number}`,
+    message: `Added ${pullRequests.length} pull request${pullRequests.length === 1 ? '' : 's'} to native stack #${stack.number} on ${host.host}`,
     url: stack.url,
   }
 }
@@ -1027,14 +1064,17 @@ export async function unstackNativeStackAction(
   stackNumber: number,
 ): Promise<ActionResult> {
   const [owner, name] = originFullName.split('/')
-  const before = await getPullRequestStack(owner, name, stackNumber)
-  const result = await unstackPullRequestStack(owner, name, stackNumber)
+  const host = await mutationHost(repoPath)
+  const before = await getPullRequestStack(owner, name, stackNumber, { host })
+  const result = await unstackPullRequestStack(owner, name, stackNumber, { host })
   await retireLegacyStackComments(
     originFullName,
     before.pullRequests.map((member) => member.number),
+    { host },
   )
   if (result.dissolved) {
-    return { message: `Dissolved native stack #${stackNumber}` }
+    return { message: `Dissolved native stack #${stackNumber} on ${host.host}` }
   }
-  return { message: `Unstacked pull requests from native stack #${stackNumber}` }
+  return { message: `Unstacked pull requests from native stack #${stackNumber} on ${host.host}` }
 }
+

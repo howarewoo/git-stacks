@@ -3,15 +3,47 @@
  * authorization-code flow because its token exchange requires a client secret,
  * and a shipped binary must not carry one; the device flow issues and refreshes
  * user access tokens from the public client id alone.
+ *
+ * The flow is addressed to a host. github.com and a GitHub Enterprise Server
+ * both serve it, each from its own origin, so every endpoint here is derived
+ * from the host rather than from a constant.
  */
+
+import { githubHostContext, GITHUB_DOTCOM_HOST } from './github-host'
 
 export const GITHUB_APP_CLIENT_ID_ENV = 'GIT_STACKS_GITHUB_APP_CLIENT_ID'
 export const GITHUB_DEVICE_VERIFICATION_URI = 'https://github.com/login/device'
-const DEVICE_CODE_URL = 'https://github.com/login/device/code'
-const ACCESS_TOKEN_URL = 'https://github.com/login/oauth/access_token'
+const DEVICE_CODE_PATH = '/login/device/code'
+const ACCESS_TOKEN_PATH = '/login/oauth/access_token'
+const DEVICE_VERIFICATION_PATH = '/login/device'
 const DEVICE_CODE_GRANT = 'urn:ietf:params:oauth:grant-type:device_code'
 export const DEVICE_CODE_INTERVAL_SECONDS = 5
 export const DEVICE_CODE_TTL_SECONDS = 900
+/**
+ * One GitHub App client id per host. github.com keeps the unprefixed name it
+ * has always had; any other host is configured as
+ * `GIT_STACKS_GITHUB_APP_CLIENT_ID_<HOST>` with the host's dots and hyphens
+ * written as underscores, so two hosts can hold registrations of their own.
+ */
+export function githubAppClientIdEnvName(host: string): string {
+  const name = host.trim().toLowerCase()
+  if (name === GITHUB_DOTCOM_HOST) return GITHUB_APP_CLIENT_ID_ENV
+  return `${GITHUB_APP_CLIENT_ID_ENV}_${name.replace(/[.-]/gu, '_').toUpperCase()}`
+}
+
+/** Where a host's device flow lives. A host that is not a GitHub host is refused. */
+function appEndpoints(host: string | undefined): {
+  deviceCode: string
+  accessToken: string
+  verification: string
+} {
+  const context = githubHostContext(host ?? GITHUB_DOTCOM_HOST)
+  return {
+    deviceCode: `${context.webOrigin}${DEVICE_CODE_PATH}`,
+    accessToken: `${context.webOrigin}${ACCESS_TOKEN_PATH}`,
+    verification: `${context.webOrigin}${DEVICE_VERIFICATION_PATH}`,
+  }
+}
 /** `slow_down` adds five seconds to the interval GitHub last required. */
 const SLOW_DOWN_SECONDS = 5
 
@@ -77,6 +109,8 @@ export interface GitHubAppRequest {
   fetch?: typeof globalThis.fetch
   signal?: AbortSignal
   timeoutMs?: number
+  /** The GitHub host this sign-in is for; it defaults to github.com. */
+  host?: string
 }
 
 export interface DevicePollRequest extends GitHubAppRequest {
@@ -195,15 +229,18 @@ function session(body: Record<string, unknown>): GitHubAppSession {
 }
 
 /** The public client id of the registered GitHub App. Never a client secret. */
-export function githubAppClientId(env: NodeJS.ProcessEnv = process.env): string | null {
-  return text(env[GITHUB_APP_CLIENT_ID_ENV])
+export function githubAppClientId(
+  env: NodeJS.ProcessEnv = process.env,
+  host: string = GITHUB_DOTCOM_HOST,
+): string | null {
+  return text(env[githubAppClientIdEnvName(host)])
 }
 
 /** Asks GitHub for a device code and the one-time code the person types into a browser. */
 export async function requestDeviceCode(request: GitHubAppRequest): Promise<DeviceChallenge> {
   const clientId = text(request.clientId)
   if (!clientId) throw new GitHubAppError('not_configured')
-  const body = await post(DEVICE_CODE_URL, { client_id: clientId }, request)
+  const body = await post(appEndpoints(request.host).deviceCode, { client_id: clientId }, request)
   if (text(body.error)) throw failure(body)
   const deviceCode = text(body.device_code)
   const userCode = text(body.user_code)
@@ -225,7 +262,7 @@ async function redeem(
 ): Promise<Record<string, unknown>> {
   const clientId = text(request.clientId)
   if (!clientId) throw new GitHubAppError('not_configured')
-  return post(ACCESS_TOKEN_URL, { ...parameters, client_id: clientId }, request)
+  return post(appEndpoints(request.host).accessToken, { ...parameters, client_id: clientId }, request)
 }
 
 export type DevicePollResult =
