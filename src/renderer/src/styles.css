@@ -710,13 +710,10 @@ button:disabled {
     border-color 120ms ease;
 }
 
-.branch-select {
-  position: absolute;
-  z-index: 1;
-  inset: 0;
-  border: 0;
-  border-radius: inherit;
-  background: transparent;
+/* The tree row is the focusable widget: one tab stop, one visible focus ring. */
+.branch-row:focus-visible {
+  outline: 2px solid var(--gs-semantic-focus-ring);
+  outline-offset: -2px;
 }
 
 .branch-summary {

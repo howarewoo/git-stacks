@@ -380,9 +380,9 @@ npm run format:check
 
 The gallery can also be built with `npm run build:gallery`. Its output is `out/renderer-fixtures`, outside the production renderer entry point. `test:controls` loads that output in an isolated Electron window.
 
-Run `npx playwright test` locally for one combined visual/behavioral HTML report (separate invocations replace the previous report). Axe attachments retain violations and incomplete checks; rendered contrast measurements are report annotations. Renderer checks do not run in GitHub Actions. Baselines use macOS 26.5.2 (25F84), arm64, with pinned Playwright Chromium; patch-level system-font drift is a reviewed failure, not masked.
+Run `npx playwright test` locally for one combined visual/behavioral HTML report (separate invocations replace the previous report). Axe attachments retain violations and incomplete checks; rendered contrast measurements are report annotations. The `Accessibility checks` workflow runs the behavioural renderer suite (axe, contrast, keyboard, focus, 200% zoom, reduced motion) plus the shared keyboard/state-label unit tests on every push and pull request. Pixel baselines are macOS-only and stay a local gate. Baselines use macOS 26.5.2 (25F84), arm64, with pinned Playwright Chromium; patch-level system-font drift is a reviewed failure, not masked.
 
-The visual suite covers the six destinations and three dialog compositions at minimum/default/wide sizes, shared-control variants, and a small set of long/error/recovery layouts. Other fixture states remain available in the gallery without separate screenshots or label-only assertions. Behavioral tests focus on keyboard access, asynchronous transitions, contrast, zoom/reduced motion, and mutation guards.
+The visual suite covers the seven destinations and three dialog compositions at minimum/default/wide sizes, shared-control variants, and a small set of long/error/recovery layouts. Other fixture states remain available in the gallery without separate screenshots or label-only assertions. Behavioral tests focus on keyboard access, asynchronous transitions, contrast, zoom/reduced motion, and mutation guards.
 
 ### Packaged desktop smoke
 
@@ -420,16 +420,20 @@ When adding a variant or migrating a view:
 
 ### Manual assistive-technology sign-off
 
-Automated axe and contrast checks supplement, not replace, human keyboard and assistive-technology review. Final migration sign-off requires an explicitly recorded manual pass; missing evidence is a blocker, not an implied pass.
+Automated axe and contrast checks supplement, not replace, human keyboard and assistive-technology review. Final migration sign-off requires an explicitly recorded manual pass; missing evidence is a blocker, not an implied pass. The `Accessibility checks` workflow automates what a machine can judge; the script below is the part it cannot.
 
 Use the packaged build and only disposable fixture repositories. `npm run test:desktop -- --keep` retains its disposable workspace and prints the path for a reviewer. Open only that fixture repository in the packaged app; remove the retained workspace after review.
 
 1. Record reviewer, date, exact macOS/build, Electron/app revision, VoiceOver version/settings, display scaling, and keyboard navigation settings.
-2. Navigate all six destinations, search, segmented filters, branch/file/commit selection, and separate PR links without a mouse. Record spoken names, roles, selected/current state, reading order, and visible focus.
-3. Open form, reviewed-operation, and destructive dialogs. Verify initial focus, labels/errors, trapped modal focus, typed confirmation, disabled explanations, explicit cancellation, and focus return.
-4. Read/scroll the diff at 200% zoom and reduced motion; verify no content or action becomes unreachable. Verify native close/minimize/full-screen controls, including returning from full screen.
-5. Exercise unavailable GitHub metadata, history errors, stale preview reload, busy state, partial completion, and conflict Continue/Abort. Record whether announcements are timely without duplicating or hiding important state.
-6. Record findings and platform limits in the pull request. Sign off only after blocking keyboard, contrast, state-truthfulness, and safety-dispatch findings are resolved.
+2. **Destination navigation.** With no pointer, arrow through the Workspace destinations rail and activate each of the seven destinations. After each switch, confirm focus lands on the destination's heading and the change is spoken through the polite live region. Also verify the direct routes: `/` focuses the in-view filter, `Mod+K` opens the command palette with its own search focused, and the view shortcuts (`Mod+1`–`Mod+7`) reach every destination.
+3. **Branch tree.** Tab once into the repository branch tree and confirm it is a single tab stop. With Up/Down move between rows and confirm level, sibling position, and set size are announced; Home/End jump to the first and last row. Press Enter and confirm the details pane follows the selection and focus stays in the tree. Confirm every row states current, remote, parent cycle, parent missing, requires-restack, pull-request number, checks, and ahead/behind in words, and that a visible focus ring marks the row.
+4. **Stack rail and history.** On Stacks, Tab into the member list and repeat the same arrow/Home/End/Enter contract. On History, do the same for the commit list and confirm the inspected commit is announced as current.
+5. **Text entry.** Type `7/k` into the in-view filter and confirm every character is inserted, no destination changes, and the palette does not open. Repeat inside the command palette search. Open a dialog and confirm Tab is trapped, Escape does not discard entered work, explicit Cancel returns focus to the control that opened the dialog, and a rejected operation keeps focus inside the modal with its error associated.
+6. **Zoom and motion.** Set the window to 200% zoom (or 720×470) and walk all seven destinations: no horizontal scrolling, no action pushed off-screen, and the tree, rail, and history still keyboard-reachable. Enable Reduce Motion and confirm transitions are suppressed while status text, focus rings, and busy locks remain.
+7. **State without colour.** Repeat the branch, pull-request, and Diagnostics surfaces under a high-contrast or monochrome display setting and confirm lifecycle, checks, review, capability support, and unavailable/unknown data are all still readable as words.
+8. **Errors and recovery.** Trigger unavailable GitHub metadata, a history error, a stale preview reload, busy state, partial completion, and conflict Continue/Abort. Confirm focus moves to the raised error and that announcements are timely without duplicating or hiding important state.
+9. Verify the native close/minimize/full-screen controls, including returning from full screen.
+10. Record findings and platform limits in the pull request. Sign off only after blocking keyboard, contrast, state-truthfulness, and safety-dispatch findings are resolved.
 
 Real GitHub mutations require a separately designated test repository and explicit authorization; none is included in routine fixtures or CI.
 

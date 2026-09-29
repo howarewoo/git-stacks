@@ -15,14 +15,21 @@ test.describe('Keyboard routes and accessibility navigation', () => {
     page,
   }) => {
     await openGallery(page, { scenario: 'shell-connected' })
+
     const searchInput = getViewFilterInput(page)
     await expect(searchInput).not.toBeFocused()
+
+    // `/` is the in-view filter shortcut and is separate from the global palette.
     await page.keyboard.press('/')
     await expect(searchInput).toBeFocused()
+
     await searchInput.blur()
     await page.keyboard.press('Meta+k')
+    if (!(await page.getByRole('dialog', { name: 'Command palette' }).isVisible())) {
+      await page.keyboard.press('Control+k')
+    }
+    // The palette takes focus; the background is hidden from the reader while it is open.
     const palette = page.getByRole('dialog', { name: 'Command palette' })
-    if (!(await palette.isVisible())) await page.keyboard.press('Control+k')
     await expect(palette).toBeVisible()
     await expect(palette.getByRole('combobox')).toBeFocused()
   })
@@ -57,30 +64,33 @@ test.describe('Keyboard routes and accessibility navigation', () => {
     await expect(remoteBtn).toHaveAttribute('aria-pressed', 'true')
   })
 
-  test('branch row selection button and PR link are separate focusable controls', async ({
+  test('a branch row is one treeitem and its pull request link is a separate control', async ({
     page,
   }) => {
     await openGallery(page, { scenario: 'pull-requests-checks' })
 
-    // Find the branch row that has a PR link
+    const row = page.getByRole('tree', { name: 'Repository branches' }).getByRole('treeitem')
+    await expect(row.first()).toBeVisible()
+
+    // Exactly one row of the tree is in the tab order; the rest are reached with
+    // arrow keys, so Tab does not walk the whole stack one row at a time.
+    const tabStops = await row.evaluateAll((rows) => rows.filter((el) => el.tabIndex === 0).length)
+    expect(tabStops).toBe(1)
+
+    // The pull request link is a control of its own, separate from row selection.
     const prLink = page.getByRole('link', { name: /Open pull request #/ }).first()
     await expect(prLink).toBeVisible()
-
-    // PR link must be focusable independently from the row selection button
     await prLink.focus()
     await expect(prLink).toBeFocused()
 
-    // Activating PR link opens external URL without switching branch or mutating
+    // Activating it opens the external URL without selecting the branch or mutating.
     await page.keyboard.press('Enter')
     await settle(page)
 
     const openedUrls = await getOpenedExternalUrls(page)
     expect(openedUrls.length).toBeGreaterThan(0)
     expect(openedUrls[0]).toContain('github.com')
-
-    // No GitAction should have been dispatched
-    const actions = await getDispatchedActions(page)
-    expect(actions).toEqual([])
+    expect(await getDispatchedActions(page)).toEqual([])
   })
 
   test('dialog form initial focus lands on first input and tabs through fields', async ({
@@ -217,5 +227,152 @@ test.describe('Keyboard routes and accessibility navigation', () => {
 
     const actions = await getDispatchedActions(page)
     expect(actions).toContainEqual({ type: 'stackContinue' })
+  })
+
+  test('branch tree is one Tab stop with arrow, Home, and End movement', async ({ page }) => {
+    await openGallery(page, { scenario: 'shell-connected' })
+
+    const tree = page.getByRole('tree', { name: 'Repository branches' })
+    await expect(tree).toBeVisible()
+    const rows = tree.getByRole('treeitem')
+    const rowCount = await rows.count()
+    expect(rowCount).toBeGreaterThan(2)
+
+    // Exactly one row is in the tab order; the rest are reached with arrows.
+    const tabbable = await rows.evaluateAll((elements) =>
+      elements.filter((element) => element.getAttribute('tabindex') === '0').length,
+    )
+    expect(tabbable).toBe(1)
+
+    await rows.first().focus()
+    await page.keyboard.press('ArrowDown')
+    await expect(rows.nth(1)).toBeFocused()
+    await page.keyboard.press('ArrowUp')
+    await expect(rows.first()).toBeFocused()
+
+    await page.keyboard.press('End')
+    await expect(rows.nth(rowCount - 1)).toBeFocused()
+    await page.keyboard.press('Home')
+    await expect(rows.first()).toBeFocused()
+  })
+
+  test('branch tree rows expose level, sibling position, and state as text', async ({ page }) => {
+    await openGallery(page, { scenario: 'shell-connected' })
+
+    const tree = page.getByRole('tree', { name: 'Repository branches' })
+    const rows = tree.getByRole('treeitem')
+    const first = rows.first()
+    await expect(first).toHaveAttribute('aria-level', /^\d+$/)
+    await expect(first).toHaveAttribute('aria-setsize', /^\d+$/)
+    await expect(first).toHaveAttribute('aria-posinset', /^\d+$/)
+
+    // The checked-out branch is named in words, not only marked with the accent
+    // colour and the cloud icon.
+    const current = tree.getByRole('treeitem', { name: /^.*, current branch/ })
+    await expect(current).toHaveCount(1)
+    await expect(current).toHaveAttribute('aria-selected', 'true')
+  })
+
+  test('Enter selects a focused branch row without mutating the working tree', async ({ page }) => {
+    await openGallery(page, { scenario: 'shell-connected' })
+
+    const tree = page.getByRole('tree', { name: 'Repository branches' })
+    const rows = tree.getByRole('treeitem')
+    await rows.nth(1).focus()
+    await page.keyboard.press('Enter')
+    await settle(page)
+
+    await expect(rows.nth(1)).toHaveAttribute('aria-selected', 'true')
+    await expect(page.locator('#branch-inspector .details-header h2')).toBeVisible()
+    expect(await getDispatchedActions(page)).toEqual([])
+  })
+
+  test('commit history is a list with one Tab stop and arrow movement', async ({ page }) => {
+    await openGallery(page, { scenario: 'shell-connected' })
+    await switchDestination(page, 'history')
+
+    const commits = page.getByRole('list', { name: 'Commits' })
+    await expect(commits).toBeVisible()
+    const rows = commits.getByRole('button')
+    const rowCount = await rows.count()
+    expect(rowCount).toBeGreaterThan(1)
+
+    const tabbable = await rows.evaluateAll((elements) =>
+      elements.filter((element) => element.getAttribute('tabindex') === '0').length,
+    )
+    expect(tabbable).toBe(1)
+
+    await rows.first().focus()
+    await page.keyboard.press('ArrowDown')
+    await expect(rows.nth(1)).toBeFocused()
+
+    await page.keyboard.press('Enter')
+    await settle(page)
+    await expect(rows.nth(1)).toHaveAttribute('aria-current', 'true')
+  })
+
+  test('stack rail members form a list and move with arrow keys', async ({ page }) => {
+    await openGallery(page, { scenario: 'shell-connected' })
+    await switchDestination(page, 'stacks')
+
+    const rail = page.getByRole('list', { name: 'Stack branches, children above parents' })
+    await expect(rail).toBeVisible()
+    const members = rail.getByRole('listitem')
+    expect(await members.count()).toBeGreaterThan(0)
+
+    const names = rail.locator('.stack-member-name')
+    await names.first().focus()
+    await page.keyboard.press('ArrowDown')
+    await expect(names.nth(1)).toBeFocused()
+  })
+
+  test('workspace navigation moves with arrow keys and announces the destination change', async ({
+    page,
+  }) => {
+    await openGallery(page, { scenario: 'shell-connected' })
+
+    const nav = page.getByRole('navigation', { name: 'Workspace destinations' })
+    const branches = nav.getByRole('button', { name: /^Branches/ })
+    await branches.focus()
+    await page.keyboard.press('ArrowDown')
+    const stacks = nav.getByRole('button', { name: /^Stacks/ })
+    await expect(stacks).toBeFocused()
+    await page.keyboard.press('End')
+    await expect(nav.getByRole('button', { name: /^Diagnostics/ })).toBeFocused()
+  })
+
+  test('a keyboard destination change moves focus to the new workspace heading', async ({ page }) => {
+    await openGallery(page, { scenario: 'shell-connected' })
+
+    const branches = page
+      .getByRole('navigation', { name: 'Workspace destinations' })
+      .getByRole('button', { name: /^Branches/ })
+    await branches.focus()
+    await page.keyboard.press('Meta+7')
+    if (await page.getByRole('heading', { level: 1, name: 'Branches' }).isVisible()) {
+      await page.keyboard.press('Control+7')
+    }
+
+    const heading = page.locator('#workspace-view-heading')
+    await expect(heading).toBeFocused()
+    await expect(heading).toHaveText('Diagnostics')
+    // The change is also announced politely for readers that track the live region.
+    await expect(page.locator('[aria-live="polite"]').filter({ hasText: 'Diagnostics workspace' })).toHaveCount(1)
+  })
+
+  test('the search field keeps every typed keystroke, including shortcut characters', async ({
+    page,
+  }) => {
+    await openGallery(page, { scenario: 'shell-connected' })
+
+    const search = getViewFilterInput(page)
+    await search.click()
+    // `/`, a digit, and a letter are each bound to a global action elsewhere.
+    await page.keyboard.type('7/k')
+    await expect(search).toHaveValue('7/k')
+
+    // None of them was captured: no view changed and no palette opened.
+    await expect(page.getByRole('heading', { level: 1, name: 'Branches' })).toBeVisible()
+    await expect(page.getByRole('dialog', { name: 'Command palette' })).toHaveCount(0)
   })
 })

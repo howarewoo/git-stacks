@@ -1,4 +1,5 @@
-import type { Branch } from '../../../shared/types'
+import type { Branch, PullRequest } from '../../../shared/types'
+import { checkLabel } from './pull-request-state'
 
 export function getRepresentedRemoteRef(branch: Branch): string | null {
   if (branch.remote) return null
@@ -106,4 +107,42 @@ export function sortBranchesByUpdatedAt(branches: readonly Branch[]): Branch[] {
     if (!emitted[rank]) ordered.push(ranked[rank])
   }
   return ordered
+}
+
+export interface BranchRowFacts {
+  name: string
+  current: boolean
+  remote: boolean
+  requiresRestack: boolean
+  cycle: boolean
+  missingParent: boolean
+  pullRequestNumber: number | null
+  checks: PullRequest['checks'] | null
+  ahead: number
+  behind: number
+  upstream: string | null
+}
+
+/**
+ * The branch row's accessible name. Every state the row also renders with a
+ * colour or an icon is spelled out here, so a screen reader, a monochrome
+ * window, or a 200% zoomed row communicates the same thing as the pixels.
+ */
+export function describeBranchRow(facts: BranchRowFacts): string {
+  const parts = [facts.name]
+  if (facts.current) parts.push('current branch')
+  if (facts.remote) parts.push('remote branch')
+  if (facts.cycle) parts.push('parent cycle')
+  if (facts.missingParent) parts.push('parent missing')
+  if (facts.requiresRestack) parts.push('requires restack')
+  if (facts.pullRequestNumber !== null) {
+    parts.push(`pull request #${facts.pullRequestNumber}`)
+    parts.push(facts.checks ? checkLabel(facts.checks) : 'checks unknown')
+  }
+  parts.push(
+    facts.upstream
+      ? `${facts.ahead} ahead, ${facts.behind} behind ${facts.upstream}`
+      : 'no upstream configured',
+  )
+  return parts.join(', ')
 }

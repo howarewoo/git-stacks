@@ -31,18 +31,28 @@ const FEATURE = 'packaged-smoke/feature'
 const CONFLICT = 'conflict.txt'
 const ORIGIN = 'app://git-stacks'
 const UI_TIMEOUT = 20_000
+// The exact surface the preload bridge is allowed to expose. Any method the
+// bridge grows must be listed here, so an unexpected addition still fails the
+// smoke rather than passing silently.
 const API = [
+  'cancel',
   'commitDiff',
+  'conflictView',
   'fileView',
+  'gitRuntimeStatus',
   'history',
+  'onSubmitStackProgress',
   'openExternal',
   'openRepository',
   'pullRequest',
   'pushPreview',
   'recentRepositories',
+  'reconciliationPreview',
   'refresh',
   'runAction',
+  'setSystemGit',
   'stackPreview',
+  'submitStackProgress',
 ]
 const results = []
 const limits = []
@@ -608,6 +618,10 @@ async function connectRenderer(devtools) {
   throw new Error('The packaged window never exposed an app:// page over the DevTools endpoint')
 }
 
+function escapeForRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
 function ui(page) {
   const button = (name) => page.getByRole('button', { name, exact: true })
   return {
@@ -620,7 +634,14 @@ function ui(page) {
     success: () => page.locator('.global-banner[aria-live="polite"]'),
     operation: () => page.locator('section[aria-label="Git operation status"]'),
     branch: (name, current = false) =>
-      page.locator(`.branch-select[aria-label="${name}${current ? ', current branch' : ''}"]`),
+      page
+        .getByRole('tree', { name: 'Repository branches' })
+        .getByRole('treeitem', {
+          name: new RegExp(
+            `^${escapeForRegExp(name)}${current ? ', current branch' : ''}(,|$)`,
+          ),
+        })
+        .first(),
     dialog: () => page.getByRole('dialog'),
     staged: () => page.locator('section[aria-labelledby="staged-heading"]'),
     unstaged: () => page.locator('section[aria-labelledby="unstaged-heading"]'),
@@ -1412,18 +1433,32 @@ async function run(options) {
         .click()
       const inspectorPanel = page.locator(`section[aria-label="Inspect ${CONFLICT}"]`)
       await inspectorPanel.waitFor()
-      await inspectorPanel.getByRole('button', { name: 'Resolve conflict', exact: true }).click()
-      await inspectorPanel.getByRole('button', { name: /Use theirs/ }).click()
-      const confirm = inspectorPanel.getByRole('button', {
-        name: 'Confirm resolution',
-        exact: true,
-      })
-      await confirm.waitFor()
-      await withNotice(locators, () => confirm.click(), /^Resolved /)
-      await locators
-        .staged()
-        .getByRole('button', { name: `Inspect ${CONFLICT}` })
-        .waitFor()
+      // Resolution now happens in the three-way resolver the inspector opens. The
+      // resolver names each side by what it means for the active operation, so the
+      // stage-3 (incoming) label is read from the pane instead of hardcoded.
+      await inspectorPanel.getByRole('button', { name: 'Open conflict resolver' }).click()
+      const resolver = page.getByRole('dialog')
+      await resolver.waitFor()
+      const incomingSide = text(
+        await resolver
+          .locator('.conflict-pane')
+          .nth(2)
+          .locator('.conflict-pane-head > span')
+          .first()
+          .innerText(),
+      )
+      // A file with conflicting regions is decided one region at a time, then the
+      // edited result is staged; the whole-file accept controls only exist for a
+      // file with no regions.
+      await resolver
+        .getByRole('button', { name: `Accept ${incomingSide} for conflict 1` })
+        .click()
+      await withNotice(
+        locators,
+        () => resolver.getByRole('button', { name: 'Mark resolved and stage' }).click(),
+        /^Resolved /,
+      )
+      await locators.staged().getByRole('button', { name: `Inspect ${CONFLICT}` }).waitFor()
       const resolved = readFileSync(join(workspace.repo, CONFLICT), 'utf8')
       assert(
         !/^<{7}|^={7}|^>{7}/m.test(resolved),

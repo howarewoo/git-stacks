@@ -311,4 +311,66 @@ test.describe('Automated accessibility audits and contrast', () => {
       )
     })
   })
+
+  test.describe('Colour-independent state', () => {
+    test('every status badge names its state in text, not colour or icon alone', async ({
+      page,
+    }) => {
+      await openGallery(page, { scenario: 'pull-requests-checks' })
+      await switchDestination(page, 'pullRequests')
+      await settle(page)
+
+      // The row's own words carry lifecycle, checks, and review independently, so
+      // removing every colour and icon would not remove the information.
+      const rows = page.locator('.pr-row')
+      const rowCount = await rows.count()
+      expect(rowCount).toBeGreaterThan(0)
+      const texts = await rows.evaluateAll((elements) =>
+        elements.map((element) => (element.textContent || '').toLowerCase()),
+      )
+      for (const text of texts) {
+        expect(text).toMatch(/(open|closed|merged|draft)/)
+        expect(text).toMatch(/checks (passing|failing|pending)|no checks/)
+        expect(text).toMatch(
+          /review approved|changes requested|review required|no review decision/,
+        )
+      }
+    })
+
+    test('branch rows state their Git status in words for a reader without colour', async ({
+      page,
+    }) => {
+      await openGallery(page, { scenario: 'ancestry-requires-restack' })
+
+      const rows = page.getByRole('tree', { name: 'Repository branches' }).getByRole('treeitem')
+      expect(await rows.count()).toBeGreaterThan(0)
+
+      const names = await rows.evaluateAll((elements) =>
+        elements.map((element) => element.getAttribute('aria-label') || ''),
+      )
+      for (const name of names) {
+        expect(name.length).toBeGreaterThan(0)
+      }
+      // A branch that needs a restack says so; the warning colour is not the message.
+      expect(names.some((name) => name.includes('requires restack'))).toBe(true)
+      expect(names.some((name) => name.includes('current branch'))).toBe(true)
+    })
+
+    test('capability support states are labelled, never colour-coded alone', async ({ page }) => {
+      await openGallery(page, { scenario: 'shell-connected' })
+      await switchDestination(page, 'diagnostics')
+      await settle(page)
+
+      const capabilityList = page.getByRole('list', { name: 'Detected capabilities' })
+      const rows = capabilityList.getByRole('listitem')
+      const rowCount = await rows.count()
+      expect(rowCount).toBeGreaterThan(0)
+      const texts = await rows.evaluateAll((elements) =>
+        elements.map((element) => (element.textContent || '').toLowerCase()),
+      )
+      for (const text of texts) {
+        expect(text).toMatch(/supported|limited|unsupported/)
+      }
+    })
+  })
 })

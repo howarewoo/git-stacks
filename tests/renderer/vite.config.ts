@@ -13,6 +13,7 @@ const repoRoot = resolve(testsDir, '../..')
  * `electron.vite.config.ts` so specimens and fixture code never reach the packaged renderer:
  *
  *   dev:   npx vite --config tests/renderer/vite.config.ts --port 5199 --strictPort
+ *         (override the port with GALLERY_PORT so parallel worktrees stay separate)
  *   build: npx vite build --config tests/renderer/vite.config.ts   (out/renderer-fixtures)
  *
  * `base: './'` and the absolute outDir keep the built gallery loadable over `file://`, which is

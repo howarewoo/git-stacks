@@ -9,6 +9,7 @@ export const DESTINATIONS = [
   { id: 'pullRequests', label: 'Pull requests', heading: 'Pull requests' },
   { id: 'review', label: 'Review', heading: 'Review' },
   { id: 'stashes', label: 'Stashes', heading: 'Stashes' },
+  { id: 'diagnostics', label: 'Diagnostics', heading: 'Diagnostics' },
 ] as const
 
 export type DestinationId = (typeof DESTINATIONS)[number]['id']

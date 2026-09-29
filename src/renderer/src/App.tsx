@@ -73,13 +73,25 @@ import { cn } from './lib/utils'
 import { EmptyState, InlineAlert } from './components/ui/surface'
 import { RemoteFreshnessBadge } from './components/remote-freshness'
 import {
+  describeBranchRow,
   getCombinedBranches,
   getRepresentedRemoteRef,
   indexBranchesByParentName,
   sortBranchesByUpdatedAt,
 } from './lib/branches'
+import {
+  clampRovingIndex,
+  rovingAction,
+  rovingTabIndex,
+  rovingTarget,
+} from './lib/tree-navigation'
 import { WorkflowDialog, type WorkflowRequest } from './components/workflow-dialog'
-import { WorkspaceNavigation } from './components/workspace-navigation'
+import {
+  WORKSPACE_VIEW_HEADING_ID,
+  WORKSPACE_VIEW_SHORTCUTS,
+  WorkspaceNavigation,
+  workspaceViewLabel,
+} from './components/workspace-navigation'
 import { ReviewView, type ReviewCommands } from './components/review-view'
 import { ConflictResolver } from './components/conflict-resolver'
 import { HistoryView, OperationBanner, StackView } from './components/repository-views'
@@ -141,7 +153,10 @@ import { resolveStackNavigation } from './lib/stack-navigation'
 type BranchFilter = 'all' | 'local' | 'remote' | 'prs'
 
 type BranchTreeInfo = {
+  /** Visual lane depth used for connector geometry only. */
   depth: number
+  /** Semantic hierarchy depth, one per resolved parent hop. Drives `aria-level`. */
+  level: number
   cycle: boolean
   missingParent: boolean
 }
@@ -160,6 +175,7 @@ function branchTreeInfo(
   const visited = new Set<string>([branch.name])
   let parent = branch.parent
   let depth = 0
+  let level = 0
   let cycle = false
   let missingParent = false
 
@@ -174,16 +190,20 @@ function branchTreeInfo(
       missingParent = true
       break
     }
+    level += 1
     if (!parentBranch.parent || (childCounts.get(parentBranch.ref) ?? 0) > 1) depth += 1
     parent = parentBranch.parent
   }
 
-  return { depth, cycle, missingParent }
+  return { depth, level, cycle, missingParent }
 }
 
 type BranchTreeRow = BranchTreeInfo & {
   trunks: { lane: number; kind: 'start' | 'start-node' | 'full' | 'end-parent' | 'end-child' }[]
   elbows: { lane: number }[]
+  /** 1-based position and size within the row's sibling set, for `aria-posinset`/`aria-setsize`. */
+  posInSet: number
+  setSize: number
 }
 
 function getBranchTreeGeometry(visibleBranches: readonly Branch[], byName: Map<string, Branch>) {
@@ -196,6 +216,8 @@ function getBranchTreeGeometry(visibleBranches: readonly Branch[], byName: Map<s
     ...branchTreeInfo(branch, byName, childCounts),
     trunks: [],
     elbows: [],
+    posInSet: 1,
+    setSize: 1,
   }))
   const visibleByName = indexBranchesByParentName(visibleBranches)
   const visibleIndex = new Map(visibleBranches.map((branch, index) => [branch.ref, index]))
@@ -256,8 +278,31 @@ function getBranchTreeGeometry(visibleBranches: readonly Branch[], byName: Map<s
     }
   }
 
+  // Screen readers need the sibling set, not just the drawn lane. A row whose
+  // parent is unresolved or cyclic forms its own set so unrelated rows never
+  // claim each other as siblings.
+  const siblingSets = new Map<string, number[]>()
+  for (let index = 0; index < visibleBranches.length; index += 1) {
+    const branch = visibleBranches[index]
+    const parent =
+      branch.parent && !rows[index].cycle && !rows[index].missingParent
+        ? (visibleByName.get(branch.parent) ?? byName.get(branch.parent))
+        : null
+    const key = parent?.ref ?? `unresolved:${branch.ref}`
+    const set = siblingSets.get(key)
+    if (set) set.push(index)
+    else siblingSets.set(key, [index])
+  }
+  for (const set of siblingSets.values()) {
+    set.forEach((rowIndex, position) => {
+      rows[rowIndex].posInSet = position + 1
+      rows[rowIndex].setSize = set.length
+    })
+  }
+
   return { rows }
 }
+
 
 function formatBranchDate(value: string): string {
   const date = new Date(value)
@@ -332,6 +377,16 @@ function App() {
     ref: string
     name: string
   } | null>(null)
+  const anyModalOpen =
+    paletteOpen ||
+    shortcutSettingsOpen ||
+    checkoutGuardTarget !== null ||
+    deleteTarget !== null ||
+    newBranchOpen ||
+    prOpen ||
+    workflow !== null
+  const [announcement, setAnnouncement] = React.useState('')
+  const previousViewRef = React.useRef(workspaceView)
   const isMac = React.useMemo(() => isMacPlatform(), [])
   const [showDetails, setShowDetails] = React.useState(true)
   const busyRef = React.useRef<string | null>(null)
@@ -734,6 +789,21 @@ function App() {
     [branchByName, visibleBranches],
   )
   const branchWindow = useListWindow(visibleBranches, LIST_PAGE_SIZE)
+  // The branch tree is one composite widget: a single Tab stop whose position
+  // follows keyboard focus, so Tab reaches the tree once instead of once per row.
+  const [branchTreeActiveIndex, setBranchTreeActiveIndex] = React.useState(0)
+  const branchTreeListRef = React.useRef<HTMLDivElement>(null)
+  const focusBranchRow = (index: number) => {
+    const target = branchTree.rows[index]
+    if (!target) return
+    setBranchTreeActiveIndex(index)
+    branchTreeListRef.current
+      ?.querySelectorAll<HTMLElement>('[role="treeitem"]')
+      [index].focus()
+  }
+  React.useEffect(() => {
+    setBranchTreeActiveIndex((index) => clampRovingIndex(index, branchWindow.visible.length))
+  }, [branchWindow.visible.length])
 
   const changeState = React.useMemo(
     () => changeGroups(snapshot?.files ?? [], search),
@@ -1061,7 +1131,28 @@ function App() {
       snapshot,
     ],
   )
+  // Focus follows navigation: switching destination moves focus to the new
+  // workspace heading instead of leaving it on the control that was pressed, and
+  // the same change is announced politely for readers that track the live region.
+  React.useEffect(() => {
+    if (previousViewRef.current === workspaceView) return
+    previousViewRef.current = workspaceView
+    setAnnouncement(`${workspaceViewLabel(workspaceView)} workspace`)
+    if (anyModalOpen) return
+    document.getElementById(WORKSPACE_VIEW_HEADING_ID)?.focus()
+  }, [anyModalOpen, workspaceView])
 
+  // A raised error answers something the user just did, so focus is taken to it
+  // — except while a modal owns focus and presents its own inline error.
+  React.useEffect(() => {
+    if (anyModalOpen) return
+    const raised = error ?? actionError
+    if (!raised) return
+    const banner = document.getElementById(
+      error ? 'global-error-banner' : 'global-action-error-banner',
+    )
+    banner?.focus()
+  }, [actionError, anyModalOpen, error])
   React.useEffect(() => {
     if (
       !paletteHandoffFocusRef.current ||
@@ -1101,14 +1192,7 @@ function App() {
       if (isComposingKeyEvent(event)) return
 
       // If any modal dialog is currently open, don't execute global hotkeys underneath
-      const anyModalOpen =
-        paletteOpen ||
-        shortcutSettingsOpen ||
-        checkoutGuardTarget !== null ||
-        deleteTarget !== null ||
-        newBranchOpen ||
-        prOpen ||
-        workflow !== null
+      if (anyModalOpen) return
 
       // A bare printable remap must not steal text from either search field.
       // Modified openers such as Cmd/Ctrl+K still work while editing.
@@ -1142,55 +1226,12 @@ function App() {
         return
       }
 
-      // View navigation shortcuts
-      if (matchesChord(event, shortcutBindings['view.branches'], isMac)) {
+      // View navigation shortcuts, one binding per destination so a new
+      // destination cannot ship without a keyboard route.
+      for (const [shortcut, view] of WORKSPACE_VIEW_SHORTCUTS) {
+        if (!matchesChord(event, shortcutBindings[shortcut], isMac)) continue
         event.preventDefault()
-        setWorkspaceView('branches')
-        return
-      }
-      if (matchesChord(event, shortcutBindings['view.stacks'], isMac)) {
-        event.preventDefault()
-        setWorkspaceView('stacks')
-        return
-      }
-      if (matchesChord(event, shortcutBindings['view.history'], isMac)) {
-        event.preventDefault()
-        setWorkspaceView('history')
-        return
-      }
-      if (matchesChord(event, shortcutBindings['view.changes'], isMac)) {
-        event.preventDefault()
-        setWorkspaceView('changes')
-        return
-      }
-      if (matchesChord(event, shortcutBindings['view.pullRequests'], isMac)) {
-        event.preventDefault()
-        setWorkspaceView('pullRequests')
-        return
-      }
-      if (matchesChord(event, shortcutBindings['view.review'], isMac)) {
-        event.preventDefault()
-        setWorkspaceView('review')
-        return
-      }
-      // The review workspace publishes its file and layer steps through a ref.
-      // The shell keeps every remappable key, and a key pressed while no pull
-      // request is open stays a no-op rather than reaching into the view.
-      const reviewChords: Array<[ShortcutId, () => void]> = [
-        ['review.nextFile', () => reviewCommands.current?.nextFile()],
-        ['review.previousFile', () => reviewCommands.current?.previousFile()],
-        ['review.nextLayer', () => reviewCommands.current?.nextLayer()],
-        ['review.previousLayer', () => reviewCommands.current?.previousLayer()],
-      ]
-      for (const [id, run] of reviewChords) {
-        if (!matchesChord(event, shortcutBindings[id], isMac)) continue
-        event.preventDefault()
-        if (workspaceView === 'review') run()
-        return
-      }
-      if (matchesChord(event, shortcutBindings['view.stashes'], isMac)) {
-        event.preventDefault()
-        setWorkspaceView('stashes')
+        setWorkspaceView(view)
         return
       }
 
@@ -1610,7 +1651,9 @@ function App() {
   const renderBranchFilters = () => (
     <div className="list-toolbar">
       <div className="list-title-group">
-        <h1>Branches</h1>
+        <h1 id={WORKSPACE_VIEW_HEADING_ID} tabIndex={-1}>
+          Branches
+        </h1>
         <span className="list-subtitle">{visibleBranches.length} shown</span>
       </div>
       <SegmentedControl<BranchFilter>
@@ -1675,26 +1718,75 @@ function App() {
     return (
       <>
         {renderBranchBudgetNote()}
-        <div className="branch-list" role="group" aria-label="Repository branches">
+        <div
+          aria-label="Repository branches"
+          className="branch-list"
+          ref={branchTreeListRef}
+          role="tree"
+        >
           {branchWindow.visible.map((branch, branchIndex) => {
             const tree = branchTree.rows[branchWindow.start + branchIndex]
             const pullRequest = branch.pr
             const selected = branch.ref === selectedBranch?.ref
+            const requiresRestack = branch.needsRestack || (branch.parentBehind ?? 0) > 0
             return (
-              <div
-                className={cn('branch-row', selected && 'branch-row-selected')}
-                key={branch.ref}
-                style={{ '--branch-depth': tree.depth } as React.CSSProperties}
-              >
-                <BranchHoverCard branch={branch}>
-                  <button
-                    aria-current={selected ? 'true' : undefined}
-                    aria-label={`${branch.name}${branch.remote ? ', remote branch' : ''}${branch.current ? ', current branch' : ''}`}
-                    className="branch-select"
-                    onClick={() => setSelectedBranchRef(branch.ref)}
-                    type="button"
-                  />
-                </BranchHoverCard>
+              <BranchHoverCard branch={branch}>
+                <div
+                  aria-current={selected ? 'true' : undefined}
+                  aria-label={describeBranchRow({
+                    ahead: branch.ahead,
+                    behind: branch.behind,
+                    checks: pullRequest?.checks ?? null,
+                    current: branch.current,
+                    cycle: tree.cycle,
+                    missingParent: tree.missingParent,
+                    name: branch.name,
+                    pullRequestNumber: pullRequest?.number ?? null,
+                    remote: branch.remote,
+                    requiresRestack,
+                    upstream: branch.upstream,
+                  })}
+                  aria-level={tree.level + 1}
+                  aria-posinset={tree.posInSet}
+                  aria-selected={selected}
+                  aria-setsize={tree.setSize}
+                  className={cn('branch-row', selected && 'branch-row-selected')}
+                  key={branch.ref}
+                  onClick={(event) => {
+                    // The row's own controls keep their own activation; only the
+                    // row background selects the branch.
+                    const hit = event.target as Element
+                    if (hit !== event.currentTarget && hit.closest('a, button, [role="button"]')) {
+                      return
+                    }
+                    setSelectedBranchRef(branch.ref)
+                  }}
+                  onFocus={() => setBranchTreeActiveIndex(branchWindow.start + branchIndex)}
+                  onKeyDown={(event) => {
+                    // A control inside the row owns its own keys; the roving
+                    // contract belongs to the row itself.
+                    if (event.target !== event.currentTarget) return
+                    const action = rovingAction(event.key)
+                    if (action) {
+                      const target = rovingTarget(
+                        action,
+                        branchWindow.start + branchIndex,
+                        branchWindow.visible.length,
+                      )
+                      if (target === null) return
+                      event.preventDefault()
+                      focusBranchRow(target)
+                      return
+                    }
+                    if (event.key === 'Enter' || event.key === ' ') {
+                      event.preventDefault()
+                      setSelectedBranchRef(branch.ref)
+                    }
+                  }}
+                  role="treeitem"
+                  style={{ '--branch-depth': tree.depth } as React.CSSProperties}
+                  tabIndex={rovingTabIndex(branchWindow.start + branchIndex, branchTreeActiveIndex)}
+                >
                 {tree.trunks.map((trunk, segmentIndex) => (
                   <span
                     aria-hidden="true"
@@ -1760,16 +1852,7 @@ function App() {
                   ) : null}
                   <Tooltip>
                     <TooltipTrigger asChild>
-                      <span
-                        className="ahead-behind relative z-[2] rounded-sm outline-none focus-visible:ring-2 focus-visible:ring-[var(--ring)]"
-                        role="group"
-                        tabIndex={0}
-                        aria-label={
-                          branch.upstream
-                            ? `${branch.ahead} ahead, ${branch.behind} behind ${branch.upstream}`
-                            : 'No upstream configured'
-                        }
-                      >
+                      <span aria-hidden="true" className="ahead-behind relative z-[2] rounded-sm">
                         <span className={branch.ahead > 0 ? 'metric-positive' : 'metric-muted'}>
                           <ArrowUp className="size-3" />
                           {branch.ahead}
@@ -1789,18 +1872,19 @@ function App() {
                   <span className="branch-updated">{formatBranchDate(branch.updatedAt)}</span>
                 </span>
                 <ChevronRight className="branch-chevron size-4" />
-              </div>
+                </div>
+              </BranchHoverCard>
             )
           })}
-          <ListWindowMore
-            pageSize={LIST_PAGE_SIZE}
-            remaining={branchWindow.remaining}
-            previous={branchWindow.hasPrevious}
-            noun="branches"
-            onReveal={branchWindow.reveal}
-            onPrevious={branchWindow.retreat}
-          />
         </div>
+        <ListWindowMore
+          pageSize={LIST_PAGE_SIZE}
+          remaining={branchWindow.remaining}
+          previous={branchWindow.hasPrevious}
+          noun="branches"
+          onReveal={branchWindow.reveal}
+          onPrevious={branchWindow.retreat}
+        />
       </>
     )
   }
@@ -2553,7 +2637,13 @@ function App() {
         <span className="titlebar-build">Native Git workspace</span>
       </header>
       {error ? (
-        <InlineAlert tone="error" className="global-banner" role="alert">
+        <InlineAlert
+          tone="error"
+          className="global-banner"
+          id="global-error-banner"
+          role="alert"
+          tabIndex={-1}
+        >
           <span className="global-banner-row">
             <span>{error}</span>
             <IconButton label="Dismiss error" onClick={() => setError(null)}>
@@ -2563,7 +2653,13 @@ function App() {
         </InlineAlert>
       ) : null}
       {actionError ? (
-        <InlineAlert tone="error" className="global-banner" role="alert">
+        <InlineAlert
+          tone="error"
+          className="global-banner"
+          id="global-action-error-banner"
+          role="alert"
+          tabIndex={-1}
+        >
           <span className="global-banner-row">
             <span>{actionError}</span>
             <IconButton label="Dismiss action error" onClick={() => setActionError(null)}>
@@ -2609,6 +2705,9 @@ function App() {
           </span>
         </InlineAlert>
       ))}
+      <div aria-atomic="true" aria-live="polite" className="sr-only">
+        {announcement}
+      </div>
       {snapshot ? <section aria-label="Repository controls">{renderToolbar()}</section> : null}
       {snapshot ? (
         <OperationBanner

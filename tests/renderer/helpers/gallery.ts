@@ -23,6 +23,10 @@ export const STANDARD_VIEWPORTS = {
 
 export type StandardViewportName = keyof typeof STANDARD_VIEWPORTS
 
+/**
+ * The in-view filter field. Its accessible name is the product's contract, so
+ * it is resolved here once instead of being re-spelled by every suite.
+ */
 export function getViewFilterInput(page: Page): Locator {
   return page.getByRole('textbox', {
     name: 'Filter current view branches, files, and pull requests',

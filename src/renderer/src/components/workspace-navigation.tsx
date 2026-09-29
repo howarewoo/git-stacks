@@ -11,6 +11,8 @@ import {
   type LucideIcon,
 } from 'lucide-react'
 import { cn } from '../lib/utils'
+import { rovingAction, rovingTarget } from '../lib/tree-navigation'
+import type { ShortcutId } from '../lib/keyboard-shortcuts'
 
 export type WorkspaceView =
   | 'branches'
@@ -21,6 +23,13 @@ export type WorkspaceView =
   | 'review'
   | 'stashes'
   | 'diagnostics'
+
+/**
+ * Every destination heading carries this id so a keyboard-driven destination
+ * change can move focus to the new workspace instead of stranding it on the
+ * navigation control the user just pressed.
+ */
+export const WORKSPACE_VIEW_HEADING_ID = 'workspace-view-heading'
 
 type WorkspaceDestination = {
   id: WorkspaceView
@@ -37,6 +46,25 @@ const workspaceDestinations: readonly WorkspaceDestination[] = [
   { id: 'review', label: 'Review', icon: MessageSquareDiff },
   { id: 'stashes', label: 'Stashes', icon: Archive },
   { id: 'diagnostics', label: 'Diagnostics', icon: SlidersHorizontal },
+]
+
+/** The spoken name of a destination, used for the workspace-change announcement. */
+export function workspaceViewLabel(view: WorkspaceView): string {
+  return workspaceDestinations.find((destination) => destination.id === view)?.label ?? view
+}
+
+/**
+ * One keyboard route per destination, kept beside the destination list so a new
+ * destination cannot ship without both a binding and a spoken label.
+ */
+export const WORKSPACE_VIEW_SHORTCUTS: readonly (readonly [ShortcutId, WorkspaceView])[] = [
+  ['view.branches', 'branches'],
+  ['view.stacks', 'stacks'],
+  ['view.history', 'history'],
+  ['view.changes', 'changes'],
+  ['view.pullRequests', 'pullRequests'],
+  ['view.stashes', 'stashes'],
+  ['view.diagnostics', 'diagnostics'],
 ]
 
 export function WorkspaceNavigation({
@@ -66,7 +94,23 @@ export function WorkspaceNavigation({
   }
 
   return (
-    <nav className="workspace-nav" aria-label="Workspace destinations">
+    <nav
+      aria-label="Workspace destinations"
+      className="workspace-nav"
+      onKeyDown={(event) => {
+        // Arrow keys walk the destination group. Every item also stays in the
+        // tab order, so the rail is usable without knowing the arrow contract.
+        const action = rovingAction(event.key)
+        if (!action) return
+        const items = [...event.currentTarget.querySelectorAll<HTMLButtonElement>('.nav-item')]
+        const index = items.indexOf(event.target as HTMLButtonElement)
+        if (index < 0) return
+        const target = rovingTarget(action, index, items.length)
+        if (target === null) return
+        event.preventDefault()
+        items[target].focus()
+      }}
+    >
       {workspaceDestinations.map(({ id, label, icon: Icon }) => {
         const active = activeView === id
         const count = countFor(id)

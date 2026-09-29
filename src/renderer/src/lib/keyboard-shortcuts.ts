@@ -16,6 +16,7 @@ export type ShortcutId =
   | 'view.stashes'
   | 'view.history'
   | 'view.review'
+  | 'view.diagnostics'
   | 'review.nextFile'
   | 'review.previousFile'
   | 'review.nextLayer'
@@ -177,6 +178,13 @@ export const SHORTCUT_DEFINITIONS: readonly ShortcutMetadata[] = [
     group: 'Stack navigation',
     defaultChord: 'Mod+Alt+ArrowUp',
     description: 'Review the pull request stacked directly below this one.',
+  },
+  {
+    id: 'view.diagnostics',
+    label: 'Go to Diagnostics',
+    group: 'Views',
+    defaultChord: 'Mod+8',
+    description: 'Switch to the repository diagnostics and compatibility report.',
   },
 ]
 

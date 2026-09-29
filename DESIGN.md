@@ -260,11 +260,21 @@ The renderer builds on the repository's existing [shadcn/ui](https://ui.shadcn.c
 - **Style:** The shell uses quiet text and count metadata with a selected state separate from checked-out state. Active navigation uses the selection role, while primary action emphasis remains Workbench Ink.
 - **Keyboard:** Global `:focus-visible` treatment is available for keyboard navigation and controls. Disabled or unavailable actions retain a text or tooltip explanation.
 
+### Keyboard and screen-reader contract
+
+- **Keyboard-first, never keyboard-only:** every primary action is reachable and operable with Tab, arrows, Enter, Space, and Escape alone. A pointer-only affordance is a defect, not an enhancement gap.
+- **Composite row surfaces:** the branch tree, the stack rail, and the commit history are one widget each — a single Tab stop with roving `tabindex`. Up/Down move between rows and stop at both ends instead of wrapping, Home/End jump to the first and last row, and Enter or Space performs the row's explicit action. A key the focused control has already handled is never re-consumed.
+- **Role model:** the branch list is a `tree` whose items carry `aria-level`, `aria-posinset`, `aria-setsize`, and `aria-selected`; a row whose parent is unresolved or cyclic forms its own sibling set rather than borrowing one. The stack rail and commit history are `list`/`listitem` surfaces, and paging controls stay outside the list they extend. Visual connector lanes are decoration and never carry the hierarchy the roles already state.
+- **Focus follows navigation:** switching workspace destination moves focus to that destination's heading and announces the change in a polite live region, so focus is never left on the control that was pressed. Dialogs keep the Radix trap and return focus to their trigger. A raised error takes focus unless a modal already owns it and shows its own inline error.
+- **State is named, not tinted:** a row's accessible name spells out the states the pixels also mark — current, remote, parent cycle, parent missing, requires restack, pull-request number, checks, and ahead/behind against the configured upstream. Unreported checks stay explicitly unknown rather than reading as passing, and a metric drawn as arrows and numbers is decoration whose meaning lives in the row's name.
+- **Announcements:** success notices, rejected previews, and workspace changes are polite; errors and blockers are assertive. A live region states an outcome once, and never replaces the visible control it describes.
+- **Zoom and motion:** the workbench reflows to a 720×470 CSS-pixel viewport, equivalent to 200% zoom on the standard window, without horizontal scrolling or unreachable actions. `prefers-reduced-motion: reduce` suppresses transitions while status text, focus rings, and operation locks remain.
+
 ### Cards / Containers
 
 - **Corner Style:** Workbench surfaces use the 24px token scale; existing specimen and shared utility surfaces retain their current utility-specific radius.
-- **Background:** White content surfaces and inset grouping surfaces.
 - **Shadow Strategy:** Tonal separation at rest; medium or large shadow only for floating and dialog layers.
+
 - **Internal Padding:** Use the 4px spacing rhythm, with 16px and 24px steps for work-surface and section rhythm.
 
 ### Dialogs
@@ -297,6 +307,8 @@ The renderer builds on the repository's existing [shadcn/ui](https://ui.shadcn.c
 ### Git and Diff States
 
 Checked-out, selected, pull-request lifecycle, checks, review, requires-restack, unknown, and diff states use the semantic/component roles in `tokens.json`. The state is represented by text/icon/color together; unknown and unavailable remain explicit. Diff addition, deletion, and hunk excerpts use their separate text and surface roles.
+
+Every status, lifecycle, checks, review, restack, capability, and diff state carries a text label in addition to its colour and icon. Colour never carries meaning by itself, and an unavailable or unreported value is stated as such.
 
 ### Repository compatibility
 
