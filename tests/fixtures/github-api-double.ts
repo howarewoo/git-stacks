@@ -1103,6 +1103,10 @@ function json(status: number, body: unknown, headers: Record<string, string> = {
 /** A `fetch` implementation that answers GitHub requests from the harness fixture state. */
 export function createGitHubApiDouble(): typeof globalThis.fetch {
   const double = (async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+    // A real request in flight is killed when its caller walks away. The double answers
+    // immediately, so it has to honour the signal itself or an abandoned read looks
+    // exactly like one that finished.
+    if (init?.signal?.aborted) throw new DOMException('The operation was aborted.', 'AbortError')
     const url = new URL(typeof input === 'string' ? input : String(input))
     const method = (init?.method || 'GET').toUpperCase()
     const headers: Record<string, string> = {}

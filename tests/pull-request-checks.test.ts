@@ -13,7 +13,8 @@ import {
 // static import above would hand Git Stacks the unpatched `execFile`.
 const { execFileSync } = await import('node:child_process')
 const { createGitHubApiDouble } = await import('./fixtures/github-api-double')
-const { DirectGitHubTransport, setGitHubTransport } = await import('../src/main/github-transport')
+const { DirectGitHubTransport, GitHubTransportError, setGitHubTransport } =
+  await import('../src/main/github-transport')
 const { clearPullRequestChecksCache, getPullRequestChecks, rerunPullRequestCheck } =
   await import('../src/main/pull-request-checks')
 const { classifyCheckRun, classifyCommitStatus, safeGitHubUrl, summariseCheckRollupState } =
@@ -1122,5 +1123,253 @@ test('a branch protection 404 only answers for a viewer who may read protection'
       report.checks.some((check) => check.source === 'expected'),
       false,
     )
+  })
+})
+
+test('a refresh re-reads which head the pull request has, not the head the caller was given', async () => {
+  await withHarness(async (harness) => {
+    const head = await setup(harness, (headSha) => ({
+      checkRuns: [
+        {
+          id: 1,
+          headSha,
+          name: 'build',
+          status: 'completed',
+          conclusion: 'failure',
+          appSlug: 'github-actions',
+          appId: 15368,
+        },
+      ],
+    }))
+    const first = await getPullRequestChecks(harness.repo, PR_NUMBER, {
+      headSha: head,
+      base: 'main',
+    })
+    assert.equal(first.freshness, 'live')
+    assert.equal(first.headSha, head)
+
+    // The pull request advances on GitHub while the renderer still shows the old head,
+    // which is exactly what the renderer sends with every refresh.
+    git(harness, ['checkout', 'feature/checks'])
+    git(harness, ['commit', '--allow-empty', '-m', 'advance the pull request'])
+    git(harness, ['push', harness.bare, 'feature/checks:refs/heads/feature/checks'])
+    const nextHead = git(harness, ['rev-parse', 'feature/checks'])
+    const state = await harness.readState()
+    state.checks = {
+      ...state.checks,
+      checkRuns: [
+        {
+          id: 2,
+          headSha: nextHead,
+          name: 'build',
+          status: 'completed',
+          conclusion: 'success',
+          appSlug: 'github-actions',
+          appId: 15368,
+        },
+      ],
+    }
+    await harness.writeState(state)
+
+    const refreshed = await getPullRequestChecks(harness.repo, PR_NUMBER, {
+      headSha: head,
+      base: 'main',
+      force: true,
+    })
+    assert.equal(refreshed.headSha, nextHead)
+    assert.equal(refreshed.freshness, 'live')
+    assert.deepEqual(
+      refreshed.checks.map((check) => check.state),
+      ['success'],
+    )
+    // The previous head's failing check is gone rather than still shown as current.
+    assert.equal(
+      refreshed.checks.some((check) => check.state === 'failure'),
+      false,
+    )
+  })
+})
+
+test('a bounded list that GitHub confirms page by page stays reported as cut short', async () => {
+  await withHarness(async (harness) => {
+    // Eleven full pages of check runs: more than the ten-page bound this read follows.
+    const head = await setup(harness, (headSha) => ({
+      conditional: true,
+      checkRuns: Array.from({ length: 1_100 }, (_unused, index) => ({
+        id: 5_000 + index,
+        headSha,
+        name: `check ${index}`,
+        status: 'completed',
+        conclusion: 'success',
+      })),
+    }))
+    const first = await getPullRequestChecks(harness.repo, PR_NUMBER, {
+      headSha: head,
+      base: 'main',
+    })
+    assert.equal(first.truncated, true)
+    assert.equal(first.checks.length, 1_000)
+
+    // Nothing changed, so every page answers 304 - including the full tenth page, which
+    // is still where the read stopped.
+    const confirmed = await getPullRequestChecks(harness.repo, PR_NUMBER, {
+      headSha: head,
+      base: 'main',
+      force: true,
+    })
+    assert.equal(confirmed.freshness, 'not-modified')
+    assert.equal(confirmed.truncated, true)
+  })
+})
+
+test('a page that regrows is read rather than dropped behind a stale validator', async () => {
+  await withHarness(async (harness) => {
+    const firstPage = (headSha: string) =>
+      Array.from({ length: 100 }, (_unused, index) => ({
+        id: 6_000 + index,
+        headSha,
+        name: `first page ${index}`,
+        status: 'completed' as const,
+        conclusion: 'success' as const,
+      }))
+    const secondPage = (headSha: string) => [
+      {
+        id: 7_000,
+        headSha,
+        name: 'second page check',
+        status: 'completed' as const,
+        conclusion: 'failure' as const,
+      },
+    ]
+    const head = await setup(harness, (headSha) => ({
+      conditional: true,
+      checkRuns: [...firstPage(headSha), ...secondPage(headSha)],
+    }))
+    const full = await getPullRequestChecks(harness.repo, PR_NUMBER, {
+      headSha: head,
+      base: 'main',
+    })
+    assert.equal(full.checks.length, 101)
+
+    // The collection shrinks to one page, so the second page's body is gone.
+    const shrunk = await harness.readState()
+    shrunk.checks = { ...shrunk.checks, checkRuns: firstPage(head) }
+    await harness.writeState(shrunk)
+    const one = await getPullRequestChecks(harness.repo, PR_NUMBER, {
+      headSha: head,
+      base: 'main',
+      force: true,
+    })
+    assert.equal(one.checks.length, 100)
+
+    // It regrows with exactly the page that was there before, so its old validator would
+    // match again if the cache still carried it.
+    const regrown = await harness.readState()
+    regrown.checks = { ...regrown.checks, checkRuns: [...firstPage(head), ...secondPage(head)] }
+    await harness.writeState(regrown)
+    const two = await getPullRequestChecks(harness.repo, PR_NUMBER, {
+      headSha: head,
+      base: 'main',
+      force: true,
+    })
+    assert.equal(two.checks.length, 101)
+    assert.equal(two.truncated, false)
+    assert.equal(
+      two.checks.some((check) => check.name === 'second page check' && check.state === 'failure'),
+      true,
+    )
+  })
+})
+
+test('an unreadable required-check policy is reported as unknown even with no checks at all', async () => {
+  await withHarness(async (harness) => {
+    const head = await setup(harness, () => ({
+      // Neither policy read is answerable: branch protection 404s for a viewer who may
+      // not read it, and the effective rules are refused outright.
+      viewerPermissions: { admin: false, maintain: false, push: true, triage: true, pull: true },
+      requiredStatusChecks: null,
+      branchRules: { branch: 'main', forbidden: true },
+      checkRuns: [],
+    }))
+    const report = await getPullRequestChecks(harness.repo, PR_NUMBER, {
+      headSha: head,
+      base: 'main',
+    })
+    assert.equal(report.checks.length, 0)
+    assert.equal(report.summary, 'none')
+    // Nothing reported, so no row could carry the policy: the rollup still has to say the
+    // required set was never read rather than "0 required of 0 checks".
+    assert.equal(report.rollup.requirementKnown, false)
+    assert.equal(report.rollup.requiredTotal, 0)
+  })
+})
+
+test('a rate-limited read waits for GitHub’s deadline, even when nothing was ever read', async () => {
+  await withHarness(async (harness) => {
+    const head = await setup(harness, (headSha) => ({
+      checkRuns: [{ id: 1, headSha, name: 'build', status: 'completed', conclusion: 'success' }],
+    }))
+    const state = await harness.readState()
+    state.lostResponses = [
+      {
+        method: 'GET',
+        pathIncludes: '/check-runs',
+        status: 403,
+        message: 'API rate limit exceeded for 203.0.113.7.',
+      },
+    ]
+    await harness.writeState(state)
+
+    const before = Date.now()
+    const failed = await getPullRequestChecks(harness.repo, PR_NUMBER, {
+      headSha: head,
+      base: 'main',
+    })
+    assert.equal(failed.available, false)
+    // The local backoff alone would be two seconds; GitHub's own reset is the deadline.
+    const deadline = Date.parse(failed.nextAttemptAt ?? '')
+    assert.ok(deadline - before >= 60_000, `next attempt at ${failed.nextAttemptAt}`)
+
+    // A forced refresh inside that window must not ask GitHub again.
+    const requestsBefore = (await harness.readState()).requests.length
+    const again = await getPullRequestChecks(harness.repo, PR_NUMBER, {
+      headSha: head,
+      base: 'main',
+      force: true,
+    })
+    assert.equal(again.available, false)
+    assert.equal(again.nextAttemptAt, failed.nextAttemptAt)
+    assert.match(again.message, /rate limit was reached/)
+    assert.equal((await harness.readState()).requests.length, requestsBefore)
+  })
+})
+
+test('a refresh the caller abandons stops instead of finishing work nobody is waiting for', async () => {
+  await withHarness(async (harness) => {
+    const head = await setup(harness, (headSha) => ({
+      conditional: true,
+      checkRuns: [{ id: 1, headSha, name: 'build', status: 'completed', conclusion: 'success' }],
+    }))
+    const controller = new AbortController()
+    controller.abort()
+    const abandoned = getPullRequestChecks(harness.repo, PR_NUMBER, {
+      headSha: head,
+      base: 'main',
+      force: true,
+      signal: controller.signal,
+    })
+    await assert.rejects(
+      abandoned,
+      (error: unknown) => error instanceof GitHubTransportError && error.kind === 'cancelled',
+    )
+
+    // The abandoned read left nothing behind: the next refresh reads for real.
+    const after = await getPullRequestChecks(harness.repo, PR_NUMBER, {
+      headSha: head,
+      base: 'main',
+      force: true,
+    })
+    assert.equal(after.freshness, 'live')
+    assert.equal(after.headSha, head)
   })
 })
