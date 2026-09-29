@@ -21,6 +21,11 @@ export interface RepositoryWatcherOptions {
   sweepMs?: number
   /** Overridable so a test can watch a directory without spawning Git. */
   resolveGitDirectories?: (root: string) => Promise<string[]>
+  /**
+   * Whether a recursive watch is available. `false` reproduces the platforms
+   * and filesystems that refuse one, where only the top level delivers events.
+   */
+  recursiveWatch?: boolean
 }
 
 const DEFAULT_DEBOUNCE_MS = 400
@@ -102,6 +107,33 @@ async function gitStateSignature(directories: readonly string[]): Promise<string
 }
 
 /**
+ * The worktree and ref content a snapshot reads, as Git reports it. A recursive
+ * watch delivers these changes as events; without one, nothing else sees a
+ * nested file or a loose ref below `refs/heads/feature/`, because no
+ * `fs.watch` on an ancestor of those paths reports them. The status refresh
+ * reads the index stat cache rather than every file, and the ref listing reads
+ * the packed refs plus the loose ones.
+ */
+async function repositoryContentSignature(root: string): Promise<string> {
+  try {
+    // `--no-optional-locks` is a global option: it keeps the read from writing
+    // the index, so a sweep running beside a Git operation of the person's
+    // cannot take its lock.
+    const status = await tryGit(root, [
+      '--no-optional-locks',
+      'status',
+      '--porcelain=v2',
+      '--branch',
+    ])
+    const refs = await tryGit(root, ['for-each-ref', '--format=%(refname) %(objectname) %(symref)'])
+    return `${status ?? ''}\u0000${refs ?? ''}`
+  } catch {
+    // A repository Git cannot describe yet has no content to fingerprint.
+    return ''
+  }
+}
+
+/**
  * Notices worktree, index, and ref changes made outside this window — a commit
  * typed in a terminal, a branch switch, or a background fetch — and reports one
  * coalesced event instead of one per file. Deleting or moving the repository is
@@ -123,6 +155,8 @@ export class RepositoryWatcher {
   private started = false
   private stopping = false
   private generation = 0
+  /** False where only the top level delivers events, so the sweep reads content. */
+  private deepWatch = true
   private presenceTimer: NodeJS.Timeout | undefined
   constructor(
     root: string,
@@ -136,6 +170,7 @@ export class RepositoryWatcher {
       maxDelayMs: options.maxDelayMs ?? DEFAULT_MAX_DELAY_MS,
       sweepMs: options.sweepMs ?? DEFAULT_SWEEP_MS,
       resolveGitDirectories: options.resolveGitDirectories ?? defaultGitDirectories,
+      recursiveWatch: options.recursiveWatch !== false,
     }
   }
 
@@ -189,9 +224,6 @@ export class RepositoryWatcher {
     const gitDirectories = await this.options.resolveGitDirectories(this.root)
     if (!this.started || this.stopping || this.generation !== gen) return
     this.gitDirectories = gitDirectories
-    const signature = await gitStateSignature(this.gitDirectories)
-    if (!this.started || this.stopping || this.generation !== gen) return
-    this.signature = signature
     const name = basename(this.root)
     // The repository's own directory can vanish; its parent is how a move is seen.
     this.attach(dirname(this.root), false, (changed) => {
@@ -202,14 +234,22 @@ export class RepositoryWatcher {
     // without having to run a Git command first.
     this.attachWorktree(this.root)
     for (const directory of this.gitDirectories) this.attachGitDirectory(directory)
+    // The signature is taken once the watches are armed, because whether the
+    // worktree watch reached below the top level decides what it must cover.
+    const signature = await this.currentSignature()
+    if (!this.started || this.stopping || this.generation !== gen) return
+    this.signature = signature
   }
 
   private attachWorktree(root: string): void {
-    if (this.attach(root, true)) return
-    this.attach(root, false)
+    // Only a recursive watch reaches every path below the worktree. Where the
+    // platform refuses one, the top level is all that delivers events and the
+    // sweep has to fingerprint the worktree and ref content instead.
+    this.deepWatch = this.options.recursiveWatch ? this.attach(root, true) : false
+    if (!this.deepWatch) this.attach(root, false)
   }
   private attachGitDirectory(directory: string): void {
-    if (this.attach(directory, true)) return
+    if (this.attach(directory, this.options.recursiveWatch) && this.options.recursiveWatch) return
     // Recursive watches are unavailable here; cover the state a snapshot reads.
     this.attach(directory, false)
     for (const child of WATCHED_SUBDIRECTORIES) this.attach(join(directory, child), false)
@@ -341,8 +381,20 @@ export class RepositoryWatcher {
       }
       void this.sweep()
     }, this.options.sweepMs)
+
     // A pending sweep must never hold the process open on quit.
     this.sweepTimer.unref()
+  }
+
+  /**
+   * What the next sweep compares against: the Git state files a snapshot
+   * reads, plus the worktree and ref content where no watch reaches below the
+   * top level.
+   */
+  private async currentSignature(): Promise<string> {
+    const metadata = await gitStateSignature(this.gitDirectories)
+    if (this.deepWatch) return metadata
+    return `${metadata}\u0000${await repositoryContentSignature(this.root)}`
   }
 
   private async sweep(): Promise<void> {
@@ -351,7 +403,7 @@ export class RepositoryWatcher {
     await this.checkPresence()
     if (!this.started || this.stopping || this.generation !== gen) return
     if (!this.present) return
-    const next = await gitStateSignature(this.gitDirectories)
+    const next = await this.currentSignature()
     if (!this.started || this.stopping || this.generation !== gen) return
     if (next === this.signature) return
     this.signature = next

@@ -113,6 +113,15 @@ class WatchLog {
   }
 }
 
+/** Runs every promise continuation already queued, without waiting on a clock. */
+async function drainTurns(count = 8): Promise<void> {
+  for (let turn = 0; turn < count; turn += 1) {
+    const idle = Promise.withResolvers<void>()
+    setImmediate(idle.resolve)
+    await idle.promise
+  }
+}
+
 function pullRequest(number: number): PullRequest {
   return {
     number,
@@ -198,13 +207,9 @@ class ManualClock implements SyncClock {
       const [id, timer] = due[0]!
       this.timers.delete(id)
       timer.run()
-      for (let round = 0; round < 8; round += 1) {
-        await new Promise((resolve) => setImmediate(resolve))
-      }
+      await drainTurns()
     }
-    for (let round = 0; round < 8; round += 1) {
-      await new Promise((resolve) => setImmediate(resolve))
-    }
+    await drainTurns()
   }
 }
 
@@ -365,6 +370,44 @@ test('background reads overlap, and a mutation ends a stalled one instead of wai
   assert.equal(await stalled, 'aborted')
 })
 
+test('a mutation waits for the reads it ended to settle, without waiting on a stalled one', async () => {
+  const scheduler = new RepositoryScheduler(2)
+  const order: string[] = []
+  // The abort only starts a read unwinding: it still owns the repository for
+  // the turns that follow, so the mutation may not start inside that window.
+  const running = Promise.withResolvers<void>()
+  const unwinding = Promise.withResolvers<void>()
+  const first = scheduler.read('/repo', async (signal) => {
+    order.push('read-start')
+    running.resolve()
+    const aborted = Promise.withResolvers<void>()
+    signal.addEventListener('abort', () => aborted.resolve(), { once: true })
+    await aborted.promise
+    await unwinding.promise
+    order.push('read-settled')
+    return 'aborted'
+  })
+  const second = scheduler.read('/repo', async (signal) => {
+    const aborted = Promise.withResolvers<void>()
+    signal.addEventListener('abort', () => aborted.resolve(), { once: true })
+    await aborted.promise
+    return 'aborted'
+  })
+  // The abort only reaches a read that is already running, so let both begin.
+  await running.promise
+  await drainTurns()
+  const mutation = scheduler.mutate('/repo', async () => {
+    order.push('mutation-start')
+    return 'mutated'
+  })
+  await drainTurns()
+  assert.deepEqual(order, ['read-start'], 'a read still unwinding owns the repository')
+  unwinding.resolve()
+  assert.equal(await mutation, 'mutated')
+  assert.deepEqual(order, ['read-start', 'read-settled', 'mutation-start'])
+  assert.deepEqual(await Promise.all([first, second]), ['aborted', 'aborted'])
+})
+
 test('mutations for one repository run in order, and reads wait for them', async () => {
   const scheduler = new RepositoryScheduler(2)
   const order: string[] = []
@@ -471,9 +514,52 @@ test('a secondary rate limit parks the inbox refresh and recovers by itself', as
   await coordinator.clock.advance(DEFAULT_INTERVALS.secondaryMs + 1)
   assert.equal(coordinator.issueReads(), parked, 'the inbox refresh stays parked while limited')
   coordinator.failWith(null)
-  // The parked tier rechecks on its own schedule, and an answer lifts it.
+  // The parked tier rechecks on its own schedule, and an answer lifts the park
+  // to the health the pull-request data actually has: confirmed before the
+  // rate limit, so it is fresh again.
   await coordinator.clock.advance(DEFAULT_INTERVALS.secondaryMs + 1)
   assert.equal(coordinator.pushed.status?.state, 'fresh')
+})
+
+test('an inbox refresh that recovers never calls unconfirmed pull-request data fresh', async () => {
+  const coordinator = harness()
+  // An unconfirmed snapshot still carries a time, so only the health its own
+  // last refresh earned may be reported after the inbox recovers.
+  coordinator.coordinator.attach(
+    '/tmp/repository',
+    snapshotFixture({
+      github: { available: false, message: 'GitHub data has not been confirmed yet' },
+      githubStale: {
+        reason: 'GitHub data has not been confirmed yet',
+        fetchedAt: new Date(coordinator.clock.now() - 60_000).toISOString(),
+      },
+    }),
+  )
+  coordinator.coordinator.reportActivity({ focused: false, visible: true })
+  coordinator.failWith(
+    new GitHubTransportError({
+      kind: 'secondary-rate-limit',
+      detail: 'You have exceeded a secondary rate limit',
+      rateLimit: {
+        limit: 5000,
+        remaining: 4980,
+        reset: null,
+        resource: 'core',
+        retryAfterSeconds: 60,
+      },
+    }),
+  )
+  await coordinator.clock.advance(DEFAULT_INTERVALS.secondaryMs + 1)
+  assert.equal(coordinator.pushed.status?.state, 'rate-limited')
+  coordinator.failWith(null)
+  await coordinator.clock.advance(DEFAULT_INTERVALS.secondaryMs + 1)
+  assert.ok(coordinator.issueReads(), 'the inbox read recovered')
+  assert.equal(
+    coordinator.pushed.status?.state,
+    'stale',
+    'an answer about issues says nothing about the pull requests on screen',
+  )
+  assert.match(coordinator.pushed.status?.detail ?? '', /not been confirmed/iu)
 })
 
 test('an expired token stops polling until the person refreshes', async () => {
@@ -817,6 +903,84 @@ test('a live snapshot read that cannot reach GitHub never reuses the confirmed p
   }
 })
 
+test('a failed issue read keeps the confirmed inbox and reports why it is unconfirmed', async () => {
+  const { repo, cleanup } = await disposableRepository()
+  git(repo, 'remote', 'add', 'origin', 'git@github.com:acme/widgets.git')
+  const state = { issuesFail: false }
+  class PartialTransport implements GitHubTransport {
+    readonly kind = 'direct' as const
+    async rest<T = unknown>(): Promise<GitHubRestResponse<T>> {
+      return {
+        status: 404,
+        data: {} as T,
+        rateLimit: {
+          limit: 5000,
+          remaining: 4999,
+          reset: null,
+          resource: 'core',
+          retryAfterSeconds: null,
+        },
+      }
+    }
+    async paginate<T = unknown>(): Promise<T[]> {
+      return []
+    }
+    async graphql<T = Record<string, unknown>>(query: string): Promise<T> {
+      if (!query.includes('pullRequests(')) {
+        if (state.issuesFail) {
+          throw new GitHubTransportError({ kind: 'network', detail: 'fetch failed' })
+        }
+        return {
+          repository: {
+            issues: {
+              nodes: [{ number: 11, title: 'Confirmed inbox item', url: 'https://x/11' }],
+              pageInfo: { hasNextPage: false, endCursor: null },
+            },
+          },
+        } as T
+      }
+      return {
+        repository: {
+          pullRequests: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } },
+        },
+      } as T
+    }
+  }
+  setGitHubTransport(new PartialTransport())
+  try {
+    const confirmed = await getSnapshot(repo, undefined, undefined, 'on-failure')
+    assert.equal(confirmed.github.available, true)
+    assert.deepEqual(
+      confirmed.issues?.map((issue) => issue.number),
+      [11],
+    )
+
+    // The pull requests still answer; only the issue read is lost.
+    state.issuesFail = true
+    const partial = await getSnapshot(repo, undefined, undefined, 'on-failure')
+    assert.equal(partial.github.available, true, 'the pull-request read did answer')
+    assert.equal(partial.githubStale, null)
+    assert.deepEqual(
+      partial.issues?.map((issue) => issue.number),
+      [11],
+      'an unread inbox is not an empty inbox',
+    )
+    assert.match(partial.issuesMessage ?? '', /fetch failed/iu)
+
+    // The failed read never became the confirmed payload, so a read that does
+    // not ask GitHub still shows the last confirmed inbox without a failure.
+    const reused = await getSnapshot(repo, undefined, undefined, 'reuse')
+    assert.deepEqual(
+      reused.issues?.map((issue) => issue.number),
+      [11],
+    )
+    assert.equal(reused.issuesMessage, '')
+  } finally {
+    setGitHubTransport(null)
+    await cleanup()
+  }
+})
+
 test('the conditional cache is never consulted for a read that did not opt in', async () => {
   const requested: (string | null)[] = []
   const cache = new GitHubResponseCacheStore()
@@ -1050,6 +1214,7 @@ test('real repository watcher fires coordinator during rate limit and delivers l
           retryAfterSeconds: 3600,
         },
       }),
+      'remote',
     )
     assert.equal(coordinator.freshness().state, 'rate-limited')
     reads.length = 0
@@ -1124,6 +1289,55 @@ test('worktree file edit or creation without git triggers the watcher and notifi
   }
 })
 
+// These two drive the real `fs.watch` of a platform that refuses a recursive
+// one. Only the sweep can report either change, so waiting for the event is
+// waiting for the sweep; the debounce is the one real delay the watcher owns.
+test('a nested worktree edit schedules a refresh where no recursive watch is available', async () => {
+  const { repo, cleanup } = await disposableRepository()
+  await mkdir(join(repo, 'src', 'main'), { recursive: true })
+  await writeFile(join(repo, 'src', 'main', 'nested.txt'), 'one\n')
+  git(repo, 'add', '.')
+  git(repo, 'commit', '-m', 'Add a nested file')
+  const log = new WatchLog()
+  const watcher = new RepositoryWatcher(repo, (event) => log.record(event.reason), {
+    debounceMs: 20,
+    maxDelayMs: 100,
+    sweepMs: 40,
+    recursiveWatch: false,
+  })
+  try {
+    await watcher.start()
+    await writeFile(join(repo, 'src', 'main', 'nested.txt'), 'two\n')
+    await log.waitFor((reason) => reason === 'change')
+  } finally {
+    watcher.stop()
+    await cleanup()
+  }
+})
+
+test('a nested loose ref schedules a refresh where no recursive watch is available', async () => {
+  const { repo, cleanup } = await disposableRepository()
+  // A ref below a directory Git already created: no watch on an ancestor of
+  // `refs/heads/feature/nested` delivers an event for it.
+  git(repo, 'update-ref', 'refs/heads/feature/base', 'HEAD')
+  const log = new WatchLog()
+  const watcher = new RepositoryWatcher(repo, (event) => log.record(event.reason), {
+    debounceMs: 20,
+    maxDelayMs: 100,
+    sweepMs: 40,
+    recursiveWatch: false,
+  })
+  try {
+    await watcher.start()
+    // The new ref lands below the existing directory, unseen by any watch.
+    git(repo, 'update-ref', 'refs/heads/feature/nested', 'HEAD')
+    await log.waitFor((reason) => reason === 'change')
+  } finally {
+    watcher.stop()
+    await cleanup()
+  }
+})
+
 test('actual production performBackgroundRead forwards scheduler cancellation to in-flight snapshot read during mutation', async () => {
   const scheduler = new RepositoryScheduler()
   const registry = new RequestRegistry()
@@ -1133,28 +1347,26 @@ test('actual production performBackgroundRead forwards scheduler cancellation to
   const readCancelled = Promise.withResolvers<boolean>()
 
   // Simulate an in-flight background snapshot read wired through the actual production adapter
-  const backgroundTask = scheduler.read(
-    root,
-    (schedulerSignal) =>
-      performBackgroundRead(
-        registry,
-        root,
-        schedulerSignal,
-        async (combinedSignal) => {
-          readStarted.resolve()
-          return new Promise<string>((resolve, reject) => {
-            combinedSignal.addEventListener(
-              'abort',
-              () => {
-                readCancelled.resolve(combinedSignal.aborted)
-                reject(new Error('Operation cancelled by scheduler'))
-              },
-              { once: true },
-            )
-          })
-        },
-        'sync-refresh',
-      ),
+  const backgroundTask = scheduler.read(root, (schedulerSignal) =>
+    performBackgroundRead(
+      registry,
+      root,
+      schedulerSignal,
+      async (combinedSignal) => {
+        readStarted.resolve()
+        return new Promise<string>((resolve, reject) => {
+          combinedSignal.addEventListener(
+            'abort',
+            () => {
+              readCancelled.resolve(combinedSignal.aborted)
+              reject(new Error('Operation cancelled by scheduler'))
+            },
+            { once: true },
+          )
+        })
+      },
+      'sync-refresh',
+    ),
   )
 
   await readStarted.promise
@@ -1275,11 +1487,19 @@ test('low remaining budget derives parking deadline from rate-limit reset and pa
 
   // Advance time: secondary polling encounters low budget, derives parkUntil from resetTime (120s away)
   await h.clock.advance(DEFAULT_INTERVALS.secondaryMs + 1)
-  assert.equal(h.issueReads(), initialIssueReads, 'secondary tier parks when remaining budget is low')
+  assert.equal(
+    h.issueReads(),
+    initialIssueReads,
+    'secondary tier parks when remaining budget is low',
+  )
 
   // Advance to just before the reset time: still parked
   await h.clock.advance(200_000)
-  assert.equal(h.issueReads(), initialIssueReads, 'secondary tier stays parked until rate limit reset')
+  assert.equal(
+    h.issueReads(),
+    initialIssueReads,
+    'secondary tier stays parked until rate limit reset',
+  )
 
   // Past reset: secondary tier can resume
   await h.clock.advance(150_000)
@@ -1322,15 +1542,11 @@ test('start-stop during asynchronous arm does not attach watchers or leak timers
   })
 
   const events: unknown[] = []
-  const watcher = new RepositoryWatcher(
-    repo,
-    (event) => events.push(event),
-    {
-      debounceMs: 20,
-      sweepMs: 100,
-      resolveGitDirectories: async () => armPending,
-    },
-  )
+  const watcher = new RepositoryWatcher(repo, (event) => events.push(event), {
+    debounceMs: 20,
+    sweepMs: 100,
+    resolveGitDirectories: async () => armPending,
+  })
 
   try {
     // 1. Start the watcher: begins arm(), awaiting resolveGitDirectories
@@ -1378,7 +1594,13 @@ test('delayed network GitHub request is aborted by mutation; coordinator clears 
       return {
         status: 200,
         data: {} as T,
-        rateLimit: { limit: 5000, remaining: 4999, reset: null, resource: 'core', retryAfterSeconds: null },
+        rateLimit: {
+          limit: 5000,
+          remaining: 4999,
+          reset: null,
+          resource: 'core',
+          retryAfterSeconds: null,
+        },
       }
     }
     async paginate<T = unknown>(): Promise<T[]> {
@@ -1435,7 +1657,11 @@ test('delayed network GitHub request is aborted by mutation; coordinator clears 
           root,
           signal,
           async (readSignal) => {
-            const issues = await getGitHubIssues(root, 'https://github.com/acme/project-alpha.git', readSignal)
+            const issues = await getGitHubIssues(
+              root,
+              'https://github.com/acme/project-alpha.git',
+              readSignal,
+            )
             if (readSignal.aborted) throw new CommandCancelled()
             if (issues.message) throw new Error(issues.message)
             return issues.issues
@@ -1520,7 +1746,13 @@ test('tracked closed or merged PR detail stall is aborted by mutation and preser
       return {
         status: 200,
         data: {} as T,
-        rateLimit: { limit: 5000, remaining: 4999, reset: null, resource: 'core', retryAfterSeconds: null },
+        rateLimit: {
+          limit: 5000,
+          remaining: 4999,
+          reset: null,
+          resource: 'core',
+          retryAfterSeconds: null,
+        },
       }
     }
     async paginate<T = unknown>(): Promise<T[]> {
@@ -1564,7 +1796,9 @@ test('tracked closed or merged PR detail stall is aborted by mutation and preser
         })
       }
 
-      return { repository: { issues: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } } } } as T
+      return {
+        repository: { issues: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } } },
+      } as T
     }
   }
 
@@ -1599,7 +1833,10 @@ test('tracked closed or merged PR detail stall is aborted by mutation and preser
   })
 
   try {
-    const initial = snapshotFixture({ path: repo, github: { available: true, message: 'GitHub metadata available' } })
+    const initial = snapshotFixture({
+      path: repo,
+      github: { available: true, message: 'GitHub metadata available' },
+    })
     coordinator.attach(repo, initial)
     const initialFreshness = coordinator.freshness()
     assert.equal(initialFreshness.state, 'fresh')
@@ -1640,7 +1877,11 @@ test('tracked closed or merged PR detail stall is aborted by mutation and preser
     assert.equal(coordinatorInternals.running, null, 'coordinator.running is cleared')
     // 3. Freshness was PRESERVED: failures not incremented, state not flipped to stale or cancelled!
     assert.equal(coordinatorInternals.failures, 0, 'failures count must stay 0 on cancellation')
-    assert.equal(coordinator.freshness().state, initialFreshness.state, 'freshness state must be preserved')
+    assert.equal(
+      coordinator.freshness().state,
+      initialFreshness.state,
+      'freshness state must be preserved',
+    )
 
     // 4. Local change notified to coordinator runs immediately upon settle without being deferred
     coordinator.notifyLocalChange()

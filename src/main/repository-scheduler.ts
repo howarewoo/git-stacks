@@ -14,15 +14,18 @@ interface RepositoryLane {
   activeReads: Set<AbortController>
   /** Waiters for the lane to have no running read. */
   settled: (() => void)[]
+  /** A mutation that has claimed the lane and waits for the reads it ended. */
+  pendingStart: (() => void) | null
 }
 
 /**
  * Per-repository ordering for background refresh reads and repository
  * mutations. Background reads may overlap each other, because several views ask
  * for different data at once, but a mutation first claims the lane: it ends the
- * reads still running and holds the lane until it settles. A Git operation
- * therefore never waits on a network that is not answering, and no read starts
- * against a repository that is mid-mutation.
+ * reads still running, waits for them to settle, and holds the lane until it
+ * does. A Git operation therefore never waits on a network that is not
+ * answering, never overlaps a read still unwinding from that abort, and no
+ * read starts against a repository that is mid-mutation.
  *
  * Reads routed here are background work the user did not request. A foreground
  * read the user is waiting on belongs to `RepositoryOperations`, which serialises
@@ -47,6 +50,7 @@ export class RepositoryScheduler {
       readsActive: 0,
       activeReads: new Set(),
       settled: [],
+      pendingStart: null,
     }
     this.lanes.set(repository, lane)
     return lane
@@ -81,7 +85,13 @@ export class RepositoryScheduler {
       lane.activeReads.add(controller)
       lane.readsActive += 1
       return Promise.resolve()
-        .then(() => task(controller.signal))
+        .then(() => {
+          // A mutation claimed the lane before this read began, so the read
+          // never runs: an already-ended signal would otherwise leave it
+          // holding a lane that nothing can release.
+          if (controller.signal.aborted) throw new CommandCancelled()
+          return task(controller.signal)
+        })
         .finally(() => {
           lane.activeReads.delete(controller)
           lane.readsActive -= 1
@@ -112,7 +122,8 @@ export class RepositoryScheduler {
 
   /**
    * A repository mutation. Every mutation for one repository runs alone and in
-   * submission order, and it ends the background reads that would interleave.
+   * submission order, and it ends the background reads that would interleave
+   * and waits for those reads to settle before its own work begins.
    */
   async mutate<T>(repository: string, task: () => Promise<T>): Promise<T> {
     const lane = this.lane(repository)
@@ -151,6 +162,9 @@ export class RepositoryScheduler {
   private notifySettled(lane: RepositoryLane): void {
     if (lane.readsActive > 0) return
     for (const done of lane.settled.splice(0)) done()
+    const start = lane.pendingStart
+    lane.pendingStart = null
+    start?.()
   }
 
   private drain(lane: RepositoryLane): void {
@@ -159,8 +173,13 @@ export class RepositoryScheduler {
     if (start) {
       lane.mutationActive = true
       // A Git command must not interleave with a read of the same repository,
-      // and a read that is stuck on an unreachable network must not delay it.
+      // and a read that is stuck on an unreachable network must not delay it:
+      // the abort ends it, and the mutation starts as soon as it has settled.
       this.endReads(lane)
+      if (lane.readsActive > 0) {
+        lane.pendingStart = start
+        return
+      }
       start()
       return
     }
@@ -171,6 +190,7 @@ export class RepositoryScheduler {
 
   private retire(lane: RepositoryLane): void {
     if (lane.mutationActive || lane.mutations.length > 0) return
+    if (lane.pendingStart) return
     if (lane.readsActive > 0 || lane.waiting.length > 0 || lane.settled.length > 0) return
     if (this.lanes.get(lane.repository) === lane) this.lanes.delete(lane.repository)
   }

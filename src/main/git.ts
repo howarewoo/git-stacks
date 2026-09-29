@@ -4743,11 +4743,17 @@ export async function getSnapshot(
           getGitHubIssues(root, originUrl, signal),
         ])
   const answered = live !== null && live[0].available
+  // The inbox is a second read with its own outcome. A pull-request answer
+  // says nothing about it: an issue read that failed carries its reason in its
+  // message, and an empty list is then unknown, not "there are no issues".
+  const issuesAnswered = live !== null && live[1].message === ''
   if (answered) {
+    // A failed issue read never becomes the confirmed inbox, so the last
+    // confirmed one survives a refresh that could not reach the issues.
     rememberConfirmedPayload(root, {
       originUrl,
       data: live[0],
-      issues: live[1],
+      issues: issuesAnswered ? live[1] : (confirmed?.issues ?? live[1]),
       fetchedAt: confirmedAt,
     })
   }
@@ -4768,13 +4774,16 @@ export async function getSnapshot(
       : live
         ? live[0]
         : unavailableGitHubResult('GitHub could not be read')
-  const issueData = answered
-    ? live![1]
-    : mayFallBack
-      ? fallbackIssues
-      : live
-        ? live[1]
-        : { issues: [] as RepositoryIssue[], message: '' }
+  // Without a confirmed inbox, keep the issues last confirmed and say why this
+  // read could not refresh them, rather than passing off an empty list as one.
+  const issueData =
+    live === null || !issuesAnswered
+      ? mayFallBack && confirmed
+        ? { issues: fallbackIssues.issues, message: live?.[1].message ?? '' }
+        : live
+          ? live[1]
+          : fallbackIssues
+      : live[1]
   const githubFailure = live === null ? null : (live[0].failure ?? null)
   const githubStale: RepositorySnapshot['githubStale'] = answered
     ? null

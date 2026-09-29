@@ -31,12 +31,22 @@ commit, a branch switch, a fetch that moves refs — is picked up by a debounced
 filesystem watch, as is a deleted or moved repository and its return. Reads for
 one repository run concurrently while mutations serialize behind them.
 
+On a platform that cannot watch a directory tree recursively, the periodic
+sweep fingerprints the worktree and ref content instead, so a nested file or a
+loose ref below `refs/heads/feature/` still schedules a refresh. A mutation
+starts only after the reads its arrival cancelled have settled.
+
 GitHub is read on a focus-aware cadence: a short interval while the window is
 focused and visible, a slow inbox and repository refresh otherwise. Responses
 are read conditionally where GitHub supports it, and failures back off
 exponentially. A secondary rate limit parks the nonessential tier, a low
 remaining budget parks it too, and rejected credentials stop polling until the
 person refreshes.
+
+The inbox is read separately from the pull requests, so a successful issue
+refresh never reports the pull requests on screen as freshly checked. When the
+issue read fails, the last confirmed issues stay listed and the reason they are
+unconfirmed is shown, instead of an empty inbox that looks current.
 
 The title bar states remote freshness in words, with the age of the last
 confirmed data, and says when local Git still works. Cached responses are

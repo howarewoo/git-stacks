@@ -155,6 +155,13 @@ export class RepositorySyncCoordinator {
   private state: RemoteFreshnessState = 'stale'
   private detail: string | null = null
   private fetchedAt: number | null = null
+  /**
+   * The health of the pull-request and stack data itself, kept apart from the
+   * health of the whole GitHub conversation. The inbox refresh reads no pull
+   * request, so it must never claim that data was checked.
+   */
+  private prState: RemoteFreshnessState = 'stale'
+  private prDetail: string | null = null
   private checkedAt: number | null = null
   private rateLimitReset: number | null = null
   private resumeAt: number | null = null
@@ -220,6 +227,8 @@ export class RepositorySyncCoordinator {
     this.dirtyRemoteTier = null
     this.failures = 0
     this.state = 'stale'
+    this.prState = 'stale'
+    this.prDetail = null
     this.detail = null
     this.fetchedAt = null
     this.checkedAt = null
@@ -286,6 +295,8 @@ export class RepositorySyncCoordinator {
     this.checkedAt = this.clock.now()
     if (snapshot.githubStale) {
       this.fetchedAt = Date.parse(snapshot.githubStale.fetchedAt) || this.clock.now()
+      this.prState = 'stale'
+      this.prDetail = snapshot.githubStale.reason
       this.state = 'stale'
       this.detail = snapshot.githubStale.reason
       return
@@ -293,8 +304,10 @@ export class RepositorySyncCoordinator {
     // No confirmed GitHub data at all: the origin is not a usable GitHub
     // repository, so there is nothing to keep fresh and nothing to fall back to.
     this.fetchedAt = this.clock.now()
-    this.state = snapshot.github.available ? 'fresh' : 'stale'
-    this.detail = snapshot.github.available ? null : snapshot.github.message
+    this.prState = snapshot.github.available ? 'fresh' : 'stale'
+    this.prDetail = snapshot.github.available ? null : snapshot.github.message
+    this.state = this.prState
+    this.detail = this.prDetail
   }
 
   private scheduleRemote(delayMs: number): void {
@@ -401,7 +414,7 @@ export class RepositorySyncCoordinator {
       return await work
     } catch (error) {
       if (this.repository === repository && tier !== 'local' && !isCancelled(error)) {
-        this.recordFailure(error)
+        this.recordFailure(error, tier === 'secondary' ? 'inbox' : 'remote')
       }
       return null
     }
@@ -457,7 +470,7 @@ export class RepositorySyncCoordinator {
         return snapshot
       }
       this.emit({ kind: 'snapshot', snapshot: { ...snapshot, remote: this.freshness() } })
-      this.recordFailure(snapshot.githubFailure)
+      this.recordFailure(snapshot.githubFailure, 'remote')
       return snapshot
     }
     this.adopt(snapshot)
@@ -486,8 +499,15 @@ export class RepositorySyncCoordinator {
       this.parkUntil = 0
     }
     // An answer at all proves the limit is over, so a parked state lifts without
-    // the person having to do anything.
-    if (this.state === 'rate-limited') this.state = this.fetchedAt === null ? 'stale' : 'fresh'
+    // the person having to do anything. It proves nothing about the pull
+    // requests: this read never asked for one, so the data on screen keeps the
+    // health its own last refresh earned.
+    if (this.state === 'rate-limited') {
+      this.state = this.prState
+      this.detail = this.prDetail
+      this.rateLimitReset = null
+      this.resumeAt = null
+    }
     this.emit({ kind: 'issues', issues })
     this.emit({ kind: 'status', freshness: this.freshness() })
     this.scheduleRemote(this.intervalFor('secondary'))
@@ -508,7 +528,12 @@ export class RepositorySyncCoordinator {
     return remaining !== null && remaining <= this.intervals.budgetFloor
   }
 
-  private recordFailure(error: unknown): void {
+  /**
+   * Records why a refresh could not reach GitHub. A failed inbox read says
+   * nothing about the pull-request data, so only a failed remote refresh
+   * changes the health that data keeps.
+   */
+  private recordFailure(error: unknown, scope: 'remote' | 'inbox'): void {
     this.checkedAt = this.clock.now()
     this.failures += 1
     const report = lastGitHubRateLimit()
@@ -523,6 +548,10 @@ export class RepositorySyncCoordinator {
     )
     this.state = failure.state
     this.detail = failure.detail
+    if (scope === 'remote') {
+      this.prState = failure.state
+      this.prDetail = failure.detail
+    }
     this.resumeAt = failure.resumeAt
     this.rateLimitReset = failure.resumeAt
     this.secondarySuspended = failure.secondaryOnly
