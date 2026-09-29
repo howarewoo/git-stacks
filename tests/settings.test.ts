@@ -110,9 +110,9 @@ test('a rejected theme is restored without touching its siblings', () => {
 })
 
 test('an absent field is not reported as corrupt, so a sparse file is not all noise', () => {
-  const { issues, settings } = validateSettings({ git: { editor: 'vim' } })
+  const { issues, settings } = validateSettings({ git: { editor: 'code' } })
   assert.deepEqual(issues, [])
-  assert.equal(settings.git.editor, 'vim')
+  assert.equal(settings.git.editor, 'code')
   assert.equal(settings.git.mergeTool, DEFAULT_SETTINGS.git.mergeTool)
 })
 
@@ -565,4 +565,22 @@ test('redundant legacy shortcut migration does not overwrite existing user short
   }
   const result = applyPatch(current, patch)
   assert.equal(result.settings.shortcuts['stack.selectChild'], 'b')
+})
+
+test('the advertised notepad++ editor is accepted and persisted', async () => {
+  await withTempDir(async (dir) => {
+    const file = join(dir, 'settings.json')
+    const snapshot = await updateSettings(file, { git: { editor: 'notepad++' } }, NO_LOCKS)
+    assert.equal(snapshot.settings.git.editor, 'notepad++')
+    assert.equal(snapshot.issues.length, 0)
+  })
+})
+
+test('terminal editors like vim and nano are rejected by the GUI editor allowlist', async () => {
+  await withTempDir(async (dir) => {
+    const file = join(dir, 'settings.json')
+    const snapshot = await updateSettings(file, { git: { editor: 'nano' } }, NO_LOCKS)
+    assert.equal(snapshot.settings.git.editor, null)
+    assert.ok(snapshot.issues.some((issue) => issue.key === 'git.editor'))
+  })
 })

@@ -1336,7 +1336,7 @@ export interface DesktopAPI {
    * Writes the bundle where the user chose. The path comes from the save
    * dialog main opened, never from the renderer.
    */
-  exportSupportBundle?(): Promise<SupportBundleExport>
+  exportSupportBundle?(previewId: string): Promise<SupportBundleExport>
   /**
    * Opens a file in the configured editor. Main resolves the tool from settings
    * and checks the path is inside the active repository; the renderer supplies

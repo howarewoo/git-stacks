@@ -60,7 +60,7 @@ export interface SettingsDialogProps {
     resetSettings?: () => Promise<SettingsSnapshot>
     diagnostics?: () => Promise<DiagnosticReport>
     supportBundlePreview?: () => Promise<SupportBundlePreview>
-    exportSupportBundle?: () => Promise<{ path: string; bytes: number }>
+    exportSupportBundle?: (previewId: string) => Promise<{ path: string; bytes: number }>
     signOutOfGitHub?: () => Promise<GitHubAccountStatus>
     githubAccountStatus?: () => Promise<GitHubAccountStatus>
   } | null
@@ -189,10 +189,10 @@ export function SettingsDialog({
   }, [desktop, onError])
 
   const exportBundle = React.useCallback(async () => {
-    if (!desktop?.exportSupportBundle) return
+    if (!desktop?.exportSupportBundle || !bundle?.id) return
     setBusy(true)
     try {
-      const result = await desktop.exportSupportBundle()
+      const result = await desktop.exportSupportBundle(bundle.id)
       setMessage(
         result.path
           ? `Support bundle written (${result.bytes} bytes).`
@@ -203,7 +203,7 @@ export function SettingsDialog({
     } finally {
       setBusy(false)
     }
-  }, [desktop, onError])
+  }, [desktop, bundle?.id, onError])
 
   const signOut = React.useCallback(async () => {
     if (!desktop?.signOutOfGitHub) return
@@ -532,21 +532,22 @@ export function SettingsDialog({
                       label="Include local paths"
                       checked={settings.privacy.includeLocalPaths}
                       disabled={busy || locked('privacy.includeLocalPaths')}
-                      onChange={(event) =>
+                      onChange={(event) => {
+                        setBundle(null)
                         void save(
                           { privacy: { includeLocalPaths: event.target.checked } },
                           event.target.checked
                             ? 'Local paths will be included in a support bundle.'
                             : 'Local paths will be withheld from a support bundle.',
                         )
-                      }
+                      }}
                     />
                   </Field>
                   <div className="flex flex-wrap gap-2">
                     <Button variant="secondary" disabled={busy} onClick={previewBundle}>
                       Preview bundle
                     </Button>
-                    <Button disabled={busy} onClick={exportBundle}>
+                    <Button disabled={busy || !bundle?.id} onClick={exportBundle}>
                       Create support bundle
                     </Button>
                   </div>

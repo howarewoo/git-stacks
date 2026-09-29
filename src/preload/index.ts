@@ -153,7 +153,7 @@ const desktop: DesktopAPI = {
   resetSettings: () => ipcRenderer.invoke('settings:reset'),
   diagnostics: () => ipcRenderer.invoke('diagnostics'),
   supportBundlePreview: () => ipcRenderer.invoke('support-bundle:preview'),
-  exportSupportBundle: () => ipcRenderer.invoke('support-bundle:export'),
+  exportSupportBundle: (previewId: string) => ipcRenderer.invoke('support-bundle:export', previewId),
   openInEditor: (relativePath) => ipcRenderer.invoke('editor:open', relativePath),
 }
 

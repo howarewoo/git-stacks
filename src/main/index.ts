@@ -1230,9 +1230,8 @@ function installHandlers() {
   })
   ipcMain.handle('support-bundle:preview', async (event) => {
     validateSender(event)
-    const { settings, currentRevision } = await runSettingsTransaction(async () => {
-      const s = (await readSettingsFile(settingsFile())).settings
-      return { settings: s, currentRevision: settingsRevision }
+    const settings = await runSettingsTransaction(async () => {
+      return (await readSettingsFile(settingsFile())).settings
     })
     const report = await operations.read(() => currentDiagnostics(settings))
     const preview = buildBundle(report, settings, recordedFailures())
@@ -1240,20 +1239,31 @@ function installHandlers() {
     const renderedBody = preview.renderedBody ?? renderBundle(preview, settings.privacy.includeLocalPaths)
     const bytes = preview.bytes ?? Buffer.byteLength(renderedBody)
     const pathCount = settings.privacy.includeLocalPaths ? preview.pathCount : 0
-    activeBundlePreview = {
-      id,
-      preview: { ...preview, id },
-      renderedBody,
-      bytes,
-      pathCount,
-      consent: settings.privacy.includeLocalPaths,
-      settingsRevision: currentRevision,
-      timestamp: Date.now(),
-    }
-    return { ...preview, id, bytes, pathCount }
+
+    return runSettingsTransaction(async () => {
+      activeBundlePreview = {
+        id,
+        preview: { ...preview, id },
+        renderedBody,
+        bytes,
+        pathCount,
+        consent: settings.privacy.includeLocalPaths,
+        settingsRevision,
+        timestamp: Date.now(),
+      }
+      return { ...preview, id, bytes, pathCount }
+    })
   })
-  ipcMain.handle('support-bundle:export', async (event, requestedPreviewId?: unknown) => {
+  ipcMain.handle('support-bundle:export', async (event, requestedPreviewId: unknown) => {
     validateSender(event)
+    if (typeof requestedPreviewId !== 'string' || requestedPreviewId.trim().length === 0) {
+      throw new Error('A valid support bundle preview ID is required.')
+    }
+    if (!activeBundlePreview || activeBundlePreview.id !== requestedPreviewId) {
+      throw new Error(
+        'The support bundle preview has expired or does not match the active preview. Please preview the bundle again before exporting.',
+      )
+    }
     if (!window) throw new Error('There is no window to export from.')
     const target = await dialog.showSaveDialog(window, {
       title: 'Export support bundle',
@@ -1263,31 +1273,29 @@ function installHandlers() {
     if (target.canceled || !target.filePath) return { path: '', bytes: 0, includedPaths: 0 }
 
     return runSettingsTransaction(async () => {
-      if (!activeBundlePreview) {
+      const snapshot = activeBundlePreview
+      if (!snapshot || snapshot.id !== requestedPreviewId) {
         throw new Error(
-          'The support bundle preview has expired because settings changed. Please preview the bundle again before exporting.',
+          'The support bundle preview has expired or does not match the active preview. Please preview the bundle again before exporting.',
         )
       }
-      if (typeof requestedPreviewId === 'string' && activeBundlePreview.id !== requestedPreviewId) {
-        throw new Error('The preview id does not match the active support bundle preview.')
-      }
-      if (activeBundlePreview.settingsRevision !== settingsRevision) {
+      if (snapshot.settingsRevision !== settingsRevision) {
         throw new Error(
           'Settings changed while preparing export. Please preview the bundle again before exporting.',
         )
       }
       const currentSettings = (await readSettingsFile(settingsFile())).settings
-      if (currentSettings.privacy.includeLocalPaths !== activeBundlePreview.consent) {
+      if (currentSettings.privacy.includeLocalPaths !== snapshot.consent) {
         throw new Error(
           'Privacy consent changed while preparing export. Please preview the bundle again before exporting.',
         )
       }
 
-      await writeFile(target.filePath, activeBundlePreview.renderedBody, { mode: 0o600 })
+      await writeFile(target.filePath, snapshot.renderedBody, { mode: 0o600 })
       return {
         path: target.filePath,
-        bytes: activeBundlePreview.bytes,
-        includedPaths: activeBundlePreview.pathCount,
+        bytes: snapshot.bytes,
+        includedPaths: snapshot.pathCount,
       }
     })
   })

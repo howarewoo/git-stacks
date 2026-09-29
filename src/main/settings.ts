@@ -23,7 +23,7 @@ import { isRecord } from './git-core'
  * newline, or a path separator is refused rather than split or quoted, so no
  * stored setting can turn into more than one argument.
  */
-const TOOL_NAME = /^[A-Za-z0-9._-]+$/
+const TOOL_NAME = /^[A-Za-z0-9._\-+]+$/
 
 /** Every setting key, in the order the Settings surface presents them. */
 export const SETTING_KEYS = [
@@ -69,7 +69,7 @@ function toolName(
   if (!TOOL_NAME.test(trimmed)) {
     return {
       value: null,
-      issue: 'must be one program name: letters, digits, dot, dash, or underscore',
+      issue: 'must be one program name: letters, digits, dot, dash, plus, or underscore',
     }
   }
   if (!allowed.includes(trimmed)) {
