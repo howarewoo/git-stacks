@@ -22,6 +22,9 @@ When changing `GitAction`, update the renderer fixture's action messages in
 `tests/renderer/fixtures/control.ts` and affected test payloads. `npm run build`
 typechecks these test consumers as well as the application.
 
+Stale-preview publishing tests assert rejection and unchanged local and remote
+refs. Diagnostic wording is not part of that behavioral contract.
+
 ## Performance budgets
 
 Git Stacks is used on repositories far larger than the ones it was built
@@ -308,6 +311,7 @@ If Git encounters conflicts during the rebase cascade:
 2. Conflicted files appear in the Changes view and conflict resolver.
 3. Once conflicts are resolved, use **Continue** to adopt the rebased commit and resume the cascade for the remaining branches.
 4. Alternatively, use **Abort** to restore all branches and their metadata to their exact pre-sync backup refs and return to the original clean checkout.
+
 ## Linked issues
 
 A pull request inspector and the pull request workflow dialog both list the issues

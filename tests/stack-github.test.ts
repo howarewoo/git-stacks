@@ -360,7 +360,6 @@ test(
             child: { title: 'Child title', body: '', draft: false, updateBase: true },
           },
         }),
-        /pull request for child changed/u,
       )
 
       assert.equal(remoteOid(harness, 'parent'), parentRemoteBefore)
@@ -621,6 +620,12 @@ test(
       let staleState = await harness.readState()
       updatePr(staleState, 'child', { base: 'main' })
       await harness.writeState(staleState)
+      const beforeStaleBase = {
+        parent: localOid(harness, 'parent'),
+        child: localOid(harness, 'child'),
+        remoteParent: remoteOid(harness, 'parent'),
+        remoteChild: remoteOid(harness, 'child'),
+      }
       await assert.rejects(
         runAction(harness.repo, {
           type: 'submitStack',
@@ -631,7 +636,16 @@ test(
             child: { title: 'Child title', body: '', draft: false, updateBase: true },
           },
         }),
-        /pull request for child changed/u,
+      )
+      assert.deepEqual(
+        {
+          parent: localOid(harness, 'parent'),
+          child: localOid(harness, 'child'),
+          remoteParent: remoteOid(harness, 'parent'),
+          remoteChild: remoteOid(harness, 'child'),
+        },
+        beforeStaleBase,
+        'a stale pull request refuses the run before any ref or pull request moves',
       )
       staleState = await harness.readState()
       updatePr(staleState, 'child', { base: 'parent' })
