@@ -16,6 +16,11 @@ import {
   type ReviewLine,
   type ReviewStackRail,
 } from '../../../src/shared/review'
+import type {
+  ReviewEvent,
+  ReviewPermissions,
+  ReviewThreadSet,
+} from '../../../src/shared/review-threads'
 import type { DiffHunkLineKind, PullRequestStackMember } from '../../../src/shared/types'
 import type { NativeStack, PullRequest } from '../../../src/shared/types'
 
@@ -245,5 +250,108 @@ export function reviewRail(
     previous: position > 0 ? ordered[position - 1] : null,
     next: position < ordered.length - 1 ? ordered[position + 1] : null,
     message: '',
+  }
+}
+
+/**
+ * The threads and the viewer's permissions for one pull request, in the shape
+ * the main process returns.
+ *
+ * The gallery needs every state the conversation can be in, because the states
+ * are the design: a resolved thread, an outdated one, a reply from the viewer, a
+ * reviewer who cannot post, and a reviewer who is also the author and therefore
+ * cannot approve their own pull request.
+ */
+export function reviewThreadSet(
+  number: number,
+  headOid: string,
+  options: { resolved?: boolean; outdated?: boolean } = {},
+): ReviewThreadSet {
+  const comparison = { headOid, baseOid: 'b'.repeat(40), baseRef: 'main' }
+  return {
+    number,
+    comparison,
+    totalCount: 2,
+    truncated: false,
+    threads: [
+      {
+        id: 'T_thr_1',
+        path: 'src/main/review.ts',
+        side: 'head',
+        line: 2,
+        startLine: null,
+        startSide: null,
+        fileLevel: false,
+        resolved: options.resolved ?? false,
+        collapsed: false,
+        outdated: options.outdated ?? false,
+        viewerCanReply: true,
+        viewerCanResolve: true,
+        viewerCanUnresolve: true,
+        comments: [
+          {
+            id: 'IC_1',
+            author: 'acme-reviewer',
+            body: 'Should this be re-read when the base moves, or is the head enough?',
+            createdAt: '2026-09-23T09:00:00Z',
+            url: 'https://github.com/acme/widgets/pull/7#discussion_r1',
+            viewerDidAuthor: false,
+          },
+          {
+            id: 'IC_2',
+            author: 'acme-viewer',
+            body: 'The base too — the head alone is not enough.',
+            createdAt: '2026-09-23T09:12:00Z',
+            url: 'https://github.com/acme/widgets/pull/7#discussion_r2',
+            viewerDidAuthor: true,
+          },
+        ],
+      },
+      {
+        id: 'T_thr_2',
+        path: 'src/renderer/src/components/review-view.tsx',
+        side: 'head',
+        line: 12,
+        startLine: 10,
+        startSide: 'head',
+        fileLevel: false,
+        resolved: true,
+        collapsed: true,
+        outdated: true,
+        viewerCanReply: true,
+        viewerCanResolve: false,
+        viewerCanUnresolve: true,
+        comments: [
+          {
+            id: 'IC_3',
+            author: 'acme-reviewer',
+            body: 'This block moved in the last push; is it still doing this?',
+            createdAt: '2026-09-22T16:30:00Z',
+            url: 'https://github.com/acme/widgets/pull/7#discussion_r3',
+            viewerDidAuthor: false,
+          },
+        ],
+      },
+    ],
+  }
+}
+
+/** The viewer's permissions, with one event blocked at a time so each gate is visible. */
+export function reviewPermissions(
+  number: number,
+  options: { isAuthor?: boolean; blocked?: ReviewEvent } = {},
+): ReviewPermissions {
+  const isAuthor = options.isAuthor ?? false
+  const blocked: Partial<Record<ReviewEvent, string>> = {}
+  if (options.blocked) blocked[options.blocked] = 'You do not have write access to this repository.'
+  if (isAuthor) {
+    blocked.APPROVE = 'You opened this pull request, and GitHub does not let you approve it.'
+  }
+  return {
+    viewer: 'acme-viewer',
+    isAuthor,
+    state: 'OPEN',
+    permission: options.blocked ? 'READ' : 'WRITE',
+    blocked,
   }
 }

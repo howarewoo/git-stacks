@@ -1,6 +1,14 @@
 import type { SnapshotLimits } from './performance'
 import type { RepositoryCapabilities } from './capabilities'
 import type { ReviewCommitSet, ReviewFileSet, ReviewHeadline, ReviewViewedRecord } from './review'
+import type {
+  ReviewDraft,
+  ReviewDraftRecord,
+  ReviewDraftResolution,
+  ReviewEvent,
+  ReviewMutationResult,
+  ReviewThreadRead,
+} from './review-threads'
 
 export type NativeStackValidationStatus =
   | 'valid'
@@ -1014,6 +1022,31 @@ export interface DesktopAPI {
   /** Locally recorded viewed files, bound to the head they were read at. */
   reviewViewed?(number: number): Promise<ReviewViewedRecord | null>
   reviewSetViewed?(record: ReviewViewedRecord): Promise<ReviewViewedRecord>
+  /** Threads and the viewer's permissions for one pull request, read from GitHub. */
+  reviewThreads?(number: number, requestId?: string): Promise<ReviewThreadRead>
+  /** Locally recorded pending comments, journalled beside the repository. */
+  reviewDrafts?(number: number): Promise<ReviewDraftRecord | null>
+  reviewSetDrafts?(record: ReviewDraftRecord): Promise<ReviewDraftRecord>
+  /**
+   * Where each pending draft's lines sit at the comparison on screen now. The
+   * view marks a stale draft before anybody presses submit; the main process
+   * revalidates again at the write boundary, so this is a warning, not the gate.
+   */
+  reviewResolveDrafts?(
+    number: number,
+    drafts: ReviewDraft[],
+  ): Promise<ReviewDraftResolution[]>
+  /**
+   * Writes every pending comment as one review. The anchors are revalidated in
+   * the main process, so a draft that no longer names its line refuses the whole
+   * submission rather than being posted elsewhere.
+   */
+  reviewSubmit?(
+    number: number,
+    submission: { event: ReviewEvent; body: string; drafts: ReviewDraft[] },
+  ): Promise<ReviewMutationResult>
+  reviewReply?(number: number, threadId: string, body: string): Promise<ReviewMutationResult>
+  reviewSetResolved?(number: number, threadId: string, resolved: boolean): Promise<ReviewMutationResult>
   listNativeStacks?: () => Promise<NativeStack[]>
   createNativeStack?: (pullRequests: number[]) => Promise<NativeStack>
   addPullRequestsToNativeStack?: (

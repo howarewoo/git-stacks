@@ -37,10 +37,23 @@ import {
   restackPreview,
   syncPreview,
 } from '../../fixtures/workflow-scenarios'
-import { reviewCommits, reviewFileSet, reviewRail, stackMember } from './review'
+import { reviewCommits, reviewFileSet, reviewPermissions, reviewRail, reviewThreadSet, stackMember } from './review'
+import type { ReviewFile, ReviewLine, ReviewSide } from '../../../src/shared/review'
+import type {
+  ReviewDraftRecord,
+  ReviewDraftResolution,
+  ReviewEvent,
+} from '../../../src/shared/review-threads'
 import { scenarios } from './scenarios'
 import { DEFAULT_SCENARIO, type ScenarioName } from './manifest'
 import type { FixtureCall, FixtureCallRecord, FixtureControl, FixtureScenario } from './types'
+
+/** The review state GitHub reports back for each submitted event. */
+const REVIEW_SUBMIT_STATES: Record<ReviewEvent, string> = {
+  COMMENT: 'COMMENTED',
+  APPROVE: 'APPROVED',
+  REQUEST_CHANGES: 'CHANGES_REQUESTED',
+}
 
 /** Production labels of the controls that open a repository from the onboarding pane. */
 const OPEN_REPOSITORY_LABELS = ['Open local repository', 'Open repository']
@@ -53,6 +66,28 @@ const stackPreviewsByKind: Record<StackKind, StackPreview> = {
   publish: publishPreview,
   merge: mergePreview,
   sync: syncPreview,
+}
+
+function unresolved(id: string, reason: string): ReviewDraftResolution {
+  return { id, match: 'unresolved', side: null, line: null, startLine: null, reason }
+}
+
+/** The line a draft's address names, or null when the file set no longer has it. */
+function lineAt(
+  files: ReviewFile[],
+  path: string,
+  side: ReviewSide,
+  number: number,
+): ReviewLine | null {
+  const file = files.find((entry) => entry.path === path)
+  if (!file || file.diff.kind !== 'text') return null
+  for (const hunk of file.diff.hunks) {
+    for (const line of hunk.lines) {
+      if (line.side !== side) continue
+      if ((side === 'base' ? line.oldLine : line.newLine) === number) return line
+    }
+  }
+  return null
 }
 
 const bundledRuntime: GitRuntimeInfo = {
@@ -202,6 +237,8 @@ export function installFixtureControl(options: {
 }): FixtureControl {
   const actions: GitAction[] = []
   const externalUrls: string[] = []
+  /** Pending drafts per pull request, held for the life of the page as the real journal is. */
+  const heldDrafts = new Map<number, ReviewDraftRecord>()
   const calls: FixtureCallRecord[] = []
   const holds = new Set<FixtureCall>()
   const oneShotFailures = new Map<FixtureCall, string>()
@@ -468,6 +505,89 @@ export function installFixtureControl(options: {
     reviewSetViewed: (record_) => {
       record('reviewSetViewed', [record_])
       return answer('reviewSetViewed', () => record_ as ReviewViewedRecord)
+    },
+    reviewThreads: (number) => {
+      record('reviewThreads', [number])
+      return answer('reviewThreads', () => {
+        const found = scenario.snapshot?.pullRequests.find((pr) => pr.number === number)
+        const headOid = scenario.reviewHeadOid ?? found?.headOid ?? `head-${number}`
+        return {
+          threads: reviewThreadSet(number, headOid),
+          permissions: reviewPermissions(number, scenario.reviewPermissions),
+        }
+      })
+    },
+    reviewDrafts: (number) => {
+      record('reviewDrafts', [number])
+      // The real journal outlives the workspace, so the double keeps drafts for
+      // the life of the page: leaving the review workspace and coming back has
+      // to show the pending comments again, which is the behaviour being proven.
+      return answer('reviewDrafts', () => heldDrafts.get(number) ?? null)
+    },
+    reviewSetDrafts: (draftRecord) => {
+      record('reviewSetDrafts', [draftRecord])
+      heldDrafts.set(draftRecord.number, draftRecord)
+      return answer('reviewSetDrafts', () => draftRecord as ReviewDraftRecord)
+    },
+    reviewSubmit: (number, submission) => {
+      record('reviewSubmit', [number, submission])
+      return answer('reviewSubmit', () => ({
+        id: `review-${number}`,
+        state: REVIEW_SUBMIT_STATES[submission.event],
+        url: `https://github.com/acme/widgets/pull/${number}#pullrequestreview-1`,
+      }))
+    },
+    reviewReply: (number, threadId) => {
+      record('reviewReply', [number, threadId])
+      return answer('reviewReply', () => ({
+        id: `reply-${threadId}`,
+        state: 'COMMENTED',
+        url: `https://github.com/acme/widgets/pull/${number}#discussion_r9`,
+      }))
+    },
+    reviewSetResolved: (number, threadId, resolved) => {
+      record('reviewSetResolved', [number, threadId, resolved])
+      return answer('reviewSetResolved', () => ({
+        id: threadId,
+        state: resolved ? 'RESOLVED' : 'UNRESOLVED',
+        url: null,
+      }))
+    },
+    reviewResolveDrafts: (number, drafts) => {
+      record('reviewResolveDrafts', [number, drafts])
+      return answer('reviewResolveDrafts', () => {
+        const found = scenario.snapshot?.pullRequests.find((pr) => pr.number === number)
+        const headOid = scenario.reviewHeadOid ?? found?.headOid ?? `head-${number}`
+        const files = reviewFileSet(number, headOid)
+        // The main process re-resolves each anchor against a freshly read file
+        // set; the double answers for the set it already serves, so a draft the
+        // reviewer just wrote is exact and a draft naming a line the fixture does
+        // not have is unresolved with a reason. A range is never re-anchored
+        // across a side, exactly as the real resolver refuses.
+        return drafts.map((draft) => {
+          const line = lineAt(files.files, draft.ref.path, draft.ref.side, draft.ref.line)
+          const start = draft.startRef ?? null
+          const startLine = start ? lineAt(files.files, start.path, start.side, start.line) : null
+          if (start && (start.side !== draft.ref.side || start.line > draft.ref.line)) {
+            return unresolved(draft.id, 'The two ends of this comment are not one range on the same side of the diff.')
+          }
+          if (!line) {
+            return unresolved(draft.id, `${draft.ref.path} no longer holds line ${draft.ref.line} on the ${draft.ref.side}.`)
+          }
+          if (start && !startLine) {
+            return unresolved(draft.id, `${start.path} no longer holds the first line of this comment.`)
+          }
+          return {
+            id: draft.id,
+            match: 'exact' as const,
+            side: draft.ref.side,
+            line: draft.ref.side === 'base' ? line.oldLine : line.newLine,
+            startLine:
+              startLine && draft.startRef?.side === 'base' ? startLine.oldLine : (startLine?.newLine ?? null),
+            reason: '',
+          }
+        })
+      })
     },
     openExternal: (url) => {
       record('openExternal', [url])

@@ -7,6 +7,7 @@ import { useListWindow } from '../lib/list-window'
 import { ListWindowMore } from './list-window'
 import { Badge } from './ui/badge'
 import { cn } from '../lib/utils'
+import type { ReviewSelection } from './review-conversation'
 
 function lineClass(line: ReviewLine | null | undefined): string | undefined {
   if (!line) return undefined
@@ -34,10 +35,14 @@ export function ReviewDiff({
   file,
   mode,
   hideWhitespace,
+  selection,
+  onSelect,
 }: {
   file: ReviewFile
   mode: ReviewDiffMode
   hideWhitespace: boolean
+  selection: ReviewSelection | null
+  onSelect: (selection: ReviewSelection) => void
 }) {
   if (file.diff.kind !== 'text') {
     return (
@@ -70,15 +75,66 @@ export function ReviewDiff({
         </p>
       ) : null}
       {mode === 'split' ? (
-        <SplitRows file={file} hideWhitespace={hideWhitespace} />
+        <SplitRows
+          file={file}
+          hideWhitespace={hideWhitespace}
+          selection={selection}
+          onSelect={onSelect}
+        />
       ) : (
-        <UnifiedRows file={file} hideWhitespace={hideWhitespace} />
+        <UnifiedRows
+          file={file}
+          hideWhitespace={hideWhitespace}
+          selection={selection}
+          onSelect={onSelect}
+        />
       )}
     </div>
   )
 }
 
-function UnifiedRows({ file, hideWhitespace }: { file: ReviewFile; hideWhitespace: boolean }) {
+/** True when a line falls inside the range the reviewer has chosen. */
+function inSelection(selection: ReviewSelection | null, path: string, line: ReviewLine): boolean {
+  if (!selection || selection.path !== path || line.side === null) return false
+  if (selection.side !== line.side) return false
+  const number = line.side === 'base' ? line.oldLine : line.newLine
+  if (number === null) return false
+  return number >= Math.min(selection.anchor, selection.head) &&
+    number <= Math.max(selection.anchor, selection.head)
+}
+
+/**
+ * Selecting a line extends the range when the range already starts on the same
+ * file and side. A range may not cross a side — GitHub addresses its two ends
+ * separately — so a choice on the other side starts a new selection rather than
+ * silently widening one into something that cannot be sent.
+ */
+function extendSelection(
+  selection: ReviewSelection | null,
+  path: string,
+  line: ReviewLine,
+  extend: boolean,
+): ReviewSelection {
+  if (line.side === null) return selection ?? { path, side: 'head', anchor: 0, head: 0 }
+  const number = line.side === 'base' ? line.oldLine : line.newLine
+  if (number === null) return selection ?? { path, side: line.side, anchor: 0, head: 0 }
+  if (extend && selection && selection.path === path && selection.side === line.side) {
+    return { ...selection, head: number }
+  }
+  return { path, side: line.side, anchor: number, head: number }
+}
+
+function UnifiedRows({
+  file,
+  hideWhitespace,
+  selection,
+  onSelect,
+}: {
+  file: ReviewFile
+  hideWhitespace: boolean
+  selection: ReviewSelection | null
+  onSelect: (selection: ReviewSelection) => void
+}) {
   const rows = React.useMemo(
     () => (file.diff.kind === 'text' ? reviewUnifiedRows(file.diff.hunks, { hideWhitespace }) : []),
     [file, hideWhitespace],
@@ -106,10 +162,28 @@ function UnifiedRows({ file, hideWhitespace }: { file: ReviewFile; hideWhitespac
               {'\n'}
             </span>
           ) : (
-            <span className={lineClass(row.line)} key={`line:${row.hunkId}:${index}`}>
-              <span aria-hidden="true" className="review-line-number">
-                {row.number === null ? '' : `${row.number} `}
-              </span>
+            <span
+              className={cn(
+                lineClass(row.line),
+                'review-line',
+                inSelection(selection, file.path, row.line) && 'review-line-selected',
+              )}
+              key={`line:${row.hunkId}:${index}`}
+            >
+              {row.line.side === null ? null : (
+                <button
+                  aria-label={`Comment on ${file.path} line ${
+                    row.line.side === 'base' ? row.line.oldLine : row.line.newLine
+                  } on the ${row.line.side}`}
+                  className="review-line-gutter"
+                  type="button"
+                  onClick={(event) =>
+                    onSelect(extendSelection(selection, file.path, row.line, event.shiftKey))
+                  }
+                >
+                  {row.number === null ? '' : row.number}
+                </button>
+              )}
               {row.line.text}
               {'\n'}
             </span>
@@ -128,7 +202,17 @@ function UnifiedRows({ file, hideWhitespace }: { file: ReviewFile; hideWhitespac
   )
 }
 
-function SplitRows({ file, hideWhitespace }: { file: ReviewFile; hideWhitespace: boolean }) {
+function SplitRows({
+  file,
+  hideWhitespace,
+  selection,
+  onSelect,
+}: {
+  file: ReviewFile
+  hideWhitespace: boolean
+  selection: ReviewSelection | null
+  onSelect: (selection: ReviewSelection) => void
+}) {
   const rows = React.useMemo(
     () => (file.diff.kind === 'text' ? reviewSplitRows(file.diff.hunks, { hideWhitespace }) : []),
     [file, hideWhitespace],
@@ -149,18 +233,54 @@ function SplitRows({ file, hideWhitespace }: { file: ReviewFile; hideWhitespace:
             </div>
           ) : (
             <div className="review-split-row" key={`split:${row.hunkId}:${index}`}>
-              <span className={cn('review-split-cell', lineClass(row.left?.line))}>
-                <span aria-hidden="true" className="review-split-gutter">
-                  {row.left ? `${row.left.number} ` : ''}
+              {row.left ? (
+                <span
+                  className={cn(
+                    'review-split-cell',
+                    lineClass(row.left.line),
+                    inSelection(selection, file.path, row.left.line) && 'review-line-selected',
+                  )}
+                >
+                  <button
+                    aria-label={`Comment on ${file.path} line ${row.left.number} on the base`}
+                    className="review-split-gutter"
+                    type="button"
+                    onClick={(event) =>
+                      onSelect(extendSelection(selection, file.path, row.left!.line, event.shiftKey))
+                    }
+                  >
+                    {row.left.number}
+                  </button>
+                  {`${row.left.line.text}\n`}
                 </span>
-                {row.left ? `${row.left.line.text}\n` : ''}
-              </span>
-              <span className={cn('review-split-cell', lineClass(row.right?.line))}>
-                <span aria-hidden="true" className="review-split-gutter">
-                  {row.right ? `${row.right.number} ` : ''}
+              ) : (
+                <span className="review-split-cell" />
+              )}
+              {row.right ? (
+                <span
+                  className={cn(
+                    'review-split-cell',
+                    lineClass(row.right.line),
+                    inSelection(selection, file.path, row.right.line) && 'review-line-selected',
+                  )}
+                >
+                  <button
+                    aria-label={`Comment on ${file.path} line ${row.right.number} on the head`}
+                    className="review-split-gutter"
+                    type="button"
+                    onClick={(event) =>
+                      onSelect(
+                        extendSelection(selection, file.path, row.right!.line, event.shiftKey),
+                      )
+                    }
+                  >
+                    {row.right.number}
+                  </button>
+                  {`${row.right.line.text}\n`}
                 </span>
-                {row.right ? `${row.right.line.text}\n` : ''}
-              </span>
+              ) : (
+                <span className="review-split-cell" />
+              )}
             </div>
           ),
         )}

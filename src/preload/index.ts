@@ -53,6 +53,18 @@ const desktop: DesktopAPI = {
     ipcRenderer.invoke('repository:review-commits', number, requestId),
   reviewViewed: (number) => ipcRenderer.invoke('repository:review-viewed', number),
   reviewSetViewed: (record) => ipcRenderer.invoke('repository:review-set-viewed', record),
+  reviewThreads: (number, requestId) =>
+    ipcRenderer.invoke('repository:review-threads', number, requestId),
+  reviewDrafts: (number) => ipcRenderer.invoke('repository:review-drafts', number),
+  reviewResolveDrafts: (number, drafts) =>
+    ipcRenderer.invoke('repository:review-resolve-drafts', number, drafts),
+  reviewSetDrafts: (record) => ipcRenderer.invoke('repository:review-set-drafts', record),
+  reviewSubmit: (number, submission) =>
+    ipcRenderer.invoke('repository:review-submit', number, submission),
+  reviewReply: (number, threadId, body) =>
+    ipcRenderer.invoke('repository:review-reply', number, threadId, body),
+  reviewSetResolved: (number, threadId, resolved) =>
+    ipcRenderer.invoke('repository:review-resolve', number, threadId, resolved),
   openExternal: (url) => ipcRenderer.invoke('external:open', url),
   cancel: (requestId) => ipcRenderer.invoke('operation:cancel', requestId),
   gitRuntimeStatus: () => ipcRenderer.invoke('git-runtime'),

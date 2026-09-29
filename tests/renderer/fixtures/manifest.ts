@@ -62,6 +62,8 @@ export const SCENARIO_NAMES = [
   'review-force-pushed',
   'review-stacked',
   'review-unstacked',
+  'review-read-only',
+  'review-own-pull-request',
   // Workflows and recovery
   'workflow-preview-ready',
   'workflow-preview-loading',

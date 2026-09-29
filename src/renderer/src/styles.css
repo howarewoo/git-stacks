@@ -2965,9 +2965,16 @@ textarea.conflict-content {
   display: grid;
   min-height: 0;
   flex: 1;
-  grid-template-areas: 'tree diff commits';
-  grid-template-columns: minmax(200px, 260px) minmax(0, 1fr) minmax(220px, 300px);
+  grid-template-areas:
+    'tree diff commits'
+    'tree diff conversation';
+  grid-template-columns: minmax(200px, 260px) minmax(0, 1fr) minmax(240px, 340px);
+  grid-template-rows: minmax(0, 28%) minmax(0, 1fr);
   overflow: hidden;
+}
+
+.review-conversation {
+  grid-area: conversation;
 }
 
 .review-tree {
@@ -2976,6 +2983,174 @@ textarea.conflict-content {
 
 .review-diff {
   grid-area: diff;
+}
+
+/* The conversation column: what has been said, what is still unsent, and the
+   one decision that submits them. */
+.review-conversation {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px 12px;
+  border-inline-start: 1px solid var(--gs-semantic-border-decorative);
+  overflow: auto;
+}
+
+.review-conversation-alert,
+.review-conversation-note {
+  margin: 0;
+  font-size: 12px;
+  color: var(--gs-semantic-text-secondary);
+}
+
+.review-selection {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 8px;
+  border: 1px solid var(--gs-semantic-accent-border);
+  border-radius: var(--gs-semantic-radius-control);
+  background: var(--gs-semantic-accent-subtle);
+}
+
+.review-selection-label {
+  flex: 1 1 100%;
+  min-width: 0;
+  font-size: 12px;
+  font-family: var(--gs-semantic-font-mono);
+  overflow-wrap: anywhere;
+}
+
+.review-selection-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.review-drafts,
+.review-thread-list,
+.review-conversation-threads {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.review-drafts-caption,
+.review-conversation-threads-head {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--gs-semantic-text-muted);
+}
+
+.review-draft-head,
+.review-thread-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--gs-semantic-text-secondary);
+}
+
+.review-draft-reason,
+.review-submit-reason {
+  margin: 0;
+  font-size: 11px;
+  color: var(--gs-semantic-text-secondary);
+}
+
+/* An unsent draft is a pending idea, not a comment GitHub holds; it is tinted so
+   the two are never mistaken for each other in the same list. */
+.review-draft {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  border: 1px dashed var(--gs-semantic-border-decorative);
+  border-radius: var(--gs-semantic-radius-control);
+  background: var(--gs-semantic-surface-inset);
+}
+
+.review-draft-selected {
+  border-color: var(--gs-semantic-accent-border);
+  background: var(--gs-semantic-accent-subtle);
+}
+
+.review-draft-body,
+.review-thread-reply {
+  width: 100%;
+  min-height: 4.5em;
+  resize: vertical;
+  font: inherit;
+}
+
+.review-thread {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  border: 1px solid var(--gs-semantic-border-decorative);
+  border-radius: var(--gs-semantic-radius-control);
+}
+
+.review-thread-resolved {
+  opacity: 0.72;
+}
+
+.review-thread-comments {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.review-thread-comment-head {
+  display: flex;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--gs-semantic-text-muted);
+}
+
+.review-thread-comment-body {
+  margin: 2px 0 0;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.review-thread-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.review-submit {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 0 0;
+  border-top: 1px solid var(--gs-semantic-border-decorative);
+}
+
+.review-submit-summary {
+  font-size: 12px;
+  color: var(--gs-semantic-text-secondary);
+}
+
+.review-submit-events {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
 }
 
 .review-commits {
@@ -3128,12 +3303,29 @@ textarea.conflict-content {
   display: block;
 }
 
-.review-line-number {
+/* The line number becomes the control that starts a review comment, so it must
+   look pressable and must never be selected as diff text. */
+.review-line-gutter {
   display: inline-block;
-  min-width: 4ch;
+  min-width: 5ch;
+  padding: 0 6px 0 2px;
   color: var(--gs-semantic-text-muted);
   text-align: right;
   user-select: none;
+  background: none;
+  border: 0;
+  font: inherit;
+  cursor: pointer;
+}
+
+.review-line-gutter:hover,
+.review-line-gutter:focus-visible {
+  color: var(--gs-semantic-text-primary);
+  background: var(--gs-semantic-surface-hover);
+}
+
+.review-line-selected {
+  background: var(--gs-semantic-accent-subtle);
 }
 
 /* Split mode is a two-column grid rather than two preformatted columns so that
@@ -3177,9 +3369,20 @@ textarea.conflict-content {
 .review-split-gutter {
   display: inline-block;
   min-width: 4ch;
+  padding: 0 6px 0 2px;
   color: var(--gs-semantic-text-muted);
   text-align: right;
   user-select: none;
+  background: none;
+  border: 0;
+  font: inherit;
+  cursor: pointer;
+}
+
+.review-split-gutter:hover,
+.review-split-gutter:focus-visible {
+  color: var(--gs-semantic-text-primary);
+  background: var(--gs-semantic-surface-hover);
 }
 
 .review-split-hunk {
@@ -3229,44 +3432,56 @@ textarea.conflict-content {
 }
 
 /* Too narrow for three columns: the commit list moves under the diff rather
-   than disappearing, so the pull request's commits stay reachable. */
+   than disappearing, so the pull request's commits stay reachable, and the
+   conversation follows it. */
 @container review (max-width: 1320px) {
   .review-body {
     grid-template-areas:
       'tree diff'
-      'tree commits';
+      'tree commits'
+      'tree conversation';
     grid-template-columns: minmax(180px, 220px) minmax(0, 1fr);
-    grid-template-rows: minmax(0, 1fr) minmax(0, 30%);
+    grid-template-rows: minmax(0, 24%) minmax(0, 24%) minmax(0, 1fr);
   }
 
-  .review-commits {
+  .review-commits,
+  .review-conversation {
     border-block-start: 1px solid var(--gs-semantic-border-decorative);
     border-inline-start: 0;
   }
 }
 
 /* Too narrow even for that: one region at a time, tree first.
-   The three regions share the window rather than each growing to its content, so
+   The four regions share the window rather than each growing to its content, so
    the patch is on screen when the workspace opens instead of below a screenful
    of file rows, and each region scrolls inside its own share. The pane is the
-   scroll container at this width, exactly as it is for the other workspaces. */
+   scroll container at this width, exactly as it is for the other workspaces.
+   The conversation is last, so the reviewer's own words and the decision to
+   submit them follow the diff they are about. */
 @container review (max-width: 720px) {
   .review-body {
     grid-template-areas:
       'tree'
       'diff'
-      'commits';
+      'commits'
+      'conversation';
     grid-template-columns: minmax(0, 1fr);
     grid-template-rows: auto auto auto;
   }
 
-  /* Content-sized rows, each region capped, so the three stack at a usable size
+  /* Content-sized rows, each region capped, so the four stack at a usable size
      instead of one region claiming the whole workspace. The pane is the scroll
      container at this width, as it is for every other workspace, so the view
      grows to the sum of the caps and each region scrolls inside itself. */
   .review-tree,
-  .review-commits {
+  .review-commits,
+  .review-conversation {
     max-height: 15rem;
+  }
+
+  .review-conversation {
+    border-block-start: 1px solid var(--gs-semantic-border-decorative);
+    border-inline-start: 0;
   }
 
   .review-diff {

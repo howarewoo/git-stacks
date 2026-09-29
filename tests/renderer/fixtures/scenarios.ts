@@ -751,6 +751,32 @@ export const scenarios: Record<ScenarioName, FixtureScenario> = {
     }),
     recentRepositories,
   },
+  'review-read-only': {
+    name: 'review-read-only',
+    summary:
+      'A viewer with no write access, so every submit decision is refused before any request is made.',
+    snapshot: repository({
+      branches: [mainBranch, ...reviewStackBranches],
+      currentBranch: 'feature/review-42',
+      pullRequests: reviewStackPullRequests,
+    }),
+    recentRepositories,
+    reviewHeadOid: 'ffffeee',
+    reviewPermissions: { blocked: 'COMMENT' },
+  },
+  'review-own-pull-request': {
+    name: 'review-own-pull-request',
+    summary:
+      'The viewer opened this pull request, so approval is refused while comment and request changes stay available.',
+    snapshot: repository({
+      branches: [mainBranch, ...reviewStackBranches],
+      currentBranch: 'feature/review-42',
+      pullRequests: reviewStackPullRequests,
+    }),
+    recentRepositories,
+    reviewHeadOid: 'ffffeee',
+    reviewPermissions: { isAuthor: true },
+  },
   'pull-requests-lifecycle': {
     name: 'pull-requests-lifecycle',
     summary: 'Draft, open, closed, and merged pull requests on their own branches.',

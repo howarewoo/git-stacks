@@ -389,6 +389,48 @@ The rail states the pull request's position in its native stack and offers the t
 
 Viewed files are a local reading aid bound to the **whole comparison** they were recorded at: the head object, the base object, and the base branch name. A force-push changes the head and a push to the base branch changes the base, so either drops the marks rather than carrying them onto a diff nobody looked at. A retarget is a third case: it can leave both object ids untouched, so the branch name is carried too, and a rename reads the same way. Retargeting is a routine action, not a rare race, and a mark carried across it would claim review of changes nobody opened; the cost is re-opening a few files. GitHub is not asked to store them, and the app never claims to have synced a state GitHub does not expose.
 
+**Leaving a review.** The conversation column holds the three states a review is
+in at once — what GitHub already holds, what the reviewer has written but not
+sent, and the single decision that sends it — because splitting them across
+panes would make the pending state the hardest one to notice, which is exactly
+the state that is lost if it is missed. A line number is the affordance that
+starts a comment: the reviewer points at the lines they mean, and a held
+modifier extends the range to a multi-line comment. Nothing asks for a path and
+a number that the reviewer would have to read off the screen.
+
+Pending comments are local by necessity, not by preference: GitHub has no
+pending-comment resource, so they are journalled in the app's own storage and
+restored when the workspace reopens. They are drawn to be visibly unsent — a
+pending rule, a pending label, never the styling of something already on GitHub
+— and a draft recorded against a comparison that is no longer on screen is shown
+as stale rather than re-placed. Restoring them on reopen is the whole point:
+navigating to another pull request and back must not cost a reviewer their
+unfinished sentence.
+
+One decision submits every pending comment. GitHub's review endpoint takes all
+of a review's inline comments in one request, so several comments become one
+Comment, Approve, or Request changes event; the alternative, one event per
+comment, would be several events the reviewer never chose. The app cannot approve
+the viewer's own pull request, and it does not offer the choice it knows GitHub
+will refuse. Every other permission is read from GitHub and GitHub stays the
+authority: a local permission decision is a preflight, never a substitute for
+the server's answer.
+
+An anchor is revalidated in the main process immediately before the write. A
+force-push since the draft was taken means some anchors name a revision that no
+longer exists, and the result is **no mutation at all** plus a per-draft reason —
+never a comment that landed on a neighbouring line or on a different revision
+than the one reviewed. Silence about a dropped comment is indistinguishable from
+success; an explicit stale report is the only safe outcome. A write whose
+response is lost is not replayed automatically, because the replay's most likely
+outcome is a duplicate review carrying a comment the reviewer never wrote twice.
+
+Thread topology, replies, and resolved and outdated state come from GraphQL,
+which is the only place that knows them; REST review comments are flat and cannot
+report a resolved thread. Resolved threads stay visible and marked rather than
+disappearing, because a reviewer coming back to a thread needs to see it was
+resolved rather than assume it was deleted.
+
 The four review commands — next file, previous file, next layer, previous layer — are remappable like every other command and are dispatched by the shell through a ref the view publishes. The view registers no key listener of its own, so two surfaces never compete for the same keystroke.
 
 ### Git runtime diagnostics

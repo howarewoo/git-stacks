@@ -41,6 +41,14 @@ import { EmptyState, InlineAlert } from './ui/surface'
 import { checkLabel, checksVariant, reviewLabel, reviewVariant } from '../lib/pull-request-state'
 import { createRequestGate } from '../lib/request-gate'
 import { cn } from '../lib/utils'
+import { ReviewConversation, type ReviewSelection } from './review-conversation'
+import { withReviewDraft } from '../../../shared/review-threads'
+import type {
+  ReviewDraft,
+  ReviewDraftRecord,
+  ReviewDraftResolution,
+  ReviewThreadRead,
+} from '../../../shared/review-threads'
 import { ReviewDiff } from './review-diff'
 
 /**
@@ -83,6 +91,12 @@ export function ReviewView({
   const [viewed, setViewed] = React.useState<ReviewViewedRecord | null>(null)
   const [selectedPath, setSelectedPath] = React.useState<string | null>(null)
   const [mode, setMode] = React.useState<ReviewDiffMode>('unified')
+  const [threadRead, setThreadRead] = React.useState<ReviewThreadRead | null>(null)
+  const [threadState, setThreadState] = React.useState<Stage>('idle')
+  const [threadError, setThreadError] = React.useState<string | null>(null)
+  const [draftRecord, setDraftRecord] = React.useState<ReviewDraftRecord | null>(null)
+  const [resolutions, setResolutions] = React.useState<ReviewDraftResolution[]>([])
+  const [selection, setSelection] = React.useState<ReviewSelection | null>(null)
   const [hideWhitespace, setHideWhitespace] = React.useState(false)
   const [search, setSearch] = React.useState('')
   const [collapsed, setCollapsed] = React.useState<ReadonlySet<string>>(new Set())
@@ -95,6 +109,7 @@ export function ReviewView({
   const headlineGate = React.useRef(createRequestGate())
   const filesGate = React.useRef(createRequestGate())
   const commitsGate = React.useRef(createRequestGate())
+  const threadsGate = React.useRef(createRequestGate())
 
   // Progressive loading: the headline answers first, and only then are the files
   // and commits requested. Each stage carries its own request id so leaving for
@@ -153,6 +168,115 @@ export function ReviewView({
       void desktop.cancel?.('review-files')
     }
   }, [desktop, headline, reloadToken])
+
+  // The conversation is a fifth independent read with its own request id, so
+  // moving to another pull request cancels the thread read that is now obsolete
+  // instead of letting it answer for a pull request nobody is looking at.
+  React.useEffect(() => {
+    if (!headline || desktop?.reviewThreads === undefined) return
+    const claim = threadsGate.current
+    claim.reset()
+    setThreadState('loading')
+    setThreadError(null)
+    const ticket = claim.claim()
+    void desktop
+      .reviewThreads?.(headline.pullRequest.number, 'review-threads')
+      .then((value) => {
+        if (!claim.current(ticket)) return
+        setThreadRead(value)
+        setThreadState('ready')
+      })
+      .catch((cause) => {
+        if (!claim.current(ticket)) return
+        setThreadRead(null)
+        setThreadError(readableError(cause))
+        setThreadState('failed')
+      })
+    return () => {
+      void desktop.cancel?.('review-threads')
+    }
+  }, [desktop, headline, reloadToken])
+
+  // Pending comments are the reviewer's unsent words. They are read from the
+  // repository's own journal, so leaving for another workspace and coming back
+  // finds them exactly as they were left.
+  React.useEffect(() => {
+    if (!headline || desktop?.reviewDrafts === undefined) return
+    let live = true
+    setDraftRecord(null)
+    setResolutions([])
+    void desktop
+      .reviewDrafts?.(headline.pullRequest.number)
+      .then((record) => {
+        if (live) setDraftRecord(record)
+      })
+      .catch(() => {
+        if (live) setDraftRecord(null)
+      })
+    return () => {
+      live = false
+    }
+  }, [desktop, headline, reloadToken])
+
+  // Every draft is re-resolved against the head currently on screen, so a
+  // force-push marks the comments it invalidated before anybody submits. The
+  // words are never discarded for being stale.
+  React.useEffect(() => {
+    if (!headline || !files || desktop?.reviewResolveDrafts === undefined) return
+    const drafts = draftRecord?.number === headline.pullRequest.number ? draftRecord.drafts : []
+    if (drafts.length === 0) {
+      setResolutions([])
+      return
+    }
+    let live = true
+    void desktop
+      .reviewResolveDrafts?.(headline.pullRequest.number, drafts)
+      .then((value) => {
+        if (live) setResolutions(value)
+      })
+      .catch(() => {
+        // An unreadable revalidation leaves the drafts unclassified rather than
+        // claiming they are fine; submit revalidates again and refuses.
+        if (live) setResolutions([])
+      })
+    return () => {
+      live = false
+    }
+  }, [desktop, draftRecord, files, headline, reloadToken])
+
+  /**
+   * A draft edit is journalled immediately and bound to the head its lines were
+   * read at. A write that fails is surfaced rather than swallowed: unsent words
+   * a reviewer believes are saved would be lost silently.
+   */
+  const saveDrafts = React.useCallback(
+    (drafts: ReviewDraft[]) => {
+      // A draft's line numbers are an address in one comparison. With the files
+      // not yet read there is no comparison to bind them to, so nothing is
+      // journalled rather than journalled against an identity nobody can check.
+      if (!headline || !files) return
+      const record: ReviewDraftRecord = {
+        number: headline.pullRequest.number,
+        comparison: files.comparison,
+        drafts,
+        updatedAt: new Date().toISOString(),
+      }
+      setDraftRecord(record)
+      void desktop
+        ?.reviewSetDrafts?.(record)
+        ?.catch(() => {
+          setError(
+            'The pending comments could not be saved for this repository, so they will not survive leaving this workspace.',
+          )
+        })
+    },
+    [desktop, files, headline],
+  )
+
+  const selectLines = React.useCallback((next: ReviewSelection) => {
+    setSelection(next)
+    setSelectedPath(next.path)
+  }, [])
 
   React.useEffect(() => {
     if (!headline || desktop?.reviewCommits === undefined) return
@@ -535,7 +659,13 @@ export function ReviewView({
                   Loading diff…
                 </p>
               ) : selected ? (
-                <ReviewDiff file={selected} mode={mode} hideWhitespace={hideWhitespace} />
+                <ReviewDiff
+                  file={selected}
+                  mode={mode}
+                  hideWhitespace={hideWhitespace}
+                  selection={selection}
+                  onSelect={selectLines}
+                />
               ) : (
                 <EmptyState className="compact-empty">
                   <FileQuestion className="empty-icon" />
@@ -549,6 +679,22 @@ export function ReviewView({
               commits={commits}
               state={commitsState}
               number={headline.pullRequest.number}
+            />
+
+            <ReviewConversation
+              desktop={desktop}
+              number={headline.pullRequest.number}
+              files={files}
+              read={threadRead}
+              readError={threadError}
+              readState={threadState === 'ready' ? 'ready' : threadState === 'failed' ? 'failed' : 'loading'}
+              drafts={draftRecord}
+              resolutions={resolutions}
+              selection={selection}
+              onClearSelection={() => setSelection(null)}
+              onDraftChange={saveDrafts}
+              onReload={() => setReloadToken((value) => value + 1)}
+              onSelect={selectLines}
             />
           </div>
         </>

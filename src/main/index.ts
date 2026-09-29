@@ -28,7 +28,22 @@ import { previewReconciliationRepair } from './reconciliation'
 import { getPullRequestIssueLinks, previewIssueLink, searchGitHubIssues } from './issue-links'
 import { readReviewCommits, readReviewFiles, readReviewHeadline } from './review'
 import { readViewedRecord, writeViewedRecord } from './review-viewed'
-import type { ReviewComparison, ReviewViewedRecord } from '../shared/review'
+import { readReviewDrafts, writeReviewDrafts } from './review-drafts'
+import {
+  readReviewThreads,
+  replyToThread,
+  resolveReviewDraftsAt,
+  setThreadResolved,
+  submitReview,
+} from './review-threads'
+import type {
+  ReviewDraft,
+  ReviewDraftRecord,
+  ReviewEvent,
+  ReviewSubmission,
+} from '../shared/review-threads'
+import { REVIEW_EVENTS } from '../shared/review-threads'
+import type { ReviewComparison, ReviewLineRef, ReviewViewedRecord } from '../shared/review'
 import type {
   GitAction,
   MergeProgress,
@@ -293,6 +308,127 @@ function readComparison(value: unknown): ReviewComparison {
   }
 }
 
+// The viewed-file validator already accepts every field of a comparison, so a
+// pending-draft record is held to the same shape rather than a second notion of
+// what a comparison is.
+function requireComparison(value: unknown): ReviewComparison {
+  if (!isComparisonLike(value)) {
+    throw new Error('Invalid review comparison.')
+  }
+  return readComparison(value)
+}
+
+function requireLineRef(value: unknown): ReviewLineRef {
+  if (typeof value !== 'object' || value === null) throw new Error('Invalid review line address.')
+  const ref = value as Record<string, unknown>
+  if (
+    typeof ref.path !== 'string' ||
+    ref.path === '' ||
+    ref.path.length > 4096 ||
+    (ref.side !== 'base' && ref.side !== 'head') ||
+    typeof ref.line !== 'number' ||
+    !Number.isInteger(ref.line) ||
+    ref.line <= 0 ||
+    typeof ref.anchor !== 'string' ||
+    ref.anchor === '' ||
+    typeof ref.context !== 'string'
+  ) {
+    throw new Error('Invalid review line address.')
+  }
+  return {
+    path: ref.path,
+    side: ref.side,
+    line: ref.line,
+    hunkId: typeof ref.hunkId === 'string' ? ref.hunkId : '',
+    anchor: ref.anchor,
+    context: ref.context,
+  }
+}
+
+function requireDraft(value: unknown): ReviewDraft {
+  if (typeof value !== 'object' || value === null) throw new Error('Invalid review comment draft.')
+  const draft = value as Record<string, unknown>
+  if (typeof draft.id !== 'string' || draft.id === '' || draft.id.length > 128) {
+    throw new Error('Invalid review comment draft.')
+  }
+  if (typeof draft.body !== 'string' || draft.body.length > 65_536) {
+    throw new Error('Invalid review comment draft.')
+  }
+  if (draft.startRef !== null && draft.startRef !== undefined) {
+    return {
+      id: draft.id,
+      ref: requireLineRef(draft.ref),
+      startRef: requireLineRef(draft.startRef),
+      body: draft.body,
+      createdAt: typeof draft.createdAt === 'string' ? draft.createdAt : '',
+    }
+  }
+  return {
+    id: draft.id,
+    ref: requireLineRef(draft.ref),
+    startRef: null,
+    body: draft.body,
+    createdAt: typeof draft.createdAt === 'string' ? draft.createdAt : '',
+  }
+}
+
+function requireDraftRecord(value: unknown): ReviewDraftRecord {
+  if (typeof value !== 'object' || value === null) throw new Error('Invalid review draft record.')
+  const record = value as Record<string, unknown>
+  if (
+    typeof record.number !== 'number' ||
+    !Number.isInteger(record.number) ||
+    record.number <= 0 ||
+    !Array.isArray(record.drafts) ||
+    record.drafts.length > 200 ||
+    typeof record.comparison !== 'object' ||
+    record.comparison === null ||
+    typeof record.updatedAt !== 'string'
+  ) {
+    throw new Error('Invalid review draft record.')
+  }
+  return {
+    number: record.number,
+    // The whole comparison, because a draft's line numbers mean nothing outside
+    // the diff they were read from.
+    comparison: requireComparison(record.comparison),
+    drafts: record.drafts.map(requireDraft),
+    updatedAt: record.updatedAt,
+  }
+}
+
+
+function requireSubmission(value: unknown): ReviewSubmission {
+  if (typeof value !== 'object' || value === null) throw new Error('Invalid review submission.')
+  const submission = value as Record<string, unknown>
+  const event = submission.event
+  if (typeof event !== 'string' || !REVIEW_EVENTS.includes(event as ReviewEvent)) {
+    throw new Error('Choose comment, approve, or request changes.')
+  }
+  if (typeof submission.body !== 'string' || submission.body.length > 65_536) {
+    throw new Error('Invalid review submission.')
+  }
+  if (!Array.isArray(submission.drafts) || submission.drafts.length > 200) {
+    throw new Error('Invalid review submission.')
+  }
+  return { event: event as ReviewEvent, body: submission.body, drafts: submission.drafts.map(requireDraft) }
+}
+
+function requireThreadId(value: unknown): string {
+  if (typeof value !== 'string' || value === '' || value.length > 256) {
+    throw new Error('Choose a comment thread on this pull request.')
+  }
+  return value
+}
+
+function requireCommentBody(value: unknown): string {
+  if (typeof value !== 'string' || value.length > 65_536) {
+    throw new Error('Invalid comment body.')
+  }
+  return value
+}
+
+
 function installHandlers() {
   ipcMain.handle('repositories:recent', (event) => {
     validateSender(event)
@@ -432,6 +568,7 @@ function installHandlers() {
     return readRepository((root) => getMergeStatus(root))
   })
   // A running submission pushes its own progress. The renderer cannot poll for it: the read
+
   // queues behind the very action that is producing the steps, so it would only ever observe
   // the finished state.
   onPublishProgress((progress: PublishProgress | null) => {
@@ -526,6 +663,69 @@ function installHandlers() {
       writeViewedRecord(root, requireViewedRecord(value), signal),
     )
   })
+  ipcMain.handle('repository:review-threads', (event, number: unknown, requestId?: unknown) => {
+    validateSender(event)
+    return readRepository(
+      (root, signal) => readReviewThreads(root, requirePullRequestNumber(number), signal),
+      requestIdClaim(requestId, 'review-threads'),
+    )
+  })
+  ipcMain.handle('repository:review-drafts', (event, number: unknown) => {
+    validateSender(event)
+    return readRepository((root, signal) =>
+      readReviewDrafts(root, requirePullRequestNumber(number), signal),
+    )
+  })
+  ipcMain.handle('repository:review-set-drafts', (event, value: unknown) => {
+    validateSender(event)
+    return readRepository((root, signal) =>
+      writeReviewDrafts(root, requireDraftRecord(value), signal),
+    )
+  })
+  ipcMain.handle('repository:review-submit', (event, number: unknown, value: unknown) => {
+    validateSender(event)
+    return operations.write(async () => {
+      const runtime = await resolveGitRuntime()
+      return withGitRuntime(runtime, () =>
+        submitReview(repository(), requirePullRequestNumber(number), requireSubmission(value)),
+      )
+    })
+  })
+  ipcMain.handle('repository:review-reply', (event, number: unknown, threadId: unknown, body: unknown) => {
+    validateSender(event)
+    return operations.write(async () => {
+      const runtime = await resolveGitRuntime()
+      return withGitRuntime(runtime, () =>
+        replyToThread(
+          repository(),
+          requireThreadId(threadId),
+          requireCommentBody(body),
+        ),
+      )
+    })
+  })
+  ipcMain.handle('repository:review-resolve', (event, number: unknown, threadId: unknown, resolved: unknown) => {
+    validateSender(event)
+    if (typeof resolved !== 'boolean') throw new Error('Choose whether to resolve this thread.')
+    return operations.write(async () => {
+      const runtime = await resolveGitRuntime()
+      return withGitRuntime(runtime, () =>
+        setThreadResolved(repository(), requireThreadId(threadId), resolved),
+      )
+    })
+  })
+  ipcMain.handle('repository:review-resolve-drafts', (event, number: unknown, value: unknown) => {
+    validateSender(event)
+    return readRepository((root, signal) =>
+      resolveReviewDraftsAt(
+        root,
+        requirePullRequestNumber(number),
+        Array.isArray(value) ? value.map(requireDraft) : [],
+        signal,
+      ),
+    )
+  })
+
   ipcMain.handle('operation:cancel', (event, requestId: unknown) => {
     validateSender(event)
     if (typeof requestId !== 'string' || !requestId || !activeRepository) return

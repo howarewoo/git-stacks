@@ -51,7 +51,7 @@ function isCancelledRead(error: unknown): boolean {
   return false
 }
 
-async function originRemote(repoPath: string, signal?: AbortSignal): Promise<ParsedRemote> {
+export async function originRemote(repoPath: string, signal?: AbortSignal): Promise<ParsedRemote> {
   const remote = parseRemote(await getConfigValue(repoPath, 'remote.origin.url', signal))
   if (!remote || remote.host !== 'github.com') {
     throw new Error('Pull request review requires a github.com origin remote.')
@@ -313,7 +313,7 @@ export async function readReviewHeadline(
  * identity, and a set read while any of them moved describes a comparison that
  * never existed.
  */
-async function readReviewIdentity(
+export async function readReviewIdentity(
   remote: ParsedRemote,
   number: number,
   signal?: AbortSignal,
@@ -393,7 +393,22 @@ export async function readReviewFiles(
   number: number,
   signal?: AbortSignal,
 ): Promise<ReviewFileSet> {
-  const remote = await originRemote(repoPath, signal)
+  return readReviewFilesFrom(await originRemote(repoPath, signal), number, signal)
+}
+
+/**
+ * The same read against an already-resolved origin.
+ *
+ * A review write resolves the origin once and then needs the diff twice: once
+ * to show, and once more at the write boundary to revalidate what is about to be
+ * posted. Both go through this one pinned read, so the diff a draft is judged
+ * against is produced by the same code path as the diff on screen.
+ */
+export async function readReviewFilesFrom(
+  remote: ParsedRemote,
+  number: number,
+  signal?: AbortSignal,
+): Promise<ReviewFileSet> {
   const { comparison, value: files } = await readPinnedPages<ReviewFile[]>(
     remote,
     number,

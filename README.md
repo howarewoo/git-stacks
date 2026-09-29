@@ -641,3 +641,47 @@ against that oid.
 The headline is read first, so a force-push between the two reads can leave its
 oid out of date. The workspace says the head is _as of the headline_ in that case
 instead of presenting it as the revision on screen.
+
+### Leaving a review
+
+The conversation column carries the whole review loop: what has been said on
+GitHub, what is still unsent, and the one decision that submits it.
+
+A line number in the diff is the control that starts a comment, so a draft is
+created by choosing the lines rather than by typing a path and a number. Holding
+shift extends the range to a multi-line comment, which becomes GitHub's
+`start_line`/`side` pair.
+
+Drafts are local. They are journalled to the repository's own storage under the
+app's data directory — GitHub has no "pending comments" resource to hold them —
+and are re-read when the workspace opens, so navigating away to another pull
+request and back does not lose them. A draft record carries the whole comparison
+it was written at, so drafts from a superseded revision are shown as stale
+instead of being re-anchored onto a diff nobody was looking at. A draft is drawn
+with a dashed rule and a "pending" label, and never looks like something already
+sent.
+
+Submitting writes every pending draft as **one** review: GitHub's
+`POST /pulls/{number}/reviews` takes a single `comments` array, so several
+separate inline comments become one Comment, Approve, or Request changes event
+rather than N events. Approving your own pull request is refused locally, because
+GitHub refuses it and a failed submit after several comments were already written
+is a worse experience than never offering it. The viewer permission gate comes
+from GitHub and GitHub stays authoritative: a permission the app believes is
+missing is still a mutation the server can refuse, and its refusal is reported
+as it came back.
+
+Anchors are revalidated in the main process immediately before the write, not
+from what the renderer happened to be holding. A force-push since the draft was
+written produces **zero** mutation rather than a best guess: the drafts that can
+no longer be placed are reported individually with the reason, and nothing is
+posted to a line or a revision the reviewer did not name. There is no blind
+replay — a submission that failed after the request left is not retried
+automatically, because a duplicate review is a comment the reviewer never wrote.
+
+Threads are read through GraphQL, which is the only source for a thread's
+replies, resolved state, and per-comment outdated state; the REST comments
+endpoint cannot see any of it. Reply, resolve, and unresolve round-trip through
+GraphQL mutations. The read is bounded and paged like every other read in the
+app, and resolved and outdated threads are shown as such rather than hidden.
+

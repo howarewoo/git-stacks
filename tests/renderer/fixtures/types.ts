@@ -12,6 +12,7 @@ import type {
   StackPreview,
   SurgeryPreview,
 } from '../../../src/shared/types'
+import type { ReviewEvent } from '../../../src/shared/review-threads'
 
 /** Every promise-returning `DesktopAPI` method the fixture double can intercept. */
 export type FixtureCall =
@@ -33,6 +34,13 @@ export type FixtureCall =
   | 'reviewCommits'
   | 'reviewViewed'
   | 'reviewSetViewed'
+  | 'reviewThreads'
+  | 'reviewDrafts'
+  | 'reviewSetDrafts'
+  | 'reviewResolveDrafts'
+  | 'reviewSubmit'
+  | 'reviewReply'
+  | 'reviewSetResolved'
   | 'openExternal'
   | 'gitRuntimeStatus'
   | 'setSystemGit'
@@ -74,6 +82,13 @@ export interface FixtureScenario {
    * two claims disagreeing, and the workspace has to say which one it is showing.
    */
   readonly reviewHeadOid?: string
+  /**
+   * The viewer's review permissions, when the scenario is not a reviewer with
+   * full write access. A scenario that blocks one event, or that makes the
+   * viewer the author of the pull request, has to show that gate rather than
+   * only the permissive default.
+   */
+  readonly reviewPermissions?: { isAuthor?: boolean; blocked?: ReviewEvent }
   readonly pushPreview?: PushPreview
   readonly stackPreviews?: Readonly<Partial<Record<StackKind, StackPreview>>>
   /** The surgery preview a scenario answers; insert between two layers by default. */

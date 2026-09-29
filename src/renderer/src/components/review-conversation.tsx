@@ -1,0 +1,674 @@
+import * as React from 'react'
+import { CheckCircle2, CircleDot, MessageSquarePlus, Trash2, TriangleAlert } from 'lucide-react'
+
+import type { ReviewFileSet, ReviewLineRef } from '../../../shared/review'
+import type {
+  ReviewDraft,
+  ReviewDraftRecord,
+  ReviewDraftResolution,
+  ReviewEvent,
+  ReviewPermissions,
+  ReviewThread,
+  ReviewThreadRead,
+} from '../../../shared/review-threads'
+import {
+  REVIEW_EVENT_LABELS,
+  REVIEW_EVENTS,
+  reviewDraftKey,
+  reviewDraftLabel,
+  reviewEventBlocked,
+  reviewThreadLabel,
+  reviewThreadState,
+  REVIEW_THREAD_STATE_LABELS,
+} from '../../../shared/review-threads'
+import type { DesktopAPI } from '../../../shared/types'
+import { LIST_PAGE_SIZE } from '../../../shared/performance'
+import { Badge } from './ui/badge'
+import { Button } from './ui/button'
+import { Textarea } from './ui/textarea'
+import { InlineAlert } from './ui/surface'
+import { useListWindow } from '../lib/list-window'
+import { ListWindowMore } from './list-window'
+import { cn } from '../lib/utils'
+
+/**
+ * A line range the reviewer has picked to comment on.
+ *
+ * Selection is the two ends of a range rather than a browser text selection,
+ * because GitHub addresses a comment by path, side, and line and a text
+ * selection carries none of that. A single line is a range whose ends are equal.
+ */
+export interface ReviewSelection {
+  path: string
+  side: 'base' | 'head'
+  anchor: number
+  head: number
+}
+
+/** The line reference for one end of a selection, from the diff the reviewer is reading. */
+export function selectionRef(
+  files: ReviewFileSet | null,
+  selection: ReviewSelection,
+  which: 'anchor' | 'head',
+): ReviewLineRef | null {
+  if (!files) return null
+  const wanted = selection[which]
+  for (const file of files.files) {
+    if (file.path !== selection.path || file.diff.kind !== 'text') continue
+    for (const hunk of file.diff.hunks) {
+      for (const line of hunk.lines) {
+        if (line.side !== selection.side) continue
+        const number = line.side === 'base' ? line.oldLine : line.newLine
+        if (number !== wanted) continue
+        return {
+          path: file.path,
+          side: line.side,
+          line: number,
+          hunkId: hunk.id,
+          anchor: line.anchor,
+          context: line.context,
+        }
+      }
+    }
+  }
+  return null
+}
+
+/** The selection as an ordered range, so a range never runs backwards on the wire. */
+function orderedEnds(
+  files: ReviewFileSet | null,
+  selection: ReviewSelection | null,
+): { first: ReviewLineRef; last: ReviewLineRef } | null {
+  if (selection === null) return null
+  const anchor = selectionRef(files, selection, 'anchor')
+  const head = selectionRef(files, selection, 'head')
+  if (!anchor || !head) return null
+  return selection.anchor <= selection.head
+    ? { first: anchor, last: head }
+    : { first: head, last: anchor }
+}
+
+function readableError(value: unknown): string {
+  if (typeof value === 'object' && value !== null && 'message' in value) {
+    const message = value.message
+    if (typeof message === 'string' && message !== '') return message
+  }
+  return 'The review could not be sent to GitHub.'
+}
+
+export interface ReviewConversationProps {
+  desktop: DesktopAPI | undefined
+  number: number
+  files: ReviewFileSet | null
+  read: ReviewThreadRead | null
+  readState: 'loading' | 'ready' | 'failed'
+  readError: string | null
+  drafts: ReviewDraftRecord | null
+  resolutions: ReviewDraftResolution[]
+  selection: ReviewSelection | null
+  onSelect: (selection: ReviewSelection) => void
+  onClearSelection: () => void
+  onDraftChange: (drafts: ReviewDraft[]) => void
+  onReload: () => void
+}
+
+export function ReviewConversation({
+  desktop,
+  number,
+  files,
+  read,
+  readState,
+  readError,
+  drafts,
+  resolutions,
+  selection,
+  onSelect,
+  onClearSelection,
+  onDraftChange,
+  onReload,
+}: ReviewConversationProps) {
+  const [summary, setSummary] = React.useState('')
+  const [event, setEvent] = React.useState<ReviewEvent>('COMMENT')
+  const [sending, setSending] = React.useState(false)
+  const [error, setError] = React.useState<string | null>(null)
+  const [notice, setNotice] = React.useState<string | null>(null)
+
+  const draftList = drafts?.drafts ?? []
+  const byId = React.useMemo(
+    () => new Map(resolutions.map((entry) => [entry.id, entry])),
+    [resolutions],
+  )
+  const sendable = draftList.filter(
+    (draft) => draft.body.trim() !== '' && byId.get(draft.id)?.match !== 'unresolved',
+  )
+  const stale = draftList.filter((draft) => byId.get(draft.id)?.match === 'unresolved')
+  const permissions: ReviewPermissions | null = read?.permissions ?? null
+
+  const addDraft = () => {
+    const ends = orderedEnds(files, selection)
+    if (!ends) return
+    const draft: ReviewDraft = {
+      id: reviewDraftKey(ends.last, ends.first.line === ends.last.line ? null : ends.first),
+      ref: ends.last,
+      startRef: ends.first.line === ends.last.line ? null : ends.first,
+      body: '',
+      createdAt: new Date().toISOString(),
+    }
+    // One pending comment per range: a second comment on lines that already have
+    // one would submit as two threads the reviewer never meant to write.
+    onDraftChange([
+      ...draftList.filter((entry) => reviewDraftKey(entry.ref, entry.startRef) !== draft.id),
+      draft,
+    ])
+    onClearSelection()
+  }
+
+  const submit = async () => {
+    if (!desktop?.reviewSubmit || sendable.length === 0) return
+    setSending(true)
+    setError(null)
+    setNotice(null)
+    try {
+      const result = await desktop.reviewSubmit(number, {
+        event,
+        body: summary,
+        drafts: sendable,
+      })
+      setSummary('')
+      onDraftChange([])
+      onReload()
+      setNotice(
+        `Sent one ${REVIEW_EVENT_LABELS[event].toLowerCase()} review with ${sendable.length} comment${
+          sendable.length === 1 ? '' : 's'
+        }${result.state ? `; GitHub recorded it as ${result.state}` : ''}.`,
+      )
+    } catch (cause) {
+      setError(readableError(cause))
+    } finally {
+      setSending(false)
+    }
+  }
+
+  return (
+    <section className="review-conversation" aria-label="Review conversation">
+      <div className="review-tree-header">
+        <strong>Review</strong>
+        <span className="code-region-meta">
+          {draftList.length} pending · {read?.threads.threads.length ?? 0} submitted
+        </span>
+      </div>
+
+      <SelectionComposer
+        selection={selection}
+        disabled={sending}
+        onAdd={addDraft}
+        onClear={onClearSelection}
+      />
+
+      <DraftList
+        drafts={draftList}
+        byId={byId}
+        staleCount={stale.length}
+        disabled={sending}
+        onChangeBody={(id, body) =>
+          onDraftChange(draftList.map((draft) => (draft.id === id ? { ...draft, body } : draft)))
+        }
+        onRemove={(id) => onDraftChange(draftList.filter((draft) => draft.id !== id))}
+      />
+
+      <SubmitBar
+        permissions={permissions}
+        event={event}
+        summary={summary}
+        sendableCount={sendable.length}
+        busy={sending}
+        onEvent={setEvent}
+        onSummary={setSummary}
+        onSubmit={submit}
+      />
+
+      {error ? (
+        <InlineAlert className="review-conversation-alert" tone="warning" role="status">
+          {error}
+        </InlineAlert>
+      ) : null}
+      {notice ? (
+        <InlineAlert className="review-conversation-alert" tone="info" role="status">
+          {notice}
+        </InlineAlert>
+      ) : null}
+
+      <ThreadList
+        desktop={desktop}
+        number={number}
+        read={read}
+        state={readState}
+        error={readError}
+        onReload={onReload}
+        onSelect={onSelect}
+      />
+    </section>
+  )
+}
+
+function SelectionComposer({
+  selection,
+  disabled,
+  onAdd,
+  onClear,
+}: {
+  selection: ReviewSelection | null
+  disabled: boolean
+  onAdd: () => void
+  onClear: () => void
+}) {
+  if (!selection) {
+    return (
+      <p className="review-conversation-note">
+        <MessageSquarePlus aria-hidden="true" className="size-3.5" />
+        Choose a line in the diff to comment on it. Choose a second line on the same side to comment
+        on a range.
+      </p>
+    )
+  }
+  const low = Math.min(selection.anchor, selection.head)
+  const high = Math.max(selection.anchor, selection.head)
+  const label = `${selection.path}:${low === high ? low : `${low}–${high}`} (${selection.side})`
+  return (
+    <div className="review-selection" role="group" aria-label="Selected lines">
+      <span className="review-selection-label">{label}</span>
+      <div className="review-selection-actions">
+        <Button disabled={disabled} size="sm" variant="accent" onClick={onAdd}>
+          Add pending comment
+        </Button>
+        <Button disabled={disabled} size="sm" variant="ghost" onClick={onClear}>
+          Clear
+        </Button>
+      </div>
+    </div>
+  )
+}
+
+function DraftList({
+  drafts,
+  byId,
+  staleCount,
+  disabled,
+  onChangeBody,
+  onRemove,
+}: {
+  drafts: ReviewDraft[]
+  byId: Map<string, ReviewDraftResolution>
+  staleCount: number
+  disabled: boolean
+  onChangeBody: (id: string, body: string) => void
+  onRemove: (id: string) => void
+}) {
+  if (drafts.length === 0) {
+    return (
+      <p className="review-conversation-note">
+        No pending comments. Nothing here has been sent to GitHub.
+      </p>
+    )
+  }
+  return (
+    <div className="review-drafts" role="group" aria-label="Pending comments not yet sent">
+      <p className="review-drafts-caption">
+        <Badge variant="outline">pending, not sent</Badge>
+        <span>
+          Composed locally and submitted together as one review
+          {staleCount > 0
+            ? `. ${staleCount} cannot be sent until it names a line again.`
+            : '. They survive leaving this workspace.'}
+        </span>
+      </p>
+      <ul className="review-draft-list">
+        {drafts.map((draft) => {
+          const resolution = byId.get(draft.id)
+          const isStale = resolution?.match === 'unresolved'
+          return (
+            <li className={cn('review-draft', isStale && 'review-draft-stale')} key={draft.id}>
+              <div className="review-draft-head">
+                <code>{reviewDraftLabel(draft)}</code>
+                {isStale ? <Badge variant="warning">outdated</Badge> : null}
+                {resolution?.match === 'moved' ? <Badge variant="secondary">moved</Badge> : null}
+                <Button
+                  aria-label={`Discard pending comment on ${reviewDraftLabel(draft)}`}
+                  disabled={disabled}
+                  size="icon-sm"
+                  tooltip="Discard this pending comment"
+                  variant="ghost"
+                  onClick={() => onRemove(draft.id)}
+                >
+                  <Trash2 className="size-3.5" />
+                </Button>
+              </div>
+              {isStale ? (
+                <p className="review-draft-reason">
+                  {resolution?.reason} It is not sent while it does not name the line it was written
+                  about.
+                </p>
+              ) : null}
+              <Textarea
+                aria-label={`Comment on ${reviewDraftLabel(draft)}`}
+                disabled={disabled}
+                onChange={(event) => onChangeBody(draft.id, event.target.value)}
+                placeholder="What should the author know about these lines?"
+                rows={3}
+                value={draft.body}
+              />
+            </li>
+          )
+        })}
+      </ul>
+    </div>
+  )
+}
+
+function SubmitBar({
+  permissions,
+  event,
+  summary,
+  sendableCount,
+  busy,
+  onEvent,
+  onSummary,
+  onSubmit,
+}: {
+  permissions: ReviewPermissions | null
+  event: ReviewEvent
+  summary: string
+  sendableCount: number
+  busy: boolean
+  onEvent: (event: ReviewEvent) => void
+  onSummary: (summary: string) => void
+  onSubmit: () => void
+}) {
+  const blocked = reviewEventBlocked(permissions, event)
+  const needsSummary = event === 'REQUEST_CHANGES' && summary.trim() === ''
+  const disabled = busy || sendableCount === 0 || blocked !== null || needsSummary
+  const reason =
+    blocked ??
+    (needsSummary
+      ? 'Requesting changes needs a summary saying what must change.'
+      : sendableCount === 0
+        ? 'Write at least one pending comment first.'
+        : `Submit ${sendableCount} comment${sendableCount === 1 ? '' : 's'} as one ${
+            REVIEW_EVENT_LABELS[event]
+          } review.`)
+  return (
+    <div className="review-submit" role="group" aria-label="Submit review">
+      <label className="review-submit-summary">
+        <span>Review summary</span>
+        <Textarea
+          aria-label="Review summary"
+          disabled={busy}
+          onChange={(changeEvent) => onSummary(changeEvent.target.value)}
+          placeholder="Optional for a comment; required when requesting changes."
+          rows={2}
+          value={summary}
+        />
+      </label>
+      <div className="review-submit-events" role="radiogroup" aria-label="Review decision">
+        {REVIEW_EVENTS.map((candidate) => {
+          const candidateReason = reviewEventBlocked(permissions, candidate)
+          return (
+            <label
+              className={cn('review-submit-event', candidateReason && 'review-submit-event-blocked')}
+              key={candidate}
+              title={candidateReason ?? REVIEW_EVENT_LABELS[candidate]}
+            >
+              <input
+                checked={event === candidate}
+                disabled={busy}
+                name="review-event"
+                onChange={() => onEvent(candidate)}
+                type="radio"
+                value={candidate}
+              />
+              {REVIEW_EVENT_LABELS[candidate]}
+            </label>
+          )
+        })}
+      </div>
+      <Button disabled={disabled} size="sm" tooltip={reason} variant="accent" onClick={onSubmit}>
+        {busy
+          ? 'Sending…'
+          : `Submit ${sendableCount} comment${sendableCount === 1 ? '' : 's'} as one review`}
+      </Button>
+      <p className="review-submit-reason">{reason}</p>
+    </div>
+  )
+}
+
+function ThreadList({
+  desktop,
+  number,
+  read,
+  state,
+  error,
+  onReload,
+  onSelect,
+}: {
+  desktop: DesktopAPI | undefined
+  number: number
+  read: ReviewThreadRead | null
+  state: 'loading' | 'ready' | 'failed'
+  error: string | null
+  onReload: () => void
+  onSelect: (selection: ReviewSelection) => void
+}) {
+  const threads = read?.threads.threads ?? []
+  const window_ = useListWindow(threads, LIST_PAGE_SIZE)
+  const [replyFor, setReplyFor] = React.useState<string | null>(null)
+  const [replyBody, setReplyBody] = React.useState('')
+  const [busy, setBusy] = React.useState<string | null>(null)
+  const [actionError, setActionError] = React.useState<string | null>(null)
+
+  const sendReply = async (thread: ReviewThread) => {
+    if (!desktop?.reviewReply) return
+    setBusy(thread.id)
+    setActionError(null)
+    try {
+      await desktop.reviewReply(number, thread.id, replyBody)
+      setReplyBody('')
+      setReplyFor(null)
+      onReload()
+    } catch (cause) {
+      setActionError(readableError(cause))
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  const toggleResolved = async (thread: ReviewThread) => {
+    if (!desktop?.reviewSetResolved) return
+    setBusy(thread.id)
+    setActionError(null)
+    try {
+      await desktop.reviewSetResolved(number, thread.id, !thread.resolved)
+      onReload()
+    } catch (cause) {
+      setActionError(readableError(cause))
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  if (state === 'loading') {
+    return (
+      <p className="section-empty" role="status">
+        Loading the conversation from GitHub…
+      </p>
+    )
+  }
+  if (state === 'failed' || !read) {
+    return (
+      <div className="review-conversation-threads">
+        <p className="section-empty">
+          {error ?? 'The conversation could not be read from GitHub.'}
+        </p>
+        <Button size="sm" variant="secondary" onClick={onReload}>
+          Retry
+        </Button>
+      </div>
+    )
+  }
+
+  return (
+    <div className="review-conversation-threads">
+      <div className="review-conversation-threads-head">
+        <strong>Submitted</strong>
+        {read.threads.truncated ? (
+          <span className="code-region-meta">
+            showing {threads.length} of {read.threads.totalCount}
+          </span>
+        ) : null}
+      </div>
+      {actionError ? (
+        <InlineAlert className="review-conversation-alert" tone="warning" role="status">
+          {actionError}
+        </InlineAlert>
+      ) : null}
+      {threads.length === 0 ? (
+        <p className="section-empty">GitHub holds no review comments on this pull request yet.</p>
+      ) : (
+        <>
+          <ul className="review-thread-list" aria-label="Submitted review threads">
+            {window_.visible.map((thread) => (
+              <li className="review-thread" key={thread.id}>
+                <ThreadHeader thread={thread} onSelect={onSelect} />
+                <ul className="review-thread-comments">
+                  {thread.comments.map((comment) => (
+                    <li key={comment.id}>
+                      <span className="review-thread-comment-head">
+                        <strong>{comment.author}</strong>
+                        {comment.viewerDidAuthor ? <Badge variant="outline">you</Badge> : null}
+                        {comment.createdAt ? <small>{comment.createdAt.slice(0, 10)}</small> : null}
+                      </span>
+                      <p>{comment.body}</p>
+                    </li>
+                  ))}
+                </ul>
+                <div className="review-thread-actions">
+                  {thread.viewerCanResolve && !thread.resolved ? (
+                    <Button
+                      disabled={busy === thread.id}
+                      size="sm"
+                      variant="secondary"
+                      onClick={() => void toggleResolved(thread)}
+                    >
+                      Resolve
+                    </Button>
+                  ) : null}
+                  {thread.viewerCanUnresolve && thread.resolved ? (
+                    <Button
+                      disabled={busy === thread.id}
+                      size="sm"
+                      variant="secondary"
+                      onClick={() => void toggleResolved(thread)}
+                    >
+                      Reopen
+                    </Button>
+                  ) : null}
+                  {thread.viewerCanReply ? (
+                    <Button
+                      disabled={busy === thread.id}
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => setReplyFor(replyFor === thread.id ? null : thread.id)}
+                    >
+                      Reply
+                    </Button>
+                  ) : null}
+                </div>
+                {replyFor === thread.id ? (
+                  <div className="review-thread-reply">
+                    <Textarea
+                      aria-label={`Reply to ${reviewThreadLabel(thread)}`}
+                      disabled={busy === thread.id}
+                      onChange={(event) => setReplyBody(event.target.value)}
+                      placeholder="Reply to this thread"
+                      rows={3}
+                      value={replyBody}
+                    />
+                    <Button
+                      disabled={busy === thread.id || replyBody.trim() === ''}
+                      size="sm"
+                      variant="accent"
+                      onClick={() => void sendReply(thread)}
+                    >
+                      {busy === thread.id ? 'Sending…' : 'Send reply'}
+                    </Button>
+                  </div>
+                ) : null}
+              </li>
+            ))}
+          </ul>
+          <ListWindowMore
+            noun="threads"
+            pageSize={LIST_PAGE_SIZE}
+            previous={window_.hasPrevious}
+            remaining={window_.remaining}
+            onReveal={window_.reveal}
+            onPrevious={window_.retreat}
+          />
+        </>
+      )}
+    </div>
+  )
+}
+
+function ThreadHeader({
+  thread,
+  onSelect,
+}: {
+  thread: ReviewThread
+  onSelect: (selection: ReviewSelection) => void
+}) {
+  const state = reviewThreadState(thread)
+  return (
+    <div className="review-thread-head">
+      <code>{reviewThreadLabel(thread)}</code>
+      <Badge
+        variant={state === 'resolved' ? 'success' : state === 'outdated' ? 'warning' : 'secondary'}
+      >
+        {state === 'resolved' ? (
+          <CheckCircle2 aria-hidden="true" className="size-3" />
+        ) : (
+          <CircleDot aria-hidden="true" className="size-3" />
+        )}
+        {REVIEW_THREAD_STATE_LABELS[state]}
+      </Badge>
+      {/* Resolved and outdated are independent facts about one thread, and a
+          push can make an already-resolved thread outdated. The state above
+          names one of them, so a thread that is both says so rather than
+          letting the reader assume its line is still there. */}
+      {state === 'resolved' && thread.outdated ? (
+        <Badge variant="warning">
+          <TriangleAlert aria-hidden="true" className="size-3" />
+          outdated
+        </Badge>
+      ) : null}
+      {thread.fileLevel || thread.line === null || thread.side === null ? null : (
+        <Button
+          size="sm"
+          variant="ghost"
+          onClick={() => {
+            const side = thread.side
+            const line = thread.line
+            if (side === null || line === null) return
+            onSelect({
+              path: thread.path,
+              side,
+              anchor: thread.startLine ?? line,
+              head: line,
+            })
+          }}
+        >
+          Show in diff
+        </Button>
+      )}
+    </div>
+  )
+}
