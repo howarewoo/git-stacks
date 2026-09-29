@@ -925,6 +925,11 @@ test('parent comparisons use fetched remote parents and remain unknown for missi
     git('update-ref', '-d', 'refs/remotes/origin/fetched-parent')
     snapshot = await getSnapshot(repo)
     assert.equal(snapshot.branches.find((branch) => branch.name === 'child')?.parentBehind, null)
+    const unresolved = snapshot.reconciliation?.stacks.find((stack) =>
+      stack.members.some((member) => member.branch === 'child'),
+    )
+    assert.equal(unresolved?.state, 'ambiguous')
+    assert.match(unresolved.blockers.join(' '), /Recorded parent fetched-parent.*unavailable/)
   } finally {
     await rm(root, { recursive: true, force: true })
   }

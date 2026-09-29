@@ -11,6 +11,7 @@ import {
   matchesPullRequest,
 } from '../src/renderer/src/components/data-views'
 import { DiffView, StackView, diffLineKind } from '../src/renderer/src/components/repository-views'
+import { ReconciliationPanel } from '../src/renderer/src/components/reconciliation-view'
 import { RepositoryHoverCardProvider } from '../src/renderer/src/components/repository-hover-cards'
 import { TooltipProvider } from '../src/renderer/src/components/ui/tooltip'
 import {
@@ -309,6 +310,58 @@ test('a genuinely empty list and a filtered empty list are different states', ()
   assert.match(filtered, /Change or clear the search/)
 })
 
+test('reconciliation shows local-only stacks separately from matching submitted stacks', () => {
+  const snapshot: RepositorySnapshot = {
+    ...pullRequestSnapshots.available,
+    reconciliation: {
+      available: true,
+      message: 'Submitted stacks match the local graph.',
+      blockers: [],
+      evidence: null,
+      stacks: [
+        {
+          key: 'local:feature/local',
+          base: 'main',
+          stackNumber: null,
+          stackUrl: null,
+          state: 'local-only',
+          summary: 'Local metadata only; nothing was submitted.',
+          submittedOrder: [],
+          members: [],
+          repairs: [],
+          blockers: [],
+        },
+        {
+          key: 'native:9',
+          base: 'main',
+          stackNumber: 9,
+          stackUrl: null,
+          state: 'matching',
+          summary: 'Submitted order and ancestry agree.',
+          submittedOrder: ['feature/submitted'],
+          members: [],
+          repairs: [],
+          blockers: [],
+        },
+      ],
+    },
+  }
+  const markup = render(
+    React.createElement(ReconciliationPanel, {
+      snapshot,
+      busy: false,
+      runAction: noopRunAction,
+      actionError: null,
+      onClearActionError: () => undefined,
+    }),
+  )
+  assert.match(markup, /Local stack/)
+  assert.match(markup, /Local only/)
+  assert.match(markup, /GitHub stack #9/)
+  assert.match(markup, /Matching/)
+  assert.ok(!markup.includes('No local or submitted stack relationships were found'))
+})
+
 test('lifecycle, checks, and review stay independent and always carry a label', () => {
   const markup = render(
     React.createElement(PullRequestListView, {
@@ -412,6 +465,9 @@ test('unmeasured parent comparison is not presented as publish-ready', () => {
   const markup = render(
     React.createElement(StackView, {
       snapshot,
+      runAction: noopRunAction,
+      actionError: null,
+      onClearActionError: () => undefined,
       busy: false,
       onRequest: noopRequest,
       onSelect: () => undefined,

@@ -14,6 +14,7 @@ import {
   getPushPreview,
 } from './git'
 import { previewStack } from './stacks'
+import { previewReconciliationRepair } from './reconciliation'
 import { getPullRequest } from './github'
 import type { GitAction, RecentRepository, StackKind } from '../shared/types'
 import { RepositoryOperations } from './repository-operations'
@@ -195,6 +196,12 @@ function installHandlers() {
     validateSender(event)
     return readRepository(async (root, signal) =>
       previewStack(root, await getSnapshot(root, signal), kind, branch),
+    )
+  })
+  ipcMain.handle('repository:reconciliation-preview', (event, stackKey: string) => {
+    validateSender(event)
+    return readRepository(async (root) =>
+      previewReconciliationRepair(root, await getSnapshot(root), stackKey),
     )
   })
   ipcMain.handle('repository:pull-request', (event, number: number) => {

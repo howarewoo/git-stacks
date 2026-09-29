@@ -1659,8 +1659,11 @@ function App() {
     if (workspaceView === 'stacks')
       return (
         <StackView
+          actionError={actionError}
+          onClearActionError={() => setActionError(null)}
           snapshot={snapshot}
           busy={isBusy}
+          runAction={runAction}
           onRequest={openWorkflow}
           onSelect={(branch) => setSelectedBranchRef(branch.ref)}
           search={search}

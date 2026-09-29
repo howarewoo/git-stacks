@@ -156,6 +156,8 @@ function actionMessage(action: GitAction): string {
       return `Added pull requests ${action.pullRequests.map((n) => `#${n}`).join(', ')} to stack #${action.stackNumber}`
     case 'unstackNativeStack':
       return `Removed pull requests from stack #${action.stackNumber}`
+    case 'reconcileRepair':
+      return `Applied ${action.ids.length} reconciliation repairs`
   }
 }
 
