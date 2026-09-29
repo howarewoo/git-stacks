@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import type {
   DesktopAPI,
+  GitHubAccountStatus,
   MergeProgress,
   PublishProgress,
   RemoteFreshness,
@@ -103,6 +104,17 @@ const desktop: DesktopAPI = {
     }
   },
   dismissPendingMutation: (id) => ipcRenderer.invoke('repository:dismiss-pending-mutation', id),
+  githubAccountStatus: () => ipcRenderer.invoke('github-account'),
+  startGitHubSignIn: () => ipcRenderer.invoke('github-account:sign-in'),
+  cancelGitHubSignIn: () => ipcRenderer.invoke('github-account:cancel'),
+  signOutOfGitHub: () => ipcRenderer.invoke('github-account:sign-out'),
+  onGitHubAccount: (listener: (status: GitHubAccountStatus) => void) => {
+    const handler = (_event: unknown, status: GitHubAccountStatus): void => listener(status)
+    ipcRenderer.on('github-account', handler)
+    return () => {
+      ipcRenderer.removeListener('github-account', handler)
+    }
+  },
 }
 
 contextBridge.exposeInMainWorld('desktop', desktop)

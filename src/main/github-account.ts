@@ -1,0 +1,522 @@
+import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
+import { dirname } from 'node:path'
+import { CredentialStoreError, type CredentialVault } from './credentials'
+import {
+  GitHubAppError,
+  githubAppClientId,
+  refreshUserAccessToken,
+  requestDeviceCode,
+  waitForDeviceAuthorization,
+  type DeviceChallenge,
+  type GitHubAppSession,
+} from './github-app'
+import {
+  GitHubTransportError,
+  githubTransport,
+  onGitHubFailure,
+  resolveGitHubToken,
+  setGitHubCredentialSource,
+  type GitHubTransport,
+} from './github-transport'
+import type { GitHubAccountState, GitHubAccountStatus, GitHubAppPermission } from '../shared/types'
+
+/** The account signs in to github.com; a GitHub Enterprise host has no registration yet. */
+export const GITHUB_ACCOUNT_HOST = 'github.com'
+
+/**
+ * The fine-grained permissions the registered GitHub App asks for, each tied to
+ * the feature that needs it. User access tokens do not use OAuth scopes, so this
+ * set belongs to the app registration rather than to a sign-in request. Nothing
+ * here writes issues, notifications, projects, or workflows, and nothing here
+ * requests administrative organization access.
+ */
+export const GITHUB_APP_PERMISSIONS: GitHubAppPermission[] = [
+  { permission: 'Contents', access: 'read', feature: 'Pull request commits and check rollups' },
+  { permission: 'Issues', access: 'read', feature: 'Open pull request discovery' },
+  {
+    permission: 'Pull requests',
+    access: 'write',
+    feature: 'Pull request creation and native stacks',
+  },
+  { permission: 'Checks', access: 'read', feature: 'Pull request check status' },
+  { permission: 'Statuses', access: 'read', feature: 'Commit status rollups' },
+]
+
+/** GitHub reports an unapproved organization authorization on the failure message. */
+const ORGANIZATION_AUTHORIZATION = /saml|sso|protected by organization/iu
+/** A credential this far from its stated expiry is renewed rather than treated as revoked. */
+const RENEWAL_GRACE_MS = 60_000
+
+const ORGANIZATION_AUTHORIZATION_MESSAGE =
+  'This organization requires single sign-on. Authorize the app for the organization, then sign in again.'
+
+interface LiveCredential {
+  accessToken: string
+  refreshToken: string | null
+  expiresAt: number | null
+  refreshExpiresAt: number | null
+}
+
+/** Everything application state keeps: an opaque reference and non-secret facts. */
+interface StoredAccount {
+  reference: string
+  host: string
+  login: string | null
+  createdAt: number
+  expiresAt: number | null
+  refreshExpiresAt: number | null
+}
+
+function finiteOrNull(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null
+}
+
+function storedAccount(value: unknown): StoredAccount | null {
+  if (typeof value !== 'object' || value === null) return null
+  const record = value as Record<string, unknown>
+  if (typeof record.reference !== 'string' || !record.reference) return null
+  if (typeof record.host !== 'string' || !record.host) return null
+  return {
+    reference: record.reference,
+    host: record.host,
+    login: typeof record.login === 'string' ? record.login : null,
+    createdAt: finiteOrNull(record.createdAt) ?? 0,
+    expiresAt: finiteOrNull(record.expiresAt),
+    refreshExpiresAt: finiteOrNull(record.refreshExpiresAt),
+  }
+}
+
+async function readAccount(file: string): Promise<StoredAccount | null> {
+  let text: string
+  try {
+    text = await readFile(file, 'utf8')
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null
+    throw error
+  }
+  try {
+    return storedAccount(JSON.parse(text))
+  } catch {
+    return null
+  }
+}
+
+async function writeAccount(file: string, account: StoredAccount): Promise<void> {
+  await mkdir(dirname(file), { recursive: true })
+  const temporary = `${file}.tmp`
+  await writeFile(temporary, JSON.stringify(account), { mode: 0o600 })
+  await rename(temporary, file)
+}
+
+export interface GitHubAccountOptions {
+  vault: CredentialVault
+  /** Application state: the opaque reference and its non-secret facts. */
+  stateFile: string
+  env?: NodeJS.ProcessEnv
+  fetch?: typeof globalThis.fetch
+  transport?: () => GitHubTransport
+  now?: () => number
+  sleep?: (milliseconds: number, signal?: AbortSignal) => Promise<void>
+  onChange?: (status: GitHubAccountStatus) => void
+}
+
+function defaultSleep(milliseconds: number, signal?: AbortSignal): Promise<void> {
+  const { promise, resolve } = Promise.withResolvers<void>()
+  const timer = setTimeout(resolve, milliseconds)
+  signal?.addEventListener(
+    'abort',
+    () => {
+      clearTimeout(timer)
+      resolve()
+    },
+    { once: true },
+  )
+  return promise
+}
+
+/**
+ * The signed-in GitHub account: it runs the device flow, seals the resulting
+ * credential in the operating system's store, refreshes and reports expiry,
+ * detects a revoked or policy-blocked credential, and answers the renderer with
+ * a status that holds an opaque reference and never the credential itself.
+ */
+export class GitHubAccount {
+  private readonly options: GitHubAccountOptions
+  private readonly env: NodeJS.ProcessEnv
+  private readonly now: () => number
+  private readonly sleep: (milliseconds: number, signal?: AbortSignal) => Promise<void>
+  private account: StoredAccount | null = null
+  private live: LiveCredential | null = null
+  private challenge: GitHubAccountStatus['challenge'] = null
+  private pending: AbortController | null = null
+  private refreshing: Promise<string | null> | null = null
+  private expiry: NodeJS.Timeout | null = null
+  private state: GitHubAccountState = 'signed-out'
+  private message: string | null = null
+
+  constructor(options: GitHubAccountOptions) {
+    this.options = options
+    this.env = options.env ?? process.env
+    this.now = options.now ?? (() => Date.now())
+    this.sleep = options.sleep ?? defaultSleep
+    this.state = githubAppClientId(this.env) ? 'signed-out' : 'not-configured'
+    this.message =
+      this.state === 'not-configured'
+        ? 'This build has no GitHub App client id configured, so it cannot sign in.'
+        : null
+    setGitHubCredentialSource(this)
+    onGitHubFailure((error) => this.reportFailure(error))
+  }
+
+  private get clientId(): string | null {
+    return githubAppClientId(this.env)
+  }
+
+  private get transport(): () => GitHubTransport {
+    return this.options.transport ?? githubTransport
+  }
+
+  /** The state to return when nothing is in progress and no credential is active. */
+  private baseline(): GitHubAccountState {
+    if (this.options.vault.store().kind !== 'system') return 'storage-unavailable'
+    if (this.live) return 'signed-in'
+    if (this.account) return 'expired'
+    return this.clientId ? 'signed-out' : 'not-configured'
+  }
+
+  status(): GitHubAccountStatus {
+    const store = this.options.vault.store()
+    return {
+      state: this.state,
+      reference: this.account?.reference ?? null,
+      host: GITHUB_ACCOUNT_HOST,
+      login: this.account?.login ?? null,
+      permissions: GITHUB_APP_PERMISSIONS,
+      expiresAt: this.account?.expiresAt ?? null,
+      refreshExpiresAt: this.account?.refreshExpiresAt ?? null,
+      store: {
+        available: store.kind === 'system',
+        name: store.kind === 'system' ? store.name : null,
+        reason: store.kind === 'system' ? null : store.reason,
+      },
+      challenge: this.challenge,
+      message: this.message,
+      externalCredential: resolveGitHubToken(this.env) !== null,
+    }
+  }
+
+  private setState(state: GitHubAccountState, message: string | null = null): GitHubAccountStatus {
+    if (this.state !== state || this.message !== message) {
+      this.state = state
+      this.message = message
+      this.options.onChange?.(this.status())
+    }
+    return this.status()
+  }
+
+  private failureState(error: GitHubAppError): GitHubAccountState {
+    if (error.code === 'not_configured') return 'not-configured'
+    if (error.code === 'device_flow_disabled' || error.code === 'incorrect_client_credentials') {
+      return 'not-configured'
+    }
+    if (error.code === 'network') return 'offline'
+    if (error.code === 'bad_refresh_token') return 'expired'
+    if (error.code === 'cancelled' || error.code === 'access_denied') return this.baseline()
+    return this.baseline()
+  }
+
+  /** Reads the sealed credential at startup. Local Git never depends on this. */
+  async restore(): Promise<GitHubAccountStatus> {
+    const store = this.options.vault.store()
+    if (store.kind !== 'system') {
+      return this.setState('storage-unavailable', store.reason)
+    }
+    const account = await readAccount(this.options.stateFile)
+    if (!account) return this.setState(this.baseline())
+    this.account = account
+    try {
+      const live = this.parse(await this.options.vault.open(account.reference))
+      this.live = live
+      this.scheduleExpiry()
+      const expired = live.expiresAt !== null && live.expiresAt <= this.now()
+      return this.setState(expired ? 'expired' : 'signed-in', null)
+    } catch (error) {
+      this.live = null
+      return this.setState(
+        'expired',
+        error instanceof CredentialStoreError
+          ? error.message
+          : 'The saved GitHub sign-in could not be read. Sign in again.',
+      )
+    }
+  }
+
+  private parse(value: string): LiveCredential {
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(value)
+    } catch {
+      throw new CredentialStoreError('unsealed', 'The saved GitHub sign-in could not be read.')
+    }
+    if (typeof parsed !== 'object' || parsed === null) {
+      throw new CredentialStoreError('unsealed', 'The saved GitHub sign-in could not be read.')
+    }
+    const record = parsed as Record<string, unknown>
+    if (typeof record.accessToken !== 'string' || !record.accessToken) {
+      throw new CredentialStoreError('unsealed', 'The saved GitHub sign-in could not be read.')
+    }
+    return {
+      accessToken: record.accessToken,
+      refreshToken: typeof record.refreshToken === 'string' ? record.refreshToken : null,
+      expiresAt: finiteOrNull(record.expiresAt),
+      refreshExpiresAt: finiteOrNull(record.refreshExpiresAt),
+    }
+  }
+
+  private scheduleExpiry(): void {
+    clearTimeout(this.expiry ?? undefined)
+    this.expiry = null
+    const at = this.live?.expiresAt
+    if (at === null || at === undefined) return
+    const timer = setTimeout(
+      () => {
+        void this.refresh()
+      },
+      Math.max(0, at - this.now() + 60_000),
+    )
+    timer.unref?.()
+    this.expiry = timer
+  }
+
+  /** Seals a new session and replaces the application state that points at it. */
+  private async adopt(session: GitHubAppSession): Promise<void> {
+    const issuedAt = this.now()
+    const live: LiveCredential = {
+      accessToken: session.accessToken,
+      refreshToken: session.refreshToken,
+      expiresAt: session.expiresIn === null ? null : issuedAt + session.expiresIn * 1000,
+      refreshExpiresAt:
+        session.refreshTokenExpiresIn === null
+          ? null
+          : issuedAt + session.refreshTokenExpiresIn * 1000,
+    }
+    const reference = await this.options.vault.seal(
+      GITHUB_ACCOUNT_HOST,
+      JSON.stringify(live),
+      issuedAt,
+    )
+    this.live = live
+    this.account = {
+      reference,
+      host: GITHUB_ACCOUNT_HOST,
+      login: this.account?.login ?? null,
+      createdAt: issuedAt,
+      expiresAt: live.expiresAt,
+      refreshExpiresAt: live.refreshExpiresAt,
+    }
+    await writeAccount(this.options.stateFile, this.account)
+    this.scheduleExpiry()
+  }
+
+  private async discard(state: GitHubAccountState, message: string): Promise<void> {
+    if (this.account) await this.options.vault.remove(this.account.reference)
+    await rm(this.options.stateFile, { force: true })
+    this.account = null
+    this.live = null
+    clearTimeout(this.expiry ?? undefined)
+    this.expiry = null
+    this.setState(state, message)
+  }
+
+  /**
+   * The credential the transport uses. It refreshes an expired one and returns
+   * null when sign-in is required; the transport never sees anything else.
+   */
+  async current(): Promise<string | null> {
+    const live = this.live
+    if (!live) return null
+    if (live.expiresAt === null || live.expiresAt > this.now()) {
+      if (this.state === 'offline' || this.state === 'expired') this.setState('signed-in')
+      return live.accessToken
+    }
+    return this.refresh()
+  }
+
+  /** One refresh at a time, so concurrent requests cannot rotate the credential twice. */
+  private refresh(): Promise<string | null> {
+    if (!this.refreshing) {
+      this.refreshing = this.renew().finally(() => {
+        this.refreshing = null
+      })
+    }
+    return this.refreshing
+  }
+
+  private async renew(): Promise<string | null> {
+    const live = this.live
+    if (!live?.refreshToken) {
+      this.live = null
+      this.setState('expired', 'The saved GitHub sign-in has expired. Sign in again.')
+      return null
+    }
+    if (live.refreshExpiresAt !== null && live.refreshExpiresAt <= this.now()) {
+      await this.discard('expired', 'The saved GitHub sign-in has expired. Sign in again.')
+      return null
+    }
+    try {
+      const session = await refreshUserAccessToken({
+        clientId: this.clientId ?? '',
+        refreshToken: live.refreshToken,
+        fetch: this.options.fetch,
+        signal: this.pending?.signal,
+      })
+      await this.adopt(session)
+      this.setState('signed-in')
+      return this.live?.accessToken ?? null
+    } catch (error) {
+      if (error instanceof GitHubAppError) {
+        if (error.code === 'network' || error.code === 'cancelled') {
+          this.setState('offline', error.message)
+          return null
+        }
+        await this.discard(this.failureState(error), error.message)
+        return null
+      }
+      this.setState('expired', 'The saved GitHub sign-in could not be renewed. Sign in again.')
+      return null
+    }
+  }
+  /**
+   * A rejection GitHub sends for a credential that should still be valid is a
+   * revocation; one that arrives at or past the stated expiry is renewed instead.
+   */
+  private async reportFailure(error: GitHubTransportError): Promise<void> {
+    if (error.kind === 'forbidden') {
+      if (ORGANIZATION_AUTHORIZATION.test(error.detail)) {
+        this.setState('permission-denied', ORGANIZATION_AUTHORIZATION_MESSAGE)
+      }
+      return
+    }
+    const live = this.live
+    if (!live) return
+    const renewable = live.expiresAt !== null && live.expiresAt - this.now() <= RENEWAL_GRACE_MS
+    if (!renewable) {
+      await this.discard('revoked', 'GitHub rejected the saved sign-in. Sign in again.')
+      return
+    }
+    await this.refresh()
+  }
+
+  /** Starts device sign-in and polls in the background, so no read queues behind it. */
+  async signIn(): Promise<GitHubAccountStatus> {
+    const clientId = this.clientId
+    if (!clientId) {
+      return this.setState(
+        'not-configured',
+        'This build has no GitHub App client id configured, so it cannot sign in.',
+      )
+    }
+    const store = this.options.vault.store()
+    if (store.kind !== 'system') return this.setState('storage-unavailable', store.reason)
+    await this.cancelSignIn()
+    const controller = new AbortController()
+    this.pending = controller
+    this.setState('signing-in')
+    let challenge: DeviceChallenge
+    try {
+      challenge = await requestDeviceCode({
+        clientId,
+        fetch: this.options.fetch,
+        signal: controller.signal,
+      })
+    } catch (error) {
+      this.pending = null
+      return this.setState(
+        this.failureState(error as GitHubAppError),
+        error instanceof GitHubAppError ? error.message : 'Sign-in could not be started.',
+      )
+    }
+    this.challenge = {
+      userCode: challenge.userCode,
+      verificationUri: challenge.verificationUri,
+      expiresAt: this.now() + challenge.expiresIn * 1000,
+    }
+    this.setState('signing-in')
+    void this.poll(challenge, controller)
+    return this.status()
+  }
+
+  private async poll(challenge: DeviceChallenge, controller: AbortController): Promise<void> {
+    try {
+      const session = await waitForDeviceAuthorization({
+        clientId: this.clientId ?? '',
+        deviceCode: challenge.deviceCode,
+        fetch: this.options.fetch,
+        signal: controller.signal,
+        intervalSeconds: challenge.interval,
+        expiresAt: this.now() + challenge.expiresIn * 1000,
+        sleep: this.sleep,
+        now: this.now,
+      })
+      if (controller.signal.aborted) return
+      await this.adopt(session)
+      this.pending = null
+      this.challenge = null
+      const identified = await this.identify()
+      this.setState(identified.state, identified.message)
+    } catch (error) {
+      if (controller.signal.aborted) return
+      this.pending = null
+      this.challenge = null
+      const code = error instanceof GitHubAppError ? error : null
+      this.setState(
+        code ? this.failureState(code) : this.baseline(),
+        code ? code.message : 'Sign-in could not be completed.',
+      )
+    }
+  }
+
+  /**
+   * Reads the signed-in account's login before the state settles, so one pushed
+   * status carries the login and any policy block together.
+   */
+  private async identify(): Promise<{ state: GitHubAccountState; message: string | null }> {
+    try {
+      const response = await this.transport().rest<{ login?: unknown }>({ path: 'user' })
+      const login = typeof response.data?.login === 'string' ? response.data.login : null
+      if (this.account && login && login !== this.account.login) {
+        this.account = { ...this.account, login }
+        await writeAccount(this.options.stateFile, this.account)
+      }
+      return { state: 'signed-in', message: null }
+    } catch (error) {
+      if (error instanceof GitHubTransportError && error.kind === 'forbidden') {
+        return { state: 'permission-denied', message: ORGANIZATION_AUTHORIZATION_MESSAGE }
+      }
+      return { state: 'signed-in', message: null }
+    }
+  }
+
+  async cancelSignIn(): Promise<GitHubAccountStatus> {
+    const wasSigningIn = this.state === 'signing-in'
+    this.pending?.abort()
+    this.pending = null
+    this.challenge = null
+    return this.setState(
+      wasSigningIn ? this.baseline() : this.state,
+      wasSigningIn ? null : this.message,
+    )
+  }
+
+  /** Removes the credential this application owns. Git repositories are untouched. */
+  async signOut(): Promise<GitHubAccountStatus> {
+    await this.cancelSignIn()
+    await this.options.vault.clear()
+    await rm(this.options.stateFile, { force: true })
+    this.account = null
+    this.live = null
+    clearTimeout(this.expiry ?? undefined)
+    this.expiry = null
+    return this.setState(this.baseline())
+  }
+}

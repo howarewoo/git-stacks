@@ -75,6 +75,9 @@ import {
   withGitRuntime,
   writeGitRuntimePreference,
 } from './git-runtime'
+import { CredentialVault } from './credentials'
+import { safeStorageProtector } from './secret-storage'
+import { GitHubAccount } from './github-account'
 
 const readKeys = new RequestRegistry()
 
@@ -202,6 +205,23 @@ if (devUrl) {
 const trustedOrigin = devUrl ? new URL(devUrl).origin : productionOrigin
 const settingsPath = () => join(app.getPath('userData'), 'repositories.json')
 const settingsFile = () => join(app.getPath('userData'), 'settings.json')
+let account: GitHubAccount | null = null
+
+/**
+ * The signed-in GitHub account. Its credential is sealed by the operating
+ * system and never reaches the renderer: the bridge carries status only.
+ */
+function githubAccount() {
+  account ??= new GitHubAccount({
+    vault: new CredentialVault(
+      join(app.getPath('userData'), 'credentials.vault.json'),
+      safeStorageProtector,
+    ),
+    stateFile: join(app.getPath('userData'), 'github-account.json'),
+    onChange: (status) => window?.webContents.send('github-account', status),
+  })
+  return account
+}
 
 function validateSender(event: IpcMainInvokeEvent) {
   if (
@@ -871,6 +891,23 @@ function installHandlers() {
       return gitRuntimeStatus(settingsFile())
     })
   })
+  // Account status only. No handler here can return, log, or accept a credential.
+  ipcMain.handle('github-account', async (event) => {
+    validateSender(event)
+    return githubAccount().status()
+  })
+  ipcMain.handle('github-account:sign-in', async (event) => {
+    validateSender(event)
+    return operations.write(() => githubAccount().signIn())
+  })
+  ipcMain.handle('github-account:cancel', async (event) => {
+    validateSender(event)
+    return operations.write(() => githubAccount().cancelSignIn())
+  })
+  ipcMain.handle('github-account:sign-out', async (event) => {
+    validateSender(event)
+    return operations.write(() => githubAccount().signOut())
+  })
 }
 
 async function createWindow() {
@@ -954,6 +991,11 @@ app
       resourcesRoot: app.isPackaged ? process.resourcesPath : resolve(bundleDir, '../../resources'),
       useSystemGit: preference?.useSystemGit ?? false,
     })
+    // A stored credential is restored before any handler can reach GitHub, so a
+    // signed-in account works with no `gh` executable installed.
+    await githubAccount()
+      .restore()
+      .catch(() => githubAccount().status())
     installHandlers()
     Menu.setApplicationMenu(
       Menu.buildFromTemplate([

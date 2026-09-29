@@ -754,3 +754,13 @@ Legacy aliases may remain only for the existing consumers listed below and must 
 The only permitted literal renderer colors outside generated tokens are the decorative `::-webkit-scrollbar-thumb` (`#c7cbd3`) and its hover state (`#abb1bd`). Do not use these exceptions for text, essential control boundaries, or status indicators. Palette-looking text displayed in a source diff is content, not a visual style.
 
 Fixed numeric sizes in `styles.css` are permitted for branch connector lanes/offsets, dense list metadata, icon geometry, workbench breakpoints, and pane constraints. Preserve their desktop layout roles rather than converting every number to a token.
+
+### GitHub account and credential storage
+
+GitHub authentication is a first-class desktop flow, not a precondition of a pre-authenticated `gh`. Sign-in uses the GitHub App device flow, because the web authorization-code exchange requires a client secret and a shipped binary must never carry one; the public client id is the only registration value the build needs, read from `GIT_STACKS_GITHUB_APP_CLIENT_ID`. A running sign-in pushes its own state to the renderer rather than blocking a read, so the account panel is never waiting on the main process.
+
+The credential is sealed by the operating system's own store — the macOS Keychain, DPAPI on Windows, the kernel keyring on Linux. Linux's `basic_text` fallback obfuscates rather than encrypts, so it is reported as an unavailable store and no session is stored: an unavailable key store is a stated state, never a plaintext fallback. Application state keeps only an opaque reference, the host, the account login, and the expiry times; the sealed value exists only inside the credential store. Nothing crosses the preload boundary except a status object, and the renderer bridge exposes no key containing `auth` or `token`.
+
+A credential GitHub rejects at or before its stated expiry is renewed through the refresh token; a rejection of a credential that should still be valid is a revocation. Both, along with an organization that requires single sign-on and an unreachable GitHub, resolve to a recoverable account state that leaves local Git untouched. Sign-out removes only the credential this application owns.
+
+User access tokens do not use OAuth scopes; they carry the fine-grained permissions of the app registration. The account panel states the permissions each enabled feature needs and names no notification, project, or workflow access. An environment or `gh` credential stays a separate, explicit override: it wins when present, is never read back into application state, and sign-out does not touch it.

@@ -122,6 +122,23 @@ to a stack, and the operation is worth knowing about from the outside:
   or retargets a local branch for you, and any base GitHub moved is reported
   for you to restack and publish.
 
+## GitHub sign-in
+
+Git Stacks signs in to GitHub with a GitHub App device flow, so no `gh`
+executable is required. The registration is created out of band; the only value
+the build needs is its public client id, given as `GIT_STACKS_GITHUB_APP_CLIENT_ID`.
+Without it the account panel reports "not configured" and nothing else changes.
+
+```sh
+GIT_STACKS_GITHUB_APP_CLIENT_ID=Iv1... npm run dev
+```
+
+Device sign-in must be enabled under the app's `Optional Features`, and
+user-to-server token expiration must stay enabled so a refresh token is issued.
+`GIT_STACKS_GITHUB_TOKEN`, `GITHUB_TOKEN`, and `GH_TOKEN` remain an explicit
+override: when one is set it is used instead of the app's own credential, is
+never written to application state, and is not removed by sign-out.
+
 ## Performance budgets
 
 Git Stacks is used on repositories far larger than the ones it was built

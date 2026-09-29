@@ -41,6 +41,8 @@ import type {
   DesktopAPI,
   GitAction,
   GitRuntimeStatus,
+  GitHubAccountState,
+  GitHubAccountStatus,
   LinkedIssue,
   PullRequest,
   RecentRepository,
@@ -97,6 +99,7 @@ import { ReviewView, type ReviewCommands } from './components/review-view'
 import { ConflictResolver } from './components/conflict-resolver'
 import { HistoryView, OperationBanner, StackView } from './components/repository-views'
 import { GitRuntimeDialog } from './components/git-runtime-dialog'
+import { GitHubAccountDialog } from './components/github-account-dialog'
 import {
   ChangesView,
   DiagnosticsView,
@@ -389,6 +392,9 @@ function App() {
   const [gitRuntimeOpen, setGitRuntimeOpen] = React.useState(false)
   const [gitRuntimeStatus, setGitRuntimeStatus] = React.useState<GitRuntimeStatus | null>(null)
   const [gitRuntimeBusy, setGitRuntimeBusy] = React.useState(false)
+  const [accountOpen, setAccountOpen] = React.useState(false)
+  const [account, setAccount] = React.useState<GitHubAccountStatus | null>(null)
+  const [accountBusy, setAccountBusy] = React.useState(false)
   const workflowSequence = React.useRef(0)
 
   const [paletteOpen, setPaletteOpen] = React.useState(false)
@@ -592,6 +598,60 @@ function App() {
     [desktop, isBusy, operationActive],
   )
 
+  const openAccount = React.useCallback(() => {
+    if (!desktop || isBusy || operationActive) return
+    setAccountOpen(true)
+    desktop
+      .githubAccountStatus?.()
+      .then((value) => value && setAccount(value))
+      .catch((value) => setError(readableError(value)))
+  }, [desktop, isBusy, operationActive])
+
+  // A running sign-in pushes its own state, so the panel is never left waiting on a read.
+  React.useEffect(() => {
+    if (!desktop) return
+    const stop = desktop.onGitHubAccount?.(setAccount)
+    desktop
+      .githubAccountStatus?.()
+      .then((value) => value && setAccount(value))
+      .catch(() => undefined)
+    return stop
+  }, [desktop])
+
+  const runAccountAction = React.useCallback(
+    async (action: () => Promise<GitHubAccountStatus>) => {
+      if (!desktop || accountBusy) return
+      setAccountBusy(true)
+      try {
+        setAccount(await action())
+      } catch (value) {
+        setError(readableError(value))
+      } finally {
+        setAccountBusy(false)
+      }
+    },
+    [accountBusy, desktop],
+  )
+
+  const openDevicePage = React.useCallback(() => {
+    const uri = account?.challenge?.verificationUri
+    if (!desktop || !uri) return
+    desktop.openExternal(uri).catch((value) => setError(readableError(value)))
+  }, [account, desktop])
+
+  const ACCOUNT_LABELS: Record<GitHubAccountState, string> = {
+    'not-configured': 'GitHub: not configured',
+    'signed-out': 'GitHub: signed out',
+    'signing-in': 'GitHub: waiting for sign-in',
+    'signed-in': 'GitHub: signed in',
+    expired: 'GitHub: sign-in expired',
+    revoked: 'GitHub: authorization revoked',
+    'permission-denied': 'GitHub: organization access required',
+    offline: 'GitHub: unreachable',
+    'storage-unavailable': 'GitHub: no secure store',
+  }
+  const accountLabel = ACCOUNT_LABELS[account?.state ?? 'signed-out']
+  const accountConnected = account?.state === 'signed-in' || account?.state === 'signing-in'
   const runAction = React.useCallback(
     async (action: GitAction, label: string): Promise<boolean> => {
       if (!desktop || !snapshot || busyRef.current) return false
@@ -1509,6 +1569,23 @@ function App() {
             )}
           />
           <span>{desktop ? 'Desktop connected' : 'Desktop integration unavailable'}</span>
+        </div>
+        <div className="connection-state">
+          <span
+            className={cn(
+              'connection-dot',
+              accountConnected ? 'connection-dot-live' : 'connection-dot-offline',
+            )}
+          />
+          <button
+            className="version-label version-label-action"
+            disabled={!desktop || isBusy || operationActive}
+            onClick={openAccount}
+            title="GitHub account"
+            type="button"
+          >
+            {accountLabel}
+          </button>
         </div>
         <div className="sidebar-footer-actions">
           <button
@@ -2821,6 +2898,16 @@ function App() {
         onSelectSystemGit={selectGitRuntime}
         open={gitRuntimeOpen}
         status={gitRuntimeStatus}
+      />
+      <GitHubAccountDialog
+        busy={accountBusy || isBusy || operationActive}
+        onCancelSignIn={() => runAccountAction(() => desktop!.cancelGitHubSignIn!())}
+        onOpenChange={setAccountOpen}
+        onOpenVerification={openDevicePage}
+        onSignIn={() => runAccountAction(() => desktop!.startGitHubSignIn!())}
+        onSignOut={() => runAccountAction(() => desktop!.signOutOfGitHub!())}
+        open={accountOpen}
+        status={account}
       />
       {conflictPath && snapshot ? (
         <ConflictResolver

@@ -983,6 +983,52 @@ export interface ActionResult {
   /** Present only for a merge: the per-pull-request outcome, including queue state. */
   merge?: MergeResult
 }
+/**
+ * Where the GitHub account stands. Every field is a status: an opaque reference
+ * to the sealed credential, never the credential itself, so nothing here can be
+ * replayed against the API.
+ */
+export type GitHubAccountState =
+  | 'not-configured'
+  | 'signed-out'
+  | 'signing-in'
+  | 'signed-in'
+  | 'expired'
+  | 'revoked'
+  | 'permission-denied'
+  | 'offline'
+  | 'storage-unavailable'
+
+export interface GitHubAppPermission {
+  permission: string
+  access: 'read' | 'write'
+  /** The enabled feature that needs this permission, or null when several share it. */
+  feature: string | null
+}
+
+export interface GitHubSignInChallenge {
+  userCode: string
+  verificationUri: string
+  expiresAt: number
+}
+
+export interface GitHubAccountStatus {
+  state: GitHubAccountState
+  /** Opaque handle for the sealed credential held by the operating system. */
+  reference: string | null
+  host: string
+  login: string | null
+  /** The fine-grained permissions the registered app requests; never a runtime scope. */
+  permissions: GitHubAppPermission[]
+  expiresAt: number | null
+  refreshExpiresAt: number | null
+  store: { available: boolean; name: string | null; reason: string | null }
+  challenge: GitHubSignInChallenge | null
+  message: string | null
+  /** A credential supplied by the environment is in use instead of the app's own. */
+  externalCredential: boolean
+}
+
 export interface DesktopAPI {
   recentRepositories(): Promise<RecentRepository[]>
   openRepository(path?: string): Promise<RepositorySnapshot | null>
@@ -1099,6 +1145,19 @@ export interface DesktopAPI {
   cancel(requestId: string): Promise<void>
   gitRuntimeStatus(): Promise<GitRuntimeStatus>
   setSystemGit(enabled: boolean): Promise<GitRuntimeStatus>
+  /** Status only: the account's state, permissions, and an opaque credential reference. */
+  githubAccountStatus?(): Promise<GitHubAccountStatus>
+  /** Starts GitHub App device sign-in and returns the one-time code to enter in a browser. */
+  startGitHubSignIn?(): Promise<GitHubAccountStatus>
+  /** Ends a pending sign-in without affecting an already stored credential. */
+  cancelGitHubSignIn?(): Promise<GitHubAccountStatus>
+  /** Removes the credential this application owns. Local repositories are untouched. */
+  signOutOfGitHub?(): Promise<GitHubAccountStatus>
+  /**
+   * Subscribes to account changes pushed by a running sign-in, and returns the
+   * unsubscribe. The renderer reads status rather than polling a long sign-in.
+   */
+  onGitHubAccount?: (listener: (status: GitHubAccountStatus) => void) => () => void
 }
 
 export type GitCapability = 'referenceTransactions' | 'rebaseUpdateRefs'

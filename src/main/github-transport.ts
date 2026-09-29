@@ -185,6 +185,40 @@ export function resolveGitHubToken(env: NodeJS.ProcessEnv = process.env): string
   }
   return null
 }
+/**
+ * The signed-in account's credential. `current` refreshes it when it has
+ * expired and returns null when sign-in is required; the credential itself
+ * never leaves this call, so no caller and no renderer can observe it.
+ */
+export interface GitHubCredentialSource {
+  current(): Promise<string | null>
+}
+
+let credentialSource: GitHubCredentialSource | null = null
+let credentialGeneration = 0
+
+/** Installs the account credential for the process, or clears it on sign-out. */
+export function setGitHubCredentialSource(source: GitHubCredentialSource | null): void {
+  credentialSource = source
+  credentialGeneration += 1
+}
+
+type GitHubFailureListener = (error: GitHubTransportError) => void | Promise<void>
+let failureListener: GitHubFailureListener | null = null
+
+/**
+ * Reports a rejected credential to the account so it can refresh once and then
+ * present a recoverable state instead of failing every call silently.
+ */
+export function onGitHubFailure(listener: GitHubFailureListener | null): void {
+  failureListener = listener
+}
+
+/** Awaited so a recovered credential is in place before the next request is made. */
+async function reportFailure(error: GitHubTransportError): Promise<void> {
+  if (error.kind !== 'unauthorized' && error.kind !== 'forbidden') return
+  await failureListener?.(error)
+}
 
 function numberHeader(value: string | null): number | null {
   if (value === null) return null
@@ -288,6 +322,7 @@ function toTransportError(error: unknown, signal?: AbortSignal): GitHubTransport
 
 export interface DirectGitHubTransportOptions {
   token?: string | null
+  credential?: GitHubCredentialSource
   env?: NodeJS.ProcessEnv
   fetch?: typeof globalThis.fetch
   apiUrl?: string
@@ -319,12 +354,27 @@ export class DirectGitHubTransport implements GitHubTransport {
     return this.options.timeoutMs ?? GITHUB_TIMEOUT_MS
   }
 
-  private headers(hasBody: boolean, customHeaders?: Record<string, string>): Headers {
-    const token = this.options.token ?? resolveGitHubToken(this.env)
+  /**
+   * An explicit environment credential always wins; otherwise the signed-in
+   * account's credential is asked for, which refreshes it when it has expired.
+   */
+  private async accessCredential(): Promise<string | null> {
+    const explicit = this.options.token ?? resolveGitHubToken(this.env)
+    if (explicit) return explicit
+    return (await this.options.credential?.current()) ?? null
+  }
+
+  private async headers(
+    hasBody: boolean,
+    customHeaders?: Record<string, string>,
+  ): Promise<Headers> {
+    const token = await this.accessCredential()
     if (!token) {
       throw new GitHubTransportError({
         kind: 'unauthorized',
-        detail: `set ${GITHUB_TRANSPORT_ENV} with a token or provide GH_TOKEN`,
+        detail: this.options.credential
+          ? 'sign in to GitHub from the account panel'
+          : `set ${GITHUB_TRANSPORT_ENV} with a token or provide GH_TOKEN`,
       })
     }
     const headers = new Headers({
@@ -362,9 +412,19 @@ export class DirectGitHubTransport implements GitHubTransport {
     }
     const request$ = (this.options.fetch ?? globalThis.fetch) as typeof globalThis.fetch
     try {
+      // Resolving the credential can suspend; an abort in that window must not
+      // be lost, because a fetch invoked with an already-aborted signal never settles.
+      const headers = await this.headers(payload !== undefined, request.headers)
+      if (controller.signal.aborted) {
+        throw new GitHubTransportError(
+          timedOut
+            ? { kind: 'timeout', detail: `request did not complete within ${timeoutMs}ms` }
+            : { kind: 'cancelled', detail: 'the request was cancelled' },
+        )
+      }
       const response = await request$(url, {
         method,
-        headers: this.headers(payload !== undefined, request.headers),
+        headers,
         body: payload === undefined ? undefined : JSON.stringify(payload),
         signal: controller.signal,
       })
@@ -387,7 +447,10 @@ export class DirectGitHubTransport implements GitHubTransport {
       }
       return { status: response.status, body, headers: response.headers, rateLimit }
     } catch (error) {
-      if (error instanceof GitHubTransportError) throw error
+      if (error instanceof GitHubTransportError) {
+        await reportFailure(error)
+        throw error
+      }
       if (timedOut) {
         throw new GitHubTransportError({
           kind: 'timeout',
@@ -666,13 +729,15 @@ export class GhGitHubTransport implements GitHubTransport {
       return { status: 304, headers: response.headers, body: null }
     }
     if (response.status < 200 || response.status >= 300) {
-      throw new GitHubTransportError({
+      const failure = new GitHubTransportError({
         kind: statusKind(response.status, rateLimit, apiMessage(response.body)),
         status: response.status,
         detail: apiMessage(response.body) ?? 'request failed',
         rateLimit,
         body: response.body,
       })
+      await reportFailure(failure)
+      throw failure
     }
     return response
   }
@@ -815,14 +880,20 @@ export function githubTransport(env: NodeJS.ProcessEnv = process.env): GitHubTra
   const choice: GitHubTransportChoice =
     configured === 'direct' || configured === 'gh' ? configured : 'auto'
   const token = resolveGitHubToken(env)
-  // A different token or API version changes what a stored body means, so the
-  // cache is dropped rather than reused across identities.
-  const key = `${choice}:${githubApiUrl(env)}:${githubApiVersion(env)}:${token ?? ''}`
+  // A different token, API version, or signed-in identity changes what a stored
+  // body means, so the cache is dropped rather than reused across identities.
+  const key = `${choice}:${githubApiUrl(env)}:${githubApiVersion(env)}:${token ?? ''}:${credentialGeneration}`
   if (cached?.key === key) return cached.transport
   if (cached) responseCache.clear()
-  const direct = choice === 'direct' || (choice === 'auto' && token !== null)
+  // A signed-in account selects the direct transport even without `gh` on PATH.
+  const direct =
+    choice === 'direct' || (choice === 'auto' && (token !== null || credentialSource !== null))
   const transport: GitHubTransport = direct
-    ? new DirectGitHubTransport({ env, cache: responseCache })
+    ? new DirectGitHubTransport({
+        env,
+        cache: responseCache,
+        credential: credentialSource ?? undefined,
+      })
     : new GhGitHubTransport({ env, cache: responseCache })
   cached = { key, transport }
   return transport
