@@ -169,9 +169,12 @@ interface SyncPushEntry {
   branch: string
   expectedRemoteOid: string | null
   force: boolean
+  status?: 'pending' | 'completed'
+  publishedOid?: string | null
 }
 
 interface SyncPushConfig {
+  originUrl?: string
   pushUrl: string
   allowForce: boolean
   branches: SyncPushEntry[]
@@ -3047,13 +3050,39 @@ async function restackJournal(repoPath: string, journal: StackJournal): Promise<
   }
   let pushMessage = ''
   if (journal.kind === 'sync' && journal.syncPushes) {
+    const origin = await currentOrigin(repoPath, true)
+    if (
+      !origin.pushUrl ||
+      origin.pushUrl !== journal.syncPushes.pushUrl ||
+      (journal.syncPushes.originUrl && origin.url !== journal.syncPushes.originUrl)
+    ) {
+      throw new Error('Sync progress is stale: the origin remote changed')
+    }
     const { pushUrl, allowForce, branches } = journal.syncPushes
     const pushed: string[] = []
     for (const item of branches) {
       const oid = await resolveCommit(repoPath, `refs/heads/${item.branch}`)
       if (!oid) throw new Error(`Branch ${item.branch} no longer exists after the replay`)
-      if (oid === item.expectedRemoteOid) continue
+      if (item.status === 'completed') {
+        const currentRemote = await remoteOid(repoPath, pushUrl, item.branch)
+        if (item.publishedOid && currentRemote !== item.publishedOid) {
+          throw new Error(
+            `Stack preview is stale: remote ${item.branch} changed after it was synced`,
+          )
+        }
+        pushed.push(item.branch)
+        continue
+      }
+      if (oid === item.expectedRemoteOid) {
+        item.status = 'completed'
+        item.publishedOid = oid
+        await writeJournal(repoPath, journal)
+        continue
+      }
       await pushBranch(repoPath, item.branch, oid, item.expectedRemoteOid, allowForce, pushUrl)
+      item.status = 'completed'
+      item.publishedOid = oid
+      await writeJournal(repoPath, journal)
       pushed.push(item.branch)
     }
     if (pushed.length > 0) {
@@ -3151,12 +3180,14 @@ async function runPlanSync(
   }
   await revalidatePlan(repoPath, plan)
   const syncPushes: SyncPushConfig = {
+    originUrl: plan.originUrl ?? (await getOriginUrl(repoPath)) ?? undefined,
     pushUrl,
     allowForce,
     branches: pushes.map((layer) => ({
       branch: layer.branch,
       expectedRemoteOid: plan.capturedRemoteOids[layer.branch] ?? null,
       force: layer.push === 'force',
+      status: 'pending',
     })),
   }
   const replayed = new Set(rebases.map((layer) => layer.branch))
@@ -3185,6 +3216,16 @@ async function stackContinue(repoPath: string): Promise<ActionResult> {
   if (!journal) throw new Error('No interrupted Git Stacks operation is available')
   if (journal.status === 'aborting')
     throw new Error('Stack rollback has started; use Abort to finish it')
+  if (journal.kind === 'sync' && journal.syncPushes) {
+    const origin = await currentOrigin(repoPath, true)
+    if (
+      !origin.pushUrl ||
+      origin.pushUrl !== journal.syncPushes.pushUrl ||
+      (journal.syncPushes.originUrl && origin.url !== journal.syncPushes.originUrl)
+    ) {
+      throw new Error('Sync progress is stale: the origin remote changed')
+    }
+  }
   const active = journal.entries.find((entry) => entry.status === 'rebasing')
   if (!active) return restackJournal(repoPath, journal)
   await verifyCompletedEntries(repoPath, journal)

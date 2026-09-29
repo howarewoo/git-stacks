@@ -429,3 +429,129 @@ test('Sync Stack 3+ layer stack syncs cleanly after lower PR merge and trunk adv
     assert.equal(git(harness, ['branch', '--show-current']), 'layer3')
   })
 })
+test('Sync Stack partial push retry: completed push is checkpointed and continuation does not fail on spent lease when later push is retried', async () => {
+  await withHarness(async (harness) => {
+    // 1. Create a 2-layer stack: p1 -> p2
+    await runAction(harness.repo, { type: 'createBranch', name: 'push-p1', parent: 'main' })
+    await commitFile(harness, 'p1.txt', 'p1 work\n', 'P1 work')
+
+    await runAction(harness.repo, { type: 'createBranch', name: 'push-p2', parent: 'push-p1' })
+    await commitFile(harness, 'p2.txt', 'p2 work\n', 'P2 work')
+
+    await publishStack(harness, 'push-p2')
+    const initialRemoteP1 = bareGit(harness, ['rev-parse', 'refs/heads/push-p1'])
+    const initialRemoteP2 = bareGit(harness, ['rev-parse', 'refs/heads/push-p2'])
+
+    // 2. Advance main so both branches need rebase
+    git(harness, ['switch', 'main'])
+    await commitFile(harness, 'main-advance.txt', 'advance\n', 'Main advance')
+    git(harness, ['push', harness.bare, 'main:refs/heads/main'])
+
+    git(harness, ['switch', 'push-p2'])
+    const snapshot = await getSnapshot(harness.repo)
+    const preview = await previewStack(harness.repo, snapshot, 'sync', 'push-p2')
+    assert.equal(preview.kind, 'sync')
+    assert.equal(preview.blockers.length, 0)
+
+    // 3. Install push hook that allows push-p1 to succeed but fails push-p2
+    let failP2 = true
+    harness.hookGitPush({
+      branch: 'push-p2',
+      armed: true,
+      before() {
+        if (failP2) {
+          throw new Error('Simulated network drop pushing push-p2')
+        }
+      },
+    })
+
+    // 4. Run executeStack, which should rebase both, push p1, and fail pushing p2
+    await assert.rejects(
+      runAction(harness.repo, {
+        type: 'executeStack',
+        token: preview.token,
+        allowForce: true,
+        mergeMethod: 'squash',
+      }),
+      /Simulated network drop/i,
+    )
+
+    // 5. Verify p1 was successfully pushed to remote and checkpointed
+    const intermediateRemoteP1 = bareGit(harness, ['rev-parse', 'refs/heads/push-p1'])
+    const intermediateRemoteP2 = bareGit(harness, ['rev-parse', 'refs/heads/push-p2'])
+    assert.notEqual(intermediateRemoteP1, initialRemoteP1)
+    assert.equal(intermediateRemoteP2, initialRemoteP2)
+
+    const gitDir = git(harness, ['rev-parse', '--absolute-git-dir'])
+    const journalRaw = await readFile(join(gitDir, 'git-stacks-stack.json'), 'utf8')
+    const journal = JSON.parse(journalRaw)
+    const p1Push = journal.syncPushes?.branches.find((b: { branch: string }) => b.branch === 'push-p1')
+    assert.ok(p1Push)
+    assert.equal(p1Push.status, 'completed')
+    assert.equal(p1Push.publishedOid, intermediateRemoteP1)
+
+    // 6. Disarm failure and continue. It must NOT fail on p1's spent lease!
+    failP2 = false
+    const result = await runAction(harness.repo, { type: 'stackContinue' })
+    assert.match(result.message, /Synced/i)
+
+    // 7. Verify both branches are now rebased and pushed
+    const finalRemoteP1 = bareGit(harness, ['rev-parse', 'refs/heads/push-p1'])
+    const finalRemoteP2 = bareGit(harness, ['rev-parse', 'refs/heads/push-p2'])
+    const finalLocalP1 = git(harness, ['rev-parse', 'refs/heads/push-p1'])
+    const finalLocalP2 = git(harness, ['rev-parse', 'refs/heads/push-p2'])
+
+    assert.equal(finalRemoteP1, finalLocalP1)
+    assert.equal(finalRemoteP2, finalLocalP2)
+    assert.equal(finalRemoteP1, intermediateRemoteP1)
+    assert.notEqual(finalRemoteP2, initialRemoteP2)
+  })
+})
+
+test('Sync Stack changed origin during paused conflict is rejected before any mutation', async () => {
+  await withHarness(async (harness) => {
+    // 1. Create a branch modifying shared.txt
+    await runAction(harness.repo, { type: 'createBranch', name: 'feat-origin-check', parent: 'main' })
+    await commitFile(harness, 'shared.txt', 'feature change\n', 'Feature change')
+    git(harness, ['push', harness.bare, 'feat-origin-check:refs/heads/feat-origin-check'])
+
+    // 2. Advance remote main with conflicting change
+    git(harness, ['switch', 'main'])
+    await commitFile(harness, 'shared.txt', 'main change\n', 'Main conflicting change')
+    git(harness, ['push', harness.bare, 'main:refs/heads/main'])
+
+    git(harness, ['switch', 'feat-origin-check'])
+
+    // 3. Preview and run sync, causing a conflict
+    const snapshot = await getSnapshot(harness.repo)
+    const preview = await previewStack(harness.repo, snapshot, 'sync', 'feat-origin-check')
+    assert.equal(preview.kind, 'sync')
+
+    await assert.rejects(
+      runAction(harness.repo, {
+        type: 'executeStack',
+        token: preview.token,
+        allowForce: true,
+        mergeMethod: 'squash',
+      }),
+      /conflict/i,
+    )
+
+    // 4. Change origin remote URL while paused in conflict
+    git(harness, ['remote', 'set-url', 'origin', 'https://github.com/attacker/malicious.git'])
+
+    // 5. Attempt stackContinue: must reject with origin changed error
+    await assert.rejects(
+      runAction(harness.repo, { type: 'stackContinue' }),
+      /Sync progress is stale: the origin remote changed/i,
+    )
+
+    // 6. Restore original remote URL, resolve conflict, and continue
+    git(harness, ['remote', 'set-url', 'origin', 'https://github.com/acme/widgets.git'])
+    await writeFile(join(harness.repo, 'shared.txt'), 'resolved change\n', 'utf8')
+    git(harness, ['add', '--', 'shared.txt'])
+
+    const result = await runAction(harness.repo, { type: 'stackContinue' })
+    assert.match(result.message, /Synced/i)
+  })
+})
