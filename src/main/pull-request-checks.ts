@@ -42,6 +42,10 @@ const BACKOFF_CEILING_MS = 120_000
 const MINIMUM_INTERVAL_MS = 15_000
 const MAX_CHECK_RUNS = 100
 const MAX_WORKFLOW_RUNS = 100
+const MAX_STATUSES = 100
+
+/** GitHub's own app id for Actions, the app every workflow run and its check run report. */
+const ACTIONS_APP_ID = 15368
 
 interface CachedReport {
   etags: Map<string, string>
@@ -55,6 +59,8 @@ interface CachedReport {
   base: string | null
   fetchedAt: string
   permissions: PullRequestChecksPermissions
+  /** True when a resource reported more pages than the bounded read followed. */
+  truncated: boolean
   failures: number
   nextAttemptAt: number
   lastReason: string | null
@@ -141,6 +147,103 @@ async function conditionalRead(request: CheckRequest): Promise<CheckRead> {
   }
 }
 
+/** The most pages one resource read follows before it admits it stopped early. */
+const MAX_PAGES = 10
+
+interface PagedResult {
+  entries: unknown[]
+  notModified: boolean
+  etag: string | null
+  rateLimit: GitHubRateLimitLike
+  truncated: boolean
+}
+
+interface GitHubRateLimitLike {
+  remaining: number | null
+  reset: string | null
+}
+
+/**
+ * Follow a REST list to its end, one bounded page at a time.
+ *
+ * A first page short of `perPage` is the whole list, so an ordinary read costs one
+ * request. A full page means there may be more, and the read follows until GitHub
+ * returns a short page or the page bound is reached. Reaching the bound is reported as
+ * truncation rather than passed off as a complete list: a head with thousands of
+ * check runs is unusual, and a silent cut would be a lie about what was inspected.
+ *
+ * The conditional validator belongs to the first page. A later page answering 304 is
+ * not a question GitHub answers, so it is read unconditionally rather than treated as
+ * proof that the remaining pages are current.
+ */
+async function readAllPages(
+  path: string,
+  options: {
+    perPage: number
+    etag?: string | null
+    pick: (data: unknown) => unknown[]
+    signal?: AbortSignal
+  },
+): Promise<PagedResult> {
+  const separator = path.includes('?') ? '&' : '?'
+  const entries: unknown[] = []
+  let first: CheckRead | null = null
+  let truncated = false
+  for (let page = 1; page <= MAX_PAGES; page += 1) {
+    const read = await conditionalRead({
+      path: `${path}${separator}per_page=${options.perPage}&page=${page}`,
+      ...(page === 1 ? { etag: options.etag ?? null } : {}),
+      ...(options.signal ? { signal: options.signal } : {}),
+    })
+    if (page === 1) {
+      first = read
+      if (read.notModified) {
+        return {
+          entries: [],
+          notModified: true,
+          etag: read.etag,
+          rateLimit: read.rateLimit,
+          truncated: false,
+        }
+      }
+    }
+    const pageEntries = options.pick(read.data)
+    entries.push(...pageEntries)
+    if (pageEntries.length < options.perPage) break
+    if (page === MAX_PAGES) truncated = true
+  }
+  return {
+    entries,
+    notModified: false,
+    etag: first?.etag ?? null,
+    rateLimit: first?.rateLimit ?? { remaining: null, reset: null },
+    truncated,
+  }
+}
+
+/**
+ * The pull request's own current head and base. A mutation proves identity through this
+ * read, never through a value the renderer supplied earlier.
+ */
+async function readPullRequestIdentity(
+  fullName: string,
+  number: number,
+  signal?: AbortSignal,
+): Promise<{ headSha: string; base: string | null }> {
+  const response = await githubTransport().rest({
+    path: `repos/${fullName}/pulls/${number}`,
+    ...(signal ? { signal } : {}),
+  })
+  const data = response.data
+  if (!isRecord(data) || !isRecord(data.head) || typeof data.head.sha !== 'string') {
+    throw new Error('GitHub returned a pull request without a head commit')
+  }
+  return {
+    headSha: data.head.sha,
+    base: isRecord(data.base) && typeof data.base.ref === 'string' ? data.base.ref : null,
+  }
+}
+
 function checkRunEntries(data: unknown): unknown[] {
   if (!isRecord(data) || !Array.isArray(data.check_runs)) return []
   return data.check_runs
@@ -157,41 +260,126 @@ function workflowRunEntries(data: unknown): unknown[] {
 }
 
 /**
- * The check contexts a repository requires on its base branch. GitHub answers 403 for
- * anyone without admin read on branch protection and 404 when no rule exists; both
- * mean "unknown", never "none", so every check stays informational-but-unproven.
+ * The checks a repository requires, and whether that answer is complete.
+ *
+ * Two APIs can make a check required, and a read that ignores the second one is not
+ * evidence that a check is optional. Legacy branch protection reports required
+ * contexts, each optionally bound to a reporting app; repository rulesets can require
+ * checks that appear nowhere in branch protection. So both are read, a ruleset
+ * requirement is only claimed when the ruleset that declares it is the base branch's
+ * own, and any read that does not succeed leaves the whole answer `unknown` rather
+ * than presenting the checks it did read as the complete required set.
  */
 async function requiredContexts(
   fullName: string,
   base: string | null,
   signal?: AbortSignal,
-): Promise<{ known: boolean; contexts: Set<string> }> {
-  if (!base) return { known: false, contexts: new Set() }
+): Promise<{ known: boolean; contexts: Map<string, number | null> }> {
+  if (!base) return { known: false, contexts: new Map() }
+  let legacy: { known: boolean; contexts: Map<string, number | null> } = {
+    known: false,
+    contexts: new Map(),
+  }
   try {
     const response = await githubTransport().rest({
       path: `repos/${fullName}/branches/${encodeURIComponent(base)}/protection/required_status_checks`,
       ...(signal ? { signal } : {}),
     })
     const data = response.data
-    if (!isRecord(data)) return { known: false, contexts: new Set() }
-    const contexts = new Set<string>()
+    if (!isRecord(data)) return { known: false, contexts: new Map() }
+    const contexts = new Map<string, number | null>()
     if (Array.isArray(data.contexts)) {
       for (const context of data.contexts) {
-        if (typeof context === 'string' && context) contexts.add(context.toLowerCase())
+        if (typeof context === 'string' && context) contexts.set(context.toLowerCase(), null)
       }
     }
     if (Array.isArray(data.checks)) {
       for (const entry of data.checks) {
-        if (isRecord(entry) && typeof entry.context === 'string' && entry.context) {
-          contexts.add(entry.context.toLowerCase())
+        if (!isRecord(entry) || typeof entry.context !== 'string' || !entry.context) continue
+        // A context bound to an app is only that app's check; the app id is what keeps
+        // another app's identically named check from being read as required.
+        contexts.set(
+          entry.context.toLowerCase(),
+          typeof entry.app_id === 'number' ? entry.app_id : null,
+        )
+      }
+    }
+    legacy = { known: true, contexts }
+  } catch (error) {
+    if (error instanceof GitHubTransportError && error.kind === 'cancelled') throw error
+    return { known: false, contexts: new Map() }
+  }
+
+  const rulesets = await requiredRulesetContexts(fullName, base, signal)
+  if (!rulesets.known) return { known: false, contexts: new Map() }
+  for (const [context, appId] of rulesets.contexts) {
+    if (!legacy.contexts.has(context)) legacy.contexts.set(context, appId)
+  }
+  return legacy
+}
+
+/**
+ * Required checks declared by repository rulesets that target the base branch. A
+ * ruleset GitHub will not let this account read is the reason the whole required set
+ * stays unknown: a check no readable API mentions may still gate the merge.
+ */
+async function requiredRulesetContexts(
+  fullName: string,
+  base: string | null,
+  signal?: AbortSignal,
+): Promise<{ known: boolean; contexts: Map<string, number | null> }> {
+  try {
+    const response = await githubTransport().rest({
+      path: `repos/${fullName}/rulesets?includes_parents=true&per_page=100`,
+      ...(signal ? { signal } : {}),
+    })
+    const data = response.data
+    if (!Array.isArray(data)) return { known: false, contexts: new Map() }
+    const contexts = new Map<string, number | null>()
+    for (const ruleset of data) {
+      if (!isRecord(ruleset) || ruleset.target !== 'branch' || ruleset.enforcement !== 'active') {
+        continue
+      }
+      if (!rulesetTargetsBranch(ruleset, base)) continue
+      if (!Array.isArray(ruleset.rules)) continue
+      for (const rule of ruleset.rules) {
+        if (!isRecord(rule) || rule.type !== 'required_status_checks') continue
+        const parameters = isRecord(rule.parameters) ? rule.parameters : null
+        const entries =
+          parameters && Array.isArray(parameters.required_status_checks)
+            ? parameters.required_status_checks
+            : []
+        for (const entry of entries) {
+          if (!isRecord(entry) || typeof entry.context !== 'string' || !entry.context) continue
+          contexts.set(
+            entry.context.toLowerCase(),
+            typeof entry.integration_id === 'number' ? entry.integration_id : null,
+          )
         }
       }
     }
     return { known: true, contexts }
   } catch (error) {
     if (error instanceof GitHubTransportError && error.kind === 'cancelled') throw error
-    return { known: false, contexts: new Set() }
+    return { known: false, contexts: new Map() }
   }
+}
+
+/**
+ * Whether a branch ruleset applies to the base branch. GitHub returns the patterns under
+ * `conditions.ref_name.include`, where `~DEFAULT_BRANCH` is its token for the repository's
+ * own default branch; the literal base ref is accepted as well. A ruleset that names
+ * neither the base nor the default branch is about other branches and proves nothing here.
+ */
+function rulesetTargetsBranch(ruleset: Record<string, unknown>, base: string | null): boolean {
+  if (!base) return false
+  const conditions = ruleset.conditions
+  if (!isRecord(conditions)) return false
+  const refName = conditions.ref_name
+  const include = isRecord(refName) && Array.isArray(refName.include) ? refName.include : []
+  return include.some(
+    (value) => typeof value === 'string' && (value === '~DEFAULT_BRANCH' || value === base),
+  )
 }
 
 /**
@@ -285,7 +473,7 @@ function buildReport(
   statuses: unknown[],
   workflowRuns: unknown[],
   requirementKnown: boolean,
-  required: Set<string>,
+  required: Map<string, number | null>,
 ): BuiltReport {
   const checks: PullRequestCheckDetail[] = []
   // An Actions run and the check run it creates are one piece of work, joined by the
@@ -311,7 +499,9 @@ function buildReport(
       source: 'workflow-run',
       app: 'github-actions',
       state: classifyCheckRun(entry.status, entry.conclusion),
-      requirement: requirementKnown ? classifyRequirement(name, required) : 'unknown',
+      requirement: requirementKnown
+        ? classifyRequirement(name, required, ACTIONS_APP_ID)
+        : 'unknown',
       summary: typeof entry.run_number === 'number' ? `Run #${entry.run_number}` : null,
       detailsUrl: details,
       startedAt: typeof entry.run_started_at === 'string' ? entry.run_started_at : null,
@@ -332,7 +522,9 @@ function buildReport(
       source: 'check-run',
       app,
       state: classifyCheckRun(entry.status, entry.conclusion),
-      requirement: requirementKnown ? classifyRequirement(entry.name, required) : 'unknown',
+      requirement: requirementKnown
+        ? classifyRequirement(entry.name, required, checkRunAppId(entry))
+        : 'unknown',
       summary:
         isRecord(entry.output) && typeof entry.output.title === 'string'
           ? entry.output.title
@@ -354,7 +546,9 @@ function buildReport(
       source: 'commit-status',
       app: null,
       state,
-      requirement: requirementKnown ? classifyRequirement(entry.context, required) : 'unknown',
+      requirement: requirementKnown
+        ? classifyRequirement(entry.context, required, null)
+        : 'unknown',
       summary:
         typeof entry.description === 'string' && entry.description ? entry.description : null,
       detailsUrl: safeGitHubUrl(entry.target_url),
@@ -366,8 +560,9 @@ function buildReport(
   }
 
   if (requirementKnown) {
-    for (const context of required) {
-      if (checks.some((check) => check.name.toLowerCase() === context)) continue
+    for (const [context, appId] of required) {
+      if (checks.some((check) => check.name.toLowerCase() === context && matchesApp(check, appId)))
+        continue
       // GitHub lists this context as required but has reported nothing for it yet.
       checks.push({
         key: `expected:${context}`,
@@ -393,8 +588,24 @@ function buildReport(
   }
 }
 
-function classifyRequirement(name: string, required: Set<string>): PullRequestCheckRequirement {
-  return required.has(name.trim().toLowerCase()) ? 'required' : 'informational'
+function checkRunAppId(entry: Record<string, unknown>): number | null {
+  return isRecord(entry.app) && typeof entry.app.id === 'number' ? entry.app.id : null
+}
+
+/**
+ * Whether a reported check is the one the repository requires. A required context that
+ * names an app is that app's check only, so an identically named check from another app
+ * stays informational rather than counting as the required one that never reported.
+ */
+function classifyRequirement(
+  name: string,
+  required: Map<string, number | null>,
+  appId: number | null,
+): PullRequestCheckRequirement {
+  const key = name.trim().toLowerCase()
+  if (!required.has(key)) return 'informational'
+  const requiredAppId = required.get(key) ?? null
+  return requiredAppId === null || appId === requiredAppId ? 'required' : 'informational'
 }
 
 function failureReport(
@@ -428,6 +639,7 @@ function failureReport(
       rateLimit,
       nextAttemptAt: new Date(remembered.nextAttemptAt).toISOString(),
       permissions: remembered.permissions,
+      truncated: remembered.truncated,
     }
   }
   return {
@@ -446,6 +658,7 @@ function failureReport(
     rateLimit,
     nextAttemptAt: null,
     permissions: { actionsEnabled: false, canRerun: false, reason: '' },
+    truncated: false,
   }
 }
 
@@ -464,6 +677,24 @@ function describeFailure(error: unknown): string {
     return `Checks could not be refreshed: ${error.detail}`
   }
   return `Checks could not be refreshed: ${error instanceof Error ? error.message : String(error)}`
+}
+
+/**
+ * Whether a reported check is the app-bound context the repository requires. A context
+ * bound to an app counts as reported when that app reported it, even when another app
+ * reported a check of the same name.
+ */
+function withoutRerun(
+  permissions: PullRequestChecksPermissions,
+  reason: string,
+): PullRequestChecksPermissions {
+  return permissions.canRerun ? { ...permissions, canRerun: false, reason } : permissions
+}
+
+function matchesApp(check: PullRequestCheckDetail, appId: number | null): boolean {
+  if (appId === null) return true
+  if (check.source === 'workflow-run') return appId === ACTIONS_APP_ID
+  return check.app === 'github-actions' && appId === ACTIONS_APP_ID
 }
 
 /**
@@ -494,23 +725,20 @@ export async function getPullRequestChecks(
 
   let headSha = options.headSha ?? null
   let base = options.base ?? null
+  // Identity is either proved in this call or reported as unproved. A read that could
+  // not confirm which head the pull request has may still show the last good report,
+  // but it is not current, and it cannot authorise a mutation.
+  let identityReason: string | null = null
   if (!headSha) {
     try {
-      const response = await githubTransport().rest({
-        path: `repos/${fullName}/pulls/${number}`,
-        ...(options.signal ? { signal: options.signal } : {}),
-      })
-      const data = response.data
-      if (!isRecord(data) || !isRecord(data.head) || typeof data.head.sha !== 'string') {
-        throw new Error('GitHub returned a pull request without a head commit')
-      }
-      headSha = data.head.sha
-      if (isRecord(data.base) && typeof data.base.ref === 'string') base = data.base.ref
+      const identity = await readPullRequestIdentity(fullName, number, options.signal)
+      headSha = identity.headSha
+      base = identity.base ?? base
     } catch (error) {
       if (error instanceof GitHubTransportError && error.kind === 'cancelled') throw error
-      // The last head this view resolved is still worth showing, marked stale, rather
-      // than discarding a report because one lookup failed.
       if (!remembered?.headSha) throw error
+      identityReason =
+        'This pull request could not be re-read from GitHub, so these checks are the last ones Git Stacks read.'
       headSha = remembered.headSha
       base = base ?? remembered.base
     }
@@ -536,54 +764,97 @@ export async function getPullRequestChecks(
       )
     }
     if (!options.force && now - Date.parse(remembered.fetchedAt) < MINIMUM_INTERVAL_MS) {
+      // A report served without asking GitHub anything is only as current as the identity
+      // behind it, so an unproved head is labelled here too.
+      if (identityReason) {
+        return reportFrom(
+          { ...remembered, permissions: withoutRerun(remembered.permissions, identityReason) },
+          number,
+          base,
+          'stale',
+          identityReason,
+        )
+      }
       return reportFrom(remembered, number, base, 'cached', null)
     }
   }
 
   try {
     const commitPath = `repos/${fullName}/commits/${encodeURIComponent(headSha)}`
-    const checkRuns = await conditionalRead({
-      path: `${commitPath}/check-runs?per_page=${MAX_CHECK_RUNS}`,
+    const checkRuns = await readAllPages(`${commitPath}/check-runs`, {
+      perPage: MAX_CHECK_RUNS,
       etag: remembered?.etags.get('check-runs'),
+      pick: checkRunEntries,
       ...(options.signal ? { signal: options.signal } : {}),
     })
-    const status = await conditionalRead({
-      path: `${commitPath}/status?per_page=${MAX_CHECK_RUNS}`,
+    const status = await readAllPages(`${commitPath}/status`, {
+      perPage: MAX_STATUSES,
       etag: remembered?.etags.get('status'),
+      pick: statusEntries,
       ...(options.signal ? { signal: options.signal } : {}),
     })
-    const workflowRuns = await conditionalRead({
-      path: `repos/${fullName}/actions/runs?head_sha=${encodeURIComponent(headSha)}&per_page=${MAX_WORKFLOW_RUNS}`,
-      etag: remembered?.etags.get('workflow-runs'),
-      ...(options.signal ? { signal: options.signal } : {}),
-    })
+    const workflowRuns = await readAllPages(
+      `repos/${fullName}/actions/runs?head_sha=${encodeURIComponent(headSha)}`,
+      {
+        perPage: MAX_WORKFLOW_RUNS,
+        etag: remembered?.etags.get('workflow-runs'),
+        pick: workflowRunEntries,
+        ...(options.signal ? { signal: options.signal } : {}),
+      },
+    )
     const rateLimit = checkRuns.rateLimit
+    const truncated = checkRuns.truncated || status.truncated || workflowRuns.truncated
+
+    // Requirement and permission are policy, not payload: neither has an ETag, and a
+    // rerun must never act on a policy that was true at some earlier read. Both are
+    // re-read on every path, including the one where all three payloads answered 304.
+    const requirement = await requiredContexts(fullName, base, options.signal)
+    const readPermissions = await actionsPermissions(fullName, options.signal)
+    // An unproved head cannot authorise a mutation: the run behind the button may belong
+    // to a commit Git Stacks never confirmed this pull request has.
+    const permissions = identityReason
+      ? withoutRerun(readPermissions, identityReason)
+      : readPermissions
 
     if (checkRuns.notModified && status.notModified && workflowRuns.notModified && remembered) {
+      // The payloads are still current, but they are rebuilt against the policy read
+      // just now: a retargeted base or a withdrawn role must change the report even
+      // when not one check result moved.
+      const sources = remembered.sources
+      const built = buildReport(
+        sources.checkRuns,
+        sources.statuses,
+        sources.workflowRuns,
+        requirement.known,
+        requirement.contexts,
+      )
       const confirmed: CachedReport = {
         ...remembered,
+        checks: built.checks,
+        rollup: built.rollup,
+        summary: built.summary,
+        base,
         rateLimit,
+        permissions,
+        truncated,
         failures: 0,
         nextAttemptAt: 0,
         lastReason: null,
       }
       cache.set(cacheKey, confirmed)
-      return reportFrom(confirmed, number, base, 'not-modified', null)
+      return identityReason
+        ? reportFrom(confirmed, number, base, 'stale', identityReason)
+        : reportFrom(confirmed, number, base, 'not-modified', null)
     }
 
     // A resource that answered 304 keeps the entries this head was last seen with.
     const sources = {
-      checkRuns: checkRuns.notModified
-        ? (remembered?.sources.checkRuns ?? [])
-        : checkRunEntries(checkRuns.data),
-      statuses: status.notModified
-        ? (remembered?.sources.statuses ?? [])
-        : statusEntries(status.data),
+      checkRuns: checkRuns.notModified ? (remembered?.sources.checkRuns ?? []) : checkRuns.entries,
+      statuses: status.notModified ? (remembered?.sources.statuses ?? []) : status.entries,
       workflowRuns: workflowRuns.notModified
         ? (remembered?.sources.workflowRuns ?? [])
-        : workflowRunEntries(workflowRuns.data),
+        : workflowRuns.entries,
     }
-    const requirement = await requiredContexts(fullName, base, options.signal)
     const built = buildReport(
       sources.checkRuns,
       sources.statuses,
@@ -591,7 +862,6 @@ export async function getPullRequestChecks(
       requirement.known,
       requirement.contexts,
     )
-    const permissions = await actionsPermissions(fullName, options.signal)
     const etags = new Map(remembered?.etags ?? [])
     if (checkRuns.etag) etags.set('check-runs', checkRuns.etag)
     if (status.etag) etags.set('status', status.etag)
@@ -607,12 +877,15 @@ export async function getPullRequestChecks(
       base,
       fetchedAt: new Date().toISOString(),
       permissions,
+      truncated,
       failures: 0,
       nextAttemptAt: 0,
       lastReason: null,
     }
     cache.set(cacheKey, entry)
-    return reportFrom(entry, number, base, 'live', null)
+    return identityReason
+      ? reportFrom(entry, number, base, 'stale', identityReason)
+      : reportFrom(entry, number, base, 'live', null)
   } catch (error) {
     if (error instanceof GitHubTransportError && error.kind === 'cancelled') throw error
     if (!remembered) return failureReport(number, headSha, base, error, null)
@@ -656,6 +929,7 @@ function reportFrom(
     rateLimit: entry.rateLimit,
     nextAttemptAt: entry.nextAttemptAt > 0 ? new Date(entry.nextAttemptAt).toISOString() : null,
     permissions: entry.permissions,
+    truncated: entry.truncated,
   }
 }
 
@@ -668,7 +942,7 @@ export async function rerunPullRequestCheck(
   repoPath: string,
   number: number,
   runId: number,
-  options: { headSha?: string | null; signal?: AbortSignal } = {},
+  options: { headSha?: string | null; base?: string | null; signal?: AbortSignal } = {},
 ): Promise<PullRequestChecksReport> {
   if (!Number.isInteger(number) || number <= 0) {
     throw new Error('Pull request number must be a positive integer')
@@ -681,10 +955,23 @@ export async function rerunPullRequestCheck(
     throw new Error('Pull request integration requires a github.com origin remote.')
   }
   const fullName = remote.fullName
-  // A rerun is a mutation, so the report behind the button is re-read and the run has
-  // to be proved against a read GitHub confirmed in this call. A cached or stale report
-  // is not proof: it may name a run that has since been replaced on this head.
-  const report = await getPullRequestChecks(repoPath, number, { ...options, force: true })
+  // Identity is proved here, from GitHub, before anything else. The head the caller
+  // saw is what the user acted on, so a head that has moved since is refused outright
+  // rather than rerun: the button described a different commit than the one GitHub has.
+  const identity = await readPullRequestIdentity(fullName, number, options.signal)
+  if (options.headSha && options.headSha !== identity.headSha) {
+    throw new Error(
+      'This pull request moved to a new head commit after these checks were read. Review the checks for the new commit, then rerun from there.',
+    )
+  }
+  // The report behind the button is then re-read against that proved head. A cached or
+  // stale report is not proof: it may name a run that has since been replaced.
+  const report = await getPullRequestChecks(repoPath, number, {
+    ...options,
+    headSha: identity.headSha,
+    base: identity.base ?? options.base ?? null,
+    force: true,
+  })
   if (!report.available) {
     throw new Error(
       `Could not re-read this pull request's checks before rerunning: ${report.message}`,

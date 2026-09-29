@@ -176,6 +176,13 @@ export function PullRequestChecksPanel({
           to be required or optional.
         </p>
       )}
+      {report.truncated ? (
+        <InlineAlert tone="warning" title="More checks than shown">
+          GitHub reported more check runs, commit statuses, or workflow runs for this head than Git
+          Stacks read. Everything listed here is what GitHub reported; the list is not the whole of
+          it.
+        </InlineAlert>
+      ) : null}
       <InlineAlert tone={freshness.tone} title={freshness.title}>
         {freshness.detail}
       </InlineAlert>

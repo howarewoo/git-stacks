@@ -739,3 +739,192 @@ test('the read follows the pull request head when the caller does not supply one
     )
   })
 })
+
+test('a rerun is refused with no request posted when the head moved after the report was read', async () => {
+  await withHarness(async (harness) => {
+    const head = await setup(harness, (headSha) => ({
+      checkRuns: [
+        {
+          id: 1,
+          headSha,
+          name: 'CI',
+          status: 'completed',
+          conclusion: 'failure',
+          appSlug: 'github-actions',
+          detailsUrl: 'https://github.com/acme/widgets/actions/runs/9500',
+        },
+      ],
+      workflowRuns: [
+        {
+          id: 9500,
+          headSha,
+          name: 'CI',
+          status: 'completed',
+          conclusion: 'failure',
+          htmlUrl: 'https://github.com/acme/widgets/actions/runs/9500',
+        },
+      ],
+    }))
+    // The renderer read this head, then the branch moved before the button was pressed.
+    git(harness, ['commit', '--allow-empty', '-m', 'moved under the button'])
+    const moved = git(harness, ['rev-parse', 'feature/checks'])
+    git(harness, ['push', harness.bare, 'feature/checks:refs/heads/feature/checks'])
+    assert.notEqual(moved, head)
+
+    await assert.rejects(
+      rerunPullRequestCheck(harness.repo, PR_NUMBER, 9500, { headSha: head }),
+      /moved to a new head commit/,
+    )
+    const state = await harness.readState()
+    assert.deepEqual(state.checks?.reruns ?? [], [])
+  })
+})
+
+test('a pull request that cannot be re-read is served stale and offers no rerun', async () => {
+  await withHarness(async (harness) => {
+    const head = await setup(harness, (headSha) => ({
+      checkRuns: [{ id: 1, headSha, name: 'build', status: 'completed', conclusion: 'success' }],
+    }))
+    const first = await getPullRequestChecks(harness.repo, PR_NUMBER, {
+      headSha: head,
+      base: 'main',
+    })
+    assert.equal(first.freshness, 'live')
+
+    // Identity is proved by reading the pull request, so refusing that read has to
+    // reach the report: otherwise a read GitHub could not confirm looks current.
+    const state = await harness.readState()
+    state.lostResponses = [
+      {
+        method: 'GET',
+        pathIncludes: `/pulls/${PR_NUMBER}`,
+        status: 403,
+        message: 'Forbidden',
+      },
+    ]
+    await harness.writeState(state)
+
+    const second = await getPullRequestChecks(harness.repo, PR_NUMBER, {
+      force: true,
+    })
+    assert.equal(second.headSha, head)
+    assert.equal(second.freshness, 'stale')
+    assert.match(second.staleReason ?? '', /could not be re-read/)
+    assert.equal(second.permissions.canRerun, false)
+    assert.equal(second.checks.length, 1)
+  })
+})
+
+test('an unreadable rulesets read leaves every requirement unknown rather than optional', async () => {
+  await withHarness(async (harness) => {
+    const head = await setup(harness, (headSha) => ({
+      // Branch protection is readable and requires nothing this head reported, so only
+      // the ruleset read can tell a required check from an optional one here.
+      requiredStatusChecks: { branch: 'main', contexts: [] },
+      rulesets: { forbidden: true },
+      checkRuns: [{ id: 1, headSha, name: 'build', status: 'completed', conclusion: 'success' }],
+    }))
+    const report = await getPullRequestChecks(harness.repo, PR_NUMBER, {
+      headSha: head,
+      base: 'main',
+    })
+    assert.equal(report.rollup.requirementKnown, false)
+    assert.equal(report.checks[0]?.requirement, 'unknown')
+  })
+})
+
+test('a ruleset-required check no readable API reported is still shown as required', async () => {
+  await withHarness(async (harness) => {
+    const head = await setup(harness, (headSha) => ({
+      requiredStatusChecks: { branch: 'main', contexts: [] },
+      rulesets: { contexts: [{ context: 'audit', branch: 'main' }] },
+      checkRuns: [{ id: 1, headSha, name: 'build', status: 'completed', conclusion: 'success' }],
+    }))
+    const report = await getPullRequestChecks(harness.repo, PR_NUMBER, {
+      headSha: head,
+      base: 'main',
+    })
+    assert.equal(report.rollup.requirementKnown, true)
+    const expected = report.checks.find((check) => check.name === 'audit')
+    assert.equal(expected?.requirement, 'required')
+    assert.equal(expected?.state, 'waiting')
+    assert.equal(report.rollup.requiredTotal, 1)
+  })
+})
+
+test('a required context bound to one app is not satisfied by another app check of the same name', async () => {
+  await withHarness(async (harness) => {
+    const head = await setup(harness, (headSha) => ({
+      // Branch protection binds the required context to one app, id 1.
+      requiredStatusChecks: { branch: 'main', contexts: ['build'], appIds: { build: 1 } },
+      rulesets: { contexts: [] },
+      checkRuns: [
+        {
+          id: 1,
+          headSha,
+          name: 'build',
+          status: 'completed',
+          conclusion: 'success',
+          appSlug: 'someone-elses-bot',
+          appId: 99,
+        },
+      ],
+    }))
+    const report = await getPullRequestChecks(harness.repo, PR_NUMBER, {
+      headSha: head,
+      base: 'main',
+    })
+    // The required context is bound to app 1 and this check reports as app 99, so it is
+    // not the required one: it stays informational and the context is still outstanding.
+    const reported = report.checks.find((check) => check.name === 'build')
+    assert.equal(reported?.requirement, 'informational')
+    assert.equal(
+      report.checks.some((check) => check.expected && check.requirement === 'required'),
+      true,
+    )
+  })
+})
+
+test('check runs past the first page are read rather than silently dropped', async () => {
+  await withHarness(async (harness) => {
+    const head = await setup(harness, (headSha) => {
+      // More than one page at the read's page size, so a single-page read would omit some.
+      const runs = Array.from({ length: 101 }, (_unused, index) => ({
+        id: 1000 + index,
+        headSha,
+        name: `check ${index}`,
+        status: 'completed',
+        conclusion: 'success',
+      }))
+      return { checkRuns: runs }
+    })
+    const report = await getPullRequestChecks(harness.repo, PR_NUMBER, {
+      headSha: head,
+      base: 'main',
+    })
+    assert.equal(report.checks.length, 101)
+    assert.equal(report.truncated, false)
+  })
+})
+
+test('a report the page bound cut short says so instead of claiming to be the whole list', async () => {
+  await withHarness(async (harness) => {
+    const head = await setup(harness, (headSha) => {
+      // Ten full pages is the bound; an eleventh full page means more exists.
+      const runs = Array.from({ length: 1000 + 1 }, (_unused, index) => ({
+        id: 2000 + index,
+        headSha,
+        name: `check ${index}`,
+        status: 'completed',
+        conclusion: 'success',
+      }))
+      return { checkRuns: runs }
+    })
+    const report = await getPullRequestChecks(harness.repo, PR_NUMBER, {
+      headSha: head,
+      base: 'main',
+    })
+    assert.equal(report.checks.length, 1000)
+    assert.equal(report.truncated, true)
+  })
+})

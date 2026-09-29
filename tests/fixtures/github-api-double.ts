@@ -272,6 +272,25 @@ function etagFor(body: unknown): string {
   return `"${createHash('sha1').update(JSON.stringify(body)).digest('hex')}"`
 }
 
+/** The query string of an API path, which is where `per_page` and `page` arrive. */
+function queryOf(path: string): string {
+  const index = path.indexOf('?')
+  return index === -1 ? '' : path.slice(index + 1)
+}
+
+/**
+ * One page of a REST list, the way GitHub serves it. The double keeps the whole list and
+ * answers `per_page`/`page`, so a reader that never follows pages really does lose
+ * entries instead of silently receiving everything.
+ */
+function page<T>(entries: T[], rawQuery: string | undefined): T[] {
+  const queryParams = new URLSearchParams(rawQuery ?? '')
+  const perPage = Number(queryParams.get('per_page')) || 30
+  const number = Number(queryParams.get('page')) || 1
+  const start = (number - 1) * perPage
+  return entries.slice(start, start + perPage)
+}
+
 function checkRunResponse(
   state: GitHubFixtureState,
   request: GitHubApiDoubleRequest,
@@ -280,7 +299,7 @@ function checkRunResponse(
   const runs = (state.checks?.checkRuns ?? []).filter((run) => run.headSha === headSha)
   const body = {
     total_count: runs.length,
-    check_runs: runs.map((run) => ({
+    check_runs: page(runs, queryOf(request.path)).map((run) => ({
       id: run.id,
       head_sha: run.headSha,
       node_id: `CR_${run.id}`,
@@ -295,7 +314,7 @@ function checkRunResponse(
       output: { title: run.title ?? null, summary: null, text: null, annotations_count: 0 },
       name: run.name,
       check_suite: { id: Math.floor(run.id / 10) },
-      app: run.appSlug ? { id: 1, slug: run.appSlug, name: run.appSlug } : null,
+      app: run.appSlug ? { id: run.appId ?? 1, slug: run.appSlug, name: run.appSlug } : null,
       pull_requests: [],
     })),
   }
@@ -314,7 +333,7 @@ function commitStatusResponse(
       : statuses.some((entry) => entry.state === 'pending')
         ? 'pending'
         : 'success',
-    statuses: statuses.map((entry) => ({
+    statuses: page(statuses, queryOf(request.path)).map((entry) => ({
       description: entry.description ?? null,
       id: 900_000,
       node_id: 'CS_1',
@@ -341,7 +360,7 @@ function workflowRunsResponse(
   )
   const body = {
     total_count: runs.length,
-    workflow_runs: runs.map((run) => ({
+    workflow_runs: page(runs, queryOf(request.path)).map((run) => ({
       id: run.id,
       name: run.name,
       node_id: `WR_${run.id}`,
@@ -706,9 +725,46 @@ function handleRest(state: GitHubFixtureState, request: GitHubApiDoubleRequest):
         url: `https://api.github.com/repos/${repository}/branches/${branch}/protection/required_status_checks`,
         strict: true,
         contexts: rule.contexts,
-        checks: rule.contexts.map((context) => ({ context, app_id: 1 })),
+        // GitHub reports app_id only for a context bound to one integration.
+        checks: rule.contexts.map((context) => ({
+          context,
+          app_id: rule.appIds?.[context] ?? null,
+        })),
         contexts_url: `https://api.github.com/repos/${repository}/branches/${branch}/protection/required_status_checks/contexts`,
       },
+    }
+  }
+  if (rawPath === `${prefix}/rulesets` && method === 'GET') {
+    // A ruleset read needs administration access, and GitHub refuses it without it. A
+    // refusal is not "no rules": it means the required set cannot be read at all.
+    if (state.checks?.rulesets?.forbidden) {
+      throw new HttpError(403, 'Forbidden', 'Resource not accessible by integration')
+    }
+    const contexts = state.checks?.rulesets?.contexts ?? []
+    if (contexts.length === 0) return { status: 200, body: [] }
+    const branches = [...new Set(contexts.map((entry) => entry.branch ?? 'main'))]
+    return {
+      status: 200,
+      body: branches.map((branch, index) => ({
+        id: 9000 + index,
+        name: `protect ${branch}`,
+        target: 'branch',
+        enforcement: 'active',
+        conditions: { ref_name: { include: [branch], exclude: [] } },
+        rules: [
+          {
+            type: 'required_status_checks',
+            parameters: {
+              required_status_checks: contexts
+                .filter((entry) => (entry.branch ?? 'main') === branch)
+                .map((entry) => ({
+                  context: entry.context,
+                  integration_id: entry.integrationId ?? null,
+                })),
+            },
+          },
+        ],
+      })),
     }
   }
   const pull = new RegExp(`^${prefix}/pulls/(\\d+)$`, 'u').exec(path)

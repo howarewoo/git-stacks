@@ -273,6 +273,11 @@ export interface PullRequestChecksReport {
   /** The earliest time the next read may be attempted. */
   nextAttemptAt: string | null
   permissions: PullRequestChecksPermissions
+  /**
+   * True when GitHub reported more entries than the bounded read followed. A truncated
+   * report is still true about everything it lists, and says that it is not the whole.
+   */
+  truncated: boolean
 }
 
 const GITHUB_HOST = 'github.com'

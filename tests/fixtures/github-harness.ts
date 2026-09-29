@@ -140,6 +140,8 @@ export interface GitHubFixtureCheckRun {
   status: string
   conclusion: string | null
   appSlug?: string | null
+  /** The app's id, which is what a required context is bound to. Defaults to 1. */
+  appId?: number
   title?: string | null
   detailsUrl?: string | null
   startedAt?: string | null
@@ -170,8 +172,22 @@ export interface GitHubFixtureChecks {
   checkRuns?: GitHubFixtureCheckRun[]
   commitStatuses?: GitHubFixtureCommitStatus[]
   workflowRuns?: GitHubFixtureWorkflowRun[]
-  /** The contexts branch protection requires on `branch`; null means no rule is readable. */
-  requiredStatusChecks?: { branch: string; contexts: string[] } | null
+  /**
+   * The contexts branch protection requires on `branch`; null means no rule is readable.
+   * `appIds` binds a context to the app that must report it, the way GitHub does when a
+   * required check belongs to one integration; a context absent from it is unbound.
+   */
+  requiredStatusChecks?: {
+    branch: string
+    contexts: string[]
+    appIds?: Record<string, number>
+  } | null
+  /** Branch rulesets that make a check required, independent of branch protection. */
+  rulesets?: {
+    /** Refuses the rulesets read, which leaves the required set unknown. */
+    forbidden?: boolean
+    contexts?: { context: string; integrationId?: number | null; branch?: string }[]
+  }
   actionsEnabled?: boolean
   /** The viewer's repository role, as `GET /repos/{o}/{r}` reports it. */
   viewerPermissions?: {
