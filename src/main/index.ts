@@ -16,6 +16,7 @@ import {
 import { getSubmitStackProgress, onPublishProgress, previewStack } from './stacks'
 import { previewReconciliationRepair } from './reconciliation'
 import { getPullRequest } from './github'
+import { getPullRequestIssueLinks, previewIssueLink, searchGitHubIssues } from './issue-links'
 import type { GitAction, PublishProgress, RecentRepository, StackKind } from '../shared/types'
 import { RepositoryOperations } from './repository-operations'
 import { RequestRegistry } from './request-registry'
@@ -221,6 +222,44 @@ function installHandlers() {
       `pull-request:${number}`,
     )
   })
+  ipcMain.handle('repository:search-issues', (event, query: unknown, requestId?: unknown) => {
+    validateSender(event)
+    const q = typeof query === 'string' ? query : ''
+    const reqId = typeof requestId === 'string' ? requestId : 'search-issues'
+    return readRepository((root, signal) => searchGitHubIssues(root, q, signal), reqId)
+  })
+  ipcMain.handle('repository:pull-request-issue-links', (event, number: unknown) => {
+    validateSender(event)
+    if (typeof number !== 'number' || !Number.isInteger(number) || number <= 0) {
+      throw new Error('Pull request number must be a positive integer')
+    }
+    return readRepository(
+      (root, signal) => getPullRequestIssueLinks(root, number, signal),
+      `issue-links:${number}`,
+    )
+  })
+  ipcMain.handle(
+    'repository:preview-issue-link',
+    (event, prNumber: unknown, issueNumber: unknown, relation: unknown, action: unknown) => {
+      validateSender(event)
+      if (typeof prNumber !== 'number' || !Number.isInteger(prNumber) || prNumber <= 0) {
+        throw new Error('Pull request number must be a positive integer')
+      }
+      if (typeof issueNumber !== 'number' || !Number.isInteger(issueNumber) || issueNumber <= 0) {
+        throw new Error('Issue number must be a positive integer')
+      }
+      if (relation !== 'contextual' && relation !== 'closing') {
+        throw new Error('Invalid issue relation')
+      }
+      if (action !== 'link' && action !== 'unlink') {
+        throw new Error('Invalid issue action')
+      }
+      return readRepository(
+        (root, signal) => previewIssueLink(root, prNumber, issueNumber, relation, action, signal),
+        `preview-issue-link:${prNumber}:${issueNumber}`,
+      )
+    },
+  )
   ipcMain.handle('operation:cancel', (event, requestId: unknown) => {
     validateSender(event)
     if (typeof requestId !== 'string' || !requestId || !activeRepository) return

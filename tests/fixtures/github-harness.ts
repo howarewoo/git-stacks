@@ -149,6 +149,16 @@ export interface GitHubFixtureState {
     message: string
     rateLimitRemaining?: number
   }
+  issuesFailure?: {
+    status: number
+    reason: string
+    message: string
+  }
+  prWriteFailure?: {
+    status: number
+    reason: string
+    message: string
+  }
   /**
    * Mutations that succeed on GitHub but whose response never reaches the caller, which is
    * what a dropped connection mid-request looks like to the person waiting. Each entry is
@@ -184,6 +194,14 @@ export interface GitHubFixtureState {
   prs: GitHubFixturePullRequest[]
   comments: Record<string, GitHubFixtureComment[]>
   stacks?: GitHubFixtureStack[]
+  issues?: Array<{
+    number: number
+    title: string
+    url: string
+    state: 'OPEN' | 'CLOSED'
+    /** Repository that owns the issue; search results expose it so foreign issues are rejected. */
+    repository?: string
+  }>
   asyncMerge?: { number: number; sha: string; method: string }
   requests: Array<{ argv: string[]; cwd: string; at: string; body?: Record<string, unknown> }>
 }
@@ -456,6 +474,7 @@ const initialState = (): GitHubFixtureState => ({
   prs: [],
   comments: {},
   stacks: [],
+  issues: [],
   requests: [],
 })
 

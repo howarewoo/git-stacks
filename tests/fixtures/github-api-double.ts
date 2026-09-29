@@ -497,6 +497,13 @@ function handleRest(
     const pr = findPr(state, Number(pull[1]))
     if (method === 'GET') return { status: 200, body: restPullRequest(state, pr) }
     if (method === 'PATCH') {
+      if (state.prWriteFailure) {
+        throw new HttpError(
+          state.prWriteFailure.status,
+          state.prWriteFailure.reason,
+          state.prWriteFailure.message,
+        )
+      }
       if (body.draft !== undefined)
         throw new HttpError(422, 'Unprocessable Entity', 'draft cannot be updated through REST')
       if (pr.state === 'MERGED' && body.state === 'open')
@@ -609,6 +616,94 @@ function handleGraphql(
     return {
       status: 200,
       body: { data: { [field]: { pullRequest: { id: `PR_${pr.number}`, isDraft: pr.draft } } } },
+    }
+  }
+  if (query.includes('search(query:')) {
+    if (state.issuesFailure) {
+      throw new HttpError(
+        state.issuesFailure.status,
+        state.issuesFailure.reason,
+        state.issuesFailure.message,
+      )
+    }
+    const rawQuery = String(variables.searchQuery ?? variables.query ?? '')
+    const terms = rawQuery
+      .replace(/repo:[^\s]+/gu, '')
+      .replace(/is:issue/gu, '')
+      .trim()
+      .toLowerCase()
+    const issues = state.issues ?? []
+    let matched = issues
+    if (terms) {
+      matched = issues.filter((iss) => {
+        if (String(iss.number) === terms || `#${iss.number}` === terms) return true
+        return iss.title.toLowerCase().includes(terms)
+      })
+    }
+    return {
+      status: 200,
+      body: {
+        data: {
+          search: {
+            issueCount: matched.length,
+            nodes: matched.map((iss) => ({
+              __typename: 'Issue',
+              number: iss.number,
+              title: iss.title,
+              url: iss.url,
+              state: iss.state,
+              repository: { nameWithOwner: iss.repository ?? 'acme/widgets' },
+            })),
+            pageInfo: { hasNextPage: false, endCursor: null },
+          },
+        },
+      },
+    }
+  }
+  if (query.includes('issue(number:')) {
+    if (state.issuesFailure) {
+      throw new HttpError(
+        state.issuesFailure.status,
+        state.issuesFailure.reason,
+        state.issuesFailure.message,
+      )
+    }
+    const num = Number(variables.number)
+    const iss = (state.issues ?? []).find((i) => i.number === num)
+    return {
+      status: 200,
+      body: {
+        data: {
+          repository: {
+            issue: iss
+              ? { number: iss.number, title: iss.title, url: iss.url, state: iss.state }
+              : null,
+          },
+        },
+      },
+    }
+  }
+  if (query.includes('issues(first:')) {
+    if (state.issuesFailure) {
+      throw new HttpError(
+        state.issuesFailure.status,
+        state.issuesFailure.reason,
+        state.issuesFailure.message,
+      )
+    }
+    const issues = (state.issues ?? []).filter((iss) => iss.state === 'OPEN')
+    return {
+      status: 200,
+      body: {
+        data: {
+          repository: {
+            issues: {
+              nodes: issues.map((iss) => ({ number: iss.number, title: iss.title, url: iss.url })),
+              pageInfo: { hasNextPage: false, endCursor: null },
+            },
+          },
+        },
+      },
     }
   }
   if (query.includes('pullRequest(number:')) {

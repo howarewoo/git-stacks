@@ -166,6 +166,10 @@ function actionMessage(action: GitAction): string {
       return `Removed pull requests from stack #${action.stackNumber}`
     case 'reconcileRepair':
       return `Applied ${action.ids.length} reconciliation repairs`
+    case 'linkIssue':
+      return `Linked issue #${action.issueNumber} to pull request #${action.prNumber}`
+    case 'unlinkIssue':
+      return `Removed issue #${action.issueNumber} from pull request #${action.prNumber}`
   }
 }
 
@@ -354,6 +358,54 @@ export function installFixtureControl(options: {
     cancel: (requestId) => {
       record('cancel', [requestId])
       return answer('cancel', () => undefined)
+    },
+    searchIssues: (query) => {
+      record('searchIssues', [query])
+      return answer('searchIssues', () => {
+        const terms = query.toLowerCase().replace(/^#+/u, '')
+        const issues = (scenario.snapshot?.issues ?? []).filter((iss) => {
+          if (String(iss.number) === terms || `#${iss.number}` === terms) return true
+          return iss.title.toLowerCase().includes(terms)
+        })
+        return { issues, message: '' }
+      })
+    },
+    pullRequestIssueLinks: (prNumber) => {
+      record('pullRequestIssueLinks', [prNumber])
+      return answer('pullRequestIssueLinks', () => ({
+        prNumber,
+        links: [...(scenario.issueLinks?.[prNumber] ?? [])],
+      }))
+    },
+    previewIssueLink: (prNumber, issueNumber, relation, action) => {
+      record('previewIssueLink', [prNumber, issueNumber, relation, action])
+      return answer('previewIssueLink', () => {
+        const found = scenario.snapshot?.pullRequests.find((pr) => pr.number === prNumber)
+        const closing = (scenario.issueLinks?.[prNumber] ?? []).find(
+          (link) => link.relation === 'closing',
+        )
+        const existingClause = closing ? `\n\nCloses #${closing.number}\n` : '\n'
+        const currentBody = found
+          ? `${found.title}\n\nDeterministic fixture body for pull request #${prNumber}.${existingClause}`
+          : ''
+        const closingSyntax = `Closes #${issueNumber}`
+        const newBody =
+          action === 'link'
+            ? `${currentBody.trimEnd()}\n\n${closingSyntax}\n`
+            : closing
+              ? currentBody.replace(`\n\nCloses #${closing.number}\n`, '\n')
+              : currentBody
+        return {
+          prNumber,
+          issueNumber,
+          relation,
+          action,
+          currentBody,
+          newBody,
+          changed: newBody !== currentBody,
+          ...(relation === 'closing' ? { closingSyntax } : {}),
+        }
+      })
     },
   }
 
