@@ -311,6 +311,34 @@ export interface ReviewUncertainWrite {
    * "Thanks" is not this attempt.
    */
   threadCommentIds: string[]
+  /**
+   * What GitHub turned out to hold, once a reconciliation recognised this write.
+   *
+   * This is not cleared when the write settles. Deleting the record as soon as
+   * GitHub's own state explains it loses the evidence at the one moment it is
+   * still needed: the submission that recognised it may go on to fail, or the
+   * app may die between GitHub's answer and the view dropping the draft. Either
+   * way the next submission carries comments GitHub already holds, and with the
+   * record gone nothing stops them being posted a second time.
+   *
+   * So a settled record is kept, and it is the submission *payload* that retires
+   * it: once a later payload no longer mentions these comments, the view has
+   * demonstrably dropped them, and only then is the record removed. That makes
+   * the recovery idempotent without depending on a callback the view may never
+   * send.
+   */
+  settled: ReviewSettledWrite | null
+}
+
+/** A review a reconciliation recognised, kept alongside the attempt it settles. */
+export interface ReviewSettledWrite {
+  /** GitHub's own id for the review, which is a number on the REST API. */
+  reviewId: string
+  /** The state GitHub recorded — APPROVED, COMMENTED, CHANGES_REQUESTED. */
+  state: string
+  url: string | null
+  /** When it was recognised, so a record that is never retired can be aged out. */
+  at: string
 }
 
 /** One inline comment as an attempt recorded it, so a reconciliation can match it. */

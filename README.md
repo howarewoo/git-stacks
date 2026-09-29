@@ -700,25 +700,44 @@ the pull request already held when the attempt began.
 The journal is not a dead end. Pressing Submit asks GitHub what it actually
 holds, and every part of the attempt is checked — the review is newer than the
 recorded boundary, is this account's, is on this revision, records the decision
-that was asked for, and carries the same comments. A matching summary on its own
-proves nothing and is not what is matched on. If that review is there the
-attempt did land: the record is retired, the outcome GitHub recorded is
-reported, and those comments are left out of what is sent, so a recovery posts
-only what never arrived. The drafts that were never sent stay pending rather than
-being cleared by a recovery.
+GitHub stored for it, and carries the same comments. A matching summary on its own
+proves nothing and is not what is matched on. Those two reads come from REST:
+`PullRequestReviewComment` has no `side` or `startSide` in GitHub's schema, so
+GraphQL cannot answer them and a query naming them is refused outright. REST
+reports them as `LEFT`/`RIGHT`, converted once to the diff's `base`/`head` for both
+ends of a range — without which a comment on a deleted line is recorded as a head
+comment and can never be recognised as its own attempt.
+
+If the review is there, the attempt did land. Those comments are left out of what
+is sent, so a recovery posts only what never arrived, and every comment the
+operation confirms is named back — the adopted ones and the newly posted ones
+alike — so the view drops exactly those and the drafts that were never sent stay
+pending.
+
+A settled write is kept rather than tidied away. The evidence that GitHub holds a
+comment is the only thing between a retry and a duplicate, and the submission that
+found it can still fail, or be killed before the view drops the draft. What retires
+the record is a later payload that no longer carries those comments: the view keeps
+a draft in its payload exactly while it has not been told it was delivered. That
+makes a resumed submission idempotent without waiting on a callback the view may
+never send, and GitHub losing the ability to re-derive the answer — because the
+review was edited on the web — cannot hold the write for good.
 
 The search is not limited to recent history. An attempt outlives any window, so
-the reviews are walked backwards from newest to oldest until the recorded
-boundary is reached, and running out of pages before then is a hold rather than
-a "not there" — the search gave up, which is not the same as concluding. If
-GitHub does not hold the review once the search is exhaustive, the guard stands:
-the record says only that the app never heard back, which is also true of a
-request that never arrived, so absence is never taken as licence to post again
-automatically.
+the reviews are walked newest first until the recorded boundary is reached, and
+running out of pages before then is a hold rather than a "not there" — the search
+gave up, which is not the same as concluding. Both collections are paged in full:
+a review may carry 200 inline comments and a page holds 100, and a review whose
+tail was never read cannot be compared whole. If GitHub does not hold the review
+once the search is exhaustive, the guard stands: the record says only that the app
+never heard back, which is also true of a request that never arrived, so absence is
+never taken as licence to post again automatically.
 
 The guard covers an unresolved *comment*, not an attempt. Changing the decision
 or adding one more pending draft changes the attempt but not the comments, so
-every attempt touching any line this payload writes is reconciled first.
+every attempt touching any line this payload writes is reconciled first — and what
+is journalled is what is sent, so a recovery cannot re-post a comment it just
+adopted.
 
 Replies reconcile against the thread's own comments by the same rules, with the
 comment ids the thread held when the attempt began as their boundary and this

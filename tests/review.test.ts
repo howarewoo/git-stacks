@@ -1010,6 +1010,50 @@ function reviewComments(write: Write): Array<Record<string, unknown>> {
   )
 }
 
+/**
+ * A review as the REST list endpoint reports it, with the inline comments it
+ * carries. `side` and `start_side` are GitHub's own `LEFT`/`RIGHT` here, which
+ * is the whole reason a settlement reads this endpoint rather than GraphQL.
+ */
+interface HeldReview {
+  [key: string]: unknown
+  id: number
+  state: string
+  body: string
+  commit_id: string | null
+  user: { login: string }
+  html_url?: string
+  comments?: Array<{
+    path: string
+    line: number
+    side: string
+    body: string
+    start_line?: number | null
+    start_side?: string | null
+  }>
+}
+
+/** The decision GitHub records a submitted review as. */
+const STATE_FOR_EVENT: Record<string, string> = {
+  COMMENT: 'COMMENTED',
+  APPROVE: 'APPROVED',
+  REQUEST_CHANGES: 'CHANGES_REQUESTED',
+}
+
+/**
+ * One page of a REST list, honouring the `per_page` and `page` the code asked
+ * for. GitHub returns these oldest first, and a page shorter than `per_page` is
+ * the last one — which is what tells a paged read it has seen everything.
+ */
+function restPage(path: string, rows: Array<Record<string, unknown>>): Array<Record<string, unknown>> {
+  const query = new URLSearchParams(path.split('?')[1] ?? '')
+  const perPage = Number(query.get('per_page') ?? '30')
+  const page = Number(query.get('page') ?? '1')
+  const size = Number.isFinite(perPage) && perPage > 0 ? perPage : 30
+  const index = Number.isFinite(page) && page > 0 ? page : 1
+  return rows.slice((index - 1) * size, index * size)
+}
+
 
 interface DoubleOptions {
   head?: string
@@ -1035,13 +1079,40 @@ interface DoubleOptions {
    */
   commentPages?: Record<string, Array<{ after: string; nodes: ThreadComment[] }>>
   /**
-   * The reviews GitHub already holds, as the `reviews` connection returns them.
-   * A reconciliation reads this to tell a write that landed from one that did
-   * not, so a test can put the landed review here and watch the record retire.
+   * The reviews GitHub already holds, in the shape its REST list endpoint
+   * returns them, with the inline comments each one carries.
+   *
+   * Reviews this app posts are not written here: the double applies the request
+   * and serves what it applied, exactly as GitHub does. A landed review is
+   * therefore a consequence of a request that was made and answered, not a
+   * fixture a test asserts alongside it — which is the only way a test can catch
+   * a write that claimed success while sending something other than what it
+   * recorded.
    */
-  reviews?: Array<Record<string, unknown>>
-  /** The reviews GitHub held before any attempt was made. */
-  reviewsBefore?: Array<Record<string, unknown>>
+  heldReviews?: HeldReview[]
+  /**
+   * Rewrites what the server stored, after it applied the request.
+   *
+   * The one thing a test cannot build out of a request is a record GitHub holds
+   * that is *not* what the request said — a review recorded under a different
+   * decision, or a comment whose text is not the one that was sent. That is a
+   * property of the server, not of the request, so it is modelled here rather
+   * than faked by hand-writing a review the request never produced.
+   */
+  landedAs?: (review: HeldReview, comments: Array<Record<string, unknown>>) => void
+  /**
+   * Reviews that appear on the pull request after this one is applied, given the
+   * applied review so ids can be placed above it. A settlement that only reads
+   * a recent page has to walk past all of them to reach the one it is looking
+   * for, which is the only way that read is actually tested.
+   */
+  reviewsAfterApply?: (applied: HeldReview) => Array<Omit<HeldReview, 'id'>>
+  /**
+ * Whether a submitted review is stored at all. The default is yes, because a
+   * request that left usually was applied; setting it to false models the one
+   * case a lost response cannot rule out — the request arrived and was dropped.
+   */
+  keepsReview?: boolean
   /**
    * A comment another account leaves in the thread once a reply is attempted,
    * so a test can put somebody else's identical words inside the attempt's own
@@ -1123,11 +1194,8 @@ const GRAPHQL_SCHEMA: Record<
     returns: { pullRequest: 'PullRequest' },
   },
   PullRequest: {
-    fields: ['state', 'viewerDidAuthor', 'reviewThreads', 'reviews', 'number', 'title'],
-    returns: {
-      reviewThreads: 'PullRequestReviewThreadConnection',
-      reviews: 'PullRequestReviewConnection',
-    },
+    fields: ['state', 'viewerDidAuthor', 'reviewThreads', 'number', 'title'],
+    returns: { reviewThreads: 'PullRequestReviewThreadConnection' },
   },
   PullRequestReviewThread: {
     fields: ['comments', 'id', 'isResolved', 'isOutdated'],
@@ -1136,9 +1204,14 @@ const GRAPHQL_SCHEMA: Record<
   // A user or the signed-in viewer. `login` is on both, so the account field is
   // what distinguishes the one that is wrong at the repository level.
   User: { fields: ['login', 'id'] },
+  // GitHub's real shape, verified against the live schema. There is deliberately
+  // no `side` and no `startSide` here: `PullRequestReviewComment` has neither, and
+  // a double that answered for them would hand back a plausible value for a
+  // document GitHub refuses to execute at all — which is how a query that can
+  // never succeed past a first submission ends up looking tested.
   PullRequestReviewComment: {
     fields: ['id', 'url', 'body', 'viewerDidAuthor', 'createdAt', 'path', 'line',
-      'startLine', 'side', 'startSide', 'author'],
+      'startLine', 'author'],
     returns: { author: 'User' },
   },
   PageInfo: { fields: ['hasNextPage', 'endCursor', 'hasPreviousPage', 'startCursor'] },
@@ -1162,14 +1235,6 @@ const GRAPHQL_SCHEMA: Record<
   PullRequestReviewCommentConnection: {
     fields: ['totalCount', 'pageInfo', 'nodes'],
     returns: { nodes: 'PullRequestReviewComment' },
-  },
-  PullRequestReviewConnection: {
-    fields: ['totalCount', 'pageInfo', 'nodes'],
-    returns: { nodes: 'PullRequestReview' },
-  },
-  PullRequestReview: {
-    fields: ['id', 'state', 'body', 'submittedAt', 'url', 'author', 'commit', 'comments'],
-    returns: { author: 'User', commit: 'Commit', comments: 'PullRequestReviewCommentConnection' },
   },
   Commit: { fields: ['oid', 'messageHeadline'] },
   Node: { fields: ['id'], returns: { comments: 'PullRequestReviewCommentConnection' } },
@@ -1243,6 +1308,8 @@ function threadDouble(options: DoubleOptions = {}): {
   writes: Write[]
   /** Every GraphQL document the code under test sent, in order. */
   queries: string[]
+  /** Rewrites what GitHub holds about a review, the way the web UI can. */
+  editReview: (id: number, change: (review: HeldReview) => void) => void
 } {
   const writes: Write[] = []
   const queries: string[] = []
@@ -1252,8 +1319,17 @@ function threadDouble(options: DoubleOptions = {}): {
   const isAuthor = options.isAuthor === true
   const state = options.state ?? 'OPEN'
   const viewer = options.viewer ?? 'ada'
-  // The reviews GitHub holds once a review has actually been attempted.
-  let landedReview: Array<Record<string, unknown>> | null = null
+  // The reviews GitHub holds, as a server that applies what it is sent. A
+  // review this app posts is created here from the request body, so what a test
+  // reads back is exactly what the code chose to send — not a fixture written
+  // to agree with it.
+  const reviews: HeldReview[] = (options.heldReviews ?? []).map((review) => ({ ...review }))
+  const reviewCommentsOnGitHub: Array<Record<string, unknown>> = []
+  /** Changes what GitHub holds about a review after the fact, as the web UI can. */
+  const editReview = (id: number, change: (review: HeldReview) => void): void => {
+    const found = reviews.find((review) => review.id === id)
+    if (found) change(found)
+  }
   const threads = options.threads ?? []
   // The comparison identity, in the shape the pull request resource returns:
   // a base branch has both an object and a name, and the name is part of it.
@@ -1288,6 +1364,7 @@ function threadDouble(options: DoubleOptions = {}): {
   return {
     writes,
     queries,
+    editReview,
     transport: {
       kind: 'direct',
       async rest<T>(request: GitHubRestRequest): Promise<GitHubRestResponse<T>> {
@@ -1300,11 +1377,86 @@ function threadDouble(options: DoubleOptions = {}): {
             threadId: null,
             text: '',
           })
-          // The request left, so from here on GitHub holds whatever the
-          // fixture says it took. That is modelled even for a lost response,
-          // because a lost response is precisely the case where the write may
-          // have been applied without the app hearing about it.
-          landedReview = options.reviews ?? []
+          // The request left, so GitHub now holds what it was sent. That is
+          // modelled even for a lost response, because a lost response is
+          // precisely the case where the write was applied without the app
+          // hearing about it — and it is applied from the body the code actually
+          // sent, so a test cannot assert a landed review the request never
+          // carried.
+          const sent = request.body as {
+            commit_id?: string
+            body?: string
+            event?: string
+            comments?: unknown[]
+          }
+          if (path.endsWith('/pulls/7/reviews') && typeof sent?.event === 'string') {
+            const id = reviews.reduce((max, review) => Math.max(max, review.id), 100) + 1
+            const comments = (sent.comments ?? []).filter(
+              (comment): comment is Record<string, unknown> =>
+                typeof comment === 'object' && comment !== null,
+            )
+            reviews.push({
+              id,
+              state: STATE_FOR_EVENT[sent.event] ?? 'COMMENTED',
+              body: typeof sent.body === 'string' ? sent.body : '',
+              commit_id: typeof sent.commit_id === 'string' ? sent.commit_id : null,
+              user: { login: viewer },
+              html_url: `https://github.com/acme/widgets/pull/7#pullrequestreview-${id}`,
+            })
+            for (const comment of comments) {
+              reviewCommentsOnGitHub.push({
+                id: reviewCommentsOnGitHub.length + 1,
+                pull_request_review_id: id,
+                path: comment.path,
+                line: comment.line,
+                side: comment.side,
+                start_line: comment.start_line ?? null,
+                start_side: comment.start_side ?? null,
+                commit_id: typeof sent.commit_id === 'string' ? sent.commit_id : null,
+                body: comment.body,
+                user: { login: viewer },
+              })
+            }
+            const applied = reviews[reviews.length - 1] as HeldReview
+            const appliedComments = reviewCommentsOnGitHub.filter(
+              (comment) => comment.pull_request_review_id === applied.id,
+            )
+            if (options.landedAs) {
+              options.landedAs(applied, appliedComments)
+            } else if (options.keepsReview === false) {
+              // The request arrived and was dropped, so GitHub holds nothing.
+              reviews.length = 0
+              reviewCommentsOnGitHub.length = 0
+            }
+            if (options.reviewsAfterApply) {
+              let next = applied.id
+              for (const later of options.reviewsAfterApply(applied)) {
+                next += 1
+                reviews.push({ ...later, id: next } as HeldReview)
+              }
+            }
+            if (options.failReviewOnce && !reviewFailed) {
+              reviewFailed = true
+              throw new GitHubTransportError({
+                kind: statusKind(
+                  options.failReviewOnce.status,
+                  rateLimit(),
+                  options.failReviewOnce.message,
+                ),
+                detail: `GitHub answered ${options.failReviewOnce.status} ${options.failReviewOnce.message}`,
+              })
+            }
+            const created = applied
+            return {
+              status: 201,
+              rateLimit: rateLimit(),
+              data: {
+                id: created.id,
+                state: created.state,
+                html_url: created.html_url,
+              },
+            } as GitHubRestResponse<T>
+          }
           if (options.failReviewOnce && !reviewFailed) {
             reviewFailed = true
             throw new GitHubTransportError({
@@ -1316,14 +1468,19 @@ function threadDouble(options: DoubleOptions = {}): {
               detail: `GitHub answered ${options.failReviewOnce.status} ${options.failReviewOnce.message}`,
             })
           }
+          return { status: 201, rateLimit: rateLimit(), data: {} } as GitHubRestResponse<T>
+        }
+        // The two reads a settlement needs. Both paginate the way GitHub does,
+        // so a review or a comment beyond the first page is reachable rather
+        // than quietly absent.
+        if (path.includes('/pulls/7/reviews')) {
+          return { status: 200, rateLimit: rateLimit(), data: restPage(path, reviews) } as GitHubRestResponse<T>
+        }
+        if (path.includes('/pulls/7/comments')) {
           return {
-            status: 201,
+            status: 200,
             rateLimit: rateLimit(),
-            data: {
-              id: 4242,
-              state: 'COMMENTED',
-              html_url: 'https://github.com/acme/widgets/pull/7#pullrequestreview-4242',
-            },
+            data: restPage(path, reviewCommentsOnGitHub),
           } as GitHubRestResponse<T>
         }
         if (path.includes('/files')) {
@@ -1436,45 +1593,6 @@ function threadDouble(options: DoubleOptions = {}): {
                   totalCount: threads.length,
                   pageInfo: { hasNextPage: false, endCursor: null },
                   nodes: threads,
-                },
-              },
-            },
-          } as T
-        }
-        if (operation === 'ReviewSubmitted') {
-          // What GitHub already holds for this pull request, newest first, as
-          // the reconciliation walks it: it stops when it reaches the review the
-          // attempt recorded as the newest one before it began.
-          // Reviews GitHub held when the attempt began, and the ones that
-          // appeared once the request was made. A reconciliation may only adopt
-          // the latter, so a test that wants a landed review has to say when it
-          // landed rather than only that it exists.
-          // Before the request, GitHub holds whatever the fixture says it held;
-          // after it, the reviews the attempt is meant to have produced. A
-          // reconciliation may only adopt the latter, so a test that wants a
-          // landed review has to say when it landed rather than only that it
-          // exists.
-          // GitHub returns a review connection oldest first, and `last` takes
-          // the newest page of it, with `before` walking further back. Modelling
-          // that order is what makes a reconciliation that pages actually able
-          // to reach a review buried under everything that came after it.
-          // The reviews GitHub held before the attempt stay held, and whatever
-          // the attempt produced joins them, oldest first as GitHub orders them.
-          const all = [...(options.reviewsBefore ?? []), ...(landedReview ?? [])]
-          const last = typeof variables.last === 'number' ? variables.last : all.length
-          const before = typeof variables.before === 'string' ? variables.before : null
-          const end = before === null ? all.length : Math.max(0, all.findIndex((r) => r.id === before))
-          const start = Math.max(0, end - last)
-          const nodes = all.slice(start, end)
-          return {
-            repository: {
-              pullRequest: {
-                reviews: {
-                  pageInfo: {
-                    hasPreviousPage: start > 0,
-                    startCursor: nodes[0]?.id ?? null,
-                  },
-                  nodes,
                 },
               },
             },
@@ -2072,6 +2190,8 @@ test('a review GitHub never confirmed is refused the second time, from the recor
   const { transport, writes } = threadDouble({
     files: [apiFile({ patch })],
     failReviewOnce: { status: 502, message: 'Bad Gateway' },
+    // The request left and GitHub kept nothing: the outcome stays unknown.
+    keepsReview: false,
   })
   setGitHubTransport(transport)
   t.after(() => setGitHubTransport(null))
@@ -2109,38 +2229,15 @@ test('a lost review is settled by asking GitHub what it holds, not by the summar
     drafts: [draft({ id: 'd1', ref: at, body: text })],
   })
 
-  // GitHub accepted the review and the response was lost. The summary is
-  // component-local state, so reopening the workspace or editing a sentence
+  // GitHub accepted the review and the response was lost. The double builds the
+  // landed review from the body the code actually sent, so this can only be
+  // settled if what was sent is what the record says was attempted. The summary
+  // is component-local state, so reopening the workspace or editing a sentence
   // must not change what the attempt was — and the record, not the composer, is
   // what a reconciliation compares against.
   const landed = threadDouble({
     files: [apiFile({ patch })],
     failReviewOnce: { status: 502, message: 'Bad Gateway' },
-    reviews: [
-      {
-        id: 'R_1',
-        state: 'COMMENTED',
-        body: '',
-        url: 'https://github.com/acme/widgets/pull/7#pullrequestreview-1',
-        author: { login: 'ada' },
-        commit: { oid: comparison().headOid },
-        comments: {
-          totalCount: 1,
-          nodes: [
-            {
-              id: 'C_1',
-              path: 'src/app.ts',
-              line: 1,
-              startLine: null,
-              side: 'RIGHT',
-              startSide: null,
-              body: 'needs a name',
-              author: { login: 'ada' },
-            },
-          ],
-        },
-      },
-    ],
   })
   setGitHubTransport(landed.transport)
   t.after(() => setGitHubTransport(null))
@@ -2168,25 +2265,6 @@ test('an older review of the same commit is not adopted for a later attempt', as
     comparison: comparison(),
     drafts: [draft({ id: 'd1', ref: at, body: 'needs a name' })],
   }
-  const comment = (id: string) => ({
-    id,
-    path: 'src/app.ts',
-    line: 1,
-    startLine: null,
-    side: 'RIGHT',
-    startSide: null,
-    body: 'needs a name',
-    author: { login: 'ada' },
-  })
-  const older = {
-    id: 'R_0',
-    state: 'COMMENTED',
-    body: '',
-    author: { login: 'ada' },
-    commit: { oid: comparison().headOid },
-    comments: { totalCount: 1, nodes: [comment('C_0')] },
-  }
-
   // The reviewer wrote the same comment on the same line before, and GitHub
   // took it. This attempt is the second one and its review never arrived, so
   // adopting the first review would report a success this attempt never had and
@@ -2194,9 +2272,23 @@ test('an older review of the same commit is not adopted for a later attempt', as
   const { transport, writes } = threadDouble({
     files: [apiFile({ patch })],
     failReviewOnce: { status: 502, message: 'Bad Gateway' },
-    reviewsBefore: [older],
-    reviews: [],
+    heldReviews: [
+      {
+        id: 90,
+        state: 'COMMENTED',
+        body: '',
+        commit_id: comparison().headOid,
+        user: { login: 'ada' },
+        comments: [
+          { path: 'src/app.ts', line: 1, side: 'RIGHT', body: 'needs a name' },
+        ],
+      },
+    ],
+    // GitHub holds the earlier review and nothing else: this attempt's own
+    // review never arrived, and the earlier one must not stand in for it.
+    keepsReview: false,
   })
+
   setGitHubTransport(transport)
   t.after(() => setGitHubTransport(null))
 
@@ -2218,31 +2310,9 @@ test('a review of the same commit with a different decision is not adopted', asy
   const added = hunk.lines.findIndex((line) => line.side === 'head' && line.newLine !== null)
   const at = refFor(hunk, added)
 
-  // An approval of the same comment on the same commit. The attempt was a plain
-  // comment, and GitHub records what it was told; an approval is not the thing
-  // that was sent, so it cannot stand in for it.
-  const approval = {
-    id: 'R_1',
-    state: 'APPROVED',
-    body: '',
-    author: { login: 'ada' },
-    commit: { oid: comparison().headOid },
-    comments: {
-      totalCount: 1,
-      nodes: [
-        {
-          id: 'C_1',
-          path: 'src/app.ts',
-          line: 1,
-          startLine: null,
-          side: 'RIGHT',
-          startSide: null,
-          body: 'needs a name',
-          author: { login: 'ada' },
-        },
-      ],
-    },
-  }
+  // GitHub accepted the request and recorded a different decision for it. The
+  // attempt was a plain comment; an approval is not the thing that was sent, so
+  // it cannot stand in for it.
   const submission = {
     event: 'COMMENT' as const,
     body: '',
@@ -2252,7 +2322,9 @@ test('a review of the same commit with a different decision is not adopted', asy
   const { transport, writes } = threadDouble({
     files: [apiFile({ patch })],
     failReviewOnce: { status: 502, message: 'Bad Gateway' },
-    reviews: [approval],
+    landedAs: (review) => {
+      review.state = 'APPROVED'
+    },
   })
   setGitHubTransport(transport)
   t.after(() => setGitHubTransport(null))
@@ -2274,31 +2346,10 @@ test('a review carrying different comments is not adopted for this attempt', asy
   const hunk = textHunk(entry, 0)
   const added = hunk.lines.findIndex((line) => line.side === 'head' && line.newLine !== null)
   const at = refFor(hunk, added)
-  // Same author, same commit, same decision, same empty summary — and a
-  // different comment. The comments are the review; a matching summary says
+  // GitHub accepted the request and stored a comment that is not the one that
+  // was sent. Same author, same commit, same decision, same empty summary — and
+  // different words. The comments are the review; a matching summary says
   // nothing about whether this attempt's words reached GitHub.
-  const other = {
-    id: 'R_1',
-    state: 'COMMENTED',
-    body: '',
-    author: { login: 'ada' },
-    commit: { oid: comparison().headOid },
-    comments: {
-      totalCount: 1,
-      nodes: [
-        {
-          id: 'C_1',
-          path: 'src/app.ts',
-          line: 1,
-          startLine: null,
-          side: 'RIGHT',
-          startSide: null,
-          body: 'an entirely different remark',
-          author: { login: 'ada' },
-        },
-      ],
-    },
-  }
   const submission = {
     event: 'COMMENT' as const,
     body: '',
@@ -2308,7 +2359,10 @@ test('a review carrying different comments is not adopted for this attempt', asy
   const { transport, writes } = threadDouble({
     files: [apiFile({ patch })],
     failReviewOnce: { status: 502, message: 'Bad Gateway' },
-    reviews: [other],
+    landedAs: (_review, comments) => {
+      const first = comments[0]
+      if (first) first.body = 'an entirely different remark'
+    },
   })
   setGitHubTransport(transport)
   t.after(() => setGitHubTransport(null))
@@ -2332,38 +2386,22 @@ test("a collaborator's identical review is not adopted for this account", async 
   const at = refFor(hunk, added)
   // Byte for byte what this account was trying to write, except that somebody
   // else wrote it. A collaborator's review is not this reviewer's write.
-  const collaborators = {
-    id: 'R_1',
-    state: 'COMMENTED',
-    body: '',
-    author: { login: 'grace' },
-    commit: { oid: comparison().headOid },
-    comments: {
-      totalCount: 1,
-      nodes: [
-        {
-          id: 'C_1',
-          path: 'src/app.ts',
-          line: 1,
-          startLine: null,
-          side: 'RIGHT',
-          startSide: null,
-          body: 'needs a name',
-          author: { login: 'grace' },
-        },
-      ],
-    },
-  }
   const submission = {
     event: 'COMMENT' as const,
     body: '',
     comparison: comparison(),
     drafts: [draft({ id: 'd1', ref: at, body: 'needs a name' })],
   }
+  // GitHub applied the request and recorded it against another account, which
+  // is what a review submitted on somebody else's behalf looks like. A
+  // collaborator's review is not this reviewer's write.
   const { transport, writes } = threadDouble({
     files: [apiFile({ patch })],
     failReviewOnce: { status: 502, message: 'Bad Gateway' },
-    reviews: [collaborators],
+    landedAs: (review, comments) => {
+      review.user = { login: 'grace' }
+      for (const comment of comments) comment.user = { login: 'grace' }
+    },
   })
   setGitHubTransport(transport)
   t.after(() => setGitHubTransport(null))
@@ -2393,6 +2431,8 @@ test('the same unresolved comments stay guarded when the decision changes', asyn
   const { transport, writes } = threadDouble({
     files: [apiFile({ patch })],
     failReviewOnce: { status: 502, message: 'Bad Gateway' },
+    // The request left and GitHub kept nothing: the outcome stays unknown.
+    keepsReview: false,
   })
   setGitHubTransport(transport)
   t.after(() => setGitHubTransport(null))
@@ -2436,6 +2476,8 @@ test('an unresolved comment stays guarded when a second draft joins the batch', 
   const { transport, writes } = threadDouble({
     files: [apiFile({ patch })],
     failReviewOnce: { status: 502, message: 'Bad Gateway' },
+    // The request left and GitHub kept nothing: the outcome stays unknown.
+    keepsReview: false,
   })
   setGitHubTransport(transport)
   t.after(() => setGitHubTransport(null))
@@ -2484,7 +2526,9 @@ test('a lost review GitHub does not hold still refuses the second send', async (
   const { transport, writes } = threadDouble({
     files: [apiFile({ patch })],
     failReviewOnce: { status: 502, message: 'Bad Gateway' },
-    reviews: [],
+    // The request left and GitHub kept nothing, which is the one outcome the
+    // lost response cannot rule out.
+    keepsReview: false,
   })
   setGitHubTransport(transport)
   t.after(() => setGitHubTransport(null))
@@ -2515,19 +2559,17 @@ test("another account's review of another revision does not retire the record", 
   }
 
   // Someone else's review of a different revision is not this write, so
-  // matching on it would retire the guard and permit the duplicate.
+  // matching on it would retire the guard and permit the duplicate. The
+  // comments are identical to this account's, so only the account and the
+  // revision can tell them apart.
   const { transport, writes } = threadDouble({
     files: [apiFile({ patch })],
     failReviewOnce: { status: 502, message: 'Bad Gateway' },
-    reviews: [
-      {
-        id: 'R_1',
-        state: 'COMMENTED',
-        body: '',
-        author: { login: 'grace' },
-        commit: { oid: 'other' },
-      },
-    ],
+    landedAs: (review, comments) => {
+      review.user = { login: 'grace' }
+      review.commit_id = 'other'
+      for (const comment of comments) comment.user = { login: 'grace' }
+    },
   })
   setGitHubTransport(transport)
   t.after(() => setGitHubTransport(null))
@@ -2565,6 +2607,8 @@ test("another account's unresolved write does not hold this one's button shut", 
     files: [apiFile({ patch })],
     viewer: 'ada',
     failReviewOnce: { status: 502, message: 'Bad Gateway' },
+    // The request left and GitHub kept nothing: the outcome stays unknown.
+    keepsReview: false,
   })
   setGitHubTransport(first.transport)
   await assert.rejects(() => submitReview(workspace.repo, 7, submission), {
@@ -2644,46 +2688,22 @@ test('a lost review is found however many reviews came after it', async (t) => {
     comparison: comparison(),
     drafts: [draft({ id: 'd1', ref: at, body: 'needs a name' })],
   }
-  const landed = {
-    id: 'R_1',
-    state: 'COMMENTED',
-    body: '',
-    author: { login: 'ada' },
-    commit: { oid: comparison().headOid },
-    comments: {
-      totalCount: 1,
-      nodes: [
-        {
-          id: 'C_1',
-          path: 'src/app.ts',
-          line: 1,
-          startLine: null,
-          side: 'RIGHT',
-          startSide: null,
-          body: 'needs a name',
-          author: { login: 'ada' },
-        },
-      ],
-    },
-  }
   // An attempt outlives any recent window: the review it made is now buried
-  // under more reviews than one page holds. Reading only the newest page would
-  // report "not found" and hold a write GitHub had already settled, with no
-  // way out of the hold.
-  const review = (index: number) => ({
-    id: `R_${index}`,
-    state: 'COMMENTED',
-    body: `unrelated ${index}`,
-    author: { login: 'grace' },
-    commit: { oid: comparison().headOid },
-    comments: { totalCount: 0, nodes: [] },
-  })
+  // under more reviews than one page holds, and the pages hold 100. Reading only
+  // the newest page would report "not found" and hold a write GitHub had already
+  // settled, with no way out of the hold.
   const { transport, writes } = threadDouble({
     files: [apiFile({ patch })],
     failReviewOnce: { status: 502, message: 'Bad Gateway' },
-    // Oldest first, as GitHub returns a review connection, with the landed
-    // review underneath every review that came after it.
-    reviews: [landed, ...Array.from({ length: 60 }, (_, i) => review(100 - i))],
+    // Reviews that arrived after this one, so the landed review is only reachable
+    // by walking past a whole page of them.
+    reviewsAfterApply: (review) =>
+      Array.from({ length: 150 }, (_, index) => ({
+        state: 'COMMENTED',
+        body: `unrelated ${index}`,
+        commit_id: review.commit_id,
+        user: { login: 'grace' },
+      })),
   })
   setGitHubTransport(transport)
   t.after(() => setGitHubTransport(null))
@@ -2695,6 +2715,244 @@ test('a lost review is found however many reviews came after it', async (t) => {
 
   assert.equal(second.state, 'COMMENTED')
   assert.equal(writes.length, 1, 'the review is found by paging back, not by giving up')
+})
+
+test('a review carrying more comments than one page holds is still settled', async (t) => {
+  const workspace = await reviewWorkspace()
+  t.after(workspace.dispose)
+  // GitHub accepts up to 200 inline comments in one review, and the review
+  // comment page holds 100. A submission of that size whose response is lost has
+  // to be reconcilable, or a write this app is able to make is one it can never
+  // find out about.
+  const count = 150
+  const lines = Array.from({ length: count }, (_, index) => `+added ${index}`).join('\n')
+  const patch = `@@ -0,0 +1,${count} @@\n${lines}`
+  const entry = file({ diff: { kind: 'text', hunks: hunks(patch) } })
+  const hunk = textHunk(entry, 0)
+  const drafts = hunk.lines
+    .map((line, index) => ({ line, index }))
+    .filter(({ line }) => line.side === 'head' && line.newLine !== null)
+    .map(({ line, index }, position) =>
+      draft({
+        id: `d${position}`,
+        ref: refFor(hunk, index),
+        body: `remark ${position}`,
+      }),
+    )
+  assert.equal(drafts.length, count)
+  const submission = {
+    event: 'COMMENT' as const,
+    body: '',
+    comparison: comparison(),
+    drafts,
+  }
+  const { transport, writes } = threadDouble({
+    files: [apiFile({ patch })],
+    failReviewOnce: { status: 502, message: 'Bad Gateway' },
+  })
+  setGitHubTransport(transport)
+  t.after(() => setGitHubTransport(null))
+
+  await assert.rejects(() => submitReview(workspace.repo, 7, submission), {
+    name: 'ReviewOutcomeUnknownError',
+  })
+  const second = await submitReview(workspace.repo, 7, submission)
+
+  assert.equal(second.state, 'COMMENTED')
+  assert.equal(writes.length, 1, 'every page of the review was read, so nothing was posted again')
+})
+
+test('a recovery that adopts some comments posts only the ones GitHub never took', async (t) => {
+  const workspace = await reviewWorkspace()
+  t.after(workspace.dispose)
+  const patch = '@@ -1,3 +1,3 @@\n keep\n-removed\n+added\n tail'
+  const entry = file({ diff: { kind: 'text', hunks: hunks(patch) } })
+  const hunk = textHunk(entry, 0)
+  const added = hunk.lines.findIndex((line) => line.side === 'head' && line.newLine !== null)
+  const removed = hunk.lines.findIndex((line) => line.side === 'base' && line.oldLine !== null)
+  const addedRef = refFor(hunk, added)
+  const removedRef = refFor(hunk, removed)
+  // A comment on an added line, and one on the line it replaced. The second is
+  // the interesting one: it is written on the base, which is GitHub's LEFT, and
+  // a settlement that recorded it as a head comment could never match it again.
+  const first = draft({ id: 'd1', ref: addedRef, body: 'already on GitHub' })
+  const secondDraft = draft({ id: 'd2', ref: removedRef, body: 'never sent' })
+  const { transport, writes } = threadDouble({
+    files: [apiFile({ patch })],
+    failReviewOnce: { status: 502, message: 'Bad Gateway' },
+  })
+  setGitHubTransport(transport)
+  t.after(() => setGitHubTransport(null))
+
+  const one = {
+    event: 'COMMENT' as const,
+    body: '',
+    comparison: comparison(),
+    drafts: [first],
+  }
+  // The first attempt carried one comment, and GitHub took it.
+  await assert.rejects(() => submitReview(workspace.repo, 7, one), {
+    name: 'ReviewOutcomeUnknownError',
+  })
+  // The reviewer then composed a second comment before retrying, so the payload
+  // now names one comment GitHub holds and one it has never seen.
+  const both = { ...one, drafts: [first, secondDraft] }
+  const recovered = await submitReview(workspace.repo, 7, both)
+
+  assert.equal(writes.length, 2, 'the recovery is one further request')
+  const sent = writes.flatMap((write) => reviewComments(write))
+  assert.equal(
+    sent.filter((comment) => comment.body === 'already on GitHub').length,
+    1,
+    'the adopted comment is never posted a second time',
+  )
+  assert.equal(
+    sent.filter((comment) => comment.body === 'never sent').length,
+    1,
+    'and the new comment is posted exactly once',
+  )
+  // A comment written on the base is GitHub's LEFT on the way out, and a
+  // settlement has to see it as such to recognise its own attempt.
+  assert.equal(sent.find((comment) => comment.body === 'never sent')?.side, 'LEFT')
+  // Both are confirmed to the view: the adopted one so it stops offering it, and
+  // the posted one so it is not offered again either.
+  assert.deepEqual([...(recovered.delivered ?? [])].sort(), ['d1', 'd2'])
+})
+
+test('a settled comment is not posted again after the view drops it late', async (t) => {
+  const workspace = await reviewWorkspace()
+  t.after(workspace.dispose)
+  const patch = '@@ -1,2 +1,3 @@\n keep\n+added\n tail'
+  const entry = file({ diff: { kind: 'text', hunks: hunks(patch) } })
+  const hunk = textHunk(entry, 0)
+  const added = hunk.lines.findIndex((line) => line.side === 'head' && line.newLine !== null)
+  const at = refFor(hunk, added)
+  const one = draft({ id: 'd1', ref: at, body: 'first' })
+  const { transport, writes, editReview } = threadDouble({
+    files: [apiFile({ patch })],
+    failReviewOnce: { status: 502, message: 'Bad Gateway' },
+  })
+  setGitHubTransport(transport)
+  t.after(() => setGitHubTransport(null))
+
+  const submission = {
+    event: 'COMMENT' as const,
+    body: '',
+    comparison: comparison(),
+    drafts: [one],
+  }
+  // GitHub took it and the response was lost.
+  await assert.rejects(() => submitReview(workspace.repo, 7, submission), {
+    name: 'ReviewOutcomeUnknownError',
+  })
+  // The view was never told, because the app died before it could be. The draft
+  // is still in the payload, and the recovery settles it from what GitHub holds
+  // — reporting the comment as delivered so the view can drop it.
+  const recovered = await submitReview(workspace.repo, 7, submission)
+  assert.deepEqual(recovered.delivered, ['d1'], 'the delivered comment is named so the view drops it')
+  assert.equal(writes.length, 1, 'nothing was posted again')
+
+  // The reviewer then edits the review's summary on the web, which is
+  // ordinary and which GitHub records. GitHub can no longer answer the question
+  // this attempt asked — the review it holds is no longer the review that was
+  // attempted — so the record of what was recognised is the only thing left that
+  // knows the comment is already there. A guard that forgot the moment it
+  // settled would hold this submission for good, with no way for the reviewer to
+  // clear the draft.
+  editReview(Number(recovered.id), (review) => {
+    review.body = 'edited on the web afterwards'
+  })
+  const again = await submitReview(workspace.repo, 7, submission)
+  assert.deepEqual(
+    again.delivered,
+    ['d1'],
+    'the evidence that GitHub holds this comment outlives GitHub being able to re-derive it',
+  )
+  assert.equal(writes.length, 1, 'and it is still not posted a second time')
+
+  // A later submission that no longer carries the comment is the view's
+  // acknowledgement, and it is what retires the record. Nothing about the
+  // journal grows without bound while the reviewer keeps working.
+  const nothing = await submitReview(workspace.repo, 7, { ...submission, drafts: [] }).catch(
+    (error: Error) => error,
+  )
+  assert.ok(nothing instanceof Error, 'an empty submission is refused on its own terms')
+  assert.equal(writes.length, 1, 'a submission that drops the comment sends nothing')
+})
+
+test('a review GitHub accepted is not posted again after the view never hears', async (t) => {
+  const workspace = await reviewWorkspace()
+  t.after(workspace.dispose)
+  const patch = '@@ -1,2 +1,3 @@\n keep\n+added\n tail'
+  const entry = file({ diff: { kind: 'text', hunks: hunks(patch) } })
+  const hunk = textHunk(entry, 0)
+  const added = hunk.lines.findIndex((line) => line.side === 'head' && line.newLine !== null)
+  const at = refFor(hunk, added)
+  const one = draft({ id: 'd1', ref: at, body: 'first' })
+  const { transport, writes, editReview } = threadDouble({
+    files: [apiFile({ patch })],
+  })
+  setGitHubTransport(transport)
+  t.after(() => setGitHubTransport(null))
+
+  const submission = {
+    event: 'COMMENT' as const,
+    body: '',
+    comparison: comparison(),
+    drafts: [one],
+  }
+  // GitHub answered 201 and the review is on the pull request. The app is killed
+  // here, before the view is told, so the draft is still in its payload and the
+  // user still sees it as unsent.
+  const accepted = await submitReview(workspace.repo, 7, submission)
+  assert.equal(accepted.state, 'COMMENTED')
+  assert.deepEqual(accepted.delivered, ['d1'])
+
+  // GitHub's copy of the review is then edited on the web, so it no longer
+  // matches the attempt that produced it. The only remaining evidence that the
+  // comment is already there is the record of the write this app made — which is
+  // why a settled write is kept rather than tidied away on the way out.
+  editReview(Number(accepted.id), (review) => {
+    review.body = 'edited on the web afterwards'
+  })
+  const again = await submitReview(workspace.repo, 7, submission)
+  assert.deepEqual(
+    again.delivered,
+    ['d1'],
+    'the review GitHub already holds is not written a second time',
+  )
+  assert.equal(writes.length, 1, 'and nothing new left the app')
+})
+
+test('a comment posted on the base side is recorded and matched as the base', async (t) => {
+  const workspace = await reviewWorkspace()
+  t.after(workspace.dispose)
+  const patch = '@@ -1,3 +1,3 @@\n keep\n-removed\n+added\n tail'
+  const entry = file({ diff: { kind: 'text', hunks: hunks(patch) } })
+  const hunk = textHunk(entry, 0)
+  const removed = hunk.lines.findIndex((line) => line.side === 'base' && line.oldLine !== null)
+  const at = refFor(hunk, removed)
+  const submission = {
+    event: 'COMMENT' as const,
+    body: '',
+    comparison: comparison(),
+    drafts: [draft({ id: 'd1', ref: at, body: 'why is this going?' })],
+  }
+  const { transport, writes } = threadDouble({
+    files: [apiFile({ patch })],
+    failReviewOnce: { status: 502, message: 'Bad Gateway' },
+  })
+  setGitHubTransport(transport)
+  t.after(() => setGitHubTransport(null))
+
+  await assert.rejects(() => submitReview(workspace.repo, 7, submission), {
+    name: 'ReviewOutcomeUnknownError',
+  })
+  // GitHub stored the comment as LEFT. A settlement that read that as a head
+  // comment would not recognise its own attempt and would hold this forever.
+  const second = await submitReview(workspace.repo, 7, submission)
+  assert.equal(second.state, 'COMMENTED')
+  assert.equal(writes.length, 1, 'a deletion comment is recognised as a deletion comment')
 })
 
 test('an uncertain record of another repository does not block this pull request', async (t) => {

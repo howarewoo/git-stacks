@@ -71,6 +71,23 @@ function parseUncertain(value: unknown): ReviewUncertainWrite | null {
     threadCommentIds: Array.isArray(value.threadCommentIds)
       ? value.threadCommentIds.filter((entry): entry is string => typeof entry === 'string')
       : [],
+    // A record written before this field existed reads as unsettled, which is
+    // the safe direction: an unrecognised write is reconciled against GitHub
+    // again rather than trusted.
+    settled: parseSettled(value.settled),
+  }
+}
+
+/** The review a reconciliation recognised, or null when the record carries none. */
+function parseSettled(value: unknown): ReviewUncertainWrite['settled'] {
+  if (!isRecord(value)) return null
+  if (typeof value.reviewId !== 'string') return null
+  if (typeof value.state !== 'string') return null
+  return {
+    reviewId: value.reviewId,
+    state: value.state,
+    url: typeof value.url === 'string' ? value.url : null,
+    at: typeof value.at === 'string' ? value.at : '',
   }
 }
 
@@ -387,5 +404,56 @@ export async function clearUncertainWrite(
         ),
     ),
     signal,
+  )
+}
+
+/**
+ * Retires the settled records a payload no longer mentions, keeping the rest.
+ *
+ * A settled record is evidence that GitHub holds comments, and it is only safe
+ * to drop that evidence once a later submission has demonstrably moved on: the
+ * view keeps a draft in its payload precisely while it has not been told that
+ * draft was delivered, so a record whose comments are absent from the payload
+ * are comments the view has finished with. That is the acknowledgement, and it
+ * is read off the payload rather than waited for from a callback the view may
+ * never send — which is what makes resuming after a crash idempotent instead of
+ * a race.
+ *
+ * Records that are still uncertain, and settled records this payload does still
+ * mention, are left exactly as they are.
+ */
+export async function retireSettledWrites(
+  repoPath: string,
+  repo: string,
+  number: number,
+  viewer: string,
+  comments: readonly UncertainComment[],
+  signal?: AbortSignal,
+): Promise<void> {
+  const file = await uncertainPath(repoPath, signal)
+  const existing = await readUncertain(file)
+  const kept = existing.filter((entry) => {
+    if (
+      entry.number !== number ||
+      entry.viewer !== viewer ||
+      entry.repo !== repo ||
+      entry.settled === null
+    ) {
+      return true
+    }
+    return entry.comments.some((theirs) => comments.some((mine) => sameCommentAnchor(theirs, mine)))
+  })
+  if (kept.length === existing.length) return
+  await writeUncertain(file, kept, signal)
+}
+
+/** Whether two comments name the same line of the same file, whatever they say. */
+function sameCommentAnchor(one: UncertainComment, other: UncertainComment): boolean {
+  return (
+    one.path === other.path &&
+    one.side === other.side &&
+    one.line === other.line &&
+    one.startLine === other.startLine &&
+    one.startSide === other.startSide
   )
 }

@@ -449,25 +449,55 @@ it actually holds, and every part of the attempt is checked: the review must be
 request held when it began), **this account's**, **on this revision**, recording
 **the decision that was asked for**, and carrying **the same comments** compared
 as a set on body and anchor. A matching summary proves nothing, so it is not
-what is matched on. If that review is there the attempt did land, so the record
-is retired and the outcome GitHub recorded is reported — the rest of the
-payload is left out of what is sent, and the drafts that were never sent stay
-pending rather than being cleared by a recovery.
+what is matched on. The state compared is the one GitHub recorded, not the one
+that was asked for, so a comment review never adopts an approval.
 
-The boundary is what makes the search honest rather than recent. An attempt
-outlives any window, so the reviews connection is walked backwards from newest
-to oldest until the boundary is reached, and running out of pages before it is a
-hold rather than a "not there": the search gave up, which is not the same as
-concluding. If GitHub does not hold the review once the search is exhaustive,
-the guard stands — the record says only that the app never heard back, which is
-also true of a request that never arrived, so absence is never taken as licence
-to post again automatically.
+Those two reads come from REST, not from GraphQL. `PullRequestReviewComment` has
+no `side` and no `startSide` in GitHub's schema — the side of a comment is known
+only to the thread and to the REST comment — and a query naming a field that does
+not exist is refused before it runs, which would make every submission fail at the
+first reconciliation. The review list and the pull request's review comments are
+therefore read from `pulls/{n}/reviews` and `pulls/{n}/comments`, whose `side`
+and `start_side` are `LEFT`/`RIGHT` and are converted to the diff's `base`/`head`
+in one place for both ends of a range. A comment left unconverted would be recorded
+as a head comment, and a deletion comment could then never be recognised as its
+own attempt.
+
+A settled write is recorded, not deleted. The evidence that GitHub holds a
+comment is the only thing standing between a retry and a duplicate, and the
+submission that recognised the write is still free to fail afterwards, or to be
+interrupted before the view drops the draft. The record therefore keeps what was
+recognised, and it is a later *payload* that retires it: the view keeps a draft in
+its payload precisely while it has not been told the draft was delivered, so a
+record whose comments are absent from a later submission are comments the view has
+finished with. That makes resuming after a crash idempotent without depending on a
+callback the view may never send, and it means GitHub no longer being able to
+re-derive the answer — because the review was edited on the web, say — cannot hold
+a write for good.
+
+The boundary is what makes the search honest rather than recent, and it is a
+number. REST review ids increase, so the boundary is the greatest id the pull
+request held when the attempt began, and a reconciliation walks reviews newest
+first and stops at the boundary: everything at or below it pre-existed. Both
+collections are paged in full, because a review may carry up to 200 inline
+comments while a page holds 100, and a review whose tail was never read cannot be
+compared whole — comparing part of it would claim a match that was not made.
+Running out of pages is a hold rather than a "not there". If GitHub does not hold
+the review once the search is exhaustive, the guard stands: the record says only
+that the app never heard back, which is also true of a request that never arrived,
+so absence is never taken as licence to post again automatically.
 
 The guard covers an unresolved *comment*, not an attempt id. Changing the
 decision, or adding one more pending draft, produces a different attempt over
 the same comments, and matching on the whole payload would let those comments be
 posted a second time. So every attempt touching any line this payload writes is
-reconciled first, whatever decision or batch size is being sent now.
+reconciled first, whatever decision or batch size is being sent now. What is
+journalled is what is sent: the comments GitHub never took, and no more. Sending
+the whole payload while recording only the remainder would post the adopted
+comment again — the exact duplicate the guard exists to prevent — and leave a
+record describing something other than the write. When the write does go out, every
+comment it confirms is named back, the adopted ones and the newly posted ones
+alike, so the view drops exactly those and keeps the drafts that were never sent.
 
 Replies reconcile against the thread's own comments by the same rules, with the
 comment ids the thread held when the attempt began as their boundary and this
