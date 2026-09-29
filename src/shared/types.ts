@@ -483,13 +483,7 @@ export interface StackPreview {
  * described as anything else.
  */
 export type SyncLayerState =
-  | 'merged'
-  | 'retargeted'
-  | 'needs-force'
-  | 'needs-rebase'
-  | 'needs-push'
-  | 'up-to-date'
-  | 'blocked'
+  'merged' | 'retargeted' | 'needs-force' | 'needs-rebase' | 'needs-push' | 'up-to-date' | 'blocked'
 
 /** What syncing a layer does to the remote branch of the same name. */
 export type SyncPushKind = 'none' | 'create' | 'fast-forward' | 'force'
@@ -541,6 +535,77 @@ export interface SyncPreview {
   blockers: string[]
   warnings: string[]
 }
+
+/** The structural edit a stack surgery makes to one linear stack. */
+export type SurgeryKind = 'insert' | 'move' | 'remove'
+
+/** What a surgery does to one branch of the stack. */
+export type SurgeryLayerAction = 'insert' | 'rewrite' | 'retarget' | 'remove'
+
+/**
+ * One branch a surgery touches. Every field is captured from real Git or from
+ * the pull request GitHub reported when the preview was taken, so the review
+ * names the exact rewrite, push and pull request change the run will attempt.
+ */
+export interface SurgeryLayer {
+  branch: string
+  action: SurgeryLayerAction
+  /** The parent before the surgery, and the parent this layer lands on after it. */
+  fromParent: string | null
+  toParent: string
+  /** The local tip captured when the preview was taken; null for a new branch. */
+  oid: string | null
+  /** The remote tip captured when the preview was taken, and the lease a force push names. */
+  remoteOid: string | null
+  /** Commits replayed onto the new parent. */
+  commits: number
+  push: SyncPushKind
+  pullRequest: number | null
+  /** The base GitHub recorded for the pull request when the preview was taken. */
+  pullRequestBase: string | null
+  pullRequestAction: 'none' | 'retarget' | 'close'
+  note: string
+  blockers: string[]
+}
+
+/**
+ * The native stack mutation a surgery needs. GitHub exposes no single-member
+ * removal and no reorder, so a changed composition is unstacked and, when the
+ * remaining pull requests still form a chain, registered again in the new
+ * order.
+ */
+export type NativeStackSurgery = 'none' | 'unstack' | 'unstack-and-create'
+
+/** What a surgery does, before the preview is bound to a runnable token. */
+export interface SurgeryPlanPreview {
+  kind: SurgeryKind
+  /** The branch the surgery is anchored on: the new parent, the moved layer, or the removed one. */
+  branch: string
+  trunk: string
+  /** The stack bottom-to-top after the surgery. */
+  order: string[]
+  layers: SurgeryLayer[]
+  forcePushes: string[]
+  /** Pull requests whose base changes, bottom-to-top. */
+  retargets: { number: number; branch: string; from: string; to: string }[]
+  /** Pull requests the surgery closes because their layer leaves the stack. */
+  closes: number[]
+  nativeStack: { number: number | null; action: NativeStackSurgery; members: number[] } | null
+  blockers: string[]
+  warnings: string[]
+}
+
+/** A reviewed surgery bound to the exact facts the run re-reads before it writes. */
+export interface SurgeryPreview extends SurgeryPlanPreview {
+  token: string
+  expiresAt: number
+}
+
+/** The exact surgery a preview was built for, re-read before anything is rewritten. */
+export type SurgeryRequest =
+  | { kind: 'insert'; branch: string; name: string }
+  | { kind: 'move'; branch: string; target: string }
+  | { kind: 'remove'; branch: string }
 
 /** One resumable unit of Submit Stack work, in bottom-to-top order. */
 export type PublishStepKind = 'push' | 'create-pr' | 'retarget-pr' | 'create-stack' | 'extend-stack'
@@ -656,6 +721,13 @@ export type StackAction =
     }
   | SubmitStackAction
   | { type: 'stackContinue' | 'stackAbort' }
+  | {
+      type: 'executeSurgery'
+      token: string
+      allowForce: boolean
+      /** Consent to close the pull request of a submitted layer the surgery removes. */
+      closePullRequests: boolean
+    }
   | { type: 'updatePr'; number: number; title: string; body: string; draft: boolean }
   | { type: 'closePr' | 'reopenPr'; number: number }
   | { type: 'createNativeStack'; pullRequests: number[] }
@@ -744,6 +816,8 @@ export interface DesktopAPI {
   commitDiff(oid: string, requestId?: string): Promise<{ text: string; truncated: boolean }>
   pushPreview(): Promise<PushPreview>
   stackPreview(kind: StackKind, branch: string): Promise<StackPreview>
+  /** The reviewed insert, move, or remove surgery for one stack. */
+  surgeryPreview(request: SurgeryRequest): Promise<SurgeryPreview>
   /** Resumable Submit Stack progress left on disk, or null when nothing is pending. */
   submitStackProgress?: () => Promise<PublishProgress | null>
   /**

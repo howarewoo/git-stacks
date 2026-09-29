@@ -12,6 +12,7 @@ const desktop: DesktopAPI = {
   commitDiff: (oid, requestId) => ipcRenderer.invoke('repository:commit-diff', oid, requestId),
   pushPreview: () => ipcRenderer.invoke('repository:push-preview'),
   stackPreview: (kind, branch) => ipcRenderer.invoke('repository:stack-preview', kind, branch),
+  surgeryPreview: (request) => ipcRenderer.invoke('repository:surgery-preview', request),
   submitStackProgress: () => ipcRenderer.invoke('repository:submit-stack-progress'),
   onSubmitStackProgress: (listener: (progress: PublishProgress | null) => void) => {
     const handler = (_event: unknown, progress: PublishProgress | null): void => listener(progress)

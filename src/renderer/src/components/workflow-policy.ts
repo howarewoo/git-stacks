@@ -19,6 +19,7 @@ export type WorkflowKind =
   | 'forcePush'
   | 'commitAction'
   | 'stack'
+  | 'surgery'
   | 'pr'
   | 'confirm'
 

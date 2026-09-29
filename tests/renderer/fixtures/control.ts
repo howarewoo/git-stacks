@@ -9,6 +9,7 @@ import type {
   PushPreview,
   StackKind,
   StackPreview,
+  SurgeryPreview,
 } from '../../../src/shared/types'
 import {
   conflictLabels,
@@ -21,6 +22,7 @@ import {
   longDiffText,
 } from '../../../src/renderer/src/design-system/data-fixtures'
 import {
+  insertSurgeryPreview,
   leasePreview,
   mergePreview,
   publishPreview,
@@ -170,6 +172,8 @@ function actionMessage(action: GitAction): string {
       return `Linked issue #${action.issueNumber} to pull request #${action.prNumber}`
     case 'unlinkIssue':
       return `Removed issue #${action.issueNumber} from pull request #${action.prNumber}`
+    case 'executeSurgery':
+      return `Ran the reviewed surgery ${action.token}`
   }
 }
 
@@ -329,6 +333,13 @@ export function installFixtureControl(options: {
       return answer<StackPreview>('stackPreview', () => {
         const preview = scenario.stackPreviews?.[kind] ?? stackPreviewsByKind[kind]
         return preview.kind === kind ? preview : { ...preview, kind }
+      })
+    },
+    surgeryPreview: (request) => {
+      record('surgeryPreview', [request])
+      return answer<SurgeryPreview>('surgeryPreview', () => {
+        const preview = scenario.surgeryPreview ?? insertSurgeryPreview
+        return preview.kind === request.kind ? preview : { ...preview, kind: request.kind }
       })
     },
     pullRequest: (number) => {

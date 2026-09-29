@@ -8,6 +8,7 @@ import type {
   RepositorySnapshot,
   StackKind,
   StackPreview,
+  SurgeryPreview,
 } from '../../../src/shared/types'
 
 /** Every promise-returning `DesktopAPI` method the fixture double can intercept. */
@@ -22,6 +23,7 @@ export type FixtureCall =
   | 'commitDiff'
   | 'pushPreview'
   | 'stackPreview'
+  | 'surgeryPreview'
   | 'pullRequest'
   | 'openExternal'
   | 'gitRuntimeStatus'
@@ -60,6 +62,8 @@ export interface FixtureScenario {
   readonly commitDiff?: { text: string; truncated: boolean }
   readonly pushPreview?: PushPreview
   readonly stackPreviews?: Readonly<Partial<Record<StackKind, StackPreview>>>
+  /** The surgery preview a scenario answers; insert between two layers by default. */
+  readonly surgeryPreview?: SurgeryPreview
   /** Git action types that always reject; every other action resolves with a status message. */
   readonly actionFailures?: Readonly<Partial<Record<GitAction['type'], string>>>
   /** Linked issues per pull request number, covering both contextual and closing relations. */

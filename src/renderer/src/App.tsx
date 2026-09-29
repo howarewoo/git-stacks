@@ -1846,6 +1846,103 @@ function App() {
                 <Upload className="size-3.5" />
                 Publish stack…
               </Button>
+              {(() => {
+                // The three surgeries act on the selected layer, so each one is offered
+                // only where it can be expressed: a parent to move down onto, a layer
+                // above to move up past, and no layer above to remove.
+                const parent = selectedBranch.parent ?? null
+                const above = snapshot.branches.find(
+                  (branch) => !branch.remote && branch.parent === selectedBranch.name,
+                )
+                const common = isBusy || operationActive
+                return (
+                  <>
+                    <Button
+                      variant="ghost"
+                      disabled={common || Boolean(shapeReason('executeSurgery'))}
+                      tooltip={
+                        shapeReason('executeSurgery') ??
+                        'Preview a new layer on this branch, replaying the layers above it onto it.'
+                      }
+                      onClick={() =>
+                        openWorkflow({
+                          kind: 'surgery',
+                          request: { kind: 'insert', branch: selectedBranch.name, name: '' },
+                        })
+                      }
+                    >
+                      <Layers className="size-3.5" />
+                      Insert layer above…
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      disabled={common || !parent || Boolean(shapeReason('executeSurgery'))}
+                      tooltip={
+                        shapeReason('executeSurgery') ??
+                        (parent
+                          ? `Preview reparenting ${selectedBranch.name} onto ${parent} and replaying the layers above it.`
+                          : 'This layer already sits directly on the stack trunk.')
+                      }
+                      onClick={() =>
+                        parent
+                          ? openWorkflow({
+                              kind: 'surgery',
+                              request: {
+                                kind: 'move',
+                                branch: selectedBranch.name,
+                                target: parent,
+                              },
+                            })
+                          : undefined
+                      }
+                    >
+                      Move layer down…
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      disabled={common || !above?.parent || Boolean(shapeReason('executeSurgery'))}
+                      tooltip={
+                        shapeReason('executeSurgery') ??
+                        (above
+                          ? `Preview moving ${selectedBranch.name} above ${above.name} and replaying both layers.`
+                          : 'No layer sits above this one.')
+                      }
+                      onClick={() =>
+                        above
+                          ? openWorkflow({
+                              kind: 'surgery',
+                              request: {
+                                kind: 'move',
+                                branch: selectedBranch.name,
+                                target: above.name,
+                              },
+                            })
+                          : undefined
+                      }
+                    >
+                      Move layer up…
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      disabled={common || Boolean(above) || Boolean(shapeReason('executeSurgery'))}
+                      tooltip={
+                        shapeReason('executeSurgery') ??
+                        (above
+                          ? 'Reorder the layers above this one first: removing a middle layer has to replay them, and the preview shows it.'
+                          : 'Preview deleting this local branch, retargeting nothing above it, and closing its pull request.')
+                      }
+                      onClick={() =>
+                        openWorkflow({
+                          kind: 'surgery',
+                          request: { kind: 'remove', branch: selectedBranch.name },
+                        })
+                      }
+                    >
+                      Remove layer…
+                    </Button>
+                  </>
+                )
+              })()}
               <Button
                 variant="ghost"
                 disabled={isBusy || operationActive || Boolean(shapeReason('setParent'))}
