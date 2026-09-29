@@ -390,7 +390,9 @@ function handleRest(
     if (stackMatch) {
       const stackNum = Number(stackMatch[1])
       const stack = (state.stacks ?? []).find((s) => s.number === stackNum)
-      if (!stack) throw new HttpError(404, 'Not Found', `Stack #${stackNum} not found`)
+      if (!stack || (state.missingStackDetails ?? []).includes(stackNum)) {
+        throw new HttpError(404, 'Not Found', `Stack #${stackNum} not found`)
+      }
       if (method === 'GET') {
         return { status: 200, body: formatStack(state, stack) }
       }

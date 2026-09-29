@@ -470,7 +470,7 @@ test('a completed step whose pull request drifted again stops the run before it 
 
     await assert.rejects(
       runAction(harness.repo, { type: 'stackContinue' }),
-      /changed from two to main on GitHub/u,
+      /was moved to main after this surgery retargeted it to one/u,
     )
     const after = await harness.readState()
     assert.equal(prFor(after, 'three').base, 'main', 'the external change is not overwritten')
@@ -789,5 +789,209 @@ test('a resumed replay still performs the reviewed pull request and stack change
       'the native stack the review named is registered after the conflict is resolved',
     )
     assert.equal(await getStackProgress(harness.repo), null)
+  })
+})
+
+test('an uncertain stack registration is never posted twice while its outcome is unknown', async () => {
+  await withPublishedStack(async (harness) => {
+    const layers = await publishedFourLayerStack(harness)
+    git(harness, ['switch', 'two'])
+    const state = await harness.readState()
+    state.lostResponses = [
+      {
+        method: 'POST',
+        pathIncludes: '/stacks',
+        pathEndsWith: '/stacks',
+        status: 502,
+        message: 'Bad gateway',
+      },
+    ]
+    await harness.writeState(state)
+
+    const plan = await preview(harness, { kind: 'move', branch: 'two', target: 'three' })
+    assert.deepEqual(plan.blockers, [])
+    await assert.rejects(runSurgery(harness.repo, plan.token, true, false))
+
+    // The request the journal recorded is still in flight on GitHub, so the
+    // membership it would hold is not listed yet.
+    const pending = await harness.readState()
+    pending.stacks = pending.stacks?.filter((stack) => !stack.open)
+    await harness.writeState(pending)
+
+    await assert.rejects(
+      runAction(harness.repo, { type: 'stackContinue' }),
+      /was requested and GitHub does not list it yet/u,
+    )
+    const after = await harness.readState()
+    assert.equal(
+      requestCount(after, 'POST', '/stacks', '/stacks'),
+      1,
+      'the uncertain registration is not sent again',
+    )
+    assert.ok(
+      (await getStackProgress(harness.repo)) !== null,
+      'the journal is retained so the run can be continued once GitHub is read again',
+    )
+  })
+})
+
+test('a registration whose read-back failed is adopted, and the checkpoint is re-proved', async () => {
+  await withPublishedStack(async (harness) => {
+    const layers = await publishedFourLayerStack(harness)
+    git(harness, ['switch', 'two'])
+    const state = await harness.readState()
+    // The create lands; neither its own response nor the read-back that proves it
+    // reaches this run.
+    state.lostResponses = [
+      {
+        method: 'POST',
+        pathIncludes: '/stacks',
+        pathEndsWith: '/stacks',
+        status: 502,
+        message: 'Bad gateway',
+      },
+    ]
+    await harness.writeState(state)
+
+    const plan = await preview(harness, { kind: 'move', branch: 'two', target: 'three' })
+    await assert.rejects(runSurgery(harness.repo, plan.token, true, false))
+
+    const adopted = await runAction(harness.repo, { type: 'stackContinue' })
+    assert.match(adopted.message, /holds the new order/)
+    const after = await harness.readState()
+    assert.equal(requestCount(after, 'POST', '/stacks', '/stacks'), 1)
+    assert.deepEqual(
+      openStacks(after).map((stack) => stackOrder(after, stack.number)),
+      [expectedMembership(layers)],
+    )
+    assert.equal(await getStackProgress(harness.repo), null)
+  })
+})
+
+test('a completed registration that changed after the run refuses the next resumption', async () => {
+  await withPublishedStack(async (harness) => {
+    await publishedFourLayerStack(harness)
+    git(harness, ['switch', 'two'])
+    const state = await harness.readState()
+    state.lostResponses = [
+      {
+        method: 'POST',
+        pathIncludes: '/stacks/1/unstack',
+        status: 502,
+        message: 'Bad gateway',
+      },
+    ]
+    await harness.writeState(state)
+    // The layer this surgery removes is rewritten behind its back, so the run
+    // finishes every reviewed remote step and then stops on the local deletion
+    // instead of clearing its journal.
+    harness.hookGitPush({
+      branch: 'three',
+      armed: true,
+      after() {
+        git(harness, ['update-ref', 'refs/heads/two', git(harness, ['rev-parse', 'main'])])
+      },
+    })
+
+    const plan = await preview(harness, { kind: 'remove', branch: 'two' })
+    assert.deepEqual(plan.blockers, [])
+    await assert.rejects(runSurgery(harness.repo, plan.token, true, true))
+    await assert.rejects(
+      runAction(harness.repo, { type: 'stackContinue' }),
+      /Refusing to delete two/u,
+    )
+    const registered = await harness.readState()
+    assert.equal(
+      registered.prs.find((entry) => entry.head === 'two')?.state,
+      'CLOSED',
+      'the reviewed close really did reach GitHub',
+    )
+    assert.ok((await getStackProgress(harness.repo)) !== null, 'the journal is retained')
+
+    // Somebody reorders the registered stack after this run proved it.
+    const drifted = await harness.readState()
+    const open = openStacks(drifted)[0]!
+    open.pull_requests = open.pull_requests.slice().reverse()
+    await harness.writeState(drifted)
+
+    await assert.rejects(
+      runAction(harness.repo, { type: 'stackContinue' }),
+      /instead of the reviewed order/u,
+    )
+    const after = await harness.readState()
+    assert.deepEqual(
+      stackOrder(after, open.number),
+      open.pull_requests.map((member) => member.number),
+      "somebody else's order is not overwritten",
+    )
+    assert.ok((await getStackProgress(harness.repo)) !== null, 'the journal is still retained')
+  })
+})
+
+test('a completed retarget somebody moved back stops the run instead of repeating it', async () => {
+  await withPublishedStack(async (harness) => {
+    const layers = await publishedFourLayerStack(harness)
+    git(harness, ['switch', 'two'])
+    const state = await harness.readState()
+    state.lostResponses = [
+      {
+        method: 'PATCH',
+        pathIncludes: `/pulls/${layers.two.number}`,
+        status: 502,
+        message: 'Bad gateway',
+      },
+    ]
+    await harness.writeState(state)
+
+    const plan = await preview(harness, { kind: 'move', branch: 'two', target: 'three' })
+    await assert.rejects(runSurgery(harness.repo, plan.token, true, false))
+    const landed = await harness.readState()
+    assert.equal(prFor(landed, 'three').base, 'one', 'the first retarget landed')
+
+    // Somebody put the first pull request back on the base it had before this
+    // surgery, after the surgery moved it.
+    const reverted = await harness.readState()
+    prFor(reverted, 'three').base = 'two'
+    await harness.writeState(reverted)
+
+    await assert.rejects(
+      runAction(harness.repo, { type: 'stackContinue' }),
+      /was moved to two after this surgery retargeted it to one/u,
+    )
+    const after = await harness.readState()
+    assert.equal(prFor(after, 'three').base, 'two', "somebody else's edit is not overwritten")
+    assert.equal(
+      requestCount(after, 'POST', '/stacks', '/stacks'),
+      0,
+      'nothing after the stale step is attempted',
+    )
+    assert.ok((await getStackProgress(harness.repo)) !== null, 'the journal is retained')
+  })
+})
+
+test('a stack detail that disagrees with the listing is unresolved, never completed', async () => {
+  await withPublishedStack(async (harness) => {
+    await publishedFourLayerStack(harness)
+    git(harness, ['switch', 'two'])
+    const state = await harness.readState()
+    // GitHub's detail read loses the stack while its listing still has it open.
+    state.missingStackDetails = [1]
+    await harness.writeState(state)
+
+    const plan = await preview(harness, { kind: 'move', branch: 'two', target: 'three' })
+    await assert.rejects(runSurgery(harness.repo, plan.token, true, false))
+
+    await assert.rejects(
+      runAction(harness.repo, { type: 'stackContinue' }),
+      /as not found and as an open stack at the same time/u,
+    )
+    const after = await harness.readState()
+    assert.equal(
+      requestCount(after, 'POST', '/stacks/1/unstack'),
+      0,
+      'a stack this run cannot resolve is not unstacked',
+    )
+    assert.deepEqual(stackOrder(after, 1), [1, 2, 3, 4], 'the membership is untouched')
+    assert.ok((await getStackProgress(harness.repo)) !== null, 'the journal is retained')
   })
 })

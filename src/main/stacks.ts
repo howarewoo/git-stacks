@@ -4078,6 +4078,13 @@ async function runSurgeryRemote(root: string, journal: StackJournal): Promise<st
         parts.push(`Pull request #${step.number} targets ${step.toBase}`)
         continue
       }
+      if (step.status === 'completed') {
+        // The step already landed, so any other base is somebody's own edit after
+        // this surgery. Re-applying the reviewed base would overwrite it.
+        throw new Error(
+          `Pull request #${step.number} was moved to ${current.base} after this surgery retargeted it to ${step.toBase}`,
+        )
+      }
       if (current.base !== step.fromBase) {
         throw new Error(
           `Pull request #${step.number} changed from ${step.fromBase} to ${current.base} on GitHub`,
@@ -4120,15 +4127,22 @@ async function runSurgeryRemote(root: string, journal: StackJournal): Promise<st
   if (!stack) return parts.length > 0 ? parts.join('. ') : ''
   if (stack.unstackStatus !== 'completed') {
     const observed = await readNativeStackMembers(owner, name, stack.stackNumber)
-    const dissolved =
-      observed === null ? !(await nativeStackStillListed(owner, name, stack.stackNumber)) : false
-    if (dissolved || observed?.length === 0) {
+    if (observed === null && (await nativeStackStillListed(owner, name, stack.stackNumber))) {
+      // GitHub answered the detail read and the listing differently, so this run
+      // cannot tell whether the stack is gone. The journal stays: an unstack it
+      // cannot prove must never be recorded as done.
+      throw new Error(
+        `GitHub reports native stack #${stack.stackNumber} as not found and as an open stack at the same time; resolve it on GitHub before continuing`,
+      )
+    }
+    const dissolved = observed === null
+    if (dissolved || observed.length === 0) {
       // An unstack whose response was lost left the stack empty or dissolved:
       // nothing to repeat. A 404 only counts as dissolved while the repository
       // still answers stack reads, so an unavailable stacks API stops the run
       // instead of quietly claiming the membership is gone.
       parts.push(`Native stack #${stack.stackNumber} is unstacked`)
-    } else if (observed) {
+    } else {
       if (
         observed.length !== stack.membersBefore.length ||
         observed.some((member, index) => member !== stack.membersBefore[index])
@@ -4159,62 +4173,107 @@ async function runSurgeryRemote(root: string, journal: StackJournal): Promise<st
     stack.unstackStatus = 'completed'
     await writeJournal(root, journal)
   }
-  if (stack.action === 'unstack-and-create' && stack.createStatus !== 'completed') {
-    // A create whose response was lost already registered the stack. Looking it up
-    // first is what keeps a resumed run from posting the same membership twice.
-    const existing = await findNativeStack(owner, name, surgery.trunk, stack.members)
-    if (existing.conflict) {
-      throw new Error(
-        `Another native stack now holds ${existing.conflict.join(', ')}; this surgery registered ${stack.members.join(', ')}`,
-      )
-    }
-    if (existing.stack) {
-      stack.stackNumberAfter = existing.stack.number
-      stack.createStatus = 'completed'
-      await writeJournal(root, journal)
-      parts.push(`Native stack #${existing.stack.number} holds the new order`)
+  if (stack.action === 'unstack-and-create') {
+    if (stack.createStatus === 'completed') {
+      // A checkpoint is a claim about GitHub, so it is re-proved on every
+      // resumption rather than trusted because it was written once.
+      if (stack.stackNumberAfter === null) {
+        throw new Error('The journal records a completed stack registration without a stack number')
+      }
+      const verified = await getPullRequestStack(owner, name, stack.stackNumberAfter)
+      assertRegisteredStack(stack, surgery.trunk, verified, stack.stackNumberAfter)
+      parts.push(`Native stack #${stack.stackNumberAfter} holds the new order`)
     } else {
-      const capability = await detectNativeStacksCapability(owner, name)
-      if (!capability.available) {
+      // A create whose response was lost already registered the stack. Looking it
+      // up first is what keeps a resumed run from posting the same membership twice.
+      const existing = await findNativeStack(owner, name, surgery.trunk, stack.members)
+      if (existing.conflict) {
         throw new Error(
-          `GitHub cannot create native stacks for ${surgery.fullName}: ${capability.message}`,
+          `Another native stack now holds ${existing.conflict
+            .map((number) => `#${number}`)
+            .join(', ')}; this surgery registered ${stack.members.join(', ')}`,
         )
       }
-      let requested = false
-      try {
-        const created = await createPullRequestStack(owner, name, stack.members, {
-          defaultBranch: surgery.trunk,
-          knownPullRequests: await Promise.all(
-            stack.members.map((member) => getPullRequest(root, member)),
-          ),
-          beforeCreate: async () => {
-            stack.createRequested = true
-            await writeJournal(root, journal)
-            requested = true
-          },
-        })
+      if (existing.stack) {
+        assertRegisteredStack(stack, surgery.trunk, existing.stack, existing.stack.number)
+        stack.stackNumberAfter = existing.stack.number
         stack.createStatus = 'completed'
-        stack.stackNumberAfter = created.number
         await writeJournal(root, journal)
-        const readBack = await getPullRequestStack(owner, name, created.number)
-        if (
-          readBack.pullRequests.map((member) => member.number).join(',') !== stack.members.join(',')
-        ) {
+        parts.push(`Native stack #${existing.stack.number} holds the new order`)
+      } else if (stack.createRequested) {
+        // The first create may still be completing on GitHub, or it may have been
+        // lost entirely. Posting again risks a second stack holding the same pull
+        // requests, so the run stops and keeps its journal until it can be told.
+        throw new Error(
+          `Native stack registration for ${stack.members
+            .map((number) => `#${number}`)
+            .join(
+              ', ',
+            )} was requested and GitHub does not list it yet, so it is not sent again; the first request may still be completing. Check GitHub, then continue.`,
+        )
+      } else {
+        const capability = await detectNativeStacksCapability(owner, name)
+        if (!capability.available) {
           throw new Error(
-            `Native stack #${created.number} holds ${readBack.pullRequests.map((member) => member.number).join(', ')} instead of the reviewed order`,
+            `GitHub cannot create native stacks for ${surgery.fullName}: ${capability.message}`,
           )
         }
-        parts.push(`Registered native stack #${created.number} for the new order`)
-      } catch (error) {
-        if (requested && definitivelyRejectedCreation(error)) {
-          stack.createRequested = false
+        let requested = false
+        try {
+          const created = await createPullRequestStack(owner, name, stack.members, {
+            defaultBranch: surgery.trunk,
+            knownPullRequests: await Promise.all(
+              stack.members.map((member) => getPullRequest(root, member)),
+            ),
+            beforeCreate: async () => {
+              stack.createRequested = true
+              await writeJournal(root, journal)
+              requested = true
+            },
+          })
+          // The checkpoint follows the proof, never the other way round: a journal
+          // that claims a registration nobody verified is worse than no journal.
+          const readBack = await getPullRequestStack(owner, name, created.number)
+          assertRegisteredStack(stack, surgery.trunk, readBack, created.number)
+          stack.createStatus = 'completed'
+          stack.stackNumberAfter = created.number
           await writeJournal(root, journal)
+          parts.push(`Registered native stack #${created.number} for the new order`)
+        } catch (error) {
+          if (requested && definitivelyRejectedCreation(error)) {
+            stack.createRequested = false
+            await writeJournal(root, journal)
+          }
+          throw error
         }
-        throw error
       }
     }
   }
   return parts.length > 0 ? parts.join('. ') : ''
+}
+
+/**
+ * Proves that a native stack really holds the membership this surgery registered,
+ * on the trunk it was registered against. Every path that records or trusts that
+ * registration goes through here.
+ */
+function assertRegisteredStack(
+  stack: { members: number[] },
+  trunk: string,
+  observed: NativeStack,
+  stackNumber: number,
+): void {
+  const held = observed.pullRequests.map((member) => member.number)
+  if (observed.base !== trunk) {
+    throw new Error(
+      `Native stack #${stackNumber} is based on ${observed.base} instead of the registered ${trunk}`,
+    )
+  }
+  if (held.join(',') !== stack.members.join(',')) {
+    throw new Error(
+      `Native stack #${stackNumber} holds ${held.join(', ')} instead of the reviewed order ${stack.members.join(', ')}`,
+    )
+  }
 }
 
 /**
@@ -4562,7 +4621,45 @@ async function stackAbort(repoPath: string): Promise<ActionResult> {
   await restoreCheckout(repoPath, journal.originalBranch, journal.originalHead)
   await deleteBackups(repoPath, journal)
   await removeJournal(repoPath)
-  return { message: 'Aborted the stack restack and restored the original branch tips' }
+  // Abort restores this repository and nothing else. What already reached GitHub
+  // stands, so the recovery report names it rather than implying it was undone.
+  const applied = appliedRemoteState(journal)
+  return {
+    message:
+      'Aborted the stack restack and restored the original branch tips' +
+      (applied.length > 0
+        ? `. GitHub keeps the changes already applied: ${applied.join('. ')}`
+        : ''),
+  }
+}
+
+/**
+ * The GitHub changes a run had already made when it was aborted. Git Stacks has no
+ * supported way to take a retarget, a close, or a native stack membership back, so
+ * the truth about them outlives the journal: this is what the recovery report says
+ * stands on GitHub.
+ */
+function appliedRemoteState(journal: StackJournal): string[] {
+  const surgery = journal.surgery
+  if (!surgery) return []
+  const applied: string[] = []
+  for (const step of surgery.pullRequests) {
+    if (step.status !== 'completed') continue
+    applied.push(
+      step.action === 'retarget'
+        ? `pull request #${step.number} targets ${step.toBase}`
+        : `pull request #${step.number} is closed`,
+    )
+  }
+  const stack = surgery.stack
+  if (stack?.unstackStatus === 'completed') {
+    applied.push(
+      stack.createStatus === 'completed' && stack.stackNumberAfter !== null
+        ? `native stack #${stack.stackNumber} was unstacked and #${stack.stackNumberAfter} holds the new order`
+        : `native stack #${stack.stackNumber} was unstacked`,
+    )
+  }
+  return applied
 }
 
 /** Puts the parent metadata a removed branch carried before the surgery took it. */

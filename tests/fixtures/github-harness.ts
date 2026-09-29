@@ -142,6 +142,12 @@ export interface GitHubFixtureState {
   nextCommentId: number
   nextStackNumber?: number
   stacksPreviewDisabled?: boolean
+  /**
+   * Stack numbers whose detail read answers 404 while the listing still includes
+   * them: what an inconsistent GitHub looks like to a client that has to decide
+   * whether a native stack is really gone.
+   */
+  missingStackDetails?: number[]
   /** When set, every native-stacks endpoint answers with this error instead of stack data. */
   stacksFailure?: {
     status: number
