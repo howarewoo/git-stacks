@@ -1023,6 +1023,13 @@ export interface GitHubAccountStatus {
   expiresAt: number | null
   refreshExpiresAt: number | null
   store: { available: boolean; name: string | null; reason: string | null }
+  /**
+   * A device sign-in is in progress. This is reported separately from `state`
+   * because the flow belongs to no credential: it survives a renewal of the
+   * account that is still signed in, so the code and its cancel control stay on
+   * screen until the flow itself ends.
+   */
+  signingIn: boolean
   challenge: GitHubSignInChallenge | null
   message: string | null
   /** A credential supplied by the environment is in use instead of the app's own. */

@@ -874,6 +874,15 @@ function commitBarrier() {
   return { writes, before, isHeld: () => held, release: () => gate.resolve() }
 }
 
+async function waitFor<T>(produce: () => T | false | Promise<T | false>): Promise<T> {
+  for (let attempt = 0; attempt < 400; attempt += 1) {
+    const value = await produce()
+    if (value !== false) return value
+    await new Promise((resolve) => setTimeout(resolve, 5))
+  }
+  throw new Error('the expected state never arrived')
+}
+
 async function waitUntil(predicate: () => boolean | Promise<boolean>): Promise<void> {
   for (let attempt = 0; attempt < 400; attempt += 1) {
     if (await predicate()) return
@@ -1092,6 +1101,198 @@ test('an error status is reported by what GitHub said, not as a network failure'
   const unhelpful = await odd.signIn()
   assert.equal(unhelpful.state, 'signed-out')
   assert.match(unhelpful.message ?? '', /usable sign-in response/u)
+
+  setGitHubCredentialSource(null)
+  onGitHubFailure(null)
+})
+
+/** Holds the removal of one sealed reference open, the way a slow key store would. */
+function retireBarrier(target: string) {
+  const gate = Promise.withResolvers<void>()
+  let held = false
+  return {
+    isHeld: () => held,
+    release: () => gate.resolve(),
+    vault(vault: CredentialVault): CredentialVault {
+      const removing = vault.remove.bind(vault)
+      vault.remove = async (reference: string) => {
+        if (reference !== target) return await removing(reference)
+        held = true
+        await gate.promise
+        await removing(reference)
+      }
+      return vault
+    },
+  }
+}
+
+test('signing out while the replaced credential is being retired leaves nothing behind', async () => {
+  const harness = await signedIn([])
+  const { protector, stateFile, vaultFile } = harness
+  const before = JSON.parse(await readFile(stateFile, 'utf8')) as { reference: string }
+  const barrier = retireBarrier(before.reference)
+  const vault = barrier.vault(new CredentialVault(vaultFile, protector))
+  const { fetch: fetchDouble } = fetchReturning([
+    { body: DEVICE_CODE },
+    { body: session('ghu_replacement', 'ghr_replacement') },
+  ])
+  const account = new GitHubAccount({
+    vault,
+    stateFile,
+    env: { GIT_STACKS_GITHUB_APP_CLIENT_ID: CLIENT_ID },
+    identify: async () => 'ada',
+    fetch: fetchDouble,
+    now: () => harness.clock.now,
+    sleep: async () => {},
+  })
+  await account.restore()
+  await account.signIn()
+  // The replacement is published and the account it replaced is on its way out.
+  await waitUntil(barrier.isHeld)
+  assert.equal(account.status().state, 'signed-in')
+  assert.equal((await account.current())?.token, 'ghu_replacement')
+
+  // The user signs out exactly here, while the retirement is still in flight.
+  const signingOut = account.signOut()
+  assert.equal(account.available(), false, 'the credential stops being usable at once')
+  assert.equal(await account.current(), null)
+  barrier.release()
+  const signedOut = await signingOut
+
+  assert.equal(signedOut.state, 'signed-out', 'the sign-out wins, not the retirement')
+  assert.equal(signedOut.reference, null)
+  assert.equal(signedOut.login, null)
+  assert.equal(signedOut.signingIn, false)
+  assert.equal(account.available(), false)
+  assert.equal(await account.current(), null, 'no token survives the sign-out')
+  assert.equal(await exists(vaultFile), false, 'the store is empty')
+  assert.equal(await exists(stateFile), false, 'no account metadata survives')
+  assert.equal(account.status().state, 'signed-out')
+
+  const restarted = new GitHubAccount({
+    vault: new CredentialVault(vaultFile, protector),
+    stateFile,
+    env: { GIT_STACKS_GITHUB_APP_CLIENT_ID: CLIENT_ID },
+    identify: async () => 'ada',
+  })
+  assert.equal((await restarted.restore()).state, 'signed-out')
+  assert.equal(await restarted.current(), null)
+
+  setGitHubCredentialSource(null)
+  onGitHubFailure(null)
+})
+
+test('cancelling while the replaced credential is being retired cannot lose either account', async () => {
+  const harness = await signedIn([])
+  const { protector, stateFile, vaultFile } = harness
+  const before = JSON.parse(await readFile(stateFile, 'utf8')) as { reference: string }
+  const barrier = retireBarrier(before.reference)
+  const vault = barrier.vault(new CredentialVault(vaultFile, protector))
+  const { fetch: fetchDouble } = fetchReturning([
+    { body: DEVICE_CODE },
+    { body: session('ghu_replacement', 'ghr_replacement') },
+  ])
+  const account = new GitHubAccount({
+    vault,
+    stateFile,
+    env: { GIT_STACKS_GITHUB_APP_CLIENT_ID: CLIENT_ID },
+    identify: async () => 'ada',
+    fetch: fetchDouble,
+    now: () => harness.clock.now,
+    sleep: async () => {},
+  })
+  await account.restore()
+  await account.signIn()
+  await waitUntil(barrier.isHeld)
+  await account.cancelSignIn()
+  barrier.release()
+
+  // The commit was already published when the cancel arrived, so the replacement
+  // is the account — and every surface agrees on that, with nothing dangling.
+  const settled = await waitFor(() => {
+    const status = account.status()
+    if (status.state === 'signing-in' || status.reference === null) return false
+    return status
+  })
+  assert.equal(settled.state, 'signed-in')
+  assert.equal(settled.signingIn, false, 'the device flow is over')
+  assert.equal(settled.challenge, null)
+  assert.notEqual(settled.reference, before.reference, 'the published replacement is the account')
+
+  const stored = JSON.parse(await readFile(stateFile, 'utf8')) as { reference: string }
+  assert.equal(stored.reference, settled.reference, 'the state file names the same credential')
+  assert.equal(account.available(), true)
+  assert.equal((await account.current())?.token, 'ghu_replacement')
+  const entries = await waitFor(async () => {
+    const store = JSON.parse(await readFile(vaultFile, 'utf8')) as {
+      entries: { reference: string }[]
+    }
+    return store.entries.length === 1 ? store : false
+  })
+  assert.deepEqual(
+    entries.entries.map((entry) => entry.reference),
+    [settled.reference],
+    'the retired credential left the store',
+  )
+
+  const restarted = new GitHubAccount({
+    vault: new CredentialVault(vaultFile, protector),
+    stateFile,
+    env: { GIT_STACKS_GITHUB_APP_CLIENT_ID: CLIENT_ID },
+    now: () => harness.clock.now,
+    identify: async () => 'ada',
+  })
+  assert.equal((await restarted.restore()).state, 'signed-in')
+  assert.equal((await restarted.current())?.token, 'ghu_replacement')
+
+  setGitHubCredentialSource(null)
+  onGitHubFailure(null)
+})
+
+test('a renewal that lands while a replacement is being authorized does not hide it', async () => {
+  const harness = await signedIn([{ body: session('ghu_rotated', 'ghr_rotated') }])
+  const { clock, protector, stateFile, vaultFile } = harness
+  const rotation = Promise.withResolvers<Response>()
+  const account = new GitHubAccount({
+    vault: new CredentialVault(vaultFile, protector),
+    stateFile,
+    env: { GIT_STACKS_GITHUB_APP_CLIENT_ID: CLIENT_ID },
+    identify: async () => 'ada',
+    now: () => clock.now,
+    fetch: (async (input: string | URL | Request, init?: RequestInit) => {
+      const body = new URLSearchParams(String(init?.body ?? ''))
+      if (body.get('grant_type') === 'refresh_token') return await rotation.promise
+      return new Response(JSON.stringify(DEVICE_CODE), { status: 200 })
+    }) as typeof globalThis.fetch,
+    // The device poll parks here: the user has not entered the code yet, and
+    // this test is about what the panel shows while that is true.
+    sleep: () => new Promise(() => {}),
+  })
+  await account.restore()
+  clock.now += 28_801_000
+  const renewing = account.current()
+  await account.signIn()
+  assert.equal(account.status().signingIn, true, 'the replacement flow is in progress')
+  const code = account.status().challenge
+  assert.ok(code, 'a one-time code is on screen')
+  assert.equal(account.status().state, 'signed-in', 'the account is still the one described')
+
+  // The renewal is answered while the user is still entering the code.
+  rotation.resolve(
+    new Response(JSON.stringify(session('ghu_rotated', 'ghr_rotated')), { status: 200 }),
+  )
+  assert.equal((await renewing)?.token, 'ghu_rotated', 'the renewal is handed back')
+  const during = account.status()
+  assert.equal(during.state, 'signed-in', 'the renewed account is signed in')
+  assert.equal(during.signingIn, true, 'the device flow is still reported as in progress')
+  assert.deepEqual(during.challenge, code, 'the same code and its cancel control stay on screen')
+
+  // Cancelling afterwards ends the flow and leaves the renewed account alone.
+  const cancelled = await account.cancelSignIn()
+  assert.equal(cancelled.signingIn, false)
+  assert.equal(cancelled.challenge, null)
+  assert.equal(cancelled.state, 'signed-in')
+  assert.equal((await account.current())?.token, 'ghu_rotated')
 
   setGitHubCredentialSource(null)
   onGitHubFailure(null)

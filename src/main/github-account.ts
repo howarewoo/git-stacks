@@ -213,6 +213,12 @@ export class GitHubAccount implements GitHubCredentialSource {
    */
   private generation = 0
   /**
+   * Counts every published credential. A sign-out reads it before it clears the
+   * store so it can tell "nothing ran while I was cleaning" from "a sign-in the
+   * user started after me is now the account".
+   */
+  private epoch = 0
+  /**
    * Identity of the device sign-in currently in progress. It is separate from
    * the account generation on purpose: starting or cancelling a replacement flow
    * says nothing about the account that stays signed in, and must not disturb
@@ -288,6 +294,7 @@ export class GitHubAccount implements GitHubCredentialSource {
         name: store.kind === 'system' ? store.name : null,
         reason: store.kind === 'system' ? null : store.reason,
       },
+      signingIn: this.pending !== null,
       challenge: this.challenge,
       message: this.message,
       externalCredential: resolveGitHubToken(this.env) !== null,
@@ -379,22 +386,17 @@ export class GitHubAccount implements GitHubCredentialSource {
   }
 
   /**
-   * Seals a new session and replaces the application state that points at it.
-   * The whole transaction — seal, state file, in-memory publication — runs on
-   * the commit queue and is re-checked against the generation it started under,
-   * so a cancel or a sign-out that arrives at any point leaves nothing behind.
-   */
-  /**
-   * Replaces the stored credential, transactionally. The new credential is
-   * staged alongside whatever is already stored, and the previous reference and
-   * metadata are only given up once the new state file is written. Abandoning
-   * the replacement at any point therefore leaves the previous account exactly
-   * as it was — and leaves nothing behind when there was no previous account.
+   * Replaces the stored credential. The transaction has one linearization point:
+   * the publication of the new credential in memory, which is not separated from
+   * the last ownership check by an await. Before it, the staged credential is
+   * abandoned and the previous account is left exactly as it was — and nothing
+   * at all is left when there was no previous account. After it, the previous
+   * credential is retired, because from that moment the replacement is the truth
+   * and no rollback can need the old one back.
    */
   private adopt(session: GitHubAppSession, fence: () => boolean): Promise<LiveCredential | null> {
     return this.commit(async () => {
       const previousAccount = this.account
-      const previousLive = this.live
       const issuedAt = this.now()
       const live: LiveCredential = {
         accessToken: session.accessToken,
@@ -439,13 +441,21 @@ export class GitHubAccount implements GitHubCredentialSource {
         await abandon()
         return null
       }
+      // The commit happens here. Nothing awaits between the check above and the
+      // publication below, so a sign-out or a cancel either lands entirely
+      // before this point — and the fence refuses it, leaving the previous
+      // account intact — or entirely after it, when the replacement is already
+      // the truth. No stale token can be published behind an invalidation.
+      this.live = live
+      this.account = account
+      this.epoch += 1
+      this.scheduleExpiry()
+      // The credential this one replaces is retired only after the replacement
+      // is published, so no rollback can ever need it back and a cancel that
+      // arrives here has nothing to undo.
       if (previousAccount && previousAccount.reference !== reference) {
         await this.options.vault.remove(previousAccount.reference)
       }
-      this.live = live
-      this.account = account
-      this.scheduleExpiry()
-      void previousLive
       return live
     })
   }
@@ -536,6 +546,11 @@ export class GitHubAccount implements GitHubCredentialSource {
       if (this.live === null || this.live.session !== session) return null
       const committed = await this.adopt(refreshed, () => this.live?.session === session)
       if (committed === null) return null
+      // The commit is published, but a sign-out or a discard may have landed
+      // while the credential it replaced was being retired. The token is then
+      // already gone and this renewal has nothing left to hand back, so the
+      // account's own state is left to whoever invalidated it.
+      if (this.live?.session !== committed.session) return null
       this.setState('signed-in')
       return committed.accessToken
     } catch (error) {
@@ -597,7 +612,7 @@ export class GitHubAccount implements GitHubCredentialSource {
     this.pending?.abort()
     const controller = new AbortController()
     this.pending = controller
-    this.setState('signing-in')
+    this.setState(this.baseline() === 'signed-in' ? 'signed-in' : 'signing-in')
     let challenge: DeviceChallenge
     try {
       challenge = await requestDeviceCode({
@@ -618,7 +633,10 @@ export class GitHubAccount implements GitHubCredentialSource {
       verificationUri: challenge.verificationUri,
       expiresAt: this.now() + challenge.expiresIn * 1000,
     }
-    this.setState('signing-in')
+    // A replacement does not unsettle the account that is already signed in. The
+    // flow in progress is reported by `signingIn`; the state only says
+    // "signing in" when there is no account for the panel to describe.
+    this.setState(this.baseline() === 'signed-in' ? 'signed-in' : 'signing-in')
     void this.poll(challenge, controller, flow, generationAtStart)
     return this.status()
   }
@@ -648,6 +666,9 @@ export class GitHubAccount implements GitHubCredentialSource {
       if (committed === null) return
       this.pending = null
       this.challenge = null
+      // A sign-out may have landed while the credential this replaced was being
+      // retired. The token is gone, so it is not spent on an identity lookup.
+      if (this.live?.session !== committed.session) return
       const identified = await this.identify(committed.accessToken, committed.session, current)
       if (!current()) return
       this.setState(identified.state, identified.message)
@@ -700,19 +721,17 @@ export class GitHubAccount implements GitHubCredentialSource {
   }
 
   async cancelSignIn(): Promise<GitHubAccountStatus> {
-    const wasSigningIn = this.state === 'signing-in'
+    const wasPending = this.pending !== null
     // Cancelling abandons the device flow only. The account that is already
-    // signed in keeps its credential and its ability to renew it; the adoption
-    // that is in flight rolls itself back, and does so without giving up what
-    // was stored before it started.
+    // signed in keeps its credential and its ability to renew it; an adoption
+    // that has not yet been published rolls itself back, and does so without
+    // giving up what was stored before it started.
     this.flow += 1
     this.pending?.abort()
     this.pending = null
     this.challenge = null
-    return this.setState(
-      wasSigningIn ? this.baseline() : this.state,
-      wasSigningIn ? null : this.message,
-    )
+    if (!wasPending) return this.status()
+    return this.setState(this.baseline())
   }
 
   /** Removes the credential this application owns. Git repositories are untouched. */
@@ -721,11 +740,19 @@ export class GitHubAccount implements GitHubCredentialSource {
     this.pending?.abort()
     this.pending = null
     this.challenge = null
+    // The credential stops being usable at once, so nothing can be handed out
+    // from the moment the user asks for it.
     this.forget()
+    const epoch = this.epoch
     await this.commit(async () => {
       await this.options.vault.clear()
       await rm(this.options.stateFile, { force: true })
     })
+    // Clearing memory again states the invariant rather than repairing it:
+    // whatever ran while the queue drained must leave no credential behind. A
+    // sign-in the user started after this one is the exception — it is now the
+    // account, and it survives.
+    if (this.epoch === epoch) this.forget()
     return this.setState(this.baseline())
   }
 }

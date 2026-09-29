@@ -45,6 +45,54 @@ function when(timestamp: number | null): string | null {
 }
 
 /**
+ * The one-time code and the control that abandons it. It is rendered from the
+ * flow itself and knows nothing about the account state, so it stays on screen
+ * while a renewal of the account that is still signed in changes what the
+ * status section says.
+ */
+export function OneTimeCodeSection({
+  challenge,
+  onCancelSignIn,
+  onOpenVerification,
+}: {
+  challenge: GitHubAccountStatus['challenge']
+  onCancelSignIn: () => void
+  onOpenVerification: () => void
+}) {
+  return (
+    <WorkflowSection label="One-time code">
+      {challenge ? (
+        <>
+          <p className="m-0 text-[length:var(--gs-semantic-type-body-size)]">
+            Open GitHub&rsquo;s device page, enter this code, and authorize the app. The code
+            expires {when(challenge.expiresAt)}.
+          </p>
+          <p className="m-0 font-mono text-[length:var(--gs-semantic-type-metadata-size)]">
+            {challenge.userCode}
+          </p>
+        </>
+      ) : (
+        <p className="m-0 text-[length:var(--gs-semantic-type-body-size)]">
+          Asking GitHub for a one-time code.
+        </p>
+      )}
+      <div className="flex flex-wrap gap-2">
+        {/* Never disabled and shown before the code exists: a sign-in
+            waiting on GitHub is exactly the case to be able to abandon. */}
+        {challenge ? (
+          <Button onClick={onOpenVerification} size="sm">
+            Open device page
+          </Button>
+        ) : null}
+        <Button onClick={onCancelSignIn} size="sm" variant="secondary">
+          Cancel sign-in
+        </Button>
+      </div>
+    </WorkflowSection>
+  )
+}
+
+/**
  * Account status, the permissions the registered app asks for, and the one
  * sign-in flow. Everything here is a status: the credential itself is sealed by
  * the operating system and never reaches this window.
@@ -69,12 +117,13 @@ export function GitHubAccountDialog({
   status: GitHubAccountStatus | null
 }) {
   const state = status?.state ?? 'signed-out'
+  // The device flow is its own thing: it outlives a renewal of the account that
+  // is still signed in, so the code and its cancel control are shown from the
+  // flow itself rather than from the account state.
+  const signingIn = status?.signingIn === true
   const signedIn = state === 'signed-in'
   const canSignIn =
-    !busy &&
-    status?.store.available === true &&
-    state !== 'signing-in' &&
-    state !== 'not-configured'
+    !busy && status?.store.available === true && !signingIn && state !== 'not-configured'
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="workflow-dialog" aria-label="GitHub account">
@@ -104,36 +153,12 @@ export function GitHubAccountDialog({
             ) : null}
           </WorkflowSection>
 
-          {state === 'signing-in' ? (
-            <WorkflowSection label="One-time code">
-              {status?.challenge ? (
-                <>
-                  <p className="m-0 text-[length:var(--gs-semantic-type-body-size)]">
-                    Open GitHub&rsquo;s device page, enter this code, and authorize the app. The
-                    code expires {when(status.challenge.expiresAt)}.
-                  </p>
-                  <p className="m-0 font-mono text-[length:var(--gs-semantic-type-metadata-size)]">
-                    {status.challenge.userCode}
-                  </p>
-                </>
-              ) : (
-                <p className="m-0 text-[length:var(--gs-semantic-type-body-size)]">
-                  Asking GitHub for a one-time code.
-                </p>
-              )}
-              <div className="flex flex-wrap gap-2">
-                {/* Never disabled and shown before the code exists: a sign-in
-                    waiting on GitHub is exactly the case to be able to abandon. */}
-                {status?.challenge ? (
-                  <Button onClick={onOpenVerification} size="sm">
-                    Open device page
-                  </Button>
-                ) : null}
-                <Button onClick={onCancelSignIn} size="sm" variant="secondary">
-                  Cancel sign-in
-                </Button>
-              </div>
-            </WorkflowSection>
+          {signingIn ? (
+            <OneTimeCodeSection
+              challenge={status?.challenge ?? null}
+              onCancelSignIn={onCancelSignIn}
+              onOpenVerification={onOpenVerification}
+            />
           ) : null}
 
           <WorkflowSection label="Credential">
@@ -188,11 +213,11 @@ export function GitHubAccountDialog({
           </WorkflowSection>
 
           <div className="flex flex-wrap gap-2">
-            <Button disabled={!canSignIn} loading={state === 'signing-in'} onClick={onSignIn}>
+            <Button disabled={!canSignIn} loading={signingIn} onClick={onSignIn}>
               {signedIn ? 'Sign in again' : 'Sign in to GitHub'}
             </Button>
             <Button
-              disabled={!status?.reference && state !== 'signing-in'}
+              disabled={!status?.reference && !signingIn}
               onClick={onSignOut}
               variant="secondary"
             >
