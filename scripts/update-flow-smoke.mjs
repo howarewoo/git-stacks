@@ -440,6 +440,22 @@ async function main() {
       }
       await new Promise((settle) => setTimeout(settle, 200))
     },
+    /**
+     * Waits until the window stops showing a dialog. Used before a dialog is
+     * opened again, so what is read afterwards is what the app says when it
+     * reads its own state afresh rather than what it was already showing.
+     */
+    async waitForGone(selector, timeoutMs = TIMEOUT_MS) {
+      const deadline = Date.now() + timeoutMs
+      while (Date.now() < deadline) {
+        await ui.foreground()
+        if (!(await evaluate((wanted) => Boolean(document.querySelector(wanted)), selector))) {
+          return
+        }
+        await new Promise((settle) => setTimeout(settle, 200))
+      }
+      throw new Error(`the window still shows ${selector} after ${timeoutMs}ms`)
+    },
     /** Types into whatever has the keyboard focus, as a person would. */
     async type(text) {
       await cdp.send('Input.insertText', { text }, session)
@@ -846,6 +862,30 @@ async function main() {
   assert(
     racedStored.updates.channel === 'beta',
     `the stored channel is the later one (${racedStored.updates.channel})`,
+  )
+  // Those two say what the app is doing. They do not say what a person can see:
+  // the Settings window was open across both calls and is still showing the
+  // state it read when it opened, and a call made through the bridge bypasses
+  // the control that would have moved the segment with it. So the window is
+  // closed and opened again — a fresh read, the way a person would see it — and
+  // the channel on screen is the one asserted. A stale control is a picture of
+  // the past, not a claim about the app, so it is not what gets captured here.
+  await ui.press('Escape', 'Escape', 27)
+  await ui.waitForGone('[role="dialog"]')
+  await ui.clickText('Open command palette')
+  await ui.waitFor('esc Dismiss')
+  await ui.type('Settings')
+  await ui.clickText('Settings…')
+  await ui.clickText('Updates')
+  await ui.waitFor('Channel')
+  const visible = await evaluate(() => {
+    const group = document.querySelector('[aria-label="Channel"]')
+    const pressed = group?.querySelector('button[aria-pressed="true"]')
+    return pressed?.textContent?.trim() ?? null
+  })
+  assert(
+    visible?.toLowerCase() === racedStatus.channel,
+    `the channel a person can see is the one the app is following (${visible} / ${racedStatus.channel})`,
   )
   await shot('10-after-raced-reset-and-channel')
 
