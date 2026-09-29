@@ -212,6 +212,13 @@ export class GitHubAccount implements GitHubCredentialSource {
    * refresh already in flight can never resurrect a sign-out.
    */
   private generation = 0
+  /**
+   * Identity of the device sign-in currently in progress. It is separate from
+   * the account generation on purpose: starting or cancelling a replacement flow
+   * says nothing about the account that stays signed in, and must not disturb
+   * the refresh that maintains it.
+   */
+  private flow = 0
   private refreshController: AbortController | null = null
   /**
    * Every change to stored state runs through here, one at a time, so an
@@ -377,8 +384,17 @@ export class GitHubAccount implements GitHubCredentialSource {
    * the commit queue and is re-checked against the generation it started under,
    * so a cancel or a sign-out that arrives at any point leaves nothing behind.
    */
-  private adopt(session: GitHubAppSession, generation: number): Promise<LiveCredential | null> {
+  /**
+   * Replaces the stored credential, transactionally. The new credential is
+   * staged alongside whatever is already stored, and the previous reference and
+   * metadata are only given up once the new state file is written. Abandoning
+   * the replacement at any point therefore leaves the previous account exactly
+   * as it was — and leaves nothing behind when there was no previous account.
+   */
+  private adopt(session: GitHubAppSession, fence: () => boolean): Promise<LiveCredential | null> {
     return this.commit(async () => {
+      const previousAccount = this.account
+      const previousLive = this.live
       const issuedAt = this.now()
       const live: LiveCredential = {
         accessToken: session.accessToken,
@@ -390,19 +406,26 @@ export class GitHubAccount implements GitHubCredentialSource {
             : issuedAt + session.refreshTokenExpiresIn * 1000,
         session: randomUUID(),
       }
-      const reference = await this.options.vault.seal(
+      const reference = await this.options.vault.stage(
         GITHUB_ACCOUNT_HOST,
         JSON.stringify(live),
         issuedAt,
       )
-      if (generation !== this.generation) {
+      // Nothing has been given up yet, so abandoning the staged credential is
+      // enough to leave the store and application state as they were.
+      const abandon = async () => {
         await this.options.vault.remove(reference)
+        if (previousAccount) await writeAccount(this.options.stateFile, previousAccount)
+        else await rm(this.options.stateFile, { force: true })
+      }
+      if (!fence()) {
+        await abandon()
         return null
       }
       const account: StoredAccount = {
         reference,
         host: GITHUB_ACCOUNT_HOST,
-        login: this.account?.login ?? null,
+        login: previousAccount?.login ?? null,
         createdAt: issuedAt,
         expiresAt: live.expiresAt,
         refreshExpiresAt: live.refreshExpiresAt,
@@ -410,13 +433,19 @@ export class GitHubAccount implements GitHubCredentialSource {
       }
       await this.options.beforeStateWrite?.()
       await writeAccount(this.options.stateFile, account)
-      if (generation !== this.generation) {
-        await this.options.vault.remove(reference)
+      if (!fence()) {
+        // The metadata now names the staged credential; put back what it named
+        // before, so the state on disk never points at a removed reference.
+        await abandon()
         return null
+      }
+      if (previousAccount && previousAccount.reference !== reference) {
+        await this.options.vault.remove(previousAccount.reference)
       }
       this.live = live
       this.account = account
       this.scheduleExpiry()
+      void previousLive
       return live
     })
   }
@@ -466,10 +495,10 @@ export class GitHubAccount implements GitHubCredentialSource {
   /** One refresh at a time, so concurrent requests cannot rotate the credential twice. */
   private refresh(): Promise<string | null> {
     if (!this.refreshing) {
-      const generation = this.generation
+      const session = this.live?.session ?? ''
       const controller = new AbortController()
       this.refreshController = controller
-      this.refreshing = this.renew(generation, controller.signal).finally(() => {
+      this.refreshing = this.renew(session, controller.signal).finally(() => {
         if (this.refreshController === controller) this.refreshController = null
         this.refreshing = null
       })
@@ -477,9 +506,15 @@ export class GitHubAccount implements GitHubCredentialSource {
     return this.refreshing
   }
 
-  private async renew(generation: number, signal: AbortSignal): Promise<string | null> {
+  /**
+   * Renews the session it started from. Ownership is per session, not per
+   * account-generation: a device sign-in that is merely started or cancelled
+   * must not invalidate a rotation for the account that is still active, while a
+   * rotation whose session has since been replaced or signed out is dropped.
+   */
+  private async renew(session: string, signal: AbortSignal): Promise<string | null> {
     const live = this.live
-    if (generation !== this.generation) return null
+    if (live === null || live.session !== session) return null
     if (!live?.refreshToken) {
       this.live = null
       this.setState('expired', 'The saved GitHub sign-in has expired. Sign in again.')
@@ -490,21 +525,21 @@ export class GitHubAccount implements GitHubCredentialSource {
       return null
     }
     try {
-      const session = await refreshUserAccessToken({
+      const refreshed = await refreshUserAccessToken({
         clientId: this.clientId ?? '',
         refreshToken: live.refreshToken,
         fetch: this.options.fetch,
         signal,
       })
-      // A sign-out, a second sign-in, or a revocation that landed meanwhile owns
-      // the state now; this response belongs to a session that no longer exists.
-      if (generation !== this.generation) return null
-      const committed = await this.adopt(session, generation)
-      if (committed === null || generation !== this.generation) return null
+      // A sign-out or a replacement that landed meanwhile owns the state now;
+      // this response belongs to a session that no longer exists.
+      if (this.live === null || this.live.session !== session) return null
+      const committed = await this.adopt(refreshed, () => this.live?.session === session)
+      if (committed === null) return null
       this.setState('signed-in')
       return committed.accessToken
     } catch (error) {
-      if (generation !== this.generation) return null
+      if (this.live === null || this.live.session !== session) return null
       if (error instanceof GitHubAppError) {
         if (error.code === 'network' || error.code === 'cancelled') {
           this.setState('offline', error.message)
@@ -554,9 +589,13 @@ export class GitHubAccount implements GitHubCredentialSource {
     }
     const store = this.options.vault.store()
     if (store.kind !== 'system') return this.setState('storage-unavailable', store.reason)
-    await this.cancelSignIn()
+    // Starting a replacement leaves the account that is already signed in alone:
+    // only the device flow in progress is superseded.
+    this.flow += 1
+    const flow = this.flow
+    const generationAtStart = this.generation
+    this.pending?.abort()
     const controller = new AbortController()
-    const generation = this.generation
     this.pending = controller
     this.setState('signing-in')
     let challenge: DeviceChallenge
@@ -567,6 +606,7 @@ export class GitHubAccount implements GitHubCredentialSource {
         signal: controller.signal,
       })
     } catch (error) {
+      if (flow !== this.flow) return this.status()
       this.pending = null
       return this.setState(
         this.failureState(error as GitHubAppError),
@@ -579,15 +619,19 @@ export class GitHubAccount implements GitHubCredentialSource {
       expiresAt: this.now() + challenge.expiresIn * 1000,
     }
     this.setState('signing-in')
-    void this.poll(challenge, controller, generation)
+    void this.poll(challenge, controller, flow, generationAtStart)
     return this.status()
   }
 
   private async poll(
     challenge: DeviceChallenge,
     controller: AbortController,
-    generation: number,
+    flow: number,
+    generationAtStart: number,
   ): Promise<void> {
+    // A replacement is committed only while it is still the sign-in in progress
+    // and the account has not been signed out or discarded underneath it.
+    const current = () => flow === this.flow && this.generation === generationAtStart
     try {
       const session = await waitForDeviceAuthorization({
         clientId: this.clientId ?? '',
@@ -599,16 +643,16 @@ export class GitHubAccount implements GitHubCredentialSource {
         sleep: this.sleep,
         now: this.now,
       })
-      if (controller.signal.aborted || generation !== this.generation) return
-      const committed = await this.adopt(session, generation)
+      if (controller.signal.aborted) return
+      const committed = await this.adopt(session, current)
       if (committed === null) return
       this.pending = null
       this.challenge = null
-      const identified = await this.identify(committed.accessToken, committed.session, generation)
-      if (generation !== this.generation) return
+      const identified = await this.identify(committed.accessToken, committed.session, current)
+      if (!current()) return
       this.setState(identified.state, identified.message)
     } catch (error) {
-      if (controller.signal.aborted || generation !== this.generation) return
+      if (controller.signal.aborted) return
       this.pending = null
       this.challenge = null
       const code = error instanceof GitHubAppError ? error : null
@@ -628,7 +672,7 @@ export class GitHubAccount implements GitHubCredentialSource {
   private async identify(
     accessToken: string,
     session: string,
-    generation: number,
+    current: () => boolean,
   ): Promise<{ state: GitHubAccountState; message: string | null }> {
     try {
       const login = await (this.options.identify ?? identifyWithToken)(
@@ -636,10 +680,10 @@ export class GitHubAccount implements GitHubCredentialSource {
         session,
         this.options.fetch,
       )
-      if (generation !== this.generation) return { state: 'signed-in', message: null }
+      if (!current()) return { state: 'signed-in', message: null }
       if (login) {
         await this.commit(async () => {
-          if (generation !== this.generation || !this.account) return
+          if (!current() || !this.account) return
           if (login === this.account.login) return
           this.account = { ...this.account, login }
           await this.options.beforeStateWrite?.()
@@ -657,9 +701,11 @@ export class GitHubAccount implements GitHubCredentialSource {
 
   async cancelSignIn(): Promise<GitHubAccountStatus> {
     const wasSigningIn = this.state === 'signing-in'
-    // Fencing the generation is what makes a cancel durable: an adoption already
-    // past its check finds a newer generation and discards what it sealed.
-    this.generation += 1
+    // Cancelling abandons the device flow only. The account that is already
+    // signed in keeps its credential and its ability to renew it; the adoption
+    // that is in flight rolls itself back, and does so without giving up what
+    // was stored before it started.
+    this.flow += 1
     this.pending?.abort()
     this.pending = null
     this.challenge = null

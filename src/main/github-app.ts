@@ -140,15 +140,26 @@ async function post(
       body: new URLSearchParams(parameters).toString(),
       signal: controller.signal,
     })
-    if (!response.ok) throw new GitHubAppError('network')
+    // An error status still carries GitHub's own explanation, and that
+    // explanation is what the user has to act on. Only a status with nothing
+    // usable behind it counts as the service being unreachable.
     let body: unknown
     try {
       body = JSON.parse(await response.text())
     } catch {
-      throw new GitHubAppError('invalid_response')
+      throw new GitHubAppError(response.ok ? 'invalid_response' : statusCode(response))
     }
-    if (typeof body !== 'object' || body === null) throw new GitHubAppError('invalid_response')
-    return body as Record<string, unknown>
+    if (typeof body !== 'object' || body === null) {
+      throw new GitHubAppError(response.ok ? 'invalid_response' : statusCode(response))
+    }
+    const record = body as Record<string, unknown>
+    // A successful response is the caller's to read: the poll needs to see the
+    // pending and slow-down codes itself. An error status is not.
+    if (!response.ok) {
+      if (text(record.error)) throw failure(record)
+      throw new GitHubAppError(statusCode(response))
+    }
+    return record
   } catch (error) {
     if (error instanceof GitHubAppError) throw error
     if (timedOut) throw new GitHubAppError('network')
@@ -158,6 +169,11 @@ async function post(
     clearTimeout(timer)
     request.signal?.removeEventListener('abort', forward)
   }
+}
+
+/** A status with no usable body: a busy or broken service, not a bad request. */
+function statusCode(response: Response): GitHubAppErrorCode {
+  return response.status >= 500 || response.status === 429 ? 'network' : 'invalid_response'
 }
 
 function failure(body: Record<string, unknown>): GitHubAppError {

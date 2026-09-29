@@ -163,8 +163,14 @@ export class CredentialVault {
     return [...(await this.read()).values()]
   }
 
-  /** Replaces the stored secret for `host` and returns its opaque reference. */
-  async seal(host: string, secret: string, now: number): Promise<string> {
+  /**
+   * Adds a credential for `host` under a new opaque reference and returns it,
+   * leaving any credential already stored for that host in place. A replacement
+   * is therefore never destructive: the caller removes the previous reference
+   * only once the new one is committed, and a caller that abandons the
+   * replacement can remove what it staged and keep what was there before.
+   */
+  async stage(host: string, secret: string, now: number): Promise<string> {
     this.requireStore()
     const entries = new Map(await this.read())
     const reference = randomUUID()
@@ -176,9 +182,6 @@ export class CredentialVault {
         'unavailable',
         'The operating-system key store rejected the credential.',
       )
-    }
-    for (const [existing, entry] of entries) {
-      if (entry.host === host) entries.delete(existing)
     }
     entries.set(reference, {
       reference,

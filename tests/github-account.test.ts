@@ -859,3 +859,240 @@ test('a sign-out during the state-file write leaves nothing persisted', async ()
   assert.equal(await account.current(), null)
   assert.equal(intercepted.status().state, 'signed-out')
 })
+
+/** A vault barrier that holds the next state-file rename open, then releases it. */
+function commitBarrier() {
+  const writes: string[] = []
+  let held = false
+  const gate = Promise.withResolvers<void>()
+  const before = async () => {
+    writes.push('begin')
+    held = true
+    await gate.promise
+    writes.push('end')
+  }
+  return { writes, before, isHeld: () => held, release: () => gate.resolve() }
+}
+
+async function waitUntil(predicate: () => boolean | Promise<boolean>): Promise<void> {
+  for (let attempt = 0; attempt < 400; attempt += 1) {
+    if (await predicate()) return
+    await new Promise((resolve) => setTimeout(resolve, 5))
+  }
+  throw new Error('the expected state never arrived')
+}
+
+test('cancelling a replacement sign-in keeps the account that was already stored', async () => {
+  const harness = await signedIn([])
+  const { account, vaultFile, stateFile, protector } = harness
+  const before = JSON.parse(await readFile(stateFile, 'utf8')) as {
+    reference: string
+    login: string
+  }
+  // A replacement starts and stalls with its commit already in flight.
+  const barrier = commitBarrier()
+  const { fetch: fetchDouble } = fetchReturning([
+    { body: DEVICE_CODE },
+    { body: session('ghu_replacement', 'ghr_replacement') },
+  ])
+  const vault = new CredentialVault(vaultFile, protector)
+  const sealedBefore = await vault.open(before.reference)
+  assert.match(sealedBefore, /ghu_first/u)
+  // The rollback is observable exactly: the staged reference is removed and the
+  // previous one is not.
+  const removed: string[] = []
+  const removing = vault.remove.bind(vault)
+  vault.remove = async (reference: string) => {
+    removed.push(reference)
+    await removing(reference)
+  }
+  const replacing = new GitHubAccount({
+    vault,
+    stateFile,
+    env: { GIT_STACKS_GITHUB_APP_CLIENT_ID: CLIENT_ID },
+    identify: async () => 'ada',
+    beforeStateWrite: barrier.before,
+    fetch: fetchDouble,
+    now: () => harness.clock.now,
+    sleep: async () => {},
+  })
+  await replacing.restore()
+  assert.equal(replacing.status().state, 'signed-in')
+  await replacing.signIn()
+  await waitUntil(barrier.isHeld)
+
+  await replacing.cancelSignIn()
+  barrier.release()
+  await waitUntil(() => removed.length > 0)
+  await waitUntil(async () => (await readFile(stateFile, 'utf8')).includes(before.reference))
+
+  // The account that was signed in is still signed in, and still on disk.
+  assert.equal(replacing.status().state, 'signed-in', 'the previous account is preserved')
+  assert.equal(replacing.status().login, 'ada')
+  const after = JSON.parse(await readFile(stateFile, 'utf8')) as { reference: string }
+  assert.equal(after.reference, before.reference, 'the state file still names the old credential')
+  assert.equal(removed.length, 1, 'exactly one credential is removed, the staged one')
+  assert.notEqual(removed[0], before.reference, 'the stored credential is not the one removed')
+  assert.ok(
+    (await vault.open(after.reference)).includes('ghu_first'),
+    'the old credential is still sealed and readable',
+  )
+
+  // And a restart still finds it.
+  const restarted = new GitHubAccount({
+    vault: new CredentialVault(vaultFile, protector),
+    stateFile,
+    env: { GIT_STACKS_GITHUB_APP_CLIENT_ID: CLIENT_ID },
+    now: () => harness.clock.now,
+    identify: async () => 'ada',
+  })
+  assert.equal((await restarted.restore()).state, 'signed-in')
+  assert.equal((await restarted.current())?.token, 'ghu_first')
+  assert.equal(account.status().state, 'signed-in')
+
+  setGitHubCredentialSource(null)
+  onGitHubFailure(null)
+})
+
+test('cancelling a first sign-in leaves no account metadata behind', async () => {
+  const harness = await accountUnder([])
+  const { vaultFile, stateFile, protector } = harness
+  const barrier = commitBarrier()
+  const { fetch: fetchDouble } = fetchReturning([
+    { body: DEVICE_CODE },
+    { body: session('ghu_new', 'ghr_new') },
+  ])
+  const signingIn = new GitHubAccount({
+    vault: new CredentialVault(vaultFile, protector),
+    stateFile,
+    env: { GIT_STACKS_GITHUB_APP_CLIENT_ID: CLIENT_ID },
+    identify: async () => 'ada',
+    beforeStateWrite: barrier.before,
+    fetch: fetchDouble,
+    sleep: async () => {},
+  })
+  await signingIn.signIn()
+  await waitUntil(barrier.isHeld)
+  await signingIn.cancelSignIn()
+  barrier.release()
+  await waitUntil(async () => (await exists(stateFile)) === false)
+  await waitUntil(async () => (await exists(vaultFile)) === false)
+
+  assert.equal(signingIn.status().state, 'signed-out')
+  assert.equal(signingIn.available(), false)
+  assert.equal(await exists(stateFile), false, 'no dangling account metadata survives')
+  assert.equal(await exists(vaultFile), false, 'the staged credential is gone')
+
+  const restarted = new GitHubAccount({
+    vault: new CredentialVault(vaultFile, protector),
+    stateFile,
+    env: { GIT_STACKS_GITHUB_APP_CLIENT_ID: CLIENT_ID },
+    identify: async () => 'ada',
+  })
+  assert.equal((await restarted.restore()).state, 'signed-out')
+
+  setGitHubCredentialSource(null)
+  onGitHubFailure(null)
+})
+
+test('cancelling a sign-in does not abandon the refresh the current account owns', async () => {
+  const harness = await signedIn([])
+  const { clock, protector, vaultFile, stateFile } = harness
+  const vault = new CredentialVault(vaultFile, protector)
+  const removed: string[] = []
+  const removing = vault.remove.bind(vault)
+  vault.remove = async (reference: string) => {
+    removed.push(reference)
+    await removing(reference)
+  }
+  // The rotation is held open so the replacement sign-in provably overlaps it.
+  const rotation = Promise.withResolvers<Response>()
+  const barrier = commitBarrier()
+  let armBarrier = true
+  const account = new GitHubAccount({
+    vault,
+    stateFile,
+    env: { GIT_STACKS_GITHUB_APP_CLIENT_ID: CLIENT_ID },
+    identify: async () => 'ada',
+    now: () => clock.now,
+    sleep: async () => {},
+    beforeStateWrite: async () => {
+      if (armBarrier) await barrier.before()
+    },
+    fetch: (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input)
+      const body = new URLSearchParams(String(init?.body ?? ''))
+      if (url.endsWith('/login/device/code')) {
+        return new Response(JSON.stringify(DEVICE_CODE), { status: 200 })
+      }
+      if (body.get('grant_type') === 'refresh_token') return await rotation.promise
+      return new Response(JSON.stringify(session('ghu_replacement', 'ghr_replacement')), {
+        status: 200,
+      })
+    }) as typeof globalThis.fetch,
+  })
+  await account.restore()
+  // The stored account is at expiry, so the next request starts a rotation.
+  clock.now += 28_801_000
+  const rotating = account.current()
+
+  await account.signIn()
+  await waitUntil(barrier.isHeld)
+  await account.cancelSignIn()
+  armBarrier = false
+  barrier.release()
+  await waitUntil(() => removed.length > 0)
+
+  // GitHub answers the rotation afterwards, having already rotated the token.
+  rotation.resolve(
+    new Response(JSON.stringify(session('ghu_rotated', 'ghr_rotated')), { status: 200 }),
+  )
+  const rotated = await rotating
+
+  assert.equal(rotated?.token, 'ghu_rotated', 'the rotation is kept, not dropped')
+  assert.equal(account.status().state, 'signed-in', 'the account is signed in on the new session')
+  const state = JSON.parse(await readFile(stateFile, 'utf8')) as { reference: string }
+  const stored = await vault.open(state.reference)
+  assert.ok(stored.includes('ghr_rotated'), 'the rotated refresh token is the one now stored')
+  assert.ok(!stored.includes('ghu_replacement'), 'the abandoned replacement left nothing behind')
+
+  setGitHubCredentialSource(null)
+  onGitHubFailure(null)
+})
+
+test('an error status is reported by what GitHub said, not as a network failure', async () => {
+  const harness = await accountUnder([])
+  const { vaultFile, stateFile, protector } = harness
+  const github = (status: number, body: string) => ({
+    vault: new CredentialVault(vaultFile, protector),
+    stateFile,
+    env: { GIT_STACKS_GITHUB_APP_CLIENT_ID: CLIENT_ID },
+    identify: async () => 'ada',
+    fetch: (async () => new Response(body, { status })) as typeof globalThis.fetch,
+  })
+  // A rejected client id arrives with an error status and a readable reason.
+  const rejected = new GitHubAccount(
+    github(404, JSON.stringify({ error: 'incorrect_client_credentials' })),
+  )
+  await rejected.restore()
+  const rejection1 = await rejected.signIn()
+  assert.equal(rejection1.state, 'not-configured')
+  assert.match(rejection1.message ?? '', /rejected the client id/u)
+
+  // A service failure with nothing usable behind it is the network.
+  const broken = new GitHubAccount(github(502, '<html>bad gateway</html>'))
+  await broken.restore()
+  const outage = await broken.signIn()
+  assert.equal(outage.state, 'offline')
+  assert.match(outage.message ?? '', /could not be reached/u)
+
+  // A reachable but unhelpful answer is not the network either.
+  const odd = new GitHubAccount(github(404, JSON.stringify({ message: 'Not Found' })))
+  await odd.restore()
+  const unhelpful = await odd.signIn()
+  assert.equal(unhelpful.state, 'signed-out')
+  assert.match(unhelpful.message ?? '', /usable sign-in response/u)
+
+  setGitHubCredentialSource(null)
+  onGitHubFailure(null)
+})
