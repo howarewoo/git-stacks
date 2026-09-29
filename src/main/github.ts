@@ -179,7 +179,7 @@ function typedFailure(error: unknown): GitHubFailure | undefined {
   return { kind: 'unknown', detail: githubErrorMessage(error) }
 }
 
-function unavailable(message: string, failure?: GitHubFailure): GitHubResult {
+export function unavailableGitHubResult(message: string, failure?: GitHubFailure): GitHubResult {
   return {
     pullRequests: [],
     failure,
@@ -191,6 +191,7 @@ function unavailable(message: string, failure?: GitHubFailure): GitHubResult {
     nativeStackMessage: message,
   }
 }
+const unavailable = unavailableGitHubResult
 
 /** Read open issues separately from PR workflows; paging one connection never truncates the other. */
 export async function getGitHubIssues(

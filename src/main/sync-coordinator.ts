@@ -144,7 +144,8 @@ export class RepositorySyncCoordinator {
   private readonly listeners = new Set<(event: SyncEvent) => void>()
   private repository: string | null = null
   private activity: SyncActivity = { focused: true, visible: true }
-  private timer: SyncTimer | undefined
+  private remoteTimer: SyncTimer | undefined
+  private localTimer: SyncTimer | undefined
   private running: Promise<unknown> | null = null
   private dirtyLocal = false
   private failures = 0
@@ -196,12 +197,14 @@ export class RepositorySyncCoordinator {
     this.ledger = new RemoteMutationLedger()
     if (snapshot) this.adopt(snapshot)
     this.emit({ kind: 'status', freshness: this.freshness() })
-    this.schedule(this.intervalFor(this.currentTier()))
+    this.scheduleRemote(this.intervalFor(this.currentTier()))
   }
 
   detach(): void {
-    this.clock.clearTimeout(this.timer)
-    this.timer = undefined
+    this.clock.clearTimeout(this.remoteTimer)
+    this.clock.clearTimeout(this.localTimer)
+    this.remoteTimer = undefined
+    this.localTimer = undefined
     this.repository = null
     this.running = null
     this.dirtyLocal = false
@@ -221,12 +224,19 @@ export class RepositorySyncCoordinator {
       activity.focused !== this.activity.focused || activity.visible !== this.activity.visible
     this.activity = activity
     if (!changed || !this.repository) return
+    // An unauthorized state stops polling until the person refreshes manually.
+    if (this.state === 'unauthorized') return
     const due =
       this.fetchedAt === null || this.clock.now() - this.fetchedAt >= this.intervals.visibleMs
     // Returning to the window with due data earns an immediate read; hiding it
     // earns the slower inbox tier instead of nothing.
-    if (activity.focused && activity.visible && due) this.run('visible')
-    else this.schedule(this.intervalFor(this.currentTier()))
+    if (activity.focused && activity.visible && due) {
+      const wait = this.resumeAt === null ? 0 : this.resumeAt - this.clock.now()
+      if (wait <= 0) void this.run('visible')
+      else this.scheduleRemote(wait)
+    } else {
+      this.scheduleRemote(this.intervalFor(this.currentTier()))
+    }
   }
 
   /** A filesystem event: read local Git now, GitHub only when it is due. */
@@ -236,7 +246,7 @@ export class RepositorySyncCoordinator {
       this.dirtyLocal = true
       return
     }
-    this.schedule(this.intervals.localSettleMs, 'local')
+    this.scheduleLocal(this.intervals.localSettleMs)
   }
 
   /** The person's own refresh: never deferred, always a live remote read. */
@@ -277,13 +287,25 @@ export class RepositorySyncCoordinator {
     this.detail = snapshot.github.available ? null : snapshot.github.message
   }
 
-  private schedule(delayMs: number, tier?: 'local'): void {
+  private scheduleRemote(delayMs: number): void {
     if (!this.repository) return
-    this.clock.clearTimeout(this.timer)
-    this.timer = this.clock.setTimeout(
+    this.clock.clearTimeout(this.remoteTimer)
+    this.remoteTimer = this.clock.setTimeout(
       () => {
-        this.timer = undefined
-        void this.run(tier ?? this.currentTier())
+        this.remoteTimer = undefined
+        void this.run(this.currentTier())
+      },
+      Math.max(0, delayMs),
+    )
+  }
+
+  private scheduleLocal(delayMs: number): void {
+    if (!this.repository) return
+    this.clock.clearTimeout(this.localTimer)
+    this.localTimer = this.clock.setTimeout(
+      () => {
+        this.localTimer = undefined
+        void this.run('local')
       },
       Math.max(0, delayMs),
     )
@@ -301,41 +323,45 @@ export class RepositorySyncCoordinator {
   ): Promise<RepositorySnapshot | null> {
     const repository = this.repository
     if (!repository) return null
-    if (!options.manual && tier === 'secondary') {
-      const parked = this.secondarySuspended || this.budgetExhausted()
-      // A limit parks the nonessential tier for a while, never forever: once the
-      // park is over the tier tries again and an answer lifts the state.
-      if (parked && this.clock.now() < this.parkUntil) {
-        this.schedule(this.parkUntil - this.clock.now())
-        return null
-      }
-      if (parked) this.secondarySuspended = false
-    }
     if (!options.manual) {
-      const wait = this.resumeAt === null ? 0 : this.resumeAt - this.clock.now()
-      if (wait > 0) {
-        this.schedule(wait)
-        return null
+      if (tier === 'secondary') {
+        const parked = this.secondarySuspended || this.budgetExhausted()
+        // A limit parks the nonessential tier for a while, never forever: once the
+        // park is over the tier tries again and an answer lifts the state.
+        if (parked && this.clock.now() < this.parkUntil) {
+          this.scheduleRemote(this.parkUntil - this.clock.now())
+          return null
+        }
+        if (parked) this.secondarySuspended = false
+      }
+      if (tier !== 'local') {
+        if (this.state === 'unauthorized') return null
+        const wait = this.resumeAt === null ? 0 : this.resumeAt - this.clock.now()
+        if (wait > 0) {
+          this.scheduleRemote(wait)
+          return null
+        }
       }
       if (this.running) {
-        this.dirtyLocal = true
+        if (tier === 'local') this.dirtyLocal = true
         return null
       }
     } else {
-      this.clock.clearTimeout(this.timer)
+      this.clock.clearTimeout(this.remoteTimer)
+      this.remoteTimer = undefined
     }
     const work = this.execute(repository, tier, options).finally(() => {
       this.running = null
       if (this.dirtyLocal && this.repository === repository) {
         this.dirtyLocal = false
-        this.schedule(this.intervals.localSettleMs, 'local')
+        this.scheduleLocal(this.intervals.localSettleMs)
       }
     })
     this.running = work
     try {
       return await work
     } catch (error) {
-      if (this.repository === repository) this.recordFailure(error)
+      if (this.repository === repository && tier !== 'local') this.recordFailure(error)
       return null
     }
   }
@@ -346,14 +372,27 @@ export class RepositorySyncCoordinator {
     options: { manual?: boolean; requestId?: string },
   ): Promise<RepositorySnapshot | null> {
     if (tier === 'secondary') return this.refreshInbox(repository)
-    const due =
-      this.fetchedAt === null || this.clock.now() - this.fetchedAt >= this.intervals.visibleMs
-    const live = tier === 'visible' || due || options.manual === true
+
+    if (tier === 'local') {
+      // A filesystem event reads local Git immediately; remote health, failures,
+      // rate limits, and backoff belong to GitHub and are untouched by local work.
+      const snapshot = await this.deps.scheduler.read(repository, (signal) =>
+        this.deps.readSnapshot(repository, signal, {
+          requestId: options.requestId ?? 'sync-local',
+          github: { remote: 'reuse' },
+        }),
+      )
+      if (this.repository !== repository) return null
+      this.emit({ kind: 'snapshot', snapshot: { ...snapshot, remote: this.freshness() } })
+      return snapshot
+    }
+
+    const live = options.manual === true
     this.state = 'refreshing'
     const snapshot = await this.deps.scheduler.read(repository, (signal) =>
       this.deps.readSnapshot(repository, signal, {
         requestId: options.requestId ?? 'sync-refresh',
-        github: { remote: live ? (options.manual ? 'live' : 'on-failure') : 'reuse' },
+        github: { remote: live ? 'live' : 'on-failure' },
       }),
     )
     if (this.repository !== repository) return null
@@ -372,7 +411,7 @@ export class RepositorySyncCoordinator {
     this.parkUntil = 0
     this.emit({ kind: 'snapshot', snapshot: { ...snapshot, remote: this.freshness() } })
     this.emit({ kind: 'status', freshness: this.freshness() })
-    this.schedule(this.intervalFor(this.currentTier()))
+    this.scheduleRemote(this.intervalFor(this.currentTier()))
     return snapshot
   }
 
@@ -390,7 +429,7 @@ export class RepositorySyncCoordinator {
     if (this.state === 'rate-limited') this.state = this.fetchedAt === null ? 'stale' : 'fresh'
     this.emit({ kind: 'issues', issues })
     this.emit({ kind: 'status', freshness: this.freshness() })
-    this.schedule(this.intervalFor('secondary'))
+    this.scheduleRemote(this.intervalFor('secondary'))
     return null
   }
 
@@ -432,7 +471,7 @@ export class RepositorySyncCoordinator {
         ? failureDelay(this.failures, this.intervals)
         : failure.resumeAt - this.clock.now()
     this.parkUntil = this.clock.now() + Math.max(delay, this.intervals.localSettleMs)
-    this.schedule(Math.max(delay, this.intervals.localSettleMs))
+    this.scheduleRemote(Math.max(delay, this.intervals.localSettleMs))
   }
 
   private emit(event: SyncEvent): void {

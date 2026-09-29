@@ -227,7 +227,7 @@ function harness(snapshotFor?: (attempt: number) => RepositorySnapshot): Harness
     {
       readSnapshot: async (_repository, _signal, request) => {
         reads.push(request.github.remote)
-        if (state.failure) throw state.failure
+        if (state.failure && request.github.remote !== 'reuse') throw state.failure
         state.attempts += 1
         return (
           snapshotFor?.(state.attempts) ??
@@ -850,5 +850,247 @@ test('the gh path resolves a 304 that arrived with a nonzero exit', async () => 
   } finally {
     process.env.PATH = previous
     await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('observable local commit during rate-limit block with zero added remote calls and unchanged remote health', async () => {
+  const resetTime = new Date(Date.now() + 1800_000)
+  const coordinatorHarness = harness((attempt) => {
+    return snapshotFixture({
+      headOid: `commit-${attempt}`,
+      branches: [
+        {
+          ref: 'refs/heads/main',
+          name: 'main',
+          current: true,
+          remote: false,
+          upstream: null,
+          upstreamRef: null,
+          ahead: attempt,
+          behind: 0,
+          subject: `Commit #${attempt}`,
+          updatedAt: new Date().toISOString(),
+          parent: null,
+          parentBehind: null,
+          pr: null,
+        },
+      ],
+    })
+  })
+  const { coordinator, clock, reads, pushed, failWith } = coordinatorHarness
+  coordinator.attach('/tmp/repository', snapshotFixture())
+  failWith(
+    new GitHubTransportError({
+      kind: 'rate-limited',
+      detail: 'API rate limit exceeded',
+      rateLimit: {
+        limit: 5000,
+        remaining: 0,
+        reset: resetTime,
+        resource: 'core',
+        retryAfterSeconds: 1800,
+      },
+    }),
+  )
+  // Advance to remote refresh tier: the remote read fails and records rate-limited
+  await clock.advance(DEFAULT_INTERVALS.visibleMs + 1)
+  assert.equal(coordinator.freshness().state, 'rate-limited')
+  assert.equal(coordinator.freshness().rateLimitReset, resetTime.toISOString())
+  assert.deepEqual(reads, ['on-failure'])
+
+  // Now an external local commit lands!
+  coordinator.notifyLocalChange()
+  await clock.advance(DEFAULT_INTERVALS.localSettleMs + 1)
+
+  // 1. Local commit is observable in the pushed snapshot
+  assert.ok(pushed.snapshot)
+  assert.equal(pushed.snapshot.branches[0].subject, 'Commit #1')
+  // 2. ZERO added remote calls: only 'reuse' was issued
+  assert.deepEqual(reads, ['on-failure', 'reuse'])
+  // 3. Remote health and rate-limit reset remain completely unchanged
+  assert.equal(coordinator.freshness().state, 'rate-limited')
+  assert.equal(coordinator.freshness().rateLimitReset, resetTime.toISOString())
+  assert.equal(pushed.snapshot.remote.state, 'rate-limited')
+  assert.equal(pushed.snapshot.remote.rateLimitReset, resetTime.toISOString())
+
+  // Advance time: polling is still parked waiting for the reset time
+  await clock.advance(DEFAULT_INTERVALS.visibleMs * 2)
+  assert.deepEqual(reads, ['on-failure', 'reuse'], 'no remote polling while rate limited')
+})
+
+test('observable local commit during auth block with zero added remote calls and unchanged remote health', async () => {
+  const coordinatorHarness = harness((attempt) => {
+    return snapshotFixture({
+      headOid: `commit-${attempt}`,
+      branches: [
+        {
+          ref: 'refs/heads/main',
+          name: 'main',
+          current: true,
+          remote: false,
+          upstream: null,
+          upstreamRef: null,
+          ahead: attempt,
+          behind: 0,
+          subject: `Auth-blocked commit #${attempt}`,
+          updatedAt: new Date().toISOString(),
+          parent: null,
+          parentBehind: null,
+          pr: null,
+        },
+      ],
+    })
+  })
+  const { coordinator, clock, reads, pushed, failWith } = coordinatorHarness
+  coordinator.attach('/tmp/repository', snapshotFixture())
+  failWith(
+    new GitHubTransportError({
+      kind: 'unauthorized',
+      detail: 'Bad credentials',
+    }),
+  )
+  await clock.advance(DEFAULT_INTERVALS.visibleMs + 1)
+  assert.equal(coordinator.freshness().state, 'unauthorized')
+  assert.deepEqual(reads, ['on-failure'])
+
+  // Local change arrives
+  coordinator.notifyLocalChange()
+  await clock.advance(DEFAULT_INTERVALS.localSettleMs + 1)
+
+  // 1. Observable local commit
+  assert.ok(pushed.snapshot)
+  assert.equal(pushed.snapshot.branches[0].subject, 'Auth-blocked commit #1')
+  // 2. Zero remote calls
+  assert.deepEqual(reads, ['on-failure', 'reuse'])
+  // 3. Remote health unchanged
+  assert.equal(coordinator.freshness().state, 'unauthorized')
+  assert.equal(pushed.snapshot.remote.state, 'unauthorized')
+
+  // Focus changes must not trigger remote reads while unauthorized
+  coordinator.reportActivity({ focused: true, visible: true })
+  await clock.advance(DEFAULT_INTERVALS.visibleMs * 2)
+  assert.deepEqual(
+    reads,
+    ['on-failure', 'reuse'],
+    'unauthorized state suppresses remote reads on activity',
+  )
+})
+
+test('getSnapshot remote reuse never contacts GitHub even when no confirmed data exists', async () => {
+  const { repo, cleanup } = await disposableRepository()
+  const previous = { ...process.env }
+  process.env.GIT_STACKS_GITHUB_API_URL = 'http://127.0.0.1:9'
+  try {
+    const snapshot = await getSnapshot(repo, undefined, undefined, 'reuse')
+    assert.equal(snapshot.github.available, false)
+    assert.equal(snapshot.githubStale?.reason, 'GitHub data has not been confirmed yet')
+    assert.equal(
+      snapshot.githubFailure,
+      null,
+      'reuse never reports a failure because no request was made',
+    )
+  } finally {
+    Object.assign(process.env, previous)
+    await cleanup()
+  }
+})
+
+test('real repository watcher fires coordinator during rate limit and delivers local commit with unchanged remote health', async () => {
+  const { repo, cleanup } = await disposableRepository()
+  const resetTime = new Date(Date.now() + 3600_000)
+  const reads: string[] = []
+  const snapshots: RepositorySnapshot[] = []
+  const clock = new ManualClock()
+  const scheduler = new RepositoryScheduler()
+
+  const coordinator = new RepositorySyncCoordinator(
+    {
+      readSnapshot: async (r, signal, request) => {
+        reads.push(request.github.remote)
+        return getSnapshot(r, undefined, signal, request.github.remote)
+      },
+      readIssues: async () => [],
+      scheduler,
+      clock,
+    },
+    { ...DEFAULT_INTERVALS, localSettleMs: 50 },
+  )
+
+  const watcher = new RepositoryWatcher(repo, () => coordinator.notifyLocalChange(), {
+    debounceMs: 50,
+    maxDelayMs: 200,
+    sweepMs: 0,
+  })
+
+  coordinator.onEvent((event) => {
+    if (event.kind === 'snapshot' && event.snapshot) snapshots.push(event.snapshot)
+  })
+
+  try {
+    await watcher.start()
+    const initial = await getSnapshot(repo, undefined, undefined, 'reuse')
+    coordinator.attach(repo, initial)
+
+    // Simulate rate-limited state
+    coordinator['recordFailure'](
+      new GitHubTransportError({
+        kind: 'rate-limited',
+        detail: 'Rate limit hit',
+        rateLimit: {
+          limit: 5000,
+          remaining: 0,
+          reset: resetTime,
+          resource: 'core',
+          retryAfterSeconds: 3600,
+        },
+      }),
+    )
+    assert.equal(coordinator.freshness().state, 'rate-limited')
+    reads.length = 0
+
+    // Make a real git commit using real Git
+    git(repo, 'commit', '--allow-empty', '-m', 'Commit made during rate limit')
+
+    // Wait for the watcher to observe filesystem change and notify coordinator
+    const observed = Promise.withResolvers<RepositorySnapshot>()
+    const unsubscribe = coordinator.onEvent((event) => {
+      if (
+        event.kind === 'snapshot' &&
+        event.snapshot?.branches.some((b) => b.subject === 'Commit made during rate limit')
+      ) {
+        observed.resolve(event.snapshot)
+      }
+    })
+
+    // Advance clock in small increments until watcher triggers and settle completes
+    let elapsed = 0
+    while (elapsed < 3000) {
+      await clock.advance(50)
+      const winner = await Promise.race([
+        observed.promise.then((s) => s),
+        new Promise<null>((res) => setTimeout(() => res(null), 50)),
+      ])
+      if (winner) break
+      elapsed += 50
+    }
+    const finalSnapshot = await observed.promise
+    unsubscribe()
+
+    assert.ok(finalSnapshot)
+    assert.equal(
+      finalSnapshot.branches.some((b) => b.subject === 'Commit made during rate limit'),
+      true,
+    )
+    // Verify zero remote calls: only 'reuse' was called
+    assert.ok(reads.length >= 1)
+    assert.ok(reads.every((r) => r === 'reuse'))
+    // Remote health is unchanged
+    assert.equal(coordinator.freshness().state, 'rate-limited')
+    assert.equal(finalSnapshot.remote.state, 'rate-limited')
+    assert.equal(finalSnapshot.remote.rateLimitReset, resetTime.toISOString())
+  } finally {
+    await watcher.stop()
+    coordinator.detach()
+    await cleanup()
   }
 })

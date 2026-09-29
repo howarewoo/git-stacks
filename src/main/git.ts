@@ -115,7 +115,12 @@ import {
   hasConflictMarkers,
   parseConflictSegments,
 } from '../shared/conflict'
-import { getGitHubData, getGitHubIssues, type GitHubResult } from './github'
+import {
+  getGitHubData,
+  getGitHubIssues,
+  unavailableGitHubResult,
+  type GitHubResult,
+} from './github'
 import { githubTransport } from './github-transport'
 import {
   getStackProgress,
@@ -4686,8 +4691,10 @@ export async function getSnapshot(
   // A background refresh of local Git must not spend a GitHub request, and a
   // refresh whose GitHub answer was lost must keep the last confirmed payload
   // rather than emptying the pull-request and stack workspace.
+  // A local refresh ('reuse') must never hit the network, even when no confirmed
+  // payload exists yet: it preserves local independence and spends zero GitHub quota.
   const live =
-    remote === 'reuse' && confirmed
+    remote === 'reuse'
       ? null
       : await Promise.all([
           getGitHubData(root, originUrl, signal),
@@ -4701,8 +4708,26 @@ export async function getSnapshot(
   // (a mutation preview, a publication) must never be handed an older payload
   // wearing a fresh label. Only the background modes may fall back.
   const mayFallBack = remote !== 'live'
-  const github = answered ? live![0] : mayFallBack && confirmed ? confirmed.data : live![0]
-  const issueData = answered ? live![1] : mayFallBack && confirmed ? confirmed.issues : live![1]
+  const fallbackData = confirmed
+    ? confirmed.data
+    : unavailableGitHubResult('GitHub data has not been confirmed yet')
+  const fallbackIssues = confirmed
+    ? confirmed.issues
+    : { issues: [] as RepositoryIssue[], message: '' }
+  const github = answered
+    ? live![0]
+    : mayFallBack
+      ? fallbackData
+      : live
+        ? live[0]
+        : unavailableGitHubResult('GitHub could not be read')
+  const issueData = answered
+    ? live![1]
+    : mayFallBack
+      ? fallbackIssues
+      : live
+        ? live[1]
+        : { issues: [] as RepositoryIssue[], message: '' }
   const githubFailure = live === null ? null : (live[0].failure ?? null)
   const githubStale: RepositorySnapshot['githubStale'] = answered
     ? null
