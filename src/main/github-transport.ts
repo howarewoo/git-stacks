@@ -48,6 +48,12 @@ export interface GitHubTransportFailure {
   status?: number | null
   detail: string
   rateLimit?: GitHubRateLimit
+  /**
+   * The parsed response body of a failed request. A `409` from the asynchronous merge API
+   * carries the enqueued request's own UUID and options, which is the only way to tell an
+   * existing merge request apart from one this client would have made.
+   */
+  body?: unknown
 }
 
 /** Every transport failure carries a typed kind plus the rate-limit metadata GitHub returned. */
@@ -56,6 +62,7 @@ export class GitHubTransportError extends Error {
   readonly status: number | null
   readonly detail: string
   readonly rateLimit: GitHubRateLimit
+  readonly body: unknown
 
   constructor(failure: GitHubTransportFailure) {
     const status = failure.status ?? null
@@ -68,6 +75,7 @@ export class GitHubTransportError extends Error {
     this.status = status
     this.detail = detail
     this.rateLimit = failure.rateLimit ?? emptyRateLimit()
+    this.body = failure.body
     publishRateLimit(this.rateLimit, failure.kind)
   }
 }
@@ -371,6 +379,7 @@ export class DirectGitHubTransport implements GitHubTransport {
           status: response.status,
           detail: apiMessage(body) ?? response.statusText ?? 'request failed',
           rateLimit,
+          body,
         })
       }
       return { status: response.status, body, headers: response.headers, rateLimit }
@@ -648,6 +657,7 @@ export class GhGitHubTransport implements GitHubTransport {
         status: response.status,
         detail: apiMessage(response.body) ?? 'request failed',
         rateLimit,
+        body: response.body,
       })
     }
     return response

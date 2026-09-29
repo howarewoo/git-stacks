@@ -753,6 +753,7 @@ function mergeAction(token: string) {
     token,
     allowForce: false,
     mergeMethod: 'merge' as const,
+    mergeAction: 'direct_merge' as const,
   }
 }
 

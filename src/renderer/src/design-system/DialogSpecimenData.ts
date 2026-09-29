@@ -43,8 +43,37 @@ export const restackPreview: StackPreview = {
   warnings: ['feature/checkout-tests has an open draft pull request; its base moves with it.'],
   blockers: [],
   mergeMethods: ['merge', 'squash', 'rebase'],
+  merge: null,
   publish: null,
   sync: null,
+}
+
+export const mergePreview: StackPreview = {
+  ...restackPreview,
+  token: 'preview-merge-1',
+  kind: 'merge',
+  warnings: [],
+  merge: {
+    branch: 'feature/checkout-tests',
+    native: true,
+    actions: ['default', 'merge_queue', 'direct_merge'],
+    layers: [
+      {
+        branch: 'feature/checkout',
+        pullRequest: 40,
+        base: 'main',
+        headOid: '2222222222222222222222222222222222222222',
+        includedInRequest: true,
+      },
+      {
+        branch: 'feature/checkout-tests',
+        pullRequest: 41,
+        base: 'main',
+        headOid: '3333333333333333333333333333333333333333',
+        includedInRequest: true,
+      },
+    ],
+  },
 }
 
 export const publishPreview: StackPreview = {

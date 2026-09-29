@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import type {
   DesktopAPI,
+  MergeProgress,
   PublishProgress,
   RemoteFreshness,
   RepositoryIssue,
@@ -25,6 +26,13 @@ const desktop: DesktopAPI = {
     ipcRenderer.on('submit-stack-progress', handler)
     return () => {
       ipcRenderer.removeListener('submit-stack-progress', handler)
+    }
+  },
+  onMergeProgress: (listener: (progress: MergeProgress | null) => void) => {
+    const handler = (_event: unknown, progress: MergeProgress | null): void => listener(progress)
+    ipcRenderer.on('merge-progress', handler)
+    return () => {
+      ipcRenderer.removeListener('merge-progress', handler)
     }
   },
   reconciliationPreview: (stackKey) =>

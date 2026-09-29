@@ -17,6 +17,7 @@ import { CommandCancelled, getOriginUrl } from './git-core'
 import { getGitHubIssues, getPullRequest } from './github'
 import {
   getSubmitStackProgress,
+  onMergeProgress,
   onPublishProgress,
   previewStack,
   previewSurgery,
@@ -26,6 +27,7 @@ import { previewReconciliationRepair } from './reconciliation'
 import { getPullRequestIssueLinks, previewIssueLink, searchGitHubIssues } from './issue-links'
 import type {
   GitAction,
+  MergeProgress,
   PublishProgress,
   RecentRepository,
   RepositorySnapshot,
@@ -362,6 +364,11 @@ function installHandlers() {
   // the finished state.
   onPublishProgress((progress: PublishProgress | null) => {
     window?.webContents.send('submit-stack-progress', progress)
+  })
+  // A merge runs on GitHub's side, so its result arrives asynchronously. Pushing it is the
+  // only way the dialog can follow it: a read would queue behind the merge itself.
+  onMergeProgress((progress: MergeProgress | null) => {
+    window?.webContents.send('merge-progress', progress)
   })
   ipcMain.handle('repository:pull-request', (event, number: number) => {
     validateSender(event)

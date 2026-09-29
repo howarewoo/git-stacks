@@ -7,6 +7,14 @@ import type {
   ActionResult,
   Branch,
   NativeStack,
+  MergeAction,
+  MergeLayerPreview,
+  MergeLayerResult,
+  MergeMethod,
+  MergePreview,
+  MergeProgress,
+  MergeQueueState,
+  MergeResult,
   PublishLayer,
   PublishLayerChoice,
   PublishPreview,
@@ -89,6 +97,16 @@ import {
   type SurgeryPullRequestPlan,
   type SurgeryRequest,
 } from './stack-surgery'
+import { runLinkIssueAction, runUnlinkIssueAction } from './issue-links'
+import {
+  pollAsyncMerge,
+  readMergeObservations,
+  recordMergeObservation,
+  startAsyncMerge,
+  mergeQueueState,
+  queueConfiguredFor,
+  type AsyncMergeResult,
+} from './merge-async'
 
 const PLAN_TTL_MS = 5 * 60_000
 const JOURNAL_VERSION = 1
@@ -154,11 +172,20 @@ interface StackPlan {
   >
   warnings: string[]
   blockers: string[]
-  mergeMethods: ('merge' | 'squash' | 'rebase')[]
+  mergeMethods: MergeMethod[]
   /** Present only for a sync preview: the facts the per-layer classification rests on. */
   sync: SyncCapture | null
   /** A surgery re-reads pull requests and native stacks like a publish plan does. */
   revalidateRemote?: boolean
+  /**
+   * Present only for a merge: the pull requests one reviewed action will land, bottom-to-top,
+   * with the head each one was reviewed at. A GitHub-native stack lands all of them from a
+   * single request for the selected pull request; a locally chained stack needs one
+   * request per layer.
+   */
+  merge: MergePreview | null
+  /** The native stack this merge belongs to, revalidated at the mutation boundary. */
+  mergeStackNumber: number | null
 }
 
 interface JournalEntry {
@@ -378,7 +405,7 @@ export function validateStackAction(value: unknown): StackAction {
       }
     case 'executeStack':
       if (
-        !hasOnlyKeys(value, ['type', 'token', 'allowForce', 'mergeMethod']) ||
+        !hasOnlyKeys(value, ['type', 'token', 'allowForce', 'mergeMethod', 'mergeAction']) ||
         typeof value.allowForce !== 'boolean'
       ) {
         stackActionError('Invalid executeStack action')
@@ -390,11 +417,22 @@ export function validateStackAction(value: unknown): StackAction {
       ) {
         stackActionError('Invalid merge method')
       }
+      // Only a merge reads this, so an absent action is valid here: restack and publish carry
+      // no merge intent. `mergeStack` refuses a merge that arrives without one.
+      if (
+        value.mergeAction !== undefined &&
+        value.mergeAction !== 'default' &&
+        value.mergeAction !== 'direct_merge' &&
+        value.mergeAction !== 'merge_queue'
+      ) {
+        stackActionError('Invalid merge action')
+      }
       return {
         type: 'executeStack',
         token: requireString(value.token, 'stack preview token', 512),
         allowForce: value.allowForce,
         mergeMethod: value.mergeMethod,
+        mergeAction: value.mergeAction,
       }
     case 'stackContinue':
     case 'stackAbort':
@@ -2077,15 +2115,48 @@ async function capturePlan(
       restackedAncestors.add(entry.branch)
     }
   }
+  let merge: MergePreview | null = null
+  let mergeStackNumber: number | null = null
+  let queueConfigured = false
   if (kind === 'merge') {
-    const mergeEntry = entries.find((entry) => entry.branch === selectedBranch)
-    if (!mergeEntry) blockers.push(`No unmerged stack entry exists for ${selectedBranch}`)
-    else {
-      if (mergeEntry.parent !== trunk)
-        blockers.push(`Only the bottom pull request based on ${trunk} may be merged`)
-      if (!mergeEntry.pr) blockers.push(`Branch ${selectedBranch} has no canonical pull request`)
-      else {
-        blockers.push(...mergeBlockers(mergeEntry.pr, trunk, mergeEntry.oldTip))
+    const selectedEntry = entries.find((entry) => entry.branch === selectedBranch)
+    if (!selectedEntry) {
+      blockers.push(`No unmerged stack entry exists for ${selectedBranch}`)
+    } else if (!selectedEntry.pr) {
+      blockers.push(`Branch ${selectedBranch} has no canonical pull request`)
+    } else {
+      const chain = contiguousMergeChain(entries, selectedEntry, defaultBranch)
+      blockers.push(...chain.blockers)
+      for (const entry of chain.layers) {
+        const pr = entry.pr
+        if (!pr || !pr.headOid) continue
+        blockers.push(...mergeLayerBlockers(pr, entry.parent, entry.oldTip))
+        const gates = directMergeGates(pr)
+        if (gates.length > 0) {
+          warnings.push(
+            `${gates.join('; ')}. A direct merge needs that resolved now; a merge-queue merge is evaluated by GitHub after the queue runs its checks.`,
+          )
+        }
+      }
+      if (chain.layers.length > 0) {
+        // A merge queue is proven by an enqueue GitHub accepted for this base ref, because
+        // the asynchronous merge API is the only documented view of one.
+        queueConfigured = queueConfiguredFor(
+          await readMergeObservations(root),
+          selectedEntry.pr.base,
+        )
+        merge = mergePreviewFor(
+          chain.layers,
+          selectedEntry.pr,
+          snapshot.nativeStacks ?? [],
+          queueConfigured,
+          blockers,
+          warnings,
+        )
+        mergeStackNumber = merge?.native ? (selectedEntry.pr.stack?.stackNumber ?? null) : null
+        if (merge?.native && mergeStackNumber === null) {
+          blockers.push('The selected pull request reports stack membership without a stack number')
+        }
       }
     }
   }
@@ -2125,16 +2196,42 @@ async function capturePlan(
       'No unmerged branches remain in this stack; select a remaining branch to continue',
     )
   }
-  const steps: StackStep[] = entries.map((entry) => ({
+  /**
+   * One merge action lands a contiguous run of pull requests, so each layer says how it
+   * relates to the pull request the person selected. A GitHub-native stack lands all of them
+   * from one request; a locally chained stack has nothing linking them, so each layer merges
+   * from its own request and the order is what makes the stack mergeable.
+   */
+  function mergeLayerNote(entry: PlanEntry, merge: MergePreview): string {
+    const selected = merge.layers[merge.layers.length - 1]
+    const number = entry.pr?.number ?? 0
+    if (number === selected.pullRequest) {
+      return merge.native
+        ? `Merge #${number} into ${entry.parent}; GitHub lands every pull request below it in this same operation`
+        : `Merge #${number} into ${entry.parent} last, after the pull requests below it`
+    }
+    return merge.native
+      ? `Lands in this same operation as #${selected.pullRequest}, into ${entry.parent}`
+      : `Merges into ${entry.parent} first, from its own request`
+  }
+
+  // A merge review is about the pull requests one action will land, not about every branch in
+  // the connected graph, so the reviewed steps are the merge's own layers, bottom-to-top.
+  const reviewEntries = merge
+    ? merge.layers
+        .map((layer) => entries.find((entry) => entry.pr?.number === layer.pullRequest))
+        .filter((entry): entry is PlanEntry => Boolean(entry))
+    : entries
+  const steps: StackStep[] = reviewEntries.map((entry) => ({
     branch: entry.branch,
     parent: entry.parent,
     oid: entry.oldTip,
     commits: 0,
     title: entry.pr?.title ?? entry.branch,
     pr: entry.pr,
-    note: entry.note,
+    note: merge ? mergeLayerNote(entry, merge) : entry.note,
   }))
-  for (const [index, entry] of entries.entries()) {
+  for (const [index, entry] of reviewEntries.entries()) {
     steps[index] = {
       ...steps[index],
       commits: await commitCount(root, entry.boundary, entry.oldTip),
@@ -2177,6 +2274,8 @@ async function capturePlan(
     blockers,
     mergeMethods,
     sync: syncCapture,
+    merge,
+    mergeStackNumber,
   }
   const syncPreview = syncCapture ? buildSyncPreview(syncCapture, selectedBranch) : null
   if (syncPreview) blockers.push(...syncPreview.blockers.filter((reason) => !blockers.includes(reason)))
@@ -2191,6 +2290,7 @@ async function capturePlan(
       warnings,
       blockers,
       mergeMethods: plan.mergeMethods,
+      merge,
       publish: kind === 'publish' ? await publishPreview(plan) : null,
       sync: syncPreview,
     },
@@ -3935,6 +4035,9 @@ async function captureSurgery(
     mergeMethods: [],
     sync: null,
     revalidateRemote: true,
+    // A restack moves no pull request; it only proves the local shape GitHub will read.
+    merge: null,
+    mergeStackNumber: null,
   }
   if (fetchFailure) stackPlan.blockers = [fetchFailure, ...stackPlan.blockers]
   return { plan, stackPlan }
@@ -4742,21 +4845,174 @@ async function canonicalPullRequests(
   return { data, fullName: origin.fullName }
 }
 
-function mergeBlockers(pr: PullRequest, base: string, head: string): string[] {
+/** What GitHub itself checks when a merge request is submitted. */
+function mergeLayerBlockers(pr: PullRequest, base: string, head: string): string[] {
   const blockers: string[] = []
   if (pr.state !== 'OPEN') blockers.push(`Pull request #${pr.number} is not open`)
   if (pr.base !== base) blockers.push(`Pull request #${pr.number} is not based on ${base}`)
   if (!pr.headOid || pr.headOid !== head)
     blockers.push(`Pull request #${pr.number} head does not match the reviewed local tip`)
   if (pr.draft) blockers.push(`Pull request #${pr.number} is still a draft`)
+  return blockers
+}
+
+/**
+ * What only a direct merge has to satisfy before the request is sent. GitHub evaluates
+ * branch protection and repository rules when the merge actually runs, so these are
+ * reported as a failure of that run rather than a reason to refuse the request now; a
+ * merge-queue merge is where those rules are meant to be evaluated.
+ */
+function directMergeGates(pr: PullRequest): string[] {
+  const gates: string[] = []
   if (pr.checks === 'pending' || pr.checks === 'failing')
-    blockers.push(`Pull request #${pr.number} checks are ${pr.checks}`)
+    gates.push(`Pull request #${pr.number} checks are ${pr.checks}`)
   if (pr.reviewDecision === 'CHANGES_REQUESTED' || pr.reviewDecision === 'REVIEW_REQUIRED') {
-    blockers.push(`Pull request #${pr.number} still requires review approval`)
+    gates.push(`Pull request #${pr.number} still requires review approval`)
   }
   if (pr.mergeState?.toUpperCase() !== 'CLEAN')
-    blockers.push(`Pull request #${pr.number} is not mergeable (${pr.mergeState || 'unknown'})`)
-  return blockers
+    gates.push(`Pull request #${pr.number} is not mergeable (${pr.mergeState || 'unknown'})`)
+  return gates
+}
+
+/**
+ * The contiguous unmerged portion of the stack at and below `selected`: every layer whose
+ * base is the branch beneath it, down to the default branch. Merging the top pull request of
+ * a stack lands the layers below it, so they are all part of the review. A layer with no
+ * canonical open pull request ends the walk and is reported rather than merged across.
+ */
+function contiguousMergeChain(
+  entries: PlanEntry[],
+  selected: PlanEntry,
+  defaultBranch: string,
+): { layers: PlanEntry[]; blockers: string[] } {
+  const byBranch = new Map(entries.map((entry) => [entry.branch, entry]))
+  const blockers: string[] = []
+  const layers: PlanEntry[] = [selected]
+  let current = selected
+  while (current.parent !== defaultBranch) {
+    const parent = byBranch.get(current.parent)
+    if (!parent) {
+      blockers.push(
+        `Branch ${current.parent} is between ${current.branch} and ${defaultBranch} but is not an unmerged stack layer`,
+      )
+      break
+    }
+    if (!parent.pr) {
+      blockers.push(
+        `Branch ${parent.branch} has no canonical pull request, so the stack below ${selected.branch} cannot merge as one operation`,
+      )
+      break
+    }
+    if (parent.pr.state !== 'OPEN') {
+      blockers.push(
+        `Pull request #${parent.pr.number} is not open and breaks the stack below ${selected.branch}`,
+      )
+      break
+    }
+    layers.unshift(parent)
+    current = parent
+  }
+  return { layers, blockers }
+}
+
+/**
+ * Build the reviewed merge for a contiguous chain, and refuse one GitHub would not land the
+ * same way. A submitted native stack is merged by GitHub as a single request for its top
+ * pull request, so its own membership has to be exactly the reviewed layers; a locally
+ * chained stack is merged one request per layer instead.
+ */
+function mergePreviewFor(
+  layers: PlanEntry[],
+  selected: PullRequest,
+  nativeStacks: NativeStack[],
+  queueConfigured: boolean,
+  blockers: string[],
+  warnings: string[],
+): MergePreview | null {
+  const membership = selected.stack ?? null
+  const actions: MergeAction[] = queueConfigured
+    ? ['default', 'merge_queue', 'direct_merge']
+    : ['default', 'direct_merge']
+  if (!queueConfigured) {
+    warnings.push(
+      `No merge queue has answered for ${selected.base} in this repository yet, so this preview offers a direct merge or the repository default. Choosing the merge queue still works: GitHub reports whether it accepted it.`,
+    )
+  }
+  const layerNumbers = layers.map((entry) => entry.pr?.number ?? 0)
+  if (!membership) {
+    for (const entry of layers) {
+      if (entry.pr?.stack) {
+        blockers.push(
+          `Pull request #${entry.pr.number} belongs to native stack #${entry.pr.stack.stackNumber}, but the selected pull request does not; publish the stack before merging`,
+        )
+        return null
+      }
+    }
+    return {
+      branch: selected.head,
+      layers: layers.map((entry) => ({
+        branch: entry.branch,
+        pullRequest: entry.pr?.number ?? 0,
+        base: entry.parent,
+        headOid: entry.pr?.headOid ?? '',
+        // Nothing submitted links these pull requests, so each one is merged from its own
+        // request, bottom-to-top. Only the selected pull request is its own request.
+        includedInRequest: entry.branch === selected.head,
+      })),
+      native: false,
+      actions,
+    }
+  }
+  const stack = nativeStacks.find((candidate) => candidate.number === membership.stackNumber)
+  if (!stack) {
+    blockers.push(
+      `Native stack #${membership.stackNumber} is not available; reload the stack preview before merging`,
+    )
+    return null
+  }
+  if (!stack.open) {
+    blockers.push(
+      `Native stack #${stack.number} is closed; reload the stack preview before merging`,
+    )
+    return null
+  }
+  const downstack = stack.pullRequests
+    .filter((member) => member.position <= membership.position && member.state === 'OPEN')
+    .map((member) => member.number)
+  const missing = downstack.filter((number) => !layerNumbers.includes(number))
+  if (missing.length > 0) {
+    blockers.push(
+      `Native stack #${stack.number} also lands pull request ${missing.map((n) => `#${n}`).join(', ')}, which is not a reviewed local layer; publish or reconcile the stack first`,
+    )
+    return null
+  }
+  const extra = layerNumbers.filter((number) => !downstack.includes(number))
+  if (extra.length > 0) {
+    blockers.push(
+      `Pull request ${extra.map((n) => `#${n}`).join(', ')} sits below the selected pull request but is not part of native stack #${stack.number}; publish the stack before merging`,
+    )
+    return null
+  }
+  if (stack.base !== layers[0].parent) {
+    blockers.push(
+      `Native stack #${stack.number} merges into ${stack.base}, but the reviewed layers merge into ${layers[0].parent}`,
+    )
+    return null
+  }
+  return {
+    branch: selected.head,
+    layers: layers.map((entry) => ({
+      branch: entry.branch,
+      pullRequest: entry.pr?.number ?? 0,
+      base: entry.parent,
+      headOid: entry.pr?.headOid ?? '',
+      // One request for the selected pull request lands every downstack layer of a
+      // submitted stack, so each layer below it is part of that request's outcome.
+      includedInRequest: true,
+    })),
+    native: true,
+    actions,
+  }
 }
 
 async function exactPrForBranch(branch: string, data: GitHubResult): Promise<PullRequest | null> {
@@ -5671,12 +5927,117 @@ async function dismissSubmitStack(repoPath: string): Promise<ActionResult> {
   }
 }
 
+type MergeProgressListener = (progress: MergeProgress | null) => void
+
+const mergeProgressListeners = new Set<MergeProgressListener>()
+
+/**
+ * Subscribes to the running merge's progress. A merge waits on GitHub's background result
+ * for as long as the stack takes, and the renderer cannot poll for it: the read would queue
+ * behind the very action that is producing the state.
+ */
+export function onMergeProgress(listener: MergeProgressListener): () => void {
+  mergeProgressListeners.add(listener)
+  return () => {
+    mergeProgressListeners.delete(listener)
+  }
+}
+
+function publishMergeProgress(progress: MergeProgress | null): void {
+  for (const listener of mergeProgressListeners) listener(progress)
+}
+
+/** A merge commit GitHub created, as observed rather than assumed from the request. */
+interface ConfirmedMerge {
+  layer: MergeLayerPreview
+  mergeOid: string | null
+}
+
+/**
+ * The merge commit a direct or queued merge left on the default branch, recovered from the
+ * fetched history when GitHub did not report one. A squash commit has a single parent, so
+ * only a real merge commit is identifiable here.
+ */
+async function findMergeCommit(
+  repoPath: string,
+  ref: string,
+  headOid: string,
+): Promise<string | null> {
+  try {
+    const logOutput = await runGit(repoPath, ['log', '-n', '20', '--merges', '--format=%H %P', ref])
+    for (const line of logOutput.split('\n')) {
+      const tokens = line.trim().split(/\s+/u)
+      if (tokens.length < 3) continue
+      if (tokens[2] === headOid || (await isAncestor(repoPath, headOid, tokens[2]))) {
+        return tokens[0]
+      }
+    }
+  } catch {
+    // Best effort recovery; a missing merge commit never blocks the recorded merge.
+  }
+  return null
+}
+
+function mergeResultMessage(
+  results: MergeLayerResult[],
+  confirmed: ConfirmedMerge[],
+  remaining: MergeResult['remaining'],
+  note: string | null,
+): string {
+  const numbers = confirmed.map((entry) => `#${entry.layer.pullRequest}`)
+  const parts: string[] = []
+  if (numbers.length > 0) {
+    parts.push(
+      `Merged pull request${numbers.length === 1 ? '' : 's'} ${numbers.join(', ')} on GitHub.`,
+    )
+  }
+  const queued = results.find((entry) => entry.status === 'enqueued')
+  if (queued) {
+    parts.push(
+      `Pull request #${queued.pullRequest} joined the merge queue, which merges it later. That result is final for the request, so refresh to read the queue state.`,
+    )
+  }
+  const running = results.find((entry) => entry.status === 'pending')
+  if (running) {
+    parts.push(
+      `GitHub is still merging pull request #${running.pullRequest}. Refresh to read the result.`,
+    )
+  }
+  const failed = results.find((entry) => entry.status === 'failed')
+  if (failed) {
+    parts.push(`GitHub refused to merge pull request #${failed.pullRequest}: ${failed.detail}`)
+  }
+  if (note) parts.push(note)
+  const notMerged = results.filter((entry) => entry.status === 'not-merged')
+  if (notMerged.length > 0 && numbers.length > 0) {
+    parts.push(
+      `Pull request${notMerged.length === 1 ? '' : 's'} ${notMerged
+        .map((entry) => `#${entry.pullRequest}`)
+        .join(', ')} did not merge.`,
+    )
+  }
+  if (remaining.length > 0) {
+    parts.push(
+      `Above the merge, GitHub now bases ${remaining
+        .map((entry) => `#${entry.pullRequest} on ${entry.base}`)
+        .join(', ')}; restack and publish those branches to update their pull requests.`,
+    )
+  }
+  if (parts.length === 0) parts.push(`No pull request of this stack was merged.`)
+  parts.push('No local branch was changed.')
+  return parts.join(' ')
+}
+
 async function mergeStack(
   repoPath: string,
   plan: StackPlan,
   action: Extract<StackAction, { type: 'executeStack' }>,
 ): Promise<ActionResult> {
   if (plan.blockers.length > 0) throw new Error(plan.blockers.join('; '))
+  const merge = plan.merge
+  if (!merge || merge.layers.length === 0) {
+    throw new Error('This stack has no pull request that can be merged')
+  }
   const origin = await currentOrigin(repoPath)
   if (
     origin.url !== plan.originUrl ||
@@ -5688,164 +6049,313 @@ async function mergeStack(
   await ensureClean(repoPath, 'merge the pull request')
   await revalidatePlan(repoPath, plan)
   if (!plan.originFullName) throw new Error('A github.com origin remote is required')
-  const entry = plan.entries.find((candidate) => candidate.branch === plan.branch)
-  if (!entry?.pr || !entry.pr.headOid)
-    throw new Error('The selected bottom pull request is unavailable')
-  const currentTip = await resolveCommit(repoPath, `refs/heads/${entry.branch}`)
-  if (currentTip !== entry.oldTip || currentTip !== entry.pr.headOid)
-    throw new Error('Stack preview is stale: pull request head changed')
-  const currentPr = await getPullRequest(repoPath, entry.pr.number)
+  const requestedAction: MergeAction | undefined = action.mergeAction
   if (
-    currentPr.state !== 'OPEN' ||
-    currentPr.head !== entry.branch ||
-    currentPr.headOid !== entry.pr.headOid
+    requestedAction !== 'default' &&
+    requestedAction !== 'direct_merge' &&
+    requestedAction !== 'merge_queue'
   ) {
-    throw new Error(`Pull request #${entry.pr.number} changed since preview`)
+    throw new Error('Choose how GitHub should land this stack: directly or through its merge queue')
   }
-  const currentData = await getGitHubData(repoPath, plan.originUrl)
-  if (!currentData.available) throw new Error(currentData.message)
-  const canonical = await exactPrForBranch(entry.branch, currentData)
-  if (
-    !canonical ||
-    canonical.number !== entry.pr.number ||
-    canonical.headOid !== entry.pr.headOid
-  ) {
-    throw new Error(`Pull request #${entry.pr.number} changed since preview`)
+  const mergeAction: MergeAction = requestedAction
+  if (!merge.actions.includes(mergeAction)) {
+    throw new Error(
+      `Merge action ${mergeAction} is not available for this repository; choose ${merge.actions.join(' or ')}`,
+    )
   }
-  const blockers = mergeBlockers(currentPr, plan.defaultBranch, entry.oldTip)
-  blockers.push(...mergeBlockers(canonical, plan.defaultBranch, entry.oldTip))
-  if (blockers.length > 0) throw new Error([...new Set(blockers)].join('; '))
-  const allowedMethods = await repositoryMergeMethods(plan.originFullName)
-  if (
-    !plan.mergeMethods.includes(action.mergeMethod) ||
-    !allowedMethods ||
-    !allowedMethods.includes(action.mergeMethod)
-  ) {
-    throw new Error(`Merge method ${action.mergeMethod} is not allowed by the repository`)
+  if (mergeAction === 'direct_merge') {
+    const allowedMethods = await repositoryMergeMethods(plan.originFullName)
+    if (
+      !plan.mergeMethods.includes(action.mergeMethod) ||
+      !allowedMethods ||
+      !allowedMethods.includes(action.mergeMethod)
+    ) {
+      throw new Error(`Merge method ${action.mergeMethod} is not allowed by the repository`)
+    }
   }
-  await setPullRequestNumber(repoPath, entry.branch, entry.pr.number)
-  let mergeError: unknown
-  try {
-    const native = Boolean(currentPr.stack || canonical.stack)
-    const endpoint = `repos/${plan.originFullName}/pulls/${entry.pr.number}/merge${native ? '-async' : ''}`
-    const response = await githubTransport().rest<unknown>({
-      method: 'PUT',
-      path: endpoint,
-      ...(native ? { headers: { 'X-GitHub-Api-Version': '2026-03-10' } } : {}),
-      body: {
-        sha: entry.pr.headOid,
-        merge_method: action.mergeMethod,
-        ...(native ? { merge_action: 'direct_merge' } : {}),
-      },
-    })
-    if (native) {
-      let result = response.data
-      for (let attempt = 0; attempt < 10; attempt++) {
-        if (!isRecord(result))
-          throw new Error('GitHub returned an invalid asynchronous merge result')
-        if (result.status === 'merged') break
-        if (result.status === 'failed' || result.status === 'enqueued') {
+  const data = await getGitHubData(repoPath, plan.originUrl)
+  if (!data.available) throw new Error(data.message)
+  for (const layer of merge.layers) {
+    const canonical = await exactPrForBranch(layer.branch, data)
+    if (!canonical || canonical.number !== layer.pullRequest) {
+      throw new Error(
+        `Pull request #${layer.pullRequest} is no longer the canonical pull request for ${layer.branch}`,
+      )
+    }
+    if (canonical.headOid !== layer.headOid) {
+      throw new Error(
+        `Pull request #${layer.pullRequest} head changed since the preview; no merge was requested`,
+      )
+    }
+  }
+  const selected = merge.layers[merge.layers.length - 1]
+  const results: MergeLayerResult[] = merge.layers.map((layer) => ({
+    branch: layer.branch,
+    pullRequest: layer.pullRequest,
+    status: 'pending',
+    detail: layer.includedInRequest
+      ? 'Awaiting the merge request for this pull request'
+      : 'Below the selected pull request, merged from its own request',
+    mergedOid: null,
+    queue: null,
+  }))
+  const resultFor = (pullRequest: number): MergeLayerResult | undefined =>
+    results.find((entry) => entry.pullRequest === pullRequest)
+  // A submitted stack is landed by one request for the selected pull request, downstack
+  // included. A locally chained stack has nothing linking its pull requests, so each layer
+  // is merged from its own request, bottom-to-top.
+  const requests = merge.native ? [selected] : merge.layers
+  let attempted = false
+  let landed = 0
+  let note: string | null = null
+  const observed: AsyncMergeResult[] = []
+  publishMergeProgress({
+    action: mergeAction,
+    status: 'running',
+    layers: results,
+    message: `Merging ${merge.layers.length} pull request${merge.layers.length === 1 ? '' : 's'} on GitHub`,
+  })
+  for (const layer of requests) {
+    const result = resultFor(layer.pullRequest)
+    if (!result) continue
+    try {
+      const current = await getPullRequest(repoPath, layer.pullRequest)
+      if (current.state !== 'OPEN' || current.head !== layer.branch) {
+        throw new Error(
+          `Pull request #${layer.pullRequest} is ${current.state.toLowerCase()} on ${current.head} since the preview`,
+        )
+      }
+      if (current.headOid !== layer.headOid) {
+        throw new Error(
+          `Pull request #${layer.pullRequest} head changed since the preview; no merge was requested for it`,
+        )
+      }
+      if (current.base !== layer.base) {
+        if (!(current.base === plan.defaultBranch && landed > 0)) {
           throw new Error(
-            `GitHub asynchronous merge ${result.status}: ${isRecord(result.details) && typeof result.details.message === 'string' ? result.details.message : 'inspect GitHub before retrying'}`,
+            `Pull request #${layer.pullRequest} is based on ${current.base} instead of ${layer.base}; publish the stack so its pull requests share one base, then merge again`,
           )
         }
-        const details = result.details
-        if (result.status !== 'pending' || !isRecord(details) || typeof details.uuid !== 'string')
-          throw new Error('GitHub returned an invalid asynchronous merge result')
-        await new Promise((resolve) => setTimeout(resolve, 300 * (attempt + 1)))
-        result = (
-          await githubTransport().rest<unknown>({
-            path: `${endpoint}/${encodeURIComponent(details.uuid)}`,
-            headers: { 'X-GitHub-Api-Version': '2026-03-10' },
-          })
-        ).data
+        // GitHub retargeted the pull request onto the branch it merged into; that is
+        // observed here rather than assumed from the preview.
+        result.detail = `GitHub retargeted this pull request to ${current.base}`
       }
-      if (!isRecord(result) || result.status !== 'merged')
-        throw new Error(
-          `Merge of PR #${entry.pr.number} is still pending; inspect GitHub before retrying`,
-        )
-    }
-  } catch (error) {
-    mergeError = error
-  }
-  let readBack: PullRequest
-  try {
-    readBack = await getPullRequest(repoPath, entry.pr.number)
-  } catch {
-    throw new Error(
-      `Could not confirm whether PR #${entry.pr.number} merged. Inspect GitHub before retrying; no merge was retried.`,
-    )
-  }
-  if (readBack.state !== 'MERGED' || readBack.headOid !== entry.pr.headOid) {
-    throw new Error(
-      `GitHub did not confirm the reviewed head of PR #${entry.pr.number} as merged${mergeError ? `: ${commandDetail(mergeError)}` : ''}`,
-    )
-  }
-  let mergeOid = readBack.mergeOid ?? null
-  if (!mergeOid) {
-    for (let attempt = 0; attempt < 5; attempt++) {
-      await new Promise((resolve) => setTimeout(resolve, 300 * (attempt + 1)))
-      try {
-        const refreshed = await getPullRequest(repoPath, entry.pr.number)
-        if (refreshed.mergeOid) {
-          mergeOid = refreshed.mergeOid
-          break
+      if (mergeAction === 'direct_merge') {
+        const gates = directMergeGates(current)
+        if (gates.length > 0) throw new Error(gates.join('; '))
+      }
+      await setPullRequestNumber(repoPath, layer.branch, layer.pullRequest)
+      attempted = true
+      const start = await startAsyncMerge({
+        fullName: plan.originFullName,
+        number: layer.pullRequest,
+        sha: layer.headOid,
+        mergeMethod: action.mergeMethod,
+        mergeAction: mergeAction,
+      })
+      let outcome = start.result
+      if (start.kind === 'conflict') {
+        // GitHub already holds a merge request for this pull request. Adopting it is the
+        // only safe answer, and only when it is the reviewed head with the reviewed action.
+        if (outcome.expectedHeadSha && outcome.expectedHeadSha !== layer.headOid) {
+          throw new Error(
+            `GitHub already has a merge request for pull request #${layer.pullRequest} on head ${outcome.expectedHeadSha.slice(0, 12)}; wait for it or reload the preview`,
+          )
         }
-      } catch {
-        // Continue retry
+        if (outcome.mergeAction && outcome.mergeAction !== mergeAction) {
+          throw new Error(
+            `GitHub already has a ${outcome.mergeAction} merge request for pull request #${layer.pullRequest}; wait for it or choose ${outcome.mergeAction}`,
+          )
+        }
+        note = `GitHub already had a merge request for pull request #${layer.pullRequest}, so no second request was sent.`
       }
+      if (outcome.status === 'pending' && outcome.uuid) {
+        const uuid = outcome.uuid
+        outcome = await pollAsyncMerge(
+          { fullName: plan.originFullName, number: layer.pullRequest, uuid },
+          {
+            onUpdate: (update) => {
+              result.detail = update.message ?? `GitHub reports ${update.status}`
+              publishMergeProgress({
+                action: mergeAction,
+                status: 'running',
+                layers: results,
+                message: `Pull request #${layer.pullRequest}: ${result.detail}`,
+              })
+            },
+          },
+        )
+      }
+      observed.push(outcome)
+      // The requested pull request is always part of the outcome, and one request for a
+      // native stack lands its downstack with it, so every layer that request carried is
+      // marked here and each one is confirmed by its own read-back below.
+      const carried = results.filter(
+        (entry) =>
+          entry.pullRequest === layer.pullRequest ||
+          merge.layers.some(
+            (item) => item.pullRequest === entry.pullRequest && item.includedInRequest,
+          ),
+      )
+      if (outcome.status === 'merged') {
+        for (const entry of carried) {
+          entry.status = 'merged'
+          entry.detail =
+            entry.pullRequest === layer.pullRequest
+              ? (outcome.message ?? 'Merged on GitHub')
+              : `Landed by the same GitHub operation as #${layer.pullRequest}`
+        }
+        landed++
+        continue
+      }
+      if (outcome.status === 'enqueued') {
+        // A stacked request carries its downstack, so the group the queue accepted is every
+        // layer it included, and each one is journalled for the later queue read.
+        const requestedAt = Date.now()
+        for (const entry of carried) {
+          entry.status = 'enqueued'
+          entry.detail =
+            entry.pullRequest === layer.pullRequest
+              ? (outcome.message ?? 'Added to the merge queue')
+              : `Added to the merge queue by the request for #${layer.pullRequest}`
+          const preview = merge.layers.find((item) => item.pullRequest === entry.pullRequest)
+          if (!preview) continue
+          await recordMergeObservation(repoPath, {
+            pullRequest: preview.pullRequest,
+            branch: preview.branch,
+            base: preview.base,
+            headOid: preview.headOid,
+            action: mergeAction,
+            requestedAt,
+            outcome: 'queued',
+          })
+        }
+        break
+      }
+      if (outcome.status === 'failed') {
+        result.status = 'failed'
+        result.detail = outcome.message ?? 'GitHub refused the merge'
+        break
+      }
+      result.detail = 'GitHub is still running this merge; refresh to read the result'
+      break
+    } catch (error) {
+      if (!attempted) throw error
+      result.status = 'failed'
+      result.detail = commandDetail(error)
+      break
     }
+  }
+  // GitHub's own record is the proof that a pull request landed: the head the review read
+  // from legitimately advances when the pull request above it merges into that branch, so
+  // the head is not re-read here. The reviewed head was already checked against GitHub at the
+  // mutation boundary and sent as the request's `sha`, which cancels a moved head.
+  const confirmed: ConfirmedMerge[] = []
+  for (const layer of merge.layers) {
+    const result = resultFor(layer.pullRequest)
+    if (!result || result.status !== 'merged') continue
+    const readBack = await getPullRequest(repoPath, layer.pullRequest)
+    if (readBack.state !== 'MERGED') {
+      result.status = 'not-merged'
+      result.detail = `GitHub reports pull request #${layer.pullRequest} as ${readBack.state.toLowerCase()}, not merged`
+      continue
+    }
+    const outcome = observed.find((entry) => entry.expectedHeadSha === layer.headOid)
+    const mergeOid = readBack.mergeOid ?? outcome?.mergeOid ?? null
+    confirmed.push({ layer, mergeOid })
+    result.mergedOid = mergeOid
+    result.detail = mergeOid ? `Merged on GitHub as ${mergeOid.slice(0, 10)}` : 'Merged on GitHub'
+  }
+  for (const result of results) {
+    if (result.status !== 'pending') continue
+    result.status = 'not-merged'
+    result.detail = 'Not merged in this run'
+  }
+  const observations = await readMergeObservations(repoPath)
+  for (const result of results) {
+    const live = await getPullRequest(repoPath, result.pullRequest).catch(() => null)
+    result.queue = mergeQueueState(observations.get(result.pullRequest), live?.state ?? '')
   }
   let fetchMessage = ''
   try {
-    if ((await getOriginUrl(repoPath)) !== plan.originUrl)
+    if ((await getOriginUrl(repoPath)) !== plan.originUrl) {
       throw new Error('Origin changed after the merge')
-    await runGit(repoPath, [
-      'fetch',
-      'origin',
-      `refs/heads/${plan.defaultBranch}:refs/remotes/origin/${plan.defaultBranch}`,
-    ])
-  } catch (error) {
-    fetchMessage = ` The pull request merged, but refreshing origin/${plan.defaultBranch} failed: ${commandDetail(error)}`
-  }
-  if (!mergeOid) {
-    try {
-      const logOutput = await runGit(repoPath, [
-        'log',
-        '-n',
-        '20',
-        '--merges',
-        '--format=%H %P',
-        `refs/remotes/origin/${plan.defaultBranch}`,
+    }
+    for (const branch of [plan.defaultBranch, ...confirmed.map((entry) => entry.layer.branch)]) {
+      await runGit(repoPath, [
+        'fetch',
+        'origin',
+        `refs/heads/${branch}:refs/remotes/origin/${branch}`,
       ])
-      for (const line of logOutput.split('\n')) {
-        const tokens = line.trim().split(/\s+/u)
-        if (
-          tokens.length >= 3 &&
-          (tokens[2] === entry.pr.headOid ||
-            (await isAncestor(repoPath, entry.pr.headOid, tokens[2])))
-        ) {
-          mergeOid = tokens[0]
-          break
-        }
-      }
-    } catch {
-      // Best effort recovery
+    }
+  } catch (error) {
+    fetchMessage = ` Refreshing origin tracking refs failed: ${commandDetail(error)}`
+  }
+  for (const entry of confirmed) {
+    const mergeOid =
+      entry.mergeOid ??
+      (await findMergeCommit(
+        repoPath,
+        `refs/remotes/origin/${plan.defaultBranch}`,
+        entry.layer.headOid,
+      ))
+    await writeMergedPrRecord(repoPath, {
+      branch: entry.layer.branch,
+      pr: entry.layer.pullRequest,
+      headOid: entry.layer.headOid,
+      mergeOid,
+      mergedAt: Date.now(),
+    })
+    await setConfig(
+      repoPath,
+      `branch.${entry.layer.branch}.gitStacksMergedHeadPr`,
+      String(entry.layer.pullRequest),
+    )
+    await setConfig(
+      repoPath,
+      `branch.${entry.layer.branch}.gitStacksMergedHeadOid`,
+      entry.layer.headOid,
+    )
+    if (mergeOid) {
+      await setConfig(repoPath, `branch.${entry.layer.branch}.gitStacksMergedCommitOid`, mergeOid)
     }
   }
-  await writeMergedPrRecord(repoPath, {
-    branch: entry.branch,
-    pr: entry.pr.number,
-    headOid: entry.pr.headOid,
-    mergeOid,
-    mergedAt: Date.now(),
-  })
-  await setConfig(repoPath, `branch.${entry.branch}.gitStacksMergedHeadPr`, String(entry.pr.number))
-  await setConfig(repoPath, `branch.${entry.branch}.gitStacksMergedHeadOid`, entry.pr.headOid)
-  if (mergeOid) {
-    await setConfig(repoPath, `branch.${entry.branch}.gitStacksMergedCommitOid`, mergeOid)
+  const remaining: MergeResult['remaining'] = []
+  const after = await getGitHubData(repoPath, plan.originUrl)
+  if (after.available) {
+    const mergedBranches = new Set(confirmed.map((entry) => entry.layer.branch))
+    for (const entry of plan.entries) {
+      if (mergedBranches.has(entry.branch)) continue
+      for (const [index, pr] of after.pullRequests.entries()) {
+        if (pr.head !== entry.branch || !after.sameRepository(index)) continue
+        remaining.push({
+          pullRequest: pr.number,
+          branch: entry.branch,
+          base: pr.base,
+          state: pr.state,
+        })
+      }
+    }
   }
-  return { message: `Merged pull request #${entry.pr.number}.${fetchMessage}` }
+  const message = mergeResultMessage(results, confirmed, remaining, note) + fetchMessage
+  const queued = results.some((entry) => entry.status === 'enqueued')
+  const failed = results.some((entry) => entry.status === 'failed')
+  publishMergeProgress({
+    action: mergeAction,
+    status: failed ? 'failed' : queued ? 'queued' : 'succeeded',
+    layers: results,
+    message,
+  })
+  return {
+    message,
+    merge: {
+      action: mergeAction,
+      method: action.mergeMethod,
+      native: merge.native,
+      layers: results,
+      remaining,
+    },
+  }
 }
 
 async function updatePullRequest(

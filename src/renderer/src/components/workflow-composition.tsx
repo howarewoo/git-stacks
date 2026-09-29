@@ -5,7 +5,13 @@ import { Badge } from './ui/badge'
 import { Field } from './ui/field'
 import { Input } from './ui/input'
 import { InlineAlert } from './ui/surface'
-import type { PublishProgress, PublishStepStatus, StackStep } from '../../../shared/types'
+import type {
+  MergeLayerResult,
+  MergeProgress,
+  PublishProgress,
+  PublishStepStatus,
+  StackStep,
+} from '../../../shared/types'
 import { PHASE_PRESENTATION, type WorkflowComposition, type WorkflowPhase } from './workflow-policy'
 
 /**
@@ -409,6 +415,99 @@ export function PublishProgressPanel({
             ) : null}
           </li>
         ))}
+      </ol>
+    </WorkflowSection>
+  )
+}
+
+const mergeLayerPresentation: Record<
+  MergeLayerResult['status'],
+  { label: string; tone: 'success' | 'warning' | 'danger' | 'info' }
+> = {
+  pending: { label: 'waiting', tone: 'info' },
+  merged: { label: 'merged', tone: 'success' },
+  enqueued: { label: 'in the queue', tone: 'info' },
+  'not-merged': { label: 'not merged', tone: 'warning' },
+  failed: { label: 'failed', tone: 'danger' },
+}
+
+/**
+ * The asynchronous merge API is GitHub's only documented view of a merge queue, and its
+ * `enqueued` result is final: it never changes when the queue later merges or drops the
+ * group. So the text says what is known and where the answer comes from, rather than
+ * inventing a queue state GitHub never published.
+ */
+function queueDetail(queue: NonNullable<MergeLayerResult['queue']>): string {
+  if (queue.outcome === 'merged') return 'The merge queue landed this pull request.'
+  if (queue.outcome === 'dropped')
+    return 'The merge queue did not land this pull request: it is closed without merging. Close it out locally and enqueue again once the failing rule is resolved.'
+  if (queue.outcome === 'queued')
+    return 'Queued. GitHub keeps the enqueued result final, so this pull request is the record: it reports merged once the queue lands it.'
+  return 'Queued, and this pull request reports no state GitHub published.'
+}
+
+export function MergeOutcomePanel({
+  progress,
+  className,
+}: {
+  progress: MergeProgress | null
+  className?: string
+}) {
+  if (!progress) return null
+  const failed = progress.layers.find((layer) => layer.status === 'failed')
+  const landed = progress.layers.filter((layer) => layer.status === 'merged').length
+  return (
+    <WorkflowSection
+      className={className}
+      label={`Merge result \u2014 ${progress.layers.length} pull request${
+        progress.layers.length === 1 ? '' : 's'
+      } in this operation`}
+    >
+      {failed ? (
+        <InlineAlert tone="error">
+          <strong className="block">{failed.detail}</strong>
+          Ruleset, required review, and failing check failures are reported by GitHub.{' '}
+          {landed > 0
+            ? `${landed} pull request${landed === 1 ? '' : 's'} of this operation merged before it stopped, and no local branch was changed.`
+            : 'No local branch was changed.'}
+        </InlineAlert>
+      ) : progress.status === 'succeeded' ? (
+        <InlineAlert tone="success">{progress.message}</InlineAlert>
+      ) : (
+        <InlineAlert tone="info">{progress.message}</InlineAlert>
+      )}
+      <ol aria-label="Merged pull requests" className="m-0 grid list-none gap-1.5 p-0">
+        {progress.layers.map((layer) => {
+          const presentation = mergeLayerPresentation[layer.status]
+          return (
+            <li
+              key={layer.pullRequest}
+              className="grid grid-cols-[auto_minmax(0,1fr)_auto] items-start gap-2 rounded-[var(--gs-semantic-radius-item)] border border-[var(--gs-semantic-border-essential)] bg-[var(--gs-semantic-surface-content)] px-3 py-2"
+            >
+              <Badge variant={presentation.tone} className="mt-0.5 shrink-0">
+                {presentation.label}
+              </Badge>
+              <div className="grid min-w-0 gap-0.5">
+                <strong className="break-words text-[length:var(--gs-semantic-type-label-size)] text-[var(--gs-semantic-text-primary)]">
+                  #{layer.pullRequest} {layer.branch}
+                </strong>
+                <span className="text-[length:var(--gs-semantic-type-metadata-size)] text-[var(--gs-semantic-text-secondary)]">
+                  {layer.detail}
+                </span>
+                {layer.queue ? (
+                  <span className="text-[length:var(--gs-semantic-type-metadata-size)] text-[var(--gs-semantic-text-secondary)]">
+                    {queueDetail(layer.queue)}
+                  </span>
+                ) : null}
+              </div>
+              {layer.mergedOid ? (
+                <span className="font-mono text-[length:var(--gs-semantic-type-metadata-size)] text-[var(--gs-semantic-text-secondary)]">
+                  {layer.mergedOid.slice(0, 10)}
+                </span>
+              ) : null}
+            </li>
+          )
+        })}
       </ol>
     </WorkflowSection>
   )

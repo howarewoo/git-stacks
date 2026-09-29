@@ -230,6 +230,50 @@ export interface PullRequest {
   mergeState?: string
   stack?: PullRequestStackMembership | null
 }
+
+/** How GitHub is asked to land a pull request, per the asynchronous merge API. */
+export type MergeAction = 'default' | 'direct_merge' | 'merge_queue'
+
+export type MergeMethod = 'merge' | 'squash' | 'rebase'
+
+/**
+ * What Git Stacks' own last merge request for a pull request did. The asynchronous merge API
+ * is the only documented view of a merge queue: an `enqueued` result means the pull request
+ * joined one and, as the documentation states, that result never changes afterwards, so a
+ * later read of the pull request itself is the only later signal.
+ */
+export type MergeQueueOutcome = 'queued' | 'merged' | 'dropped'
+
+export interface MergeQueueState {
+  /** True once GitHub accepted an enqueue for this base ref, which is the only proof of a queue. */
+  configured: boolean
+  /** `dropped` means the enqueued pull request was closed without merging, so the queue did not land it. */
+  outcome: MergeQueueOutcome | null
+  requestedAt: string | null
+}
+
+/** One pull request that a single merge action will land, bottom-to-top. */
+export interface MergeLayerPreview {
+  branch: string
+  pullRequest: number
+  base: string
+  headOid: string
+  /**
+   * True when GitHub lands this layer as part of the selected pull request's own
+   * request, which is how a GitHub-native stack merge covers its downstack.
+   */
+  includedInRequest: boolean
+}
+
+export interface MergePreview {
+  branch: string
+  /** Bottom-to-top; the last layer is the pull request the person selected. */
+  layers: MergeLayerPreview[]
+  /** True when one request for the selected pull request lands every layer. */
+  native: boolean
+  /** Actions this repository and base ref accept. */
+  actions: MergeAction[]
+}
 export interface RepositoryIssue {
   number: number
   title: string
@@ -525,7 +569,9 @@ export interface StackPreview {
   steps: StackStep[]
   warnings: string[]
   blockers: string[]
-  mergeMethods: ('merge' | 'squash' | 'rebase')[]
+  mergeMethods: MergeMethod[]
+  /** Present only for a merge preview: the pull requests one action will land. */
+  merge: MergePreview | null
   /** Present only for a publish preview: the resumable submission plan. */
   publish: PublishPreview | null
   /** Present only for a sync preview: the trunk and per-layer classification. */
@@ -780,7 +826,9 @@ export type StackAction =
       type: 'executeStack'
       token: string
       allowForce: boolean
-      mergeMethod: 'merge' | 'squash' | 'rebase'
+      mergeMethod: MergeMethod
+      /** Required for a merge: direct or merge-queue delivery for the reviewed layers. */
+      mergeAction?: MergeAction
     }
   | SubmitStackAction
   | { type: 'stackContinue' | 'stackAbort' }
@@ -864,9 +912,41 @@ export type GitAction =
     }
   | { type: 'conflictMergeTool'; path: string; fingerprint: string }
   | StackAction
+
+export type MergeLayerStatus = 'merged' | 'enqueued' | 'failed' | 'pending' | 'not-merged'
+
+export interface MergeLayerResult {
+  branch: string
+  pullRequest: number
+  status: MergeLayerStatus
+  detail: string
+  /** The merge commit GitHub reports, once the pull request is merged. */
+  mergedOid: string | null
+  queue: MergeQueueState | null
+}
+
+/** What one merge action did to every pull request it was reviewed against. */
+export interface MergeResult {
+  action: MergeAction
+  method: MergeMethod
+  native: boolean
+  layers: MergeLayerResult[]
+  /** Observed base of the pull requests left above the merge, after GitHub's own retargeting. */
+  remaining: { pullRequest: number; branch: string; base: string; state: string }[]
+}
+
+/** A running merge, pushed while it waits on GitHub's background result. */
+export interface MergeProgress {
+  action: MergeAction
+  status: 'running' | 'queued' | 'succeeded' | 'failed'
+  layers: MergeLayerResult[]
+  message: string
+}
 export interface ActionResult {
   message: string
   url?: string
+  /** Present only for a merge: the per-pull-request outcome, including queue state. */
+  merge?: MergeResult
 }
 export interface DesktopAPI {
   recentRepositories(): Promise<RecentRepository[]>
@@ -889,6 +969,11 @@ export interface DesktopAPI {
    * producing the steps.
    */
   onSubmitStackProgress?: (listener: (progress: PublishProgress | null) => void) => () => void
+  /**
+   * Subscribes to the running merge's own progress. A merge waits on GitHub's background
+   * result, so the dialog cannot poll for it: the read queues behind the action itself.
+   */
+  onMergeProgress?: (listener: (progress: MergeProgress | null) => void) => () => void
   reconciliationPreview?: (stackKey: string) => Promise<ReconciliationPreview>
   pullRequest(number: number): Promise<PullRequest & { body: string }>
   listNativeStacks?: () => Promise<NativeStack[]>

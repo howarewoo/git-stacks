@@ -220,7 +220,20 @@ export interface GitHubFixtureState {
     /** Repository that owns the issue; search results expose it so foreign issues are rejected. */
     repository?: string
   }>
-  asyncMerge?: { number: number; sha: string; method: string }
+  /** A merge-queue request GitHub accepted for a base ref, which is the only proof of a queue. */
+  mergeQueue?: boolean
+  /**
+   * The terminal result a pending asynchronous merge reports when its poll is read, so a test
+   * can stand in for a queue that accepted, or refused, the group.
+   */
+  asyncMergeResult?: { status: 'merged' | 'enqueued' | 'failed'; message?: string }
+  asyncMerge?: {
+    number: number
+    sha: string
+    method: string
+    action: 'default' | 'direct_merge' | 'merge_queue'
+    uuid: string
+  }
   requests: Array<{ argv: string[]; cwd: string; at: string; body?: Record<string, unknown> }>
 }
 

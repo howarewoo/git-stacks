@@ -209,6 +209,7 @@ export const unavailableGitHubSnapshot = withSnapshot({
 export const restackPreview: StackPreview = {
   token: 'preview-restack-1',
   kind: 'restack',
+  merge: null,
   branch: 'feature/checkout',
   steps: [
     {
@@ -304,6 +305,27 @@ export const mergePreview: StackPreview = {
   steps: [restackPreview.steps[1]],
   blockers: [],
   warnings: ['This merges one pull request. The remaining branches still need a restack.'],
+  merge: {
+    branch: 'feature/checkout-tests',
+    native: true,
+    actions: ['default', 'merge_queue', 'direct_merge'],
+    layers: [
+      {
+        branch: 'feature/checkout',
+        pullRequest: 40,
+        base: 'main',
+        headOid: '2222222222222222222222222222222222222222',
+        includedInRequest: true,
+      },
+      {
+        branch: 'feature/checkout-tests',
+        pullRequest: 41,
+        base: 'feature/checkout',
+        headOid: '3333333333333333333333333333333333333333',
+        includedInRequest: true,
+      },
+    ],
+  },
 }
 
 export const syncPreview: StackPreview = {

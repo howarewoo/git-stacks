@@ -48,6 +48,8 @@ import {
   unstartedRestackProgress,
 } from './fixtures/workflow-scenarios'
 
+import type { StackPreview } from '../src/shared/types'
+
 const context = { headOid: featureBranch.oid as string, currentBranch: 'feature/checkout' }
 
 function guard(overrides: Partial<WorkflowGuardInput> = {}): WorkflowGuardInput {
@@ -457,6 +459,7 @@ test('the representative flows produce their exact reviewed payloads', () => {
         kind: 'stack',
         operation: 'restack',
         preview: restackPreview,
+        mergeAction: 'default',
         confirmation: '',
         confirmationTarget: null,
         allowForce: false,
@@ -467,6 +470,44 @@ test('the representative flows produce their exact reviewed payloads', () => {
         token: 'preview-restack-1',
         allowForce: false,
         mergeMethod: 'squash',
+      },
+    ],
+    [
+      {
+        kind: 'stack',
+        operation: 'merge',
+        preview: mergePreview,
+        mergeAction: 'merge_queue',
+        confirmation: '',
+        confirmationTarget: null,
+        allowForce: false,
+        mergeMethod: '',
+      },
+      {
+        type: 'executeStack',
+        token: 'preview-merge-1',
+        allowForce: false,
+        mergeMethod: 'squash',
+        mergeAction: 'merge_queue',
+      },
+    ],
+    [
+      {
+        kind: 'stack',
+        operation: 'merge',
+        preview: mergePreview,
+        mergeAction: 'direct_merge',
+        confirmation: '',
+        confirmationTarget: null,
+        allowForce: false,
+        mergeMethod: 'rebase',
+      },
+      {
+        type: 'executeStack',
+        token: 'preview-merge-1',
+        allowForce: false,
+        mergeMethod: 'rebase',
+        mergeAction: 'direct_merge',
       },
     ],
     [
@@ -484,6 +525,52 @@ test('the representative flows produce their exact reviewed payloads', () => {
   for (const [input, expected] of inputs) {
     assert.deepEqual(workflowAction(input, context), expected)
   }
+})
+
+test('a merge only dispatches an offered delivery action, and a method for a direct one', () => {
+  const base = {
+    kind: 'stack',
+    operation: 'merge',
+    preview: mergePreview,
+    confirmation: '',
+    confirmationTarget: null,
+    allowForce: false,
+  } as const
+  assert.equal(
+    workflowAction({ ...base, mergeAction: 'direct_merge', mergeMethod: '' }, context),
+    null,
+    'a direct merge with no chosen method would dispatch one the repository may not allow',
+  )
+  assert.deepEqual(
+    workflowAction({ ...base, mergeAction: 'merge_queue', mergeMethod: 'rebase' }, context),
+    {
+      type: 'executeStack',
+      token: 'preview-merge-1',
+      allowForce: false,
+      mergeMethod: 'squash',
+      mergeAction: 'merge_queue',
+    },
+    'a queued merge lets the repository method win over the one left on screen',
+  )
+  const withoutQueue: StackPreview = {
+    ...mergePreview,
+    merge: { ...mergePreview.merge!, actions: ['default', 'direct_merge'] },
+  }
+  assert.equal(
+    workflowAction(
+      { ...base, preview: withoutQueue, mergeAction: 'merge_queue', mergeMethod: '' },
+      context,
+    ),
+    null,
+    'an action the preview does not offer is never dispatched',
+  )
+  assert.deepEqual(workflowAction({ ...base, mergeAction: 'default', mergeMethod: '' }, context), {
+    type: 'executeStack',
+    token: 'preview-merge-1',
+    allowForce: false,
+    mergeMethod: 'squash',
+    mergeAction: 'default',
+  })
 })
 
 test('a force-with-lease push only dispatches against a confirmed captured tip', () => {
@@ -542,6 +629,7 @@ test('a blocked preview and a missing captured HEAD never dispatch a mutation', 
     draft: true,
     titles: {},
     mergeMethod: '',
+    mergeAction: 'default',
   } as const
   assert.equal(workflowAction(stack, context), null)
   assert.equal(

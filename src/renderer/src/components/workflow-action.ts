@@ -1,6 +1,8 @@
 import type {
   Branch,
   Commit,
+  MergeAction,
+  MergeMethod,
   GitAction,
   PublishLayerChoice,
   PushPreview,
@@ -38,6 +40,8 @@ export type WorkflowActionInput =
       confirmation: string
       confirmationTarget: string | null
       mergeMethod: string
+      /** Direct or merge-queue delivery; `default` follows the repository's own policy. */
+      mergeAction: MergeAction
     }
   | {
       kind: 'submit'
@@ -175,7 +179,7 @@ export function workflowAction(
         body: input.body,
         draft: input.draft,
       }
-    case 'stack':
+    case 'stack': {
       if (!input.preview || input.preview.blockers.length > 0) return null
       // A sync that would replace published history cannot be dispatched without the
       // explicit lease approval, and replacing it needs the typed branch name on top.
@@ -186,12 +190,31 @@ export function workflowAction(
         (input.confirmationTarget === null || input.confirmation !== input.confirmationTarget)
       )
         return null
+      if (input.preview.kind !== 'merge') {
+        return {
+          type: 'executeStack',
+          token: input.preview.token,
+          allowForce: input.allowForce,
+          mergeMethod: 'squash',
+        }
+      }
+      const merge = input.preview.merge
+      if (!merge || !merge.actions.includes(input.mergeAction)) return null
+      // A queued merge runs the repository's own merge settings, so a method is only sent
+      // for a direct merge; sending one for a queue merge would be a request GitHub does
+      // not document it honours. The builder refuses a direct merge with no supported method
+      // independently of the guard, so a bypassed guard cannot dispatch one.
+      const direct = input.mergeAction === 'direct_merge'
+      const method = input.mergeMethod as MergeMethod
+      if (direct && !input.preview.mergeMethods.includes(method)) return null
       return {
         type: 'executeStack',
         token: input.preview.token,
         allowForce: input.allowForce,
-        mergeMethod: (input.mergeMethod || 'squash') as 'merge' | 'squash' | 'rebase',
+        mergeMethod: direct ? method : 'squash',
+        mergeAction: input.mergeAction,
       }
+    }
     case 'submit': {
       if (!input.preview.publish || input.preview.publish.layers.length === 0) return null
       if (input.preview.blockers.length > 0) return null
