@@ -251,6 +251,12 @@ export interface PullRequestChecksPermissions {
   actionsEnabled: boolean
   canRerun: boolean
   reason: string
+  /**
+   * Whether GitHub reported the viewer as a repository admin. GitHub answers 404 both
+   * for a branch with no protection and for one whose protection the viewer may not
+   * read, so this is what tells the two apart.
+   */
+  isAdmin: boolean
 }
 
 export interface PullRequestChecksRateLimit {

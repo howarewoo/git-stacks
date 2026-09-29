@@ -979,11 +979,12 @@ test('a change on a later page is read even when the first page validator is unc
   })
 })
 
-test('a report and an org rule that both name one context accept either required app', async () => {
+test('two rules requiring one context from two apps are two requirements, not one', async () => {
   await withHarness(async (harness) => {
-    const head = await setup(harness, (headSha) => ({
-      // Branch protection requires `build` from app 1; the effective branch rules report
-      // an organisation rule requiring the same context from app 2. Either satisfies it.
+    // GitHub enforces every applicable rule and the most restrictive wins, so a
+    // repository rule and an organisation rule that both require `build` each have to
+    // be satisfied.
+    const onlyFirst = await setup(harness, (headSha) => ({
       requiredStatusChecks: { branch: 'main', contexts: ['build'], appIds: { build: 1 } },
       branchRules: { branch: 'main', required: [{ context: 'build', integrationId: 2 }] },
       checkRuns: [
@@ -993,8 +994,86 @@ test('a report and an org rule that both name one context accept either required
           name: 'build',
           status: 'completed',
           conclusion: 'success',
+          appSlug: 'repo-bot',
+          appId: 1,
+        },
+      ],
+    }))
+    const first = await getPullRequestChecks(harness.repo, PR_NUMBER, {
+      headSha: onlyFirst,
+      base: 'main',
+    })
+    const reported = first.checks.find((check) => check.source === 'check-run')
+    assert.equal(reported?.requirement, 'required')
+    // App 1's report satisfies its own rule and nothing else, so the second rule is
+    // still outstanding and is reported as its own waiting check.
+    const outstanding = first.checks.filter((check) => check.source === 'expected')
+    assert.equal(outstanding.length, 1)
+    assert.equal(outstanding[0]?.name, 'build')
+    assert.equal(outstanding[0]?.appId, 2)
+    assert.equal(outstanding[0]?.state, 'waiting')
+    assert.equal(first.rollup.requiredTotal, 2)
+    assert.equal(first.rollup.requiredPending, 1)
+    assert.equal(first.rollup.requiredFailing, 0)
+
+    // With both apps reporting, no requirement is outstanding.
+    const state = await harness.readState()
+    state.checks = {
+      ...state.checks,
+      checkRuns: [
+        ...(state.checks?.checkRuns ?? []),
+        {
+          id: 2,
+          headSha: onlyFirst,
+          name: 'build',
+          status: 'completed',
+          conclusion: 'success',
           appSlug: 'org-bot',
           appId: 2,
+        },
+      ],
+    }
+    await harness.writeState(state)
+    const second = await getPullRequestChecks(harness.repo, PR_NUMBER, {
+      headSha: onlyFirst,
+      base: 'main',
+      force: true,
+    })
+    assert.equal(
+      second.checks.some((check) => check.source === 'expected'),
+      false,
+    )
+    assert.equal(second.rollup.requiredTotal, 2)
+    assert.equal(second.rollup.requiredPending, 0)
+    assert.equal(second.rollup.requiredFailing, 0)
+  })
+})
+
+test('an unbound requirement does not loosen a bound one', async () => {
+  await withHarness(async (harness) => {
+    // One rule requires `build` from any app, another requires `lint` bound to app 2.
+    // The unbound rule must not let an app 1 lint check stand in for the bound one.
+    const head = await setup(harness, (headSha) => ({
+      // An admin viewer, so a 404 from branch protection is an answer: this branch
+      // carries none, and only the effective rules below require anything.
+      viewerPermissions: { admin: true, maintain: true, push: true, triage: true, pull: true },
+      branchRules: {
+        branch: 'main',
+        required: [
+          { context: 'build', integrationId: null },
+          { context: 'lint', integrationId: 2 },
+        ],
+      },
+      checkRuns: [
+        { id: 1, headSha, name: 'build', status: 'completed', conclusion: 'success', appId: 9 },
+        {
+          id: 2,
+          headSha,
+          name: 'lint',
+          status: 'completed',
+          conclusion: 'failure',
+          appSlug: 'other-bot',
+          appId: 1,
         },
       ],
     }))
@@ -1002,10 +1081,45 @@ test('a report and an org rule that both name one context accept either required
       headSha: head,
       base: 'main',
     })
-    const reported = report.checks.find((check) => check.name === 'build')
-    assert.equal(reported?.requirement, 'required')
+    const build = report.checks.find((check) => check.name === 'build')
+    assert.equal(build?.requirement, 'required')
+    // The app 1 lint check is not the required app 2 lint, so it is informational and
+    // the required app 2 lint is still outstanding.
+    const lint = report.checks.find(
+      (check) => check.source === 'check-run' && check.name === 'lint',
+    )
+    assert.equal(lint?.requirement, 'informational')
+    const outstanding = report.checks.filter((check) => check.source === 'expected')
+    assert.deepEqual(
+      outstanding.map((check) => [check.name, check.appId]),
+      [['lint', 2]],
+    )
+  })
+})
+
+test('a branch protection 404 only answers for a viewer who may read protection', async () => {
+  await withHarness(async (harness) => {
+    // GitHub answers 404 both for an unprotected branch and for one whose protection
+    // the viewer may not read. A non-admin cannot tell those apart, so the required set
+    // must stay unknown rather than present the readable ruleset as the whole answer.
+    const head = await setup(harness, (headSha) => ({
+      viewerPermissions: { admin: false, maintain: false, push: true, triage: true, pull: true },
+      branchRules: { branch: 'main', required: [{ context: 'build', integrationId: 2 }] },
+      checkRuns: [
+        { id: 1, headSha, name: 'build', status: 'completed', conclusion: 'success', appId: 2 },
+      ],
+    }))
+    const report = await getPullRequestChecks(harness.repo, PR_NUMBER, {
+      headSha: head,
+      base: 'main',
+    })
+    assert.equal(report.rollup.requirementKnown, false)
     assert.equal(
-      report.checks.some((check) => check.expected),
+      report.checks.every((check) => check.requirement === 'unknown'),
+      true,
+    )
+    assert.equal(
+      report.checks.some((check) => check.source === 'expected'),
       false,
     )
   })

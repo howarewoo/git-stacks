@@ -581,7 +581,7 @@ function checksReport(
     staleReason: null,
     rateLimit: { remaining: 4871, reset: UPDATED },
     nextAttemptAt: null,
-    permissions: { actionsEnabled: true, canRerun: true, reason: '' },
+    permissions: { actionsEnabled: true, canRerun: true, reason: '', isAdmin: true },
     truncated: false,
     ...overrides,
   }
@@ -669,6 +669,7 @@ const staleChecksReport = checksReport(
       actionsEnabled: true,
       canRerun: false,
       reason: 'Your role on this repository cannot run workflows, so rerun is unavailable.',
+      isAdmin: false,
     },
   },
 )

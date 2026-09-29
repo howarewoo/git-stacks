@@ -279,25 +279,33 @@ function workflowRunEntries(data: unknown): unknown[] {
 }
 
 /**
- * One required context, and the apps that may satisfy it. A repository and an
- * organisation can both require the same context name, bound to different integrations,
- * so a context is a set rather than a single app. `null` means any app satisfies it.
+ * One required check, as GitHub states it: a context name bound to the app that must
+ * report it, or unbound when any app may.
  */
-type RequiredContexts = Map<string, Set<number> | null>
+interface RequiredConstraint {
+  context: string
+  appId: number | null
+}
 
-function addRequired(contexts: RequiredContexts, name: string, appId: number | null): void {
-  const key = name.trim().toLowerCase()
-  if (!contexts.has(key)) {
-    contexts.set(key, appId === null ? null : new Set([appId]))
-    return
-  }
-  const existing = contexts.get(key) ?? null
-  // Two rules naming the same context, one of them unbound, together accept any app.
-  if (existing === null || appId === null) {
-    contexts.set(key, null)
-    return
-  }
-  existing.add(appId)
+/**
+ * Every applicable required check, kept as separate constraints. GitHub enforces all
+ * applicable rules and the most restrictive one wins, so a repository rule and an
+ * organisation rule that both require `build` are two requirements, not one that either
+ * app can satisfy. An unbound requirement is likewise its own requirement: it does not
+ * loosen a bound one.
+ */
+function addRequired(constraints: RequiredConstraint[], name: string, appId: number | null): void {
+  const context = name.trim().toLowerCase()
+  if (constraints.some((entry) => entry.context === context && entry.appId === appId)) return
+  constraints.push({ context, appId })
+}
+
+/** Whether one reported check satisfies one required constraint. */
+function satisfies(check: PullRequestCheckDetail, constraint: RequiredConstraint): boolean {
+  if (check.name.trim().toLowerCase() !== constraint.context) return false
+  if (constraint.appId === null) return true
+  const appId = check.source === 'workflow-run' ? ACTIONS_APP_ID : check.appId
+  return appId !== null && appId === constraint.appId
 }
 
 /**
@@ -316,17 +324,18 @@ function addRequired(contexts: RequiredContexts, name: string, appId: number | n
 async function requiredContexts(
   fullName: string,
   base: string | null,
+  viewerIsAdmin: boolean,
   signal?: AbortSignal,
-): Promise<{ known: boolean; contexts: RequiredContexts }> {
-  if (!base) return { known: false, contexts: new Map() }
-  const contexts: RequiredContexts = new Map()
+): Promise<{ known: boolean; constraints: RequiredConstraint[] }> {
+  if (!base) return { known: false, constraints: [] }
+  const constraints: RequiredConstraint[] = []
   try {
     const response = await githubTransport().rest({
       path: `repos/${fullName}/branches/${encodeURIComponent(base)}/protection/required_status_checks`,
       ...(signal ? { signal } : {}),
     })
     const data = response.data
-    if (!isRecord(data)) return { known: false, contexts: new Map() }
+    if (!isRecord(data)) return { known: false, constraints: [] }
     // `checks` carries the app each required context is bound to; the deprecated
     // `contexts` list carries the same names with no app identity at all. Reading both
     // would make every context unbound, so `checks` is authoritative whenever GitHub
@@ -334,22 +343,31 @@ async function requiredContexts(
     if (Array.isArray(data.checks) && data.checks.length > 0) {
       for (const entry of data.checks) {
         if (!isRecord(entry) || typeof entry.context !== 'string' || !entry.context) continue
-        addRequired(contexts, entry.context, typeof entry.app_id === 'number' ? entry.app_id : null)
+        addRequired(
+          constraints,
+          entry.context,
+          typeof entry.app_id === 'number' ? entry.app_id : null,
+        )
       }
     } else if (Array.isArray(data.contexts)) {
       for (const context of data.contexts) {
-        if (typeof context === 'string' && context) addRequired(contexts, context, null)
+        if (typeof context === 'string' && context) addRequired(constraints, context, null)
       }
     }
   } catch (error) {
     if (error instanceof GitHubTransportError && error.kind === 'cancelled') throw error
-    return { known: false, contexts: new Map() }
+    // GitHub answers 404 both for a branch that carries no protection and for one whose
+    // protection the token may not read. An admin viewer can only be reading the first,
+    // so only then is a 404 an answer; for anyone else the required set stays unknown.
+    const unprotected =
+      viewerIsAdmin && error instanceof GitHubTransportError && error.kind === 'not-found'
+    if (!unprotected) return { known: false, constraints: [] }
   }
 
   const rules = await effectiveBranchRules(fullName, base, signal)
-  if (!rules.known) return { known: false, contexts: new Map() }
-  for (const [name, appId] of rules.contexts) addRequired(contexts, name, appId)
-  return { known: true, contexts }
+  if (!rules.known) return { known: false, constraints: [] }
+  for (const entry of rules.constraints) addRequired(constraints, entry.context, entry.appId)
+  return { known: true, constraints }
 }
 
 /**
@@ -362,8 +380,8 @@ async function effectiveBranchRules(
   fullName: string,
   base: string,
   signal?: AbortSignal,
-): Promise<{ known: boolean; contexts: Map<string, number | null> }> {
-  const contexts = new Map<string, number | null>()
+): Promise<{ known: boolean; constraints: RequiredConstraint[] }> {
+  const constraints: RequiredConstraint[] = []
   for (let page = 1; page <= MAX_PAGES; page += 1) {
     let rules: unknown
     try {
@@ -374,9 +392,9 @@ async function effectiveBranchRules(
       rules = response.data
     } catch (error) {
       if (error instanceof GitHubTransportError && error.kind === 'cancelled') throw error
-      return { known: false, contexts: new Map() }
+      return { known: false, constraints: [] }
     }
-    if (!Array.isArray(rules)) return { known: false, contexts: new Map() }
+    if (!Array.isArray(rules)) return { known: false, constraints: [] }
     for (const rule of rules) {
       if (!isRecord(rule) || rule.type !== 'required_status_checks') continue
       const parameters = isRecord(rule.parameters) ? rule.parameters : null
@@ -386,15 +404,16 @@ async function effectiveBranchRules(
           : []
       for (const entry of entries) {
         if (!isRecord(entry) || typeof entry.context !== 'string' || !entry.context) continue
-        contexts.set(
-          entry.context.toLowerCase(),
+        addRequired(
+          constraints,
+          entry.context,
           typeof entry.integration_id === 'number' ? entry.integration_id : null,
         )
       }
     }
-    if (rules.length < 100) return { known: true, contexts }
+    if (rules.length < 100) return { known: true, constraints }
   }
-  return { known: false, contexts: new Map() }
+  return { known: false, constraints: [] }
 }
 
 /**
@@ -420,18 +439,26 @@ async function actionsEnabled(fullName: string, signal?: AbortSignal): Promise<b
  * needs the same write role as pushing, and `GET /repos/{o}/{r}` is the only read that
  * reports it; read access alone must not be dressed up as a rerun button.
  */
-async function viewerCanWrite(fullName: string, signal?: AbortSignal): Promise<boolean | null> {
+async function viewerRole(
+  fullName: string,
+  signal?: AbortSignal,
+): Promise<{ canWrite: boolean | null; isAdmin: boolean | null }> {
   try {
     const { data } = await githubTransport().rest({
       path: `repos/${fullName}`,
       ...(signal ? { signal } : {}),
     })
-    if (!isRecord(data) || !isRecord(data.permissions)) return null
+    if (!isRecord(data) || !isRecord(data.permissions)) {
+      return { canWrite: null, isAdmin: null }
+    }
     const role = data.permissions
-    return role.push === true || role.maintain === true || role.admin === true
+    return {
+      canWrite: role.push === true || role.maintain === true || role.admin === true,
+      isAdmin: role.admin === true,
+    }
   } catch (error) {
     if (error instanceof GitHubTransportError && error.kind === 'cancelled') throw error
-    return null
+    return { canWrite: null, isAdmin: null }
   }
 }
 
@@ -444,15 +471,17 @@ async function actionsPermissions(
   fullName: string,
   signal?: AbortSignal,
 ): Promise<PullRequestChecksPermissions> {
-  const [enabled, canWrite] = await Promise.all([
+  const [enabled, role] = await Promise.all([
     actionsEnabled(fullName, signal),
-    viewerCanWrite(fullName, signal),
+    viewerRole(fullName, signal),
   ])
+  const canWrite = role.canWrite
   if (enabled === false) {
     return {
       actionsEnabled: false,
       canRerun: false,
       reason: 'GitHub Actions are disabled for this repository.',
+      isAdmin: role.isAdmin === true,
     }
   }
   if (canWrite === false) {
@@ -460,6 +489,7 @@ async function actionsPermissions(
       actionsEnabled: enabled === true,
       canRerun: false,
       reason: 'Your role on this repository cannot run workflows, so rerun is unavailable.',
+      isAdmin: role.isAdmin === true,
     }
   }
   if (enabled !== true || canWrite !== true) {
@@ -467,9 +497,10 @@ async function actionsPermissions(
       actionsEnabled: enabled === true,
       canRerun: false,
       reason: 'GitHub did not confirm permission to rerun workflows; rerun stays unavailable.',
+      isAdmin: role.isAdmin === true,
     }
   }
-  return { actionsEnabled: true, canRerun: true, reason: '' }
+  return { actionsEnabled: true, canRerun: true, reason: '', isAdmin: role.isAdmin === true }
 }
 
 interface BuiltReport {
@@ -488,7 +519,7 @@ function buildReport(
   statuses: unknown[][],
   workflowRuns: unknown[][],
   requirementKnown: boolean,
-  required: RequiredContexts,
+  required: RequiredConstraint[],
 ): BuiltReport {
   const checks: PullRequestCheckDetail[] = []
   const checkRunEntriesFlat = checkRuns.flat()
@@ -583,21 +614,22 @@ function buildReport(
   }
 
   if (requirementKnown) {
-    for (const [context, appIds] of required) {
-      // Only a check the required apps could have reported satisfies the context, so a
-      // same-named check from another app never hides a context that is still outstanding.
-      if (checks.some((check) => check.name.toLowerCase() === context && satisfies(check, appIds)))
-        continue
-      // GitHub lists this context as required but has reported nothing for it yet.
+    for (const constraint of required) {
+      // Every applicable required check must be satisfied, so one check satisfies one
+      // constraint: a check from another app never hides a requirement still outstanding.
+      if (checks.some((check) => satisfies(check, constraint))) continue
       checks.push({
-        key: `expected:${context}`,
-        name: context,
+        key: `expected:${constraint.context}:${constraint.appId ?? 'any'}`,
+        name: constraint.context,
         source: 'expected',
         app: null,
-        appId: appIds ? ([...appIds][0] ?? null) : null,
+        appId: constraint.appId,
         state: 'waiting',
         requirement: 'required',
-        summary: 'Expected: waiting for this check to report',
+        summary:
+          constraint.appId === null
+            ? 'Expected: waiting for this check to report'
+            : 'Expected: waiting for this app to report this check',
         detailsUrl: null,
         startedAt: null,
         completedAt: null,
@@ -621,13 +653,16 @@ function buildReport(
  */
 function classifyRequirement(
   name: string,
-  required: RequiredContexts,
+  required: RequiredConstraint[],
   appId: number | null,
 ): PullRequestCheckRequirement {
-  const appIds = required.get(name.trim().toLowerCase())
-  if (appIds === undefined) return 'informational'
-  if (appIds === null) return 'required'
-  return appId !== null && appIds.has(appId) ? 'required' : 'informational'
+  const key = name.trim().toLowerCase()
+  return required.some(
+    (constraint) =>
+      constraint.context === key && (constraint.appId === null || constraint.appId === appId),
+  )
+    ? 'required'
+    : 'informational'
 }
 
 function failureReport(
@@ -679,7 +714,7 @@ function failureReport(
     staleReason: describeFailure(error),
     rateLimit,
     nextAttemptAt: null,
-    permissions: { actionsEnabled: false, canRerun: false, reason: '' },
+    permissions: { actionsEnabled: false, canRerun: false, reason: '', isAdmin: false },
     truncated: false,
   }
 }
@@ -699,16 +734,6 @@ function describeFailure(error: unknown): string {
     return `Checks could not be refreshed: ${error.detail}`
   }
   return `Checks could not be refreshed: ${error instanceof Error ? error.message : String(error)}`
-}
-
-/**
- * Whether a reported check satisfies a required context. `null` accepts any app; a set
- * accepts only the integrations the requiring rules named.
- */
-function satisfies(check: PullRequestCheckDetail, appIds: Set<number> | null): boolean {
-  if (appIds === null) return true
-  if (check.source === 'workflow-run') return appIds.has(ACTIONS_APP_ID)
-  return check.appId !== null && appIds.has(check.appId)
 }
 
 /** The app that reported a check, which is what a required context is bound to. */
@@ -840,8 +865,13 @@ export async function getPullRequestChecks(
     // Requirement and permission are policy, not payload: neither has an ETag, and a
     // rerun must never act on a policy that was true at some earlier read. Both are
     // re-read on every path, including the one where all three payloads answered 304.
-    const requirement = await requiredContexts(fullName, base, options.signal)
     const readPermissions = await actionsPermissions(fullName, options.signal)
+    const requirement = await requiredContexts(
+      fullName,
+      base,
+      readPermissions.isAdmin,
+      options.signal,
+    )
     // An unproved head cannot authorise a mutation: the run behind the button may belong
     // to a commit Git Stacks never confirmed this pull request has.
     const permissions = identityReason
@@ -858,7 +888,7 @@ export async function getPullRequestChecks(
         sources.statuses,
         sources.workflowRuns,
         requirement.known,
-        requirement.contexts,
+        requirement.constraints,
       )
       const confirmed: CachedReport = {
         ...remembered,
@@ -891,7 +921,7 @@ export async function getPullRequestChecks(
       sources.statuses,
       sources.workflowRuns,
       requirement.known,
-      requirement.contexts,
+      requirement.constraints,
     )
     // Validators accumulate across resources rather than replacing each other, so a
     // confirmed page keeps the validator that proved it.
