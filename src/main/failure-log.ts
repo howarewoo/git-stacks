@@ -1,3 +1,5 @@
+import { sanitizeSecrets } from './support-bundle'
+
 /**
  * A bounded in-memory record of failures the main process handled. It exists so
  * a support bundle can carry what went wrong on this machine, and it holds
@@ -14,7 +16,8 @@ const entries: string[] = []
  * by the bundle before it is written, never stored here.
  */
 export function recordFailure(scope: string, message: string): void {
-  const line = `${new Date().toISOString()} ${scope}: ${message.split('\n')[0].slice(0, 300)}`
+  const clean = sanitizeSecrets(message.split('\n')[0].slice(0, 300))
+  const line = `${new Date().toISOString()} ${scope}: ${clean}`
   entries.push(line)
   if (entries.length > MAX_ENTRIES) entries.splice(0, entries.length - MAX_ENTRIES)
 }

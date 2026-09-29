@@ -36,11 +36,11 @@ export async function loadSettingsPolicy(file: string | undefined): Promise<Load
   let text: string
   try {
     text = await readFile(file, 'utf8')
-  } catch (error) {
+  } catch {
     return {
       locks: allKeysLocked(FAIL_CLOSED_REASON),
       blocked: true,
-      error: `${FAIL_CLOSED_REASON} (${(error as Error).message})`,
+      error: `${FAIL_CLOSED_REASON} The policy file could not be read.`,
       path: file,
     }
   }
@@ -52,7 +52,7 @@ export async function loadSettingsPolicy(file: string | undefined): Promise<Load
     return {
       locks: allKeysLocked(FAIL_CLOSED_REASON),
       blocked: true,
-      error: `${FAIL_CLOSED_REASON} The file at ${file} is not valid JSON.`,
+      error: `${FAIL_CLOSED_REASON} The policy file is not valid JSON.`,
       path: file,
     }
   }

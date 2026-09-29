@@ -1,12 +1,15 @@
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import {
   DEFAULT_SETTINGS,
   MAX_FETCH_INTERVAL_SECONDS,
   MAX_TOOL_NAME_LENGTH,
   SETTINGS_VERSION,
+  SUPPORTED_EDITORS,
+  SUPPORTED_MERGE_TOOLS,
   type AppSettings,
   type SettingsIssue,
+  type SettingsMigrations,
   type SettingsLock,
   type SettingsPatch,
   type SettingsSnapshot,
@@ -51,7 +54,11 @@ const THEMES: Record<string, true> = { system: true, light: true, dark: true }
 export type SettingsPolicy = { locks?: Record<string, string> }
 
 /** A tool name, or null for "use the platform default". Empty means unset. */
-function toolName(value: unknown): { value: string | null; issue?: string } {
+function toolName(
+  value: unknown,
+  allowed: readonly string[],
+  kind: string,
+): { value: string | null; issue?: string } {
   if (value === null || value === undefined) return { value: null }
   if (typeof value !== 'string') return { value: null, issue: 'must be text or empty' }
   const trimmed = value.trim()
@@ -63,6 +70,12 @@ function toolName(value: unknown): { value: string | null; issue?: string } {
     return {
       value: null,
       issue: 'must be one program name: letters, digits, dot, dash, or underscore',
+    }
+  }
+  if (!allowed.includes(trimmed)) {
+    return {
+      value: null,
+      issue: `must be a supported ${kind} (${allowed.slice(0, 5).join(', ')}, ...)`,
     }
   }
   return { value: trimmed }
@@ -85,7 +98,17 @@ function oneOf<T>(
   return { value: fallback, issue: `must be ${Object.keys(allowed).join(' or ')}` }
 }
 
-const BOOLEANS: Record<string, true> = { true: true, false: true }
+/**
+ * A boolean field. A boolean is not an enum of two names: the string `"false"`
+ * is truthy to every consumer, so accepting it would turn a setting the user
+ * believes is off into one that is on. Only a real boolean is accepted, and
+ * anything else recovers to the default and is reported.
+ */
+function booleanField(value: unknown, fallback: boolean): { value: boolean; issue: string | null } {
+  if (typeof value === 'boolean') return { value, issue: null }
+  if (value === undefined) return { value: fallback, issue: null }
+  return { value: fallback, issue: 'must be true or false' }
+}
 
 /**
  * Builds settings from an untrusted object. Every field is validated on its own:
@@ -112,10 +135,10 @@ export function validateSettings(value: unknown): {
   const fields = {
     'git.useSystemGit': [
       git.useSystemGit,
-      oneOf(git.useSystemGit, BOOLEANS, DEFAULT_SETTINGS.git.useSystemGit),
+      booleanField(git.useSystemGit, DEFAULT_SETTINGS.git.useSystemGit),
     ] as const,
-    'git.editor': [git.editor, toolName(git.editor)] as const,
-    'git.mergeTool': [git.mergeTool, toolName(git.mergeTool)] as const,
+    'git.editor': [git.editor, toolName(git.editor, SUPPORTED_EDITORS, 'editor')] as const,
+    'git.mergeTool': [git.mergeTool, toolName(git.mergeTool, SUPPORTED_MERGE_TOOLS, 'merge tool')] as const,
     'git.defaultPullStrategy': [
       git.defaultPullStrategy,
       oneOf(git.defaultPullStrategy, PULL_STRATEGIES, DEFAULT_SETTINGS.git.defaultPullStrategy),
@@ -130,11 +153,11 @@ export function validateSettings(value: unknown): {
     ] as const,
     'appearance.reduceMotion': [
       appearance.reduceMotion,
-      oneOf(appearance.reduceMotion, BOOLEANS, DEFAULT_SETTINGS.appearance.reduceMotion),
+      booleanField(appearance.reduceMotion, DEFAULT_SETTINGS.appearance.reduceMotion),
     ] as const,
     'privacy.includeLocalPaths': [
       privacy.includeLocalPaths,
-      oneOf(privacy.includeLocalPaths, BOOLEANS, DEFAULT_SETTINGS.privacy.includeLocalPaths),
+      booleanField(privacy.includeLocalPaths, DEFAULT_SETTINGS.privacy.includeLocalPaths),
     ] as const,
   }
   for (const [key, [raw, result]] of Object.entries(fields)) {
@@ -167,6 +190,14 @@ export function validateSettings(value: unknown): {
   }
 
   const shortcuts = sanitizeShortcutBindings(value.shortcuts)
+  const migratedField = booleanField(
+    isRecord(value.migrated) ? value.migrated.legacyShortcutStorage : undefined,
+    false,
+  )
+  const migrated: SettingsMigrations = { legacyShortcutStorage: migratedField.value }
+  if (migratedField.issue) {
+    issues.push({ key: 'migrated.legacyShortcutStorage', message: migratedField.issue })
+  }
   if (value.shortcuts !== undefined && !isRecord(value.shortcuts)) {
     issues.push({ key: 'shortcuts', message: 'must be an object of shortcut chords' })
   }
@@ -185,6 +216,7 @@ export function validateSettings(value: unknown): {
       appearance: { theme, reduceMotion },
       privacy: { includeLocalPaths },
       shortcuts,
+      migrated,
     },
     issues,
     recovered: false,
@@ -198,7 +230,6 @@ export function validatePolicy(value: unknown): {
 } {
   const issues: SettingsIssue[] = []
   const locks: Record<string, string> = {}
-  if (value === undefined || value === null) return { policy: { locks }, issues }
   if (!isRecord(value)) {
     return { policy: { locks }, issues: [{ key: 'policy', message: 'must be an object' }] }
   }
@@ -232,6 +263,7 @@ export function applyPatch(
     appearance: { ...current.appearance, ...(isRecord(patch.appearance) ? patch.appearance : {}) },
     privacy: { ...current.privacy, ...(isRecord(patch.privacy) ? patch.privacy : {}) },
     shortcuts: patch.shortcuts ?? current.shortcuts,
+    migrated: { ...current.migrated, ...(isRecord(patch.migrated) ? patch.migrated : {}) },
   }
   const result = validateSettings(merged)
 
@@ -302,10 +334,25 @@ function restore(settings: AppSettings, key: string, current: AppSettings): void
  * actually change it: re-saving the value a lock already fixed is allowed, so
  * an unrelated edit is not blocked by a setting it did not touch.
  */
+export function stripUndefined<T>(value: T): T {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return value
+  const result: Record<string, unknown> = {}
+  for (const [k, v] of Object.entries(value)) {
+    if (v === undefined) continue
+    if (v !== null && typeof v === 'object' && !Array.isArray(v)) {
+      result[k] = stripUndefined(v)
+    } else {
+      result[k] = v
+    }
+  }
+  return result as T
+}
+
 export function lockedKeys(
   settings: AppSettings,
   locks: readonly SettingsLock[],
   patch: SettingsPatch,
+  prospective?: AppSettings,
 ): SettingsLock[] {
   const refused: SettingsLock[] = []
   for (const lock of locks) {
@@ -317,11 +364,23 @@ export function lockedKeys(
     const groupPatch = isRecord(patch[group as keyof SettingsPatch])
       ? (patch[group as keyof SettingsPatch] as Record<string, unknown>)
       : null
-    if (!groupPatch || field === undefined || groupPatch[field] === undefined) continue
-    const current = (
+    const curVal = (
       settings[group as 'git' | 'appearance' | 'privacy'] as unknown as Record<string, unknown>
-    )[field]
-    if (groupPatch[field] !== current) refused.push(lock)
+    )?.[field]
+    if (groupPatch && field !== undefined && field in groupPatch) {
+      if (groupPatch[field] !== curVal) {
+        refused.push(lock)
+        continue
+      }
+    }
+    if (prospective && group && field) {
+      const proVal = (
+        prospective[group as 'git' | 'appearance' | 'privacy'] as unknown as Record<string, unknown>
+      )?.[field]
+      if (proVal !== curVal && !refused.includes(lock)) {
+        refused.push(lock)
+      }
+    }
   }
   return refused
 }
@@ -368,11 +427,16 @@ export async function readSettingsFile(file: string): Promise<{
  */
 export async function writeSettingsFile(file: string, settings: AppSettings): Promise<void> {
   await mkdir(dirname(file), { recursive: true })
-  const temporary = `${file}.tmp`
-  await writeFile(temporary, JSON.stringify({ ...settings, version: SETTINGS_VERSION }, null, 2), {
-    mode: 0o600,
-  })
-  await rename(temporary, file)
+  const nonce = `${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}`
+  const temporary = `${file}.tmp.${nonce}`
+  const body = `${JSON.stringify({ ...settings, version: SETTINGS_VERSION }, null, 2)}\n`
+  try {
+    await writeFile(temporary, body, { mode: 0o600 })
+    await rename(temporary, file)
+  } catch (error) {
+    await rm(temporary, { force: true }).catch(() => {})
+    throw error
+  }
 }
 
 export async function readSettingsSnapshot(
@@ -393,17 +457,18 @@ export async function updateSettings(
   locks: readonly SettingsLock[],
 ): Promise<SettingsSnapshot> {
   const current = await readSettingsFile(file)
-  const refused = lockedKeys(current.settings, locks, patch)
+  const cleanPatch = stripUndefined(patch)
+  const { settings: prospective, issues } = applyPatch(current.settings, cleanPatch)
+  const refused = lockedKeys(current.settings, locks, patch, prospective)
   if (refused.length > 0) {
     const names = refused.map((lock) => lock.key).join(', ')
     throw new Error(
       `${names} ${refused.length === 1 ? 'is' : 'are'} fixed by the settings policy on this computer and cannot be changed here.`,
     )
   }
-  const { settings, issues } = applyPatch(current.settings, patch)
-  await writeSettingsFile(file, settings)
+  await writeSettingsFile(file, prospective)
   return {
-    settings,
+    settings: prospective,
     locks: [...locks],
     issues: [...current.issues, ...issues],
     recovered: current.recovered,
@@ -415,12 +480,56 @@ export async function updateSettings(
  * Restores every setting to its default. This rewrites the application settings
  * file only: no repository, working tree, ref, or configuration is read or
  * written, so resetting preferences cannot change a checkout.
+ *
+ * A value a policy fixed keeps the value it has. Reset is a change like any
+ * other, so it must not be a way around a lock that refuses the same change
+ * field by field.
  */
 export async function resetSettings(
   file: string,
   locks: readonly SettingsLock[],
 ): Promise<SettingsSnapshot> {
-  const defaults = structuredClone(DEFAULT_SETTINGS)
-  await writeSettingsFile(file, defaults)
-  return { settings: defaults, locks: [...locks], issues: [], recovered: false, file }
+  const current = await readSettingsFile(file)
+  const settings = structuredClone(DEFAULT_SETTINGS)
+  for (const lock of locks) preserveLocked(settings, current.settings, lock.key)
+  await writeSettingsFile(file, settings)
+  return { settings, locks: [...locks], issues: [...current.issues], recovered: current.recovered, file }
+}
+
+/** Puts back the value a lock fixed, so a reset cannot quietly clear it. */
+function preserveLocked(target: AppSettings, current: AppSettings, key: string): void {
+  switch (key) {
+    case 'git.useSystemGit':
+      target.git.useSystemGit = current.git.useSystemGit
+      return
+    case 'git.editor':
+      target.git.editor = current.git.editor
+      return
+    case 'git.mergeTool':
+      target.git.mergeTool = current.git.mergeTool
+      return
+    case 'git.defaultPullStrategy':
+      target.git.defaultPullStrategy = current.git.defaultPullStrategy
+      return
+    case 'git.defaultMergeMethod':
+      target.git.defaultMergeMethod = current.git.defaultMergeMethod
+      return
+    case 'git.fetchIntervalSeconds':
+      target.git.fetchIntervalSeconds = current.git.fetchIntervalSeconds
+      return
+    case 'appearance.theme':
+      target.appearance.theme = current.appearance.theme
+      return
+    case 'appearance.reduceMotion':
+      target.appearance.reduceMotion = current.appearance.reduceMotion
+      return
+    case 'privacy.includeLocalPaths':
+      target.privacy.includeLocalPaths = current.privacy.includeLocalPaths
+      return
+    case 'shortcuts':
+      target.shortcuts = current.shortcuts
+      return
+    default:
+      return
+  }
 }

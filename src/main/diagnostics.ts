@@ -28,19 +28,17 @@ async function probe(
   args: readonly string[],
 ): Promise<{ ok: boolean; output: string; error: string | null }> {
   try {
-    const { stdout, stderr } = await exec(executable, [...args], {
+    const { stdout } = await exec(executable, [...args], {
       timeout: MAX_PROBE_SECONDS * 1000,
       maxBuffer: MAX_PROBE_BYTES,
       windowsHide: true,
     })
-    return { ok: true, output: `${stdout}${stderr}`.trim(), error: null }
-  } catch (error) {
-    const failure = error as NodeJS.ErrnoException & { stderr?: string }
-    const detail = typeof failure.stderr === 'string' ? failure.stderr.trim() : ''
+    return { ok: true, output: stdout.trim(), error: null }
+  } catch {
     return {
       ok: false,
       output: '',
-      error: detail || failure.message || 'the probe could not be run',
+      error: 'probe failed',
     }
   }
 }
@@ -69,7 +67,7 @@ function runtimeEntries(runtime: GitRuntimeStatus): DiagnosticEntry[] {
       label: 'Git build in use',
       value: info ? (info.useSystemGit ? 'system Git' : 'bundled Git') : 'unresolved',
       status: info ? 'confirmed' : 'unavailable',
-      detail: info ? undefined : (runtime.error ?? 'the runtime could not be resolved'),
+      detail: info ? undefined : 'Git runtime could not be resolved',
     },
     {
       source: 'runtime',
@@ -172,6 +170,14 @@ function accountEntries(account: GitHubAccountStatus | null): DiagnosticEntry[] 
   return entries
 }
 
+function safeHelperIdentifier(helper: string): string {
+  const trimmed = helper.trim()
+  if (!trimmed || trimmed.includes(' ') || trimmed.includes('/') || trimmed.includes('\\') || trimmed.includes('!')) {
+    return 'custom helper'
+  }
+  return trimmed.slice(0, 32)
+}
+
 function stackEntries(environment: GitEnvironmentStatus | null): DiagnosticEntry[] {
   const credentials = environment?.httpsCredentials
   return [
@@ -196,7 +202,7 @@ function stackEntries(environment: GitEnvironmentStatus | null): DiagnosticEntry
       value: credentials?.configured ? 'a helper is configured' : 'no helper configured',
       status: environment ? 'confirmed' : 'unavailable',
       detail: credentials?.helper
-        ? `helper: ${credentials.helper}`
+        ? `helper: ${safeHelperIdentifier(credentials.helper)}`
         : 'the helper name is reported; its configuration is never read',
     },
     {
@@ -215,7 +221,7 @@ function filesystemEntries(filesystem: DiagnosticSources['filesystem']): Diagnos
       label: 'Ref storage backend',
       value: filesystem.refFormat ?? 'not detected',
       status: filesystem.refFormat ? 'confirmed' : 'unavailable',
-      detail: filesystem.error ?? undefined,
+      detail: filesystem.error ? 'storage unavailable' : undefined,
     },
   ]
 }
@@ -320,7 +326,7 @@ export async function detectRefFormat(
       .then(() => true)
       .catch(() => false)
     return { refFormat: reftable ? 'reftable' : 'files', error: null }
-  } catch (error) {
-    return { refFormat: null, error: (error as Error).message }
+  } catch {
+    return { refFormat: null, error: 'ref storage format could not be determined' }
   }
 }

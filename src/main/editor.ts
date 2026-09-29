@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process'
 import { isAbsolute, relative, resolve, sep } from 'node:path'
 import { promises as fs } from 'node:fs'
+import { SUPPORTED_EDITORS } from '../shared/settings'
 
 /** The editor used when settings name none. Only what the platform ships. */
 const PLATFORM_EDITOR =
@@ -15,7 +16,12 @@ export function resolveEditorCommand(configured: string | null): {
   command: string | null
   reason: string
 } {
-  if (configured) return { command: configured, reason: 'the editor configured in Settings' }
+  if (configured) {
+    if ((SUPPORTED_EDITORS as readonly string[]).includes(configured)) {
+      return { command: configured, reason: 'the editor configured in Settings' }
+    }
+    return { command: null, reason: `${configured} is not a supported editor` }
+  }
   if (PLATFORM_EDITOR) {
     return { command: PLATFORM_EDITOR, reason: 'this platform’s default application handler' }
   }
@@ -35,18 +41,34 @@ export async function resolveInsideRepository(
   if (isAbsolute(relativePath)) {
     return { error: 'The path must be relative to the repository.' }
   }
-  const absolute = resolve(repositoryRoot, relativePath)
-  const inside = relative(repositoryRoot, absolute)
+  let canonicalRepoRoot: string
+  try {
+    canonicalRepoRoot = await fs.realpath(repositoryRoot)
+  } catch {
+    return { error: 'The repository directory no longer exists.' }
+  }
+  const rawAbsolute = resolve(canonicalRepoRoot, relativePath)
+  const rawInside = relative(canonicalRepoRoot, rawAbsolute)
+  if (rawInside === '' || rawInside.startsWith('..') || isAbsolute(rawInside)) {
+    return { error: 'That file is outside the repository.' }
+  }
+  let canonicalTarget: string
+  try {
+    canonicalTarget = await fs.realpath(rawAbsolute)
+  } catch {
+    return { error: 'That file no longer exists.' }
+  }
+  const inside = relative(canonicalRepoRoot, canonicalTarget)
   if (inside === '' || inside.startsWith('..') || isAbsolute(inside)) {
     return { error: 'That file is outside the repository.' }
   }
   try {
-    const stat = await fs.stat(absolute)
+    const stat = await fs.stat(canonicalTarget)
     if (!stat.isFile()) return { error: 'That path is not a file.' }
   } catch {
     return { error: 'That file no longer exists.' }
   }
-  return { absolute }
+  return { absolute: canonicalTarget }
 }
 
 export interface OpenResult {
@@ -79,21 +101,29 @@ export async function openInEditor(
     return { opened: false, reason: `${command} is not installed on this computer.` }
   }
 
-  try {
-    const child = spawn(command, [target.absolute], {
-      detached: true,
-      stdio: 'ignore',
-      windowsHide: true,
-    })
-    child.on('error', () => {})
-    child.unref()
-    return { opened: true, reason: `Opened with ${command} (${reason}).` }
-  } catch (error) {
-    return {
-      opened: false,
-      reason: `Could not start ${command}: ${(error as Error).message}`,
+  // Existence is not launchability: an executable script whose shebang names an
+  // interpreter this machine lacks passes `locateTool` and still fails to
+  // start. The child's own `spawn` event is the only thing that answers
+  // "did it actually start", so success waits for it rather than assuming.
+  const started = await new Promise<{ ok: true } | { ok: false; message: string }>((settle) => {
+    let child
+    try {
+      child = spawn(command, [target.absolute], {
+        detached: true,
+        stdio: 'ignore',
+        windowsHide: true,
+      })
+    } catch (error) {
+      settle({ ok: false, message: (error as Error).message })
+      return
     }
+    child.once('spawn', () => settle({ ok: true }))
+    child.once('error', (error: Error) => settle({ ok: false, message: error.message }))
+  })
+  if (!started.ok) {
+    return { opened: false, reason: `Could not start ${command}: ${started.message}` }
   }
+  return { opened: true, reason: `Opened with ${command} (${reason}).` }
 }
 /**
  * Whether a configured program exists on this machine. Settings accept any

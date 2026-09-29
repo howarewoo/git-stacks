@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -409,4 +409,105 @@ test('the settings file is written with owner-only permissions', async () => {
       assert.equal(mode, 0o600, 'the settings file is not world-readable')
     }
   })
+})
+test('sentinel secrets and paths are redacted from failures and diagnostic bundle', () => {
+  const secretFailures = [
+    'failed while using token ghp_1234567890abcdef1234567890 for https://github.com/repo',
+    'fatal: password=supersecretpass in remote helper response',
+    'error in /Users/victim/secrets/private_key.pem: bearer secret-token-value-xyz',
+  ]
+  const preview = buildBundle(REPORT, DEFAULT_SETTINGS, secretFailures)
+  const body = renderBundle(preview, false)
+  assert.equal(body.includes('ghp_1234567890abcdef1234567890'), false)
+  assert.equal(body.includes('supersecretpass'), false)
+  assert.equal(body.includes('/Users/victim'), false)
+  assert.match(body, /REDACTED_SECRET/)
+  assert.match(body, /withheld: path/)
+})
+
+test('unsupported editor and merge tool programs like shell or arbitrary interpreters are refused', () => {
+  const editorRefusal = validateSettings({ git: { editor: 'sh' } })
+  assert.equal(editorRefusal.settings.git.editor, null)
+  assert.match(editorRefusal.issues[0]?.message ?? '', /must be a supported editor/)
+
+  const mergeToolRefusal = validateSettings({ git: { mergeTool: 'python3' } })
+  assert.equal(mergeToolRefusal.settings.git.mergeTool, null)
+  assert.match(mergeToolRefusal.issues[0]?.message ?? '', /must be a supported merge tool/)
+
+  assert.equal(resolveEditorCommand('sh').command, null)
+  assert.match(resolveEditorCommand('sh').reason, /not a supported editor/)
+})
+
+test('symlinks pointing outside the repository root are refused by editor containment', async () => {
+  await withTempDir(async (dir) => {
+    const repoDir = join(dir, 'repo')
+    const outsideDir = join(dir, 'outside')
+    await mkdir(repoDir, { recursive: true })
+    await mkdir(outsideDir, { recursive: true })
+
+    const target = join(outsideDir, 'secret.txt')
+    await writeFile(target, 'secret')
+    const link = join(repoDir, 'symlink-outside.txt')
+    await symlink(target, link)
+
+    const result = await resolveInsideRepository(repoDir, 'symlink-outside.txt')
+    assert.equal('error' in result, true)
+    assert.match('error' in result ? result.error : '', /outside the repository/)
+  })
+})
+
+test('explicit undefined properties in patches cannot bypass locked settings', async () => {
+  await withTempDir(async (dir) => {
+    const file = join(dir, 'settings.json')
+    await writeSettingsFile(file, {
+      ...structuredClone(DEFAULT_SETTINGS),
+      git: { ...structuredClone(DEFAULT_SETTINGS.git), editor: 'code' },
+    })
+    const locks = [{ key: 'git.editor', reason: 'Fixed by policy' }]
+    await assert.rejects(
+      updateSettings(file, { git: { editor: undefined as unknown as string } }, locks),
+      /git\.editor is fixed by the settings policy/,
+    )
+  })
+})
+
+test('a configured policy file containing JSON null fails closed and locks all keys', async () => {
+  await withTempDir(async (dir) => {
+    const policyFile = join(dir, 'policy.json')
+    await writeFile(policyFile, 'null')
+    const loaded = await loadSettingsPolicy(policyFile)
+    assert.equal(loaded.blocked, true)
+    assert.equal(loaded.locks.length > 0, true)
+    assert.match(loaded.error ?? '', /must be an object/)
+  })
+})
+
+test('concurrent settings writes do not collide on temporary files and preserve opt-outs', async () => {
+  await withTempDir(async (dir) => {
+    const file = join(dir, 'settings.json')
+    await writeSettingsFile(file, DEFAULT_SETTINGS)
+    await Promise.all([
+      updateSettings(file, { appearance: { theme: 'dark' } }, NO_LOCKS),
+      updateSettings(file, { privacy: { includeLocalPaths: false } }, NO_LOCKS),
+      updateSettings(file, { git: { defaultPullStrategy: 'rebase' } }, NO_LOCKS),
+    ])
+    const { settings } = await readSettingsFile(file)
+    assert.equal(settings.privacy.includeLocalPaths, false)
+    assert.ok(['dark', 'system'].includes(settings.appearance.theme))
+  })
+})
+
+test('revoked path consent withholds local paths even if preview was generated with consent', () => {
+  const preview = buildBundle(
+    REPORT,
+    { ...structuredClone(DEFAULT_SETTINGS), privacy: { includeLocalPaths: true } },
+    [],
+  )
+  const liveSettings = {
+    ...structuredClone(DEFAULT_SETTINGS),
+    privacy: { includeLocalPaths: false },
+  }
+  const exportedBody = renderBundle(preview, liveSettings.privacy.includeLocalPaths)
+  assert.equal(exportedBody.includes('/opt/tools/git/bin/git'), false)
+  assert.match(exportedBody, /local paths: withheld/)
 })

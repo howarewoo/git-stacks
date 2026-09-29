@@ -11,7 +11,7 @@ import type {
   GitRuntimeStatus,
 } from '../shared/types'
 
-import { applyPatch, readSettingsFile, writeSettingsFile } from './settings'
+import { readSettingsFile } from './settings'
 const execFileAsync = promisify(execFileCallback)
 
 /** Oldest Git the guarded ref transactions can run on (`rev-parse --show-object-format`). */
@@ -604,24 +604,13 @@ export async function requireGitCapability(
 }
 
 /**
- * The runtime preference is one field of the settings document rather than a
- * file of its own, so it is validated and policy-locked the same way as every
- * other setting.
+ * Whether the settings document asks for the system Git. This is one field of
+ * the unified settings file, so it is validated and policy-locked the same way
+ * as every other setting; there is no second file and no second write path.
  */
-export async function readGitRuntimePreference(
-  settingsFile: string,
-): Promise<{ useSystemGit: boolean } | null> {
+export async function readGitRuntimePreference(settingsFile: string): Promise<boolean> {
   const { settings } = await readSettingsFile(settingsFile)
-  return { useSystemGit: settings.git.useSystemGit }
-}
-
-export async function writeGitRuntimePreference(
-  settingsFile: string,
-  value: { useSystemGit: boolean },
-): Promise<void> {
-  const current = await readSettingsFile(settingsFile)
-  const merged = applyPatch(current.settings, { git: { useSystemGit: value.useSystemGit } })
-  await writeSettingsFile(settingsFile, merged.settings)
+  return settings.git.useSystemGit
 }
 
 /** Diagnostics retain the configured preference even if its selected executable cannot start. */
@@ -637,7 +626,7 @@ export async function gitRuntimeStatus(settingsFile: string): Promise<GitRuntime
   } catch (error) {
     return {
       runtime: null,
-      useSystemGit: (await readGitRuntimePreference(settingsFile))?.useSystemGit ?? false,
+      useSystemGit: await readGitRuntimePreference(settingsFile),
       error: error instanceof Error ? error.message : String(error),
       minimumVersion: MINIMUM_GIT_VERSION,
     }

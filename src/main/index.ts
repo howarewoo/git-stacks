@@ -73,7 +73,6 @@ import {
   readGitRuntimePreference,
   resolveGitRuntime,
   withGitRuntime,
-  writeGitRuntimePreference,
 } from './git-runtime'
 import { CredentialVault } from './credentials'
 import { safeStorageProtector } from './secret-storage'
@@ -108,6 +107,7 @@ import type {
   SettingsPatch,
   SettingsSnapshot,
   SettingsTools,
+  SupportBundlePreview,
 } from '../shared/settings'
 
 import type { GitEnvironmentStatus } from '../shared/types'
@@ -653,6 +653,42 @@ async function withToolAvailability(
   }
 }
 
+/**
+ * The one place a settings write happens, so every entry point — the Settings
+ * surface, the older Git runtime dialog, and reset — goes through the same
+ * policy check and the same follow-up.
+ *
+ * The follow-up matters: the Git resolver reads its configuration in memory,
+ * so a stored preference that is not applied to it would leave the surface
+ * reporting one Git while operations use another until the app restarts.
+ */
+let settingsQueue: Promise<unknown> = Promise.resolve()
+function runSettingsTransaction<T>(operation: () => Promise<T>): Promise<T> {
+  const result = settingsQueue.then(operation, operation)
+  settingsQueue = result.then(
+    () => {},
+    () => {},
+  )
+  return result
+}
+
+interface ActiveBundlePreview {
+  id: string
+  preview: SupportBundlePreview
+  timestamp: number
+}
+let activeBundlePreview: ActiveBundlePreview | null = null
+
+async function changeSettings(
+  write: (file: string) => Promise<SettingsSnapshot>,
+): Promise<SettingsSnapshot> {
+  return runSettingsTransaction(async () => {
+    const snapshot = await write(settingsFile())
+    configureGitRuntime({ useSystemGit: snapshot.settings.git.useSystemGit })
+    return snapshot
+  })
+}
+
 /** One capability report, built from the same sources the Diagnostics view shows. */
 async function currentDiagnostics(settings: AppSettings) {
   return runDiagnostics({
@@ -1142,10 +1178,14 @@ function installHandlers() {
   ipcMain.handle('git-runtime:system-git', async (event, requested: unknown) => {
     validateSender(event)
     if (typeof requested !== 'boolean') throw new Error('Use system Git must be true or false.')
+    // This control predates Settings and is still mounted. It goes through the
+    // same policy-aware write as the Settings surface so a machine that locked
+    // the choice cannot be changed through the older dialog.
     return operations.write(async () => {
-      await writeGitRuntimePreference(settingsFile(), { useSystemGit: requested })
-      configureGitRuntime({ useSystemGit: requested })
-      return gitRuntimeStatus(settingsFile())
+      const snapshot = await changeSettings((file) =>
+        updateSettings(file, { git: { useSystemGit: requested } }, settingsLocks),
+      )
+      return withToolAvailability(snapshot)
     })
   })
   // Settings never take the repository gate: a preference can be corrected
@@ -1153,7 +1193,9 @@ function installHandlers() {
   // to change an unrelated preference is not a safety property.
   ipcMain.handle('settings', async (event) => {
     validateSender(event)
-    return withToolAvailability(await readSettingsSnapshot(settingsFile(), settingsLocks))
+    return runSettingsTransaction(async () => {
+      return withToolAvailability(await readSettingsSnapshot(settingsFile(), settingsLocks))
+    })
   })
   ipcMain.handle('settings:update', async (event, patch: unknown) => {
     validateSender(event)
@@ -1161,14 +1203,16 @@ function installHandlers() {
       throw new Error('Settings changes must be an object of setting groups.')
     }
     return withToolAvailability(
-      await updateSettings(settingsFile(), patch as SettingsPatch, settingsLocks),
+      await changeSettings((file) => updateSettings(file, patch as SettingsPatch, settingsLocks)),
     )
   })
   ipcMain.handle('settings:reset', async (event) => {
     validateSender(event)
     // Restoring defaults rewrites the settings file and nothing else: no
     // repository, ref, or working tree is read or written.
-    return withToolAvailability(await resetSettings(settingsFile(), settingsLocks))
+    return withToolAvailability(
+      await changeSettings((file) => resetSettings(file, settingsLocks)),
+    )
   })
   // The capability report takes no argument, so the window cannot ask main to
   // run a command of its choosing. Main runs its own fixed allowlist.
@@ -1179,33 +1223,43 @@ function installHandlers() {
   })
   ipcMain.handle('support-bundle:preview', async (event) => {
     validateSender(event)
-    const settings = (await readSettingsFile(settingsFile())).settings
-    const report = await operations.read(() => currentDiagnostics(settings))
-    return buildBundle(report, settings, recordedFailures())
+    return runSettingsTransaction(async () => {
+      const settings = (await readSettingsFile(settingsFile())).settings
+      const report = await operations.read(() => currentDiagnostics(settings))
+      const preview = buildBundle(report, settings, recordedFailures())
+      const id = `preview-${Date.now()}-${Math.random().toString(36).slice(2)}`
+      activeBundlePreview = { id, preview, timestamp: Date.now() }
+      return preview
+    })
   })
   ipcMain.handle('support-bundle:export', async (event) => {
     validateSender(event)
     if (!window) throw new Error('There is no window to export from.')
-    const settings = (await readSettingsFile(settingsFile())).settings
-    const preview = buildBundle(
-      await operations.read(() => currentDiagnostics(settings)),
-      settings,
-      recordedFailures(),
-    )
-    // Main chooses the destination: the renderer never supplies a path.
     const target = await dialog.showSaveDialog(window, {
       title: 'Export support bundle',
       defaultPath: join(app.getPath('downloads'), 'git-stacks-support.txt'),
       filters: [{ name: 'Text', extensions: ['txt'] }],
     })
     if (target.canceled || !target.filePath) return { path: '', bytes: 0, includedPaths: 0 }
-    const body = renderBundle(preview, settings.privacy.includeLocalPaths)
-    await writeFile(target.filePath, body, { mode: 0o600 })
-    return {
-      path: target.filePath,
-      bytes: Buffer.byteLength(body),
-      includedPaths: settings.privacy.includeLocalPaths ? preview.pathCount : 0,
-    }
+
+    return runSettingsTransaction(async () => {
+      const currentSettings = (await readSettingsFile(settingsFile())).settings
+      let previewToExport: SupportBundlePreview
+      if (activeBundlePreview) {
+        previewToExport = activeBundlePreview.preview
+      } else {
+        const report = await operations.read(() => currentDiagnostics(currentSettings))
+        previewToExport = buildBundle(report, currentSettings, recordedFailures())
+      }
+      const allowLocalPaths = currentSettings.privacy.includeLocalPaths === true
+      const body = renderBundle(previewToExport, allowLocalPaths)
+      await writeFile(target.filePath, body, { mode: 0o600 })
+      return {
+        path: target.filePath,
+        bytes: Buffer.byteLength(body),
+        includedPaths: allowLocalPaths ? previewToExport.pathCount : 0,
+      }
+    })
   })
   // Main resolves the editor from settings and checks the path is inside the
   // repository. The renderer supplies neither a command nor an absolute path.
@@ -1321,12 +1375,12 @@ app
     settingsLocks = policy.locks
     settingsPolicyError = policy.error
     if (policy.error) console.warn(policy.error)
-    const preference = await readGitRuntimePreference(settingsFile()).catch(() => null)
+    const preference = await readGitRuntimePreference(settingsFile()).catch(() => false)
     configureGitRuntime({
       appVersion: app.getVersion(),
       packaged: app.isPackaged,
       resourcesRoot,
-      useSystemGit: preference?.useSystemGit ?? false,
+      useSystemGit: preference,
     })
     // The clone promotion helper is bundled beside the Git runtime and resolves
     // from the same resources directory.

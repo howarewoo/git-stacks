@@ -26,8 +26,9 @@ import {
   requireGitCapability,
   resolveGitRuntime,
   withGitRuntime,
-  writeGitRuntimePreference,
 } from '../src/main/git-runtime'
+import { updateSettings } from '../src/main/settings'
+import type { SettingsLock } from '../src/shared/settings'
 import type { GitAction } from '../src/shared/types'
 const require = createRequire(import.meta.url)
 const refreshWindowsInventory = require('../scripts/refresh-win-git-runtime.cjs') as (context: {
@@ -824,23 +825,29 @@ testOnRuntimes('a clean and smudge filter configured like Git LFS still runs', a
   }
 })
 
+const NO_LOCKS: SettingsLock[] = []
+
 test('the system Git override is stored as a reversible preference', async () => {
   const settings = join(await temporaryRoot('git-stacks-settings-'), 'settings.json')
   // With no stored preference the bundled runtime is the answer.
-  assert.deepEqual(await readGitRuntimePreference(settings), { useSystemGit: false })
-  await writeGitRuntimePreference(settings, { useSystemGit: true })
-  assert.deepEqual(await readGitRuntimePreference(settings), { useSystemGit: true })
+  assert.equal(await readGitRuntimePreference(settings), false)
+  await updateSettings(settings, { git: { useSystemGit: true } }, NO_LOCKS)
+  assert.equal(await readGitRuntimePreference(settings), true)
   // A stored value that is not a boolean must never resolve to "use system
   // Git": the default is the only safe reading of a value that means nothing.
-  await writeFile(settings, JSON.stringify({ useSystemGit: 'yes' }))
-  assert.deepEqual(await readGitRuntimePreference(settings), { useSystemGit: false })
-  await writeGitRuntimePreference(settings, { useSystemGit: false })
-  assert.deepEqual(await readGitRuntimePreference(settings), { useSystemGit: false })
+  await writeFile(settings, JSON.stringify({ git: { useSystemGit: 'yes' } }))
+  assert.equal(await readGitRuntimePreference(settings), false)
+  // The string "false" is truthy to every consumer, so it must not be read as
+  // a preference to use system Git.
+  await writeFile(settings, JSON.stringify({ git: { useSystemGit: 'false' } }))
+  assert.equal(await readGitRuntimePreference(settings), false)
+  await updateSettings(settings, { git: { useSystemGit: false } }, NO_LOCKS)
+  assert.equal(await readGitRuntimePreference(settings), false)
 })
 
 test('diagnostics retain the system override when its executable cannot start', async () => {
   const settings = join(await temporaryRoot('git-stacks-settings-'), 'settings.json')
-  await writeGitRuntimePreference(settings, { useSystemGit: true })
+  await updateSettings(settings, { git: { useSystemGit: true } }, NO_LOCKS)
   configureGitRuntime({
     packaged: true,
     resourcesRoot: releaseResources,

@@ -8,7 +8,7 @@ import { Input } from './ui/input'
 import { SegmentedControl } from './ui/segmented-control'
 import { InlineAlert } from './ui/surface'
 import { OperationFacts, WorkflowSection, type ContextFact } from './workflow-composition'
-import { ShortcutSettings } from './shortcut-settings'
+import { ShortcutEditor } from './shortcut-settings'
 import {
   MERGE_METHODS,
   PULL_STRATEGIES,
@@ -498,14 +498,15 @@ export function SettingsDialog({
 
             {section === 'shortcuts' ? (
               <WorkflowSection label="Keyboard shortcuts">
-                <ShortcutSettings
-                  open
-                  onOpenChange={() => undefined}
+                <ShortcutEditor
                   bindings={shortcutBindings}
+                  // The active bindings follow the settings the main process
+                  // confirmed, never the edit being offered: adopting first
+                  // would leave a locked or refused change in force.
                   onBindingsChange={(bindings) => {
-                    onShortcutBindingsChange(bindings)
                     void save({ shortcuts: bindings }, 'Shortcuts saved.')
                   }}
+                  disabledReason={lockFor('shortcuts')?.reason}
                 />
               </WorkflowSection>
             ) : null}

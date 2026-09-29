@@ -175,10 +175,7 @@ and validates; the renderer never chooses or writes that path.
 | Include local paths                  | Lets a support bundle name the Git executable path. Nothing else widens.                                                              |
 | Shortcuts                            | Chord editing with conflict detection.                                                                                                |
 
-A value is validated before use. An unreadable field falls back to its default
-and is reported on the Settings surface; the rest of the file still applies. A
-file that is not valid JSON is replaced by defaults on the next save.
-
+A value is validated before use. Editors and merge tools are restricted to a supported program allowlist (`code`, `cursor`, `vim`, `nvim`, `kdiff3`, etc.); arbitrary shell interpreters or commands with arguments are refused. Editor launching enforces repository containment following symlinks. An unreadable field falls back to its default and is reported on the Settings surface; the rest of the file still applies. A file that is not valid JSON is replaced by defaults on the next save. All settings reads and modifications are serialized through an atomic transactional queue.
 This build collects nothing and sends nothing: there is no telemetry endpoint
 and no crash upload, and no setting enables one. The only artifact is the
 support bundle you create yourself.
@@ -208,9 +205,11 @@ GIT_STACKS_SETTINGS_POLICY=/etc/git-stacks-policy.json npm run dev
 **Create support bundle** previews first: every section is listed with whether it
 is included and why. The bundle is assembled from named fields and never
 contains access tokens, source contents, diffs, branch or pull-request text, or
-raw GitHub API bodies — not even when local paths are included. It is written
-where you choose in a save dialog opened by the main process.
-
+raw GitHub API bodies — not even when local paths are included. Diagnostic probes
+use fixed, non-destructive read commands with sanitized outputs and error codes.
+The export binds to the preview snapshot and verifies live settings immediately
+before writing: if path consent is revoked while the save dialog is open, local paths
+remain withheld in the saved bundle.
 ## Onboarding
 
 With no repository open, the window offers three ways in, and all of them end

@@ -104,7 +104,6 @@ import { ConflictResolver } from './components/conflict-resolver'
 import { HistoryView, OperationBanner, StackView } from './components/repository-views'
 import { GitRuntimeDialog } from './components/git-runtime-dialog'
 import { SettingsDialog } from './components/settings-dialog'
-import type { AppSettings } from '../../shared/settings'
 import { GitHubAccountDialog } from './components/github-account-dialog'
 import {
   ChangesView,
@@ -151,14 +150,17 @@ import { DirtyCheckoutGuard } from './components/dirty-checkout-guard'
 import { buildPaletteItems, type PaletteItem } from './lib/command-palette'
 import {
   ariaKeyShortcuts,
+  clearLegacyShortcuts,
+  defaultShortcutBindings,
   formatChord,
   isComposingKeyEvent,
   isEditableTarget,
   isMacPlatform,
-  defaultShortcutBindings,
   matchesChord,
+  readLegacyShortcuts,
   type ShortcutId,
 } from '../../shared/shortcuts'
+import type { AppSettings, SettingsLock } from '../../shared/settings'
 import { resolveStackNavigation } from './lib/stack-navigation'
 type BranchFilter = 'all' | 'local' | 'remote' | 'prs'
 
@@ -414,6 +416,30 @@ function App() {
     defaultShortcutBindings(),
   )
   const [settings, setSettings] = React.useState<AppSettings | null>(null)
+  const [settingsLocks, setSettingsLocks] = React.useState<readonly SettingsLock[]>([])
+  /**
+   * Writes a shortcut change and adopts only what main confirmed. A refused
+   * write — a policy lock, an invalid chord — must leave the running app on
+   * the bindings that are actually in force.
+   */
+  const persistShortcutBindings = React.useCallback(
+    async (bindings: Record<ShortcutId, string>) => {
+      if (!desktop?.updateSettings) return
+      try {
+        const snapshot = await desktop.updateSettings({ shortcuts: bindings })
+        setSettings(snapshot.settings)
+        setShortcutBindings(snapshot.settings.shortcuts)
+      } catch (value) {
+        setError(readableError(value))
+        // Re-read so the editor shows what is stored rather than what was tried.
+        const current = await desktop?.settings?.().catch(() => null)
+        if (current) setShortcutBindings(current.settings.shortcuts)
+      }
+    },
+    [desktop],
+  )
+  const shortcutLockReason =
+    settingsLocks.find((lock) => lock.key === 'shortcuts')?.reason ?? undefined
   const [settingsOpen, setSettingsOpen] = React.useState(false)
   const [checkoutGuardTarget, setCheckoutGuardTarget] = React.useState<{
     ref: string
@@ -560,6 +586,7 @@ function App() {
       .then((snapshot) => {
         if (cancelled) return
         setSettings(snapshot.settings)
+        setSettingsLocks(snapshot.locks)
         setShortcutBindings(snapshot.settings.shortcuts)
       })
       .catch((value) => {
@@ -569,6 +596,37 @@ function App() {
       cancelled = true
     }
   }, [desktop])
+
+  // The build before this one kept shortcuts in web storage. Those bindings
+  // belong to the user, so they are folded into the settings file once, before
+  // anything saves over them with defaults. The document records that the
+  // import happened, so it cannot run a second time and cannot be re-triggered
+  // by an old copy of the key reappearing.
+  React.useEffect(() => {
+    if (!desktop?.updateSettings || settings?.migrated.legacyShortcutStorage) return
+    let cancelled = false
+    const legacy = readLegacyShortcuts()
+    if (!legacy) return
+    desktop
+      .updateSettings({
+        shortcuts: legacy,
+        migrated: { legacyShortcutStorage: true },
+      })
+      .then((snapshot) => {
+        if (cancelled) return
+        setSettings(snapshot.settings)
+        setSettingsLocks(snapshot.locks)
+        setShortcutBindings(snapshot.settings.shortcuts)
+        clearLegacyShortcuts()
+      })
+      .catch(() => {
+        // A migration that cannot be written is left undone rather than marked
+        // done, so it is retried instead of silently losing the bindings.
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [desktop, settings?.migrated.legacyShortcutStorage])
 
   // The theme attribute is the only place the preference takes effect: the
   // generated token sheet switches on it, and "system" defers to the operating
@@ -3496,7 +3554,10 @@ function App() {
         open={shortcutSettingsOpen}
         onOpenChange={setShortcutSettingsOpen}
         bindings={shortcutBindings}
-        onBindingsChange={setShortcutBindings}
+        onBindingsChange={(bindings) => {
+          void persistShortcutBindings(bindings)
+        }}
+        disabledReason={shortcutLockReason}
       />
       <DirtyCheckoutGuard
         target={checkoutGuardTarget}

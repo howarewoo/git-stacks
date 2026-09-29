@@ -607,3 +607,61 @@ export function sanitizeShortcutBindings(value: unknown): Record<ShortcutId, str
 export function defaultShortcutBindings(): Record<ShortcutId, string> {
   return { ...DEFAULT_SHORTCUTS }
 }
+
+/** Where the build before the settings file kept shortcut bindings. */
+export const LEGACY_SHORTCUT_STORAGE_KEY = 'git-stacks.shortcuts.v1'
+
+/** The slice of web storage this migration needs, so it can be exercised. */
+export interface LegacyStorage {
+  getItem(key: string): string | null
+  removeItem(key: string): void
+}
+
+/**
+ * The bindings an earlier build left in web storage, or null when there are
+ * none. The document is untrusted, so it goes through the same sanitizer as the
+ * settings file: a chord that cannot be dispatched is replaced by its default
+ * rather than kept.
+ */
+export function readLegacyShortcuts(
+  storage: LegacyStorage | null = browserStorage(),
+): Record<ShortcutId, string> | null {
+  if (!storage) return null
+  let raw: string | null
+  try {
+    raw = storage.getItem(LEGACY_SHORTCUT_STORAGE_KEY)
+  } catch {
+    return null
+  }
+  if (!raw) return null
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    return null
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null
+  const sanitized = sanitizeShortcutBindings(parsed)
+  // An empty document carries nothing worth importing, and treating it as an
+  // import would overwrite real stored bindings with defaults.
+  if (SHORTCUT_DEFINITIONS.every((def) => sanitized[def.id] === DEFAULT_SHORTCUTS[def.id])) return null
+  return sanitized
+}
+
+/** Clears the old location once its bindings are safely in the settings file. */
+export function clearLegacyShortcuts(storage: LegacyStorage | null = browserStorage()): void {
+  if (!storage) return
+  try {
+    storage.removeItem(LEGACY_SHORTCUT_STORAGE_KEY)
+  } catch {
+    // A storage that refuses to clear is not a reason to fail the migration.
+  }
+}
+
+function browserStorage(): LegacyStorage | null {
+  try {
+    return typeof window === 'undefined' ? null : window.localStorage
+  } catch {
+    return null
+  }
+}

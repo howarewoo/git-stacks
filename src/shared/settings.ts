@@ -10,6 +10,46 @@ export const PULL_STRATEGIES = ['ff-only', 'merge', 'rebase'] as const
 export const MERGE_METHODS = ['merge', 'squash', 'rebase'] as const
 export const THEMES = ['system', 'light', 'dark'] as const
 
+/** Supported editor program identifiers. Arbitrary interpreters are refused. */
+export const SUPPORTED_EDITORS = [
+  'code',
+  'cursor',
+  'subl',
+  'atom',
+  'zed',
+  'idea',
+  'webstorm',
+  'pycharm',
+  'vim',
+  'nvim',
+  'emacs',
+  'nano',
+  'bbedit',
+  'mate',
+  'notepad++',
+  'notepad',
+] as const
+
+/** Supported merge tools with fixed invocation semantics. */
+export const SUPPORTED_MERGE_TOOLS = [
+  'kdiff3',
+  'meld',
+  'opendiff',
+  'p4merge',
+  'vimdiff',
+  'nvimdiff',
+  'code',
+  'diffmerge',
+  'bcompare',
+  'emerge',
+  'smerge',
+  'araxis',
+  'winmerge',
+] as const
+
+export type SupportedEditor = (typeof SUPPORTED_EDITORS)[number]
+export type SupportedMergeTool = (typeof SUPPORTED_MERGE_TOOLS)[number]
+
 export type PullStrategy = (typeof PULL_STRATEGIES)[number]
 export type MergeMethod = (typeof MERGE_METHODS)[number]
 export type ThemePreference = (typeof THEMES)[number]
@@ -53,6 +93,17 @@ export interface AppSettings {
   appearance: AppearanceSettings
   privacy: PrivacySettings
   shortcuts: Record<ShortcutId, string>
+  /**
+   * Which older storage locations have already been folded into this file. The
+   * marker is part of the document so a one-time import cannot run twice, and
+   * so it stays done after the old location is cleared.
+   */
+  migrated: SettingsMigrations
+}
+
+export interface SettingsMigrations {
+  /** Shortcuts stored by the build that kept them in web storage. */
+  legacyShortcutStorage: boolean
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -68,6 +119,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   appearance: { theme: 'system', reduceMotion: false },
   privacy: { includeLocalPaths: false },
   shortcuts: { ...DEFAULT_SHORTCUTS },
+  migrated: { legacyShortcutStorage: false },
 }
 
 /** A partial change. An omitted group or field keeps its stored value. */
@@ -76,6 +128,7 @@ export interface SettingsPatch {
   appearance?: Partial<AppearanceSettings>
   privacy?: Partial<PrivacySettings>
   shortcuts?: Record<string, string>
+  migrated?: Partial<SettingsMigrations>
 }
 
 /** Why a stored value was refused, named by the key the surface shows. */
@@ -147,6 +200,7 @@ export interface BundleSection {
   /** Why this section is in or out, shown in the preview. */
   reason: string
   content: string
+  fields?: { name: string; value: string; locational?: boolean }[]
 }
 
 export interface SupportBundlePreview {

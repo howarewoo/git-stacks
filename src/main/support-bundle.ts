@@ -15,6 +15,39 @@ const HOME_PREFIXES = [process.env.HOME, process.env.USERPROFILE].filter(
   (value): value is string => typeof value === 'string' && value.length > 0,
 )
 
+const SECRET_PATTERNS = [
+  /ghp_[A-Za-z0-9_]{16,}/g,
+  /github_pat_[A-Za-z0-9_]{16,}/g,
+  /gho_[A-Za-z0-9_]{16,}/g,
+  /ghu_[A-Za-z0-9_]{16,}/g,
+  /ghs_[A-Za-z0-9_]{16,}/g,
+  /ghr_[A-Za-z0-9_]{16,}/g,
+  /bearer\s+[A-Za-z0-9._~+/-]+=*/gi,
+  /password\s*=\s*[^\s]+/gi,
+  /token\s*=\s*[^\s]+/gi,
+  /-----BEGIN [A-Z ]+ PRIVATE KEY-----[\s\S]*?-----END [A-Z ]+ PRIVATE KEY-----/g,
+]
+
+export function sanitizeSecrets(text: string): string {
+  let result = text
+  for (const pattern of SECRET_PATTERNS) {
+    result = result.replace(pattern, '[REDACTED_SECRET]')
+  }
+  return result
+}
+
+const PATH_PATTERNS = [
+  /(?:\/Users|\/home|\/var|\/tmp|\/private|\/opt|\/usr|\/etc|[a-zA-Z]:\\)[\w\-./\\]+/g,
+]
+
+export function sanitizePaths(text: string): string {
+  let result = text
+  for (const pattern of PATH_PATTERNS) {
+    result = result.replace(pattern, '[withheld: path]')
+  }
+  return result
+}
+
 /**
  * The bundle is assembled from named fields, never from a log that was filtered
  * afterwards. Every value below is either chosen by this file or is a diagnostic
@@ -75,10 +108,13 @@ function reportFields(report: DiagnosticReport): SafeField[] {
 function renderFields(title: string, fields: SafeField[], includeLocalPaths: boolean) {
   const lines = [`## ${title}`]
   for (const field of fields) {
-    const value =
-      field.locational && !includeLocalPaths
-        ? '[withheld: include local paths in Settings to include this]'
-        : field.value
+    let value = field.value
+    if (field.locational && !includeLocalPaths) {
+      value = '[withheld: include local paths in Settings to include this]'
+    } else if (!includeLocalPaths) {
+      value = sanitizePaths(value)
+    }
+    value = sanitizeSecrets(value)
     lines.push(`${field.name}: ${value}`)
   }
   return lines.join('\n')
@@ -91,36 +127,40 @@ export function buildBundle(
 ): SupportBundlePreview {
   const includePaths = settings.privacy.includeLocalPaths
 
+  const capFields = reportFields(report)
+  const setFields = settingsFields(settings)
   const sections: BundleSection[] = [
     {
       id: 'capabilities',
       title: 'Capability report',
       included: true,
       reason: 'measured on this machine by a fixed command allowlist in the main process',
-      content: renderFields('Capability report', reportFields(report), includePaths),
+      content: renderFields('Capability report', capFields, includePaths),
+      fields: capFields,
     },
     {
       id: 'settings',
       title: 'Settings',
       included: true,
       reason: 'the preference values themselves; this file holds no credential',
-      content: renderFields('Settings', settingsFields(settings), includePaths),
+      content: renderFields('Settings', setFields, includePaths),
+      fields: setFields,
     },
   ]
 
   if (failures.length > 0) {
+    const failFields = failures.map((line, index) => {
+      let safeLine = sanitizeSecrets(line)
+      if (!includePaths) safeLine = sanitizePaths(safeLine)
+      return { name: `failure ${index + 1}`, value: safeLine }
+    })
     sections.push({
       id: 'failures',
       title: 'Recent failures',
       included: true,
       reason: 'application error summaries recorded in memory; they carry no repository content',
-      content: renderFields(
-        'Recent failures',
-        // Recorded as scope plus a one-line message. The main process never puts
-        // a command, a path, or repository text in this line.
-        failures.map((line, index) => ({ name: `failure ${index + 1}`, value: line })),
-        includePaths,
-      ),
+      content: renderFields('Recent failures', failFields, includePaths),
+      fields: failFields,
     })
   } else {
     sections.push({
@@ -160,7 +200,12 @@ export function renderBundle(preview: SupportBundlePreview, includeLocalPaths: b
   ]
   const body = preview.sections
     .filter((section) => section.included)
-    .map((section) => `${section.content}\n\nWhy this is here: ${section.reason}`)
+    .map((section) => {
+      const content = section.fields
+        ? renderFields(section.title, section.fields, includeLocalPaths)
+        : (includeLocalPaths ? section.content : sanitizePaths(section.content))
+      return `${content}\n\nWhy this is here: ${section.reason}`
+    })
   return `${[...header, ...body].join('\n')}\n`
 }
 
