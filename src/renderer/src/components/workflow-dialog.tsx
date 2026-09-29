@@ -27,6 +27,7 @@ import type {
 } from '../../../shared/types'
 import { actionBlockReason, stashRemovalBlockReason } from '../../../shared/capabilities'
 import { Button } from './ui/button'
+import { InlineAlert } from './ui/surface'
 import { Badge, type BadgeProps } from './ui/badge'
 import { Checkbox } from './ui/checkbox'
 import { Field } from './ui/field'
@@ -784,6 +785,7 @@ export function WorkflowDialog({
   const [mergeAction, setMergeAction] = React.useState<MergeAction>('default')
   const [mergeProgress, setMergeProgress] = React.useState<MergeProgress | null>(null)
   const [mergeStatus, setMergeStatus] = React.useState<MergeStatus | null>(null)
+  const [mergeStatusError, setMergeStatusError] = React.useState<string | null>(null)
   const [preview, setPreview] = React.useState<StackPreview | null>(null)
   const [surgery, setSurgery] = React.useState<SurgeryPreview | null>(null)
   const [closePullRequests, setClosePullRequests] = React.useState(false)
@@ -988,13 +990,17 @@ export function WorkflowDialog({
     if (!stackApi.mergeStatus) return
     try {
       setMergeStatus(await stackApi.mergeStatus())
-    } catch {
-      setMergeStatus(null)
+      setMergeStatusError(null)
+    } catch (error) {
+      // The last result GitHub reported is kept: a failed read is not evidence that the
+      // request or the queue changed.
+      setMergeStatusError(error instanceof Error ? error.message : String(error))
     }
   }, [stackApi])
   React.useEffect(() => {
     if (request.kind !== 'stack' || request.operation !== 'merge') {
       setMergeStatus(null)
+      setMergeStatusError(null)
       return
     }
     void readMergeStatus()
@@ -2001,26 +2007,35 @@ export function WorkflowDialog({
                       )}
                     </>
                   ) : null}
-                  {request.operation === 'merge' && mergeProgress ? (
-                    <MergeOutcomePanel progress={mergeProgress} />
-                  ) : null}
-                  {request.operation === 'merge' && !mergeProgress && mergeStatus ? (
+                  {request.operation === 'merge' && (mergeProgress || mergeStatus) ? (
                     <div className="grid gap-2">
-                      <MergeOutcomePanel
-                        label={`What GitHub reports now \u2014 ${mergeStatus.layers.length} pull request${
-                          mergeStatus.layers.length === 1 ? '' : 's'
-                        } from earlier merge requests`}
-                        progress={{
-                          action: 'default',
-                          status: mergeStatus.layers.some((layer) => layer.status === 'pending')
-                            ? 'running'
-                            : mergeStatus.layers.some((layer) => layer.status === 'enqueued')
-                              ? 'queued'
-                              : 'succeeded',
-                          layers: mergeStatus.layers,
-                          message: mergeStatus.message,
-                        }}
-                      />
+                      {mergeStatusError ? (
+                        <InlineAlert tone="error">
+                          GitHub could not be read: {mergeStatusError} The last result it reported
+                          is kept until a read succeeds.
+                        </InlineAlert>
+                      ) : null}
+                      {/* A run in flight speaks for itself; the read is what reports on it
+                          afterwards, and on any request GitHub is still running. */}
+                      {mergeProgress ? (
+                        <MergeOutcomePanel progress={mergeProgress} />
+                      ) : (
+                        <MergeOutcomePanel
+                          label={`What GitHub reports now \u2014 ${mergeStatus!.layers.length} pull request${
+                            mergeStatus!.layers.length === 1 ? '' : 's'
+                          } from this and earlier merge requests`}
+                          progress={{
+                            action: 'default',
+                            status: mergeStatus!.layers.some((layer) => layer.status === 'pending')
+                              ? 'running'
+                              : mergeStatus!.layers.some((layer) => layer.status === 'enqueued')
+                                ? 'queued'
+                                : 'succeeded',
+                            layers: mergeStatus!.layers,
+                            message: mergeStatus!.message,
+                          }}
+                        />
+                      )}
                       <div>
                         <Button type="button" onClick={() => void readMergeStatus()}>
                           Refresh what GitHub reports

@@ -1,7 +1,13 @@
 import { randomUUID } from 'node:crypto'
 import fs from 'node:fs/promises'
 import path from 'node:path'
-import type { MergeAction, MergeMethod, MergeQueueOutcome, MergeQueueState } from '../shared/types'
+import type {
+  MergeAction,
+  MergeMethod,
+  MergeQueueOutcome,
+  MergeQueueState,
+  MergeRequestOutcome,
+} from '../shared/types'
 import { isRecord, runGit, stripTrailingNewline } from './git-core'
 import {
   GITHUB_STACKS_API_VERSION,
@@ -49,11 +55,14 @@ const MERGE_ACTIONS: Record<string, MergeAction> = {
   merge_queue: 'merge_queue',
 }
 
-const MERGE_OUTCOMES: Record<string, MergeQueueOutcome> = {
+const MERGE_OUTCOMES: Record<string, MergeRequestOutcome> = {
   pending: 'pending',
-  queued: 'queued',
   merged: 'merged',
-  dropped: 'dropped',
+  enqueued: 'enqueued',
+  failed: 'failed',
+  // Journal files written before the request outcome and the enqueue were separated.
+  queued: 'enqueued',
+  dropped: 'failed',
 }
 
 /** Read the documented merge-async result envelope, or null when GitHub sent something else. */
@@ -206,9 +215,13 @@ export async function pollAsyncMerge(
 }
 
 /**
- * What Git Stacks last asked GitHub to do with a pull request. The UUID is the accepted
- * request's own identity, so a still-pending result can be read again after a refresh or a
- * restart without submitting a second request.
+ * What Git Stacks last asked GitHub to do with a pull request.
+ *
+ * `request` is the identity GitHub handed back: the pull request whose endpoint serves the
+ * result, and the UUID. One request covers every layer it carried, so those layers share
+ * this identity and the result is read once, from the endpoint that owns it, and applied to
+ * all of them. `enqueuedAt` is kept apart from the outcome because an accepted enqueue is the
+ * only evidence that a base ref has a merge queue, while the outcome of any request is not.
  */
 export interface MergeQueueObservation {
   pullRequest: number
@@ -218,9 +231,13 @@ export interface MergeQueueObservation {
   headOid: string
   action: MergeAction
   method: MergeMethod | null
-  uuid: string | null
+  request: { pullRequest: number; uuid: string } | null
+  /** Set when GitHub reported that it accepted an enqueue for this base ref. */
+  enqueuedAt: number | null
   requestedAt: number
-  outcome: MergeQueueOutcome
+  outcome: MergeRequestOutcome
+  /** GitHub's message for a terminal result, kept so a reopen does not need the request. */
+  message: string | null
 }
 
 async function observationPath(repoPath: string): Promise<string> {
@@ -250,6 +267,7 @@ export async function readMergeObservations(
       const outcome = MERGE_OUTCOMES[typeof value.outcome === 'string' ? value.outcome : '']
       if (!action || !outcome) continue
       const method = MERGE_METHODS[typeof value.method === 'string' ? value.method : ''] ?? null
+      const request = isRecord(value.request) ? value.request : null
       observations.set(value.pullRequest, {
         pullRequest: value.pullRequest,
         branch: value.branch,
@@ -257,9 +275,19 @@ export async function readMergeObservations(
         headOid: value.headOid,
         action,
         method,
-        uuid: typeof value.uuid === 'string' && value.uuid ? value.uuid : null,
+        // A journal written before the owning pull request was kept alongside the UUID read
+        // the request from the layer it observed, which was the request's own pull request
+        // back when one request covered one layer.
+        request:
+          request && typeof request.uuid === 'string' && typeof request.pullRequest === 'number'
+            ? { pullRequest: request.pullRequest, uuid: request.uuid }
+            : typeof value.uuid === 'string' && value.uuid
+              ? { pullRequest: value.pullRequest, uuid: value.uuid }
+              : null,
+        enqueuedAt: typeof value.enqueuedAt === 'number' ? value.enqueuedAt : null,
         requestedAt: value.requestedAt,
         outcome,
+        message: typeof value.message === 'string' && value.message ? value.message : null,
       })
     }
   } catch {
@@ -322,20 +350,18 @@ export function mergeQueueState(
 
 /**
  * Read what GitHub now reports for a request this client already made. Nothing is submitted:
- * the pull request is read for its own state, and an accepted request that never reported a
- * terminal result is read again through its own UUID.
+ * the result is read through the identity GitHub returned, from the endpoint of the pull
+ * request that owns it, because that is the only endpoint that serves it.
  */
 export async function readMergeRequest(input: {
   fullName: string
-  observation: MergeQueueObservation
+  request: { pullRequest: number; uuid: string }
 }): Promise<AsyncMergeResult | null> {
-  const { observation } = input
-  if (!observation.uuid || observation.outcome === 'queued') return null
   try {
     return await readAsyncMerge({
       fullName: input.fullName,
-      number: observation.pullRequest,
-      uuid: observation.uuid,
+      number: input.request.pullRequest,
+      uuid: input.request.uuid,
     })
   } catch {
     // The result is retained for 24 hours and then the endpoint answers 404. A request this
@@ -344,13 +370,16 @@ export async function readMergeRequest(input: {
   }
 }
 
-/** True when GitHub has already accepted a merge-queue enqueue for this base ref. */
+/**
+ * True only when GitHub has accepted an enqueue for this base ref. A request that is still
+ * running, or a direct merge that exceeded the polling bound, is no evidence of a queue.
+ */
 export function queueConfiguredFor(
   observations: Map<number, MergeQueueObservation>,
   base: string,
 ): boolean {
   for (const observation of observations.values()) {
-    if (observation.base === base) return true
+    if (observation.base === base && observation.enqueuedAt !== null) return true
   }
   return false
 }

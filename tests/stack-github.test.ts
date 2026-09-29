@@ -2478,3 +2478,244 @@ test(
     })
   },
 )
+
+test(
+  'a request that later enqueues is read from the owning endpoint and stays enqueued',
+  { concurrency: false },
+  async () => {
+    await withHarness(async (harness) => {
+      await createStack(harness)
+      await publishStack(harness)
+      const state = await makeStackMergeable(harness)
+      const childNumber = prFor(state, 'child').number
+      const parentNumber = prFor(state, 'parent').number
+      const preview = await previewStack(
+        harness.repo,
+        await getSnapshot(harness.repo),
+        'merge',
+        'child',
+      )
+      const running = await harness.readState()
+      running.asyncMergeStaysPending = true
+      await harness.writeState(running)
+      const { transport, polls } = recordingMergeTransport()
+      await withHarnessTransport(harness, transport, async () => {
+        const result = await runAction(harness.repo, {
+          type: 'executeStack',
+          token: preview.token,
+          allowForce: false,
+          mergeMethod: 'squash',
+          mergeAction: 'direct_merge',
+        })
+        assert.deepEqual(
+          result.merge?.layers.map((layer) => layer.status),
+          ['pending', 'pending'],
+        )
+        // The request belongs to the pull request it was made for, so it is read there, not
+        // on the downstack layer that shares its identity.
+        const settled = await harness.readState()
+        settled.asyncMergeStaysPending = false
+        settled.asyncMergeResult = { status: 'enqueued' }
+        await harness.writeState(settled)
+        const beforePolls = polls.length
+        const status = await getMergeStatus(harness.repo)
+        assert.deepEqual(
+          status?.layers.map((layer) => [layer.pullRequest, layer.status]),
+          [
+            [parentNumber, 'enqueued'],
+            [childNumber, 'enqueued'],
+          ],
+          "one request's enqueue covers the layers it carried",
+        )
+        assert.equal(
+          polls
+            .slice(beforePolls)
+            .some((url) => url.includes(`/pulls/${childNumber}/merge-async/`)),
+          true,
+          'the result is read from the pull request that owns the request',
+        )
+        assert.equal(
+          polls
+            .slice(beforePolls)
+            .some((url) => url.includes(`/pulls/${parentNumber}/merge-async/`)),
+          false,
+        )
+        // The enqueue is terminal and persisted, so a read after the request expires still
+        // reports the queue rather than a request that is somehow still running.
+        const expired = await harness.readState()
+        delete expired.asyncMerge
+        await harness.writeState(expired)
+        const reopened = await getMergeStatus(harness.repo)
+        assert.deepEqual(
+          reopened?.layers.map((layer) => [layer.pullRequest, layer.queue?.outcome ?? null]),
+          [
+            [parentNumber, 'queued'],
+            [childNumber, 'queued'],
+          ],
+        )
+        const offered = await previewStack(
+          harness.repo,
+          await getSnapshot(harness.repo),
+          'merge',
+          'child',
+        )
+        assert.equal(
+          offered.merge?.actions.includes('merge_queue'),
+          true,
+          'an accepted enqueue is the evidence a queue exists for this base ref',
+        )
+      })
+    })
+  },
+)
+
+test(
+  'a merge that exceeds the polling bound offers no queue and keeps its request readable',
+  { concurrency: false },
+  async () => {
+    await withHarness(async (harness) => {
+      await createStack(harness)
+      await publishStack(harness)
+      await makeStackMergeable(harness)
+      const preview = await previewStack(
+        harness.repo,
+        await getSnapshot(harness.repo),
+        'merge',
+        'parent',
+      )
+      const running = await harness.readState()
+      running.asyncMergeStaysPending = true
+      await harness.writeState(running)
+      const { transport } = recordingMergeTransport()
+      await withHarnessTransport(harness, transport, async () => {
+        await runAction(harness.repo, {
+          type: 'executeStack',
+          token: preview.token,
+          allowForce: false,
+          mergeMethod: 'squash',
+          mergeAction: 'direct_merge',
+        })
+      })
+      const next = await previewStack(
+        harness.repo,
+        await getSnapshot(harness.repo),
+        'merge',
+        'parent',
+      )
+      assert.equal(
+        next.merge?.actions.includes('merge_queue'),
+        false,
+        'a direct merge that is still running is no evidence of a queue',
+      )
+      const status = await getMergeStatus(harness.repo)
+      assert.equal(status?.layers[0]?.status, 'pending')
+      assert.equal(status?.layers[0]?.queue, null, 'a request that never enqueued has no queue')
+    })
+  },
+)
+
+test(
+  'a locally reviewed pull request attached to a native stack is refused before any request',
+  { concurrency: false },
+  async () => {
+    await withHarness(async (harness) => {
+      await createStack(harness)
+      await publishStack(harness)
+      const state = await makeStackMergeable(harness)
+      const stackNumber = (await harness.readState()).stacks?.[0]?.number
+      assert.ok(stackNumber)
+      await runAction(harness.repo, { type: 'unstackNativeStack', stackNumber })
+      const preview = await previewStack(
+        harness.repo,
+        await getSnapshot(harness.repo),
+        'merge',
+        'parent',
+      )
+      assert.equal(preview.merge?.native, false)
+      // The stack is rebuilt behind the review, so GitHub would apply stack semantics to a
+      // request this review assumed was single.
+      const restored = await harness.readState()
+      const childNumber = prFor(restored, 'child').number
+      restored.prs = restored.prs.map((pr) =>
+        pr.number === childNumber ? { ...pr, stack: { stackNumber, position: 2 } } : pr,
+      )
+      restored.stacks = [
+        {
+          id: stackNumber,
+          number: stackNumber,
+          node_id: `S_${stackNumber}`,
+          url: `https://api.github.com/repos/acme/widgets/stacks/${stackNumber}`,
+          base: { ref: 'main' },
+          open: true,
+          created_at: '2026-09-01T00:00:00Z',
+          pull_requests: restored.prs.map((pr) => ({
+            number: pr.number,
+            state: 'open',
+            draft: false,
+            merged_at: null,
+            head: { ref: pr.head, sha: pr.headOid ?? '' },
+          })),
+        },
+      ]
+      await harness.writeState(restored)
+      const { transport, starts } = recordingMergeTransport()
+      await withHarnessTransport(harness, transport, async () => {
+        await assert.rejects(
+          runAction(harness.repo, {
+            type: 'executeStack',
+            token: preview.token,
+            allowForce: false,
+            mergeMethod: 'squash',
+            mergeAction: 'direct_merge',
+          }),
+          /now belongs to native stack/u,
+        )
+      })
+      assert.equal(starts.length, 0, 'native membership is refused before a request is sent')
+      void prFor(state, 'parent')
+    })
+  },
+)
+
+test(
+  'a request GitHub failed keeps its reason for a later read',
+  { concurrency: false },
+  async () => {
+    await withHarness(async (harness) => {
+      await createStack(harness)
+      await publishStack(harness)
+      const state = await makeStackMergeable(harness)
+      const parentNumber = prFor(state, 'parent').number
+      const preview = await previewStack(
+        harness.repo,
+        await getSnapshot(harness.repo),
+        'merge',
+        'parent',
+      )
+      const failing = await harness.readState()
+      failing.asyncMergeResult = { status: 'failed', message: 'Required review is missing' }
+      await harness.writeState(failing)
+      const { transport } = recordingMergeTransport()
+      await withHarnessTransport(harness, transport, async () => {
+        await runAction(harness.repo, {
+          type: 'executeStack',
+          token: preview.token,
+          allowForce: false,
+          mergeMethod: 'squash',
+          mergeAction: 'direct_merge',
+        })
+      })
+      const status = await getMergeStatus(harness.repo)
+      assert.equal(status?.layers[0]?.status, 'not-merged')
+      assert.match(status?.layers[0]?.detail ?? '', /Required review is missing/u)
+      // The result is kept, so the reason survives the request expiring.
+      const expired = await harness.readState()
+      delete expired.asyncMerge
+      await harness.writeState(expired)
+      const reopened = await getMergeStatus(harness.repo)
+      assert.equal(reopened?.layers[0]?.status, 'not-merged')
+      assert.match(reopened?.layers[0]?.detail ?? '', /Required review is missing/u)
+      void parentNumber
+    })
+  },
+)

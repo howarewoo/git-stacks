@@ -353,8 +353,11 @@ export function installFixtureControl(options: {
       return answer<MergeStatus>('mergeStatus', () => {
         const base = scenario.mergeStatus ?? mergeStatus
         // The queue lands the group between reads, so a refresh visibly replaces the queued
-        // layer with what GitHub now reports for it.
-        if (mergeStatusReads++ === 0) return base
+        // layer with what GitHub now reports for it; a later read fails, standing in for a
+        // transport error that must not erase the last result GitHub reported.
+        const read = mergeStatusReads++
+        if (read === 2) throw new Error('GitHub is unreachable')
+        if (read === 0) return base
         return {
           ...base,
           layers: base.layers.map((layer) =>

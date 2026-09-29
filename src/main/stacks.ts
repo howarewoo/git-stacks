@@ -14,6 +14,7 @@ import type {
   MergePreview,
   MergeProgress,
   MergeQueueState,
+  MergeRequestOutcome,
   MergeResult,
   MergeStatus,
   PublishLayer,
@@ -4919,15 +4920,28 @@ function contiguousMergeChain(
 }
 
 /**
- * Re-read the submitted stack at the mutation boundary. GitHub decides which pull requests a
- * request for a stacked pull request lands, so membership is compared against the preview
- * rather than trusted from it: a pull request inserted below the selection would otherwise
- * land unreviewed, and one removed would leave the reviewed downstack unmerged.
+ * Re-read submitted stack membership at the mutation boundary, in both directions. GitHub
+ * decides which pull requests a request for a stacked pull request lands, so what it reports
+ * now has to match what the review covered: a pull request inserted below the selection would
+ * otherwise land unreviewed, a removed one would leave the reviewed downstack unmerged, and a
+ * locally chained pull request attached to a native stack would silently switch to stack
+ * semantics and land whatever joined it.
  */
-function revalidateNativeMerge(merge: MergePreview, data: GitHubResult): void {
+function revalidateMergeMembership(merge: MergePreview, data: GitHubResult): void {
   const selected = merge.layers[merge.layers.length - 1]
-  const membership =
-    data.pullRequests.find((pr) => pr.number === selected.pullRequest)?.stack ?? null
+  const membershipOf = (number: number) =>
+    data.pullRequests.find((pr) => pr.number === number)?.stack ?? null
+  if (!merge.native) {
+    for (const layer of merge.layers) {
+      const membership = membershipOf(layer.pullRequest)
+      if (!membership) continue
+      throw new Error(
+        `Pull request #${layer.pullRequest} now belongs to native stack #${membership.stackNumber}, so GitHub would land its unreviewed downstack with it; reload the preview before merging`,
+      )
+    }
+    return
+  }
+  const membership = membershipOf(selected.pullRequest)
   const stack = data.nativeStacks?.find((candidate) => candidate.number === membership?.stackNumber)
   const reviewed = merge.layers.map((layer) => layer.pullRequest)
   const downstack = stack
@@ -4951,6 +4965,40 @@ function revalidateNativeMerge(merge: MergePreview, data: GitHubResult): void {
     changed(
       `now lands pull requests ${downstack.map((n) => `#${n}`).join(', ')}, not the reviewed ${reviewed.map((n) => `#${n}`).join(', ')}`,
     )
+  }
+}
+
+/**
+ * Record one accepted request against every pull request it covers, so its result is readable
+ * again after a refresh, a reopened dialog, or a restart.
+ */
+async function recordMergeRequest(
+  repoPath: string,
+  input: {
+    request: { pullRequest: number; uuid: string }
+    layers: MergeLayerPreview[]
+    action: MergeAction
+    method: MergeMethod | null
+    outcome: MergeRequestOutcome
+    enqueuedAt: number | null
+    message: string | null
+    requestedAt: number
+  },
+): Promise<void> {
+  for (const layer of input.layers) {
+    await recordMergeObservation(repoPath, {
+      pullRequest: layer.pullRequest,
+      branch: layer.branch,
+      base: layer.base,
+      headOid: layer.headOid,
+      action: input.action,
+      method: input.method,
+      request: input.request,
+      enqueuedAt: input.enqueuedAt,
+      requestedAt: input.requestedAt,
+      outcome: input.outcome,
+      message: input.message,
+    })
   }
 }
 
@@ -6000,56 +6048,68 @@ export async function getMergeStatus(repoPath: string): Promise<MergeStatus | nu
   const originUrl = await getOriginUrl(root)
   const fullName = canonicalRemoteName(originUrl)
   if (!fullName) return null
-  const layers: MergeLayerResult[] = []
   const journalled = [...observations.values()].sort(
     (left, right) => left.pullRequest - right.pullRequest,
   )
+  // One request covers every layer it carried, so its result is read once, from the endpoint
+  // that owns it, and applied to all of them.
+  const requests = new Map<
+    string,
+    { request: { pullRequest: number; uuid: string }; layers: number[] }
+  >()
   for (const observation of journalled) {
+    if (!observation.request || observation.outcome !== 'pending') continue
+    const key = `${observation.request.pullRequest}:${observation.request.uuid}`
+    const group = requests.get(key) ?? { request: observation.request, layers: [] }
+    group.layers.push(observation.pullRequest)
+    requests.set(key, group)
+  }
+  const reported = new Map<string, AsyncMergeResult>()
+  for (const [key, group] of requests) {
+    const result = await readMergeRequest({ fullName, request: group.request })
+    if (result) reported.set(key, result)
+  }
+  const layers: MergeLayerResult[] = []
+  for (const observation of journalled) {
+    const key = observation.request
+      ? `${observation.request.pullRequest}:${observation.request.uuid}`
+      : null
+    const result = key ? reported.get(key) : undefined
+    if (result && result.status !== 'pending') {
+      // A terminal result is kept, so a later read without the request still reports it.
+      await recordMergeObservation(root, {
+        ...observation,
+        outcome: result.status,
+        enqueuedAt: result.status === 'enqueued' ? observation.requestedAt : observation.enqueuedAt,
+        message: result.message ?? observation.message,
+      })
+    }
     const live = await getPullRequest(root, observation.pullRequest).catch(() => null)
-    const queue = mergeQueueState(observation, live?.state ?? '')
+    const effective: MergeQueueObservation = result
+      ? { ...observation, outcome: result.status, message: result.message ?? observation.message }
+      : observation
+    const queue = mergeQueueState(
+      effective.enqueuedAt === null ? undefined : effective,
+      live?.state ?? '',
+    )
     layers.push({
       branch: observation.branch,
       pullRequest: observation.pullRequest,
       status:
-        live?.state === 'MERGED' || observation.outcome === 'merged'
+        live?.state === 'MERGED' || effective.outcome === 'merged'
           ? 'merged'
           : queue?.outcome === 'dropped'
             ? 'not-merged'
-            : observation.outcome === 'queued'
+            : effective.outcome === 'enqueued'
               ? 'enqueued'
-              : 'pending',
-      detail: mergeStatusDetail(observation, queue, live?.mergeOid ?? null),
-      mergedOid: live?.mergeOid ?? null,
+              : effective.outcome === 'failed'
+                ? 'not-merged'
+                : 'pending',
+      detail: mergeStatusDetail(effective, queue, result?.mergeOid ?? live?.mergeOid ?? null),
+      mergedOid: result?.mergeOid ?? live?.mergeOid ?? null,
       queue,
-      requestUuid: observation.uuid,
+      requestUuid: observation.request?.uuid ?? null,
     })
-  }
-  for (const [index, observation] of journalled.entries()) {
-    const reported = await readMergeRequest({ fullName, observation })
-    if (!reported) continue
-    const layer = layers[index]
-    if (reported.status === 'merged') {
-      layer.status = 'merged'
-      layer.mergedOid = reported.mergeOid ?? layer.mergedOid
-      layer.detail = layer.mergedOid
-        ? `Merged on GitHub as ${layer.mergedOid.slice(0, 10)}`
-        : 'Merged on GitHub'
-    } else if (reported.status === 'failed') {
-      layer.status = 'not-merged'
-      layer.detail = reported.message ?? 'GitHub reported that the merge request failed'
-    }
-  }
-  // A request that just reported merged lands the whole group it covered, so the members this
-  // client has no request of its own for are read again rather than reported as still running.
-  for (const layer of layers) {
-    if (layer.status !== 'pending') continue
-    const live = await getPullRequest(root, layer.pullRequest).catch(() => null)
-    if (live?.state !== 'MERGED') continue
-    layer.status = 'merged'
-    layer.mergedOid = live.mergeOid ?? layer.mergedOid
-    layer.detail = layer.mergedOid
-      ? `Merged on GitHub as ${layer.mergedOid.slice(0, 10)}`
-      : 'Merged on GitHub'
   }
   return { layers, message: mergeStatusMessage(layers) }
 }
@@ -6068,6 +6128,12 @@ function mergeStatusDetail(
   }
   if (queue?.outcome === 'queued') {
     return `In the merge queue since ${requested}; refresh to read what the queue did with it`
+  }
+  if (observation.outcome === 'failed') {
+    return observation.message ?? 'GitHub reported that the merge request failed'
+  }
+  if (observation.outcome === 'merged') {
+    return mergeOid ? `Merged on GitHub as ${mergeOid.slice(0, 10)}` : 'Merged on GitHub'
   }
   return `The merge request GitHub accepted at ${requested} has not reported a result yet`
 }
@@ -6253,7 +6319,7 @@ async function mergeStack(
       )
     }
   }
-  if (merge.native) revalidateNativeMerge(merge, data)
+  revalidateMergeMembership(merge, data)
   const selected = merge.layers[merge.layers.length - 1]
   const results: MergeLayerResult[] = merge.layers.map((layer) => ({
     branch: layer.branch,
@@ -6347,10 +6413,48 @@ async function mergeStack(
         }
         note = `GitHub already had a merge request for pull request #${layer.pullRequest}, so no second request was sent.`
       }
+      // A request only carries the pull requests it actually includes. One request for a
+      // native stack includes its downstack; a request for a locally chained layer includes
+      // only itself, because every other layer needs its own request.
+      const carried = merge.native
+        ? results.filter((entry) =>
+            merge.layers.some(
+              (item) => item.pullRequest === entry.pullRequest && item.includedInRequest,
+            ),
+          )
+        : [result]
+      const carriedLayers = merge.layers.filter((item) =>
+        carried.some((entry) => entry.pullRequest === item.pullRequest),
+      )
+      const method = mergeAction === 'direct_merge' ? action.mergeMethod : null
+      // The accepted request is journalled before the first read of its result, so a transport
+      // error, a crash, or a restart while GitHub is still running it leaves the request
+      // readable instead of losing the only identity that can report it.
+      const requestedAt = Date.now()
+      const request = outcome.uuid ? { pullRequest: layer.pullRequest, uuid: outcome.uuid } : null
+      if (request) {
+        await recordMergeRequest(repoPath, {
+          request,
+          layers: carriedLayers,
+          action: mergeAction,
+          method,
+          outcome: 'pending',
+          enqueuedAt: null,
+          message: null,
+          requestedAt,
+        })
+        for (const entry of carried) {
+          entry.status = 'pending'
+          entry.requestUuid = request.uuid
+          entry.detail =
+            entry.pullRequest === layer.pullRequest
+              ? 'GitHub has not reported a result yet; refresh to read this request'
+              : `Included in the request for #${layer.pullRequest}, still running`
+        }
+      }
       if (outcome.status === 'pending' && outcome.uuid) {
-        const uuid = outcome.uuid
         outcome = await pollAsyncMerge(
-          { fullName: plan.originFullName, number: layer.pullRequest, uuid },
+          { fullName: plan.originFullName, number: layer.pullRequest, uuid: outcome.uuid },
           {
             onUpdate: (update) => {
               result.detail = update.message ?? `GitHub reports ${update.status}`
@@ -6365,17 +6469,19 @@ async function mergeStack(
         )
       }
       observed.push(outcome)
-      // A request only carries the pull requests it actually includes. One request for a
-      // native stack includes its downstack; a request for a locally chained layer includes
-      // only itself, because every other layer needs its own request.
-      const carried = merge.native
-        ? results.filter((entry) =>
-            merge.layers.some(
-              (item) => item.pullRequest === entry.pullRequest && item.includedInRequest,
-            ),
-          )
-        : [result]
       if (outcome.status === 'merged') {
+        if (request) {
+          await recordMergeRequest(repoPath, {
+            request,
+            layers: carriedLayers,
+            action: mergeAction,
+            method,
+            outcome: 'merged',
+            enqueuedAt: null,
+            message: outcome.message,
+            requestedAt,
+          })
+        }
         for (const entry of carried) {
           entry.status = 'merged'
           entry.detail =
@@ -6387,32 +6493,44 @@ async function mergeStack(
         continue
       }
       if (outcome.status === 'enqueued') {
-        // A stacked request carries its downstack, so the group the queue accepted is every
-        // layer it included, and each one is journalled for the later queue read.
-        const requestedAt = Date.now()
+        // The queue accepted the group, which is the evidence a base ref has one, and that
+        // result is final: what the queue does later is read from the pull requests.
+        if (request) {
+          await recordMergeRequest(repoPath, {
+            request,
+            layers: carriedLayers,
+            action: mergeAction,
+            method,
+            outcome: 'enqueued',
+            enqueuedAt: requestedAt,
+            message: outcome.message,
+            requestedAt,
+          })
+        }
         for (const entry of carried) {
           entry.status = 'enqueued'
           entry.detail =
             entry.pullRequest === layer.pullRequest
               ? (outcome.message ?? 'Added to the merge queue')
               : `Added to the merge queue by the request for #${layer.pullRequest}`
-          const preview = merge.layers.find((item) => item.pullRequest === entry.pullRequest)
-          if (!preview) continue
-          await recordMergeObservation(repoPath, {
-            pullRequest: preview.pullRequest,
-            branch: preview.branch,
-            base: preview.base,
-            headOid: preview.headOid,
-            action: mergeAction,
-            method: null,
-            uuid: outcome.uuid ?? null,
-            requestedAt,
-            outcome: 'queued',
-          })
         }
         break
       }
       if (outcome.status === 'failed') {
+        // The refusal is kept, so a reopen reports why instead of showing a request that is
+        // still running.
+        if (request) {
+          await recordMergeRequest(repoPath, {
+            request,
+            layers: carriedLayers,
+            action: mergeAction,
+            method,
+            outcome: 'failed',
+            enqueuedAt: null,
+            message: outcome.message,
+            requestedAt,
+          })
+        }
         result.status = 'failed'
         result.detail = outcome.message ?? 'GitHub refused the merge'
         // GitHub may still have landed part of the group it accepted, so the downstack a
@@ -6424,37 +6542,13 @@ async function mergeStack(
         }
         break
       }
-      // GitHub accepted the request and has not reported a terminal result. Every layer that
-      // request carries keeps that fact, and the requested one keeps the UUID it can be read
-      // with, so the outcome is read on a refresh instead of being reported as finished.
-      if (outcome.uuid) {
-        const requestedAt = Date.now()
-        for (const entry of carried) {
-          const requested = entry.pullRequest === layer.pullRequest
-          entry.status = 'pending'
-          // One request identity covers every layer it includes, so a refresh can tell that
-          // this pull request was part of a request GitHub is still running.
-          entry.requestUuid = outcome.uuid
-          entry.detail = requested
-            ? 'GitHub has not reported a result yet; refresh to read this request'
-            : `Included in the request for #${layer.pullRequest}, still running`
-          const reviewed = merge.layers.find((item) => item.pullRequest === entry.pullRequest)
-          if (!reviewed) continue
-          await recordMergeObservation(repoPath, {
-            pullRequest: reviewed.pullRequest,
-            branch: reviewed.branch,
-            base: reviewed.base,
-            headOid: reviewed.headOid,
-            action: mergeAction,
-            method: mergeAction === 'direct_merge' ? action.mergeMethod : null,
-            uuid: outcome.uuid,
-            requestedAt,
-            outcome: 'pending',
-          })
-        }
+      // The request was journalled before it was read, so a merge GitHub is still running ends
+      // the run in that state: its outcome is read on a refresh, not guessed at here.
+      result.detail = request
+        ? 'GitHub has not reported a result yet; refresh to read this request'
+        : 'GitHub accepted the merge request but reported no result to read'
+      if (request) {
         note = `GitHub is still running the merge request for pull request #${layer.pullRequest}; its result is read on refresh.`
-      } else {
-        result.detail = 'GitHub accepted the merge request but reported no result to read'
       }
       break
     } catch (error) {

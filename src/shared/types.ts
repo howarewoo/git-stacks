@@ -244,6 +244,12 @@ export type MergeMethod = 'merge' | 'squash' | 'rebase'
  */
 export type MergeQueueOutcome = 'pending' | 'queued' | 'merged' | 'dropped'
 
+/**
+ * What GitHub reported for one accepted asynchronous merge request. A request is not a
+ * queue: `enqueued` is the only outcome that proves a base ref has one.
+ */
+export type MergeRequestOutcome = 'pending' | 'merged' | 'enqueued' | 'failed'
+
 export interface MergeQueueState {
   /** True once GitHub accepted an enqueue for this base ref, which is the only proof of a queue. */
   configured: boolean
