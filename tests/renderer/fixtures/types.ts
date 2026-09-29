@@ -68,6 +68,12 @@ export interface FixtureScenario {
   readonly fileViews?: Readonly<Record<string, FileView>>
   readonly history?: HistoryPage
   readonly commitDiff?: { text: string; truncated: boolean }
+  /**
+   * The head the review file read reports, when it is not the pull request's own
+   * headOid. A force-push between the headline read and the file read leaves the
+   * two claims disagreeing, and the workspace has to say which one it is showing.
+   */
+  readonly reviewHeadOid?: string
   readonly pushPreview?: PushPreview
   readonly stackPreviews?: Readonly<Partial<Record<StackKind, StackPreview>>>
   /** The surgery preview a scenario answers; insert between two layers by default. */

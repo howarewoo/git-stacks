@@ -454,7 +454,7 @@ export function installFixtureControl(options: {
       return answer('reviewFiles', () => {
         const found = scenario.snapshot?.pullRequests.find((pr) => pr.number === number)
         if (!found) throw new Error(`Pull request #${number} is not in this fixture snapshot.`)
-        return reviewFileSet(number, found.headOid ?? `head-${number}`)
+        return reviewFileSet(number, scenario.reviewHeadOid ?? found.headOid ?? `head-${number}`)
       })
     },
     reviewCommits: (number) => {

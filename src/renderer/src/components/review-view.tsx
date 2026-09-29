@@ -387,7 +387,7 @@ export function ReviewView({
 
       {headline ? (
         <>
-          <ReviewHeadlineBlock headline={headline} />
+          <ReviewHeadlineBlock headline={headline} filesHeadOid={files?.headOid ?? null} />
 
           <ReviewRail
             rail={headline.rail}
@@ -554,7 +554,20 @@ export function ReviewView({
   )
 }
 
-function ReviewHeadlineBlock({ headline }: { headline: ReviewHeadline }) {
+function ReviewHeadlineBlock({
+  headline,
+  filesHeadOid,
+}: {
+  headline: ReviewHeadline
+  /**
+   * The head the displayed files were actually read at. The headline is read
+   * first, so a force-push between the two reads leaves the two claims
+   * disagreeing. The file set is pinned to its own head, so the headline's oid is
+   * the one that is out of date and it is labelled as such rather than being
+   * shown as the revision on screen.
+   */
+  filesHeadOid: string | null
+}) {
   const pr = headline.pullRequest
   return (
     <header className="review-headline">
@@ -579,7 +592,10 @@ function ReviewHeadlineBlock({ headline }: { headline: ReviewHeadline }) {
         <ArrowUpRight aria-hidden="true" className="size-3.5" />
         <code>{pr.base}</code>
         {pr.headOid ? (
-          <span className="review-headline-oid">head {pr.headOid.slice(0, 7)}</span>
+          <span className="review-headline-oid">
+            head {pr.headOid.slice(0, 7)}
+            {filesHeadOid && filesHeadOid !== pr.headOid ? ' as of the headline' : null}
+          </span>
         ) : null}
       </p>
     </header>

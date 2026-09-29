@@ -59,6 +59,7 @@ export const SCENARIO_NAMES = [
   'stash-empty',
   'stash-index-shift',
   // Review
+  'review-force-pushed',
   'review-stacked',
   'review-unstacked',
   // Workflows and recovery

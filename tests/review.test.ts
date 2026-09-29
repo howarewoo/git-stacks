@@ -7,8 +7,24 @@
  * the rail offers at the ends of a stack, and when a viewed mark stops counting.
  */
 import assert from 'node:assert/strict'
+import { execFileSync } from 'node:child_process'
+import { mkdir, mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import test from 'node:test'
-import { parseReviewFileEntry, resolveReviewAnchor } from '../src/main/review'
+import {
+  setGitHubTransport,
+  type GitHubRestRequest,
+  type GitHubRestResponse,
+  type GitHubTransport,
+} from '../src/main/github-transport'
+import {
+  parseReviewFileEntry,
+  readReviewCommits,
+  readReviewFiles,
+  resolveReviewAnchor,
+  ReviewRevisionMovedError,
+} from '../src/main/review'
 import {
   adjacentReviewFileIndex,
   adjacentStackLayer,
@@ -89,6 +105,15 @@ function refFor(
     context: line.context,
     ...overrides,
   }
+}
+
+/** One hunk of a file whose diff parsed as text, named so a test can address it. */
+function textHunk(entry: ReviewFile, index: number): ReviewHunk {
+  const diff = entry.diff
+  assert.equal(diff.kind, 'text')
+  const hunk = diff.kind === 'text' ? diff.hunks[index] : undefined
+  assert.ok(hunk, `expected a parsed hunk at index ${index}`)
+  return hunk
 }
 
 function fileSet(entry: ReviewFile): ReviewFileSet {
@@ -424,4 +449,281 @@ test('a marker line carries no number and no side', () => {
   )
   assert.ok(marker)
   assert.equal(marker.side, null)
+})
+
+/**
+ * A transport that answers the pull request identity and the paginated read, and
+ * lets a test decide which comparison the pages belong to. `movesBeforePages`
+ * is the sequence of identities the pull request reports: each identity read
+ * takes the next one, so a test can move the head or the base between the read
+ * that pins the revision and the read that confirms it.
+ */
+function scriptedTransport(
+  identities: Array<{ head: string | null; base: string | null }>,
+  pages: unknown[],
+): { transport: GitHubTransport; calls: string[] } {
+  const calls: string[] = []
+  let identityRead = 0
+  const reply = <T>(data: T): GitHubRestResponse<T> => ({
+    status: 200,
+    rateLimit: {
+      limit: 5000,
+      remaining: 5000,
+      reset: new Date(0),
+      resource: 'core',
+      retryAfterSeconds: null,
+    },
+    data,
+  })
+  return {
+    calls,
+    transport: {
+      kind: 'direct',
+      async rest<T>(request: GitHubRestRequest): Promise<GitHubRestResponse<T>> {
+        const path = request.path ?? ''
+        calls.push(path)
+        if (path.includes('/files') || path.includes('/commits')) return reply(pages as T)
+        const value = identities[Math.min(identityRead, identities.length - 1)]
+        identityRead += 1
+        return reply({ head: { sha: value.head }, base: { sha: value.base } } as T)
+      },
+      async paginate<T>(): Promise<T[]> {
+        return pages as T[]
+      },
+      async graphql<T>(): Promise<T> {
+        return {} as T
+      },
+    },
+  }
+}
+
+/** A workspace whose origin points at the repository the scripted transport answers for. */
+async function reviewWorkspace(): Promise<{ repo: string; dispose: () => Promise<void> }> {
+  const root = await mkdtemp(join(tmpdir(), 'git-stacks-review-'))
+  const repo = join(root, 'workspace')
+  await mkdir(repo)
+  const git = (...args: string[]) =>
+    execFileSync('git', ['-C', repo, ...args], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    }).trim()
+  git('init', '-b', 'main')
+  git('config', 'user.name', 'Git Stacks test')
+  git('config', 'user.email', 'test@example.invalid')
+  git('remote', 'add', 'origin', 'https://github.com/acme/widgets.git')
+  return { repo, dispose: () => rm(root, { recursive: true, force: true }) }
+}
+
+test('a file set read while nothing moved is returned, tagged with the head it came from', async (t) => {
+  const workspace = await reviewWorkspace()
+  t.after(workspace.dispose)
+  const { transport, calls } = scriptedTransport(
+    [{ head: 'a'.repeat(40), base: 'b'.repeat(40) }],
+    [apiFile()],
+  )
+  setGitHubTransport(transport)
+  t.after(() => setGitHubTransport(null))
+
+  const set = await readReviewFiles(workspace.repo, 7)
+
+  assert.equal(set.headOid, 'a'.repeat(40))
+  assert.equal(set.files.length, 1)
+  assert.equal(set.files[0].path, 'src/app.ts')
+  // The comparison is pinned by reading the identity before the pages and again
+  // after them, so a change during the read cannot slip through unnoticed.
+  assert.equal(
+    calls.filter((path) => path === 'repos/acme/widgets/pulls/7').length,
+    2,
+    'expected the identity to be read on both sides of the pages',
+  )
+})
+
+test('a file set is refused when the head is force-pushed while the pages are read', async (t) => {
+  const workspace = await reviewWorkspace()
+  t.after(workspace.dispose)
+  // First identity read pins the revision; the second observes the force-push.
+  const { transport } = scriptedTransport(
+    [
+      { head: 'a'.repeat(40), base: 'b'.repeat(40) },
+      { head: 'c'.repeat(40), base: 'b'.repeat(40) },
+    ],
+    [apiFile()],
+  )
+  setGitHubTransport(transport)
+  t.after(() => setGitHubTransport(null))
+
+  await assert.rejects(
+    () => readReviewFiles(workspace.repo, 7),
+    (error: unknown) => {
+      assert.ok(error instanceof ReviewRevisionMovedError)
+      assert.match(error.message, /changed while it was being read/)
+      return true
+    },
+  )
+})
+
+test('a file set is refused when the base branch moves, which changes the diff under a fixed head', async (t) => {
+  const workspace = await reviewWorkspace()
+  t.after(workspace.dispose)
+  // The head never moves, so a head-only check would call this stable. GitHub
+  // diffs the head against the merge base of the two, so this is a different
+  // comparison and the pages already fetched belong to neither one.
+  const { transport } = scriptedTransport(
+    [
+      { head: 'a'.repeat(40), base: 'b'.repeat(40) },
+      { head: 'a'.repeat(40), base: 'd'.repeat(40) },
+    ],
+    [apiFile()],
+  )
+  setGitHubTransport(transport)
+  t.after(() => setGitHubTransport(null))
+
+  await assert.rejects(() => readReviewFiles(workspace.repo, 7), ReviewRevisionMovedError)
+})
+
+test('a file set is refused rather than returned untagged when the head cannot be read', async (t) => {
+  const workspace = await reviewWorkspace()
+  t.after(workspace.dispose)
+  // GitHub omitted the head object. A set that cannot name its revision must
+  // not be handed on as though it could.
+  const { transport } = scriptedTransport([{ head: null, base: 'b'.repeat(40) }], [apiFile()])
+  setGitHubTransport(transport)
+  t.after(() => setGitHubTransport(null))
+
+  await assert.rejects(() => readReviewFiles(workspace.repo, 7), ReviewRevisionMovedError)
+})
+
+test('the commit list is pinned to one comparison too, so a force-push cannot leave it short', async (t) => {
+  const workspace = await reviewWorkspace()
+  t.after(workspace.dispose)
+  const { transport } = scriptedTransport(
+    [
+      { head: 'a'.repeat(40), base: 'b'.repeat(40) },
+      { head: 'c'.repeat(40), base: 'b'.repeat(40) },
+    ],
+    [
+      {
+        sha: 'e'.repeat(40),
+        commit: { message: 'One commit', author: { name: 'Dev', date: '2026-09-23' } },
+      },
+    ],
+  )
+  setGitHubTransport(transport)
+  t.after(() => setGitHubTransport(null))
+
+  await assert.rejects(() => readReviewCommits(workspace.repo, 7), ReviewRevisionMovedError)
+})
+
+test('a commit list read while nothing moved is returned in full', async (t) => {
+  const workspace = await reviewWorkspace()
+  t.after(workspace.dispose)
+  const { transport } = scriptedTransport(
+    [{ head: 'a'.repeat(40), base: 'b'.repeat(40) }],
+    [
+      {
+        sha: 'e'.repeat(40),
+        commit: { message: 'First commit', author: { name: 'Dev', date: '2026-09-23' } },
+      },
+      {
+        sha: 'f'.repeat(40),
+        commit: { message: 'Second commit', author: { name: 'Dev', date: '2026-09-24' } },
+      },
+    ],
+  )
+  setGitHubTransport(transport)
+  t.after(() => setGitHubTransport(null))
+
+  const commits = await readReviewCommits(workspace.repo, 7)
+
+  assert.deepEqual(
+    commits.map((entry) => entry.shortOid),
+    ['eeeeeee', 'fffffff'],
+  )
+})
+
+test('a comment on a removed line is not re-anchored onto identical text on the head side', () => {
+  // A reviewer commented on a line the pull request deleted. The author then
+  // added a line carrying the same text on the head side. Both carry the same
+  // anchor, so an anchor-only match would re-anchor the base-side comment onto
+  // the head-side line and read as a comment on the replacement.
+  const before = file({
+    diff: { kind: 'text', hunks: hunks('@@ -1,2 +1,2 @@\n-warn\n+other\n keep', 'src/app.ts') },
+  })
+  const beforeHunk = textHunk(before, 0)
+  const ref = refFor(
+    beforeHunk,
+    beforeHunk.lines.findIndex((line) => line.side === 'base'),
+  )
+  assert.equal(ref.side, 'base', 'expected the commented line to be a removal')
+
+  // The current diff keeps the text on the head side only.
+  const after = file({
+    diff: {
+      kind: 'text',
+      hunks: hunks('@@ -5,3 +5,3 @@\n keep\n-gone\n+warn\n tail', 'src/app.ts'),
+    },
+  })
+  const afterHunk = textHunk(after, 0)
+  assert.ok(
+    afterHunk.lines.some((line) => line.side === 'head' && line.anchor === ref.anchor),
+    'expected the text to still exist on the head side',
+  )
+  assert.ok(
+    !afterHunk.lines.some((line) => line.side === 'base' && line.anchor === ref.anchor),
+    'expected the text to be gone from the base side',
+  )
+
+  const resolution = resolveReviewAnchor(fileSet(after), ref)
+
+  assert.equal(resolution.match, 'unresolved')
+  assert.equal(resolution.ref, null)
+  assert.match(resolution.reason, /no longer holds this line on the base/)
+  assert.match(resolution.reason, /same text now appears on the head/)
+  assert.match(resolution.reason, /which is a different line/)
+})
+
+test('a comment on an added line is not re-anchored onto identical text on the base side', () => {
+  const before = file({
+    diff: { kind: 'text', hunks: hunks('@@ -1,2 +1,2 @@\n-gone\n+warn\n keep', 'src/app.ts') },
+  })
+  const beforeHunk = textHunk(before, 0)
+  const ref = refFor(
+    beforeHunk,
+    beforeHunk.lines.findIndex((line) => line.side === 'head'),
+  )
+  assert.equal(ref.side, 'head', 'expected the commented line to be an addition')
+
+  const after = file({
+    diff: {
+      kind: 'text',
+      hunks: hunks('@@ -5,3 +5,3 @@\n keep\n-warn\n+other\n tail', 'src/app.ts'),
+    },
+  })
+
+  const resolution = resolveReviewAnchor(fileSet(after), ref)
+
+  assert.equal(resolution.match, 'unresolved')
+  assert.equal(resolution.ref, null)
+  assert.match(resolution.reason, /no longer holds this line on the head/)
+  assert.match(resolution.reason, /same text now appears on the base/)
+})
+
+test('a comment resolves to the same side when both sides carry identical text', () => {
+  // The same text exists on both sides, but only the head-side line is the one
+  // the comment was written about, so that is the line it must resolve to.
+  const both = file({
+    diff: {
+      kind: 'text',
+      hunks: hunks('@@ -1,3 +1,3 @@\n keep\n-common\n+common\n tail', 'src/app.ts'),
+    },
+  })
+  const hunk = textHunk(both, 0)
+  const headIndex = hunk.lines.findIndex((line) => line.side === 'head')
+  assert.ok(headIndex >= 0, 'expected an added line')
+
+  const resolution = resolveReviewAnchor(fileSet(both), refFor(hunk, headIndex))
+
+  assert.equal(resolution.match, 'exact')
+  assert.equal(resolution.ref?.side, 'head')
+  assert.equal(resolution.ref?.line, hunk.lines[headIndex].newLine)
 })

@@ -729,6 +729,18 @@ export const scenarios: Record<ScenarioName, FixtureScenario> = {
     }),
     recentRepositories,
   },
+  'review-force-pushed': {
+    name: 'review-force-pushed',
+    summary:
+      'The pull request was force-pushed between the headline read and the file read, so the two revisions disagree.',
+    snapshot: repository({
+      branches: [mainBranch, ...reviewStackBranches],
+      currentBranch: 'feature/review-42',
+      pullRequests: reviewStackPullRequests,
+    }),
+    recentRepositories,
+    reviewHeadOid: 'ffffeee',
+  },
   'review-unstacked': {
     name: 'review-unstacked',
     summary: 'One pull request GitHub reports no stack membership for.',

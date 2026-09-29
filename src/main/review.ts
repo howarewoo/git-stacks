@@ -9,6 +9,7 @@ import type {
   ReviewHunk,
   ReviewLine,
   ReviewLineRef,
+  ReviewSide,
   ReviewStackRail,
 } from '../shared/review'
 import {
@@ -303,28 +304,80 @@ export async function readReviewHeadline(
   }
 }
 
-interface PullRequestHead {
+/**
+ * The identity of the comparison a pull request's files are read against.
+ *
+ * The head alone is not enough. GitHub computes the file list and the diff
+ * between the merge base of the base and head and the head, so a push to the
+ * *base* branch moves the diff just as a force-push to the head does, with the
+ * head object unchanged. Both objects are therefore part of the identity, and a
+ * set read while either moved describes a comparison that never existed.
+ */
+export interface ReviewComparisonIdentity {
   headSha: string | null
+  baseSha: string | null
 }
 
-/**
- * The head commit a pull request points at right now. Read on its own so a file
- * set always carries the commit it was read at, rather than trusting a value the
- * renderer happened to hold from an earlier headline.
- */
-async function readPullRequestHead(
+async function readReviewIdentity(
   remote: ParsedRemote,
   number: number,
   signal?: AbortSignal,
-): Promise<PullRequestHead> {
+): Promise<ReviewComparisonIdentity> {
   const response = await githubTransport().rest<unknown>({
     method: 'GET',
     path: `repos/${remote.owner}/${remote.name}/pulls/${number}`,
     signal,
   })
-  const head = isRecord(response.data) ? response.data.head : null
-  const sha = isRecord(head) && typeof head.sha === 'string' ? head.sha : null
-  return { headSha: sha }
+  const data = isRecord(response.data) ? response.data : null
+  const head = data && isRecord(data.head) ? data.head : null
+  const base = data && isRecord(data.base) ? data.base : null
+  return {
+    headSha: head && typeof head.sha === 'string' ? head.sha : null,
+    baseSha: base && typeof base.sha === 'string' ? base.sha : null,
+  }
+}
+
+/**
+ * Raised when the comparison moved while a paginated read was in flight.
+ *
+ * The pages already fetched are a mixture of two comparisons, and labelling them
+ * with either object's object id would assert a revision the diff never came
+ * from. Viewed-file marks and any comment written later would inherit that false
+ * claim, so the read fails instead and the reader reloads against one revision.
+ */
+export class ReviewRevisionMovedError extends Error {
+  constructor(number: number) {
+    super(
+      `Pull request #${number} changed while it was being read, so the pages do not belong to one revision. Reload to read it again.`,
+    )
+    this.name = 'ReviewRevisionMovedError'
+  }
+}
+
+/**
+ * Runs a paginated read pinned to one comparison.
+ *
+ * The identity is read before the pages and again after them. It is compared on
+ * both objects, so a force-push to the head and a push to the base branch both
+ * fail closed. A read that cannot learn the identity (GitHub omitted the object,
+ * or the transport could not reach it) is not treated as stable: a revision that
+ * cannot be pinned must not be presented as though it were.
+ */
+async function readPinnedPages<T>(
+  remote: ParsedRemote,
+  number: number,
+  path: string,
+  signal: AbortSignal | undefined,
+  read: (entries: unknown[]) => T,
+): Promise<{ identity: ReviewComparisonIdentity; value: T }> {
+  const before = await readReviewIdentity(remote, number, signal)
+  const raw = await githubTransport().paginate<unknown>({ method: 'GET', path, signal })
+  const after = await readReviewIdentity(remote, number, signal)
+  if (before.headSha === null || after.headSha === null || before.headSha !== after.headSha) {
+    throw new ReviewRevisionMovedError(number)
+  }
+  if (before.baseSha !== after.baseSha) throw new ReviewRevisionMovedError(number)
+  return { identity: after, value: read(raw) }
 }
 
 /**
@@ -337,20 +390,23 @@ export async function readReviewFiles(
   signal?: AbortSignal,
 ): Promise<ReviewFileSet> {
   const remote = await originRemote(repoPath, signal)
-  const { headSha } = await readPullRequestHead(remote, number, signal)
-  const raw = await githubTransport().paginate<unknown>({
-    method: 'GET',
-    path: `repos/${remote.owner}/${remote.name}/pulls/${number}/files?per_page=${REVIEW_PAGE_SIZE}`,
+  const { identity, value: files } = await readPinnedPages<ReviewFile[]>(
+    remote,
+    number,
+    `repos/${remote.owner}/${remote.name}/pulls/${number}/files?per_page=${REVIEW_PAGE_SIZE}`,
     signal,
-  })
-  const files: ReviewFile[] = []
-  for (const entry of raw) {
-    const file = parseReviewFileEntry(entry)
-    if (file) files.push(file)
-  }
+    (raw) => {
+      const files: ReviewFile[] = []
+      for (const entry of raw) {
+        const file = parseReviewFileEntry(entry)
+        if (file) files.push(file)
+      }
+      return files
+    },
+  )
   return {
     number,
-    headOid: headSha,
+    headOid: identity.headSha,
     files,
     additions: files.reduce((total, file) => total + file.additions, 0),
     deletions: files.reduce((total, file) => total + file.deletions, 0),
@@ -365,13 +421,15 @@ export async function readReviewCommits(
   signal?: AbortSignal,
 ): Promise<ReviewCommit[]> {
   const remote = await originRemote(repoPath, signal)
-  const raw = await githubTransport().paginate<unknown>({
-    method: 'GET',
-    path: `repos/${remote.owner}/${remote.name}/pulls/${number}/commits?per_page=${REVIEW_PAGE_SIZE}`,
+  const { value: entries } = await readPinnedPages<unknown[]>(
+    remote,
+    number,
+    `repos/${remote.owner}/${remote.name}/pulls/${number}/commits?per_page=${REVIEW_PAGE_SIZE}`,
     signal,
-  })
+    (raw) => raw,
+  )
   const commits: ReviewCommit[] = []
-  for (const entry of raw) {
+  for (const entry of entries) {
     if (!isRecord(entry) || typeof entry.sha !== 'string' || entry.sha === '') continue
     const commit = isRecord(entry.commit) ? entry.commit : null
     const gitAuthor = commit && isRecord(commit.author) ? commit.author : null
@@ -427,48 +485,63 @@ export function resolveReviewAnchor(
       reason: `The diff for ${ref.path} is not available as text, so the line cannot be verified.`,
     }
   }
-  const candidates: Array<{ ref: ReviewLineRef; exact: boolean }> = []
+  // A line is only ever identified against the side it is addressed on. A
+  // removed line and an added line that happen to carry the same text are two
+  // different facts about the pull request: matching across the side would let a
+  // comment on a deletion re-anchor itself onto the line that replaced it and
+  // read as if the reviewer had commented on the replacement. Cross-side text is
+  // reported as the change it is, never resolved.
+  const sameSide: Array<{ ref: ReviewLineRef; exact: boolean }> = []
+  const otherSide: Array<ReviewLineRef> = []
   for (const hunk of file.diff.hunks) {
     for (const line of hunk.lines) {
-      if (line.anchor !== ref.anchor) continue
+      if (line.anchor !== ref.anchor || line.side === null) continue
       const number = line.side === 'base' ? line.oldLine : line.newLine
-      if (line.side === null || number === null) continue
-      candidates.push({
-        exact: line.context === ref.context,
-        ref: {
-          path: file.path,
-          side: line.side,
-          line: number,
-          hunkId: hunk.id,
-          anchor: line.anchor,
-          context: line.context,
-        },
-      })
+      if (number === null) continue
+      const candidate: ReviewLineRef = {
+        path: file.path,
+        side: line.side,
+        line: number,
+        hunkId: hunk.id,
+        anchor: line.anchor,
+        context: line.context,
+      }
+      if (line.side !== ref.side) {
+        otherSide.push(candidate)
+        continue
+      }
+      sameSide.push({ exact: line.context === ref.context, ref: candidate })
     }
   }
-  const exact = candidates.filter((candidate) => candidate.exact)
+  const exact = sameSide.filter((candidate) => candidate.exact)
   if (exact.length === 1) return { match: 'exact', ref: exact[0].ref, reason: '' }
   if (exact.length > 1) {
-    const sameSide = exact.filter((candidate) => candidate.ref.side === ref.side)
-    if (sameSide.length === 1) return { match: 'exact', ref: sameSide[0].ref, reason: '' }
     return {
       match: 'unresolved',
       ref: null,
       reason: `${ref.path} now holds ${exact.length} identical lines, so the commented one cannot be named.`,
     }
   }
-  if (candidates.length === 1) {
+  if (sameSide.length === 1) {
     return {
       match: 'moved',
-      ref: candidates[0].ref,
-      reason: `The line moved from ${ref.side === 'base' ? 'base' : 'head'} line ${ref.line} to line ${candidates[0].ref.line}.`,
+      ref: sameSide[0].ref,
+      reason: `The line moved from ${ref.side} line ${ref.line} to line ${sameSide[0].ref.line}.`,
     }
   }
-  if (candidates.length > 1) {
+  if (sameSide.length > 1) {
     return {
       match: 'unresolved',
       ref: null,
-      reason: `${ref.path} now holds ${candidates.length} identical lines, so the commented one cannot be named.`,
+      reason: `${ref.path} now holds ${sameSide.length} identical lines, so the commented one cannot be named.`,
+    }
+  }
+  if (otherSide.length > 0) {
+    const sideName = (side: ReviewSide) => (side === 'base' ? 'the base' : 'the head')
+    return {
+      match: 'unresolved',
+      ref: null,
+      reason: `${ref.path} no longer holds this line on ${sideName(ref.side)}; the same text now appears on ${sideName(otherSide[0].side)}, which is a different line.`,
     }
   }
   return {

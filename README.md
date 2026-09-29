@@ -572,3 +572,23 @@ file set: **exact** when the anchor and the neighbourhood are both intact,
 reason says where it went), and **unresolved** with a reason a reviewer can act on
 for edited text, a duplicated line, a file the pull request no longer touches, or
 a diff that is not available as text.
+
+Resolution never crosses a side. A comment on a removed line is not re-anchored
+onto an added line that happens to carry the same text — that would read as a
+comment on the replacement. When the text survives only on the other side, the
+result is unresolved and the reason names the side the line moved to.
+
+### Reading a pull request at one revision
+
+The file and commit reads are pinned to a single comparison. The comparison's
+identity is read before the pages and again after them, and both objects count:
+GitHub diffs the head against the merge base of the base and head, so a push to
+the base branch changes the diff with the head object unchanged. If either moved,
+or the head could not be read, the read fails with a message asking for a reload
+rather than returning a set labelled with an oid the pages never came from. This
+matters because viewed-file marks and any later review comment are recorded
+against that oid.
+
+The headline is read first, so a force-push between the two reads can leave its
+oid out of date. The workspace says the head is _as of the headline_ in that case
+instead of presenting it as the revision on screen.
