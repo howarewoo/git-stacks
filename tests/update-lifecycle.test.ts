@@ -1106,3 +1106,43 @@ test('a stop asked for after the last byte arrived leaves nothing staged or offe
   assert.equal(afterStop.readyToInstall, false, 'nothing is offered as installable')
   assert.deepEqual(app.staged(), [], 'the file this run created is removed')
 })
+
+test('a change asked for after a reset is not overtaken by it', async (t) => {
+  // Which channel a reset lands on comes out of the file the reset is about to
+  // rewrite, because a policy that has fixed the channel keeps it. Reading that
+  // file before the reset is admitted loses the person's ordering: the channel
+  // asked for a moment later is admitted first, commits, and is then overwritten
+  // by the reset that arrived behind it. So the read happens inside the boundary,
+  // where the reset is already next in line.
+  //
+  // The read is held open here for exactly as long as the reviewer's window was:
+  // the later request is made while it is still waiting, and the answer has to
+  // be the later one in both the queue and the result.
+  const feed = await startFeed()
+  t.after(() => feed.close())
+  const app = harnessFor(feed.base)
+  const order: string[] = []
+  const holding = gate()
+  const reset = app.service.applyResolvedChannel(
+    async () => {
+      void holding.open()
+      await holding.wait
+      return 'stable'
+    },
+    async () => {
+      order.push('reset')
+    },
+  )
+  await holding.wait
+  const later = app.service.applyChannel('beta', async () => {
+    order.push('beta')
+  })
+  holding.open()
+  await Promise.all([reset, later])
+  assert.deepEqual(
+    order,
+    ['reset', 'beta'],
+    'the two changes are written in the order they were asked in',
+  )
+  assert.equal(app.service.status().channel, 'beta', 'the later choice is the channel in force')
+})

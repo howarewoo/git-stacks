@@ -1596,24 +1596,36 @@ function installHandlers() {
     // Restoring defaults touches this app's own settings and its own update
     // state and nothing else: no repository, ref, or working tree is read or
     // written. A reset carries the update channel with it, so it is decided with
-    // the updater rather than written beside it: the channel a reset would land
-    // on is worked out first, the reset is written while the change is still
-    // undecided, and a reset refused — because an install owns the files —
-    // writes nothing at all. A reset that does go through also disposes of the
-    // update the previous channel had staged, because that staged file belongs
-    // to the channel being left and is this app's own to remove.
+    // the updater rather than written beside it: the reset is written while the
+    // change is still undecided, and a reset refused — because an install owns
+    // the files — writes nothing at all. A reset that does go through also
+    // disposes of the update the previous channel had staged, because that staged
+    // file belongs to the channel being left and is this app's own to remove.
+    //
+    // Which channel a reset lands on is read out of the file the reset is about
+    // to rewrite, because a policy that has fixed the channel keeps it rather
+    // than resetting it. That read is the first thing this transaction asks for
+    // and its admission is the second, in that order. Reading it before asking to
+    // be admitted would let a channel change asked for a moment later be admitted
+    // first and then be overwritten by this reset, so the later choice would be
+    // the one lost; the read is made inside the boundary instead, where the
+    // reset is already next in line. Both requests go through the updater's own
+    // queue, so the order a person asked in is the order the two are written in.
     const service = updateService
     if (!service) {
       return withToolAvailability(
         await changeSettings((file) => resetSettings(file, settingsLocks)),
       )
     }
-    const current = (await readSettingsFile(settingsFile())).settings
-    const target = resetTarget(current, settingsLocks).updates.channel
     let committed: SettingsSnapshot | null = null
-    const status = await service.applyChannel(target, async () => {
-      committed = await changeSettings((file) => resetSettings(file, settingsLocks))
-    })
+    const status = await service.applyResolvedChannel(
+      async () =>
+        resetTarget((await readSettingsFile(settingsFile())).settings, settingsLocks).updates
+          .channel,
+      async () => {
+        committed = await changeSettings((file) => resetSettings(file, settingsLocks))
+      },
+    )
     if (!committed) {
       throw new Error(status.failure?.message ?? 'The settings were not reset.')
     }

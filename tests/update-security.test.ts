@@ -405,9 +405,24 @@ test('a macOS architecture is recognised under every name it is called', async (
 const X64 = 0x01000007
 const ARM64 = 0x0100000c
 const X86_32 = 7
+// The subtype is a different field from the type, and these are the values real
+// binaries carry: arm64 and arm64e are subtype 0 and 2, x86_64 is subtype 3. A
+// fixture that wrote the type into both bytes would pass a reader reading the
+// wrong one, which is exactly the bug these tests exist to catch.
+const X64_SUBTYPE = 3
+const ARM64_SUBTYPE = 0
+const ARM64E_SUBTYPE = 2
 
-/** A thin Mach-O header, as it appears inside a file. */
-function thinHeader(cpuType: number, sixtyFour = true, littleEndian = true): Buffer {
+/**
+ * A thin Mach-O header, as it appears inside a file: the type at byte 4 and the
+ * subtype at byte 8, which are the values a real binary has.
+ */
+function thinHeader(
+  cpuType: number,
+  sixtyFour = true,
+  littleEndian = true,
+  cpuSubtype = cpuType === X64 ? X64_SUBTYPE : cpuType === X86_32 ? 3 : ARM64_SUBTYPE,
+): Buffer {
   const buffer = Buffer.alloc(4096)
   const write = (value: number, at: number) => {
     if (littleEndian) buffer.writeUInt32LE(value, at)
@@ -415,7 +430,7 @@ function thinHeader(cpuType: number, sixtyFour = true, littleEndian = true): Buf
   }
   write(sixtyFour ? 0xfeedfacf : 0xfeedface, 0)
   write(cpuType, 4)
-  write(cpuType, 8)
+  write(cpuSubtype, 8)
   return buffer
 }
 
@@ -487,14 +502,27 @@ test('a Mach-O file is read without a developer tool, and only what it really ca
 
   // A single-architecture 64-bit build, in both byte orders, and the two ways a
   // person writes its name.
+  // The two fixtures below are the layout a real binary has: the CPU type at
+  // byte 4, the CPU subtype at byte 8, and those bytes differ. An arm64 binary
+  // carries subtype 0 and an x86_64 one subtype 3, so a reader that took the
+  // architecture from the subtype would answer "no architecture" for both and
+  // refuse a correctly signed update on the machine it was built for.
   assert.deepEqual(readMachArchitectures(file('arm64', thinHeader(ARM64))), ['arm64'])
   assert.deepEqual(readMachArchitectures(file('x64', thinHeader(X64))), ['x64'])
+  assert.deepEqual(
+    readMachArchitectures(file('arm64e', thinHeader(ARM64, true, true, ARM64E_SUBTYPE))),
+    ['arm64'],
+    'an arm64e slice is arm64 whatever its subtype says',
+  )
   assert.deepEqual(
     readMachArchitectures(file('swapped', thinHeader(X64, true, false))),
     ['x64'],
     'a big-endian header is read in the order it declares',
   )
-  assert.deepEqual(readMachArchitectures(file('arm64e', thinHeader(ARM64))), ['arm64'])
+  assert.deepEqual(
+    readMachArchitectures(file('arm64e-plain', thinHeader(ARM64, true, true, ARM64E_SUBTYPE))),
+    ['arm64'],
+  )
 
   // A 32-bit build is not a 64-bit machine's build, whichever family it is.
   assert.deepEqual(readMachArchitectures(file('i386', thinHeader(X86_32, false))), [])

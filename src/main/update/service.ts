@@ -179,6 +179,26 @@ export class UpdateService {
     return this.exclusive(() => this.runApplyChannel(channel, commit))
   }
 
+  /**
+   * A channel change whose target is only knowable once this operation holds the
+   * boundary.
+   *
+   * Restoring the default settings is that case: which channel a reset lands on
+   * depends on the file it is about to rewrite, because an administrator's policy
+   * may have fixed the channel, and a fixed channel is kept rather than reset.
+   * Reading that file before asking to be admitted loses the person's ordering:
+   * a channel change asked for a moment later would be admitted first, commit,
+   * and then be overwritten by the earlier reset that arrived behind it. So the
+   * target is resolved here, inside the same boundary that commits it, and the
+   * queue has one owner either way.
+   */
+  async applyResolvedChannel(
+    resolve: () => Promise<UpdateChannel>,
+    commit?: () => Promise<void>,
+  ): Promise<UpdateStatus> {
+    return this.exclusive(async () => this.runApplyChannel(await resolve(), commit))
+  }
+
   private async runApplyChannel(
     channel: UpdateChannel,
     commit?: () => Promise<void>,

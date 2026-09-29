@@ -820,6 +820,35 @@ async function main() {
     `the stored channel is the one the app is following (${stored.updates.channel})`,
   )
 
+  // Two changes asked for at once, in the order a person asked in them, through
+  // the same two public methods the Settings surface calls: a reset, and then a
+  // channel. The reset has to find the channel it lands on by reading the file
+  // it is about to rewrite, and doing that read before it is admitted let the
+  // later request commit first and then be overwritten by the reset. The later
+  // choice is the one that must survive, in the running updater and on disk.
+  const raced = await evaluate(async () => {
+    const answers = await Promise.allSettled([
+      window.desktop.resetSettings(),
+      window.desktop.updateSettings({ updates: { channel: 'beta' } }),
+    ])
+    return answers.map((answer) => answer.status)
+  })
+  assert(
+    raced.every((status) => status === 'fulfilled'),
+    `both changes were answered (${raced.join(', ')})`,
+  )
+  const racedStatus = await ui.waitForStatus((status) => status.channel === 'beta')
+  assert(
+    racedStatus.channel === 'beta',
+    `the later choice is the one the app is following (${racedStatus.channel})`,
+  )
+  const racedStored = JSON.parse(readFileSync(join(userData, 'settings.json'), 'utf8'))
+  assert(
+    racedStored.updates.channel === 'beta',
+    `the stored channel is the later one (${racedStored.updates.channel})`,
+  )
+  await shot('10-after-raced-reset-and-channel')
+
   const fetched = release.requests
   assert(
     fetched.includes(`/update-${CHANNEL}.json`) && fetched.includes(`/update-${CHANNEL}.json.sig`),

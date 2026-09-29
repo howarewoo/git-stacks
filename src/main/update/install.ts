@@ -343,8 +343,13 @@ function readThin(handle: number, order: ByteOrder, size: number): string[] {
   // The 64-bit ABI is a bit in the cpu type, not the whole of it: the check is
   // that bit, so a 32-bit header and a 64-bit one cannot be told apart by
   // clearing it.
-  if ((u32(header, order, 4) & CPU_ARCH_ABI64) !== (sixtyFour ? CPU_ARCH_ABI64 : 0)) return []
-  const name = architectureName(u32(header, order, 8), sixtyFour)
+  const cpuType = u32(header, order, 4)
+  if ((cpuType & CPU_ARCH_ABI64) !== (sixtyFour ? CPU_ARCH_ABI64 : 0)) return []
+  // Byte 4 is the CPU type and byte 8 is the CPU subtype, and they are not the
+  // same field: an arm64 binary carries subtype 0 and an x86_64 one subtype 3,
+  // so reading the subtype here would answer "no architecture" for both and
+  // refuse a correctly signed update for the machine it was built for.
+  const name = architectureName(cpuType, sixtyFour)
   return name ? [name] : []
 }
 
