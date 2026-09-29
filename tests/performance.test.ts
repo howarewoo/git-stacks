@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import { promises as fs } from 'node:fs'
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { delimiter, join } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import { test } from 'node:test'
 import { getCommitDiff, getFileView, getHistory, getSnapshot } from '../src/main/git'
@@ -47,6 +47,43 @@ async function repository() {
   git('add', '.')
   git('commit', '-m', 'Base')
   return { root, repo, git }
+}
+
+/**
+ * Counts the Git subcommands a run actually forked. A shim named `git` sits
+ * first on PATH and forwards to the real binary, so the tally is observed at
+ * the process boundary rather than inferred from a timer.
+ */
+async function recordGitCommands<T>(
+  run: () => Promise<T>,
+): Promise<{ result: T; commands: Map<string, number> }> {
+  const root = await mkdtemp(join(tmpdir(), 'git-stacks-gitlog-'))
+  const bin = join(root, 'bin')
+  const log = join(root, 'commands')
+  await mkdir(bin)
+  const realGit = execFileSync('which', ['git'], { encoding: 'utf8' }).trim()
+  await writeFile(
+    join(bin, 'git'),
+    `#!/bin/sh
+printf '%s\\n' "$1" >> '${log}'
+exec '${realGit}' "$@"
+`,
+  )
+  await chmod(join(bin, 'git'), 0o755)
+  const original = process.env.PATH
+  process.env.PATH = `${bin}${delimiter}${original ?? ''}`
+  let result: T
+  try {
+    result = await run()
+  } finally {
+    process.env.PATH = original
+  }
+  const commands = new Map<string, number>()
+  for (const line of (await readFile(log, 'utf8')).split('\n')) {
+    if (line) commands.set(line, (commands.get(line) ?? 0) + 1)
+  }
+  await rm(root, { recursive: true, force: true })
+  return { result, commands }
 }
 
 test('a stale refresh cannot be applied to a newly selected repository', () => {
@@ -435,6 +472,117 @@ test('an inferred branch keeps its restack comparison within a one-branch budget
     assert.equal(branch?.needsRestack, true)
     assert.equal(snapshot.limits.branchesAnalyzed, 1)
     assert.equal(snapshot.limits.branchesSkipped, 0)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('a snapshot reports the behind count Git itself reports for every branch shape', async () => {
+  const { root, repo, git } = await repository()
+  try {
+    // A stack whose bases are one and two commits further down, a base that has
+    // moved on, a branch that has moved on, and a branch that already contains
+    // a merge of its base: the shortcut and the fallback must agree on all of
+    // them, and every one of them is compared against the count Git computes.
+    git('checkout', '-b', 'stacked/one')
+    git('commit', '--allow-empty', '-m', 'One')
+    git('checkout', '-b', 'stacked/two')
+    git('commit', '--allow-empty', '-m', 'Two')
+    git('commit', '--allow-empty', '-m', 'Two again')
+    git('checkout', '-b', 'stacked/three')
+    git('commit', '--allow-empty', '-m', 'Three')
+    git('config', 'branch.stacked/one.parent', 'main')
+    git('config', 'branch.stacked/two.parent', 'stacked/one')
+    git('config', 'branch.stacked/three.parent', 'stacked/two')
+    git('checkout', 'main')
+    git('checkout', '-b', 'feature/side')
+    git('commit', '--allow-empty', '-m', 'Side')
+    git('checkout', 'main')
+    git('commit', '--allow-empty', '-m', 'Advance one')
+    git('checkout', '-b', 'behind/one')
+    git('commit', '--allow-empty', '-m', 'Behind one')
+    git('checkout', 'main')
+    git('commit', '--allow-empty', '-m', 'Advance two')
+    git('commit', '--allow-empty', '-m', 'Advance three')
+    git('checkout', '-b', 'behind/three')
+    git('commit', '--allow-empty', '-m', 'Behind three')
+    git('checkout', 'main')
+    git('checkout', '-b', 'feature/diverged')
+    git('commit', '--allow-empty', '-m', 'Feature')
+    git('commit', '--allow-empty', '-m', 'Feature again')
+    git('checkout', 'main')
+    git('commit', '--allow-empty', '-m', 'Advance four')
+    git('checkout', '-b', 'holds-merge')
+    git('merge', '--no-ff', '-m', 'Merge side', 'feature/side')
+    git('config', 'branch.holds-merge.parent', 'main')
+    git('checkout', 'main')
+
+    const snapshot = await getSnapshot(repo)
+    const reported = new Map<string, number | null>()
+    for (const branch of snapshot.branches) {
+      if (!branch.parent) continue
+      const child = git('rev-parse', branch.ref)
+      const base = git('rev-parse', `refs/heads/${branch.parent}`)
+      const fromGit = Number(git('rev-list', '--count', `${child}..${base}`, '--'))
+      reported.set(branch.name, branch.parentBehind)
+      assert.equal(branch.parentBehind, fromGit, `${branch.name} should match git rev-list`)
+      assert.equal(branch.needsRestack, fromGit > 0, `${branch.name} restack state`)
+    }
+    // A base the branch already contains, whether it is a stack tip one commit
+    // down or a merge the branch has taken, is behind by nothing.
+    for (const name of ['stacked/two', 'stacked/three', 'holds-merge']) {
+      assert.equal(reported.get(name), 0, `${name} is up to date with its base`)
+    }
+    // The fixture has to produce both answers, or it proves nothing about the
+    // comparisons the batched evidence declines to answer.
+    const counts = [...reported.values()]
+    assert.ok(
+      counts.includes(0) && counts.some((count) => (count ?? 0) > 0),
+      `expected up-to-date and behind branches, saw ${JSON.stringify(counts)}`,
+    )
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('a branch whose base is already in its history is compared without a per-branch process', async () => {
+  const { root, repo, git } = await repository()
+  try {
+    for (let index = 0; index < 40; index += 1) {
+      git('checkout', '-b', `feature/up-${index}`, 'main')
+      git('commit', '--allow-empty', '-m', `Up ${index}`)
+    }
+    git('checkout', 'main')
+    const { result: snapshot, commands } = await recordGitCommands(() => getSnapshot(repo))
+    const branches = snapshot.branches.filter((item) => item.name.startsWith('feature/up-'))
+    assert.equal(branches.length, 40)
+    assert.ok(branches.every((item) => item.parentBehind === 0 && !item.needsRestack))
+    assert.equal(
+      commands.get('rev-list') ?? 0,
+      0,
+      'an up-to-date branch is answered from the parent edges already read',
+    )
+    // The tips are read in batches, so the process count tracks the batch size
+    // rather than the branch count.
+    assert.ok((commands.get('log') ?? 0) <= 2, `expected batched reads, saw ${commands.get('log')}`)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('a branch that really is behind its base still gets a counted rev-list', async () => {
+  const { root, repo, git } = await repository()
+  try {
+    git('checkout', '-b', 'feature/lagging')
+    git('commit', '--allow-empty', '-m', 'Feature')
+    git('checkout', 'main')
+    git('commit', '--allow-empty', '-m', 'Advance one')
+    git('commit', '--allow-empty', '-m', 'Advance two')
+    const { result: snapshot, commands } = await recordGitCommands(() => getSnapshot(repo))
+    const branch = snapshot.branches.find((item) => item.name === 'feature/lagging')
+    assert.equal(branch?.parentBehind, 2)
+    assert.equal(branch?.needsRestack, true)
+    assert.equal(commands.get('rev-list'), 1, 'an unproved pair is still counted by Git')
   } finally {
     await rm(root, { recursive: true, force: true })
   }

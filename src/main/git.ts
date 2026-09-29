@@ -74,6 +74,7 @@ import {
   refExists,
   requireRefInput,
   requireString,
+  readDirectParents,
   resolveParentRef,
   runGit,
   runGitCapped,
@@ -4505,6 +4506,33 @@ function branchFromRef(ref: RefRecord, currentBranch: string | null, remote: boo
     needsRestack: false,
   }
 }
+
+/**
+ * True when the parent edges a snapshot has already read prove that `parent`
+ * is an ancestor of `child`. Such a base is behind by nothing the branch does
+ * not already contain, so its behind count is exactly zero. The walk follows
+ * only commits that were read and stops at the first one whose parents are
+ * unknown, so an unproved pair still gets its own `rev-list` count.
+ */
+function knownAncestor(
+  child: string,
+  parent: string,
+  directParents: Map<string, string[]>,
+): boolean {
+  const seen = new Set([child])
+  const frontier = [child]
+  for (let head = 0; head < frontier.length; head += 1) {
+    const parents = directParents.get(frontier[head])
+    if (!parents) continue
+    for (const candidate of parents) {
+      if (candidate === parent) return true
+      if (seen.has(candidate)) continue
+      seen.add(candidate)
+      frontier.push(candidate)
+    }
+  }
+  return false
+}
 export async function getSnapshot(
   repoPath: string,
   signal?: AbortSignal,
@@ -4652,6 +4680,7 @@ export async function getSnapshot(
   }
 
   const refsByName = new Map(refs.filter((ref) => !ref.symref).map((ref) => [ref.refname, ref]))
+  const directParents = new Map<string, string[]>()
   const defaultRef =
     refsByName.get(`refs/heads/${defaultBranch}`) ??
     refsByName.get(`refs/remotes/origin/${defaultBranch}`)
@@ -4682,24 +4711,8 @@ export async function getSnapshot(
           .filter((oid) => oid !== defaultRef.objectName),
       ),
     ]
-    const directParents = new Map<string, string[]>()
-    for (let start = 0; start < divergent.length; start += 200) {
-      const output = await tryGit(
-        root,
-        ['log', '--no-walk=unsorted', '--format=%H:%P', ...divergent.slice(start, start + 200)],
-        signal,
-      )
-      for (const line of (output ?? '').split('\n')) {
-        const separator = line.indexOf(':')
-        if (separator < 0) continue
-        directParents.set(
-          line.slice(0, separator),
-          line
-            .slice(separator + 1)
-            .trim()
-            .split(' '),
-        )
-      }
+    for (const [oid, parents] of await readDirectParents(root, divergent, signal)) {
+      directParents.set(oid, parents)
     }
     await mapWithConcurrency(analyzable, GIT_CONCURRENCY, async (branch) => {
       const child = refsByName.get(branch.ref) as RefRecord
@@ -4759,12 +4772,36 @@ export async function getSnapshot(
     if (branch.parent && !parentOf(branch)) branch.needsRestack = Boolean(branch.parentTip)
   }
   const behind = takeBudget(comparable)
+  // Every behind count compares a branch tip against its base. The batched
+  // parent edges this snapshot already read settle most of them outright, so
+  // read the few remaining tips once and answer from that evidence instead of
+  // forking one `rev-list` per branch.
+  const compared = new Set<string>()
+  for (const branch of behind) {
+    const child = refsByName.get(branch.ref)
+    const parent = parentOf(branch)
+    if (child) compared.add(child.objectName)
+    if (parent) compared.add(parent.objectName)
+  }
+  for (const [oid, parents] of await readDirectParents(
+    root,
+    [...compared].filter((oid) => !directParents.has(oid)),
+    signal,
+  )) {
+    directParents.set(oid, parents)
+  }
   await mapWithConcurrency(behind, GIT_CONCURRENCY, async (branch) => {
     const child = refsByName.get(branch.ref) as RefRecord
     const parent = parentOf(branch) as RefRecord
-    if (child.objectName === parent.objectName) {
+    const recordedTipMoved = Boolean(branch.parentTip && branch.parentTip !== parent.objectName)
+    if (
+      child.objectName === parent.objectName ||
+      knownAncestor(child.objectName, parent.objectName, directParents)
+    ) {
+      // The base contributes nothing this branch does not already contain, so
+      // the count Git would report is exactly zero.
       branch.parentBehind = 0
-      branch.needsRestack = Boolean(branch.parentTip && branch.parentTip !== parent.objectName)
+      branch.needsRestack = recordedTipMoved
       return
     }
     const { text } = await runGitCapped(
@@ -4773,10 +4810,9 @@ export async function getSnapshot(
       { maxBytes: 1024, signal },
     )
     branch.parentBehind = Number(text)
-    branch.needsRestack =
-      (branch.parentBehind ?? 0) > 0 ||
-      Boolean(branch.parentTip && branch.parentTip !== parent.objectName)
+    branch.needsRestack = Number(text) > 0 || recordedTipMoved
   })
+  if (signal?.aborted) throw new CommandCancelled()
   const measured = new Set(behind)
   for (const branch of comparable) {
     if (measured.has(branch)) continue
