@@ -1758,8 +1758,14 @@ async function capturePlan(
   }
   // The stack hangs from the branch GitHub registered it against when it is a
   // native stack, and from the repository default branch otherwise.
+  // A sync and a merge both walk down to the trunk, so both read the branch
+  // GitHub registered the native stack against. A release-line trunk is not the
+  // repository default branch, and treating it as a missing layer would block a
+  // stack that is registered correctly.
   const registeredTrunk =
-    kind === 'sync' ? nativeStackTrunk(githubData, selectedBranch, snapshot, defaultBranch) : null
+    kind === 'sync' || kind === 'merge'
+      ? nativeStackTrunk(githubData, selectedBranch, snapshot, defaultBranch)
+      : null
   const trunk = registeredTrunk ?? defaultBranch
   const records = await branchRecords(root, snapshot, trunk, originFullName, canonicalPrs)
   const mergedJournal = await readMergedPrJournal(root)
@@ -2128,7 +2134,7 @@ async function capturePlan(
     } else if (!selectedEntry.pr) {
       blockers.push(`Branch ${selectedBranch} has no canonical pull request`)
     } else {
-      const chain = contiguousMergeChain(entries, selectedEntry, defaultBranch)
+      const chain = contiguousMergeChain(entries, selectedEntry, trunk)
       blockers.push(...chain.blockers)
       for (const entry of chain.layers) {
         const pr = entry.pr
@@ -4887,24 +4893,26 @@ function directMergeGates(pr: PullRequest): string[] {
 
 /**
  * The contiguous unmerged portion of the stack at and below `selected`: every layer whose
- * base is the branch beneath it, down to the default branch. Merging the top pull request of
+ * base is the branch beneath it, down to `trunk`. Merging the top pull request of
  * a stack lands the layers below it, so they are all part of the review. A layer with no
  * canonical open pull request ends the walk and is reported rather than merged across.
+ * `trunk` is the branch the stack actually hangs from — a native stack registered
+ * against a release line hangs from that line, not from the repository default.
  */
 function contiguousMergeChain(
   entries: PlanEntry[],
   selected: PlanEntry,
-  defaultBranch: string,
+  trunk: string,
 ): { layers: PlanEntry[]; blockers: string[] } {
   const byBranch = new Map(entries.map((entry) => [entry.branch, entry]))
   const blockers: string[] = []
   const layers: PlanEntry[] = [selected]
   let current = selected
-  while (current.parent !== defaultBranch) {
+  while (current.parent !== trunk) {
     const parent = byBranch.get(current.parent)
     if (!parent) {
       blockers.push(
-        `Branch ${current.parent} is between ${current.branch} and ${defaultBranch} but is not an unmerged stack layer`,
+        `Branch ${current.parent} is between ${current.branch} and ${trunk} but is not an unmerged stack layer`,
       )
       break
     }

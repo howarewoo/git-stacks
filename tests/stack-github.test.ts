@@ -808,6 +808,81 @@ function recordingMergeTransport(): {
 }
 
 test(
+  'a native stack on a release line merges against the branch it is registered against',
+  { concurrency: false },
+  async () => {
+    await withHarness(async (harness) => {
+      // The repository default branch stays `main`; the stack is registered
+      // against `release/1.x`, which is the only base its layers can hang from.
+      await runAction(harness.repo, {
+        type: 'createBranch',
+        name: 'release/1.x',
+        parent: 'main',
+      })
+      await commitFile(harness, 'release.txt', 'release\n', 'Release line')
+      await runAction(harness.repo, { type: 'createBranch', name: 'parent', parent: 'release/1.x' })
+      await commitFile(harness, 'parent.txt', 'parent\n', 'Parent work')
+      await runAction(harness.repo, { type: 'createBranch', name: 'child', parent: 'parent' })
+      await commitFile(harness, 'child.txt', 'child\n', 'Child work')
+      await publishStack(harness)
+
+      const state = await harness.readState()
+      const parent = prFor(state, 'parent')
+      const child = prFor(state, 'child')
+      state.stacks = [
+        {
+          id: 1,
+          number: 1,
+          node_id: 'S_kwDOA',
+          url: `https://github.com/${state.repository.owner}/${state.repository.name}/stacks/1`,
+          base: { ref: 'release/1.x' },
+          open: true,
+          created_at: '2026-09-29T00:00:00Z',
+          pull_requests: [
+            {
+              number: parent.number,
+              state: 'open',
+              draft: false,
+              merged_at: null,
+              head: { ref: 'parent', sha: localOid(harness, 'parent') },
+            },
+            {
+              number: child.number,
+              state: 'open',
+              draft: false,
+              merged_at: null,
+              head: { ref: 'child', sha: localOid(harness, 'child') },
+            },
+          ],
+        },
+      ]
+      await harness.writeState(state)
+      await makeStackMergeable(harness)
+
+      const preview = await previewStack(
+        harness.repo,
+        await getSnapshot(harness.repo),
+        'merge',
+        'child',
+      )
+      assert.deepEqual(
+        preview.blockers,
+        [],
+        'the release line the stack is registered against is its trunk, not a missing layer',
+      )
+      assert.ok(preview.merge, 'a merge preview must describe the layers it will land')
+      assert.deepEqual(
+        preview.merge.layers.map((layer) => [layer.pullRequest, layer.branch]),
+        [
+          [parent.number, 'parent'],
+          [child.number, 'child'],
+        ],
+      )
+    })
+  },
+)
+
+test(
   'merge previews the contiguous downstack of a stacked pull request and lands it from one request',
   { concurrency: false },
   async () => {
