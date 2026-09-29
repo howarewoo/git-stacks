@@ -288,14 +288,29 @@ test.describe('Keyboard routes and accessibility navigation', () => {
 
     const childRow = tree.getByRole('treeitem', { name: /^feature\/checkout-tests,/ })
     await childRow.focus()
-    // Read defaultPrevented at the window, which is after the row's own handler
-    // ran: a row that claimed the chord would have called preventDefault.
+    // Read the chord's own keydown, not the first one. `press('ControlOrMeta+Enter')`
+    // dispatches the modifier and the key as separate keydowns, so a one-shot
+    // listener settles on the bare modifier and never observes the event this
+    // contract is about.
+    //
+    // Read it at the document, in the bubble phase. That point is after React
+    // has dispatched the row's own handler — React delegates at the `#root`
+    // container, so its listener runs first — and before the global chord
+    // dispatcher, which `App.tsx` registers on `window` and re-registers
+    // whenever its effect re-runs. Reading at `window` instead made the result
+    // depend on which of the two listeners happened to be registered first,
+    // which is why the assertion went red on some runs and green on others.
+    // Here the row's own decision is all that is left to observe: a row that
+    // claimed the chord called preventDefault, one that left it alone did not.
     const chordConsumed = page.evaluate(
       () =>
         new Promise<boolean>((resolve) => {
-          window.addEventListener('keydown', (event) => resolve(event.defaultPrevented), {
-            once: true,
-          })
+          const onKeyDown = (event: KeyboardEvent) => {
+            if (event.key !== 'Enter') return
+            document.removeEventListener('keydown', onKeyDown)
+            resolve(event.defaultPrevented)
+          }
+          document.addEventListener('keydown', onKeyDown)
         }),
     )
     await page.keyboard.press('ControlOrMeta+Enter')
