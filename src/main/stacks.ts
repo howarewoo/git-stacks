@@ -70,6 +70,7 @@ import { canonicalRemoteName, getGitHubData, getPullRequest, pullRequestReposito
 import { GitHubTransportError, githubTransport } from './github-transport'
 import type { GitHubResult } from './github'
 import { runReconciliationRepair } from './reconciliation'
+import { runLinkIssueAction, runUnlinkIssueAction } from './issue-links'
 
 const PLAN_TTL_MS = 5 * 60_000
 const JOURNAL_VERSION = 1
@@ -320,6 +321,43 @@ export function validateStackAction(value: unknown): StackAction {
         stackActionError('Pull request number must be a positive integer')
       }
       return { type: value.type, number: value.number }
+    case 'linkIssue':
+    case 'unlinkIssue':
+      if (!hasOnlyKeys(value, ['type', 'prNumber', 'issueNumber', 'relation', 'expectedBody'])) {
+        stackActionError(`Invalid ${value.type} action`)
+      }
+      if (
+        typeof value.prNumber !== 'number' ||
+        !Number.isInteger(value.prNumber) ||
+        value.prNumber <= 0
+      ) {
+        stackActionError('Pull request number must be a positive integer')
+      }
+      if (
+        typeof value.issueNumber !== 'number' ||
+        !Number.isInteger(value.issueNumber) ||
+        value.issueNumber <= 0
+      ) {
+        stackActionError('Issue number must be a positive integer')
+      }
+      if (value.relation !== 'contextual' && value.relation !== 'closing') {
+        stackActionError('relation must be contextual or closing')
+      }
+      if (
+        value.expectedBody !== undefined &&
+        (typeof value.expectedBody !== 'string' ||
+          value.expectedBody.length > MAX_MESSAGE_LENGTH ||
+          value.expectedBody.includes('\0'))
+      ) {
+        stackActionError('expectedBody must be a valid string without NUL bytes')
+      }
+      return {
+        type: value.type,
+        prNumber: value.prNumber,
+        issueNumber: value.issueNumber,
+        relation: value.relation,
+        expectedBody: value.expectedBody,
+      }
     case 'createNativeStack':
       if (!hasOnlyKeys(value, ['type', 'pullRequests']) || !Array.isArray(value.pullRequests)) {
         stackActionError('Invalid createNativeStack action')
@@ -3185,7 +3223,7 @@ async function createPullRequest(fullName: string, layer: PublishLayer): Promise
   )
 }
 
-async function patchPullRequest(
+export async function patchPullRequest(
   fullName: string,
   number: number,
   body: Record<string, unknown>,
@@ -4246,6 +4284,10 @@ export async function runStackAction(
       return changePullRequestState(root, action.number, 'closed')
     case 'reopenPr':
       return changePullRequestState(root, action.number, 'open')
+    case 'linkIssue':
+      return runLinkIssueAction(root, action)
+    case 'unlinkIssue':
+      return runUnlinkIssueAction(root, action)
     case 'executeStack': {
       prunePlans()
       const plan = plans.get(action.token)

@@ -234,6 +234,34 @@ export interface RepositoryIssue {
   number: number
   title: string
   url: string
+  state?: 'OPEN' | 'CLOSED'
+}
+
+export type IssueLinkRelation = 'contextual' | 'closing'
+
+export interface LinkedIssue {
+  number: number
+  title: string
+  url: string
+  state: 'OPEN' | 'CLOSED'
+  relation: IssueLinkRelation
+}
+
+export interface PullRequestIssueLinks {
+  prNumber: number
+  links: LinkedIssue[]
+  message?: string
+}
+
+export interface IssueLinkPreview {
+  prNumber: number
+  issueNumber: number
+  relation: IssueLinkRelation
+  action: 'link' | 'unlink'
+  currentBody: string
+  newBody: string
+  changed: boolean
+  closingSyntax?: string
 }
 
 export interface Branch {
@@ -571,6 +599,20 @@ export type StackAction =
       ids: string[]
       confirmRewrites: boolean
     }
+  | {
+      type: 'linkIssue'
+      prNumber: number
+      issueNumber: number
+      relation: IssueLinkRelation
+      expectedBody?: string
+    }
+  | {
+      type: 'unlinkIssue'
+      prNumber: number
+      issueNumber: number
+      relation: IssueLinkRelation
+      expectedBody?: string
+    }
 
 export type GitAction =
   | { type: 'switch'; ref: string; carry?: boolean }
@@ -653,6 +695,17 @@ export interface DesktopAPI {
   unstackNativeStack?: (
     stackNumber: number,
   ) => Promise<{ dissolved: boolean; stack: NativeStack | null }>
+  searchIssues?: (
+    query: string,
+    requestId?: string,
+  ) => Promise<{ issues: RepositoryIssue[]; message: string }>
+  pullRequestIssueLinks?: (prNumber: number) => Promise<PullRequestIssueLinks>
+  previewIssueLink?: (
+    prNumber: number,
+    issueNumber: number,
+    relation: IssueLinkRelation,
+    action: 'link' | 'unlink',
+  ) => Promise<IssueLinkPreview>
   openExternal(url: string): Promise<void>
   /** Cancel an in-flight read by the request id the caller supplied. */
   cancel(requestId: string): Promise<void>

@@ -367,6 +367,9 @@ function handleApi(state, args, fixture) {
     const pr = findPr(state, prNumber)
     if (method === 'GET') return restPullRequest(state, pr, fixture)
     if (method !== 'PATCH') fail(`unsupported pull request method ${method}`)
+    if (state.prWriteFailure) {
+      fail(state.prWriteFailure.message || 'Write failure', state.prWriteFailure.status || 403)
+    }
     if (forms.has('draft')) fail('draft cannot be updated through REST')
     if (forms.has('title')) pr.title = forms.get('title')
     if (forms.has('body')) pr.body = forms.get('body')
@@ -439,6 +442,58 @@ function handleGraphql(state, args, fixture) {
     if (pr.state !== 'OPEN') fail('Pull request is not open')
     pr.draft = field === 'convertPullRequestToDraft'
     return { data: { [field]: { pullRequest: { id: `PR_${pr.number}`, isDraft: pr.draft } } } }
+  }
+  if (query.includes('search(query:')) {
+    if (state.issuesFailure) {
+      fail(state.issuesFailure.message || 'Issues failure', state.issuesFailure.status || 500)
+    }
+    const rawQuery = String(forms.get('searchQuery') || forms.get('query') || '')
+    const terms = rawQuery
+      .replace(/repo:[^\s]+/gu, '')
+      .replace(/is:issue/gu, '')
+      .trim()
+      .toLowerCase()
+    const issues = state.issues || []
+    let matched = issues
+    if (terms) {
+      matched = issues.filter((iss) => {
+        if (String(iss.number) === terms || `#${iss.number}` === terms) return true
+        return String(iss.title || '')
+          .toLowerCase()
+          .includes(terms)
+      })
+    }
+    return {
+      data: {
+        search: {
+          issueCount: matched.length,
+          nodes: matched.map((iss) => ({
+            __typename: 'Issue',
+            number: iss.number,
+            title: iss.title,
+            url: iss.url,
+            state: iss.state || 'OPEN',
+          })),
+          pageInfo: { hasNextPage: false, endCursor: null },
+        },
+      },
+    }
+  }
+  if (query.includes('issue(number:')) {
+    if (state.issuesFailure) {
+      fail(state.issuesFailure.message || 'Issues failure', state.issuesFailure.status || 500)
+    }
+    const num = Number(forms.get('number'))
+    const iss = (state.issues || []).find((i) => i.number === num)
+    return {
+      data: {
+        repository: {
+          issue: iss
+            ? { number: iss.number, title: iss.title, url: iss.url, state: iss.state || 'OPEN' }
+            : null,
+        },
+      },
+    }
   }
   if (query.includes('issues(first:')) {
     return {

@@ -52,6 +52,7 @@ export const SCENARIO_NAMES = [
   'pull-requests-checks',
   'pull-requests-empty',
   'pull-requests-unavailable',
+  'pull-requests-issue-links',
   // Stashes
   'stash-stable-oid',
   'stash-empty',
@@ -110,6 +111,7 @@ export const SCENARIO_GROUPS = {
     'pull-requests-checks',
     'pull-requests-empty',
     'pull-requests-unavailable',
+    'pull-requests-issue-links',
   ],
   stashes: ['stash-stable-oid', 'stash-empty', 'stash-index-shift'],
   workflows: [

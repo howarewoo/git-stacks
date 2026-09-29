@@ -132,7 +132,7 @@ function parseGraphQlPullRequest(value: unknown): PullRequestWithRepository | nu
   return { pullRequest, headRepository }
 }
 
-function githubErrorMessage(error: unknown): string {
+export function githubErrorMessage(error: unknown): string {
   if (error instanceof GitHubTransportError) {
     switch (error.kind) {
       case 'unsupported':

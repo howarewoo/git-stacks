@@ -93,8 +93,9 @@ const BARE_RESTRICTED_ACTIONS: readonly GitAction['type'][] = [
   'updatePr',
   'closePr',
   'reopenPr',
+  'linkIssue',
+  'unlinkIssue',
 ]
-
 /** Operations that need the current checkout to be a branch. */
 const BRANCH_ACTIONS: readonly GitAction['type'][] = [
   'push',
@@ -147,8 +148,9 @@ const operationLabels: Partial<Record<GitAction['type'], string>> = {
   updatePr: 'Update pull request',
   closePr: 'Close pull request',
   reopenPr: 'Reopen pull request',
+  linkIssue: 'Link issue',
+  unlinkIssue: 'Remove linked issue',
 }
-
 function restrictions(
   types: readonly GitAction['type'][],
   reason: string,

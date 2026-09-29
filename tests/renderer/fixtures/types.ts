@@ -2,6 +2,7 @@ import type {
   FileView,
   GitAction,
   HistoryPage,
+  LinkedIssue,
   PushPreview,
   RecentRepository,
   RepositorySnapshot,
@@ -26,6 +27,9 @@ export type FixtureCall =
   | 'gitRuntimeStatus'
   | 'setSystemGit'
   | 'cancel'
+  | 'searchIssues'
+  | 'pullRequestIssueLinks'
+  | 'previewIssueLink'
 
 /** One entry of the ordered {@link FixtureControl.calls} log. */
 export interface FixtureCallRecord {
@@ -58,6 +62,8 @@ export interface FixtureScenario {
   readonly stackPreviews?: Readonly<Partial<Record<StackKind, StackPreview>>>
   /** Git action types that always reject; every other action resolves with a status message. */
   readonly actionFailures?: Readonly<Partial<Record<GitAction['type'], string>>>
+  /** Linked issues per pull request number, covering both contextual and closing relations. */
+  readonly issueLinks?: Readonly<Record<number, readonly LinkedIssue[]>>
 }
 
 /** Typed gallery control surface. Every field is plain serializable data. */
