@@ -555,9 +555,13 @@ export class DirectGitHubTransport implements GitHubTransport {
     }
     const credential = this.options.credential
     if (!credential || !this.servesGitHubOrigin) return null
-    // The credential is the one this host issued, and this transport serves that
-    // host. A host switch or a repository move on another host gets nothing.
-    if (this.host && credential.host.trim().toLowerCase() !== this.host) return null
+    // The credential is the one this transport's own host issued, and this
+    // transport serves that host. A transport built for no host in particular
+    // serves the default one, so an enterprise application credential cannot
+    // pass the guard simply by arriving on a hostless transport and ride it to
+    // the public API.
+    const issuer = this.host ?? GITHUB_HOST
+    if (credential.host.trim().toLowerCase() !== issuer) return null
     const held = await credential.current()
     return held === null
       ? null
@@ -1170,8 +1174,16 @@ export function githubTransport(env: NodeJS.ProcessEnv = process.env): GitHubTra
   // A different token, API version, or signed-in identity changes what a stored
   // body means. Availability is part of the key, so a sign-in or a sign-out
   // changes the choice on the next call without any explicit invalidation.
-  const available = credentialSource?.available() === true
-  const key = `${choice}:${githubApiUrl(env)}:${githubApiVersion(env)}:${token ?? ''}:${available}`
+  //
+  // This transport names no host, so it serves the default one. Only a
+  // credential the default host issued counts here: an enterprise sign-in
+  // neither selects the direct transport nor rides it to the public API.
+  const publicCredential =
+    credentialSource !== null && credentialSource.host.trim().toLowerCase() === GITHUB_HOST
+      ? credentialSource
+      : null
+  const available = publicCredential?.available() === true
+  const key = `${choice}:${githubApiUrl(env)}:${githubApiVersion(env)}:${token ?? ''}:${available}:${publicCredential?.host ?? ''}`
   if (cached?.key === key) return cached.transport
   if (cached) responseCache.clear()
   // Only a usable account credential selects the direct transport: an account
@@ -1181,7 +1193,7 @@ export function githubTransport(env: NodeJS.ProcessEnv = process.env): GitHubTra
     ? new DirectGitHubTransport({
         env,
         cache: responseCache,
-        credential: credentialSource ?? undefined,
+        credential: publicCredential ?? undefined,
       })
     : new GhGitHubTransport({ env, cache: responseCache })
   cached = { key, transport }

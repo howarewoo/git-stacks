@@ -66,8 +66,14 @@ export async function originRemote(repoPath: string, signal?: AbortSignal): Prom
   return remote
 }
 
-/** The transport for the host a remote names, for the review reads that remote drives. */
-function reviewTransport(remote: ParsedRemote): GitHubTransport {
+/**
+ * The transport for the host a remote names, for every review read and write
+ * that remote drives: permissions, conversations, submission, replies,
+ * resolution, and history. A review is one host's business end to end, so a
+ * consumer that asked the public host instead would read — or publish — against
+ * a same-named repository on the wrong server.
+ */
+export function reviewTransport(remote: ParsedRemote): GitHubTransport {
   const host = remoteHostContext(remote)
   if (!host) throw new Error('Pull request review requires a GitHub origin remote.')
   return hostTransport(host)

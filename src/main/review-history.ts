@@ -3,12 +3,13 @@ import { looksGenerated, sameReviewComparison } from '../shared/review'
 import type { ReviewHistory, ReviewHistoryDiff, ReviewSnapshot } from '../shared/review-snapshots'
 import { reviewHistoryOf } from '../shared/review-snapshots'
 import { isRecord, type ParsedRemote, runGit } from './git-core'
-import { GitHubTransportError, githubTransport } from './github-transport'
+import { GitHubTransportError } from './github-transport'
 import { parseHunkBlock } from './hunks'
 import {
   originRemote,
   parseReviewFileEntry,
   readReviewIdentity,
+  reviewTransport,
   ReviewRevisionMovedError,
   toReviewHunk,
 } from './review'
@@ -68,7 +69,7 @@ async function probeCommitExists(
   signal?: AbortSignal,
 ): Promise<boolean> {
   try {
-    const response = await githubTransport().rest<unknown>({
+    const response = await reviewTransport(remote).rest<unknown>({
       method: 'GET',
       path: `repos/${remote.owner}/${remote.name}/commits/${oid}`,
       signal,
@@ -401,7 +402,7 @@ export async function readReviewHistoryDiff(
 
   // 2. Fall back to GitHub compare API, checking that the comparison is an endpoint diff.
   try {
-    const response = await githubTransport().rest<unknown>({
+    const response = await reviewTransport(remote).rest<unknown>({
       method: 'GET',
       path: `repos/${remote.owner}/${remote.name}/compare/${fromOid}...${currentHead}`,
       signal,

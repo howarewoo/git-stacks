@@ -14,9 +14,19 @@ import {
   probeNativeStacksCapability,
 } from '../src/main/github-host'
 import {
+  readReviewPermissions,
+  readReviewThreads,
+  replyToThread,
+  setThreadResolved,
+} from '../src/main/review-threads'
+import {
   DirectGitHubTransport,
   environmentTokenName,
   GhGitHubTransport,
+  setGitHubHostTransport,
+  setGitHubTransport,
+  type GitHubRestRequest,
+  type GitHubRestResponse,
   type GitHubTransport,
 } from '../src/main/github-transport'
 import type { GitHubCredentialSource } from '../src/main/github-transport'
@@ -39,8 +49,19 @@ const cert = (() => {
   const key = join(dir, 'key.pem')
   const certFile = join(dir, 'cert.pem')
   execFileSync('openssl', [
-    'req', '-x509', '-newkey', 'rsa:2048', '-nodes',
-    '-keyout', key, '-out', certFile, '-days', '1', '-subj', '/CN=127.0.0.1',
+    'req',
+    '-x509',
+    '-newkey',
+    'rsa:2048',
+    '-nodes',
+    '-keyout',
+    key,
+    '-out',
+    certFile,
+    '-days',
+    '1',
+    '-subj',
+    '/CN=127.0.0.1',
   ])
   return { key: readFileSync(key), cert: readFileSync(certFile) }
 })()
@@ -48,7 +69,9 @@ const cert = (() => {
 /** Starts one HTTPS server that answers as a GitHub host on its own origin. */
 async function startHost(
   name: string,
-  handler: (pathname: string) => { status?: number; body?: unknown } | Promise<{ status?: number; body?: unknown }>,
+  handler: (
+    pathname: string,
+  ) => { status?: number; body?: unknown } | Promise<{ status?: number; body?: unknown }>,
 ): Promise<RealHost> {
   const requested: RealHost['requested'] = []
   const server: Server = createTlsServer(
@@ -60,9 +83,9 @@ async function startHost(
         authorization: (request.headers.authorization as string | undefined) ?? null,
       })
       void (async () => {
-      const answer = await handler(url.pathname)
-      response.writeHead(answer.status ?? 200, { 'content-type': 'application/json' })
-      response.end(JSON.stringify(answer.body ?? {}))
+        const answer = await handler(url.pathname)
+        response.writeHead(answer.status ?? 200, { 'content-type': 'application/json' })
+        response.end(JSON.stringify(answer.body ?? {}))
       })()
     },
   )
@@ -100,7 +123,8 @@ const tokenEnvFor = (host: RealHost): NodeJS.ProcessEnv => ({
 test('a real enterprise host answers on its own origin, and a credential bound elsewhere is refused there', async () => {
   process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0'
   const enterprise = await startHost('enterprise', (pathname) => {
-    if (pathname === '/api/v3' || pathname === '/api/v3/') return { body: { current_user_url: '/api/v3/user' } }
+    if (pathname === '/api/v3' || pathname === '/api/v3/')
+      return { body: { current_user_url: '/api/v3/user' } }
     if (pathname === '/api/v3/meta') return { body: { installed_version: '3.13.1' } }
     // A GitHub Enterprise Server host serves GraphQL from `/api/graphql`, not
     // under its REST base, so that is the path this double answers.
@@ -122,14 +146,8 @@ test('a real enterprise host answers on its own origin, and a credential bound e
     assert.equal(status.serverVersion, '3.13.1')
     assert.equal(status.apiBase, `https://${enterprise.host}/api/v3`)
     // The capability matrix names what this host actually answered on this socket.
-    assert.equal(
-      status.capabilities.find((entry) => entry.id === 'rest')?.state,
-      'supported',
-    )
-    assert.equal(
-      status.capabilities.find((entry) => entry.id === 'graphql')?.state,
-      'supported',
-    )
+    assert.equal(status.capabilities.find((entry) => entry.id === 'rest')?.state, 'supported')
+    assert.equal(status.capabilities.find((entry) => entry.id === 'graphql')?.state, 'supported')
     assert.equal(
       status.capabilities.find((entry) => entry.id === 'native-stacks')?.state,
       'supported',
@@ -152,7 +170,11 @@ test('a real enterprise host answers on its own origin, and a credential bound e
     const foreign: GitHubCredentialSource = {
       host: other.host,
       available: () => true,
-      current: async () => ({ token: 'other-secret', session: 'other', origin: 'account' as const }),
+      current: async () => ({
+        token: 'other-secret',
+        session: 'other',
+        origin: 'account' as const,
+      }),
     }
     await assert.rejects(
       transportFor(enterprise, foreign).rest({ path: 'user' }),
@@ -287,10 +309,7 @@ test('a probe that answers after its host was retired records nothing', async ()
     // a stale caller might still make.
     const afterSwitch = hostStatus(githubHostContext('ghe.example.com'), {})
     assert.equal(afterSwitch.probedAt, null)
-    assert.equal(
-      afterSwitch.capabilities.find((entry) => entry.id === 'rest')?.state,
-      'unknown',
-    )
+    assert.equal(afterSwitch.capabilities.find((entry) => entry.id === 'rest')?.state, 'unknown')
   } finally {
     delete process.env.NODE_TLS_REJECT_UNAUTHORIZED
     await slow.close()
@@ -392,4 +411,125 @@ test('a token for one host never reaches another host that differs only in its n
     await issued.close()
     await lookalike.close()
   }
+})
+test('an enterprise-issued credential is refused by a transport that names no host', async () => {
+  process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0'
+  const enterprise = await startHost('issuer', () => ({ body: { full_name: 'acme/widgets' } }))
+  try {
+    let asked = 0
+    const credential: GitHubCredentialSource = {
+      host: enterprise.host,
+      available: () => true,
+      current: async () => {
+        asked += 1
+        return { token: 'enterprise-app-secret', origin: 'account' as const, session: null }
+      },
+    }
+    // A transport built for no host in particular serves the default one, so an
+    // application credential minted for an enterprise host is not its own and
+    // must not be read, let alone sent to the public API.
+    const hostless = new DirectGitHubTransport({
+      apiUrl: 'https://api.github.com',
+      env: {},
+      credential,
+    })
+    await assert.rejects(
+      hostless.rest({ path: 'repos/acme/widgets' }),
+      (error: unknown) => (error as { kind?: string }).kind === 'unauthorized',
+    )
+    assert.equal(asked, 0, 'an enterprise credential was read for a hostless transport')
+    assert.equal(enterprise.requested.length, 0, 'an enterprise credential reached its own host')
+  } finally {
+    delete process.env.NODE_TLS_REJECT_UNAUTHORIZED
+    await enterprise.close()
+  }
+})
+
+/**
+ * A workspace whose origin names an enterprise host. A review is one host's
+ * business end to end, so the origin decides which transport every consumer
+ * reaches for.
+ */
+async function enterpriseReviewWorkspace(): Promise<{
+  repo: string
+  dispose: () => Promise<void>
+}> {
+  const root = await mkdtemp(join(tmpdir(), 'git-stacks-enterprise-review-'))
+  const repo = join(root, 'workspace')
+  await mkdir(repo)
+  const git = (...args: string[]) =>
+    execFileSync('git', ['-C', repo, ...args], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    }).trim()
+  git('init', '-b', 'main')
+  git('config', 'user.name', 'Git Stacks test')
+  git('config', 'user.email', 'test@example.invalid')
+  git('remote', 'add', 'origin', 'https://git.acme.example/acme/widgets.git')
+  return { repo, dispose: () => rm(root, { recursive: true, force: true }) }
+}
+
+test('every review read and write reaches the host the origin names, not the public one', async () => {
+  const workspace = await enterpriseReviewWorkspace()
+  const hostCalls: string[] = []
+  const hostlessCalls: string[] = []
+  const limit = {
+    limit: 5000,
+    remaining: 4999,
+    reset: new Date(0),
+    resource: 'core' as const,
+    retryAfterSeconds: null,
+  }
+  const pullRequest = {
+    state: 'OPEN',
+    viewerDidAuthor: false,
+    reviewThreads: { totalCount: 0, pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] },
+  }
+  const record = (calls: string[], label: string): GitHubTransport => ({
+    kind: 'direct',
+    async rest<T>(request: GitHubRestRequest): Promise<GitHubRestResponse<T>> {
+      calls.push(`${label}:${request.path ?? ''}`)
+      return {
+        status: 200,
+        rateLimit: limit,
+        data: { head: { sha: 'a'.repeat(40) }, base: { sha: 'b'.repeat(40), ref: 'main' } } as T,
+      }
+    },
+    async paginate<T>(): Promise<T[]> {
+      return [] as T[]
+    },
+    async graphql<T>(query: string): Promise<T> {
+      calls.push(`${label}:${query.split(/[\s{(]/, 2)[1] ?? 'graphql'}`)
+      // Every write is answered with the thing it wrote, so the flow that
+      // confirms an outcome after a mutation can complete on this host.
+      return {
+        viewer: { login: 'ada' },
+        repository: { viewerPermission: 'WRITE', pullRequest },
+        addPullRequestReviewThreadReply: { comment: { id: 'reply-1', url: null } },
+        resolveReviewThread: { thread: { id: 'thread-1', isResolved: true } },
+        unresolveReviewThread: { thread: { id: 'thread-1', isResolved: false } },
+      } as T
+    },
+  })
+  const context = githubHostContext('git.acme.example')
+  setGitHubHostTransport(context.host, record(hostCalls, 'host'))
+  setGitHubTransport(record(hostlessCalls, 'hostless'))
+  try {
+    const permissions = await readReviewPermissions(workspace.repo, 7)
+    assert.equal(permissions.viewer, 'ada')
+    const threads = await readReviewThreads(workspace.repo, 7)
+    assert.equal(threads.threads.threads.length, 0)
+    await replyToThread(workspace.repo, 7, 'thread-1', 'looks good')
+    await setThreadResolved(workspace.repo, 'thread-1', true)
+  } finally {
+    setGitHubHostTransport(context.host, null)
+    setGitHubTransport(null)
+    await workspace.dispose()
+  }
+  assert.ok(hostCalls.length > 0, 'no review request reached the host the origin names')
+  assert.deepEqual(
+    hostlessCalls,
+    [],
+    'a review request was served by a transport that names no host',
+  )
 })

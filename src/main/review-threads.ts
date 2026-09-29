@@ -32,12 +32,13 @@ import {
   retireSettledWrites,
 } from './review-drafts'
 import { markReviewSnapshotReviewed } from './review-snapshots'
-import { GitHubTransportError, githubTransport } from './github-transport'
+import { GitHubTransportError } from './github-transport'
 import {
   originRemote,
   readReviewIdentity,
   readReviewFilesFrom,
   resolveReviewAnchor,
+  reviewTransport,
   ReviewRevisionMovedError,
 } from './review'
 
@@ -295,7 +296,7 @@ async function restList(
   signal?: AbortSignal,
 ): Promise<unknown[]> {
   const separator = path.includes('?') ? '&' : '?'
-  const response = await githubTransport().rest<unknown>({
+  const response = await reviewTransport(remote).rest<unknown>({
     method: 'GET',
     path: `${path}${separator}per_page=${REVIEW_REST_PAGE_SIZE}&page=${page}`,
     signal,
@@ -492,11 +493,12 @@ function parseThread(value: unknown): ParsedThread | null {
     return null
   }
   const connection = isRecord(value.comments) ? value.comments : null
-  const comments = connection && Array.isArray(connection.nodes)
-    ? connection.nodes
-        .map(parseThreadComment)
-        .filter((entry): entry is ReviewThreadComment => entry !== null)
-    : []
+  const comments =
+    connection && Array.isArray(connection.nodes)
+      ? connection.nodes
+          .map(parseThreadComment)
+          .filter((entry): entry is ReviewThreadComment => entry !== null)
+      : []
   const total =
     connection && typeof connection.totalCount === 'number'
       ? connection.totalCount
@@ -591,11 +593,9 @@ export async function readReviewThreads(
   let stoppedAtPageLimit = false
 
   do {
-    const data: Record<string, unknown> = await githubTransport().graphql<Record<string, unknown>>(
-      THREADS_QUERY,
-      { owner: remote.owner, name: remote.name, number, after },
-      { signal },
-    )
+    const data: Record<string, unknown> = await reviewTransport(remote).graphql<
+      Record<string, unknown>
+    >(THREADS_QUERY, { owner: remote.owner, name: remote.name, number, after }, { signal })
     const repository: Record<string, unknown> | null = isRecord(data.repository)
       ? data.repository
       : null
@@ -697,7 +697,7 @@ export async function readReviewPermissions(
   signal?: AbortSignal,
 ): Promise<ReviewPermissions> {
   const remote = await originRemote(repoPath, signal)
-  const data = await githubTransport().graphql<Record<string, unknown>>(
+  const data = await reviewTransport(remote).graphql<Record<string, unknown>>(
     PERMISSIONS_QUERY,
     { owner: remote.owner, name: remote.name, number },
     { signal },
@@ -846,8 +846,6 @@ function recordableComment(
   }
 }
 
-
-
 /** One inline comment in the field names GitHub's create-review endpoint */
 function wireComment(
   resolution: ReviewDraftResolution,
@@ -933,7 +931,11 @@ export async function submitReview(
   // alone cannot say which composition they are: the same line carrying the same
   // words twice is two pieces of work, and a recovery has to be able to tell
   // them apart.
-  const attempt = reviewAttemptId(comments, files.comparison, sendable.map((d) => d.id))
+  const attempt = reviewAttemptId(
+    comments,
+    files.comparison,
+    sendable.map((d) => d.id),
+  )
   // Each comment is recorded with the draft it came from. `comments` is built
   // from `sendable` in order, so the two are index for index.
   const recorded = comments.map((comment, index) =>
@@ -1062,7 +1064,7 @@ export async function submitReview(
   // that happens.
   await recordUncertainWrite(repoPath, journalled, signal)
   try {
-    const response = await githubTransport().rest<unknown>({
+    const response = await reviewTransport(remote).rest<unknown>({
       method: 'POST',
       path: `repos/${remote.owner}/${remote.name}/pulls/${number}/reviews`,
       body: {
@@ -1133,14 +1135,7 @@ export async function submitReview(
     // was applied, so the next attempt of these comments is a first attempt.
     // Records already settled for other comments are left alone, because those
     // comments are on GitHub whatever this refusal said.
-    await clearUncertainWrite(
-      repoPath,
-      repo,
-      number,
-      permissions.viewer,
-      journalled.id,
-      signal,
-    )
+    await clearUncertainWrite(repoPath, repo, number, permissions.viewer, journalled.id, signal)
     throw error
   }
 }
@@ -1343,7 +1338,13 @@ function sameAnchor(one: UncertainComment, other: UncertainComment): boolean {
 
 /** A comment's identity as a place in the diff, which is what an overlap is. */
 function anchorKey(comment: UncertainComment): string {
-  return [comment.path, comment.side, comment.line, comment.startLine ?? '', comment.startSide ?? '']
+  return [
+    comment.path,
+    comment.side,
+    comment.line,
+    comment.startLine ?? '',
+    comment.startSide ?? '',
+  ]
     .map(String)
     .join(':')
 }
@@ -1512,7 +1513,7 @@ async function readReviewPermissionsFrom(
   number: number,
   signal?: AbortSignal,
 ): Promise<ReviewPermissions> {
-  const data = await githubTransport().graphql<Record<string, unknown>>(
+  const data = await reviewTransport(remote).graphql<Record<string, unknown>>(
     PERMISSIONS_QUERY,
     { owner: remote.owner, name: remote.name, number },
     { signal },
@@ -1621,7 +1622,7 @@ export async function replyToThread(
   )
 
   try {
-    const data = await githubTransport().graphql<Record<string, unknown>>(
+    const data = await reviewTransport(remote).graphql<Record<string, unknown>>(
       REPLY_MUTATION,
       { threadId, body },
       { signal },
@@ -1684,7 +1685,7 @@ export async function setThreadResolved(
   const query = resolved ? RESOLVE_MUTATION : UNRESOLVE_MUTATION
   const field = resolved ? 'resolveReviewThread' : 'unresolveReviewThread'
   try {
-    const data = await githubTransport().graphql<Record<string, unknown>>(
+    const data = await reviewTransport(remote).graphql<Record<string, unknown>>(
       query,
       { threadId },
       { signal },
@@ -1712,7 +1713,7 @@ async function readThreadCommentPage(
   after: string | null,
   signal?: AbortSignal,
 ): Promise<{ comments: ReviewThreadComment[]; cursor: string | null }> {
-  const data = await githubTransport().graphql<Record<string, unknown>>(
+  const data = await reviewTransport(remote).graphql<Record<string, unknown>>(
     THREAD_COMMENTS_QUERY,
     { threadId, after },
     { signal },
@@ -1747,12 +1748,7 @@ async function readThreadComments(
   let cursor: string | null = null
   let page = 0
   do {
-    const { comments, cursor: next } = await readThreadCommentPage(
-      remote,
-      threadId,
-      cursor,
-      signal,
-    )
+    const { comments, cursor: next } = await readThreadCommentPage(remote, threadId, cursor, signal)
     all.push(...comments)
     cursor = next
     page += 1
