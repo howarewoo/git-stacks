@@ -41,6 +41,7 @@ import { Checkbox } from './ui/checkbox'
 import { SegmentedControl } from './ui/segmented-control'
 import { EmptyState, InlineAlert } from './ui/surface'
 import { checkLabel, checksVariant, reviewLabel, reviewVariant } from '../lib/pull-request-state'
+import { WORKSPACE_VIEW_HEADING_ID } from './workspace-navigation'
 import { createRequestGate } from '../lib/request-gate'
 import { cn } from '../lib/utils'
 import { ReviewConversation, type ReviewSelection } from './review-conversation'
@@ -621,7 +622,9 @@ export function ReviewView({
     <div className="review-view">
       <div className="list-toolbar review-toolbar">
         <div className="list-title-group">
-          <h1>Review</h1>
+          <h1 id={WORKSPACE_VIEW_HEADING_ID} tabIndex={-1}>
+            Review
+          </h1>
           <span className="list-subtitle">
             {headline
               ? `#${headline.pullRequest.number} ${headline.pullRequest.title}`
