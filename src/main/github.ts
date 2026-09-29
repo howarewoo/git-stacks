@@ -8,7 +8,7 @@ import {
   parseRemote,
   runGit,
 } from './git-core'
-import { GitHubTransportError, githubTransport } from './github-transport'
+import { GitHubTransportError, githubTransport, type GitHubErrorKind } from './github-transport'
 import {
   listPullRequestStacks,
   loadRepositoryNativeStacks,
@@ -19,6 +19,11 @@ export interface GitHubResult {
   pullRequests: PullRequest[]
   available: boolean
   message: string
+  /**
+   * Why the read could not answer, in typed terms. A caller that needs
+   * authoritative data fails closed on this instead of guessing.
+   */
+  failure?: GitHubFailure
   /** True when a pull request's head repository is this repository's origin. */
   sameRepository: (value: unknown) => boolean
   nativeStacks?: NativeStack[]
@@ -162,9 +167,22 @@ export function githubErrorMessage(error: unknown): string {
   return `GitHub metadata unavailable: ${detail}`
 }
 
-function unavailable(message: string): GitHubResult {
+/** The typed shape of a read that could not answer. */
+export interface GitHubFailure {
+  kind: GitHubErrorKind
+  detail: string
+}
+
+function typedFailure(error: unknown): GitHubFailure | undefined {
+  if (error instanceof GitHubTransportError) return { kind: error.kind, detail: error.detail }
+  if (isCancelled(error)) return undefined
+  return { kind: 'unknown', detail: githubErrorMessage(error) }
+}
+
+function unavailable(message: string, failure?: GitHubFailure): GitHubResult {
   return {
     pullRequests: [],
+    failure,
     available: false,
     message,
     sameRepository: () => false,
@@ -353,7 +371,7 @@ export async function getGitHubData(
     }
   } catch (error) {
     if (isCancelled(error)) throw error
-    return unavailable(githubErrorMessage(error))
+    return unavailable(githubErrorMessage(error), typedFailure(error))
   }
 }
 

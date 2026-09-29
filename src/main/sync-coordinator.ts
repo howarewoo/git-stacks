@@ -140,7 +140,7 @@ export class RepositorySyncCoordinator {
   private readonly deps: SyncCoordinatorDependencies
   private readonly intervals: SyncIntervals
   private readonly clock: SyncClock
-  private readonly ledger = new RemoteMutationLedger()
+  private ledger: RemoteMutationLedger = new RemoteMutationLedger()
   private readonly listeners = new Set<(event: SyncEvent) => void>()
   private repository: string | null = null
   private activity: SyncActivity = { focused: true, visible: true }
@@ -191,6 +191,9 @@ export class RepositorySyncCoordinator {
   attach(repository: string, snapshot?: RepositorySnapshot): void {
     this.detach()
     this.repository = repository
+    // A mutation lost in one repository says nothing about another, so the list
+    // is rebuilt per repository instead of outliving the open one.
+    this.ledger = new RemoteMutationLedger()
     if (snapshot) this.adopt(snapshot)
     this.emit({ kind: 'status', freshness: this.freshness() })
     this.schedule(this.intervalFor(this.currentTier()))
@@ -354,6 +357,13 @@ export class RepositorySyncCoordinator {
       }),
     )
     if (this.repository !== repository) return null
+    // A read that fell back to the last confirmed payload is still a failed
+    // read: local Git is usable, but the backoff and the state must survive it.
+    if (snapshot.githubFailure) {
+      this.emit({ kind: 'snapshot', snapshot: { ...snapshot, remote: this.freshness() } })
+      this.recordFailure(snapshot.githubFailure)
+      return snapshot
+    }
     this.adopt(snapshot)
     this.failures = 0
     this.resumeAt = null
@@ -399,11 +409,15 @@ export class RepositorySyncCoordinator {
     this.checkedAt = this.clock.now()
     this.failures += 1
     const report = lastGitHubRateLimit()
-    const failure = classifyRemoteFailure(error instanceof Error ? error.message : String(error), {
-      kind: report.kind,
-      remaining: report.rateLimit.remaining,
-      reset: report.rateLimit.reset,
-    })
+    const typed = error as { kind?: string; detail?: string }
+    const failure = classifyRemoteFailure(
+      typed?.detail ?? (error instanceof Error ? error.message : String(error)),
+      {
+        kind: typed?.kind ?? report.kind,
+        remaining: report.rateLimit.remaining,
+        reset: report.rateLimit.reset,
+      },
+    )
     this.state = failure.state
     this.detail = failure.detail
     this.resumeAt = failure.resumeAt

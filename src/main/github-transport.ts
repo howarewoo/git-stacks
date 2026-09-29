@@ -105,6 +105,12 @@ export interface GitHubRestRequest {
   headers?: Record<string, string>
   signal?: AbortSignal
   timeoutMs?: number
+  /**
+   * Opt in to the conditional-response cache. Off by default: a replayed body
+   * is only ever right for display, so every identity read leaves it unset and
+   * asks GitHub directly.
+   */
+  cache?: boolean
 }
 
 export interface GitHubRestResponse<T> {
@@ -392,7 +398,8 @@ export class DirectGitHubTransport implements GitHubTransport {
   async rest<T = unknown>(request: GitHubRestRequest): Promise<GitHubRestResponse<T>> {
     const method = request.method ?? 'GET'
     const path = request.path.replace(/^\/+/u, '')
-    const cache = this.options.cache
+    // Only a caller that asked for display-grade freshness gets the cache.
+    const cache = request.cache === true ? this.options.cache : undefined
     const key = cache ? conditionalCacheKey(request) : null
     const cached: CachedGitHubResponse | null = cache && key ? cache.get(key) : null
     const request$ =
@@ -680,7 +687,8 @@ export class GhGitHubTransport implements GitHubTransport {
   }
 
   async rest<T = unknown>(request: GitHubRestRequest): Promise<GitHubRestResponse<T>> {
-    const cache = this.options.cache
+    // Only a caller that asked for display-grade freshness gets the cache.
+    const cache = request.cache === true ? this.options.cache : undefined
     const key = cache ? conditionalCacheKey(request) : null
     const cached: CachedGitHubResponse | null = cache && key ? cache.get(key) : null
     const conditional =

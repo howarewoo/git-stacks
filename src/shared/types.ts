@@ -332,6 +332,12 @@ export interface RepositorySnapshot {
    * rather than a live read, with the reason and the time it was confirmed.
    */
   githubStale?: { reason: string; fetchedAt: string } | null
+  /**
+   * The typed reason the GitHub read could not answer, whenever it could not.
+   * Background refresh backs off on this; a fallback to the last confirmed
+   * payload never turns a failure into a success.
+   */
+  githubFailure?: { kind: string; detail: string } | null
 }
 
 /** A GitHub mutation whose outcome the app refuses to guess after a lost network. */

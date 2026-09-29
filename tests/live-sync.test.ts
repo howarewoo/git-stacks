@@ -5,7 +5,11 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { getSnapshot } from '../src/main/git'
-import { DirectGitHubTransport, GitHubTransportError } from '../src/main/github-transport'
+import {
+  DirectGitHubTransport,
+  GhGitHubTransport,
+  GitHubTransportError,
+} from '../src/main/github-transport'
 import { GitHubResponseCacheStore } from '../src/main/github-response-cache'
 import { RepositoryWatcher } from '../src/main/git-watcher'
 import { RepositoryScheduler } from '../src/main/repository-scheduler'
@@ -29,6 +33,10 @@ import type {
   RemoteFreshness,
   RepositorySnapshot,
 } from '../src/shared/types'
+
+/** The gh stand-in: a 304 block on stdout and a nonzero exit, like the real CLI. */
+const GH_STUB =
+  '#!/bin/sh\nfor arg in "$@"; do\n  case "$arg" in\n    if-none-match:*)\n      printf \'HTTP/2.0 304 Not Modified\\netag: W/"gh-7"\\n\\n\'\n      exit 1\n      ;;\n  esac\ndone\nprintf \'HTTP/2.0 200 OK\\netag: W/"gh-7"\\ncontent-type: application/json\\n\\n{"number":7,"state":"open"}\\n\'\n'
 
 function git(repo: string, ...args: string[]): string {
   return execFileSync('git', args, {
@@ -390,14 +398,12 @@ test('a conditional read stores a validator and a 304 replays the stored body', 
     })
   }) as typeof globalThis.fetch
   const transport = new DirectGitHubTransport({ token: 'token', fetch: fetchDouble, cache })
-  const first = await transport.rest<{ number: number; state: string }>({
-    path: 'repos/acme/pulls/7',
-  })
+  // Only a display-grade caller opts in; an identity read leaves it unset.
+  const displayRead = { path: 'repos/acme/pulls/7', cache: true }
+  const first = await transport.rest<{ number: number; state: string }>(displayRead)
   assert.equal(first.status, 200)
   assert.equal(first.notModified, undefined)
-  const second = await transport.rest<{ number: number; state: string }>({
-    path: 'repos/acme/pulls/7',
-  })
+  const second = await transport.rest<{ number: number; state: string }>(displayRead)
   assert.equal(requested[0], null, 'the first read had no validator to send')
   assert.equal(requested[1], 'W/"v7"', 'the second read asked whether the resource changed')
   assert.equal(second.status, 304)
@@ -773,4 +779,76 @@ test('the freshness badge renders every state in words, not colour alone', async
   assert.match(at('stale', '2026-09-28T11:00:00.000Z'), /GitHub stale/)
   // Colour never carries the state on its own: the sentence is in the markup.
   assert.match(at('offline', '2026-09-28T11:00:00.000Z'), /Local Git still works/)
+})
+
+test('a live snapshot read that cannot reach GitHub never reuses the confirmed payload', async () => {
+  const { repo, cleanup } = await disposableRepository()
+  const previous = { ...process.env }
+  // Point the real transport at a closed port with credentials present, so the
+  // read fails in the transport rather than in a double.
+  process.env.GIT_STACKS_GITHUB_API_URL = 'http://127.0.0.1:9'
+  process.env.GIT_STACKS_GITHUB_TRANSPORT = 'direct'
+  process.env.GIT_STACKS_GITHUB_TOKEN = 'test-token'
+  git(repo, 'remote', 'add', 'origin', 'git@github.com:acme/widgets.git')
+  try {
+    const live = await getSnapshot(repo, undefined, undefined, 'live')
+    assert.equal(live.github.available, false, 'a live read that failed is not available')
+    assert.deepEqual(live.pullRequests, [], 'no older payload is passed off as a live answer')
+    assert.equal(live.githubStale?.reason, live.github.message)
+    // The failure is typed and reported, so backoff has something to act on.
+    assert.ok(live.githubFailure, 'the snapshot carries why the read failed')
+    assert.match(live.githubFailure?.detail ?? '', /fetch failed|ECONNREFUSED|network/iu)
+
+    // A background refresh of the same repository may fall back, and says so.
+    const background = await getSnapshot(repo, undefined, undefined, 'on-failure')
+    assert.equal(background.github.available, false)
+    assert.ok(background.githubFailure)
+  } finally {
+    Object.assign(process.env, previous)
+    await cleanup()
+  }
+})
+
+test('the conditional cache is never consulted for a read that did not opt in', async () => {
+  const requested: (string | null)[] = []
+  const cache = new GitHubResponseCacheStore()
+  const fetchDouble = (async (_url: string | URL | Request, init?: RequestInit) => {
+    requested.push(new Headers(init?.headers).get('if-none-match'))
+    return new Response(JSON.stringify({ number: 7, state: 'open' }), {
+      status: 200,
+      headers: { etag: 'W/v7', 'content-type': 'application/json' },
+    })
+  }) as typeof globalThis.fetch
+  const transport = new DirectGitHubTransport({ token: 'token', fetch: fetchDouble, cache })
+  await transport.rest({ path: 'repos/acme/pulls/7' })
+  const again = await transport.rest({ path: 'repos/acme/pulls/7' })
+  assert.equal(again.status, 200, 'an identity read gets a real answer, not a replay')
+  assert.deepEqual(requested, [null, null], 'no validator is sent unless the caller opted in')
+  assert.equal(cache.size(), 0, 'nothing is stored for a caller that did not opt in')
+})
+
+test('the gh path resolves a 304 that arrived with a nonzero exit', async () => {
+  const { chmod, writeFile } = await import('node:fs/promises')
+  const root = await mkdtemp(join(tmpdir(), 'git-stacks-gh-304-'))
+  const fake = join(root, 'gh')
+  // A stand-in for the real executable: the second call carries a validator, so
+  // it prints the block gh prints and exits nonzero exactly as gh does.
+  await writeFile(fake, GH_STUB, 'utf8')
+  await chmod(fake, 0o755)
+  const previous = process.env.PATH
+  const cache = new GitHubResponseCacheStore()
+  process.env.PATH = `${root}:${previous ?? ''}`
+  try {
+    const transport = new GhGitHubTransport({ env: process.env, cache })
+    const displayRead = { path: 'repos/acme/pulls/7', cache: true }
+    const first = await transport.rest<{ number: number }>(displayRead)
+    assert.equal(first.status, 200)
+    const second = await transport.rest<{ number: number }>(displayRead)
+    assert.equal(second.status, 304, 'a nonzero gh exit still resolved its 304 block')
+    assert.equal(second.notModified, true)
+    assert.deepEqual(second.data, { number: 7, state: 'open' })
+  } finally {
+    process.env.PATH = previous
+    await rm(root, { recursive: true, force: true })
+  }
 })

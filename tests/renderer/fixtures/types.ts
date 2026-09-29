@@ -5,6 +5,7 @@ import type {
   LinkedIssue,
   PushPreview,
   RecentRepository,
+  RemoteFreshness,
   RepositorySnapshot,
   StackKind,
   StackPreview,
@@ -97,6 +98,13 @@ export interface FixtureControl {
   connect(): void
   /** Clears logs, holds, and one-shot failures while keeping the mounted scenario. */
   reset(): void
+  /**
+   * Pushes a freshness state exactly as the main process does when a read
+   * answers, fails, or hits a rate limit.
+   */
+  pushFreshness(value: RemoteFreshness): void
+  /** Pushes a background snapshot, as a filesystem watcher's refresh does. */
+  pushSnapshot(value: RepositorySnapshot): void
 }
 
 declare global {

@@ -4697,16 +4697,22 @@ export async function getSnapshot(
   if (answered) {
     rememberConfirmedPayload(root, { data: live[0], issues: live[1], fetchedAt: confirmedAt })
   }
-  const github = answered ? live![0] : (confirmed?.data ?? live![0])
-  const issueData = answered ? live![1] : (confirmed?.issues ?? live![1])
+  // A live read is authoritative by definition: a caller that asked for one
+  // (a mutation preview, a publication) must never be handed an older payload
+  // wearing a fresh label. Only the background modes may fall back.
+  const mayFallBack = remote !== 'live'
+  const github = answered ? live![0] : mayFallBack && confirmed ? confirmed.data : live![0]
+  const issueData = answered ? live![1] : mayFallBack && confirmed ? confirmed.issues : live![1]
+  const githubFailure = live === null ? null : (live[0].failure ?? null)
   const githubStale: RepositorySnapshot['githubStale'] = answered
     ? null
     : {
-        reason: confirmed
-          ? remote === 'reuse'
-            ? 'A GitHub refresh is not due yet; showing the last confirmed state'
-            : 'GitHub could not be read; showing the last confirmed state'
-          : github.message,
+        reason:
+          mayFallBack && confirmed
+            ? remote === 'reuse'
+              ? 'A GitHub refresh is not due yet; showing the last confirmed state'
+              : 'GitHub could not be read; showing the last confirmed state'
+            : github.message,
         fetchedAt: confirmed?.fetchedAt ?? confirmedAt,
       }
   const localPullRequests = new Map<string, PullRequest>()
@@ -4906,6 +4912,7 @@ export async function getSnapshot(
     limits,
     capabilities,
     githubStale,
+    githubFailure,
   }
   // Read-only: the report compares submitted membership with the local graph
   // and never rewrites a branch, a local hint, or a pull-request base.

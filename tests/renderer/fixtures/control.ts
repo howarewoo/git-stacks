@@ -7,6 +7,9 @@ import type {
   GitRuntimeStatus,
   HistoryPage,
   PushPreview,
+  RemoteFreshness,
+  RepositorySnapshot,
+  SyncActivity,
   StackKind,
   StackPreview,
   SurgeryPreview,
@@ -478,6 +481,62 @@ export function installFixtureControl(options: {
       released.clear()
       waiting.length = 0
     },
+    pushFreshness(value) {
+      push('repository:remote-status', value)
+    },
+    pushSnapshot(value) {
+      push('repository:background-snapshot', value)
+    },
+  }
+
+  // The main process's live-sync surface: the App subscribes to the pushes its
+  // watcher and refresh timers make, reports window activity, and can be asked
+  // for the current freshness. The control drives all of it, so a test walks the
+  // same path a real background refresh does.
+  const subscribers = new Map<string, (value: never) => void>()
+  let freshness: RemoteFreshness | null = scenario.snapshot?.remote ?? null
+  const push = (channel: string, value: unknown): void => {
+    if (channel === 'repository:remote-status') freshness = value as RemoteFreshness
+    subscribers.get(channel)?.(value as never)
+  }
+  const live = desktop as DesktopAPI & {
+    reportActivity: (activity: SyncActivity) => Promise<void>
+    remoteStatus: () => Promise<RemoteFreshness>
+    dismissPendingMutation: (id: string) => Promise<void>
+  }
+  live.reportActivity = async () => {}
+  // The main process always has a state for the open repository; before one is
+  // attached it reports the state the snapshot carried.
+  live.remoteStatus = async () =>
+    freshness ?? {
+      state: 'stale',
+      fetchedAt: null,
+      checkedAt: null,
+      detail: null,
+      rateLimitReset: null,
+      pendingMutations: [],
+    }
+  live.dismissPendingMutation = async (id: string) => {
+    if (!freshness) return
+    freshness = {
+      ...freshness,
+      pendingMutations: freshness.pendingMutations.filter((entry) => entry.id !== id),
+    }
+  }
+  const channelToMethod: Record<string, string> = {
+    'repository:background-snapshot': 'onBackgroundSnapshot',
+    'repository:background-issues': 'onBackgroundIssues',
+    'repository:remote-status': 'onRemoteStatus',
+  }
+  for (const [channel, method] of Object.entries(channelToMethod)) {
+    void ((live as unknown as Record<string, unknown>)[method] = (
+      listener: (value: never) => void,
+    ): (() => void) => {
+      subscribers.set(channel, listener)
+      return () => {
+        if (subscribers.get(channel) === listener) subscribers.delete(channel)
+      }
+    })
   }
 
   window.desktop = desktop
