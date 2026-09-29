@@ -114,10 +114,12 @@ export function GitHubAccountDialog({
                 {status.challenge.userCode}
               </p>
               <div className="flex flex-wrap gap-2">
-                <Button disabled={busy} onClick={onOpenVerification} size="sm">
+                <Button onClick={onOpenVerification} size="sm">
                   Open device page
                 </Button>
-                <Button disabled={busy} onClick={onCancelSignIn} size="sm" variant="secondary">
+                {/* Never disabled: a sign-in waiting on GitHub is exactly the
+                    case a user needs to be able to abandon. */}
+                <Button onClick={onCancelSignIn} size="sm" variant="secondary">
                   Cancel sign-in
                 </Button>
               </div>

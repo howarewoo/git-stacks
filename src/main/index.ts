@@ -896,17 +896,20 @@ function installHandlers() {
     validateSender(event)
     return githubAccount().status()
   })
+  // Authentication never touches a repository, so it never takes the repository
+  // gate: a stalled GitHub endpoint must not block local Git work, and a cancel
+  // must stay reachable while a sign-in is still in progress.
   ipcMain.handle('github-account:sign-in', async (event) => {
     validateSender(event)
-    return operations.write(() => githubAccount().signIn())
+    return githubAccount().signIn()
   })
   ipcMain.handle('github-account:cancel', async (event) => {
     validateSender(event)
-    return operations.write(() => githubAccount().cancelSignIn())
+    return githubAccount().cancelSignIn()
   })
   ipcMain.handle('github-account:sign-out', async (event) => {
     validateSender(event)
-    return operations.write(() => githubAccount().signOut())
+    return githubAccount().signOut()
   })
 }
 

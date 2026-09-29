@@ -619,8 +619,10 @@ function App() {
   }, [desktop])
 
   const runAccountAction = React.useCallback(
-    async (action: () => Promise<GitHubAccountStatus>) => {
-      if (!desktop || accountBusy) return
+    async (action: () => Promise<GitHubAccountStatus>, interruptible = false) => {
+      // Cancelling and signing out must stay reachable while a sign-in is in
+      // progress; only starting one is prevented from being doubled up.
+      if (!desktop || (accountBusy && !interruptible)) return
       setAccountBusy(true)
       try {
         setAccount(await action())
@@ -2901,11 +2903,11 @@ function App() {
       />
       <GitHubAccountDialog
         busy={accountBusy || isBusy || operationActive}
-        onCancelSignIn={() => runAccountAction(() => desktop!.cancelGitHubSignIn!())}
+        onCancelSignIn={() => runAccountAction(() => desktop!.cancelGitHubSignIn!(), true)}
         onOpenChange={setAccountOpen}
         onOpenVerification={openDevicePage}
         onSignIn={() => runAccountAction(() => desktop!.startGitHubSignIn!())}
-        onSignOut={() => runAccountAction(() => desktop!.signOutOfGitHub!())}
+        onSignOut={() => runAccountAction(() => desktop!.signOutOfGitHub!(), true)}
         open={accountOpen}
         status={account}
       />

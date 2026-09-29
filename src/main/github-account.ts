@@ -11,11 +11,13 @@ import {
   type GitHubAppSession,
 } from './github-app'
 import {
+  DirectGitHubTransport,
   GitHubTransportError,
-  githubTransport,
   onGitHubFailure,
+  refreshGitHubCredentialSource,
   resolveGitHubToken,
   setGitHubCredentialSource,
+  type GitHubCredentialSource,
   type GitHubTransport,
 } from './github-transport'
 import type { GitHubAccountState, GitHubAccountStatus, GitHubAppPermission } from '../shared/types'
@@ -114,7 +116,8 @@ export interface GitHubAccountOptions {
   stateFile: string
   env?: NodeJS.ProcessEnv
   fetch?: typeof globalThis.fetch
-  transport?: () => GitHubTransport
+  /** Resolves the login the given credential authenticates as. */
+  identify?: (accessToken: string, env: NodeJS.ProcessEnv) => Promise<string | null>
   now?: () => number
   sleep?: (milliseconds: number, signal?: AbortSignal) => Promise<void>
   onChange?: (status: GitHubAccountStatus) => void
@@ -140,7 +143,20 @@ function defaultSleep(milliseconds: number, signal?: AbortSignal): Promise<void>
  * detects a revoked or policy-blocked credential, and answers the renderer with
  * a status that holds an opaque reference and never the credential itself.
  */
-export class GitHubAccount {
+/** The login the given application-owned credential authenticates as. */
+async function identifyWithToken(
+  accessToken: string,
+  env: NodeJS.ProcessEnv,
+): Promise<string | null> {
+  const transport = new DirectGitHubTransport({ token: accessToken, env })
+  const response = await transport.rest<{ login?: unknown }>({ path: 'user' })
+  return typeof response.data?.login === 'string' ? response.data.login : null
+}
+
+export class GitHubAccount implements GitHubCredentialSource {
+  /** The host this credential was issued for; it is never sent anywhere else. */
+  readonly host = GITHUB_ACCOUNT_HOST
+
   private readonly options: GitHubAccountOptions
   private readonly env: NodeJS.ProcessEnv
   private readonly now: () => number
@@ -153,6 +169,14 @@ export class GitHubAccount {
   private expiry: NodeJS.Timeout | null = null
   private state: GitHubAccountState = 'signed-out'
   private message: string | null = null
+  /**
+   * Incremented whenever the stored credential is invalidated. Any operation that
+   * started earlier carries the older value and is refused on completion, so a
+   * refresh already in flight can never resurrect a sign-out.
+   */
+  private generation = 0
+  private refreshController: AbortController | null = null
+  private holding = false
 
   constructor(options: GitHubAccountOptions) {
     this.options = options
@@ -172,8 +196,9 @@ export class GitHubAccount {
     return githubAppClientId(this.env)
   }
 
-  private get transport(): () => GitHubTransport {
-    return this.options.transport ?? githubTransport
+  /** Whether a usable credential is held, which is what selects the direct transport. */
+  available(): boolean {
+    return this.holding
   }
 
   /** The state to return when nothing is in progress and no credential is active. */
@@ -289,7 +314,7 @@ export class GitHubAccount {
   }
 
   /** Seals a new session and replaces the application state that points at it. */
-  private async adopt(session: GitHubAppSession): Promise<void> {
+  private async adopt(session: GitHubAppSession, generation: number): Promise<void> {
     const issuedAt = this.now()
     const live: LiveCredential = {
       accessToken: session.accessToken,
@@ -305,6 +330,11 @@ export class GitHubAccount {
       JSON.stringify(live),
       issuedAt,
     )
+    // The store write itself suspends, so re-check the fence before publishing it.
+    if (generation !== this.generation) {
+      await this.options.vault.remove(reference)
+      throw new GitHubAppError('cancelled')
+    }
     this.live = live
     this.account = {
       reference,
@@ -315,17 +345,35 @@ export class GitHubAccount {
       refreshExpiresAt: live.refreshExpiresAt,
     }
     await writeAccount(this.options.stateFile, this.account)
+    this.markAvailable(true)
     this.scheduleExpiry()
   }
 
+  /** Credential availability decides the automatic transport choice, so publish it. */
+  private markAvailable(available: boolean): void {
+    if (this.holding === available) return
+    this.holding = available
+    refreshGitHubCredentialSource()
+  }
+
   private async discard(state: GitHubAccountState, message: string): Promise<void> {
+    this.generation += 1
+    this.invalidate()
     if (this.account) await this.options.vault.remove(this.account.reference)
     await rm(this.options.stateFile, { force: true })
     this.account = null
     this.live = null
+    this.setState(state, message)
+  }
+
+  /** Drops in-memory credential state and stops the work that maintains it. */
+  private invalidate(): void {
+    this.refreshController?.abort()
+    this.refreshController = null
+    this.refreshing = null
     clearTimeout(this.expiry ?? undefined)
     this.expiry = null
-    this.setState(state, message)
+    this.markAvailable(false)
   }
 
   /**
@@ -345,17 +393,23 @@ export class GitHubAccount {
   /** One refresh at a time, so concurrent requests cannot rotate the credential twice. */
   private refresh(): Promise<string | null> {
     if (!this.refreshing) {
-      this.refreshing = this.renew().finally(() => {
+      const generation = this.generation
+      const controller = new AbortController()
+      this.refreshController = controller
+      this.refreshing = this.renew(generation, controller.signal).finally(() => {
+        if (this.refreshController === controller) this.refreshController = null
         this.refreshing = null
       })
     }
     return this.refreshing
   }
 
-  private async renew(): Promise<string | null> {
+  private async renew(generation: number, signal: AbortSignal): Promise<string | null> {
     const live = this.live
+    if (generation !== this.generation) return null
     if (!live?.refreshToken) {
       this.live = null
+      this.markAvailable(false)
       this.setState('expired', 'The saved GitHub sign-in has expired. Sign in again.')
       return null
     }
@@ -368,12 +422,16 @@ export class GitHubAccount {
         clientId: this.clientId ?? '',
         refreshToken: live.refreshToken,
         fetch: this.options.fetch,
-        signal: this.pending?.signal,
+        signal,
       })
-      await this.adopt(session)
+      // A sign-out, a second sign-in, or a revocation that landed meanwhile owns
+      // the state now; this response belongs to a session that no longer exists.
+      if (generation !== this.generation) return null
+      await this.adopt(session, generation)
       this.setState('signed-in')
       return this.live?.accessToken ?? null
     } catch (error) {
+      if (generation !== this.generation) return null
       if (error instanceof GitHubAppError) {
         if (error.code === 'network' || error.code === 'cancelled') {
           this.setState('offline', error.message)
@@ -420,6 +478,7 @@ export class GitHubAccount {
     if (store.kind !== 'system') return this.setState('storage-unavailable', store.reason)
     await this.cancelSignIn()
     const controller = new AbortController()
+    const generation = this.generation
     this.pending = controller
     this.setState('signing-in')
     let challenge: DeviceChallenge
@@ -442,11 +501,15 @@ export class GitHubAccount {
       expiresAt: this.now() + challenge.expiresIn * 1000,
     }
     this.setState('signing-in')
-    void this.poll(challenge, controller)
+    void this.poll(challenge, controller, generation)
     return this.status()
   }
 
-  private async poll(challenge: DeviceChallenge, controller: AbortController): Promise<void> {
+  private async poll(
+    challenge: DeviceChallenge,
+    controller: AbortController,
+    generation: number,
+  ): Promise<void> {
     try {
       const session = await waitForDeviceAuthorization({
         clientId: this.clientId ?? '',
@@ -458,14 +521,15 @@ export class GitHubAccount {
         sleep: this.sleep,
         now: this.now,
       })
-      if (controller.signal.aborted) return
-      await this.adopt(session)
+      if (controller.signal.aborted || generation !== this.generation) return
+      await this.adopt(session, generation)
       this.pending = null
       this.challenge = null
-      const identified = await this.identify()
+      const identified = await this.identify(session.accessToken, generation)
+      if (generation !== this.generation) return
       this.setState(identified.state, identified.message)
     } catch (error) {
-      if (controller.signal.aborted) return
+      if (controller.signal.aborted || generation !== this.generation) return
       this.pending = null
       this.challenge = null
       const code = error instanceof GitHubAppError ? error : null
@@ -478,13 +542,20 @@ export class GitHubAccount {
 
   /**
    * Reads the signed-in account's login before the state settles, so one pushed
-   * status carries the login and any policy block together.
+   * status carries the login and any policy block together. The request is bound
+   * to the credential just adopted: an environment token or a `gh` session for
+   * another user must never supply this account's identity.
    */
-  private async identify(): Promise<{ state: GitHubAccountState; message: string | null }> {
+  private async identify(
+    accessToken: string,
+    generation: number,
+  ): Promise<{ state: GitHubAccountState; message: string | null }> {
     try {
-      const response = await this.transport().rest<{ login?: unknown }>({ path: 'user' })
-      const login = typeof response.data?.login === 'string' ? response.data.login : null
-      if (this.account && login && login !== this.account.login) {
+      const login = await (this.options.identify ?? identifyWithToken)(accessToken, this.env)
+      if (generation !== this.generation || !this.account) {
+        return { state: 'signed-in', message: null }
+      }
+      if (login && login !== this.account.login) {
         this.account = { ...this.account, login }
         await writeAccount(this.options.stateFile, this.account)
       }
@@ -499,6 +570,9 @@ export class GitHubAccount {
 
   async cancelSignIn(): Promise<GitHubAccountStatus> {
     const wasSigningIn = this.state === 'signing-in'
+    // Fencing the generation is what makes a cancel durable: an adoption already
+    // past its check finds a newer generation and discards what it sealed.
+    this.generation += 1
     this.pending?.abort()
     this.pending = null
     this.challenge = null
@@ -510,13 +584,15 @@ export class GitHubAccount {
 
   /** Removes the credential this application owns. Git repositories are untouched. */
   async signOut(): Promise<GitHubAccountStatus> {
-    await this.cancelSignIn()
+    this.generation += 1
+    this.pending?.abort()
+    this.pending = null
+    this.challenge = null
+    this.invalidate()
     await this.options.vault.clear()
     await rm(this.options.stateFile, { force: true })
     this.account = null
     this.live = null
-    clearTimeout(this.expiry ?? undefined)
-    this.expiry = null
     return this.setState(this.baseline())
   }
 }

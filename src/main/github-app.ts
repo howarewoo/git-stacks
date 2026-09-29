@@ -76,6 +76,7 @@ export interface GitHubAppRequest {
   clientId: string
   fetch?: typeof globalThis.fetch
   signal?: AbortSignal
+  timeoutMs?: number
 }
 
 export interface DevicePollRequest extends GitHubAppRequest {
@@ -107,12 +108,26 @@ function seconds(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : null
 }
 
+/**
+ * Every authorization request carries its own deadline, so a stalled GitHub
+ * endpoint cannot hold the caller — and a user waiting to cancel — indefinitely.
+ */
+const REQUEST_TIMEOUT_MS = 20_000
+
 async function post(
   url: string,
   parameters: Record<string, string>,
   request: GitHubAppRequest,
 ): Promise<Record<string, unknown>> {
   const send = (request.fetch ?? globalThis.fetch) as typeof globalThis.fetch
+  const controller = new AbortController()
+  let timedOut = false
+  const timer = setTimeout(() => {
+    timedOut = true
+    controller.abort()
+  }, request.timeoutMs ?? REQUEST_TIMEOUT_MS)
+  const forward = () => controller.abort()
+  request.signal?.addEventListener('abort', forward, { once: true })
   let response: Response
   try {
     response = await send(url, {
@@ -123,21 +138,26 @@ async function post(
         'user-agent': 'git-stacks',
       },
       body: new URLSearchParams(parameters).toString(),
-      signal: request.signal,
+      signal: controller.signal,
     })
-  } catch {
+    if (!response.ok) throw new GitHubAppError('network')
+    let body: unknown
+    try {
+      body = JSON.parse(await response.text())
+    } catch {
+      throw new GitHubAppError('invalid_response')
+    }
+    if (typeof body !== 'object' || body === null) throw new GitHubAppError('invalid_response')
+    return body as Record<string, unknown>
+  } catch (error) {
+    if (error instanceof GitHubAppError) throw error
+    if (timedOut) throw new GitHubAppError('network')
     if (request.signal?.aborted) throw new GitHubAppError('cancelled')
     throw new GitHubAppError('network')
+  } finally {
+    clearTimeout(timer)
+    request.signal?.removeEventListener('abort', forward)
   }
-  if (!response.ok) throw new GitHubAppError('network')
-  let body: unknown
-  try {
-    body = JSON.parse(await response.text())
-  } catch {
-    throw new GitHubAppError('invalid_response')
-  }
-  if (typeof body !== 'object' || body === null) throw new GitHubAppError('invalid_response')
-  return body as Record<string, unknown>
 }
 
 function failure(body: Record<string, unknown>): GitHubAppError {

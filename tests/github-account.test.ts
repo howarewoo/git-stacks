@@ -9,6 +9,7 @@ import { GitHubAppError } from '../src/main/github-app'
 import {
   DirectGitHubTransport,
   emptyRateLimit,
+  githubTransport,
   onGitHubFailure,
   setGitHubCredentialSource,
   type GitHubTransport,
@@ -97,16 +98,13 @@ function session(accessToken: string, refreshToken: string) {
   }
 }
 
-const authorized = (login: string): GitHubTransport => ({
-  kind: 'direct',
-  rest: async () => ({ status: 200, data: { login }, rateLimit: emptyRateLimit() }) as never,
-  paginate: async () => [],
-  graphql: async () => ({}) as never,
-})
-
 async function accountUnder(
   responses: Array<{ status?: number; body: unknown }>,
-  options: { store?: SecretStore; transport?: () => GitHubTransport } = {},
+  options: {
+    store?: SecretStore
+    login?: string
+    identify?: (accessToken: string, env: NodeJS.ProcessEnv) => Promise<string | null>
+  } = {},
 ) {
   const root = await mkdtemp(join(tmpdir(), 'git-stacks-account-'))
   roots.push(root)
@@ -123,7 +121,7 @@ async function accountUnder(
     stateFile,
     env: { GIT_STACKS_GITHUB_APP_CLIENT_ID: CLIENT_ID },
     fetch: fetchDouble,
-    transport: options.transport ?? (() => authorized('ada')),
+    identify: options.identify ?? (async () => options.login ?? 'ada'),
     now: () => clock.now,
     sleep: async (milliseconds) => {
       clock.now += milliseconds
@@ -147,6 +145,76 @@ async function signedIn(
   await harness.account.signIn()
   await harness.settled.promise
   return harness
+}
+
+/**
+ * An account whose refresh only completes when the test releases it, so a
+ * sign-out can be made to land while GitHub still owes an answer.
+ */
+async function deferredRenewalHarness() {
+  const root = await mkdtemp(join(tmpdir(), 'git-stacks-account-'))
+  roots.push(root)
+  const { protector } = sealingProtector()
+  const vaultFile = join(root, 'credentials.vault.json')
+  const stateFile = join(root, 'github-account.json')
+  const clock = { now: 1_700_000_000_000 }
+  const statuses: GitHubAccountStatus[] = []
+  const settled = Promise.withResolvers<GitHubAccountStatus>()
+  const renewal = Promise.withResolvers<Response>()
+  const releaseRenewal = () =>
+    renewal.resolve(new Response(JSON.stringify(session('ghu_late', 'ghr_late')), { status: 200 }))
+  const account = new GitHubAccount({
+    vault: new CredentialVault(vaultFile, protector),
+    stateFile,
+    env: { GIT_STACKS_GITHUB_APP_CLIENT_ID: CLIENT_ID },
+    fetch: (async (_input: string | URL | Request, init?: RequestInit) => {
+      const body = new URLSearchParams(String(init?.body ?? ''))
+      if (body.get('grant_type') === 'urn:ietf:params:oauth:grant-type:device_code') {
+        return new Response(JSON.stringify(DEVICE_CODE), { status: 200 })
+      }
+      if (body.get('grant_type') === 'refresh_token') {
+        if (init?.signal?.aborted) throw new TypeError('fetch failed')
+        return await renewal.promise
+      }
+      throw new TypeError('fetch failed')
+    }) as typeof globalThis.fetch,
+    identify: async () => 'ada',
+    now: () => clock.now,
+    sleep: async (milliseconds) => {
+      clock.now += milliseconds
+    },
+    onChange: (status) => {
+      statuses.push(status)
+      if (status.state === 'signed-in') settled.resolve(status)
+    },
+  })
+  return { account, clock, releaseRenewal, stateFile, statuses, settled, vaultFile }
+}
+
+/**
+ * An account whose poll is suspended between attempts, so a cancel provably
+ * lands while GitHub is still being asked.
+ */
+async function suspendedPollHarness() {
+  const root = await mkdtemp(join(tmpdir(), 'git-stacks-account-'))
+  roots.push(root)
+  const { protector } = sealingProtector()
+  const vaultFile = join(root, 'credentials.vault.json')
+  const stateFile = join(root, 'github-account.json')
+  const gate = Promise.withResolvers<void>()
+  const release = () => gate.resolve()
+  const account = new GitHubAccount({
+    vault: new CredentialVault(vaultFile, protector),
+    stateFile,
+    env: { GIT_STACKS_GITHUB_APP_CLIENT_ID: CLIENT_ID },
+    fetch: (async (_input: string | URL | Request) =>
+      new Response(JSON.stringify(DEVICE_CODE), { status: 200 })) as typeof globalThis.fetch,
+    identify: async () => 'ada',
+    sleep: async () => {
+      await gate.promise
+    },
+  })
+  return { account, release, stateFile, vaultFile }
 }
 
 async function exists(file: string) {
@@ -242,7 +310,7 @@ test('a credential GitHub cannot renew offline is reported, not discarded', asyn
     fetch: (async () => {
       throw new TypeError('fetch failed')
     }) as typeof globalThis.fetch,
-    transport: () => authorized('ada'),
+    identify: async () => 'ada',
     now: () => harness.clock.now,
   })
   const status = await offline.restore()
@@ -350,7 +418,7 @@ test('a build with no client id cannot sign in and never asks GitHub for a code'
     stateFile: join(root, 'github-account.json'),
     env: {},
     fetch: fetchDouble,
-    transport: () => authorized('ada'),
+    identify: async () => 'ada',
   })
   assert.equal(account.status().state, 'not-configured')
   assert.equal((await account.signIn()).state, 'not-configured')
@@ -377,7 +445,7 @@ test('a session with no operating-system keyring is never stored', async () => {
     stateFile,
     env: { GIT_STACKS_GITHUB_APP_CLIENT_ID: CLIENT_ID },
     fetch: fetchDouble,
-    transport: () => authorized('ada'),
+    identify: async () => 'ada',
   })
 
   const status = await account.signIn()
@@ -419,7 +487,7 @@ test('a signed-in account restores from the sealed store without a network call'
     fetch: (async () => {
       throw new Error('no request is expected while restoring')
     }) as typeof globalThis.fetch,
-    transport: () => authorized('ada'),
+    identify: async () => 'ada',
     now: () => first.clock.now,
   })
   const status = await restored.restore()
@@ -461,6 +529,139 @@ test('no failure string carries a credential', async () => {
     assert.equal(JSON.stringify(status).includes('ghu_'), false)
     assert.equal(JSON.stringify(status).includes('ghr_'), false)
   }
+
+  setGitHubCredentialSource(null)
+  onGitHubFailure(null)
+})
+
+test('a refresh in flight cannot restore a credential after sign-out', async () => {
+  const { account, vaultFile, stateFile, clock, statuses, settled, releaseRenewal } =
+    await deferredRenewalHarness()
+  await account.signIn()
+  clock.now += 28_801_000
+  const refreshing = account.current()
+  await account.signOut()
+  releaseRenewal()
+  assert.equal(await refreshing, null, 'the abandoned renewal yields no credential')
+  assert.equal(account.status().state, 'signed-out')
+  assert.equal(account.status().login, null)
+  assert.equal(await account.current(), null)
+  assert.equal(await exists(vaultFile), false, 'sign-out leaves no sealed credential behind')
+  assert.equal(await exists(stateFile), false)
+  assert.ok(
+    statuses.every((status) => status.state !== 'signed-in'),
+    'no status reports a signed-in account after the sign-out',
+  )
+
+  setGitHubCredentialSource(null)
+  onGitHubFailure(null)
+})
+
+test('a device sign-in cancelled while GitHub is answering stores nothing', async () => {
+  const { account, vaultFile, stateFile, release } = await suspendedPollHarness()
+  await account.signIn()
+  await account.cancelSignIn()
+  release()
+  // Give the abandoned poll a turn to finish before asserting what it left.
+  await new Promise((resolve) => setImmediate(resolve))
+  assert.equal(account.status().state, 'signed-out')
+  assert.equal(account.status().challenge, null)
+  assert.equal(await account.current(), null)
+  assert.equal(await exists(vaultFile), false)
+  assert.equal(await exists(stateFile), false)
+
+  setGitHubCredentialSource(null)
+  onGitHubFailure(null)
+})
+
+test('a constructed account does not disable the gh transport until it holds a credential', async () => {
+  const { account } = await accountUnder([])
+  assert.equal(account.available(), false)
+  assert.equal(githubTransport({}).kind, 'gh', 'a signed-out account leaves gh in charge')
+  setGitHubCredentialSource(null)
+  onGitHubFailure(null)
+})
+
+test('a signed-in account selects the direct transport with no gh on PATH', async () => {
+  const { account } = await signedIn([])
+  assert.equal(account.available(), true)
+  assert.equal(githubTransport({}).kind, 'direct')
+
+  await account.signOut()
+  assert.equal(account.available(), false)
+  assert.equal(githubTransport({}).kind, 'gh', 'signing out hands the work back to gh')
+
+  setGitHubCredentialSource(null)
+  onGitHubFailure(null)
+})
+
+test('an external credential rejection never deletes the stored account', async () => {
+  const { account, stateFile, vaultFile } = await signedIn([])
+  const withOverride = new DirectGitHubTransport({
+    credential: account,
+    env: { GIT_STACKS_GITHUB_TOKEN: 'override' },
+    fetch: (async () =>
+      new Response(JSON.stringify({ message: 'Bad credentials' }), {
+        status: 401,
+      })) as typeof globalThis.fetch,
+  })
+  await assert.rejects(withOverride.rest({ path: 'user' }))
+  assert.equal(account.status().state, 'signed-in', 'the stored session is untouched')
+  assert.equal(account.status().login, 'ada')
+  assert.equal(await exists(vaultFile), true)
+  assert.equal(await exists(stateFile), true)
+
+  setGitHubCredentialSource(null)
+  onGitHubFailure(null)
+})
+
+test('the stored github.com credential is never sent to another API origin', async () => {
+  const { account } = await signedIn([])
+  const seen: string[] = []
+  const record = (async (_input: string | URL | Request, init?: RequestInit) => {
+    seen.push(new Headers(init?.headers).get('authorization') ?? '')
+    return new Response(JSON.stringify({ login: 'ada' }), { status: 200 })
+  }) as typeof globalThis.fetch
+
+  await assert.rejects(
+    new DirectGitHubTransport({
+      credential: account,
+      env: { GIT_STACKS_GITHUB_API_URL: 'https://ghe.example.com/api/v3' },
+      fetch: record,
+    }).rest({ path: 'user' }),
+  )
+  assert.deepEqual(seen, [], 'no request leaves, so no credential can be attached')
+
+  await assert.rejects(
+    new DirectGitHubTransport({
+      credential: account,
+      env: { GIT_STACKS_GITHUB_API_URL: 'http://127.0.0.1:9/api' },
+      fetch: record,
+    }).rest({ path: 'user' }),
+  )
+  assert.deepEqual(seen, [], 'an insecure origin receives nothing either')
+
+  setGitHubCredentialSource(null)
+  onGitHubFailure(null)
+})
+
+test('the stored identity is the one the stored credential authenticates as', async () => {
+  const identified: string[] = []
+  const harness = await accountUnder(
+    [{ body: DEVICE_CODE }, { body: session('ghu_app', 'ghr_app') }],
+    {
+      identify: async (accessToken) => {
+        identified.push(accessToken)
+        return accessToken === 'ghu_app' ? 'app-user' : 'other-user'
+      },
+    },
+  )
+  await harness.account.signIn()
+  await harness.settled.promise
+
+  assert.deepEqual(identified, ['ghu_app'], 'only the newly adopted credential is asked')
+  const state = JSON.parse(await readFile(harness.stateFile, 'utf8')) as { login: string }
+  assert.equal(state.login, 'app-user')
 
   setGitHubCredentialSource(null)
   onGitHubFailure(null)

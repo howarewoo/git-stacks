@@ -764,3 +764,12 @@ The credential is sealed by the operating system's own store — the macOS Keych
 A credential GitHub rejects at or before its stated expiry is renewed through the refresh token; a rejection of a credential that should still be valid is a revocation. Both, along with an organization that requires single sign-on and an unreachable GitHub, resolve to a recoverable account state that leaves local Git untouched. Sign-out removes only the credential this application owns.
 
 User access tokens do not use OAuth scopes; they carry the fine-grained permissions of the app registration. The account panel states the permissions each enabled feature needs and names no notification, project, or workflow access. An environment or `gh` credential stays a separate, explicit override: it wins when present, is never read back into application state, and sign-out does not touch it.
+
+Four boundaries keep that override from damaging the credential this application owns, and the credential from leaking through it:
+
+- **Sign-out is durable.** Every operation that can store a credential carries the account generation it started under. Signing out, cancelling a sign-in, or discarding a revoked credential advances that generation and aborts the in-flight refresh, so a response that arrives afterwards is discarded instead of written back — including a response whose sealed value was already produced.
+- **Transport choice follows authentication, not construction.** A signed-out account leaves an existing `gh` installation in charge; only a usable credential selects the direct transport. Constructing the service never disables `gh`.
+- **A credential is bound to one origin.** The stored credential is only attached to requests for `https://api.github.com`. A configured enterprise or diagnostic endpoint receives nothing; such an endpoint needs its own explicitly supplied credential.
+- **A rejection is attributed.** Each request records which credential authenticated it — the stored account, an environment override, or `gh` — and only a rejection of the stored credential can renew, revoke, or policy-block it. An invalid override leaves the account intact.
+
+Authentication also stays out of the repository mutation gate: a stalled GitHub endpoint cannot block local Git work, every authorization request carries its own deadline, and cancelling a sign-in stays reachable while GitHub is still answering.
