@@ -659,6 +659,37 @@ test('the stored github.com credential is never sent to another API origin', asy
   )
   assert.deepEqual(seen, [], 'an insecure origin receives nothing either')
 
+  // The same refusal on the path production takes, where the host is named and the
+  // API base is configured for that host. Serving the configured base is a statement
+  // about where a caller's own credential may go; it never redirects the credential
+  // the host's name derives.
+  const hostBound = (apiUrl: string): DirectGitHubTransport =>
+    new DirectGitHubTransport({
+      credential: account,
+      host: 'github.com',
+      env: { GIT_STACKS_GITHUB_TRANSPORT: 'direct', GIT_STACKS_GITHUB_API_URL: apiUrl },
+      fetch: record,
+    })
+  await assert.rejects(hostBound('https://other.example/api').rest({ path: 'user' }))
+  assert.deepEqual(seen, [], 'a configured base receives nothing the host did not issue it')
+
+  // A credential the caller supplied for that base is its own assertion, and does go.
+  const supplied: string[] = []
+  const suppliedRecord = (async (_input: string | URL | Request, init?: RequestInit) => {
+    supplied.push(new Headers(init?.headers).get('authorization') ?? '')
+    return new Response(JSON.stringify({ login: 'ada' }), { status: 200 })
+  }) as typeof globalThis.fetch
+  await new DirectGitHubTransport({
+    host: 'github.com',
+    env: {
+      GIT_STACKS_GITHUB_TRANSPORT: 'direct',
+      GIT_STACKS_GITHUB_API_URL: 'https://other.example/api',
+      GIT_STACKS_GITHUB_TOKEN: 'supplied-token',
+    },
+    fetch: suppliedRecord,
+  }).rest({ path: 'user' })
+  assert.deepEqual(supplied, ['Bearer supplied-token'], "the caller's own credential is used")
+
   setGitHubCredentialSource(null)
   onGitHubFailure(null)
 })

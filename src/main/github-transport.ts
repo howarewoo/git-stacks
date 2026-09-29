@@ -495,30 +495,37 @@ export class DirectGitHubTransport implements GitHubTransport {
   }
 
   /**
-   * Whether requests go to an API origin the host this transport serves owns.
-   * A host owns the origin its name derives, and the public host additionally
-   * owns the base it is configured to serve, so pointing the public host at
-   * another API is a statement about that host rather than about a stranger.
-   * A transport built without a host keeps the older rule: only
-   * `https://api.github.com` is an origin an owned credential may reach.
+   * Whether requests go to the API origin the host this transport serves owns,
+   * derived from that host's name alone. A transport built without a host keeps
+   * the older rule: only `https://api.github.com` is an origin an owned
+   * credential may reach.
+   *
+   * This is the origin the host's own saved credential may be sent to, so an API
+   * base configured for the host never widens it.
    */
   private get servesGitHubOrigin(): boolean {
     const host = this.host
-    const owned: string[] = [GITHUB_CREDENTIAL_ORIGIN]
-    if (host && host !== GITHUB_HOST) owned.length = 0
-    if (host) {
-      try {
-        owned.push(githubApiOriginForHost(host))
-      } catch {
-        return false
-      }
-      if (host === GITHUB_HOST) {
-        const configured = originOf(githubApiUrl(this.env))
-        if (configured) owned.push(configured)
-      }
+    try {
+      return host
+        ? new URL(this.apiUrl).origin === githubApiOriginForHost(host)
+        : new URL(this.apiUrl).origin === GITHUB_CREDENTIAL_ORIGIN
+    } catch {
+      return false
     }
-    const here = originOf(this.apiUrl)
-    return here !== null && owned.includes(here)
+  }
+
+  /**
+   * Whether requests go to an origin a credential this caller supplied may be
+   * sent to: the origin the host's name derives, or — for the public host — the
+   * base the environment configures it to serve. A caller that configures the
+   * base and supplies the credential for it has stated both; the host's saved
+   * credential is a different matter and is not widened by this.
+   */
+  private get servesSuppliedCredentialOrigin(): boolean {
+    if (this.servesGitHubOrigin) return true
+    if (this.host !== GITHUB_HOST) return false
+    const configured = originOf(githubApiUrl(this.env))
+    return configured !== null && configured === originOf(this.apiUrl)
   }
 
   /**
@@ -534,7 +541,7 @@ export class DirectGitHubTransport implements GitHubTransport {
   } | null> {
     // Nothing leaves this machine before the destination is known to be a host
     // this transport is allowed to serve.
-    if (this.host && !this.servesGitHubOrigin) return null
+    if (this.host && !this.servesSuppliedCredentialOrigin) return null
     // A token handed to this transport directly is the caller's own assertion
     // that it belongs to this host; an ambient one is not, and is treated as the
     // host's issue rather than this machine's.
