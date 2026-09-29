@@ -61,8 +61,9 @@ carried into the current trend.
 The `startup` measurement runs the built Electron app against the 3,000-ref
 fixture. It starts before process launch and ends after the automation clicks
 the pre-seeded recent repository and its first 200 branch rows complete two
-animation frames. The `interaction` measurement starts at an actual search input
-event in that window and ends after the filtered branch result completes two
+animation frames. The `interaction` measurement starts at an actual input event
+in the “Filter current view branches, files, and pull requests” field, not the
+command palette, and ends after the filtered branch result completes two
 animation frames. The separate `diff-render-ssr` measurement is server-side
 rendering cost for a 1,000-line diff preview; it is not an input-to-paint budget.
 CI builds first and runs Electron under Xvfb. Local runs need a display server.
@@ -173,6 +174,8 @@ Open the loopback URL printed by Vite. No GitHub credentials, Electron preload, 
 Append `#/index` for the scenario directory. App scenarios use `/?scenario=shell-connected#/app`; the gallery activates the real App's Open local repository control to load the deterministic snapshot. `shell-no-repository` and `shell-loading` intentionally stay on the no-repository/loading surface. Component routes retain `#/design-system-controls`, `#/design-system-shell-specimen`, `#/design-system-data-specimen`, and `#/design-system-dialog-specimen` in this separate gallery only.
 
 The typed control surface is `window.fixture`: `actions` and `externalUrls` record dispatch; `calls` records reads and writes; `hold(method)` and `release(method)` control in-flight requests; `failNext(method, message)` rejects one request; `setScenario(name)` remounts the App against another deterministic snapshot. This API exists only in the gallery. `manifest.ts` lists all scenario names; `scenarios.ts` owns their typed data.
+
+The conflict fixture implements `conflictView` with index stages and a captured fingerprint. The safety scenario verifies that choosing incoming content edits only the draft, then `resolveConflict` sends that content and fingerprint when the user explicitly stages it.
 
 | Area      | Gallery scenarios / exercised controls                                                                                                                                                                                                                                                                                                                               |
 | --------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
