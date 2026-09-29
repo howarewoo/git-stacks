@@ -4814,7 +4814,7 @@ export async function getSnapshot(
   }
   // Read-only: the report compares submitted membership with the local graph
   // and never rewrites a branch, a local hint, or a pull-request base.
-  snapshot.reconciliation = await buildReconciliationReport(root, snapshot)
+  snapshot.reconciliation = await buildReconciliationReport(root, snapshot, configParents)
   return snapshot
 }
 async function runRenameBranch(
