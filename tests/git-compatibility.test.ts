@@ -411,8 +411,6 @@ test('a detached HEAD can execute a stack restack without attaching the checkout
       type: 'executeStack',
       token: preview.token,
       allowForce: false,
-      draft: false,
-      titles: {},
       mergeMethod: 'squash',
     })
     assert.notEqual(git('rev-parse', 'feature'), originalFeature)

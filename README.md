@@ -18,6 +18,10 @@ npm run format:check   # formatting gate
 npm run bench:performance  # large-repository benchmarks
 ```
 
+When changing `GitAction`, update the renderer fixture's action messages in
+`tests/renderer/fixtures/control.ts` and affected test payloads. `npm run build`
+typechecks these test consumers as well as the application.
+
 ## Performance budgets
 
 Git Stacks is used on repositories far larger than the ones it was built
