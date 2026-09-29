@@ -1,6 +1,6 @@
 import { app, BrowserWindow, dialog, ipcMain, Menu, net, protocol, session, shell } from 'electron'
 import type { IpcMainInvokeEvent } from 'electron'
-import { readFile, writeFile, mkdir, rename } from 'node:fs/promises'
+import { readFile, writeFile, mkdir, rename, rm } from 'node:fs/promises'
 import { dirname, join, resolve, sep, basename } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import {
@@ -87,7 +87,7 @@ import {
   ghCloneCommandText,
 } from './github-repositories'
 import { CloneError, cloneRepository, readGitEnvironment } from './clone-repository'
-import { isCancelled as isCommandCancelled } from './git-core'
+import { CommandCancelled, isCancelled as isCommandCancelled } from './git-core'
 import type {
   CloneCommandPreview,
   CloneProtocol,
@@ -404,16 +404,21 @@ function requireCommitOid(value: unknown): string {
  * recent repository. Adding a repository this way never writes to the
  * repository itself: it is read, never rewritten.
  */
-async function activateRepository(selected: string) {
+async function activateRepository(selected: string, signal?: AbortSignal) {
+  if (signal?.aborted) throw new CommandCancelled()
   const path = await resolveRepository(selected)
+  if (signal?.aborted) throw new CommandCancelled()
   // Retire old reads before waiting for the operation queue; a long-running
   // history/diff must not delay switching to a newly selected repository.
   if (activeRepository) readKeys.cancelRoot(activeRepository)
   stopBackgroundSync()
   return operations.switchRepository(path, async () => {
+    if (signal?.aborted) throw new CommandCancelled()
     const runtime = await resolveGitRuntime()
     return withGitRuntime(runtime, async () => {
+      if (signal?.aborted) throw new CommandCancelled()
       const snapshot = await getSnapshot(path)
+      if (signal?.aborted) throw new CommandCancelled()
       await remember(path)
       activeRepository = path
       startBackgroundSync(path, snapshot)
@@ -585,9 +590,15 @@ function validatedClone(request: unknown): ValidatedClone {
   const fullName = assertFullName(repository.fullName)
   const protocol = cloneProtocol(asked.protocol)
   return {
-    url:
-      protocol === 'ssh' ? `git@github.com:${fullName}.git` : `https://github.com/${fullName}.git`,
     fullName,
+    url:
+      !app.isPackaged &&
+      typeof repository.cloneUrl === 'string' &&
+      repository.cloneUrl.startsWith('file://')
+        ? repository.cloneUrl
+        : protocol === 'ssh'
+          ? `git@github.com:${fullName}.git`
+          : `https://github.com/${fullName}.git`,
     directoryName: assertDirectoryName(asked.directoryName),
     parentDirectory: requireString(asked.parentDirectory, 'destination folder'),
     protocol,
@@ -669,8 +680,19 @@ function installHandlers() {
       const clone = validatedClone(asked)
       const value = await onboardingRequest(readRequestId(asked.requestId), async (signal) => {
         const outcome = await cloneRepository({ ...clone, signal })
-        // The repository is registered only after it reads as a finished clone.
-        await activateRepository(outcome.path)
+        if (signal.aborted) {
+          await rm(outcome.path, { recursive: true, force: true }).catch(() => undefined)
+          throw new CommandCancelled()
+        }
+        try {
+          await activateRepository(outcome.path, signal)
+        } catch (error) {
+          // If activation was cancelled or failed, ensure the unregistered clone
+          // folder is cleaned up so no half-registered repository is left behind.
+          await rm(outcome.path, { recursive: true, force: true }).catch(() => undefined)
+          if (signal.aborted || isCommandCancelled(error)) throw new CommandCancelled()
+          throw error
+        }
         return {
           path: outcome.path,
           name: clone.directoryName,

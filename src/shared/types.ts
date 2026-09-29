@@ -1043,6 +1043,12 @@ export interface RepositoryDiscovery {
   repositories: GitHubRepositorySummary[]
   /** The query that produced this list, echoed so a slow page can be labelled. */
   query: string
+  /** The total number of matches reported by the search, which can exceed the 1,000-result cap. */
+  totalCount?: number
+  /** True when the search had more matches than the 1,000-result cap or the page limit. */
+  truncated?: boolean
+  /** True when GitHub answered partial results because the query timed out. */
+  incompleteResults?: boolean
 }
 
 export interface RepositoryDiscoveryRequest {

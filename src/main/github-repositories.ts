@@ -15,6 +15,9 @@ export const REPOSITORY_PAGE_SIZE = 100
 export const MAX_REPOSITORY_PAGES = 30
 
 const PAGE_CAP = MAX_REPOSITORY_PAGES
+/** GitHub's search API imposes a hard limit of 1,000 results per query. */
+const GITHUB_SEARCH_RESULT_CAP = 1000
+const SEARCH_PAGE_CAP = Math.floor(GITHUB_SEARCH_RESULT_CAP / REPOSITORY_PAGE_SIZE)
 
 /** `owner/name`: the only identifier a clone URL or a `gh` command is built from. */
 const FULL_NAME =
@@ -80,9 +83,12 @@ export function summarizeRepository(value: unknown): GitHubRepositorySummary | n
     private: value.private === true,
     fork: value.fork === true,
     archived: value.archived === true,
-    // GitHub reports an empty repository as no commits yet: zero objects and no
-    // default branch to check out.
-    empty: value.size === 0 || value.default_branch === null,
+    // A repository is empty when it has no default branch, or when it has no
+    // recorded size and was never pushed. A small repository whose size rounds
+    // down to 0 KB is still non-empty when it has commits pushed to it.
+    empty:
+      value.default_branch === null ||
+      (value.size === 0 && (value.pushed_at === null || value.pushed_at === undefined)),
     language: stringField(value.language),
     defaultBranch: stringField(value.default_branch) ?? 'main',
     pushedAt: stringField(value.pushed_at),
@@ -221,10 +227,11 @@ export async function discoverRepositories(
 ): Promise<RepositoryDiscovery> {
   const transport = options.transport ?? githubTransport()
   const query = (options.query ?? '').trim()
-  const repositories = query
-    ? await searchRepositories(transport, query, options)
-    : await listAccessible(transport, options)
-  return { repositories, query }
+  if (query) {
+    return searchRepositories(transport, query, options)
+  }
+  const repositories = await listAccessible(transport, options)
+  return { repositories, query: '' }
 }
 
 /**
@@ -259,9 +266,12 @@ async function searchRepositories(
   transport: GitHubTransport,
   query: string,
   options: DiscoveryOptions,
-): Promise<GitHubRepositorySummary[]> {
-  const maxPages = Math.max(1, Math.min(options.maxPages ?? PAGE_CAP, PAGE_CAP))
+): Promise<RepositoryDiscovery> {
+  const maxPages = Math.max(1, Math.min(options.maxPages ?? SEARCH_PAGE_CAP, SEARCH_PAGE_CAP))
   const collected: unknown[] = []
+  let totalCount: number | undefined
+  let incompleteResults = false
+
   for (let page = 1; page <= maxPages; page += 1) {
     const search = new URLSearchParams({
       q: query,
@@ -274,8 +284,7 @@ async function searchRepositories(
       path: `search/repositories?${search}`,
       ...(options.signal ? { signal: options.signal } : {}),
     })
-    const items = isRecord(response.data) ? response.data.items : null
-    if (!Array.isArray(items)) {
+    if (!isRecord(response.data) || !Array.isArray(response.data.items)) {
       throw new GitHubTransportError({
         kind: 'invalid-response',
         status: response.status,
@@ -283,8 +292,24 @@ async function searchRepositories(
         rateLimit: response.rateLimit,
       })
     }
-    collected.push(...items)
-    if (items.length < REPOSITORY_PAGE_SIZE) break
+    if (typeof response.data.total_count === 'number') {
+      totalCount = response.data.total_count
+    }
+    if (response.data.incomplete_results === true) {
+      incompleteResults = true
+    }
+    collected.push(...response.data.items)
+    if (response.data.items.length < REPOSITORY_PAGE_SIZE) break
   }
-  return accessible(collected)
+  const repositories = accessible(collected)
+  const truncated =
+    (totalCount !== undefined && totalCount > repositories.length) ||
+    collected.length >= GITHUB_SEARCH_RESULT_CAP
+  return {
+    repositories,
+    query,
+    ...(totalCount !== undefined ? { totalCount } : {}),
+    ...(truncated ? { truncated: true } : {}),
+    ...(incompleteResults ? { incompleteResults: true } : {}),
+  }
 }

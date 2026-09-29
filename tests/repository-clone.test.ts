@@ -375,3 +375,108 @@ test('adding an existing repository reads it without rewriting a byte of its con
     await rm(root, { recursive: true, force: true })
   }
 })
+
+test('a concurrent empty destination folder created after clone begins is preserved and refused as a collision', async () => {
+  const root = await temporary()
+  try {
+    const remote = await bareRemote(root, 'concurrent-target')
+    const parent = join(root, 'workspaces')
+    await mkdir(parent)
+    const destination = join(parent, 'target')
+
+    const started = join(root, 'started')
+    const proceed = join(root, 'proceed')
+    const wrapper = join(root, 'hook.sh')
+    await writeFile(
+      wrapper,
+      `#!/bin/sh\ntouch "${started}"\nwhile [ ! -f "${proceed}" ]; do sleep 0.02; done\neval "$2"\n`,
+      { mode: 0o755 },
+    )
+
+    const previous = process.env.GIT_SSH_COMMAND
+    process.env.GIT_SSH_COMMAND = wrapper
+
+    try {
+      const cloning = cloneRepository({
+        url: `git@localhost:${remote}`,
+        fullName: 'acme/target',
+        parentDirectory: parent,
+        directoryName: 'target',
+        shallow: false,
+      })
+
+      await waitForFile(root, basename(started))
+      // While Git clone is running, create the empty destination directory concurrently
+      await mkdir(destination)
+
+      // Let Git clone finish in staging
+      await writeFile(proceed, 'ok\n')
+
+      await assert.rejects(
+        cloning,
+        (error: unknown) => error instanceof CloneError && error.reason === 'destination-exists',
+      )
+
+      // The concurrently created empty destination was NOT overwritten, deleted, or clobbered
+      assert.deepEqual(await readdir(destination), [])
+      // The staging folder was discarded
+      assert.deepEqual(await stagingEntries(parent), [])
+    } finally {
+      if (previous === undefined) delete process.env.GIT_SSH_COMMAND
+      else process.env.GIT_SSH_COMMAND = previous
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('cancelling after the git process completes but before promotion leaves no destination and cleans only own staging', async () => {
+  const root = await temporary()
+  try {
+    const remote = await bareRemote(root, 'cancel-postprocess')
+    const parent = join(root, 'workspaces')
+    await mkdir(parent)
+    const destination = join(parent, 'postprocess')
+
+    const done = join(root, 'git-done')
+    const proceed = join(root, 'proceed-done')
+    const wrapper = join(root, 'hook-done.sh')
+    await writeFile(
+      wrapper,
+      `#!/bin/sh\neval "$2"\ntouch "${done}"\nwhile [ ! -f "${proceed}" ]; do sleep 0.02; done\n`,
+      { mode: 0o755 },
+    )
+
+    const previous = process.env.GIT_SSH_COMMAND
+    process.env.GIT_SSH_COMMAND = wrapper
+
+    try {
+      const controller = new AbortController()
+      const cloning = cloneRepository({
+        url: `git@localhost:${remote}`,
+        fullName: 'acme/postprocess',
+        parentDirectory: parent,
+        directoryName: 'postprocess',
+        shallow: false,
+        signal: controller.signal,
+      })
+
+      // Wait until the git transfer has finished in staging
+      await waitForFile(root, basename(done))
+      // Abort before promotion occurs
+      controller.abort()
+      await writeFile(proceed, 'ok\n')
+
+      await assert.rejects(cloning, /cancelled/iu)
+      // Staging was cleaned up
+      assert.deepEqual(await stagingEntries(parent), [])
+      // Destination was never created
+      assert.equal(await stat(destination).catch(() => null), null)
+    } finally {
+      if (previous === undefined) delete process.env.GIT_SSH_COMMAND
+      else process.env.GIT_SSH_COMMAND = previous
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})

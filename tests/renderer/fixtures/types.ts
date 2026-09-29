@@ -56,6 +56,12 @@ export type FixtureCall =
   | 'searchIssues'
   | 'pullRequestIssueLinks'
   | 'previewIssueLink'
+  | 'gitEnvironment'
+  | 'searchRepositories'
+  | 'previewCloneCommand'
+  | 'chooseDestinationDirectory'
+  | 'cloneRepository'
+  | 'addRepository'
 
 /** One entry of the ordered {@link FixtureControl.calls} log. */
 export interface FixtureCallRecord {
@@ -153,6 +159,8 @@ export interface FixtureControl {
   pushFreshness(value: RemoteFreshness): void
   /** Pushes a background snapshot, as a filesystem watcher's refresh does. */
   pushSnapshot(value: RepositorySnapshot): void
+  /** Simulates dropping folders onto the window, dispatching to preload listeners. */
+  dropRepository?(paths: string[]): void
 }
 
 declare global {

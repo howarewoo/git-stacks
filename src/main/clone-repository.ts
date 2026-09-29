@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { lstat, rename, rm } from 'node:fs/promises'
+import { lstat, mkdir, rename, rm, rmdir } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { isAbsolute, join } from 'node:path'
 import {
@@ -178,23 +178,126 @@ export async function cloneRepository(options: CloneOptions): Promise<CloneOutco
     throw classifyCloneFailure(commandDetail(error))
   }
 
-  try {
-    await rename(staging, destination)
-  } catch (error) {
-    // The destination is someone else's data: it is reported, never replaced.
+  // Git finished, but a request cancelled between the process resolving and the
+  // repository being promoted is still a cancelled clone.
+  if (options.signal?.aborted) {
     await discardStaging(staging, token)
+    throw new CommandCancelled()
+  }
+
+  // The staging folder is proved to be a working tree before it can take the
+  // destination's name, so the commit point of this clone is the promotion and
+  // everything before it is reversible.
+  let head: string
+  try {
+    await requireGit(staging, ['rev-parse', '--show-toplevel'], options.signal)
+    head = await headValue(staging, options.signal)
+  } catch (error) {
+    await discardStaging(staging, token)
+    if (isCancelled(error) || options.signal?.aborted) throw new CommandCancelled()
     throw new CloneError(
-      'destination-exists',
-      `The clone finished but ${directoryName} could not be moved into place: ${commandDetail(error)}`,
+      'failed',
+      `The clone finished but is not a usable Git repository: ${commandDetail(error)}`,
     )
+  }
+  if (options.signal?.aborted) {
+    await discardStaging(staging, token)
+    throw new CommandCancelled()
+  }
+
+  // Atomic no-clobber promotion: if another process created an empty or non-empty
+  // destination folder while the clone was running, it is preserved rather than
+  // quietly replaced.
+  try {
+    await promoteNoClobber(staging, destination, directoryName)
+  } catch (error) {
+    await discardStaging(staging, token)
+    throw error
   }
 
   // Git reports its working tree root on stdout with a trailing newline, which
   // must not become part of the path the rest of the app opens.
   const reported = await tryGit(destination, ['rev-parse', '--show-toplevel'], options.signal)
   const path = reported ? stripTrailingNewline(reported).trim() || destination : destination
-  const head = await tryGit(path, ['rev-parse', '--verify', '--quiet', 'HEAD'])
-  return { path, empty: head === null }
+  return { path, empty: head.trim() === '' }
+}
+
+/**
+ * Promotes the finished staging folder to the destination path.
+ *
+ * On POSIX, `rename(staging, destination)` silently replaces an existing empty
+ * directory. To make promotion atomically no-clobber across platforms, we first
+ * claim the destination with `mkdir`. If the destination already exists (even if
+ * empty!), `mkdir` throws `EEXIST` and preserves the user's directory. If
+ * `mkdir` succeeds, `rename` replaces our newly created empty directory. On
+ * Windows, `rename` naturally fails if the destination exists (empty or not).
+ */
+async function promoteNoClobber(
+  staging: string,
+  destination: string,
+  directoryName: string,
+): Promise<void> {
+  if (process.platform !== 'win32') {
+    try {
+      await mkdir(destination)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
+        throw new CloneError(
+          'destination-exists',
+          `${directoryName} already exists in that folder. Choose another name, or open the existing folder.`,
+        )
+      }
+      throw error
+    }
+  }
+  try {
+    await rename(staging, destination)
+  } catch (error) {
+    if (process.platform !== 'win32') {
+      await rmdir(destination).catch(() => undefined)
+    }
+    throw new CloneError(
+      'destination-exists',
+      `The clone finished but ${directoryName} could not be moved into place: ${commandDetail(error)}`,
+    )
+  }
+}
+
+/**
+ * A Git read that must succeed. `tryGit` answering null is honest for a probe
+ * whose value is optional, not for a working tree that has to be one.
+ */
+async function requireGit(
+  root: string,
+  args: string[],
+  signal?: AbortSignal,
+): Promise<string> {
+  const runtime = await resolveGitRuntime()
+  return withGitRuntime(runtime, () =>
+    executeCapped(runtime.executable, args, root, commandOptions(runtime, signal)),
+  ).then((result) => result.text)
+}
+
+/**
+ * The commit a clone landed on, or the empty string when it has none yet. An
+ * unborn `HEAD` is a real state of a real repository, not a failure to read one.
+ */
+async function headValue(root: string, signal?: AbortSignal): Promise<string> {
+  const runtime = await resolveGitRuntime()
+  try {
+    return await withGitRuntime(runtime, () =>
+      executeCapped(
+        runtime.executable,
+        ['rev-parse', '--verify', '--quiet', 'HEAD'],
+        root,
+        commandOptions(runtime, signal),
+      ).then((result) => result.text),
+    )
+  } catch (error) {
+    if (isCancelled(error) || signal?.aborted) throw error
+    if (commandCode(error) === 1) return ''
+    throw error
+  }
 }
 
 /**

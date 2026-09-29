@@ -252,6 +252,7 @@ export function installFixtureControl(options: {
   const calls: FixtureCallRecord[] = []
   const holds = new Set<FixtureCall>()
   const oneShotFailures = new Map<FixtureCall, string>()
+  const dropListeners = new Set<(paths: string[]) => void>()
   const released = new Set<FixtureCall>()
   const waiting: WaitingCall[] = []
   let startsPending = new Set<FixtureCall>()
@@ -861,6 +862,147 @@ export function installFixtureControl(options: {
         }
       })
     },
+
+    gitEnvironment: (requestId) => {
+      record('gitEnvironment', [requestId])
+      return answer('gitEnvironment', () => ({
+        ok: true as const,
+        value: {
+          identity: { name: 'Ada Lovelace', email: 'ada@example.invalid' },
+          defaultBranch: 'main',
+          httpsCredentials: { configured: true, helper: 'osxkeychain' },
+          ssh: { available: true, version: '9.8p1' },
+        },
+      }))
+    },
+    searchRepositories: (request) => {
+      record('searchRepositories', [request])
+      return answer('searchRepositories', () => {
+        const query = request.query?.trim() ?? ''
+        if (query === 'sso-error') {
+          return {
+            ok: false as const,
+            failure: {
+              reason: 'sso-denied' as const,
+              message: 'This organization requires single sign-on.',
+            },
+          }
+        }
+        const items =
+          query === 'empty-repo'
+            ? [
+                {
+                  name: 'empty-repo',
+                  fullName: 'acme/empty-repo',
+                  owner: 'acme',
+                  description: 'An empty repository with no commits yet',
+                  private: false,
+                  fork: false,
+                  archived: false,
+                  empty: true,
+                  language: null,
+                  defaultBranch: 'main',
+                  pushedAt: null,
+                  url: 'https://github.com/acme/empty-repo',
+                  httpsUrl: 'https://github.com/acme/empty-repo.git',
+                  sshUrl: 'git@github.com:acme/empty-repo.git',
+                  canPush: true,
+                },
+              ]
+            : [
+                {
+                  name: 'git-stacks',
+                  fullName: 'howarewoo/git-stacks',
+                  owner: 'howarewoo',
+                  description: 'Stacked Git pull requests on GitHub',
+                  private: false,
+                  fork: false,
+                  archived: false,
+                  empty: false,
+                  language: 'TypeScript',
+                  defaultBranch: 'main',
+                  pushedAt: '2026-09-29T00:00:00Z',
+                  url: 'https://github.com/howarewoo/git-stacks',
+                  httpsUrl: 'https://github.com/howarewoo/git-stacks.git',
+                  sshUrl: 'git@github.com:howarewoo/git-stacks.git',
+                  canPush: true,
+                },
+                {
+                  name: 'widgets',
+                  fullName: 'acme/widgets',
+                  owner: 'acme',
+                  description: 'Sample widget repository',
+                  private: true,
+                  fork: false,
+                  archived: false,
+                  empty: false,
+                  language: 'TypeScript',
+                  defaultBranch: 'main',
+                  pushedAt: '2026-09-28T00:00:00Z',
+                  url: 'https://github.com/acme/widgets',
+                  httpsUrl: 'https://github.com/acme/widgets.git',
+                  sshUrl: 'git@github.com:acme/widgets.git',
+                  canPush: true,
+                },
+              ]
+        return {
+          ok: true as const,
+          value: {
+            repositories: items,
+            query,
+            totalCount: items.length,
+            truncated: false,
+          },
+        }
+      })
+    },
+    previewCloneCommand: (request) => {
+      record('previewCloneCommand', [request])
+      const url = request.protocol === 'ssh' ? request.repository.sshUrl : request.repository.httpsUrl
+      return answer('previewCloneCommand', () => ({
+        ok: true as const,
+        value: {
+          gitCommand: `git clone ${url} "${request.parentDirectory}/${request.directoryName}"`,
+          ghCommand: `gh repo clone ${request.repository.fullName} "${request.parentDirectory}/${request.directoryName}"`,
+        },
+      }))
+    },
+    chooseDestinationDirectory: (current) => {
+      record('chooseDestinationDirectory', [current])
+      return answer('chooseDestinationDirectory', () => '/mock/workspaces')
+    },
+    cloneRepository: (request) => {
+      record('cloneRepository', [request])
+      return answer('cloneRepository', () => {
+        if (request.directoryName === 'collision') {
+          return {
+            ok: false as const,
+            failure: {
+              reason: 'destination-exists' as const,
+              message: 'collision already exists in that folder. Choose another name.',
+            },
+          }
+        }
+        return {
+          ok: true as const,
+          value: {
+            path: `${request.parentDirectory}/${request.directoryName}`,
+            name: request.directoryName,
+            empty: request.repository.empty,
+            gitCommand: `git clone https://github.com/${request.repository.fullName}.git "${request.parentDirectory}/${request.directoryName}"`,
+            ghCommand: `gh repo clone ${request.repository.fullName} "${request.parentDirectory}/${request.directoryName}"`,
+          },
+        }
+      })
+    },
+    addRepository: (path) => {
+      record('addRepository', [path])
+      return answer('addRepository', () => scenario.snapshot)
+    },
+    onRepositoryDropped: (listener) => {
+      dropListeners.add(listener)
+      return () => dropListeners.delete(listener)
+    },
   }
 
   const control: FixtureControl = {
@@ -926,6 +1068,9 @@ export function installFixtureControl(options: {
     },
     pushSnapshot(value) {
       push('repository:background-snapshot', value)
+    },
+    dropRepository(paths) {
+      for (const listener of dropListeners) listener(paths)
     },
   }
 

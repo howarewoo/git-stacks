@@ -142,6 +142,11 @@ export function RepositoryDiscoveryDialog({
   const [searching, setSearching] = React.useState(false)
   const [searched, setSearched] = React.useState(false)
   const [discoveryFailure, setDiscoveryFailure] = React.useState<OnboardingFailure | null>(null)
+  const [discoveryMeta, setDiscoveryMeta] = React.useState<{
+    totalCount?: number
+    truncated?: boolean
+    incompleteResults?: boolean
+  } | null>(null)
   const [selected, setSelected] = React.useState<GitHubRepositorySummary | null>(null)
   const [parentDirectory, setParentDirectory] = React.useState('')
   const [directoryName, setDirectoryName] = React.useState('')
@@ -161,10 +166,16 @@ export function RepositoryDiscoveryDialog({
       setSearching(false)
       if (outcome.ok) {
         setResults(outcome.value.repositories)
+        setDiscoveryMeta({
+          totalCount: outcome.value.totalCount,
+          truncated: outcome.value.truncated,
+          incompleteResults: outcome.value.incompleteResults,
+        })
         setSearched(true)
       } else if (outcome.failure.reason !== 'cancelled') {
         setDiscoveryFailure(outcome.failure)
         setResults([])
+        setDiscoveryMeta(null)
         setSearched(true)
       }
     },
@@ -316,6 +327,19 @@ export function RepositoryDiscoveryDialog({
             </EmptyState>
           ) : null}
 
+          {discoveryMeta?.incompleteResults ? (
+            <InlineAlert tone="warning">
+              GitHub returned partial results because the search timed out. Refine your query for more.
+            </InlineAlert>
+          ) : null}
+
+          {discoveryMeta?.truncated && discoveryMeta.totalCount ? (
+            <p className="onboarding-hint">
+              Showing the first {results.length} of {discoveryMeta.totalCount} repositories. Refine
+              your search to narrow the list.
+            </p>
+          ) : null}
+
           {results.length > 0 ? (
             <ul aria-label="Repositories you can reach" className="onboarding-results">
               {results.map((repository) => (
@@ -358,13 +382,16 @@ export function RepositoryDiscoveryDialog({
                 </InlineAlert>
               ) : null}
               <div className="onboarding-clone-grid">
-                <Field
-                  id="clone-folder"
-                  label="Folder"
-                  description={parentDirectory || 'Choose where the repository folder is created.'}
-                >
+                <div className="grid gap-1.5">
+                  <label
+                    className="text-[length:var(--gs-semantic-type-label-size)] font-medium text-[var(--gs-semantic-text-primary)]"
+                    htmlFor="clone-folder"
+                  >
+                    Folder
+                  </label>
                   <div className="onboarding-folder">
                     <Input
+                      aria-describedby="clone-folder-description"
                       id="clone-folder"
                       onChange={(event) => setDirectoryName(event.target.value)}
                       value={directoryName}
@@ -382,7 +409,13 @@ export function RepositoryDiscoveryDialog({
                       Choose folder
                     </Button>
                   </div>
-                </Field>
+                  <p
+                    className="text-[length:var(--gs-semantic-type-metadata-size)] text-[var(--gs-semantic-text-secondary)]"
+                    id="clone-folder-description"
+                  >
+                    {parentDirectory || 'Choose where the repository folder is created.'}
+                  </p>
+                </div>
                 <Field id="clone-protocol" label="Protocol">
                   <SegmentedControl
                     label="Protocol"

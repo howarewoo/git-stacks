@@ -102,6 +102,18 @@ async function githubFixture(): Promise<Fixture> {
       return
     }
     if (url.pathname === '/search/repositories') {
+      const q = url.searchParams.get('q') ?? ''
+      if (q === 'overflow') {
+        response.writeHead(200, rateLimit)
+        response.end(
+          JSON.stringify({
+            total_count: 1500,
+            incomplete_results: true,
+            items: [apiRepository(300)],
+          }),
+        )
+        return
+      }
       const items =
         page === 1
           ? Array.from({ length: perPage }, (_, index) =>
@@ -235,10 +247,35 @@ test('an empty repository is labelled so its first branch starts from nothing', 
   try {
     const discovery = await discoverRepositories({ transport: authenticated(fixture) })
     assert.equal(discovery.repositories.find((entry) => entry.name === 'repo-3')?.empty, false)
+    // A small repository whose size rounds to 0 KB is NOT marked empty when it has commits pushed to it.
     assert.equal(
-      summarizeRepository(apiRepository(1, { size: 0, default_branch: null }))?.empty,
+      summarizeRepository(
+        apiRepository(1, { size: 0, default_branch: 'main', pushed_at: '2026-09-29T00:00:00Z' }),
+      )?.empty,
+      false,
+    )
+    // A repository with no default branch or zero size without a push is empty.
+    assert.equal(
+      summarizeRepository(apiRepository(2, { size: 0, default_branch: null, pushed_at: null }))?.empty,
       true,
     )
+  } finally {
+    await fixture.close()
+  }
+})
+
+test('a search with total_count > 1000 reports truncation and incomplete results', async () => {
+  const fixture = await githubFixture()
+  try {
+    const discovery = await discoverRepositories({
+      transport: authenticated(fixture),
+      query: 'overflow',
+    })
+    assert.equal(discovery.query, 'overflow')
+    assert.equal(discovery.totalCount, 1500)
+    assert.equal(discovery.truncated, true)
+    assert.equal(discovery.incompleteResults, true)
+    assert.equal(discovery.repositories.length, 1)
   } finally {
     await fixture.close()
   }
