@@ -644,6 +644,7 @@ button:disabled {
 .branches-view,
 .changes-view,
 .pull-requests-view,
+.review-view,
 .stashes-view {
   display: flex;
   height: 100%;
@@ -2860,7 +2861,7 @@ textarea.conflict-content {
 .review-view {
   display: flex;
   min-height: 0;
-  flex: 1;
+  flex: 1 1 0%;
   flex-direction: column;
   overflow: hidden;
   /* The workspace sits beside a repository sidebar, so its width is not the
@@ -3244,7 +3245,11 @@ textarea.conflict-content {
   }
 }
 
-/* Too narrow even for that: one region at a time, tree first. */
+/* Too narrow even for that: one region at a time, tree first.
+   The three regions share the window rather than each growing to its content, so
+   the patch is on screen when the workspace opens instead of below a screenful
+   of file rows, and each region scrolls inside its own share. The pane is the
+   scroll container at this width, exactly as it is for the other workspaces. */
 @container review (max-width: 720px) {
   .review-body {
     grid-template-areas:
@@ -3252,7 +3257,20 @@ textarea.conflict-content {
       'diff'
       'commits';
     grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: minmax(0, 26%) minmax(0, 1fr) minmax(0, 26%);
+    grid-template-rows: auto auto auto;
+  }
+
+  /* Content-sized rows, each region capped, so the three stack at a usable size
+     instead of one region claiming the whole workspace. The pane is the scroll
+     container at this width, as it is for every other workspace, so the view
+     grows to the sum of the caps and each region scrolls inside itself. */
+  .review-tree,
+  .review-commits {
+    max-height: 15rem;
+  }
+
+  .review-diff {
+    max-height: 60dvh;
   }
 
   .review-tree {

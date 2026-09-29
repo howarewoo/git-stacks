@@ -534,6 +534,13 @@ files, its commits, and its stack position are four separate reads, each with it
 own cancellation id. The headline answers first; a stage that has not arrived yet
 shows a loading state rather than an empty list.
 
+The workspace fills its pane like the other destinations, and each of its three
+regions is bounded and scrolls inside itself, so a large pull request cannot
+stretch the page. The diff renders a two-hundred row window and labels itself
+with how many rows of how many are mounted; **Show 200 more diff rows** grows
+that window. At 200% zoom the three regions stack, each capped, and the pane
+scrolls as it does for every other workspace.
+
 The file tree groups changed files by directory, shows each file's status, size,
 and generated/binary/too-large state, and searches both the new path and the path
 a rename came from. Arrow keys move between rows and Enter or Space opens one; the
