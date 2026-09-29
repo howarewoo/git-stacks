@@ -1091,6 +1091,13 @@ interface DoubleOptions {
    */
   heldReviews?: HeldReview[]
   /**
+   * Reviews to publish when the pull request's history is walked for the given
+   * time. The settlement reads that history twice, so this is how a review from
+   * somebody else is placed after the boundary was read and before the settled
+   * writes are matched.
+   */
+  afterReviewWalk?: (walk: number, appliedWrites: number) => HeldReview[] | null
+  /**
    * Rewrites what the server stored, after it applied the request.
    *
    * The one thing a test cannot build out of a request is a record GitHub holds
@@ -1312,11 +1319,13 @@ function threadDouble(options: DoubleOptions = {}): {
   editReview: (id: number, change: (review: HeldReview) => void) => void
   /** Moves the head commit the pull request reports, the way a push does. */
   setHead: (oid: string) => void
+  /** Moves the base commit, the way retargeting the pull request does. */
+  setBase: (oid: string) => void
 } {
   const writes: Write[] = []
   const queries: string[] = []
   let head = options.head ?? 'a'.repeat(40)
-  const base = options.base ?? 'b'.repeat(40)
+  let base = options.base ?? 'b'.repeat(40)
   const permission = options.permission ?? 'WRITE'
   const isAuthor = options.isAuthor === true
   const state = options.state ?? 'OPEN'
@@ -1326,6 +1335,8 @@ function threadDouble(options: DoubleOptions = {}): {
   // reads back is exactly what the code chose to send — not a fixture written
   // to agree with it.
   const reviews: HeldReview[] = (options.heldReviews ?? []).map((review) => ({ ...review }))
+  let reviewWalks = 0
+  let reviewWalksWritten = 0
   const reviewCommentsOnGitHub: Array<Record<string, unknown>> = []
   // A review GitHub already holds has its comments in the comments listing, on
   // the same model the create-review path pushes to. Seeding them here is what
@@ -1360,7 +1371,9 @@ function threadDouble(options: DoubleOptions = {}): {
     get head() {
       return { sha: head }
     },
-    base: { sha: base, ref: options.baseRef ?? 'main' },
+    get base() {
+      return { sha: base, ref: options.baseRef ?? 'main' }
+    },
   }
   // The comment pages of every thread, so a thread's own connection can be read
   // again with its own cursor. The first page is the one the outer list already
@@ -1395,6 +1408,9 @@ function threadDouble(options: DoubleOptions = {}): {
     editReview,
     setHead: (oid: string) => {
       head = oid
+    },
+    setBase: (oid: string) => {
+      base = oid
     },
     transport: {
       kind: 'direct',
@@ -1468,6 +1484,7 @@ function threadDouble(options: DoubleOptions = {}): {
                 }
               }
             }
+            reviewWalksWritten += 1
             if (options.reviewsAfterApply) {
               let next = applied.id
               for (const later of options.reviewsAfterApply(applied)) {
@@ -1513,7 +1530,24 @@ function threadDouble(options: DoubleOptions = {}): {
         // The two reads a settlement needs. Both paginate the way GitHub does,
         // so a review or a comment beyond the first page is reachable rather
         // than quietly absent.
+        //
+        // A review that lands between them is the race the settlement is built
+        // against: the first read fixes what existed when the attempt was made
+        // and the second sees what exists now, so anything above the first
+        // read's reach is somebody else's work by definition. `afterReviewWalk`
+        // puts one exactly there.
         if (path.includes('/pulls/7/reviews')) {
+          if (options.afterReviewWalk) {
+            const later = options.afterReviewWalk(reviewWalks, reviewWalksWritten)
+            reviewWalks += 1
+            if (later) {
+              let next = reviews.reduce((max, review) => Math.max(max, review.id), 100)
+              for (const review of later) {
+                next += 1
+                reviews.push({ ...review, id: next } as HeldReview)
+              }
+            }
+          }
           return { status: 200, rateLimit: rateLimit(), data: restPage(path, reviews) } as GitHubRestResponse<T>
         }
         if (path.includes('/pulls/7/comments')) {
@@ -3125,6 +3159,250 @@ test('more reviews than the walk reads make the boundary null, not low', async (
   assert.equal(writes.length, sentBefore, 'and sends nothing')
 })
 
+test('an unbounded history is not searched, even for an exact match inside it', async (t) => {
+  const workspace = await reviewWorkspace()
+  t.after(workspace.dispose)
+  const patch = '@@ -1,2 +1,3 @@\n keep\n+added\n tail'
+  const entry = file({ diff: { kind: 'text', hunks: hunks(patch) } })
+  const hunk = textHunk(entry, 0)
+  const added = hunk.lines.findIndex((line) => line.side === 'head' && line.newLine !== null)
+  const at = refFor(hunk, added)
+  const one = draft({ id: 'd1', ref: at, body: 'needs a name' })
+  // More reviews than the walk reads, and one of them — within the pages that
+  // were read — is an exact match for the write about to be attempted. With no
+  // boundary to rule it out, that review could equally be somebody's from before
+  // the attempt, so searching for it is the one thing that must not happen: the
+  // attempt never reached GitHub, and matching it here would report a success
+  // that did not occur and clear the reviewer's unsent comment.
+  const many: HeldReview[] = []
+  for (let id = 1; id <= 2001; id += 1) {
+    many.push({
+      id,
+      state: 'COMMENTED',
+      body: id === 1500 ? '' : `older review ${id}`,
+      commit_id: comparison().headOid,
+      user: { login: 'ada' },
+      comments:
+        id === 1500
+          ? [{ path: 'src/app.ts', line: 1, side: 'RIGHT', body: 'needs a name' }]
+          : undefined,
+    })
+  }
+  const { transport, writes } = threadDouble({
+    files: [apiFile({ patch })],
+    failReviewOnce: { status: 502, message: 'Bad Gateway' },
+    heldReviews: many,
+    keepsReview: false,
+  })
+  setGitHubTransport(transport)
+  t.after(() => setGitHubTransport(null))
+
+  const submission = {
+    event: 'COMMENT' as const,
+    body: '',
+    comparison: comparison(),
+    drafts: [one],
+  }
+  await assert.rejects(() => submitReview(workspace.repo, 7, submission), {
+    name: 'ReviewOutcomeUnknownError',
+  })
+  const sentBefore = writes.length
+  const held = await submitReview(workspace.repo, 7, submission).catch((error: Error) => error)
+  assert.ok(
+    held instanceof Error && held.name === 'ReviewWriteUncertainError',
+    'history that could not be bounded is not searched for a match',
+  )
+  assert.equal(writes.length, sentBefore, 'and nothing is sent or reported delivered')
+})
+
+test('a draft written again after the first was sent is new work, not a recovery', async (t) => {
+  const workspace = await reviewWorkspace()
+  t.after(workspace.dispose)
+  const patch = '@@ -1,2 +1,3 @@\n keep\n+added\n tail'
+  const entry = file({ diff: { kind: 'text', hunks: hunks(patch) } })
+  const hunk = textHunk(entry, 0)
+  const added = hunk.lines.findIndex((line) => line.side === 'head' && line.newLine !== null)
+  const at = refFor(hunk, added)
+  const body = 'needs a name'
+  // A third reviewer posts the same words on the same line while the second
+  // attempt is between its two settlement reads, so the review is newer than
+  // the boundary and identical in every way a head-stamped review can be. It
+  // is still not this draft: it was written before the reviewer came back, and
+  // the record proves which one that was.
+  const theirs: HeldReview = {
+    id: 0,
+    state: 'COMMENTED',
+    body: 'also needs a name',
+    commit_id: comparison().headOid,
+    user: { login: 'grace' },
+    comments: [{ path: 'src/app.ts', line: 1, side: 'RIGHT', body }],
+  }
+  const { transport, writes } = threadDouble({
+    files: [apiFile({ patch })],
+    // Every read after the second review was posted belongs to the second
+    // attempt's settlement, whose boundary was read before it went out. So this
+    // lands on that settled read, and the boundary it will be judged against
+    // does not contain it.
+    afterReviewWalk: (_walk, appliedWrites) => (appliedWrites === 2 ? [theirs] : null),
+  })
+  setGitHubTransport(transport)
+  t.after(() => setGitHubTransport(null))
+
+  const record = (drafts: ReviewDraft[], nextDraftId: number): ReviewDraftRecord => ({
+    number: 7,
+    repo: JOURNAL_OWNER.repo,
+    viewer: JOURNAL_OWNER.viewer,
+    comparison: comparison(),
+    drafts,
+    nextDraftId,
+    updatedAt: '2026-09-23T10:00:00Z',
+  })
+  // The reviewer writes the comment, sends it as a plain comment, and GitHub
+  // takes it. The view is told, and drops the draft — the acknowledgement.
+  const first = draft({ id: 'src/app.ts:head:1-head:1#1', ref: at, body })
+  await writeReviewDrafts(workspace.repo, record([first], 2))
+  const sent = await submitReview(workspace.repo, 7, {
+    event: 'COMMENT' as const,
+    body: '',
+    comparison: comparison(),
+    drafts: [first],
+  })
+  assert.equal(sent.state, 'COMMENTED')
+  assert.deepEqual(sent.delivered, ['src/app.ts:head:1-head:1#1'])
+  assert.equal(writes.length, 1)
+
+  // Now they come back and write the same words on the same line, and approve
+  // this time. It reads exactly like the comment that was just sent — same
+  // anchor, same body, same comparison — and it is a different piece of work.
+  // Treating the settled record as its recovery would clear this draft, send
+  // no approval at all, and report one GitHub never received.
+  const second = draft({ id: 'src/app.ts:head:1-head:1#2', ref: at, body })
+  await writeReviewDrafts(workspace.repo, record([second], 3))
+  const approved = await submitReview(workspace.repo, 7, {
+    event: 'APPROVE' as const,
+    body: 'approved',
+    comparison: comparison(),
+    drafts: [second],
+  })
+  assert.equal(writes.length, 2, 'the new composition is sent as its own review')
+  assert.equal(approved.state, 'APPROVED', 'and the decision asked for is the one recorded')
+  assert.deepEqual(approved.delivered, ['src/app.ts:head:1-head:1#2'], 'naming the draft it sent')
+  const posted = writes[1]?.body as { event: string; comments: Array<{ body: string }> }
+  assert.equal(posted.event, 'APPROVE', 'the request that left the app is the approval')
+  assert.equal(posted.comments.length, 1)
+  assert.equal(posted.comments[0]?.body, body)
+})
+
+test('the counter for naming drafts survives being written and read back', async (t) => {
+  const workspace = await reviewWorkspace()
+  t.after(workspace.dispose)
+  const patch = '@@ -1,2 +1,3 @@\n keep\n+added\n tail'
+  const entry = file({ diff: { kind: 'text', hunks: hunks(patch) } })
+  const hunk = textHunk(entry, 0)
+  const added = hunk.lines.findIndex((line) => line.side === 'head' && line.newLine !== null)
+  const at = refFor(hunk, added)
+  const owned = {
+    number: 7,
+    repo: JOURNAL_OWNER.repo,
+    viewer: JOURNAL_OWNER.viewer,
+    comparison: comparison(),
+    updatedAt: '2026-09-23T10:00:00Z',
+  }
+  // A draft's identity is minted from a counter, so the counter has to outlive
+  // the process. Cleared and reopened with the drafts gone, the next identity
+  // still has to be one this account has not used: a name reused on a line that
+  // now holds different words is a comment the app would fold into the old one.
+  await writeReviewDrafts(workspace.repo, { ...owned, drafts: [], nextDraftId: 4 })
+  const cleared = await readReviewDrafts(
+    workspace.repo,
+    JOURNAL_OWNER.repo,
+    JOURNAL_OWNER.viewer,
+    7,
+  )
+  assert.equal(cleared?.nextDraftId, 4, 'the count comes back with the record')
+  assert.deepEqual(cleared?.drafts, [], 'and the record is the empty one that was written')
+
+  // A record whose counter was lost — written by a build that predates it, or
+  // truncated — is not rewound below the identities its own drafts already
+  // carry, so the next name is still new.
+  await writeReviewDrafts(workspace.repo, {
+    ...owned,
+    drafts: [draft({ id: 'src/app.ts:head:1-head:1#9', ref: at, body: 'one' })],
+    nextDraftId: 1,
+  })
+  const rewound = await readReviewDrafts(
+    workspace.repo,
+    JOURNAL_OWNER.repo,
+    JOURNAL_OWNER.viewer,
+    7,
+  )
+  assert.equal(
+    rewound?.nextDraftId,
+    10,
+    'a counter below a draft that already used the name is not believed',
+  )
+})
+
+test('a draft that never left still recovers after the app is reopened', async (t) => {
+  const workspace = await reviewWorkspace()
+  t.after(workspace.dispose)
+  const patch = '@@ -1,2 +1,3 @@\n keep\n+added\n tail'
+  const entry = file({ diff: { kind: 'text', hunks: hunks(patch) } })
+  const hunk = textHunk(entry, 0)
+  const added = hunk.lines.findIndex((line) => line.side === 'head' && line.newLine !== null)
+  const at = refFor(hunk, added)
+  const { transport, writes } = threadDouble({
+    files: [apiFile({ patch })],
+    // The review is created and then the response is lost, which is the one
+    // failure a retry cannot make safely: the review is on GitHub already, and
+    // posting again would duplicate every word of it.
+    failReviewOnce: { status: 502, message: 'Bad Gateway' },
+  })
+  setGitHubTransport(transport)
+  t.after(() => setGitHubTransport(null))
+
+  // The same draft, journalled and then submitted: GitHub takes the review and
+  // the response is lost. The draft was never acknowledged, so it is still the
+  // reviewer's pending work — the same one, with the same identity, and the
+  // recovery has to recognise it rather than post it a second time.
+  const one = draft({ id: 'src/app.ts:head:1-head:1#1', ref: at, body: 'needs a name' })
+  await writeReviewDrafts(workspace.repo, {
+    number: 7,
+    repo: JOURNAL_OWNER.repo,
+    viewer: JOURNAL_OWNER.viewer,
+    comparison: comparison(),
+    drafts: [one],
+    nextDraftId: 2,
+    updatedAt: '2026-09-23T10:00:00Z',
+  })
+  const submission = {
+    event: 'COMMENT' as const,
+    body: '',
+    comparison: comparison(),
+    drafts: [one],
+  }
+  await assert.rejects(() => submitReview(workspace.repo, 7, submission), {
+    name: 'ReviewOutcomeUnknownError',
+  })
+  // Reopened, the draft is still pending and still carries the identity it was
+  // written with.
+  const reopened = await readReviewDrafts(
+    workspace.repo,
+    JOURNAL_OWNER.repo,
+    JOURNAL_OWNER.viewer,
+    7,
+  )
+  assert.equal(reopened?.drafts.length, 1, 'the draft survived the crash')
+  assert.equal(reopened?.drafts[0]?.id, one.id, 'with the identity it was composed under')
+  const recovered = await submitReview(workspace.repo, 7, submission)
+  assert.deepEqual(
+    recovered.delivered,
+    [one.id],
+    'the pending draft is reported as already on GitHub, not posted again',
+  )
+  assert.equal(writes.length, 1, 'and nothing new left the app')
+})
+
 test('a review GitHub accepted is not posted again after the view never hears', async (t) => {
   const workspace = await reviewWorkspace()
   t.after(workspace.dispose)
@@ -3428,6 +3706,7 @@ test('pending comments survive leaving the workspace and are bound to the head t
     viewer: JOURNAL_OWNER.viewer,
     comparison: comparison(),
     drafts: [draft({ id: 'd1', ref: refFor(hunk, added), body: 'still thinking about this' })],
+    nextDraftId: 1,
     updatedAt: '2026-09-23T10:00:00Z',
   }
 
@@ -3461,6 +3740,7 @@ test("one pull request's drafts are not another's", async (t) => {
     viewer: JOURNAL_OWNER.viewer,
     comparison: comparison(),
     drafts: [draft({ id: 'd1', ref: line, body: 'on seven' })],
+    nextDraftId: 1,
     updatedAt: '2026-09-23T10:00:00Z',
   })
   await writeReviewDrafts(workspace.repo, {
@@ -3469,6 +3749,7 @@ test("one pull request's drafts are not another's", async (t) => {
     viewer: JOURNAL_OWNER.viewer,
     comparison: comparison(),
     drafts: [draft({ id: 'd1', ref: line, body: 'on eight' })],
+    nextDraftId: 1,
     updatedAt: '2026-09-23T10:00:00Z',
   })
 
@@ -3500,6 +3781,7 @@ test('drafts are kept apart by repository and by account, not by pull request nu
     viewer: JOURNAL_OWNER.viewer,
     comparison: comparison(),
     drafts: [draft({ id: 'd1', ref: line, body: 'mine' })],
+    nextDraftId: 1,
     updatedAt: '2026-09-23T10:00:00Z',
   })
 
@@ -3536,6 +3818,7 @@ test('writing an empty list is what retires a sent review, so it is not offered 
     viewer: JOURNAL_OWNER.viewer,
     comparison: comparison(),
     drafts: [draft({ id: 'd1', ref: refFor(hunk, added), body: 'sent' })],
+    nextDraftId: 1,
     updatedAt: '2026-09-23T10:00:00Z',
   })
   assert.ok(
@@ -3549,6 +3832,7 @@ test('writing an empty list is what retires a sent review, so it is not offered 
     viewer: JOURNAL_OWNER.viewer,
     comparison: comparison(),
     drafts: [],
+    nextDraftId: 1,
     updatedAt: '2026-09-23T10:05:00Z',
   })
 
@@ -3570,6 +3854,7 @@ test('a draft is not offered again once the base branch moves under a fixed head
     viewer: JOURNAL_OWNER.viewer,
     comparison: written,
     drafts: [draft({ id: 'd1', ref: refFor(hunk, added), body: 'mine' })],
+    nextDraftId: 1,
     updatedAt: '2026-09-23T10:00:00Z',
   }
 

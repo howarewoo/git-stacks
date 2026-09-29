@@ -1,7 +1,9 @@
 import { createHash } from 'node:crypto'
 
 import type { ReviewComparison, ReviewFileSet, ReviewSide } from '../shared/review'
+import { sameReviewComparison } from '../shared/review'
 import type {
+  ReviewBoundary,
   ReviewDraft,
   ReviewDraftResolution,
   ReviewEvent,
@@ -15,7 +17,13 @@ import type {
   UncertainComment,
   ReviewThreadSet,
 } from '../shared/review-threads'
-import { reviewDraftSpan, reviewDraftStart, REVIEW_EVENTS } from '../shared/review-threads'
+import {
+  reviewDraftSpan,
+  reviewDraftStart,
+  REVIEW_EVENTS,
+  UNKNOWN_REVIEW_BOUNDARY,
+  UNKNOWN_REVIEW_COMPARISON,
+} from '../shared/review-threads'
 import { isRecord, type ParsedRemote } from './git-core'
 import {
   clearUncertainWrite,
@@ -31,7 +39,6 @@ import {
   resolveReviewAnchor,
   ReviewRevisionMovedError,
 } from './review'
-import { sameReviewComparison } from '../shared/review'
 
 /** Threads per GraphQL page. `reviewThreads` is a connection and pages. */
 const REVIEW_THREAD_PAGE_SIZE = 50
@@ -916,27 +923,31 @@ export async function submitReview(
   const comments = sendable.map((draft) =>
     wireComment(byId.get(draft.id)!, draft, reviewDraftStart(draft).path),
   )
-  // The attempt is identified by the comments it would post and the revision it
-  // would post them on — not by the summary. A reviewer who edits only the
-  // summary has not written a different review, and keying on the summary would
-  // let them post the same comments twice by changing one sentence.
-  const attempt = reviewAttemptId(comments, files.comparison.headOid)
+  // The attempt is identified by the comments it would post, the comparison it
+  // would post them on, and the drafts they came from — not by the summary. A
+  // reviewer who edits only the summary has not written a different review, and
+  // keying on the summary would let them post the same comments twice by
+  // changing one sentence. The drafts are in the identity because the comments
+  // alone cannot say which composition they are: the same line carrying the same
+  // words twice is two pieces of work, and a recovery has to be able to tell
+  // them apart.
+  const attempt = reviewAttemptId(comments, files.comparison, sendable.map((d) => d.id))
   const recorded = recordableComments(comments)
+  const draftIds = sendable.map((draft) => draft.id)
 
   // A settled record the view has finished with is retired here, before this
-  // submission reconciles anything. The payload is the acknowledgement: a
-  // comment the view has dropped is not in it, so the evidence that GitHub holds
-  // it is no longer what is stopping a duplicate. Anything still in the payload
-  // is still being held on for, and is left alone — as is any record about a
-  // revision other than the one being submitted, which this payload cannot speak
-  // for.
+  // submission reconciles anything. The payload is the acknowledgement: a draft
+  // the view has dropped is not in it, so the evidence that GitHub holds it is
+  // no longer what is stopping a duplicate. What is carried in the payload is
+  // still being held on for, and is left alone — and so is any record about a
+  // comparison other than this one, which this payload cannot speak for.
   await retireSettledWrites(
     repoPath,
     repo,
     number,
     permissions.viewer,
-    recorded,
-    files.comparison.headOid,
+    files.comparison,
+    draftIds,
     signal,
   )
 
@@ -944,7 +955,7 @@ export async function submitReview(
   // twice. The record survives a reload, so this still holds after the
   // workspace is reopened, and it covers the crash case because the record was
   // written before the request rather than after its failure. Every attempt
-  // whose comments this payload would write again is reconciled first, whatever
+  // whose drafts this payload would write again is reconciled first, whatever
   // decision or batch size is being sent now.
   const guard = await reconcileOverlappingAttempts(
     repoPath,
@@ -953,7 +964,8 @@ export async function submitReview(
     number,
     permissions.viewer,
     recorded,
-    files.comparison.headOid,
+    files.comparison,
+    draftIds,
     signal,
   )
   if (guard.unsettled) throw new ReviewWriteUncertainError(guard.unsettled)
@@ -995,23 +1007,31 @@ export async function submitReview(
   // would be reconciled against comments GitHub was never asked to take, and
   // this attempt could never be recognised at all.
   const sentAt = new Date().toISOString()
-  const boundary = await newestReviewId(remote, number, signal)
+  const boundary = await readReviewBoundary(remote, number, signal)
   const journalled = {
-    id: reviewAttemptId(undelivered, files.comparison.headOid),
+    id: reviewAttemptId(undelivered, files.comparison, postedIds),
     number,
     kind: 'review' as const,
     summary: reviewAttemptSummary(submission.body),
     threadId: null,
     headOid: files.comparison.headOid,
+    // The whole comparison, because the head alone does not identify a diff: a
+    // retargeted base renames every line under a head that never moved.
+    comparison: files.comparison,
+    // The drafts this record covers — the undelivered ones, which are exactly
+    // what is about to be sent. A later payload carrying any of them is this
+    // write's recovery even after a crash; a payload carrying none is the
+    // reviewer having moved on, and one carrying a different set is new work.
+    draftIds: postedIds,
     event: submission.event,
     at: sentAt,
     repo: `${remote.owner}/${remote.name}`,
     viewer: permissions.viewer,
     comments: undelivered.map((comment) => recordableComment(comment)),
-    // Everything GitHub already held when the attempt began. A reconciliation
-    // stops when it reaches this review, so an older one can never be adopted
-    // for this attempt however much its wording matches.
-    beforeReviewId: boundary,
+    // What GitHub already held when the attempt began, and whether that could
+    // be established. A reconciliation stops when it reaches a complete
+    // boundary's review, and does not search a history it could not bound.
+    boundary,
     threadCommentIds: [],
     settled: null,
   }
@@ -1107,17 +1127,21 @@ function reviewAttemptSummary(body: string): string {
 /**
  * The comments of one review, as the identity of that review.
  *
- * This is deliberately the posted comments and the head, not the summary. The
- * summary is free text the reviewer can edit at will, and keying on it would
- * mean that changing one sentence is enough to slip past the guard and post the
- * same comments a second time — which is the duplicate this exists to prevent.
- * What makes a write the same write is what it says and where it says it, so
- * that is the identity: same comments against the same revision is the same
- * review, whatever the summary now reads.
+ * This is deliberately the posted comments, the comparison and the drafts, not
+ * the summary. The summary is free text the reviewer can edit at will, and
+ * keying on it would mean that changing one sentence is enough to slip past the
+ * guard and post the same comments a second time — which is the duplicate this
+ * exists to prevent. What makes a write the same write is what it says, which
+ * diff it says it about, and which composition it came from; so that is the
+ * identity. The drafts are in it because the comments alone cannot say: the same
+ * line carrying the same words, written a second time after the first was sent,
+ * is a different review, and hashing it to the same id would let the first
+ * answer for the second.
  */
 function reviewAttemptId(
   comments: readonly Record<string, unknown>[],
-  headOid: string | null,
+  comparison: ReviewComparison,
+  draftIds: readonly string[],
 ): string {
   const positions = comments
     .map((comment) =>
@@ -1126,7 +1150,10 @@ function reviewAttemptId(
         .join(':'),
     )
     .join('|')
-  return shortHash(`${headOid ?? ''}${positions}`)
+  const where = [comparison.headOid, comparison.baseOid, comparison.baseRef]
+    .map((part) => String(part ?? ''))
+    .join(':')
+  return shortHash(`${where} ${draftIds.join(',')} ${positions}`)
 }
 
 /**
@@ -1170,18 +1197,19 @@ function shortHash(value: string): string {
  * A record that a previous reconciliation already settled is answered from
  * itself, without asking GitHub again, and is *kept*: it is the durable evidence
  * that those comments are on GitHub, and the only thing that retires it is a
- * later payload that no longer mentions them. A record settled here is written
+ * later payload carrying none of its drafts. A record settled here is written
  * back for the same reason. Retiring either one as soon as it settles would drop
  * the evidence while the submission that found it is still free to fail.
  *
- * A record made against a different revision is not this submission's recovery
- * and is skipped entirely. A settled record proves GitHub took that write, and it
- * proves it about the commit it names: review H1 says nothing about what happened
- * on H2, and the same line carrying the same words on the new head is a new
- * comment about a new commit. Adopting across the boundary would drop the
- * reviewer's unsent work and return a decision they asked for without ever
- * sending it. It is neither delivered nor a hold — a request for H1 is GitHub's
- * to answer, and it cannot be this write about H2.
+ * A record is about one comparison and one set of drafts, and it is asked about
+ * only in those terms. A different comparison is a different diff: the same
+ * head commit against a retargeted base names different lines, and a settled
+ * record proves nothing about it. A different draft is different work: the
+ * first review was acknowledged and its draft cleared, so the same words on the
+ * same line are a comment the reviewer has just written, and it is not the
+ * settled record's recovery. Answering either is not a small slip — it clears
+ * unsent work and returns a decision, an approval say, that GitHub was never
+ * sent. Both are therefore neither delivered nor a hold.
  */
 async function reconcileOverlappingAttempts(
   repoPath: string,
@@ -1190,7 +1218,8 @@ async function reconcileOverlappingAttempts(
   number: number,
   viewer: string,
   comments: readonly UncertainComment[],
-  headOid: string,
+  comparison: ReviewComparison,
+  draftIds: readonly string[],
   signal?: AbortSignal,
 ): Promise<{
   delivered: Set<string>
@@ -1203,7 +1232,17 @@ async function reconcileOverlappingAttempts(
   const outstanding = writes.filter(
     (entry) =>
       entry.kind === 'review' &&
-      entry.headOid === headOid &&
+      // The comparison, not the head: a retargeted or advanced base renames every
+      // line in the diff while the head commit stands still, so an old review
+      // carries the same `commit_id` as a new one and would satisfy a head-only
+      // check.
+      sameReviewComparison(entry.comparison, comparison) &&
+      // The drafts, by their own identity. A draft's identity is minted rather
+      // than derived from its line, so the same line carrying the same words a
+      // second time is a different draft. Without that distinction this record
+      // would be taken up as the new comment's own recovery, and the comment
+      // would be reported as sent without anything being sent.
+      entry.draftIds.some((theirs) => draftIds.includes(theirs)) &&
       entry.comments.length > 0 &&
       entry.comments.some((comment) => comments.some((mine) => sameAnchor(comment, mine))),
   )
@@ -1265,26 +1304,29 @@ function anchorKey(comment: UncertainComment): string {
 }
 
 /**
- * The newest review the pull request already holds, or null when it has none.
+ * The newest review the pull request already holds, and whether that could be
+ * established at all.
  *
  * Read immediately before the request so the record carries the boundary as it
  * was at the moment of the attempt, not as it is whenever a reconciliation runs
  * later. A failure to read it does not block the write: the reviewer's own
  * decision to submit is not withheld because a boundary could not be noted, and
- * a null boundary makes the reconciliation hold rather than adopt wrongly.
+ * an unknown boundary makes the reconciliation hold rather than adopt wrongly.
  *
- * A boundary that stops short of the end of the list is worse than none at all,
- * so a pull request with more reviews than the page ceiling are read across
- * pages leaves it null rather than low: a null boundary holds, and a low one
- * adopts somebody else's review.
+ * The two answers are kept apart because they say opposite things about the
+ * history. "This pull request held no review" means every review GitHub has is
+ * newer than the attempt, so any of them may be the lost one. "The walk never
+ * reached the end" means the newest review is not known and the history still
+ * contains reviews that predate the attempt — and searching that for a match
+ * finds somebody else's review. So a walk that cannot finish is unknown, and
+ * unknown holds.
  */
-async function newestReviewId(
+async function readReviewBoundary(
   remote: ParsedRemote,
   number: number,
   signal?: AbortSignal,
-): Promise<string | null> {
+): Promise<ReviewBoundary> {
   let newest: number | null = null
-  let complete = false
   for (let page = 1; page <= REVIEW_REST_REVIEW_PAGES; page += 1) {
     const rows = await restList(
       remote,
@@ -1296,18 +1338,14 @@ async function newestReviewId(
       if (!isRecord(row) || typeof row.id !== 'number') continue
       if (newest === null || row.id > newest) newest = row.id
     }
+    // The list is chronological, so page one is the *oldest* hundred reviews and
+    // the boundary has to be read off the last one. A short page is the end of
+    // the list, and only a short page is.
     if (rows.length < REVIEW_REST_PAGE_SIZE) {
-      complete = true
-      break
+      return { kind: 'complete', latestReviewId: newest === null ? null : String(newest) }
     }
   }
-  // The list is chronological, so page one is the *oldest* hundred reviews and
-  // the boundary has to be read off the last one. A partial walk cannot name the
-  // newest review at all, and a boundary below it would put reviews that already
-  // existed above the line — so an older review matching this attempt exactly
-  // would be adopted as the write that never arrived. Null holds; a low boundary
-  // would not.
-  return complete && newest !== null ? String(newest) : null
+  return { kind: 'unknown' }
 }
 
 /** A review on GitHub that a lost attempt turned out to be. */
@@ -1336,9 +1374,9 @@ interface SettledReview {
  *
  * The reviews are walked newest first, and the walk stops at the boundary rather
  * than at the end of a window, so an attempt that landed long ago is still
- * found. A read that stopped at the page ceiling has not seen everything, so
- * what it did not find is never reported as absent: the record stays outstanding
- * and a later attempt looks again with a bigger budget.
+ * found. A boundary that was never established stops the search before it
+ * starts: the history it cannot rule out is exactly the history that must not be
+ * searched, so the record stays outstanding and a later attempt looks again.
  */
 async function findSettledReview(
   remote: ParsedRemote,
@@ -1346,8 +1384,16 @@ async function findSettledReview(
   attempt: ReviewUncertainWrite,
   signal?: AbortSignal,
 ): Promise<SettledReview | null> {
+  // An unknown boundary is not a boundary of zero. It says the walk never
+  // reached the end of the review history, so the history still holds reviews
+  // that predate this attempt — and one of them can match in every field the
+  // comparison below makes. Searching anyway would answer a lost write with
+  // somebody else's review and report unsent comments as delivered, so the
+  // history is not searched at all.
+  if (attempt.boundary.kind === 'unknown') return null
+  const boundary =
+    attempt.boundary.latestReviewId === null ? null : Number(attempt.boundary.latestReviewId)
   const snapshot = await readRestReviews(remote, number, signal)
-  const boundary = attempt.beforeReviewId === null ? null : Number(attempt.beforeReviewId)
   const reviews = [...snapshot.reviews].sort((one, other) => other.id - one.id)
   for (const review of reviews) {
     // Everything at or below the boundary already existed when the attempt began.
@@ -1506,12 +1552,17 @@ export async function replyToThread(
       summary: body.trim(),
       threadId,
       headOid: null,
+      // A reply is reconciled against the thread's own comment list rather than
+      // a review boundary, so it carries no comparison and no drafts, and the
+      // review guard skips it on kind alone.
+      comparison: UNKNOWN_REVIEW_COMPARISON,
+      draftIds: [],
       event: null,
       at: new Date().toISOString(),
       repo,
       viewer: permissions.viewer,
       comments: [],
-      beforeReviewId: null,
+      boundary: UNKNOWN_REVIEW_BOUNDARY,
       // The comments the thread already held, so a reconciliation can tell this
       // account's new words from another participant's identical ones and from
       // an older identical reply of its own.

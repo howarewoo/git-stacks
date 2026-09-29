@@ -3,13 +3,19 @@ import * as fs from 'node:fs/promises'
 import path from 'node:path'
 
 import type { ReviewComparison, ReviewLineRef, ReviewSide } from '../shared/review'
+import { sameReviewComparison } from '../shared/review'
 import type {
+  ReviewBoundary,
   ReviewDraft,
   ReviewDraftRecord,
   ReviewUncertainWrite,
   UncertainComment,
 } from '../shared/review-threads'
-import { REVIEW_DRAFTS_MAX, REVIEW_UNCERTAIN_MAX } from '../shared/review-threads'
+import {
+  nextReviewDraftNumber,
+  REVIEW_DRAFTS_MAX,
+  REVIEW_UNCERTAIN_MAX,
+} from '../shared/review-threads'
 import { isRecord, runGit, stripTrailingNewline } from './git-core'
 
 interface DraftJournal {
@@ -59,6 +65,16 @@ function parseUncertain(value: unknown): ReviewUncertainWrite | null {
     summary: typeof value.summary === 'string' ? value.summary : '',
     threadId: typeof value.threadId === 'string' ? value.threadId : null,
     headOid: typeof value.headOid === 'string' ? value.headOid : null,
+    // A record written before the comparison was stored cannot be shown to
+    // belong to any one of them, and a record that matches no comparison is one
+    // this submission is not: it is neither this write's recovery nor a hold on
+    // it, so it is retired rather than trusted.
+    comparison: parseComparison(value.comparison),
+    // Likewise a record with no draft identities predates generations, and one
+    // that names no draft of this payload cannot be evidence about it.
+    draftIds: Array.isArray(value.draftIds)
+      ? value.draftIds.filter((entry): entry is string => typeof entry === 'string')
+      : [],
     event:
       value.event === 'COMMENT' || value.event === 'APPROVE' || value.event === 'REQUEST_CHANGES'
         ? value.event
@@ -67,7 +83,6 @@ function parseUncertain(value: unknown): ReviewUncertainWrite | null {
     repo: typeof value.repo === 'string' ? value.repo : '',
     viewer: typeof value.viewer === 'string' ? value.viewer : '',
     comments: parseUncertainComments(value.comments),
-    beforeReviewId: typeof value.beforeReviewId === 'string' ? value.beforeReviewId : null,
     threadCommentIds: Array.isArray(value.threadCommentIds)
       ? value.threadCommentIds.filter((entry): entry is string => typeof entry === 'string')
       : [],
@@ -75,7 +90,28 @@ function parseUncertain(value: unknown): ReviewUncertainWrite | null {
     // the safe direction: an unrecognised write is reconciled against GitHub
     // again rather than trusted.
     settled: parseSettled(value.settled),
+    boundary: parseBoundary(value.boundary, value.beforeReviewId),
   }
+}
+
+/**
+ * The boundary an attempt recorded, read back.
+ *
+ * A record written before the boundary was a union stored a bare id, where null
+ * meant "this pull request held no review" and an absent field meant the same
+ * thing. Those are now different facts, and reading an absent one as "none"
+ * would search the whole history for a match — so an id is taken at face value
+ * and anything else is unknown, which holds.
+ */
+function parseBoundary(value: unknown, legacy: unknown): ReviewBoundary {
+  if (typeof legacy === 'string') return { kind: 'complete', latestReviewId: legacy }
+  if (isRecord(value) && value.kind === 'complete') {
+    return {
+      kind: 'complete',
+      latestReviewId: typeof value.latestReviewId === 'string' ? value.latestReviewId : null,
+    }
+  }
+  return { kind: 'unknown' }
 }
 
 /** The review a reconciliation recognised, or null when the record carries none. */
@@ -211,6 +247,10 @@ function parseRecord(value: unknown): ReviewDraftRecord | null {
   // would otherwise be offered to whichever account happens to be signed in.
   if (typeof value.repo !== 'string' || value.repo === '') return null
   if (typeof value.viewer !== 'string' || value.viewer === '') return null
+  const drafts = value.drafts
+    .map(parseDraft)
+    .filter((draft): draft is ReviewDraft => draft !== null)
+    .slice(0, REVIEW_DRAFTS_MAX)
   return {
     number: value.number,
     repo: value.repo,
@@ -219,10 +259,18 @@ function parseRecord(value: unknown): ReviewDraftRecord | null {
     // that can no longer be identified, so it is refused rather than guessed at
     // and the reviewer's words are left in the file for them to find.
     comparison: parseComparison(value.comparison),
-    drafts: value.drafts
-      .map(parseDraft)
-      .filter((draft): draft is ReviewDraft => draft !== null)
-      .slice(0, REVIEW_DRAFTS_MAX),
+    drafts,
+    // The counter is never read below what this record's own drafts have already
+    // consumed, so reopening a workspace cannot reissue an identity a settled
+    // record still names. A record written before the counter existed starts at
+    // one: its ids were the range alone, which a generated id never collides with.
+    nextDraftId: Math.max(
+      typeof value.nextDraftId === 'number' && Number.isInteger(value.nextDraftId)
+        ? value.nextDraftId
+        : 1,
+      ...drafts.map((draft) => nextReviewDraftNumber(draft.id) + 1),
+      1,
+    ),
     updatedAt: typeof value.updatedAt === 'string' ? value.updatedAt : '',
   }
 }
@@ -310,7 +358,15 @@ export async function writeReviewDrafts(
       entry.number !== record.number ||
       !sameOwner(entry, record.repo, record.viewer),
   )
-  if (record.drafts.length > 0) {
+  // A record is kept while it has drafts, and afterwards for as long as its
+  // counter is still to come. The counter is what keeps a draft's identity
+  // unique: it names the second comment written on a line after the first was
+  // sent, which no amount of reading the words or the anchor can tell from the
+  // first. Dropping the record the moment the drafts are gone would restart the
+  // count and hand the next draft an identity this account has already used, so
+  // the count outlives the drafts. An account that never wrote a draft still
+  // leaves nothing behind.
+  if (record.drafts.length > 0 || record.nextDraftId > 1) {
     kept.unshift({ ...record, drafts: record.drafts.slice(0, REVIEW_DRAFTS_MAX) })
   }
   await writeJournal(repoPath, kept, signal)
@@ -411,29 +467,37 @@ export async function clearUncertainWrite(
  * Retires the settled records this payload no longer vouches for, keeping the rest.
  *
  * A settled record is evidence that GitHub holds comments, and it is only safe to
- * drop that evidence once a later submission has demonstrably moved on: the view
- * keeps a draft in its payload precisely while it has not been told that draft was
- * delivered, so a record whose comments are absent from the payload are comments
- * the view has finished with. That is the acknowledgement, and it is read off the
- * payload rather than waited for from a callback the view may never send — which is
- * what makes resuming after a crash idempotent instead of a race.
+ * drop that evidence once a later submission has demonstrably moved on. The
+ * acknowledgement is *which drafts* the payload carries, not what they say or
+ * where they sit: the view keeps a draft in its payload precisely while it has
+ * not been told that draft was delivered, and a draft's identity is minted once
+ * when the comment is composed. So a record whose drafts are absent from the
+ * payload are drafts the view has finished with, and that is what retires the
+ * record — read off the payload rather than waited for from a callback the view
+ * may never send, which is what makes resuming after a crash idempotent instead
+ * of a race.
  *
- * A record is also retired when it names a different revision. It was already
- * answered — GitHub took that write, about that commit — and the same line
- * carrying the same words on the new head is a different comment that nobody has
- * sent. A payload about H2 must not keep the evidence for H1 alive by naming the
- * same anchor, or the record outlives every submission that could retire it.
+ * Identity rather than wording is the whole point. A record is kept while the
+ * same draft comes back after a crash, and retired as soon as the reviewer
+ * composes something new — even on the same line, with the same words, in the
+ * same place. Anchoring on the words instead would keep the record alive for the
+ * second composition and let it answer for work the reviewer had not sent.
  *
- * Records that are still uncertain, and settled records about this revision that
- * this payload does still mention, are left exactly as they are.
+ * A record is also retired when it names a different comparison. It was already
+ * answered — GitHub took that write, about that diff — and a payload about a
+ * different base speaks nothing for it. A record that matches no comparison
+ * cannot be placed in this one at all, and is dropped.
+ *
+ * Records that are still uncertain, and settled records about this comparison
+ * that this payload does still carry drafts from, are left exactly as they are.
  */
 export async function retireSettledWrites(
   repoPath: string,
   repo: string,
   number: number,
   viewer: string,
-  comments: readonly UncertainComment[],
-  headOid: string,
+  comparison: ReviewComparison,
+  draftIds: readonly string[],
   signal?: AbortSignal,
 ): Promise<void> {
   const file = await uncertainPath(repoPath, signal)
@@ -447,8 +511,8 @@ export async function retireSettledWrites(
     ) {
       return true
     }
-    if (entry.headOid !== headOid) return false
-    return entry.comments.some((theirs) => comments.some((mine) => sameCommentAnchor(theirs, mine)))
+    if (!sameReviewComparison(entry.comparison, comparison)) return false
+    return entry.draftIds.some((theirs) => draftIds.includes(theirs))
   })
   if (kept.length === existing.length) return
   await writeUncertain(file, kept, signal)

@@ -251,7 +251,7 @@ export function ReviewView({
    * a reviewer believes are saved would be lost silently.
    */
   const saveDrafts = React.useCallback(
-    (drafts: ReviewDraft[]) => {
+    (drafts: ReviewDraft[], nextDraftId: number) => {
       // A draft's line numbers are an address in one comparison. With the files
       // not yet read there is no comparison to bind them to, so nothing is
       // journalled rather than journalled against an identity nobody can check.
@@ -266,6 +266,9 @@ export function ReviewView({
         viewer: '',
         comparison: files.comparison,
         drafts,
+        // The identity counter travels with the record, so a draft written after
+        // a reload never reuses an identity an earlier one had.
+        nextDraftId,
         updatedAt: new Date().toISOString(),
       }
       setDraftRecord(record)

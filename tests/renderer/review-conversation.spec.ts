@@ -32,7 +32,7 @@ async function addPendingComment(page: Page, label: string, body: string): Promi
 interface Submission {
   event: string
   body: string
-  drafts: { line: number; side: string; start: number | null; body: string }[]
+  drafts: { id: string; line: number; side: string; start: number | null; body: string }[]
 }
 
 async function submissions(page: Page): Promise<Submission[]> {
@@ -54,6 +54,7 @@ test.beforeEach(async ({ page }) => {
           event: submission.event,
           body: submission.body,
           drafts: submission.drafts.map((draft) => ({
+            id: draft.id,
             line: draft.ref.line,
             side: draft.ref.side,
             start: draft.startRef ? draft.startRef.line : null,
@@ -86,7 +87,15 @@ test.describe('Leaving a review', () => {
       {
         event: 'COMMENT',
         body: '',
-        drafts: [{ line: 4, side: 'head', start: 1, body: 'Keep these four together.' }],
+        drafts: [
+          {
+            id: expect.any(String),
+            line: 4,
+            side: 'head',
+            start: 1,
+            body: 'Keep these four together.',
+          },
+        ],
       },
     ])
   })
@@ -139,6 +148,47 @@ test.describe('Leaving a review', () => {
     const remaining = page.locator('.review-draft')
     await expect(remaining).toHaveCount(1)
     await expect(remaining).toContainText('Never sent.')
+  })
+
+  test('the same words on the same line, written again after sending, are a new comment', async ({
+    page,
+  }) => {
+    const words = 'Rename this before it lands.'
+    await page.getByRole('button', { name: RANGE_SECOND }).click()
+    await addPendingComment(page, 'Comment on src/main/review.ts:2 (head)', words)
+    await page.getByRole('button', { name: 'Submit 1 comment as one review' }).click()
+    await settle(page)
+    await expect(page.locator('.review-draft')).toHaveCount(0)
+
+    // Leaving the workspace and coming back is what a reviewer does between
+    // reading and deciding, and it is where an identity is easiest to lose: the
+    // count that names the next comment lives with the drafts, and nothing is
+    // on screen to rebuild it from.
+    await switchDestination(page, 'history')
+    await switchDestination(page, 'review')
+    await settle(page)
+
+    // The reviewer comes back to the same line and writes the same sentence
+    // again, this time to approve. Read by its anchor alone this is the comment
+    // that was just sent, and clearing it as already delivered would leave the
+    // approval unwritten and the workspace claiming the words are on GitHub.
+    await page.getByRole('button', { name: RANGE_SECOND }).click()
+    await addPendingComment(page, 'Comment on src/main/review.ts:2 (head)', words)
+    await page.getByRole('textbox', { name: 'Review summary' }).fill('Fine now.')
+    await page.getByRole('radio', { name: 'Approve' }).check()
+    await page.getByRole('button', { name: 'Submit 1 comment as one review' }).click()
+    await settle(page)
+
+    const sent = await submissions(page)
+    expect(sent).toHaveLength(2)
+    expect(sent[1]?.event).toBe('APPROVE')
+    expect(sent[1]?.body).toBe('Fine now.')
+    expect(sent[1]?.drafts.map((draft) => draft.body)).toEqual([words])
+    // The two comments share a line, a side and every word, and are still two
+    // comments. A name derived from where the comment sits would have given them
+    // one identity, and the app would then have folded the second into the
+    // first as though it had already been sent.
+    expect(sent[1]?.drafts[0]?.id).not.toBe(sent[0]?.drafts[0]?.id)
   })
 
   test('a pending comment survives leaving the workspace and comes back unsent', async ({ page }) => {

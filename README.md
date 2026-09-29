@@ -714,6 +714,15 @@ operation confirms is named back — the adopted ones and the newly posted ones
 alike — so the view drops exactly those and the drafts that were never sent stay
 pending.
 
+Checking a review on this revision is not enough on its own. A reviewer can send
+a comment on a line, then write the same words on the same line of the same head
+while approving instead of commenting, and every field the check compares — the
+line, the words, the account, the revision — reads identically for the two. So a
+pending comment is named by a number minted when it is written, not by the line it
+is on, and a recovery only looks at records that name this payload's comments.
+The number is kept in the journal beside the comments and outlives them, so the
+comment written after a reopen is never given a name the account has already used.
+
 A settled write is kept rather than tidied away. The evidence that GitHub holds a
 comment is the only thing between a retry and a duplicate, and the submission that
 found it can still fail, or be killed before the view drops the draft. What retires

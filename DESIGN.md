@@ -507,6 +507,25 @@ front of them. An uncertain record about an older head is left alone for the sam
 reason: a question GitHub may never answer is a question about that head, and it
 must not lock a reviewer out of a new revision.
 
+A draft is named by a minted identity, not by where it sits. The revision guard
+above separates a comment about a new head from one about the old, but a
+revision does not move for everything: the reviewer can read a line, write a
+comment, send it, and write the same words on the same line of the *same* head
+while approving instead of commenting. Nothing about that second comment is
+distinguishable from the first except that it is later, and both would be
+matched by every field the settlement compares — anchor, words, decision, head.
+Adopting the first would clear the second without sending it, and the workspace
+would report an approval that GitHub never received. So each draft takes the
+range it covers and a number from a counter, and the settlement only looks at
+records that name this payload's drafts. The number has to be durable, because
+the record outlives the drafts: the second comment is written after the first
+has been sent and cleared, and a count that restarted with the app would hand
+the new draft an identity its own account had already used — which is the same
+collision, arrived at by a different route. The counter therefore travels with
+the drafts in the journal and is never read below the identities a record's own
+drafts have already consumed, and a record whose drafts are gone is kept for as
+long as its counter still has names to give.
+
 The guard covers an unresolved *comment*, not an attempt id. Changing the
 decision, or adding one more pending draft, produces a different attempt over
 the same comments, and matching on the whole payload would let those comments be

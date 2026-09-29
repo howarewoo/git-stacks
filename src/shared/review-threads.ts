@@ -84,6 +84,21 @@ export interface ReviewDraftRecord {
   comparison: ReviewComparison
   drafts: ReviewDraft[]
   updatedAt: string
+  /**
+   * The next number to mint a draft identity from.
+   *
+   * A draft's identity has to survive being cleared and written again with the
+   * same words on the same line, or the second composition is indistinguishable
+   * from the first and a settled record answers for work nobody has sent. So the
+   * identity is minted once from a counter that is persisted with the record,
+   * not derived from where the comment sits: the same line and the same words
+   * are one draft the first time and a different one every time after.
+   *
+   * Ids minted before this existed are the range alone, which no longer collides
+   * with a generated one, so a record written by an older build starts at one
+   * without reusing anything.
+   */
+  nextDraftId: number
 }
 
 /**
@@ -273,6 +288,27 @@ export interface ReviewUncertainWrite {
   /** A reply's thread, or a review's head commit — where to look for it. */
   threadId: string | null
   headOid: string | null
+  /**
+   * The whole comparison this attempt was made against: head, base, and base
+   * ref. A head alone is not enough, because a retargeted or advanced base
+   * changes what every line number in the diff names while the head commit
+   * stands still — so a review of the old base comparison carries the same
+   * `commit_id` as a new one and would satisfy a head-only check. Delivery
+   * evidence is about the comparison it was written against.
+   */
+  comparison: ReviewComparison
+  /**
+   * The drafts this attempt posted, by their own identity.
+   *
+   * A draft id is minted once, when the comment is first composed, and is what
+   * tells one composition from the next. A range cannot: the same line carrying
+   * the same words is indistinguishable from the same comment sent twice, so
+   * the reviewer approves, the review lands, the draft is cleared, and writing
+   * those words again on that line would look like the very work already sent.
+   * A generation says which composition this is, and a new one is new work even
+   * when it reads identically.
+   */
+  draftIds: string[]
   event: ReviewEvent | null
   /** When the attempt was made, so the oldest can be reasoned about. */
   at: string
@@ -297,14 +333,17 @@ export interface ReviewUncertainWrite {
    */
   comments: UncertainComment[]
   /**
-   * The newest review the pull request already held when the attempt began.
+   * What the pull request already held when the attempt began, and whether that
+   * could be established at all.
    *
-   * This is the attempt's boundary. A review older than it cannot be this
-   * attempt whatever it happens to say, and a review newer than it can only be
-   * this one or something later. Reading a bounded recent page without it is
-   * how an old review gets mistaken for the lost one.
+   * A review older than a complete boundary cannot be this attempt whatever it
+   * happens to say, and a review newer than one can only be this write or
+   * something later. An *unknown* boundary is not a boundary of zero: the walk
+   * never reached the end, so the history still contains reviews that predate
+   * the attempt, and matching within it would find somebody else's review. So
+   * unknown holds, and only a complete boundary is searched.
    */
-  beforeReviewId: string | null
+  boundary: ReviewBoundary
   /**
    * The comment ids a thread already held when the attempt began, for the same
    * reason: an older "Thanks" is somebody else's, and this account's older
@@ -329,6 +368,25 @@ export interface ReviewUncertainWrite {
    */
   settled: ReviewSettledWrite | null
 }
+
+/**
+ * What the pull request already held when an attempt began, as far as it could
+ * be established.
+ *
+ * The two states are not the same, and collapsing them fails open. `complete`
+ * with a null id means the pull request genuinely held no review, so every
+ * review GitHub has is newer than the attempt and any of them may be the lost
+ * one. `unknown` means the walk never reached the end of the list, so the
+ * newest review is not known and the history still contains reviews that
+ * predate the attempt. Searching that history for a match would find somebody
+ * else's review, so `unknown` holds and is never a licence to adopt.
+ */
+export type ReviewBoundary =
+  | { kind: 'complete'; latestReviewId: string | null }
+  | { kind: 'unknown' }
+
+/** A boundary that was never established, for the writes that establish none. */
+export const UNKNOWN_REVIEW_BOUNDARY: ReviewBoundary = { kind: 'unknown' }
 
 /** A review a reconciliation recognised, kept alongside the attempt it settles. */
 export interface ReviewSettledWrite {
@@ -395,8 +453,33 @@ export function withReviewDraft(
     viewer: record?.viewer ?? '',
     comparison,
     drafts: drafts.length > REVIEW_DRAFTS_MAX ? drafts.slice(0, REVIEW_DRAFTS_MAX) : drafts,
+    // The counter never goes backwards, so an id is never reused after the draft
+    // it named has been cleared.
+    nextDraftId: Math.max(record?.nextDraftId ?? 1, nextReviewDraftNumber(draft.id)),
     updatedAt: now,
   }
+}
+
+/**
+ * The number a minted draft id ends with, or zero for one minted before ids
+ * were generated. A record is never rewound below what its own drafts have
+ * already consumed, so a reload cannot reissue an identity that a settled
+ * record still names.
+ */
+export function nextReviewDraftNumber(id: string): number {
+  const at = id.lastIndexOf('#')
+  if (at < 0) return 0
+  const parsed = Number(id.slice(at + 1))
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : 0
+}
+
+/** The identity a new draft is minted with: the range it covers, and a number. */
+export function reviewDraftId(
+  ref: ReviewLineRef,
+  startRef: ReviewLineRef | null,
+  n: number,
+): string {
+  return `${reviewDraftKey(ref, startRef)}#${n}`
 }
 
 export function withReviewDraftBody(
@@ -408,7 +491,15 @@ export function withReviewDraftBody(
   const drafts = (record?.drafts ?? []).map((entry) =>
     entry.id === id ? { ...entry, body } : entry,
   )
-  return { number: record?.number ?? 0, repo: record?.repo ?? '', viewer: record?.viewer ?? '', comparison: record?.comparison ?? UNKNOWN_REVIEW_COMPARISON, drafts, updatedAt: now }
+  return {
+    number: record?.number ?? 0,
+    repo: record?.repo ?? '',
+    viewer: record?.viewer ?? '',
+    comparison: record?.comparison ?? UNKNOWN_REVIEW_COMPARISON,
+    drafts,
+    nextDraftId: record?.nextDraftId ?? 1,
+    updatedAt: now,
+  }
 }
 
 export function withoutReviewDraft(
@@ -417,7 +508,15 @@ export function withoutReviewDraft(
   now: string,
 ): ReviewDraftRecord {
   const drafts = (record?.drafts ?? []).filter((entry) => entry.id !== id)
-  return { number: record?.number ?? 0, repo: record?.repo ?? '', viewer: record?.viewer ?? '', comparison: record?.comparison ?? UNKNOWN_REVIEW_COMPARISON, drafts, updatedAt: now }
+  return {
+    number: record?.number ?? 0,
+    repo: record?.repo ?? '',
+    viewer: record?.viewer ?? '',
+    comparison: record?.comparison ?? UNKNOWN_REVIEW_COMPARISON,
+    drafts,
+    nextDraftId: record?.nextDraftId ?? 1,
+    updatedAt: now,
+  }
 }
 
 /**
