@@ -3248,11 +3248,12 @@ async function runPublishStep(
           `Pull request for ${facts.branch} changed during publication; inspect the published branches before retrying`,
         )
       }
-      // A layer approved for a base change legitimately still carries its old base until the
-      // retarget step runs, so only an unapproved base difference is drift.
+      // Until retargeting, either the reviewed original base or the approved target is valid.
       if (
         current &&
-        ((!tracked.updateBase && current.base !== tracked.base) || current.state !== 'OPEN')
+        (current.state !== 'OPEN' ||
+          (current.base !== tracked.base &&
+            (!tracked.updateBase || current.base !== facts.pullRequestBase)))
       ) {
         throw new Error(
           `Pull request for ${facts.branch} changed during publication; inspect the published branches before retrying`,
@@ -3298,7 +3299,9 @@ async function runPublishStep(
       if (
         (current?.number ?? null) !== tracked.pullRequest ||
         (current !== null &&
-          ((!tracked.updateBase && current.base !== tracked.base) || current.state !== 'OPEN'))
+          (current.state !== 'OPEN' ||
+            (current.base !== tracked.base &&
+              (!tracked.updateBase || current.base !== facts.pullRequestBase))))
       ) {
         throw new Error(
           `Pull request for ${facts.branch} changed during publication; inspect the published branches before retrying`,
@@ -3714,6 +3717,25 @@ async function runPublishSteps(
     step.failure = null
     await writePublishOperation(repoPath, operation)
     try {
+      // A completed lower layer is not rerun on Resume. Prove its published identity and
+      // tips before any later step can mutate another branch or pull request.
+      for (const layer of operation.layers) {
+        if (layer.pullRequest === null || layer.branch === step.branch) continue
+        if (
+          !operation.steps.some(
+            (prior) =>
+              prior.branch === layer.branch &&
+              prior.kind === 'push' &&
+              prior.status === 'completed',
+          )
+        )
+          continue
+        const pr = await getPullRequest(repoPath, layer.pullRequest)
+        if (pr.base !== layer.base) {
+          throw new Error(`Pull request #${layer.pullRequest} for ${layer.branch} changed base`)
+        }
+        await provePublishedHead(repoPath, operation, layer, pr)
+      }
       step.detail = await runPublishStep(repoPath, operation, step)
       step.status = 'completed'
       step.failure = null

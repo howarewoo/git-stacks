@@ -834,7 +834,7 @@ test('publishStack rejects an already-registered stack when a published pull req
         runStackAction(harness.repo, publishAction(preview.token)),
         drift === 'force-push'
           ? /Pull request #101 (head moved to|is registered in stack #99 at .* rather than)/u
-          : /base changed from main to release/u,
+          : /(?:base changed from main to release|now based on release, not main)/u,
         drift,
       )
       assert.deepEqual(stackWrites, [], drift)
@@ -1935,6 +1935,134 @@ for (const currentBase of ['main', 'feature/step-1', 'release']) {
         )
         assert.deepEqual(patchedBases, currentBase === 'main' ? ['feature/step-1'] : [])
       }
+    })
+  })
+}
+
+test('retarget retry rejects a foreign base before pushing the reviewed branch', async () => {
+  await withHarness(async (harness) => {
+    await setupThreeBranches(harness)
+    git(harness, ['config', '--local', 'branch.feature/step-2.parent', 'feature/step-1'])
+    git(harness, [
+      'config',
+      '--local',
+      'branch.feature/step-2.parentTip',
+      git(harness, ['rev-parse', 'feature/step-1']),
+    ])
+    const state = await harness.readState()
+    state.prs.find((pr) => pr.number === 102)!.base = 'main'
+    await harness.writeState(state)
+    git(harness, ['commit', '--allow-empty', '-m', 'reviewed child update'])
+    const preview = await previewStack(
+      harness.repo,
+      await getSnapshot(harness.repo),
+      'publish',
+      'feature/step-2',
+    )
+    const originalRemote = bareGit(harness, ['rev-parse', 'feature/step-2'])
+    const hook = path.join(harness.bare, 'hooks', 'pre-receive')
+    writeFileSync(hook, '#!/bin/sh\necho "Push interrupted" >&2\nexit 1\n')
+    chmodSync(hook, 0o755)
+    await assert.rejects(
+      runStackAction(harness.repo, publishAction(preview.token, ['feature/step-2'])),
+      /Push interrupted/iu,
+    )
+    unlinkSync(hook)
+    const changed = await harness.readState()
+    changed.prs.find((pr) => pr.number === 102)!.base = 'release'
+    await harness.writeState(changed)
+    await assert.rejects(runStackAction(harness.repo, { type: 'submitStackRetry' }))
+    assert.equal(bareGit(harness, ['rev-parse', 'feature/step-2']), originalRemote)
+    const progress = await getSubmitStackProgress(harness.repo)
+    assert.equal(progress?.steps.find((step) => step.status === 'failed')?.kind, 'push')
+  })
+})
+
+for (const drift of ['closed', 'remote', 'local'] as const) {
+  test(`retry proves completed lower PR before creating next PR after ${drift} drift`, async () => {
+    await withHarness(async (harness) => {
+      await setupFreshBranches(harness)
+      const branches = ['feature/step-1', 'feature/step-2', 'feature/step-3']
+      for (const [index, branch] of branches.entries()) {
+        const parent = index === 0 ? 'main' : branches[index - 1]
+        git(harness, ['config', '--local', `branch.${branch}.parent`, parent])
+        git(harness, [
+          'config',
+          '--local',
+          `branch.${branch}.parentTip`,
+          git(harness, ['rev-parse', parent]),
+        ])
+      }
+      const preview = await previewStack(
+        harness.repo,
+        await getSnapshot(harness.repo),
+        'publish',
+        'feature/step-2',
+      )
+      assert.deepEqual(
+        preview.publish?.layers.map((layer) => layer.branch),
+        branches,
+      )
+      const inner = createGitHubApiDouble()
+      let interrupt = true
+      let creations = 0
+      const writes: string[] = []
+      setGitHubTransport(
+        new DirectGitHubTransport({
+          token: 'fixture-token',
+          fetch: async (input, init) => {
+            if (
+              (init?.method === 'POST' || init?.method === 'PATCH') &&
+              !String(input).endsWith('/graphql')
+            )
+              writes.push(String(input))
+            if (interrupt && String(input).endsWith('/pulls') && init?.method === 'POST') {
+              creations++
+              if (creations === 2) {
+                interrupt = false
+                return new Response(JSON.stringify({ message: 'Create interrupted' }), {
+                  status: 503,
+                })
+              }
+            }
+            return inner(input, init)
+          },
+        }),
+      )
+      await assert.rejects(
+        runStackAction(harness.repo, {
+          type: 'submitStack',
+          token: preview.token,
+          allowForce: false,
+          layers: freshLayers(),
+        }),
+        /Create interrupted/iu,
+      )
+      const before = await harness.readState()
+      assert.equal(before.prs.length, 1)
+      if (drift === 'closed') {
+        before.prs[0].state = 'CLOSED'
+        await harness.writeState(before)
+      } else {
+        git(harness, ['checkout', 'main'])
+        git(harness, ['checkout', '-B', 'feature/step-1'])
+        git(harness, ['commit', '--allow-empty', '-m', 'unreviewed lower tip'])
+        if (drift === 'remote') {
+          git(harness, [
+            'push',
+            '--force',
+            harness.bare,
+            'feature/step-1:refs/heads/feature/step-1',
+          ])
+        }
+      }
+      writes.length = 0
+      await assert.rejects(runStackAction(harness.repo, { type: 'submitStackRetry' }))
+      const after = await harness.readState()
+      assert.equal(after.prs.length, 1)
+      assert.equal(after.stacks?.length, 0)
+      assert.deepEqual(writes, [])
+      assert.equal((await getSubmitStackProgress(harness.repo))?.status, 'failed')
     })
   })
 }
