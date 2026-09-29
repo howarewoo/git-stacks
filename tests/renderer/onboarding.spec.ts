@@ -20,6 +20,9 @@ test.describe('Onboarding and repository discovery', () => {
     // Primary action buttons are available
     await expect(page.getByRole('button', { name: 'Search GitHub', exact: true })).toBeVisible()
     await expect(page.getByRole('button', { name: 'Add local repository', exact: true })).toBeVisible()
+
+    // Visual proof of the onboarding empty state pane
+    await page.screenshot({ path: 'test-results/onboarding-pane.png' })
   })
 
   test('searches accessible repositories, previews commands, and handles clone collisions and cancellation', async ({
@@ -55,6 +58,9 @@ test.describe('Onboarding and repository discovery', () => {
     // Verify command preview displays both git and gh commands
     await expect(dialog.getByText('git clone https://github.com/acme/empty-repo.git', { exact: false })).toBeVisible()
     await expect(dialog.getByText('gh repo clone acme/empty-repo', { exact: false })).toBeVisible()
+
+    // Visual proof of the clone dialog with command previews and empty repo guidance
+    await page.screenshot({ path: 'test-results/onboarding-clone-flow.png' })
 
     // Protocol switch updates commands
     await dialog.getByRole('button', { name: 'SSH', exact: true }).click()

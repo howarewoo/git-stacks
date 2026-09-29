@@ -160,11 +160,17 @@ with an ordinary Git working tree:
 - **Drop a folder** on the window. Drops are ignored while a repository is
   already open so a stray drag cannot switch workspaces.
 
-The clone is built in a staging folder next to the destination and renamed into
-place only after it reads as a finished clone, and it is registered with the app
-only then. Cancelling, a failed authentication, or a destination that already
-exists leaves nothing behind and opens nothing. Only the staging folder this
-clone created is ever removed.
+The clone is built in an isolated staging folder (`.git-stacks-clone-${token}`)
+beside the destination and promoted into place via atomic `mkdir` collision
+detection only after it reads as a finished clone. Promotion into the target
+directory is the single commit point: everything before promotion is completely
+reversible. If a cancellation arrives while the Git transfer is running, after
+the Git process exits but before promotion, or during initial repository
+activation, the staging directory is safely discarded, any promoted folder is
+removed, and no half-registered repository is ever opened or registered in recents.
+A preexisting destination (empty or non-empty) is treated as a collision and never
+clobbered or silently merged into; only the staging folder this clone created is
+ever removed.
 
 The onboarding pane also reports what this machine can already do with Git: the
 commit identity, the default branch, whether a credential helper is configured
@@ -173,10 +179,15 @@ Git Stacks never sets a Git credential helper, `user.name`, `user.email`, or
 `init.defaultBranch`; a private HTTPS clone needs a credential helper the user
 already has, and the dialog says so rather than configuring one.
 
-Repository discovery sends one `Authorization` header to `api.github.com` and
-nothing else. Access tokens never reach a command line, a log, the renderer, or
-a remote URL: the app-signed transport is used directly from the main process.
-
+Repository discovery lists accessible repositories with pagination, bounded by
+GitHub's hard limit of 1,000 search results (10 pages of 100 items). Searches
+returning `incomplete_results` (due to GitHub query timeouts) or exceeding the
+1,000-result cap surface clear inline warnings prompting the user to refine
+their search. Small non-empty repositories whose size rounds down to 0 KB are
+accurately distinguished from unborn or unpushed empty repositories.
+Discovery sends one `Authorization` header to `api.github.com` and nothing
+else. Access tokens never reach a command line, a log, the renderer, or a
+remote URL: the app-signed transport is used directly from the main process.
 ## Performance budgets
 
 Git Stacks is used on repositories far larger than the ones it was built
