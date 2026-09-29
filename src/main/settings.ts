@@ -90,7 +90,11 @@ function toolName(
  * One validated enum field. `allowed` is a static list, so the refusal names
  * every value the field accepts rather than a type.
  */
-function oneOf<T>(value: unknown, allowed: readonly string[], fallback: T): { value: T; issue: string | null } {
+function oneOf<T>(
+  value: unknown,
+  allowed: readonly string[],
+  fallback: T,
+): { value: T; issue: string | null } {
   if (typeof value === 'string' && allowed.includes(value)) {
     return { value: value as T, issue: null }
   }
@@ -572,8 +576,7 @@ export async function resetSettings(
   locks: readonly SettingsLock[],
 ): Promise<SettingsSnapshot> {
   const current = await readSettingsFile(file)
-  const settings = structuredClone(DEFAULT_SETTINGS)
-  for (const lock of locks) preserveLocked(settings, current.settings, lock.key)
+  const settings = resetTarget(current.settings, locks)
   await writeSettingsFile(file, settings)
   return {
     settings,
@@ -582,6 +585,20 @@ export async function resetSettings(
     recovered: current.recovered,
     file,
   }
+}
+
+/**
+ * What a reset would write, without writing it.
+ *
+ * The updater has to know the channel a reset lands on before the reset is
+ * stored, so that the stored channel and the one this process follows are
+ * decided together rather than one of them trailing the other. The rules live
+ * here once: every default, and every value a lock keeps.
+ */
+export function resetTarget(current: AppSettings, locks: readonly SettingsLock[]): AppSettings {
+  const settings = structuredClone(DEFAULT_SETTINGS)
+  for (const lock of locks) preserveLocked(settings, current, lock.key)
+  return settings
 }
 
 /** Puts back the value a lock fixed, so a reset cannot quietly clear it. */

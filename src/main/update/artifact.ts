@@ -231,6 +231,10 @@ export async function privateInstallHandoff(
     constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL,
     0o600,
   )
+  // From the moment this call created the file, this attempt owns it: every way
+  // out of here that is not success removes it. A destination that was already
+  // there was refused by the exclusive create above, so nothing another process
+  // or an earlier run left behind is ever deleted by this one.
   try {
     const source = await open(staged.path, constants.O_RDONLY | constants.O_NOFOLLOW)
     try {
@@ -238,15 +242,17 @@ export async function privateInstallHandoff(
     } finally {
       await source.close()
     }
-  } finally {
     await handle.close()
-  }
-  const { size } = await stat(target)
-  if (size !== staged.size) {
+    const { size } = await stat(target)
+    if (size !== staged.size) {
+      throw new Error('The verified build could not be handed to the installer unchanged.')
+    }
+    return { ...staged, path: target }
+  } catch (error) {
+    await handle.close().catch(() => undefined)
     await rm(target, { force: true }).catch(() => undefined)
-    throw new Error('The verified build could not be handed to the installer unchanged.')
+    throw error
   }
-  return { ...staged, path: target }
 }
 
 /**

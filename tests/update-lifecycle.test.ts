@@ -2,7 +2,15 @@ import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import { EventEmitter } from 'node:events'
 import { createHash, generateKeyPairSync, sign } from 'node:crypto'
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { createServer as createTlsServer, type Server } from 'node:https'
 import { tmpdir } from 'node:os'
@@ -10,6 +18,7 @@ import { join } from 'node:path'
 import { once } from 'node:events'
 import { test } from 'node:test'
 import { UpdateService, type UpdateServiceOptions } from '../src/main/update/service'
+import { privateInstallHandoff, type StagedUpdate } from '../src/main/update/artifact'
 import type { UpdateChannel } from '../src/shared/update'
 
 /**
@@ -65,12 +74,22 @@ interface Release {
 }
 
 /** A response the test holds open and releases when it chooses. */
-function gate(): { wait: Promise<void>; open: () => void } {
+let opened = false
+function gate(): { wait: Promise<void>; open: () => void; entered: boolean } {
   let open = (): void => undefined
   const wait = new Promise<void>((resolve) => {
     open = resolve
   })
-  return { wait, open }
+  return {
+    wait,
+    open: () => {
+      opened = true
+      open()
+    },
+    get entered(): boolean {
+      return opened
+    },
+  }
 }
 
 function manifestFor(release: Release, base: string): Buffer {
@@ -199,7 +218,10 @@ function unsignedBundle(): string {
   return executable
 }
 
-function harnessFor(base: string, install?: UpdateServiceOptions['install']): Harness {
+function harnessFor(
+  base: string,
+  options: Pick<UpdateServiceOptions, 'install' | 'prepare'> = {},
+): Harness {
   const userDataPath = mkdtempSync(join(tmpdir(), 'git-stacks-update-data-'))
   const service = new UpdateService({
     packaged: false,
@@ -215,11 +237,15 @@ function harnessFor(base: string, install?: UpdateServiceOptions['install']): Ha
       GIT_STACKS_UPDATE_CA_FILE: TLS.caFile,
     },
     relaunch: () => undefined,
-    ...(install ? { install } : {}),
+    ...options,
   })
   const phases = new EventEmitter()
   service.onChange((status) => {
-    if (status.phase === 'checking' || status.phase === 'downloading' || status.phase === 'installing') {
+    if (
+      status.phase === 'checking' ||
+      status.phase === 'downloading' ||
+      status.phase === 'installing'
+    ) {
       phases.emit(status.phase)
     }
   })
@@ -761,9 +787,11 @@ test('a cancel during the platform install is refused, and the boundary stays he
   t.after(() => feed.close())
   feed.set({ version: '0.2.0', sequence: 1, bytes: ARTIFACT, channel: 'stable' })
   const installing = gate()
-  const app = harnessFor(feed.base, async () => {
-    await installing.wait
-    return { installed: false, reason: 'the installer did not finish' }
+  const app = harnessFor(feed.base, {
+    install: async () => {
+      await installing.wait
+      return { installed: false, reason: 'the installer did not finish' }
+    },
   })
   await app.service.start('stable')
   await app.service.check()
@@ -788,4 +816,156 @@ test('a cancel during the platform install is refused, and the boundary stays he
   const after = await switching
   assert.equal(after.channel, 'beta')
   assert.equal(committed, 1, 'the change is applied once the installer has returned')
+})
+
+test('a handoff that fails leaves the destination free for the next attempt', async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), 'git-stacks-handoff-'))
+  t.after(() => rmSync(directory, { recursive: true, force: true }))
+  const staged: StagedUpdate = {
+    path: join(directory, 'source.dmg'),
+    sha256: 'a'.repeat(64),
+    size: Buffer.byteLength('signed bytes'),
+    fileName: 'Git-Stacks.dmg',
+  }
+  writeFileSync(staged.path, 'signed bytes')
+
+  // A source that is not there: the copy cannot start, and the destination this
+  // attempt created is removed with it. The name it would use is fixed, so
+  // leaving a partial file there would make every later attempt — including one
+  // after a restart — fail on a file this app wrote itself.
+  await assert.rejects(
+    privateInstallHandoff(
+      { ...staged, path: join(directory, 'absent.dmg') },
+      join(directory, 'handoff'),
+    ),
+    /ENOENT/u,
+  )
+  assert.deepEqual(readdirSync(join(directory, 'handoff')), [], 'the half-made copy is gone')
+
+  // The retry succeeds, and the copy handed over is the verified bytes.
+  const handoff = await privateInstallHandoff(staged, join(directory, 'handoff'))
+  assert.equal(readFileSync(handoff.path, 'utf8'), 'signed bytes')
+
+  // A destination something else already holds is refused, and left exactly as
+  // it was: refusing is not the same as cleaning up somebody else's file.
+  const occupied = join(directory, 'occupied')
+  mkdirSync(occupied, { recursive: true })
+  writeFileSync(join(occupied, 'Git-Stacks.dmg'), 'not ours')
+  await assert.rejects(privateInstallHandoff(staged, occupied), /EEXIST/u)
+  assert.equal(
+    readFileSync(join(occupied, 'Git-Stacks.dmg'), 'utf8'),
+    'not ours',
+    'a file this attempt did not create is still there',
+  )
+})
+
+test('a stop asked for while the history is written is not turned into an offer', async (t) => {
+  const feed = await startFeed()
+  t.after(() => feed.close())
+  const manifest = gate()
+  feed.set({
+    version: '0.2.0',
+    sequence: 5,
+    bytes: ARTIFACT,
+    channel: 'stable',
+    hold: manifest.wait,
+  })
+  const app = harnessFor(feed.base)
+  await app.service.start('stable')
+  // The check is held at the point where the history is being committed, so the
+  // stop lands after the manifest was authenticated and while the local step
+  // that makes an offer possible is still running. The hold is the service's own
+  // history write, held open by the test; everything after it is the real path.
+  const held = app.service as unknown as { writeState(): Promise<void> }
+  const write = held.writeState.bind(held)
+  const writing = gate()
+  const reached = gate()
+  held.writeState = async () => {
+    void reached.open()
+    await writing.wait
+    await write()
+  }
+  const checking = app.service.check()
+  await app.until('checking')
+  manifest.open()
+  // The manifest is authenticated and the history write is what is now running.
+  await reached.wait
+  app.service.cancel()
+  writing.open()
+  const afterStop = await checking
+  assert.equal(afterStop.phase, 'cancelled')
+  assert.equal(afterStop.offer, null, 'a cancelled check offers nothing')
+  assert.equal(afterStop.readyToInstall, false)
+  const history = JSON.parse(readFileSync(join(app.userDataPath, 'updates.json'), 'utf8'))
+  assert.equal(
+    history.seenSequences.stable,
+    5,
+    'the sequence stays spent, so the counter never moves back down',
+  )
+  // And the same release is offered again, because the guard is a high-water
+  // mark rather than a record of what was installed.
+  manifest.open()
+  const again = await app.service.check()
+  assert.equal(again.phase, 'available')
+  assert.equal(again.offer?.version, '0.2.0')
+})
+
+test('a stop asked for while the build is prepared never starts the installer', async (t) => {
+  const feed = await startFeed()
+  t.after(() => feed.close())
+  feed.set({ version: '0.2.0', sequence: 1, bytes: ARTIFACT, channel: 'stable' })
+  let started = 0
+  const preparing = gate()
+  const reached = gate()
+  const app = harnessFor(feed.base, {
+    install: async () => {
+      started += 1
+      return { installed: false, reason: 'the installer should not have run' }
+    },
+    prepare: async (staged, parent) => {
+      const handoff = await handoffOnce(staged, parent)
+      // The install owns the boundary from here. The stop is asked for while the
+      // verified build is being prepared, which is a window the person can
+      // reach: the installer has been given nothing yet, so a cancel here is
+      // honoured rather than refused.
+      void reached.open()
+      await preparing.wait
+      return handoff
+    },
+  })
+  await app.service.start('stable')
+  await app.service.check()
+  await app.service.download()
+  const install = app.service.install()
+  await reached.wait
+  app.service.cancel()
+  preparing.open()
+  const afterStop = await install
+  assert.equal(afterStop.phase, 'cancelled', 'the stop was honoured before the cut-over')
+  assert.equal(started, 0, 'the platform installer was never started')
+  assert.equal(afterStop.readyToInstall, false)
+  assert.equal(
+    existsSync(join(app.userDataPath, 'handoff')),
+    false,
+    'the prepared copy was removed with the handoff directory',
+  )
+})
+
+/** The real handoff, so the held preparation is the real copy. */
+async function handoffOnce(staged: StagedUpdate, parent: string): Promise<StagedUpdate> {
+  return privateInstallHandoff(staged, parent)
+}
+
+test('a channel request for the channel already in force still writes its other fields', async (t) => {
+  const feed = await startFeed()
+  t.after(() => feed.close())
+  feed.set({ version: '0.2.0', sequence: 1, bytes: ARTIFACT, channel: 'stable' })
+  const app = harnessFor(feed.base)
+  await app.service.start('stable')
+  let committed = 0
+  const same = await app.service.applyChannel('stable', async () => {
+    committed += 1
+  })
+  assert.equal(committed, 1, 'the write inside the change is not skipped as a no-op')
+  assert.equal(same.channel, 'stable')
 })

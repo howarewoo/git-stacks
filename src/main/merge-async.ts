@@ -8,7 +8,8 @@ import type {
   MergeQueueState,
   MergeRequestOutcome,
 } from '../shared/types'
-import { isRecord, runGit, stripTrailingNewline } from './git-core'
+import { runGit, stripTrailingNewline } from './git-core'
+import { isRecord } from '../shared/guards'
 import {
   GITHUB_STACKS_API_VERSION,
   GitHubTransportError,

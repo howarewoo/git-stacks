@@ -105,6 +105,7 @@ import {
   readSettingsSnapshot,
   resetSettings,
   settingsPatchToWrite,
+  resetTarget,
   updateSettings,
 } from './settings'
 import { loadSettingsPolicy } from './settings-service'
@@ -972,7 +973,8 @@ async function changeSettings(
 async function changeSettingsPatch(patch: SettingsPatch): Promise<SettingsSnapshot> {
   const channel = patch.updates?.channel
   const service = updateService
-  if (channel === undefined || !service || channel === currentSettings?.updates.channel) {
+  // Channel requests enter the updater queue even when they appear unchanged.
+  if (channel === undefined || !service) {
     return changeSettings(async (file) =>
       updateSettings(file, await settingsPatchToWrite(file, patch, settingsRevision), settingsLocks),
     )
@@ -1592,8 +1594,27 @@ function installHandlers() {
   ipcMain.handle('settings:reset', async (event) => {
     validateSender(event)
     // Restoring defaults rewrites the settings file and nothing else: no
-    // repository, ref, or working tree is read or written.
-    return withToolAvailability(await changeSettings((file) => resetSettings(file, settingsLocks)))
+    // repository, ref, or working tree is read or written. A reset carries the
+    // update channel with it, so it is decided with the updater rather than
+    // written beside it: the channel a reset would land on is worked out first,
+    // the reset is written while the change is still undecided, and a reset
+    // refused — because an install owns the files — writes nothing at all.
+    const service = updateService
+    if (!service) {
+      return withToolAvailability(
+        await changeSettings((file) => resetSettings(file, settingsLocks)),
+      )
+    }
+    const current = (await readSettingsFile(settingsFile())).settings
+    const target = resetTarget(current, settingsLocks).updates.channel
+    let committed: SettingsSnapshot | null = null
+    const status = await service.applyChannel(target, async () => {
+      committed = await changeSettings((file) => resetSettings(file, settingsLocks))
+    })
+    if (!committed) {
+      throw new Error(status.failure?.message ?? 'The settings were not reset.')
+    }
+    return withToolAvailability(committed)
   })
   // The capability report takes no argument, so the window cannot ask main to
   // run a command of its choosing. Main runs its own fixed allowlist.

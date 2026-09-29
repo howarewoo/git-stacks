@@ -3,7 +3,8 @@ import * as fs from 'node:fs/promises'
 import path from 'node:path'
 
 import { REVIEW_VIEWED_MAX_RECORDS, type ReviewViewedRecord } from '../shared/review'
-import { isRecord, runGit, stripTrailingNewline } from './git-core'
+import { runGit, stripTrailingNewline } from './git-core'
+import { isRecord } from '../shared/guards'
 
 interface ViewedJournal {
   version: 1

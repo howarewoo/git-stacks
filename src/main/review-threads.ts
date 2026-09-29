@@ -24,7 +24,8 @@ import {
   UNKNOWN_REVIEW_BOUNDARY,
   UNKNOWN_REVIEW_COMPARISON,
 } from '../shared/review-threads'
-import { isRecord, type ParsedRemote } from './git-core'
+import { type ParsedRemote } from './git-core'
+import { isRecord } from '../shared/guards'
 import {
   clearUncertainWrite,
   readUncertainWrites,

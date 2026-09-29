@@ -46,6 +46,14 @@ export interface UpdateServiceOptions {
    * without a real signed installer, which no development machine has.
    */
   install?: typeof installStagedUpdate
+  /**
+   * The owner-private copy handed to the platform installer. The app always
+   * passes the real one; it is a parameter so the window before the cut-over can
+   * be exercised — a stop asked for while the build is being prepared must never
+   * start an installer, and no development machine has a signed installer to
+   * observe that against.
+   */
+  prepare?: typeof privateInstallHandoff
 }
 
 interface UpdateState {
@@ -159,10 +167,7 @@ export class UpdateService {
    * The change waits for whatever is in flight to finish and clean up, so a
    * result from the old feed can never be recorded against the new one.
    */
-  async applyChannel(
-    channel: UpdateChannel,
-    commit?: () => Promise<void>,
-  ): Promise<UpdateStatus> {
+  async applyChannel(channel: UpdateChannel, commit?: () => Promise<void>): Promise<UpdateStatus> {
     return this.exclusive(() => this.runApplyChannel(channel, commit))
   }
 
@@ -170,7 +175,16 @@ export class UpdateService {
     channel: UpdateChannel,
     commit?: () => Promise<void>,
   ): Promise<UpdateStatus> {
-    if (!UPDATE_CHANNELS.includes(channel) || channel === this.channel) return this.publish()
+    if (!UPDATE_CHANNELS.includes(channel)) return this.publish()
+    if (channel === this.channel) {
+      // A request that names the channel this process already follows still
+      // comes through here, and its commit still runs inside the boundary. That
+      // is what makes the order of two requests the order of the two changes: a
+      // request that arrives behind a pending one is not allowed to overtake it
+      // by looking, from the outside, like a no-op.
+      if (commit) await commit()
+      return this.publish()
+    }
     if (this.cutover) {
       // The platform installer is already replacing this app's files. A channel
       // change now would report a state the installer is about to contradict.
@@ -278,6 +292,13 @@ export class UpdateService {
         await this.discardCandidate()
         this.offer = null
         this.authenticated = null
+        if (run.controller.signal.aborted) {
+          // The stop arrived while the feed was being read. The attempt was
+          // called off, which is not a feed that could not be read, and the
+          // surface must not say that one release was found where none was
+          // asked for.
+          return this.classify(run, new Error('The update check was cancelled.'))
+        }
         if (
           result.failure.reason === 'not-newer' &&
           this.manifestIsCurrent(result.failure.message)
@@ -307,6 +328,16 @@ export class UpdateService {
       this.state.seenSequences[channel] = Math.max(offered.sequence, before ?? 0)
       try {
         await this.writeState()
+        if (run.controller.signal.aborted) {
+          // The stop arrived while the history was being written, and the
+          // release is not offered. The sequence stays recorded: the manifest was
+          // authenticated, so the sequence is spent whether or not a person ever
+          // saw the release, and a counter that moved down here would let an
+          // older release be accepted as new. The same release is offered again
+          // on the next check, because the guard is a high-water mark and not a
+          // record of what was installed.
+          return this.classify(run, new Error('The update check was cancelled.'))
+        }
       } catch (error) {
         if (before === undefined) delete this.state.seenSequences[channel]
         else this.state.seenSequences[channel] = before
@@ -329,7 +360,7 @@ export class UpdateService {
       this.failure = null
       return this.publish()
     } catch (error) {
-      return this.classify(error)
+      return this.classify(run, error)
     } finally {
       this.release(run)
     }
@@ -398,7 +429,7 @@ export class UpdateService {
       // has nothing to remove, and nothing belonging to another operation is
       // touched — the boundary is held until this cleanup has settled.
       if (staged) await discardStagedUpdate(staged)
-      return this.classify(error)
+      return this.classify(run, error)
     } finally {
       this.release(run)
     }
@@ -430,6 +461,9 @@ export class UpdateService {
     const handoffDirectory = join(this.options.userDataPath, 'handoff')
     try {
       const digest = await hashStagedUpdate(candidate.staged)
+      if (run.controller.signal.aborted) {
+        return this.classify(run, new Error('The update install was cancelled.'))
+      }
       if (digest !== candidate.sha256) {
         await this.discardCandidate()
         this.phase = 'failed'
@@ -445,7 +479,25 @@ export class UpdateService {
       // download between the digest check and the install; it does not bind the
       // check to an immutable object, and it is not a claim about anything
       // already running as this user.
-      const handoff = await privateInstallHandoff(candidate.staged, handoffDirectory)
+      let handoff: StagedUpdate
+      try {
+        handoff = await (this.options.prepare ?? privateInstallHandoff)(
+          candidate.staged,
+          handoffDirectory,
+        )
+      } catch (error) {
+        // The preparation failed. Whatever it left behind is this attempt's to
+        // remove, and nothing is handed to the platform installer.
+        await rm(handoffDirectory, { recursive: true, force: true }).catch(() => undefined)
+        return this.classify(run, error)
+      }
+      if (run.controller.signal.aborted) {
+        // The stop arrived while the build was being prepared. The prepared copy
+        // is removed and the installer is never started, rather than a cancel
+        // being accepted here and the update running anyway.
+        await rm(handoffDirectory, { recursive: true, force: true }).catch(() => undefined)
+        return this.classify(run, new Error('The update install was cancelled.'))
+      }
       this.phase = 'installing'
       // From here the platform installer owns this app's files. A cancel asked
       // for in this window is refused rather than pretended at, and the
@@ -477,7 +529,7 @@ export class UpdateService {
       }
       return this.publish()
     } catch (error) {
-      return this.classify(error)
+      return this.classify(run, error)
     } finally {
       this.release(run)
     }
@@ -567,8 +619,8 @@ export class UpdateService {
    * off, and the surface says the attempt was called off rather than that
    * something went wrong.
    */
-  private classify(error: unknown): UpdateStatus {
-    if (this.running?.controller.signal.aborted) {
+  private classify(run: Run, error: unknown): UpdateStatus {
+    if (run.controller.signal.aborted) {
       this.phase = 'cancelled'
       this.failure = null
       this.progress = null
@@ -689,12 +741,26 @@ export class UpdateService {
     try {
       await rename(temporary, target)
       // The rename itself has to reach the disk, or a crash can lose the name
-      // while keeping the bytes the next start would have read.
-      const directory = await open(this.options.userDataPath, 'r')
-      try {
-        await directory.sync()
-      } finally {
-        await directory.close()
+      // while keeping the bytes the next start would have read. On a POSIX
+      // system that is a flush of the directory, which a read-only handle can
+      // do. Windows cannot: FlushFileBuffers requires a handle opened for
+      // GENERIC_WRITE (Microsoft, "FlushFileBuffers function"), and a directory
+      // handle with write access needs FILE_FLAG_BACKUP_SEMANTICS, neither of
+      // which Node's fs API can express — so the flush there fails on every
+      // attempt and would stop this app from ever recording what it has seen.
+      // This is a platform branch, not a swallowed error: the file's own flush
+      // and the replacement above are still required, and their failures still
+      // stop the release. What Windows gives is the atomic replacement and the
+      // file contents reaching the disk; the durability of the directory entry
+      // across a power loss is the platform's own guarantee, and no claim is
+      // made here beyond what this code does.
+      if (process.platform !== 'win32') {
+        const directory = await open(this.options.userDataPath, 'r')
+        try {
+          await directory.sync()
+        } finally {
+          await directory.close()
+        }
       }
     } catch (error) {
       await rm(temporary, { force: true }).catch(() => undefined)

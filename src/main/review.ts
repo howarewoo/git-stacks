@@ -23,9 +23,10 @@ import {
   sameReviewComparison,
 } from '../shared/review'
 import type { DiffHunk, DiffHunkLine, NativeStack } from '../shared/types'
-import { getConfigValue, isRecord, parseRemote, type ParsedRemote } from './git-core'
-import { GitHubTransportError, type GitHubTransport } from './github-transport'
+import { getConfigValue, parseRemote, type ParsedRemote } from './git-core'
+import { isRecord } from '../shared/guards'
 import { hostTransport, remoteHostContext } from './github-host'
+import { GitHubTransportError, type GitHubTransport } from './github-transport'
 import { getPullRequest } from './github'
 import { listPullRequestStacks } from './native-stacks'
 import { parseHunkBlock } from './hunks'

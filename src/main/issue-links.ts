@@ -8,7 +8,8 @@ import type {
   RepositoryIssue,
   StackAction,
 } from '../shared/types'
-import { getConfigValue, isCancelled, isRecord, parseRemote, runGit } from './git-core'
+import { getConfigValue, isCancelled, parseRemote, runGit } from './git-core'
+import { isRecord } from '../shared/guards'
 import { getPullRequest, githubErrorMessage } from './github'
 import { hostTransport, remoteHostContext, type GitHubHostContext } from './github-host'
 import { patchPullRequest } from './stacks'

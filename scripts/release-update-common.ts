@@ -183,6 +183,18 @@ export interface PublishedManifest {
 }
 
 /**
+ * How one named asset is read off a published release.
+ *
+ * The bytes are the whole contract: everything this module concludes about a
+ * channel's history is concluded from what a reader hands back, and `null` means
+ * only that the release does not carry that name. Anything a reader cannot
+ * deliver is thrown, and the release is stopped above rather than reasoned
+ * about, so a reader that cannot tell the difference between "absent" and
+ * "unreadable" cannot start a sequence over one it does not know.
+ */
+export type ReleaseAssetFetcher = (name: string) => Buffer | null
+
+/**
  * Reads the manifest a channel currently publishes, through the GitHub API by
  * way of `gh`.
  *
@@ -191,44 +203,38 @@ export interface PublishedManifest {
  * published but unreadable is a problem for a person to look at, not something
  * to route around: restarting the count at 1 would mint a sequence this channel
  * has already used, which is a replay the app is right to refuse.
+ *
+ * `fetch` is the only part that talks to anything. The default reads a release
+ * asset with `gh` into a temporary directory of its own and is what every
+ * release run uses; a caller with the bytes already in hand (a test) passes
+ * them in, and gets the same decisions made about them.
  */
-export function publishedManifest(channel: UpdateChannel, repo: string): PublishedManifest | null {
+export function publishedManifest(
+  channel: UpdateChannel,
+  repo: string,
+  fetch?: ReleaseAssetFetcher,
+): PublishedManifest | null {
   const fileName = manifestFileName(channel)
   const signatureName = signatureFileName(channel)
   const tag = channelTagOf(channel)
   const directory = mkdtempSync(join(tmpdir(), 'git-stacks-published-feed-'))
-  const fetch = (name: string): Buffer | null => {
+  const read: ReleaseAssetFetcher =
+    fetch ?? ((name: string) => downloadReleaseAsset(name, channel, repo, directory))
+  const asset = (name: string): Buffer | null => {
     try {
-      execFileSync(
-        'gh',
-        [
-          'release',
-          'download',
-          tag,
-          '--repo',
-          repo,
-          '--pattern',
-          name,
-          '--dir',
-          directory,
-          '--clobber',
-        ],
-        { stdio: 'pipe' },
-      )
+      return read(name)
     } catch (error) {
-      if (absentFromRelease(error, name, tag)) return null
       fail(
         `the ${channel} feed on ${tag} could not be read, so the sequence this channel has already issued is unknown and no manifest can be minted safely. This release publishes nothing. The reader said: ${readFailure(error)}`,
       )
     }
-    return readFileSync(join(directory, name))
   }
   try {
-    const bytes = fetch(fileName)
+    const bytes = asset(fileName)
     if (bytes === null) {
       // Absent, and only absent: anything that failed to be read stopped the
       // release above rather than arriving here.
-      if (fetch(signatureName) !== null) {
+      if (asset(signatureName) !== null) {
         fail(
           `the ${channel} feed on ${tag} publishes a signature with no manifest beside it. Repair the channel by hand before releasing; this run will not mint a sequence over an unknown history.`,
         )
@@ -236,7 +242,7 @@ export function publishedManifest(channel: UpdateChannel, repo: string): Publish
       console.log(`release-update: ${channel} has no published ${fileName} yet.`)
       return null
     }
-    const detached = fetch(signatureName)
+    const detached = asset(signatureName)
     if (detached === null) {
       fail(
         `the ${channel} feed on ${tag} publishes ${fileName} with no signature beside it, so its sequence and version cannot be believed. A release that cannot read its own history does not publish.`,
@@ -257,6 +263,47 @@ export function publishedManifest(channel: UpdateChannel, repo: string): Publish
   } finally {
     rmSync(directory, { recursive: true, force: true })
   }
+}
+
+/**
+ * One asset off a published release, with `gh`, into a directory this call
+ * owns.
+ *
+ * `gh` is named as it is on PATH on purpose: this runs in a release job, where
+ * it is the tool that authenticated the API call, and a different `gh` found
+ * through a different search is a different tool. What is refused here is a
+ * release that does not carry the name: an unreadable one is thrown, so it stops
+ * the release where the decision is made.
+ */
+function downloadReleaseAsset(
+  name: string,
+  channel: UpdateChannel,
+  repo: string,
+  directory: string,
+): Buffer | null {
+  const tag = channelTagOf(channel)
+  try {
+    execFileSync(
+      'gh',
+      [
+        'release',
+        'download',
+        tag,
+        '--repo',
+        repo,
+        '--pattern',
+        name,
+        '--dir',
+        directory,
+        '--clobber',
+      ],
+      { stdio: 'pipe' },
+    )
+  } catch (error) {
+    if (absentFromRelease(error, name, tag)) return null
+    throw error
+  }
+  return readFileSync(join(directory, name))
 }
 
 /**

@@ -11,13 +11,67 @@ import {
   stat,
   writeFile,
 } from 'node:fs/promises'
-import { existsSync } from 'node:fs'
-import { basename, dirname, join } from 'node:path'
+import { existsSync, readFileSync, statSync } from 'node:fs'
+import { basename, dirname, join, win32 as winPath } from 'node:path'
 import { tmpdir } from 'node:os'
 import { promisify } from 'node:util'
 import type { StagedUpdate } from './artifact'
 
 const execFile = promisify(execFileCallback)
+
+/**
+ * The platform tools this module runs, named by the absolute path the operating
+ * system keeps them at.
+ *
+ * A tool name on its own is resolved through `PATH`, and on Windows through the
+ * current directory as well — which is the repository the app was started in. A
+ * `powershell.exe` sitting in that repository would be executed, and believed
+ * about a signature, before anything had checked anything. Every tool here is
+ * therefore the full path, and a tool that is not at its path is not run: the
+ * call fails, and a verifier that cannot run refuses rather than guessing.
+ *
+ * These are all part of a stock macOS: `codesign`, `spctl`, `plutil`, `hdiutil`
+ * and `ditto` are what the system itself uses to answer the same questions.
+ * Nothing from a developer-tools package is used here, because an update has to
+ * work on a machine that has never had Xcode installed on it.
+ */
+export const MACOS_TOOLS = {
+  codesign: '/usr/bin/codesign',
+  spctl: '/usr/sbin/spctl',
+  plutil: '/usr/bin/plutil',
+  hdiutil: '/usr/bin/hdiutil',
+  ditto: '/usr/bin/ditto',
+} as const
+
+const WINDOWS_POWERSHELL = 'System32\\WindowsPowerShell\\v1.0\\powershell.exe'
+
+/**
+ * The absolute path of the Windows PowerShell this module runs, derived from the
+ * system directory Windows itself reports.
+ *
+ * `SystemRoot` is the one environment value that can be trusted to name the
+ * operating system, and it is required to be an absolute Windows path with no
+ * way out of it: a relative value, a value with a `..` in it, or anything that
+ * does not end in the interpreter's own directory is a refusal, not something to
+ * repair. The result is used only if a file is actually there.
+ */
+export function windowsPowerShellPath(systemRoot: string | undefined): string {
+  if (!systemRoot || !winPath.isAbsolute(systemRoot)) {
+    throw new Error('Windows reported no system directory, so no signature can be read.')
+  }
+  // The check is on the value as reported, before it is normalised: a path that
+  // steps out of the system directory is refused rather than resolved to
+  // somewhere it should never have been allowed to reach.
+  if (systemRoot.split(/[\\/]+/u).some((segment) => segment === '..')) {
+    throw new Error('The Windows system directory is not a directory, so no signature can be read.')
+  }
+  const root = winPath.normalize(systemRoot)
+  const executable = winPath.join(root, WINDOWS_POWERSHELL)
+  if (!winPath.isAbsolute(executable) || !executable.endsWith(winPath.join(WINDOWS_POWERSHELL))) {
+    throw new Error('The Windows PowerShell path is not a system path.')
+  }
+  return executable
+}
 
 /** Prefixes this app alone creates, so a cleanup can never touch anything else. */
 const STAGING_PREFIX = '.git-stacks-updating-'
@@ -107,14 +161,18 @@ export async function currentSigningIdentity(
 ): Promise<string | null> {
   try {
     if (platform === 'darwin') {
-      const { stderr } = await execFile('codesign', ['-dv', '--verbose=4', identityPath], {
-        maxBuffer: 1 << 20,
-      })
+      const { stderr } = await execFile(
+        MACOS_TOOLS.codesign,
+        ['-dv', '--verbose=4', identityPath],
+        {
+          maxBuffer: 1 << 20,
+        },
+      )
       return /TeamIdentifier=([A-Z0-9]+)/u.exec(stderr)?.[1] ?? null
     }
     if (platform === 'win32') {
       const { stdout } = await execFile(
-        'powershell',
+        windowsPowerShellPath(process.env.SystemRoot ?? process.env.WINDIR),
         [
           '-NoProfile',
           '-NonInteractive',
@@ -143,7 +201,7 @@ interface Expectations {
 
 async function plistValue(bundle: string, key: string): Promise<string | null> {
   const { stdout } = await execFile(
-    'plutil',
+    MACOS_TOOLS.plutil,
     ['-extract', key, 'raw', join(bundle, 'Contents', 'Info.plist')],
     { maxBuffer: 1 << 20 },
   )
@@ -161,9 +219,10 @@ async function plistValue(bundle: string, key: string): Promise<string | null> {
  */
 /**
  * Every name one architecture is called in, on the two sides of this check.
- * Node and the signed manifest say `x64`; `lipo` reports the Mach-O name,
- * `x86_64`. A universal binary reports both slices, and either one satisfies
- * an Intel or Apple Silicon machine.
+ *
+ * Node and the signed manifest say `x64`; a Mach-O header says `x86_64`, and a
+ * universal binary reports both slices, and either one satisfies an Intel or
+ * Apple Silicon machine.
  */
 export function machArchitectures(name: string): string[] {
   if (name === 'x64') return ['x64', 'x86_64']
@@ -173,15 +232,96 @@ export function machArchitectures(name: string): string[] {
   return [name]
 }
 
+/** The one name this app uses for an architecture, on either side of a check. */
+export function canonicalArchitecture(name: string): string {
+  return machArchitectures(name)[0] ?? name
+}
+
+const FAT_MAGIC = 0xcafebabe
+const FAT_MAGIC_64 = 0xcafebabf
+const THIN_MAGIC = 0xfeedface
+const THIN_MAGIC_64 = 0xfeedfacf
+const CPU_ARCH_ABI64 = 0x01000000
+const CPU_TYPE_X86 = 7
+const CPU_TYPE_ARM = 12
+
+/**
+ * The architectures a Mach-O file carries, read out of its own header.
+ *
+ * `lipo` is a developer tool, and asking a person to install one to be able to
+ * update the app they already have is not a thing this app can do. The header
+ * says the same thing and is in the file: a universal binary is a big-endian
+ * table of slices, a single-architecture binary is one header naming its own
+ * processor, and both forms are read here rather than asked about. An `arm64e`
+ * slice is an arm64 slice as far as running it goes, so it is reported as one.
+ *
+ * A file that is not a Mach-O file at all reads as no architectures, which is a
+ * refusal rather than a guess.
+ */
+export function readMachArchitectures(file: string, header?: Buffer): string[] {
+  const bytes = header ?? readFileSync(file).subarray(0, 4096)
+  const wide = (offset: number) => bytes.readUInt32BE(offset)
+  const fatMagic = bytes.length >= 4 ? wide(0) : 0
+  if (fatMagic === FAT_MAGIC || fatMagic === FAT_MAGIC_64) {
+    const wide64 = fatMagic === FAT_MAGIC_64
+    const entrySize = wide64 ? 32 : 20
+    const count = wide(4)
+    const found = new Set<string>()
+    for (let slice = 0; slice < count; slice += 1) {
+      const at = 8 + slice * entrySize
+      if (at + 4 > bytes.length) break
+      const name = architectureName(wide(at))
+      if (name) found.add(name)
+    }
+    // Sorted, so the same file always reads the same way round.
+    return [...found].sort()
+  }
+  const thin = thinMagic(bytes)
+  if (thin === null) return []
+  return [architectureName(thin)].filter((name): name is string => name !== null)
+}
+
+/** The processor a Mach-O header names, or null when it is not one. */
+function thinMagic(bytes: Buffer): number | null {
+  if (bytes.length < 8) return null
+  // A thin header names its own byte order: the magic is one value read either
+  // way, and the processor type that follows it is in the same one.
+  const candidates: [number, number][] = [
+    [bytes.readUInt32LE(0), bytes.readUInt32LE(4)],
+    [bytes.readUInt32BE(0), bytes.readUInt32BE(4)],
+  ]
+  for (const [magic, cpuType] of candidates) {
+    if (magic === THIN_MAGIC || magic === THIN_MAGIC_64) return cpuType
+  }
+  return null
+}
+
+/** The name this app uses for a Mach-O cpu type, or null for another one. */
+function architectureName(cpuType: number): string | null {
+  const base = cpuType & ~CPU_ARCH_ABI64
+  if (base === CPU_TYPE_X86) return 'x64'
+  if (base === CPU_TYPE_ARM) return 'arm64'
+  return null
+}
+
 /**
  * Proves the disk image itself is the one this release signed, before it is
  * mounted. The application inside is checked separately and cannot stand in for
  * the image: an image can be unsigned, or signed by another team, and still
  * contain a correctly signed application.
+ *
+ * An unsigned image is refused here rather than opened and inspected later, so
+ * the question "is this the release, from this project" is answered by the
+ * platform's own signature check and not by anything this app decides
+ * afterwards. The application inside then has to answer it again with more:
+ * same bundle identifier, same version, a stapled ticket, and its own Gatekeeper
+ * assessment.
  */
 async function verifyDiskImage(image: string, expectedTeam: string): Promise<void> {
-  await execFile('codesign', ['--verify', '--strict', '--verbose=2', image], { maxBuffer: 1 << 20 })
-  const { stderr } = await execFile('codesign', ['-dv', '--verbose=4', image], {
+  await execFile(MACOS_TOOLS.codesign, ['--verify', '--strict', '--verbose=2', image], {
+    maxBuffer: 1 << 20,
+  })
+  const { stderr } = await execFile(MACOS_TOOLS.codesign, ['-dv', '--verbose=4', image], {
     maxBuffer: 1 << 20,
   })
   const team = /TeamIdentifier=([A-Z0-9]+)/u.exec(stderr)?.[1] ?? null
@@ -190,10 +330,11 @@ async function verifyDiskImage(image: string, expectedTeam: string): Promise<voi
       'The downloaded disk image is signed by a different team than this app, so it was not opened.',
     )
   }
-  // The image is assessed as a disk image, which is what macOS will act on when
-  // it is opened; the application inside is assessed again once it is mounted.
+  // The image is assessed as a disk image, which is what macOS acts on when it
+  // is opened. The application inside is assessed again once it is mounted, and
+  // that assessment is what decides whether it may be run.
   await execFile(
-    'spctl',
+    MACOS_TOOLS.spctl,
     ['--assess', '--type', 'open', '--context', 'context:primary-signature', '-v', image],
     {
       maxBuffer: 1 << 20,
@@ -202,16 +343,26 @@ async function verifyDiskImage(image: string, expectedTeam: string): Promise<voi
 }
 
 async function verifyAppBundle(bundle: string, expected: Expectations): Promise<void> {
-  await execFile('codesign', ['--verify', '--strict', '--verbose=2', bundle], {
+  await execFile(MACOS_TOOLS.codesign, ['--verify', '--strict', '--verbose=2', bundle], {
     maxBuffer: 1 << 20,
   })
-  const { stderr } = await execFile('codesign', ['-dv', '--verbose=4', bundle], {
+  const { stderr } = await execFile(MACOS_TOOLS.codesign, ['-dv', '--verbose=4', bundle], {
     maxBuffer: 1 << 20,
   })
   const team = /TeamIdentifier=([A-Z0-9]+)/u.exec(stderr)?.[1] ?? null
   if (team !== expected.team) {
     throw new Error('The downloaded app is signed by a different team than this app.')
   }
+  // Gatekeeper is the operating system's own answer to "may this run", and it is
+  // the answer a person gets when they open the new build, so it is asked here
+  // rather than approximated. It reads the stapled ticket and the notarisation
+  // record, which is why the release job also proves the ticket with
+  // `xcrun stapler validate` where the developer tools exist: nothing in this
+  // path requires Xcode, or `lipo`, or any other tool a person who only wants
+  // the update will have.
+  await execFile(MACOS_TOOLS.spctl, ['--assess', '--type', 'execute', '-v', bundle], {
+    maxBuffer: 1 << 20,
+  })
   const bundleIdentifier = await plistValue(bundle, 'CFBundleIdentifier')
   if (bundleIdentifier !== expected.bundleIdentifier) {
     throw new Error(
@@ -226,23 +377,17 @@ async function verifyAppBundle(bundle: string, expected: Expectations): Promise<
   }
   const executable = await plistValue(bundle, 'CFBundleExecutable')
   if (!executable) throw new Error('The downloaded app names no executable.')
-  const { stdout: archs } = await execFile(
-    'lipo',
-    ['-archs', join(bundle, 'Contents', 'MacOS', executable)],
-    { maxBuffer: 1 << 20 },
-  )
-  const built = new Set(archs.split(/\s+/u).filter(Boolean).flatMap(machArchitectures))
-  if (!built.has(expected.arch)) {
+  const built = new Set(readMachArchitectures(join(bundle, 'Contents', 'MacOS', executable)))
+  if (!built.has(canonicalArchitecture(expected.arch))) {
     throw new Error(
       `The downloaded app has no ${expected.arch} build, which is the one this computer needs. It has ${[...built].join(', ') || 'none'}.`,
     )
   }
-  await execFile('spctl', ['--assess', '--type', 'execute', '-v', bundle], { maxBuffer: 1 << 20 })
 }
 
 async function verifyNsisIdentity(staged: StagedUpdate, expectedSubject: string): Promise<void> {
   const { stdout } = await execFile(
-    'powershell',
+    windowsPowerShellPath(process.env.SystemRoot ?? process.env.WINDIR),
     [
       '-NoProfile',
       '-NonInteractive',
@@ -337,7 +482,7 @@ async function installDmg(staged: StagedUpdate, options: DmgOptions): Promise<In
     await verifyDiskImage(staged.path, team)
     options.onProgress?.('Opening the downloaded disk image')
     await execFile(
-      'hdiutil',
+      MACOS_TOOLS.hdiutil,
       ['attach', '-nobrowse', '-readonly', '-mountpoint', mountPoint, staged.path],
       { maxBuffer: 1 << 20 },
     )
@@ -371,7 +516,7 @@ async function installDmg(staged: StagedUpdate, options: DmgOptions): Promise<In
     // so the cut-over itself moves something already known good into place.
     options.onProgress?.('Installing the new version')
     await rm(prepared, { recursive: true, force: true })
-    await execFile('ditto', [contained, prepared], { maxBuffer: 1 << 20 })
+    await execFile(MACOS_TOOLS.ditto, [contained, prepared], { maxBuffer: 1 << 20 })
     await verifyAppBundle(prepared, expected)
 
     const currentBundle = basename(target.identityPath)
@@ -406,7 +551,7 @@ async function installDmg(staged: StagedUpdate, options: DmgOptions): Promise<In
     return { installed: true, reason: 'The update was installed and the app is restarting.' }
   } finally {
     if (mounted) {
-      await execFile('hdiutil', ['detach', mountPoint], { maxBuffer: 1 << 20 }).catch(
+      await execFile(MACOS_TOOLS.hdiutil, ['detach', mountPoint], { maxBuffer: 1 << 20 }).catch(
         () => undefined,
       )
     }

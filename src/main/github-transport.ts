@@ -1,7 +1,8 @@
 import { execFile as execFileCallback } from 'node:child_process'
 import { promisify } from 'node:util'
 import { canonicalHostName } from '../shared/host'
-import { commandCode, commandDetail, isRecord, MAX_BUFFER } from './git-core'
+import { commandCode, commandDetail, MAX_BUFFER } from './git-core'
+import { isRecord } from '../shared/guards'
 import {
   conditionalCacheKey,
   conditionalHeaders,

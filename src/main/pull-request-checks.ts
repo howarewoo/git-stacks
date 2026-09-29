@@ -13,7 +13,8 @@ import {
   type PullRequestChecksReport,
   type PullRequestChecksSummary,
 } from '../shared/pull-request-checks'
-import { getConfigValue, isRecord, parseRemote, type ParsedRemote } from './git-core'
+import { getConfigValue, parseRemote, type ParsedRemote } from './git-core'
+import { isRecord } from '../shared/guards'
 import {
   GitHubTransportError,
   type GitHubTransport,

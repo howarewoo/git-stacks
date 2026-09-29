@@ -161,35 +161,116 @@ jobs:
               throw "Invalid Authenticode signature: $($artifact.Name)"
             }
           }
-      - name: Sign and notarise the disk image itself
+      - name: Sign, notarise, and staple the disk image
         if: matrix.platform == 'darwin'
         shell: bash
         env:
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         # The application inside the image is signed by the packager, and the
         # image is signed again over it. The updater refuses a disk image whose
-        # own signature or team is not this app's, before it mounts anything, so
-        # an image that is only signed inside is a release that cannot be
-        # installed. The image is stapled and assessed as an image here, which is
-        # the same question the app asks when it opens one.
+        # own signature is missing or is not this app's, before it mounts
+        # anything, so an image that is only signed inside is a release that
+        # cannot be installed. The image is stapled and assessed as an image
+        # here, which is the same pair of questions the app asks when it opens
+        # one.
+        #
+        # The packager imports the certificate into a temporary keychain and
+        # deletes that keychain when the build command returns, so by the time
+        # this step runs there is no private key left anywhere. This step
+        # therefore does the one thing that needs one, and does it in a keychain
+        # that exists only here: created with a password generated for this
+        # step, unlocked for this step, given a partition list that lets
+        # codesign use it, made the only keychain in the search path so the
+        # signing identity cannot come from somewhere else, and deleted again by
+        # a trap however this step ends. The certificate is written to a file
+        # this step owns and removed with it, and the keychain password and the
+        # certificate are added to the log mask before either is used.
+        #
+        # The identity is the one distribution certificate in that keychain whose
+        # team is the team this release claims. A development certificate for the
+        # same team is not one: it cannot notarise and is not what the updater's
+        # own check expects to find on an image. Zero or more than one is a
+        # refusal rather than a guess, and a team selector alone is not used: a
+        # selector is a search term, and a search that finds the wrong
+        # certificate would sign a release as somebody else.
         run: |
+          set -euo pipefail
           shopt -s nullglob
           images=(release/*.dmg)
           test "${#images[@]}" -eq 1
-          codesign --force --sign "$APPLE_TEAM_ID" --timestamp --options runtime "${images[0]}"
+          apps=(release/mac*/"Git Stacks.app")
+          test "${#apps[@]}" -eq 1
+          codesign --verify --deep --strict --verbose=2 "${apps[0]}"
+          test "$(codesign -dv --verbose=2 "${apps[0]}" 2>&1 | sed -n 's/^TeamIdentifier=//p')" = "$APPLE_TEAM_ID"
+
+          echo "::add-mask::$CSC_KEY_PASSWORD"
+          echo "::add-mask::$APPLE_APP_SPECIFIC_PASSWORD"
+          keychain_password="$(openssl rand -hex 32)"
+          echo "::add-mask::$keychain_password"
+          signing_keychain="$RUNNER_TEMP/git-stacks-signing.keychain-db"
+          certificate="$RUNNER_TEMP/git-stacks-certificate.p12"
+          previous_keychains="$(security list-keychains -d user | tr -d '"')"
+          cleanup() {
+            security delete-keychain "$signing_keychain" >/dev/null 2>&1 || true
+            security list-keychains -d user -s $previous_keychains
+            rm -f "$certificate"
+          }
+          trap cleanup EXIT
+
+          rm -f "$signing_keychain" "$certificate"
+          security create-keychain -p "$keychain_password" "$signing_keychain"
+          security set-keychain-settings -lut 21600 "$signing_keychain"
+          security unlock-keychain -p "$keychain_password" "$signing_keychain"
+          if [ -f "$CSC_LINK" ]; then
+            cp "$CSC_LINK" "$certificate"
+          else
+            printf '%s' "$CSC_LINK" | base64 --decode > "$certificate"
+          fi
+          chmod 600 "$certificate"
+          echo "::add-mask::$(base64 < "$certificate" | tr -d '\n')"
+          security import "$certificate" -k "$signing_keychain" -P "$CSC_KEY_PASSWORD" \
+            -T /usr/bin/codesign -T /usr/bin/security
+          rm -f "$certificate"
+          # A keychain created here is not trusted for signing until its
+          # partition list says so, and the signing identity has to come from
+          # this keychain rather than from whatever else this runner holds.
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$keychain_password" \
+            "$signing_keychain" >/dev/null
+          security list-keychains -d user -s "$signing_keychain"
+
+          matched=0
+          identity=""
+          while IFS= read -r line; do
+            case "$line" in
+              *"Developer ID Application:"*"($APPLE_TEAM_ID)"*) ;;
+              *) continue ;;
+            esac
+            candidate="${line#*\) }"
+            matched=$((matched + 1))
+            identity="$candidate"
+          done <<IDENTITIES
+          $(security find-identity -v -p codesigning "$signing_keychain")
+          IDENTITIES
+          if [ "$matched" -ne 1 ]; then
+            echo "expected exactly one codesigning identity for team ${APPLE_TEAM_ID}, found ${matched}" >&2
+            exit 1
+          fi
+          echo "signing the image with the ${APPLE_TEAM_ID} identity the keychain holds"
+
+          codesign --force --sign "$identity" --timestamp --options runtime "${images[0]}"
           codesign --verify --strict --verbose=2 "${images[0]}"
           codesign -dv --verbose=4 "${images[0]}" 2>&1 | grep -Fq 'Authority=Developer ID Application:'
           test "$(codesign -dv --verbose=2 "${images[0]}" 2>&1 | sed -n 's/^TeamIdentifier=//p')" = "$APPLE_TEAM_ID"
+
           # notarytool knows nothing about electron-builder's environment. It
           # reads APPLE_ID and APPLE_APP_SPECIFIC_PASSWORD only when they are
           # named on its own command line, or out of a stored keychain profile,
           # so a submit with neither is a submit that fails as uncredentialed
-          # and not as a refusal. The credentials are stored once under a
-          # profile name and the password is added to the log mask first, so it
-          # appears in neither the log nor any later command line.
-          echo "::add-mask::$APPLE_APP_SPECIFIC_PASSWORD"
+          # and not as a refusal.
           xcrun notarytool store-credentials git-stacks-notary \
             --apple-id "$APPLE_ID" \
             --password "$APPLE_APP_SPECIFIC_PASSWORD" \
@@ -231,19 +312,23 @@ jobs:
           # The AppImage is published for someone to download and run from
           # wherever they put it. It is not updated in place because the app has
           # no way to: `installSupportFor()` in src/main/update/install.ts lists
-          # only darwin and win32, so a packaged Linux build reports `supported:
-          # false` and sits in the `unsupported` phase, and an install offer on
-          # Linux is a refusal rather than a half-finished replacement. This step
-          # fails if the code ever grows a Linux installer, so the line above can
-          # never quietly stop being true.
+          # only darwin and win32, so a packaged Linux build reports
+          # `supported: false` and sits in the `unsupported` phase, and an
+          # install offer on Linux is a refusal before the verified bytes are
+          # looked at rather than a half-finished replacement.
+          #
+          # That is asserted by running the shipped code, not by reading it: the
+          # test asks the installer what it supports on Linux, installs a staged
+          # update anyway, and requires a refusal that writes nothing, starts
+          # nothing and restarts nothing. A Linux installer appearing in the
+          # source would fail this step because the app would answer differently
+          # — and that is the moment the policy line above has to be rewritten,
+          # rather than something that has to be remembered.
+          npx tsx --test tests/update-security.test.ts
           echo 'release policy — linux: best-effort artifact — built, published and signed, never updated in place by the app'
           shopt -s nullglob
           appimages=(signed-release/*.AppImage)
           test "${#appimages[@]}" -gt 0
-          if grep -qE "^[[:space:]]+linux:" src/main/update/install.ts; then
-            echo '::error::src/main/update/install.ts now installs on Linux; rewrite the release policy line before the next release'
-            exit 1
-          fi
       - name: Attest the packaged release artifacts
         uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
         with:
@@ -308,6 +393,23 @@ jobs:
     # published.
     needs: [supply-chain, release-assets]
     runs-on: ubuntu-24.04
+    # One channel's history is read, this release's manifest is signed with the
+    # next sequence, and the feed is moved — as one step, never two at a time.
+    # Two releases published in the same moment would each read the same
+    # published history, each issue the same next sequence for different bytes,
+    # and the feed would then carry two releases claiming one sequence. Every
+    # app that had already taken the first would refuse the second for good,
+    # because a sequence is spent once used, and the release would be
+    # un-installable until some later release moved the sequence on. The group
+    # is per channel, so stable and beta publish independently, and a run that is
+    # already in progress is never cancelled part-way through: half a
+    # publication is the outcome this lock exists to prevent. A queued run waits
+    # and then reads the history the run before it left behind, and re-checks
+    # the version against the feed on its own terms, so waiting costs nothing
+    # and skipping the check would cost correctness.
+    concurrency:
+      group: signed-desktop-publish-${{ github.event.release.prerelease && 'beta' || 'stable' }}
+      cancel-in-progress: false
     permissions:
       contents: write
       attestations: read

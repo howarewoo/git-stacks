@@ -12,7 +12,8 @@ import type {
   UncertainComment,
 } from '../shared/review-threads'
 import { REVIEW_DRAFTS_MAX } from '../shared/review-threads'
-import { CommandCancelled, isRecord, runGit, stripTrailingNewline } from './git-core'
+import { CommandCancelled, runGit, stripTrailingNewline } from './git-core'
+import { isRecord } from '../shared/guards'
 
 /**
  * Both journals are read, changed, and written back by every process that has

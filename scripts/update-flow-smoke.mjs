@@ -477,6 +477,20 @@ async function main() {
       }
       throw new Error(`clicking "${label}" never produced "${expected}". The window says:\n${last}`)
     },
+    /** Waits until the updater's own status says what it should. */
+    async waitForStatus(predicate, timeoutMs = TIMEOUT_MS) {
+      const deadline = Date.now() + timeoutMs
+      let last = null
+      while (Date.now() < deadline) {
+        await ui.foreground()
+        last = await evaluate(() => window.desktop.updateStatus())
+        if (predicate(last)) return last
+        await new Promise((settle) => setTimeout(settle, 200))
+      }
+      throw new Error(
+        `the updater never reached the expected state. It says: ${JSON.stringify(last)}`,
+      )
+    },
     async text() {
       await ui.foreground()
       return evaluate(() => document.body.innerText)
@@ -749,6 +763,47 @@ async function main() {
   )
   assert(probe.fired === false, 'nothing in the payload ran')
   await shot('08-untrusted-text')
+
+  // A reset is a change like any other, and it carries the channel with it: the
+  // Settings control a person presses, through the real IPC, on a running app
+  // that is following the beta channel.
+  await ui.clickText('Open command palette')
+  await ui.waitFor('esc Dismiss')
+  await ui.type('Settings')
+  await ui.clickText('Settings…')
+  await ui.clickText('Updates')
+  await ui.waitFor('Channel')
+  await ui.clickText('Beta')
+  await ui.waitFor('Following the beta channel')
+  const onBeta = await evaluate(() => window.desktop.updateStatus())
+  assert(
+    onBeta.channel === 'beta',
+    `the app is following beta before the reset (${onBeta.channel})`,
+  )
+  await ui.clickText('Reset all')
+  // A confirmation may stand between the control and the change; a person
+  // answers it, and so does this.
+  await Promise.resolve()
+  const answered = await evaluate(() => {
+    const buttons = [...document.querySelectorAll('button')]
+    const confirm = buttons.find((button) => /^Reset$/u.test(button.textContent?.trim() ?? ''))
+    if (!confirm) return false
+    confirm.click()
+    return true
+  })
+  if (answered) log('  confirmed the reset the dialog asked for')
+  const settled = await ui.waitForStatus((status) => status.channel === 'stable')
+  await shot('09-after-reset')
+  const afterReset = settled
+  assert(
+    afterReset.channel === 'stable',
+    `the reset put the running updater back on the default channel (${afterReset.channel})`,
+  )
+  const stored = JSON.parse(readFileSync(join(userData, 'settings.json'), 'utf8'))
+  assert(
+    stored.updates.channel === 'stable',
+    `the stored channel is the one the app is following (${stored.updates.channel})`,
+  )
 
   const fetched = release.requests
   assert(

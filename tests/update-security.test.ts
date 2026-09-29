@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict'
+import { mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { createHash, generateKeyPairSync, sign as signBytes } from 'node:crypto'
 import test from 'node:test'
 import {
@@ -360,4 +363,140 @@ test('a macOS architecture is recognised under every name it is called', async (
   assert.ok(universal.includes('x64'), 'an Intel slice satisfies an x64 update')
   assert.ok(universal.includes('arm64'), 'an Apple Silicon slice satisfies an arm64 update')
   assert.equal(universal.includes('ia32'), false, 'a 32-bit slice satisfies nothing')
+})
+
+test('a Linux build refuses an update outright and touches nothing', async (t) => {
+  // The release job prints a Linux support policy, and this is what makes that
+  // line true: there is no installer for the platform, so the refusal happens
+  // before the verified bytes are looked at, and no handoff, no mount point and
+  // no data directory is written on the way to saying no. A Linux build that
+  // grew an installer would answer differently here, and the policy line would
+  // have to be rewritten with it.
+  const { installStagedUpdate, installSupportFor } = await import('../src/main/update/install')
+  assert.equal(installSupportFor('linux'), null)
+  const directory = mkdtempSync(join(tmpdir(), 'git-stacks-linux-'))
+  t.after(() => rmSync(directory, { recursive: true, force: true }))
+  let relaunched = 0
+  let quitFor = 0
+  const before = readdirSync(directory)
+  const outcome = await installStagedUpdate(
+    {
+      path: join(directory, 'Git-Stacks.AppImage'),
+      fileName: 'Git-Stacks.AppImage',
+      size: 0,
+      sha256: 'x',
+    },
+    {
+      platform: 'linux',
+      appPath: join(directory, 'Git-Stacks.AppImage'),
+      userDataPath: join(directory, 'data'),
+      relaunch: () => {
+        relaunched += 1
+      },
+      quit: () => {
+        quitFor += 1
+      },
+    },
+  )
+  assert.equal(outcome.installed, false)
+  assert.equal(relaunched, 0, 'a refused update does not restart anything')
+  assert.equal(quitFor, 0, 'a refused update does not close the app')
+  assert.deepEqual(readdirSync(directory), before, 'nothing was written or removed')
+})
+
+test('a Mach-O header is read without a developer tool', async (t) => {
+  // `lipo` is not installed on a machine that has never had Xcode on it, and an
+  // update that needs it is an update that cannot be installed. The reader is
+  // checked against headers written here, in both the universal and the
+  // single-architecture form and in both byte orders, because a wrong answer
+  // from this reader is an app installed on a machine that cannot run it.
+  const { readMachArchitectures } = await import('../src/main/update/install')
+  const directory = mkdtempSync(join(tmpdir(), 'git-stacks-macho-'))
+  t.after(() => rmSync(directory, { recursive: true, force: true }))
+
+  const thin = (cpuType: number, littleEndian = true) => {
+    const buffer = Buffer.alloc(32)
+    const magic = 0xfeedfacf
+    if (littleEndian) {
+      buffer.writeUInt32LE(magic, 0)
+      buffer.writeUInt32LE(cpuType, 4)
+    } else {
+      buffer.writeUInt32BE(magic, 0)
+      buffer.writeUInt32BE(cpuType, 4)
+    }
+    return buffer
+  }
+  const X64 = 0x01000007
+  const ARM64 = 0x0100000c
+  const ARM64E = 0x0100000c // an arm64e slice is an arm64 slice to run
+  const file = (name: string, bytes: Buffer) => {
+    const path = join(directory, name)
+    writeFileSync(path, bytes)
+    return path
+  }
+
+  assert.deepEqual(readMachArchitectures(file('ls-arm64', thin(ARM64))), ['arm64'])
+  assert.deepEqual(readMachArchitectures(file('ls-x64', thin(X64))), ['x64'])
+  assert.deepEqual(readMachArchitectures(file('ls-arm64e', thin(ARM64E))), ['arm64'])
+  assert.deepEqual(readMachArchitectures(file('ls-swapped', thin(X64, false))), ['x64'])
+
+  // A universal binary: a big-endian table of slices, in both widths. The order
+  // slices appear in is not the order they are reported in.
+  const universal = (magic: number, cpuTypes: number[]) => {
+    const width = magic === 0xcafebabf ? 32 : 20
+    const buffer = Buffer.alloc(8 + cpuTypes.length * width)
+    buffer.writeUInt32BE(magic, 0)
+    buffer.writeUInt32BE(cpuTypes.length, 4)
+    cpuTypes.forEach((cpuType, index) => {
+      buffer.writeUInt32BE(cpuType, 8 + index * width)
+    })
+    return buffer
+  }
+  assert.deepEqual(readMachArchitectures(file('fat', universal(0xcafebabe, [ARM64, X64]))), [
+    'arm64',
+    'x64',
+  ])
+  assert.deepEqual(readMachArchitectures(file('fat64', universal(0xcafebabf, [X64, ARM64]))), [
+    'arm64',
+    'x64',
+  ])
+  // A file that is not a Mach-O file is no architectures, not a guess.
+  assert.deepEqual(readMachArchitectures(file('notes', Buffer.from('not a binary\n'))), [])
+  assert.deepEqual(readMachArchitectures(file('empty', Buffer.alloc(0))), [])
+})
+
+test('the architecture check compares one name on both sides', async () => {
+  const { canonicalArchitecture, machArchitectures } = await import('../src/main/update/install')
+  assert.equal(canonicalArchitecture('x86_64'), 'x64')
+  assert.equal(canonicalArchitecture('x64'), 'x64')
+  assert.equal(canonicalArchitecture('aarch64'), 'arm64')
+  assert.equal(canonicalArchitecture('arm64'), 'arm64')
+  // An architecture neither side recognises is still compared, not dropped.
+  assert.equal(canonicalArchitecture('sparc'), 'sparc')
+  assert.deepEqual(machArchitectures('x86_64'), ['x64', 'x86_64'])
+})
+
+test('the Windows PowerShell is named by the system directory, or not at all', async () => {
+  const { windowsPowerShellPath } = await import('../src/main/update/install')
+  // The one value Windows itself reports is the only thing trusted to name the
+  // interpreter: a `powershell.exe` in the directory the app was started in would
+  // otherwise be run, and believed about a signature, before anything had been
+  // checked.
+  assert.equal(
+    windowsPowerShellPath('C:\\Windows'),
+    'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
+  )
+  for (const refused of [
+    undefined,
+    '',
+    'Windows',
+    'System32\\WindowsPowerShell\\v1.0\\powershell.exe',
+    'C:\\Windows\\..\\..\\Program Files',
+  ]) {
+    assert.throws(
+      () => windowsPowerShellPath(refused),
+      /system directory|absolute Windows path|system path/u,
+      `refuses ${JSON.stringify(refused)}`,
+    )
+  }
 })

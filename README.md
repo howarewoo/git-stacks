@@ -135,6 +135,15 @@ to a stack, and the operation is worth knowing about from the outside:
   or retargets a local branch for you, and any base GitHub moved is reported
   for you to restack and publish.
 
+One test is deliberately platform-scoped. The release producer's own reader
+shells out to `gh`, and the job that publishes runs on `ubuntu-24.04`, so that
+reader is exercised on POSIX with a stand-in for `gh` on the search path rather
+than with the network: every decision the producer makes about a channel's
+history — the sequence, the version, an unreadable feed, a signature with no
+manifest, a manifest with no signature — is tested on all three platforms by
+handing the helper the bytes a release would have published, because that is the
+only part of the read that talks to anything.
+
 ## GitHub sign-in
 
 Git Stacks signs in to GitHub with a GitHub App device flow, so no `gh`
@@ -473,6 +482,18 @@ is verified again with the key this release injected, every installer is
 re-hashed, each packaged build's own key set is compared with the one being
 signed with, and each artifact's provenance is verified.
 
+One channel publishes one release at a time. The publishing job takes a lock
+named after the channel it is about to move, and a run already in progress is
+never cancelled part-way: without that lock two releases published in the same
+moment would each read the same published history, each issue the same next
+sequence for different bytes, and the feed would carry two releases claiming one
+sequence — which every app that had already taken the first would refuse for
+good, since a sequence is spent once used. A queued run waits and then reads
+the history the run before it left behind, and re-checks its own version against
+the feed, so waiting costs a queue slot and skipping the check would cost
+correctness. `stable` and `beta` hold separate locks and do not wait on each
+other.
+
 A manifest is issued, never edited in place. Its signing key is the
 `UPDATE_SIGNING_KEY` repository secret, and the packaging job injects that key's
 public half into the app it builds, so a released build is the only build that
@@ -530,11 +551,25 @@ The order is the point, and it belongs to the app rather than to the feed:
    backup or sync agent commonly is one.
 6. Before anything is run, the download must carry the platform's own signature
    and the identity of the app that is already installed. An installer signed by
-   anybody else is refused even when its digest matches the manifest exactly. A
-   macOS disk image is checked for its own signature and team, and assessed by
-   Gatekeeper, before it is mounted; the application inside it is checked again
-   separately, and the copied bundle is checked a third time before it replaces
-   the running one. An installer that cannot be started is a refusal, not an
+   anybody else is refused even when its digest matches the manifest exactly.
+   The programs that answer those questions are named by absolute path —
+   `/usr/bin/codesign`, `/usr/sbin/spctl`, `/usr/bin/plutil`, `/usr/bin/hdiutil`,
+   `/usr/bin/ditto`, and on Windows the interpreter under the system directory
+   Windows itself reports — because a program named on its own is found through
+   `PATH`, and on Windows through the current directory too, which is the
+   repository the app was started in. Nothing on the install path needs Xcode or
+   any other developer tool: the architecture is read out of the Mach-O header
+   rather than asked of `lipo`, and the notarisation ticket is left to
+   Gatekeeper's own assessment rather than to `xcrun stapler`, which is a
+   developer tool. On
+   macOS the disk image is opened read-only and nothing is mounted until the
+   image itself has proved that it is this app's — a valid signature carrying
+   this app's team, and a passing Gatekeeper assessment of the image — and then
+   the application inside it has to prove the same thing again with more:
+   same bundle identifier, same version, a stapled notarisation ticket, and its
+   own Gatekeeper assessment. The copied bundle is checked a third time before it
+   replaces the running one. Nothing here is optional: an image this app cannot
+   attribute to its own team is not opened at all. An installer that cannot be started is a refusal, not an
    install: this app stays open rather than closing with nothing to finish the
    work. On macOS the installed bundle is moved aside rather than overwritten in
    place, so a failure part-way through leaves a working app to go back to;
@@ -555,7 +590,15 @@ newer one, and why a stopped download removes only the file it staged rather
 than whatever is in the staging directory at the time.
 
 A release becomes offerable only after the history that records having seen it
-is written and flushed to the disk. A check that cannot record what it saw
+is written and flushed to the disk: a temporary file of its own, flushed
+through its own handle, and then moved into place, with the directory entry
+flushed as well on macOS and Linux. Windows has no way to flush a directory
+entry from Node's standard library — `FlushFileBuffers` requires a handle
+opened for `GENERIC_WRITE`, and a writable directory handle needs
+`FILE_FLAG_BACKUP_SEMANTICS` — so there the file's own flush and the atomic
+replacement are what this code performs, and the durability of the name across a
+power loss is left to the platform rather than claimed here. A write or a
+replacement that fails is a failure: the check offers nothing. A check that cannot record what it saw
 offers nothing, revokes a build already downloaded for the same release, and
 stops every later download and install, because the replay guard is the thing
 that keeps an older release from being offered as a new one. A cancelled
@@ -574,15 +617,15 @@ The updater writes only to the app's own user-data directory, and on macOS to a
 staged and a moved-aside copy of the bundle beside the installed one, both
 carrying this app's own prefix. It never reads or writes a repository.
 
-**What has not been observed here.** No signed macOS or Windows installer has
-been installed by this work: that needs an Apple Developer ID and a Windows
-signing certificate, neither of which this repository holds. The digest re-check
-in step 5, the native signature checks in step 6, the handoff, and the
-Gatekeeper assessment of a disk image are all code paths that only run on a
-platform with a real signature, so their behaviour against a real signed
-installer is unproven and is not claimed. The handoff's directory and file modes
-describe POSIX protection; the equivalent Windows isolation has not been
-independently verified here either.
+**What a fixture cannot prove.** The test suite stages an installer and runs the
+real code over it, which proves the digests, the manifest, the channel, the
+sequencing and the refusals. It cannot prove a native install: `codesign`,
+`spctl`, `hdiutil`, `Get-AuthenticodeSignature` and the NSIS installer are not
+run in a test process on any platform, so a path that asks the operating system
+about a signature is only ever exercised as far as the operating system answers. Installing a real signed release is the
+acceptance step, and it is written out under Platform support below. The
+handoff's directory and file modes describe POSIX protection; the equivalent
+Windows isolation is a documented limit, not something the tests establish.
 
 ### Channels
 
@@ -630,24 +673,55 @@ chosen.
 
 | Platform | Package                                              | Signing                                                                                              | Updated in place                                                                                                                                                                                                                                             |
 | -------- | ---------------------------------------------------- | ---------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| macOS    | `dmg`                                                | Developer ID Application, notarised and stapled                                                      | Yes. The download is checked against the installed app's own signing identity, team, bundle identifier, version, and architecture, staged beside the running bundle and proved again there, then moved into the bundle's place and the app restarts into it. |
+| macOS    | `dmg`                                                | Developer ID Application for the app and for the image, notarised and stapled                        | Yes. The download is checked against the installed app's own signing identity, team, bundle identifier, version, and architecture, staged beside the running bundle and proved again there, then moved into the bundle's place and the app restarts into it. |
 | Windows  | NSIS installer                                       | Authenticode, verified before it runs                                                                | Yes. The installer's Authenticode identity is compared with the installed app's own; the installer is then started, this app closes, and the update finishes on its own.                                                                                     |
 | Linux    | AppImage, also covered by the packaged desktop smoke | No platform signature exists to check; the release's own manifest signature is what authenticates it | No. An AppImage is a single file the person runs from wherever they put it, with no installed copy to replace and no signature to check before running it, so in-place updates are unsupported there and a download is offered to run instead.               |
 
 The release states the Linux policy in its own log on every Linux build — "linux:
 best-effort artifact — built, published and signed, never updated in place by the
-app" — and that step fails the release if `src/main/update/install.ts` ever grows
-a Linux entry, so the line cannot quietly stop being true.
+app" — and the step that prints it runs the shipped code to make it true: it
+asks the installer what it supports on Linux, hands it a staged update anyway,
+and requires a refusal that writes nothing, starts nothing and restarts
+nothing. A Linux installer that appeared would make the app answer differently
+and fail that step, which is the moment the policy line has to be rewritten with
+it.
 
-No signed macOS or Windows artifact has been produced, and none can be produced
-from this repository as it stands. Signing needs a code-signing certificate
-(`CSC_LINK`, `CSC_KEY_PASSWORD`), and macOS notarisation needs an Apple
-developer account (`APPLE_ID`, `APPLE_APP_SPECIFIC_PASSWORD`, `APPLE_TEAM_ID`).
-The release job fails closed when any of them is missing: it stops before
-packaging rather than publishing an unsigned artifact under a release name. No
-release has been published and no manifest has been signed, and this repository
-carries no release key, so no build of it can currently be offered a verified
-update at all.
+Signing needs a code-signing certificate (`CSC_LINK`, `CSC_KEY_PASSWORD`), and
+macOS notarisation needs an Apple developer account (`APPLE_ID`,
+`APPLE_APP_SPECIFIC_PASSWORD`, `APPLE_TEAM_ID`). Maintainers have to configure
+those as repository secrets; the release job fails closed when any of them is
+missing, stopping before packaging rather than publishing an unsigned artifact
+under a release name. Installing a real signed release is the acceptance step,
+run on a machine that holds the real credentials, before a signed release counts
+as delivered:
+
+1. Publish a release and let the workflow run to completion. Every job must be
+   green; a failed attestation, signature, or provenance step is not a release.
+2. On macOS, confirm the shipped image and the application inside it are signed
+   by the expected team, that `xcrun stapler validate` accepts the ticket, and
+   that `spctl --assess --type open` accepts the image, on a machine that has
+   never seen the download.
+3. On Windows, confirm `Get-AuthenticodeSignature` reports `Valid` and the
+   signer's subject matches the installed app's own.
+4. Install the published release on a clean machine, then publish the next
+   pre-release and let an installed build take it: the digest re-check, the
+   native signature checks, the handoff, the replacement, and the relaunch all
+   run only there.
+5. Confirm the channel lock behaved: two releases published at once must leave
+   one sequence per channel, and the second must have read the first's history.
+
+Signing the disk image as well as the application inside it needs the private key
+a second time, after the packager has already deleted the keychain it imported
+the certificate into. The release job does that in a keychain that exists only
+for the step: created with a password generated at that moment, unlocked only
+there, given the partition list `codesign` needs, made the only keychain in the
+search path so the identity cannot come from anywhere else, and deleted by a trap
+however the step ends, with the earlier search path restored. The certificate is
+written to a file the step owns, masked in the log, and removed. The signing
+identity is the single distribution certificate in that keychain for the team the
+release claims — matched by name and team rather than by a bare team selector,
+because a selector is a search term — and none or several is a refusal rather
+than a guess.
 
 ### An unsigned build is not a release
 

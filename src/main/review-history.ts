@@ -2,7 +2,8 @@ import type { ReviewComparison, ReviewFile, ReviewFileDiff } from '../shared/rev
 import { looksGenerated, sameReviewComparison } from '../shared/review'
 import type { ReviewHistory, ReviewHistoryDiff, ReviewSnapshot } from '../shared/review-snapshots'
 import { reviewHistoryOf } from '../shared/review-snapshots'
-import { isRecord, type ParsedRemote, runGit } from './git-core'
+import { type ParsedRemote, runGit } from './git-core'
+import { isRecord } from '../shared/guards'
 import { GitHubTransportError } from './github-transport'
 import { parseHunkBlock } from './hunks'
 import {

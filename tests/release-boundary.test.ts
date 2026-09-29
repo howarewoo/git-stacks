@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict'
 import { createHash, generateKeyPairSync, sign, type KeyObject } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import React from 'react'
@@ -180,64 +181,72 @@ test('a channel may only be called unpublished when the reader says so', () => {
 
 /**
  * The producer reads a channel's history before it mints the next sequence, and
- * the only history it may read is bytes a trusted key signed. These run the real
- * helper in a child process, against a real key and a real signature over real
- * manifest bytes, with `gh` replaced by a script that serves those exact bytes —
- * the point being that a signed, correct, existing history is read, and that
- * every way of being wrong about it stops the release.
+ * the only history it may read is bytes a trusted key signed.
+ *
+ * These run the real helper in a child process against a real key and a real
+ * signature over real manifest bytes, in a working directory of the run's own so
+ * the key set it reads is the one written for it. The bytes a channel publishes
+ * are handed to the helper directly, which is the only part of the read that
+ * talks to anything: the point being that a signed, correct, existing history is
+ * read, and that every way of being wrong about it stops the release. The
+ * helper's own `gh` reader is exercised separately, on the platform that
+ * publishes.
  */
 function runProducer(options: {
   manifest: unknown
   signature: { keyId: string; signature: string } | null
   keys: unknown
   channel?: string
+  /** Asset names the reader cannot deliver, as a release run's reader would. */
+  unreadable?: string[]
 }): { code: number | null; out: string } {
   const root = mkdtempSync(join(tmpdir(), 'git-stacks-producer-'))
-  const assets = join(root, 'assets')
-  const tools = join(root, 'tools')
   mkdirSync(join(root, 'resources'), { recursive: true })
-  mkdirSync(join(root, 'scripts'))
-  mkdirSync(assets, { recursive: true })
-  mkdirSync(tools, { recursive: true })
-  // The module resolves its key set relative to the working directory, so the
-  // run gets its own key set in its own tree rather than the repository's.
-  symlinkSync(join(ROOT, 'scripts'), join(root, 'scripts-linked'), 'dir')
   writeFileSync(join(root, 'resources', 'update-trusted-keys.json'), JSON.stringify(options.keys))
-  writeFileSync(join(assets, 'update-stable.json'), JSON.stringify(options.manifest))
-  if (options.signature) {
-    writeFileSync(join(assets, 'update-stable.json.sig'), JSON.stringify(options.signature))
+  const assets: Record<string, string> = {}
+  if (options.manifest !== null) {
+    assets['update-stable.json'] = Buffer.from(JSON.stringify(options.manifest)).toString('base64')
   }
-  writeFileSync(
-    join(tools, 'gh'),
-    [
-      '#!/bin/sh',
-      'dir=; name=',
-      'while [ $# -gt 0 ]; do',
-      '  case "$1" in',
-      '    --dir) dir="$2"; shift 2 ;;',
-      '    --pattern) name="$2"; shift 2 ;;',
-      '    *) shift ;;',
-      '  esac',
-      'done',
-      'if [ -f "' + assets + '/$name" ]; then cp "' + assets + '/$name" "$dir/$name"; exit 0; fi',
-      'echo "release not found" >&2; exit 1',
-    ].join('\n'),
-    { mode: 0o755 },
-  )
+  if (options.signature) {
+    assets['update-stable.json.sig'] = Buffer.from(JSON.stringify(options.signature)).toString(
+      'base64',
+    )
+  }
   const run = spawnSync(
     process.execPath,
     [
       join(ROOT, 'node_modules', 'tsx', 'dist', 'cli.mjs'),
       '--eval',
-      'import { publishedManifest } from "./scripts-linked/release-update-common.ts";' +
-        'process.stdout.write(JSON.stringify(publishedManifest(process.env.PROBE_CHANNEL, "owner/repo")))',
+      [
+        'import { pathToFileURL } from "node:url"',
+        // The eval runs as CommonJS, so the import is a promise rather than a
+        // top-level await, and a refusal ends the process the way a release
+        // script's own `fail` does: the message on stderr, the code 1.
+        'import(pathToFileURL(process.env.PROBE_MODULE).href).then((helper) => {',
+        '  const assets = JSON.parse(process.env.PROBE_ASSETS)',
+        '  const unreadable = new Set(JSON.parse(process.env.PROBE_UNREADABLE))',
+        '  const history = helper.publishedManifest(process.env.PROBE_CHANNEL, "owner/repo", (name) => {',
+        '    if (unreadable.has(name)) throw new Error("error connecting to api.github.com: no route to host")',
+        '    const value = assets[name]',
+        '    return value === undefined ? null : Buffer.from(value, "base64")',
+        '  })',
+        '  process.stdout.write(JSON.stringify(history))',
+        '}).catch((error) => {',
+        '  console.error(`release-update: ${error instanceof Error ? error.message : String(error)}`)',
+        '  process.exit(1)',
+        '})',
+      ].join('\n'),
     ],
     {
       cwd: root,
       encoding: 'utf8',
       env: {
         ...process.env,
-        PATH: `${tools}:${process.env.PATH ?? ''}`,
+        PROBE_MODULE: fileURLToPath(
+          new URL('../scripts/release-update-common.ts', import.meta.url),
+        ),
+        PROBE_ASSETS: JSON.stringify(assets),
+        PROBE_UNREADABLE: JSON.stringify(options.unreadable ?? []),
         PROBE_CHANNEL: options.channel ?? 'stable',
       },
     },
@@ -359,9 +368,151 @@ test('a manifest whose bytes were changed after signing is not read', () => {
   const signed = Buffer.from(JSON.stringify(signedManifest('stable', '1.4.0', 12)))
   const run = runProducer({
     manifest: { ...signedManifest('stable', '1.4.0', 12), version: '9.9.9' },
-    signature: { keyId: key.keyId, signature: sign(null, signed, key.privateKey).toString('base64') },
+    signature: {
+      keyId: key.keyId,
+      signature: sign(null, signed, key.privateKey).toString('base64'),
+    },
     keys: keySet([{ keyId: key.keyId, publicKey: key.publicKey }]),
   })
   assert.equal(run.code, 1)
   assert.match(run.out, /does not match the signature beside it/u)
 })
+
+test('a channel with nothing published yet is read as no history', () => {
+  const run = runProducer({ manifest: null, signature: null, keys: keySet([]) })
+  assert.equal(run.code, 0, `a brand new channel is not a failure: ${run.out}`)
+  assert.match(run.out, /has no published update-stable\.json yet/u)
+  assert.match(run.out, /null/u)
+})
+
+test('a channel this release cannot read stops the release', () => {
+  // The failure that matters most here is the one that looks like an empty
+  // channel. A reader that could not answer is not an answer, and a sequence
+  // minted over it would be minted over a history nobody has read.
+  const key = releaseKey()
+  const run = runProducer({
+    manifest: signedManifest('stable', '1.4.0', 12),
+    signature: {
+      keyId: key.keyId,
+      signature: sign(null, Buffer.from('{}'), key.privateKey).toString('base64'),
+    },
+    keys: keySet([{ keyId: key.keyId, publicKey: key.publicKey }]),
+    unreadable: ['update-stable.json'],
+  })
+  assert.equal(run.code, 1, 'the release publishes nothing rather than start the count over')
+  assert.match(run.out, /could not be read/u)
+  assert.match(run.out, /no route to host/u)
+  assert.doesNotMatch(run.out, /has no published/u)
+})
+
+test('a signature with no manifest beside it is not an empty channel', () => {
+  const key = releaseKey()
+  const run = runProducer({
+    manifest: null,
+    signature: {
+      keyId: key.keyId,
+      signature: sign(null, Buffer.from('{}'), key.privateKey).toString('base64'),
+    },
+    keys: keySet([{ keyId: key.keyId, publicKey: key.publicKey }]),
+  })
+  assert.equal(run.code, 1)
+  assert.match(run.out, /publishes a signature with no manifest beside it/u)
+})
+
+test('a manifest with no signature beside it is not this channel’s history', () => {
+  const run = runProducer({
+    manifest: signedManifest('stable', '1.4.0', 12),
+    signature: null,
+    keys: keySet([]),
+  })
+  assert.equal(run.code, 1)
+  assert.match(run.out, /with no signature beside it/u)
+})
+
+test(
+  'the producer’s own reader asks gh for the channel’s manifest',
+  {
+    // The default reader shells out to `gh`, which is a release job's tool, and
+    // the job that publishes runs on ubuntu-24.04. It is exercised there, with a
+    // stand-in for `gh` on the search path rather than the network: a stand-in
+    // that cannot run fails the read, and an unreadable read stops the release, so
+    // a test run can never fall through to a real `gh` and reach GitHub.
+    skip:
+      process.platform === 'win32' ? 'the reader is proven on the platform that publishes' : false,
+  },
+  () => {
+    const key = releaseKey()
+    const manifest = signedManifest('stable', '1.4.0', 12)
+    const bytes = Buffer.from(JSON.stringify(manifest))
+    const assets = join(mkdtempSync(join(tmpdir(), 'git-stacks-gh-')), 'assets')
+    const tools = join(join(assets, '..'), 'tools')
+    mkdirSync(join(assets, '..', 'resources'), { recursive: true })
+    mkdirSync(assets, { recursive: true })
+    mkdirSync(tools, { recursive: true })
+    const root = join(assets, '..')
+    writeFileSync(
+      join(root, 'resources', 'update-trusted-keys.json'),
+      JSON.stringify(keySet([{ keyId: key.keyId, publicKey: key.publicKey }])),
+    )
+    writeFileSync(join(assets, 'update-stable.json'), bytes)
+    writeFileSync(
+      join(assets, 'update-stable.json.sig'),
+      JSON.stringify({
+        keyId: key.keyId,
+        signature: sign(null, bytes, key.privateKey).toString('base64'),
+      }),
+    )
+    writeFileSync(
+      join(tools, 'gh'),
+      [
+        '#!/bin/sh',
+        'dir=; name=',
+        'while [ $# -gt 0 ]; do',
+        '  case "$1" in',
+        '    --dir) dir="$2"; shift 2 ;;',
+        '    --pattern) name="$2"; shift 2 ;;',
+        '    *) shift ;;',
+        '  esac',
+        'done',
+        `if [ -f "${assets}/$name" ]; then cp "${assets}/$name" "$dir/$name"; exit 0; fi`,
+        'echo "release not found" >&2; exit 1',
+      ].join('\n'),
+      { mode: 0o755 },
+    )
+    const run = spawnSync(
+      process.execPath,
+      [
+        join(ROOT, 'node_modules', 'tsx', 'dist', 'cli.mjs'),
+        '--eval',
+        [
+          'import { pathToFileURL } from "node:url"',
+          'import(pathToFileURL(process.env.PROBE_MODULE).href).then((helper) => {',
+          '  process.stdout.write(JSON.stringify(helper.publishedManifest("stable", "owner/repo")))',
+          '}).catch((error) => {',
+          '  console.error(`release-update: ${error instanceof Error ? error.message : String(error)}`)',
+          '  process.exit(1)',
+          '})',
+        ].join('\n'),
+      ],
+      {
+        cwd: root,
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          PATH: `${tools}:${process.env.PATH ?? ''}`,
+          PROBE_MODULE: fileURLToPath(
+            new URL('../scripts/release-update-common.ts', import.meta.url),
+          ),
+        },
+      },
+    )
+    rmSync(root, { recursive: true, force: true })
+    assert.equal(
+      run.status,
+      0,
+      `the reader read what the release publishes: ${run.stdout}${run.stderr}`,
+    )
+    assert.match(`${run.stdout}`, /"sequence":12/u)
+    assert.match(`${run.stdout}`, /"version":"1\.4\.0"/u)
+  },
+)
