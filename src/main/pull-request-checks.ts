@@ -13,13 +13,14 @@ import {
   type PullRequestChecksReport,
   type PullRequestChecksSummary,
 } from '../shared/pull-request-checks'
-import { getConfigValue, isRecord, parseRemote } from './git-core'
+import { getConfigValue, isRecord, parseRemote, type ParsedRemote } from './git-core'
 import {
   GitHubTransportError,
-  githubTransport,
+  type GitHubTransport,
   type GitHubRateLimit,
   type GitHubRestResponse,
 } from './github-transport'
+import { hostTransport, remoteHostContext, type GitHubHostContext } from './github-host'
 
 export type {
   PullRequestChecksFreshness,
@@ -85,8 +86,31 @@ export function clearPullRequestChecksCache(): void {
   cache.clear()
 }
 
-function key(fullName: string, number: number): string {
-  return `${fullName}#${number}`
+/**
+ * The host a pull request lives on and the repository it names there. A pull
+ * request number only means something together with the host that issued it, so
+ * the host is carried with every read and every cache key rather than assumed to
+ * be the public one.
+ */
+interface ChecksTarget {
+  host: GitHubHostContext
+  fullName: string
+}
+
+/** The transport for the host this target lives on. */
+function targetTransport(target: ChecksTarget): GitHubTransport {
+  return hostTransport(target.host)
+}
+
+function key(target: ChecksTarget, number: number): string {
+  return `${target.host.host}/${target.fullName}#${number}`
+}
+
+/** The host context for a repository's origin, or the reason it has none. */
+function targetFor(remote: ParsedRemote | null): ChecksTarget | null {
+  const host = remoteHostContext(remote)
+  if (!host || !remote) return null
+  return { host, fullName: remote.fullName }
 }
 
 function backoffDelay(failures: number): number {
@@ -148,8 +172,8 @@ interface CheckRequest {
  * is current; neither means the report is stale, so the caller records when GitHub
  * last confirmed it.
  */
-async function conditionalRead(request: CheckRequest): Promise<CheckRead> {
-  const transport = githubTransport()
+async function conditionalRead(target: ChecksTarget, request: CheckRequest): Promise<CheckRead> {
+  const transport = targetTransport(target)
   const headers: Record<string, string> = {}
   if (request.etag) headers['if-none-match'] = request.etag
   try {
@@ -211,6 +235,7 @@ interface GitHubRateLimitLike {
  * page asked about confirmed itself.
  */
 async function readAllPages(
+  target: ChecksTarget,
   path: string,
   options: {
     key: string
@@ -230,7 +255,7 @@ async function readAllPages(
   for (let page = 1; page <= MAX_PAGES; page += 1) {
     const sent = options.etags.get(pageKey(options.key, page)) ?? null
     const pagePath = `${path}${separator}per_page=${options.perPage}&page=${page}`
-    let read = await conditionalRead({
+    let read = await conditionalRead(target, {
       path: pagePath,
       ...(sent ? { etag: sent } : {}),
       ...(options.signal ? { signal: options.signal } : {}),
@@ -251,7 +276,7 @@ async function readAllPages(
       // GitHub confirmed a page whose body is no longer cached, which happens after the
       // collection changed shape. Those checks are still real, so the page is read
       // unconditionally rather than silently dropped from a live report.
-      read = await conditionalRead({
+      read = await conditionalRead(target, {
         path: pagePath,
         ...(options.signal ? { signal: options.signal } : {}),
       })
@@ -287,12 +312,12 @@ function pageKey(resource: string, page: number): string {
  * read, never through a value the renderer supplied earlier.
  */
 async function readPullRequestIdentity(
-  fullName: string,
+  target: ChecksTarget,
   number: number,
   signal?: AbortSignal,
 ): Promise<{ headSha: string; base: string | null }> {
-  const response = await githubTransport().rest({
-    path: `repos/${fullName}/pulls/${number}`,
+  const response = await targetTransport(target).rest({
+    path: `repos/${target.fullName}/pulls/${number}`,
     ...(signal ? { signal } : {}),
   })
   const data = response.data
@@ -364,7 +389,7 @@ function satisfies(check: PullRequestCheckDetail, constraint: RequiredConstraint
  * `unknown` rather than presenting what was read as the complete required set.
  */
 async function requiredContexts(
-  fullName: string,
+  target: ChecksTarget,
   base: string | null,
   viewerIsAdmin: boolean,
   signal?: AbortSignal,
@@ -372,8 +397,8 @@ async function requiredContexts(
   if (!base) return { known: false, constraints: [] }
   const constraints: RequiredConstraint[] = []
   try {
-    const response = await githubTransport().rest({
-      path: `repos/${fullName}/branches/${encodeURIComponent(base)}/protection/required_status_checks`,
+    const response = await targetTransport(target).rest({
+      path: `repos/${target.fullName}/branches/${encodeURIComponent(base)}/protection/required_status_checks`,
       ...(signal ? { signal } : {}),
     })
     const data = response.data
@@ -406,7 +431,7 @@ async function requiredContexts(
     if (!unprotected) return { known: false, constraints: [] }
   }
 
-  const rules = await effectiveBranchRules(fullName, base, signal)
+  const rules = await effectiveBranchRules(target, base, signal)
   if (!rules.known) return { known: false, constraints: [] }
   for (const entry of rules.constraints) addRequired(constraints, entry.context, entry.appId)
   return { known: true, constraints }
@@ -419,7 +444,7 @@ async function requiredContexts(
  * readable rule mentions may still gate the merge.
  */
 async function effectiveBranchRules(
-  fullName: string,
+  target: ChecksTarget,
   base: string,
   signal?: AbortSignal,
 ): Promise<{ known: boolean; constraints: RequiredConstraint[] }> {
@@ -427,8 +452,8 @@ async function effectiveBranchRules(
   for (let page = 1; page <= MAX_PAGES; page += 1) {
     let rules: unknown
     try {
-      const response = await githubTransport().rest({
-        path: `repos/${fullName}/rules/branches/${encodeURIComponent(base)}?per_page=100&page=${page}`,
+      const response = await targetTransport(target).rest({
+        path: `repos/${target.fullName}/rules/branches/${encodeURIComponent(base)}?per_page=100&page=${page}`,
         ...(signal ? { signal } : {}),
       })
       rules = response.data
@@ -463,10 +488,10 @@ async function effectiveBranchRules(
  * Whether GitHub Actions are enabled for the repository. `GET /repos/{o}/{r}/actions/
  * permissions` reports repository policy only, never the viewer's rights.
  */
-async function actionsEnabled(fullName: string, signal?: AbortSignal): Promise<boolean | null> {
+async function actionsEnabled(target: ChecksTarget, signal?: AbortSignal): Promise<boolean | null> {
   try {
-    const { data } = await githubTransport().rest({
-      path: `repos/${fullName}/actions/permissions`,
+    const { data } = await targetTransport(target).rest({
+      path: `repos/${target.fullName}/actions/permissions`,
       ...(signal ? { signal } : {}),
     })
     if (!isRecord(data)) return null
@@ -483,12 +508,12 @@ async function actionsEnabled(fullName: string, signal?: AbortSignal): Promise<b
  * reports it; read access alone must not be dressed up as a rerun button.
  */
 async function viewerRole(
-  fullName: string,
+  target: ChecksTarget,
   signal?: AbortSignal,
 ): Promise<{ canWrite: boolean | null; isAdmin: boolean | null }> {
   try {
-    const { data } = await githubTransport().rest({
-      path: `repos/${fullName}`,
+    const { data } = await targetTransport(target).rest({
+      path: `repos/${target.fullName}`,
       ...(signal ? { signal } : {}),
     })
     if (!isRecord(data) || !isRecord(data.permissions)) {
@@ -511,12 +536,12 @@ async function viewerRole(
  * unavailable instead of offering a button that can only fail.
  */
 async function actionsPermissions(
-  fullName: string,
+  target: ChecksTarget,
   signal?: AbortSignal,
 ): Promise<PullRequestChecksPermissions> {
   const [enabled, role] = await Promise.all([
-    actionsEnabled(fullName, signal),
-    viewerRole(fullName, signal),
+    actionsEnabled(target, signal),
+    viewerRole(target, signal),
   ])
   const canWrite = role.canWrite
   if (enabled === false) {
@@ -846,12 +871,14 @@ export async function getPullRequestChecks(
   if (!Number.isInteger(number) || number <= 0) {
     throw new Error('Pull request number must be a positive integer')
   }
-  const remote = parseRemote(await getConfigValue(repoPath, 'remote.origin.url'))
-  if (!remote || remote.host !== 'github.com') {
-    throw new Error('Pull request integration requires a github.com origin remote.')
+  const target = targetFor(parseRemote(await getConfigValue(repoPath, 'remote.origin.url')))
+  if (!target) {
+    throw new Error('Pull request integration requires a GitHub origin remote.')
   }
-  const fullName = remote.fullName
-  const cacheKey = key(fullName, number)
+  const fullName = target.fullName
+  // The cache remembers a report per host and repository, because a pull request
+  // number on one host says nothing about the same number on another.
+  const cacheKey = key(target, number)
   const remembered = cache.get(cacheKey) ?? null
   const now = Date.now()
   const backoffKey = `${repoPath}\u0000${cacheKey}`
@@ -896,7 +923,7 @@ export async function getPullRequestChecks(
     base = base ?? remembered.base
   } else {
     try {
-      const identity = await readPullRequestIdentity(fullName, number, options.signal)
+      const identity = await readPullRequestIdentity(target, number, options.signal)
       headSha = identity.headSha
       base = identity.base ?? base
     } catch (error) {
@@ -945,7 +972,7 @@ export async function getPullRequestChecks(
 
   try {
     const commitPath = `repos/${fullName}/commits/${encodeURIComponent(headSha)}`
-    const checkRuns = await readAllPages(`${commitPath}/check-runs`, {
+    const checkRuns = await readAllPages(target, `${commitPath}/check-runs`, {
       key: 'check-runs',
       perPage: MAX_CHECK_RUNS,
       etags: new Map(remembered?.etags ?? []),
@@ -953,7 +980,7 @@ export async function getPullRequestChecks(
       pick: checkRunEntries,
       ...(options.signal ? { signal: options.signal } : {}),
     })
-    const status = await readAllPages(`${commitPath}/status`, {
+    const status = await readAllPages(target, `${commitPath}/status`, {
       key: 'status',
       perPage: MAX_STATUSES,
       etags: new Map(remembered?.etags ?? []),
@@ -962,6 +989,7 @@ export async function getPullRequestChecks(
       ...(options.signal ? { signal: options.signal } : {}),
     })
     const workflowRuns = await readAllPages(
+      target,
       `repos/${fullName}/actions/runs?head_sha=${encodeURIComponent(headSha)}`,
       {
         key: 'workflow-runs',
@@ -978,9 +1006,9 @@ export async function getPullRequestChecks(
     // Requirement and permission are policy, not payload: neither has an ETag, and a
     // rerun must never act on a policy that was true at some earlier read. Both are
     // re-read on every path, including the one where all three payloads answered 304.
-    const readPermissions = await actionsPermissions(fullName, options.signal)
+    const readPermissions = await actionsPermissions(target, options.signal)
     const requirement = await requiredContexts(
-      fullName,
+      target,
       base,
       readPermissions.isAdmin,
       options.signal,
@@ -1169,15 +1197,15 @@ export async function rerunPullRequestCheck(
   if (!Number.isInteger(runId) || runId <= 0) {
     throw new Error('Workflow run id must be a positive integer')
   }
-  const remote = parseRemote(await getConfigValue(repoPath, 'remote.origin.url'))
-  if (!remote || remote.host !== 'github.com') {
-    throw new Error('Pull request integration requires a github.com origin remote.')
+  const target = targetFor(parseRemote(await getConfigValue(repoPath, 'remote.origin.url')))
+  if (!target) {
+    throw new Error('Pull request integration requires a GitHub origin remote.')
   }
-  const fullName = remote.fullName
+  const fullName = target.fullName
   // Identity is proved here, from GitHub, before anything else. The head the caller
   // saw is what the user acted on, so a head that has moved since is refused outright
   // rather than rerun: the button described a different commit than the one GitHub has.
-  const identity = await readPullRequestIdentity(fullName, number, options.signal)
+  const identity = await readPullRequestIdentity(target, number, options.signal)
   if (options.headSha && options.headSha !== identity.headSha) {
     throw new Error(
       'This pull request moved to a new head commit after these checks were read. Review the checks for the new commit, then rerun from there.',
@@ -1211,7 +1239,7 @@ export async function rerunPullRequestCheck(
     throw new Error(report.permissions.reason || 'Rerunning workflows is not permitted here.')
   }
   try {
-    await githubTransport().rest({
+    await targetTransport(target).rest({
       method: 'POST',
       path: `repos/${fullName}/actions/runs/${runId}/rerun`,
       ...(options.signal ? { signal: options.signal } : {}),
@@ -1220,6 +1248,6 @@ export async function rerunPullRequestCheck(
     if (error instanceof GitHubTransportError) throw new Error(describeFailure(error))
     throw error
   }
-  cache.delete(key(fullName, number))
+  cache.delete(key(target, number))
   return getPullRequestChecks(repoPath, number, { ...options, force: true })
 }

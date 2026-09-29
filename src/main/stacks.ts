@@ -6226,6 +6226,9 @@ export async function getMergeStatus(repoPath: string): Promise<MergeStatus | nu
   const originUrl = await getOriginUrl(root)
   const fullName = canonicalRemoteName(originUrl)
   if (!fullName) return null
+  // A resumed request is read from the host that accepted it, not from whichever
+  // host a hostless transport would default to.
+  const host = await repositoryHost(root)
   const journalled = [...observations.values()].sort(
     (left, right) => left.pullRequest - right.pullRequest,
   )
@@ -6244,7 +6247,7 @@ export async function getMergeStatus(repoPath: string): Promise<MergeStatus | nu
   }
   const reported = new Map<string, AsyncMergeResult>()
   for (const [key, group] of requests) {
-    const result = await readMergeRequest({ fullName, request: group.request })
+    const result = await readMergeRequest({ fullName, request: group.request, host })
     if (result) reported.set(key, result)
   }
   const layers: MergeLayerResult[] = []
@@ -6590,6 +6593,9 @@ async function mergeStack(
         sha: layer.headOid,
         mergeMethod: action.mergeMethod,
         mergeAction: mergeAction,
+        // The request, its polling, and a later resume are one conversation with
+        // the host the pull request was read from.
+        host,
       })
       let outcome = start.result
       if (start.kind === 'conflict') {
@@ -6661,7 +6667,12 @@ async function mergeStack(
       }
       if (outcome.status === 'pending' && outcome.uuid) {
         outcome = await pollAsyncMerge(
-          { fullName: plan.originFullName, number: layer.pullRequest, uuid: outcome.uuid },
+          {
+            fullName: plan.originFullName,
+            number: layer.pullRequest,
+            uuid: outcome.uuid,
+            host,
+          },
           {
             onUpdate: (update) => {
               result.detail = update.message ?? `GitHub reports ${update.status}`

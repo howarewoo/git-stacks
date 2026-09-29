@@ -581,10 +581,17 @@ test('a moved head discards the remembered report instead of showing the previou
 test('an unreadable remote origin is refused before any GitHub read', async () => {
   await withHarness(async (harness) => {
     const head = await setup(harness, () => ({}))
-    git(harness, ['remote', 'set-url', 'origin', 'https://gitlab.com/acme/widgets.git'])
+    // An origin that names no host at all. A host name is a candidate GitHub
+    // host, so the refusal belongs to an origin there is no host to read from.
+    git(harness, ['remote', 'set-url', 'origin', '/srv/git/widgets.git'])
+    const before = (await harness.readState()).requests.length
     await assert.rejects(
       getPullRequestChecks(harness.repo, PR_NUMBER, { headSha: head, base: 'main' }),
-      /github\.com origin remote/,
+    )
+    assert.equal(
+      (await harness.readState()).requests.length,
+      before,
+      'nothing is read from a repository with no host to read it from',
     )
   })
 })

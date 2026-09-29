@@ -13,7 +13,19 @@ import {
   GITHUB_STACKS_API_VERSION,
   GitHubTransportError,
   githubTransport,
+  type GitHubTransport,
 } from './github-transport'
+import { hostTransport, type GitHubHostContext } from './github-host'
+
+/**
+ * The transport a merge request and its result reads travel on. A request is made
+ * against the pull request the review was read from, so the request, its polling,
+ * and a later resume of that request all have to reach the same host; a hostless
+ * global transport would send them to github.com instead.
+ */
+function mergeTransport(host: GitHubHostContext | undefined): GitHubTransport {
+  return host ? hostTransport(host) : githubTransport()
+}
 
 /**
  * GitHub's asynchronous merge API, which is the only documented way to land a pull request
@@ -106,6 +118,7 @@ export async function startAsyncMerge(input: {
   sha: string
   mergeMethod: MergeMethod | null
   mergeAction: MergeAction
+  host?: GitHubHostContext
   signal?: AbortSignal
 }): Promise<AsyncMergeStart> {
   const body: Record<string, unknown> = {
@@ -118,7 +131,7 @@ export async function startAsyncMerge(input: {
     body.merge_method = input.mergeMethod
   }
   try {
-    const { data } = await githubTransport().rest<unknown>({
+    const { data } = await mergeTransport(input.host).rest<unknown>({
       method: 'PUT',
       path: `repos/${input.fullName}/pulls/${input.number}/merge-async`,
       headers: ASYNC_MERGE_HEADERS,
@@ -153,9 +166,10 @@ export async function readAsyncMerge(input: {
   fullName: string
   number: number
   uuid: string
+  host?: GitHubHostContext
   signal?: AbortSignal
 }): Promise<AsyncMergeResult> {
-  const { data } = await githubTransport().rest<unknown>({
+  const { data } = await mergeTransport(input.host).rest<unknown>({
     path: `repos/${input.fullName}/pulls/${input.number}/merge-async/${encodeURIComponent(input.uuid)}`,
     headers: ASYNC_MERGE_HEADERS,
     ...(input.signal ? { signal: input.signal } : {}),
@@ -186,7 +200,7 @@ const defaultSleep = (ms: number): Promise<void> => {
  * still working, and the caller has to say so instead of calling it merged or failed.
  */
 export async function pollAsyncMerge(
-  input: { fullName: string; number: number; uuid: string },
+  input: { fullName: string; number: number; uuid: string; host?: GitHubHostContext },
   options: PollOptions = {},
 ): Promise<AsyncMergeResult> {
   const maxAttempts = options.maxAttempts ?? 12
@@ -364,12 +378,14 @@ export function mergeQueueState(
 export async function readMergeRequest(input: {
   fullName: string
   request: { pullRequest: number; uuid: string }
+  host?: GitHubHostContext
 }): Promise<AsyncMergeResult | null> {
   try {
     return await readAsyncMerge({
       fullName: input.fullName,
       number: input.request.pullRequest,
       uuid: input.request.uuid,
+      ...(input.host ? { host: input.host } : {}),
     })
   } catch {
     // The result is retained for 24 hours and then the endpoint answers 404. A request this

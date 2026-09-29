@@ -24,8 +24,8 @@ import {
 } from '../shared/review'
 import type { DiffHunk, DiffHunkLine, NativeStack } from '../shared/types'
 import { getConfigValue, isRecord, parseRemote, type ParsedRemote } from './git-core'
-import { remoteHostContext } from './github-host'
-import { GitHubTransportError, githubTransport } from './github-transport'
+import { GitHubTransportError, type GitHubTransport } from './github-transport'
+import { hostTransport, remoteHostContext } from './github-host'
 import { getPullRequest } from './github'
 import { listPullRequestStacks } from './native-stacks'
 import { parseHunkBlock } from './hunks'
@@ -52,12 +52,25 @@ function isCancelledRead(error: unknown): boolean {
   return false
 }
 
+/**
+ * The repository's origin, when it is a GitHub host this build can speak to. Which
+ * host that is matters as much as which repository: a review is read, submitted and
+ * re-read on that one host, so the host travels with the remote rather than being
+ * assumed to be the public one.
+ */
 export async function originRemote(repoPath: string, signal?: AbortSignal): Promise<ParsedRemote> {
   const remote = parseRemote(await getConfigValue(repoPath, 'remote.origin.url', signal))
-  if (!remote || remote.host !== 'github.com') {
-    throw new Error('Pull request review requires a github.com origin remote.')
+  if (!remote || !remoteHostContext(remote)) {
+    throw new Error('Pull request review requires a GitHub origin remote.')
   }
   return remote
+}
+
+/** The transport for the host a remote names, for the review reads that remote drives. */
+function reviewTransport(remote: ParsedRemote): GitHubTransport {
+  const host = remoteHostContext(remote)
+  if (!host) throw new Error('Pull request review requires a GitHub origin remote.')
+  return hostTransport(host)
 }
 
 function statusOf(value: unknown): ReviewFile['status'] {
@@ -326,7 +339,7 @@ export async function readReviewIdentity(
   number: number,
   signal?: AbortSignal,
 ): Promise<{ comparison: ReviewComparison; totalCommits: number | null }> {
-  const response = await githubTransport().rest<unknown>({
+  const response = await reviewTransport(remote).rest<unknown>({
     method: 'GET',
     path: `repos/${remote.owner}/${remote.name}/pulls/${number}`,
     signal,
@@ -385,7 +398,7 @@ async function readPinnedPages<T>(
   read: (entries: unknown[]) => T,
 ): Promise<{ comparison: ReviewComparison; totalCommits: number | null; value: T }> {
   const before = await readReviewIdentity(remote, number, signal)
-  const raw = await githubTransport().paginate<unknown>({ method: 'GET', path, signal })
+  const raw = await reviewTransport(remote).paginate<unknown>({ method: 'GET', path, signal })
   const after = await readReviewIdentity(remote, number, signal)
   if (!sameReviewComparison(before.comparison, after.comparison))
     throw new ReviewRevisionMovedError(number)
