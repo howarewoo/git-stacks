@@ -158,22 +158,47 @@ export function removeClosingReference(
     return body
   }
 
-  const spans = extractClosingReferences(body, originFullName)
-    .filter((ref) => ref.issueNumber === issueNumber)
-    .map((ref) => deletionSpan(body, ref.startIndex, ref.endIndex))
-    .sort((a, b) => b.start - a.start)
-
-  // Edits are applied per line so only the clause's own line and the blank lines
-  // it leaves behind are touched. Every other byte of the author's description
-  // — including deliberate runs of blank lines — is preserved.
+  // Edits are grouped per line and applied to that line's own text, so several
+  // clauses for the same issue on one line are all removed and no untouched
+  // bytes are reconstructed. Every other line — including deliberate runs of
+  // blank lines — is preserved exactly.
   const lines = body.split('\n')
+  const lineStarts: number[] = []
+  for (let offset = 0; offset < body.length;) {
+    lineStarts.push(offset)
+    const next = body.indexOf('\n', offset)
+    if (next === -1) break
+    offset = next + 1
+  }
+  const byLine = new Map<number, { start: number; end: number }[]>()
+  for (const ref of extractClosingReferences(body, originFullName)) {
+    if (ref.issueNumber !== issueNumber) continue
+    const span = deletionSpan(body, ref.startIndex, ref.endIndex)
+    let lineIndex = 0
+    while (lineIndex + 1 < lineStarts.length && lineStarts[lineIndex + 1] <= span.start) {
+      lineIndex++
+    }
+    const lineStart = lineStarts[lineIndex]
+    const group = byLine.get(lineIndex) ?? []
+    group.push({ start: span.start - lineStart, end: span.end - lineStart })
+    byLine.set(lineIndex, group)
+  }
+
   const dropped = new Set<number>()
-  for (const span of spans) {
-    const lineStart = body.lastIndexOf('\n', span.start - 1) + 1
-    const lineEndIndex = body.indexOf('\n', span.end)
-    const lineEnd = lineEndIndex === -1 ? body.length : lineEndIndex
-    const lineIndex = body.slice(0, lineStart).split('\n').length - 1
-    const kept = `${body.slice(lineStart, span.start)}${body.slice(span.end, lineEnd)}`
+  for (const [lineIndex, group] of byLine) {
+    const line = lines[lineIndex]
+    const ordered = group.sort((a, b) => a.start - b.start)
+    let kept = ''
+    let cursor = 0
+    for (const span of ordered) {
+      kept += line.slice(cursor, span.start)
+      cursor = span.end
+    }
+    kept += line.slice(cursor)
+    // A clause removed from the start or end of the line takes the blank space
+    // it leaves with it; interior spacing is untouched.
+    if (ordered[0].start === 0) kept = kept.replace(/^[ \t]+/u, '')
+    if (ordered[ordered.length - 1].end === line.length) kept = kept.replace(/[ \t]+$/u, '')
     if (kept.trim()) {
       lines[lineIndex] = kept
     } else {

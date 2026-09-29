@@ -250,6 +250,19 @@ test('removeClosingReference deletes only the parsed clause span', () => {
   // Two separate clauses for the same issue are both removed; other issues stay.
   const twoClauses = 'Closes #12\n\nFixes #12\n\nCloses #30\n'
   assert.equal(removeClosingReference(twoClauses, 12, 'acme/widgets'), 'Closes #30\n')
+
+  // Two clauses for the same issue on ONE line are both removed, and the text
+  // around them survives exactly.
+  const sameLine = 'Notes first.\nCloses #12; fixes #12\nTrailing text.\n'
+  assert.equal(
+    removeClosingReference(sameLine, 12, 'acme/widgets'),
+    'Notes first.\nTrailing text.\n',
+  )
+  // A line that keeps other issues keeps them.
+  assert.equal(
+    removeClosingReference('Closes #12, closes #12, closes #30\n', 12, 'acme/widgets'),
+    'closes #30\n',
+  )
 })
 
 // ---------------------------------------------------------------------------
