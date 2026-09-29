@@ -28,7 +28,7 @@ import { previewReconciliationRepair } from './reconciliation'
 import { getPullRequestIssueLinks, previewIssueLink, searchGitHubIssues } from './issue-links'
 import { readReviewCommits, readReviewFiles, readReviewHeadline } from './review'
 import { readViewedRecord, writeViewedRecord } from './review-viewed'
-import type { ReviewViewedRecord } from '../shared/review'
+import type { ReviewComparison, ReviewViewedRecord } from '../shared/review'
 import type {
   GitAction,
   MergeProgress,
@@ -255,16 +255,41 @@ function requireViewedRecord(value: unknown): ReviewViewedRecord {
     !Array.isArray(paths) ||
     paths.length > 5000 ||
     !paths.every((entry) => typeof entry === 'string' && entry.length > 0 && entry.length < 4096) ||
-    (record.headOid !== null && typeof record.headOid !== 'string') ||
+    !isComparisonLike(record.comparison) ||
     typeof record.updatedAt !== 'string'
   ) {
     throw new Error('Invalid viewed-file record.')
   }
   return {
     number: record.number,
-    headOid: typeof record.headOid === 'string' ? record.headOid : null,
+    comparison: readComparison(record.comparison),
     paths: [...new Set(paths as string[])],
     updatedAt: record.updatedAt,
+  }
+}
+
+/**
+ * A comparison crossing the bridge is three optional object ids and a branch
+ * name. Anything that is not that shape is refused outright rather than coerced,
+ * so a record cannot reach the store already missing half of what it claims to
+ * be bound to.
+ */
+function isComparisonLike(value: unknown): boolean {
+  if (typeof value !== 'object' || value === null) return false
+  const comparison = value as Record<string, unknown>
+  return (
+    (comparison.headOid === null || typeof comparison.headOid === 'string') &&
+    (comparison.baseOid === null || typeof comparison.baseOid === 'string') &&
+    (comparison.baseRef === null || typeof comparison.baseRef === 'string')
+  )
+}
+
+function readComparison(value: unknown): ReviewComparison {
+  const comparison = value as Record<string, unknown>
+  return {
+    headOid: typeof comparison.headOid === 'string' ? comparison.headOid : null,
+    baseOid: typeof comparison.baseOid === 'string' ? comparison.baseOid : null,
+    baseRef: typeof comparison.baseRef === 'string' ? comparison.baseRef : null,
   }
 }
 

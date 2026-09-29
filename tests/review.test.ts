@@ -31,6 +31,7 @@ import {
   isWhitespaceOnlyChange,
   looksGenerated,
   reviewChangeBlocks,
+  reviewComparisonDrift,
   reviewDiffStateLabel,
   reviewFileRows,
   reviewSplitRows,
@@ -45,7 +46,7 @@ import {
   type ReviewLine,
 } from '../src/shared/review'
 import type { PullRequestStackMember } from '../src/shared/types'
-import type { ReviewFileSet, ReviewLineRef } from '../src/shared/review'
+import type { ReviewComparison, ReviewFileSet, ReviewLineRef } from '../src/shared/review'
 
 /** The shape GitHub's "list pull request files" endpoint returns for one file. */
 function apiFile(overrides: Record<string, unknown> = {}): Record<string, unknown> {
@@ -116,10 +117,15 @@ function textHunk(entry: ReviewFile, index: number): ReviewHunk {
   return hunk
 }
 
+/** A comparison with three distinct objects, so a change to any one of them is visible. */
+function comparison(overrides: Partial<ReviewComparison> = {}): ReviewComparison {
+  return { headOid: 'a'.repeat(40), baseOid: 'b'.repeat(40), baseRef: 'main', ...overrides }
+}
+
 function fileSet(entry: ReviewFile): ReviewFileSet {
   return {
     number: 7,
-    headOid: 'a'.repeat(40),
+    comparison: comparison(),
     files: [entry],
     additions: entry.additions,
     deletions: entry.deletions,
@@ -181,7 +187,7 @@ test('a reference into a file the pull request no longer touches says so', () =>
   const resolution = resolveReviewAnchor(
     {
       number: 7,
-      headOid: null,
+      comparison: comparison({ headOid: null }),
       files: [file({ path: 'other.ts' })],
       additions: 0,
       deletions: 0,
@@ -407,30 +413,81 @@ test('the file summary counts binary and unreadable files apart from text', () =
   })
 })
 
-test('a viewed mark belongs to one head and is dropped when the head moves', () => {
-  const headA = 'a'.repeat(40)
-  const headB = 'b'.repeat(40)
-  let record = withViewedFile(null, 7, headA, 'src/a.ts', '2026-01-01T00:00:00.000Z')
-  record = withViewedFile(record, 7, headA, 'src/b.ts', '2026-01-01T00:00:01.000Z')
+test('a viewed mark belongs to one comparison and is dropped when the head moves', () => {
+  const at = comparison()
+  const afterPush = comparison({ headOid: 'c'.repeat(40) })
+  let record = withViewedFile(null, 7, at, 'src/a.ts', '2026-01-01T00:00:00.000Z')
+  record = withViewedFile(record, 7, at, 'src/b.ts', '2026-01-01T00:00:01.000Z')
   assert.deepEqual(record.paths, ['src/a.ts', 'src/b.ts'])
-  assert.equal(record.headOid, headA)
+  assert.deepEqual(record.comparison, at)
 
   // New commits change the patch, so a mark made against the old head is no
   // longer a mark on the same content.
-  const moved = withViewedFile(record, 7, headB, 'src/c.ts', '2026-01-02T00:00:00.000Z')
+  const moved = withViewedFile(record, 7, afterPush, 'src/c.ts', '2026-01-02T00:00:00.000Z')
   assert.deepEqual(moved.paths, ['src/c.ts'])
-  assert.equal(moved.headOid, headB)
-  assert.deepEqual(viewedPaths(moved, 7, headB), ['src/c.ts'])
-  // A record read against a different head or a different pull request is not
-  // evidence about this one.
-  assert.deepEqual(viewedPaths(moved, 7, headA), [])
-  assert.deepEqual(viewedPaths(moved, 8, headB), [])
+  assert.deepEqual(moved.comparison, afterPush)
+  assert.deepEqual(viewedPaths(moved, 7, afterPush), ['src/c.ts'])
+  // A record read against a different comparison or a different pull request is
+  // not evidence about this one.
+  assert.deepEqual(viewedPaths(moved, 7, at), [])
+  assert.deepEqual(viewedPaths(moved, 8, afterPush), [])
+})
+
+test('a viewed mark is dropped when the base branch advances under a fixed head', () => {
+  // The head never moves, so a head-only check calls this stable. It is not: a
+  // push to the base branch moves the merge base, and the file set is now a
+  // different set of changes. A mark carried across would claim these files were
+  // reviewed when nobody has seen this diff.
+  const at = comparison()
+  const afterBasePush = comparison({ baseOid: 'd'.repeat(40) })
+  const record = withViewedFile(null, 7, at, 'src/a.ts', '2026-01-01T00:00:00.000Z')
+  assert.deepEqual(record.paths, ['src/a.ts'])
+
+  assert.deepEqual(viewedPaths(record, 7, afterBasePush), [])
+  // And the next mark starts a fresh record rather than appending to the old one.
+  const reopened = withViewedFile(record, 7, afterBasePush, 'src/b.ts', '2026-01-02T00:00:00.000Z')
+  assert.deepEqual(reopened.paths, ['src/b.ts'])
+})
+
+test('a viewed mark is dropped when the pull request is retargeted to another base', () => {
+  // Retargeting can leave both object ids untouched, so this is only detectable
+  // by the branch name. It is still a different comparison, and it is a routine
+  // action a reviewer will meet, so the drift is reported as such rather than as
+  // a general staleness.
+  const at = comparison({ baseRef: 'main' })
+  const retargeted = comparison({ baseRef: 'release' })
+  const record = withViewedFile(null, 7, at, 'src/a.ts', '2026-01-01T00:00:00.000Z')
+
+  assert.deepEqual(viewedPaths(record, 7, retargeted), [])
+  assert.equal(reviewComparisonDrift(retargeted, at), 'base-name')
+  // A rename of the same branch is the same case, and the same cheap drop.
+  assert.equal(reviewComparisonDrift(at, comparison({ baseRef: 'trunk' })), 'base-name')
+  // Nothing moved: the marks are the marks.
+  assert.equal(reviewComparisonDrift(at, comparison()), 'none')
+  assert.deepEqual(viewedPaths(record, 7, at), ['src/a.ts'])
+})
+
+test('drift says which part of the comparison moved, and an unreadable one is its own case', () => {
+  const at = comparison()
+  assert.equal(reviewComparisonDrift(at, comparison({ headOid: 'e'.repeat(40) })), 'head')
+  assert.equal(reviewComparisonDrift(at, comparison({ baseOid: 'f'.repeat(40) })), 'base')
+  assert.equal(reviewComparisonDrift(at, comparison({ baseRef: 'release' })), 'base-name')
+  // A comparison that cannot name its objects is not a comparison, so it is
+  // reported as unreadable rather than being compared field by field.
+  assert.equal(reviewComparisonDrift(at, comparison({ headOid: null })), 'unreadable')
+  assert.equal(reviewComparisonDrift(at, comparison({ baseOid: null })), 'unreadable')
+  // The head is checked first, because a force-push is the more consequential
+  // of the two movements.
+  assert.equal(
+    reviewComparisonDrift(at, comparison({ headOid: 'e'.repeat(40), baseOid: 'f'.repeat(40) })),
+    'head',
+  )
 })
 
 test('re-marking a file replaces its timestamp instead of duplicating it', () => {
-  const head = 'a'.repeat(40)
-  let record = withViewedFile(null, 7, head, 'src/a.ts', '2026-01-01T00:00:00.000Z')
-  record = withViewedFile(record, 7, head, 'src/a.ts', '2026-01-02T00:00:00.000Z')
+  const at = comparison()
+  let record = withViewedFile(null, 7, at, 'src/a.ts', '2026-01-01T00:00:00.000Z')
+  record = withViewedFile(record, 7, at, 'src/a.ts', '2026-01-02T00:00:00.000Z')
   assert.deepEqual(record.paths, ['src/a.ts'])
   assert.equal(record.updatedAt, '2026-01-02T00:00:00.000Z')
 })
@@ -459,7 +516,7 @@ test('a marker line carries no number and no side', () => {
  * that pins the revision and the read that confirms it.
  */
 function scriptedTransport(
-  identities: Array<{ head: string | null; base: string | null }>,
+  identities: Array<{ head: string | null; base: string | null; baseRef?: string }>,
   pages: unknown[],
 ): { transport: GitHubTransport; calls: string[] } {
   const calls: string[] = []
@@ -485,7 +542,10 @@ function scriptedTransport(
         if (path.includes('/files') || path.includes('/commits')) return reply(pages as T)
         const value = identities[Math.min(identityRead, identities.length - 1)]
         identityRead += 1
-        return reply({ head: { sha: value.head }, base: { sha: value.base } } as T)
+        return reply({
+          head: { sha: value.head },
+          base: { sha: value.base, ref: value.baseRef ?? 'main' },
+        } as T)
       },
       async paginate<T>(): Promise<T[]> {
         return pages as T[]
@@ -526,7 +586,14 @@ test('a file set read while nothing moved is returned, tagged with the head it c
 
   const set = await readReviewFiles(workspace.repo, 7)
 
-  assert.equal(set.headOid, 'a'.repeat(40))
+  // The published comparison is the one read after the pages were confirmed
+  // stable, and it carries all three parts, so a later read that publishes a
+  // thread set can be compared against this one field by field.
+  assert.deepEqual(set.comparison, {
+    headOid: 'a'.repeat(40),
+    baseOid: 'b'.repeat(40),
+    baseRef: 'main',
+  })
   assert.equal(set.files.length, 1)
   assert.equal(set.files[0].path, 'src/app.ts')
   // The comparison is pinned by reading the identity before the pages and again
@@ -726,4 +793,97 @@ test('a comment resolves to the same side when both sides carry identical text',
   assert.equal(resolution.match, 'exact')
   assert.equal(resolution.ref?.side, 'head')
   assert.equal(resolution.ref?.line, hunk.lines[headIndex].newLine)
+})
+
+test('a file of pure additions shows every added line in split, not just the first', () => {
+  // A newly added file is one pure run with nothing to pair against. It has to
+  // arrive as one block per line, or the split layout shows one line of a hundred
+  // with nothing to page to and no warning that the rest is missing.
+  const total = 100
+  const raw = Array.from({ length: total }, (_, index) => [`+added line ${index}`, null, index + 1])
+  const rows = reviewSplitRows(
+    hunks(`@@ -0,0 +1,${total} @@\n${raw.map(([text]) => text).join('\n')}`, 'src/new.ts'),
+    {
+      hideWhitespace: false,
+    },
+  )
+
+  const lines = rows.filter((row) => row.kind === 'split')
+  assert.equal(rows.filter((row) => row.kind === 'hunk').length, 1)
+  assert.equal(lines.length, total, 'every added line needs its own split row')
+  assert.deepEqual(
+    lines.map((row) => (row.kind === 'split' ? row.right?.number : null)),
+    Array.from({ length: total }, (_, index) => index + 1),
+  )
+  assert.ok(
+    lines.every((row) => row.kind === 'split' && row.left === null && row.right !== null),
+    'an added line belongs only on the head side',
+  )
+})
+
+test('a file of pure deletions shows every removed line in split, on the base side', () => {
+  const total = 100
+  const raw = Array.from({ length: total }, (_, index) => [
+    `-removed line ${index}`,
+    index + 1,
+    null,
+  ])
+  const rows = reviewSplitRows(
+    hunks(`@@ -1,${total} +0,0 @@\n${raw.map(([text]) => text).join('\n')}`, 'src/gone.ts'),
+    {
+      hideWhitespace: false,
+    },
+  )
+
+  const lines = rows.filter((row) => row.kind === 'split')
+  assert.equal(lines.length, total, 'every removed line needs its own split row')
+  assert.deepEqual(
+    lines.map((row) => (row.kind === 'split' ? row.left?.number : null)),
+    Array.from({ length: total }, (_, index) => index + 1),
+  )
+  assert.ok(
+    lines.every((row) => row.kind === 'split' && row.right === null),
+    'a removed line belongs only on the base side',
+  )
+})
+
+test('each hunk header introduces its own lines, in order', () => {
+  // Two hunks in one file. A header prepended to the whole file would render as
+  // header B, header A, lines A, lines B: the second hunk would have nothing
+  // introducing it, and its range would sit above the first hunk's lines.
+  const twoHunks: ReviewHunk[] = [
+    ...hunks('@@ -1,3 +1,3 @@\n alpha\n-beta\n+beta\n gamma', 'src/multi.ts'),
+    ...hunks('@@ -40,3 +40,3 @@\n delta\n-epsilon\n+epsilon\n zeta', 'src/multi.ts'),
+  ]
+  assert.equal(twoHunks.length, 2)
+
+  // Unified shows the removal and the addition as two rows; split pairs them, so
+  // each hunk is one header followed by three rows rather than four.
+  for (const [name, rows, width] of [
+    ['unified', reviewUnifiedRows(twoHunks, { hideWhitespace: false }), 4],
+    ['split', reviewSplitRows(twoHunks, { hideWhitespace: false }), 3],
+  ] as const) {
+    const shape = rows.map((row) => (row.kind === 'hunk' ? `hunk:${row.header}` : 'line'))
+    assert.deepEqual(
+      shape,
+      [
+        'hunk:@@ -1,3 +1,3 @@',
+        ...Array.from({ length: width }, () => 'line'),
+        'hunk:@@ -40,3 +40,3 @@',
+        ...Array.from({ length: width }, () => 'line'),
+      ],
+      `${name}: each header must sit directly in front of its own hunk`,
+    )
+    // Every line after a header belongs to that hunk, in both layouts.
+    for (const [index, row] of rows.entries()) {
+      if (row.kind !== 'hunk') continue
+      const following = rows.slice(index + 1).findIndex((next) => next.kind === 'hunk')
+      const owned = rows.slice(index + 1, following === -1 ? rows.length : index + 1 + following)
+      assert.ok(owned.length > 0, `${name}: hunk header at ${index} introduces no lines`)
+      assert.ok(
+        owned.every((line) => line.hunkId === row.hunkId),
+        `${name}: a line after the header belongs to another hunk`,
+      )
+    }
+  }
 })

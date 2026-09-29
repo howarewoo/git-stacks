@@ -560,9 +560,12 @@ view never registers a competing key listener. Layer navigation reads the native
 stack only: choosing an adjacent layer changes what is being read and never
 dispatches a checkout.
 
-Opening a file records it as viewed locally, bound to the head commit it was read
-at. A force-push changes that content, so the marks are dropped rather than
-carried onto a diff nobody looked at. Nothing is written to GitHub.
+Opening a file records it as viewed locally, bound to the whole comparison it was
+read at: the head commit, the base commit, and the base branch name. A force-push
+or a push to the base branch changes the diff, and a retarget changes what the
+files are relative to even when both commits are untouched, so the marks are
+dropped rather than carried onto a diff nobody looked at. Nothing is written to
+GitHub.
 
 ### Line identity contract
 

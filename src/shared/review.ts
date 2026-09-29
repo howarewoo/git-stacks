@@ -97,13 +97,60 @@ export interface ReviewFile {
 /** How one file's changes are laid out. */
 export type ReviewDiffMode = 'unified' | 'split'
 
+/**
+ * The comparison a pull request's files are read against.
+ *
+ * The head alone does not identify a diff. GitHub computes the file list and the
+ * patch between the merge base of the base and head and the head, so a push to
+ * the base branch changes the diff with the head object untouched, and
+ * retargeting the pull request to another base changes what the files are
+ * measured against. A line number is an address only within one of these, so
+ * every position a review remembers — a viewed mark, a draft, a comment — is
+ * bound to the whole comparison and not to any one object in it.
+ */
+export interface ReviewComparison {
+  /** The head commit. A line number is only an address at this commit. */
+  headOid: string | null
+  /** The tip of the base branch, which is half of what the diff is taken between. */
+  baseOid: string | null
+  /** The base branch's name. A retarget changes it even when both objects are the same. */
+  baseRef: string | null
+}
+
+/**
+ * Which part of a comparison moved.
+ *
+ * A caller says what happened rather than that something did: a base branch
+ * rename leaves the diff provably identical, and reporting that the same way as
+ * a force-push would train a reviewer to ignore the message that matters.
+ */
+export type ReviewComparisonDrift = 'none' | 'head' | 'base' | 'base-name' | 'unreadable'
+
+export function reviewComparisonDrift(
+  before: ReviewComparison,
+  after: ReviewComparison,
+): ReviewComparisonDrift {
+  if (before.headOid === null || after.headOid === null) return 'unreadable'
+  if (before.baseOid === null || after.baseOid === null) return 'unreadable'
+  if (before.headOid !== after.headOid) return 'head'
+  if (before.baseOid !== after.baseOid) return 'base'
+  if (before.baseRef !== after.baseRef) return 'base-name'
+  return 'none'
+}
+
+/** Two comparisons are the same only when every object and every name agrees. */
+export function sameReviewComparison(a: ReviewComparison, b: ReviewComparison): boolean {
+  return reviewComparisonDrift(a, b) === 'none'
+}
+
 export interface ReviewFileSet {
   number: number
   /**
-   * The head commit this file set was read at. A line number is only an address
-   * at this commit, so every position a review remembers is bound to it.
+   * The comparison this file set was read at, confirmed stable across the
+   * paginated read. It is the comparison the displayed diff actually came from,
+   * which is not always the one the headline reported.
    */
-  headOid: string | null
+  comparison: ReviewComparison
   files: ReviewFile[]
   additions: number
   deletions: number
@@ -172,12 +219,14 @@ export interface ReviewHeadline {
 
 /**
  * Which files of one pull request a person has opened, recorded locally and bound
- * to the head it was recorded at. A force-pushed head makes the record stale
- * rather than wrong: the marks are dropped instead of claimed for new content.
+ * to the comparison it was recorded at. A moved comparison makes the record stale
+ * rather than wrong: the marks are dropped instead of claimed for a diff nobody
+ * looked at. Binding to the head alone would let them survive a base retarget,
+ * where the files are now entirely different changes.
  */
 export interface ReviewViewedRecord {
   number: number
-  headOid: string | null
+  comparison: ReviewComparison
   paths: string[]
   updatedAt: string
 }
@@ -206,13 +255,16 @@ export function reviewChangeBlocks(
     if (run.length === 0) return
     const removes = run.filter((index) => lines[index].kind === 'remove')
     const adds = run.filter((index) => lines[index].kind === 'add')
-    // A run of only removals or only additions has no counterpart to pair with,
-    // so it stays a single block rather than pretending one side is missing text.
-    blocks.push(
-      removes.length === 0 || adds.length === 0
-        ? { kind: 'single', index: run[0] }
-        : { kind: 'change', removes, adds },
-    )
+    if (removes.length > 0 && adds.length > 0) {
+      blocks.push({ kind: 'change', removes, adds })
+    } else {
+      // A run of only removals or only additions has no counterpart to pair
+      // with, so each line keeps its own block rather than the run pretending
+      // one side is missing text. One block for the whole run would drop every
+      // line after the first: a newly added file is a single pure run, and the
+      // split layout iterates blocks, so it would show one line of a hundred.
+      for (const index of run) blocks.push({ kind: 'single', index })
+    }
     run = []
   }
   for (let index = 0; index < lines.length; index += 1) {
@@ -298,15 +350,21 @@ export function reviewUnifiedRows(
   const rows: ReviewUnifiedRow[] = []
   for (const hunk of hunks) {
     let hidden = 0
+    // Collected per hunk so the header can be placed directly in front of the
+    // lines it introduces. Prepending to the whole file instead would put the
+    // last hunk's header above the first hunk's lines, and the second hunk would
+    // have no separator introducing it at all.
+    const hunkRows: ReviewUnifiedRow[] = []
     for (const line of hunk.lines) {
       if (options.hideWhitespace && line.whitespaceOnly) {
         hidden += 1
         continue
       }
-      rows.push({ kind: 'line', hunkId: hunk.id, line, number: sideNumber(line) })
+      hunkRows.push({ kind: 'line', hunkId: hunk.id, line, number: sideNumber(line) })
     }
     if (hidden > 0 || hunk.lines.length > 0) {
-      rows.unshift({ kind: 'hunk', hunkId: hunk.id, header: hunk.header, hidden })
+      rows.push({ kind: 'hunk', hunkId: hunk.id, header: hunk.header, hidden })
+      for (const row of hunkRows) rows.push(row)
     }
   }
   return rows
@@ -330,6 +388,7 @@ export function reviewSplitRows(
   const rows: ReviewSplitRow[] = []
   for (const hunk of hunks) {
     let hidden = 0
+    const hunkRows: ReviewSplitRow[] = []
     for (const block of reviewChangeBlocks(hunk.lines)) {
       if (block.kind === 'single') {
         const line = hunk.lines[block.index]
@@ -338,7 +397,7 @@ export function reviewSplitRows(
             hidden += 1
             continue
           }
-          rows.push({
+          hunkRows.push({
             kind: 'split',
             hunkId: hunk.id,
             left: { line, number: line.oldLine ?? 0 },
@@ -349,14 +408,14 @@ export function reviewSplitRows(
             hidden += 1
             continue
           }
-          rows.push({
+          hunkRows.push({
             kind: 'split',
             hunkId: hunk.id,
             left: null,
             right: { line, number: line.newLine ?? 0 },
           })
         } else {
-          rows.push({ kind: 'split', hunkId: hunk.id, left: null, right: null })
+          hunkRows.push({ kind: 'split', hunkId: hunk.id, left: null, right: null })
         }
         continue
       }
@@ -370,7 +429,7 @@ export function reviewSplitRows(
           hidden += 1
           continue
         }
-        rows.push({
+        hunkRows.push({
           kind: 'split',
           hunkId: hunk.id,
           left: remove ? { line: remove, number: remove.oldLine ?? 0 } : null,
@@ -379,7 +438,8 @@ export function reviewSplitRows(
       }
     }
     if (hunk.lines.length > 0) {
-      rows.unshift({ kind: 'hunk', hunkId: hunk.id, header: hunk.header, hidden })
+      rows.push({ kind: 'hunk', hunkId: hunk.id, header: hunk.header, hidden })
+      for (const row of hunkRows) rows.push(row)
     }
   }
   return rows
@@ -640,35 +700,41 @@ export function adjacentStackLayer(
 }
 
 /**
- * Records a file as viewed. The record is bound to the head it was made at, so a
- * force-push that changes content drops the marks rather than carrying them onto
- * a diff nobody looked at.
+ * Records a file as viewed. The record is bound to the comparison it was made at,
+ * so a force-push or a base retarget drops the marks rather than carrying them
+ * onto a diff nobody looked at.
  */
 export function withViewedFile(
   record: ReviewViewedRecord | null,
   number: number,
-  headOid: string | null,
+  comparison: ReviewComparison,
   path: string,
   now: string,
 ): ReviewViewedRecord {
   const current =
-    record && record.number === number && record.headOid === headOid
+    record && record.number === number && sameReviewComparison(record.comparison, comparison)
       ? record
-      : { number, headOid, paths: [], updatedAt: now }
+      : { number, comparison, paths: [], updatedAt: now }
   return {
     number,
-    headOid,
+    comparison,
     paths: current.paths.includes(path) ? current.paths : [...current.paths, path],
     updatedAt: now,
   }
 }
 
+/**
+ * The marks recorded for one pull request at one comparison, or none at any
+ * other. A `null` comparison means the file set has not been read yet, so there
+ * is no revision the marks could be about and none are reported.
+ */
 export function viewedPaths(
   record: ReviewViewedRecord | null,
   number: number,
-  headOid: string | null,
+  comparison: ReviewComparison | null,
 ): string[] {
-  if (!record || record.number !== number || record.headOid !== headOid) return []
+  if (!record || record.number !== number || comparison === null) return []
+  if (!sameReviewComparison(record.comparison, comparison)) return []
   return record.paths
 }
 

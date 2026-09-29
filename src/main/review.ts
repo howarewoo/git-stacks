@@ -7,6 +7,7 @@ import type {
   ReviewFileSet,
   ReviewHeadline,
   ReviewHunk,
+  ReviewComparison,
   ReviewLine,
   ReviewLineRef,
   ReviewSide,
@@ -18,6 +19,7 @@ import {
   looksGenerated,
   reviewChangeBlocks,
   reviewLineContent,
+  sameReviewComparison,
 } from '../shared/review'
 import type { DiffHunk, DiffHunkLine, NativeStack } from '../shared/types'
 import { getConfigValue, isRecord, parseRemote, type ParsedRemote } from './git-core'
@@ -305,24 +307,21 @@ export async function readReviewHeadline(
 }
 
 /**
- * The identity of the comparison a pull request's files are read against.
+ * The comparison a pull request's files are read against.
  *
  * The head alone is not enough. GitHub computes the file list and the diff
  * between the merge base of the base and head and the head, so a push to the
  * *base* branch moves the diff just as a force-push to the head does, with the
- * head object unchanged. Both objects are therefore part of the identity, and a
- * set read while either moved describes a comparison that never existed.
+ * head object unchanged, and a retarget changes what the files are measured
+ * against without either object moving. All three are therefore part of the
+ * identity, and a set read while any of them moved describes a comparison that
+ * never existed.
  */
-export interface ReviewComparisonIdentity {
-  headSha: string | null
-  baseSha: string | null
-}
-
-async function readReviewIdentity(
+async function readReviewComparison(
   remote: ParsedRemote,
   number: number,
   signal?: AbortSignal,
-): Promise<ReviewComparisonIdentity> {
+): Promise<ReviewComparison> {
   const response = await githubTransport().rest<unknown>({
     method: 'GET',
     path: `repos/${remote.owner}/${remote.name}/pulls/${number}`,
@@ -332,8 +331,9 @@ async function readReviewIdentity(
   const head = data && isRecord(data.head) ? data.head : null
   const base = data && isRecord(data.base) ? data.base : null
   return {
-    headSha: head && typeof head.sha === 'string' ? head.sha : null,
-    baseSha: base && typeof base.sha === 'string' ? base.sha : null,
+    headOid: head && typeof head.sha === 'string' ? head.sha : null,
+    baseOid: base && typeof base.sha === 'string' ? base.sha : null,
+    baseRef: base && typeof base.ref === 'string' ? base.ref : null,
   }
 }
 
@@ -357,11 +357,15 @@ export class ReviewRevisionMovedError extends Error {
 /**
  * Runs a paginated read pinned to one comparison.
  *
- * The identity is read before the pages and again after them. It is compared on
- * both objects, so a force-push to the head and a push to the base branch both
- * fail closed. A read that cannot learn the identity (GitHub omitted the object,
- * or the transport could not reach it) is not treated as stable: a revision that
- * cannot be pinned must not be presented as though it were.
+ * The comparison is read before the pages and again after them, so a force-push
+ * to the head, a push to the base branch, and a retarget all fail closed. A read
+ * that cannot learn the comparison (GitHub omitted an object, or the transport
+ * could not reach it) is not treated as stable: a revision that cannot be pinned
+ * must not be presented as though it were.
+ *
+ * The comparison returned is the one read *after* the pages were confirmed
+ * stable, so a caller that records against it records against the comparison its
+ * data actually came from rather than the one it hoped for.
  */
 async function readPinnedPages<T>(
   remote: ParsedRemote,
@@ -369,15 +373,12 @@ async function readPinnedPages<T>(
   path: string,
   signal: AbortSignal | undefined,
   read: (entries: unknown[]) => T,
-): Promise<{ identity: ReviewComparisonIdentity; value: T }> {
-  const before = await readReviewIdentity(remote, number, signal)
+): Promise<{ comparison: ReviewComparison; value: T }> {
+  const before = await readReviewComparison(remote, number, signal)
   const raw = await githubTransport().paginate<unknown>({ method: 'GET', path, signal })
-  const after = await readReviewIdentity(remote, number, signal)
-  if (before.headSha === null || after.headSha === null || before.headSha !== after.headSha) {
-    throw new ReviewRevisionMovedError(number)
-  }
-  if (before.baseSha !== after.baseSha) throw new ReviewRevisionMovedError(number)
-  return { identity: after, value: read(raw) }
+  const after = await readReviewComparison(remote, number, signal)
+  if (!sameReviewComparison(before, after)) throw new ReviewRevisionMovedError(number)
+  return { comparison: after, value: read(raw) }
 }
 
 /**
@@ -390,7 +391,7 @@ export async function readReviewFiles(
   signal?: AbortSignal,
 ): Promise<ReviewFileSet> {
   const remote = await originRemote(repoPath, signal)
-  const { identity, value: files } = await readPinnedPages<ReviewFile[]>(
+  const { comparison, value: files } = await readPinnedPages<ReviewFile[]>(
     remote,
     number,
     `repos/${remote.owner}/${remote.name}/pulls/${number}/files?per_page=${REVIEW_PAGE_SIZE}`,
@@ -406,7 +407,7 @@ export async function readReviewFiles(
   )
   return {
     number,
-    headOid: identity.headSha,
+    comparison,
     files,
     additions: files.reduce((total, file) => total + file.additions, 0),
     deletions: files.reduce((total, file) => total + file.deletions, 0),

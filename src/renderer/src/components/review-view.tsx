@@ -14,6 +14,7 @@ import {
 } from 'lucide-react'
 import type {
   ReviewCommit,
+  ReviewComparison,
   ReviewDiffMode,
   ReviewFileSet,
   ReviewHeadline,
@@ -200,11 +201,13 @@ export function ReviewView({
   const markViewed = React.useCallback(
     (path: string) => {
       if (!headline || !files) return
-      const headOid = files.headOid
+      // Bound to the comparison the displayed files were read at, not to the
+      // head alone: a base retarget changes what every file means, and a mark
+      // carried across it would claim a review of changes nobody looked at.
       const next = withViewedFile(
         viewed,
         headline.pullRequest.number,
-        headOid,
+        files.comparison,
         path,
         new Date().toISOString(),
       )
@@ -267,7 +270,7 @@ export function ReviewView({
       visibleReviewFileRows(
         reviewFileRows(searched),
         search.trim() === '' ? collapsed : new Set<string>(),
-        new Set(viewedPaths(viewed, headline?.pullRequest.number ?? 0, files?.headOid ?? null)),
+        new Set(viewedPaths(viewed, headline?.pullRequest.number ?? 0, files?.comparison ?? null)),
       ),
     [collapsed, files, headline, searched, viewed],
   )
@@ -387,7 +390,7 @@ export function ReviewView({
 
       {headline ? (
         <>
-          <ReviewHeadlineBlock headline={headline} filesHeadOid={files?.headOid ?? null} />
+          <ReviewHeadlineBlock headline={headline} filesComparison={files?.comparison ?? null} />
 
           <ReviewRail
             rail={headline.rail}
@@ -556,17 +559,17 @@ export function ReviewView({
 
 function ReviewHeadlineBlock({
   headline,
-  filesHeadOid,
+  filesComparison,
 }: {
   headline: ReviewHeadline
   /**
-   * The head the displayed files were actually read at. The headline is read
-   * first, so a force-push between the two reads leaves the two claims
-   * disagreeing. The file set is pinned to its own head, so the headline's oid is
-   * the one that is out of date and it is labelled as such rather than being
-   * shown as the revision on screen.
+   * The comparison the displayed files were actually read at. The headline is
+   * read first, so a force-push or a base retarget between the two reads leaves
+   * the two claims disagreeing. The file set is pinned to its own comparison, so
+   * the headline is the out-of-date one and is labelled as such rather than shown
+   * as the revision on screen.
    */
-  filesHeadOid: string | null
+  filesComparison: ReviewComparison | null
 }) {
   const pr = headline.pullRequest
   return (
@@ -594,7 +597,9 @@ function ReviewHeadlineBlock({
         {pr.headOid ? (
           <span className="review-headline-oid">
             head {pr.headOid.slice(0, 7)}
-            {filesHeadOid && filesHeadOid !== pr.headOid ? ' as of the headline' : null}
+            {filesComparison && filesComparison.headOid !== pr.headOid
+              ? ' as of the headline'
+              : null}
           </span>
         ) : null}
       </p>

@@ -27,9 +27,25 @@ function parseRecord(value: unknown): ReviewViewedRecord | null {
   if (!isRecord(value) || typeof value.number !== 'number' || !Array.isArray(value.paths)) {
     return null
   }
+  // A record from the shape that bound to a head alone is dropped rather than
+  // read as an empty record: it cannot be shown to be about the comparison now
+  // on screen, and keeping it would reintroduce the marks a retarget must clear.
+  if (!isRecord(value.comparison)) return null
+  const comparison = value.comparison
+  if (
+    (comparison.headOid !== null && typeof comparison.headOid !== 'string') ||
+    (comparison.baseOid !== null && typeof comparison.baseOid !== 'string') ||
+    (comparison.baseRef !== null && typeof comparison.baseRef !== 'string')
+  ) {
+    return null
+  }
   return {
     number: value.number,
-    headOid: typeof value.headOid === 'string' ? value.headOid : null,
+    comparison: {
+      headOid: typeof comparison.headOid === 'string' ? comparison.headOid : null,
+      baseOid: typeof comparison.baseOid === 'string' ? comparison.baseOid : null,
+      baseRef: typeof comparison.baseRef === 'string' ? comparison.baseRef : null,
+    },
     paths: value.paths.filter((path): path is string => typeof path === 'string'),
     updatedAt: typeof value.updatedAt === 'string' ? value.updatedAt : '',
   }
