@@ -582,6 +582,7 @@ function checksReport(
     rateLimit: { remaining: 4871, reset: UPDATED },
     nextAttemptAt: null,
     permissions: { actionsEnabled: true, canRerun: true, reason: '' },
+    truncated: false,
     ...overrides,
   }
 }
