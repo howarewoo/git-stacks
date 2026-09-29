@@ -95,14 +95,23 @@ function settingsFields(settings: AppSettings): SafeField[] {
  * travels with it so a reader can tell a measurement from something the app
  * could not establish, and `locational` marks the values that name a location.
  */
-function reportFields(report: DiagnosticReport): SafeField[] {
-  return report.entries.map((entry) => ({
-    name: `${entry.source}/${entry.label}`,
-    value: entry.detail
+function reportFields(report: DiagnosticReport, includeLocalPaths: boolean): SafeField[] {
+  return report.entries.map((entry) => {
+    let value = entry.detail
       ? `${entry.value} — ${entry.detail} [${entry.status}]`
-      : `${entry.value} [${entry.status}]`,
-    locational: entry.locational === true,
-  }))
+      : `${entry.value} [${entry.status}]`
+    if (entry.locational && !includeLocalPaths) {
+      value = '[withheld: include local paths in Settings to include this]'
+    } else if (!includeLocalPaths) {
+      value = sanitizePaths(value)
+    }
+    value = sanitizeSecrets(value)
+    return {
+      name: `${entry.source}/${entry.label}`,
+      value,
+      locational: entry.locational === true,
+    }
+  })
 }
 
 function renderFields(title: string, fields: SafeField[], includeLocalPaths: boolean) {
@@ -127,7 +136,7 @@ export function buildBundle(
 ): SupportBundlePreview {
   const includePaths = settings.privacy.includeLocalPaths
 
-  const capFields = reportFields(report)
+  const capFields = reportFields(report, includePaths)
   const setFields = settingsFields(settings)
   const sections: BundleSection[] = [
     {
@@ -174,20 +183,29 @@ export function buildBundle(
 
   // A capability entry can name the runtime executable, which is a path. It is
   // the one report field that is locational, so it is opted into like any other.
-  return {
+  const pathCount = includePaths ? countLocational(report, settings) : 0
+  const preview: SupportBundlePreview = {
     sections,
     redacted: 0,
-    pathCount: includePaths ? countLocational(report, settings) : 0,
+    pathCount,
+    consent: includePaths,
   }
+  const rendered = renderBundle(preview, includePaths)
+  preview.renderedBody = rendered
+  preview.bytes = Buffer.byteLength(rendered)
+  return preview
 }
 
 function countLocational(report: DiagnosticReport, settings: AppSettings): number {
   let count = settingsFields(settings).filter((field) => field.locational).length
-  count += reportFields(report).filter((field) => field.locational).length
+  count += report.entries.filter((entry) => entry.locational === true).length
   return count
 }
 
 export function renderBundle(preview: SupportBundlePreview, includeLocalPaths: boolean): string {
+  if (preview.renderedBody && preview.consent === includeLocalPaths) {
+    return preview.renderedBody
+  }
   const header = [
     '# Git Stacks support bundle',
     '',

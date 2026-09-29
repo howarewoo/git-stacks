@@ -204,10 +204,14 @@ export interface BundleSection {
 }
 
 export interface SupportBundlePreview {
+  id?: string
   sections: BundleSection[]
   /** Everything a section would contribute that is not redacted, counted. */
   redacted: number
   pathCount: number
+  renderedBody?: string
+  bytes?: number
+  consent?: boolean
 }
 
 export interface SupportBundleExport {

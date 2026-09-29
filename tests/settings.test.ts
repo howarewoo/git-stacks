@@ -15,7 +15,8 @@ import {
 } from '../src/main/settings'
 import { loadSettingsPolicy, NO_POLICY } from '../src/main/settings-service'
 import { buildBundle, renderBundle } from '../src/main/support-bundle'
-import { locateTool, resolveEditorCommand, resolveInsideRepository } from '../src/main/editor'
+import { locateTool, resolveEditorCommand, resolveEditorInvocation, resolveInsideRepository } from '../src/main/editor'
+import { parseGitBuildOptions, parseGitVersion } from '../src/main/diagnostics'
 import { DEFAULT_SETTINGS } from '../src/shared/settings'
 import type { AppSettings, DiagnosticReport } from '../src/shared/settings'
 
@@ -510,4 +511,58 @@ test('revoked path consent withholds local paths even if preview was generated w
   const exportedBody = renderBundle(preview, liveSettings.privacy.includeLocalPaths)
   assert.equal(exportedBody.includes('/opt/tools/git/bin/git'), false)
   assert.match(exportedBody, /local paths: withheld/)
+})
+
+test('a preview generated with paths withheld never retains raw paths in fields and cannot be expanded to leak paths', () => {
+  const preview = buildBundle(
+    REPORT,
+    { ...structuredClone(DEFAULT_SETTINGS), privacy: { includeLocalPaths: false } },
+    [],
+  )
+  assert.equal(preview.pathCount, 0)
+  assert.equal(preview.consent, false)
+  const rendered = renderBundle(preview, true)
+  assert.equal(rendered.includes('/opt/tools/git/bin/git'), false)
+})
+
+test('default text editor uses platform safe text editor invocation and never executes scripts', () => {
+  const target = '/path/to/repo/run.command'
+  const resolved = resolveEditorInvocation(null, target)
+  assert.ok(resolved.invocation !== null)
+  if (process.platform === 'darwin') {
+    assert.equal(resolved.invocation.command, 'open')
+    assert.deepEqual(resolved.invocation.args, ['-t', target])
+  } else if (process.platform === 'win32') {
+    assert.equal(resolved.invocation.command, 'notepad')
+    assert.deepEqual(resolved.invocation.args, [target])
+  }
+})
+
+test('Git version probe parses strictly semantic version and strips build paths or arbitrary stdout', () => {
+  const dirtyOutput = 'git version 2.45.0 build=/Volumes/company/private-build (custom wrapper)\n'
+  const parsed = parseGitVersion(dirtyOutput)
+  assert.equal(parsed.value, 'git version 2.45.0')
+  assert.equal(parsed.status, 'confirmed')
+  assert.equal(parsed.value.includes('/Volumes'), false)
+
+  const buildOutput = 'sizeof-long: 8\nshell-path: /private/bin/sh\nfsmonitor\npthreads\n'
+  const parsedBuild = parseGitBuildOptions(buildOutput)
+  assert.equal(parsedBuild.value, 'fsmonitor, pthreads')
+  assert.equal(parsedBuild.status, 'confirmed')
+  assert.equal(parsedBuild.value.includes('/private'), false)
+  assert.equal(parsedBuild.value.includes('shell-path'), false)
+})
+
+test('redundant legacy shortcut migration does not overwrite existing user shortcuts', () => {
+  const current: AppSettings = {
+    ...DEFAULT_SETTINGS,
+    shortcuts: { ...DEFAULT_SETTINGS.shortcuts, 'stack.selectChild': 'b' },
+    migrated: { legacyShortcutStorage: true },
+  }
+  const patch = {
+    shortcuts: { ...DEFAULT_SETTINGS.shortcuts, 'stack.selectChild': 's' },
+    migrated: { legacyShortcutStorage: true },
+  }
+  const result = applyPatch(current, patch)
+  assert.equal(result.settings.shortcuts['stack.selectChild'], 'b')
 })

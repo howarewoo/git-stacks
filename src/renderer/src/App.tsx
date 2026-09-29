@@ -603,7 +603,7 @@ function App() {
   // import happened, so it cannot run a second time and cannot be re-triggered
   // by an old copy of the key reappearing.
   React.useEffect(() => {
-    if (!desktop?.updateSettings || settings?.migrated.legacyShortcutStorage) return
+    if (!desktop?.updateSettings || !settings || settings.migrated.legacyShortcutStorage) return
     let cancelled = false
     const legacy = readLegacyShortcuts()
     if (!legacy) return
@@ -626,7 +626,7 @@ function App() {
     return () => {
       cancelled = true
     }
-  }, [desktop, settings?.migrated.legacyShortcutStorage])
+  }, [desktop, settings])
 
   // The theme attribute is the only place the preference takes effect: the
   // generated token sheet switches on it, and "system" defers to the operating

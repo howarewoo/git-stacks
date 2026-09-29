@@ -258,11 +258,15 @@ export function applyPatch(
   current: AppSettings,
   patch: SettingsPatch,
 ): { settings: AppSettings; issues: SettingsIssue[] } {
+  let shortcuts = patch.shortcuts ?? current.shortcuts
+  if (current.migrated.legacyShortcutStorage && patch.migrated?.legacyShortcutStorage === true) {
+    shortcuts = current.shortcuts
+  }
   const merged: Record<string, unknown> = {
     git: { ...current.git, ...(isRecord(patch.git) ? patch.git : {}) },
     appearance: { ...current.appearance, ...(isRecord(patch.appearance) ? patch.appearance : {}) },
     privacy: { ...current.privacy, ...(isRecord(patch.privacy) ? patch.privacy : {}) },
-    shortcuts: patch.shortcuts ?? current.shortcuts,
+    shortcuts,
     migrated: { ...current.migrated, ...(isRecord(patch.migrated) ? patch.migrated : {}) },
   }
   const result = validateSettings(merged)

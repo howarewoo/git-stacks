@@ -3,29 +3,58 @@ import { isAbsolute, relative, resolve, sep } from 'node:path'
 import { promises as fs } from 'node:fs'
 import { SUPPORTED_EDITORS } from '../shared/settings'
 
-/** The editor used when settings name none. Only what the platform ships. */
-const PLATFORM_EDITOR =
-  process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? null : 'xdg-open'
+export interface EditorInvocation {
+  command: string
+  args: string[]
+  reason: string
+}
 
 /**
- * Resolves the program to launch. A configured name wins; otherwise the
- * platform's own opener is used, and a platform that has none is reported
- * rather than guessed at.
+ * Resolves the program and invocation arguments to launch. A configured name
+ * wins if allowlisted. Otherwise a platform-specific text editor adapter is
+ * used (e.g. macOS 'open -t' to force opening in the default text editor and
+ * avoid executing executable scripts).
  */
-export function resolveEditorCommand(configured: string | null): {
-  command: string | null
+export function resolveEditorInvocation(configured: string | null, targetPath: string): {
+  invocation: EditorInvocation | null
   reason: string
 } {
   if (configured) {
     if ((SUPPORTED_EDITORS as readonly string[]).includes(configured)) {
-      return { command: configured, reason: 'the editor configured in Settings' }
+      return {
+        invocation: { command: configured, args: [targetPath], reason: 'the editor configured in Settings' },
+        reason: 'the editor configured in Settings',
+      }
     }
-    return { command: null, reason: `${configured} is not a supported editor` }
+    return { invocation: null, reason: `${configured} is not a supported editor` }
   }
-  if (PLATFORM_EDITOR) {
-    return { command: PLATFORM_EDITOR, reason: 'this platform’s default application handler' }
+  if (process.platform === 'darwin') {
+    return {
+      invocation: { command: 'open', args: ['-t', targetPath], reason: 'the default text editor on macOS' },
+      reason: 'this platform’s default text editor',
+    }
   }
-  return { command: null, reason: 'no default application handler exists on this platform' }
+  if (process.platform === 'win32') {
+    return {
+      invocation: { command: 'notepad', args: [targetPath], reason: 'Notepad' },
+      reason: 'this platform’s default text editor',
+    }
+  }
+  return {
+    invocation: { command: 'gedit', args: [targetPath], reason: 'default text editor' },
+    reason: 'this platform’s default text editor',
+  }
+}
+
+export function resolveEditorCommand(configured: string | null): {
+  command: string | null
+  reason: string
+} {
+  const resolved = resolveEditorInvocation(configured, '')
+  return {
+    command: resolved.invocation?.command ?? null,
+    reason: resolved.reason,
+  }
 }
 
 /**
@@ -89,26 +118,18 @@ export async function openInEditor(
   const target = await resolveInsideRepository(repositoryRoot, relativePath)
   if ('error' in target) return { opened: false, reason: target.error }
 
-  const { command, reason } = resolveEditorCommand(configured)
-  if (!command) return { opened: false, reason }
+  const { invocation, reason } = resolveEditorInvocation(configured, target.absolute)
+  if (!invocation) return { opened: false, reason }
 
-  // A program that is not installed must be reported before anything is
-  // launched. Starting a detached child cannot answer this on its own: `spawn`
-  // does not fail for a name it cannot find, it emits an error later, so
-  // claiming a launch here would report a success that never happened.
-  const located = await locateTool(command, null)
+  const located = await locateTool(invocation.command, null)
   if (!located.available) {
-    return { opened: false, reason: `${command} is not installed on this computer.` }
+    return { opened: false, reason: `${invocation.command} is not installed on this computer.` }
   }
 
-  // Existence is not launchability: an executable script whose shebang names an
-  // interpreter this machine lacks passes `locateTool` and still fails to
-  // start. The child's own `spawn` event is the only thing that answers
-  // "did it actually start", so success waits for it rather than assuming.
   const started = await new Promise<{ ok: true } | { ok: false; message: string }>((settle) => {
     let child
     try {
-      child = spawn(command, [target.absolute], {
+      child = spawn(invocation.command, invocation.args, {
         detached: true,
         stdio: 'ignore',
         windowsHide: true,
@@ -121,9 +142,9 @@ export async function openInEditor(
     child.once('error', (error: Error) => settle({ ok: false, message: error.message }))
   })
   if (!started.ok) {
-    return { opened: false, reason: `Could not start ${command}: ${started.message}` }
+    return { opened: false, reason: `Could not start ${invocation.command}: ${started.message}` }
   }
-  return { opened: true, reason: `Opened with ${command} (${reason}).` }
+  return { opened: true, reason: `Opened with ${invocation.command} (${reason}).` }
 }
 /**
  * Whether a configured program exists on this machine. Settings accept any

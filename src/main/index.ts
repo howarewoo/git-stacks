@@ -671,10 +671,16 @@ function runSettingsTransaction<T>(operation: () => Promise<T>): Promise<T> {
   )
   return result
 }
+let settingsRevision = 0
 
 interface ActiveBundlePreview {
   id: string
   preview: SupportBundlePreview
+  renderedBody: string
+  bytes: number
+  pathCount: number
+  consent: boolean
+  settingsRevision: number
   timestamp: number
 }
 let activeBundlePreview: ActiveBundlePreview | null = null
@@ -684,6 +690,9 @@ async function changeSettings(
 ): Promise<SettingsSnapshot> {
   return runSettingsTransaction(async () => {
     const snapshot = await write(settingsFile())
+    settingsRevision++
+    // Any change to settings invalidates the cached support bundle preview
+    activeBundlePreview = null
     configureGitRuntime({ useSystemGit: snapshot.settings.git.useSystemGit })
     return snapshot
   })
@@ -1181,12 +1190,10 @@ function installHandlers() {
     // This control predates Settings and is still mounted. It goes through the
     // same policy-aware write as the Settings surface so a machine that locked
     // the choice cannot be changed through the older dialog.
-    return operations.write(async () => {
-      const snapshot = await changeSettings((file) =>
-        updateSettings(file, { git: { useSystemGit: requested } }, settingsLocks),
-      )
-      return withToolAvailability(snapshot)
-    })
+    await changeSettings((file) =>
+      updateSettings(file, { git: { useSystemGit: requested } }, settingsLocks),
+    )
+    return gitRuntimeStatus(settingsFile())
   })
   // Settings never take the repository gate: a preference can be corrected
   // while a repository is mid-operation, and locking the user out of Settings
@@ -1223,16 +1230,29 @@ function installHandlers() {
   })
   ipcMain.handle('support-bundle:preview', async (event) => {
     validateSender(event)
-    return runSettingsTransaction(async () => {
-      const settings = (await readSettingsFile(settingsFile())).settings
-      const report = await operations.read(() => currentDiagnostics(settings))
-      const preview = buildBundle(report, settings, recordedFailures())
-      const id = `preview-${Date.now()}-${Math.random().toString(36).slice(2)}`
-      activeBundlePreview = { id, preview, timestamp: Date.now() }
-      return preview
+    const { settings, currentRevision } = await runSettingsTransaction(async () => {
+      const s = (await readSettingsFile(settingsFile())).settings
+      return { settings: s, currentRevision: settingsRevision }
     })
+    const report = await operations.read(() => currentDiagnostics(settings))
+    const preview = buildBundle(report, settings, recordedFailures())
+    const id = `preview-${Date.now()}-${Math.random().toString(36).slice(2)}`
+    const renderedBody = preview.renderedBody ?? renderBundle(preview, settings.privacy.includeLocalPaths)
+    const bytes = preview.bytes ?? Buffer.byteLength(renderedBody)
+    const pathCount = settings.privacy.includeLocalPaths ? preview.pathCount : 0
+    activeBundlePreview = {
+      id,
+      preview: { ...preview, id },
+      renderedBody,
+      bytes,
+      pathCount,
+      consent: settings.privacy.includeLocalPaths,
+      settingsRevision: currentRevision,
+      timestamp: Date.now(),
+    }
+    return { ...preview, id, bytes, pathCount }
   })
-  ipcMain.handle('support-bundle:export', async (event) => {
+  ipcMain.handle('support-bundle:export', async (event, requestedPreviewId?: unknown) => {
     validateSender(event)
     if (!window) throw new Error('There is no window to export from.')
     const target = await dialog.showSaveDialog(window, {
@@ -1243,21 +1263,31 @@ function installHandlers() {
     if (target.canceled || !target.filePath) return { path: '', bytes: 0, includedPaths: 0 }
 
     return runSettingsTransaction(async () => {
-      const currentSettings = (await readSettingsFile(settingsFile())).settings
-      let previewToExport: SupportBundlePreview
-      if (activeBundlePreview) {
-        previewToExport = activeBundlePreview.preview
-      } else {
-        const report = await operations.read(() => currentDiagnostics(currentSettings))
-        previewToExport = buildBundle(report, currentSettings, recordedFailures())
+      if (!activeBundlePreview) {
+        throw new Error(
+          'The support bundle preview has expired because settings changed. Please preview the bundle again before exporting.',
+        )
       }
-      const allowLocalPaths = currentSettings.privacy.includeLocalPaths === true
-      const body = renderBundle(previewToExport, allowLocalPaths)
-      await writeFile(target.filePath, body, { mode: 0o600 })
+      if (typeof requestedPreviewId === 'string' && activeBundlePreview.id !== requestedPreviewId) {
+        throw new Error('The preview id does not match the active support bundle preview.')
+      }
+      if (activeBundlePreview.settingsRevision !== settingsRevision) {
+        throw new Error(
+          'Settings changed while preparing export. Please preview the bundle again before exporting.',
+        )
+      }
+      const currentSettings = (await readSettingsFile(settingsFile())).settings
+      if (currentSettings.privacy.includeLocalPaths !== activeBundlePreview.consent) {
+        throw new Error(
+          'Privacy consent changed while preparing export. Please preview the bundle again before exporting.',
+        )
+      }
+
+      await writeFile(target.filePath, activeBundlePreview.renderedBody, { mode: 0o600 })
       return {
         path: target.filePath,
-        bytes: Buffer.byteLength(body),
-        includedPaths: allowLocalPaths ? previewToExport.pathCount : 0,
+        bytes: activeBundlePreview.bytes,
+        includedPaths: activeBundlePreview.pathCount,
       }
     })
   })

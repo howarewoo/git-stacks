@@ -43,12 +43,41 @@ async function probe(
   }
 }
 
-/** Trims a probe's output to a single report line, dropping anything path-like. */
-function oneLine(value: string): string {
-  const firstLine = value.split('\n').find((line) => line.trim().length > 0) ?? ''
-  return firstLine.replace(/\s+/g, ' ').trim().slice(0, 200)
+/**
+ * Safe projection of Git version probe output. Extracts strictly the semantic
+ * version number so build metadata, wrapper paths, or arbitrary surrounding
+ * text cannot leak into diagnostic reports or support bundles.
+ */
+export function parseGitVersion(output: string): { value: string; status: 'confirmed' | 'unavailable' } {
+  const match = output.match(/\bgit version (\d+\.\d+(?:\.\d+)?)\b/)
+  if (match) {
+    return { value: `git version ${match[1]}`, status: 'confirmed' }
+  }
+  return { value: 'unrecognized Git version output', status: 'unavailable' }
 }
 
+const KNOWN_BUILD_FLAGS = [
+  'fsmonitor',
+  'pthreads',
+  'libcurl',
+  'openssl',
+  'gettext',
+  'iconv',
+  'pcre2',
+] as const
+
+/**
+ * Safe projection of Git build options. Extracts only confirmed safe boolean
+ * capability tokens from an allowlist; never admits compiler flags, shell
+ * paths, or raw build strings.
+ */
+export function parseGitBuildOptions(output: string): { value: string; status: 'confirmed' | 'unavailable' } {
+  const flags = KNOWN_BUILD_FLAGS.filter((flag) => new RegExp(`\\b${flag}\\b`, 'i').test(output))
+  if (flags.length > 0) {
+    return { value: flags.join(', '), status: 'confirmed' }
+  }
+  return { value: 'standard build options', status: 'confirmed' }
+}
 export interface DiagnosticSources {
   runtime: GitRuntimeStatus
   account: GitHubAccountStatus | null
@@ -276,16 +305,28 @@ export async function runDiagnostics(sources: DiagnosticSources): Promise<Diagno
   if (sources.runtime.runtime) {
     for (const command of DIAGNOSTIC_COMMANDS) {
       const result = await probe(sources.runtime.runtime!.executable, command.args)
+      if (!result.ok) {
+        entries.push({
+          source: 'git',
+          label: `git ${command.args.join(' ')}`,
+          value: 'could not be run',
+          status: 'unavailable',
+          detail: 'probe failed',
+        })
+        continue
+      }
+      const parsed =
+        command.args[0] === '--version'
+          ? parseGitVersion(result.output)
+          : parseGitBuildOptions(result.output)
       entries.push({
         source: 'git',
         label: `git ${command.args.join(' ')}`,
-        value: result.ok ? oneLine(result.output) : 'could not be run',
-        status: result.ok ? 'confirmed' : 'unavailable',
-        detail: result.ok ? undefined : (result.error ?? undefined),
+        value: parsed.value,
+        status: parsed.status,
       })
     }
   }
-
   return {
     entries,
     generatedAt: new Date().toISOString(),
