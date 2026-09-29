@@ -20,6 +20,35 @@ test.describe('Async loading and workflow recovery', () => {
       // Commits should now be rendered
       await expect(page.locator('.history-row').first()).toBeVisible()
     })
+
+    test('a failed refresh during a pending diff leaves History retryable', async ({ page }) => {
+      await openGallery(page, { scenario: 'history-loading' })
+      await page.evaluate(() => window.fixture.hold('commitDiff'))
+      await switchDestination(page, 'history')
+      await releaseDoubleCalls(page, 'history')
+      await expect(page.getByText('Reading commit diff…')).toBeVisible()
+
+      await page.evaluate(() => {
+        const refresh = window.desktop.refresh
+        window.desktop.refresh = async () => ({
+          ...(await refresh()),
+          headOid: 'f'.repeat(40),
+        })
+        window.fixture.failNext('history', 'The selected ref disappeared.')
+      })
+      await page.getByRole('button', { name: 'Refresh repository', exact: true }).click()
+      await expect(page.getByRole('alert')).toHaveText('The selected ref disappeared.')
+      const reload = page.getByRole('button', { name: 'Reload history', exact: true })
+      await expect(reload).toBeEnabled()
+      await expect(page.getByLabel('History branch', { exact: true })).toBeEnabled()
+
+      await releaseDoubleCalls(page, 'commitDiff')
+      await reload.click()
+      await expect(page.locator('.history-row').first()).toBeVisible()
+      await expect(page.getByText('Reading commit diff…')).not.toBeVisible()
+      await expect(page.getByRole('alert')).toHaveCount(0)
+      await expect(reload).toBeEnabled()
+    })
   })
 
   test.describe('Workflow and recovery states', () => {

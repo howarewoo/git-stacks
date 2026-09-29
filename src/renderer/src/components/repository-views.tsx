@@ -581,7 +581,10 @@ export function HistoryView({
     const claim = diffGate.claim()
     setDiff(null)
     setDiffError(null)
-    if (!selectedOid) return
+    if (!selectedOid) {
+      setDiffLoading(false)
+      return
+    }
     const requestId = `commit-diff:${selectedOid}`
     setDiffLoading(true)
     window.desktop
