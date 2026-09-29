@@ -4596,7 +4596,6 @@ export function confirmedGitHubPayload(
   }
   return cached
 }
-
 export async function getSnapshot(
   repoPath: string,
   signal?: AbortSignal,

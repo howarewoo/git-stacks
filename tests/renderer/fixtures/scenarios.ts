@@ -552,7 +552,6 @@ const unavailableGithub = {
   message: 'GitHub CLI is not authenticated for this repository.',
 }
 
-<<<<<<< HEAD
 const checksBranch = local({
   name: 'feature/lifecycle-open',
   current: true,
@@ -711,9 +710,6 @@ const staleChecksReport = checksReport(
   },
 )
 
-=======
-
-
 /** Comfortably past the point where revealing a second page starts sliding. */
 const DEEP_CHAIN_LENGTH = 620
 
@@ -737,7 +733,6 @@ const deepChainSnapshot = repository({
   headOid: oid('local:feature/deep-0001'),
 })
 
->>>>>>> e9b00be (fix(a11y): leave modified chords to the global dispatcher and keep roving inside the mounted window)
 export const scenarios: Record<ScenarioName, FixtureScenario> = {
   'shell-no-repository': {
     name: 'shell-no-repository',
