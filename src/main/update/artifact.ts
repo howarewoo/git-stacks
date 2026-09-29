@@ -87,28 +87,35 @@ export async function downloadUpdateArtifact(options: DownloadOptions): Promise<
   timer.unref()
   const live = new Set<{ destroy: (error: Error) => void }>()
 
-  const opened = await openArtifact(url, 0).finally(() => clearTimeout(timer))
   try {
-    await pipeline(opened, meter, createWriteStream(partialPath, { mode: 0o600 }))
-  } catch (error) {
-    await rm(partialPath, { force: true }).catch(() => undefined)
-    throw error
+    const opened = await openArtifact(url, 0)
+    try {
+      await pipeline(opened, meter, createWriteStream(partialPath, { mode: 0o600 }))
+    } catch (error) {
+      await rm(partialPath, { force: true }).catch(() => undefined)
+      throw error
+    }
+
+    const digest = hash.digest('hex')
+    if (received !== artifact.size || digest !== artifact.sha256) {
+      await rm(partialPath, { force: true })
+      throw new Error(
+        received !== artifact.size
+          ? 'The downloaded build is not the size the signed manifest allowed.'
+          : 'The downloaded build does not match the signed manifest’s digest.',
+      )
+    }
+    await rename(partialPath, finalPath)
+    options.onProgress?.(100)
+    return { path: finalPath, sha256: digest, size: received, fileName: artifact.fileName }
   } finally {
+    // The deadline is cleared only when the whole operation has ended. It used
+    // to be cleared as soon as the response headers arrived, which left a peer
+    // that answered and then stopped sending with no timer at all: the body
+    // could then take as long as it liked. It now spans opening, streaming,
+    // proving, and moving the file into place.
     clearTimeout(timer)
   }
-
-  const digest = hash.digest('hex')
-  if (received !== artifact.size || digest !== artifact.sha256) {
-    await rm(partialPath, { force: true })
-    throw new Error(
-      received !== artifact.size
-        ? 'The downloaded build is not the size the signed manifest allowed.'
-        : 'The downloaded build does not match the signed manifest’s digest.',
-    )
-  }
-  await rename(partialPath, finalPath)
-  options.onProgress?.(100)
-  return { path: finalPath, sha256: digest, size: received, fileName: artifact.fileName }
 
   /**
    * One request, following only the redirects this updater is willing to

@@ -545,6 +545,31 @@ Once the platform installer owns the files, the update cannot be stopped: a
 cancel or a channel change at that point is reported as too late rather than
 pretending to have taken effect.
 
+One thing happens at a time. A check, a download, an install, and a channel
+change are each a single operation, and the second of them waits for the first
+to finish and clean up rather than running beside it. A stop is asked for
+through the operation's own signal and does not take the boundary away from it:
+the operation releases it, in its own cleanup, before the next one starts. That
+is why a result from a cancelled or superseded attempt can never land beside a
+newer one, and why a stopped download removes only the file it staged rather
+than whatever is in the staging directory at the time.
+
+A release becomes offerable only after the history that records having seen it
+is written and flushed to the disk. A check that cannot record what it saw
+offers nothing, revokes a build already downloaded for the same release, and
+stops every later download and install, because the replay guard is the thing
+that keeps an older release from being offered as a new one. A cancelled
+attempt leaves the release it authenticated standing, but the next download is
+a fresh decision made by a fresh check, so nothing is ever downloaded on the
+strength of a run that did not finish.
+
+A channel change is committed with the setting that records it. The updater
+takes the channel, the settings file is written while the change is still
+undecided, and only then is the new channel published; a write that fails puts
+the previous channel back, and an install in flight refuses the change
+outright. A stored channel and the channel this process is following cannot
+disagree.
+
 The updater writes only to the app's own user-data directory, and on macOS to a
 staged and a moved-aside copy of the bundle beside the installed one, both
 carrying this app's own prefix. It never reads or writes a repository.
@@ -653,6 +678,27 @@ moment it is retired rather than whenever someone notices. A private key is neve
 compiled into a build, never committed to this repository, and never written to a
 CI log: the release job signs with a secret held by the repository owner, and a
 build only ever carries the public half of it.
+
+## Untrusted text
+
+Text that arrives from outside this app is text, and it is shown as text. The
+values a person reads but did not write are a pull request title and branch
+name, a repository description, and a commit subject and author. They are
+rendered as React children — `data-views.tsx`, `repository-hover-cards.tsx`,
+`repository-views.tsx`, `onboarding.tsx` — so an author's angle brackets are
+characters on the screen and never markup. There is no Markdown renderer in
+this app and no sanitiser standing in for one: nothing parses a value into
+elements, and nothing writes one with `innerHTML`.
+
+`scripts/update-flow-smoke.mjs` proves that in the real window rather than
+asserting it about the source. It commits a subject that is
+`<img src=x onerror="…"> <script>…</script> <b>bold</b>`, opens **History**,
+and then reads the rendered document: the characters are present, the deepest
+element containing them has no element children at all, nothing in the window
+carries an inline `on*` handler, no `img`, `object`, `embed`, or `iframe`
+appeared, and nothing the payload says ran. Release notes and refusal messages
+arriving over a release signature are held to the same rule, in
+`tests/release-boundary.test.ts`.
 ## Onboarding
 
 With no repository open, the window offers three ways in, and all of them end

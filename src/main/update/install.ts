@@ -276,12 +276,6 @@ export interface InstallOptions {
   arch?: string
   /** Where a leftover from a previous cut-over is recorded. */
   userDataPath?: string
-  /**
-   * Aborted by a cancel or a channel change. Everything the installer does
-   * before the platform installer takes the files is stopped by it; after that
-   * the installer owns them and this signal is not consulted.
-   */
-  signal?: AbortSignal
   /** Called once the platform installer has taken the update. */
   relaunch: () => void
   /** Called when this app must close for the platform installer to finish. */

@@ -1,4 +1,4 @@
-import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
+import { mkdir, open, readFile, rename, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import {
   compareVersions,
@@ -39,6 +39,13 @@ export interface UpdateServiceOptions {
   relaunch: () => void
   /** Called when the platform installer needs this app to close first. */
   quit?: () => void
+  /**
+   * The platform installer this service calls. The app always passes the real
+   * one; it is a parameter so the window around it — where a cancel is refused
+   * and the boundary is held until the installer returns — can be exercised
+   * without a real signed installer, which no development machine has.
+   */
+  install?: typeof installStagedUpdate
 }
 
 interface UpdateState {
@@ -60,9 +67,9 @@ interface Candidate {
   channel: UpdateChannel
 }
 
-/** One attempt at one thing. Its generation decides whether it still counts. */
+/** The one operation holding the boundary, and the signal a stop is asked through. */
 interface Run {
-  generation: number
+  /** The one signal a stop is asked through. */
   controller: AbortController
 }
 
@@ -89,10 +96,16 @@ export class UpdateService {
   private progress: number | null = null
   private phase: UpdateStatus['phase'] = 'idle'
   private restartRequired = false
+  /**
+   * The one operation allowed to be in flight. It is not released by a cancel
+   * or a channel change: it is released by the operation that holds it, in its
+   * own `finally`, after its own cleanup has settled. Anything asked for while
+   * it is held waits its turn rather than running beside it.
+   */
   private running: Run | null = null
-  private generation = 0
-  /** State writes take their turn, so two runs never write through one file. */
-  private writing: Promise<void> = Promise.resolve()
+  private queue: Promise<void> = Promise.resolve()
+  /** Counts durable writes, so two temporary files never share a name. */
+  private writes = 0
   /** True once the platform installer owns the files this app runs from. */
   private cutover = false
   private channel: UpdateChannel = 'stable'
@@ -133,11 +146,31 @@ export class UpdateService {
 
   /**
    * A channel change starts over: a different feed, a different sequence, and
-   * anything the old channel had in flight is stopped before the new one
-   * begins, so a result from the old feed can never be recorded against the new.
+   * the previous channel's staged build is removed.
+   *
+   * The caller's `commit` — the write that records the new channel in this
+   * app's settings — runs inside this operation, between taking the channel and
+   * publishing it. That is the whole point of the shape: a stored channel and
+   * the channel this process is following cannot disagree, because the file is
+   * written while the change is still undecided, and a failed write puts the
+   * previous channel back before anything is published. A caller that passes no
+   * commit changes the channel for this run only.
+   *
+   * The change waits for whatever is in flight to finish and clean up, so a
+   * result from the old feed can never be recorded against the new one.
    */
-  async setChannel(channel: UpdateChannel): Promise<void> {
-    if (!UPDATE_CHANNELS.includes(channel) || channel === this.channel) return
+  async applyChannel(
+    channel: UpdateChannel,
+    commit?: () => Promise<void>,
+  ): Promise<UpdateStatus> {
+    return this.exclusive(() => this.runApplyChannel(channel, commit))
+  }
+
+  private async runApplyChannel(
+    channel: UpdateChannel,
+    commit?: () => Promise<void>,
+  ): Promise<UpdateStatus> {
+    if (!UPDATE_CHANNELS.includes(channel) || channel === this.channel) return this.publish()
     if (this.cutover) {
       // The platform installer is already replacing this app's files. A channel
       // change now would report a state the installer is about to contradict.
@@ -146,18 +179,37 @@ export class UpdateService {
         message:
           'The update is already being installed; the channel changes when the app restarts.',
       }
-      this.publish()
-      return
+      return this.publish()
     }
-    this.abandon()
-    this.channel = channel
+    const previous = this.channel
+    // This operation holds the boundary, so removing what the previous channel
+    // staged is this operation's work, not a race with a run beside it.
     await this.discardCandidate()
+    this.channel = channel
     this.offer = null
     this.authenticated = null
     this.progress = null
+    if (commit) {
+      try {
+        await commit()
+      } catch (error) {
+        // The stored channel is still the old one, so this process follows it
+        // too: a channel that failed to be saved is not a channel this app is
+        // on. What was already discarded is gone; the next check offers again.
+        this.channel = previous
+        this.phase = 'failed'
+        this.failure = {
+          reason: 'unreachable',
+          message: `The update channel was not changed: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        }
+        return this.publish()
+      }
+    }
     this.phase = this.stateFailure ? 'failed' : 'idle'
     this.failure = this.stateFailure
-    this.publish()
+    return this.publish()
   }
 
   status(): UpdateStatus {
@@ -172,7 +224,8 @@ export class UpdateService {
       trust: trustedUpdateKeys(this.options.env, this.options.packaged).trust,
       // Only the build this run just verified, for the release on offer, may be
       // installed. An installer left over from an earlier offer is not this.
-      readyToInstall: this.phase === 'downloaded' && this.candidate !== null,
+      readyToInstall:
+        this.phase === 'downloaded' && this.candidate !== null && this.stateFailure === null,
       restartRequired: this.restartRequired,
     }
   }
@@ -194,13 +247,16 @@ export class UpdateService {
    * refused as a replay.
    */
   async check(): Promise<UpdateStatus> {
+    return this.exclusive(() => this.runCheck())
+  }
+
+  private async runCheck(): Promise<UpdateStatus> {
     if (this.stateFailure) {
       this.phase = 'failed'
       this.failure = this.stateFailure
       return this.publish()
     }
-    const run = this.begin()
-    if (!run) return this.status()
+    const run = this.claim()
     this.phase = 'checking'
     this.failure = null
     this.publish()
@@ -215,16 +271,11 @@ export class UpdateService {
         },
         { packaged: this.options.packaged, env: this.options.env, signal: run.controller.signal },
       )
-      if (!this.current(run)) return this.status()
       if (!result.ok) {
-        // Anything other than "there is nothing new" invalidates the offer:
-        // a channel's feed that cannot be trusted must not leave the previous
+        // Anything other than "there is nothing new" invalidates the offer: a
+        // channel's feed that cannot be trusted must not leave the previous
         // release staged and one click from being installed.
         await this.discardCandidate()
-        // The cleanup above awaited, and a cancel or a channel change during it
-        // retires this run. Whatever that run did next belongs to it, not to
-        // this answer, so nothing here is applied to a service it no longer owns.
-        if (!this.current(run)) return this.status()
         this.offer = null
         this.authenticated = null
         if (
@@ -240,46 +291,47 @@ export class UpdateService {
         return this.publish()
       }
       const offered = result.value.offer
-      // A check that finds the same release again leaves a verified download
-      // of it in place, still installable; one that finds a different release
+      // A check that finds the same release again leaves a verified download of
+      // it in place, still installable; one that finds a different release
       // discards it, so a staged installer is never one click from being
       // installed as something other than what it is.
       const kept = this.sameAsCandidate(offered)
       if (!kept) await this.discardCandidate()
-      if (!this.current(run)) return this.status()
-      this.authenticated = result.value
-      this.offer = offered
-      this.state.seenSequences[offered.channel] = Math.max(
-        offered.sequence,
-        this.state.seenSequences[offered.channel] ?? 0,
-      )
+      // The release becomes offerable only after the sequence that saw it is on
+      // disk. A check that cannot record what it saw forgets it at the next
+      // restart, and a replay guard that was never written is not a guard — so
+      // the history is committed and made durable first, and a failure here
+      // revokes the release rather than offering it.
+      const channel = offered.channel
+      const before = this.state.seenSequences[channel]
+      this.state.seenSequences[channel] = Math.max(offered.sequence, before ?? 0)
       try {
         await this.writeState()
       } catch (error) {
-        // The release is authenticated either way. A guard that cannot be
-        // persisted would forget what it has seen, so checks stop instead.
+        if (before === undefined) delete this.state.seenSequences[channel]
+        else this.state.seenSequences[channel] = before
         this.stateFailure = {
           reason: 'unreachable',
           message: `The update history could not be saved: ${
             error instanceof Error ? error.message : String(error)
-          }`,
+          }. Updates are stopped rather than run without it.`,
         }
-        if (!this.current(run)) return this.status()
+        await this.discardCandidate()
+        this.offer = null
+        this.authenticated = null
         this.phase = 'failed'
         this.failure = this.stateFailure
-        this.authenticated = null
-        this.offer = null
         return this.publish()
       }
-      // The write awaited, and this run may have been retired while it did.
-      if (!this.current(run)) return this.status()
+      this.authenticated = result.value
+      this.offer = offered
       this.phase = kept ? 'downloaded' : 'available'
       this.failure = null
       return this.publish()
     } catch (error) {
-      return this.current(run) ? this.refuse(error) : this.status()
+      return this.classify(error)
     } finally {
-      this.end(run)
+      this.release(run)
     }
   }
 
@@ -289,39 +341,48 @@ export class UpdateService {
    * nothing else — no installer, no helper, no Git — is ever fetched.
    */
   async download(): Promise<UpdateStatus> {
+    return this.exclusive(() => this.runDownload())
+  }
+
+  private async runDownload(): Promise<UpdateStatus> {
+    // A history that could not be recorded stops every download and install,
+    // not only the check that found the problem: the release on offer is
+    // dependent on a guard this app can no longer keep.
+    if (this.stateFailure) {
+      this.phase = 'failed'
+      this.failure = this.stateFailure
+      return this.publish()
+    }
     const offer = this.authenticated
-    // A cancelled check or download leaves the offer standing: cancelling stops
-    // the attempt, it does not withdraw the release that was authenticated.
-    if (!offer || (this.phase !== 'available' && this.phase !== 'cancelled')) {
+    // Only a release this process recorded as seen and committed to disk is
+    // downloadable. A cancelled attempt leaves the offer standing, but the
+    // next download is a fresh decision made by a fresh check, so a cancelled
+    // run never downloads on the strength of a run that did not finish.
+    if (!offer || this.phase !== 'available') {
       this.phase = 'failed'
       this.failure = { reason: 'malformed', message: 'There is no offered update to download.' }
       return this.publish()
     }
-    const run = this.begin()
-    if (!run) return this.status()
+    const run = this.claim()
+    this.phase = 'downloading'
+    this.progress = 0
+    this.publish()
+    let staged: StagedUpdate | null = null
     try {
-      this.phase = 'downloading'
-      this.progress = 0
-      this.publish()
-      const staged = await downloadUpdateArtifact({
+      const downloaded = await downloadUpdateArtifact({
         feed: offer.feed,
         artifact: offer.artifact,
         stagingDirectory: join(this.options.userDataPath, 'updates'),
         signal: run.controller.signal,
         timeoutMs: UPDATE_DOWNLOAD_TIMEOUT_MS,
         onProgress: (percent) => {
-          // Progress from a superseded run is not this run's progress.
-          if (!this.current(run)) return
           this.progress = percent
           this.publish()
         },
       })
-      if (!this.current(run)) {
-        await discardStagedUpdate(staged)
-        return this.status()
-      }
+      staged = downloaded
       this.candidate = {
-        staged,
+        staged: downloaded,
         version: offer.offer.version,
         arch: offer.offer.arch,
         sequence: offer.offer.sequence,
@@ -333,10 +394,13 @@ export class UpdateService {
       this.failure = null
       return this.publish()
     } catch (error) {
-      await this.discardCandidate()
-      return this.current(run) ? this.refuse(error) : this.status()
+      // Only the file this run staged is removed. A run that never reached one
+      // has nothing to remove, and nothing belonging to another operation is
+      // touched — the boundary is held until this cleanup has settled.
+      if (staged) await discardStagedUpdate(staged)
+      return this.classify(error)
     } finally {
-      this.end(run)
+      this.release(run)
     }
   }
 
@@ -347,17 +411,25 @@ export class UpdateService {
    * the running app's own identity is checked by the platform installer.
    */
   async install(): Promise<UpdateStatus> {
+    return this.exclusive(() => this.runInstall())
+  }
+
+  private async runInstall(): Promise<UpdateStatus> {
+    if (this.stateFailure) {
+      this.phase = 'failed'
+      this.failure = this.stateFailure
+      return this.publish()
+    }
     const candidate = this.candidate
     if (!candidate || this.phase !== 'downloaded') {
       this.phase = 'failed'
       this.failure = { reason: 'malformed', message: 'There is no downloaded update to install.' }
       return this.publish()
     }
-    const run = this.begin()
-    if (!run) return this.status()
+    const run = this.claim()
+    const handoffDirectory = join(this.options.userDataPath, 'handoff')
     try {
       const digest = await hashStagedUpdate(candidate.staged)
-      if (!this.current(run)) return this.status()
       if (digest !== candidate.sha256) {
         await this.discardCandidate()
         this.phase = 'failed'
@@ -373,38 +445,31 @@ export class UpdateService {
       // download between the digest check and the install; it does not bind the
       // check to an immutable object, and it is not a claim about anything
       // already running as this user.
-      const handoff = await privateInstallHandoff(
-        candidate.staged,
-        join(this.options.userDataPath, 'handoff'),
-      )
-      if (!this.current(run)) {
-        await rm(handoff.path, { force: true }).catch(() => undefined)
-        return this.status()
-      }
+      const handoff = await privateInstallHandoff(candidate.staged, handoffDirectory)
       this.phase = 'installing'
+      // From here the platform installer owns this app's files. A cancel asked
+      // for in this window is refused rather than pretended at, and the
+      // boundary stays held until the installer has returned.
       this.cutover = true
       this.publish()
-      const outcome = await installStagedUpdate(handoff, {
-        platform: this.options.platform,
-        appPath: this.options.appPath,
-        version: candidate.version,
-        arch: candidate.arch,
-        userDataPath: this.options.userDataPath,
-        // Everything before the platform installer takes the update is stopped
-        // by this signal; after that boundary the installer owns the files and
-        // the only honest answer to a cancel is that it is too late.
-        signal: run.controller.signal,
-        quit: this.options.quit,
-        relaunch: () => {
-          this.restartRequired = true
-          this.options.relaunch()
-        },
-      })
-      this.cutover = false
-      await rm(join(this.options.userDataPath, 'handoff'), {
-        recursive: true,
-        force: true,
-      }).catch(() => undefined)
+      let outcome: Awaited<ReturnType<typeof installStagedUpdate>>
+      try {
+        outcome = await (this.options.install ?? installStagedUpdate)(handoff, {
+          platform: this.options.platform,
+          appPath: this.options.appPath,
+          version: candidate.version,
+          arch: candidate.arch,
+          userDataPath: this.options.userDataPath,
+          quit: this.options.quit,
+          relaunch: () => {
+            this.restartRequired = true
+            this.options.relaunch()
+          },
+        })
+      } finally {
+        this.cutover = false
+        await rm(handoffDirectory, { recursive: true, force: true }).catch(() => undefined)
+      }
       if (!outcome.installed) {
         this.phase = 'failed'
         this.failure = { reason: 'bad-signature', message: outcome.reason }
@@ -412,9 +477,9 @@ export class UpdateService {
       }
       return this.publish()
     } catch (error) {
-      return this.current(run) ? this.refuse(error) : this.status()
+      return this.classify(error)
     } finally {
-      this.end(run)
+      this.release(run)
     }
   }
 
@@ -441,54 +506,75 @@ export class UpdateService {
   }
 
   /**
-   * Stops whatever is in flight. The run is retired before its controller is
-   * released, so the stopped run's own cleanup can neither resurrect it nor
-   * clear the run that comes next.
+   * Stops whatever is in flight.
+   *
+   * The operation is asked to stop through its signal, and the boundary stays
+   * held: it is released by the operation itself, in its own `finally`, once
+   * its own cleanup has settled. Anything asked for in the meantime waits its
+   * turn, so a result from a stopped operation can never land beside a newer
+   * one.
+   *
+   * A cancel during the platform install is not honoured, and says so. The
+   * installer has already taken this app's files; pretending to stop there
+   * would report a cancellation that did not happen.
    */
   cancel(): UpdateStatus {
     const run = this.running
-    this.running = null
-    run?.controller.abort()
-    this.generation += 1
     this.progress = null
-    if (
-      run &&
-      (this.phase === 'downloading' || this.phase === 'checking' || this.phase === 'installing')
-    ) {
-      this.phase = 'cancelled'
+    if (!run) return this.publish()
+    if (this.cutover) {
+      // The platform installer already has this app's files.
+      this.failure = {
+        reason: 'unreachable',
+        message:
+          'The update is already being installed and cannot be stopped now. It will finish or report why it did not.',
+      }
+      return this.publish()
     }
+    if (this.phase === 'checking' || this.phase === 'downloading') this.phase = 'cancelled'
+    run.controller.abort()
     return this.publish()
   }
 
-  /** Claims the one run slot, or refuses because something is already in it. */
-  private begin(): Run | null {
-    if (this.running) {
-      this.phase = 'failed'
-      this.failure = { reason: 'malformed', message: 'An update is already in progress.' }
-      this.publish()
-      return null
-    }
-    this.generation += 1
-    const run: Run = { generation: this.generation, controller: new AbortController() }
+  /**
+   * Runs one operation at a time. A second call waits for the one in flight
+   * rather than running beside it, and the wait is the whole reason a result
+   * from a stopped operation cannot be applied to a newer one.
+   */
+  private exclusive<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.queue.then(operation)
+    this.queue = result.then(
+      () => undefined,
+      () => undefined,
+    )
+    return result
+  }
+
+  /** Takes the boundary. The queue is empty when this is called. */
+  private claim(): Run {
+    const run: Run = { controller: new AbortController() }
     this.running = run
     return run
   }
 
-  /** A run still counts only while it is the one holding the slot. */
-  private current(run: Run): boolean {
-    return this.running?.generation === run.generation
+  /** Gives the boundary back, after this operation's own cleanup has settled. */
+  private release(run: Run): void {
+    if (this.running === run) this.running = null
   }
 
-  private end(run: Run): void {
-    if (this.current(run)) this.running = null
-  }
-
-  /** Retires whatever is in flight without touching any published state. */
-  private abandon(): void {
-    const run = this.running
-    this.running = null
-    run?.controller.abort()
-    this.generation += 1
+  /**
+   * How an operation ended. A stop is not a failure: the attempt was called
+   * off, and the surface says the attempt was called off rather than that
+   * something went wrong.
+   */
+  private classify(error: unknown): UpdateStatus {
+    if (this.running?.controller.signal.aborted) {
+      this.phase = 'cancelled'
+      this.failure = null
+      this.progress = null
+      return this.publish()
+    }
+    return this.refuse(error)
   }
 
   /** Removes the verified installer bound to the offer, if there is one. */
@@ -579,30 +665,40 @@ export class UpdateService {
   }
 
   /**
-   * Written whole or not at all, so a crash cannot leave half a history.
+   * Written whole or not at all, and made durable before it is believed.
    *
-   * Each write gets its own temporary name and its own turn: two runs that
-   * overlap cannot write through one file, and the last rename wins with a whole
-   * history rather than a blend of two. The history only ever grows, so the
-   * newest value is the one that carries every sequence either run had seen.
+   * The bytes go to a temporary name of their own, are flushed to the disk, and
+   * only then take the name the next start reads. The directory is flushed as
+   * well, so a power loss cannot leave the history this process believed it had
+   * committed missing. One operation holds the boundary at a time, so two runs
+   * never write through one file, and the history only grows: the newest value
+   * carries every sequence either run had seen.
    */
   private async writeState(): Promise<void> {
-    const previous = this.writing
-    let release = (): void => {}
-    const mine = new Promise<void>((done) => {
-      release = done
-    })
-    this.writing = previous.then(() => mine)
-    await previous.catch(() => undefined)
+    this.writes += 1
+    await mkdir(this.options.userDataPath, { recursive: true })
+    const target = this.statePath()
+    const temporary = `${target}.${process.pid}.${this.writes}.next`
+    const handle = await open(temporary, 'w', 0o600)
     try {
-      await mkdir(this.options.userDataPath, { recursive: true })
-      const target = this.statePath()
-      const temporary = `${target}.${process.pid}.${this.generation}.next`
-      await writeFile(temporary, `${JSON.stringify(this.state, null, 2)}\n`, { mode: 0o600 })
-      await rename(temporary, target)
+      await handle.writeFile(`${JSON.stringify(this.state, null, 2)}\n`, 'utf8')
+      await handle.sync()
     } finally {
-      release()
-      if (this.writing === mine) this.writing = Promise.resolve()
+      await handle.close()
+    }
+    try {
+      await rename(temporary, target)
+      // The rename itself has to reach the disk, or a crash can lose the name
+      // while keeping the bytes the next start would have read.
+      const directory = await open(this.options.userDataPath, 'r')
+      try {
+        await directory.sync()
+      } finally {
+        await directory.close()
+      }
+    } catch (error) {
+      await rm(temporary, { force: true }).catch(() => undefined)
+      throw error
     }
   }
 

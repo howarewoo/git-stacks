@@ -354,7 +354,6 @@ const hostWork = new Set<AbortController>()
 function applySettings(settings: AppSettings): void {
   const previousHost = currentSettings?.github.host ?? null
   currentSettings = settings
-  void updateService?.setChannel(settings.updates.channel)
   if (previousHost === settings.github.host) return
   // Everything already in flight was addressed to the host that is no longer
   // selected. It is aborted, and its generation is retired, so a response that
@@ -960,6 +959,36 @@ async function changeSettings(
   })
 }
 
+/**
+ * A settings change, with the update channel committed through the updater.
+ *
+ * Everything else is written and then applied. A channel change is different:
+ * the file records the channel, and the running process follows one, so the
+ * write happens inside the updater's own boundary — the change is taken, the
+ * file is written, and only then is the new channel published. An install in
+ * flight, or a write that fails, leaves both where they were, and this call
+ * reports why rather than returning a channel the app is not on.
+ */
+async function changeSettingsPatch(patch: SettingsPatch): Promise<SettingsSnapshot> {
+  const channel = patch.updates?.channel
+  const service = updateService
+  if (channel === undefined || !service || channel === currentSettings?.updates.channel) {
+    return changeSettings(async (file) =>
+      updateSettings(file, await settingsPatchToWrite(file, patch, settingsRevision), settingsLocks),
+    )
+  }
+  let committed: SettingsSnapshot | null = null
+  const status = await service.applyChannel(channel, async () => {
+    committed = await changeSettings(async (file) =>
+      updateSettings(file, await settingsPatchToWrite(file, patch, settingsRevision), settingsLocks),
+    )
+  })
+  if (!committed) {
+    throw new Error(status.failure?.message ?? 'The update channel was not changed.')
+  }
+  return committed
+}
+
 /** One capability report, built from the same sources the Diagnostics view shows. */
 async function currentDiagnostics(settings: AppSettings) {
   // A diagnostics report is the one place a person is told what the host does,
@@ -1558,15 +1587,7 @@ function installHandlers() {
     if (typeof patch !== 'object' || patch === null || Array.isArray(patch)) {
       throw new Error('Settings changes must be an object of setting groups.')
     }
-    return withToolAvailability(
-      await changeSettings(async (file) =>
-        updateSettings(
-          file,
-          await settingsPatchToWrite(file, patch as SettingsPatch, settingsRevision),
-          settingsLocks,
-        ),
-      ),
-    )
+    return withToolAvailability(await changeSettingsPatch(patch as SettingsPatch))
   })
   ipcMain.handle('settings:reset', async (event) => {
     validateSender(event)

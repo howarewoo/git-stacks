@@ -2,14 +2,14 @@ import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import { EventEmitter } from 'node:events'
 import { createHash, generateKeyPairSync, sign } from 'node:crypto'
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { createServer as createTlsServer, type Server } from 'node:https'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { once } from 'node:events'
 import { test } from 'node:test'
-import { UpdateService } from '../src/main/update/service'
+import { UpdateService, type UpdateServiceOptions } from '../src/main/update/service'
 import type { UpdateChannel } from '../src/shared/update'
 
 /**
@@ -187,7 +187,7 @@ interface Harness {
   service: UpdateService
   userDataPath: string
   staged: () => string[]
-  until: (phase: 'checking' | 'downloading') => Promise<void>
+  until: (phase: 'checking' | 'downloading' | 'installing') => Promise<void>
 }
 
 /** A bundle-shaped path that exists but carries no signature. */
@@ -199,7 +199,7 @@ function unsignedBundle(): string {
   return executable
 }
 
-function harnessFor(base: string): Harness {
+function harnessFor(base: string, install?: UpdateServiceOptions['install']): Harness {
   const userDataPath = mkdtempSync(join(tmpdir(), 'git-stacks-update-data-'))
   const service = new UpdateService({
     packaged: false,
@@ -215,15 +215,16 @@ function harnessFor(base: string): Harness {
       GIT_STACKS_UPDATE_CA_FILE: TLS.caFile,
     },
     relaunch: () => undefined,
+    ...(install ? { install } : {}),
   })
   const phases = new EventEmitter()
   service.onChange((status) => {
-    if (status.phase === 'checking' || status.phase === 'downloading') {
+    if (status.phase === 'checking' || status.phase === 'downloading' || status.phase === 'installing') {
       phases.emit(status.phase)
     }
   })
   /** Resolves once the service is actually in the named phase. */
-  const until = (phase: 'checking' | 'downloading'): Promise<void> =>
+  const until = (phase: 'checking' | 'downloading' | 'installing'): Promise<void> =>
     service.status().phase === phase ? Promise.resolve() : once(phases, phase).then(() => undefined)
   return {
     service,
@@ -421,6 +422,12 @@ test('a download that is cancelled leaves nothing, and the next one still works'
   assert.deepEqual(app.staged(), [])
 
   release.hold = null
+  // The offer is still the authenticated one, but a cancelled attempt is not
+  // one to build on: the next download is a fresh decision made by a fresh
+  // check, so nothing is downloaded on the strength of a run that was stopped.
+  const refused = await app.service.download()
+  assert.equal(refused.phase, 'failed')
+  await app.service.check()
   const retried = await app.service.download()
   assert.equal(retried.phase, 'downloaded')
   assert.equal(retried.readyToInstall, true)
@@ -437,18 +444,25 @@ test('a check that finishes after the channel changed is not recorded against th
   // The stable manifest is on the wire and unanswered: switching channels now
   // must not let it land in the beta channel's history.
   await app.until('checking')
-  await app.service.setChannel('beta')
+  // The change is asked for while that check is in flight. It does not take the
+  // boundary away from the run that holds it: it waits, and the answer that was
+  // on the wire is answered on the channel it belongs to.
+  const switching = app.service.applyChannel('beta')
   hold.open()
-  const afterSwitch = await checking
+  assert.equal((await checking).channel, 'stable', 'the held answer is answered on stable')
+  const afterSwitch = await switching
   assert.equal(afterSwitch.channel, 'beta')
   assert.notEqual(
     afterSwitch.offer?.version,
     '0.2.0',
     'the old channel’s release is not offered here',
   )
+  assert.equal(afterSwitch.readyToInstall, false, 'nothing is installable across the change')
 
-  // The new channel can be checked straight away: the abandoned run left the
-  // slot free, and the stable sequence was not written into the beta history.
+  // The sequence stable issued is not in the beta history, and a beta release
+  // with a lower sequence of its own is still offered.
+  const history = JSON.parse(readFileSync(join(app.userDataPath, 'updates.json'), 'utf8'))
+  assert.equal(history.seenSequences.beta ?? 0, 0, 'the stable sequence stayed out of beta')
   feed.set({ version: '0.3.0', sequence: 2, bytes: ARTIFACT, channel: 'beta' })
   const beta = await app.service.check()
   assert.equal(beta.phase, 'available')
@@ -630,4 +644,148 @@ test('a staged build is handed to the installer through a file only this app can
     'not this file',
     'the link was never written through',
   )
+})
+
+/**
+ * The history the replay guard is made of has to reach the disk before a
+ * release counts as seen. These two make the write fail for real — the file the
+ * app publishes is a directory, so the rename that commits the history cannot
+ * succeed — and read what the surface is allowed to do afterwards.
+ */
+test('a release is not offered at all when the history that records it cannot be written', async (t) => {
+  const feed = await startFeed()
+  t.after(() => feed.close())
+  feed.set({ version: '0.2.0', sequence: 4, bytes: ARTIFACT, channel: 'stable' })
+  const app = harnessFor(feed.base)
+  await app.service.start('stable')
+  // A directory where the history file belongs: the write that would record
+  // what this computer has seen cannot be renamed into place.
+  mkdirSync(join(app.userDataPath, 'updates.json'), { recursive: true })
+  const offered = await app.service.check()
+  assert.equal(offered.phase, 'failed')
+  assert.equal(offered.offer, null, 'a release nobody can record is not offered')
+  assert.equal(offered.readyToInstall, false)
+  assert.match(offered.failure?.message ?? '', /history could not be saved/u)
+  // Every later action stops too, rather than acting on a guard that is gone.
+  assert.equal((await app.service.download()).phase, 'failed')
+  assert.equal((await app.service.install()).phase, 'failed')
+  assert.equal(app.service.status().readyToInstall, false)
+})
+
+test('a history that cannot be recorded revokes the build already downloaded', async (t) => {
+  const feed = await startFeed()
+  t.after(() => feed.close())
+  feed.set({ version: '0.2.0', sequence: 4, bytes: ARTIFACT, channel: 'stable' })
+  const app = harnessFor(feed.base)
+  await app.service.start('stable')
+  await app.service.check()
+  assert.equal((await app.service.download()).phase, 'downloaded')
+  assert.equal(app.staged().length, 1)
+  // The next check finds the same release and cannot record it: a directory
+  // where the history file belongs makes the commit fail for real.
+  rmSync(join(app.userDataPath, 'updates.json'))
+  mkdirSync(join(app.userDataPath, 'updates.json'))
+  const offered = await app.service.check()
+  assert.equal(offered.phase, 'failed')
+  assert.equal(offered.readyToInstall, false)
+  assert.deepEqual(app.staged(), [], 'the downloaded build is revoked with the guard')
+  assert.equal((await app.service.install()).phase, 'failed')
+})
+
+test('a channel change removes the build the old channel staged, and a failed write puts it back', async (t) => {
+  const feed = await startFeed()
+  t.after(() => feed.close())
+  feed.set({ version: '0.2.0', sequence: 1, bytes: ARTIFACT, channel: 'stable' })
+  const app = harnessFor(feed.base)
+  await app.service.start('stable')
+  await app.service.check()
+  await app.service.download()
+  const staged = app.staged()
+  assert.equal(staged.length, 1)
+
+  let committed = 0
+  const moved = await app.service.applyChannel('beta', async () => {
+    committed += 1
+    // The stored channel is written while the change is still undecided, so a
+    // reader of this file never sees a channel the app is not following.
+    assert.equal(app.service.status().channel, 'beta')
+  })
+  assert.equal(moved.channel, 'beta')
+  assert.equal(committed, 1, 'the stored channel is written inside the change')
+  assert.deepEqual(app.staged(), [], 'the old channel’s staged build is gone')
+  assert.equal(moved.readyToInstall, false, 'nothing is installable across the change')
+
+  const refused = await app.service.applyChannel('stable', async () => {
+    throw new Error('the settings file could not be written')
+  })
+  assert.equal(refused.channel, 'beta', 'a channel that was not saved is not the one followed')
+  assert.equal(refused.phase, 'failed')
+  assert.match(refused.failure?.message ?? '', /the settings file could not be written/u)
+})
+
+test('a stopped download removes only what it staged, and the next one is not disturbed', async (t) => {
+  const feed = await startFeed()
+  t.after(() => feed.close())
+  const release: Release = { version: '0.2.0', sequence: 1, bytes: ARTIFACT, channel: 'stable' }
+  feed.set(release)
+  const app = harnessFor(feed.base)
+  await app.service.start('stable')
+  await app.service.check()
+  const hold = gate()
+  release.hold = hold.wait
+  const first = app.service.download()
+  await app.until('downloading')
+  assert.equal(app.service.cancel().phase, 'cancelled')
+  // The next download is asked for while the stopped one is still settling, and
+  // waits behind it rather than running beside it.
+  const second = app.service.download()
+  hold.open()
+  await first
+  assert.equal(app.service.status().readyToInstall, false)
+  assert.equal((await second).phase, 'failed', 'a fresh check is what makes a download legal')
+  assert.deepEqual(app.staged(), [], 'the stopped download left nothing behind')
+
+  release.hold = null
+  await app.service.check()
+  assert.equal((await app.service.download()).phase, 'downloaded')
+  const files = app.staged()
+  assert.equal(files.length, 1, 'exactly one verified file is staged')
+  const digest = createHash('sha256')
+    .update(readFileSync(join(app.userDataPath, 'updates', files[0])))
+    .digest('hex')
+  assert.equal(digest, createHash('sha256').update(ARTIFACT).digest('hex'))
+})
+
+test('a cancel during the platform install is refused, and the boundary stays held', async (t) => {
+  const feed = await startFeed()
+  t.after(() => feed.close())
+  feed.set({ version: '0.2.0', sequence: 1, bytes: ARTIFACT, channel: 'stable' })
+  const installing = gate()
+  const app = harnessFor(feed.base, async () => {
+    await installing.wait
+    return { installed: false, reason: 'the installer did not finish' }
+  })
+  await app.service.start('stable')
+  await app.service.check()
+  await app.service.download()
+  const install = app.service.install()
+  await app.until('installing')
+
+  const refused = app.service.cancel()
+  assert.match(refused.failure?.message ?? '', /cannot be stopped now/u)
+  assert.equal(refused.phase, 'installing', 'the install is still the one in progress')
+
+  // A channel change asked for during the install does not overtake it.
+  let committed = 0
+  const switching = app.service.applyChannel('beta', async () => {
+    committed += 1
+  })
+  assert.equal(committed, 0, 'nothing is stored while the installer has the files')
+  installing.open()
+  const installStatus = await install
+  assert.equal(installStatus.phase, 'failed', 'the installer’s own refusal is reported')
+  assert.match(installStatus.failure?.message ?? '', /did not finish/u)
+  const after = await switching
+  assert.equal(after.channel, 'beta')
+  assert.equal(committed, 1, 'the change is applied once the installer has returned')
 })

@@ -182,7 +182,19 @@ jobs:
           codesign --verify --strict --verbose=2 "${images[0]}"
           codesign -dv --verbose=4 "${images[0]}" 2>&1 | grep -Fq 'Authority=Developer ID Application:'
           test "$(codesign -dv --verbose=2 "${images[0]}" 2>&1 | sed -n 's/^TeamIdentifier=//p')" = "$APPLE_TEAM_ID"
-          xcrun notarytool submit "${images[0]}" --wait
+          # notarytool knows nothing about electron-builder's environment. It
+          # reads APPLE_ID and APPLE_APP_SPECIFIC_PASSWORD only when they are
+          # named on its own command line, or out of a stored keychain profile,
+          # so a submit with neither is a submit that fails as uncredentialed
+          # and not as a refusal. The credentials are stored once under a
+          # profile name and the password is added to the log mask first, so it
+          # appears in neither the log nor any later command line.
+          echo "::add-mask::$APPLE_APP_SPECIFIC_PASSWORD"
+          xcrun notarytool store-credentials git-stacks-notary \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_APP_SPECIFIC_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID"
+          xcrun notarytool submit "${images[0]}" --wait --keychain-profile git-stacks-notary
           xcrun stapler staple "${images[0]}"
           xcrun stapler validate "${images[0]}"
           spctl --assess --type open --context context:primary-signature -v "${images[0]}"

@@ -183,6 +183,16 @@ function certificate() {
  */
 const OFFERED_VERSION = '999.0.0'
 
+/**
+ * Untrusted text as a real repository carries it: the subject of a commit
+ * anyone who can push can choose. The app has to show it to someone, and
+ * nothing here is a Markdown document — these surfaces are React text children,
+ * so the question this run answers is whether the value is ever turned into
+ * markup instead of being shown.
+ */
+const HOSTILE_TEXT =
+  '<img src=x onerror="window.__gitStacksXss = true"> <script>window.__gitStacksXss = true</script> <b>bold</b>'
+
 async function startRelease() {
   const tls = certificate()
   const key = generateKeyPairSync('ed25519')
@@ -291,6 +301,13 @@ async function main() {
     join(home, '.gitconfig'),
     '[user]\n\tname = Smoke\n\temail = smoke@example.invalid\n',
   )
+  // A commit whose subject is hostile, written before the app opens the
+  // repository, so the History view has it to render from the first frame.
+  const commit = spawnSync('git', ['commit', '--quiet', '--allow-empty', '-m', HOSTILE_TEXT], {
+    encoding: 'utf8',
+    cwd: workspace,
+  })
+  if (commit.status !== 0) throw new Error(`git commit failed: ${commit.stderr}`)
 
   // The app is launched the way this repository launches it for a real run:
   // as a process, with its own Chromium debugging endpoint, connected to over
@@ -680,6 +697,45 @@ async function main() {
     !leftover.includes(staged[0]),
     `the replaced installer is not left staged (${leftover.join(', ')})`,
   )
+
+  // What the person has to be able to read is the characters of a commit subject
+  // they did not write; what the DOM must not get is markup.
+  await ui.clickText('History')
+  await ui.waitFor(HOSTILE_TEXT)
+  const probe = await evaluate((wanted) => {
+    const every = [...document.querySelectorAll('*')]
+    // The deepest element that still contains the payload is the element the
+    // text node sits in: everything the payload says is one text node, or the
+    // renderer made part of it an element.
+    let holder = null
+    for (const element of every) {
+      if (!(element.textContent ?? '').includes(wanted)) continue
+      if (holder === null || holder.contains(element)) holder = element
+    }
+    return {
+      holder: holder?.tagName ?? null,
+      children: holder?.children.length ?? -1,
+      handlers: every.filter((element) =>
+        [...element.attributes].some((attribute) => attribute.name.startsWith('on')),
+      ).length,
+      payloadElements: document.querySelectorAll('img[src="x"], object, embed, iframe').length,
+      fired: window.__gitStacksXss === true,
+    }
+  }, HOSTILE_TEXT)
+  assert(
+    probe.children === 0,
+    `the subject is one text node, not markup (${probe.holder} holds ${probe.children} element(s))`,
+  )
+  assert(
+    probe.handlers === 0,
+    `nothing in the window carries an inline handler (${probe.handlers})`,
+  )
+  assert(
+    probe.payloadElements === 0,
+    `the payload became no elements (${probe.payloadElements} img/object/embed/iframe)`,
+  )
+  assert(probe.fired === false, 'nothing in the payload ran')
+  await shot('08-untrusted-text')
 
   const fetched = release.requests
   assert(
