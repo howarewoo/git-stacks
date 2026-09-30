@@ -207,6 +207,78 @@ test.describe('Leaving a review', () => {
     expect(sent[1]?.drafts[0]?.id).not.toBe(sent[0]?.drafts[0]?.id)
   })
 
+  test('two windows composing the same comment on one line each send their own', async ({
+    page,
+    context,
+  }) => {
+    // A second tab is a second window of the app: the same pull request, the
+    // same diff, the same reviewer, and the same journal behind both. What is
+    // written in one of them is not in the other's screen until it is read
+    // again, which is why the two comments below share everything a payload
+    // can be matched on — line, words, revision, account — except the identity
+    // each was composed under.
+    const other = await context.newPage()
+    try {
+      await openGallery(other, { scenario: 'review-stacked' })
+      await other.evaluate(() => {
+        const desktop = window.desktop
+        const sent: unknown[] = []
+        ;(window as unknown as { __reviewSubmissions: unknown[] }).__reviewSubmissions = sent
+        const submit = desktop.reviewSubmit?.bind(desktop)
+        if (submit) {
+          desktop.reviewSubmit = async (number, submission) => {
+            sent.push({
+              event: submission.event,
+              body: submission.body,
+              drafts: submission.drafts.map((draft) => ({
+                id: draft.id,
+                line: draft.ref.line,
+                side: draft.ref.side,
+                start: draft.startRef ? draft.startRef.line : null,
+                body: draft.body,
+              })),
+            })
+            return submit(number, submission)
+          }
+        }
+      })
+      await switchDestination(other, 'review')
+      await settle(other)
+
+      const words = 'Rename this before it lands.'
+      const compose = async (target: Page): Promise<void> => {
+        await target.getByRole('button', { name: RANGE_SECOND }).click()
+        await addPendingComment(target, 'Comment on src/main/review.ts:2 (head)', words)
+      }
+      await compose(page)
+      await compose(other)
+
+      // The first window sends it as a comment; the second is approving.
+      await page.getByRole('button', { name: 'Submit 1 comment as one review' }).click()
+      await settle(page)
+      await other.getByRole('radio', { name: 'Approve' }).check()
+      await other.getByRole('button', { name: 'Submit 1 comment as one review' }).click()
+      await settle(other)
+
+      const first = await submissions(page)
+      const second = await submissions(other)
+      expect(first).toHaveLength(1)
+      expect(second).toHaveLength(1)
+      expect(first[0]?.event).toBe('COMMENT')
+      expect(second[0]?.event).toBe('APPROVE')
+      expect(first[0]?.drafts[0]?.body).toBe(words)
+      expect(second[0]?.drafts[0]?.body).toBe(words)
+      // The same line, the same side, the same sentence, in two windows that
+      // read the same journal — and still two comments. A name counted from
+      // what the journal last held would have given both windows one name, and
+      // the approval the second window made would have been reported as
+      // delivered by the first window's comment.
+      expect(second[0]?.drafts[0]?.id).not.toBe(first[0]?.drafts[0]?.id)
+    } finally {
+      await other.close()
+    }
+  })
+
   test('a pending comment survives leaving the workspace and comes back unsent', async ({
     page,
   }) => {

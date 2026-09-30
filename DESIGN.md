@@ -515,16 +515,23 @@ while approving instead of commenting. Nothing about that second comment is
 distinguishable from the first except that it is later, and both would be
 matched by every field the settlement compares — anchor, words, decision, head.
 Adopting the first would clear the second without sending it, and the workspace
-would report an approval that GitHub never received. So each draft takes the
-range it covers and a number from a counter, and the settlement only looks at
-records that name this payload's drafts. The number has to be durable, because
-the record outlives the drafts: the second comment is written after the first
-has been sent and cleared, and a count that restarted with the app would hand
-the new draft an identity its own account had already used — which is the same
-collision, arrived at by a different route. The counter therefore travels with
-the drafts in the journal and is never read below the identities a record's own
-drafts have already consumed, and a record whose drafts are gone is kept for as
-long as its counter still has names to give.
+would report an approval that GitHub never received. So each draft carries an
+identity generated where the draft is composed, and the settlement only looks at
+records that name this payload's drafts.
+
+Generated, not counted, and the distinction is the whole rule. A counter is
+unique only while one process owns it, and the journal that would hold it is read
+by every window of the repository: two windows that opened the same record would
+count from the same number, mint one identity for the same line, and then a
+settled record naming that identity would answer for the other window's comment —
+clearing words it never sent and reporting a decision GitHub never received. So a
+draft's identity may not depend on the state any other window last read. It also
+may not depend on the record outliving it: a record whose drafts are gone has
+nothing left to keep, and is dropped rather than retained as a counter that would
+have to be read, rewound, and trusted. Identities minted under earlier rules —
+the range alone, or the range and a small whole number — remain opaque strings
+compared only with each other, so stored drafts stay readable and submit as
+themselves, and none of those names can be minted again.
 
 The guard covers an unresolved *comment*, not an attempt id. Changing the
 decision, or adding one more pending draft, produces a different attempt over
@@ -613,6 +620,15 @@ be updated in order has exactly one honest outcome, and the record already on
 disk stays readable and unchanged. An in-process queue is not a substitute — it
 would serialize two callers in one window and leave the second window exactly as
 unprotected, which is the case the journal exists for.
+
+That refusal must be bounded and it must distinguish *why* the lock could not be
+used. Exactly one read failure means the holder is gone: the lock was not there
+when the contender looked, so the next attempt takes the name. Every other
+failure — a lock this account may not open, a path that is not a file — leaves a
+holder whose existence is unknown and cannot become known by waiting, so it
+refuses at once, names the file and the reason it could not be read, and writes
+nothing. Retrying it is not caution: it spins on a lock that never clears while
+the window holds a save that will never finish and reports nothing.
 
 Records are not evicted to keep either file small. A draft record is one pull
 request's unsent words and an unresolved write is the sole durable proof that a

@@ -11,7 +11,7 @@ import type {
   ReviewUncertainWrite,
   UncertainComment,
 } from '../shared/review-threads'
-import { nextReviewDraftNumber, REVIEW_DRAFTS_MAX } from '../shared/review-threads'
+import { REVIEW_DRAFTS_MAX } from '../shared/review-threads'
 import { CommandCancelled, isRecord, runGit, stripTrailingNewline } from './git-core'
 
 /**
@@ -32,13 +32,14 @@ import { CommandCancelled, isRecord, runGit, stripTrailingNewline } from './git-
  * created, so a lock another process has since taken over is never taken away
  * from it.
  *
- * A holder that was killed cannot release its own lock, so a lock whose owner
- * is not running is broken — but only after the same inode has been observed
- * twice, and only after the file the rename produced is confirmed to be that
- * inode. A lock created in between is restored rather than taken from whoever
- * owns it now. A wait that runs out refuses the update instead of writing over
- * a live one: the honest outcome for a journal that cannot be updated in order
- * is that nothing was written, which the caller already reports.
+ * No lock is ever taken from its holder, not even one whose owner has been
+ * killed: reclaiming a lock is a rename, and a rename that frees the name lets a
+ * contender in while a holder that turns out to be alive still believes it owns
+ * the journal. A lock whose holder is gone therefore blocks, and the refusal
+ * names the one file a person may remove once they know no window is open. A
+ * lock this process cannot read, or a wait that runs out, refuses the same
+ * way: the honest outcome for a journal that cannot be updated in order is
+ * that nothing was written, which the caller already reports.
  */
 const JOURNAL_LOCK_POLL_MS = 20
 const JOURNAL_LOCK_WAIT_MS = 15_000
@@ -109,6 +110,33 @@ function journalLockRefusal(lockPath: string, running: boolean | null): Error {
 }
 
 /**
+ * The refusal a writer gets when the lock exists and cannot be read: a file
+ * this process may not open, or not one it can read bytes from.
+ *
+ * Nothing about it can be answered by waiting. The holder's identity is the
+ * one thing the lock carries, and there is none of it here, so this is the
+ * same unknown as a lock written by something else — except that the person
+ * reading it can do something about it: a lock that cannot be opened is almost
+ * always a permission, and saying so is what makes the refusal actionable
+ * rather than a wall.
+ */
+function journalLockUnreadable(lockPath: string, cause: unknown): Error {
+  const code = (cause as NodeJS.ErrnoException | null)?.code
+  const reason =
+    code === 'EACCES' || code === 'EPERM'
+      ? 'this app is not allowed to read it'
+      : code === 'EISDIR'
+        ? 'it is a directory rather than a lock file'
+        : `it could not be read (${code ?? 'no reason reported'})`
+  return new Error(
+    `This repository's review journal is locked at ${lockPath} and ${reason}, so its owner cannot be identified. Nothing was written. ` +
+      'A lock is never taken from its holder, so the write stops here rather than writing beside a window that may still hold the journal. ' +
+      'Close every Git Stacks window for this repository, confirm none is open, and then remove that one file — or make it readable ' +
+      'to this account — and the next write takes the lock itself.',
+  )
+}
+
+/**
  * Takes the journal lock, or refuses.
  *
  * The lock is created with `link(2)`, which is atomic: exactly one process can
@@ -125,7 +153,9 @@ function journalLockRefusal(lockPath: string, running: boolean | null): Error {
  * closing the last window for a repository knows something no process on disk
  * can know. A lock that cannot be read as one is refused the same way: it was
  * not written by this protocol, and guessing at its owner is how a live lock
- * gets deleted.
+ * gets deleted. So is a lock that cannot be read at all, which says nothing
+ * even about who wrote it — that one is refused immediately rather than waited
+ * on, because no amount of waiting opens a file this process may not read.
  */
 async function acquireJournalLock(
   file: string,
@@ -162,9 +192,18 @@ async function acquireJournalLock(
     // Someone held it a moment ago. The lock is only read, to say who, and is
     // left exactly as it was found: it is never taken from its holder. A holder
     // that released between the failed link and this read has simply finished,
-    // so the name is free now and the next attempt takes it.
-    const held = await fs.readFile(lockPath, 'utf8').catch(() => null)
-    if (held === null) continue
+    // so the name is free now and the next attempt takes it — a lock that is
+    // gone is the only read failure worth trying again. Any other failure
+    // leaves a lock standing that this process cannot see into, and retrying
+    // that spins on a file no waiting helps: the owner may well be alive, so the
+    // write refuses instead of guessing.
+    let held: string
+    try {
+      held = await fs.readFile(lockPath, 'utf8')
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue
+      throw journalLockUnreadable(lockPath, error)
+    }
     const running = lockHolderIsRunning(held)
     // Only a holder known to be alive gets the wait: it is a window mid-write,
     // and it will let go. A holder that is gone, or one this build cannot read,
@@ -460,17 +499,10 @@ function parseRecord(value: unknown): ReviewDraftRecord | null {
     // and the reviewer's words are left in the file for them to find.
     comparison: parseComparison(value.comparison),
     drafts,
-    // The counter is never read below what this record's own drafts have already
-    // consumed, so reopening a workspace cannot reissue an identity a settled
-    // record still names. A record written before the counter existed starts at
-    // one: its ids were the range alone, which a generated id never collides with.
-    nextDraftId: Math.max(
-      typeof value.nextDraftId === 'number' && Number.isInteger(value.nextDraftId)
-        ? value.nextDraftId
-        : 1,
-      ...drafts.map((draft) => nextReviewDraftNumber(draft.id) + 1),
-      1,
-    ),
+    // Nothing here counts drafts. An identity is minted where a draft is
+    // composed, so there is no counter to rewind, refuse, or keep — and a
+    // record written before ids were generated, or one carrying a counter this
+    // build no longer uses, reads exactly as it was written.
     updatedAt: typeof value.updatedAt === 'string' ? value.updatedAt : '',
   }
 }
@@ -570,15 +602,16 @@ export async function writeReviewDrafts(
       const kept = records.filter(
         (entry) => entry.number !== record.number || !sameOwner(entry, record.repo, record.viewer),
       )
-      // A record is kept while it has drafts, and afterwards for as long as its
-      // counter is still to come. The counter is what keeps a draft's identity
-      // unique: it names the second comment written on a line after the first was
-      // sent, which no amount of reading the words or the anchor can tell from the
-      // first. Dropping the record the moment the drafts are gone would restart the
-      // count and hand the next draft an identity this account has already used, so
-      // the count outlives the drafts. An account that never wrote a draft still
-      // leaves nothing behind.
-      if (record.drafts.length > 0 || record.nextDraftId > 1) {
+      // A record is kept while it has drafts, and dropped once they are gone.
+      // It used to outlive them for the sake of a counter: a draft's identity
+      // had to be counted from this record, so removing it would hand the next
+      // draft a name this account has already used — the second comment on a
+      // line, which no amount of reading the words or the anchor can tell from
+      // the first. An identity is minted where a draft is composed now, so
+      // there is nothing here left to keep, and an empty record would be one
+      // pull request occupying a slot in a file that is never pruned. An
+      // account that never wrote a draft still leaves nothing behind.
+      if (record.drafts.length > 0) {
         kept.unshift({ ...record, drafts: record.drafts.slice(0, REVIEW_DRAFTS_MAX) })
       }
       await writeJournalFile(file, kept)

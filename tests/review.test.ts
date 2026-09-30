@@ -43,6 +43,7 @@ import {
   retireSettledWrites,
 } from '../src/main/review-drafts'
 import {
+  newReviewDraftId,
   reviewDraftsAt,
   reviewThreadState,
   type ReviewThread,
@@ -3340,19 +3341,18 @@ test('a draft written again after the first was sent is new work, not a recovery
   setGitHubTransport(transport)
   t.after(() => setGitHubTransport(null))
 
-  const record = (drafts: ReviewDraft[], nextDraftId: number): ReviewDraftRecord => ({
+  const record = (drafts: ReviewDraft[]): ReviewDraftRecord => ({
     number: 7,
     repo: JOURNAL_OWNER.repo,
     viewer: JOURNAL_OWNER.viewer,
     comparison: comparison(),
     drafts,
-    nextDraftId,
     updatedAt: '2026-09-23T10:00:00Z',
   })
   // The reviewer writes the comment, sends it as a plain comment, and GitHub
   // takes it. The view is told, and drops the draft — the acknowledgement.
-  const first = draft({ id: 'src/app.ts:head:1-head:1#1', ref: at, body })
-  await writeReviewDrafts(workspace.repo, record([first], 2))
+  const first = draft({ id: newReviewDraftId(at, null), ref: at, body })
+  await writeReviewDrafts(workspace.repo, record([first]))
   const sent = await submitReview(workspace.repo, 7, {
     event: 'COMMENT' as const,
     body: '',
@@ -3360,7 +3360,7 @@ test('a draft written again after the first was sent is new work, not a recovery
     drafts: [first],
   })
   assert.equal(sent.state, 'COMMENTED')
-  assert.deepEqual(sent.delivered, ['src/app.ts:head:1-head:1#1'])
+  assert.deepEqual(sent.delivered, [first.id])
   assert.equal(writes.length, 1)
 
   // Now they come back and write the same words on the same line, and approve
@@ -3368,8 +3368,8 @@ test('a draft written again after the first was sent is new work, not a recovery
   // anchor, same body, same comparison — and it is a different piece of work.
   // Treating the settled record as its recovery would clear this draft, send
   // no approval at all, and report one GitHub never received.
-  const second = draft({ id: 'src/app.ts:head:1-head:1#2', ref: at, body })
-  await writeReviewDrafts(workspace.repo, record([second], 3))
+  const second = draft({ id: newReviewDraftId(at, null), ref: at, body })
+  await writeReviewDrafts(workspace.repo, record([second]))
   const approved = await submitReview(workspace.repo, 7, {
     event: 'APPROVE' as const,
     body: 'approved',
@@ -3378,14 +3378,14 @@ test('a draft written again after the first was sent is new work, not a recovery
   })
   assert.equal(writes.length, 2, 'the new composition is sent as its own review')
   assert.equal(approved.state, 'APPROVED', 'and the decision asked for is the one recorded')
-  assert.deepEqual(approved.delivered, ['src/app.ts:head:1-head:1#2'], 'naming the draft it sent')
+  assert.deepEqual(approved.delivered, [second.id], 'naming the draft it sent')
   const posted = writes[1]?.body as { event: string; comments: Array<{ body: string }> }
   assert.equal(posted.event, 'APPROVE', 'the request that left the app is the approval')
   assert.equal(posted.comments.length, 1)
   assert.equal(posted.comments[0]?.body, body)
 })
 
-test('the counter for naming drafts survives being written and read back', async (t) => {
+test('two windows that opened the same journal each send their own identical comment', async (t) => {
   const workspace = await reviewWorkspace()
   t.after(workspace.dispose)
   const patch = '@@ -1,2 +1,3 @@\n keep\n+added\n tail'
@@ -3393,6 +3393,16 @@ test('the counter for naming drafts survives being written and read back', async
   const hunk = textHunk(entry, 0)
   const added = hunk.lines.findIndex((line) => line.side === 'head' && line.newLine !== null)
   const at = refFor(hunk, added)
+  const { transport, writes } = threadDouble({
+    files: [apiFile({ patch })],
+    // The first window's review lands and its response is lost, which is the
+    // state the second window has to survive: GitHub holds a comment this
+    // account wrote, and no window was ever told so.
+    failReviewOnce: { status: 502, message: 'Bad Gateway' },
+  })
+  setGitHubTransport(transport)
+  t.after(() => setGitHubTransport(null))
+
   const owned = {
     number: 7,
     repo: JOURNAL_OWNER.repo,
@@ -3400,39 +3410,140 @@ test('the counter for naming drafts survives being written and read back', async
     comparison: comparison(),
     updatedAt: '2026-09-23T10:00:00Z',
   }
-  // A draft's identity is minted from a counter, so the counter has to outlive
-  // the process. Cleared and reopened with the drafts gone, the next identity
-  // still has to be one this account has not used: a name reused on a line that
-  // now holds different words is a comment the app would fold into the old one.
-  await writeReviewDrafts(workspace.repo, { ...owned, drafts: [], nextDraftId: 4 })
-  const cleared = await readReviewDrafts(
-    workspace.repo,
-    JOURNAL_OWNER.repo,
-    JOURNAL_OWNER.viewer,
-    7,
+  const body = 'needs a name'
+  // Both windows open the repository and read the journal, which is empty. Two
+  // windows then compose the same sentence on the same line of the same head:
+  // same anchor, same words, same revision, same account. Nothing in a payload
+  // can tell those two comments apart except the identity each was composed
+  // under, which is why it is minted where the draft is composed rather than
+  // counted from what the journal last held — a count read from the same empty
+  // journal by both windows hands both of them the same name.
+  assert.equal(
+    await readReviewDrafts(workspace.repo, JOURNAL_OWNER.repo, JOURNAL_OWNER.viewer, 7),
+    null,
+    'precondition: neither window has anything journalled',
   )
-  assert.equal(cleared?.nextDraftId, 4, 'the count comes back with the record')
-  assert.deepEqual(cleared?.drafts, [], 'and the record is the empty one that was written')
+  const first = draft({ id: newReviewDraftId(at, null), ref: at, body })
+  const second = draft({ id: newReviewDraftId(at, null), ref: at, body })
+  assert.notEqual(second.id, first.id, 'two compositions on one line are two identities')
 
-  // A record whose counter was lost — written by a build that predates it, or
-  // truncated — is not rewound below the identities its own drafts already
-  // carry, so the next name is still new.
+  // The first window sends it as a plain comment. GitHub applies the review and
+  // the response never arrives.
+  await writeReviewDrafts(workspace.repo, { ...owned, drafts: [first] })
+  await assert.rejects(
+    () =>
+      submitReview(workspace.repo, 7, {
+        event: 'COMMENT' as const,
+        body: '',
+        comparison: comparison(),
+        drafts: [first],
+      }),
+    { name: 'ReviewOutcomeUnknownError' },
+  )
+  assert.equal(writes.length, 1, 'and the comment is on GitHub, unacknowledged')
+
+  // The second window writes the same sentence again and approves this time.
+  // Its comment is not the first window's recovery: it was never sent, so
+  // adopting the settled record for it would clear words GitHub does not have
+  // and report an approval nobody made.
   await writeReviewDrafts(workspace.repo, {
     ...owned,
-    drafts: [draft({ id: 'src/app.ts:head:1-head:1#9', ref: at, body: 'one' })],
-    nextDraftId: 1,
+    drafts: [second],
+    updatedAt: '2026-09-23T10:05:00Z',
   })
-  const rewound = await readReviewDrafts(
-    workspace.repo,
-    JOURNAL_OWNER.repo,
-    JOURNAL_OWNER.viewer,
-    7,
+  const approved = await submitReview(workspace.repo, 7, {
+    event: 'APPROVE' as const,
+    body: 'approved',
+    comparison: comparison(),
+    drafts: [second],
+  })
+  assert.equal(writes.length, 2, 'the second window sends a review of its own')
+  assert.equal(approved.state, 'APPROVED', 'and the decision it asked for is the one recorded')
+  assert.deepEqual(
+    approved.delivered,
+    [second.id],
+    'the answer names the comment it carried, not the one the record holds',
   )
+  const posted = writes[1]?.body as { event: string; comments: Array<{ body: string }> }
+  assert.equal(posted.event, 'APPROVE', 'the request that left the app is the approval')
+  assert.equal(posted.comments.length, 1)
+  assert.equal(posted.comments[0]?.body, body)
+
+  // And the journal holds what the second window saved: the first window's
+  // draft is its own unsent work, and a save by one window never rewrites
+  // another one's comment into its own.
   assert.equal(
-    rewound?.nextDraftId,
-    10,
-    'a counter below a draft that already used the name is not believed',
+    (await readReviewDrafts(workspace.repo, JOURNAL_OWNER.repo, JOURNAL_OWNER.viewer, 7))?.drafts[0]
+      ?.id,
+    second.id,
+    'the second window saved its own draft, under its own identity',
   )
+})
+
+test('a journal written before identities were generated still reads and still submits', async (t) => {
+  const workspace = await reviewWorkspace()
+  t.after(workspace.dispose)
+  const patch = '@@ -1,2 +1,3 @@\n keep\n+added\n tail'
+  const entry = file({ diff: { kind: 'text', hunks: hunks(patch) } })
+  const hunk = textHunk(entry, 0)
+  const added = hunk.lines.findIndex((line) => line.side === 'head' && line.newLine !== null)
+  const at = refFor(hunk, added)
+  const { transport } = threadDouble({ files: [apiFile({ patch })] })
+  setGitHubTransport(transport)
+  t.after(() => setGitHubTransport(null))
+
+  // A record as an older build wrote it: the identity is the range and a small
+  // whole number, and the record carries a counter this build has no use for.
+  // It is unsent work somebody is still looking at, so it is read as written
+  // rather than refused or renumbered.
+  const legacyId = 'src/app.ts:head:1-head:1#1'
+  await writeFile(
+    join(workspace.repo, '.git', 'git-stacks-review-drafts.json'),
+    `${JSON.stringify(
+      {
+        version: 1,
+        records: [
+          {
+            number: 7,
+            repo: JOURNAL_OWNER.repo,
+            viewer: JOURNAL_OWNER.viewer,
+            comparison: comparison(),
+            drafts: [
+              {
+                id: legacyId,
+                ref: at,
+                startRef: null,
+                body: 'written by an older build',
+                createdAt: '2026-09-23T10:00:00Z',
+              },
+            ],
+            updatedAt: '2026-09-23T10:00:00Z',
+          },
+        ],
+      },
+      null,
+      2,
+    )}\n`,
+  )
+
+  const read = await readReviewDrafts(workspace.repo, JOURNAL_OWNER.repo, JOURNAL_OWNER.viewer, 7)
+  const stored = read?.drafts[0]
+  assert.equal(read?.drafts.length, 1, "the pending words are still the reviewer's")
+  assert.equal(stored?.id, legacyId, 'and they keep the identity they were written with')
+  assert.equal(stored?.body, 'written by an older build')
+
+  const sent = await submitReview(workspace.repo, 7, {
+    event: 'COMMENT' as const,
+    body: '',
+    comparison: comparison(),
+    drafts: [stored!],
+  })
+  assert.equal(sent.state, 'COMMENTED', 'and a stored identity still submits as itself')
+  assert.deepEqual(sent.delivered, [legacyId])
+
+  // A name minted now cannot be one of those, however the old record counted:
+  // there is no count left to continue.
+  assert.notEqual(newReviewDraftId(at, null), legacyId)
 })
 
 test('a comment edited after it was composed is sent again, not dropped as sent', async (t) => {
@@ -3577,7 +3688,6 @@ test('a draft that never left still recovers after the app is reopened', async (
     viewer: JOURNAL_OWNER.viewer,
     comparison: comparison(),
     drafts: [one],
-    nextDraftId: 2,
     updatedAt: '2026-09-23T10:00:00Z',
   })
   const submission = {
@@ -3918,7 +4028,6 @@ test('pending comments survive leaving the workspace and are bound to the head t
     viewer: JOURNAL_OWNER.viewer,
     comparison: comparison(),
     drafts: [draft({ id: 'd1', ref: refFor(hunk, added), body: 'still thinking about this' })],
-    nextDraftId: 1,
     updatedAt: '2026-09-23T10:00:00Z',
   }
 
@@ -3959,7 +4068,6 @@ test("one pull request's drafts are not another's", async (t) => {
     viewer: JOURNAL_OWNER.viewer,
     comparison: comparison(),
     drafts: [draft({ id: 'd1', ref: line, body: 'on seven' })],
-    nextDraftId: 1,
     updatedAt: '2026-09-23T10:00:00Z',
   })
   await writeReviewDrafts(workspace.repo, {
@@ -3968,7 +4076,6 @@ test("one pull request's drafts are not another's", async (t) => {
     viewer: JOURNAL_OWNER.viewer,
     comparison: comparison(),
     drafts: [draft({ id: 'd1', ref: line, body: 'on eight' })],
-    nextDraftId: 1,
     updatedAt: '2026-09-23T10:00:00Z',
   })
 
@@ -4004,7 +4111,6 @@ test('drafts are kept apart by repository and by account, not by pull request nu
     viewer: JOURNAL_OWNER.viewer,
     comparison: comparison(),
     drafts: [draft({ id: 'd1', ref: line, body: 'mine' })],
-    nextDraftId: 1,
     updatedAt: '2026-09-23T10:00:00Z',
   })
 
@@ -4044,7 +4150,6 @@ test('writing an empty list is what retires a sent review, so it is not offered 
     viewer: JOURNAL_OWNER.viewer,
     comparison: comparison(),
     drafts: [draft({ id: 'd1', ref: refFor(hunk, added), body: 'sent' })],
-    nextDraftId: 1,
     updatedAt: '2026-09-23T10:00:00Z',
   })
   assert.ok(
@@ -4058,7 +4163,6 @@ test('writing an empty list is what retires a sent review, so it is not offered 
     viewer: JOURNAL_OWNER.viewer,
     comparison: comparison(),
     drafts: [],
-    nextDraftId: 1,
     updatedAt: '2026-09-23T10:05:00Z',
   })
 
@@ -4082,7 +4186,6 @@ test('a draft is not offered again once the base branch moves under a fixed head
     viewer: JOURNAL_OWNER.viewer,
     comparison: written,
     drafts: [draft({ id: 'd1', ref: refFor(hunk, added), body: 'mine' })],
-    nextDraftId: 1,
     updatedAt: '2026-09-23T10:00:00Z',
   }
 
@@ -4184,7 +4287,6 @@ await writeReviewDrafts(repo, {
       createdAt: '2026-09-23T10:00:00Z',
     },
   ],
-  nextDraftId: 2,
   updatedAt: '2026-09-23T10:00:00Z',
 })
 process.stdout.write('written\\n')
@@ -4252,7 +4354,6 @@ test('a journal update waits for the lock another process holds instead of publi
     viewer: JOURNAL_OWNER.viewer,
     comparison: comparison(),
     drafts: [draft({ id: 'd1', ref: draftRef(3), body: 'before' })],
-    nextDraftId: 2,
     updatedAt: '2026-09-23T10:00:00Z',
   })
 
@@ -4265,7 +4366,6 @@ test('a journal update waits for the lock another process holds instead of publi
     viewer: JOURNAL_OWNER.viewer,
     comparison: comparison(),
     drafts: [draft({ id: 'd1', ref: draftRef(4), body: 'after' })],
-    nextDraftId: 2,
     updatedAt: '2026-09-23T10:05:00Z',
   })
 
@@ -4343,7 +4443,6 @@ test('a lock left behind by a killed window is refused, not taken from whoever h
     viewer: JOURNAL_OWNER.viewer,
     comparison: comparison(),
     drafts: [draft({ id: 'd1', ref: draftRef(3), body: 'before' })],
-    nextDraftId: 2,
     updatedAt: '2026-09-23T10:00:00Z',
   })
   // A pid that cannot be running: the lock names a window that was killed, so
@@ -4359,7 +4458,6 @@ test('a lock left behind by a killed window is refused, not taken from whoever h
         viewer: JOURNAL_OWNER.viewer,
         comparison: comparison(),
         drafts: [draft({ id: 'd1', ref: draftRef(4), body: 'after' })],
-        nextDraftId: 2,
         updatedAt: '2026-09-23T10:05:00Z',
       }),
     (error: Error) => {
@@ -4412,13 +4510,71 @@ test('a lock this build cannot read is refused rather than guessed at', async (t
         viewer: JOURNAL_OWNER.viewer,
         comparison: comparison(),
         drafts: [draft({ id: 'd1', ref: draftRef(3), body: 'never sent' })],
-        nextDraftId: 2,
         updatedAt: '2026-09-23T10:00:00Z',
       }),
     /whose owner cannot be identified/,
   )
   assert.equal(await readFile(`${journal}.lock`, 'utf8'), 'held by something else\n')
 })
+
+test(
+  'a lock that cannot be read at all refuses at once rather than spinning on it',
+  { timeout: 10_000 },
+  async (t) => {
+    const workspace = await reviewWorkspace()
+    t.after(workspace.dispose)
+    const journal = join(workspace.repo, '.git', 'git-stacks-review-drafts.json')
+    await writeReviewDrafts(workspace.repo, {
+      number: 7,
+      repo: JOURNAL_OWNER.repo,
+      viewer: JOURNAL_OWNER.viewer,
+      comparison: comparison(),
+      drafts: [draft({ id: 'd1', ref: draftRef(3), body: 'before' })],
+      updatedAt: '2026-09-23T10:00:00Z',
+    })
+    // The lock is there, and it is not something that can be read: a directory
+    // where the protocol puts a file. A writer that treats "I could not read it"
+    // as "it is not there" retries for ever against a lock that never goes away,
+    // holding a window on a save that will never complete and saying nothing
+    // about why. The one failure worth retrying is the lock being absent, which
+    // means the holder let go.
+    await mkdir(`${journal}.lock`)
+
+    await assert.rejects(
+      () =>
+        writeReviewDrafts(workspace.repo, {
+          number: 8,
+          repo: JOURNAL_OWNER.repo,
+          viewer: JOURNAL_OWNER.viewer,
+          comparison: comparison(),
+          drafts: [draft({ id: 'd2', ref: draftRef(4), body: 'after' })],
+          updatedAt: '2026-09-23T10:05:00Z',
+        }),
+      (error: Error) => {
+        // The refusal is bounded by the test's own timeout: a writer that retries
+        // an unreadable lock never answers at all, and this is the assertion that
+        // it answers.
+        assert.ok(error.message.includes(`${journal}.lock`), 'the refusal names the lock file')
+        assert.match(error.message, /a directory rather than a lock file/)
+        assert.match(error.message, /Nothing was written/)
+        assert.match(error.message, /Close every Git Stacks window/)
+        return true
+      },
+    )
+
+    // Nothing was taken, nothing was written, and what was already journalled is
+    // exactly as it was.
+    assert.ok(
+      (await readFile(journal, 'utf8')).includes('before'),
+      'the record already on disk is untouched',
+    )
+    assert.equal(
+      await readReviewDrafts(workspace.repo, JOURNAL_OWNER.repo, JOURNAL_OWNER.viewer, 8),
+      null,
+      'and the refused save left no record of its own',
+    )
+  },
+)
 
 /** An unresolved attempt exactly as a lost review response would record it. */
 function uncertain(id: string, number: number): ReviewUncertainWrite {

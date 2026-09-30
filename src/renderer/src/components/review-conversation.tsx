@@ -12,9 +12,9 @@ import type {
   ReviewThreadRead,
 } from '../../../shared/review-threads'
 import {
+  newReviewDraftId,
   REVIEW_EVENT_LABELS,
   REVIEW_EVENTS,
-  reviewDraftId,
   reviewDraftKey,
   reviewDraftLabel,
   reviewEventBlocked,
@@ -123,7 +123,7 @@ export interface ReviewConversationProps {
   selection: ReviewSelection | null
   onSelect: (selection: ReviewSelection) => void
   onClearSelection: () => void
-  onDraftChange: (drafts: ReviewDraft[], nextDraftId: number) => void
+  onDraftChange: (drafts: ReviewDraft[]) => void
   onReload: () => void
 }
 
@@ -169,17 +169,14 @@ export function ReviewConversation({
   // button stays dead even though the drafts and the error are still here.
   const [uncertain, setUncertain] = React.useState(false)
 
-  // Draft identities are minted, not derived from where a comment sits. The
-  // range cannot carry the identity: the same line carrying the same words is
-  // one draft the first time it is written and a different one every time
-  // after, and a settled record has to be able to tell those apart. So each new
-  // draft takes the next number, and the counter is journalled with the drafts
-  // so reopening the workspace never reissues one.
-  const nextId = React.useRef(drafts?.nextDraftId ?? 1)
-  React.useEffect(() => {
-    const persisted = drafts?.nextDraftId ?? 1
-    if (persisted > nextId.current) nextId.current = persisted
-  }, [drafts?.nextDraftId])
+  // Draft identities are minted where a draft is composed, not derived from
+  // where the comment sits and not counted from what the journal last held.
+  // The same line carrying the same words is one draft the first time and a
+  // different one every time after, and a settled record has to be able to tell
+  // those apart — including when the second one is written in another window,
+  // which read this same journal and would have counted from it as well. A
+  // generated name is unique where it is made, so nothing has to be allocated,
+  // persisted, or reclaimed for it to stay unique.
 
   const addDraft = () => {
     const ends = orderedEnds(files, selection)
@@ -187,25 +184,19 @@ export function ReviewConversation({
     const startRef = ends.first.line === ends.last.line ? null : ends.first
     const range = reviewDraftKey(ends.last, startRef)
     const draft: ReviewDraft = {
-      id: reviewDraftId(ends.last, startRef, nextId.current),
+      id: newReviewDraftId(ends.last, startRef),
       ref: ends.last,
       startRef,
       body: '',
       createdAt: new Date().toISOString(),
     }
-    nextId.current += 1
     // One pending comment per range: a second comment on lines that already have
     // one would submit as two threads the reviewer never meant to write. That is
     // about the range; the identity above is about this composition of it.
-    onDraftChange(
-      [
-        ...draftList.filter(
-          (entry) => reviewDraftKey(entry.ref, entry.startRef) !== range,
-        ),
-        draft,
-      ],
-      nextId.current,
-    )
+    onDraftChange([
+      ...draftList.filter((entry) => reviewDraftKey(entry.ref, entry.startRef) !== range),
+      draft,
+    ])
     onClearSelection()
   }
 
@@ -237,10 +228,7 @@ export function ReviewConversation({
       // are still the reviewer's unsent work and stay pending.
       const delivered = new Set(result.delivered ?? [])
       onDraftChange(
-        delivered.size === 0
-          ? []
-          : draftList.filter((draft) => !delivered.has(draft.id)),
-        nextId.current,
+        delivered.size === 0 ? [] : draftList.filter((draft) => !delivered.has(draft.id)),
       )
       onReload()
       setNotice(
@@ -281,17 +269,9 @@ export function ReviewConversation({
         staleCount={stale.length}
         disabled={sending}
         onChangeBody={(id, body) =>
-          onDraftChange(
-            draftList.map((draft) => (draft.id === id ? { ...draft, body } : draft)),
-            nextId.current,
-          )
+          onDraftChange(draftList.map((draft) => (draft.id === id ? { ...draft, body } : draft)))
         }
-        onRemove={(id) =>
-          onDraftChange(
-            draftList.filter((draft) => draft.id !== id),
-            nextId.current,
-          )
-        }
+        onRemove={(id) => onDraftChange(draftList.filter((draft) => draft.id !== id))}
       />
 
       <SubmitBar

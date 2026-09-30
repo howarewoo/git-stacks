@@ -411,14 +411,6 @@ function requireDraftRecord(value: unknown): ReviewDraftRecord {
     // the diff they were read from.
     comparison: requireComparison(record.comparison),
     drafts: record.drafts.map(requireDraft),
-    // The counter is a positive whole number, and it is floored at one so a
-    // record can never claim the identities an older one already used.
-    nextDraftId:
-      typeof record.nextDraftId === 'number' &&
-      Number.isInteger(record.nextDraftId) &&
-      record.nextDraftId > 0
-        ? record.nextDraftId
-        : 1,
     updatedAt: record.updatedAt,
   }
 }

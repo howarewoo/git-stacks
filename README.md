@@ -677,9 +677,18 @@ once and names the file and the condition under which removing it is safe:
 close every Git Stacks window for the repository, confirm none is open, then
 remove that one file, and the next write takes the lock itself. That step
 belongs to a person because whether somebody still has a window open is not a
-fact on disk. Records are never
-dropped to keep the file small — unsent words and unresolved-write guards both
-leave it only when they have been sent, cleared, or settled.
+fact on disk.
+
+Only one thing is worth trying again, and it is the one case that is not a
+refusal: a lock that is no longer there when the contender reads it was simply
+released, so the next attempt takes the name. Every other failure to read it —
+a lock this account may not open, or a path that is not a file — says nothing
+about the holder at all, and no waiting helps, so the write refuses immediately
+with the reason it could not be read and the same instruction about that one
+file. Retrying it would spin on a lock that never goes away while a window sits
+on a save that will not finish. Records are never dropped to keep the file small
+— unsent words and unresolved-write guards both leave it only when they have been
+sent, cleared, or settled.
 
 A draft record carries the whole comparison
 it was written at, plus the repository and the signed-in account it belongs to:
@@ -752,10 +761,21 @@ Checking a review on this revision is not enough on its own. A reviewer can send
 a comment on a line, then write the same words on the same line of the same head
 while approving instead of commenting, and every field the check compares — the
 line, the words, the account, the revision — reads identically for the two. So a
-pending comment is named by a number minted when it is written, not by the line it
-is on, and a recovery only looks at records that name this payload's comments.
-The number is kept in the journal beside the comments and outlives them, so the
-comment written after a reopen is never given a name the account has already used.
+pending comment is named by an identity minted where it is composed, not by the
+line it is on, and a recovery only looks at records that name this payload's
+comments.
+
+That identity is generated, not counted. A count is only unique if one process
+owns it, and the journal is read by every window of the repository: two windows
+that opened the same record and counted from the same number would mint one name
+for the same line, and a settled record naming it would then answer for the other
+window's comment — clearing words it never sent and reporting a decision GitHub
+never received. Nothing has to be allocated, persisted, or reclaimed for a
+generated name to stay unique, so the record keeps the words and nothing else,
+and a record whose drafts are all sent is dropped rather than kept as a counter.
+Identities minted before this — the range alone, or the range and a small whole
+number — are opaque strings too, so every stored draft still reads and submits,
+and none of them can be minted again.
 
 That name is recorded per comment, so a review is only ever evidence about the
 comments it was made of. Two comments sent together that land and go

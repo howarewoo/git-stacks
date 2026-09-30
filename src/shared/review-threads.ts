@@ -84,21 +84,29 @@ export interface ReviewDraftRecord {
   comparison: ReviewComparison
   drafts: ReviewDraft[]
   updatedAt: string
-  /**
-   * The next number to mint a draft identity from.
-   *
-   * A draft's identity has to survive being cleared and written again with the
-   * same words on the same line, or the second composition is indistinguishable
-   * from the first and a settled record answers for work nobody has sent. So the
-   * identity is minted once from a counter that is persisted with the record,
-   * not derived from where the comment sits: the same line and the same words
-   * are one draft the first time and a different one every time after.
-   *
-   * Ids minted before this existed are the range alone, which no longer collides
-   * with a generated one, so a record written by an older build starts at one
-   * without reusing anything.
-   */
-  nextDraftId: number
+}
+
+/**
+ * The identity a new draft is minted with: the range it covers, and a
+ * generated name.
+ *
+ * It is minted, not counted, because a count is only unique if exactly one
+ * process owns it. The journal that would hold the count is read by every
+ * window of the repository, so two windows that opened the same record each
+ * counted from the number they read and minted the same name for the same
+ * line. A settled record naming that one identity would then answer for the
+ * other window's comment — clearing words it never sent and reporting a
+ * decision GitHub never received. A generated name is unique where it is
+ * minted, so there is no counter to allocate, persist, or hand out in order,
+ * and a draft identity never depends on the state any other window last read.
+ *
+ * Names minted before this existed are the range alone or the range with a
+ * small whole number. All three are opaque strings, compared only with each
+ * other, so every stored identity stays readable and none of them can be
+ * minted a second time.
+ */
+export function newReviewDraftId(ref: ReviewLineRef, startRef: ReviewLineRef | null): string {
+  return `${reviewDraftKey(ref, startRef)}#${crypto.randomUUID()}`
 }
 
 /**
@@ -458,33 +466,8 @@ export function withReviewDraft(
     viewer: record?.viewer ?? '',
     comparison,
     drafts: drafts.length > REVIEW_DRAFTS_MAX ? drafts.slice(0, REVIEW_DRAFTS_MAX) : drafts,
-    // The counter never goes backwards, so an id is never reused after the draft
-    // it named has been cleared.
-    nextDraftId: Math.max(record?.nextDraftId ?? 1, nextReviewDraftNumber(draft.id)),
     updatedAt: now,
   }
-}
-
-/**
- * The number a minted draft id ends with, or zero for one minted before ids
- * were generated. A record is never rewound below what its own drafts have
- * already consumed, so a reload cannot reissue an identity that a settled
- * record still names.
- */
-export function nextReviewDraftNumber(id: string): number {
-  const at = id.lastIndexOf('#')
-  if (at < 0) return 0
-  const parsed = Number(id.slice(at + 1))
-  return Number.isInteger(parsed) && parsed > 0 ? parsed : 0
-}
-
-/** The identity a new draft is minted with: the range it covers, and a number. */
-export function reviewDraftId(
-  ref: ReviewLineRef,
-  startRef: ReviewLineRef | null,
-  n: number,
-): string {
-  return `${reviewDraftKey(ref, startRef)}#${n}`
 }
 
 export function withReviewDraftBody(
@@ -502,7 +485,6 @@ export function withReviewDraftBody(
     viewer: record?.viewer ?? '',
     comparison: record?.comparison ?? UNKNOWN_REVIEW_COMPARISON,
     drafts,
-    nextDraftId: record?.nextDraftId ?? 1,
     updatedAt: now,
   }
 }
@@ -519,7 +501,6 @@ export function withoutReviewDraft(
     viewer: record?.viewer ?? '',
     comparison: record?.comparison ?? UNKNOWN_REVIEW_COMPARISON,
     drafts,
-    nextDraftId: record?.nextDraftId ?? 1,
     updatedAt: now,
   }
 }
