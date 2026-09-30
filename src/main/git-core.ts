@@ -564,6 +564,26 @@ export async function runGitCapped(
 }
 
 /**
+ * The capped counterpart of `tryGit`. A read that legitimately fails — an
+ * unborn HEAD, an empty repository — answers `null` rather than rejecting, so
+ * a caller can ask one whole-repository question without forking per path.
+ */
+export async function tryGitCapped(
+  repoPath: string,
+  args: string[],
+  options: CappedOptions,
+): Promise<CappedResult | null> {
+  try {
+    return await runGitCapped(repoPath, args, options)
+  } catch (error) {
+    if (isExitCode(error, 1) || isExitCode(error, 2) || isExitCode(error, 128)) {
+      return null
+    }
+    throw error
+  }
+}
+
+/**
  * The working-tree listing used by snapshots. A repository with 100k changed
  * files is cut on a whole-record boundary at `MAX_STATUS_BYTES` and reports
  * `truncated` so the renderer states the limit instead of silently dropping

@@ -213,6 +213,25 @@ behind counts can be unknown.
 `snapshot.limits.branchesSkipped` counts branches with incomplete analysis;
 the Branches view states this limit rather than claiming an exact comparison.
 
+**One index and HEAD-tree read instead of one process per batch of paths.** To
+mark submodules and sparse-excluded paths, `getSnapshot` asked `getIndexEntries`
+and `getHeadGitlinks` about every changed path. Each of those split the path
+list into batches of at most 1024 pathspecs and forked one process per batch,
+sequentially, so a working tree with 100,000 changed files forked ~200
+processes that mostly returned nothing: the paths were untracked, and the
+benchmark fixture has no commit, so `HEAD` had no tree to read at all. Both now
+read the whole repository once in a single process and filter in memory:
+`git ls-files -v --stage -z` for the index, and `git ls-tree -r -d -z HEAD`,
+which recurses only into directories and so reports gitlinks without listing
+every blob. The two reads are independent, so `getSnapshot` runs them together
+and settles both before a rejection escapes. The batched pathspec read is still
+used when it answers in a single process, so a caller that asks about one file —
+a diff preview, a staging guard — does not read a large repository's whole
+index. Both whole-repository reads stay capped at `MAX_STATUS_BYTES`: a cap that
+truncates them falls back to the batched pathspec read for the paths it did not
+resolve, so an unread path is never reported as an ordinary file. An unborn
+`HEAD` is a complete answer rather than a truncated one, and is not retried.
+
 **Streaming reads instead of buffer-then-copy.** `executeCapped` retains at most
 its byte cap while the child process runs. Cancellation sends TERM, escalates
 when necessary, and waits for the process to close before releasing the read

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import { promises as fs } from 'node:fs'
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
@@ -279,18 +279,79 @@ test('a huge changed-file listing is bounded and reported instead of hanging', a
   }
 })
 
-test('snapshot enriches changed files across multiple bounded pathspec batches', async () => {
+test('a bulk changed-file listing still classifies submodules', async () => {
   const { root, repo, git } = await repository()
   try {
+    // Enough changed paths that a snapshot reads the whole index and the whole
+    // HEAD tree once instead of forking a process per batch of pathspecs.
     const paths = Array.from({ length: 1100 }, (_, index) => `tracked-${index}.txt`)
     await Promise.all(paths.map((filePath) => writeFile(join(repo, filePath), 'before\n')))
     git('add', '.')
     git('commit', '-m', 'Tracked files')
+    // A nested repository is recorded as a gitlink. `staged` is only in the
+    // index, `indexed` is in both, and `headOnly` left the index while HEAD
+    // still records it, so each one has to be classified by a different read.
+    const nested = async (dir: string, marker: string) => {
+      const inner = join(repo, dir)
+      await mkdir(inner, { recursive: true })
+      const run = (...args: string[]) =>
+        execFileSync('git', ['-C', inner, ...args], { encoding: 'utf8' })
+      run('init', '-b', 'main')
+      run('config', 'user.name', 'Perf fixture')
+      run('config', 'user.email', 'perf@example.invalid')
+      // Distinct content keeps the three commits distinct, so Git reports the
+      // removed gitlink as a deletion rather than pairing it with the added
+      // one as a rename and hiding it from the listing under its new path.
+      await writeFile(join(inner, 'inner.txt'), `${marker}\n`)
+      run('add', '.')
+      run('commit', '-m', marker)
+      return run
+    }
+    const indexed = await nested('vendor/indexed', 'indexed')
+    await nested('vendor/headOnly', 'head-only')
+    git('add', '.')
+    git('commit', '-m', 'Add gitlinks')
+    // Staged but never committed, so only the index records this gitlink.
+    await nested('vendor/staged', 'staged')
+    git('add', 'vendor/staged')
+    // Every one of the 1100 tracked files is now a changed path, which is what
+    // pushes the snapshot onto the whole-repository read. Moving the inner
+    // repository past the recorded commit makes the index gitlink a changed
+    // path, and dropping the other from the index leaves a staged deletion that
+    // only `HEAD` still records as a gitlink.
     await Promise.all(paths.map((filePath) => writeFile(join(repo, filePath), 'after\n')))
+    await writeFile(join(repo, 'vendor/indexed/second.txt'), 'second\n')
+    indexed('add', '.')
+    indexed('commit', '-m', 'Advance')
+    git('rm', '--cached', '-q', 'vendor/headOnly')
+    await rm(join(repo, 'vendor/headOnly'), { recursive: true, force: true })
+
     const snapshot = await getSnapshot(repo)
-    assert.equal(snapshot.files.length, paths.length)
+    const byPath = new Map(snapshot.files.map((file) => [file.path, file]))
     assert.equal(snapshot.limits.filesTruncated, false)
-    assert.ok(snapshot.files.every((file) => !file.submodule && !file.sparseExcluded))
+    assert.ok(byPath.has('vendor/staged'), 'the staged gitlink is listed')
+    assert.ok(byPath.has('vendor/indexed'), 'the changed index gitlink is listed')
+    assert.ok(byPath.has('vendor/headOnly'), 'the staged deletion of the gitlink is listed')
+    assert.equal(
+      byPath.get('vendor/staged')?.submodule,
+      true,
+      'only the index records this gitlink, so the index read must classify it',
+    )
+    assert.equal(
+      byPath.get('vendor/indexed')?.submodule,
+      true,
+      'a gitlink in the index stays a submodule in a bulk listing',
+    )
+    assert.equal(
+      byPath.get('vendor/headOnly')?.submodule,
+      true,
+      'a gitlink that left the index is still a submodule while HEAD records it',
+    )
+    assert.equal(
+      byPath.get('tracked-0.txt')?.submodule,
+      undefined,
+      'an ordinary changed file is not reported as a submodule',
+    )
   } finally {
     await rm(root, { recursive: true, force: true })
   }

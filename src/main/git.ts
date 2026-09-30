@@ -4668,13 +4668,24 @@ export async function getSnapshot(
     return allowed
   }
 
-  const indexEntries = await getIndexEntries(
-    root,
-    files.flatMap((file) => (file.originalPath ? [file.path, file.originalPath] : [file.path])),
-  )
-  const headGitlinks = await getHeadGitlinks(
-    root,
-    files.map((file) => file.path),
+  // The index and the HEAD tree are independent reads, so they run together
+  // rather than one after the other. A rejected read must not leave its sibling
+  // running, so every read is awaited before the rejection escapes.
+  const classification = [
+    getIndexEntries(
+      root,
+      files.flatMap((file) => (file.originalPath ? [file.path, file.originalPath] : [file.path])),
+    ),
+    getHeadGitlinks(
+      root,
+      files.map((file) => file.path),
+    ),
+  ] as const
+  const [indexEntries, headGitlinks] = await Promise.all(classification).catch(
+    async (error: unknown) => {
+      await Promise.allSettled(classification)
+      throw error
+    },
   )
   for (const file of files) {
     const entry = indexEntries.get(file.path)
