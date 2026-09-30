@@ -180,6 +180,13 @@ never applied to the one it now shows:
 - Cancelling a file view also stops its fingerprint scan and waits for both
   diff commands and the fingerprint task to settle before the next repository
   operation starts; mutation preflight reads remain non-cancelable.
+- A mutation is refused only while another mutation or a repository switch is
+  pending, never because a read is still being answered. Reads and writes share
+  one queue, so a mutation submitted during a read runs after it, and no other
+  write or switch can interleave with it; what the action then checks is that
+  action's own business, unchanged by the wait. A repository switch refuses
+  mutations for as long as it is pending, so an action asked for against the
+  repository being left cannot land on the one the window opens next.
 
 ### Documented limits
 
