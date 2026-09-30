@@ -110,6 +110,8 @@ import {
 import { loadSettingsPolicy } from './settings-service'
 import {
   configuredHostContext,
+  EXTERNAL_LINK_REFUSAL,
+  externalGitHubLink,
   forgetHost,
   GITHUB_DOTCOM_HOST,
   githubHostContext,
@@ -429,6 +431,30 @@ function configuredHost(): GitHubHostContext {
   // One resolver for every host question in the main process, so an absent host
   // is always github.com rather than an empty one.
   return configuredHostContext(currentSettings?.github.host)
+}
+
+/**
+ * The hosts whose links this installation may hand to the operating system.
+ *
+ * These are the hosts the app already talks to, not the hosts a link names: the
+ * configured host, which is github.com unless an enterprise host was chosen,
+ * and, when a repository is open, the host that owns its origin. The second one
+ * is what keeps a repository cloned from an enterprise host usable while the
+ * app is pointed somewhere else: its pull request, issue, and stack links all
+ * live on that host, and its API requests already go there.
+ */
+async function trustedExternalLinkHosts(): Promise<GitHubHostContext[]> {
+  const hosts = [configuredHost()]
+  if (!activeRepository) return hosts
+  try {
+    const remote = parseRemote(await getConfigValue(activeRepository, 'remote.origin.url'))
+    const owner = remoteHostContext(remote)
+    if (owner && owner.host !== hosts[0].host) hosts.push(owner)
+  } catch {
+    // An origin that cannot be read names no host, so the configured host is
+    // the whole of what this install will open.
+  }
+  return hosts
 }
 
 /** A sign-in belongs to one host, so choosing another host drops the old one. */
@@ -1441,18 +1467,12 @@ function installHandlers() {
   })
   ipcMain.handle('external:open', async (event, value: unknown) => {
     validateSender(event)
-    if (typeof value !== 'string') throw new Error('Invalid GitHub URL.')
-    const url = new URL(value)
-    if (url.protocol !== 'https:' || url.username || url.password) {
-      throw new Error('Only HTTPS links on a configured GitHub host can be opened.')
-    }
-    // The host is validated as a whole, port included, so a link to a GitHub
-    // Enterprise Server host served from a custom port is opened on the port it
-    // was given, while a path, a query aimed elsewhere, or a bad host is refused.
-    if (!validateGitHubHostInput(url.host).ok) {
-      throw new Error('Only HTTPS links on a configured GitHub host can be opened.')
-    }
-    await shell.openExternal(url.href)
+    // Trust is decided by the hosts this installation already speaks to, never
+    // by the shape of the link. A host that is only spelled like one of them is
+    // a different host, and a link to it is refused the same as any other.
+    const link = externalGitHubLink(value, await trustedExternalLinkHosts())
+    if (!link.ok) throw new Error(link.message)
+    await shell.openExternal(link.href)
   })
   // The capability matrix for the host this installation is pointed at. It is
   // produced by probing that host, so a host that has never answered reports

@@ -188,6 +188,49 @@ export function configuredHostContext(value: unknown): GitHubHostContext {
   return githubHostContext(parsed.ok && parsed.host ? parsed.host : GITHUB_DOTCOM_HOST)
 }
 
+/** Said once, wherever a link is refused, so the gate has a single voice. */
+export const EXTERNAL_LINK_REFUSAL = 'Only HTTPS links on a configured GitHub host can be opened.'
+
+/** A link this installation is willing to hand to the operating system. */
+export type ExternalGitHubLink = { ok: true; href: string } | { ok: false; message: string }
+
+const REFUSE_LINK: ExternalGitHubLink = {
+  ok: false,
+  message: EXTERNAL_LINK_REFUSAL,
+}
+
+/**
+ * Decides whether a link may be opened outside the app.
+ *
+ * Trust is never read off the link. A value is opened only when it is HTTPS,
+ * carries no credentials, names a usable GitHub host, and that host is one this
+ * installation already speaks to — the public host, the host the person
+ * configured, or the host that owns the open repository's own origin. The host
+ * is compared whole, port included and nothing else relaxed, so a foreign host,
+ * a look-alike that merely ends in a trusted name, and a configured enterprise
+ * host reached on a different port are all refused, while that host's own
+ * links — on the port it was configured with — keep working.
+ */
+export function externalGitHubLink(
+  value: unknown,
+  trusted: readonly GitHubHostContext[],
+): ExternalGitHubLink {
+  if (typeof value !== 'string' || !value) return REFUSE_LINK
+  let url: URL
+  try {
+    url = new URL(value)
+  } catch {
+    return REFUSE_LINK
+  }
+  if (url.protocol !== 'https:' || url.username || url.password) return REFUSE_LINK
+  // The host has to be one this build can name at all before any comparison
+  // against a trusted host means anything: `url.host` is the parsed name, port
+  // included, so it is the same string a host context carries.
+  if (!validateGitHubHostInput(url.host).ok) return REFUSE_LINK
+  if (!trusted.some((context) => context.host === url.host)) return REFUSE_LINK
+  return { ok: true, href: url.href }
+}
+
 /**
  * The stacks resource is only served on the preview API version, so the header
  * is built when a request is made rather than at module load: a module graph

@@ -11,6 +11,8 @@ import {
   hostStatus,
   GITHUB_DOTCOM_API_BASE,
   GITHUB_DOTCOM_WEB_ORIGIN,
+  EXTERNAL_LINK_REFUSAL,
+  externalGitHubLink,
   githubHostContext,
   probeGitHubHost,
   probeNativeStacksCapability,
@@ -710,6 +712,100 @@ test('a host on the default HTTPS port is one host, not two', () => {
   assert.equal(configuredHostContext('ghe.example.com').host, 'ghe.example.com')
   assert.equal(configuredHostContext('github.com:443').dotcom, true)
   assert.equal(githubHostContext('ghe.example.com:443').apiBase, 'https://ghe.example.com/api/v3')
+})
+
+test('a link is opened only on a host this installation already speaks to', () => {
+  const publicInstall = [configuredHostContext(null)]
+  const opened = (value: unknown) => {
+    const link = externalGitHubLink(value, publicInstall)
+    return link.ok ? link.href : null
+  }
+  // A host this install does not speak to, however much it resembles one, and
+  // every shape that is not an HTTPS link at all.
+  for (const refused of [
+    'https://gitlab.com/howarewoo/git-stacks',
+    'https://github.com.evil.example/howarewoo/git-stacks',
+    'https://evil.example/howarewoo/github.com',
+    'https://notgithub.com/howarewoo/git-stacks',
+    'https://gist.github.com/howarewoo/1',
+    'https://api.github.com/repos/howarewoo/git-stacks',
+    'https://github.com./howarewoo/git-stacks',
+    'https://ghe.example.com/howarewoo/git-stacks',
+    'http://github.com/howarewoo/git-stacks',
+    'https://user:token@github.com/howarewoo/git-stacks',
+    'https://[::1]/howarewoo/git-stacks',
+    'file:///etc/passwd',
+    'javascript:alert(1)',
+    'not a url',
+    '',
+    42,
+    null,
+  ]) {
+    assert.equal(opened(refused), null, `${String(refused)} is refused`)
+  }
+  // The public host is the one this build's own links use.
+  assert.equal(
+    opened('https://github.com/howarewoo/git-stacks/pull/1'),
+    'https://github.com/howarewoo/git-stacks/pull/1',
+  )
+  assert.equal(opened('https://github.com'), 'https://github.com/')
+  assert.equal(opened('https://GITHUB.COM/howarewoo'), 'https://github.com/howarewoo')
+  assert.equal(
+    opened('https://login.github.com/login/device'),
+    null,
+    'the sign-in page of the public host is trusted; another host on it is not',
+  )
+})
+
+test('a configured enterprise host is trusted on the port it was configured with, and on no other', () => {
+  const onCustomPort = [configuredHostContext('ghe.example.com:8443')]
+  const onDefaultPort = [configuredHostContext('ghe.example.com')]
+  assert.deepEqual(externalGitHubLink('https://ghe.example.com:8443/o/r/pull/1', onCustomPort), {
+    ok: true,
+    href: 'https://ghe.example.com:8443/o/r/pull/1',
+  })
+  // The port is part of the host: the same name on another port is another
+  // host, and a host that was configured with one is not reachable without it.
+  for (const refused of [
+    'https://ghe.example.com/o/r/pull/1',
+    'https://ghe.example.com:9999/o/r/pull/1',
+    'https://ghe.example.com:443/o/r/pull/1',
+  ]) {
+    assert.equal(
+      externalGitHubLink(refused, onCustomPort).ok,
+      false,
+      `${refused} is not the configured host`,
+    )
+  }
+  assert.equal(
+    externalGitHubLink('https://ghe.example.com/o/r/pull/1', onDefaultPort).ok,
+    true,
+    'a host configured without a port is reached on the default one',
+  )
+  // Choosing an enterprise host is not choosing the public one instead.
+  assert.equal(
+    externalGitHubLink('https://github.com/howarewoo/git-stacks', onCustomPort).ok,
+    false,
+    'the public host is not a configured host here',
+  )
+})
+
+test('a repository on its own host is trusted only while that host is in the set', () => {
+  const configured = [configuredHostContext(null)]
+  const withRepository = [...configured, configuredHostContext('ghe.example.com:8443')]
+  const link = 'https://ghe.example.com:8443/howarewoo/git-stacks/pull/1'
+  assert.equal(externalGitHubLink(link, configured).ok, false)
+  assert.deepEqual(externalGitHubLink(link, withRepository), { ok: true, href: link })
+  // The same host name reached on a port the origin never named stays refused.
+  assert.equal(
+    externalGitHubLink('https://ghe.example.com/howarewoo/git-stacks', withRepository).ok,
+    false,
+  )
+  // An installation that speaks to no host opens nothing at all.
+  assert.deepEqual(externalGitHubLink('https://ghe.example.com:8443/x', []), {
+    ok: false,
+    message: EXTERNAL_LINK_REFUSAL,
+  })
 })
 
 test('a host that signs in again is not handed the transport of the sign-in it retired', () => {
