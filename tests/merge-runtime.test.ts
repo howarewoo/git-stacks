@@ -197,8 +197,8 @@ test(
           layer.queue?.outcome ?? null,
         ]),
         [
-          [prFor(accepted, 'parent').number, 'enqueued', 'queued'],
-          [prFor(accepted, 'child').number, 'enqueued', 'queued'],
+          [prFor(accepted, 'parent').number, 'enqueued', 'unconfirmed'],
+          [prFor(accepted, 'child').number, 'enqueued', 'unconfirmed'],
         ],
         'the enqueue and the queue evidence it carries are reported on the first read',
       )

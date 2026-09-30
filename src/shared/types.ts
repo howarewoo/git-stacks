@@ -241,8 +241,13 @@ export type MergeMethod = 'merge' | 'squash' | 'rebase'
  * is the only documented view of a merge queue: an `enqueued` result means the pull request
  * joined one and, as the documentation states, that result never changes afterwards, so a
  * later read of the pull request itself is the only later signal.
+ *
+ * `unconfirmed` is what a pull request that is still open reports. GitHub ejects a pull
+ * request from a queue after failed required checks or a timeout without closing it, so an
+ * open pull request proves neither that the queue still holds it nor that it left: it is
+ * reported as unconfirmed rather than as a membership that was never published.
  */
-export type MergeQueueOutcome = 'pending' | 'queued' | 'merged' | 'dropped'
+export type MergeQueueOutcome = 'pending' | 'unconfirmed' | 'merged' | 'dropped'
 
 /**
  * What GitHub reported for one accepted asynchronous merge request. A request is not a

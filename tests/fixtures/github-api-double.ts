@@ -612,6 +612,17 @@ function handleRest(
           },
         }
       const queued = action === 'merge_queue' || (action === 'default' && state.mergeQueue === true)
+      // The documented `200`: this pull request is already in a merge queue, so the result
+      // is terminal and GitHub hands back no request identity to read it through.
+      if (queued && state.asyncMergeAlreadyQueued) {
+        return {
+          status: 200,
+          body: {
+            status: 'enqueued',
+            details: { message: state.asyncMergeResult?.message ?? 'Already in the merge queue' },
+          },
+        }
+      }
       const uuid = `fixture-${number}`
       state.asyncMerge = {
         number,

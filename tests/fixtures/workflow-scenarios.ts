@@ -390,7 +390,15 @@ export const syncPreview: StackPreview = {
   },
 }
 
-/** What a read-only refresh reports: one pull request still in the queue, one still running. */
+/**
+ * The sentence a read contributes for a pull request GitHub accepted into a queue. It is
+ * named because a later read swaps it for what the queue did, and a pull request that is
+ * still open says nothing about membership either way.
+ */
+export const mergeStatusQueueSentence =
+  'Pull request #40 joined the merge queue; whether it is still there is unconfirmed, because GitHub publishes no later state for it.'
+
+/** What a read-only refresh reports: one pull request the queue took, one still running. */
 export const mergeStatus: MergeStatus = {
   layers: [
     {
@@ -398,9 +406,13 @@ export const mergeStatus: MergeStatus = {
       pullRequest: 40,
       status: 'enqueued',
       detail:
-        'In the merge queue since 2026-09-29T10:00:00.000Z; refresh to read what the queue did with it',
+        'GitHub accepted this enqueue at 2026-09-29T10:00:00.000Z; this pull request is still open, which does not say whether the queue still holds it',
       mergedOid: null,
-      queue: { configured: true, outcome: 'queued', requestedAt: '2026-09-29T10:00:00.000Z' },
+      queue: {
+        configured: true,
+        outcome: 'unconfirmed',
+        requestedAt: '2026-09-29T10:00:00.000Z',
+      },
       requestUuid: 'fixture-queued-40',
     },
     {
@@ -414,8 +426,27 @@ export const mergeStatus: MergeStatus = {
       requestUuid: 'fixture-pending-41',
     },
   ],
-  message:
-    'GitHub is still running the merge request for pull request #41. Pull request #40 is in the merge queue.',
+  message: `GitHub is still running the merge request for pull request #41. ${mergeStatusQueueSentence}`,
+}
+
+/**
+ * What a reopened dialog reads after GitHub refused the merge. A terminal `failed` result
+ * never changes, so the read keeps the refusal and GitHub's own reason instead of reporting
+ * an operation that is neither running nor queued.
+ */
+export const failedMergeStatus: MergeStatus = {
+  layers: [
+    {
+      branch: 'feature/lifecycle-open',
+      pullRequest: 42,
+      status: 'failed',
+      detail: 'Required review is missing',
+      mergedOid: null,
+      queue: null,
+      requestUuid: 'fixture-refused-42',
+    },
+  ],
+  message: 'GitHub refused the merge request for pull request #42.',
 }
 
 export const leasePreview: PushPreview = {

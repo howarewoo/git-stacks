@@ -41,4 +41,24 @@ test.describe('Merge reads after a run', () => {
     await dialog.getByRole('button', { name: 'Refresh what GitHub reports' }).click()
     await expect(dialog.getByText('Merged on GitHub as 4444444444')).toBeVisible()
   })
+
+  test('a refused merge stays failed on reopen, with the reason GitHub gave', async ({ page }) => {
+    await openGallery(page, { scenario: 'pull-requests-merge-refused' })
+    await page.getByRole('button', { name: 'Preview PR merge', exact: true }).first().click()
+    const dialog = page.getByRole('dialog', { name: 'Merge pull request' })
+    await expect(dialog).toBeVisible({ timeout: 10_000 })
+    await settle(page)
+    // A terminal `failed` result never changes, so a reopened dialog has to present the
+    // refusal as the failure it is, still carrying GitHub's own reason. `InlineAlert` only
+    // carries `role="alert"` for an error tone, so this also proves the refusal is presented
+    // as an error rather than as the success a fallback would have produced.
+    const refusal = dialog.getByRole('alert')
+    await expect(refusal).toContainText('Required review is missing')
+    await expect(dialog.getByText('failed', { exact: true })).toBeVisible()
+    await expect(dialog.getByText('GitHub reports no further change')).toHaveCount(0)
+
+    // Reading again answers with the same refusal: no later read quietly resolves it.
+    await dialog.getByRole('button', { name: 'Refresh what GitHub reports' }).click()
+    await expect(dialog.getByRole('alert')).toContainText('Required review is missing')
+  })
 })

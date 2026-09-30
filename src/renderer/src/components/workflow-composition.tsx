@@ -426,7 +426,7 @@ const mergeLayerPresentation: Record<
 > = {
   pending: { label: 'running', tone: 'info' },
   merged: { label: 'merged', tone: 'success' },
-  enqueued: { label: 'in the queue', tone: 'info' },
+  enqueued: { label: 'enqueued', tone: 'info' },
   'not-requested': { label: 'not requested', tone: 'info' },
   'not-merged': { label: 'not merged', tone: 'warning' },
   failed: { label: 'failed', tone: 'danger' },
@@ -436,7 +436,9 @@ const mergeLayerPresentation: Record<
  * The asynchronous merge API is GitHub's only documented view of a merge queue, and its
  * `enqueued` result is final: it never changes when the queue later merges or drops the
  * group. So the text says what is known and where the answer comes from, rather than
- * inventing a queue state GitHub never published.
+ * inventing a queue state GitHub never published: GitHub ejects a pull request whose
+ * checks fail or whose wait times out without closing it, and a still-open pull request is
+ * therefore an unconfirmed membership, not one.
  */
 function queueDetail(queue: NonNullable<MergeLayerResult['queue']>): string {
   if (queue.outcome === 'merged') return 'The merge queue landed this pull request.'
@@ -444,8 +446,8 @@ function queueDetail(queue: NonNullable<MergeLayerResult['queue']>): string {
     return 'The merge queue did not land this pull request: it is closed without merging. Close it out locally and enqueue again once the failing rule is resolved.'
   if (queue.outcome === 'pending')
     return 'GitHub accepted this merge request and has not reported a result for it. Refresh to read the request again.'
-  if (queue.outcome === 'queued')
-    return 'Queued. GitHub keeps the enqueued result final, so this pull request is the record: it reports merged once the queue lands it.'
+  if (queue.outcome === 'unconfirmed')
+    return 'GitHub accepted this enqueue and publishes no state after it, so an open pull request cannot be told apart from one the queue ejected. Its timeline says why it left.'
   return 'Queued, and this pull request reports no state GitHub published.'
 }
 

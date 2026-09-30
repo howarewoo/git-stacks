@@ -9,6 +9,7 @@ import type {
 } from '../../../src/shared/types'
 import {
   blockedRestackPreview,
+  failedMergeStatus,
   openPullRequest,
   pausedRestackProgress,
   restackPreview,
@@ -434,6 +435,17 @@ const shiftedStashes: Stash[] = [
   },
 ]
 
+/** The one open, mergeable pull request, reused by the merge read-back scenario. */
+const lifecycleOpenBranch = local({
+  name: 'feature/lifecycle-open',
+  current: true,
+  parent: 'main',
+  parentTip: oid('local:main'),
+  ahead: 1,
+  pr: pullRequestFixtures[0],
+  subject: 'Open pull request branch',
+})
+
 const lifecycleBranches: Branch[] = [
   mainBranch,
   local({
@@ -443,15 +455,7 @@ const lifecycleBranches: Branch[] = [
     pr: pullRequestFixtures[1],
     subject: 'Draft pull request branch',
   }),
-  local({
-    name: 'feature/lifecycle-open',
-    current: true,
-    parent: 'main',
-    parentTip: oid('local:main'),
-    ahead: 1,
-    pr: pullRequestFixtures[0],
-    subject: 'Open pull request branch',
-  }),
+  lifecycleOpenBranch,
   local({
     name: 'feature/lifecycle-closed',
     parent: 'main',
@@ -731,6 +735,18 @@ export const scenarios: Record<ScenarioName, FixtureScenario> = {
         },
       ],
     },
+  },
+
+  'pull-requests-merge-refused': {
+    name: 'pull-requests-merge-refused',
+    summary: 'A reopened merge dialog whose earlier request GitHub refused.',
+    snapshot: repository({
+      branches: [mainBranch, lifecycleOpenBranch],
+      currentBranch: 'feature/lifecycle-open',
+      pullRequests: [pullRequestFixtures[0]],
+    }),
+    recentRepositories,
+    mergeStatus: failedMergeStatus,
   },
 
   'stash-stable-oid': {

@@ -333,8 +333,10 @@ export async function recordMergeObservation(
  * pull request itself, because the documentation is explicit that an `enqueued` result is
  * final and does not change when the queue later merges or drops the group. A pull request
  * that reports itself merged was landed; one that was closed without merging was dropped by
- * the queue or closed underneath it; one still open was neither, and GitHub publishes no
- * further state for it, so that fact is shown rather than guessed at.
+ * the queue or closed underneath it; one still open is neither, and GitHub publishes no
+ * further state for it, so membership is reported as unconfirmed instead of being guessed:
+ * GitHub ejects a pull request whose required checks fail or whose wait times out without
+ * closing it, and the pull request's own timeline is where it says why.
  */
 export function mergeQueueState(
   observation: MergeQueueObservation | undefined,
@@ -352,7 +354,7 @@ export function mergeQueueState(
       ? 'dropped'
       : observation.outcome === 'pending'
         ? 'pending'
-        : 'queued'
+        : 'unconfirmed'
   return {
     configured: true,
     outcome,

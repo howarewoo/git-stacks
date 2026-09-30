@@ -232,6 +232,12 @@ export interface GitHubFixtureState {
    * running. Cleared again to let that same request report its result.
    */
   asyncMergeStaysPending?: boolean
+  /**
+   * Answers a queued merge request with the documented immediate `200` instead of a `202`:
+   * the pull request is already in the queue, so the result is terminal and carries no
+   * request UUID to poll.
+   */
+  asyncMergeAlreadyQueued?: boolean
   asyncMerge?: {
     number: number
     sha: string

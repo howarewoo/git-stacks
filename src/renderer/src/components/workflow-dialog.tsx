@@ -2281,11 +2281,13 @@ export function WorkflowDialog({
                     } from this and earlier merge requests`}
                     progress={{
                       action: 'default',
-                      status: mergeStatus!.layers.some((layer) => layer.status === 'pending')
-                        ? 'running'
-                        : mergeStatus!.layers.some((layer) => layer.status === 'enqueued')
-                          ? 'queued'
-                          : 'succeeded',
+                      status: mergeStatus!.layers.some((layer) => layer.status === 'failed')
+                        ? 'failed'
+                        : mergeStatus!.layers.some((layer) => layer.status === 'pending')
+                          ? 'running'
+                          : mergeStatus!.layers.some((layer) => layer.status === 'enqueued')
+                            ? 'queued'
+                            : 'succeeded',
                       layers: mergeStatus!.layers,
                       message: mergeStatus!.message,
                     }}

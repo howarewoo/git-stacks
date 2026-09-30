@@ -24,6 +24,7 @@ typechecks these test consumers as well as the application.
 
 Stale-preview publishing tests assert rejection and unchanged local and remote
 refs. Diagnostic wording is not part of that behavioral contract.
+
 ## Live local and remote freshness
 
 The open repository updates itself. Local Git work done in a terminal — a
@@ -102,12 +103,22 @@ to a stack, and the operation is worth knowing about from the outside:
   pull request state a read confirmed, so a crash, a restart, an expired result,
   or a refresh that cannot reach GitHub still reports what was confirmed — merged,
   enqueued, or failed with GitHub's reason.
-- A merge queue has no published position or ejection feed, so what the queue
-  did is read back from the pull requests themselves: merged, still queued, or
-  dropped when it was closed without merging. A queue is offered for a base ref
-  once GitHub has accepted an enqueue for it, and not before. A pull request that
+- A merge queue has no published position or ejection feed, and an `enqueued`
+  result never changes afterwards, so what the queue did is read back from the
+  pull requests themselves: merged, dropped when it was closed without merging,
+  or unconfirmed while it is still open. GitHub ejects a pull request whose
+  required checks fail or whose wait times out without closing it, and it
+  publishes no membership of its own, so an open pull request is never reported
+  as one the queue is still holding. A queue is offered for a base ref once
+  GitHub has accepted an enqueue for it, and not before. A pull request that
   GitHub could not be asked about keeps what a read last confirmed; a read that
   failed is never reported as a queue still holding the group.
+- A terminal result is written down even when GitHub returns no request UUID,
+  which is what the immediate `200` for a pull request that is already merged or
+  already in a queue carries. Nothing is polled for an identity GitHub never
+  issued, and the accepted enqueue still proves the queue for that base ref.
+- A merge GitHub refused stays a failure on every later read, with GitHub's own
+  reason, instead of being summarised as an operation that changed nothing.
 - GitHub owns what happens to a merged pull request. Git Stacks never deletes
   or retargets a local branch for you, and any base GitHub moved is reported
   for you to restack and publish.

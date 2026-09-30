@@ -4986,11 +4986,16 @@ function revalidateMergeMembership(merge: MergePreview, data: GitHubResult): voi
 /**
  * Record one accepted request against every pull request it covers, so its result is readable
  * again after a refresh, a reopened dialog, or a restart.
+ *
+ * A terminal result is recorded even when GitHub returned no UUID: the documented `200` for a
+ * pull request that is already merged or already queued answers with the result alone, and
+ * that result and the base ref it was accepted for are the only evidence the queue exists.
  */
 async function recordMergeRequest(
   repoPath: string,
   input: {
-    request: { pullRequest: number; uuid: string }
+    /** Null when GitHub reported a terminal result without an identity to read it through. */
+    request: { pullRequest: number; uuid: string } | null
     layers: MergeLayerPreview[]
     action: MergeAction
     method: MergeMethod | null
@@ -6137,7 +6142,7 @@ export async function getMergeStatus(repoPath: string): Promise<MergeStatus | nu
             : effective.outcome === 'enqueued'
               ? 'enqueued'
               : effective.outcome === 'failed'
-                ? 'not-merged'
+                ? 'failed'
                 : 'pending',
       detail: mergeStatusDetail(effective, queue, result?.mergeOid ?? live?.mergeOid ?? null, live),
       mergedOid: result?.mergeOid ?? live?.mergeOid ?? null,
@@ -6160,8 +6165,11 @@ function mergeStatusDetail(
   if (queue?.outcome === 'merged') detail = merged
   else if (queue?.outcome === 'dropped') {
     detail = 'The pull request was closed without merging, so the queue dropped it'
-  } else if (queue?.outcome === 'queued') {
-    detail = `In the merge queue since ${requested}; refresh to read what the queue did with it`
+  } else if (queue?.outcome === 'unconfirmed') {
+    detail =
+      live === null
+        ? `GitHub accepted this enqueue at ${requested} and has published no later state for it`
+        : `GitHub accepted this enqueue at ${requested}; this pull request is still open, which does not say whether the queue still holds it`
   } else if (observation.outcome === 'failed') {
     detail = observation.message ?? 'GitHub reported that the merge request failed'
   } else if (observation.outcome === 'merged') detail = merged
@@ -6182,8 +6190,15 @@ function mergeStatusMessage(layers: MergeLayerResult[]): string {
   }
   const queued = layers.filter((entry) => entry.status === 'enqueued')
   if (queued.length > 0) {
+    const numbers = queued.map((entry) => `#${entry.pullRequest}`).join(', ')
     parts.push(
-      `Pull request${queued.length === 1 ? '' : 's'} ${queued.map((entry) => `#${entry.pullRequest}`).join(', ')} ${queued.length === 1 ? 'is' : 'are'} in the merge queue.`,
+      `Pull request${queued.length === 1 ? '' : 's'} ${numbers} joined the merge queue; whether ${queued.length === 1 ? 'it is' : 'they are'} still there is unconfirmed, because GitHub publishes no later state for ${queued.length === 1 ? 'it' : 'them'}.`,
+    )
+  }
+  const failed = layers.filter((entry) => entry.status === 'failed')
+  if (failed.length > 0) {
+    parts.push(
+      `GitHub refused the merge request for pull request${failed.length === 1 ? '' : 's'} ${failed.map((entry) => `#${entry.pullRequest}`).join(', ')}.`,
     )
   }
   const merged = layers.filter((entry) => entry.status === 'merged')
@@ -6463,7 +6478,9 @@ async function mergeStack(
       const method = mergeAction === 'direct_merge' ? action.mergeMethod : null
       // The accepted request is journalled before the first read of its result, so a transport
       // error, a crash, or a restart while GitHub is still running it leaves the request
-      // readable instead of losing the only identity that can report it.
+      // readable instead of losing the only identity that can report it. A request GitHub
+      // reports as still running without that identity is nothing a later read can advance,
+      // so it is described by this run's own result rather than journalled as pending.
       const requestedAt = Date.now()
       const request = outcome.uuid ? { pullRequest: layer.pullRequest, uuid: outcome.uuid } : null
       if (request) {
@@ -6504,18 +6521,19 @@ async function mergeStack(
       }
       observed.push(outcome)
       if (outcome.status === 'merged') {
-        if (request) {
-          await recordMergeRequest(repoPath, {
-            request,
-            layers: carriedLayers,
-            action: mergeAction,
-            method,
-            outcome: 'merged',
-            enqueuedAt: null,
-            message: outcome.message,
-            requestedAt,
-          })
-        }
+        // Recorded with or without a request identity: the documented `200` answers a pull
+        // request that is already merged with the merge commit and no UUID, and that result
+        // is the whole record of it.
+        await recordMergeRequest(repoPath, {
+          request,
+          layers: carriedLayers,
+          action: mergeAction,
+          method,
+          outcome: 'merged',
+          enqueuedAt: null,
+          message: outcome.message,
+          requestedAt,
+        })
         for (const entry of carried) {
           entry.status = 'merged'
           entry.detail =
@@ -6528,19 +6546,20 @@ async function mergeStack(
       }
       if (outcome.status === 'enqueued') {
         // The queue accepted the group, which is the evidence a base ref has one, and that
-        // result is final: what the queue does later is read from the pull requests.
-        if (request) {
-          await recordMergeRequest(repoPath, {
-            request,
-            layers: carriedLayers,
-            action: mergeAction,
-            method,
-            outcome: 'enqueued',
-            enqueuedAt: requestedAt,
-            message: outcome.message,
-            requestedAt,
-          })
-        }
+        // result is final: what the queue does later is read from the pull requests. An
+        // immediate `200` for a pull request that is already queued carries no UUID, and is
+        // recorded all the same: it is still an accepted enqueue for this base ref, and it is
+        // not polled, because there is no identity to poll.
+        await recordMergeRequest(repoPath, {
+          request,
+          layers: carriedLayers,
+          action: mergeAction,
+          method,
+          outcome: 'enqueued',
+          enqueuedAt: requestedAt,
+          message: outcome.message,
+          requestedAt,
+        })
         for (const entry of carried) {
           entry.status = 'enqueued'
           entry.detail =
@@ -6553,18 +6572,16 @@ async function mergeStack(
       if (outcome.status === 'failed') {
         // The refusal is kept, so a reopen reports why instead of showing a request that is
         // still running.
-        if (request) {
-          await recordMergeRequest(repoPath, {
-            request,
-            layers: carriedLayers,
-            action: mergeAction,
-            method,
-            outcome: 'failed',
-            enqueuedAt: null,
-            message: outcome.message,
-            requestedAt,
-          })
-        }
+        await recordMergeRequest(repoPath, {
+          request,
+          layers: carriedLayers,
+          action: mergeAction,
+          method,
+          outcome: 'failed',
+          enqueuedAt: null,
+          message: outcome.message,
+          requestedAt,
+        })
         result.status = 'failed'
         result.detail = outcome.message ?? 'GitHub refused the merge'
         // GitHub may still have landed part of the group it accepted, so the downstack a

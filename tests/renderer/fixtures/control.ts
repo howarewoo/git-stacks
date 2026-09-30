@@ -31,6 +31,7 @@ import {
   leasePreview,
   mergePreview,
   mergeStatus,
+  mergeStatusQueueSentence,
   publishPreview,
   restackPreview,
   syncPreview,
@@ -401,10 +402,7 @@ export function installFixtureControl(options: {
                 }
               : layer,
           ),
-          message: base.message.replace(
-            'Pull request #40 is in the merge queue.',
-            'Pull request #40 merged.',
-          ),
+          message: base.message.replace(mergeStatusQueueSentence, 'Pull request #40 merged.'),
         }
       })
     },
