@@ -33,9 +33,10 @@ const DEFAULT_MAX_DELAY_MS = 2_000
 const DEFAULT_SWEEP_MS = 15_000
 
 /**
- * How many times one arm resolves the Git directories before it commits the
- * watches. A repository replaced at this path over and over cannot be armed at
- * a moment it stays put, and this bound is what keeps the retries from spinning.
+ * How many times one settle pass re-resolves the Git directories of a root
+ * that keeps being replaced underneath it. Each attempt is asynchronous and
+ * the path cannot be held still, so the pass gives up rather than spin; the
+ * sweep settles it on a later turn.
  */
 const MAX_ARM_ATTEMPTS = 3
 
@@ -181,6 +182,13 @@ export class RepositoryWatcher {
   private checking = false
   /** The directory the armed watches belong to; null while it is absent. */
   private identity: string | null = null
+  /**
+   * True once a resolution's identity has held, which is what the Git
+   * directory watches and the fingerprint are allowed to describe. False means
+   * nothing is watched for them, because no resolution has been shown to
+   * belong to the directory now at the path.
+   */
+  private targetSettled = false
   private started = false
   private stopping = false
   private generation = 0
@@ -250,15 +258,72 @@ export class RepositoryWatcher {
     const gen = expectedGen ?? ++this.generation
     this.closeWatchers()
     if (!this.armed(gen)) return
-    // Nothing is subscribed while this runs, so a replacement arriving now
-    // delivers no event, and the target is settled before anything is attached.
-    // The identity stays unset until then, so a presence check running
-    // alongside has nothing to claim that replacement against.
+    // Nothing is watched on the Git directories until the target settles, and
+    // nothing at all until then, so a replacement arriving now delivers no
+    // event. The identity stays unset until the resolution holds, so a
+    // presence check running alongside has nothing to claim it against.
     this.identity = null
-    const target = await this.resolveWatchTarget(gen)
-    if (!this.armed(gen) || target === null) return
-    this.identity = target.identity
-    this.gitDirectories = target.gitDirectories
+    this.gitDirectories = []
+    this.targetSettled = false
+    await this.settleTarget(gen)
+    if (!this.armed(gen) || this.targetSettled) return
+    // A root rewritten past every attempt has no Git directory that can be
+    // watched without watching the tree that moved away. The watches below
+    // describe the path rather than a tree, so they still deliver the worktree
+    // and the parent's view of a move until a later turn settles the target.
+    this.attachPathWatches()
+  }
+
+  /** The watcher is still running, and this arm is still the current one. */
+  private armed(gen: number): boolean {
+    return this.started && !this.stopping && this.generation === gen
+  }
+
+  /**
+   * Resolves the Git directories of the directory now at the root, and on a
+   * resolution that still holds, attaches every watch belonging to it and
+   * takes the signature the sweep compares against.
+   *
+   * A replacement can land between the identity check and the lookups that
+   * follow it. No watch is subscribed on the Git directories until this
+   * returns, so nothing reports that, and the directories just resolved
+   * describe the tree that moved away. The identity is therefore rechecked
+   * after every lookup, and a resolution whose identity no longer holds is
+   * discarded rather than watched: the worktree and the parent are re-armed
+   * from the same tree the identity names, so the two can never disagree.
+   * Nothing is committed if the path is still moving when the attempts run
+   * out, which leaves the watches off the Git directories instead of on the
+   * directories of a tree that is gone.
+   */
+  private async settleTarget(gen: number): Promise<void> {
+    for (let attempt = 1; attempt <= MAX_ARM_ATTEMPTS; attempt += 1) {
+      const identity = await directoryIdentity(this.root)
+      if (!this.armed(gen)) return
+      const gitDirectories = await this.options.resolveGitDirectories(this.root)
+      if (!this.armed(gen)) return
+      const resolved = await directoryIdentity(this.root)
+      if (!this.armed(gen)) return
+      if (resolved !== identity) continue
+      this.closeWatchers()
+      this.identity = identity
+      this.gitDirectories = gitDirectories
+      this.attachPathWatches()
+      for (const directory of this.gitDirectories) this.attachGitDirectory(directory)
+      this.targetSettled = true
+      // The signature is taken once every watch is armed, because whether the
+      // worktree watch reached below the top level decides what it must cover.
+      const signature = await this.currentSignature()
+      if (!this.armed(gen)) return
+      this.signature = signature
+      return
+    }
+  }
+
+  /**
+   * The watches that follow the path rather than a particular tree: the
+   * worktree, and the parent that shows the repository being moved.
+   */
+  private attachPathWatches(): void {
     const name = basename(this.root)
     // The repository's own directory can vanish; its parent is how a move is seen.
     this.attach(dirname(this.root), false, (changed) => {
@@ -268,47 +333,6 @@ export class RepositoryWatcher {
     // file or creating an untracked file triggers a debounced local refresh
     // without having to run a Git command first.
     this.attachWorktree(this.root)
-    for (const directory of this.gitDirectories) this.attachGitDirectory(directory)
-    // The signature is taken once the watches are armed, because whether the
-    // worktree watch reached below the top level decides what it must cover.
-    const signature = await this.currentSignature()
-    if (!this.armed(gen)) return
-    this.signature = signature
-  }
-
-  /** The watcher is still running, and this arm is still the current one. */
-  private armed(gen: number): boolean {
-    return this.started && !this.stopping && this.generation === gen
-  }
-
-  /**
-   * The identity of the directory the watches will belong to, with the Git
-   * directories to watch beside it, or null when the watcher stopped while
-   * they were being resolved.
-   *
-   * A replacement can land between the identity check and the Git lookups that
-   * follow it, and no watch is subscribed during an arm, so nothing reports it
-   * and the directories just resolved describe the tree that moved away. The
-   * identity is therefore rechecked after every resolution, and the lookups are
-   * redone against whatever is at the path now. When the path keeps being
-   * rewritten past the last attempt the freshest resolution is armed as it
-   * stands, because leaving the watches closed would leave nothing to notice
-   * the next replacement.
-   */
-  private async resolveWatchTarget(
-    gen: number,
-  ): Promise<{ identity: string | null; gitDirectories: string[] } | null> {
-    for (let attempt = 1; ; attempt += 1) {
-      const identity = await directoryIdentity(this.root)
-      if (!this.armed(gen)) return null
-      const gitDirectories = await this.options.resolveGitDirectories(this.root)
-      if (!this.armed(gen)) return null
-      const resolved = await directoryIdentity(this.root)
-      if (!this.armed(gen)) return null
-      if (resolved === identity || attempt >= MAX_ARM_ATTEMPTS) {
-        return { identity: resolved, gitDirectories }
-      }
-    }
   }
 
   private attachWorktree(root: string): void {
@@ -455,16 +479,23 @@ export class RepositoryWatcher {
     const gen = this.generation
     try {
       const exists = await pathExists(this.root)
-      if (!this.started || this.stopping || this.generation !== gen) return
+      if (!this.armed(gen)) return
       if (exists !== this.present) {
         await this.emit()
         return
       }
+      if (!exists) return
+      if (!this.targetSettled) {
+        // The arm gave up on a root that kept being replaced, so nothing is
+        // watched for its Git directories. The path watches are still armed,
+        // and a change at this path is the moment to finish settling it.
+        await this.settleTarget(gen)
+        return
+      }
       // Still here, so the only thing left that can invalidate the armed
       // watches is a replacement at this path.
-      if (!exists || this.identity === null) return
       const identity = await directoryIdentity(this.root)
-      if (!this.started || this.stopping || this.generation !== gen) return
+      if (!this.armed(gen)) return
       if (identity === null || identity === this.identity) return
       await this.emit()
     } finally {
@@ -501,6 +532,13 @@ export class RepositoryWatcher {
   private async sweep(): Promise<void> {
     if (!this.started || this.stopping) return
     const gen = this.generation
+    if (!this.targetSettled) {
+      // A root that kept being replaced during the arm has no Git directory
+      // that can be watched, so there is no state here to fingerprint yet.
+      // The path watches are still armed; this is where it gets settled.
+      await this.settleTarget(gen)
+      return
+    }
     await this.checkPresence()
     if (!this.started || this.stopping || this.generation !== gen) return
     if (!this.present) return
