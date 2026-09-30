@@ -227,10 +227,15 @@ every blob. The two reads are independent, so `getSnapshot` runs them together
 and settles both before a rejection escapes. The batched pathspec read is still
 used when it answers in a single process, so a caller that asks about one file —
 a diff preview, a staging guard — does not read a large repository's whole
-index. Both whole-repository reads stay capped at `MAX_STATUS_BYTES`: a cap that
-truncates them falls back to the batched pathspec read for the paths it did not
-resolve, so an unread path is never reported as an ordinary file. An unborn
-`HEAD` is a complete answer rather than a truncated one, and is not retried.
+index. Both whole-repository reads stay capped at `MAX_STATUS_BYTES`. A cap that
+truncates one falls back to the batched pathspec read, asking again about every
+requested path rather than only the ones still unresolved. An unmerged path
+occupies one `ls-files` record per stage, so a cap landing on a NUL boundary can
+leave the straddling path half-read — and a half-read path is one the "still
+unresolved" filter would have kept, reporting a gitlink as an ordinary file. The
+fallback is rare (it needs a listing past the cap) and reuses the batched reads
+this path used before. An unborn `HEAD` is a complete answer rather than a
+truncated one, and is not retried.
 
 **Streaming reads instead of buffer-then-copy.** `executeCapped` retains at most
 its byte cap while the child process runs. Cancellation sends TERM, escalates

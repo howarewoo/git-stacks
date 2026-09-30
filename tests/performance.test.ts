@@ -1,12 +1,14 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import { promises as fs } from 'node:fs'
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import { test } from 'node:test'
 import { getCommitDiff, getFileView, getHistory, getSnapshot } from '../src/main/git'
+import { getIndexEntries } from '../src/main/capabilities'
+import { withGitRuntime, type GitRuntimeRecord } from '../src/main/git-runtime'
 import {
   getBranchConfigs,
   isCancelled,
@@ -352,6 +354,78 @@ test('a bulk changed-file listing still classifies submodules', async () => {
       undefined,
       'an ordinary changed file is not reported as a submodule',
     )
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('a truncated whole-index read still classifies a path whose stages the cap split', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'git-stacks-cap-'))
+  try {
+    // An unmerged path occupies one `ls-files` record per stage, so a cap
+    // landing on a NUL boundary can leave the straddling path half-read. The
+    // double answers a whole-index read with stage 1 followed by a flood the
+    // cap cuts, and answers a pathspec read with the correct records for the
+    // paths it was asked about — which is all real Git ever returns.
+    const stages =
+      `H 100644 ${'a'.repeat(40)} 1\tvendor/lib\0` +
+      `H 160000 ${'b'.repeat(40)} 2\tvendor/lib\0` +
+      `H 160000 ${'c'.repeat(40)} 3\tvendor/lib\0`
+    const log = join(root, 'invocations.log')
+    const module = join(root, 'double.mjs')
+    await writeFile(
+      module,
+      `import { appendFileSync, writeSync } from 'node:fs'
+const args = process.argv.slice(2)
+appendFileSync(${JSON.stringify(log)}, JSON.stringify(args) + '\\n')
+const stages = ${JSON.stringify(stages)}
+// The caller kills the child when its cap is reached, closing the pipe. Real
+// Git dies on the resulting SIGPIPE; this double stops instead.
+const put = (data) => {
+  try {
+    writeSync(1, data)
+  } catch {
+    process.exit(0)
+  }
+}
+if (args[0] === '--literal-pathspecs') {
+  const wanted = new Set(args.slice(6))
+  const kept = stages
+    .split('\\0')
+    .filter(Boolean)
+    .filter((record) => wanted.has(record.slice(record.indexOf('\\t') + 1)))
+  put(kept.length ? kept.join('\\0') + '\\0' : '')
+} else {
+  put(stages.slice(0, stages.indexOf('\\0') + 1))
+  const chunk = Buffer.alloc(1 << 16, 0x78)
+  for (let index = 0; index < 160; index += 1) put(chunk)
+}
+`,
+    )
+    // The record stream carries NUL bytes, so it lives in a module and an ASCII
+    // shim launches it.
+    const shim = join(root, 'git')
+    await writeFile(shim, `#!/bin/sh\nexec "${process.execPath}" "${module}" "$@"\n`)
+    await chmod(shim, 0o755)
+    await writeFile(log, '')
+
+    // More than the batch size, so the whole-repository read is the strategy.
+    const paths = ['vendor/lib', ...Array.from({ length: 1_100 }, (_, i) => `filler/${i}.txt`)]
+    const entries = await withGitRuntime({ executable: shim } as unknown as GitRuntimeRecord, () =>
+      getIndexEntries(root, paths),
+    )
+
+    assert.deepEqual(
+      JSON.parse((await readFile(log, 'utf8')).trim().split('\n')[0]),
+      ['ls-files', '-v', '--stage', '-z'],
+      'the listing is read once for the whole repository',
+    )
+    assert.equal(
+      entries.get('vendor/lib')?.submodule,
+      true,
+      'the later gitlink stage decides the path even though the cap hid it',
+    )
+    assert.equal(entries.size, 1, 'only the path present in the index is reported')
   } finally {
     await rm(root, { recursive: true, force: true })
   }

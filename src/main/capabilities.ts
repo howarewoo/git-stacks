@@ -109,11 +109,16 @@ export async function getIndexEntries(
     for (const [filePath, entry] of parseIndexEntries(text)) {
       if (wanted.has(filePath)) entries.set(filePath, entry)
     }
-    // A cap cut the index short, so the unread records can still hold a
-    // gitlink or a sparse-excluded path. Resolve the rest by pathspec rather
-    // than reporting an unread path as an ordinary file.
+    // A cap cut the index short. An unmerged path occupies one record per
+    // stage, so a cut on a NUL boundary can leave the path that straddles it
+    // half-read: `parseIndexEntries` then reports that path from the stages it
+    // did see. Re-reading only the paths still missing would keep that partial
+    // entry — a gitlink whose later stage says `160000` would be classified as
+    // an ordinary file. So the fallback asks about every requested path again.
+    // It is rare (it needs an index whose listing exceeds the cap) and it costs
+    // the same batched reads this path used before.
     if (truncated) {
-      for (const batch of pathBatches(paths.filter((p) => !entries.has(p)))) {
+      for (const batch of pathBatches(paths)) {
         const output = await runGit(repoPath, [
           '--literal-pathspecs',
           'ls-files',
