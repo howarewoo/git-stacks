@@ -33,6 +33,13 @@ const DEFAULT_MAX_DELAY_MS = 2_000
 const DEFAULT_SWEEP_MS = 15_000
 
 /**
+ * How many times one arm resolves the Git directories before it commits the
+ * watches. A repository replaced at this path over and over cannot be armed at
+ * a moment it stays put, and this bound is what keeps the retries from spinning.
+ */
+const MAX_ARM_ATTEMPTS = 3
+
+/**
  * Subdirectories that carry the ref, index, and operation state a snapshot reads.
  * Watched individually only when the platform refuses a recursive watch.
  */
@@ -242,15 +249,16 @@ export class RepositoryWatcher {
   private async arm(expectedGen?: number): Promise<void> {
     const gen = expectedGen ?? ++this.generation
     this.closeWatchers()
-    if (!this.started || this.stopping || this.generation !== gen) return
-    // The watches belong to the directory at this path from here on. Claiming
-    // that identity before the Git lookups means a replacement arriving while
-    // this arm is still working is recognised as one already being watched.
-    this.identity = await directoryIdentity(this.root)
-    if (!this.started || this.stopping || this.generation !== gen) return
-    const gitDirectories = await this.options.resolveGitDirectories(this.root)
-    if (!this.started || this.stopping || this.generation !== gen) return
-    this.gitDirectories = gitDirectories
+    if (!this.armed(gen)) return
+    // Nothing is subscribed while this runs, so a replacement arriving now
+    // delivers no event, and the target is settled before anything is attached.
+    // The identity stays unset until then, so a presence check running
+    // alongside has nothing to claim that replacement against.
+    this.identity = null
+    const target = await this.resolveWatchTarget(gen)
+    if (!this.armed(gen) || target === null) return
+    this.identity = target.identity
+    this.gitDirectories = target.gitDirectories
     const name = basename(this.root)
     // The repository's own directory can vanish; its parent is how a move is seen.
     this.attach(dirname(this.root), false, (changed) => {
@@ -264,8 +272,43 @@ export class RepositoryWatcher {
     // The signature is taken once the watches are armed, because whether the
     // worktree watch reached below the top level decides what it must cover.
     const signature = await this.currentSignature()
-    if (!this.started || this.stopping || this.generation !== gen) return
+    if (!this.armed(gen)) return
     this.signature = signature
+  }
+
+  /** The watcher is still running, and this arm is still the current one. */
+  private armed(gen: number): boolean {
+    return this.started && !this.stopping && this.generation === gen
+  }
+
+  /**
+   * The identity of the directory the watches will belong to, with the Git
+   * directories to watch beside it, or null when the watcher stopped while
+   * they were being resolved.
+   *
+   * A replacement can land between the identity check and the Git lookups that
+   * follow it, and no watch is subscribed during an arm, so nothing reports it
+   * and the directories just resolved describe the tree that moved away. The
+   * identity is therefore rechecked after every resolution, and the lookups are
+   * redone against whatever is at the path now. When the path keeps being
+   * rewritten past the last attempt the freshest resolution is armed as it
+   * stands, because leaving the watches closed would leave nothing to notice
+   * the next replacement.
+   */
+  private async resolveWatchTarget(
+    gen: number,
+  ): Promise<{ identity: string | null; gitDirectories: string[] } | null> {
+    for (let attempt = 1; ; attempt += 1) {
+      const identity = await directoryIdentity(this.root)
+      if (!this.armed(gen)) return null
+      const gitDirectories = await this.options.resolveGitDirectories(this.root)
+      if (!this.armed(gen)) return null
+      const resolved = await directoryIdentity(this.root)
+      if (!this.armed(gen)) return null
+      if (resolved === identity || attempt >= MAX_ARM_ATTEMPTS) {
+        return { identity: resolved, gitDirectories }
+      }
+    }
   }
 
   private attachWorktree(root: string): void {

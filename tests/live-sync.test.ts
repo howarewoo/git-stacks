@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { mkdtemp, mkdir, rename, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, mkdir, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
@@ -122,6 +122,20 @@ async function drainTurns(count = 8): Promise<void> {
     setImmediate(idle.resolve)
     await idle.promise
   }
+}
+
+/**
+ * A wall-clock failure guard of the kind the file already allows: the arm owes
+ * a re-resolution, and awaiting it unguarded would hang the whole suite
+ * instead of naming the step that never came.
+ */
+function within(promise: Promise<void>, what: string, ms = 10_000): Promise<void> {
+  return Promise.race([
+    promise,
+    new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error(`Waited ${ms}ms for ${what}`)), ms).unref(),
+    ),
+  ])
 }
 
 function pullRequest(number: number): PullRequest {
@@ -382,6 +396,129 @@ test('a repository replaced at the same path re-arms the watch on the new direct
       !log.reasons.includes('missing'),
       'the replacement was never absent, so nothing was reported missing',
     )
+  } finally {
+    watcher.stop()
+    await cleanup()
+  }
+})
+
+/** A repository the replacement tests can move into place at a watched path. */
+async function preparedRepository(path: string, content: string): Promise<void> {
+  await mkdir(path)
+  git(path, 'init', '-b', 'main')
+  git(path, 'config', 'user.name', 'Git Stacks test')
+  git(path, 'config', 'user.email', 'test@example.invalid')
+  await writeFile(join(path, 'shared.txt'), `${content}\n`)
+  git(path, 'add', '.')
+  git(path, 'commit', '-m', 'Replacement commit')
+}
+
+test('a repository replaced while the Git directories are still being resolved is watched from its first event', async () => {
+  const { root, repo, cleanup } = await disposableRepository()
+  const moved = join(root, 'moved-during-arm')
+  const replacement = join(root, 'replacement-workspace')
+  await preparedRepository(replacement, 'replacement')
+
+  const log = new WatchLog()
+  // The arm parks inside this lookup, which is the window a replacement lands
+  // in: no watch is subscribed yet, so the replacement delivers no event.
+  const entered = Promise.withResolvers<void>()
+  const release = Promise.withResolvers<void>()
+  const resolvedIdentities: number[] = []
+  let resolutions = 0
+  const watcher = new RepositoryWatcher(repo, (event) => log.record(event.reason), {
+    debounceMs: 20,
+    maxDelayMs: 200,
+    // The sweep is the safety net this repair must not lean on, so it is off.
+    sweepMs: 0,
+    resolveGitDirectories: async (root) => {
+      resolutions += 1
+      resolvedIdentities.push((await stat(root)).ino)
+      if (resolutions === 1) {
+        entered.resolve()
+        await release.promise
+      }
+      return [join(root, '.git')]
+    },
+  })
+
+  try {
+    const startPromise = watcher.start()
+    await within(entered.promise, 'the first Git lookup to be entered')
+    await rename(repo, moved)
+    await rename(replacement, repo)
+    release.resolve()
+    await startPromise
+
+    // The lookup that was in flight described the tree that moved away, so the
+    // identity was rechecked and the lookup was run again against the new tree.
+    assert.deepEqual(
+      resolvedIdentities,
+      [(await stat(moved)).ino, (await stat(repo)).ino],
+      'the Git directories are resolved again for the directory now at the path',
+    )
+
+    // The new tree is what the watches belong to, so its first edit arrives as
+    // the ordinary change it is; an identity left on the moved tree reports it
+    // as a replacement and re-arms against whatever was there at startup.
+    await writeFile(join(repo, 'shared.txt'), 'edited in the replacement\n')
+    await log.waitFor((reason) => reason === 'change')
+    assert.deepEqual(log.reasons, ['change'])
+  } finally {
+    watcher.stop()
+    await cleanup()
+  }
+})
+
+test('a path replaced on every lookup is still armed, and the retries stop', async () => {
+  const { root, repo, cleanup } = await disposableRepository()
+  const replacements = [0, 1, 2].map((index) => join(root, `replacement-${index}`))
+  for (const [index, path] of replacements.entries()) {
+    await preparedRepository(path, `replacement ${index}`)
+  }
+
+  const log = new WatchLog()
+  // Every lookup is held open, so each attempt finds a different tree at the
+  // path than the one it started against.
+  const gates = replacements.map(() => ({
+    entered: Promise.withResolvers<void>(),
+    release: Promise.withResolvers<void>(),
+  }))
+  let resolutions = 0
+  const watcher = new RepositoryWatcher(repo, (event) => log.record(event.reason), {
+    debounceMs: 20,
+    maxDelayMs: 200,
+    sweepMs: 0,
+    resolveGitDirectories: async (root) => {
+      const gate = gates[Math.min(resolutions, gates.length - 1)]
+      resolutions += 1
+      gate.entered.resolve()
+      await gate.release.promise
+      return [join(root, '.git')]
+    },
+  })
+
+  try {
+    const startPromise = watcher.start()
+    for (const [index, gate] of gates.entries()) {
+      await within(gate.entered.promise, `Git lookup ${index + 1} to be entered`)
+      await rename(repo, join(root, `moved-${index}`))
+      await rename(replacements[index], repo)
+      gate.release.resolve()
+    }
+    // A path that never settles must not hold the arm open retrying forever.
+    await startPromise
+    assert.equal(
+      resolutions,
+      gates.length,
+      'one lookup per replacement, then the freshest one is armed',
+    )
+
+    // Whatever was at the path last is what the watches follow, so its edits
+    // are the ordinary changes they are.
+    await writeFile(join(repo, 'shared.txt'), 'edited after repeated replacements\n')
+    await log.waitFor((reason) => reason === 'change')
+    assert.deepEqual(log.reasons, ['change'])
   } finally {
     watcher.stop()
     await cleanup()

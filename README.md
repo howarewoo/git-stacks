@@ -33,6 +33,14 @@ directory replaced at the same path: the watch follows the directory's identity,
 so it re-arms on the replacement rather than on the tree that moved away. Reads
 for one repository run concurrently while mutations serialize behind them.
 
+No watch is subscribed while the watches are being armed, so a repository
+replaced during that window delivers no event at all. The directory's identity
+is therefore rechecked after the Git directories are resolved and the lookup is
+run again against whatever is at the path now, which keeps the armed watches and
+the identity they belong to on the same tree. The retries are bounded, so a path
+rewritten over and over is armed with the freshest result rather than left
+unwatched or retried forever.
+
 On a platform that cannot watch a directory tree recursively, the periodic
 sweep fingerprints the worktree and ref content instead, so a nested file or a
 loose ref below `refs/heads/feature/` still schedules a refresh. A mutation
