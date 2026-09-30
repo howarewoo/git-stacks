@@ -613,11 +613,14 @@ export function checksReportFor(
       : pullRequest.checks === 'pending'
         ? 'in-progress'
         : 'success'
-  return checksReport([check({ key: 'check-run:default', name: 'ci', state })], {
-    number,
-    headSha: pullRequest.headOid ?? '',
-    base: pullRequest.base ?? 'main',
-  })
+  return checksReport(
+    pullRequest.checks === 'none' ? [] : [check({ key: 'check-run:default', name: 'ci', state })],
+    {
+      number,
+      headSha: pullRequest.headOid ?? '',
+      base: pullRequest.base ?? 'main',
+    },
+  )
 }
 
 function check(

@@ -344,6 +344,9 @@ reason rather than as the current state. `Refresh checks` forces a re-read,
 appears only where the read proves the account may run workflows. The fixture
 records `pullRequestChecks` and `rerunPullRequestCheck` in `window.fixture.calls`.
 
+Ordinary scenarios keep the row's check state when its drill-down is opened or
+refreshed. A `none` state produces an empty report, not a synthetic passing run.
+
 Workflow reruns require an explicit association with the selected pull request,
 not merely a matching commit. Push-only CI remains visible without a rerun action.
 Actions check runs join workflows by their check-suite IDs, never details URLs.
