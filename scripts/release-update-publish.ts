@@ -170,11 +170,20 @@ try {
   }
   rmSync(bankDir, { recursive: true, force: true })
 
-  // Step 2. The installers the manifest names, each under the name the manifest
-  // published it as. Those names carry the version they were built from, so a
-  // name that is already on the release is this same version being republished.
+  // Step 2. Installer names are immutable once published. In particular, a
+  // retry must not clobber one the live manifest still offers: gh deletes the
+  // old asset before uploading its replacement.
   for (const name of installers) {
-    upload(join(installerDir, name), true, name)
+    const path = join(installerDir, name)
+    const existing = read(name)
+    if (existing !== null) {
+      if (!existing.equals(readFileSync(path))) {
+        fail(`${name} is already on ${tag} with different bytes, so it cannot be replaced.`)
+      }
+      console.log(`release-update: ${name} is already on ${tag} with these exact bytes.`)
+      continue
+    }
+    upload(path, false, name)
   }
 
   // Step 3. The two names a client fetches, moved onto this release. The

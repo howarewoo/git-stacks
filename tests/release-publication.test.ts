@@ -573,6 +573,9 @@ test(
         UPDATE_SIGNING_KEY_ID: key.keyId,
       })
       assert.equal(release(space, { version: '0.1.0', key }).code, 0)
+      const installerName = assetNameFor(BUILDS[0].file('0.1.0'))
+      const installer = assetOn(space, installerName)
+      assert.notEqual(installer, null)
       const again = space.run(
         'release-update-publish.ts',
         [
@@ -585,9 +588,19 @@ test(
           '--installers',
           'channel-assets',
         ],
-        { UPDATE_SIGNING_KEY: key.secret, UPDATE_SIGNING_PUBLIC_KEY: key.registry.publicKey },
+        {
+          UPDATE_SIGNING_KEY: key.secret,
+          UPDATE_SIGNING_PUBLIC_KEY: key.registry.publicKey,
+          FIXTURE_GH_FAIL_UPLOAD: installerName,
+        },
       )
       assert.equal(again.code, 0, `the publication is safe to repeat: ${again.out}`)
+      assert.match(again.out, /is already on updates-stable with these exact bytes/u)
+      assert.deepEqual(
+        assetOn(space, installerName),
+        installer,
+        'the live installer is not replaced',
+      )
       assert.match(
         again.out,
         /sequence 1 is already banked on updates-stable with these exact bytes/u,
