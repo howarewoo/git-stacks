@@ -550,6 +550,16 @@ and generated/binary/too-large state, and searches both the new path and the pat
 a rename came from. Arrow keys move between rows and Enter or Space opens one; the
 rows are plain buttons, so nothing here depends on a custom widget role.
 
+Remote patch headers preserve spaces, quoted characters, and non-ASCII paths,
+including a renamed file's old path. A missing patch with zero added and removed
+lines is **no text diff**, not evidence of binary content: pure renames, mode-only
+changes, empty files, and binaries can all have that shape.
+
+GitHub's pull-request commits endpoint returns at most 250 entries. The commit
+list carries the reported total and marks incomplete results explicitly. At the
+cap with no reported total, it says the list may be incomplete; a confirmed total
+of exactly 250 is complete. Open the pull request on GitHub for its full history.
+
 The diff has unified and split layouts and a **Hide whitespace** toggle. The
 toggle is a filter over the text GitHub already sent — the pull request files API
 has no whitespace option — and it hides only a removed/added pair that is
@@ -581,11 +591,12 @@ same hunk each side). A hunk reuses the local staging surface's `hunkId` scheme.
 
 A line number is an address, not an identity. `resolveReviewAnchor` in
 `src/main/review.ts` re-resolves a stored `ReviewLineRef` against a freshly read
-file set: **exact** when the anchor and the neighbourhood are both intact,
+file set: **exact** when a unique same-side anchor and its neighbourhood are intact,
 **moved** when the line's own text survives once but its neighbourhood changed (the
 reason says where it went), and **unresolved** with a reason a reviewer can act on
 for edited text, a duplicated line, a file the pull request no longer touches, or
 a diff that is not available as text.
+A duplicate remains unresolved even if only one copy retained the old context.
 
 Resolution never crosses a side. A comment on a removed line is not re-anchored
 onto an added line that happens to carry the same text — that would read as a

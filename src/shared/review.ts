@@ -19,8 +19,9 @@ export type ReviewFileStatus =
  * Git Stacks can actually prove rather than inventing a reason:
  *
  *  - `text` — a patch arrived and the shared diff parser accepted every hunk.
- *  - `binary` — the entry reports changed bytes but no added and no removed text
- *    line, which is how a non-text file is counted.
+ *  - `binary` — content independently identified as binary.
+ *  - `no-text` — no patch and no changed text lines; this does not distinguish
+ *    a rename, mode-only change, empty file, or binary content.
  *  - `too-large` — the entry counts added or removed lines yet still returned no
  *    patch, so GitHub had text it chose not to inline.
  *  - `unreadable` — a patch arrived and the shared diff parser refused part of
@@ -29,6 +30,7 @@ export type ReviewFileStatus =
 export type ReviewFileDiff =
   | { kind: 'text'; hunks: ReviewHunk[] }
   | { kind: 'binary' }
+  | { kind: 'no-text' }
   | { kind: 'too-large' }
   | { kind: 'unreadable'; reason: string }
 
@@ -52,9 +54,8 @@ export interface ReviewLine {
    */
   anchor: string
   /**
-   * `anchor` plus up to two neighbouring lines of the same hunk on each side. It
-   * separates two identical lines in one file; a changed neighbourhood is not a
-   * changed line.
+   * `anchor` plus up to two neighbouring lines on each side within the hunk.
+   * Context distinguishes exact from moved only when the same-side anchor is unique.
    */
   context: string
   /** True when this changed line differs from its counterpart only in spaces and tabs. */
@@ -164,6 +165,13 @@ export interface ReviewCommit {
   message: string
   author: string
   authoredAt: string
+}
+
+export interface ReviewCommitSet {
+  commits: ReviewCommit[]
+  /** GitHub's count at the confirmed comparison, or null when not provided. */
+  total: number | null
+  truncated: boolean
 }
 
 /**
@@ -775,6 +783,10 @@ export function reviewDiffStateLabel(file: ReviewFile): string {
       return 'Text diff'
     case 'binary':
       return 'Binary file — GitHub counts changed bytes, not text lines'
+    case 'no-text':
+      return file.status === 'renamed'
+        ? 'Renamed file — GitHub supplied no text diff'
+        : 'No text diff — this can be a metadata-only or binary change'
     case 'too-large':
       return 'Diff too large for GitHub to inline — open the file on GitHub'
     case 'unreadable':

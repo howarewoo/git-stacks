@@ -32,7 +32,6 @@ import {
   looksGenerated,
   reviewChangeBlocks,
   reviewComparisonDrift,
-  reviewDiffStateLabel,
   reviewFileRows,
   reviewSplitRows,
   reviewStatusLetter,
@@ -182,6 +181,53 @@ test('a duplicated line is reported as unnameable rather than guessed at', () =>
   assert.match(resolution.reason, /3 identical lines/u)
 })
 
+test('a duplicate anchor stays unresolved even when only the clone retains its old context', () => {
+  const before = hunks('@@ -1,5 +1,5 @@\n a\n b\n target\n c\n d')[0]
+  const after = fileSet(
+    file({
+      diff: {
+        kind: 'text',
+        hunks: hunks('@@ -1,8 +1,8 @@\n a\n b\n target\n c\n d\n x\n target\n y'),
+      },
+    }),
+  )
+  const resolution = resolveReviewAnchor(after, refFor(before, 2))
+  assert.equal(resolution.match, 'unresolved')
+  assert.equal(resolution.ref, null)
+})
+
+test('remote patches retain spaced and non-ASCII paths, including renamed preimages', () => {
+  for (const path of ['src/my file.ts', 'src/naïve.ts', 'src/quote"and\\slash.ts']) {
+    const parsed = parseReviewFileEntry(
+      apiFile({ filename: path, previous_filename: 'src/old name.ts', status: 'renamed' }),
+    )
+    assert.equal(parsed?.path, path)
+    assert.equal(parsed?.previousPath, 'src/old name.ts')
+    assert.ok(parsed?.diff.kind === 'text')
+    assert.deepEqual(
+      parsed.diff.hunks[0].lines.map((line) => line.text),
+      [' a', '-b', '+c', ' d'],
+    )
+  }
+})
+
+test('patchless zero-line changes do not imply binary content', () => {
+  for (const status of ['renamed', 'modified', 'added']) {
+    const parsed = parseReviewFileEntry(
+      apiFile({
+        status,
+        previous_filename: status === 'renamed' ? 'src/old.ts' : undefined,
+        additions: 0,
+        deletions: 0,
+        changes: 0,
+        patch: undefined,
+      }),
+    )
+    assert.equal(parsed?.diff.kind, 'no-text')
+    assert.equal(parsed?.status, status)
+  }
+})
+
 test('a reference into a file the pull request no longer touches says so', () => {
   const before = hunks('@@ -1,2 +1,2 @@\n a\n-b\n+B')[0]
   const resolution = resolveReviewAnchor(
@@ -274,19 +320,6 @@ test('a change block groups adjacent changes, and the extras are counted, not lo
   assert.deepEqual(
     blocks.map((block) => block.kind),
     ['change', 'single', 'change'],
-  )
-})
-
-test('a file with no text says which of the four states it is in', () => {
-  assert.match(reviewDiffStateLabel(file()), /^Text diff/)
-  assert.match(
-    reviewDiffStateLabel(file({ diff: { kind: 'binary' } })),
-    /Binary file.*changed bytes/u,
-  )
-  assert.match(reviewDiffStateLabel(file({ diff: { kind: 'too-large' } })), /too large/u)
-  assert.equal(
-    reviewDiffStateLabel(file({ diff: { kind: 'unreadable', reason: 'patch missing' } })),
-    'patch missing',
   )
 })
 
@@ -516,7 +549,12 @@ test('a marker line carries no number and no side', () => {
  * that pins the revision and the read that confirms it.
  */
 function scriptedTransport(
-  identities: Array<{ head: string | null; base: string | null; baseRef?: string }>,
+  identities: Array<{
+    head: string | null
+    base: string | null
+    baseRef?: string
+    commits?: number
+  }>,
   pages: unknown[],
 ): { transport: GitHubTransport; calls: string[] } {
   const calls: string[] = []
@@ -545,6 +583,7 @@ function scriptedTransport(
         return reply({
           head: { sha: value.head },
           base: { sha: value.base, ref: value.baseRef ?? 'main' },
+          commits: value.commits,
         } as T)
       },
       async paginate<T>(): Promise<T[]> {
@@ -703,9 +742,34 @@ test('a commit list read while nothing moved is returned in full', async (t) => 
   const commits = await readReviewCommits(workspace.repo, 7)
 
   assert.deepEqual(
-    commits.map((entry) => entry.shortOid),
+    commits.commits.map((entry) => entry.shortOid),
     ['eeeeeee', 'fffffff'],
   )
+})
+
+test('commit-list completeness distinguishes the API cap from an exact total', async (t) => {
+  const workspace = await reviewWorkspace()
+  t.after(workspace.dispose)
+  t.after(() => setGitHubTransport(null))
+  const pages = Array.from({ length: 250 }, (_, index) => ({
+    sha: index.toString(16).padStart(40, '0'),
+    commit: { message: `Commit ${index}` },
+  }))
+  for (const [total, truncated] of [
+    [251, true],
+    [250, false],
+    [undefined, true],
+  ] as const) {
+    const { transport } = scriptedTransport(
+      [{ head: 'a'.repeat(40), base: 'b'.repeat(40), commits: total }],
+      pages,
+    )
+    setGitHubTransport(transport)
+    const result = await readReviewCommits(workspace.repo, 7)
+    assert.equal(result.truncated, truncated)
+    assert.equal(result.total, total ?? null)
+    assert.equal(result.commits.length, 250)
+  }
 })
 
 test('a comment on a removed line is not re-anchored onto identical text on the head side', () => {

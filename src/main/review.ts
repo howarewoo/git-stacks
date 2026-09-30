@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto'
 import type {
   ReviewAnchorResolution,
   ReviewCommit,
+  ReviewCommitSet,
   ReviewFile,
   ReviewFileSet,
   ReviewHeadline,
@@ -116,10 +117,9 @@ function lineAnchor(path: string, text: string): string {
 }
 
 /**
- * The anchor plus two neighbouring lines of the same hunk on each side. Two
- * identical lines in one file get identical anchors; the neighbourhood is what
- * separates them, and a line whose surroundings changed still resolves through
- * its anchor alone.
+ * The anchor plus two neighbouring lines of the same hunk on each side.
+ * Context distinguishes exact from moved only for a unique same-side anchor;
+ * it never disambiguates duplicate line text.
  */
 function lineContext(anchor: string, lines: readonly DiffHunkLine[], index: number) {
   const neighbours: string[] = []
@@ -189,12 +189,8 @@ function countHunkHeaders(patch: string): number {
 /**
  * Turns one entry of the pull request files resource into a review file.
  *
- * The resource returns a per-file `patch` and omits it, without a reason, when
- * it declines to inline text. The two omissions are separated by what the entry
- * still counts: a file with changed bytes but no added and no removed text line
- * was not counted as text at all, while a file that GitHub counted lines for and
- * still declined to inline is a diff too large to show here. A patch that arrived
- * but did not verify is never rendered as if it had.
+ * Missing patches with zero line counts can be metadata-only or binary changes.
+ * Preserve that uncertainty; only a verified patch is rendered as text.
  */
 export function parseReviewFileEntry(value: unknown): ReviewFile | null {
   if (!isRecord(value) || typeof value.filename !== 'string' || value.filename === '') return null
@@ -215,13 +211,13 @@ export function parseReviewFileEntry(value: unknown): ReviewFile | null {
     diff: { kind: 'unreadable', reason: 'GitHub returned an unreadable file entry.' },
   }
   if (patch === null || patch.trim() === '') {
-    file.diff = additions === 0 && deletions === 0 ? { kind: 'binary' } : { kind: 'too-large' }
+    file.diff = additions === 0 && deletions === 0 ? { kind: 'no-text' } : { kind: 'too-large' }
     return file
   }
   const identity = { path, originalPath: previousPath }
-  const oldToken = gitHeaderToken(previousPath ?? path)
+  const oldToken = gitHeaderToken(`a/${previousPath ?? path}`)
   const block = parseHunkBlock(
-    `diff --git a/${oldToken} b/${gitHeaderToken(path)}\n${patch}\n`,
+    `diff --git ${oldToken} ${gitHeaderToken(`b/${path}`)}\n${patch}\n`,
     identity,
   )
   const declared = countHunkHeaders(patch)
@@ -317,11 +313,11 @@ export async function readReviewHeadline(
  * identity, and a set read while any of them moved describes a comparison that
  * never existed.
  */
-async function readReviewComparison(
+async function readReviewIdentity(
   remote: ParsedRemote,
   number: number,
   signal?: AbortSignal,
-): Promise<ReviewComparison> {
+): Promise<{ comparison: ReviewComparison; totalCommits: number | null }> {
   const response = await githubTransport().rest<unknown>({
     method: 'GET',
     path: `repos/${remote.owner}/${remote.name}/pulls/${number}`,
@@ -331,9 +327,15 @@ async function readReviewComparison(
   const head = data && isRecord(data.head) ? data.head : null
   const base = data && isRecord(data.base) ? data.base : null
   return {
-    headOid: head && typeof head.sha === 'string' ? head.sha : null,
-    baseOid: base && typeof base.sha === 'string' ? base.sha : null,
-    baseRef: base && typeof base.ref === 'string' ? base.ref : null,
+    comparison: {
+      headOid: head && typeof head.sha === 'string' ? head.sha : null,
+      baseOid: base && typeof base.sha === 'string' ? base.sha : null,
+      baseRef: base && typeof base.ref === 'string' ? base.ref : null,
+    },
+    totalCommits:
+      typeof data?.commits === 'number' && Number.isSafeInteger(data.commits) && data.commits >= 0
+        ? data.commits
+        : null,
   }
 }
 
@@ -373,12 +375,13 @@ async function readPinnedPages<T>(
   path: string,
   signal: AbortSignal | undefined,
   read: (entries: unknown[]) => T,
-): Promise<{ comparison: ReviewComparison; value: T }> {
-  const before = await readReviewComparison(remote, number, signal)
+): Promise<{ comparison: ReviewComparison; totalCommits: number | null; value: T }> {
+  const before = await readReviewIdentity(remote, number, signal)
   const raw = await githubTransport().paginate<unknown>({ method: 'GET', path, signal })
-  const after = await readReviewComparison(remote, number, signal)
-  if (!sameReviewComparison(before, after)) throw new ReviewRevisionMovedError(number)
-  return { comparison: after, value: read(raw) }
+  const after = await readReviewIdentity(remote, number, signal)
+  if (!sameReviewComparison(before.comparison, after.comparison))
+    throw new ReviewRevisionMovedError(number)
+  return { comparison: after.comparison, totalCommits: after.totalCommits, value: read(raw) }
 }
 
 /**
@@ -415,14 +418,14 @@ export async function readReviewFiles(
   }
 }
 
-/** The commits a pull request contains, newest last, as GitHub counts them. */
+/** GitHub caps this endpoint at 250 commits, even when more pages are requested. */
 export async function readReviewCommits(
   repoPath: string,
   number: number,
   signal?: AbortSignal,
-): Promise<ReviewCommit[]> {
+): Promise<ReviewCommitSet> {
   const remote = await originRemote(repoPath, signal)
-  const { value: entries } = await readPinnedPages<unknown[]>(
+  const { value: entries, totalCommits } = await readPinnedPages<unknown[]>(
     remote,
     number,
     `repos/${remote.owner}/${remote.name}/pulls/${number}/commits?per_page=${REVIEW_PAGE_SIZE}`,
@@ -453,7 +456,11 @@ export async function readReviewCommits(
       authoredAt,
     })
   }
-  return commits
+  return {
+    commits,
+    total: totalCommits,
+    truncated: totalCommits === null ? entries.length >= 250 : commits.length < totalCommits,
+  }
 }
 
 /**
@@ -514,16 +521,8 @@ export function resolveReviewAnchor(
       sameSide.push({ exact: line.context === ref.context, ref: candidate })
     }
   }
-  const exact = sameSide.filter((candidate) => candidate.exact)
-  if (exact.length === 1) return { match: 'exact', ref: exact[0].ref, reason: '' }
-  if (exact.length > 1) {
-    return {
-      match: 'unresolved',
-      ref: null,
-      reason: `${ref.path} now holds ${exact.length} identical lines, so the commented one cannot be named.`,
-    }
-  }
   if (sameSide.length === 1) {
+    if (sameSide[0].exact) return { match: 'exact', ref: sameSide[0].ref, reason: '' }
     return {
       match: 'moved',
       ref: sameSide[0].ref,

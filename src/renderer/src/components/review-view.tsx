@@ -13,7 +13,7 @@ import {
   ShieldCheck,
 } from 'lucide-react'
 import type {
-  ReviewCommit,
+  ReviewCommitSet,
   ReviewComparison,
   ReviewDiffMode,
   ReviewFileSet,
@@ -79,7 +79,7 @@ export function ReviewView({
 }) {
   const [headline, setHeadline] = React.useState<ReviewHeadline | null>(null)
   const [files, setFiles] = React.useState<ReviewFileSet | null>(null)
-  const [commits, setCommits] = React.useState<ReviewCommit[] | null>(null)
+  const [commits, setCommits] = React.useState<ReviewCommitSet | null>(null)
   const [viewed, setViewed] = React.useState<ReviewViewedRecord | null>(null)
   const [selectedPath, setSelectedPath] = React.useState<string | null>(null)
   const [mode, setMode] = React.useState<ReviewDiffMode>('unified')
@@ -700,7 +700,7 @@ function ReviewCommits({
   state,
   number,
 }: {
-  commits: ReviewCommit[] | null
+  commits: ReviewCommitSet | null
   state: Stage
   number: number
 }) {
@@ -714,7 +714,7 @@ function ReviewCommits({
   if (state === 'failed') {
     return <p className="section-empty">The commit list could not be loaded from GitHub.</p>
   }
-  if (!commits || commits.length === 0) {
+  if (!commits || (commits.commits.length === 0 && !commits.truncated)) {
     return <p className="section-empty">GitHub reported no commits for this pull request.</p>
   }
   return (
@@ -722,11 +722,20 @@ function ReviewCommits({
       <div className="review-tree-header">
         <strong>Commits</strong>
         <span className="code-region-meta">
-          {commits.length} commit{commits.length === 1 ? '' : 's'}
+          {commits.truncated
+            ? `${commits.commits.length} shown${commits.total === null ? '' : ` of ${commits.total}`}`
+            : `${commits.commits.length} commit${commits.commits.length === 1 ? '' : 's'}`}
         </span>
       </div>
+      {commits.truncated ? (
+        <p className="code-region-note" role="status">
+          {commits.total === null ? 'This list may be incomplete.' : 'This list is incomplete.'}{' '}
+          GitHub returns at most 250 commits here. Open the pull request on GitHub for its full
+          history.
+        </p>
+      ) : null}
       <ul className="review-commit-list">
-        {commits.map((commit) => (
+        {commits.commits.map((commit) => (
           <li key={commit.oid}>
             <GitCommitHorizontal aria-hidden="true" className="size-4" />
             <span className="review-commit-copy">
