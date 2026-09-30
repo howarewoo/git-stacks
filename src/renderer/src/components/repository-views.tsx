@@ -919,21 +919,23 @@ export function StackView({
   // commit history list: one Tab stop, arrow keys between members.
   const [activeMemberIndex, setActiveMemberIndex] = React.useState(0)
   const memberListRef = React.useRef<HTMLDivElement>(null)
-  const focusStackMember = (mountedIndex: number) => {
+  const focusStackMemberInWindow = (mountedIndex: number) => {
     const row =
       memberListRef.current?.querySelectorAll<HTMLButtonElement>('.stack-member-name')[mountedIndex]
     if (!row) return
     setActiveMemberIndex(mountedIndex)
     row.focus()
   }
-  // Home and End name the first and last member of the whole filtered rail, so a
-  // target outside the mounted window is revealed first and focused once it
-  // exists, keeping the rail's single Tab stop with the focus.
+  // Only Home and End address the whole filtered rail, so a target outside the
+  // mounted window is revealed first and focused once it exists, keeping the
+  // rail's single Tab stop with the focus. Arrow keys must never come through
+  // here: they are already in mounted coordinates, and re-basing them by the
+  // window start would send them to the page the reader has already left.
   const pendingMemberFocus = React.useRef<number | null>(null)
-  const focusStackMemberAt = (listIndex: number) => {
+  const focusStackMemberInList = (listIndex: number) => {
     const mountedIndex = listIndex - memberWindow.start
     if (mountedIndex >= 0 && mountedIndex < memberWindow.visible.length) {
-      focusStackMember(mountedIndex)
+      focusStackMemberInWindow(mountedIndex)
       return
     }
     pendingMemberFocus.current = listIndex
@@ -950,7 +952,7 @@ export function StackView({
     const mountedIndex = pending - memberWindow.start
     if (mountedIndex < 0 || mountedIndex >= memberWindow.visible.length) return
     pendingMemberFocus.current = null
-    focusStackMember(mountedIndex)
+    focusStackMemberInWindow(mountedIndex)
   }, [memberWindow.start, memberWindow.visible.length])
   return (
     <div className="stacks-view">
@@ -1122,19 +1124,21 @@ export function StackView({
                         if (!claimsRovingKey(event)) return
                         const action = rovingAction(event.key)
                         if (!action) return
-                        // Home and End address the whole filtered rail; arrows stay
-                        // inside the window the reader is looking at.
-                        const target =
-                          action === 'next' || action === 'previous'
-                            ? rovingTarget(action, memberIndex, memberWindow.visible.length)
-                            : rovingTarget(
-                                action,
-                                memberIndex + memberWindow.start,
-                                visibleMembers.length,
-                              )
+                        // Up/Down walk the mounted members in mounted coordinates;
+                        // Home and End name the first and last member of the whole
+                        // filtered rail, which can sit outside the mounted window.
+                        const wholeList = action === 'first' || action === 'last'
+                        const target = wholeList
+                          ? rovingTarget(
+                              action,
+                              memberIndex + memberWindow.start,
+                              visibleMembers.length,
+                            )
+                          : rovingTarget(action, memberIndex, memberWindow.visible.length)
                         if (target === null) return
                         event.preventDefault()
-                        focusStackMemberAt(target)
+                        if (wholeList) focusStackMemberInList(target)
+                        else focusStackMemberInWindow(target)
                       }}
                       tabIndex={rovingTabIndex(memberIndex, activeMemberIndex)}
                     >

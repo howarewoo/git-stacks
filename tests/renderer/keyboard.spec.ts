@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test'
+import { expect, type Locator, test } from '@playwright/test'
 import {
   failNextDoubleCall,
   getDispatchedActions,
@@ -10,6 +10,20 @@ import {
 import { switchDestination } from './helpers/destinations'
 import { openDeleteLocalBranchDialog, openNewBranchDialog } from './helpers/dialogs'
 import { assertFocusRestored, assertModalDialogFocusTrap } from './helpers/keyboard'
+
+/**
+ * The names of the rows a paged surface currently has mounted, in order.
+ *
+ * A mounted window can slide between two assertions, and `nth()` over a row
+ * locator silently changes which branch it points at when it does — which is
+ * how a roving move that re-based an arrow key onto the whole list could still
+ * look correct. Naming the branch a row stands for keeps the assertion on the
+ * row the reader is actually standing on.
+ */
+const mountedRowNames = (rows: Locator) =>
+  rows.evaluateAll((elements) =>
+    elements.map((element) => element.getAttribute('aria-label') ?? ''),
+  )
 
 test.describe('Keyboard routes and accessibility navigation', () => {
   test('the search shortcut focuses the in-view filter and the palette shortcut opens the palette', async ({
@@ -374,27 +388,45 @@ test.describe('Keyboard routes and accessibility navigation', () => {
       )
     expect(await tabStops()).toBe(1)
 
-    // Movement is relative to the mounted window: one ArrowDown from its first
-    // row lands on its second row, not two hundred rows away.
+    // The window has really slid: the first and last branches of the whole list
+    // are both unmounted, so "the next row" can only be asserted by naming the
+    // branch rather than by its position in whatever happens to be mounted.
+    const listStart = /^feature\/deep-0619,/
+    const base = /^main,/
+    await expect(tree.getByRole('treeitem', { name: listStart })).toHaveCount(0)
+    await expect(tree.getByRole('treeitem', { name: base })).toHaveCount(0)
+    const mounted = await mountedRowNames(rows)
+
+    // Arrow movement is relative to the mounted window: one ArrowDown from its
+    // first row lands on that same window's second row, not on the second row
+    // of the list the reader has already scrolled away from.
     await rows.first().focus()
     await page.keyboard.press('ArrowDown')
-    await expect(rows.nth(1)).toBeFocused()
+    await expect(tree.getByRole('treeitem', { name: mounted[1] })).toBeFocused()
 
-    // The base of the chain is the last branch of the whole list, and this window
-    // has never mounted it.
-    const base = tree.getByRole('treeitem', { name: /^main,/ })
-    await expect(base).toHaveCount(0)
+    // The arrow did not re-base the move onto the whole list: the mounted window
+    // is the same window, holding the same branches, in the same order.
+    expect(await mountedRowNames(rows)).toEqual(mounted)
+    await expect(tree.getByRole('treeitem', { name: listStart })).toHaveCount(0)
+    await expect(tree.getByRole('treeitem', { name: base })).toHaveCount(0)
+    await page.keyboard.press('ArrowUp')
+    await expect(tree.getByRole('treeitem', { name: mounted[0] })).toBeFocused()
 
     // End names the last row of the list rather than the last row of the window,
     // and reveals the page that mounts it.
     await page.keyboard.press('End')
-    await expect(base).toBeFocused()
+    await expect(tree.getByRole('treeitem', { name: base })).toBeFocused()
     expect(await tabStops()).toBe(1)
 
     // Home names the first row of the list, which the slid window left behind.
     await page.keyboard.press('Home')
-    await expect(tree.getByRole('treeitem', { name: /^feature\/deep-0619,/ })).toBeFocused()
+    await expect(tree.getByRole('treeitem', { name: listStart })).toBeFocused()
     expect(await tabStops()).toBe(1)
+
+    // With the window re-based onto the first page, the next arrow names the
+    // second branch of the whole list.
+    await page.keyboard.press('ArrowDown')
+    await expect(tree.getByRole('treeitem', { name: /^feature\/deep-0618,/ })).toBeFocused()
 
     // Paging back must not strand the surface without a Tab stop.
     const revealAgain = page.getByRole('button', { name: /more branches/i }).first()
@@ -498,7 +530,24 @@ test.describe('Keyboard routes and accessibility navigation', () => {
     await settle(page)
     await expect(last).toHaveCount(0)
 
+    // The window has really slid: the rail's first member is unmounted too, so
+    // an arrow assertion has to name the member rather than its position in
+    // whatever the window happens to be mounting.
+    await expect(first).toHaveCount(0)
+    const mounted = await mountedRowNames(names)
+    expect(mounted.length).toBeGreaterThan(200)
+
+    // One ArrowDown lands on the second mounted member and leaves the window
+    // exactly where it was, instead of sliding back to the top of the rail.
     await names.first().focus()
+    await page.keyboard.press('ArrowDown')
+    await expect(rail.getByRole('button', { name: mounted[1] })).toBeFocused()
+    expect(await mountedRowNames(names)).toEqual(mounted)
+    await expect(first).toHaveCount(0)
+    await page.keyboard.press('ArrowUp')
+    await expect(rail.getByRole('button', { name: mounted[0] })).toBeFocused()
+    // End still names the last member of the whole rail, not the last member of
+    // the window, and reveals the page that mounts it.
     await page.keyboard.press('End')
     await expect(last).toBeFocused()
     await page.keyboard.press('Home')

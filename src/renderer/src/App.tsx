@@ -817,21 +817,24 @@ function App() {
   // the same coordinate system the DOM lookup and the tabindex comparison use.
   const [branchTreeActiveIndex, setBranchTreeActiveIndex] = React.useState(0)
   const branchTreeListRef = React.useRef<HTMLDivElement>(null)
-  const focusBranchRow = (mountedIndex: number) => {
+  const focusBranchRowInWindow = (mountedIndex: number) => {
     const row =
       branchTreeListRef.current?.querySelectorAll<HTMLElement>('[role="treeitem"]')[mountedIndex]
     if (!row) return
     setBranchTreeActiveIndex(mountedIndex)
     row.focus()
   }
-  // Home and End address the whole filtered list, so the row they name may not be
-  // mounted yet. The window is asked to reveal it and the pending index is applied
-  // once that row exists, which keeps the surface's single Tab stop with the focus.
+  // Only Home and End address the whole filtered list, so the row they name may
+  // not be mounted yet. The window is asked to reveal it and the pending index is
+  // applied once that row exists, which keeps the surface's single Tab stop with
+  // the focus. Arrow keys must never come through here: they are already in
+  // mounted coordinates, and re-basing them by the window start would send them
+  // to the page the reader has already scrolled away from.
   const pendingBranchFocus = React.useRef<number | null>(null)
-  const focusBranchRowAt = (listIndex: number) => {
+  const focusBranchRowInList = (listIndex: number) => {
     const mountedIndex = listIndex - branchWindow.start
     if (mountedIndex >= 0 && mountedIndex < branchWindow.visible.length) {
-      focusBranchRow(mountedIndex)
+      focusBranchRowInWindow(mountedIndex)
       return
     }
     pendingBranchFocus.current = listIndex
@@ -846,7 +849,7 @@ function App() {
     const mountedIndex = pending - branchWindow.start
     if (mountedIndex < 0 || mountedIndex >= branchWindow.visible.length) return
     pendingBranchFocus.current = null
-    focusBranchRow(mountedIndex)
+    focusBranchRowInWindow(mountedIndex)
   }, [branchWindow.start, branchWindow.visible.length])
 
   const changeState = React.useMemo(
@@ -1836,20 +1839,21 @@ function App() {
                     if (!claimsRovingKey(event)) return
                     const action = rovingAction(event.key)
                     if (action) {
+                      // Up/Down walk the mounted rows in mounted coordinates;
                       // Home and End name the first and last row of the whole
-                      // filtered list, which can sit outside the mounted window;
-                      // arrows stay inside the window the reader is looking at.
-                      const target =
-                        action === 'next' || action === 'previous'
-                          ? rovingTarget(action, branchIndex, branchWindow.visible.length)
-                          : rovingTarget(
-                              action,
-                              branchIndex + branchWindow.start,
-                              visibleBranches.length,
-                            )
+                      // filtered list, which can sit outside the mounted window.
+                      const wholeList = action === 'first' || action === 'last'
+                      const target = wholeList
+                        ? rovingTarget(
+                            action,
+                            branchIndex + branchWindow.start,
+                            visibleBranches.length,
+                          )
+                        : rovingTarget(action, branchIndex, branchWindow.visible.length)
                       if (target === null) return
                       event.preventDefault()
-                      focusBranchRowAt(target)
+                      if (wholeList) focusBranchRowInList(target)
+                      else focusBranchRowInWindow(target)
                       return
                     }
                     if (event.key === 'Enter' || event.key === ' ') {
