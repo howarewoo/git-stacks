@@ -1727,7 +1727,7 @@ test('an account saved for one host is never restored or opened under another', 
     vault: new CredentialVault(harness.vaultFile, harness.protector),
     stateFile: harness.stateFile,
     host: 'ghe.example.com',
-    env: { GIT_STACKS_GITHUB_APP_CLIENT_ID_GHE_EXAMPLE_COM: CLIENT_ID },
+    env: { GIT_STACKS_GITHUB_APP_CLIENT_ID_6768652E6578616D706C652E636F6D: CLIENT_ID },
     fetch: (async (input: string | URL | Request) => {
       asked += 1
       throw new Error(`unexpected request to ${String(input)}`)
@@ -1738,4 +1738,170 @@ test('an account saved for one host is never restored or opened under another', 
   assert.notEqual(status.state, 'signed-in')
   assert.equal(status.reference ?? null, null)
   assert.equal(asked, 0)
+})
+
+/**
+ * One installation's files, and the account a host change retires.
+ *
+ * The first account is signed in to github.com over a real vault and state
+ * file; `createSuccessor` builds the account the next host gets, at the moment
+ * the test asks for it, because the order the two are created in is the whole
+ * point. Each records the statuses it publishes, so a report that arrives after
+ * the account behind it was replaced is visible rather than assumed.
+ */
+async function hostSwitchHarness() {
+  const root = await mkdtemp(join(tmpdir(), 'git-stacks-account-'))
+  roots.push(root)
+  const { protector } = sealingProtector()
+  const vaultFile = join(root, 'credentials.vault.json')
+  const stateFile = join(root, 'github-account.json')
+  const clock = { now: 1_700_000_000_000 }
+  const firstChanges: GitHubAccountStatus[] = []
+  const secondChanges: GitHubAccountStatus[] = []
+  const firstVault = new CredentialVault(vaultFile, protector)
+  const first = new GitHubAccount({
+    vault: firstVault,
+    stateFile,
+    env: { GIT_STACKS_GITHUB_APP_CLIENT_ID: CLIENT_ID },
+    fetch: fetchReturning([{ body: DEVICE_CODE }, { body: session('ghu_dotcom', 'ghr_dotcom') }])
+      .fetch,
+    identify: async () => 'ada',
+    now: () => clock.now,
+    sleep: async () => {},
+    onChange: (status) => {
+      firstChanges.push(status)
+    },
+  })
+  await first.signIn()
+  await waitForState(firstChanges, (status) => status.state === 'signed-in' && status.login === 'ada')
+  const createSuccessor = (): GitHubAccount =>
+    new GitHubAccount({
+      vault: new CredentialVault(vaultFile, protector),
+      stateFile,
+      host: 'ghe.example.com',
+      env: { GIT_STACKS_GITHUB_APP_CLIENT_ID_6768652E6578616D706C652E636F6D: CLIENT_ID },
+      fetch: fetchReturning([{ body: DEVICE_CODE }, { body: session('ghu_ghe', 'ghr_ghe') }])
+        .fetch,
+      identify: async () => 'grace',
+      now: () => clock.now,
+      sleep: async () => {},
+      onChange: (status) => {
+        secondChanges.push(status)
+      },
+    })
+  return {
+    createSuccessor,
+    first,
+    firstChanges,
+    firstVault,
+    protector,
+    secondChanges,
+    stateFile,
+    vaultFile,
+  }
+}
+
+test('a host switch cannot retire the account that replaced the retiring one', async () => {
+  const { createSuccessor, first, firstChanges, firstVault, protector, secondChanges, stateFile, vaultFile } =
+    await hostSwitchHarness()
+  const before = JSON.parse(await readFile(stateFile, 'utf8')) as { reference: string }
+
+  // The retirement is held inside the vault, so the successor signs in while the
+  // account being retired is still clearing the files they share.
+  const gate = Promise.withResolvers<void>()
+  let held = true
+  let entered = false
+  const removing = firstVault.remove.bind(firstVault)
+  const clearing = firstVault.clear.bind(firstVault)
+  firstVault.remove = async (reference: string) => {
+    if (held) {
+      entered = true
+      await gate.promise
+    }
+    await removing(reference)
+  }
+  firstVault.clear = async () => {
+    if (held) {
+      entered = true
+      await gate.promise
+    }
+    await clearing()
+  }
+
+  const signingOut = first.signOut()
+  await waitUntil(() => entered)
+  // Choosing the next host creates its account while that sign-out is still
+  // queued, and the panel is showing the successor from that moment on: every
+  // status the retired account reports from here on would repaint it wrongly.
+  const successor = createSuccessor()
+  firstChanges.length = 0
+  const signingIn = successor.signIn()
+  gate.resolve()
+  await signingOut
+  await signingIn
+  await waitForState(secondChanges, (status) => status.login === 'grace')
+
+  // The successor's credential and its metadata both survive a retirement that
+  // was already in flight when it signed in.
+  const after = JSON.parse(await readFile(stateFile, 'utf8')) as {
+    reference: string
+    host: string
+    login: string | null
+  }
+  assert.equal(after.host, 'ghe.example.com')
+  assert.equal(after.login, 'grace')
+  assert.notEqual(after.reference, before.reference)
+  const vault = new CredentialVault(vaultFile, protector)
+  assert.ok((await vault.open(after.reference, 'ghe.example.com')).includes('ghu_ghe'))
+  assert.equal((await successor.current())?.token, 'ghu_ghe')
+  assert.equal(successor.status().state, 'signed-in')
+
+  // The retired account keeps nothing and reports nothing.
+  assert.deepEqual(firstChanges, [], 'the retired account published a status of its own')
+  assert.equal(await first.current(), null, 'the retired account hands out no credential')
+  assert.equal(first.available(), false)
+
+  setGitHubCredentialSource(null)
+  onGitHubFailure(null)
+})
+
+test('a restore that finishes after the account was replaced adopts nothing and reports nothing', async () => {
+  const { createSuccessor, protector, secondChanges, stateFile, vaultFile } =
+    await hostSwitchHarness()
+
+  // A second start reads the same files, and its read is held open while the
+  // host changes underneath it.
+  const gate = Promise.withResolvers<void>()
+  const vault = new CredentialVault(vaultFile, protector)
+  const opening = vault.open.bind(vault)
+  vault.open = async (reference: string, expectedHost?: string | null) => {
+    await gate.promise
+    return opening(reference, expectedHost)
+  }
+  const changes: GitHubAccountStatus[] = []
+  const restoring = new GitHubAccount({
+    vault,
+    stateFile,
+    env: { GIT_STACKS_GITHUB_APP_CLIENT_ID: CLIENT_ID },
+    identify: async () => 'ada',
+    onChange: (status) => {
+      changes.push(status)
+    },
+  })
+  const reading = restoring.restore()
+  const successor = createSuccessor()
+  const signingIn = successor.signIn()
+  gate.resolve()
+  await reading
+  await signingIn
+  await waitForState(secondChanges, (status) => status.login === 'grace')
+
+  assert.equal(await restoring.current(), null, 'nothing is adopted once the account was replaced')
+  assert.equal(restoring.available(), false)
+  assert.deepEqual(changes, [], 'a replaced account publishes no status of its own')
+  const after = JSON.parse(await readFile(stateFile, 'utf8')) as { host: string }
+  assert.equal(after.host, 'ghe.example.com')
+
+  setGitHubCredentialSource(null)
+  onGitHubFailure(null)
 })

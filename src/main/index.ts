@@ -298,16 +298,28 @@ let settingsPolicyError: string | null = null
 let gitEnvironment: GitEnvironmentStatus | null = null
 
 /**
+ * The sealed store every account in this process shares, created once so two
+ * accounts over the same file cannot keep two caches of it, each writing back
+ * entries the other had already replaced.
+ */
+let accountVault: CredentialVault | null = null
+
+function credentialVault(): CredentialVault {
+  accountVault ??= new CredentialVault(
+    join(app.getPath('userData'), 'credentials.vault.json'),
+    safeStorageProtector,
+  )
+  return accountVault
+}
+
+/**
  * The signed-in GitHub account. Its credential is sealed by the operating
  * system and never reaches the renderer: the bridge carries status only.
  */
 function githubAccount() {
   account ??= new GitHubAccount({
     host: configuredHost().host,
-    vault: new CredentialVault(
-      join(app.getPath('userData'), 'credentials.vault.json'),
-      safeStorageProtector,
-    ),
+    vault: credentialVault(),
     stateFile: join(app.getPath('userData'), 'github-account.json'),
     onChange: (status) => window?.webContents.send('github-account', status),
   })
@@ -343,6 +355,10 @@ function applySettings(settings: AppSettings): void {
   hostGeneration += 1
   forgetHost(previous ?? undefined)
   if (account !== null && accountHost !== settings.github.host) {
+    // The sign-out is not awaited, and it does not need to be: the account
+    // removes only the identity the shared files hold for its own host, and
+    // whichever of the two lands first — this retirement or the next host's
+    // sign-in — the other one finds the files named for its own account.
     void account.signOut().catch(() => null)
     account = null
     accountHost = null
@@ -456,7 +472,12 @@ async function trustedExternalLinkHosts(): Promise<GitHubHostContext[]> {
   return hosts
 }
 
-/** A sign-in belongs to one host, so choosing another host drops the old one. */
+/**
+ * A sign-in belongs to one host, so choosing another host drops the old one.
+ * The successor claims the shared files when it is created below, and the
+ * retirement removes only this host's identity, so the two cannot erase each
+ * other whichever order they run in.
+ */
 function accountForConfiguredHost(): GitHubAccount {
   if (account && accountHost !== configuredHost().host) {
     void account.signOut().catch(() => null)

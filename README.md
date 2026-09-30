@@ -201,16 +201,23 @@ refused. A refused link never reaches the operating system.
 Each host needs its own credential. Sign-in uses the GitHub App device flow, and
 the public client id is read per host:
 
-| Host         | Client id environment variable                                                    |
-| ------------ | --------------------------------------------------------------------------------- |
-| `github.com` | `GIT_STACKS_GITHUB_APP_CLIENT_ID`                                                 |
-| Any other    | `GIT_STACKS_GITHUB_APP_CLIENT_ID_<HOST>`, dots and hyphens written as underscores |
+| Host         | Client id environment variable                                  |
+| ------------ | --------------------------------------------------------------- |
+| `github.com` | `GIT_STACKS_GITHUB_APP_CLIENT_ID`                               |
+| Any other    | `GIT_STACKS_GITHUB_APP_CLIENT_ID_<HOST>`, host as upper-case hexadecimal |
 
-`ghe.example.com` therefore reads `GIT_STACKS_GITHUB_APP_CLIENT_ID_GHE_EXAMPLE_COM`.
-A host with no client id configured reports "not configured" and nothing else
-changes. Whether a host can complete a device-flow sign-in depends on that
-host's configuration: a GitHub Enterprise Server instance must have the device
-flow enabled under the app's optional features, or no sign-in is possible.
+`ghe.example.com` therefore reads
+`GIT_STACKS_GITHUB_APP_CLIENT_ID_6768652E6578616D706C652E636F6D`, named the
+way a per-host token is: the host is not spelled out, so two hosts can never
+produce one name, and a host with a custom port (`ghe.example.com:8443`) is
+named as well as one without. There is no other name to fall back to — spelling
+the host with underscores would let `ghe.a-b.example` sign in with
+`ghe.a.b.example`'s registration, and spelling it with its port would produce a
+name no shell accepts. A host with no client id configured reports "not
+configured" and nothing else changes. Whether a host can complete a device-flow
+sign-in depends on that host's configuration: a GitHub Enterprise Server
+instance must have the device flow enabled under the app's optional features,
+or no sign-in is possible.
 
 `GIT_STACKS_GITHUB_TOKEN`, `GITHUB_TOKEN`, `GH_TOKEN`, and an authenticated
 `gh` session are used when they are present. `gh` is optional and is never
@@ -240,7 +247,7 @@ never sent to another, and an ambient `GIT_STACKS_GITHUB_TOKEN`, `GITHUB_TOKEN`,
 or `GH_TOKEN` is a `github.com` credential: another host only receives a token
 set in its own `GIT_STACKS_GITHUB_TOKEN_<HOST>`, where `<HOST>` is the host name
 written as upper-case hexadecimal: `github.com` is
-`GIT_STACKS_GITHUB_TOKEN_6769687562752E636F6D`. Two different hosts can never
+`GIT_STACKS_GITHUB_TOKEN_6769746875622E636F6D`. Two different hosts can never
 produce the same variable that way, and the name uses only characters a shell
 accepts. A `gh` child process is given that host's own token under the variable
 the CLI reads for that host — `GH_TOKEN` for github.com,

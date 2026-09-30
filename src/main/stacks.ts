@@ -377,6 +377,18 @@ interface PublishOperation {
    */
   capturedMembers: CapturedStackMember[]
   stackAction: PublishStackAction
+  /**
+   * Whether the host was observed to serve the native stacks resource when this
+   * operation was created, and what the probe established when it was not. A
+   * resume reads it to tell an ordinary chain from a native one, which the
+   * journal could not otherwise know: an ordinary chain and a submission that
+   * creates its first stack look the same in the steps they leave behind.
+   *
+   * Optional, because a journal written before this field existed has no
+   * answer to give; its shape still says which of the two it is.
+   */
+  nativeStacksAvailable?: boolean
+  nativeStacksReason?: NativeStackCapabilityReason | 'not-applicable'
   status: 'running' | 'failed' | 'completed'
   message: string
 }
@@ -2564,6 +2576,10 @@ async function readPublishOperation(repoPath: string): Promise<PublishOperation 
     (parsed.stackCreateRequested !== undefined &&
       typeof parsed.stackCreateRequested !== 'boolean') ||
     !['create', 'extend', 'none'].includes(String(parsed.stackAction)) ||
+    (parsed.nativeStacksAvailable !== undefined &&
+      typeof parsed.nativeStacksAvailable !== 'boolean') ||
+    (parsed.nativeStacksReason !== undefined &&
+      typeof parsed.nativeStacksReason !== 'string') ||
     !['running', 'failed', 'completed'].includes(String(parsed.status)) ||
     !Array.isArray(parsed.layers) ||
     parsed.layers.length === 0 ||
@@ -2721,6 +2737,8 @@ async function buildPublishOperation(
     stackNumber: offer.stackNumber,
     capturedMembers: capturedStackMembers(plan, offer.stackNumber),
     stackAction: offer.stackAction,
+    nativeStacksAvailable: plan.nativeStacksAvailable,
+    nativeStacksReason: plan.nativeStacksReason,
     stackCreateRequested: false,
     status: 'running',
     message: 'Submitting the stack',
@@ -6099,6 +6117,44 @@ async function proveCapturedStackMembership(
   }
 }
 
+/**
+ * Whether this submission was planned as an ordinary chain, because the host
+ * refused the native stacks resource.
+ *
+ * The journal records the answer for an operation this build created. One
+ * written before the answer was recorded has no stack to extend and none to
+ * create, which is exactly the shape an ordinary chain leaves behind, so it is
+ * proved as one rather than assumed to be a native submission.
+ */
+function plannedAsOrdinaryChain(operation: PublishOperation): boolean {
+  if (typeof operation.nativeStacksAvailable === 'boolean') {
+    return !operation.nativeStacksAvailable
+  }
+  return operation.stackNumber === null && operation.stackAction === 'none'
+}
+
+/**
+ * Confirms the host still refuses the native stacks resource before a resume
+ * publishes anything else. A refusal is the only answer that lets an ordinary
+ * chain continue; a listing that answers means the host serves native stacks
+ * now, and the preview has to be taken and reviewed again. Any other failure is
+ * this build's own answer not having arrived, and is raised rather than read as
+ * confirmation — the same rule the first submission's proof follows.
+ */
+async function reproveOrdinaryChain(root: string, operation: PublishOperation): Promise<void> {
+  if (!plannedAsOrdinaryChain(operation)) return
+  const [owner, name] = operation.fullName.split('/')
+  try {
+    await listPullRequestStacks(owner, name, { host: await repositoryHost(root) })
+  } catch (error) {
+    if (stacksResourceAbsent(error)) return
+    throw error
+  }
+  throw new Error(
+    `Stack preview is stale: this host now answers for native stacks on this repository, so the preview must be reviewed again`,
+  )
+}
+
 async function runSubmitStack(
   repoPath: string,
   plan: StackPlan,
@@ -6163,6 +6219,14 @@ async function retrySubmitStack(repoPath: string): Promise<ActionResult> {
   }
   await ensureNoBusyOperation(root, 'resume the stack submission')
   await ensureClean(root, 'resume the stack submission')
+  // The proof the first submission made is made again here, before the resume
+  // can push a branch or open a pull request. A host that refused the stacks
+  // resource when the preview was taken may serve it now, and an ordinary chain
+  // resumed on such a host would publish pull requests it expects to be
+  // registered in a stack, from a preview nobody reviewed against that.
+  if (operation.steps.some((step) => step.status !== 'completed')) {
+    await reproveOrdinaryChain(root, operation)
+  }
   // A step that stopped mid-write is retried from its beginning; every step treats
   // its intended end state as success, so no push or pull request is applied twice.
   for (const step of operation.steps) {

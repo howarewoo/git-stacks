@@ -125,6 +125,37 @@ async function writeAccount(file: string, account: StoredAccount): Promise<void>
   await rename(temporary, file)
 }
 
+/**
+ * The files one installation's signed-in account lives in, and who owns them.
+ *
+ * A host change replaces the account: the retired one is signed out and the
+ * next host's account is created while that sign-out is still running. Both
+ * reach the same vault and the same state file, so their work is serialized
+ * here and each account's claim is compared against the newest one. An account
+ * that has been replaced is not merely out of date — it is no longer allowed to
+ * write, restore, refresh, or report over the account that replaced it.
+ */
+interface AccountOwnership {
+  /** Every stored-state mutation, from every account that shares these files. */
+ commits: Promise<unknown>
+  /** The newest claim handed out; every earlier account has been replaced. */
+ claim: number
+}
+
+const accountOwnerships = new Map<string, AccountOwnership>()
+
+/**
+ * Claims the files named by `stateFile` for a new account, retiring whatever
+ * account held them. Keyed by the state file because that is what every account
+ * in this process shares: one installation has one signed-in account on disk.
+ */
+function claimAccountOwnership(stateFile: string): { shared: AccountOwnership; claim: number } {
+  const shared = accountOwnerships.get(stateFile) ?? { commits: Promise.resolve(), claim: 0 }
+  shared.claim += 1
+  accountOwnerships.set(stateFile, shared)
+  return { shared, claim: shared.claim }
+}
+
 export interface GitHubAccountOptions {
   vault: CredentialVault
   /** Application state: the opaque reference and its non-secret facts. */
@@ -247,13 +278,10 @@ export class GitHubAccount implements GitHubCredentialSource {
    */
   private flow = 0
   private refreshController: AbortController | null = null
-  /**
-   * Every change to stored state runs through here, one at a time, so an
-   * adoption and a sign-out can never interleave: whichever starts second
-   * observes the first one's completed result and nothing stale is renamed
-   * over the file.
-   */
-  private commits: Promise<unknown> = Promise.resolve()
+  /** The files every account in this process shares, and the newest claim on them. */
+  private readonly shared: AccountOwnership
+  /** This account's claim, retired by the claim of any account created after it. */
+  private readonly claim: number
 
   constructor(options: GitHubAccountOptions) {
     this.options = options
@@ -262,6 +290,9 @@ export class GitHubAccount implements GitHubCredentialSource {
     this.sleep = options.sleep ?? defaultSleep
     this.hostContext = githubHostContext(options.host ?? GITHUB_DOTCOM_HOST)
     this.host = this.hostContext.host
+    const ownership = claimAccountOwnership(options.stateFile)
+    this.shared = ownership.shared
+    this.claim = ownership.claim
     this.state = githubAppClientId(this.env, this.host) ? 'signed-out' : 'not-configured'
     this.message =
       this.state === 'not-configured'
@@ -281,18 +312,35 @@ export class GitHubAccount implements GitHubCredentialSource {
    * signing out cannot leave it out of step with what is actually usable.
    */
   available(): boolean {
-    return this.live !== null && this.options.vault.store().kind === 'system'
+    return this.live !== null && !this.replaced() && this.options.vault.store().kind === 'system'
   }
 
-  /** Runs stored-state mutations one at a time, in the order they were asked for. */
+  /**
+   * Whether a newer account for the same files has taken over. A replaced
+   * account answers for itself only: it never writes the shared state, hands
+   * out a credential, or reports a status, because the account that replaced it
+   * is what the person is looking at now.
+   */
+  private replaced(): boolean {
+    return this.shared.claim !== this.claim
+  }
+
+  /**
+   * Runs stored-state mutations one at a time, in the order they were asked for,
+   * across every account that shares these files — not just this one. Two
+   * accounts would otherwise interleave on the same vault and state file, and a
+   * sign-out queued by the one being replaced could land after the account that
+   * replaced it had already signed in.
+ */
   private commit<T>(work: () => Promise<T>): Promise<T> {
-    const result = this.commits.then(work, work)
-    this.commits = result.then(
+    const result = this.shared.commits.then(work, work)
+    this.shared.commits = result.then(
       () => undefined,
       () => undefined,
     )
     return result
   }
+
 
   /** The state to return when nothing is in progress and no credential is active. */
   private baseline(): GitHubAccountState {
@@ -339,6 +387,10 @@ export class GitHubAccount implements GitHubCredentialSource {
    */
   private publish(): GitHubAccountStatus {
     const status = this.status()
+    // A replaced account still answers for itself, but the panel is showing the
+    // account that replaced it, so a status that arrives late must not repaint
+    // that panel with a host that is no longer selected.
+    if (this.replaced()) return status
     if (this.published === null || JSON.stringify(this.published) !== JSON.stringify(status)) {
       this.published = status
       this.options.onChange?.(status)
@@ -357,44 +409,55 @@ export class GitHubAccount implements GitHubCredentialSource {
     return this.baseline()
   }
 
-  /** Reads the sealed credential at startup. Local Git never depends on this. */
+  /**
+   * Reads the sealed credential at startup. Local Git never depends on this.
+   *
+   * The read runs in the shared queue and refuses a replaced account, so a
+   * restore that was still reading while the host changed cannot adopt — or
+   * report — over the account that replaced it.
+   */
   async restore(): Promise<GitHubAccountStatus> {
-    const store = this.options.vault.store()
-    if (store.kind !== 'system') {
-      return this.setState('storage-unavailable', store.reason)
-    }
-    const account = await readAccount(this.options.stateFile)
-    if (!account) return this.setState(this.baseline())
-    // The saved account belongs to the host that issued it. This installation is
-    // pointed somewhere else — the setting changed while the app was closed, or
-    // a previous sign-out was interrupted — so nothing saved for that host is
-    // adopted, and nothing of this host's is either.
-    if (account.host !== this.host) {
-      this.account = null
-      this.live = null
-      return this.setState(this.baseline())
-    }
-    this.account = account
-    try {
-      // The vault is told which host the secret must belong to, so a stale
-      // reference cannot be decrypted and rebound to the host in use.
-      const live = this.parse(
-        await this.options.vault.open(account.reference, this.host),
-        account.session,
-      )
-      this.live = live
-      this.scheduleExpiry()
-      const expired = live.expiresAt !== null && live.expiresAt <= this.now()
-      return this.setState(expired ? 'expired' : 'signed-in', null)
-    } catch (error) {
-      this.live = null
-      return this.setState(
-        'expired',
-        error instanceof CredentialStoreError
-          ? error.message
-          : 'The saved GitHub sign-in could not be read. Sign in again.',
-      )
-    }
+    return this.commit(async () => {
+      if (this.replaced()) return this.status()
+      const store = this.options.vault.store()
+      if (store.kind !== 'system') {
+        return this.setState('storage-unavailable', store.reason)
+      }
+      const account = await readAccount(this.options.stateFile)
+      if (this.replaced()) return this.status()
+      if (!account) return this.setState(this.baseline())
+      // The saved account belongs to the host that issued it. This installation is
+      // pointed somewhere else — the setting changed while the app was closed, or
+      // a previous sign-out was interrupted — so nothing saved for that host is
+      // adopted, and nothing of this host's is either.
+      if (account.host !== this.host) {
+        this.account = null
+        this.live = null
+        return this.setState(this.baseline())
+      }
+      this.account = account
+      try {
+        // The vault is told which host the secret must belong to, so a stale
+        // reference cannot be decrypted and rebound to the host in use.
+        const live = this.parse(
+          await this.options.vault.open(account.reference, this.host),
+          account.session,
+        )
+        if (this.replaced()) return this.status()
+        this.live = live
+        this.scheduleExpiry()
+        const expired = live.expiresAt !== null && live.expiresAt <= this.now()
+        return this.setState(expired ? 'expired' : 'signed-in', null)
+      } catch (error) {
+        this.live = null
+        return this.setState(
+          'expired',
+          error instanceof CredentialStoreError
+            ? error.message
+            : 'The saved GitHub sign-in could not be read. Sign in again.',
+        )
+      }
+    })
   }
 
   private parse(value: string, session: string): LiveCredential {
@@ -470,14 +533,20 @@ export class GitHubAccount implements GitHubCredentialSource {
         JSON.stringify(live),
         issuedAt,
       )
-      // Nothing has been given up yet, so abandoning the staged credential is
-      // enough to leave the store and application state as they were.
+      // Nothing has been given up yet, so removing the staged credential and
+      // putting back what these files named is enough to leave the store and
+      // application state as they were. Whether the state file is rewritten at
+      // all is decided before the credential is removed: the account that
+      // replaced this one may have written metadata of its own, and restoring
+      // over it would delete the successor's account.
       const abandon = async () => {
+        const named = (await readAccount(this.options.stateFile))?.reference ?? null
         await this.options.vault.remove(reference)
+        if (named !== reference) return
         if (previousAccount) await writeAccount(this.options.stateFile, previousAccount)
         else await rm(this.options.stateFile, { force: true })
       }
-      if (!fence()) {
+      if (!fence() || this.replaced()) {
         await abandon()
         return null
       }
@@ -494,15 +563,11 @@ export class GitHubAccount implements GitHubCredentialSource {
       try {
         await writeAccount(this.options.stateFile, account)
       } catch (error) {
-        // The metadata never named this credential, so dropping the staged
-        // entry is the whole rollback: the previous account keeps the state
-        // file and its own sealed credential, and nothing is left on disk that
-        // no account owns. The failure is still reported, so the poll ends in a
-        // sign-in failure rather than a silent success.
+        // A failed metadata write never transfers ownership of this credential.
         await this.options.vault.remove(reference)
         throw error
       }
-      if (!fence()) {
+      if (!fence() || this.replaced()) {
         // The metadata now names the staged credential; put back what it named
         // before, so the state on disk never points at a removed reference.
         await abandon()
@@ -528,15 +593,31 @@ export class GitHubAccount implements GitHubCredentialSource {
     })
   }
 
+  /**
+   * Removes the identity the shared files hold for this host, and nothing else.
+   *
+   * A sign-out and a discard are how a host change retires an account, and the
+   * account for the next host may be created while one of them is still queued.
+   * Clearing the whole vault and deleting the state file would take the
+   * successor's credential and metadata with it, so both are done only for the
+   * reference these files name for this host — and only while this account is
+   * still the one that owns them.
+   */
+  private async retireStoredIdentity(): Promise<void> {
+    const stored = await readAccount(this.options.stateFile)
+    // Someone else's account is named here now: its credential and its metadata
+    // both belong to the account that replaced this one.
+    if (this.replaced() || (stored !== null && stored.host !== this.host)) return
+    if (stored) await this.options.vault.remove(stored.reference)
+    else await this.options.vault.clear()
+    await rm(this.options.stateFile, { force: true })
+  }
+
   private async discard(state: GitHubAccountState, message: string): Promise<void> {
     this.generation += 1
-    const reference = this.account?.reference ?? null
     this.forget()
     this.publish()
-    await this.commit(async () => {
-      if (reference) await this.options.vault.remove(reference)
-      await rm(this.options.stateFile, { force: true })
-    })
+    await this.commit(() => this.retireStoredIdentity())
     this.setState(state, message)
   }
 
@@ -556,9 +637,12 @@ export class GitHubAccount implements GitHubCredentialSource {
 
   /**
    * The credential the transport uses. It refreshes an expired one and returns
-   * null when sign-in is required; the transport never sees anything else.
+   * null when sign-in is required; the transport never sees anything else. A
+   * replaced account hands out nothing: the account that replaced it holds the
+   * credential now, and renewing this one would rotate the successor's.
    */
   async current(): Promise<GitHubCredential | null> {
+    if (this.replaced()) return null
     const live = this.live
     if (!live) return null
     if (live.expiresAt === null || live.expiresAt > this.now()) {
@@ -804,7 +888,7 @@ export class GitHubAccount implements GitHubCredentialSource {
       if (!current()) return { state: 'signed-in', message: null }
       if (login) {
         await this.commit(async () => {
-          if (!current() || !this.account) return
+          if (!current() || this.replaced() || !this.account) return
           if (login === this.account.login) return
           this.account = { ...this.account, login }
           await this.options.beforeStateWrite?.()
@@ -837,7 +921,14 @@ export class GitHubAccount implements GitHubCredentialSource {
     return this.setState(this.baseline())
   }
 
-  /** Removes the credential this application owns. Git repositories are untouched. */
+  /**
+   * Removes the credential this application owns. Git repositories are untouched.
+   *
+   * A host change reaches this while the next host's account is already being
+   * created, so the removal is the one the shared files hold for this host: the
+   * successor's credential and its metadata are never what a retired account
+   * deletes, whichever order the two land in.
+   */
   async signOut(): Promise<GitHubAccountStatus> {
     this.generation += 1
     this.pending?.abort()
@@ -848,10 +939,7 @@ export class GitHubAccount implements GitHubCredentialSource {
     this.forget()
     this.publish()
     const epoch = this.epoch
-    await this.commit(async () => {
-      await this.options.vault.clear()
-      await rm(this.options.stateFile, { force: true })
-    })
+    await this.commit(() => this.retireStoredIdentity())
     // Clearing memory again states the invariant rather than repairing it:
     // whatever ran while the queue drained must leave no credential behind. A
     // sign-in the user started after this one is the exception — it is now the

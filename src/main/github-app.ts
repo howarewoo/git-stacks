@@ -10,6 +10,7 @@
  */
 
 import { githubHostContext, GITHUB_DOTCOM_HOST } from './github-host'
+import { hostEnvSuffix } from './github-transport'
 
 export const GITHUB_APP_CLIENT_ID_ENV = 'GIT_STACKS_GITHUB_APP_CLIENT_ID'
 export const GITHUB_DEVICE_VERIFICATION_URI = 'https://github.com/login/device'
@@ -21,14 +22,21 @@ export const DEVICE_CODE_INTERVAL_SECONDS = 5
 export const DEVICE_CODE_TTL_SECONDS = 900
 /**
  * One GitHub App client id per host. github.com keeps the unprefixed name it
- * has always had; any other host is configured as
- * `GIT_STACKS_GITHUB_APP_CLIENT_ID_<HOST>` with the host's dots and hyphens
- * written as underscores, so two hosts can hold registrations of their own.
+ * has always had; any other host is named after the host the way a per-host
+ * token is, so the name is written as upper-case hexadecimal and differs for
+ * every host by construction.
+ *
+ * Spelling the host out instead is not safe. Replacing separators with
+ * underscores gives `ghe.a-b.example` and `ghe.a.b.example` the same name, and
+ * one host would then attempt a device sign-in with the other host's app
+ * registration; a supported host with a custom HTTPS port produces a `:`, which
+ * no shell accepts in a variable name. A registration this build cannot name is
+ * a registration it cannot be given, so there is no alias to fall back to: a
+ * host with no client id under this name reports "not configured".
  */
 export function githubAppClientIdEnvName(host: string): string {
-  const name = host.trim().toLowerCase()
-  if (name === GITHUB_DOTCOM_HOST) return GITHUB_APP_CLIENT_ID_ENV
-  return `${GITHUB_APP_CLIENT_ID_ENV}_${name.replace(/[.-]/gu, '_').toUpperCase()}`
+  if (host.trim().toLowerCase() === GITHUB_DOTCOM_HOST) return GITHUB_APP_CLIENT_ID_ENV
+  return `${GITHUB_APP_CLIENT_ID_ENV}_${hostEnvSuffix(host)}`
 }
 
 /** Where a host's device flow lives. A host that is not a GitHub host is refused. */

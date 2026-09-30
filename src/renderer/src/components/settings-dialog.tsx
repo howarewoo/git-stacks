@@ -10,9 +10,11 @@ import { InlineAlert } from './ui/surface'
 import { OperationFacts, WorkflowSection, type ContextFact } from './workflow-composition'
 import { ShortcutEditor } from './shortcut-settings'
 import {
+  GITHUB_DEFAULT_HOST,
   MERGE_METHODS,
   PULL_STRATEGIES,
   THEMES,
+  type AppSettings,
   type DiagnosticReport,
   type MergeMethod,
   type PullStrategy,
@@ -121,6 +123,7 @@ export function SettingsDialog({
     try {
       const next = await desktop.settings()
       setSnapshot(next)
+      setHostDraft(next.settings.github.host)
       setEditorDraft(next.settings.git.editor ?? '')
       setMergeToolDraft(next.settings.git.mergeTool ?? '')
       onSettingsChange(next.settings)
@@ -136,20 +139,30 @@ export function SettingsDialog({
     void refresh()
   }, [open, refresh])
 
+  /**
+   * Writes a patch and leaves every field showing what was stored, which is not
+   * always what was asked for: a value this build refuses leaves the previous
+   * one in effect, and a host pasted as a URL is normalized down to its host
+   * name. The stored settings are returned so a caller reports the host that is
+   * in effect rather than the text it typed.
+   */
   const save = React.useCallback(
-    async (patch: SettingsPatch, note: string) => {
-      if (!desktop?.updateSettings) return
+    async (patch: SettingsPatch, note: string): Promise<AppSettings | null> => {
+      if (!desktop?.updateSettings) return null
       setBusy(true)
       try {
         const next = await desktop.updateSettings(patch)
         setSnapshot(next)
+        setHostDraft(next.settings.github.host)
         onSettingsChange(next.settings)
         onShortcutBindingsChange(next.settings.shortcuts)
         setMessage(note)
         setEditorDraft(next.settings.git.editor ?? '')
         setMergeToolDraft(next.settings.git.mergeTool ?? '')
+        return next.settings
       } catch (value) {
         onError(value instanceof Error ? value.message : String(value))
+        return null
       } finally {
         setBusy(false)
       }
@@ -345,7 +358,7 @@ export function SettingsDialog({
                     id="settings-github-host"
                     className="w-full rounded-[length:var(--gs-semantic-radius-control)] border border-[var(--gs-semantic-border-default)] bg-[var(--gs-semantic-surface-raised)] px-3 py-2"
                     value={hostDraft}
-                    placeholder="github.com"
+                    placeholder={GITHUB_DEFAULT_HOST}
                     disabled={busy || locked('github.host')}
                     onChange={(event) => setHostDraft(event.target.value)}
                   />
@@ -356,12 +369,19 @@ export function SettingsDialog({
                   onClick={async () => {
                     setBusy(true)
                     try {
-                      await save(
-                        { github: { host: hostDraft.trim() || 'github.com' } },
-                        `GitHub host set to ${hostDraft.trim() || 'github.com'}.`,
+                      // The field holds the host in effect, so this submits that
+                      // host again instead of an empty draft, and the note names
+                      // the host that was stored — which is not the text that was
+                      // typed when a pasted URL was normalized down to its host.
+                      const wanted = hostDraft.trim() || GITHUB_DEFAULT_HOST
+                      const stored = await save(
+                        { github: { host: wanted } },
+                        `GitHub host set to ${wanted}.`,
                       )
-                      setHostDraft('')
                       await refreshHostStatus()
+                      if (stored && stored.github.host !== wanted) {
+                        setMessage(`GitHub host set to ${stored.github.host}.`)
+                      }
                     } finally {
                       setBusy(false)
                     }

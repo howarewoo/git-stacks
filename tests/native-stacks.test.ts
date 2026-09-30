@@ -1498,6 +1498,71 @@ test('a resumed submission refuses to stack a head somebody else moved after the
   })
 })
 
+test('a resumed ordinary chain is refused once the host serves native stacks', async () => {
+  await withHarness(async (harness) => {
+    await setupFreshBranches(harness)
+    const state = await harness.readState()
+    // The host refuses the stacks resource, so the preview plans an ordinary
+    // chain, and the answer to the first pull request never arrives, so the
+    // submission stops with layers still to publish.
+    state.stacksPreviewDisabled = true
+    state.lostResponses = [
+      { method: 'POST', pathIncludes: '/pulls', status: 502, message: 'Bad gateway' },
+    ]
+    await harness.writeState(state)
+
+    const preview = await previewStack(
+      harness.repo,
+      await getSnapshot(harness.repo),
+      'publish',
+      'feature/step-2',
+    )
+    assert.deepEqual(preview.blockers, [])
+    assert.match(preview.warnings.join('\n'), /does not serve native stacked pull requests/iu)
+    await assert.rejects(
+      runStackAction(harness.repo, {
+        type: 'submitStack',
+        token: preview.token,
+        allowForce: false,
+        layers: freshLayers(),
+      }),
+    )
+    assert.equal((await getSubmitStackProgress(harness.repo))?.status, 'failed')
+    const published = (await harness.readState()).prs.length
+
+    // The host starts serving the stacks resource while the submission waits.
+    const serving = await harness.readState()
+    serving.stacksPreviewDisabled = false
+    serving.lostResponses = []
+    await harness.writeState(serving)
+
+    await assert.rejects(
+      runStackAction(harness.repo, { type: 'submitStackRetry' }),
+      /now answers for native stacks/iu,
+    )
+    // The proof runs before the first mutating step, so the refusal published
+    // nothing: the resume is what would have opened the remaining pull requests.
+    assert.equal((await harness.readState()).prs.length, published)
+    assert.equal((await getSubmitStackProgress(harness.repo))?.status, 'failed')
+
+    // A host that still refuses it is proved again on every resume, and the
+    // submission finishes as the ordinary chain it was reviewed as.
+    const refusing = await harness.readState()
+    refusing.stacksPreviewDisabled = true
+    await harness.writeState(refusing)
+    const resumed = await runStackAction(harness.repo, { type: 'submitStackRetry' })
+    assert.match(resumed.message, /Submitted \d+ stack layer/iu)
+    assert.equal((await getSubmitStackProgress(harness.repo))?.status, 'completed')
+    // Nothing was registered as a native stack: the chain was published as the
+    // ordinary one it was reviewed as, and the host is asked again for its own
+    // answer to prove it.
+    const answering = await harness.readState()
+    answering.stacksPreviewDisabled = false
+    await harness.writeState(answering)
+    assert.equal((await listPullRequestStacks('acme', 'widgets', HOST_ONLY)).length, 0)
+  })
+})
+
 test('a native stack 422 is reported as a rejected chain rather than a retryable fault', async () => {
   await withHarness(async (harness) => {
     await setupThreeBranches(harness)

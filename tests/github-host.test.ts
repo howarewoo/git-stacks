@@ -22,6 +22,7 @@ import {
 import {
   GITHUB_DEVICE_VERIFICATION_URI,
   githubAppClientId,
+  githubAppClientIdEnvName,
   pollDeviceAuthorization,
   requestDeviceCode,
 } from '../src/main/github-app'
@@ -661,6 +662,51 @@ test('two different hosts can never share one scoped token name', () => {
   assert.equal(
     resolveGitHubToken({ GH_TOKEN: 'dotcom-secret' }, 'github.com'),
     'dotcom-secret',
+  )
+})
+
+test('two different hosts can never share one client id, and a ported host has a name a shell accepts', () => {
+  // Every pair here names two hosts a person could really configure, and each
+  // pair used to collapse to a single variable: one host would then start a
+  // device sign-in with the other host's app registration.
+  const pairs: Array<[string, string]> = [
+    ['ghe.a-b.example', 'ghe.a.b.example'],
+    ['ghe.internal.example.com', 'ghe.internal-example.com'],
+    ['ghe.internal.example.com', 'ghe-dot-internal.example.com'],
+    ['ghe.example.com', 'ghe-example.com'],
+  ]
+  for (const [one, other] of pairs) {
+    assert.notEqual(
+      githubAppClientIdEnvName(one),
+      githubAppClientIdEnvName(other),
+      `${one} and ${other} share one client id name`,
+    )
+  }
+  // A host configured with a custom HTTPS port is named at all, and only with
+  // characters a shell accepts: the port cannot be spelled into a variable.
+  const ported = githubAppClientIdEnvName('ghe.example.com:8443')
+  assert.match(ported, /^GIT_STACKS_GITHUB_APP_CLIENT_ID_[A-Z0-9]+$/u)
+  assert.notEqual(ported, githubAppClientIdEnvName('ghe.example.com'))
+  // The default port is the same host, so it is the same name.
+  assert.equal(
+    githubAppClientIdEnvName('ghe.example.com:443'),
+    githubAppClientIdEnvName('ghe.example.com'),
+  )
+  // A registration set for one host is invisible to every other host, and the
+  // name that collapses two hosts together is not read as a fallback.
+  const env: NodeJS.ProcessEnv = {
+    [githubAppClientIdEnvName('ghe.a-b.example')]: 'Iv1.hyphenated',
+    GIT_STACKS_GITHUB_APP_CLIENT_ID_GHE_A_B_EXAMPLE: 'Iv1.legacy-alias',
+  }
+  assert.equal(githubAppClientId(env, 'ghe.a-b.example'), 'Iv1.hyphenated')
+  for (const other of ['ghe.a.b.example', 'ghe.example.com', 'ghe.a_b.example']) {
+    assert.equal(githubAppClientId(env, other), null, `${other} can read another's registration`)
+  }
+  // github.com keeps the unscoped name it has always had.
+  assert.equal(githubAppClientIdEnvName('github.com'), 'GIT_STACKS_GITHUB_APP_CLIENT_ID')
+  assert.equal(
+    githubAppClientId({ GIT_STACKS_GITHUB_APP_CLIENT_ID: 'Iv1.dotcom' }, 'github.com'),
+    'Iv1.dotcom',
   )
 })
 test('a child process is given only the host its own credential came from', () => {

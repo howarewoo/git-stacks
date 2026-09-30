@@ -183,7 +183,7 @@ export function githubApiUrl(env: NodeJS.ProcessEnv = process.env): string {
 
 /** The environment variable that holds one host's own token. */
 export function environmentTokenName(host: string): string {
-  return `GIT_STACKS_GITHUB_TOKEN_${encodeAuthority(host)}`
+  return `GIT_STACKS_GITHUB_TOKEN_${hostEnvSuffix(host)}`
 }
 
 /**
@@ -193,14 +193,16 @@ export function environmentTokenName(host: string): string {
  * `ghe.a-b.example` would share a name, and a token set for one host would then
  * be sent to the other. Spelling a separator with a marker is not enough either,
  * because a host name may contain that marker's own characters: a literal
- * `ghe-dot-internal.example.com` would read the same as a dotted one.
+ * `ghe-dot-internal.example.com` would read the same as a dotted one. A custom
+ * port adds a character no shell accepts in a variable name.
  *
  * So the name is not spelled at all. The canonical authority is written as
  * upper-case hexadecimal, which differs for every host by construction, uses
  * only characters a shell accepts in a variable name, and leaves nothing for a
- * host name to imitate.
+ * host name to imitate. Every per-host variable in this build is named this
+ * way, so one host's value can never be read as another's.
  */
-function encodeAuthority(host: string): string {
+export function hostEnvSuffix(host: string): string {
   return Buffer.from(canonicalHostName(host), 'utf8').toString('hex').toUpperCase()
 }
 
