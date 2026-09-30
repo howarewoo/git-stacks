@@ -146,8 +146,11 @@ export class UpdateService {
       await reapReplacedBundle(target.target, this.options.userDataPath).catch(() => undefined)
     }
     // A prepared copy that a detached installer was still holding when this app
-    // was last closed is removed here, and only once that installer is gone.
-    await reapRetainedHandoff(this.options.userDataPath).catch(() => undefined)
+    // was last closed is removed here, and only once that installer has gone and
+    // the build it was installing is the build this process is running.
+    await reapRetainedHandoff(this.options.userDataPath, this.options.currentVersion).catch(
+      () => undefined,
+    )
     const trust = trustedUpdateKeys(this.options.env, this.options.packaged)
     if (trust.keys.length === 0) {
       this.failure = {

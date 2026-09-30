@@ -1101,16 +1101,21 @@ test('a copy a detached installer still holds outlives the call, and goes when t
   const app = harnessFor(feed.base, {
     install: async (_staged, options) => {
       const pid = installer.pid ?? null
+      const version = options.version ?? null
       assert.notEqual(pid, null, 'the installer process is identified')
-      await options.onRetain?.({ pid })
-      return { installed: true, reason: 'The installer is running.', retains: { pid } }
+      await options.onRetain?.({ pid, version })
+      return { installed: true, reason: 'The installer is running.', retains: { pid, version } }
     },
   })
-  /** The next launch of this app over the same data directory. */
-  const launch = async (userDataPath: string): Promise<void> => {
+  /**
+   * The next launch of this app over the same data directory, at the version it
+   * is running: 0.1.0 is this app after an install that has not replaced it
+   * yet, 0.2.0 is this app after one that did.
+   */
+  const launch = async (userDataPath: string, currentVersion: string): Promise<void> => {
     const next = new UpdateService({
       packaged: false,
-      currentVersion: '0.1.0',
+      currentVersion,
       appPath: unsignedBundle(),
       userDataPath,
       platform: 'darwin',
@@ -1140,22 +1145,41 @@ test('a copy a detached installer still holds outlives the call, and goes when t
 
   // A launch while the installer is running proves nothing about it having
   // finished, so nothing is removed and the copy is still where it was.
-  await launch(app.userDataPath)
+  await launch(app.userDataPath, '0.2.0')
   assert.deepEqual(
     readdirSync(handoffParent),
     [held],
     'a launch while the installer is still running removes nothing',
   )
 
+  // Now the process this app spawned has gone, and the app is still the build it
+  // was before the install: the elevated copy that is doing the work runs after
+  // that process and reads this same file, so a gone process says nothing about
+  // the copy being free. A launcher here would be about to delete the file out
+  // from under it.
   const finished = once(installer, 'exit')
   installer.stdin.end()
   await finished
+  await launch(app.userDataPath, '0.1.0')
+  assert.deepEqual(
+    readdirSync(handoffParent),
+    [held],
+    'a gone installer and an app still on the old build prove nothing, and the copy is kept',
+  )
+  assert.deepEqual(
+    readFileSync(join(handoffParent, held, prepared)),
+    ARTIFACT,
+    'the copy an elevated installer still needs is left readable',
+  )
+
+  // The replacement it was sent to make has happened, and nothing is holding
+  // the copy: this is the launch that may take it away, and nothing else.
   writeFileSync(join(handoffParent, 'somebody-elses-file'), 'not ours')
-  await launch(app.userDataPath)
+  await launch(app.userDataPath, '0.2.0')
   assert.deepEqual(
     readdirSync(handoffParent),
     ['somebody-elses-file'],
-    'the copy goes once its installer has, and nothing else went with it',
+    'the copy goes once the build it installs is this one and its installer has gone',
   )
 
   // The other kind of install still cleans up: one that hands the copy to

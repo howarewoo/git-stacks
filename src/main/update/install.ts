@@ -15,6 +15,7 @@ import { closeSync, existsSync, fstatSync, openSync, readSync, statSync } from '
 import { basename, dirname, join, win32 as winPath } from 'node:path'
 import { tmpdir } from 'node:os'
 import { promisify } from 'node:util'
+import { compareVersions, parseVersion } from '../../shared/update'
 import type { StagedUpdate } from './artifact'
 
 const execFile = promisify(execFileCallback)
@@ -111,11 +112,17 @@ export function installSupportFor(platform: string): 'dmg' | 'nsis' | null {
 /** A platform installer that is still running after the call that started it. */
 export interface RetainedInstall {
   /**
-   * The process the prepared executable was handed to, whose exit is what
-   * proves it has finished with it. Null when no process could be identified,
-   * which means the handoff can never be proved finished and has to be kept.
+   * The process the prepared executable was handed to. Null when no process
+   * could be identified, which means the handoff can never be proved finished
+   * and has to be kept.
    */
   pid: number | null
+  /**
+   * The version that installer is installing, or null when the manifest named
+   * none. This is what a later launch compares against its own version to see
+   * whether the update actually landed.
+   */
+  version: string | null
 }
 
 /** What an install attempt concluded, and why it stopped when it stopped. */
@@ -741,12 +748,13 @@ async function installNsis(staged: StagedUpdate, options: InstallOptions): Promi
   child.unref()
   // Being spawned is not the same as having read the file. A Windows installer
   // opens its own executable again after it starts — the elevated copy that
-  // does the work runs from that same path — so the prepared copy is still in
-  // use while this app is still running, and removing it here is what left an
-  // update installing from a file that had already been unlinked. What proves
-  // the copy may finally go is the exit of the process it was handed to, which
-  // a later launch of this app checks for; until then the caller keeps it.
-  const retained: RetainedInstall = { pid: child.pid ?? null }
+  // does the work runs after this process, from that same path — so the
+  // prepared copy is still in use while this app is still running, and removing
+  // it here is what left an update installing from a file that had already been
+  // unlinked. What is recorded here is the process it was handed to and the
+  // version that installer is putting in place; what proves the copy may go is
+  // decided by a later launch, from both.
+  const retained: RetainedInstall = { pid: child.pid ?? null, version: options.version ?? null }
   await options.onRetain?.(retained)
   options.quit?.()
   return {
@@ -766,34 +774,63 @@ async function installNsis(staged: StagedUpdate, options: InstallOptions): Promi
  * never reach the disk. A record that cannot be written does not fail the
  * update — the copy is still kept, it is only left without a way to be proven
  * finished — so nothing here throws.
+
+ * The version travels with the process because a process on its own is not the
+ * whole of the installer: a Windows installer hands the work to an elevated
+ * copy that runs after the process that was spawned has gone, and that copy
+ * reads this same file. Neither process proves the other is finished, so what
+ * a later launch asks is two questions — is that process still there, and has
+ * the build this installer was installing actually become the build this app is
+ * running.
  */
 export async function recordRetainedHandoff(
   userDataPath: string,
   directory: string,
   retained: RetainedInstall,
 ): Promise<void> {
-  const body = `${JSON.stringify({ path: directory, pid: retained.pid }, null, 2)}\n`
+  const body = `${JSON.stringify(
+    { path: directory, pid: retained.pid, version: retained.version },
+    null,
+    2,
+  )}\n`
   await writeFile(join(userDataPath, RETAINED_MARKER), body, { mode: 0o600 }).catch(() => undefined)
 }
 
 /**
- * Removes a prepared copy a detached installer was still holding, once that
- * installer has finished with it.
+ * Removes a prepared copy a detached installer was still holding, once two
+ * separate questions both come back the right way.
  *
  * The run that handed the copy over could not remove it: the installer was
  * spawned and this app was closed while the installer was still going to read
- * that file. So removal waits for the next launch of this app, and the answer
- * it acts on is the process, not the passage of time — signal 0 asks whether
- * that process is still there without touching it, and only "no such process"
- * is taken as finished. Anything else, a refusal for an installer running as
- * another user included, leaves the copy alone.
+ * that file. So removal waits for the next launch of this app, and it asks two
+ * questions rather than one, because one does not answer the question.
+ *
+ * The first is whether the process that was spawned is still there. Signal 0
+ * asks without touching it, and only "no such process" counts as gone;
+ * anything else, a refusal for an installer running as another user included,
+ * keeps the copy. That alone is not enough. A Windows installer is not one
+ * process: the work is handed to an elevated copy that starts afterwards, runs
+ * after the spawned process has exited, and reads this same file. A spawned
+ * process that has gone is therefore no proof that nobody is still reading it.
+ *
+ * The second question is the one that closes that gap. If the installer that
+ * was going to install version V has gone and this app is running V or
+ * something newer, the replacement it was sent to do has happened, and no
+ * installer of it is left that could still be starting from the copy this run
+ * made. A launch that finds no installer and is *still running the build that
+ * was already installed* is a launch in which the update did not happen, and
+ * the copy stays for whatever installer comes back for it.
  *
  * Nothing is removed unless the record names a directory this app made, inside
  * the handoff parent, carrying this app's own prefix — the same rule the
- * replaced-bundle marker follows. A record that cannot be read, or that names
- * anything else, removes nothing at all.
+ * replaced-bundle marker follows. A record that cannot be read, that names
+ * anything else, that names no version, or whose version this build cannot
+ * read, removes nothing at all.
  */
-export async function reapRetainedHandoff(userDataPath: string): Promise<void> {
+export async function reapRetainedHandoff(
+  userDataPath: string,
+  currentVersion: string,
+): Promise<void> {
   const marker = join(userDataPath, RETAINED_MARKER)
   let recorded: unknown
   try {
@@ -804,10 +841,15 @@ export async function reapRetainedHandoff(userDataPath: string): Promise<void> {
   if (typeof recorded !== 'object' || recorded === null || !('path' in recorded)) return
   const value: unknown = recorded.path
   const pid: unknown = 'pid' in recorded ? recorded.pid : null
+  const version: unknown = 'version' in recorded ? recorded.version : null
   if (typeof value !== 'string' || value.length === 0) return
   if (typeof pid !== 'number' || !Number.isInteger(pid) || pid <= 0) return
   if (dirname(value) !== join(userDataPath, HANDOFF_PARENT)) return
   if (!basename(value).startsWith(HANDOFF_PREFIX)) return
+  // An unreadable version on either side is not a version that was reached, so
+  // it counts as no proof rather than as a match.
+  if (typeof version !== 'string' || !parseVersion(version)) return
+  if (!parseVersion(currentVersion) || compareVersions(currentVersion, version) < 0) return
   try {
     process.kill(pid, 0)
     return

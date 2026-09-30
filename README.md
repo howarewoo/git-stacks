@@ -624,11 +624,16 @@ The order is the point, and it belongs to the app rather than to the feed:
 An installer that outlives the call that started it still owns the copy it was
 handed, so that copy is not removed with the run that made it: the Windows
 installer reopens its own executable after it starts, and the elevated copy that
-does the work runs from that same path. The process it was given is recorded, and
-the next launch of the app removes the copy once that process has finished —
-asked of the process, never guessed from how long it has been. Every other way
-out of an install, including a refused launch, takes the directory that run
-created with it as before.
+does the work runs from that same path. The next launch of the app removes it,
+and only when two separate questions both come back the right way — is the
+process that was spawned still there (asked of the process, never guessed from
+how long it has been), and is this app now running the build that installer was
+putting in place. Both are needed because neither is enough: a spawned process
+that has exited proves nothing while an elevated copy may still be starting from
+the file, and an app still running the build it already had is a launch in which
+the replacement has not happened yet. Every other way out of an install,
+including a refused launch, takes the directory that run created with it as
+before.
 
 Once the platform installer owns the files, the update cannot be stopped: a
 cancel or a channel change at that point is reported as too late rather than
@@ -681,9 +686,10 @@ acceptance step, and it is written out under Platform support below. The
 handoff's directory and file modes describe POSIX protection; the equivalent
 Windows isolation is a documented limit, not something the tests establish.
 Keeping that copy is proved over a real detached process that reopens the
-prepared executable after the install call has returned, and against the next
-launch with that process still running and then gone; what the NSIS installer
-itself does with the file in between is not, because no test process runs it.
+prepared executable after the install call has returned, and across the next
+launch with that process running, then gone with the app still on the old build,
+then gone with the app on the installed build. What the NSIS installer itself
+does with the file in between is not proved, because no test process runs it.
 
 ### Channels
 
