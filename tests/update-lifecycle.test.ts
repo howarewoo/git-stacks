@@ -1146,11 +1146,8 @@ function installerProcesses(
  * be told to go. Written into the app's own temporary data directory so it
  * leaves with the run that needed it.
  *
- * The answer is written exactly as `build/installer.nsh` writes it: `token=` and
- * `pid=` on their own ASCII lines, each ended CRLF, which is what NSIS's `$\r$\n`
- * puts in the file. The token is read the way the installer reads it — a whole
- * line, line ending left out — so what the app compares is the installer's value
- * and not this script's idea of one.
+ * Like the NSIS hook, this process echoes the raw request without stripping a
+ * prefix or normalizing its contents. The response uses token/PID CRLF lines.
  */
 function writeInstallerScript(userDataPath: string): string {
   const script = join(userDataPath, 'installer-fixture.cjs')
@@ -1158,7 +1155,7 @@ function writeInstallerScript(userDataPath: string): string {
     script,
     'const { readFileSync, writeFileSync, rmSync } = require("node:fs");' +
       'const dir = process.argv[2];' +
-      'const token = readFileSync(dir + "/git-stacks-handoff.txt", "utf8").trim().slice(6);' +
+      'const token = readFileSync(dir + "/git-stacks-handoff.txt", "utf8");' +
       'rmSync(dir + "/git-stacks-handoff.txt");' +
       'let steps = 0;' +
       'process.stdin.on("data", () => {' +
@@ -1301,18 +1298,21 @@ test('an answer this app cannot place is kept, not acted on', async (t) => {
 
   const answers: Record<string, (token: string) => string> = {
     'no answer at all': () => '',
-    'a token from another attempt': (token) => `token=${'0'.repeat(token.length)} pid=${pid}\r\n`,
-    'a token one character short': (token) => `token=${token.slice(0, -1)} pid=${pid}\r\n`,
-    'a token one character long': (token) => `token=${token}x pid=${pid}\r\n`,
-    'no process named': () => 'token=PLACEHOLDER\r\n',
-    'a process id that is not one': () => 'token=PLACEHOLDER pid=none\r\n',
-    'a process id of zero': () => 'token=PLACEHOLDER pid=0\r\n',
+    'a token from another attempt': (token) =>
+      `token=${'0'.repeat(token.length)}\r\npid=${pid}\r\n`,
+    'a token one character short': (token) => `token=${token.slice(0, -1)}\r\npid=${pid}\r\n`,
+    'a token one character long': (token) => `token=${token}x\r\npid=${pid}\r\n`,
+    'no process named': (token) => `token=${token}\r\n`,
+    'a process id that is not one': (token) => `token=${token}\r\npid=none\r\n`,
+    'a process id of zero': (token) => `token=${token}\r\npid=0\r\n`,
     'a file that is not an answer at all': () => 'nothing to see here\r\n',
   }
 
   for (const [name, answer] of Object.entries(answers)) {
+    let preparedPath: string | undefined
     const app = harnessFor(feed.base, {
       install: async (staged, options) => {
+        preparedPath = staged.path
         const directory = dirname(staged.path)
         const token = await beginHandoff(directory)
         writeFileSync(join(directory, 'git-stacks-install-complete.txt'), answer(token))
@@ -1328,10 +1328,11 @@ test('an answer this app cannot place is kept, not acted on', async (t) => {
     // Every one of these launches is on the build the install was going to put
     // in place. That says nothing about the installer, and changes nothing.
     await relaunch(app.userDataPath, feed.base, '0.2.0').start('stable')
-    assert.equal(
-      readdirSync(join(app.userDataPath, 'handoff')).length,
-      1,
-      `${name}: the prepared copy is kept`,
+    assert.ok(preparedPath)
+    assert.deepEqual(
+      readFileSync(preparedPath),
+      ARTIFACT,
+      `${name}: the prepared copy stays intact`,
     )
   }
 })

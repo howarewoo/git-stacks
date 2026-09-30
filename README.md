@@ -40,6 +40,7 @@ refs. Diagnostic wording is not part of that behavioral contract.
 
 Destination-focus checks activate the named navigation control with Enter and
 verify heading focus and the live announcement, independently of shortcut bindings.
+
 ## Live local and remote freshness
 
 The open repository updates itself. Local Git work done in a terminal — a
@@ -210,9 +211,9 @@ refused. A refused link never reaches the operating system.
 Each host needs its own credential. Sign-in uses the GitHub App device flow, and
 the public client id is read per host:
 
-| Host         | Client id environment variable                                  |
-| ------------ | --------------------------------------------------------------- |
-| `github.com` | `GIT_STACKS_GITHUB_APP_CLIENT_ID`                               |
+| Host         | Client id environment variable                                           |
+| ------------ | ------------------------------------------------------------------------ |
+| `github.com` | `GIT_STACKS_GITHUB_APP_CLIENT_ID`                                        |
 | Any other    | `GIT_STACKS_GITHUB_APP_CLIENT_ID_<HOST>`, host as upper-case hexadecimal |
 
 `ghe.example.com` therefore reads
@@ -621,30 +622,19 @@ The order is the point, and it belongs to the app rather than to the feed:
    where the platform installer has to replace files this process is running
    from, the app closes and the installer finishes on its own.
 
-An installer that outlives the call that started it still owns the copy it was
-handed, so that copy is not removed with the run that made it. The Windows
-installer reopens its own executable after it starts, and the elevated instance
-that does the work runs from that same path — so no process this app starts is
-the process that finishes, and its exit says nothing about the file being free.
-The run therefore writes a token it made up into the directory it made, beside
-the copy, before the installer exists, and the installer echoes that token back
-with the process id of the instance that finished the work. Both halves speak
-one ASCII line per field, each ended CRLF: `build/installer.nsh` is the installer
-half, compiled by electron-builder at its default `nsis.include` path.
+The Windows installer retains its prepared copy after dispatch. An elevated
+install may continue in a different process, so the originally spawned PID
+exiting does not prove the executable is free.
 
-The next launch of the app removes the copy, and only on evidence it can place:
-the echo has to carry that run's own token, it has to have been written inside
-that run's own directory, and the process it names has to be gone — asked of
-the process with signal 0, where only "no such process" counts. Everything else
-keeps the copy: no echo at all, an echo carrying another attempt's token, one
-that names no process, a process still running, or one this app is not allowed
-to signal because it runs as another user. What the app happens to be running is
-not part of the question, because an app on the new build is equally consistent
-with an install that finished and one whose installer is still starting up from
-that file. A copy kept is a file this app can clean up later; a copy removed
-early is an update installing from nothing. Every other way out of an install,
-including a refused launch and a stop before the installer starts, takes the
-directory that run created with it as before.
+Before dispatch, the app writes a random 32-character ASCII token beside the
+copy, with no prefix or newline. `build/installer.nsh`, included by
+electron-builder at its default `nsis.include` path, echoes it after the install
+work with the actual installer's PID as `token=...` and `pid=...` CRLF lines.
+On a later launch, cleanup requires that exact token, a complete response inside
+the owned handoff directory, and `ESRCH` when probing the reported installer PID.
+Missing, malformed, foreign, still-running, or unprobeable evidence retains the
+copy. The app's version is not completion evidence. A refused launch or a stop
+before dispatch still removes the directory that attempt created.
 
 Once the platform installer owns the files, the update cannot be stopped: a
 cancel or a channel change at that point is reported as too late rather than
@@ -696,22 +686,17 @@ about a signature is only ever exercised as far as the operating system answers.
 acceptance step, and it is written out under Platform support below. The
 handoff's directory and file modes describe POSIX protection; the equivalent
 Windows isolation is a documented limit, not something the tests establish.
-Keeping that copy is proved over the real service and real temporary files, with
-a two-process installer standing in for the Windows one: the process that is
-started is not the process that does the work. The copy is kept while the
-install is unfinished, kept when the installer has answered but is still
-running, and removed only once the answer carries that run's own token and names
-a process that has gone — and then only that directory, never anything else
-beside it. The stand-in writes its answer in the bytes `build/installer.nsh`
-writes, CRLF lines and all, and every way of being unable to place the answer —
-including a token one character short or one character long — keeps the copy.
+The lifecycle fixture uses two real processes: the process started by the app
+is not the process reporting completion. It checks retention before completion
+and while that process is running, removal after a matching answer and process
+exit, preservation of foreign siblings, and refusal of malformed evidence. The
+stand-in reads the raw request without prefix stripping and writes the same
+CRLF response fields as `build/installer.nsh`.
 
-That installer section is compiled, not read: `makensis` builds it inside
-electron-builder's own include chain, where `customHeader` and `customInstall`
-are inserted, and it compiles with no diagnostics from it. What is not proved is
-that section *running*: no test process on any platform runs an NSIS installer,
-so what the compiled installer does with the file on a real Windows machine is
-the acceptance step, written out under Platform support below.
+Compile the installer hook through electron-builder's NSIS include chain to
+check its `customHeader` and `customInstall` integration. Compilation and the
+two-process fixture do not execute the Windows installer; installation of a
+real signed release on Windows remains the platform acceptance step below.
 
 ### Channels
 
@@ -854,7 +839,7 @@ could not read the history it was replacing, which would stop the channel
 outright. That file is the durable record of every public key that may sign a
 channel manifest, so a release can still prove what it published last month. A
 release refuses to publish a build carrying a key the file does not declare, and
-the key is committed there *before* it signs anything, in the same change that
+the key is committed there _before_ it signs anything, in the same change that
 introduces it. It holds public keys only, which every packaged build already
 carries in its own bundle; a private key is never compiled into a build, never
 committed to this repository, and never written to a CI log. The release job
@@ -888,6 +873,7 @@ the same React child for the same value; that view is not exercised by this
 run, and the proof is of the surface in the screenshot. Release notes and refusal messages
 arriving over a release signature are held to the same rule, in
 `tests/release-boundary.test.ts`.
+
 ## Onboarding
 
 With no repository open, the window offers three ways in, and all of them end

@@ -115,13 +115,12 @@ const HANDOFF_COMPLETE = 'git-stacks-install-complete.txt'
  * naming a different token belongs to a different attempt, and is not an
  * answer about this one.
  *
- * It is one ASCII line ending in CRLF, which is the line the installer reads a
- * token out of and the line it writes its answer back in — see
- * `build/installer.nsh`, which is the other half of this.
+ * The request contains only the 32-character ASCII token, terminated by EOF.
+ * NSIS FileRead echoes it without prefix stripping or newline normalization.
  */
 export async function beginHandoff(directory: string): Promise<string> {
   const token = randomBytes(16).toString('hex')
-  await writeFile(join(directory, HANDOFF_REQUEST), `token=${token}\r\n`, { mode: 0o600 })
+  await writeFile(join(directory, HANDOFF_REQUEST), token, { mode: 0o600 })
   return token
 }
 
@@ -149,8 +148,8 @@ export interface RetainedInstall {
   /**
    * The token this run left beside the prepared copy for the installer to read
    * back. The installer echoes it when the work it was sent to do is finished,
- * with the process that finished it, and that echoed token is the only thing
- * this app treats as a completion.
+   * with the process that finished it, and that echoed token is the only thing
+   * this app treats as a completion.
    */
   token: string
 }
@@ -873,22 +872,11 @@ export async function reapRetainedHandoff(userDataPath: string): Promise<void> {
   // built before this protocol existed. There is nothing to believe, so the
   // copy stays.
   if (completion === null) return
-  // The answer is a line per field, each `name=value`, the shape the request is
-  // written in. The value ends at the next space, so a file carrying both
-  // fields on one line is read as what it is rather than as a token with a pid
-  // glued to it.
-  let echoed = ''
-  let pid = Number.NaN
-  for (const line of completion.split('\n')) {
-    const separator = line.indexOf('=')
-    if (separator < 0) continue
-    const key = line.slice(0, separator).trim()
-    const field = line.slice(separator + 1).trim().split(/\s+/u)[0] ?? ''
-    if (key === 'token') echoed = field
-    if (key === 'pid') pid = Number(field)
-  }
-  if (echoed !== token) return
-  if (!Number.isInteger(pid) || pid <= 0) return
+  // Accept only the two complete fields emitted by build/installer.nsh.
+  const answer = /^token=([0-9a-f]{32})\r?\npid=([1-9][0-9]*)\r?\n$/u.exec(completion)
+  if (!answer || answer[1] !== token) return
+  const pid = Number(answer[2])
+  if (!Number.isSafeInteger(pid)) return
   try {
     process.kill(pid, 0)
     return
