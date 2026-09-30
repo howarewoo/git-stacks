@@ -1,5 +1,3 @@
-import { sanitizeSecrets } from './support-bundle'
-
 /**
  * A bounded in-memory record of failures the main process handled. It exists so
  * a support bundle can carry what went wrong on this machine, and it holds
@@ -11,13 +9,19 @@ const MAX_ENTRIES = 40
 const entries: string[] = []
 
 /**
- * Records one handled failure. The message is kept as the main process already
- * worded it for the window; anything that looks like a credential is redacted
- * by the bundle before it is written, never stored here.
+ * Records only the fixed IPC channel and a known error category. Error messages
+ * and names can contain repository data, so neither is stored or exported.
  */
-export function recordFailure(scope: string, message: string): void {
-  const clean = sanitizeSecrets(message.split('\n')[0].slice(0, 300))
-  const line = `${new Date().toISOString()} ${scope}: ${clean}`
+export function recordFailure(scope: string, error: unknown): void {
+  const category =
+    error instanceof TypeError
+      ? 'type error'
+      : error instanceof RangeError
+        ? 'range error'
+        : error instanceof SyntaxError
+          ? 'syntax error'
+          : 'operation failed'
+  const line = `${new Date().toISOString()} ${scope}: ${category}`
   entries.push(line)
   if (entries.length > MAX_ENTRIES) entries.splice(0, entries.length - MAX_ENTRIES)
 }

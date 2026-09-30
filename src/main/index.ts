@@ -773,9 +773,9 @@ async function currentDiagnostics(settings: AppSettings) {
 
 /**
  * Every handler is registered through this, so a failure main handled leaves
- * the one record a support bundle can carry: the scope that failed and the
- * message the window is about to show for it. Nothing else is kept — the
- * thrown value is re-raised unchanged, so the window still decides what to do.
+ * the one record a support bundle can carry: the fixed channel and a safe
+ * failure category. The thrown value is re-raised unchanged, so the window
+ * still decides what to show.
  *
  * A request from outside the app is refused rather than failed, and a cancelled
  * operation is the answer the user asked for, so neither is recorded.
@@ -790,7 +790,7 @@ const ipcMain = {
         .then(() => listener(event, ...args))
         .catch((error: unknown) => {
           if (!(error instanceof UntrustedRequestError) && !isCommandCancelled(error)) {
-            recordFailure(channel, error instanceof Error ? error.message : String(error))
+            recordFailure(channel, error)
           }
           throw error
         }),

@@ -16,6 +16,7 @@ import {
 } from '../src/main/settings'
 import { loadSettingsPolicy, NO_POLICY } from '../src/main/settings-service'
 import { buildBundle, renderBundle, writeOwnerOnlyBundle } from '../src/main/support-bundle'
+import { recordFailure, recordedFailures } from '../src/main/failure-log'
 import {
   locateTool,
   resolveEditorCommand,
@@ -430,6 +431,32 @@ test('sentinel secrets and paths are redacted from failures and diagnostic bundl
   assert.equal(body.includes('/Users/victim'), false)
   assert.match(body, /REDACTED_SECRET/)
   assert.match(body, /withheld: path/)
+})
+
+test('handled failures export only the channel and known category regardless of path consent', () => {
+  const before = recordedFailures().length
+  const branch = 'private-feature-branch'
+  const path = '/worktrees/confidential-repository'
+  const token = 'ghp_1234567890abcdef1234567890'
+  const error = new Error(`Branch "${branch}" is checked out in another worktree: ${path} ${token}`)
+  error.name = `private error for ${branch}`
+  recordFailure('repository:action', error)
+  recordFailure('repository:action', new TypeError(`Parent branch "${branch}" does not exist`))
+
+  const failures = recordedFailures().slice(before)
+  assert.equal(failures.length, 2)
+  for (const consent of [false, true]) {
+    const settings = {
+      ...structuredClone(DEFAULT_SETTINGS),
+      privacy: { includeLocalPaths: consent },
+    }
+    const body = renderBundle(buildBundle(REPORT, settings, failures), consent)
+    assert.match(body, /repository:action: operation failed/)
+    assert.match(body, /repository:action: type error/)
+    for (const privateValue of [branch, path, token, error.name]) {
+      assert.equal(body.includes(privateValue), false)
+    }
+  }
 })
 
 test('unsupported editor and merge tool programs like shell or arbitrary interpreters are refused', () => {
