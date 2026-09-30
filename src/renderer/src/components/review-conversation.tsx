@@ -240,7 +240,6 @@ export function ReviewConversation({
       const delivered = new Set(result.delivered ?? [])
       onDraftChange(
         delivered.size === 0 ? [] : draftList.filter((draft) => !delivered.has(draft.id)),
-
       )
       onReload()
       setNotice(

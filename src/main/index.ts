@@ -837,7 +837,6 @@ function cloneProtocol(value: unknown): CloneProtocol {
   return value === 'ssh' ? 'ssh' : 'https'
 }
 
-
 /**
  * Validates a clone request before anything is written. The URL is rebuilt from
  * `owner/name` and the chosen protocol, never taken from the request, so a
@@ -976,13 +975,21 @@ async function changeSettingsPatch(patch: SettingsPatch): Promise<SettingsSnapsh
   // Channel requests enter the updater queue even when they appear unchanged.
   if (channel === undefined || !service) {
     return changeSettings(async (file) =>
-      updateSettings(file, await settingsPatchToWrite(file, patch, settingsRevision), settingsLocks),
+      updateSettings(
+        file,
+        await settingsPatchToWrite(file, patch, settingsRevision),
+        settingsLocks,
+      ),
     )
   }
   let committed: SettingsSnapshot | null = null
   const status = await service.applyChannel(channel, async () => {
     committed = await changeSettings(async (file) =>
-      updateSettings(file, await settingsPatchToWrite(file, patch, settingsRevision), settingsLocks),
+      updateSettings(
+        file,
+        await settingsPatchToWrite(file, patch, settingsRevision),
+        settingsLocks,
+      ),
     )
   })
   if (!committed) {
@@ -1875,7 +1882,9 @@ app
       const path = await resolveRepository(process.env.GIT_STACKS_REPO)
       recents = [{ path, name: basename(path) }, ...recents.filter((item) => item.path !== path)]
     }
-    const resourcesRoot = app.isPackaged ? process.resourcesPath : resolve(bundleDir, '../../resources')
+    const resourcesRoot = app.isPackaged
+      ? process.resourcesPath
+      : resolve(bundleDir, '../../resources')
     // Policy is read before the first settings read, so a locked key is already
     // fixed by the time the window can ask for anything.
     const policy = await loadSettingsPolicy(process.env.GIT_STACKS_SETTINGS_POLICY)

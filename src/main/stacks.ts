@@ -2578,8 +2578,7 @@ async function readPublishOperation(repoPath: string): Promise<PublishOperation 
     !['create', 'extend', 'none'].includes(String(parsed.stackAction)) ||
     (parsed.nativeStacksAvailable !== undefined &&
       typeof parsed.nativeStacksAvailable !== 'boolean') ||
-    (parsed.nativeStacksReason !== undefined &&
-      typeof parsed.nativeStacksReason !== 'string') ||
+    (parsed.nativeStacksReason !== undefined && typeof parsed.nativeStacksReason !== 'string') ||
     !['running', 'failed', 'completed'].includes(String(parsed.status)) ||
     !Array.isArray(parsed.layers) ||
     parsed.layers.length === 0 ||

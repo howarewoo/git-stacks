@@ -662,7 +662,7 @@ disk stays readable and unchanged. An in-process queue is not a substitute — i
 would serialize two callers in one window and leave the second window exactly as
 unprotected, which is the case the journal exists for.
 
-That refusal must be bounded and it must distinguish *why* the lock could not be
+That refusal must be bounded and it must distinguish _why_ the lock could not be
 used. Exactly one read failure means the holder is gone: the lock was not there
 when the contender looked, so the next attempt takes the name. Every other
 failure — a lock this account may not open, a path that is not a file — leaves a

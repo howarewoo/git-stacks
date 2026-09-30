@@ -1773,15 +1773,17 @@ async function hostSwitchHarness() {
     },
   })
   await first.signIn()
-  await waitForState(firstChanges, (status) => status.state === 'signed-in' && status.login === 'ada')
+  await waitForState(
+    firstChanges,
+    (status) => status.state === 'signed-in' && status.login === 'ada',
+  )
   const createSuccessor = (): GitHubAccount =>
     new GitHubAccount({
       vault: new CredentialVault(vaultFile, protector),
       stateFile,
       host: 'ghe.example.com',
       env: { GIT_STACKS_GITHUB_APP_CLIENT_ID_6768652E6578616D706C652E636F6D: CLIENT_ID },
-      fetch: fetchReturning([{ body: DEVICE_CODE }, { body: session('ghu_ghe', 'ghr_ghe') }])
-        .fetch,
+      fetch: fetchReturning([{ body: DEVICE_CODE }, { body: session('ghu_ghe', 'ghr_ghe') }]).fetch,
       identify: async () => 'grace',
       now: () => clock.now,
       sleep: async () => {},
@@ -1802,8 +1804,16 @@ async function hostSwitchHarness() {
 }
 
 test('a host switch cannot retire the account that replaced the retiring one', async () => {
-  const { createSuccessor, first, firstChanges, firstVault, protector, secondChanges, stateFile, vaultFile } =
-    await hostSwitchHarness()
+  const {
+    createSuccessor,
+    first,
+    firstChanges,
+    firstVault,
+    protector,
+    secondChanges,
+    stateFile,
+    vaultFile,
+  } = await hostSwitchHarness()
   const before = JSON.parse(await readFile(stateFile, 'utf8')) as { reference: string }
 
   // The retirement is held inside the vault, so the successor signs in while the

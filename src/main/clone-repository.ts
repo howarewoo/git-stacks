@@ -256,10 +256,7 @@ function promotionRefusal(
       `Git Stacks could not move the clone into place because its promotion helper is unavailable. Nothing was written. ${detail}`,
     )
   }
-  return new CloneError(
-    'failed',
-    `The clone finished but could not be moved into place: ${detail}`,
-  )
+  return new CloneError('failed', `The clone finished but could not be moved into place: ${detail}`)
 }
 
 /**
