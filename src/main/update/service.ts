@@ -18,9 +18,14 @@ import {
   type StagedUpdate,
 } from './artifact'
 import {
+  HANDOFF_PARENT,
+  HANDOFF_PREFIX,
+  type InstallOutcome,
   installStagedUpdate,
   installSupportFor,
   reapReplacedBundle,
+  reapRetainedHandoff,
+  recordRetainedHandoff,
   resolveInstallTarget,
 } from './install'
 import { trustedUpdateKeys } from './keys'
@@ -140,6 +145,9 @@ export class UpdateService {
       // this app is running from the new one rather than from it.
       await reapReplacedBundle(target.target, this.options.userDataPath).catch(() => undefined)
     }
+    // A prepared copy that a detached installer was still holding when this app
+    // was last closed is removed here, and only once that installer is gone.
+    await reapRetainedHandoff(this.options.userDataPath).catch(() => undefined)
     const trust = trustedUpdateKeys(this.options.env, this.options.packaged)
     if (trust.keys.length === 0) {
       this.failure = {
@@ -506,9 +514,9 @@ export class UpdateService {
     // then be deleting something this attempt never created — which is exactly
     // what removing a fixed handoff directory did. Nothing outside the
     // directory this run made is ever removed on any path below.
-    const handoffParent = join(this.options.userDataPath, 'handoff')
+    const handoffParent = join(this.options.userDataPath, HANDOFF_PARENT)
     await mkdir(handoffParent, { recursive: true, mode: 0o700 })
-    const handoffDirectory = await mkdtemp(join(handoffParent, 'run-'))
+    const handoffDirectory = await mkdtemp(join(handoffParent, HANDOFF_PREFIX))
     try {
       const digest = await hashStagedUpdate(candidate.staged)
       if (run.controller.signal.aborted) {
@@ -561,7 +569,12 @@ export class UpdateService {
       // boundary stays held until the installer has returned.
       this.cutover = true
       this.publish()
-      let outcome: Awaited<ReturnType<typeof installStagedUpdate>>
+      // Whether the platform installer is still holding this attempt's copy is
+      // only known once the call that started it has returned, and a call that
+      // throws hands nothing to anything — so what is left here is decided from
+      // that answer rather than from the fact that a cleanup is due.
+      let retains = false
+      let outcome: InstallOutcome
       try {
         outcome = await (this.options.install ?? installStagedUpdate)(handoff, {
           platform: this.options.platform,
@@ -570,14 +583,29 @@ export class UpdateService {
           arch: candidate.arch,
           userDataPath: this.options.userDataPath,
           quit: this.options.quit,
+          // Recorded while this app is still running and still able to write:
+          // the installer has been started and has not read the copy yet, and
+          // this app is about to be asked to close.
+          onRetain: (retained) =>
+            recordRetainedHandoff(this.options.userDataPath, handoffDirectory, retained),
           relaunch: () => {
             this.restartRequired = true
             this.options.relaunch()
           },
         })
+        retains = outcome.retains !== undefined
       } finally {
         this.cutover = false
-        await rm(handoffDirectory, { recursive: true, force: true }).catch(() => undefined)
+        // A copy a detached installer still holds is not this run's to remove:
+        // the installer reopens it after this app has gone, and removing it
+        // here is what left the update with nothing to install from. The
+        // process it was handed to is recorded, and a later launch removes the
+        // copy once that process is gone. Every other way out — a refused
+        // launch, a failed verification, a cut-over that finished — takes the
+        // directory this attempt created with it, as it always did.
+        if (!retains) {
+          await rm(handoffDirectory, { recursive: true, force: true }).catch(() => undefined)
+        }
       }
       if (!outcome.installed) {
         // The installer refused for its own honest reason — this build is

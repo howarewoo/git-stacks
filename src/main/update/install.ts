@@ -81,6 +81,18 @@ const BACKUP_PREFIX = '.git-stacks-replaced-'
 const REAP_MARKER = 'replaced-bundle.json'
 
 /**
+ * Where a run's owner-private copy is kept, and what the directories this app
+ * makes inside it are called. Both are named here so the run that creates the
+ * directory and the cleanup that removes it agree on one answer, and a record
+ * can be checked against them.
+ */
+export const HANDOFF_PARENT = 'handoff'
+export const HANDOFF_PREFIX = 'run-'
+
+/** The marker a run leaves when the installer it started outlives the call. */
+const RETAINED_MARKER = 'retained-handoff.json'
+
+/**
  * The installer formats this build knows how to apply, by platform.
  *
  * Linux is absent on purpose: it ships as a single AppImage the person runs
@@ -96,10 +108,26 @@ export function installSupportFor(platform: string): 'dmg' | 'nsis' | null {
   return INSTALLABLE_PLATFORMS[platform] ?? null
 }
 
+/** A platform installer that is still running after the call that started it. */
+export interface RetainedInstall {
+  /**
+   * The process the prepared executable was handed to, whose exit is what
+   * proves it has finished with it. Null when no process could be identified,
+   * which means the handoff can never be proved finished and has to be kept.
+   */
+  pid: number | null
+}
+
 /** What an install attempt concluded, and why it stopped when it stopped. */
 export interface InstallOutcome {
   installed: boolean
   reason: string
+  /**
+   * Set only when the platform installer still holds — or may yet reopen — the
+   * prepared executable after this call returned. The caller must not remove
+   * that file while this is set; it is what the installer was given to run.
+   */
+  retains?: RetainedInstall
 }
 
 /**
@@ -522,6 +550,12 @@ export interface InstallOptions {
   version?: string
   /** The architecture the signed manifest offered, checked on macOS. */
   arch?: string
+  /**
+   * Called with the installer process that outlives this call, before this app
+   * is asked to close. The caller owns the prepared copy and has to record that
+   * it is still in use while this app is still running and able to record it.
+   */
+  onRetain?: (retained: RetainedInstall) => Promise<void> | void
   /** Where a leftover from a previous cut-over is recorded. */
   userDataPath?: string
   /** Called once the platform installer has taken the update. */
@@ -673,6 +707,10 @@ async function installDmg(staged: StagedUpdate, options: DmgOptions): Promise<In
  * application-control policy, an antivirus that removed it, a file that was
  * taken away in between — leaves this app running and reports the refusal,
  * rather than closing with no installer to finish the work.
+ *
+ * The installer is given a path, not a copy of itself in memory, and it is
+ * still using that path after this function has returned. The outcome says so
+ * rather than leaving the caller to assume the call was the whole of it.
  */
 async function installNsis(staged: StagedUpdate, options: InstallOptions): Promise<InstallOutcome> {
   options.onProgress?.('Starting the installer and closing this app')
@@ -701,11 +739,85 @@ async function installNsis(staged: StagedUpdate, options: InstallOptions): Promi
   // while this process holds them open. It is detached, this app then closes,
   // and the installer completes on its own.
   child.unref()
+  // Being spawned is not the same as having read the file. A Windows installer
+  // opens its own executable again after it starts — the elevated copy that
+  // does the work runs from that same path — so the prepared copy is still in
+  // use while this app is still running, and removing it here is what left an
+  // update installing from a file that had already been unlinked. What proves
+  // the copy may finally go is the exit of the process it was handed to, which
+  // a later launch of this app checks for; until then the caller keeps it.
+  const retained: RetainedInstall = { pid: child.pid ?? null }
+  await options.onRetain?.(retained)
   options.quit?.()
   return {
     installed: true,
     reason: 'The installer is running. This app closes and the update finishes on its own.',
+    retains: retained,
   }
+}
+
+/**
+ * Records a prepared copy that a platform installer was handed and has not
+ * finished with, along with the process to watch for.
+ *
+ * The record is written by the run that created the directory and owns it,
+ * while this app is still running: a run that hands a file to a detached
+ * installer is about to be asked to close, and a record written after that may
+ * never reach the disk. A record that cannot be written does not fail the
+ * update — the copy is still kept, it is only left without a way to be proven
+ * finished — so nothing here throws.
+ */
+export async function recordRetainedHandoff(
+  userDataPath: string,
+  directory: string,
+  retained: RetainedInstall,
+): Promise<void> {
+  const body = `${JSON.stringify({ path: directory, pid: retained.pid }, null, 2)}\n`
+  await writeFile(join(userDataPath, RETAINED_MARKER), body, { mode: 0o600 }).catch(() => undefined)
+}
+
+/**
+ * Removes a prepared copy a detached installer was still holding, once that
+ * installer has finished with it.
+ *
+ * The run that handed the copy over could not remove it: the installer was
+ * spawned and this app was closed while the installer was still going to read
+ * that file. So removal waits for the next launch of this app, and the answer
+ * it acts on is the process, not the passage of time — signal 0 asks whether
+ * that process is still there without touching it, and only "no such process"
+ * is taken as finished. Anything else, a refusal for an installer running as
+ * another user included, leaves the copy alone.
+ *
+ * Nothing is removed unless the record names a directory this app made, inside
+ * the handoff parent, carrying this app's own prefix — the same rule the
+ * replaced-bundle marker follows. A record that cannot be read, or that names
+ * anything else, removes nothing at all.
+ */
+export async function reapRetainedHandoff(userDataPath: string): Promise<void> {
+  const marker = join(userDataPath, RETAINED_MARKER)
+  let recorded: unknown
+  try {
+    recorded = JSON.parse(await readFile(marker, 'utf8'))
+  } catch {
+    return
+  }
+  if (typeof recorded !== 'object' || recorded === null || !('path' in recorded)) return
+  const value: unknown = recorded.path
+  const pid: unknown = 'pid' in recorded ? recorded.pid : null
+  if (typeof value !== 'string' || value.length === 0) return
+  if (typeof pid !== 'number' || !Number.isInteger(pid) || pid <= 0) return
+  if (dirname(value) !== join(userDataPath, HANDOFF_PARENT)) return
+  if (!basename(value).startsWith(HANDOFF_PREFIX)) return
+  try {
+    process.kill(pid, 0)
+    return
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ESRCH') return
+  }
+  if (existsSync(value)) {
+    await rm(value, { recursive: true, force: true }).catch(() => undefined)
+  }
+  await rm(marker, { force: true }).catch(() => undefined)
 }
 
 /**

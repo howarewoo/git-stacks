@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawn } from 'node:child_process'
 import { EventEmitter } from 'node:events'
 import { createHash, generateKeyPairSync, sign } from 'node:crypto'
 import {
@@ -209,7 +209,16 @@ interface Harness {
   until: (phase: 'checking' | 'downloading' | 'installing') => Promise<void>
 }
 
-/** A bundle-shaped path that exists but carries no signature. */
+/** The environment a run of this build trusts a release feed through. */
+function updateEnv(base: string): NodeJS.ProcessEnv {
+  return {
+    GIT_STACKS_UPDATE_KEY_ID: KEY_ID,
+    GIT_STACKS_UPDATE_PUBLIC_KEY: PUBLIC_KEY,
+    GIT_STACKS_UPDATE_FEED_BASE: base,
+    GIT_STACKS_UPDATE_CA_FILE: TLS.caFile,
+  }
+}
+
 function unsignedBundle(): string {
   const root = mkdtempSync(join(tmpdir(), 'git-stacks-bundle-'))
   const executable = join(root, 'Git Stacks.app', 'Contents', 'MacOS', 'Git Stacks')
@@ -230,12 +239,7 @@ function harnessFor(
     userDataPath,
     platform: 'darwin',
     arch: 'arm64',
-    env: {
-      GIT_STACKS_UPDATE_KEY_ID: KEY_ID,
-      GIT_STACKS_UPDATE_PUBLIC_KEY: PUBLIC_KEY,
-      GIT_STACKS_UPDATE_FEED_BASE: base,
-      GIT_STACKS_UPDATE_CA_FILE: TLS.caFile,
-    },
+    env: updateEnv(base),
     relaunch: () => undefined,
     ...options,
   })
@@ -1073,6 +1077,104 @@ test('nothing a failed install cleans up was not this attempt’s own', async (t
     }
   }
   assert.equal(installed, 1, 'only the install that was supposed to run reached the installer')
+})
+
+test('a copy a detached installer still holds outlives the call, and goes when that process does', async (t) => {
+  // A Windows installer is handed a path and this app is then closed so the
+  // installer can replace the files this one is running from. It has not read
+  // that path yet at the moment it is spawned — the elevated copy that does the
+  // work runs from it afterwards — so removing the prepared copy when the call
+  // returns left the update with nothing to install from. This drives the real
+  // service over real temporary files and a real process: whether that process
+  // is running is decided by the process, not by the test.
+  const feed = await startFeed()
+  t.after(() => feed.close())
+  feed.set({ version: '0.2.0', sequence: 1, bytes: ARTIFACT, channel: 'stable' })
+  // A real process, alive because the test holds its end open and finished
+  // because the test closes it. Nothing here decides liveness by waiting.
+  const installer = spawn(process.execPath, ['-e', 'process.stdin.resume()'], {
+    stdio: ['pipe', 'pipe', 'ignore'],
+  })
+  t.after(() => installer.kill('SIGKILL'))
+  const started = once(installer, 'spawn')
+  await started
+  const app = harnessFor(feed.base, {
+    install: async (_staged, options) => {
+      const pid = installer.pid ?? null
+      assert.notEqual(pid, null, 'the installer process is identified')
+      await options.onRetain?.({ pid })
+      return { installed: true, reason: 'The installer is running.', retains: { pid } }
+    },
+  })
+  /** The next launch of this app over the same data directory. */
+  const launch = async (userDataPath: string): Promise<void> => {
+    const next = new UpdateService({
+      packaged: false,
+      currentVersion: '0.1.0',
+      appPath: unsignedBundle(),
+      userDataPath,
+      platform: 'darwin',
+      arch: 'arm64',
+      env: updateEnv(feed.base),
+      relaunch: () => undefined,
+    })
+    await next.start('stable')
+  }
+
+  await app.service.start('stable')
+  await app.service.check()
+  await app.service.download()
+  await app.service.install()
+
+  // The copy the installer was handed is still there to read, after the call
+  // that started the installer returned and this app was told to close.
+  const handoffParent = join(app.userDataPath, 'handoff')
+  const [held] = readdirSync(handoffParent)
+  assert.ok(held, 'the directory this attempt made is still there')
+  const [prepared] = readdirSync(join(handoffParent, held))
+  assert.deepEqual(
+    readFileSync(join(handoffParent, held, prepared)),
+    ARTIFACT,
+    'the prepared copy is readable, so the installer has something to install from',
+  )
+
+  // A launch while the installer is running proves nothing about it having
+  // finished, so nothing is removed and the copy is still where it was.
+  await launch(app.userDataPath)
+  assert.deepEqual(
+    readdirSync(handoffParent),
+    [held],
+    'a launch while the installer is still running removes nothing',
+  )
+
+  const finished = once(installer, 'exit')
+  installer.stdin.end()
+  await finished
+  writeFileSync(join(handoffParent, 'somebody-elses-file'), 'not ours')
+  await launch(app.userDataPath)
+  assert.deepEqual(
+    readdirSync(handoffParent),
+    ['somebody-elses-file'],
+    'the copy goes once its installer has, and nothing else went with it',
+  )
+
+  // The other kind of install still cleans up: one that hands the copy to
+  // nothing has nothing left holding it.
+  const refused = harnessFor(feed.base, {
+    install: async () => ({
+      installed: false,
+      reason: 'the platform installer refused the update',
+    }),
+  })
+  await refused.service.start('stable')
+  await refused.service.check()
+  await refused.service.download()
+  await refused.service.install()
+  assert.deepEqual(
+    readdirSync(join(refused.userDataPath, 'handoff')),
+    [],
+    'an install that left no installer running leaves no prepared copy behind',
+  )
 })
 
 test('a stop asked for after the last byte arrived leaves nothing staged or offered', async (t) => {

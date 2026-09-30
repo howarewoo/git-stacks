@@ -634,6 +634,9 @@ function preserveLocked(target: AppSettings, current: AppSettings, key: string):
     case 'privacy.includeLocalPaths':
       target.privacy.includeLocalPaths = current.privacy.includeLocalPaths
       return
+    case 'updates.channel':
+      target.updates.channel = current.updates.channel
+      return
     case 'shortcuts':
       target.shortcuts = current.shortcuts
       return
