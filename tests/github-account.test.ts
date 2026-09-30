@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, test } from 'node:test'
@@ -1509,6 +1509,158 @@ test('a superseded poll cannot clear the sign-in that replaced it', async () => 
   assert.equal(cancelled.challenge, null)
   assert.equal(cancelled.state, 'signed-in')
   assert.equal((await account.current())?.token, 'ghu_b')
+
+  setGitHubCredentialSource(null)
+  onGitHubFailure(null)
+})
+
+/**
+ * Resolves after the microtask queue has drained, so a continuation that must
+ * not have started anything has had every chance to. One turn of the event
+ * loop is the whole wait: nothing here is measured against the clock.
+ */
+async function drained(): Promise<void> {
+  const turn = Promise.withResolvers<void>()
+  setImmediate(() => turn.resolve())
+  await turn.promise
+}
+
+test('a device code answered after a newer sign-in began is refused', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'git-stacks-account-'))
+  roots.push(root)
+  const { protector } = sealingProtector()
+  const late = Promise.withResolvers<Response>()
+  // Never opened: a code that is polled parks here, so the test decides when
+  // the flows overlap instead of waiting on a timer.
+  const parked = Promise.withResolvers<Response>()
+  const polled: string[] = []
+  let requested = 0
+  const account = new GitHubAccount({
+    vault: new CredentialVault(join(root, 'credentials.vault.json'), protector),
+    stateFile: join(root, 'github-account.json'),
+    env: { GIT_STACKS_GITHUB_APP_CLIENT_ID: CLIENT_ID },
+    identify: async () => 'ada',
+    sleep: async () => {},
+    fetch: (async (input: string | URL | Request, init?: RequestInit) => {
+      const body = new URLSearchParams(String(init?.body ?? ''))
+      if (String(input).endsWith('/login/device/code')) {
+        requested += 1
+        // The first request settles only after a second sign-in replaced it, and
+        // it answers with the code it was asked for even though the signal it
+        // was given had already been aborted.
+        if (requested === 1) return await late.promise
+        return new Response(
+          JSON.stringify({ ...DEVICE_CODE, user_code: 'CODE-NEW', device_code: 'CODE-NEW' }),
+          { status: 200 },
+        )
+      }
+      polled.push(body.get('device_code') ?? '')
+      return await parked.promise
+    }) as typeof globalThis.fetch,
+  })
+
+  const abandoned = account.signIn()
+  await waitUntil(() => requested === 1)
+  await account.signIn()
+  assert.equal(account.status().challenge?.userCode, 'CODE-NEW')
+
+  late.resolve(
+    new Response(JSON.stringify({ ...DEVICE_CODE, user_code: 'STALE', device_code: 'STALE' }), {
+      status: 200,
+    }),
+  )
+  assert.equal((await abandoned).challenge?.userCode, 'CODE-NEW', 'the answer is refused')
+  await drained()
+
+  const still = account.status()
+  assert.equal(still.challenge?.userCode, 'CODE-NEW', 'the live code is not overwritten')
+  assert.equal(still.signingIn, true, 'the newer sign-in is still in progress')
+  assert.equal(still.state, 'signing-in')
+  assert.deepEqual(polled, ['CODE-NEW'], 'only the live code is polled')
+
+  // Its Cancel control still belongs to the sign-in that is running.
+  const cancelled = await account.cancelSignIn()
+  assert.equal(cancelled.signingIn, false)
+  assert.equal(cancelled.challenge, null)
+  assert.equal(cancelled.state, 'signed-out')
+
+  setGitHubCredentialSource(null)
+  onGitHubFailure(null)
+})
+
+test('a rejected account metadata write leaves no credential no account owns', async () => {
+  const harness = await signedIn([])
+  const { clock, protector, stateFile, vaultFile } = harness
+  const before = JSON.parse(await readFile(stateFile, 'utf8')) as { reference: string }
+  const { fetch: fetchDouble } = fetchReturning([
+    { body: DEVICE_CODE },
+    { body: session('ghu_replacement', 'ghr_replacement') },
+  ])
+  const vault = new CredentialVault(vaultFile, protector)
+  const staged: string[] = []
+  const removed: string[] = []
+  const staging = vault.stage.bind(vault)
+  vault.stage = async (host, secret, at) => {
+    const reference = await staging(host, secret, at)
+    staged.push(reference)
+    return reference
+  }
+  const removing = vault.remove.bind(vault)
+  vault.remove = async (reference: string) => {
+    removed.push(reference)
+    await removing(reference)
+  }
+  const changes: GitHubAccountStatus[] = []
+  const account = new GitHubAccount({
+    vault,
+    stateFile,
+    env: { GIT_STACKS_GITHUB_APP_CLIENT_ID: CLIENT_ID },
+    identify: async () => 'ada',
+    now: () => clock.now,
+    sleep: async () => {},
+    fetch: fetchDouble,
+    onChange: (status) => changes.push(status),
+  })
+  await account.restore()
+  assert.equal(account.status().state, 'signed-in')
+  // The disk refuses the write the account needs before it can publish the
+  // metadata, as a full or read-only user-data directory would.
+  await mkdir(`${stateFile}.tmp`)
+
+  await account.signIn()
+  const reported = await waitForState(
+    changes,
+    (status) => status.message === 'Sign-in could not be completed.',
+  )
+
+  assert.equal(reported.signingIn, false, 'the failed sign-in does not stay in progress')
+  assert.equal(reported.challenge, null)
+  assert.deepEqual(staged, removed, 'exactly the staged credential is removed')
+  assert.equal(removed.length, 1)
+  assert.notEqual(removed[0], before.reference, 'the account that was signed in is not removed')
+  assert.deepEqual(
+    (await vault.references()).map((entry) => entry.reference),
+    [before.reference],
+    'no sealed credential is left that no account names',
+  )
+
+  // The account that was already signed in is untouched, in memory and on disk.
+  assert.equal(account.status().state, 'signed-in')
+  assert.equal(account.status().reference, before.reference)
+  assert.equal((await account.current())?.token, 'ghu_first')
+  assert.match(await vault.open(before.reference), /ghu_first/u)
+  const stored = JSON.parse(await readFile(stateFile, 'utf8')) as { reference: string }
+  assert.equal(stored.reference, before.reference, 'the metadata still names the old credential')
+
+  const restarted = new GitHubAccount({
+    vault: new CredentialVault(vaultFile, protector),
+    stateFile,
+    env: { GIT_STACKS_GITHUB_APP_CLIENT_ID: CLIENT_ID },
+    now: () => clock.now,
+    identify: async () => 'ada',
+  })
+  assert.equal((await restarted.restore()).state, 'signed-in')
+  assert.equal((await restarted.current())?.token, 'ghu_first')
 
   setGitHubCredentialSource(null)
   onGitHubFailure(null)

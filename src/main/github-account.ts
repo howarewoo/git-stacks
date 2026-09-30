@@ -456,7 +456,17 @@ export class GitHubAccount implements GitHubCredentialSource {
         session: live.session,
       }
       await this.options.beforeStateWrite?.()
-      await writeAccount(this.options.stateFile, account)
+      try {
+        await writeAccount(this.options.stateFile, account)
+      } catch (error) {
+        // The metadata never named this credential, so dropping the staged
+        // entry is the whole rollback: the previous account keeps the state
+        // file and its own sealed credential, and nothing is left on disk that
+        // no account owns. The failure is still reported, so the poll ends in a
+        // sign-in failure rather than a silent success.
+        await this.options.vault.remove(reference)
+        throw error
+      }
       if (!fence()) {
         // The metadata now names the staged credential; put back what it named
         // before, so the state on disk never points at a removed reference.
@@ -657,6 +667,17 @@ export class GitHubAccount implements GitHubCredentialSource {
         this.failureState(error as GitHubAppError),
         error instanceof GitHubAppError ? error.message : 'Sign-in could not be started.',
       )
+    }
+    // A successful answer can still arrive after this flow was cancelled,
+    // superseded, or signed out: an abort stops the request being made, not a
+    // response that is already settling. Publishing that code would overwrite
+    // the newer flow's challenge while `pending` still points at the newer
+    // controller, leaving the code on screen and the Cancel control describing
+    // two different sign-ins. The flow number catches a replacement or a
+    // cancel, the generation catches a sign-out or a discard, and the aborted
+    // signal is the backstop for either.
+    if (controller.signal.aborted || flow !== this.flow || this.generation !== generationAtStart) {
+      return this.status()
     }
     this.challenge = {
       userCode: challenge.userCode,
