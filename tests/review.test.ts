@@ -3351,7 +3351,7 @@ test('a draft written again after the first was sent is new work, not a recovery
   })
   // The reviewer writes the comment, sends it as a plain comment, and GitHub
   // takes it. The view is told, and drops the draft — the acknowledgement.
-  const first = draft({ id: newReviewDraftId(at, null), ref: at, body })
+  const first = draft({ id: newReviewDraftId(), ref: at, body })
   await writeReviewDrafts(workspace.repo, record([first]))
   const sent = await submitReview(workspace.repo, 7, {
     event: 'COMMENT' as const,
@@ -3368,7 +3368,7 @@ test('a draft written again after the first was sent is new work, not a recovery
   // anchor, same body, same comparison — and it is a different piece of work.
   // Treating the settled record as its recovery would clear this draft, send
   // no approval at all, and report one GitHub never received.
-  const second = draft({ id: newReviewDraftId(at, null), ref: at, body })
+  const second = draft({ id: newReviewDraftId(), ref: at, body })
   await writeReviewDrafts(workspace.repo, record([second]))
   const approved = await submitReview(workspace.repo, 7, {
     event: 'APPROVE' as const,
@@ -3383,6 +3383,43 @@ test('a draft written again after the first was sent is new work, not a recovery
   assert.equal(posted.event, 'APPROVE', 'the request that left the app is the approval')
   assert.equal(posted.comments.length, 1)
   assert.equal(posted.comments[0]?.body, body)
+})
+
+test('a draft on a long path keeps a bridge-sized identity through save and submit', async (t) => {
+  const workspace = await reviewWorkspace()
+  t.after(workspace.dispose)
+  const path = `src/${'long-directory/'.repeat(12)}review.ts`
+  const patch = '@@ -1,2 +1,3 @@\n keep\n+added\n tail'
+  const entry = file({ path, diff: { kind: 'text', hunks: hunks(patch, path) } })
+  const hunk = textHunk(entry, 0)
+  const at = refFor(hunk, 1, { path })
+  const first = draft({ id: newReviewDraftId(), ref: at, body: 'Keep this line.' })
+  const second = draft({ id: newReviewDraftId(), ref: at, body: 'Keep this line.' })
+  assert.ok(path.length > 128)
+  assert.ok(first.id.length <= 128, 'the bridge accepts the generated identity')
+  assert.notEqual(first.id, second.id, 'another composition has its own identity')
+
+  const { transport, writes } = threadDouble({ files: [apiFile({ filename: path, patch })] })
+  setGitHubTransport(transport)
+  t.after(() => setGitHubTransport(null))
+  await writeReviewDrafts(workspace.repo, {
+    number: 7,
+    ...JOURNAL_OWNER,
+    comparison: comparison(),
+    drafts: [first],
+    updatedAt: '2026-09-23T10:00:00Z',
+  })
+  const stored = await readReviewDrafts(workspace.repo, JOURNAL_OWNER.repo, JOURNAL_OWNER.viewer, 7)
+  assert.equal(stored?.drafts[0]?.id, first.id)
+  const sent = await submitReview(workspace.repo, 7, {
+    event: 'COMMENT',
+    body: '',
+    comparison: comparison(),
+    drafts: stored!.drafts,
+  })
+  assert.deepEqual(sent.delivered, [first.id])
+  assert.equal(writes.length, 1)
+  assert.equal((writes[0]?.body as { comments: Array<{ path: string }> }).comments[0]?.path, path)
 })
 
 test('two windows that opened the same journal each send their own identical comment', async (t) => {
@@ -3423,8 +3460,8 @@ test('two windows that opened the same journal each send their own identical com
     null,
     'precondition: neither window has anything journalled',
   )
-  const first = draft({ id: newReviewDraftId(at, null), ref: at, body })
-  const second = draft({ id: newReviewDraftId(at, null), ref: at, body })
+  const first = draft({ id: newReviewDraftId(), ref: at, body })
+  const second = draft({ id: newReviewDraftId(), ref: at, body })
   assert.notEqual(second.id, first.id, 'two compositions on one line are two identities')
 
   // The first window sends it as a plain comment. GitHub applies the review and
@@ -3543,7 +3580,7 @@ test('a journal written before identities were generated still reads and still s
 
   // A name minted now cannot be one of those, however the old record counted:
   // there is no count left to continue.
-  assert.notEqual(newReviewDraftId(at, null), legacyId)
+  assert.notEqual(newReviewDraftId(), legacyId)
 })
 
 test('a comment edited after it was composed is sent again, not dropped as sent', async (t) => {

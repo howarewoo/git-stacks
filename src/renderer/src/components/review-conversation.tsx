@@ -184,7 +184,7 @@ export function ReviewConversation({
     const startRef = ends.first.line === ends.last.line ? null : ends.first
     const range = reviewDraftKey(ends.last, startRef)
     const draft: ReviewDraft = {
-      id: newReviewDraftId(ends.last, startRef),
+      id: newReviewDraftId(),
       ref: ends.last,
       startRef,
       body: '',

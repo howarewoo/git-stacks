@@ -87,8 +87,8 @@ export interface ReviewDraftRecord {
 }
 
 /**
- * The identity a new draft is minted with: the range it covers, and a
- * generated name.
+ * The identity a new draft is minted with: a generated name independent of
+ * its range, so even the longest accepted file path fits the bridge ID limit.
  *
  * It is minted, not counted, because a count is only unique if exactly one
  * process owns it. The journal that would hold the count is read by every
@@ -105,8 +105,8 @@ export interface ReviewDraftRecord {
  * other, so every stored identity stays readable and none of them can be
  * minted a second time.
  */
-export function newReviewDraftId(ref: ReviewLineRef, startRef: ReviewLineRef | null): string {
-  return `${reviewDraftKey(ref, startRef)}#${crypto.randomUUID()}`
+export function newReviewDraftId(): string {
+  return crypto.randomUUID()
 }
 
 /**
