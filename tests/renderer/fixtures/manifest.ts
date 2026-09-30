@@ -35,6 +35,7 @@ export const SCENARIO_NAMES = [
   'ancestry-missing-parent',
   'ancestry-cycle',
   'ancestry-requires-restack',
+  'branches-deep-chain',
   // Working changes
   'files-clean',
   'files-staged',
@@ -50,13 +51,22 @@ export const SCENARIO_NAMES = [
   // Pull requests
   'pull-requests-lifecycle',
   'pull-requests-checks',
+  'pull-requests-checks-detail',
+  'pull-requests-checks-stale',
   'pull-requests-empty',
   'pull-requests-unavailable',
   'pull-requests-issue-links',
+  'pull-requests-merge-refused',
   // Stashes
   'stash-stable-oid',
   'stash-empty',
   'stash-index-shift',
+  // Review
+  'review-force-pushed',
+  'review-stacked',
+  'review-unstacked',
+  'review-read-only',
+  'review-own-pull-request',
   // Workflows and recovery
   'workflow-preview-ready',
   'workflow-preview-loading',
@@ -94,6 +104,7 @@ export const SCENARIO_GROUPS = {
     'ancestry-missing-parent',
     'ancestry-cycle',
     'ancestry-requires-restack',
+    'branches-deep-chain',
   ],
   changes: [
     'files-clean',
@@ -109,9 +120,12 @@ export const SCENARIO_GROUPS = {
   pullRequests: [
     'pull-requests-lifecycle',
     'pull-requests-checks',
+    'pull-requests-checks-detail',
+    'pull-requests-checks-stale',
     'pull-requests-empty',
     'pull-requests-unavailable',
     'pull-requests-issue-links',
+    'pull-requests-merge-refused',
   ],
   stashes: ['stash-stable-oid', 'stash-empty', 'stash-index-shift'],
   workflows: [

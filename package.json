@@ -6,11 +6,11 @@
   "main": "./out/main/index.js",
   "type": "module",
   "scripts": {
-    "dev": "electron-vite dev",
-    "start": "electron-vite preview",
-    "build": "npm run typecheck && electron-vite build",
+    "dev": "npm run build:promotion-helper && electron-vite dev",
+    "start": "npm run build:promotion-helper && electron-vite preview",
+    "build": "npm run typecheck && npm run build:promotion-helper && electron-vite build",
     "typecheck": "tsc --noEmit",
-    "test": "npm run provision:git-runtime && tsx --test tests/*.test.ts",
+    "test": "npm run build:promotion-helper && npm run provision:git-runtime && tsx --test tests/*.test.ts",
     "bench:performance": "tsx scripts/perf/run-benchmarks.ts",
     "gallery": "vite --config tests/renderer/vite.config.ts",
     "build:gallery": "vite build --config tests/renderer/vite.config.ts",
@@ -26,6 +26,7 @@
     "format:check": "prettier --check . '!./.github/workflows/pullfrog.yml'",
     "package": "npm run build && npm run provision:git-runtime && npm run verify:git-runtime && electron-builder --dir --publish never && npm run verify:packaged-git-runtime",
     "dist": "npm run build && npm run provision:git-runtime && npm run verify:git-runtime && electron-builder --publish never && npm run verify:packaged-git-runtime",
+    "build:promotion-helper": "node scripts/build-promotion-helper.mjs",
     "provision:git-runtime": "node scripts/provision-git-runtime.mjs",
     "verify:git-runtime": "node scripts/verify-git-runtime.mjs",
     "verify:packaged-git-runtime": "node scripts/verify-packaged-git-runtime.mjs"
@@ -49,6 +50,13 @@
         "filter": [
           "**/*",
           "!.provision/**"
+        ]
+      },
+      {
+        "from": "resources/promote",
+        "to": "promote",
+        "filter": [
+          "**/*"
         ]
       }
     ],

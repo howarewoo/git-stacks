@@ -1,4 +1,18 @@
 import assert from 'node:assert/strict'
+/** github.com's own context, written out so importing the host module cannot pull
+ * `git-core` (and the real `execFile`) in before this file's harness patches it. */
+const DOTCOM = {
+  host: 'github.com',
+  sshHost: 'github.com',
+  dotcom: true,
+  webOrigin: 'https://github.com',
+  apiBase: 'https://api.github.com',
+  graphqlUrl: 'https://api.github.com/graphql',
+} as const
+
+/** Every native stack call in this file is bound to github.com. */
+const HOST_ONLY = { host: DOTCOM }
+
 import { readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { execFileSync } from 'node:child_process'
@@ -758,7 +772,7 @@ function stackFor(snapshot: RepositorySnapshot, key: string) {
 test('an unfetched GitHub stack head blocks repairs in a real repository report', async () => {
   await withHarness(async (harness) => {
     const heads = await setupStack(harness)
-    const created = await createPullRequestStack('acme', 'widgets', [101, 102, 103])
+    const created = await createPullRequestStack('acme', 'widgets', [101, 102, 103], HOST_ONLY)
     const unavailable = bareGit(harness, [
       'commit-tree',
       `${heads[1]}^{tree}`,
@@ -789,7 +803,7 @@ test('an unfetched GitHub stack head blocks repairs in a real repository report'
 test('submitted order is reconstructed from GitHub after local metadata is deleted', async () => {
   await withHarness(async (harness) => {
     const heads = await setupStack(harness)
-    const created = await createPullRequestStack('acme', 'widgets', [101, 102, 103])
+    const created = await createPullRequestStack('acme', 'widgets', [101, 102, 103], HOST_ONLY)
     const key = `native:${created.number}`
 
     // No local parent hints at all: GitHub is the only record of the order.
@@ -836,7 +850,7 @@ test('submitted order is reconstructed from GitHub after local metadata is delet
 test('selecting one of several identical repair kinds changes only that branch and retains earlier recovery evidence', async () => {
   await withHarness(async (harness) => {
     await setupStack(harness)
-    const created = await createPullRequestStack('acme', 'widgets', [101, 102, 103])
+    const created = await createPullRequestStack('acme', 'widgets', [101, 102, 103], HOST_ONLY)
     const key = `native:${created.number}`
     const preview = await previewReconciliationRepair(
       harness.repo,
@@ -882,7 +896,7 @@ test('selecting one of several identical repair kinds changes only that branch a
 test('an externally retargeted pull request is retargeted back only through a preview', async () => {
   await withHarness(async (harness) => {
     const heads = await setupStack(harness)
-    const created = await createPullRequestStack('acme', 'widgets', [101, 102, 103])
+    const created = await createPullRequestStack('acme', 'widgets', [101, 102, 103], HOST_ONLY)
     const key = `native:${created.number}`
     const before = await getSnapshot(harness.repo)
     await previewReconciliationRepair(harness.repo, before, key)
@@ -936,7 +950,7 @@ test('an externally retargeted pull request is retargeted back only through a pr
 test('a native member retargets its numbered PR, never a newer unrelated PR sharing its head', async () => {
   await withHarness(async (harness) => {
     const heads = await setupStack(harness)
-    const created = await createPullRequestStack('acme', 'widgets', [101, 102, 103])
+    const created = await createPullRequestStack('acme', 'widgets', [101, 102, 103], HOST_ONLY)
     const state = await harness.readState()
     state.prs[0].base = 'develop'
     state.prs.unshift(pullRequestFixture(201, 'feature/step-1', 'release', { headOid: heads[0] }))
@@ -968,7 +982,7 @@ test('a native member retargets its numbered PR, never a newer unrelated PR shar
 test('a native member whose numbered PR moved to another head cannot be repaired', async () => {
   await withHarness(async (harness) => {
     await setupStack(harness)
-    const created = await createPullRequestStack('acme', 'widgets', [101, 102, 103])
+    const created = await createPullRequestStack('acme', 'widgets', [101, 102, 103], HOST_ONLY)
     const state = await harness.readState()
     state.prs[0].head = 'feature/step-2'
     await harness.writeState(state)
@@ -983,7 +997,7 @@ test('a native member whose numbered PR moved to another head cannot be repaired
 test('a concurrent edit between preview and execute is reported instead of overwritten', async () => {
   await withHarness(async (harness) => {
     const heads = await setupStack(harness)
-    const created = await createPullRequestStack('acme', 'widgets', [101, 102, 103])
+    const created = await createPullRequestStack('acme', 'widgets', [101, 102, 103], HOST_ONLY)
     const key = `native:${created.number}`
     recordParent(harness, 'feature/step-2', 'main', heads[0])
 
@@ -1020,7 +1034,7 @@ test('a concurrent edit between preview and execute is reported instead of overw
 test('a parent hint changed during GitHub revalidation is not overwritten by an adopted order', async () => {
   await withHarness(async (harness) => {
     const heads = await setupStack(harness)
-    const created = await createPullRequestStack('acme', 'widgets', [101, 102, 103])
+    const created = await createPullRequestStack('acme', 'widgets', [101, 102, 103], HOST_ONLY)
     const key = `native:${created.number}`
     recordParent(harness, 'feature/step-2', 'main', heads[0])
     const preview = await previewReconciliationRepair(
@@ -1068,7 +1082,7 @@ test('a changed, removed, or re-resolved stack base invalidates an adoption prev
   for (const drift of ['move', 'remove', 'fallback'] as const) {
     await withHarness(async (harness) => {
       await setupStack(harness)
-      const created = await createPullRequestStack('acme', 'widgets', [101, 102, 103])
+      const created = await createPullRequestStack('acme', 'widgets', [101, 102, 103], HOST_ONLY)
       const preview = await previewReconciliationRepair(
         harness.repo,
         await getSnapshot(harness.repo),
@@ -1112,7 +1126,7 @@ test('a changed, removed, or re-resolved stack base invalidates an adoption prev
 test('a preview token is single use and rejects repairs it never offered', async () => {
   await withHarness(async (harness) => {
     await setupStack(harness)
-    const created = await createPullRequestStack('acme', 'widgets', [101, 102, 103])
+    const created = await createPullRequestStack('acme', 'widgets', [101, 102, 103], HOST_ONLY)
     const key = `native:${created.number}`
     const preview = await previewReconciliationRepair(
       harness.repo,
@@ -1148,7 +1162,7 @@ test('a preview token is single use and rejects repairs it never offered', async
 test('a deleted local branch is reported and restored without moving any other ref', async () => {
   await withHarness(async (harness) => {
     const heads = await setupStack(harness)
-    const created = await createPullRequestStack('acme', 'widgets', [101, 102, 103])
+    const created = await createPullRequestStack('acme', 'widgets', [101, 102, 103], HOST_ONLY)
     const key = `native:${created.number}`
     recordParent(harness, 'feature/step-1', 'main', heads[0])
     recordParent(harness, 'feature/step-2', 'feature/step-1', heads[0])
@@ -1184,7 +1198,7 @@ test('a deleted local branch is reported and restored without moving any other r
 test('restoring a missing branch refuses to move the HEAD of another worktree', async () => {
   await withHarness(async (harness) => {
     await setupStack(harness)
-    const created = await createPullRequestStack('acme', 'widgets', [101, 102, 103])
+    const created = await createPullRequestStack('acme', 'widgets', [101, 102, 103], HOST_ONLY)
     git(harness, ['switch', 'main'])
     const linked = join(harness.root, 'linked')
     git(harness, ['worktree', 'add', linked, 'feature/step-3'])
@@ -1219,7 +1233,7 @@ test('restoring a missing branch refuses to move the HEAD of another worktree', 
 test('an externally unstacked pull request is detected after GitHub drops the member', async () => {
   await withHarness(async (harness) => {
     const heads = await setupStack(harness)
-    const created = await createPullRequestStack('acme', 'widgets', [101, 102, 103])
+    const created = await createPullRequestStack('acme', 'widgets', [101, 102, 103], HOST_ONLY)
     const key = `native:${created.number}`
     recordParent(harness, 'feature/step-1', 'main', heads[0])
     recordParent(harness, 'feature/step-2', 'feature/step-1', heads[0])
@@ -1264,7 +1278,7 @@ test('an externally unstacked pull request is detected after GitHub drops the me
 test('external unstacking retains every descendant of the submitted branch in the native report', async () => {
   await withHarness(async (harness) => {
     const heads = await setupStack(harness)
-    const created = await createPullRequestStack('acme', 'widgets', [101, 102, 103])
+    const created = await createPullRequestStack('acme', 'widgets', [101, 102, 103], HOST_ONLY)
     const key = `native:${created.number}`
     recordParent(harness, 'feature/step-1', 'main', heads[0])
     recordParent(harness, 'feature/step-2', 'feature/step-1', heads[0])
@@ -1294,7 +1308,7 @@ test('external unstacking retains every descendant of the submitted branch in th
 test('a merged member keeps its identity even without local pull-request tracking', async () => {
   await withHarness(async (harness) => {
     const heads = await setupStack(harness)
-    const created = await createPullRequestStack('acme', 'widgets', [101, 102, 103])
+    const created = await createPullRequestStack('acme', 'widgets', [101, 102, 103], HOST_ONLY)
     const key = `native:${created.number}`
     recordParent(harness, 'feature/step-1', 'main', heads[0])
     recordParent(harness, 'feature/step-2', 'feature/step-1', heads[0])
@@ -1331,7 +1345,7 @@ test('a merged member keeps its identity even without local pull-request trackin
 test('adopting a squash-merged parent keeps the merged head out of child replay', async () => {
   await withHarness(async (harness) => {
     const heads = await setupStack(harness)
-    const created = await createPullRequestStack('acme', 'widgets', [101, 102, 103])
+    const created = await createPullRequestStack('acme', 'widgets', [101, 102, 103], HOST_ONLY)
     recordParent(harness, 'feature/step-2', 'feature/step-1', heads[0])
     const previousMain = git(harness, ['rev-parse', 'main'])
     const squash = git(harness, [
@@ -1416,7 +1430,7 @@ test('adopting a squash-merged parent keeps the merged head out of child replay'
 test('merged parent advancing past its submitted head cannot discard unmerged child ancestry', async () => {
   await withHarness(async (harness) => {
     const heads = await setupStack(harness)
-    const created = await createPullRequestStack('acme', 'widgets', [101, 102, 103])
+    const created = await createPullRequestStack('acme', 'widgets', [101, 102, 103], HOST_ONLY)
     git(harness, ['checkout', 'feature/step-2'])
     writeFileSync(join(harness.repo, 'unmerged-work.txt'), 'unmerged parent work\n')
     git(harness, ['add', 'unmerged-work.txt'])
@@ -1475,7 +1489,7 @@ test('merged parent advancing past its submitted head cannot discard unmerged ch
 test('multiple squash-merged predecessors require the immediately submitted head as replay boundary', async () => {
   await withHarness(async (harness) => {
     const heads = await setupStack(harness)
-    const created = await createPullRequestStack('acme', 'widgets', [101, 102, 103])
+    const created = await createPullRequestStack('acme', 'widgets', [101, 102, 103], HOST_ONLY)
     recordParent(harness, 'feature/step-3', 'feature/step-1', heads[0])
     const previousMain = git(harness, ['rev-parse', 'main'])
     const mergedA = git(harness, [
@@ -1561,7 +1575,7 @@ test('a selected order repair cannot create a parent cycle unless its dependent 
     state.prs[1].base = 'main'
     state.prs[2].base = 'feature/step-1'
     await harness.writeState(state)
-    const created = await createPullRequestStack('acme', 'widgets', [102, 101, 103])
+    const created = await createPullRequestStack('acme', 'widgets', [102, 101, 103], HOST_ONLY)
     const key = `native:${created.number}`
     const preview = await previewReconciliationRepair(
       harness.repo,
@@ -1626,7 +1640,7 @@ test('reordered member with a missing recorded boundary cannot infer commit owne
     state.prs[1].base = 'main'
     state.prs[2].base = 'feature/step-1'
     await harness.writeState(state)
-    const created = await createPullRequestStack('acme', 'widgets', [102, 101, 103])
+    const created = await createPullRequestStack('acme', 'widgets', [102, 101, 103], HOST_ONLY)
     const preview = await previewReconciliationRepair(
       harness.repo,
       await getSnapshot(harness.repo),
@@ -1650,7 +1664,7 @@ test('hintless reordered ancestor cannot adopt its descendant as its replay boun
     state.prs[1].base = 'main'
     state.prs[2].base = 'feature/step-1'
     await harness.writeState(state)
-    const created = await createPullRequestStack('acme', 'widgets', [102, 101, 103])
+    const created = await createPullRequestStack('acme', 'widgets', [102, 101, 103], HOST_ONLY)
     const preview = await previewReconciliationRepair(
       harness.repo,
       await getSnapshot(harness.repo),
@@ -1687,7 +1701,7 @@ test('reconciliation does not probe unbounded local parent chains during snapsho
 test('a force-pushed remote branch leaves the local branch behind its submitted head', async () => {
   await withHarness(async (harness) => {
     const heads = await setupStack(harness)
-    const created = await createPullRequestStack('acme', 'widgets', [101, 102, 103])
+    const created = await createPullRequestStack('acme', 'widgets', [101, 102, 103], HOST_ONLY)
     const key = `native:${created.number}`
     recordParent(harness, 'feature/step-1', 'main', heads[0])
     recordParent(harness, 'feature/step-2', 'feature/step-1', heads[0])
@@ -1741,7 +1755,7 @@ test('a force-pushed remote branch leaves the local branch behind its submitted 
 test('one confirmed repair moves a submitted ref and then records its parent without a false stale error', async () => {
   await withHarness(async (harness) => {
     const heads = await setupStack(harness)
-    const created = await createPullRequestStack('acme', 'widgets', [101, 102, 103])
+    const created = await createPullRequestStack('acme', 'widgets', [101, 102, 103], HOST_ONLY)
     const rewritten = bareGit(harness, [
       'commit-tree',
       `${heads[2]}^{tree}`,
@@ -1803,7 +1817,7 @@ test('one confirmed repair moves a submitted ref and then records its parent wit
 test('adopting a selected parent tip records the child boundary against its new tip', async () => {
   await withHarness(async (harness) => {
     const heads = await setupStack(harness)
-    const created = await createPullRequestStack('acme', 'widgets', [101, 102, 103])
+    const created = await createPullRequestStack('acme', 'widgets', [101, 102, 103], HOST_ONLY)
     git(harness, ['checkout', 'main'])
     const oldParentTip = git(harness, ['rev-parse', 'main'])
     git(harness, ['update-ref', 'refs/heads/feature/step-1', oldParentTip, heads[0]])
@@ -1845,7 +1859,7 @@ test('adopting a selected parent tip records the child boundary against its new 
 test('restoring a selected parent ref records the child boundary against the restored tip', async () => {
   await withHarness(async (harness) => {
     const heads = await setupStack(harness)
-    const created = await createPullRequestStack('acme', 'widgets', [101, 102, 103])
+    const created = await createPullRequestStack('acme', 'widgets', [101, 102, 103], HOST_ONLY)
     git(harness, ['checkout', 'main'])
     const oldParentTip = git(harness, ['rev-parse', 'main'])
     git(harness, ['update-ref', '-d', 'refs/heads/feature/step-1'])
@@ -1890,7 +1904,7 @@ test('restoring a selected parent ref records the child boundary against the res
 test('a selected ref move can precede clearing its stale parent hint', async () => {
   await withHarness(async (harness) => {
     const heads = await setupStack(harness)
-    const created = await createPullRequestStack('acme', 'widgets', [101, 102, 103])
+    const created = await createPullRequestStack('acme', 'widgets', [101, 102, 103], HOST_ONLY)
     recordParent(harness, 'feature/step-3', 'feature/step-2', 'f'.repeat(40))
     const rewritten = bareGit(harness, [
       'commit-tree',

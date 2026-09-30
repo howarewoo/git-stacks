@@ -16,3 +16,4 @@ resources/git/
 benchmarks/
 test-results/
 playwright-report/
+resources/promote/

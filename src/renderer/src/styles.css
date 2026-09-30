@@ -644,6 +644,7 @@ button:disabled {
 .branches-view,
 .changes-view,
 .pull-requests-view,
+.review-view,
 .stashes-view {
   display: flex;
   height: 100%;
@@ -709,13 +710,10 @@ button:disabled {
     border-color 120ms ease;
 }
 
-.branch-select {
-  position: absolute;
-  z-index: 1;
-  inset: 0;
-  border: 0;
-  border-radius: inherit;
-  background: transparent;
+/* The tree row is the focusable widget: one tab stop, one visible focus ring. */
+.branch-row:focus-visible {
+  outline: 2px solid var(--gs-semantic-focus-ring);
+  outline-offset: -2px;
 }
 
 .branch-summary {
@@ -1145,6 +1143,96 @@ button:disabled {
   line-height: 1.4;
 }
 
+.checks-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 7px;
+}
+
+.check-note {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+  margin: 0;
+  color: var(--gs-semantic-text-secondary);
+  font-size: var(--gs-semantic-type-metadata-size);
+  line-height: var(--gs-semantic-type-metadata-line);
+}
+
+.checks-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.check-group h4 {
+  margin: 0;
+  color: var(--gs-semantic-text-muted);
+  font-size: var(--gs-semantic-type-label-size);
+  font-weight: 650;
+  line-height: var(--gs-semantic-type-label-line);
+}
+
+.check-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.check-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px 10px;
+  border: 1px solid var(--gs-semantic-border-essential);
+  border-radius: var(--gs-semantic-radius-item);
+  background: var(--gs-semantic-surface-content);
+  padding: 8px 9px;
+}
+
+.check-row-main {
+  display: flex;
+  min-width: 0;
+  flex: 1 1 190px;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.check-name {
+  overflow-wrap: anywhere;
+  color: var(--gs-semantic-text-primary);
+  font-size: var(--gs-semantic-type-body-size);
+  line-height: var(--gs-semantic-type-body-line);
+  font-weight: 600;
+}
+
+.check-meta {
+  color: var(--gs-semantic-text-muted);
+  font-size: var(--gs-semantic-type-metadata-size);
+  line-height: var(--gs-semantic-type-metadata-line);
+}
+
+.check-summary {
+  overflow-wrap: anywhere;
+  color: var(--gs-semantic-text-secondary);
+  font-size: var(--gs-semantic-type-metadata-size);
+  line-height: var(--gs-semantic-type-metadata-line);
+}
+
+.check-badges,
+.check-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+}
+
 .onboarding-pane {
   display: flex;
   min-width: 0;
@@ -1252,6 +1340,148 @@ button:disabled {
 
 .onboarding-recent:hover {
   border-color: var(--line);
+}
+
+/* Onboarding: the actions that start a repository, and the facts about this
+   machine's Git. Every colour comes from a semantic token. */
+.onboarding-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: center;
+}
+
+.onboarding-hint {
+  color: var(--gs-semantic-text-secondary);
+  font-size: var(--gs-semantic-type-caption-size);
+  text-align: center;
+}
+
+.onboarding-environment {
+  width: 100%;
+  max-width: 560px;
+  text-align: left;
+}
+
+.onboarding-discovery {
+  display: grid;
+  gap: 12px;
+  min-height: 0;
+}
+
+.onboarding-search {
+  display: flex;
+  align-items: end;
+  gap: 8px;
+}
+
+.onboarding-search > :first-child {
+  flex: 1;
+}
+
+.onboarding-results {
+  display: grid;
+  gap: 6px;
+  max-height: 40vh;
+  margin: 0;
+  padding: 0;
+  overflow: auto;
+  list-style: none;
+}
+
+.onboarding-result {
+  display: grid;
+  gap: 3px;
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid var(--gs-semantic-border-decorative);
+  border-radius: var(--gs-semantic-radius-item);
+  background: var(--gs-semantic-surface-content);
+  text-align: left;
+  transition:
+    background 150ms ease,
+    border-color 150ms ease;
+}
+
+.onboarding-result:hover {
+  border-color: var(--gs-semantic-border-essential);
+}
+
+.onboarding-result[aria-pressed='true'] {
+  border-color: var(--gs-semantic-selection-border);
+  background: var(--gs-semantic-selection-background);
+}
+
+.onboarding-result-name {
+  font-weight: 600;
+}
+
+.onboarding-result-description {
+  color: var(--gs-semantic-text-secondary);
+  font-size: var(--gs-semantic-type-caption-size);
+}
+
+.onboarding-result-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.onboarding-clone {
+  display: grid;
+  gap: 12px;
+  border-top: 1px solid var(--gs-semantic-border-decorative);
+  padding-top: 12px;
+}
+
+.onboarding-clone-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: end;
+}
+
+.onboarding-folder {
+  display: flex;
+  gap: 8px;
+}
+
+.onboarding-commands {
+  display: grid;
+  gap: 6px;
+}
+
+.onboarding-command {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: var(--gs-semantic-radius-item);
+  background: var(--gs-semantic-surface-inset);
+}
+
+.onboarding-command-label {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 4px;
+  color: var(--gs-semantic-text-secondary);
+  font-size: var(--gs-semantic-type-caption-size);
+}
+
+.onboarding-command-text {
+  flex: 1;
+  min-width: 0;
+  overflow-x: auto;
+  white-space: nowrap;
+  font-family: var(--gs-semantic-font-mono);
+  font-size: var(--gs-semantic-type-caption-size);
+}
+
+.onboarding-clone-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
 }
 
 .browser-disclaimer {
@@ -2834,6 +3064,18 @@ textarea.conflict-content {
   }
 }
 
+/* The stored "reduce motion" preference. It sits beside the media query above
+   rather than replacing it, so a choice made here holds on a computer that has
+   not asked for reduced motion itself. */
+:root[data-motion='reduced'] *,
+:root[data-motion='reduced'] *::before,
+:root[data-motion='reduced'] *::after {
+  animation-duration: 0.01ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.01ms !important;
+  scroll-behavior: auto !important;
+}
+
 .palette-dialog {
   animation: dialog-in 140ms cubic-bezier(0.2, 0, 0, 1) both;
   box-shadow: var(--gs-semantic-elevation-large);
@@ -2850,4 +3092,701 @@ textarea.conflict-content {
 .shortcut-settings-dialog {
   width: min(calc(100% - 2rem), 620px);
   animation: dialog-in 140ms cubic-bezier(0.2, 0, 0, 1) both;
+}
+
+/* Review workspace.
+   Four regions read as one page: the headline and stack rail never scroll, and
+   the file tree, the diff, and the commit list each scroll on their own. Only
+   the diff region grows, so a long commit list cannot push the patch off the
+   screen and a long patch cannot squeeze the tree out of reach. */
+.review-view {
+  display: flex;
+  min-height: 0;
+  flex: 1 1 0%;
+  flex-direction: column;
+  overflow: hidden;
+  /* The workspace sits beside a repository sidebar, so its width is not the
+     window width. Every breakpoint below reads this container, not the viewport,
+     or a wide window still squeezes the three regions into one column. */
+  container-name: review;
+  container-type: inline-size;
+}
+
+/* The shared list toolbar is a fixed 66px strip sized for a filter and a
+   count. The review toolbar carries the diff mode, the whitespace filter, a
+   refresh, and an external link, so it has to be allowed to wrap and grow
+   instead of painting over the headline beneath it. */
+.review-toolbar {
+  min-height: 0;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  row-gap: 8px;
+}
+
+.review-loading {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  color: var(--gs-semantic-text-muted);
+}
+
+.review-chooser {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0;
+  padding: 0 18px 12px;
+  list-style: none;
+}
+
+.review-headline {
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  gap: 6px;
+  padding: 16px 18px 12px;
+  border-bottom: 1px solid var(--gs-semantic-border-decorative);
+}
+
+.review-headline-title {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px 10px;
+  color: var(--gs-semantic-text-primary);
+}
+
+.review-headline-refs {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  color: var(--gs-semantic-text-muted);
+  font-size: var(--gs-semantic-type-metadata-size);
+}
+
+.review-headline-refs code {
+  color: var(--gs-semantic-text-secondary);
+  font-family: var(--gs-semantic-font-mono);
+}
+
+.review-headline-oid {
+  color: var(--gs-semantic-text-muted);
+  font-family: var(--gs-semantic-font-mono);
+}
+
+/* The rail states the position first, then offers the two adjacent layers. The
+   note is what keeps the rail honest when GitHub has no stack to read. */
+.review-rail {
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 18px;
+  border-bottom: 1px solid var(--gs-semantic-border-decorative);
+  background: var(--gs-semantic-surface-inset);
+}
+
+.review-rail-position {
+  color: var(--gs-semantic-text-secondary);
+  font-size: var(--gs-semantic-type-metadata-size);
+}
+
+.review-rail-note {
+  color: var(--gs-semantic-text-muted);
+  font-size: var(--gs-semantic-type-metadata-size);
+}
+
+/* The snapshot history strip provides the shortcut to compare against
+   reviewed heads and choose any observed revision without leaving the workspace. */
+.review-history {
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  padding: 8px 18px;
+  border-bottom: 1px solid var(--gs-semantic-border-decorative);
+  background: var(--gs-semantic-surface-content);
+}
+
+.review-history-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.review-history-select-label {
+  display: block;
+  min-width: 220px;
+}
+
+.review-history-comparing {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.review-history-unchanged-note {
+  color: var(--gs-semantic-text-muted);
+  font-size: var(--gs-semantic-type-metadata-size);
+}
+
+.review-history-gap {
+  flex: 1 1 100%;
+  margin: 4px 0 0;
+  font-size: var(--gs-semantic-type-metadata-size);
+}
+
+.review-body {
+  display: grid;
+  min-height: 0;
+  flex: 1;
+  grid-template-areas:
+    'tree diff commits'
+    'tree diff conversation';
+  grid-template-columns: minmax(200px, 260px) minmax(0, 1fr) minmax(240px, 340px);
+  grid-template-rows: minmax(0, 28%) minmax(0, 1fr);
+  overflow: hidden;
+}
+
+.review-conversation {
+  grid-area: conversation;
+}
+
+.review-tree {
+  grid-area: tree;
+}
+
+.review-diff {
+  grid-area: diff;
+}
+
+/* The conversation column: what has been said, what is still unsent, and the
+   one decision that submits them. */
+.review-conversation {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px 12px;
+  border-inline-start: 1px solid var(--gs-semantic-border-decorative);
+  overflow: auto;
+}
+
+.review-conversation-alert,
+.review-conversation-note {
+  margin: 0;
+  font-size: 12px;
+  color: var(--gs-semantic-text-secondary);
+}
+
+.review-comparison-alert {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  font-size: 12px;
+}
+
+.review-comparison-reload {
+  margin-inline-start: auto;
+}
+
+.review-selection {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 8px;
+  border: 1px solid var(--gs-semantic-accent-border);
+  border-radius: var(--gs-semantic-radius-control);
+  background: var(--gs-semantic-accent-subtle);
+}
+
+.review-selection-label {
+  flex: 1 1 100%;
+  min-width: 0;
+  font-size: 12px;
+  font-family: var(--gs-semantic-font-mono);
+  overflow-wrap: anywhere;
+}
+
+.review-selection-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.review-drafts,
+.review-thread-list,
+.review-conversation-threads {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.review-drafts-caption,
+.review-conversation-threads-head {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--gs-semantic-text-muted);
+}
+
+.review-draft-head,
+.review-thread-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--gs-semantic-text-secondary);
+}
+
+.review-draft-reason,
+.review-submit-reason {
+  margin: 0;
+  font-size: 11px;
+  color: var(--gs-semantic-text-secondary);
+}
+
+/* An unsent draft is a pending idea, not a comment GitHub holds; it is tinted so
+   the two are never mistaken for each other in the same list. */
+.review-draft {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  border: 1px dashed var(--gs-semantic-border-decorative);
+  border-radius: var(--gs-semantic-radius-control);
+  background: var(--gs-semantic-surface-inset);
+}
+
+.review-draft-selected {
+  border-color: var(--gs-semantic-accent-border);
+  background: var(--gs-semantic-accent-subtle);
+}
+
+.review-draft-body,
+.review-thread-reply {
+  width: 100%;
+  min-height: 4.5em;
+  resize: vertical;
+  font: inherit;
+}
+
+.review-thread {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  border: 1px solid var(--gs-semantic-border-decorative);
+  border-radius: var(--gs-semantic-radius-control);
+}
+
+.review-thread-resolved {
+  opacity: 0.72;
+}
+
+.review-thread-comments {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.review-thread-comment-head {
+  display: flex;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--gs-semantic-text-muted);
+}
+
+.review-thread-comment-body {
+  margin: 2px 0 0;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.review-thread-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.review-submit {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 0 0;
+  border-top: 1px solid var(--gs-semantic-border-decorative);
+}
+
+.review-submit-summary {
+  font-size: 12px;
+  color: var(--gs-semantic-text-secondary);
+}
+
+.review-submit-events {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.review-commits {
+  grid-area: commits;
+}
+
+.review-tree {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  border-inline-end: 1px solid var(--gs-semantic-border-decorative);
+}
+
+.review-tree-header {
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 12px 10px;
+  border-bottom: 1px solid var(--gs-semantic-border-decorative);
+}
+
+.review-tree-search {
+  width: 100%;
+}
+
+.review-tree-rows {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 1px;
+  overflow: auto;
+  padding: 6px;
+}
+
+.review-tree-row {
+  display: flex;
+  width: 100%;
+  min-height: 28px;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid transparent;
+  border-radius: var(--gs-semantic-radius-control);
+  background: transparent;
+  color: var(--gs-semantic-text-secondary);
+  padding: 4px 8px;
+  text-align: left;
+}
+
+.review-tree-row:hover {
+  background: var(--gs-semantic-surface-hover);
+}
+
+.review-tree-row:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--gs-semantic-focus-ring);
+}
+
+.review-tree-row-selected,
+.review-tree-row-selected:hover {
+  border-color: var(--gs-semantic-border-focus);
+  background: var(--gs-semantic-selection-background);
+  color: var(--gs-semantic-text-primary);
+}
+
+.review-tree-directory {
+  color: var(--gs-semantic-text-muted);
+  font-size: var(--gs-semantic-type-metadata-size);
+  font-weight: 600;
+}
+
+.review-tree-name {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  font-size: var(--gs-semantic-type-body-size);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.review-tree-count {
+  flex: 0 0 auto;
+  color: var(--gs-semantic-text-muted);
+  font-size: var(--gs-semantic-type-metadata-size);
+  font-variant-numeric: tabular-nums;
+}
+
+.review-tree-flag,
+.review-viewed-mark {
+  flex: 0 0 auto;
+  border: 1px solid var(--gs-component-badge-neutral-border);
+  border-radius: var(--gs-semantic-radius-pill);
+  background: var(--gs-component-badge-neutral-background);
+  color: var(--gs-component-badge-neutral-text);
+  padding: 0 6px;
+  font-size: var(--gs-semantic-type-metadata-size);
+}
+
+.review-status {
+  display: grid;
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
+  place-items: center;
+  border-radius: 3px;
+  background: var(--gs-semantic-surface-inset);
+  color: var(--gs-semantic-text-muted);
+  font-family: var(--gs-semantic-font-mono);
+  font-size: 10px;
+}
+
+.review-diff {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+}
+
+.review-diff-toolbar {
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--gs-semantic-border-decorative);
+}
+
+.review-diff-position {
+  color: var(--gs-semantic-text-muted);
+  font-size: var(--gs-semantic-type-metadata-size);
+  font-variant-numeric: tabular-nums;
+}
+
+.review-diff-region {
+  min-height: 0;
+  flex: 1;
+  overflow: hidden;
+}
+
+.review-diff-region .code-diff {
+  max-height: none;
+  height: 100%;
+}
+
+.review-unified {
+  display: block;
+}
+
+/* The line number becomes the control that starts a review comment, so it must
+   look pressable and must never be selected as diff text. */
+.review-line-gutter {
+  display: inline-block;
+  min-width: 5ch;
+  padding: 0 6px 0 2px;
+  color: var(--gs-semantic-text-muted);
+  text-align: right;
+  user-select: none;
+  background: none;
+  border: 0;
+  font: inherit;
+  cursor: pointer;
+}
+
+.review-line-gutter:hover,
+.review-line-gutter:focus-visible {
+  color: var(--gs-semantic-text-primary);
+  background: var(--gs-semantic-surface-hover);
+}
+
+.review-line-selected {
+  background: var(--gs-semantic-accent-subtle);
+}
+
+/* Split mode is a two-column grid rather than two preformatted columns so that
+   a line wraps inside its own cell instead of pushing the other side across. */
+.review-split {
+  display: flex;
+  min-height: 0;
+  height: 100%;
+  flex-direction: column;
+  overflow: auto;
+  border: 1px solid var(--gs-semantic-border-decorative);
+  border-radius: var(--gs-semantic-radius-control);
+  background: var(--gs-semantic-surface-inset);
+  font-family: var(--gs-semantic-font-mono);
+  font-size: 12px;
+  line-height: 1.6;
+  tab-size: 4;
+}
+
+.review-split:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--gs-semantic-focus-ring);
+}
+
+.review-split-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+}
+
+.review-split-cell {
+  display: block;
+  min-width: 0;
+  padding: 0 10px 0 6px;
+  white-space: pre-wrap;
+}
+
+.review-split-cell + .review-split-cell {
+  border-inline-start: 1px solid var(--gs-semantic-border-decorative);
+}
+
+.review-split-gutter {
+  display: inline-block;
+  min-width: 4ch;
+  padding: 0 6px 0 2px;
+  color: var(--gs-semantic-text-muted);
+  text-align: right;
+  user-select: none;
+  background: none;
+  border: 0;
+  font: inherit;
+  cursor: pointer;
+}
+
+.review-split-gutter:hover,
+.review-split-gutter:focus-visible {
+  color: var(--gs-semantic-text-primary);
+  background: var(--gs-semantic-surface-hover);
+}
+
+.review-split-hunk {
+  display: block;
+  padding: 2px 10px;
+}
+
+.review-commits {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  border-inline-start: 1px solid var(--gs-semantic-border-decorative);
+}
+
+.review-commit-list {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 1px;
+  overflow: auto;
+  margin: 0;
+  padding: 6px;
+  list-style: none;
+}
+
+.review-commit-copy {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px 8px;
+}
+
+.review-commit-copy strong {
+  color: var(--gs-semantic-text-primary);
+  font-size: var(--gs-semantic-type-body-size);
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+
+.review-commit-copy small {
+  color: var(--gs-semantic-text-muted);
+  font-size: var(--gs-semantic-type-metadata-size);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Too narrow for three columns: the commit list moves under the diff rather
+   than disappearing, so the pull request's commits stay reachable, and the
+   conversation follows it. */
+@container review (max-width: 1320px) {
+  .review-body {
+    grid-template-areas:
+      'tree diff'
+      'tree commits'
+      'tree conversation';
+    grid-template-columns: minmax(180px, 220px) minmax(0, 1fr);
+    grid-template-rows: minmax(0, 24%) minmax(0, 24%) minmax(0, 1fr);
+  }
+
+  .review-commits,
+  .review-conversation {
+    border-block-start: 1px solid var(--gs-semantic-border-decorative);
+    border-inline-start: 0;
+  }
+}
+
+/* Too narrow even for that: one region at a time, tree first.
+   The four regions share the window rather than each growing to its content, so
+   the patch is on screen when the workspace opens instead of below a screenful
+   of file rows, and each region scrolls inside its own share. The pane is the
+   scroll container at this width, exactly as it is for the other workspaces.
+   The conversation is last, so the reviewer's own words and the decision to
+   submit them follow the diff they are about. */
+@container review (max-width: 720px) {
+  .review-body {
+    grid-template-areas:
+      'tree'
+      'diff'
+      'commits'
+      'conversation';
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto auto auto;
+  }
+
+  /* Content-sized rows, each region capped, so the four stack at a usable size
+     instead of one region claiming the whole workspace. The pane is the scroll
+     container at this width, as it is for every other workspace, so the view
+     grows to the sum of the caps and each region scrolls inside itself. */
+  .review-tree,
+  .review-commits,
+  .review-conversation {
+    max-height: 15rem;
+  }
+
+  .review-conversation {
+    border-block-start: 1px solid var(--gs-semantic-border-decorative);
+    border-inline-start: 0;
+  }
+
+  .review-diff {
+    max-height: 60dvh;
+  }
+
+  .review-tree {
+    border-block-end: 1px solid var(--gs-semantic-border-decorative);
+    border-inline-end: 0;
+  }
 }

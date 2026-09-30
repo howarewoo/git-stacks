@@ -1,4 +1,5 @@
 import { execFileSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { readFileSync, renameSync, writeFileSync } from 'node:fs'
 import type { GitHubFixtureState } from './github-harness'
 
@@ -172,7 +173,7 @@ function mergePullRequest(
   state: GitHubFixtureState,
   pr: GitHubFixtureState['prs'][number],
   fields: Record<string, unknown>,
-) {
+): { merged: boolean; message: string; sha: string | null } {
   const requestedSha = fields.sha
   const method = String(fields.merge_method || '')
   const allowed: Record<string, boolean> = {
@@ -180,14 +181,18 @@ function mergePullRequest(
     squash: state.repository.allowSquashMerge === true,
     rebase: state.repository.allowRebaseMerge === true,
   }
-  if (!allowed[method]) return { merged: false, message: `merge method ${method} is disabled` }
+  if (!allowed[method])
+    return { merged: false, message: `merge method ${method} is disabled`, sha: null }
   const head = currentHead(pr)
   if (!head || requestedSha !== head)
-    return { merged: false, message: 'head SHA no longer matches' }
-  if (pr.state !== 'OPEN') return { merged: false, message: 'pull request is not open' }
-  const baseRef = `refs/heads/${pr.base}`
+    return { merged: false, message: 'head SHA no longer matches', sha: null }
+  if (pr.state !== 'OPEN') return { merged: false, message: 'pull request is not open', sha: null }
+  // A stacked merge lands every pull request of the group on the branch the bottom one
+  // targets, which is how GitHub merges a stack; no branch inside the stack moves.
+  const baseName = typeof fields.base === 'string' ? fields.base : pr.base
+  const baseRef = `refs/heads/${baseName}`
   const base = bareRef(baseRef)
-  if (!base) return { merged: false, message: `base branch ${pr.base} is missing` }
+  if (!base) return { merged: false, message: `base branch ${baseName} is missing`, sha: null }
   const tree = bareGit(['rev-parse', `${head}^{tree}`])
   const parents = method === 'merge' ? ['-p', base, '-p', head] : ['-p', base]
   const mergedOid = bareGit(
@@ -208,6 +213,48 @@ function mergePullRequest(
   return { merged: true, sha: mergedOid, message: 'Pull Request successfully merged' }
 }
 
+/**
+ * A stacked pull request's merge includes every open pull request below it in the same stack,
+ * which is what the asynchronous merge endpoint documents. The downstack is merged first so
+ * the upstack request lands on the same base it was reviewed against.
+ */
+function mergeStackedPullRequest(
+  state: GitHubFixtureState,
+  pr: GitHubFixtureState['prs'][number],
+  sha: string,
+  method: string,
+) {
+  const stack = (state.stacks ?? []).find((s) =>
+    s.pull_requests.some((p) => p.number === pr.number),
+  )
+  if (!stack) return mergePullRequest(state, pr, { sha, merge_method: method })
+  const order = stack.pull_requests.map((p) => p.number)
+  const position = order.indexOf(pr.number)
+  let last: { merged: boolean; message: string; sha: string | null } = {
+    merged: false,
+    message: 'no downstack pull request was merged',
+    sha: null,
+  }
+  // GitHub merges a stack into the branch its bottom pull request targets, so no branch
+  // inside the group is rewritten and the retargeting it does afterwards is observable.
+  const bottom = state.prs.find((entry) => entry.number === order[0])
+  const stackBase = bottom?.base ?? pr.base
+  for (const number of order.slice(0, position + 1)) {
+    const member = state.prs.find((entry) => entry.number === number)
+    if (!member || member.state !== 'OPEN') continue
+    last =
+      number === pr.number
+        ? mergePullRequest(state, member, { sha, merge_method: method, base: stackBase })
+        : mergePullRequest(state, member, {
+            sha: currentHead(member),
+            merge_method: method === 'rebase' ? 'squash' : method,
+            base: stackBase,
+          })
+    if (!last.merged) break
+  }
+  return last
+}
+
 class HttpError extends Error {
   constructor(
     readonly status: number,
@@ -217,6 +264,150 @@ class HttpError extends Error {
   ) {
     super(message)
   }
+}
+
+type RestResult = { status: number; body: unknown; headers?: Record<string, string> }
+
+function etagFor(body: unknown): string {
+  return `"${createHash('sha1').update(JSON.stringify(body)).digest('hex')}"`
+}
+
+/** The query string of an API path, which is where `per_page` and `page` arrive. */
+function queryOf(path: string): string {
+  const index = path.indexOf('?')
+  return index === -1 ? '' : path.slice(index + 1)
+}
+
+/**
+ * One page of a REST list, the way GitHub serves it. The double keeps the whole list and
+ * answers `per_page`/`page`, so a reader that never follows pages really does lose
+ * entries instead of silently receiving everything.
+ */
+function page<T>(entries: T[], rawQuery: string | undefined): T[] {
+  const queryParams = new URLSearchParams(rawQuery ?? '')
+  const perPage = Number(queryParams.get('per_page')) || 30
+  const number = Number(queryParams.get('page')) || 1
+  const start = (number - 1) * perPage
+  return entries.slice(start, start + perPage)
+}
+
+function checkRunResponse(
+  state: GitHubFixtureState,
+  request: GitHubApiDoubleRequest,
+  headSha: string,
+): RestResult {
+  const runs = (state.checks?.checkRuns ?? []).filter((run) => run.headSha === headSha)
+  const body = {
+    total_count: runs.length,
+    check_runs: page(runs, queryOf(request.path)).map((run) => ({
+      id: run.id,
+      head_sha: run.headSha,
+      node_id: `CR_${run.id}`,
+      external_id: null,
+      url: `https://api.github.com/repos/acme/widgets/check-runs/${run.id}`,
+      html_url: `https://github.com/acme/widgets/runs/${run.id}`,
+      details_url: run.detailsUrl ?? null,
+      status: run.status,
+      conclusion: run.conclusion,
+      started_at: run.startedAt ?? null,
+      completed_at: run.completedAt ?? null,
+      output: { title: run.title ?? null, summary: null, text: null, annotations_count: 0 },
+      name: run.name,
+      check_suite: { id: run.checkSuiteId ?? 1 },
+      app: run.appSlug
+        ? {
+            id: run.appId ?? (run.appSlug === 'github-actions' ? 15368 : 1),
+            slug: run.appSlug,
+            name: run.appSlug,
+          }
+        : null,
+      pull_requests: [],
+    })),
+  }
+  return { status: 200, body, ...conditional(state, request, body) }
+}
+
+function commitStatusResponse(
+  state: GitHubFixtureState,
+  request: GitHubApiDoubleRequest,
+  headSha: string,
+): RestResult {
+  const statuses = (state.checks?.commitStatuses ?? []).filter((entry) => entry.headSha === headSha)
+  const body = {
+    state: statuses.some((entry) => entry.state === 'failure' || entry.state === 'error')
+      ? 'failure'
+      : statuses.some((entry) => entry.state === 'pending')
+        ? 'pending'
+        : 'success',
+    statuses: page(statuses, queryOf(request.path)).map((entry) => ({
+      description: entry.description ?? null,
+      id: 900_000,
+      node_id: 'CS_1',
+      state: entry.state,
+      context: entry.context,
+      target_url: entry.targetUrl ?? null,
+      url: `https://api.github.com/repos/acme/widgets/statuses/900000`,
+      created_at: '2026-01-01T00:00:00Z',
+      updated_at: '2026-01-01T00:00:00Z',
+    })),
+    sha: headSha,
+    total_count: statuses.length,
+  }
+  return { status: 200, body, ...conditional(state, request, body) }
+}
+
+function workflowRunsResponse(
+  state: GitHubFixtureState,
+  request: GitHubApiDoubleRequest,
+  headSha: string | null,
+): RestResult {
+  const runs = (state.checks?.workflowRuns ?? []).filter(
+    (run) => headSha === null || run.headSha === headSha,
+  )
+  const body = {
+    total_count: runs.length,
+    workflow_runs: page(runs, queryOf(request.path)).map((run) => ({
+      id: run.id,
+      name: run.name,
+      node_id: `WR_${run.id}`,
+      head_branch: null,
+      head_sha: run.headSha,
+      path: '.github/workflows/ci.yml',
+      run_number: run.runNumber ?? run.id,
+      run_attempt: 1,
+      event: run.event ?? 'pull_request',
+      check_suite_id: run.checkSuiteId ?? 1,
+      status: run.status,
+      conclusion: run.conclusion,
+      workflow_id: 1,
+      url: `https://api.github.com/repos/acme/widgets/actions/runs/${run.id}`,
+      html_url: run.htmlUrl ?? `https://github.com/acme/widgets/actions/runs/${run.id}`,
+      pull_requests: (
+        run.pullRequests ??
+        state.prs.filter((pr) => pr.headOid === run.headSha).map((pr) => pr.number)
+      ).map((number) => ({ number })),
+      created_at: '2026-01-01T00:00:00Z',
+      updated_at: run.updatedAt ?? '2026-01-01T00:01:00Z',
+      run_started_at: run.startedAt ?? '2026-01-01T00:00:00Z',
+      jobs_url: `https://api.github.com/repos/acme/widgets/actions/runs/${run.id}/jobs`,
+      logs_url: `https://api.github.com/repos/acme/widgets/actions/runs/${run.id}/logs`,
+      rerun_url: `https://api.github.com/repos/acme/widgets/actions/runs/${run.id}/rerun`,
+    })),
+  }
+  return { status: 200, body, ...conditional(state, request, body) }
+}
+
+function conditional(
+  state: GitHubFixtureState,
+  request: GitHubApiDoubleRequest,
+  body: unknown,
+): { status?: number; body?: unknown; headers?: Record<string, string> } {
+  if (!state.checks?.conditional) return {}
+  const etag = etagFor(body)
+  if (request.headers['if-none-match'] === etag) {
+    return { status: 304, body: null, headers: { etag } }
+  }
+  return { headers: { etag } }
 }
 
 /** A canned failure for every native-stacks endpoint, used to prove probe error propagation. */
@@ -277,10 +468,7 @@ function commentResponse(
   }
 }
 
-function handleRest(
-  state: GitHubFixtureState,
-  request: GitHubApiDoubleRequest,
-): { status: number; body: unknown } {
+function handleRest(state: GitHubFixtureState, request: GitHubApiDoubleRequest): RestResult {
   const { method, path } = request
   const body = request.body
   const repository = `${state.repository.owner}/${state.repository.name}`
@@ -482,7 +670,8 @@ function handleRest(
   }
   if (path !== prefix && !path.startsWith(`${prefix}/`))
     throw new HttpError(404, 'Not Found', `Not Found: ${path}`)
-  if (path === prefix && method === 'GET') {
+  if (rawPath === prefix && method === 'GET') {
+    const role = state.checks?.viewerPermissions
     return {
       status: 200,
       body: {
@@ -491,7 +680,108 @@ function handleRest(
         allow_merge_commit: state.repository.allowMergeCommit === true,
         allow_squash_merge: state.repository.allowSquashMerge === true,
         allow_rebase_merge: state.repository.allowRebaseMerge === true,
+        // GitHub only reports the viewer's own role, and only when it is authenticated.
+        ...(role ? { permissions: role } : {}),
       },
+    }
+  }
+  if (rawPath === `${prefix}/actions/permissions` && method === 'GET') {
+    return {
+      status: 200,
+      body: {
+        enabled: state.checks?.actionsEnabled === true,
+        allowed_actions: 'all',
+        sha_pinning_required: false,
+      },
+    }
+  }
+  const rerun = new RegExp(`^${prefix}/actions/runs/(\\d+)/rerun$`, 'u').exec(rawPath)
+  if (rerun) {
+    if (method !== 'POST') throw new HttpError(405, 'Method Not Allowed', 'rerun requires POST')
+    const runId = Number(rerun[1])
+    if (state.checks?.rerunForbidden)
+      throw new HttpError(403, 'Forbidden', 'Resource not accessible by integration')
+    const known = (state.checks?.workflowRuns ?? []).some((entry) => entry.id === runId)
+    if (!known) throw new HttpError(404, 'Not Found', `Workflow run ${runId} not found`)
+    state.checks = { ...state.checks, reruns: [...(state.checks?.reruns ?? []), runId] }
+    return { status: 201, body: null }
+  }
+  if (rawPath === `${prefix}/actions/runs` && method === 'GET') {
+    return workflowRunsResponse(state, request, queryParams.get('head_sha'))
+  }
+  const checkRuns = new RegExp(`^${prefix}/commits/([^/]+)/check-runs$`, 'u').exec(rawPath)
+  if (checkRuns) {
+    if (method !== 'GET') throw new HttpError(405, 'Method Not Allowed', 'check runs are read-only')
+    return checkRunResponse(state, request, decodeURIComponent(checkRuns[1]))
+  }
+  const commitStatus = new RegExp(`^${prefix}/commits/([^/]+)/status$`, 'u').exec(rawPath)
+  if (commitStatus) {
+    if (method !== 'GET')
+      throw new HttpError(405, 'Method Not Allowed', 'commit status is read-only')
+    return commitStatusResponse(state, request, decodeURIComponent(commitStatus[1]))
+  }
+  const requiredChecks = new RegExp(
+    `^${prefix}/branches/([^/]+)/protection/required_status_checks$`,
+    'u',
+  ).exec(rawPath)
+  if (requiredChecks) {
+    const rule = state.checks?.requiredStatusChecks
+    const branch = decodeURIComponent(requiredChecks[1])
+    if (!rule || rule.branch !== branch)
+      throw new HttpError(404, 'Not Found', 'Branch not protected')
+    return {
+      status: 200,
+      body: {
+        url: `https://api.github.com/repos/${repository}/branches/${branch}/protection/required_status_checks`,
+        strict: true,
+        contexts: rule.contexts,
+        // GitHub reports app_id only for a context bound to one integration.
+        checks: rule.contexts.map((context) => ({
+          context,
+          app_id: rule.appIds?.[context] ?? null,
+        })),
+        contexts_url: `https://api.github.com/repos/${repository}/branches/${branch}/protection/required_status_checks/contexts`,
+      },
+    }
+  }
+  const branchRules = new RegExp(`^${prefix}/rules/branches/([^/]+)$`, 'u').exec(rawPath)
+  if (branchRules) {
+    // GitHub's effective-rules endpoint: every active rule that applies to this exact
+    // branch, from repository and organisation rulesets, already matched. Reading it is
+    // how a caller avoids reimplementing GitHub's branch-pattern evaluation.
+    const branch = decodeURIComponent(branchRules[1])
+    const rules = state.checks?.branchRules
+    if (rules?.forbidden) {
+      throw new HttpError(403, 'Forbidden', 'Resource not accessible by integration')
+    }
+    if (!rules || rules.branch !== branch) return { status: 200, body: [] }
+    const entries = (rules.required ?? []).map((entry) => ({
+      context: entry.context,
+      integration_id: entry.integrationId ?? null,
+    }))
+    if (entries.length === 0 && !rules.workflows) return { status: 200, body: [] }
+    return {
+      status: 200,
+      body: page(
+        [
+          ...(rules.workflows
+            ? [
+                {
+                  type: 'workflows',
+                  parameters: { workflows: [{ path: '.github/workflows/required.yml' }] },
+                },
+              ]
+            : []),
+          {
+            type: 'required_status_checks',
+            ruleset_id: 9100,
+            ruleset_source: 'Repository',
+            ruleset_source_type: 'Repository',
+            parameters: { required_status_checks: entries },
+          },
+        ],
+        rawQuery,
+      ),
     }
   }
   const pull = new RegExp(`^${prefix}/pulls/(\\d+)$`, 'u').exec(path)
@@ -543,26 +833,103 @@ function handleRest(
   if (asyncMerge) {
     const number = Number(asyncMerge[1])
     if (!asyncMerge[2] && method === 'PUT') {
-      if (body.merge_action !== 'direct_merge')
-        throw new HttpError(422, 'Unprocessable Entity', 'direct merge required')
-      state.asyncMerge = { number, sha: String(body.sha), method: String(body.merge_method) }
+      const pr = findPr(state, number)
+      const action = String(body.merge_action || 'default')
+      if (action !== 'default' && action !== 'direct_merge' && action !== 'merge_queue')
+        throw new HttpError(422, 'Unprocessable Entity', 'merge_action must be a documented value')
+      if (pr.state !== 'OPEN' || pr.draft)
+        throw new HttpError(400, 'Bad Request', 'Pull request is not ready to be merged')
+      // A second request for a pull request that already has one is refused with that
+      // request's own identity, which is what a client has to adopt rather than duplicate.
+      if (state.asyncMerge?.number === number)
+        return {
+          status: 409,
+          body: {
+            status: 'pending',
+            details: {
+              message: 'a merge request is already enqueued for this pull request',
+              uuid: state.asyncMerge.uuid,
+              merge_method: state.asyncMerge.method || 'squash',
+              merge_action: state.asyncMerge.action,
+              expected_head_sha: state.asyncMerge.sha,
+            },
+          },
+        }
+      const queued = action === 'merge_queue' || (action === 'default' && state.mergeQueue === true)
+      // The documented `200`: this pull request is already in a merge queue, so the result
+      // is terminal and GitHub hands back no request identity to read it through.
+      if (queued && state.asyncMergeAlreadyQueued) {
+        return {
+          status: 200,
+          body: {
+            status: 'enqueued',
+            details: { message: state.asyncMergeResult?.message ?? 'Already in the merge queue' },
+          },
+        }
+      }
+      const uuid = `fixture-${number}`
+      state.asyncMerge = {
+        number,
+        sha: String(body.sha),
+        method: queued ? '' : String(body.merge_method || ''),
+        action: queued ? 'merge_queue' : 'direct_merge',
+        uuid,
+      }
       return {
         status: 202,
-        body: { status: 'pending', details: { uuid: `fixture-${number}`, message: 'pending' } },
+        body: { status: 'pending', details: { uuid, message: 'merge request accepted' } },
       }
     }
-    if (asyncMerge[2] === `fixture-${number}` && method === 'GET') {
-      if (state.asyncMerge?.number !== number)
+    if (asyncMerge[2] && method === 'GET') {
+      const pending = state.asyncMerge
+      if (!pending || pending.uuid !== asyncMerge[2] || pending.number !== number)
         throw new HttpError(404, 'Not Found', 'Unknown merge request')
-      const result = mergePullRequest(state, findPr(state, number), {
-        sha: state.asyncMerge.sha,
-        merge_method: state.asyncMerge.method,
-      })
+      if (state.asyncMergeStaysPending) {
+        return {
+          status: 200,
+          body: {
+            status: 'pending',
+            details: { uuid: pending.uuid, message: 'merge in progress' },
+          },
+        }
+      }
+      const canned = state.asyncMergeResult
+      const pr = findPr(state, number)
+      if (canned?.status === 'enqueued') {
+        delete state.asyncMerge
+        return {
+          status: 200,
+          body: {
+            status: 'enqueued',
+            details: { message: canned.message ?? 'Added to the merge queue' },
+          },
+        }
+      }
+      if (canned?.status === 'failed') {
+        delete state.asyncMerge
+        return {
+          status: 200,
+          body: { status: 'failed', details: { message: canned.message ?? 'merge failed' } },
+        }
+      }
+      if (pending.action === 'merge_queue') {
+        // An enqueued result is terminal and means the pull request joined a queue, not that
+        // it merged; the queue itself is not simulated further.
+        delete state.asyncMerge
+        return {
+          status: 200,
+          body: {
+            status: 'enqueued',
+            details: { message: canned?.message ?? 'Added to the merge queue' },
+          },
+        }
+      }
+      const result = mergeStackedPullRequest(state, pr, pending.sha, pending.method)
       delete state.asyncMerge
       return {
         status: 200,
         body: result.merged
-          ? { status: 'merged', details: { sha: result.sha } }
+          ? { status: 'merged', details: { message: result.message, sha: result.sha } }
           : { status: 'failed', details: { message: result.message } },
       }
     }
@@ -597,10 +964,7 @@ function handleRest(
   throw new HttpError(404, 'Not Found', `Not Found: ${path}`)
 }
 
-function handleGraphql(
-  state: GitHubFixtureState,
-  body: Record<string, unknown>,
-): { status: number; body: unknown } {
+function handleGraphql(state: GitHubFixtureState, body: Record<string, unknown>): RestResult {
   const query = String(body.query || '')
   const variables = (body.variables ?? {}) as Record<string, unknown>
   const field = query.includes('convertPullRequestToDraft')
@@ -757,6 +1121,10 @@ function json(status: number, body: unknown, headers: Record<string, string> = {
 /** A `fetch` implementation that answers GitHub requests from the harness fixture state. */
 export function createGitHubApiDouble(): typeof globalThis.fetch {
   const double = (async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+    // A real request in flight is killed when its caller walks away. The double answers
+    // immediately, so it has to honour the signal itself or an abandoned read looks
+    // exactly like one that finished.
+    if (init?.signal?.aborted) throw new DOMException('The operation was aborted.', 'AbortError')
     const url = new URL(typeof input === 'string' ? input : String(input))
     const method = (init?.method || 'GET').toUpperCase()
     const headers: Record<string, string> = {}
@@ -844,7 +1212,7 @@ export function createGitHubApiDouble(): typeof globalThis.fetch {
         saveState(state)
         return json(rule.status, { message: rule.message })
       }
-      return json(result.status, result.body)
+      return json(result.status, result.body, result.headers ?? {})
     } catch (error) {
       saveState(state)
       if (error instanceof HttpError) {

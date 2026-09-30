@@ -260,11 +260,21 @@ The renderer builds on the repository's existing [shadcn/ui](https://ui.shadcn.c
 - **Style:** The shell uses quiet text and count metadata with a selected state separate from checked-out state. Active navigation uses the selection role, while primary action emphasis remains Workbench Ink.
 - **Keyboard:** Global `:focus-visible` treatment is available for keyboard navigation and controls. Disabled or unavailable actions retain a text or tooltip explanation.
 
+### Keyboard and screen-reader contract
+
+- **Keyboard-first, never keyboard-only:** every primary action is reachable and operable with Tab, arrows, Enter, Space, and Escape alone. A pointer-only affordance is a defect, not an enhancement gap.
+- **Composite row surfaces:** the branch tree, the stack rail, and the commit history are one widget each — a single Tab stop with roving `tabindex`. Up/Down move between rows and stop at both ends of the mounted rows instead of wrapping, Home/End jump to the first and last row of the whole filtered list and reveal the page that mounts it when the list is paged, and Enter or Space performs the row's explicit action. A key the focused control has already handled is never re-consumed.
+- **Role model:** the branch list is a `tree` whose items carry `aria-level`, `aria-posinset`, `aria-setsize`, and `aria-selected`. Those four describe the rows a reader can actually reach in the current list: a row whose parent is unresolved, cyclic, or filtered out of the list is presented as a root of that list, and every presented root shares the one root sibling set. The stack rail and commit history are `list`/`listitem` surfaces, and paging controls stay outside the list they extend. Visual connector lanes are decoration and never carry the hierarchy the roles already state.
+- **Focus follows navigation:** switching workspace destination moves focus to that destination's heading and announces the change in a polite live region, so focus is never left on the control that was pressed. Dialogs keep the Radix trap and return focus to their trigger. A newly raised error takes focus unless a modal already owns it and shows its own inline error; an error that is already on screen never takes focus back, so closing a dialog still hands focus to its trigger.
+- **State is named, not tinted:** a row's accessible name spells out the states the pixels also mark — current, remote, parent cycle, parent missing, requires restack, pull-request number, checks, and ahead/behind against the configured upstream. Unreported checks stay explicitly unknown rather than reading as passing, and a metric drawn as arrows and numbers is decoration whose meaning lives in the row's name.
+- **Announcements:** success notices, rejected previews, and workspace changes are polite; errors and blockers are assertive. A live region states an outcome once, and never replaces the visible control it describes.
+- **Zoom and motion:** the workbench reflows to a 720×470 CSS-pixel viewport, equivalent to 200% zoom on the standard window, without horizontal scrolling or unreachable actions. `prefers-reduced-motion: reduce` suppresses transitions while status text, focus rings, and operation locks remain.
+
 ### Cards / Containers
 
 - **Corner Style:** Workbench surfaces use the 24px token scale; existing specimen and shared utility surfaces retain their current utility-specific radius.
-- **Background:** White content surfaces and inset grouping surfaces.
 - **Shadow Strategy:** Tonal separation at rest; medium or large shadow only for floating and dialog layers.
+
 - **Internal Padding:** Use the 4px spacing rhythm, with 16px and 24px steps for work-surface and section rhythm.
 
 ### Dialogs
@@ -280,6 +290,19 @@ The renderer builds on the repository's existing [shadcn/ui](https://ui.shadcn.c
 - **Submit Stack:** The publication dialog previews layers in bottom-to-top order, one section per branch, naming the pull request each layer opens or retargets. Base changes and the consent to replace remote history are separate, explicit approvals per layer; the force consent is only shown when the preview contains rewritten branches. Progress lists the real steps of the submission and updates while it runs, so the person watches the work they started rather than a finished state. A submission that stopped part-way is recovered from its journal: the saved per-layer title, description, readiness, and base approvals are shown read-only, the saved force consent is shown as fixed text rather than a control, and changing any of it requires dismissing the submission and taking a fresh preview. A control that looks editable while the journalled value is what actually runs is never shown.
 - **Stack surgery:** The insert, move, and remove dialogs are one reviewed composition that names the branch the surgery is anchored on, the resulting order, and the resulting parent of every affected layer. Each layer carries its action, the tip it is replayed from, the pull request base that changes, and the push it needs, as text and badge together; a reparent that moves no commit is labelled differently from a replay. A blocked layer blocks the whole surgery in place rather than dropping out of the plan. Removing a layer is a destructive composition; inserting or moving is a reviewed one. The consent to replace remote history appears only when the preview contains a rewritten branch, and a local-only surgery says that nothing will be pushed instead of showing a push it cannot make. A layer the surgery inserts is published on the remote as a new branch whenever a pull request has to hang from it, named beside the retarget it enables, because a base branch that does not exist is not a base GitHub accepts; that publication is never a force push and never replaces an existing branch. An insert that cannot be published is blocked in the preview rather than planned. The remote half of a surgery is part of the same recovery composition as the replay: a step already in its reviewed result is reported as done instead of repeated, and a step whose pull request head, base, state, or native stack membership drifted is named and stops the run before it writes.
 - **Saved submission identity:** Recovery always names the branches, bases, pull request numbers, choices, and steps from the persisted submission, never from a fresh preview of a changed stack. A failed fresh read does not hide saved approvals or recovery guidance. Resume remains available only for retryable failures; a non-retryable failure disables Resume in the dialog and rejects backend retry without changing the journal. Dismiss stays available, with guidance to fix the rejected chain and take a fresh preview.
+
+### Onboarding
+
+- **Entry:** With no repository open, the onboarding pane offers exactly three ways in — search GitHub, add a local repository, and drop a folder — with the drop hint stated as text rather than implied. Search is the accent action; adding a local repository is secondary. Recent repositories, the machine's Git facts, and the standard-Git explanation share the pane, and the explanation of what a clone produces precedes the controls that produce it.
+- **Standard Git promise:** The pane states that a repository remains ordinary Git and keeps working in a terminal, an editor, and GitHub Desktop. Never present the app as the owner of the repository, a conversion step, or a proprietary format; the recents, the environment facts, and the clone result all name real filesystem paths.
+- **Discovery results:** Each reachable repository is one row naming its full name, its badges, and its default branch. A private, empty, archived, or fork repository is labelled from the data, and a repository whose push access the response does not prove is marked read only. Neither endpoint reports a repository the credential cannot reach, and a hit that carries no permission object is a row rather than a refusal, because unproven push access is not inaccessibility; a malformed entry naming no clonable `owner/name` is never rendered, and an organization that requires single sign-on is named as such instead of appearing as an empty list.
+- **Search bounds and partial results:** Search queries are bounded by GitHub's 1,000-result API limit. When a query exceeds the cap or when GitHub returns partial results due to a query timeout (`incomplete_results`), the dialog renders an inline warning banner explaining that partial results are shown and prompting the user to refine their query. An empty repository is labelled only when it has no default branch or has no commits pushed, distinguishing it from small non-empty repositories whose size rounds to 0 KB.
+- **Clone form:** Destination folder, folder name, HTTPS/SSH, and shallow clone are one section. The folder is chosen with the platform picker; the renderer never composes a filesystem path. Selecting a repository proposes its name as the folder name, which stays editable.
+- **Command equivalence:** Before anything is written, the exact `git clone` and `gh repo clone` commands are shown as copyable monospace text on the inset surface, each with its own label and copy control that confirms in place. The text is produced by the main process, so the copy is the command a clone runs, not a parallel construction. The commands are not a second way to clone; the primary button remains the only dispatch.
+- **Refusals and commit point:** The single commit point of a clone is its promotion, one atomic rename that refuses to replace an existing destination; everything before it is reversible and nothing after it is undone, and no step anywhere in the app renames over, replaces, or removes a destination another program owns. A single-sign-on denial, a signed-out credential, an unauthenticated search, an occupied destination (an empty or populated folder, a file, a symlink), an unreachable remote, a system with no no-replace rename, and a cancellation before the commit point each name what happened and the next step in the surface where the action was taken; a system or filesystem that cannot offer that atomicity is refused rather than served with a check-then-rename. A cancellation or failure before the commit point leaves no registered repository and no folder: only the staging folder carrying that clone's random token is discarded, and the dialog never reports a repository it did not finish. A cancellation after the commit point completes the registration and reports the finished clone instead, so recents and the active repository never name a folder the request removed.
+- **Escape and interruption:** Escape and a backdrop click cannot abandon a running clone. The dialog offers an explicit Cancel that aborts the request, matching the rule that explicit Cancel is distinct from aborting Git. Changing a field never discards a running clone.
+- **Environment facts:** Commit identity, default branch, HTTPS credential helper, and `ssh` availability are read-only `OperationFacts`. A missing identity, a missing credential helper, and a missing `ssh` client are each named explicitly. The app never offers to configure them, because onboarding must not write a Git setting the user did not choose.
+- **Dropped folders:** A dropped folder is added only while no repository is open and no operation is running. A drop is never silent: it adopts the repository exactly as the picker would, and the person can switch back through the recents.
 
 ### Command Palette and Shortcuts
 
@@ -297,6 +320,8 @@ The renderer builds on the repository's existing [shadcn/ui](https://ui.shadcn.c
 ### Git and Diff States
 
 Checked-out, selected, pull-request lifecycle, checks, review, requires-restack, unknown, and diff states use the semantic/component roles in `tokens.json`. The state is represented by text/icon/color together; unknown and unavailable remain explicit. Diff addition, deletion, and hunk excerpts use their separate text and surface roles.
+
+Every status, lifecycle, checks, review, restack, capability, and diff state carries a text label in addition to its colour and icon. Colour never carries meaning by itself, and an unavailable or unreported value is stated as such.
 
 ### Repository compatibility
 
@@ -321,6 +346,46 @@ Before a new PR creation POST, both the local branch and its remote tip must sti
 
 A successful PR creation response also requires head-OID and local/remote-tip proof on readback before its step completes or later layers run; the returned PR number remains journalled if that proof fails, so recovery cannot duplicate it. An idempotent push whose remote already holds the reviewed commit still installs origin tracking through the locked push path, without issuing another remote push.
 
+Merging a pull request uses GitHub's asynchronous merge API, `PUT /repos/{owner}/{repo}/pulls/{pull_number}/merge-async`, which is the documented endpoint for stacked pull requests; the synchronous merge endpoint is never used for one. The request carries the reviewed head as `sha` plus a `merge_action` (`default`, `direct_merge`, or `merge_queue`), and `merge_method` only for a direct merge, because a queued merge runs the repository's own settings. A `202` answers `pending` with `details.uuid`, which is polled at `GET .../merge-async/{uuid}` until the documented terminal state (`merged` with its merge commit OID, `enqueued`, or `failed` with GitHub's message). A `409` returns the UUID and options of the request GitHub already holds; it is adopted only when it is the reviewed head and the chosen action, and never duplicated. Ruleset, required-review, and check failures are reported from that message rather than guessed at. Every layer's head OID is re-read at the mutation boundary and sent as `sha`, so a head pushed since the review cancels the request instead of landing commits nobody saw.
+
+One merge action covers the contiguous unmerged run at and below the selected pull request, and the preview names exactly those layers. A GitHub-native stack is landed by a single request for its top pull request, so every downstack layer is part of that request's outcome; a locally chained stack has nothing linking its pull requests, so each layer is merged from its own request, bottom-to-top, and a request's outcome is reported only for the layers that request actually carried. Submitted membership is re-read at the mutation boundary in both directions, never taken from the preview: a pull request inserted below the selection would otherwise be landed by GitHub unreviewed, a removed one would leave the reviewed downstack unmerged, and a locally reviewed pull request attached to a native stack would silently switch to stack semantics and land whatever joined it, so a stack whose number, base, open state, or downstack membership moved — or that a locally reviewed pull request has joined — is refused with the difference named. After the run, origin tracking refs are fetched and the remaining pull requests are re-read: bases GitHub retargeted are reported, and no local branch is deleted, retargeted, or checked out. Every layer a request was accepted for is read back afterwards, whatever the aggregate result was, so a group GitHub partly landed before failing is reported as partly merged.
+
+A terminal `enqueued` result records acceptance, not current queue membership. Journal accepted requests against their base ref, with the UUID when provided or the terminal result alone when omitted. The read-back uses the pull request's lifecycle: merged confirms landing, closed without merging reports dropped, and open leaves membership unconfirmed. Never label an open pull request as still queued based only on its earlier enqueue; an ejected pull request can remain open. Direct users to the pull request timeline on GitHub for queue updates. Offer queue delivery for a base ref once an accepted enqueue supplies evidence for it; otherwise offer direct merge or repository default. Retain UUID-less terminal outcomes and their base refs without inventing or polling a request identity.
+
+Polling a request is bounded, so a merge GitHub is still running does not end as a finished run. The request itself is a journalled state machine, not a message: the moment GitHub accepts a request, every pull request it covers records the request's identity — the UUID and the pull request whose endpoint serves that result — with outcome `pending`, before the first read of it. A transport error, a crash, or a restart during polling therefore still leaves the request readable, and one result is read once, from the endpoint that owns it, and applied to every layer it covered. Terminal outcomes replace that pending state in the journal, so a reopened dialog reports what GitHub said (`merged`, `enqueued`, or `failed` with its message) even after the result has expired from the 24-hour endpoint. An accepted enqueue is journalled separately from the request outcome, because that enqueue is the only evidence a base ref has a merge queue; a direct merge that merely exceeds the polling bound is not, and offers no queue delivery. A layer the run never asked for is reported as `not-requested` rather than `not-merged`.
+
+Journal the pull-request lifecycle confirmed by each read. That confirmation outranks the earlier request result: a refresh that cannot reach GitHub preserves the last confirmed outcome and labels it as unconfirmed by the current read. Build one effective observation per layer from the request result, enqueue evidence, and confirmed lifecycle, and use that same observation for persistence and presentation.
+
+`getMergeStatus` is the read-only half of all of this: it reads the journal, the pull requests, and any pending request's own endpoint, reconciles what GitHub published, and never submits a merge. The dialog reads it when it opens, whenever a run reports progress, and whenever a run returns — a read is newer than the progress that run pushed, so the run's own panel is what a person sees while it is in flight and the read-back is what they see afterwards. The read control lives outside the form fieldset for the same reason: a finished run locks everything that dispatches, and asking GitHub what it did is not a dispatch. A read that fails keeps the last result GitHub published and says the read failed, because a transport error is not evidence that the request or the queue changed. A refusal GitHub already reported is read back as a failed operation carrying its reason, never as an unmerged layer or as a run that changed nothing, so a reopened dialog cannot present a ruleset or required-review refusal as a finished merge. The running merge's own progress arrives through the narrow progress channel the publish flow uses, because a merge waits on GitHub's background result and a read would queue behind the action itself.
+
+### Live local and remote freshness
+
+One open repository stays current without the person asking. `src/main/git-watcher.ts` watches the worktree, index, and ref storage, coalesces a burst of writes (a commit rewrites all three) into one debounced refresh, and reports a deleted or moved repository and its return. A directory replaced at the same path is detected by identity rather than by absence: the subscriptions follow the tree that moved away, so the watches are re-armed on the new directory and its content is read even when nothing ever showed the path missing. Where the platform refuses a recursive watch, only the top level delivers events, so the sweep fingerprints the worktree and ref content instead: a nested file or a loose ref below `refs/heads/feature/` still schedules a refresh. `src/main/repository-scheduler.ts` runs concurrent background reads per repository while serializing mutations: a user's own write does not wait on a network a background read is stuck on, a stalled read is cancelled when a write needs the repository, and the write begins only once the reads it cancelled have settled.
+
+Foreground reads — the ones a view is waiting on — are not routed there. They share one queue in `src/main/repository-operations.ts` with the actions they belong to, so a mutation never interleaves with a read and two mutations never run at once. A mutation is refused there for exactly three reasons: another mutation is already pending, because that one was built from a state the first is about to change; a repository switch is pending, because an action asked for against the repository being left must not land on the one the window opens next; or the repository it names is no longer the one the window shows, because a switch completed while the action was still waiting for the background reads it ends. That last refusal is what keeps an action from the repository being left out of the repository the window opened next. A pending read is not a reason to refuse one. This queue promises ordering and nothing more: a mutation that waited for the reads ahead of it ran after all of them, with no other write or switch interleaved, and what the action checks once it runs is that action's own business, unchanged by the wait. Refusing it instead strands the person: the conflict resolver stages its result while the view reads describing the conflict are still being answered, and every one of those attempts failed.
+
+`src/main/sync-coordinator.ts` owns cadence. A filesystem event reads local Git immediately and spends a GitHub request only when the remote read is due, so commits, branch switches, and ref updates from a terminal appear without a manual refresh. Focused and visible windows read on a short interval; hidden or unfocused windows fall back to a slow inbox and repository refresh. Failures back off exponentially, a secondary rate limit parks only the nonessential tier until a retry window passes, low remaining budget parks it too, and rejected credentials stop polling until the person refreshes. A person's own refresh overlaps the automatic read already running, so only the newest refresh publishes: an older answer that settles later never overwrites fresher data, backoff, or authorization with its own, and only the newest refresh owns the running lane and the next wake-up.
+
+An issue read is a second answer with its own outcome. A pull-request answer never confirms the inbox, so a failed issue read keeps the last confirmed issues and states why they are unconfirmed instead of showing an apparently empty inbox. Only a confirmed pull-request refresh reports that data fresh: recovering the inbox lifts a rate-limit park without claiming the pull requests on screen were checked.
+
+Responses are read conditionally where GitHub supports it: the transport stores the ETag or Last-Modified validator with the body and replays the stored body on a 304. Only a display read opts in — the native stacks capability the snapshot asks GitHub about on every interval, which is a question about the repository rather than one request's identity — and the GraphQL polls carry no validator because the GraphQL endpoint offers none. Cached data is presentation only — mutation identity checks (review submission, publish, force-push) always read GitHub live. A high-impact mutation whose answer was lost is never replayed on reconnect: it is listed with the reason, stays until dismissed, and every refresh path is read-only. Offline keeps local Git fully usable and states the last confirmed remote data and its age in words as well as colour.
+
+### Pull request checks
+
+The row badge and the inspector badge stay compact aggregates: GitHub's own `statusCheckRollup` read through the shared state vocabulary in `src/shared/pull-request-checks.ts`, never a second stored value. The inspector drill-down behind that badge is the authority. `getPullRequestChecks` reads check runs, the combined commit status, and Actions workflow runs for the pull request's own head, each read only when the repository can answer it, and merges an Actions run GitHub also reported as a check run into one check so a failing job is not listed twice. A required context GitHub has not reported is listed as a real expected check in `waiting` rather than as an absent check. Requirement comes from branch protection's required contexts and the repository's required status checks; when neither is readable every requirement is `unknown` and the panel says so instead of calling checks optional.
+
+Freshness is part of the report, never implied. A report GitHub confirmed in this read reads as current; one served from the last good read is labelled cached or stale with its age, the reason the refresh failed, and the next attempt time, and a stale report is never presented as the current state of the head. A moved head discards the remembered report rather than showing the previous head's checks. Any call that will read from GitHub proves the pull request's current head and base for itself, because the values the renderer carries are what its list showed a moment ago; the caller's head and base are used only where nothing is read, and those results are already labelled a cache or a wait. A second read inside the minimum interval reuses the last report unless the caller forces a refresh; a forced read still backs off when GitHub refuses or rate-limits, keeping the last good report stale rather than clearing it. Watch is the same conditional read on an interval while the panel is open, and the main process still decides whether a read is due.
+
+Rerun is offered only where the read proves it is allowed: Actions must be enabled and the authenticated account must have a write role on the repository. `rerunPullRequestCheck` re-reads the head, refuses a run that no longer belongs to it, posts the rerun, and returns the re-read report so the panel never shows a state it did not just read. Details links are opened only for plain `https://github.com` URLs; an unvetted link from a third-party app is dropped rather than offered.
+
+Identity, not payload, authorises a mutation. A rerun first re-reads the pull request itself and compares GitHub's current head with the head the button was drawn for; a head that moved since is refused with nothing posted, because the user acted on a different commit than the one GitHub holds. A read that could not confirm which head the pull request has may still show the last good report, but reports it stale and offers no rerun: an unproved head cannot authorise a write.
+
+Policy is re-read on every path, including the path where every payload answers 304. Required checks come from branch protection and from the effective rules GitHub reports for the exact base branch, which is how repository and organisation rulesets are read without reimplementing GitHub's branch-pattern matching. Every applicable required check is its own `(context, app)` constraint rather than one requirement per name: GitHub enforces all applicable rules and the most restrictive wins, so a context required by two integrations is two requirements, and a requirement that names no app does not loosen one that does. A required set GitHub will not fully disclose - an unreadable ruleset read, a branch whose protection this account cannot read - leaves every requirement `unknown` and says so, because a check no readable API mentions may still gate the merge; that unknown answer stands even when no check has reported at all, since a head whose required checks are still silent is exactly when it matters. A 404 from branch protection is only an answer for a viewer GitHub reports as an administrator, because that status means both an unprotected branch and a protection the token may not read. A retargeted base or a withdrawn role therefore changes the report even when not one check result moved.
+
+List reads are complete within a bound, and each page carries its own validator. A resource is followed page by page until GitHub returns a short page; a head with more pages than the bound follows reports truncation and the panel says the list is not the whole, on every path that ends at a full page at the bound, including a page GitHub confirmed, while a list whose last page is short is complete however many pages it took. A page's 304 speaks only for that page, because page two can gain a failing check while page one's validator is unchanged, so a collection counts as confirmed only when every page asked about confirmed itself. A validator is kept only while its page's body is cached, and a page GitHub confirms whose body is gone is re-read rather than dropped from a live report.
+
+Every request a call makes is subject to the same rules, the read that proves which head the pull request has included: when GitHub refuses that read the call stops there instead of going on to ask for the commit's checks, keeps the last good report with the rerun held back, and records the same deadline it would for any other refusal. Rate limits are the server's to set. A refused or rate-limited read waits at least as long as GitHub's own `Retry-After` or primary-limit reset, never only for the local backoff, and that deadline is kept even when the read never produced a report to cache, so the next refresh and every watch tick after it respect it. A read the caller abandons stops instead of finishing work nobody is waiting for.
+
 ### Reconciliation
 
 GitHub owns submitted membership and order. `src/main/reconciliation.ts` derives one deterministic state per stack by comparing that authority with local parent hints, pull-request head/base refs and SHAs, origin tracking refs, and real Git ancestry. The states are `matching`, `local-only`, `remote-native`, `reordered`, `stale`, `diverged`, `missing-branch`, `retargeted`, `merged`, `externally-unstacked`, and `ambiguous`; `ambiguous` blocks instead of guessing and never offers a repair. Every other state lists explicit repairs with the evidence each one would act on. Reporting and refresh only read: they never rewrite a branch, a parent hint, or a pull-request base. Repairs execute from a captured preview whose plan is re-validated against the origin URL, submitted membership, pull-request head SHAs and bases, and every recorded parent immediately before the first mutation, so a concurrent change fails as a stale preview instead of being overwritten. Repairs that move a branch or retarget a pull request require explicit confirmation, back the branch up under `refs/git-stacks/reconciliation/`, and append their recovery evidence to the report.
@@ -337,6 +402,313 @@ An ordinary reordered member keeps its valid recorded replay boundary even when 
 For submitted native members, reconciliation binds the canonical pull request by the stack's PR number, not by the branch head: another open PR can share that head. If that numbered PR now identifies a different head or repository, the native stack is ambiguous and offers no repair; closed or merged members missing from the open-PR query retain their submitted stack identity.
 Adopt-order previews capture the exact resolved parent ref and commit used for the replay boundary. A changed, removed, or differently resolved parent invalidates the preview before any write; the selected parent is checked again at the mutation boundary, accounting for selected ref moves. Restoring a missing branch refuses to update a symbolic HEAD in the current or another worktree.
 
+### Review workspace
+
+The Review workspace is one page in four regions: a headline, a stack rail, and then the changed-file tree, the diff, and the commit list side by side. The body is one grid, so the regions never trade size by wrapping or by hiding: a long commit list cannot push the patch out of reach and a long patch cannot squeeze the tree away.
+
+The grid reads the width of the workspace itself, not the window, because a repository sidebar already takes part of the window. Too narrow for three columns, the commit list moves beneath the diff; narrower still, the three stack. Nothing is dropped at either step.
+
+The workspace fills its pane exactly as every other workspace does, which is what gives the regions a definite share to divide: without that, a large file set stretches the pane to the height of its content and the patch ends up below a screenful of file rows. Each region is then bounded and scrolls inside itself, so a region that has outgrown its share never becomes the page's height. Where the three stack, each is content-sized up to a cap of its own, so none claims the workspace and the pane scrolls as it does everywhere else. Bounded is a property of the _reading_ surface: a seventeen-megabyte file set is a two-hundred row window, and the region label says so. The workspace reads the pull request from GitHub; it never reads the working tree, never checks out a branch, and never changes anything on GitHub. Moving between stack layers changes only what is being read.
+
+Pull-request files, commits, and the stack are separate reads that each claim their own request id, so moving to another pull request cancels the read that is now obsolete instead of letting it answer for a pull request nobody is looking at. The headline answers first, then files and commits; a stage that has not arrived renders a loading state and never an empty state that reads as "nothing to review".
+
+A paginated read is pinned to one comparison. The identity of the comparison is read before the pages and again after them, and it covers **both** objects: GitHub diffs the head against the merge base of the base and head, so a push to the base branch changes the diff as surely as a force-push to the head does, with the head object unchanged. If either moved, or if the head could not be read at all, the read fails instead of returning. Half-old, half-new pages labelled with either oid would assert a revision the diff never came from, and viewed marks and any comment written afterwards would inherit the false claim. The commit list is pinned the same way, because a moved head mid-read otherwise leaves a silently short list presented as the pull request's commits. The headline is read first, so its oid can be the out-of-date one; when it disagrees with the pinned file set, the headline says the head is as of the headline rather than presenting it as the revision on screen.
+
+The commit count distinguishes the loaded entries from the pull request's reported total. An incomplete result displays that state next to the list and directs the reviewer to GitHub for the full history. At GitHub's 250-entry cap without a known total, the list says it may be incomplete; an exact confirmed total is not presented as truncation.
+
+Each file has exactly one state when it has no text to show: **binary** only when independently identified, **no text diff** when GitHub supplies no patch and counts no changed text lines, **too large to inline**, or **unreadable** with the reason. Missing text is not evidence of binary content: a pure rename, mode-only change, or empty file can have the same shape. A renamed file's message names the rename. "Generated" is a local path heuristic offered as a reading aid; it never changes what is rendered and is never presented as something GitHub reported.
+
+The file tree groups by directory and keeps a renamed file's preimage path searchable, so a search for the old name still finds the file it became. A collapsed directory keeps its file count, because a row must not change what it claims to hold. Files with no text diff are selectable so their state is readable; they never present an empty patch.
+
+Unified and split are two presentations of one set of lines. The whitespace toggle is a filter over text GitHub already sent, not a second fetch: it hides only a removed/added pair that is identical once spaces and tabs are removed, reports the hidden count against Git's own hunk header so a reader can check it, and leaves line endings alone because a CRLF conversion is a change worth seeing. Split pairs a changed run by position, so a run with more removals than additions leaves the extra removals on their own rows instead of shifting content against the wrong line. A run of only removals or only additions has no counterpart to pair against and is a complete change on its own, so it is presented whole, one row per line: a pure addition file of any length is the review, and truncating it to its first line would present a hundred added lines as one. Every hunk header introduces the lines of its own hunk, so the second and later headers of a multi-hunk file appear directly above their lines rather than being collected at the top of the file. Both layouts render through the same paged window, so a large diff stays bounded and every page keeps the same line identity.
+
+**Diff line identity.** Every line of a remote diff carries four things: its `side` (`base`, `head`, or none for a marker), its number on that side, an `anchor` that is the file path plus the line's text with its diff marker removed, and a `context` that is the anchor plus up to two neighbouring lines of the same hunk on each side. A number is an address, not an identity: a force-push that inserts a line above moves every line below it. A hunk reuses the same `hunkId` scheme as the local staging surface, so one scheme covers a remote review and a local stage. A line is identified only against the side it is addressed on. A removed line and an added line carrying the same text are two different facts, and matching across the side would re-anchor a comment on a deletion onto the line that replaced it, reading as though the reviewer had commented on the replacement. Identical text found only on the other side is reported as the change it is — the file no longer holds this line on that side, and the same text now appears on the other — and never resolved. A stored reference is re-resolved by anchor first: intact anchor and context is **exact**, a single intact anchor with a changed neighbourhood is **moved** and says where it went, and edited text, a duplicated line, a file the pull request no longer touches, or a diff that is not available as text is **unresolved** with a reason a reviewer can act on. Anything that cannot be named exactly is never written as if it were.
+
+Duplicate same-side anchors always remain unresolved, even when only one copy retains the old neighbourhood. Context distinguishes exact from moved only after uniqueness is established.
+
+The rail states the pull request's position in its native stack and offers the two adjacent layers. The top and bottom of a stack are boundaries, not missing data. When GitHub returns no membership, or the stacks preview is unavailable, the rail says which of those it is instead of implying an empty stack.
+
+Viewed files are a local reading aid bound to the **whole comparison** they were recorded at: the head object, the base object, and the base branch name. A force-push changes the head and a push to the base branch changes the base, so either drops the marks rather than carrying them onto a diff nobody looked at. A retarget is a third case: it can leave both object ids untouched, so the branch name is carried too, and a rename reads the same way. Retargeting is a routine action, not a rare race, and a mark carried across it would claim review of changes nobody opened; the cost is re-opening a few files. GitHub is not asked to store them, and the app never claims to have synced a state GitHub does not expose.
+
+**Leaving a review.** The conversation column holds the three states a review is
+in at once — what GitHub already holds, what the reviewer has written but not
+sent, and the single decision that sends it — because splitting them across
+panes would make the pending state the hardest one to notice, which is exactly
+the state that is lost if it is missed. A line number is the affordance that
+starts a comment: the reviewer points at the lines they mean, and a held
+modifier extends the range to a multi-line comment. Nothing asks for a path and
+a number that the reviewer would have to read off the screen.
+
+Pending comments are local by necessity, not by preference: GitHub has no
+pending-comment resource, so they are journalled in the app's own storage and
+restored when the workspace reopens. They are drawn to be visibly unsent — a
+pending rule, a pending label, never the styling of something already on GitHub
+— and a draft recorded against a comparison that is no longer on screen is shown
+as stale rather than re-placed. Restoring them on reopen is the whole point:
+navigating to another pull request and back must not cost a reviewer their
+unfinished sentence.
+
+One decision submits every pending comment. GitHub's review endpoint takes all
+of a review's inline comments in one request, so several comments become one
+Comment, Approve, or Request changes event; the alternative, one event per
+comment, would be several events the reviewer never chose. The app cannot approve
+the viewer's own pull request, and it does not offer the choice it knows GitHub
+will refuse. Every other permission is read from GitHub and GitHub stays the
+authority: a local permission decision is a preflight, never a substitute for
+the server's answer.
+
+An anchor is revalidated in the main process immediately before the write. A
+force-push since the draft was taken means some anchors name a revision that no
+longer exists, and the result is **no mutation at all** plus a per-draft reason —
+never a comment that landed on a neighbouring line or on a different revision
+than the one reviewed. Silence about a dropped comment is indistinguishable from
+success; an explicit stale report is the only safe outcome.
+
+A surviving anchor is not evidence that the reviewer agreed to a new revision. A
+comment's text often still matches after a force-push, having merely moved to a
+different line, and adopting that silently would approve a commit nobody opened.
+The comparison the diff was rendered from therefore travels with the submission
+and is checked against a fresh read **before** the anchors are resolved; a
+mismatch on the head, the base, or the base branch name refuses the whole review
+and names the revision to look at. Approving is the case this protects most, but
+the refusal applies to every decision.
+
+A write whose response is lost is not replayed automatically, because the replay's
+most likely outcome is a duplicate review carrying a comment the reviewer never
+wrote twice. An error message alone does not enforce that: it disappears on
+reload and hands the same words back to a live button. So the attempt itself is
+journalled **before** the request leaves — a crash between the POST and its
+response is precisely the case with no failure to write a record on, so a record
+written only after a failure would be missing for the one case the guard exists
+for. The attempt records the whole payload — every comment's body and anchor, and
+the decision — because the comments *are* the write, and any one of them alone
+is shared with a review that has nothing to do with this one.
+
+The record is not a dead end. Before refusing, the next attempt asks GitHub what
+it actually holds, and every part of the attempt is checked: the review must be
+**newer than the boundary the attempt recorded** (the newest review the pull
+request held when it began), **this account's**, **on this revision**, recording
+**the decision that was asked for**, and carrying **the same comments** compared
+as a set on body and anchor. A matching summary proves nothing, so it is not
+what is matched on. The state compared is the one GitHub recorded, not the one
+that was asked for, so a comment review never adopts an approval.
+
+Those two reads come from REST, not from GraphQL. `PullRequestReviewComment` has
+no `side` and no `startSide` in GitHub's schema — the side of a comment is known
+only to the thread and to the REST comment — and a query naming a field that does
+not exist is refused before it runs, which would make every submission fail at the
+first reconciliation. The review list and the pull request's review comments are
+therefore read from `pulls/{n}/reviews` and `pulls/{n}/comments`, whose `side`
+and `start_side` are `LEFT`/`RIGHT` and are converted to the diff's `base`/`head`
+in one place for both ends of a range. A comment left unconverted would be recorded
+as a head comment, and a deletion comment could then never be recognised as its
+own attempt.
+
+A settled write is recorded, not deleted. The evidence that GitHub holds a
+comment is the only thing standing between a retry and a duplicate, and the
+submission that recognised the write is still free to fail afterwards, or to be
+interrupted before the view drops the draft. The record therefore keeps what was
+recognised, and it is a later *payload* that retires it: the view keeps a draft in
+its payload precisely while it has not been told the draft was delivered, so a
+record whose comments are absent from a later submission are comments the view has
+finished with. That makes resuming after a crash idempotent without depending on a
+callback the view may never send, and it means GitHub no longer being able to
+re-derive the answer — because the review was edited on the web, say — cannot hold
+a write for good.
+
+The boundary is what makes the search honest rather than recent, and it is a
+number. REST review ids increase, so the boundary is the greatest id the pull
+request held when the attempt began, and a reconciliation walks reviews newest
+first and stops at the boundary: everything at or below it pre-existed. The list
+of reviews is **chronological**, so that number has to be read off the last page
+and not the first: on a pull request with more than a hundred reviews, the
+greatest id on page one is the hundredth review ever written, and a review that
+already existed — matching the attempt in every field — would sit above that line
+and be adopted as a write that never arrived. Both collections are paged in full,
+because a review may carry up to 200 inline comments while a page holds 100, and
+a review whose tail was never read cannot be compared whole — comparing part of
+it would claim a match that was not made. A boundary walk that cannot reach the
+end of the list records **no** boundary rather than a low one, and a null boundary
+holds: a wrong boundary is worse than an absent one, because it errs in exactly
+the direction that adopts somebody else's review. Running out of pages is a hold
+rather than a "not there". If GitHub does not hold the review once the search is
+exhaustive, the guard stands: the record says only that the app never heard back,
+which is also true of a request that never arrived, so absence is never taken as
+licence to post again automatically.
+
+The guard is bound to the revision it was written against. A record carries the
+head its attempt named, and a record about a different commit is not this
+submission's recovery: it is neither delivered nor a hold, and it is retired. A
+settled record proves GitHub took that write, and it proves it about that commit.
+Review H1 says nothing about H2, and the same line carrying the same words on the
+new head is a new comment about a new commit — so adopting across that boundary
+would clear the reviewer's unsent work and return a decision they asked for
+without ever sending it, silently suppressing an approval of the revision in
+front of them. An uncertain record about an older head is left alone for the same
+reason: a question GitHub may never answer is a question about that head, and it
+must not lock a reviewer out of a new revision.
+
+A draft is named by a minted identity, not by where it sits. The revision guard
+above separates a comment about a new head from one about the old, but a
+revision does not move for everything: the reviewer can read a line, write a
+comment, send it, and write the same words on the same line of the *same* head
+while approving instead of commenting. Nothing about that second comment is
+distinguishable from the first except that it is later, and both would be
+matched by every field the settlement compares — anchor, words, decision, head.
+Adopting the first would clear the second without sending it, and the workspace
+would report an approval that GitHub never received. So each draft carries an
+identity generated where the draft is composed, and the settlement only looks at
+records that name this payload's drafts.
+
+Generated, not counted, and the distinction is the whole rule. A counter is
+unique only while one process owns it, and the journal that would hold it is read
+by every window of the repository: two windows that opened the same record would
+count from the same number, mint one identity for the same line, and then a
+settled record naming that identity would answer for the other window's comment —
+clearing words it never sent and reporting a decision GitHub never received. So a
+draft's identity may not depend on the state any other window last read. It also
+may not depend on the record outliving it: a record whose drafts are gone has
+nothing left to keep, and is dropped rather than retained as a counter that would
+have to be read, rewound, and trusted. Identities minted under earlier rules —
+the range alone, or the range and a small whole number — remain opaque strings
+compared only with each other, so stored drafts stay readable and submit as
+themselves, and none of those names can be minted again.
+
+The guard covers an unresolved *comment*, not an attempt id. Changing the
+decision, or adding one more pending draft, produces a different attempt over
+the same comments, and matching on the whole payload would let those comments be
+posted a second time. So every attempt touching any line this payload writes is
+reconciled first, whatever decision or batch size is being sent now. What is
+journalled is what is sent: the comments GitHub never took, and no more. Sending
+the whole payload while recording only the remainder would post the adopted
+comment again — the exact duplicate the guard exists to prevent — and leave a
+record describing something other than the write. When the write does go out, every
+comment it confirms is named back, the adopted ones and the newly posted ones
+alike, so the view drops exactly those and keeps the drafts that were never sent.
+
+What a landed review delivers is exactly the comments it posted, each by the
+identity it was composed under — and the identity is recorded per comment, not
+only per attempt, because a review is only ever evidence about the comments it
+was made of. A batch of two that lands unacknowledged and is followed by a
+payload carrying one of those comments unchanged and a fresh one written on the
+same line with the same words is the case this decides: the first is delivered
+because GitHub holds it under that identity, the second is not, because the
+review posted a different comment that happened to read identically, and the
+record of it is a record about a payload the reviewer has since replaced.
+Adopting it would report the whole payload delivered, post nothing, and lose a
+decision the reviewer made after the review they had already sent. Delivery is
+therefore matched on identity *and* on what the comment says and where, so a
+draft reworded after it was composed sends the new words rather than being
+taken for the old ones, and a comment no composition can be named for is
+evidence about nothing.
+
+Replies reconcile against the thread's own comments by the same rules, with the
+comment ids the thread held when the attempt began as their boundary and this
+account as their author. Body equality alone is not enough in either direction:
+an older identical reply — this account's own or a collaborator's — is not this
+attempt, and adopting it would report a success that never happened.
+
+That record holds the reviewer's own words, so it is scoped by repository and by
+account as well as by pull request: the journal lives in a Git common directory
+that every origin and worktree shares, a pull request number is only unique
+inside one repository, and an attempt id is not unique across accounts. Without
+all three, one account's record can block an unrelated review — or be cleared by
+one, leaving a duplicate waiting to happen.
+
+Thread topology, replies, and resolved and outdated state come from GraphQL,
+which is the only place that knows them; REST review comments are flat and cannot
+report a resolved thread. Resolved threads stay visible and marked rather than
+disappearing, because a reviewer coming back to a thread needs to see it was
+resolved rather than assume it was deleted. Resolved and outdated are independent
+facts and both are shown: a later push can produce a thread that is both, and
+collapsing them to one word would hide a conversation nobody has answered.
+
+A thread's comments are a connection **inside** the thread, so exhausting the
+outer page of threads says nothing about whether a long conversation was read
+whole. Each thread's later comment pages are followed, bounded like every other
+read, and a thread that runs past the bound says so instead of presenting a
+partial reply history as the whole one. That matters beyond display: a
+lost-write reconciliation looks for the posted reply in exactly these pages, so
+reading only the first is what makes a successful reply look lost.
+
+Files and threads are read independently, and each is pinned to its own
+comparison. Both can succeed while describing different revisions, so the two are
+compared before a thread is allowed to steer anything: a thread's line number is
+an address in the diff it was read at, and following it into a newer diff would
+compose a comment onto whatever now sits at that number. A mismatch is shown with
+a reload, not resolved by picking a side.
+
+Pending drafts are journalled in the repository's Git directory, so they follow
+the repository across worktrees and workspaces. That makes the file a shared
+resource and not a boundary: the **record** carries the repository and the signed-in
+account, and lookup, replacement, and clearing are all scoped by them. A pull
+request number is only unique inside one repository, and a draft is one person's
+unsent words — so a record belonging to another repository, or to another
+account, stays on disk and is not offered. The owner is stamped by the main
+process from Git and GitHub, never taken from the caller's payload.
+
+Sharing the file makes it a resource more than one process writes, and a
+read/modify/write over a shared file is a claim on something no single process
+owns: two windows of one app, two worktrees, or two machines on one repository
+can read the same bytes and each publish its own change over them. The last
+write wins, and the loser's record is not merged away — it is gone, silently,
+and it was unsent words.
+
+So a journal update is taken whole, by one writer at a time, across every
+process that shares the repository. Where a window cannot take its turn, it
+**refuses** the write and says so, and it writes nothing: a journal that cannot
+be updated in order has exactly one honest outcome, and the record already on
+disk stays readable and unchanged. An in-process queue is not a substitute — it
+would serialize two callers in one window and leave the second window exactly as
+unprotected, which is the case the journal exists for.
+
+That refusal must be bounded and it must distinguish *why* the lock could not be
+used. Exactly one read failure means the holder is gone: the lock was not there
+when the contender looked, so the next attempt takes the name. Every other
+failure — a lock this account may not open, a path that is not a file — leaves a
+holder whose existence is unknown and cannot become known by waiting, so it
+refuses at once, names the file and the reason it could not be read, and writes
+nothing. Retrying it is not caution: it spins on a lock that never clears while
+the window holds a save that will never finish and reports nothing.
+
+Records are not evicted to keep either file small. A draft record is one pull
+request's unsent words and an unresolved write is the sole durable proof that a
+request went out; evicting the oldest to make room discards exactly the evidence
+that stops a retry from posting a second review, which is worse than a file that
+grew. A record leaves only when its owner sends or clears it, when a payload that
+no longer carries its comments retires it, or when GitHub's own state settles it.
+
+The renderer treats its own journal read as the older fact it is. Lines can be
+selected and commented on as soon as the diff renders, which can be before the
+journal read answers, so a draft edit is journalled optimistically and counted;
+a read that began before an edit is dropped rather than allowed to replace words
+just typed with the snapshot it read, which would then be written back on the
+next edit.
+
+The permissions query asks for `viewer` at the query root. GitHub's schema has no
+`Repository.viewer`, and a selection that nests it there fails the whole query
+with `undefinedField` before any review is written — which is exactly the kind of
+error a fixture double accepts happily and a live server rejects. Query shapes
+are therefore checked against the live schema, not only against fixtures.
+
+The four review commands — next file, previous file, next layer, previous layer — are remappable like every other command and are dispatched by the shell through a ref the view publishes. The view registers no key listener of its own, so two surfaces never compete for the same keystroke.
+
+### Review update snapshots and historical comparison
+
+A pull request's versions on GitHub are not a complete version control history: GitHub does not maintain permanent version objects for arbitrary force-pushes, and an app that was not running cannot know what commits previously occupied a pull request branch. The review workspace therefore persists observed PR head snapshots with timestamps, observation counts, and review associations, without claiming a complete version history the app never saw.
+
+A snapshot record is scoped strictly by repository identity (`owner/name`), pull request number, and authenticated viewer login. One account's review must never become another account's anchor. Identical heads observed across repeated reads deduplicate into a single snapshot entry, updating the observation count and last-seen timestamp rather than appending duplicate entries. A force-push or rebase moves the head SHA and creates a new snapshot entry.
+
+When the workspace first opens a pull request that already has multiple commits, it detects that earlier updates occurred before the app ever saw the branch and presents an explicit gap banner stating that earlier revisions were never observed and cannot be compared.
+
+Any observed historical snapshot can be compared against the current pull request head. The "Changes since reviewed" shortcut selects the most recent head the current user actually reviewed or had an adopted review settled for. The comparison faithfully uses GitHub's two-endpoint compare API. When in historical comparison mode, the workspace offers a "Hide unchanged files" filter that excludes files whose contents did not change between the historical snapshot and the current head, allowing reviewers to focus exclusively on what changed since their last review.
+
+Missing historical commits (garbage-collected after force-push or deleted remote branches) and lost merge bases (unrelated histories after an external rebase) produce an explicit unavailable state naming the exact failure reason, with no fabricated fallback diff. In historical comparison mode, draft commenting and review submission are disabled with an explanatory banner, preventing accidental comments on historical revisions.
+
+Snapshot metadata contains strictly object IDs, branch names, timestamps, counts, and review confirmation IDs — zero source code, diffs, or comments. Clearing local history wipes the journal beside the repository with zero GitHub mutations.
+
+A subsequent confirmed or adopted review is a new observation and recreates its anchor after clearing history. Async history reads and clear responses belong to their originating selection; a new comparison clears previous files and totals while it loads.
+
 ### Git runtime diagnostics
 
 The advanced Git runtime choice uses a labeled two-way control: **Bundled runtime** and **System Git**. Keep the selected choice visible even if that executable cannot start; pair the failure message with a recovery path so users can reverse the choice without guessing.
@@ -344,6 +716,28 @@ The advanced Git runtime choice uses a labeled two-way control: **Bundled runtim
 Display the active source, version, executable path, minimum-version result, and capability labels as text rather than color alone. If resolution fails, say that the runtime is unavailable instead of showing stale details.
 
 Both runtime choices use the same Git operation guards. Custom `files:` reference-storage paths are decoded as native absolute file paths, including Windows drive letters; a remote host, credentials, query, fragment, malformed escape, or NUL is refused instead of treated as a local lock path. Passing local runtime tests does not establish that a signed Windows or macOS release artifact was produced; signing and shipment remain release-workflow gates.
+
+### Settings, theming, and privacy
+
+Settings is a sectioned dialog: a left rail names the sections (Account, Git, Appearance, Shortcuts, Privacy, Diagnostics) and the right pane shows one at a time. Every control is a two-way control, a single-value field, or a text input; there are no controls that store a value nothing reads.
+
+Every setting carries a sentence saying what it changes and who reads it. A setting that names an external program (editor, merge tool) shows whether that program exists on this computer at the point it is typed, so a missing tool is a fact on screen rather than a failure at use. A tool value is one program name: a value carrying a space, a quote, a path separator, or a control character is refused, because such a value would reach a process launcher as more than one argument. Only supported editor and merge tool identities are accepted; arbitrary interpreters (e.g. shells, script hosts) are refused by validation and cannot be launched. Launching an editor is constrained to canonical paths verified inside the repository root; symlinks escaping the repository are rejected before execution.
+A setting that names the GitHub host is a host name, not a URL. A pasted `https://` URL is normalized down to the host name it names; a path, a query, a non-HTTPS scheme, or embedded credentials is refused and the previous value stands. The refused input is shown with the reason beside the field, the way an unaccepted program name is. The field names what is affected: the sign-in, repository discovery, and every request it makes. Changing the host retires that host's sign-in and forgets what was learned about it, so a later host never inherits an earlier host's answers.
+
+A port is part of a host only when it is that kind of port: a web port is kept in requests, an SSH port never is, and the default HTTPS port is not written at all, because one host named two ways is two hosts. A host whose capability could not be established holds the work that depended on it rather than assuming the answer. A host is a name, and every request for it is addressed to that name: a repository's own origin decides which host answers for it, and nothing falls back to the default host. A capability is a fact about one host, so a credential belongs to the host that issued it and is never shown, sent, or renewed against another; a sign-in that no longer matches the selected host is retired rather than adopted. Changing the host abandons work already in flight against the old one instead of letting its answer land.
+
+A link is handed to the operating system only when it is HTTPS, free of credentials, and served by `github.com`, the configured host, or the host owning an open repository's origin. Public GitHub links remain available when an enterprise host is selected. The comparison is the whole host, port included; look-alike suffixes, unconfigured ports, and other hosts are refused. Trust is never inferred from the link itself.
+
+The host capability matrix names the host, the API base it answered on, the version it reported, and one line per capability. A capability the host answered about and does not serve reads as unsupported; a capability this build could not ask about — no credential, no configured client id, an unreachable host, an unanswered probe — reads as a distinct unanswered state carrying the reason, because an unanswered question is not a negative answer. A capability this build never probes on any host is `not applicable` as the existing capability report requires. A host that has never been probed shows every line as unanswered rather than borrowing the default host's answers. Nothing in the matrix claims a capability because the product usually finds it.
+
+A control fixed by this computer's policy is disabled and shows the policy's reason beside it. A policy file that cannot be read or understood holds **every** managed setting at its current value and says why, rather than reading as "nothing is locked". Never present an unavailable setting as editable-but-ignored.
+
+Theming is a token-level concern, never per-component styling. `tokens.css` emits a light block, a dark block, and a `system` block that follows the operating system in a media query, so `data-gs-theme` on the document root is the only place a theme is expressed. A theme token that no palette supplies must not be offered as a choice. Reduce motion has the same shape: the operating-system media query and the stored `data-motion` attribute are siblings, so a stored choice holds on a machine that did not ask for reduced motion.
+
+The capability report states what was measured and what was not. Every line carries a status — confirmed, unavailable, or not applicable — and a line the app could not establish is shown as unavailable rather than filled in from what this build usually finds. A capability served by a network call is `not applicable` here, not `confirmed`.
+
+A support bundle is assembled from named fields, never from a log that was filtered afterwards. The bundle preview shows each section, whether it is included, and why. Text that names a location on this machine is withheld until the user opts in, and the opt-in widens that one category only: access tokens, source contents, diffs, branch and pull-request text, and raw GitHub bodies are never collected, so no opt-in can reveal them. The support bundle export binds to the inspected preview and enforces live path consent immediately prior to writing: revoking path inclusion withholds local paths in the exported file even if consent was active when the export dialog opened.
+Telemetry and crash reporting are stated as facts about the build, not as toggles. This build has no endpoint and sends nothing; presenting a checkbox for a setting with no effect would be an inert control. Privacy controls govern what the user chooses to write on this computer.
 
 ## Do's and Don'ts
 
@@ -395,3 +789,29 @@ Legacy aliases may remain only for the existing consumers listed below and must 
 The only permitted literal renderer colors outside generated tokens are the decorative `::-webkit-scrollbar-thumb` (`#c7cbd3`) and its hover state (`#abb1bd`). Do not use these exceptions for text, essential control boundaries, or status indicators. Palette-looking text displayed in a source diff is content, not a visual style.
 
 Fixed numeric sizes in `styles.css` are permitted for branch connector lanes/offsets, dense list metadata, icon geometry, workbench breakpoints, and pane constraints. Preserve their desktop layout roles rather than converting every number to a token.
+
+### GitHub account and credential storage
+
+GitHub authentication is a first-class desktop flow, not a precondition of a pre-authenticated `gh`. Sign-in uses the GitHub App device flow, because the web authorization-code exchange requires a client secret and a shipped binary must never carry one; the public client id is the only registration value the build needs, read from `GIT_STACKS_GITHUB_APP_CLIENT_ID`. A running sign-in pushes its own state to the renderer rather than blocking a read, so the account panel is never waiting on the main process.
+
+The credential is sealed by the operating system's own store — the macOS Keychain, DPAPI on Windows, the kernel keyring on Linux. Linux's `basic_text` fallback obfuscates rather than encrypts, so it is reported as an unavailable store and no session is stored: an unavailable key store is a stated state, never a plaintext fallback. Application state keeps only an opaque reference, the host, the account login, and the expiry times; the sealed value exists only inside the credential store. Nothing crosses the preload boundary except a status object, and the renderer bridge exposes no key containing `auth` or `token`.
+
+A credential GitHub rejects at or before its stated expiry is renewed through the refresh token; a rejection of a credential that should still be valid is a revocation. Both, along with an organization that requires single sign-on and an unreachable GitHub, resolve to a recoverable account state that leaves local Git untouched. Sign-out removes only the credential this application owns.
+
+User access tokens do not use OAuth scopes; they carry the fine-grained permissions of the app registration. The account panel states the permissions each enabled feature needs and names no notification, project, or workflow access. An environment or `gh` credential stays a separate, explicit override: it wins when present, is never read back into application state, and sign-out does not touch it.
+
+Four boundaries keep that override from damaging the credential this application owns, and the credential from leaking through it:
+
+- **Sign-out is durable.** Every operation that can store a credential carries the account generation it started under. Signing out, cancelling a sign-in, or discarding a revoked credential advances that generation and aborts the in-flight refresh, so a response that arrives afterwards is discarded instead of written back. The whole commit — sealing, writing application state, publishing in memory — runs on one queue and re-checks the generation after every step, so an adoption and a sign-out can never interleave and no stale rename can land after a sign-out.
+- **The commit is published or it never happened.** An adoption has one linearization point: the moment the new credential is published in memory, which is not separated from the last ownership check by an await. A sign-out or a cancel therefore lands entirely before the commit — and the check refuses it, leaving the previous account exactly as it was — or entirely after it, when the replacement is already the truth. The credential being replaced is retired only after that point, so no rollback can need it back, and a sign-out clears memory once when the user asks and again when its queue drains, which is the invariant rather than a repair.
+- **The panel hears every change, not only state changes.** The account sends its whole status whenever anything in it differs from what it last sent, so a flow that starts, a one-time code that arrives, a login that an identity lookup establishes, and a credential that is retired are all reported even when the account state itself never moves. Identity belongs to the committed credential: a rotation keeps the login it already established, a replacement establishes its own, and a cancel after the commit neither drops the lookup nor lets a newer sign-in's code be cleared by an older flow that is still finishing.
+- **The device flow is not the account.** An in-progress device sign-in is reported on its own, so a renewal of the account that is still signed in cannot hide the one-time code or its cancel control, and starting a replacement does not unsettle the account the panel is describing.
+- **A replacement is committed or it never happened.** Starting or cancelling a sign-in abandons the device flow in progress and says nothing about the account that is already signed in: its credential and its ability to renew it are untouched. An adoption stages its credential beside the existing one, checks ownership, and either publishes the replacement and drops the credential it replaced, or removes what it staged and puts back what was there. A cancel that lands mid-write therefore leaves the previous account exactly as it was, and a first sign-in that is cancelled leaves neither account metadata nor a sealed entry. Rotation of a live session is committed on its own terms, so an answer that arrives after a cancel is kept rather than dropped.
+- **Every credential is one session.** Each adopted or restored credential carries a random, opaque session id in the sealed record and in application state. A request records the session that authenticated it, so a response that arrives after a renewal is recognised as belonging to a credential that no longer exists and cannot revoke or policy-block its replacement.
+- **Identity is read where the credential belongs.** The post-sign-in identity lookup is pinned to `https://api.github.com` and is made through the credential path, so neither a configured endpoint nor an ambient environment token can redirect it or stand in for it.
+- **Restoration is a first-class path.** A restored session is usable immediately — it selects the direct transport on the same call — rather than only after some later renewal.
+- **Transport choice follows authentication, not construction.** A signed-out account leaves an existing `gh` installation in charge; only a usable credential selects the direct transport. Constructing the service never disables `gh`.
+- **A credential is bound to one origin.** The stored credential is only attached to requests for `https://api.github.com`. A configured enterprise or diagnostic endpoint receives nothing; such an endpoint needs its own explicitly supplied credential.
+- **A rejection is attributed.** Each request records which credential authenticated it — the stored account, an environment override, or `gh` — and only a rejection of the stored credential can renew, revoke, or policy-block it. An invalid override leaves the account intact.
+
+Authentication also stays out of the repository mutation gate: a stalled GitHub endpoint cannot block local Git work, every authorization request carries its own deadline, and cancelling a sign-in stays reachable while GitHub is still answering.

@@ -15,7 +15,7 @@ import type { GitHubTransport } from '../src/main/github-transport'
 // static import above would hand Git Stacks the unpatched `execFile`.
 const { getSnapshot, runAction } = await import('../src/main/git')
 const { getGitHubData, getPullRequest } = await import('../src/main/github')
-const { previewStack, recoverStaleBranchLocks } = await import('../src/main/stacks')
+const { getMergeStatus, previewStack, recoverStaleBranchLocks } = await import('../src/main/stacks')
 const { DirectGitHubTransport, GhGitHubTransport, setGitHubTransport } =
   await import('../src/main/github-transport')
 const { createGitHubApiDouble } = await import('./fixtures/github-api-double')
@@ -26,6 +26,22 @@ function git(harness: GitHubHarness, args: string[]): string {
 
 function bareGit(harness: GitHubHarness, args: string[]): string {
   return harness.runGit(['--git-dir', harness.bare, ...args])
+}
+
+/** Runs `body` against a harness whose GitHub transport is the one the caller recorded with. */
+async function withHarnessTransport(
+  harness: GitHubHarness,
+  transport: GitHubTransport,
+  body: () => Promise<void>,
+): Promise<void> {
+  setGitHubTransport(transport)
+  try {
+    await body()
+  } finally {
+    setGitHubTransport(
+      new DirectGitHubTransport({ token: 'fixture-token', fetch: createGitHubApiDouble() }),
+    )
+  }
 }
 
 async function withHarness(
@@ -753,51 +769,426 @@ test(
   },
 )
 
+/** Marks every pull request in a published stack as ready for a direct merge. */
+async function makeStackMergeable(harness: GitHubHarness): Promise<GitHubFixtureState> {
+  const state = await harness.readState()
+  for (const pr of state.prs) {
+    if (pr.state !== 'OPEN') continue
+    updatePr(state, pr.head, {
+      draft: false,
+      checks: 'passing',
+      reviewDecision: 'APPROVED',
+      mergeState: 'CLEAN',
+    })
+  }
+  await harness.writeState(state)
+  return state
+}
+
+/** Records every asynchronous merge request and its polled result. */
+function recordingMergeTransport(): {
+  transport: GitHubTransport
+  starts: Array<{ url: string; body: Record<string, unknown> }>
+  polls: string[]
+} {
+  const inner = createGitHubApiDouble()
+  const starts: Array<{ url: string; body: Record<string, unknown> }> = []
+  const polls: string[] = []
+  const transport = new DirectGitHubTransport({
+    token: 'fixture-token',
+    fetch: ((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input instanceof Request ? input.url : input)
+      if (url.includes('/merge-async') && init?.method === 'PUT')
+        starts.push({ url, body: JSON.parse(String(init.body)) })
+      if (url.includes('/merge-async/') && (!init?.method || init.method === 'GET')) polls.push(url)
+      return inner(input, init)
+    }) as typeof globalThis.fetch,
+  })
+  return { transport, starts, polls }
+}
+
 test(
-  'merge enforces bottom-only, draft/check/review/method gates, and sends the current head SHA',
+  'a native stack on a release line merges against the branch it is registered against',
   { concurrency: false },
   async () => {
     await withHarness(async (harness) => {
-      await createStack(harness)
-      await publishStack(harness, { draft: true })
-      let state = await harness.readState()
+      // The repository default branch stays `main`; the stack is registered
+      // against `release/1.x`, which is the only base its layers can hang from.
+      await runAction(harness.repo, {
+        type: 'createBranch',
+        name: 'release/1.x',
+        parent: 'main',
+      })
+      await commitFile(harness, 'release.txt', 'release\n', 'Release line')
+      await runAction(harness.repo, { type: 'createBranch', name: 'parent', parent: 'release/1.x' })
+      await commitFile(harness, 'parent.txt', 'parent\n', 'Parent work')
+      await runAction(harness.repo, { type: 'createBranch', name: 'child', parent: 'parent' })
+      await commitFile(harness, 'child.txt', 'child\n', 'Child work')
+      await publishStack(harness)
+
+      const state = await harness.readState()
       const parent = prFor(state, 'parent')
       const child = prFor(state, 'child')
+      state.stacks = [
+        {
+          id: 1,
+          number: 1,
+          node_id: 'S_kwDOA',
+          url: `https://github.com/${state.repository.owner}/${state.repository.name}/stacks/1`,
+          base: { ref: 'release/1.x' },
+          open: true,
+          created_at: '2026-09-29T00:00:00Z',
+          pull_requests: [
+            {
+              number: parent.number,
+              state: 'open',
+              draft: false,
+              merged_at: null,
+              head: { ref: 'parent', sha: localOid(harness, 'parent') },
+            },
+            {
+              number: child.number,
+              state: 'open',
+              draft: false,
+              merged_at: null,
+              head: { ref: 'child', sha: localOid(harness, 'child') },
+            },
+          ],
+        },
+      ]
+      await harness.writeState(state)
+      await makeStackMergeable(harness)
 
-      let preview = await previewStack(
+      const preview = await previewStack(
         harness.repo,
         await getSnapshot(harness.repo),
         'merge',
         'child',
       )
-      assert.match(preview.blockers.join('\n'), /Only the bottom pull request/u)
+      assert.deepEqual(
+        preview.blockers,
+        [],
+        'the release line the stack is registered against is its trunk, not a missing layer',
+      )
+      assert.ok(preview.merge, 'a merge preview must describe the layers it will land')
+      assert.deepEqual(
+        preview.merge.layers.map((layer) => [layer.pullRequest, layer.branch]),
+        [
+          [parent.number, 'parent'],
+          [child.number, 'child'],
+        ],
+      )
+      const beforeMain = git(harness, ['rev-parse', 'refs/remotes/origin/main'])
+      const beforeRelease = git(harness, ['rev-parse', 'refs/remotes/origin/release/1.x'])
+      const inner = createGitHubApiDouble()
+      const transport = new DirectGitHubTransport({
+        token: 'fixture-token',
+        fetch: (async (input: RequestInfo | URL, init?: RequestInit) => {
+          const response = await inner(input, init)
+          const url = String(input instanceof Request ? input.url : input)
+          if (!url.includes('/graphql') && !url.includes('/merge-async/')) return response
+          const payload = await response.json()
+          if (url.includes('/merge-async/')) {
+            if (payload.details) delete payload.details.sha
+          } else if (payload.data?.repository?.pullRequest) {
+            payload.data.repository.pullRequest.mergeCommit = null
+          }
+          return new Response(JSON.stringify(payload), {
+            status: response.status,
+            headers: response.headers,
+          })
+        }) as typeof globalThis.fetch,
+      })
+      await withHarnessTransport(harness, transport, async () => {
+        const result = await runAction(harness.repo, {
+          type: 'executeStack',
+          token: preview.token,
+          allowForce: false,
+          mergeMethod: 'merge',
+          mergeAction: 'direct_merge',
+        })
+        assert.deepEqual(
+          result.merge?.layers.map((layer) => layer.status),
+          ['merged', 'merged'],
+        )
+      })
+      const after = await harness.readState()
+      assert.equal(prFor(after, 'parent').state, 'MERGED')
+      assert.equal(prFor(after, 'child').state, 'MERGED')
+      assert.equal(git(harness, ['rev-parse', 'refs/remotes/origin/main']), beforeMain)
+      assert.equal(remoteOid(harness, 'main'), beforeMain)
+      assert.notEqual(remoteOid(harness, 'release/1.x'), beforeRelease)
+      assert.equal(
+        git(harness, ['rev-parse', 'refs/remotes/origin/release/1.x']),
+        remoteOid(harness, 'release/1.x'),
+      )
+      assert.equal(
+        git(harness, ['config', '--get', 'branch.child.gitStacksMergedCommitOid']),
+        prFor(after, 'child').mergeOid,
+        'fallback merge-commit discovery uses the fetched release trunk',
+      )
+    })
+  },
+)
 
-      preview = await previewStack(harness.repo, await getSnapshot(harness.repo), 'merge', 'parent')
-      assert.match(preview.blockers.join('\n'), /still a draft/u)
+test(
+  'merge previews the contiguous downstack of a stacked pull request and lands it from one request',
+  { concurrency: false },
+  async () => {
+    await withHarness(async (harness) => {
+      await createStack(harness)
+      await publishStack(harness)
+      await makeStackMergeable(harness)
+      const state = await harness.readState()
+      const parent = prFor(state, 'parent')
+      const child = prFor(state, 'child')
 
-      updatePr(state, 'parent', { draft: false, checks: 'pending' })
+      const preview = await previewStack(
+        harness.repo,
+        await getSnapshot(harness.repo),
+        'merge',
+        'child',
+      )
+      assert.deepEqual(preview.blockers, [])
+      assert.ok(preview.merge, 'a merge preview must describe the layers it will land')
+      assert.equal(preview.merge.native, true)
+      assert.deepEqual(
+        preview.merge.layers.map((layer) => [layer.pullRequest, layer.branch]),
+        [
+          [parent.number, 'parent'],
+          [child.number, 'child'],
+        ],
+        'the selected pull request and everything below it are reviewed together',
+      )
+      assert.equal(
+        preview.merge.layers.every((layer) => layer.includedInRequest),
+        true,
+      )
+      assert.deepEqual(preview.merge.actions, ['default', 'direct_merge'])
+      assert.match(preview.steps[0].note, /same operation as #\d+/u)
+
+      const { transport, starts, polls } = recordingMergeTransport()
+      await withHarnessTransport(harness, transport, async () => {
+        const result = await runAction(harness.repo, {
+          type: 'executeStack',
+          token: preview.token,
+          allowForce: false,
+          mergeMethod: 'squash',
+          mergeAction: 'direct_merge',
+        })
+        assert.match(
+          result.message,
+          new RegExp(`Merged pull requests #${parent.number}, #${child.number} on GitHub`, 'u'),
+        )
+        assert.ok(result.merge, 'the result reports what happened to every layer')
+        assert.deepEqual(
+          result.merge?.layers.map((layer) => layer.status),
+          ['merged', 'merged'],
+        )
+        assert.deepEqual(
+          result.merge?.remaining.map((entry) => [entry.pullRequest, entry.state]),
+          [],
+        )
+      })
+      const after = await harness.readState()
+      assert.equal(prFor(after, 'parent').state, 'MERGED')
+      assert.equal(prFor(after, 'child').state, 'MERGED')
+      assert.equal(
+        starts.length,
+        1,
+        'a GitHub-native stack lands from one request for its top pull request',
+      )
+      assert.equal(starts[0]?.url.endsWith(`/pulls/${child.number}/merge-async`), true)
+      assert.deepEqual(starts[0]?.body, {
+        sha: child.headOid,
+        merge_method: 'squash',
+        merge_action: 'direct_merge',
+      })
+      assert.equal(polls.length >= 1, true, 'the pending result is polled by UUID')
+      assert.equal(
+        remoteOid(harness, 'main'),
+        prFor(after, 'child').mergeOid,
+        'origin/main is refreshed to what GitHub merged',
+      )
+    })
+  },
+)
+
+test(
+  'a pull request whose head moved after the preview is refused before any merge is requested',
+  { concurrency: false },
+  async () => {
+    await withHarness(async (harness) => {
+      await createStack(harness)
+      await publishStack(harness)
+      await makeStackMergeable(harness)
+      const preview = await previewStack(
+        harness.repo,
+        await getSnapshot(harness.repo),
+        'merge',
+        'parent',
+      )
+      assert.deepEqual(preview.blockers, [])
+      const { transport, starts } = recordingMergeTransport()
+      // Somebody pushes to the branch the review was read from.
+      await makeRemoteDivergence(harness, 'parent')
+      await withHarnessTransport(harness, transport, async () => {
+        await assert.rejects(
+          runAction(harness.repo, {
+            type: 'executeStack',
+            token: preview.token,
+            allowForce: false,
+            mergeMethod: 'squash',
+            mergeAction: 'direct_merge',
+          }),
+          // The refusal is the contract: nothing is requested and nothing moves.
+          // Which words report it is not.
+        )
+      })
+      assert.deepEqual(starts, [], 'a stale preview never reaches GitHub')
+      assert.equal(prFor(await harness.readState(), 'parent').state, 'OPEN')
+    })
+  },
+)
+
+test(
+  'a merge-queue repository enqueues the stack and reports that the queue, not GitHub, owns it',
+  { concurrency: false },
+  async () => {
+    await withHarness(async (harness) => {
+      await createStack(harness)
+      await publishStack(harness)
+      await makeStackMergeable(harness)
+      const state = await harness.readState()
+      // This repository has a merge queue, so the documented default action resolves to one.
+      state.mergeQueue = true
       await harness.writeState(state)
-      preview = await previewStack(harness.repo, await getSnapshot(harness.repo), 'merge', 'parent')
-      assert.match(preview.blockers.join('\n'), /checks are pending/u)
+      const preview = await previewStack(
+        harness.repo,
+        await getSnapshot(harness.repo),
+        'merge',
+        'child',
+      )
+      assert.ok(preview.merge)
+      assert.ok(
+        preview.warnings.some((warning) => /No merge queue has answered/u.test(warning)),
+        'an enqueue GitHub has not accepted yet is stated, not assumed',
+      )
+      const { transport, starts } = recordingMergeTransport()
+      await withHarnessTransport(harness, transport, async () => {
+        const result = await runAction(harness.repo, {
+          type: 'executeStack',
+          token: preview.token,
+          allowForce: false,
+          mergeMethod: 'squash',
+          mergeAction: 'default',
+        })
+        assert.match(result.message, /joined the merge queue/u)
+        assert.deepEqual(
+          result.merge?.layers.map((layer) => layer.status),
+          ['enqueued', 'enqueued'],
+          'the one enqueued request carries both pull requests of the stack',
+        )
+        assert.deepEqual(
+          result.merge?.remaining.map((entry) => entry.state),
+          ['OPEN', 'OPEN'],
+          'an enqueued run has merged nothing, so every pull request of the stack is left open',
+        )
+      })
+      assert.equal(starts.length, 1)
+      assert.deepEqual(starts[0]?.body, {
+        sha: prFor(await harness.readState(), 'child').headOid,
+        merge_action: 'default',
+      })
+      const queued = await harness.readState()
+      assert.equal(prFor(queued, 'parent').state, 'OPEN', 'an enqueued pull request has not merged')
+      assert.equal(prFor(queued, 'child').state, 'OPEN')
 
-      state = await harness.readState()
-      updatePr(state, 'parent', { checks: 'passing', reviewDecision: 'CHANGES_REQUESTED' })
-      await harness.writeState(state)
-      preview = await previewStack(harness.repo, await getSnapshot(harness.repo), 'merge', 'parent')
-      assert.ok(preview.blockers.length > 0, 'requested changes must prevent merging')
+      // The enqueue is the only documented proof of a queue, so the next preview offers it.
+      const next = await previewStack(
+        harness.repo,
+        await getSnapshot(harness.repo),
+        'merge',
+        'child',
+      )
+      assert.ok(next.merge?.actions.includes('merge_queue'))
+    })
+  },
+)
 
-      state = await harness.readState()
-      updatePr(state, 'parent', { reviewDecision: 'APPROVED', mergeState: 'BLOCKED' })
-      await harness.writeState(state)
-      preview = await previewStack(harness.repo, await getSnapshot(harness.repo), 'merge', 'parent')
-      assert.ok(preview.blockers.length > 0, 'GitHub branch policy must prevent merging')
+test(
+  'a merge request GitHub already holds is adopted instead of duplicated, and its failure is shown',
+  { concurrency: false },
+  async () => {
+    await withHarness(async (harness) => {
+      await createStack(harness)
+      await publishStack(harness)
+      const state = await makeStackMergeable(harness)
+      const child = prFor(state, 'child')
+      const preview = await previewStack(
+        harness.repo,
+        await getSnapshot(harness.repo),
+        'merge',
+        'parent',
+      )
+      assert.deepEqual(preview.blockers, [])
+      // GitHub already holds a pending request for this pull request, and it fails.
+      const armed = await harness.readState()
+      armed.asyncMerge = {
+        number: prFor(armed, 'parent').number,
+        sha: prFor(armed, 'parent').headOid ?? '',
+        method: 'squash',
+        action: 'direct_merge',
+        uuid: 'fixture-held',
+      }
+      armed.asyncMergeResult = {
+        status: 'failed',
+        message: 'Required status check build is failing. At least 1 approving review is required.',
+      }
+      await harness.writeState(armed)
+      const { transport, starts, polls } = recordingMergeTransport()
+      await withHarnessTransport(harness, transport, async () => {
+        const result = await runAction(harness.repo, {
+          type: 'executeStack',
+          token: preview.token,
+          allowForce: false,
+          mergeMethod: 'squash',
+          mergeAction: 'direct_merge',
+        })
+        assert.match(result.message, /Required status check build is failing/u)
+        assert.equal(result.merge?.layers[0]?.status, 'failed')
+        assert.equal(result.merge?.layers[0]?.detail, armed.asyncMergeResult?.message)
+      })
+      assert.equal(starts.length, 1, 'the existing request is not sent a second time')
+      assert.equal(
+        polls.includes(
+          `https://api.github.com/repos/acme/widgets/pulls/${prFor(armed, 'parent').number}/merge-async/fixture-held`,
+        ),
+        true,
+        "GitHub's own UUID for the request it already held is the one that gets read",
+      )
+      assert.equal(prFor(await harness.readState(), 'parent').state, 'OPEN')
+      assert.equal(prFor(await harness.readState(), 'child').state, 'OPEN')
+      void child
+    })
+  },
+)
 
-      state = await harness.readState()
-      updatePr(state, 'parent', { mergeState: 'CLEAN' })
-      state.repository.allowSquashMerge = false
-      await harness.writeState(state)
-      preview = await previewStack(harness.repo, await getSnapshot(harness.repo), 'merge', 'parent')
-      assert.equal(preview.mergeMethods.includes('squash'), false)
+test(
+  'merge requires an explicit delivery action and refuses one the repository cannot take',
+  { concurrency: false },
+  async () => {
+    await withHarness(async (harness) => {
+      await createStack(harness)
+      await publishStack(harness)
+      await makeStackMergeable(harness)
+      const preview = await previewStack(
+        harness.repo,
+        await getSnapshot(harness.repo),
+        'merge',
+        'parent',
+      )
+      assert.deepEqual(preview.blockers, [])
       await assert.rejects(
         runAction(harness.repo, {
           type: 'executeStack',
@@ -805,48 +1196,185 @@ test(
           allowForce: false,
           mergeMethod: 'squash',
         }),
-        /not allowed by the repository/u,
+        /Choose how GitHub should land this stack/u,
+      )
+      // A run consumes its preview, so the second refusal is proved against a fresh one.
+      const fresh = await previewStack(
+        harness.repo,
+        await getSnapshot(harness.repo),
+        'merge',
+        'parent',
+      )
+      await assert.rejects(
+        runAction(harness.repo, {
+          type: 'executeStack',
+          token: fresh.token,
+          allowForce: false,
+          mergeMethod: 'squash',
+          mergeAction: 'merge_queue',
+        }),
+        /Merge action merge_queue is not available for this repository/u,
+      )
+      assert.equal(prFor(await harness.readState(), 'parent').state, 'OPEN')
+    })
+  },
+)
+
+test(
+  'a locally chained stack merges one request per layer and stops at the first refusal',
+  { concurrency: false },
+  async () => {
+    await withHarness(async (harness) => {
+      await createStack(harness)
+      await publishStack(harness)
+      // Nothing GitHub published links these pull requests, so each one is merged from its
+      // own request, bottom-to-top.
+      const stackNumber = (await harness.readState()).stacks?.[0]?.number
+      assert.ok(stackNumber)
+      await runAction(harness.repo, { type: 'unstackNativeStack', stackNumber })
+      const state = await makeStackMergeable(harness)
+      const preview = await previewStack(
+        harness.repo,
+        await getSnapshot(harness.repo),
+        'merge',
+        'child',
+      )
+      assert.deepEqual(preview.blockers, [])
+      assert.equal(preview.merge?.native, false)
+      assert.deepEqual(
+        preview.merge?.layers.map((layer) => [layer.pullRequest, layer.includedInRequest]),
+        [
+          [prFor(state, 'parent').number, false],
+          [prFor(state, 'child').number, true],
+        ],
       )
 
-      state = await harness.readState()
-      state.repository.allowSquashMerge = true
-      await harness.writeState(state)
-      const headBeforeMerge = parent.headOid
-      preview = await previewStack(harness.repo, await getSnapshot(harness.repo), 'merge', 'parent')
-      assert.deepEqual(preview.blockers, [])
-      const inner = createGitHubApiDouble()
-      const mergeRequests: Array<{ url: string; body: Record<string, unknown> }> = []
-      setGitHubTransport(
-        new DirectGitHubTransport({
-          token: 'fixture-token',
-          fetch: ((input: RequestInfo | URL, init?: RequestInit) => {
-            const url = String(input instanceof Request ? input.url : input)
-            if (url.endsWith('/merge-async') && init?.method === 'PUT')
-              mergeRequests.push({ url, body: JSON.parse(String(init.body)) })
-            return inner(input, init)
-          }) as typeof globalThis.fetch,
-        }),
-      )
-      await runAction(harness.repo, {
-        type: 'executeStack',
-        token: preview.token,
-        allowForce: false,
-        mergeMethod: 'squash',
+      // The pull request above the first merge has a failing required check, so the run stops
+      // there instead of asking GitHub to merge something the review did not clear.
+      const broken = await harness.readState()
+      updatePr(broken, 'child', { checks: 'failing', mergeState: 'BLOCKED' })
+      await harness.writeState(broken)
+      const localBefore = {
+        parent: localOid(harness, 'parent'),
+        child: localOid(harness, 'child'),
+        main: localOid(harness, 'main'),
+      }
+      const { transport, starts } = recordingMergeTransport()
+      await withHarnessTransport(harness, transport, async () => {
+        const result = await runAction(harness.repo, {
+          type: 'executeStack',
+          token: preview.token,
+          allowForce: false,
+          mergeMethod: 'squash',
+          mergeAction: 'direct_merge',
+        })
+        assert.deepEqual(
+          result.merge?.layers.map((layer) => layer.status),
+          ['merged', 'failed'],
+          'the partial run reports the pull request that landed and the one that did not',
+        )
+        assert.match(result.merge?.layers[1]?.detail ?? '', /checks are failing/u)
+        assert.match(result.message, /No local branch was changed/u)
       })
-      state = await harness.readState()
-      const mergedParent = prFor(state, 'parent')
-      assert.equal(mergedParent.state, 'MERGED')
-      assert.ok(mergedParent.mergeOid)
-      assert.equal(mergedParent.mergeOid, remoteOid(harness, 'main'))
-      assert.notEqual(mergedParent.mergeOid, headBeforeMerge)
-      assert.equal(prFor(state, 'child').state, 'OPEN')
-      assert.deepEqual(mergeRequests, [
-        {
-          url: 'https://api.github.com/repos/acme/widgets/pulls/1/merge-async',
-          body: { sha: headBeforeMerge, merge_method: 'squash', merge_action: 'direct_merge' },
-        },
-      ])
-      assert.equal(bareGit(harness, ['cat-file', '-t', mergedParent.mergeOid]), 'commit')
+      assert.equal(starts.length, 1, 'the refused layer never reaches GitHub')
+      const after = await harness.readState()
+      assert.equal(prFor(after, 'parent').state, 'MERGED')
+      assert.equal(prFor(after, 'child').state, 'OPEN')
+      assert.equal(localOid(harness, 'parent'), localBefore.parent)
+      assert.equal(localOid(harness, 'child'), localBefore.child)
+      assert.equal(localOid(harness, 'main'), localBefore.main)
+    })
+  },
+)
+
+test(
+  'the merge method GitHub is asked for is the reviewed one, and a disabled one never is',
+  { concurrency: false },
+  async () => {
+    await withHarness(async (harness) => {
+      await createStack(harness)
+      await publishStack(harness)
+      const state = await makeStackMergeable(harness)
+      const preview = await previewStack(
+        harness.repo,
+        await getSnapshot(harness.repo),
+        'merge',
+        'parent',
+      )
+      assert.deepEqual(preview.blockers, [])
+      assert.deepEqual(preview.mergeMethods, ['merge', 'squash', 'rebase'])
+      const disabled = await harness.readState()
+      disabled.repository.allowRebaseMerge = false
+      await harness.writeState(disabled)
+      const { transport, starts } = recordingMergeTransport()
+      await withHarnessTransport(harness, transport, async () => {
+        await assert.rejects(
+          runAction(harness.repo, {
+            type: 'executeStack',
+            token: preview.token,
+            allowForce: false,
+            mergeMethod: 'rebase',
+            mergeAction: 'direct_merge',
+          }),
+          /Merge method rebase is not allowed by the repository/u,
+        )
+      })
+      assert.deepEqual(starts, [])
+      assert.equal(prFor(await harness.readState(), 'parent').state, 'OPEN')
+
+      // The reviewed method is the one GitHub is asked for, on the same endpoint as the docs.
+      const enabled = await harness.readState()
+      enabled.repository.allowRebaseMerge = true
+      await harness.writeState(enabled)
+      const second = await previewStack(
+        harness.repo,
+        await getSnapshot(harness.repo),
+        'merge',
+        'parent',
+      )
+      const recording = recordingMergeTransport()
+      await withHarnessTransport(harness, recording.transport, async () => {
+        const result = await runAction(harness.repo, {
+          type: 'executeStack',
+          token: second.token,
+          allowForce: false,
+          mergeMethod: 'rebase',
+          mergeAction: 'direct_merge',
+        })
+        assert.equal(result.merge?.layers[0]?.status, 'merged')
+      })
+      assert.deepEqual(recording.starts[0]?.body, {
+        sha: prFor(state, 'parent').headOid,
+        merge_method: 'rebase',
+        merge_action: 'direct_merge',
+      })
+      assert.equal(prFor(await harness.readState(), 'parent').state, 'MERGED')
+    })
+  },
+)
+
+test(
+  'a stack that is not contiguous below the selection is refused instead of merged across',
+  { concurrency: false },
+  async () => {
+    await withHarness(async (harness) => {
+      await createStack(harness)
+      await publishStack(harness)
+      await makeStackMergeable(harness)
+      // The middle layer is gone locally, so the stack below the selection is not the
+      // contiguous run one merge would land.
+      git(harness, ['branch', '-D', 'parent'])
+      const preview = await previewStack(
+        harness.repo,
+        await getSnapshot(harness.repo),
+        'merge',
+        'child',
+      )
+      assert.ok(
+        preview.blockers.some((blocker) => /not an unmerged stack layer/u.test(blocker)),
+        `expected a contiguity blocker, got ${JSON.stringify(preview.blockers)}`,
+      )
+      assert.equal(preview.merge, null, 'a stack that is not contiguous is not offered for merge')
     })
   },
 )
@@ -883,6 +1411,7 @@ test(
         token: mergePreview.token,
         allowForce: false,
         mergeMethod: 'squash',
+        mergeAction: 'direct_merge',
       })
 
       state = await harness.readState()
@@ -987,6 +1516,7 @@ test(
         token: mergePreview.token,
         allowForce: false,
         mergeMethod: 'squash',
+        mergeAction: 'direct_merge',
       })
       state = await harness.readState()
       const mergedParent = prFor(state, 'parent')
@@ -1060,6 +1590,7 @@ test(
         token: mergePreview.token,
         allowForce: false,
         mergeMethod: 'squash',
+        mergeAction: 'direct_merge',
       })
       state = await harness.readState()
       const mergedHead = prFor(state, 'parent').headOid
@@ -1154,6 +1685,7 @@ test(
         token: mergePreview.token,
         allowForce: false,
         mergeMethod: 'squash',
+        mergeAction: 'direct_merge',
       })
       state = await harness.readState()
       const mergedHead = prFor(state, 'parent').headOid
@@ -1672,6 +2204,7 @@ test(
         token: mergePreview.token,
         allowForce: false,
         mergeMethod: 'squash',
+        mergeAction: 'direct_merge',
       })
       state = await harness.readState()
       const mergedHead = prFor(state, 'parent').headOid
@@ -1751,5 +2284,691 @@ test(
       },
       { transport: new GhGitHubTransport() },
     )
+  },
+)
+
+test(
+  'a native stack whose membership moved after the preview is refused instead of merged across',
+  { concurrency: false },
+  async () => {
+    await withHarness(async (harness) => {
+      await createStack(harness)
+      await publishStack(harness)
+      await makeStackMergeable(harness)
+      const state = await harness.readState()
+      const preview = await previewStack(
+        harness.repo,
+        await getSnapshot(harness.repo),
+        'merge',
+        'child',
+      )
+      assert.deepEqual(preview.blockers, [])
+      // A pull request joins the stack below the selection after the review. GitHub would land
+      // it with the request, so the reviewed membership is re-read and the run is refused.
+      const moved = await harness.readState()
+      const stack = moved.stacks?.[0]
+      assert.ok(stack)
+      const stranger = stack.pull_requests[0]
+      moved.stacks = [
+        {
+          ...stack,
+          pull_requests: [
+            {
+              ...stranger,
+              number: prFor(moved, 'parent').number + 90,
+              state: 'open',
+            },
+            ...stack.pull_requests,
+          ],
+        },
+      ]
+      await harness.writeState(moved)
+      const { transport, starts } = recordingMergeTransport()
+      await withHarnessTransport(harness, transport, async () => {
+        await assert.rejects(
+          runAction(harness.repo, {
+            type: 'executeStack',
+            token: preview.token,
+            allowForce: false,
+            mergeMethod: 'squash',
+            mergeAction: 'direct_merge',
+          }),
+          // A membership that moved is a refusal, whichever words report it.
+        )
+      })
+      assert.equal(starts.length, 0, 'a moved stack never reaches GitHub')
+      const after = await harness.readState()
+      assert.equal(prFor(after, 'parent').state, 'OPEN')
+      assert.equal(prFor(after, 'child').state, 'OPEN')
+      void state
+    })
+  },
+)
+
+test(
+  'an enqueue for one local layer never reports a pull request this run did not request',
+  { concurrency: false },
+  async () => {
+    await withHarness(async (harness) => {
+      await createStack(harness)
+      await publishStack(harness)
+      await makeStackMergeable(harness)
+      const stackNumber = (await harness.readState()).stacks?.[0]?.number
+      assert.ok(stackNumber)
+      await runAction(harness.repo, { type: 'unstackNativeStack', stackNumber })
+      const state = await harness.readState()
+      const preview = await previewStack(
+        harness.repo,
+        await getSnapshot(harness.repo),
+        'merge',
+        'child',
+      )
+      assert.equal(preview.merge?.native, false)
+      // The bottom layer's request is accepted by a queue. Every other layer needs its own
+      // request, so nothing above it can be reported as queued.
+      const queued = await harness.readState()
+      queued.asyncMergeResult = { status: 'enqueued' }
+      await harness.writeState(queued)
+      const { transport, starts } = recordingMergeTransport()
+      await withHarnessTransport(harness, transport, async () => {
+        const result = await runAction(harness.repo, {
+          type: 'executeStack',
+          token: preview.token,
+          allowForce: false,
+          mergeMethod: 'squash',
+          mergeAction: 'direct_merge',
+        })
+        assert.deepEqual(
+          result.merge?.layers.map((layer) => [layer.pullRequest, layer.status]),
+          [
+            [prFor(state, 'parent').number, 'enqueued'],
+            [prFor(state, 'child').number, 'not-requested'],
+          ],
+        )
+        assert.match(result.message, /was not requested in this run/u)
+      })
+      assert.equal(starts.length, 1, 'the queue stops the run before the next request')
+      const status = await getMergeStatus(harness.repo)
+      assert.deepEqual(
+        status?.layers.map((layer) => [layer.pullRequest, layer.queue?.outcome ?? null]),
+        [[prFor(state, 'parent').number, 'unconfirmed']],
+        'only the pull request GitHub accepted is remembered',
+      )
+    })
+  },
+)
+
+test(
+  'a merge GitHub is still running keeps its request identity and is read on refresh',
+  { concurrency: false },
+  async () => {
+    await withHarness(async (harness) => {
+      await createStack(harness)
+      await publishStack(harness)
+      const state = await makeStackMergeable(harness)
+      const preview = await previewStack(
+        harness.repo,
+        await getSnapshot(harness.repo),
+        'merge',
+        'child',
+      )
+      const running = await harness.readState()
+      running.asyncMergeStaysPending = true
+      await harness.writeState(running)
+      const { transport, starts, polls } = recordingMergeTransport()
+      let requestUuid: string | null = null
+      await withHarnessTransport(harness, transport, async () => {
+        const result = await runAction(harness.repo, {
+          type: 'executeStack',
+          token: preview.token,
+          allowForce: false,
+          mergeMethod: 'squash',
+          mergeAction: 'direct_merge',
+        })
+        assert.deepEqual(
+          result.merge?.layers.map((layer) => layer.status),
+          ['pending', 'pending'],
+          'a request GitHub is still running is neither merged nor refused',
+        )
+        requestUuid = result.merge?.layers[1]?.requestUuid ?? null
+        assert.ok(requestUuid, 'the accepted request keeps the UUID it can be read with')
+        assert.match(result.message, /still running/u)
+      })
+      assert.equal(starts.length, 1)
+      // The run ended without a terminal result, so the outcome is read, not resubmitted.
+      const before = await getMergeStatus(harness.repo)
+      assert.deepEqual(
+        before?.layers.map((layer) => layer.status),
+        ['pending', 'pending'],
+      )
+      const settled = await harness.readState()
+      settled.asyncMergeStaysPending = false
+      await harness.writeState(settled)
+      const after = await getMergeStatus(harness.repo)
+      assert.deepEqual(
+        after?.layers.map((layer) => layer.status),
+        ['merged', 'merged'],
+        "the refresh reads the same request's result",
+      )
+      assert.equal(
+        polls.filter((url) => url.endsWith(`/merge-async/${requestUuid}`)).length > 0,
+        true,
+      )
+      assert.equal(starts.length, 1, 'reading the result never sends another merge request')
+      void prFor(state, 'child')
+    })
+  },
+)
+
+test(
+  'a merge request GitHub holds with another method is refused rather than adopted',
+  { concurrency: false },
+  async () => {
+    await withHarness(async (harness) => {
+      await createStack(harness)
+      await publishStack(harness)
+      const state = await makeStackMergeable(harness)
+      const preview = await previewStack(
+        harness.repo,
+        await getSnapshot(harness.repo),
+        'merge',
+        'parent',
+      )
+      const held = await harness.readState()
+      held.asyncMerge = {
+        number: prFor(held, 'parent').number,
+        sha: prFor(held, 'parent').headOid ?? '',
+        method: 'merge',
+        action: 'direct_merge',
+        uuid: 'fixture-held',
+      }
+      await harness.writeState(held)
+      const { transport } = recordingMergeTransport()
+      await withHarnessTransport(harness, transport, async () => {
+        await assert.rejects(
+          runAction(harness.repo, {
+            type: 'executeStack',
+            token: preview.token,
+            allowForce: false,
+            mergeMethod: 'squash',
+            mergeAction: 'direct_merge',
+          }),
+          /already has a merge merge request/u,
+        )
+      })
+      void prFor(state, 'parent')
+    })
+  },
+)
+
+test(
+  'a failed native request still reads back the pull request it already landed',
+  { concurrency: false },
+  async () => {
+    await withHarness(async (harness) => {
+      await createStack(harness)
+      await publishStack(harness)
+      await makeStackMergeable(harness)
+      const state = await harness.readState()
+      const parentNumber = prFor(state, 'parent').number
+      const preview = await previewStack(
+        harness.repo,
+        await getSnapshot(harness.repo),
+        'merge',
+        'child',
+      )
+      // GitHub lands the bottom pull request and then refuses the one on top of it.
+      const partial = await harness.readState()
+      partial.asyncMergeResult = { status: 'failed', message: 'Required review is missing' }
+      partial.prs = partial.prs.map((pr) =>
+        pr.number === parentNumber ? { ...pr, state: 'MERGED', mergeState: 'MERGED' } : pr,
+      )
+      await harness.writeState(partial)
+      const { transport } = recordingMergeTransport()
+      await withHarnessTransport(harness, transport, async () => {
+        const result = await runAction(harness.repo, {
+          type: 'executeStack',
+          token: preview.token,
+          allowForce: false,
+          mergeMethod: 'squash',
+          mergeAction: 'direct_merge',
+        })
+        assert.deepEqual(
+          result.merge?.layers.map((layer) => [layer.pullRequest, layer.status]),
+          [
+            [parentNumber, 'merged'],
+            [prFor(state, 'child').number, 'failed'],
+          ],
+          'a partial merge reports the pull request that landed alongside the refusal',
+        )
+        assert.match(result.message, /Merged pull request #\d+/u)
+      })
+      const recorded = git(harness, ['config', '--get', 'branch.parent.gitStacksMergedHeadPr'])
+      assert.equal(recorded, String(parentNumber), 'the landed pull request is recorded')
+    })
+  },
+)
+
+test(
+  'a merge queue that later drops a pull request is reported by a read, not another merge',
+  { concurrency: false },
+  async () => {
+    await withHarness(async (harness) => {
+      await createStack(harness)
+      await publishStack(harness)
+      const state = await makeStackMergeable(harness)
+      const childNumber = prFor(state, 'child').number
+      // This repository has a merge queue, so the documented default action resolves to one.
+      state.mergeQueue = true
+      await harness.writeState(state)
+      const preview = await previewStack(
+        harness.repo,
+        await getSnapshot(harness.repo),
+        'merge',
+        'child',
+      )
+      const { transport, starts } = recordingMergeTransport()
+      await withHarnessTransport(harness, transport, async () => {
+        const result = await runAction(harness.repo, {
+          type: 'executeStack',
+          token: preview.token,
+          allowForce: false,
+          mergeMethod: 'squash',
+          mergeAction: 'default',
+        })
+        assert.deepEqual(
+          result.merge?.layers.map((layer) => layer.status),
+          ['enqueued', 'enqueued'],
+        )
+      })
+      // The queue is only offered once GitHub has accepted an enqueue for its base ref.
+      const afterQueue = await previewStack(
+        harness.repo,
+        await getSnapshot(harness.repo),
+        'merge',
+        'child',
+      )
+      assert.ok(afterQueue.merge?.actions.includes('merge_queue'))
+      // A pull request closed without merging is the one case the pull request itself settles:
+      // the queue dropped it.
+      const dropped = await harness.readState()
+      dropped.prs = dropped.prs.map((pr) =>
+        pr.number === childNumber ? { ...pr, state: 'CLOSED' } : pr,
+      )
+      await harness.writeState(dropped)
+      const status = await getMergeStatus(harness.repo)
+      assert.equal(status?.layers[1]?.status, 'not-merged')
+      assert.equal(status?.layers[1]?.queue?.outcome, 'dropped')
+      assert.match(status?.layers[1]?.detail ?? '', /closed without merging/u)
+      assert.equal(starts.length, 1, 'reading a queue outcome submits no merge')
+    })
+  },
+)
+
+test(
+  'an open pull request after enqueue leaves current queue membership unconfirmed',
+  { concurrency: false },
+  async () => {
+    await withHarness(async (harness) => {
+      await createStack(harness)
+      await publishStack(harness)
+      const state = await makeStackMergeable(harness)
+      const childNumber = prFor(state, 'child').number
+      // This repository has a merge queue, so the documented default action resolves to one.
+      state.mergeQueue = true
+      await harness.writeState(state)
+      const preview = await previewStack(
+        harness.repo,
+        await getSnapshot(harness.repo),
+        'merge',
+        'child',
+      )
+      const { transport, starts } = recordingMergeTransport()
+      await withHarnessTransport(harness, transport, async () => {
+        const result = await runAction(harness.repo, {
+          type: 'executeStack',
+          token: preview.token,
+          allowForce: false,
+          mergeMethod: 'squash',
+          mergeAction: 'default',
+        })
+        assert.deepEqual(
+          result.merge?.layers.map((layer) => layer.status),
+          ['enqueued', 'enqueued'],
+        )
+        // Open cannot distinguish a pull request still queued from one already ejected.
+        const status = await getMergeStatus(harness.repo)
+        const layer = status?.layers.find((entry) => entry.pullRequest === childNumber)
+        assert.equal(layer?.status, 'enqueued', 'the terminal enqueue result is what it reported')
+        assert.equal(
+          layer?.queue?.outcome,
+          'unconfirmed',
+          'an open pull request is not evidence of a queue membership',
+        )
+        assert.equal(starts.length, 1, 'reading a queue outcome submits no merge')
+      })
+    })
+  },
+)
+
+test(
+  'an immediate enqueue with no request UUID is kept, never polled, and keeps its base ref',
+  { concurrency: false },
+  async () => {
+    await withHarness(async (harness) => {
+      await createStack(harness)
+      await publishStack(harness)
+      const state = await makeStackMergeable(harness)
+      const parentNumber = prFor(state, 'parent').number
+      const childNumber = prFor(state, 'child').number
+      // GitHub answers a pull request that is already in a queue immediately, with a terminal
+      // result and no request identity at all.
+      state.mergeQueue = true
+      state.asyncMergeAlreadyQueued = true
+      await harness.writeState(state)
+      const preview = await previewStack(
+        harness.repo,
+        await getSnapshot(harness.repo),
+        'merge',
+        'child',
+      )
+      const { transport, starts, polls } = recordingMergeTransport()
+      await withHarnessTransport(harness, transport, async () => {
+        const result = await runAction(harness.repo, {
+          type: 'executeStack',
+          token: preview.token,
+          allowForce: false,
+          mergeMethod: 'squash',
+          mergeAction: 'default',
+        })
+        assert.deepEqual(
+          result.merge?.layers.map((layer) => layer.status),
+          ['enqueued', 'enqueued'],
+        )
+        assert.deepEqual(
+          result.merge?.layers.map((layer) => layer.requestUuid),
+          [null, null],
+          'no identity is invented for a result GitHub did not give one for',
+        )
+        // The terminal result is journalled anyway, so a reopened dialog and the next preview
+        // both still know a queue accepted this base ref.
+        const status = await getMergeStatus(harness.repo)
+        assert.deepEqual(
+          status?.layers.map((layer) => [layer.pullRequest, layer.status]),
+          [
+            [parentNumber, 'enqueued'],
+            [childNumber, 'enqueued'],
+          ],
+          'the terminal enqueue is what a reopened dialog reports',
+        )
+        assert.equal(
+          status?.layers.find((entry) => entry.pullRequest === childNumber)?.queue?.configured,
+          true,
+        )
+        const offered = await previewStack(
+          harness.repo,
+          await getSnapshot(harness.repo),
+          'merge',
+          'child',
+        )
+        assert.equal(
+          offered.merge?.actions.includes('merge_queue'),
+          true,
+          'an accepted enqueue is the base-ref evidence the next preview needs',
+        )
+      })
+      assert.equal(starts.length, 1)
+      assert.deepEqual(
+        polls.filter((url) => url.includes('merge-async/')),
+        [],
+        'an absent request UUID is never polled for',
+      )
+    })
+  },
+)
+
+test(
+  'a request that later enqueues is read from the owning endpoint and stays enqueued',
+  { concurrency: false },
+  async () => {
+    await withHarness(async (harness) => {
+      await createStack(harness)
+      await publishStack(harness)
+      const state = await makeStackMergeable(harness)
+      const childNumber = prFor(state, 'child').number
+      const parentNumber = prFor(state, 'parent').number
+      const preview = await previewStack(
+        harness.repo,
+        await getSnapshot(harness.repo),
+        'merge',
+        'child',
+      )
+      const running = await harness.readState()
+      running.asyncMergeStaysPending = true
+      await harness.writeState(running)
+      const { transport, polls } = recordingMergeTransport()
+      await withHarnessTransport(harness, transport, async () => {
+        const result = await runAction(harness.repo, {
+          type: 'executeStack',
+          token: preview.token,
+          allowForce: false,
+          mergeMethod: 'squash',
+          mergeAction: 'direct_merge',
+        })
+        assert.deepEqual(
+          result.merge?.layers.map((layer) => layer.status),
+          ['pending', 'pending'],
+        )
+        // The request belongs to the pull request it was made for, so it is read there, not
+        // on the downstack layer that shares its identity.
+        const settled = await harness.readState()
+        settled.asyncMergeStaysPending = false
+        settled.asyncMergeResult = { status: 'enqueued' }
+        await harness.writeState(settled)
+        const beforePolls = polls.length
+        const status = await getMergeStatus(harness.repo)
+        assert.deepEqual(
+          status?.layers.map((layer) => [layer.pullRequest, layer.status]),
+          [
+            [parentNumber, 'enqueued'],
+            [childNumber, 'enqueued'],
+          ],
+          "one request's enqueue covers the layers it carried",
+        )
+        assert.equal(
+          polls
+            .slice(beforePolls)
+            .some((url) => url.includes(`/pulls/${childNumber}/merge-async/`)),
+          true,
+          'the result is read from the pull request that owns the request',
+        )
+        assert.equal(
+          polls
+            .slice(beforePolls)
+            .some((url) => url.includes(`/pulls/${parentNumber}/merge-async/`)),
+          false,
+        )
+        // The enqueue is terminal and persisted, so a read after the request expires still
+        // reports the queue rather than a request that is somehow still running.
+        const expired = await harness.readState()
+        delete expired.asyncMerge
+        await harness.writeState(expired)
+        const reopened = await getMergeStatus(harness.repo)
+        assert.deepEqual(
+          reopened?.layers.map((layer) => [layer.pullRequest, layer.queue?.outcome ?? null]),
+          [
+            [parentNumber, 'unconfirmed'],
+            [childNumber, 'unconfirmed'],
+          ],
+          'a pull request that is still open is an unconfirmed membership, not a queued one',
+        )
+        const offered = await previewStack(
+          harness.repo,
+          await getSnapshot(harness.repo),
+          'merge',
+          'child',
+        )
+        assert.equal(
+          offered.merge?.actions.includes('merge_queue'),
+          true,
+          'an accepted enqueue is the evidence a queue exists for this base ref',
+        )
+      })
+    })
+  },
+)
+
+test(
+  'a merge that exceeds the polling bound offers no queue and keeps its request readable',
+  { concurrency: false },
+  async () => {
+    await withHarness(async (harness) => {
+      await createStack(harness)
+      await publishStack(harness)
+      await makeStackMergeable(harness)
+      const preview = await previewStack(
+        harness.repo,
+        await getSnapshot(harness.repo),
+        'merge',
+        'parent',
+      )
+      const running = await harness.readState()
+      running.asyncMergeStaysPending = true
+      await harness.writeState(running)
+      const { transport } = recordingMergeTransport()
+      await withHarnessTransport(harness, transport, async () => {
+        await runAction(harness.repo, {
+          type: 'executeStack',
+          token: preview.token,
+          allowForce: false,
+          mergeMethod: 'squash',
+          mergeAction: 'direct_merge',
+        })
+      })
+      const next = await previewStack(
+        harness.repo,
+        await getSnapshot(harness.repo),
+        'merge',
+        'parent',
+      )
+      assert.equal(
+        next.merge?.actions.includes('merge_queue'),
+        false,
+        'a direct merge that is still running is no evidence of a queue',
+      )
+      const status = await getMergeStatus(harness.repo)
+      assert.equal(status?.layers[0]?.status, 'pending')
+      assert.equal(status?.layers[0]?.queue, null, 'a request that never enqueued has no queue')
+    })
+  },
+)
+
+test(
+  'a locally reviewed pull request attached to a native stack is refused before any request',
+  { concurrency: false },
+  async () => {
+    await withHarness(async (harness) => {
+      await createStack(harness)
+      await publishStack(harness)
+      const state = await makeStackMergeable(harness)
+      const stackNumber = (await harness.readState()).stacks?.[0]?.number
+      assert.ok(stackNumber)
+      await runAction(harness.repo, { type: 'unstackNativeStack', stackNumber })
+      const preview = await previewStack(
+        harness.repo,
+        await getSnapshot(harness.repo),
+        'merge',
+        'parent',
+      )
+      assert.equal(preview.merge?.native, false)
+      // The stack is rebuilt behind the review, so GitHub would apply stack semantics to a
+      // request this review assumed was single.
+      const restored = await harness.readState()
+      const childNumber = prFor(restored, 'child').number
+      restored.prs = restored.prs.map((pr) =>
+        pr.number === childNumber ? { ...pr, stack: { stackNumber, position: 2 } } : pr,
+      )
+      restored.stacks = [
+        {
+          id: stackNumber,
+          number: stackNumber,
+          node_id: `S_${stackNumber}`,
+          url: `https://api.github.com/repos/acme/widgets/stacks/${stackNumber}`,
+          base: { ref: 'main' },
+          open: true,
+          created_at: '2026-09-01T00:00:00Z',
+          pull_requests: restored.prs.map((pr) => ({
+            number: pr.number,
+            state: 'open',
+            draft: false,
+            merged_at: null,
+            head: { ref: pr.head, sha: pr.headOid ?? '' },
+          })),
+        },
+      ]
+      await harness.writeState(restored)
+      const { transport, starts } = recordingMergeTransport()
+      await withHarnessTransport(harness, transport, async () => {
+        await assert.rejects(
+          runAction(harness.repo, {
+            type: 'executeStack',
+            token: preview.token,
+            allowForce: false,
+            mergeMethod: 'squash',
+            mergeAction: 'direct_merge',
+          }),
+          /now belongs to native stack/u,
+        )
+      })
+      assert.equal(starts.length, 0, 'native membership is refused before a request is sent')
+      void prFor(state, 'parent')
+    })
+  },
+)
+
+test(
+  'a request GitHub failed keeps its reason for a later read',
+  { concurrency: false },
+  async () => {
+    await withHarness(async (harness) => {
+      await createStack(harness)
+      await publishStack(harness)
+      const state = await makeStackMergeable(harness)
+      const parentNumber = prFor(state, 'parent').number
+      const preview = await previewStack(
+        harness.repo,
+        await getSnapshot(harness.repo),
+        'merge',
+        'parent',
+      )
+      const failing = await harness.readState()
+      failing.asyncMergeResult = { status: 'failed', message: 'Required review is missing' }
+      await harness.writeState(failing)
+      const { transport } = recordingMergeTransport()
+      await withHarnessTransport(harness, transport, async () => {
+        await runAction(harness.repo, {
+          type: 'executeStack',
+          token: preview.token,
+          allowForce: false,
+          mergeMethod: 'squash',
+          mergeAction: 'direct_merge',
+        })
+      })
+      const status = await getMergeStatus(harness.repo)
+      assert.equal(
+        status?.layers[0]?.status,
+        'failed',
+        'a refusal GitHub already reported stays a failure on the read, not an unmerged layer',
+      )
+      assert.match(status?.layers[0]?.detail ?? '', /Required review is missing/u)
+      // The result is kept, so the reason survives the request expiring.
+      const expired = await harness.readState()
+      delete expired.asyncMerge
+      await harness.writeState(expired)
+      const reopened = await getMergeStatus(harness.repo)
+      assert.equal(reopened?.layers[0]?.status, 'failed')
+      assert.match(reopened?.layers[0]?.detail ?? '', /Required review is missing/u)
+      void parentNumber
+    })
   },
 )

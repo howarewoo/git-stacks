@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/test'
 import { getViewFilterInput, openGallery, settle, STANDARD_VIEWPORTS } from './helpers/gallery'
-import { switchDestination } from './helpers/destinations'
+import { DESTINATIONS, switchDestination } from './helpers/destinations'
 
 test.describe('Responsive pane adaptation, compact reflow, and reduced motion', () => {
   test.describe('Compact reflow equivalent (720x470)', () => {
@@ -43,25 +43,39 @@ test.describe('Responsive pane adaptation, compact reflow, and reduced motion', 
       }
     })
 
-    test('working changes destination is fully operable at 720x470 reflow', async ({ page }) => {
-      await switchDestination(page, 'changes')
-      await settle(page)
 
-      const changesHeading = page.getByRole('heading', { level: 1, name: 'Working changes' })
-      await expect(changesHeading).toBeVisible()
+    // Every destination — not just the two the suite used to name — has to
+    // survive the 200% reflow without pushing actions off-screen.
+    for (const destination of DESTINATIONS) {
+      test(`${destination.label} is fully operable at 720x470 reflow`, async ({ page }) => {
+        await switchDestination(page, destination.id)
+        await settle(page)
 
-      await expect(
-        page.getByRole('heading', { level: 2, name: 'Staged', exact: true }),
-      ).toBeVisible()
-      await expect(
-        page.getByRole('heading', { level: 2, name: 'Unstaged', exact: true }),
-      ).toBeVisible()
+        const heading = page.getByRole('heading', { level: 1, name: destination.heading })
+        await expect(heading).toBeVisible()
 
-      const hasHorizontalScroll = await page.evaluate(() => {
-        return document.documentElement.scrollWidth > window.innerWidth
+        const hasHorizontalScroll = await page.evaluate(() => {
+          return document.documentElement.scrollWidth > window.innerWidth
+        })
+        expect(hasHorizontalScroll).toBe(false)
+
+        if (destination.id === 'changes') {
+          await expect(
+            page.getByRole('heading', { level: 2, name: 'Staged', exact: true }),
+          ).toBeVisible()
+          await expect(
+            page.getByRole('heading', { level: 2, name: 'Unstaged', exact: true }),
+          ).toBeVisible()
+        }
+
+        const box = await heading.boundingBox()
+        expect(box).not.toBeNull()
+        if (box) {
+          expect(box.x).toBeGreaterThanOrEqual(0)
+          expect(box.x + box.width).toBeLessThanOrEqual(720)
+        }
       })
-      expect(hasHorizontalScroll).toBe(false)
-    })
+    }
   })
 
   test.describe('Reduced motion behavior', () => {

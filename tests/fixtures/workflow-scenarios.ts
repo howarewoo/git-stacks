@@ -2,6 +2,7 @@ import type {
   Branch,
   ChangedFile,
   Commit,
+  MergeStatus,
   PullRequest,
   PushPreview,
   RepositorySnapshot,
@@ -209,6 +210,7 @@ export const unavailableGitHubSnapshot = withSnapshot({
 export const restackPreview: StackPreview = {
   token: 'preview-restack-1',
   kind: 'restack',
+  merge: null,
   branch: 'feature/checkout',
   steps: [
     {
@@ -304,6 +306,27 @@ export const mergePreview: StackPreview = {
   steps: [restackPreview.steps[1]],
   blockers: [],
   warnings: ['This merges one pull request. The remaining branches still need a restack.'],
+  merge: {
+    branch: 'feature/checkout-tests',
+    native: true,
+    actions: ['default', 'merge_queue', 'direct_merge'],
+    layers: [
+      {
+        branch: 'feature/checkout',
+        pullRequest: 40,
+        base: 'main',
+        headOid: '2222222222222222222222222222222222222222',
+        includedInRequest: true,
+      },
+      {
+        branch: 'feature/checkout-tests',
+        pullRequest: 41,
+        base: 'feature/checkout',
+        headOid: '3333333333333333333333333333333333333333',
+        includedInRequest: true,
+      },
+    ],
+  },
 }
 
 export const syncPreview: StackPreview = {
@@ -365,6 +388,65 @@ export const syncPreview: StackPreview = {
     blockers: [],
     warnings: [],
   },
+}
+
+/**
+ * The sentence a read contributes for a pull request GitHub accepted into a queue. It is
+ * named because a later read swaps it for what the queue did, and a pull request that is
+ * still open says nothing about membership either way.
+ */
+export const mergeStatusQueueSentence =
+  'Pull request #40 joined the merge queue; current queue membership is unconfirmed.'
+
+/** What a read-only refresh reports: one pull request the queue took, one still running. */
+export const mergeStatus: MergeStatus = {
+  layers: [
+    {
+      branch: 'feature/checkout',
+      pullRequest: 40,
+      status: 'enqueued',
+      detail:
+        'GitHub accepted this enqueue at 2026-09-29T10:00:00.000Z; this pull request is still open, which does not say whether the queue still holds it',
+      mergedOid: null,
+      queue: {
+        configured: true,
+        outcome: 'unconfirmed',
+        requestedAt: '2026-09-29T10:00:00.000Z',
+      },
+      requestUuid: 'fixture-queued-40',
+    },
+    {
+      branch: 'feature/checkout-tests',
+      pullRequest: 41,
+      status: 'pending',
+      detail:
+        'The merge request GitHub accepted at 2026-09-29T10:05:00.000Z has not reported a result yet',
+      mergedOid: null,
+      queue: { configured: true, outcome: 'pending', requestedAt: '2026-09-29T10:05:00.000Z' },
+      requestUuid: 'fixture-pending-41',
+    },
+  ],
+  message: `GitHub is still running the merge request for pull request #41. ${mergeStatusQueueSentence}`,
+}
+
+/**
+ * What a reopened dialog reads after GitHub refused the merge. A terminal `failed` result
+ * never changes, so the read keeps the refusal and GitHub's own reason instead of reporting
+ * an operation that is neither running nor queued.
+ */
+export const failedMergeStatus: MergeStatus = {
+  layers: [
+    {
+      branch: 'feature/lifecycle-open',
+      pullRequest: 42,
+      status: 'failed',
+      detail: 'Required review is missing',
+      mergedOid: null,
+      queue: null,
+      requestUuid: 'fixture-refused-42',
+    },
+  ],
+  message: 'GitHub refused the merge request for pull request #42.',
 }
 
 export const leasePreview: PushPreview = {

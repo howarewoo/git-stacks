@@ -1,5 +1,25 @@
 import type { SnapshotLimits } from './performance'
+
+import type { GitHubHostStatus } from './host'
 import type { RepositoryCapabilities } from './capabilities'
+import type { ReviewCommitSet, ReviewFileSet, ReviewHeadline, ReviewViewedRecord } from './review'
+import type { ReviewHistory, ReviewHistoryDiff } from './review-snapshots'
+import type { PullRequestChecksReport } from './pull-request-checks'
+import type {
+  ReviewDraft,
+  ReviewDraftRecord,
+  ReviewDraftResolution,
+  ReviewMutationResult,
+  ReviewSubmission,
+  ReviewThreadRead,
+} from './review-threads'
+import type {
+  DiagnosticReport,
+  SettingsPatch,
+  SettingsSnapshot,
+  SupportBundleExport,
+  SupportBundlePreview,
+} from './settings'
 
 export type NativeStackValidationStatus =
   | 'valid'
@@ -230,6 +250,59 @@ export interface PullRequest {
   mergeState?: string
   stack?: PullRequestStackMembership | null
 }
+
+/** How GitHub is asked to land a pull request, per the asynchronous merge API. */
+export type MergeAction = 'default' | 'direct_merge' | 'merge_queue'
+
+export type MergeMethod = 'merge' | 'squash' | 'rebase'
+
+/**
+ * The last merge request and subsequent pull-request state observed by Git Stacks.
+ * A terminal `enqueued` result does not track later queue membership. An open pull
+ * request can still be queued or have been ejected, so membership is `unconfirmed`
+ * unless a later read confirms that the pull request merged or closed.
+ */
+export type MergeQueueOutcome = 'pending' | 'unconfirmed' | 'merged' | 'dropped'
+
+/**
+ * What GitHub reported for one accepted asynchronous merge request. A request is not a
+ * queue: `enqueued` is the only outcome that proves a base ref has one.
+ */
+export type MergeRequestOutcome = 'pending' | 'merged' | 'enqueued' | 'failed'
+
+export interface MergeQueueState {
+  /** True once GitHub accepted an enqueue for this base ref, which is the only proof of a queue. */
+  configured: boolean
+  /**
+   * `pending` means GitHub accepted the asynchronous request and has not reported a terminal
+   * result for it yet; its UUID is kept so the result can be read again without a new request.
+   */
+  outcome: MergeQueueOutcome | null
+  requestedAt: string | null
+}
+
+/** One pull request that a single merge action will land, bottom-to-top. */
+export interface MergeLayerPreview {
+  branch: string
+  pullRequest: number
+  base: string
+  headOid: string
+  /**
+   * True when GitHub lands this layer as part of the selected pull request's own
+   * request, which is how a GitHub-native stack merge covers its downstack.
+   */
+  includedInRequest: boolean
+}
+
+export interface MergePreview {
+  branch: string
+  /** Bottom-to-top; the last layer is the pull request the person selected. */
+  layers: MergeLayerPreview[]
+  /** True when one request for the selected pull request lands every layer. */
+  native: boolean
+  /** Actions this repository and base ref accept. */
+  actions: MergeAction[]
+}
 export interface RepositoryIssue {
   number: number
   title: string
@@ -321,6 +394,62 @@ export interface RepositorySnapshot {
   capabilities: RepositoryCapabilities
   /** GitHub-authoritative comparison of submitted stacks with the local graph. */
   reconciliation?: ReconciliationReport
+  /**
+   * GitHub freshness for the pull-request, stack, and issue data in this
+   * snapshot. Optional so hand-built fixtures stay valid; the main process
+   * always sets it, and its absence reads as unknown rather than fresh.
+   */
+  remote?: RemoteFreshness
+  /**
+   * Set when the GitHub data in this snapshot is the last confirmed payload
+   * rather than a live read, with the reason and the time it was confirmed.
+   */
+  githubStale?: { reason: string; fetchedAt: string } | null
+  /**
+   * The typed reason the GitHub read could not answer, whenever it could not.
+   * Background refresh backs off on this; a fallback to the last confirmed
+   * payload never turns a failure into a success.
+   */
+  githubFailure?: { kind: string; detail: string } | null
+}
+
+/** A GitHub mutation whose outcome the app refuses to guess after a lost network. */
+export type RemoteMutationKind =
+  'merge' | 'review-submit' | 'force-push' | 'delete' | 'retarget' | 'create-pr' | 'publish'
+
+/**
+ * A high-impact GitHub mutation that did not complete. It is listed for the
+ * person who asked for it and never re-sent: a reconnect only ever resumes
+ * reads, because replaying a merge or a forced push could rewrite remote
+ * history nobody has seen since.
+ */
+export interface PendingRemoteMutation {
+  id: string
+  kind: RemoteMutationKind
+  label: string
+  reason: string
+  failedAt: string
+}
+
+export type RemoteFreshnessState =
+  'fresh' | 'refreshing' | 'stale' | 'offline' | 'rate-limited' | 'unauthorized'
+
+/** How far the GitHub data in a snapshot can be trusted, and when it was checked. */
+export interface RemoteFreshness {
+  state: RemoteFreshnessState
+  /** When GitHub last confirmed this data, including a 304 that changed nothing. */
+  fetchedAt: string | null
+  /** The last refresh attempt, successful or not. */
+  checkedAt: string | null
+  detail: string | null
+  /** When GitHub says rate-limited requests resume. */
+  rateLimitReset: string | null
+  pendingMutations: PendingRemoteMutation[]
+}
+
+export interface SyncActivity {
+  focused: boolean
+  visible: boolean
 }
 export interface RecentRepository {
   path: string
@@ -469,7 +598,9 @@ export interface StackPreview {
   steps: StackStep[]
   warnings: string[]
   blockers: string[]
-  mergeMethods: ('merge' | 'squash' | 'rebase')[]
+  mergeMethods: MergeMethod[]
+  /** Present only for a merge preview: the pull requests one action will land. */
+  merge: MergePreview | null
   /** Present only for a publish preview: the resumable submission plan. */
   publish: PublishPreview | null
   /** Present only for a sync preview: the trunk and per-layer classification. */
@@ -724,7 +855,9 @@ export type StackAction =
       type: 'executeStack'
       token: string
       allowForce: boolean
-      mergeMethod: 'merge' | 'squash' | 'rebase'
+      mergeMethod: MergeMethod
+      /** Required for a merge: direct or merge-queue delivery for the reviewed layers. */
+      mergeAction?: MergeAction
     }
   | SubmitStackAction
   | { type: 'stackContinue' | 'stackAbort' }
@@ -808,13 +941,262 @@ export type GitAction =
     }
   | { type: 'conflictMergeTool'; path: string; fingerprint: string }
   | StackAction
+
+export type MergeLayerStatus =
+  'merged' | 'enqueued' | 'failed' | 'pending' | 'not-requested' | 'not-merged'
+
+export interface MergeLayerResult {
+  branch: string
+  pullRequest: number
+  status: MergeLayerStatus
+  detail: string
+  /** The merge commit GitHub reports, once the pull request is merged. */
+  mergedOid: string | null
+  queue: MergeQueueState | null
+  /**
+   * The UUID GitHub returned for an accepted asynchronous merge request that has not reported
+   * a terminal result, so the result can be read again without submitting another request.
+   */
+  requestUuid: string | null
+}
+
+/** What one merge action did to every pull request it was reviewed against. */
+export interface MergeResult {
+  action: MergeAction
+  method: MergeMethod
+  native: boolean
+  layers: MergeLayerResult[]
+  /** Observed base of the pull requests left above the merge, after GitHub's own retargeting. */
+  remaining: { pullRequest: number; branch: string; base: string; state: string }[]
+}
+
+/** A running merge, pushed while it waits on GitHub's background result. */
+export interface MergeProgress {
+  action: MergeAction
+  status: 'running' | 'queued' | 'succeeded' | 'failed'
+  layers: MergeLayerResult[]
+  message: string
+}
+
+/**
+ * What a read-only refresh reports about merge requests Git Stacks made earlier. Nothing here
+ * submits anything: it is what the journal remembers, read back from GitHub.
+ */
+export interface MergeStatus {
+  layers: MergeLayerResult[]
+  message: string
+}
 export interface ActionResult {
   message: string
   url?: string
+  /** Present only for a merge: the per-pull-request outcome, including queue state. */
+  merge?: MergeResult
 }
+
+/**
+ * A repository the signed-in credential can reach, exactly as GitHub reports it.
+ * Nothing here is a credential: discovery reads the API, and the clone uses
+ * ordinary Git with the account's own Git credentials.
+ */
+export interface GitHubRepositorySummary {
+  fullName: string
+  name: string
+  owner: string
+  description: string | null
+  private: boolean
+  fork: boolean
+  archived: boolean
+  /** GitHub has no commits yet, so the first branch starts from nothing. */
+  empty: boolean
+  language: string | null
+  defaultBranch: string
+  pushedAt: string | null
+  url: string
+  httpsUrl: string
+  sshUrl: string
+  canPush: boolean
+  /** The host discovery read this repository from, and the host that owns it. */
+  host: string
+}
+
+/**
+ * Every onboarding refusal is named rather than left as Git's own text, so an
+ * organization single sign-on denial, a missing credential, and a destination
+ * that already holds someone's files each say what happened and what to do.
+ */
+export type OnboardingFailureReason =
+  | 'signed-out'
+  | 'sso-denied'
+  | 'rate-limited'
+  | 'unavailable'
+  | 'cancelled'
+  | 'not-found'
+  | 'authentication'
+  | 'ssh'
+  | 'network'
+  | 'destination-exists'
+  | 'invalid-destination'
+  | 'failed'
+
+export interface OnboardingFailure {
+  reason: OnboardingFailureReason
+  message: string
+}
+
+/**
+ * Every onboarding call answers with a named outcome rather than a thrown
+ * string, so the onboarding surface can tell an organization denial from a
+ * cancelled clone from a destination someone already has files in.
+ */
+export type OnboardingResult<T> = { ok: true; value: T } | { ok: false; failure: OnboardingFailure }
+
+export interface RepositoryDiscovery {
+  repositories: GitHubRepositorySummary[]
+  /** The query that produced this list, echoed so a slow page can be labelled. */
+  query: string
+  /** The total number of matches reported by the search, which can exceed the 1,000-result cap. */
+  totalCount?: number
+  /** True when the search had more matches than the 1,000-result cap or the page limit. */
+  truncated?: boolean
+  /** True when GitHub answered partial results because the query timed out. */
+  incompleteResults?: boolean
+}
+
+export interface RepositoryDiscoveryRequest {
+  /** An empty query lists everything the credential can reach. */
+  query?: string
+  /** Cancels the in-flight search when the same id is cancelled. */
+  requestId?: string
+}
+
+export type CloneProtocol = 'https' | 'ssh'
+
+export interface RepositoryCloneRequest {
+  repository: GitHubRepositorySummary
+  protocol: CloneProtocol
+  /** An existing absolute directory the repository folder is created inside. */
+  parentDirectory: string
+  /** The single folder name created inside `parentDirectory`. */
+  directoryName: string
+  shallow: boolean
+  /** Cancels the in-flight clone when the same id is cancelled. */
+  requestId?: string
+}
+
+export interface RepositoryCloneResult {
+  path: string
+  name: string
+  /** GitHub had no commits; the working tree is an empty repository. */
+  empty: boolean
+  /** The exact `git clone` invocation, for copying into a terminal. */
+  gitCommand: string
+  /** The equivalent `gh repo clone` invocation. */
+  ghCommand: string
+}
+
+/** The exact terminal commands a clone would run, shown before anything is written. */
+export interface CloneCommandPreview {
+  gitCommand: string
+  ghCommand: string
+}
+
+/**
+ * What this machine can already do with Git: the identity commits are authored
+ * with, the branch Git names first, whether an HTTPS credential helper is
+ * configured, and whether an SSH client Git can drive is on PATH. Git Stacks
+ * reads this and changes none of it.
+ */
+export interface GitEnvironmentStatus {
+  identity: { name: string | null; email: string | null }
+  /** `init.defaultBranch` as configured; null means Git's own built-in applies. */
+  defaultBranch: string | null
+  httpsCredentials: { configured: boolean; helper: string | null }
+  ssh: { available: boolean; version: string | null }
+}
+/**
+ * Where the GitHub account stands. Every field is a status: an opaque reference
+ * to the sealed credential, never the credential itself, so nothing here can be
+ * replayed against the API.
+ */
+export type GitHubAccountState =
+  | 'not-configured'
+  | 'signed-out'
+  | 'signing-in'
+  | 'signed-in'
+  | 'expired'
+  | 'revoked'
+  | 'permission-denied'
+  | 'offline'
+  | 'storage-unavailable'
+
+export interface GitHubAppPermission {
+  permission: string
+  access: 'read' | 'write'
+  /** The enabled feature that needs this permission, or null when several share it. */
+  feature: string | null
+}
+
+export interface GitHubSignInChallenge {
+  userCode: string
+  verificationUri: string
+  expiresAt: number
+}
+
+export interface GitHubAccountStatus {
+  state: GitHubAccountState
+  /** Opaque handle for the sealed credential held by the operating system. */
+  reference: string | null
+  host: string
+  login: string | null
+  /** The fine-grained permissions the registered app requests; never a runtime scope. */
+  permissions: GitHubAppPermission[]
+  expiresAt: number | null
+  refreshExpiresAt: number | null
+  store: { available: boolean; name: string | null; reason: string | null }
+  /**
+   * A device sign-in is in progress. This is reported separately from `state`
+   * because the flow belongs to no credential: it survives a renewal of the
+   * account that is still signed in, so the code and its cancel control stay on
+   * screen until the flow itself ends.
+   */
+  signingIn: boolean
+  challenge: GitHubSignInChallenge | null
+  message: string | null
+  /** A credential supplied by the environment is in use instead of the app's own. */
+  externalCredential: boolean
+}
+
 export interface DesktopAPI {
+  /**
+   * What the configured GitHub host was observed to support. Every field is a
+   * fact a probe established or an explicit "not established".
+   */
+  githubHostStatus?(): Promise<GitHubHostStatus>
   recentRepositories(): Promise<RecentRepository[]>
   openRepository(path?: string): Promise<RepositorySnapshot | null>
+  /** Adds an existing local repository by absolute path, for a folder dialog or a dropped folder. */
+  addRepository?(path: string): Promise<RepositorySnapshot | null>
+  /** Accessible repositories for the signed-in account; paginated and cancellable. */
+  searchRepositories?(
+    request: RepositoryDiscoveryRequest,
+  ): Promise<OnboardingResult<RepositoryDiscovery>>
+  /** Git identity, default branch, HTTPS credential helper, and SSH client availability. */
+  gitEnvironment?(requestId?: string): Promise<OnboardingResult<GitEnvironmentStatus>>
+  /** Clones with ordinary Git, then registers the finished repository. */
+  cloneRepository?(
+    request: RepositoryCloneRequest,
+  ): Promise<OnboardingResult<RepositoryCloneResult>>
+  /** The terminal commands a clone would run, without running anything. */
+  previewCloneCommand?(
+    request: RepositoryCloneRequest,
+  ): Promise<OnboardingResult<CloneCommandPreview>>
+  /** Opens the platform folder picker for a clone destination; null when cancelled. */
+  chooseDestinationDirectory?(current?: string): Promise<string | null>
+  /**
+   * Subscribes to folders dropped onto the window, resolved to absolute paths in
+   * the preload. Returns the unsubscribe.
+   */
+  onRepositoryDropped?(listener: (paths: string[]) => void): () => void
   refresh(): Promise<RepositorySnapshot>
   runAction(action: GitAction): Promise<ActionResult>
   fileView(path: string): Promise<FileView>
@@ -833,8 +1215,64 @@ export interface DesktopAPI {
    * producing the steps.
    */
   onSubmitStackProgress?: (listener: (progress: PublishProgress | null) => void) => () => void
+  /**
+   * Subscribes to the running merge's own progress. A merge waits on GitHub's background
+   * result, so the dialog cannot poll for it: the read queues behind the action itself.
+   */
+  onMergeProgress?: (listener: (progress: MergeProgress | null) => void) => () => void
+  /**
+   * Read-only: what GitHub now reports for merge requests made earlier, including requests it
+   * is still running and pull requests it dropped from a merge queue. It submits nothing.
+   */
+  mergeStatus?: () => Promise<MergeStatus | null>
   reconciliationPreview?: (stackKey: string) => Promise<ReconciliationPreview>
   pullRequest(number: number): Promise<PullRequest & { body: string }>
+  /** The review workspace headline: one pull request plus the stack layers around it. */
+  reviewHeadline?(number: number, requestId?: string): Promise<ReviewHeadline>
+  /** Every file of one pull request, read from GitHub rather than the working tree. */
+  reviewFiles?(number: number, requestId?: string): Promise<ReviewFileSet>
+  reviewCommits?(number: number, requestId?: string): Promise<ReviewCommitSet>
+  /** Locally recorded viewed files, bound to the head they were read at. */
+  reviewViewed?(number: number): Promise<ReviewViewedRecord | null>
+  reviewSetViewed?(record: ReviewViewedRecord): Promise<ReviewViewedRecord>
+  /** Threads and the viewer's permissions for one pull request, read from GitHub. */
+  reviewThreads?(number: number, requestId?: string): Promise<ReviewThreadRead>
+  /** Locally recorded pending comments, journalled beside the repository. */
+  reviewDrafts?(number: number): Promise<ReviewDraftRecord | null>
+  reviewSetDrafts?(record: ReviewDraftRecord): Promise<ReviewDraftRecord>
+  /**
+   * Where each pending draft's lines sit at the comparison on screen now. The
+   * view marks a stale draft before anybody presses submit; the main process
+   * revalidates again at the write boundary, so this is a warning, not the gate.
+   */
+  reviewResolveDrafts?(
+    number: number,
+    drafts: ReviewDraft[],
+  ): Promise<ReviewDraftResolution[]>
+  /**
+   * Writes every pending comment as one review. The anchors are revalidated in
+   * the main process, so a draft that no longer names its line refuses the whole
+   * submission rather than being posted elsewhere, and the comparison travels
+   * with it so a pull request that moved since is refused rather than
+   * re-anchored onto a revision the reviewer never read.
+   */
+  reviewSubmit?(number: number, submission: ReviewSubmission): Promise<ReviewMutationResult>
+  reviewReply?(number: number, threadId: string, body: string): Promise<ReviewMutationResult>
+  reviewSetResolved?(number: number, threadId: string, resolved: boolean): Promise<ReviewMutationResult>
+  reviewHistory?(number: number, requestId?: string): Promise<ReviewHistory>
+  reviewHistoryDiff?(
+    number: number,
+    fromOid: string,
+    requestId?: string,
+  ): Promise<ReviewHistoryDiff>
+  reviewClearHistory?(number: number): Promise<ReviewHistory>
+  /** The detailed checks behind one pull request, with its own freshness and permissions. */
+  pullRequestChecks?: (
+    number: number,
+    options?: { headSha?: string | null; base?: string | null; force?: boolean },
+  ) => Promise<PullRequestChecksReport>
+  /** Reruns one Actions workflow run behind a pull request's checks. */
+  rerunPullRequestCheck?: (number: number, runId: number) => Promise<PullRequestChecksReport>
   listNativeStacks?: () => Promise<NativeStack[]>
   createNativeStack?: (pullRequests: number[]) => Promise<NativeStack>
   addPullRequestsToNativeStack?: (
@@ -855,11 +1293,65 @@ export interface DesktopAPI {
     relation: IssueLinkRelation,
     action: 'link' | 'unlink',
   ) => Promise<IssueLinkPreview>
+  /** GitHub freshness for the open repository; never performs a read. */
+  remoteStatus?(): Promise<RemoteFreshness>
+  /** Tells the main process whether the window is focused and visible. */
+  reportActivity?(activity: SyncActivity): Promise<void>
+  /** Snapshots pushed by the background watcher and refresh timers. */
+  onBackgroundSnapshot?(listener: (snapshot: RepositorySnapshot) => void): () => void
+  /** Open issues pushed by the low-frequency inbox refresh. */
+  onBackgroundIssues?(listener: (issues: RepositoryIssue[]) => void): () => void
+  /** Freshness transitions, including offline and rate-limit suspension. */
+  onRemoteStatus?(listener: (freshness: RemoteFreshness) => void): () => void
+  /** Retires a listed high-impact mutation the person has taken over. */
+  dismissPendingMutation?(id: string): Promise<void>
   openExternal(url: string): Promise<void>
   /** Cancel an in-flight read by the request id the caller supplied. */
   cancel(requestId: string): Promise<void>
   gitRuntimeStatus(): Promise<GitRuntimeStatus>
   setSystemGit(enabled: boolean): Promise<GitRuntimeStatus>
+  /** Status only: the account's state, permissions, and an opaque credential reference. */
+  githubAccountStatus?(): Promise<GitHubAccountStatus>
+  /** Starts GitHub App device sign-in and returns the one-time code to enter in a browser. */
+  startGitHubSignIn?(): Promise<GitHubAccountStatus>
+  /** Ends a pending sign-in without affecting an already stored credential. */
+  cancelGitHubSignIn?(): Promise<GitHubAccountStatus>
+  /** Removes the credential this application owns. Local repositories are untouched. */
+  signOutOfGitHub?(): Promise<GitHubAccountStatus>
+  /**
+   * Subscribes to account changes pushed by a running sign-in, and returns the
+   * unsubscribe. The renderer reads status rather than polling a long sign-in.
+   */
+  onGitHubAccount?: (listener: (status: GitHubAccountStatus) => void) => () => void
+  /**
+   * The validated settings this computer is running with, plus the keys policy
+   * has locked and any value that was refused. Main owns the file; the renderer
+   * never chooses a path or writes one.
+   */
+  settings?(): Promise<SettingsSnapshot>
+  /** Applies a partial change. Refuses a locked key before writing anything. */
+  updateSettings?(patch: SettingsPatch): Promise<SettingsSnapshot>
+  /** Restores every setting to its default. Touches no repository. */
+  resetSettings?(): Promise<SettingsSnapshot>
+  /**
+   * The advanced capability report. Main runs a fixed allowlist of commands and
+   * stamps each result, so the window states what was measured and not what it
+   * assumes. It takes no argument and accepts none.
+   */
+  diagnostics?(): Promise<DiagnosticReport>
+  /** What a support bundle would contain, and what redaction removed. */
+  supportBundlePreview?(): Promise<SupportBundlePreview>
+  /**
+   * Writes the bundle where the user chose. The path comes from the save
+   * dialog main opened, never from the renderer.
+   */
+  exportSupportBundle?(previewId: string): Promise<SupportBundleExport>
+  /**
+   * Opens a file in the configured editor. Main resolves the tool from settings
+   * and checks the path is inside the active repository; the renderer supplies
+   * neither a command nor an absolute path.
+   */
+  openInEditor?(relativePath: string): Promise<{ opened: boolean; reason: string }>
 }
 
 export type GitCapability = 'referenceTransactions' | 'rebaseUpdateRefs'

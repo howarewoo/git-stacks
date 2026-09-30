@@ -1,12 +1,14 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import { promises as fs } from 'node:fs'
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import { test } from 'node:test'
 import { getCommitDiff, getFileView, getHistory, getSnapshot } from '../src/main/git'
+import { getIndexEntries } from '../src/main/capabilities'
+import { withGitRuntime, type GitRuntimeRecord } from '../src/main/git-runtime'
 import {
   getBranchConfigs,
   isCancelled,
@@ -18,7 +20,7 @@ import {
 } from '../src/main/git-core'
 import { RepositoryOperations } from '../src/main/repository-operations'
 import { RequestRegistry } from '../src/main/request-registry'
-import { windowSlice } from '../src/renderer/src/lib/list-window'
+import { pageForIndex, windowBounds, windowSlice } from '../src/renderer/src/lib/list-window'
 import { createRequestGate } from '../src/renderer/src/lib/request-gate'
 import {
   MAX_DIFF_BYTES,
@@ -115,7 +117,7 @@ test('a repository switch waits for a cancelled read instead of rejecting the sw
     order.push('obsolete read')
   }, controller.signal)
   controller.abort()
-  const switched = operations.switchRepository(async () => {
+  const switched = operations.switchRepository('/tmp/next-repository', async () => {
     order.push('new repository')
   })
   release.resolve()
@@ -163,7 +165,7 @@ test('a cancelled file view keeps the next repository operation behind all its f
     ])
     assert.equal(started, 'reading')
     controller.abort()
-    const next = operations.switchRepository(async () => {
+    const next = operations.switchRepository('/tmp/next-repository', async () => {
       switched = true
     })
     await delay(150)
@@ -279,18 +281,151 @@ test('a huge changed-file listing is bounded and reported instead of hanging', a
   }
 })
 
-test('snapshot enriches changed files across multiple bounded pathspec batches', async () => {
+test('a bulk changed-file listing still classifies submodules', async () => {
   const { root, repo, git } = await repository()
   try {
+    // Enough changed paths that a snapshot reads the whole index and the whole
+    // HEAD tree once instead of forking a process per batch of pathspecs.
     const paths = Array.from({ length: 1100 }, (_, index) => `tracked-${index}.txt`)
     await Promise.all(paths.map((filePath) => writeFile(join(repo, filePath), 'before\n')))
     git('add', '.')
     git('commit', '-m', 'Tracked files')
+    // A nested repository is recorded as a gitlink. `staged` is only in the
+    // index, `indexed` is in both, and `headOnly` left the index while HEAD
+    // still records it, so each one has to be classified by a different read.
+    const nested = async (dir: string, marker: string) => {
+      const inner = join(repo, dir)
+      await mkdir(inner, { recursive: true })
+      const run = (...args: string[]) =>
+        execFileSync('git', ['-C', inner, ...args], { encoding: 'utf8' })
+      run('init', '-b', 'main')
+      run('config', 'user.name', 'Perf fixture')
+      run('config', 'user.email', 'perf@example.invalid')
+      // Distinct content keeps the three commits distinct, so Git reports the
+      // removed gitlink as a deletion rather than pairing it with the added
+      // one as a rename and hiding it from the listing under its new path.
+      await writeFile(join(inner, 'inner.txt'), `${marker}\n`)
+      run('add', '.')
+      run('commit', '-m', marker)
+      return run
+    }
+    const indexed = await nested('vendor/indexed', 'indexed')
+    await nested('vendor/headOnly', 'head-only')
+    git('add', '.')
+    git('commit', '-m', 'Add gitlinks')
+    // Staged but never committed, so only the index records this gitlink.
+    await nested('vendor/staged', 'staged')
+    git('add', 'vendor/staged')
+    // Every one of the 1100 tracked files is now a changed path, which is what
+    // pushes the snapshot onto the whole-repository read. Moving the inner
+    // repository past the recorded commit makes the index gitlink a changed
+    // path, and dropping the other from the index leaves a staged deletion that
+    // only `HEAD` still records as a gitlink.
     await Promise.all(paths.map((filePath) => writeFile(join(repo, filePath), 'after\n')))
+    await writeFile(join(repo, 'vendor/indexed/second.txt'), 'second\n')
+    indexed('add', '.')
+    indexed('commit', '-m', 'Advance')
+    git('rm', '--cached', '-q', 'vendor/headOnly')
+    await rm(join(repo, 'vendor/headOnly'), { recursive: true, force: true })
+
     const snapshot = await getSnapshot(repo)
-    assert.equal(snapshot.files.length, paths.length)
+    const byPath = new Map(snapshot.files.map((file) => [file.path, file]))
     assert.equal(snapshot.limits.filesTruncated, false)
-    assert.ok(snapshot.files.every((file) => !file.submodule && !file.sparseExcluded))
+    assert.ok(byPath.has('vendor/staged'), 'the staged gitlink is listed')
+    assert.ok(byPath.has('vendor/indexed'), 'the changed index gitlink is listed')
+    assert.ok(byPath.has('vendor/headOnly'), 'the staged deletion of the gitlink is listed')
+    assert.equal(
+      byPath.get('vendor/staged')?.submodule,
+      true,
+      'only the index records this gitlink, so the index read must classify it',
+    )
+    assert.equal(
+      byPath.get('vendor/indexed')?.submodule,
+      true,
+      'a gitlink in the index stays a submodule in a bulk listing',
+    )
+    assert.equal(
+      byPath.get('vendor/headOnly')?.submodule,
+      true,
+      'a gitlink that left the index is still a submodule while HEAD records it',
+    )
+    assert.equal(
+      byPath.get('tracked-0.txt')?.submodule,
+      undefined,
+      'an ordinary changed file is not reported as a submodule',
+    )
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('a truncated whole-index read still classifies a path whose stages the cap split', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'git-stacks-cap-'))
+  try {
+    // An unmerged path occupies one `ls-files` record per stage, so a cap
+    // landing on a NUL boundary can leave the straddling path half-read. The
+    // double answers a whole-index read with stage 1 followed by a flood the
+    // cap cuts, and answers a pathspec read with the correct records for the
+    // paths it was asked about — which is all real Git ever returns.
+    const stages =
+      `H 100644 ${'a'.repeat(40)} 1\tvendor/lib\0` +
+      `H 160000 ${'b'.repeat(40)} 2\tvendor/lib\0` +
+      `H 160000 ${'c'.repeat(40)} 3\tvendor/lib\0`
+    const log = join(root, 'invocations.log')
+    const module = join(root, 'double.mjs')
+    await writeFile(
+      module,
+      `import { appendFileSync, writeSync } from 'node:fs'
+const args = process.argv.slice(2)
+appendFileSync(${JSON.stringify(log)}, JSON.stringify(args) + '\\n')
+const stages = ${JSON.stringify(stages)}
+// The caller kills the child when its cap is reached, closing the pipe. Real
+// Git dies on the resulting SIGPIPE; this double stops instead.
+const put = (data) => {
+  try {
+    writeSync(1, data)
+  } catch {
+    process.exit(0)
+  }
+}
+if (args[0] === '--literal-pathspecs') {
+  const wanted = new Set(args.slice(6))
+  const kept = stages
+    .split('\\0')
+    .filter(Boolean)
+    .filter((record) => wanted.has(record.slice(record.indexOf('\\t') + 1)))
+  put(kept.length ? kept.join('\\0') + '\\0' : '')
+} else {
+  put(stages.slice(0, stages.indexOf('\\0') + 1))
+  const chunk = Buffer.alloc(1 << 16, 0x78)
+  for (let index = 0; index < 160; index += 1) put(chunk)
+}
+`,
+    )
+    // The record stream carries NUL bytes, so it lives in a module and an ASCII
+    // shim launches it.
+    const shim = join(root, 'git')
+    await writeFile(shim, `#!/bin/sh\nexec "${process.execPath}" "${module}" "$@"\n`)
+    await chmod(shim, 0o755)
+    await writeFile(log, '')
+
+    // More than the batch size, so the whole-repository read is the strategy.
+    const paths = ['vendor/lib', ...Array.from({ length: 1_100 }, (_, i) => `filler/${i}.txt`)]
+    const entries = await withGitRuntime({ executable: shim } as unknown as GitRuntimeRecord, () =>
+      getIndexEntries(root, paths),
+    )
+
+    assert.deepEqual(
+      JSON.parse((await readFile(log, 'utf8')).trim().split('\n')[0]),
+      ['ls-files', '-v', '--stage', '-z'],
+      'the listing is read once for the whole repository',
+    )
+    assert.equal(
+      entries.get('vendor/lib')?.submodule,
+      true,
+      'the later gitlink stage decides the path even though the cap hid it',
+    )
+    assert.equal(entries.size, 1, 'only the path present in the index is reported')
   } finally {
     await rm(root, { recursive: true, force: true })
   }
@@ -637,4 +772,17 @@ test('list windows expand once and keep deep navigation bounded', () => {
   )
   const last = windowSlice(items, 400, 49_600)
   assert.deepEqual([last.visible[0], last.hasMore, last.remaining], [49_600, false, 0])
+})
+
+test('a whole-list jump reveals a window that mounts the row it names', () => {
+  const pageSize = 200
+  // Home and End address the whole list, so the page they pick has to contain the
+  // row they name — including the first row, the last row, and every page edge.
+  for (const index of [0, 1, 199, 200, 201, 399, 400, 401, 49_998, 49_999]) {
+    const { start, end } = windowBounds(pageForIndex(index, pageSize), pageSize)
+    assert.ok(index >= start && index < end, `row ${index} is outside [${start}, ${end})`)
+  }
+  assert.deepEqual(windowBounds(pageForIndex(0, pageSize), pageSize), { start: 0, end: 200 })
+  const lastPage = windowBounds(pageForIndex(49_999, pageSize), pageSize)
+  assert.deepEqual([lastPage.start, lastPage.end], [49_600, 50_000])
 })

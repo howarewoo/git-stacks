@@ -168,6 +168,7 @@ function recoveryApi(mode: string): WorkflowStackAPI {
           }
         : journal,
     onSubmitStackProgress: () => noop,
+    onMergeProgress: () => noop,
   }
 }
 

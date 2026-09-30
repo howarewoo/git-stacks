@@ -4,6 +4,7 @@ import {
   GitBranch,
   GitCommitHorizontal,
   GitMerge,
+  ExternalLink,
   Layers,
   LoaderCircle,
   RefreshCw,
@@ -22,7 +23,15 @@ import { Button } from './ui/button'
 import { SegmentedControl } from './ui/segmented-control'
 import { InlineAlert } from './ui/surface'
 import { Select } from './ui/select'
-import { sortBranchesByUpdatedAt } from '../lib/branches'
+import { describeBranchRow, sortBranchesByUpdatedAt } from '../lib/branches'
+import {
+  claimsRovingKey,
+  clampRovingIndex,
+  rovingAction,
+  rovingTabIndex,
+  rovingTarget,
+} from '../lib/tree-navigation'
+import { WORKSPACE_VIEW_HEADING_ID } from './workspace-navigation'
 import { workflowError, type RunAction, type WorkflowRequest } from './workflow-dialog'
 import { PhaseStatus, WorkflowActions } from './workflow-composition'
 import { partialProgress, workflowPhase } from './workflow-policy'
@@ -281,11 +290,14 @@ export function FileInspector({
   onClose,
   onResolveConflict,
   actionError,
+  onOpenInEditor,
 }: Omit<CommonProps, 'onRequest'> & {
   path: string
   onClose: () => void
   onResolveConflict: (path: string) => void
   actionError: string | null
+  /** Opens the file in the editor configured in Settings. */
+  onOpenInEditor?: (relativePath: string) => void
 }) {
   const [file, setFile] = React.useState<FileView | null>(null)
   const [loading, setLoading] = React.useState(true)
@@ -357,6 +369,22 @@ export function FileInspector({
           </small>
         </div>
         <div className="workflow-row">
+          {onOpenInEditor ? (
+            <Button
+              aria-label="Open in editor"
+              size="icon-sm"
+              variant="ghost"
+              disabled={busy || loading || Boolean(file?.lfs)}
+              title={
+                file?.lfs
+                  ? 'This is an LFS pointer, not the file contents'
+                  : 'Open this file in the editor configured in Settings'
+              }
+              onClick={() => onOpenInEditor(path)}
+            >
+              <ExternalLink className="size-3.5" />
+            </Button>
+          ) : null}
           <Button
             aria-label="Reload file"
             size="icon-sm"
@@ -617,6 +645,19 @@ export function HistoryView({
       ),
     [commits, search],
   )
+  // The commit list is one composite widget: a single Tab stop with arrow-key
+  // movement, matching the branch tree and the stack rail.
+  const [activeCommitIndex, setActiveCommitIndex] = React.useState(0)
+  const commitListRef = React.useRef<HTMLDivElement>(null)
+  const focusCommit = (index: number) => {
+    const row = commitListRef.current?.querySelectorAll<HTMLButtonElement>('.history-row')[index]
+    if (!row) return
+    setActiveCommitIndex(index)
+    row.focus()
+  }
+  React.useEffect(() => {
+    setActiveCommitIndex((index) => clampRovingIndex(index, visible.length))
+  }, [visible.length])
   const actionable =
     !busy &&
     !snapshot.operation &&
@@ -629,7 +670,9 @@ export function HistoryView({
     <div className="history-view">
       <div className="list-toolbar">
         <div className="list-title-group">
-          <h1>History</h1>
+          <h1 id={WORKSPACE_VIEW_HEADING_ID} tabIndex={-1}>
+            History
+          </h1>
           <span className="list-subtitle">
             {refName} · commits {offset + 1}–{offset + commits.length}
             {hasMore ? ' (more available)' : ''}
@@ -675,25 +718,41 @@ export function HistoryView({
           {error}
         </p>
       ) : null}
-      <div className="history-list" role="group" aria-label="Commit history">
-        {visible.map((commit) => (
-          <button
-            className={`history-row ${selected?.oid === commit.oid ? 'history-row-selected' : ''}`}
-            key={commit.oid}
-            disabled={diffLoading}
-            onClick={() => setSelected(commit)}
-            aria-pressed={selected?.oid === commit.oid}
-          >
-            <GitCommitHorizontal className="size-4" />
-            <span className="history-copy">
-              <strong>{commit.subject}</strong>
-              <small>
-                {commit.author} · {new Date(commit.date).toLocaleDateString()}
-              </small>
-            </span>
-            <code className="history-oid">{commit.oid.slice(0, 8)}</code>
-          </button>
-        ))}
+      <div className="history-list">
+        <div className="history-entries" role="list" aria-label="Commits" ref={commitListRef}>
+          {visible.map((commit, commitIndex) => (
+            <div className="history-item" key={commit.oid} role="listitem">
+              <button
+                aria-current={selected?.oid === commit.oid ? 'true' : undefined}
+                className={`history-row ${selected?.oid === commit.oid ? 'history-row-selected' : ''}`}
+                disabled={diffLoading}
+                onClick={() => setSelected(commit)}
+                onFocus={() => setActiveCommitIndex(commitIndex)}
+                onKeyDown={(event) => {
+                  // Only unmodified keys are claimed; a chord belongs to the global
+                  // shortcut dispatcher.
+                  if (!claimsRovingKey(event)) return
+                  const action = rovingAction(event.key)
+                  if (!action) return
+                  const target = rovingTarget(action, commitIndex, visible.length)
+                  if (target === null) return
+                  event.preventDefault()
+                  focusCommit(target)
+                }}
+                tabIndex={rovingTabIndex(commitIndex, activeCommitIndex)}
+              >
+                <GitCommitHorizontal className="size-4" />
+                <span className="history-copy">
+                  <strong>{commit.subject}</strong>
+                  <small>
+                    {commit.author} · {new Date(commit.date).toLocaleDateString()}
+                  </small>
+                </span>
+                <code className="history-oid">{commit.oid.slice(0, 8)}</code>
+              </button>
+            </div>
+          ))}
+        </div>
         {loading ? (
           <p className="workflow-loading" role="status">
             <LoaderCircle className="size-4 animate-spin" />
@@ -859,18 +918,16 @@ export function StackView({
         : (groups.keys().next().value ?? null)
   const members = root ? (groups.get(root) ?? []) : []
   const ordered = React.useMemo(() => sortBranchesByUpdatedAt(members), [members])
-  const memberWindow = useListWindow(
-    React.useMemo(
-      () =>
-        ordered.filter((branch) =>
-          `${branch.name} ${branch.pr?.title ?? ''}`
-            .toLowerCase()
-            .includes(search.trim().toLowerCase()),
-        ),
-      [ordered, search],
-    ),
-    LIST_PAGE_SIZE,
+  const visibleMembers = React.useMemo(
+    () =>
+      ordered.filter((branch) =>
+        `${branch.name} ${branch.pr?.title ?? ''}`
+          .toLowerCase()
+          .includes(search.trim().toLowerCase()),
+      ),
+    [ordered, search],
   )
+  const memberWindow = useListWindow(visibleMembers, LIST_PAGE_SIZE)
   const stale = members.filter(
     (branch) => branch.needsRestack || (branch.parentBehind ?? 0) > 0,
   ).length
@@ -878,11 +935,52 @@ export function StackView({
     (branch) => branch.parent && branch.parentBehind === null && !branch.needsRestack,
   ).length
   const blocked = busy || !!snapshot.operation || !!snapshot.stackOperation
+  // The stack rail is one composite widget, matching the branch tree and the
+  // commit history list: one Tab stop, arrow keys between members.
+  const [activeMemberIndex, setActiveMemberIndex] = React.useState(0)
+  const memberListRef = React.useRef<HTMLDivElement>(null)
+  const focusStackMemberInWindow = (mountedIndex: number) => {
+    const row =
+      memberListRef.current?.querySelectorAll<HTMLButtonElement>('.stack-member-name')[mountedIndex]
+    if (!row) return
+    setActiveMemberIndex(mountedIndex)
+    row.focus()
+  }
+  // Only Home and End address the whole filtered rail, so a target outside the
+  // mounted window is revealed first and focused once it exists, keeping the
+  // rail's single Tab stop with the focus. Arrow keys must never come through
+  // here: they are already in mounted coordinates, and re-basing them by the
+  // window start would send them to the page the reader has already left.
+  const pendingMemberFocus = React.useRef<number | null>(null)
+  const focusStackMemberInList = (listIndex: number) => {
+    const mountedIndex = listIndex - memberWindow.start
+    if (mountedIndex >= 0 && mountedIndex < memberWindow.visible.length) {
+      focusStackMemberInWindow(mountedIndex)
+      return
+    }
+    pendingMemberFocus.current = listIndex
+    memberWindow.revealIndex(listIndex)
+  }
+  // The active member is tracked by its position in the mounted window, so a
+  // sliding window has to re-clamp it or the tree loses its single Tab stop.
+  React.useEffect(() => {
+    setActiveMemberIndex((index) => clampRovingIndex(index, memberWindow.visible.length))
+  }, [memberWindow.start, memberWindow.visible.length])
+  React.useEffect(() => {
+    const pending = pendingMemberFocus.current
+    if (pending === null) return
+    const mountedIndex = pending - memberWindow.start
+    if (mountedIndex < 0 || mountedIndex >= memberWindow.visible.length) return
+    pendingMemberFocus.current = null
+    focusStackMemberInWindow(mountedIndex)
+  }, [memberWindow.start, memberWindow.visible.length])
   return (
     <div className="stacks-view">
       <div className="list-toolbar">
         <div className="list-title-group">
-          <h1>Stacks</h1>
+          <h1 id={WORKSPACE_VIEW_HEADING_ID} tabIndex={-1}>
+            Stacks
+          </h1>
           <span className="list-subtitle">
             {groups.size} local stack{groups.size === 1 ? '' : 's'}
             {snapshot.nativeStacks && snapshot.nativeStacks.length > 0
@@ -1014,15 +1112,56 @@ export function StackView({
             </p>
           ) : null}
           <div
-            className="stack-members"
-            role="group"
             aria-label="Stack branches, children above parents"
+            className="stack-members"
+            ref={memberListRef}
+            role="list"
           >
-            {memberWindow.visible.map((branch) => (
-              <article className="stack-member" key={branch.ref}>
+            {memberWindow.visible.map((branch, memberIndex) => (
+              <div className="stack-member" key={branch.ref} role="listitem">
                 <div className="stack-member-heading">
                   <BranchHoverCard branch={branch}>
-                    <button onClick={() => onSelect(branch)} className="stack-member-name">
+                    <button
+                      aria-label={describeBranchRow({
+                        ahead: branch.ahead,
+                        behind: branch.behind,
+                        checks: branch.pr?.checks ?? null,
+                        current: branch.current,
+                        cycle: false,
+                        missingParent: false,
+                        name: branch.name,
+                        pullRequestNumber: branch.pr?.number ?? null,
+                        remote: branch.remote,
+                        requiresRestack: branch.needsRestack || (branch.parentBehind ?? 0) > 0,
+                        upstream: branch.upstream,
+                      })}
+                      className="stack-member-name"
+                      onClick={() => onSelect(branch)}
+                      onFocus={() => setActiveMemberIndex(memberIndex)}
+                      onKeyDown={(event) => {
+                        // Only unmodified keys are claimed; a chord belongs to the
+                        // global shortcut dispatcher.
+                        if (!claimsRovingKey(event)) return
+                        const action = rovingAction(event.key)
+                        if (!action) return
+                        // Up/Down walk the mounted members in mounted coordinates;
+                        // Home and End name the first and last member of the whole
+                        // filtered rail, which can sit outside the mounted window.
+                        const wholeList = action === 'first' || action === 'last'
+                        const target = wholeList
+                          ? rovingTarget(
+                              action,
+                              memberIndex + memberWindow.start,
+                              visibleMembers.length,
+                            )
+                          : rovingTarget(action, memberIndex, memberWindow.visible.length)
+                        if (target === null) return
+                        event.preventDefault()
+                        if (wholeList) focusStackMemberInList(target)
+                        else focusStackMemberInWindow(target)
+                      }}
+                      tabIndex={rovingTabIndex(memberIndex, activeMemberIndex)}
+                    >
                       <GitBranch className="size-4" />
                       <strong>{branch.name}</strong>
                       <ChevronRight className="size-3.5" />
@@ -1133,17 +1272,17 @@ export function StackView({
                 ) : (
                   <p className="workflow-note">No pull request. Publish the stack to create one.</p>
                 )}
-              </article>
+              </div>
             ))}
-            <ListWindowMore
-              pageSize={LIST_PAGE_SIZE}
-              remaining={memberWindow.remaining}
-              previous={memberWindow.hasPrevious}
-              noun="stack branches"
-              onReveal={memberWindow.reveal}
-              onPrevious={memberWindow.retreat}
-            />
           </div>
+          <ListWindowMore
+            pageSize={LIST_PAGE_SIZE}
+            remaining={memberWindow.remaining}
+            previous={memberWindow.hasPrevious}
+            noun="stack branches"
+            onReveal={memberWindow.reveal}
+            onPrevious={memberWindow.retreat}
+          />
         </>
       )}
     </div>

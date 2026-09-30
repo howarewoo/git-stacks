@@ -28,6 +28,7 @@ import { EmptyState, InlineAlert } from './ui/surface'
 import { FileInspector } from './repository-views'
 import { PullRequestHoverCard } from './repository-hover-cards'
 import { cn } from '../lib/utils'
+import { WORKSPACE_VIEW_HEADING_ID } from './workspace-navigation'
 import {
   checkLabel,
   checksVariant,
@@ -126,6 +127,7 @@ export function ChangesView({
   actionError,
   onStash,
   onResolveConflict,
+  onOpenInEditor,
 }: {
   snapshot: RepositorySnapshot
   groups: ChangeGroups
@@ -143,6 +145,8 @@ export function ChangesView({
   onStash: () => void
   onResolveConflict: (path: string) => void
   actionError: string | null
+  /** Opens a file in the editor configured in Settings. */
+  onOpenInEditor?: (relativePath: string) => void
 }) {
   const stagedWindow = useListWindow(groups.visibleStaged)
   const unstagedWindow = useListWindow(groups.visibleUnstaged)
@@ -216,7 +220,9 @@ export function ChangesView({
     <div className="changes-view">
       <div className="list-toolbar">
         <div className="list-title-group">
-          <h1>Working changes</h1>
+          <h1 id={WORKSPACE_VIEW_HEADING_ID} tabIndex={-1}>
+            Working changes
+          </h1>
           <span className="list-subtitle">
             {snapshot.files.length} file{snapshot.files.length === 1 ? '' : 's'}
           </span>
@@ -378,6 +384,7 @@ export function ChangesView({
           onClose={() => onInspect(null)}
           onResolveConflict={onResolveConflict}
           actionError={actionError}
+          onOpenInEditor={onOpenInEditor}
         />
       ) : null}
       <form className="commit-panel" onSubmit={onSubmitCommit}>
@@ -487,7 +494,9 @@ export function PullRequestListView({
     <div className="pull-requests-view">
       <div className="list-toolbar">
         <div className="list-title-group">
-          <h1>Pull requests</h1>
+          <h1 id={WORKSPACE_VIEW_HEADING_ID} tabIndex={-1}>
+            Pull requests
+          </h1>
           <span className="list-subtitle">
             {snapshot.github.available ? `${pullRequests.length} shown` : 'GitHub data unavailable'}
           </span>
@@ -601,7 +610,9 @@ export function StashesView({
     <div className="stashes-view">
       <div className="list-toolbar">
         <div className="list-title-group">
-          <h1>Stashes</h1>
+          <h1 id={WORKSPACE_VIEW_HEADING_ID} tabIndex={-1}>
+            Stashes
+          </h1>
           <span className="list-subtitle">{snapshot.stashes.length} saved</span>
         </div>
         <Button
@@ -757,7 +768,9 @@ export function DiagnosticsView({ snapshot }: { snapshot: RepositorySnapshot }) 
     <div className="diagnostics-view">
       <div className="list-toolbar">
         <div className="list-title-group">
-          <h1>Diagnostics</h1>
+          <h1 id={WORKSPACE_VIEW_HEADING_ID} tabIndex={-1}>
+            Diagnostics
+          </h1>
           <span className="list-subtitle">
             {report.filter((entry) => entry.state === 'supported').length} of {report.length} fully
             supported

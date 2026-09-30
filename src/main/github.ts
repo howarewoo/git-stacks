@@ -1,5 +1,7 @@
 import type { NativeStack, PullRequest, RepositoryIssue } from '../shared/types'
+import { summariseCheckRollupState } from '../shared/pull-request-checks'
 import {
+  CommandCancelled,
   commandCode,
   commandDetail,
   getConfigValue,
@@ -8,7 +10,14 @@ import {
   parseRemote,
   runGit,
 } from './git-core'
-import { GitHubTransportError, githubTransport } from './github-transport'
+import {
+  type GitHubHostContext,
+  hostTransport,
+  observeHostCapability,
+  remoteHostContext,
+  type NativeStackCapabilityReason,
+} from './github-host'
+import { GitHubTransportError, type GitHubErrorKind } from './github-transport'
 import {
   listPullRequestStacks,
   loadRepositoryNativeStacks,
@@ -19,11 +28,22 @@ export interface GitHubResult {
   pullRequests: PullRequest[]
   available: boolean
   message: string
+  /**
+   * Why the read could not answer, in typed terms. A caller that needs
+   * authoritative data fails closed on this instead of guessing.
+   */
+  failure?: GitHubFailure
   /** True when a pull request's head repository is this repository's origin. */
   sameRepository: (value: unknown) => boolean
   nativeStacks?: NativeStack[]
   nativeStackPreviewAvailable?: boolean
   nativeStackMessage?: string
+  /**
+   * What the native stacks probe established. Only `endpoint-missing` says the
+   * host does not serve the resource; anything else means this build could not
+   * find out, and no caller may turn that into an absence.
+   */
+  nativeStackPreviewReason?: NativeStackCapabilityReason | 'not-applicable'
 }
 
 type PullRequestWithRepository = {
@@ -31,39 +51,21 @@ type PullRequestWithRepository = {
   headRepository: string | null
 }
 
+/**
+ * The compact badge the list rows carry. GitHub's own `statusCheckRollup` aggregate
+ * is read through the same state vocabulary the detailed drill-down uses, so a row can
+ * never claim a cleaner result than the checks behind it. Unreported stays pending.
+ */
 function pullRequestChecks(value: unknown): PullRequest['checks'] {
   const entries = Array.isArray(value) ? value : value == null ? [] : [value]
   if (entries.length === 0) return 'none'
-  let pending = false
-  let failing = false
-  for (const entry of entries) {
-    if (!isRecord(entry)) {
-      pending = true
-      continue
-    }
-    const raw = entry.conclusion ?? entry.state ?? entry.status
-    const state = typeof raw === 'string' ? raw.toUpperCase() : ''
-    if (
-      !state ||
-      ['PENDING', 'QUEUED', 'IN_PROGRESS', 'WAITING', 'REQUESTED', 'EXPECTED'].includes(state)
-    ) {
-      pending = true
-    } else if (
-      [
-        'FAILURE',
-        'ERROR',
-        'CANCELLED',
-        'TIMED_OUT',
-        'ACTION_REQUIRED',
-        'STARTUP_FAILURE',
-        'STALE',
-      ].includes(state)
-    ) {
-      failing = true
-    }
-  }
-  if (failing) return 'failing'
-  if (pending) return 'pending'
+  const summaries = entries.map((entry) =>
+    isRecord(entry)
+      ? summariseCheckRollupState(entry.state ?? entry.conclusion ?? entry.status)
+      : ('pending' as const),
+  )
+  if (summaries.includes('failing')) return 'failing'
+  if (summaries.includes('pending')) return 'pending'
   return 'passing'
 }
 
@@ -162,27 +164,48 @@ export function githubErrorMessage(error: unknown): string {
   return `GitHub metadata unavailable: ${detail}`
 }
 
-function unavailable(message: string): GitHubResult {
+/** The typed shape of a read that could not answer. */
+export interface GitHubFailure {
+  kind: GitHubErrorKind
+  detail: string
+}
+
+function typedFailure(error: unknown): GitHubFailure | undefined {
+  if (error instanceof GitHubTransportError) return { kind: error.kind, detail: error.detail }
+  if (isCancelled(error)) return undefined
+  return { kind: 'unknown', detail: githubErrorMessage(error) }
+}
+
+export function unavailableGitHubResult(message: string, failure?: GitHubFailure): GitHubResult {
   return {
     pullRequests: [],
+    failure,
     available: false,
     message,
     sameRepository: () => false,
     nativeStacks: [],
     nativeStackPreviewAvailable: false,
+    nativeStackPreviewReason: 'unreachable',
     nativeStackMessage: message,
   }
 }
+const unavailable = unavailableGitHubResult
 
 /** Read open issues separately from PR workflows; paging one connection never truncates the other. */
 export async function getGitHubIssues(
   repoPath: string,
   originUrl: string | null,
+  signal?: AbortSignal,
 ): Promise<{ issues: RepositoryIssue[]; message: string }> {
   const remote = parseRemote(originUrl)
-  if (!remote || remote.host !== 'github.com') {
-    return { issues: [], message: 'Issues unavailable: a github.com origin is required' }
+  const host = remoteHostContext(remote)
+  if (!remote || !host) {
+    return {
+      issues: [],
+      message: `Issues unavailable: the origin remote is on ${remote ? remote.host : 'no GitHub host'}`,
+    }
   }
+  const transport = hostTransport(host)
   const query = `query($owner: String!, $name: String!, $endCursor: String) {
     repository(owner: $owner, name: $name) {
       issues(first: 100, after: $endCursor, states: OPEN, orderBy: {field: UPDATED_AT, direction: DESC}) {
@@ -195,11 +218,16 @@ export async function getGitHubIssues(
     const issues: RepositoryIssue[] = []
     let endCursor: string | null = null
     for (;;) {
-      const page: Record<string, unknown> = await githubTransport().graphql(query, {
-        owner: remote.owner,
-        name: remote.name,
-        endCursor,
-      })
+      if (signal?.aborted) throw new CommandCancelled()
+      const page: Record<string, unknown> = await transport.graphql(
+        query,
+        {
+          owner: remote.owner,
+          name: remote.name,
+          endCursor,
+        },
+        { signal },
+      )
       const repository = isRecord(page) ? page.repository : null
       const connection = isRecord(repository) ? repository.issues : null
       if (!isRecord(connection) || !Array.isArray(connection.nodes)) {
@@ -228,8 +256,10 @@ export async function getGitHubIssues(
         break
       endCursor = next
     }
+    if (signal?.aborted) throw new CommandCancelled()
     return { issues, message: '' }
   } catch (error) {
+    if (signal?.aborted || isCancelled(error)) throw error
     return { issues: [], message: githubErrorMessage(error) }
   }
 }
@@ -271,22 +301,20 @@ export async function getGitHubData(
   signal?: AbortSignal,
 ): Promise<GitHubResult> {
   const remote = parseRemote(originUrl)
+  const host = remoteHostContext(remote)
   if (!originUrl) return unavailable('GitHub metadata unavailable: no origin remote is configured')
-  if (!remote || remote.host !== 'github.com') {
+  if (!remote || !host) {
     return unavailable(
-      'PR integration requires a github.com origin remote. Local Git actions remain available.',
+      `PR integration requires a GitHub origin remote; this repository's origin is on ${remote ? remote.host : 'no host'}. Local Git actions remain available.`,
     )
   }
+  const transport = hostTransport(host)
   try {
-    const query = `query($owner: String!, $name: String!, $endCursor: String) {
+    const query = (conservative: boolean) => `query($owner: String!, $name: String!, $endCursor: String) {
       repository(owner: $owner, name: $name) {
         pullRequests(first: 100, after: $endCursor, states: OPEN, orderBy: {field: UPDATED_AT, direction: DESC}) {
           nodes {
-            number title url headRefName headRefOid baseRefName isDraft state
-            reviewDecision mergeStateStatus
-            headRepository { nameWithOwner }
-            mergeCommit { oid }
-            commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
+            ${pullRequestFields(conservative)}
           }
           pageInfo { hasNextPage endCursor }
         }
@@ -296,12 +324,26 @@ export async function getGitHubData(
     const pullRequests: PullRequest[] = []
     const headRepositories: (string | null)[] = []
     let endCursor: string | null = null
+    // The first page is asked for in full and, if the host's schema refused one
+    // of the recent fields, every page after it is asked for the same narrower
+    // way: a host does not gain those fields halfway through a listing.
+    let conservative = false
     for (;;) {
-      const page: Record<string, unknown> = await githubTransport().graphql(query, {
+      if (signal?.aborted) throw new CommandCancelled()
+      const variables = {
         owner: remote.owner,
         name: remote.name,
         endCursor,
-      })
+      }
+      let page: Record<string, unknown>
+      try {
+        page = await transport.graphql(query(conservative), variables, { signal })
+      } catch (error) {
+        if (conservative || !isSchemaRefusal(error)) throw error
+        observeGraphqlFailure(host, error)
+        conservative = true
+        page = await transport.graphql(query(true), variables, { signal })
+      }
       const repository = isRecord(page) ? page.repository : null
       const connection = isRecord(repository) ? repository.pullRequests : null
       const nodes =
@@ -327,6 +369,7 @@ export async function getGitHubData(
     }
     const known = new Set(pullRequests.map((entry) => entry.number))
     for (const number of await trackedPullRequestNumbers(repoPath, signal)) {
+      if (signal?.aborted) throw new CommandCancelled()
       if (known.has(number)) continue
       const exact = await getPullRequest(repoPath, number, signal)
       pullRequests.push(exact)
@@ -338,26 +381,93 @@ export async function getGitHubData(
       if (typeof value !== 'number' || !Number.isInteger(value)) return false
       return headRepositories[value]?.toLowerCase() === originFullName
     }
-    const nativeStacksResult = await loadRepositoryNativeStacks(originUrl, pullRequests)
+    const nativeStacksResult = await loadRepositoryNativeStacks(originUrl, pullRequests, signal)
+    const where = host.dotcom ? 'GitHub' : host.host
     return {
       pullRequests,
       available: true,
       message:
         pullRequests.length === 0
-          ? 'GitHub metadata available; no open or tracked pull requests'
-          : `GitHub metadata available; ${pullRequests.length} pull request${pullRequests.length === 1 ? '' : 's'}`,
+          ? `${where} metadata available; no open or tracked pull requests`
+          : `${where} metadata available; ${pullRequests.length} pull request${pullRequests.length === 1 ? '' : 's'}`,
       sameRepository,
       nativeStacks: nativeStacksResult.nativeStacks,
       nativeStackPreviewAvailable: nativeStacksResult.available,
+      nativeStackPreviewReason: nativeStacksResult.reason,
       nativeStackMessage: nativeStacksResult.message,
     }
   } catch (error) {
-    if (isCancelled(error)) throw error
-    return unavailable(githubErrorMessage(error))
+    if (signal?.aborted || isCancelled(error)) throw new CommandCancelled()
+    observeGraphqlFailure(host, error)
+    return unavailable(githubErrorMessage(error), typedFailure(error))
   }
 }
 
-/** Load one canonical pull request, including its current body, from origin. */
+/**
+ * Records what a GraphQL refusal actually was, against the host that produced
+ * it. A schema that does not carry the fields this build queries is a host
+ * without that capability; a rejected credential and an unanswered host are
+ * recorded as themselves, so neither is ever reported as an unsupported one.
+ */
+function observeGraphqlFailure(host: GitHubHostContext, error: unknown): void {
+  const detail = error instanceof GitHubTransportError ? error.detail : String(error)
+  const state =
+    error instanceof GitHubTransportError && error.kind === 'network'
+      ? 'unreachable'
+      : error instanceof GitHubTransportError &&
+          (error.kind === 'unauthorized' || error.kind === 'forbidden')
+        ? 'unauthenticated'
+        : /cannot query field|doesn't exist on type|could not resolve to|unknown argument|unknown field/iu.test(
+            detail,
+          )
+          ? 'unsupported'
+          : 'unknown'
+  observeHostCapability(host.host, {
+    id: 'graphql',
+    label: 'GraphQL API',
+    state,
+    detail:
+      state === 'unsupported'
+        ? `${host.host} rejected the fields this build queries: ${detail}`
+        : detail,
+  })
+}
+
+/**
+ * True when the host refused the shape of the query rather than its result: a
+ * field or argument its schema does not carry. This is a schema-version fact,
+ * not a credential, rate limit, or network failure, and it is the only refusal
+ * that makes a narrower query worth sending.
+ */
+function isSchemaRefusal(error: unknown): boolean {
+  const detail = error instanceof GitHubTransportError ? error.detail : String(error)
+  return /cannot query field|doesn't exist on type|could not resolve to|unknown argument|unknown field|is not defined by type/iu.test(
+    detail,
+  )
+}
+
+/**
+ * The pull request fields every GitHub host carries, plus the fields only a
+ * recent schema has. `reviewDecision`, `mergeStateStatus`, and a commit's
+ * `statusCheckRollup` are asked for first and dropped when the host refuses
+ * them, so an older Enterprise schema still answers the rest of the pull
+ * request with its merge and check state honestly unknown.
+ */
+function pullRequestFields(conservative: boolean, withBody = false): string {
+  const base = `number title url headRefName headRefOid baseRefName isDraft state headRepository { nameWithOwner } mergeCommit { oid }${withBody ? ' body' : ''}`
+  return conservative
+    ? base
+    : `${base}
+        reviewDecision mergeStateStatus
+        commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }`
+}
+
+/**
+ * Load one canonical pull request, including its current body, from the host
+ * that owns the origin. Only the fields every GitHub host answers are required;
+ * a field a host's schema does not carry is reported as absent rather than
+ * turning the whole pull request into an error.
+ */
 export async function getPullRequest(
   repoPath: string,
   number: number,
@@ -365,29 +475,48 @@ export async function getPullRequest(
 ): Promise<PullRequest & { body: string }> {
   if (!Number.isInteger(number) || number <= 0)
     throw new Error('Pull request number must be a positive integer')
-  const remote = parseRemote(await getConfigValue(repoPath, 'remote.origin.url'))
-  if (!remote || remote.host !== 'github.com')
-    throw new Error('Pull request integration requires a github.com origin remote.')
-  const query = `query($owner: String!, $name: String!, $number: Int!) {
+  const remote = parseRemote(await getConfigValue(repoPath, 'remote.origin.url', signal))
+  if (signal?.aborted) throw new CommandCancelled()
+  const host = remoteHostContext(remote)
+  if (!remote || !host) {
+    throw new Error(
+      `Pull request integration requires a GitHub origin remote; this repository's origin is on ${remote ? remote.host : 'no host'}.`,
+    )
+  }
+  const transport = hostTransport(host)
+  const query = (conservative: boolean) => `query($owner: String!, $name: String!, $number: Int!) {
     repository(owner: $owner, name: $name) {
       pullRequest(number: $number) {
-        number title url headRefName headRefOid baseRefName isDraft state body
-        reviewDecision mergeStateStatus
-        headRepository { nameWithOwner }
-        mergeCommit { oid }
-        commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
+        ${pullRequestFields(conservative, true)}
       }
     }
   }`
   try {
-    const value = await githubTransport().graphql(query, {
+    const variables = {
       owner: remote.owner,
       name: remote.name,
       number,
-    })
+    }
+    const ask = (conservative: boolean) =>
+      transport.graphql(query(conservative), variables, { signal })
+    let value: unknown
+    try {
+      value = await ask(false)
+    } catch (error) {
+      // The host refused a field its schema does not carry. The narrower query
+      // is the same read without the recent fields, so the pull request is
+      // returned with its merge and check state unknown rather than lost.
+      if (!isSchemaRefusal(error)) throw error
+      observeGraphqlFailure(host, error)
+      value = await ask(true)
+    }
+    if (signal?.aborted) throw new CommandCancelled()
     const repository = isRecord(value) ? value.repository : null
     const node = isRecord(repository) ? repository.pullRequest : null
     const parsed = parseGraphQlPullRequest(node)
+    // `mergeStateStatus` and a commit's `statusCheckRollup` are recent additions
+    // to the schema; a host that does not have them still answers everything
+    // below, so only the fields every host has are required here.
     if (
       !parsed ||
       parsed.pullRequest.number !== number ||
@@ -395,27 +524,33 @@ export async function getPullRequest(
       typeof node.body !== 'string' ||
       typeof node.isDraft !== 'boolean' ||
       typeof node.headRefOid !== 'string' ||
-      typeof node.mergeStateStatus !== 'string' ||
-      !['OPEN', 'CLOSED', 'MERGED'].includes(String(node.state)) ||
-      !isRecord(node.commits) ||
-      !Array.isArray(node.commits.nodes)
+      !['OPEN', 'CLOSED', 'MERGED'].includes(String(node.state))
     ) {
-      throw new Error('GitHub returned incomplete pull request metadata')
+      throw new Error(`${host.host} returned incomplete pull request metadata`)
     }
     try {
-      const stacks = await listPullRequestStacks(remote.owner, remote.name, { pullRequest: number })
+      const stacks = await listPullRequestStacks(remote.owner, remote.name, {
+        pullRequest: number,
+        signal,
+        host,
+      })
       if (stacks.length > 0) {
         const membership = toPullRequestStackMembership(stacks[0], number)
         if (membership) {
           parsed.pullRequest.stack = membership
         }
       }
-    } catch {
-      // Preview unavailable or failed; keep stack null
+    } catch (stackError) {
+      if (signal?.aborted || isCancelled(stackError)) {
+        throw new CommandCancelled()
+      }
+      // A host without the stacks resource keeps stack null; membership is never
+      // invented from a host that did not report it.
     }
     return { ...parsed.pullRequest, body: node.body }
   } catch (error) {
-    if (isCancelled(error)) throw error
+    if (signal?.aborted || isCancelled(error)) throw new CommandCancelled()
+    observeGraphqlFailure(host, error)
     throw new Error(`Could not load pull request #${number}: ${githubErrorMessage(error)}`)
   }
 }

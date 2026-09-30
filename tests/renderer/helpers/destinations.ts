@@ -7,7 +7,9 @@ export const DESTINATIONS = [
   { id: 'history', label: 'History', heading: 'History' },
   { id: 'changes', label: 'Working changes', heading: 'Working changes' },
   { id: 'pullRequests', label: 'Pull requests', heading: 'Pull requests' },
+  { id: 'review', label: 'Review', heading: 'Review' },
   { id: 'stashes', label: 'Stashes', heading: 'Stashes' },
+  { id: 'diagnostics', label: 'Diagnostics', heading: 'Diagnostics' },
 ] as const
 
 export type DestinationId = (typeof DESTINATIONS)[number]['id']
@@ -27,7 +29,7 @@ export function getDestinationNavItem(page: Page, id: DestinationId): Locator {
 }
 
 /**
- * Navigates to one of the six actual App destinations via user click,
+ * Navigates to one of the actual App destinations via user click,
  * asserts the destination h1 heading is visible, and waits for layout to settle.
  */
 export async function switchDestination(page: Page, id: DestinationId): Promise<void> {

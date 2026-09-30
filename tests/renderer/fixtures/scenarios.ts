@@ -1,5 +1,6 @@
 import type {
   Branch,
+  PullRequest,
   FileView,
   RecentRepository,
   RepositorySnapshot,
@@ -9,6 +10,7 @@ import type {
 } from '../../../src/shared/types'
 import {
   blockedRestackPreview,
+  failedMergeStatus,
   openPullRequest,
   pausedRestackProgress,
   restackPreview,
@@ -26,6 +28,13 @@ import {
   unstagedOnlyChanges,
 } from '../../../src/renderer/src/design-system/data-fixtures'
 import { EMPTY_SNAPSHOT_LIMITS } from '../../../src/shared/performance'
+import {
+  deriveCheckRollup,
+  summariseChecks,
+  type PullRequestCheckDetail,
+  type PullRequestCheckState,
+  type PullRequestChecksReport,
+} from '../../../src/shared/pull-request-checks'
 import type { FixtureScenario } from './types'
 import type { ScenarioName } from './manifest'
 
@@ -137,6 +146,73 @@ const recentRepositories: RecentRepository[] = [
     name: 'git-stacks-workbench-fixture-with-a-long-directory-name',
   },
 ]
+
+/** A three-layer native stack whose pull requests the review rail can order. */
+const reviewStackPullRequests: PullRequest[] = [
+  {
+    number: 41,
+    title: 'Read pull request files over the transport',
+    url: 'https://github.com/howarewoo/git-stacks/pull/41',
+    head: 'feature/review-41',
+    base: 'main',
+    state: 'OPEN',
+    draft: false,
+    checks: 'passing',
+    headOid: '4141414141414141414141414141414141414141',
+    reviewDecision: 'APPROVED',
+    stack: {
+      stackNumber: 42,
+      position: 1,
+      size: 3,
+      base: 'main',
+      open: true,
+      url: 'https://github.com/howarewoo/git-stacks/stacks/42',
+    },
+  },
+  {
+    number: 42,
+    title: 'Give the review workspace its own cancellation ids',
+    url: 'https://github.com/howarewoo/git-stacks/pull/42',
+    head: 'feature/review-42',
+    base: 'feature/review-41',
+    state: 'OPEN',
+    draft: false,
+    checks: 'pending',
+    headOid: '4242424242424242424242424242424242424242',
+    reviewDecision: 'REVIEW_REQUIRED',
+    stack: {
+      stackNumber: 42,
+      position: 2,
+      size: 3,
+      base: 'feature/review-41',
+      open: true,
+      url: 'https://github.com/howarewoo/git-stacks/stacks/42',
+    },
+  },
+  {
+    number: 43,
+    title: 'Keep the review line anchors stable across a force-push',
+    url: 'https://github.com/howarewoo/git-stacks/pull/43',
+    head: 'feature/review-43',
+    base: 'feature/review-42',
+    state: 'OPEN',
+    draft: true,
+    checks: 'failing',
+    headOid: '4343434343434343434343434343434343434343',
+    stack: {
+      stackNumber: 42,
+      position: 3,
+      size: 3,
+      base: 'feature/review-42',
+      open: true,
+      url: 'https://github.com/howarewoo/git-stacks/stacks/42',
+    },
+  },
+]
+
+const reviewStackBranches: Branch[] = reviewStackPullRequests.map((pr) =>
+  local({ name: pr.head, parent: pr.base, parentTip: oid(`local:${pr.base}`), pr }),
+)
 
 /** Repository with the connected branch set; scenarios override only what they exercise. */
 function repository(overrides: Partial<RepositorySnapshot> = {}): RepositorySnapshot {
@@ -434,6 +510,17 @@ const shiftedStashes: Stash[] = [
   },
 ]
 
+/** The one open, mergeable pull request, reused by the merge read-back scenario. */
+const lifecycleOpenBranch = local({
+  name: 'feature/lifecycle-open',
+  current: true,
+  parent: 'main',
+  parentTip: oid('local:main'),
+  ahead: 1,
+  pr: pullRequestFixtures[0],
+  subject: 'Open pull request branch',
+})
+
 const lifecycleBranches: Branch[] = [
   mainBranch,
   local({
@@ -443,15 +530,7 @@ const lifecycleBranches: Branch[] = [
     pr: pullRequestFixtures[1],
     subject: 'Draft pull request branch',
   }),
-  local({
-    name: 'feature/lifecycle-open',
-    current: true,
-    parent: 'main',
-    parentTip: oid('local:main'),
-    ahead: 1,
-    pr: pullRequestFixtures[0],
-    subject: 'Open pull request branch',
-  }),
+  lifecycleOpenBranch,
   local({
     name: 'feature/lifecycle-closed',
     parent: 'main',
@@ -472,6 +551,187 @@ const unavailableGithub = {
   available: false,
   message: 'GitHub CLI is not authenticated for this repository.',
 }
+
+const checksBranch = local({
+  name: 'feature/lifecycle-open',
+  current: true,
+  parent: 'main',
+  parentTip: oid('local:main'),
+  ahead: 3,
+  pr: pullRequestFixtures[0],
+  subject: 'Split the file inspector',
+})
+
+/** Builds a report the way the main process does, so the fixture cannot drift from it. */
+function checksReport(
+  checks: PullRequestCheckDetail[],
+  overrides: Partial<PullRequestChecksReport> = {},
+): PullRequestChecksReport {
+  return {
+    number: 42,
+    headSha: oid('local:feature/lifecycle-open'),
+    base: 'main',
+    available: true,
+    message: '',
+    checks,
+    rollup: deriveCheckRollup(checks),
+    summary: summariseChecks(checks),
+    fetchedAt: UPDATED,
+    checkedAt: UPDATED,
+    freshness: 'live',
+    staleReason: null,
+    rateLimit: { remaining: 4871, reset: UPDATED },
+    nextAttemptAt: null,
+    permissions: { actionsEnabled: true, canRerun: true, reason: '', isAdmin: true },
+    truncated: false,
+    ...overrides,
+  }
+}
+
+/**
+ * The report a scenario gives a pull request that names no checks of its own.
+ * Every branch row and pull request list the app renders already declares the
+ * state it is showing, so the read that follows has to answer with that same
+ * state. Returning nothing instead makes a background refresh of every ordinary
+ * scenario fail, which is a statement about the fixture and not about the code
+ * under test.
+ */
+export function checksReportFor(
+  scenario: FixtureScenario,
+  number: number,
+): PullRequestChecksReport | null {
+  const stated = scenario.pullRequestChecks?.[number]
+  if (stated) return stated
+  const pullRequest = [
+    ...(scenario.snapshot?.pullRequests ?? []),
+    ...(scenario.snapshot?.branches ?? []).flatMap((branch) => (branch.pr ? [branch.pr] : [])),
+  ].find((entry) => entry.number === number)
+  if (!pullRequest) return null
+  const state: PullRequestCheckState =
+    pullRequest.checks === 'failing'
+      ? 'failure'
+      : pullRequest.checks === 'pending'
+        ? 'in-progress'
+        : 'success'
+  return checksReport(
+    pullRequest.checks === 'none' ? [] : [check({ key: 'check-run:default', name: 'ci', state })],
+    {
+      number,
+      headSha: pullRequest.headOid ?? '',
+      base: pullRequest.base ?? 'main',
+    },
+  )
+}
+
+function check(
+  overrides: Partial<PullRequestCheckDetail> & Pick<PullRequestCheckDetail, 'key' | 'name'>,
+): PullRequestCheckDetail {
+  return {
+    source: 'check-run',
+    app: null,
+    appId: null,
+    state: 'success',
+    requirement: 'informational',
+    summary: null,
+    detailsUrl: null,
+    startedAt: EARLIER,
+    completedAt: UPDATED,
+    workflowRunId: null,
+    expected: false,
+    ...overrides,
+  }
+}
+
+/** One required failure, one optional failure, a running workflow, and a silent required check. */
+const mixedChecksReport = checksReport([
+  check({
+    key: 'check-run:8101',
+    name: 'build',
+    app: 'github-actions',
+    appId: 15368,
+    state: 'failure',
+    requirement: 'required',
+    summary: '2 annotations on the build job',
+    detailsUrl: 'https://github.com/howarewoo/git-stacks/runs/8101',
+    workflowRunId: 8101,
+  }),
+  check({
+    key: 'check-run:8102',
+    name: 'super-linter',
+    app: 'super-linter',
+    appId: 1,
+    state: 'action-required',
+    summary: 'Fix the reported issues before merging',
+  }),
+  check({
+    key: 'commit-status:vercel/preview',
+    name: 'vercel/preview',
+    source: 'commit-status',
+    state: 'in-progress',
+    summary: 'Building preview',
+  }),
+  check({
+    key: 'expected:audit',
+    name: 'audit',
+    source: 'expected',
+    state: 'waiting',
+    requirement: 'required',
+    summary: 'Expected: waiting for this check to report',
+    startedAt: null,
+    completedAt: null,
+    expected: true,
+  }),
+])
+
+const staleChecksReport = checksReport(
+  [
+    check({
+      key: 'check-run:8201',
+      name: 'build',
+      app: 'github-actions',
+      state: 'failure',
+      requirement: 'required',
+      summary: '1 annotation on the build job',
+      workflowRunId: 8201,
+    }),
+    check({ key: 'check-run:8202', name: 'test', app: 'github-actions', state: 'success' }),
+  ],
+  {
+    freshness: 'stale',
+    staleReason: "Checks could not be refreshed: GitHub's rate limit was reached",
+    checkedAt: EARLIER,
+    nextAttemptAt: UPDATED,
+    permissions: {
+      actionsEnabled: true,
+      canRerun: false,
+      reason: 'Your role on this repository cannot run workflows, so rerun is unavailable.',
+      isAdmin: false,
+    },
+  },
+)
+
+/** Comfortably past the point where revealing a second page starts sliding. */
+const DEEP_CHAIN_LENGTH = 620
+
+// A chain long enough that the branch list slides its mounted window: the first
+// two reveals mount one then two pages, and every later reveal slides. The
+// keyboard contract has to hold on the third page, not just the first.
+const deepChainBranches: Branch[] = [
+  mainBranch,
+  ...Array.from({ length: DEEP_CHAIN_LENGTH - 1 }, (_, index) =>
+    local({
+      name: `feature/deep-${String(index + 1).padStart(4, '0')}`,
+      parent: index === 0 ? 'main' : `feature/deep-${String(index).padStart(4, '0')}`,
+      subject: `Deep change ${index + 1}`,
+      updatedAt: new Date(Date.parse(UPDATED) - (DEEP_CHAIN_LENGTH - index) * 60_000).toISOString(),
+    }),
+  ),
+]
+
+const deepChainSnapshot = repository({
+  branches: deepChainBranches,
+  headOid: oid('local:feature/deep-0001'),
+})
 
 export const scenarios: Record<ScenarioName, FixtureScenario> = {
   'shell-no-repository': {
@@ -552,13 +812,18 @@ export const scenarios: Record<ScenarioName, FixtureScenario> = {
     snapshot: repository({ branches: cycleBranches, currentBranch: 'feature/cycle-a' }),
     recentRepositories,
   },
+  'branches-deep-chain': {
+    name: 'branches-deep-chain',
+    summary: 'A branch chain far longer than one list page, for sliding-window keyboard behaviour.',
+    snapshot: deepChainSnapshot,
+    recentRepositories,
+  },
   'ancestry-requires-restack': {
     name: 'ancestry-requires-restack',
     summary: 'Both stacked branches are behind their recorded parent boundary.',
     snapshot: restackBase,
     recentRepositories,
   },
-
   'files-clean': {
     name: 'files-clean',
     summary: 'Clean working tree with nothing staged or unstaged.',
@@ -646,6 +911,65 @@ export const scenarios: Record<ScenarioName, FixtureScenario> = {
     failures: { history: 'The commit history could not be read from this repository.' },
   },
 
+  'review-stacked': {
+    name: 'review-stacked',
+    summary:
+      'Three pull requests in one native stack, so the rail shows a position and both layers.',
+    snapshot: repository({
+      branches: [mainBranch, ...reviewStackBranches],
+      currentBranch: 'feature/review-42',
+      pullRequests: reviewStackPullRequests,
+    }),
+    recentRepositories,
+  },
+  'review-force-pushed': {
+    name: 'review-force-pushed',
+    summary:
+      'The pull request was force-pushed between the headline read and the file read, so the two revisions disagree.',
+    snapshot: repository({
+      branches: [mainBranch, ...reviewStackBranches],
+      currentBranch: 'feature/review-42',
+      pullRequests: reviewStackPullRequests,
+    }),
+    recentRepositories,
+    reviewHeadOid: 'ffffeee',
+  },
+  'review-unstacked': {
+    name: 'review-unstacked',
+    summary: 'One pull request GitHub reports no stack membership for.',
+    snapshot: repository({
+      branches: [mainBranch, checkoutBranch, { ...checkoutTestsBranch, pr: checkoutPr }],
+      currentBranch: 'feature/checkout',
+      pullRequests: [checkoutPr],
+    }),
+    recentRepositories,
+  },
+  'review-read-only': {
+    name: 'review-read-only',
+    summary:
+      'A viewer with no write access, so every submit decision is refused before any request is made.',
+    snapshot: repository({
+      branches: [mainBranch, ...reviewStackBranches],
+      currentBranch: 'feature/review-42',
+      pullRequests: reviewStackPullRequests,
+    }),
+    recentRepositories,
+    reviewHeadOid: 'ffffeee',
+    reviewPermissions: { blocked: 'COMMENT' },
+  },
+  'review-own-pull-request': {
+    name: 'review-own-pull-request',
+    summary:
+      'The viewer opened this pull request, so approval is refused while comment and request changes stay available.',
+    snapshot: repository({
+      branches: [mainBranch, ...reviewStackBranches],
+      currentBranch: 'feature/review-42',
+      pullRequests: reviewStackPullRequests,
+    }),
+    recentRepositories,
+    reviewHeadOid: 'ffffeee',
+    reviewPermissions: { isAuthor: true },
+  },
   'pull-requests-lifecycle': {
     name: 'pull-requests-lifecycle',
     summary: 'Draft, open, closed, and merged pull requests on their own branches.',
@@ -666,6 +990,31 @@ export const scenarios: Record<ScenarioName, FixtureScenario> = {
     summary: 'Pending, failing, passing, and no-check pull requests, one very long title.',
     snapshot: repository({ pullRequests: pullRequestFixtures }),
     recentRepositories,
+  },
+
+  'pull-requests-checks-detail': {
+    name: 'pull-requests-checks-detail',
+    summary:
+      'Inspector checks drill-down: required failure, optional failure, running Actions run, and a required check not yet reported.',
+    snapshot: repository({
+      branches: [mainBranch, checksBranch],
+      currentBranch: 'feature/lifecycle-open',
+      pullRequests: [pullRequestFixtures[0]],
+    }),
+    recentRepositories,
+    pullRequestChecks: { 42: mixedChecksReport },
+  },
+
+  'pull-requests-checks-stale': {
+    name: 'pull-requests-checks-stale',
+    summary: 'Checks last read before a failed refresh, visibly stale, with rerun unavailable.',
+    snapshot: repository({
+      branches: [mainBranch, checksBranch],
+      currentBranch: 'feature/lifecycle-open',
+      pullRequests: [pullRequestFixtures[0]],
+    }),
+    recentRepositories,
+    pullRequestChecks: { 42: staleChecksReport },
   },
   'pull-requests-empty': {
     name: 'pull-requests-empty',
@@ -731,6 +1080,18 @@ export const scenarios: Record<ScenarioName, FixtureScenario> = {
         },
       ],
     },
+  },
+
+  'pull-requests-merge-refused': {
+    name: 'pull-requests-merge-refused',
+    summary: 'A reopened merge dialog whose earlier request GitHub refused.',
+    snapshot: repository({
+      branches: [mainBranch, lifecycleOpenBranch],
+      currentBranch: 'feature/lifecycle-open',
+      pullRequests: [pullRequestFixtures[0]],
+    }),
+    recentRepositories,
+    mergeStatus: failedMergeStatus,
   },
 
   'stash-stable-oid': {

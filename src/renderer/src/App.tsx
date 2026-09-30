@@ -25,6 +25,7 @@ import {
   PanelRightClose,
   PanelRightOpen,
   Plus,
+  MessageSquareDiff,
   RefreshCw,
   RotateCcw,
   Search,
@@ -39,12 +40,20 @@ import type {
   Branch,
   DesktopAPI,
   GitAction,
+  GitEnvironmentStatus,
   GitRuntimeStatus,
+  GitHubAccountState,
+  GitHubAccountStatus,
   LinkedIssue,
+  OnboardingFailure,
   PullRequest,
   RecentRepository,
+  RepositoryCloneResult,
   RepositorySnapshot,
+  RemoteFreshness,
+  RemoteFreshnessState,
 } from '../../shared/types'
+import { GitEnvironmentPanel, RepositoryDiscoveryDialog } from './components/onboarding'
 import { LIST_PAGE_SIZE } from '../../shared/performance'
 import { ListWindowMore } from './components/list-window'
 import { useListWindow } from './lib/list-window'
@@ -68,17 +77,34 @@ import { BranchHoverCard, PullRequestHoverCard } from './components/repository-h
 import { Field } from './components/ui/field'
 import { cn } from './lib/utils'
 import { EmptyState, InlineAlert } from './components/ui/surface'
+import { RemoteFreshnessBadge } from './components/remote-freshness'
 import {
+  describeBranchRow,
   getCombinedBranches,
   getRepresentedRemoteRef,
   indexBranchesByParentName,
   sortBranchesByUpdatedAt,
 } from './lib/branches'
+import {
+  claimsRovingKey,
+  clampRovingIndex,
+  rovingAction,
+  rovingTabIndex,
+  rovingTarget,
+} from './lib/tree-navigation'
 import { WorkflowDialog, type WorkflowRequest } from './components/workflow-dialog'
-import { WorkspaceNavigation } from './components/workspace-navigation'
+import {
+  WORKSPACE_VIEW_HEADING_ID,
+  WORKSPACE_VIEW_SHORTCUTS,
+  WorkspaceNavigation,
+  workspaceViewLabel,
+} from './components/workspace-navigation'
+import { ReviewView, type ReviewCommands } from './components/review-view'
 import { ConflictResolver } from './components/conflict-resolver'
 import { HistoryView, OperationBanner, StackView } from './components/repository-views'
 import { GitRuntimeDialog } from './components/git-runtime-dialog'
+import { SettingsDialog } from './components/settings-dialog'
+import { GitHubAccountDialog } from './components/github-account-dialog'
 import {
   ChangesView,
   DiagnosticsView,
@@ -87,7 +113,12 @@ import {
   changeGroups,
   matchesPullRequest,
 } from './components/data-views'
+import { PullRequestChecksPanel } from './components/check-details'
 import { checkLabel, checksVariant } from './lib/pull-request-state'
+import type {
+  PullRequestCheckDetail,
+  PullRequestChecksReport,
+} from '../../shared/pull-request-checks'
 import {
   OperationContext,
   PhaseStatus,
@@ -104,7 +135,14 @@ import {
 } from '../../shared/capabilities'
 
 type WorkspaceView =
-  'branches' | 'stacks' | 'history' | 'changes' | 'pullRequests' | 'stashes' | 'diagnostics'
+  | 'branches'
+  | 'stacks'
+  | 'history'
+  | 'changes'
+  | 'pullRequests'
+  | 'review'
+  | 'stashes'
+  | 'diagnostics'
 
 import { CommandPalette } from './components/command-palette'
 import { ShortcutSettings } from './components/shortcut-settings'
@@ -112,18 +150,22 @@ import { DirtyCheckoutGuard } from './components/dirty-checkout-guard'
 import { buildPaletteItems, type PaletteItem } from './lib/command-palette'
 import {
   ariaKeyShortcuts,
+  clearLegacyShortcuts,
+  defaultShortcutBindings,
   formatChord,
   isComposingKeyEvent,
   isEditableTarget,
   isMacPlatform,
-  loadShortcuts,
   matchesChord,
+  readLegacyShortcuts,
   type ShortcutId,
-} from './lib/keyboard-shortcuts'
+} from '../../shared/shortcuts'
+import type { AppSettings, SettingsLock } from '../../shared/settings'
 import { resolveStackNavigation } from './lib/stack-navigation'
 type BranchFilter = 'all' | 'local' | 'remote' | 'prs'
 
 type BranchTreeInfo = {
+  /** Visual lane depth used for connector geometry only. */
   depth: number
   cycle: boolean
   missingParent: boolean
@@ -165,8 +207,13 @@ function branchTreeInfo(
 }
 
 type BranchTreeRow = BranchTreeInfo & {
+  /** Presented hierarchy depth, one per reachable parent hop. Drives `aria-level`. */
+  level: number
   trunks: { lane: number; kind: 'start' | 'start-node' | 'full' | 'end-parent' | 'end-child' }[]
   elbows: { lane: number }[]
+  /** 1-based position and size within the row's sibling set, for `aria-posinset`/`aria-setsize`. */
+  posInSet: number
+  setSize: number
 }
 
 function getBranchTreeGeometry(visibleBranches: readonly Branch[], byName: Map<string, Branch>) {
@@ -179,6 +226,9 @@ function getBranchTreeGeometry(visibleBranches: readonly Branch[], byName: Map<s
     ...branchTreeInfo(branch, byName, childCounts),
     trunks: [],
     elbows: [],
+    level: 0,
+    posInSet: 1,
+    setSize: 1,
   }))
   const visibleByName = indexBranchesByParentName(visibleBranches)
   const visibleIndex = new Map(visibleBranches.map((branch, index) => [branch.ref, index]))
@@ -239,6 +289,51 @@ function getBranchTreeGeometry(visibleBranches: readonly Branch[], byName: Map<s
     }
   }
 
+  // Screen readers need the hierarchy of the rows a reader can actually reach,
+  // not the repository's full ancestry: the connector lanes above may still
+  // draw a parent that a filter removed or a cycle makes unreachable, but
+  // `aria-level` must not announce a parent no row in this list can reach. A row
+  // with no reachable parent is therefore a root here, and every root shares the
+  // one root sibling set instead of each claiming a set of its own.
+  const presentedParents = visibleBranches.map((branch, index) => {
+    if (!branch.parent || rows[index].cycle || rows[index].missingParent) return -1
+    const parent = visibleByName.get(branch.parent)
+    const parentIndex = parent ? visibleIndex.get(parent.ref) : undefined
+    return parentIndex === undefined || parentIndex === index ? -1 : parentIndex
+  })
+  const levelOf = new Array<number>(visibleBranches.length).fill(0)
+  for (let index = 0; index < visibleBranches.length; index += 1) {
+    const chain: number[] = []
+    let cursor = index
+    while (presentedParents[cursor] >= 0 && !levelOf[cursor] && chain.indexOf(cursor) < 0) {
+      chain.push(cursor)
+      cursor = presentedParents[cursor]
+    }
+    // A root ends the chain; an already-solved row lends its level to the rows
+    // beneath it. A chain that closes on itself cannot be traversed, so it is
+    // read as a root rather than as a hierarchy the reader could not follow.
+    const base = levelOf[cursor]
+    for (let step = chain.length - 1; step >= 0; step -= 1) {
+      levelOf[chain[step]] = base + chain.length - step
+    }
+  }
+  // `-1` is the root set: every presented root is a sibling of the others, and a
+  // presented parent's key holds the children a reader can reach from it.
+  const siblingSets = new Map<number, number[]>()
+  for (let index = 0; index < visibleBranches.length; index += 1) {
+    const key = presentedParents[index]
+    const set = siblingSets.get(key)
+    if (set) set.push(index)
+    else siblingSets.set(key, [index])
+  }
+  for (const set of siblingSets.values()) {
+    set.forEach((rowIndex, position) => {
+      rows[rowIndex].level = levelOf[rowIndex]
+      rows[rowIndex].posInSet = position + 1
+      rows[rowIndex].setSize = set.length
+    })
+  }
+
   return { rows }
 }
 
@@ -294,6 +389,7 @@ function App() {
   const [commitMessage, setCommitMessage] = React.useState('')
   const [commitAmend, setCommitAmend] = React.useState(false)
   const [inspectedPath, setInspectedPath] = React.useState<string | null>(null)
+  const [reviewNumber, setReviewNumber] = React.useState<number | null>(null)
   const [conflictPath, setConflictPath] = React.useState<string | null>(null)
   const [workflow, setWorkflow] = React.useState<{
     id: number
@@ -303,22 +399,73 @@ function App() {
   const [gitRuntimeOpen, setGitRuntimeOpen] = React.useState(false)
   const [gitRuntimeStatus, setGitRuntimeStatus] = React.useState<GitRuntimeStatus | null>(null)
   const [gitRuntimeBusy, setGitRuntimeBusy] = React.useState(false)
+  const [accountOpen, setAccountOpen] = React.useState(false)
+  const [account, setAccount] = React.useState<GitHubAccountStatus | null>(null)
+  const [accountBusy, setAccountBusy] = React.useState(false)
+  const [discoveryOpen, setDiscoveryOpen] = React.useState(false)
+  const [gitEnvironment, setGitEnvironment] = React.useState<GitEnvironmentStatus | null>(null)
+  const [gitEnvironmentFailure, setGitEnvironmentFailure] =
+    React.useState<OnboardingFailure | null>(null)
+  const accountRequest = React.useRef(0)
+  /**
+   * The legacy import is offered once. Main decides at write time whether it
+   * still applies, and a declined import leaves the stored bindings alone, so
+   * asking again would only repeat a decision that has already been made.
+   */
+  const legacyImportOffered = React.useRef(false)
   const workflowSequence = React.useRef(0)
 
   const [paletteOpen, setPaletteOpen] = React.useState(false)
   const [shortcutSettingsOpen, setShortcutSettingsOpen] = React.useState(false)
   const [shortcutBindings, setShortcutBindings] = React.useState<Record<ShortcutId, string>>(() =>
-    loadShortcuts(),
+    defaultShortcutBindings(),
   )
+  const [settings, setSettings] = React.useState<AppSettings | null>(null)
+  const [settingsLocks, setSettingsLocks] = React.useState<readonly SettingsLock[]>([])
+  /**
+   * Writes a shortcut change and adopts only what main confirmed. A refused
+   * write — a policy lock, an invalid chord — must leave the running app on
+   * the bindings that are actually in force.
+   */
+  const persistShortcutBindings = React.useCallback(
+    async (bindings: Record<ShortcutId, string>) => {
+      if (!desktop?.updateSettings) return
+      try {
+        const snapshot = await desktop.updateSettings({ shortcuts: bindings })
+        setSettings(snapshot.settings)
+        setShortcutBindings(snapshot.settings.shortcuts)
+      } catch (value) {
+        setError(readableError(value))
+        // Re-read so the editor shows what is stored rather than what was tried.
+        const current = await desktop?.settings?.().catch(() => null)
+        if (current) setShortcutBindings(current.settings.shortcuts)
+      }
+    },
+    [desktop],
+  )
+  const shortcutLockReason =
+    settingsLocks.find((lock) => lock.key === 'shortcuts')?.reason ?? undefined
+  const [settingsOpen, setSettingsOpen] = React.useState(false)
   const [checkoutGuardTarget, setCheckoutGuardTarget] = React.useState<{
     ref: string
     name: string
   } | null>(null)
+  const anyModalOpen =
+    paletteOpen ||
+    shortcutSettingsOpen ||
+    checkoutGuardTarget !== null ||
+    deleteTarget !== null ||
+    newBranchOpen ||
+    prOpen ||
+    workflow !== null
+  const [announcement, setAnnouncement] = React.useState('')
+  const previousViewRef = React.useRef(workspaceView)
   const isMac = React.useMemo(() => isMacPlatform(), [])
   const [showDetails, setShowDetails] = React.useState(true)
   const busyRef = React.useRef<string | null>(null)
   const openingRef = React.useRef(false)
   const searchRef = React.useRef<HTMLInputElement>(null)
+  const reviewCommands = React.useRef<ReviewCommands | null>(null)
   const deleteCancelRef = React.useRef<HTMLButtonElement>(null)
   const paletteHandoffFocusRef = React.useRef<HTMLElement | null>(null)
   const paletteDeleteHandoffRef = React.useRef(false)
@@ -327,9 +474,14 @@ function App() {
   // refresh, or the snapshot either returns. Switching repositories resets it
   // so no result computed for the previous repository is ever applied.
   const repositoryGate = React.useRef(createRequestGate()).current
-
+  const [remoteStatus, setRemoteStatus] = React.useState<RemoteFreshness | null>(null)
+  // A background snapshot only applies to the repository the window still shows.
+  const snapshotPathRef = React.useRef<string | null>(null)
   const setSnapshotAndSelection = React.useCallback((next: RepositorySnapshot) => {
     setSnapshot(next)
+    snapshotPathRef.current = next.path
+    // A snapshot the main process produced already knows its own freshness.
+    setRemoteStatus((current) => next.remote ?? current)
     setSelectedBranchRef((current) => {
       if (current && next.branches.some((branch) => branch.ref === current)) return current
       if (next.currentBranch) return `refs/heads/${next.currentBranch}`
@@ -381,8 +533,136 @@ function App() {
     }
   }, [desktop])
 
+  // The main process pushes what its watcher and refresh timers find: local Git
+  // made outside this window, a newer pull-request state, or a change in how
+  // fresh the remote data is.
+  React.useEffect(() => {
+    if (!desktop) return
+    const offSnapshot = desktop.onBackgroundSnapshot?.((next) => {
+      if (next.path !== snapshotPathRef.current) return
+      setSnapshotAndSelection(next)
+    })
+    const offIssues = desktop.onBackgroundIssues?.((issues) => {
+      setSnapshot((current) => (current ? { ...current, issues } : current))
+    })
+    const offStatus = desktop.onRemoteStatus?.((freshness) => setRemoteStatus(freshness))
+    desktop
+      .remoteStatus?.()
+      .then((freshness) => setRemoteStatus(freshness))
+      .catch(() => {})
+    return () => {
+      offSnapshot?.()
+      offIssues?.()
+      offStatus?.()
+    }
+  }, [desktop, setSnapshotAndSelection])
+
+  // Focus and visibility decide how often GitHub is read; the main process
+  // cannot observe either on its own.
+  React.useEffect(() => {
+    if (!desktop?.reportActivity) return
+    const report = () => {
+      desktop
+        ?.reportActivity?.({
+          focused: document.hasFocus(),
+          visible: document.visibilityState === 'visible',
+        })
+        .catch(() => {})
+    }
+    window.addEventListener('focus', report)
+    window.addEventListener('blur', report)
+    document.addEventListener('visibilitychange', report)
+    report()
+    return () => {
+      window.removeEventListener('focus', report)
+      window.removeEventListener('blur', report)
+      document.removeEventListener('visibilitychange', report)
+    }
+  }, [desktop])
+
+  // Settings are read once at startup so the window opens in the appearance and
+  // with the shortcuts the user last chose. Main owns the file.
+  React.useEffect(() => {
+    if (!desktop?.settings) return
+    let cancelled = false
+    desktop
+      .settings()
+      .then((snapshot) => {
+        if (cancelled) return
+        setSettings(snapshot.settings)
+        setSettingsLocks(snapshot.locks)
+        setShortcutBindings(snapshot.settings.shortcuts)
+      })
+      .catch((value) => {
+        if (!cancelled) setError(readableError(value))
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [desktop])
+
+  // The build before this one kept shortcuts in web storage. Those bindings
+  // belong to the user, so they are offered for import once, before anything
+  // saves over them with defaults.
+  //
+  // The import is an intent, not an assignment. Main commits it only if the
+  // settings file still holds the untouched state this offer was decided from,
+  // so a reset or a shortcut edit that lands while this write is in flight is
+  // never overwritten by bindings the user has moved on from. Either way the
+  // stored copy is dropped afterwards: a committed import cannot run again, and
+  // a declined one is a decision, not a failure to retry.
+  React.useEffect(() => {
+    if (!desktop?.updateSettings || !settings || legacyImportOffered.current) return
+    if (settings.migrated.legacyShortcutStorage) return
+    const legacy = readLegacyShortcuts()
+    if (!legacy) return
+    legacyImportOffered.current = true
+    let cancelled = false
+    desktop
+      .updateSettings({ legacyShortcutImport: legacy })
+      .then((snapshot) => {
+        clearLegacyShortcuts()
+        if (cancelled) return
+        setSettings(snapshot.settings)
+        setSettingsLocks(snapshot.locks)
+        setShortcutBindings(snapshot.settings.shortcuts)
+      })
+      .catch(() => {
+        // A migration that could not be written is left undone rather than
+        // marked done, so the stored copy is kept for the next window.
+        legacyImportOffered.current = false
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [desktop, settings])
+
+  // The theme attribute is the only place the preference takes effect: the
+  // generated token sheet switches on it, and "system" defers to the operating
+  // system in CSS so a later change is followed with no script involved.
+  React.useEffect(() => {
+    const root = document.documentElement
+    root.dataset.gsTheme = settings?.appearance.theme ?? 'system'
+    // The reduced-motion sheet reads this attribute as well as the media
+    // query, so the choice holds on a computer that did not ask for it.
+    if (settings?.appearance.reduceMotion) {
+      root.dataset.motion = 'reduced'
+    } else {
+      delete root.dataset.motion
+    }
+  }, [settings?.appearance.theme, settings?.appearance.reduceMotion])
+
+  // Background refresh has no timer here on purpose. The main process's sync
+  // coordinator is the one automatic owner of remote reads and applies the
+  // stored interval itself, so a second timer in the window would read on a
+  // different schedule and bypass the coordinator's focus, backoff, and
+  // busy-state policy. An explicit refresh still reads on demand.
+  /**
+   * Adopts a repository the main process just opened, whether it came from the
+   * recents list, the folder dialog, a dropped folder, or a finished clone.
+   */
   const openRepository = React.useCallback(
-    async (path?: string) => {
+    async (path?: string, mode: 'recent' | 'add' = 'recent') => {
       if (!desktop || openingRef.current || busyRef.current) return
       openingRef.current = true
       // Resetting the gate before awaiting retires every in-flight refresh, so
@@ -394,7 +674,10 @@ function App() {
       setActionError(null)
       setNotice(null)
       try {
-        const next = await desktop.openRepository(path)
+        const next =
+          mode === 'add'
+            ? await desktop.addRepository?.(path ?? '')
+            : await desktop.openRepository(path)
         if (next && repositoryGate.current(claim)) {
           setSnapshotAndSelection(next)
           setDeleteTarget(null)
@@ -443,6 +726,147 @@ function App() {
     [desktop, isBusy, operationActive],
   )
 
+  // Main resolves the editor from settings and checks the path is inside the
+  // open repository, so the window sends only a path it is already showing.
+  const openInEditor = React.useCallback(
+    async (relativePath: string) => {
+      if (!desktop?.openInEditor) return
+      try {
+        const result = await desktop.openInEditor(relativePath)
+        setNotice(result.opened ? result.reason : result.reason)
+      } catch (value) {
+        setError(readableError(value))
+      }
+    },
+    [desktop],
+  )
+
+  const openAccount = React.useCallback(() => {
+    if (!desktop || isBusy || operationActive) return
+    setAccountOpen(true)
+    desktop
+      .githubAccountStatus?.()
+      .then((value) => value && setAccount(value))
+      .catch((value) => setError(readableError(value)))
+  }, [desktop, isBusy, operationActive])
+
+  // A running sign-in pushes its own state, so the panel is never left waiting on a read.
+  React.useEffect(() => {
+    if (!desktop) return
+    const stop = desktop.onGitHubAccount?.(setAccount)
+    desktop
+      .githubAccountStatus?.()
+      .then((value) => value && setAccount(value))
+      .catch(() => undefined)
+    return stop
+  }, [desktop])
+
+  const runAccountAction = React.useCallback(
+    async (action: () => Promise<GitHubAccountStatus>, interruptible = false) => {
+      // Cancelling and signing out must stay reachable while a sign-in is in
+      // progress; only starting one is prevented from being doubled up.
+      if (!desktop || (accountBusy && !interruptible)) return
+      const request = ++accountRequest.current
+      setAccountBusy(true)
+      try {
+        const next = await action()
+        // A slow sign-in must not overwrite the state a later cancel already
+        // reached; only the newest action's result is applied.
+        if (request === accountRequest.current) setAccount(next)
+      } catch (value) {
+        if (request === accountRequest.current) setError(readableError(value))
+      } finally {
+        if (request === accountRequest.current) setAccountBusy(false)
+      }
+    },
+    [accountBusy, desktop],
+  )
+
+  const openDevicePage = React.useCallback(() => {
+    const uri = account?.challenge?.verificationUri
+    if (!desktop || !uri) return
+    desktop.openExternal(uri).catch((value) => setError(readableError(value)))
+  }, [account, desktop])
+
+  const openDiscovery = React.useCallback(() => {
+    if (!desktop || isBusy || operationActive) return
+    setDiscoveryOpen(true)
+  }, [desktop, isBusy, operationActive])
+
+  // A finished clone registered its repository in the main process, so the
+  // window only has to read the repository it is now showing.
+  const adoptClonedRepository = React.useCallback(
+    async (result: RepositoryCloneResult) => {
+      repositoryGate.reset()
+      const claim = repositoryGate.claim()
+      setError(null)
+      try {
+        const next = await desktop?.refresh()
+        if (next && repositoryGate.current(claim)) {
+          setSnapshotAndSelection(next)
+          setWorkspaceView('branches')
+        }
+        const repositories = await desktop?.recentRepositories().catch(() => null)
+        if (repositories) setRecentRepositories(repositories)
+        setNotice(
+          result.empty
+            ? `Cloned ${result.name}. It has no commits yet — create a branch to add the first one.`
+            : `Cloned ${result.name} into ${result.path}.`,
+        )
+      } catch (value) {
+        if (repositoryGate.current(claim)) setError(readableError(value))
+      }
+    },
+    [desktop, repositoryGate, setSnapshotAndSelection],
+  )
+
+  // Onboarding reads this machine's Git facts once; they never change while the
+  // window shows them, and nothing here writes a Git setting.
+  React.useEffect(() => {
+    if (!desktop?.gitEnvironment) return
+    let cancelled = false
+    desktop
+      .gitEnvironment('onboarding:environment')
+      .then((outcome) => {
+        if (cancelled) return
+        if (outcome.ok) {
+          setGitEnvironment(outcome.value)
+          setGitEnvironmentFailure(null)
+        } else {
+          setGitEnvironmentFailure(outcome.failure)
+        }
+      })
+      .catch(() => undefined)
+    return () => {
+      cancelled = true
+    }
+  }, [desktop])
+
+  // A folder dropped on the window is added as it was found, and only while no
+  // repository is open: switching away from a workspace by accident is worse
+  // than asking for the action again.
+  React.useEffect(() => {
+    if (!desktop?.onRepositoryDropped) return
+    return desktop.onRepositoryDropped((paths) => {
+      if (snapshot || openingRef.current || busyRef.current) return
+      const first = paths[0]
+      if (first) void openRepository(first, 'add')
+    })
+  }, [desktop, openRepository, snapshot])
+
+  const ACCOUNT_LABELS: Record<GitHubAccountState, string> = {
+    'not-configured': 'GitHub: not configured',
+    'signed-out': 'GitHub: signed out',
+    'signing-in': 'GitHub: waiting for sign-in',
+    'signed-in': 'GitHub: signed in',
+    expired: 'GitHub: sign-in expired',
+    revoked: 'GitHub: authorization revoked',
+    'permission-denied': 'GitHub: organization access required',
+    offline: 'GitHub: unreachable',
+    'storage-unavailable': 'GitHub: no secure store',
+  }
+  const accountLabel = ACCOUNT_LABELS[account?.state ?? 'signed-out']
+  const accountConnected = account?.state === 'signed-in' || account?.state === 'signing-in'
   const runAction = React.useCallback(
     async (action: GitAction, label: string): Promise<boolean> => {
       if (!desktop || !snapshot || busyRef.current) return false
@@ -536,6 +960,96 @@ function App() {
     }
   }, [selectedPullRequest?.number, snapshot])
 
+  // The checks report is per pull request and carries its own freshness, so it is
+  // never folded into the repository snapshot: a remembered report has to be able to
+  // say it was not re-read without making the whole snapshot look stale.
+  const [checksReport, setChecksReport] = React.useState<PullRequestChecksReport | null>(null)
+  const [checksLoading, setChecksLoading] = React.useState(false)
+  const [checksWatching, setChecksWatching] = React.useState(false)
+  const [rerunningRunId, setRerunningRunId] = React.useState<number | null>(null)
+  const checksGate = React.useRef(createRequestGate()).current
+  const checksNumber = selectedPullRequest?.number ?? null
+  const checksRepository = snapshot?.path ?? null
+  // The head commit and base travel with the read, so the loader reads them from a ref:
+  // depending on the snapshot itself would re-read every pull request's checks on each
+  // ordinary repository refresh, which is not what refreshing the list asked for.
+  const pullRequestsRef = React.useRef(snapshot?.pullRequests)
+  pullRequestsRef.current = snapshot?.pullRequests
+
+  const loadChecks = React.useCallback(
+    async (number: number, force: boolean): Promise<void> => {
+      if (!desktop?.pullRequestChecks) return
+      const pr = pullRequestsRef.current?.find((entry) => entry.number === number) ?? null
+      const claim = checksGate.claim()
+      setChecksLoading(true)
+      try {
+        const report = await desktop.pullRequestChecks(number, {
+          headSha: pr?.headOid ?? null,
+          base: pr?.base ?? null,
+          force,
+        })
+        if (checksGate.current(claim)) setChecksReport(report)
+      } catch (value) {
+        if (checksGate.current(claim)) setError(readableError(value))
+      } finally {
+        if (checksGate.current(claim)) setChecksLoading(false)
+      }
+    },
+    [checksGate, desktop],
+  )
+
+  // Changing what is selected retires the previous report: a checks drill-down for
+  // one pull request must never be read as the state of another.
+  React.useEffect(() => {
+    checksGate.reset()
+    setChecksReport(null)
+    setChecksWatching(false)
+  }, [checksGate, checksNumber, checksRepository])
+
+  React.useEffect(() => {
+    if (checksNumber === null) return
+    void loadChecks(checksNumber, false)
+  }, [checksNumber, loadChecks])
+
+  // Watching re-reads only while the panel is open; the interval belongs to this view,
+  // and the main process still decides whether a read is due or is backing off.
+  React.useEffect(() => {
+    if (!checksWatching || checksNumber === null) return
+    const timer = setInterval(() => void loadChecks(checksNumber, true), 10_000)
+    return () => clearInterval(timer)
+  }, [checksNumber, checksWatching, loadChecks])
+
+  const rerunCheck = React.useCallback(
+    async (check: PullRequestCheckDetail): Promise<void> => {
+      if (!desktop?.rerunPullRequestCheck || check.workflowRunId === null) return
+      const claim = checksGate.claim()
+      setRerunningRunId(check.workflowRunId)
+      try {
+        const report = await desktop.rerunPullRequestCheck(checksNumber ?? 0, check.workflowRunId)
+        if (checksGate.current(claim)) setChecksReport(report)
+      } catch (value) {
+        if (checksGate.current(claim)) setError(readableError(value))
+      } finally {
+        setRerunningRunId(null)
+      }
+    },
+    [checksGate, checksNumber, desktop],
+  )
+
+  const openCheckDetails = React.useCallback(
+    (url: string): void => {
+      desktop?.openExternal(url).catch((value) => setError(readableError(value)))
+    },
+    [desktop],
+  )
+
+  // The inspector badge follows the detailed report once it is loaded, so the badge
+  // and the drill-down below it can never disagree about the same head.
+  const inspectorChecks: PullRequest['checks'] =
+    checksReport && checksReport.number === checksNumber
+      ? checksReport.summary
+      : (selectedPullRequest?.checks ?? 'none')
+
   const branchByName = React.useMemo(
     () => indexBranchesByParentName(snapshot?.branches ?? []),
     [snapshot],
@@ -572,6 +1086,46 @@ function App() {
     [branchByName, visibleBranches],
   )
   const branchWindow = useListWindow(visibleBranches, LIST_PAGE_SIZE)
+  // The branch tree is one composite widget: a single Tab stop whose position
+  // follows keyboard focus, so Tab reaches the tree once instead of once per row.
+  // The active row is tracked by its position inside the mounted window, which is
+  // the same coordinate system the DOM lookup and the tabindex comparison use.
+  const [branchTreeActiveIndex, setBranchTreeActiveIndex] = React.useState(0)
+  const branchTreeListRef = React.useRef<HTMLDivElement>(null)
+  const focusBranchRowInWindow = (mountedIndex: number) => {
+    const row =
+      branchTreeListRef.current?.querySelectorAll<HTMLElement>('[role="treeitem"]')[mountedIndex]
+    if (!row) return
+    setBranchTreeActiveIndex(mountedIndex)
+    row.focus()
+  }
+  // Only Home and End address the whole filtered list, so the row they name may
+  // not be mounted yet. The window is asked to reveal it and the pending index is
+  // applied once that row exists, which keeps the surface's single Tab stop with
+  // the focus. Arrow keys must never come through here: they are already in
+  // mounted coordinates, and re-basing them by the window start would send them
+  // to the page the reader has already scrolled away from.
+  const pendingBranchFocus = React.useRef<number | null>(null)
+  const focusBranchRowInList = (listIndex: number) => {
+    const mountedIndex = listIndex - branchWindow.start
+    if (mountedIndex >= 0 && mountedIndex < branchWindow.visible.length) {
+      focusBranchRowInWindow(mountedIndex)
+      return
+    }
+    pendingBranchFocus.current = listIndex
+    branchWindow.revealIndex(listIndex)
+  }
+  React.useEffect(() => {
+    setBranchTreeActiveIndex((index) => clampRovingIndex(index, branchWindow.visible.length))
+  }, [branchWindow.start, branchWindow.visible.length])
+  React.useEffect(() => {
+    const pending = pendingBranchFocus.current
+    if (pending === null) return
+    const mountedIndex = pending - branchWindow.start
+    if (mountedIndex < 0 || mountedIndex >= branchWindow.visible.length) return
+    pendingBranchFocus.current = null
+    focusBranchRowInWindow(mountedIndex)
+  }, [branchWindow.start, branchWindow.visible.length])
 
   const changeState = React.useMemo(
     () => changeGroups(snapshot?.files ?? [], search),
@@ -859,6 +1413,18 @@ function App() {
           }
           break
         }
+        case 'reviewPullRequest':
+          setReviewNumber(intent.number)
+          setWorkspaceView('review')
+          break
+        case 'reviewFile':
+          if (intent.direction === 1) reviewCommands.current?.nextFile()
+          else reviewCommands.current?.previousFile()
+          break
+        case 'reviewLayer':
+          if (intent.direction === 1) reviewCommands.current?.nextLayer()
+          else reviewCommands.current?.previousLayer()
+          break
         case 'workflow':
           openWorkflow(intent.request)
           break
@@ -870,6 +1436,9 @@ function App() {
           break
         case 'openShortcutsSettings':
           setShortcutSettingsOpen(true)
+          break
+        case 'openSettings':
+          setSettingsOpen(true)
           break
       }
     },
@@ -887,7 +1456,34 @@ function App() {
       snapshot,
     ],
   )
+  // Focus follows navigation: switching destination moves focus to the new
+  // workspace heading instead of leaving it on the control that was pressed, and
+  // the same change is announced politely for readers that track the live region.
+  React.useEffect(() => {
+    if (previousViewRef.current === workspaceView) return
+    previousViewRef.current = workspaceView
+    setAnnouncement(`${workspaceViewLabel(workspaceView)} workspace`)
+    if (anyModalOpen) return
+    document.getElementById(WORKSPACE_VIEW_HEADING_ID)?.focus()
+  }, [anyModalOpen, workspaceView])
 
+  // A raised error answers something the user just did, so focus is taken to it
+  // — except while a modal owns focus and presents its own inline error. Only a
+  // newly raised error may take it: a banner that is already on screen must not
+  // pull focus back when a dialog closes and returns focus to its trigger.
+  const focusedErrorRef = React.useRef<string | null>(null)
+  React.useEffect(() => {
+    const raised = error ?? actionError
+    // A dismissed banner stops standing in for an error, so the same message
+    // raised again is a new error and takes focus again.
+    if (!raised) {
+      focusedErrorRef.current = null
+      return
+    }
+    if (anyModalOpen || focusedErrorRef.current === raised) return
+    focusedErrorRef.current = raised
+    document.getElementById(error ? 'global-error-banner' : 'global-action-error-banner')?.focus()
+  }, [actionError, anyModalOpen, error])
   React.useEffect(() => {
     if (
       !paletteHandoffFocusRef.current ||
@@ -927,14 +1523,7 @@ function App() {
       if (isComposingKeyEvent(event)) return
 
       // If any modal dialog is currently open, don't execute global hotkeys underneath
-      const anyModalOpen =
-        paletteOpen ||
-        shortcutSettingsOpen ||
-        checkoutGuardTarget !== null ||
-        deleteTarget !== null ||
-        newBranchOpen ||
-        prOpen ||
-        workflow !== null
+      if (anyModalOpen) return
 
       // A bare printable remap must not steal text from either search field.
       // Modified openers such as Cmd/Ctrl+K still work while editing.
@@ -968,35 +1557,28 @@ function App() {
         return
       }
 
-      // View navigation shortcuts
-      if (matchesChord(event, shortcutBindings['view.branches'], isMac)) {
+      // View navigation shortcuts, one binding per destination so a new
+      // destination cannot ship without a keyboard route.
+      for (const [shortcut, view] of WORKSPACE_VIEW_SHORTCUTS) {
+        if (!matchesChord(event, shortcutBindings[shortcut], isMac)) continue
         event.preventDefault()
-        setWorkspaceView('branches')
+        setWorkspaceView(view)
         return
       }
-      if (matchesChord(event, shortcutBindings['view.stacks'], isMac)) {
+
+      // The review workspace publishes its file and layer steps through a ref.
+      // The shell keeps every remappable key, and a key pressed while no pull
+      // request is open stays a no-op rather than reaching into the view.
+      const reviewChords: Array<[ShortcutId, () => void]> = [
+        ['review.nextFile', () => reviewCommands.current?.nextFile()],
+        ['review.previousFile', () => reviewCommands.current?.previousFile()],
+        ['review.nextLayer', () => reviewCommands.current?.nextLayer()],
+        ['review.previousLayer', () => reviewCommands.current?.previousLayer()],
+      ]
+      for (const [id, run] of reviewChords) {
+        if (!matchesChord(event, shortcutBindings[id], isMac)) continue
         event.preventDefault()
-        setWorkspaceView('stacks')
-        return
-      }
-      if (matchesChord(event, shortcutBindings['view.history'], isMac)) {
-        event.preventDefault()
-        setWorkspaceView('history')
-        return
-      }
-      if (matchesChord(event, shortcutBindings['view.changes'], isMac)) {
-        event.preventDefault()
-        setWorkspaceView('changes')
-        return
-      }
-      if (matchesChord(event, shortcutBindings['view.pullRequests'], isMac)) {
-        event.preventDefault()
-        setWorkspaceView('pullRequests')
-        return
-      }
-      if (matchesChord(event, shortcutBindings['view.stashes'], isMac)) {
-        event.preventDefault()
-        setWorkspaceView('stashes')
+        if (workspaceView === 'review') run()
         return
       }
 
@@ -1205,6 +1787,23 @@ function App() {
             )}
           />
           <span>{desktop ? 'Desktop connected' : 'Desktop integration unavailable'}</span>
+        </div>
+        <div className="connection-state">
+          <span
+            className={cn(
+              'connection-dot',
+              accountConnected ? 'connection-dot-live' : 'connection-dot-offline',
+            )}
+          />
+          <button
+            className="version-label version-label-action"
+            disabled={!desktop || isBusy || operationActive}
+            onClick={openAccount}
+            title="GitHub account"
+            type="button"
+          >
+            {accountLabel}
+          </button>
         </div>
         <div className="sidebar-footer-actions">
           <button
@@ -1416,7 +2015,9 @@ function App() {
   const renderBranchFilters = () => (
     <div className="list-toolbar">
       <div className="list-title-group">
-        <h1>Branches</h1>
+        <h1 id={WORKSPACE_VIEW_HEADING_ID} tabIndex={-1}>
+          Branches
+        </h1>
         <span className="list-subtitle">{visibleBranches.length} shown</span>
       </div>
       <SegmentedControl<BranchFilter>
@@ -1481,132 +2082,184 @@ function App() {
     return (
       <>
         {renderBranchBudgetNote()}
-        <div className="branch-list" role="group" aria-label="Repository branches">
+        <div
+          aria-label="Repository branches"
+          className="branch-list"
+          ref={branchTreeListRef}
+          role="tree"
+        >
           {branchWindow.visible.map((branch, branchIndex) => {
             const tree = branchTree.rows[branchWindow.start + branchIndex]
             const pullRequest = branch.pr
             const selected = branch.ref === selectedBranch?.ref
+            const requiresRestack = branch.needsRestack || (branch.parentBehind ?? 0) > 0
             return (
-              <div
-                className={cn('branch-row', selected && 'branch-row-selected')}
-                key={branch.ref}
-                style={{ '--branch-depth': tree.depth } as React.CSSProperties}
-              >
-                <BranchHoverCard branch={branch}>
-                  <button
-                    aria-current={selected ? 'true' : undefined}
-                    aria-label={`${branch.name}${branch.remote ? ', remote branch' : ''}${branch.current ? ', current branch' : ''}`}
-                    className="branch-select"
-                    onClick={() => setSelectedBranchRef(branch.ref)}
-                    type="button"
-                  />
-                </BranchHoverCard>
-                {tree.trunks.map((trunk, segmentIndex) => (
-                  <span
-                    aria-hidden="true"
-                    className={cn('branch-tree-trunk', `branch-tree-trunk-${trunk.kind}`)}
-                    key={`trunk-${segmentIndex}`}
-                    style={{ '--branch-lane': trunk.lane } as React.CSSProperties}
-                  />
-                ))}
-                {tree.elbows.map((elbow, segmentIndex) => (
-                  <span
-                    aria-hidden="true"
-                    className="branch-tree-elbow"
-                    key={`elbow-${segmentIndex}`}
-                    style={{ '--branch-lane': elbow.lane } as React.CSSProperties}
-                  />
-                ))}
-                <span className={cn('branch-icon', branch.current && 'branch-icon-current')}>
-                  {branch.remote ? (
-                    <Cloud className="size-3.5" />
-                  ) : (
-                    <GitBranch className="size-3.5" />
-                  )}
-                </span>
-                <span className="branch-copy">
-                  <span className="branch-name-line">
-                    <strong>{branch.name}</strong>
-                    {branch.current ? <Badge variant="accent">current</Badge> : null}
-                    {branch.remote ? <Badge variant="outline">remote</Badge> : null}
-                    {tree.cycle ? <Badge variant="warning">cycle</Badge> : null}
-                    {tree.missingParent ? <Badge variant="warning">parent missing</Badge> : null}
-                    {branch.needsRestack || (branch.parentBehind ?? 0) > 0 ? (
-                      <Badge variant="warning">Requires restack</Badge>
-                    ) : null}
+              <BranchHoverCard branch={branch}>
+                <div
+                  aria-current={selected ? 'true' : undefined}
+                  aria-label={describeBranchRow({
+                    ahead: branch.ahead,
+                    behind: branch.behind,
+                    checks: pullRequest?.checks ?? null,
+                    current: branch.current,
+                    cycle: tree.cycle,
+                    missingParent: tree.missingParent,
+                    name: branch.name,
+                    pullRequestNumber: pullRequest?.number ?? null,
+                    remote: branch.remote,
+                    requiresRestack,
+                    upstream: branch.upstream,
+                  })}
+                  aria-level={tree.level + 1}
+                  aria-posinset={tree.posInSet}
+                  aria-selected={selected}
+                  aria-setsize={tree.setSize}
+                  className={cn('branch-row', selected && 'branch-row-selected')}
+                  key={branch.ref}
+                  onClick={(event) => {
+                    // The row's own controls keep their own activation; only the
+                    // row background selects the branch.
+                    const hit = event.target as Element
+                    if (hit !== event.currentTarget && hit.closest('a, button, [role="button"]')) {
+                      return
+                    }
+                    setSelectedBranchRef(branch.ref)
+                  }}
+                  onFocus={() => setBranchTreeActiveIndex(branchIndex)}
+                  onKeyDown={(event) => {
+                    // A control inside the row owns its own keys, and a chord is
+                    // the global shortcut dispatcher's business; the roving
+                    // contract covers unmodified keys on the row itself only.
+                    if (event.target !== event.currentTarget) return
+                    if (!claimsRovingKey(event)) return
+                    const action = rovingAction(event.key)
+                    if (action) {
+                      // Up/Down walk the mounted rows in mounted coordinates;
+                      // Home and End name the first and last row of the whole
+                      // filtered list, which can sit outside the mounted window.
+                      const wholeList = action === 'first' || action === 'last'
+                      const target = wholeList
+                        ? rovingTarget(
+                            action,
+                            branchIndex + branchWindow.start,
+                            visibleBranches.length,
+                          )
+                        : rovingTarget(action, branchIndex, branchWindow.visible.length)
+                      if (target === null) return
+                      event.preventDefault()
+                      if (wholeList) focusBranchRowInList(target)
+                      else focusBranchRowInWindow(target)
+                      return
+                    }
+                    if (event.key === 'Enter' || event.key === ' ') {
+                      event.preventDefault()
+                      setSelectedBranchRef(branch.ref)
+                    }
+                  }}
+                  role="treeitem"
+                  style={{ '--branch-depth': tree.depth } as React.CSSProperties}
+                  tabIndex={rovingTabIndex(branchIndex, branchTreeActiveIndex)}
+                >
+                  {tree.trunks.map((trunk, segmentIndex) => (
+                    <span
+                      aria-hidden="true"
+                      className={cn('branch-tree-trunk', `branch-tree-trunk-${trunk.kind}`)}
+                      key={`trunk-${segmentIndex}`}
+                      style={{ '--branch-lane': trunk.lane } as React.CSSProperties}
+                    />
+                  ))}
+                  {tree.elbows.map((elbow, segmentIndex) => (
+                    <span
+                      aria-hidden="true"
+                      className="branch-tree-elbow"
+                      key={`elbow-${segmentIndex}`}
+                      style={{ '--branch-lane': elbow.lane } as React.CSSProperties}
+                    />
+                  ))}
+                  <span className={cn('branch-icon', branch.current && 'branch-icon-current')}>
+                    {branch.remote ? (
+                      <Cloud className="size-3.5" />
+                    ) : (
+                      <GitBranch className="size-3.5" />
+                    )}
                   </span>
-                  <span className="branch-summary">
-                    {pullRequest ? (
-                      <PullRequestHoverCard pr={pullRequest}>
-                        <a
-                          className="branch-pr-link"
-                          href={pullRequest.url}
-                          aria-label={`Open pull request #${pullRequest.number} on GitHub`}
-                          onClick={(event) => {
-                            event.preventDefault()
-                            desktop
-                              ?.openExternal(pullRequest.url)
-                              .catch((value) => setError(readableError(value)))
-                          }}
-                        >
-                          #{pullRequest.number}
-                          <ExternalLink className="size-3" aria-hidden="true" />
-                        </a>
-                      </PullRequestHoverCard>
-                    ) : null}
-                    <span className="branch-subject">{branch.subject || 'No commit subject'}</span>
-                  </span>
-                </span>
-                <span className="branch-metrics">
-                  {pullRequest ? (
-                    <Badge variant={checksVariant(pullRequest.checks)}>
-                      <ShieldCheck className="size-3" />
-                      {checkLabel(pullRequest.checks)}
-                    </Badge>
-                  ) : null}
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <span
-                        className="ahead-behind relative z-[2] rounded-sm outline-none focus-visible:ring-2 focus-visible:ring-[var(--ring)]"
-                        role="group"
-                        tabIndex={0}
-                        aria-label={
-                          branch.upstream
-                            ? `${branch.ahead} ahead, ${branch.behind} behind ${branch.upstream}`
-                            : 'No upstream configured'
-                        }
-                      >
-                        <span className={branch.ahead > 0 ? 'metric-positive' : 'metric-muted'}>
-                          <ArrowUp className="size-3" />
-                          {branch.ahead}
-                        </span>
-                        <span className={branch.behind > 0 ? 'metric-negative' : 'metric-muted'}>
-                          <ArrowDown className="size-3" />
-                          {branch.behind}
-                        </span>
+                  <span className="branch-copy">
+                    <span className="branch-name-line">
+                      <strong>{branch.name}</strong>
+                      {branch.current ? <Badge variant="accent">current</Badge> : null}
+                      {branch.remote ? <Badge variant="outline">remote</Badge> : null}
+                      {tree.cycle ? <Badge variant="warning">cycle</Badge> : null}
+                      {tree.missingParent ? <Badge variant="warning">parent missing</Badge> : null}
+                      {branch.needsRestack || (branch.parentBehind ?? 0) > 0 ? (
+                        <Badge variant="warning">Requires restack</Badge>
+                      ) : null}
+                    </span>
+                    <span className="branch-summary">
+                      {pullRequest ? (
+                        <PullRequestHoverCard pr={pullRequest}>
+                          <a
+                            className="branch-pr-link"
+                            href={pullRequest.url}
+                            aria-label={`Open pull request #${pullRequest.number} on GitHub`}
+                            onClick={(event) => {
+                              event.preventDefault()
+                              desktop
+                                ?.openExternal(pullRequest.url)
+                                .catch((value) => setError(readableError(value)))
+                            }}
+                          >
+                            #{pullRequest.number}
+                            <ExternalLink className="size-3" aria-hidden="true" />
+                          </a>
+                        </PullRequestHoverCard>
+                      ) : null}
+                      <span className="branch-subject">
+                        {branch.subject || 'No commit subject'}
                       </span>
-                    </TooltipTrigger>
-                    <TooltipContent>
-                      {branch.upstream
-                        ? `${branch.ahead} commits ahead and ${branch.behind} behind ${branch.upstream}`
-                        : 'Set an upstream to compare this branch with its remote.'}
-                    </TooltipContent>
-                  </Tooltip>
-                  <span className="branch-updated">{formatBranchDate(branch.updatedAt)}</span>
-                </span>
-                <ChevronRight className="branch-chevron size-4" />
-              </div>
+                    </span>
+                  </span>
+                  <span className="branch-metrics">
+                    {pullRequest ? (
+                      <Badge variant={checksVariant(pullRequest.checks)}>
+                        <ShieldCheck className="size-3" />
+                        {checkLabel(pullRequest.checks)}
+                      </Badge>
+                    ) : null}
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <span aria-hidden="true" className="ahead-behind relative z-[2] rounded-sm">
+                          <span className={branch.ahead > 0 ? 'metric-positive' : 'metric-muted'}>
+                            <ArrowUp className="size-3" />
+                            {branch.ahead}
+                          </span>
+                          <span className={branch.behind > 0 ? 'metric-negative' : 'metric-muted'}>
+                            <ArrowDown className="size-3" />
+                            {branch.behind}
+                          </span>
+                        </span>
+                      </TooltipTrigger>
+                      <TooltipContent>
+                        {branch.upstream
+                          ? `${branch.ahead} commits ahead and ${branch.behind} behind ${branch.upstream}`
+                          : 'Set an upstream to compare this branch with its remote.'}
+                      </TooltipContent>
+                    </Tooltip>
+                    <span className="branch-updated">{formatBranchDate(branch.updatedAt)}</span>
+                  </span>
+                  <ChevronRight className="branch-chevron size-4" />
+                </div>
+              </BranchHoverCard>
             )
           })}
-          <ListWindowMore
-            pageSize={LIST_PAGE_SIZE}
-            remaining={branchWindow.remaining}
-            previous={branchWindow.hasPrevious}
-            noun="branches"
-            onReveal={branchWindow.reveal}
-            onPrevious={branchWindow.retreat}
-          />
         </div>
+        <ListWindowMore
+          pageSize={LIST_PAGE_SIZE}
+          remaining={branchWindow.remaining}
+          previous={branchWindow.hasPrevious}
+          noun="branches"
+          onReveal={branchWindow.reveal}
+          onPrevious={branchWindow.retreat}
+        />
       </>
     )
   }
@@ -1628,6 +2281,7 @@ function App() {
           setActionError(null)
           setInspectedPath(path)
         }}
+        onOpenInEditor={openInEditor}
         onResolveConflict={openConflictResolver}
         onStash={() => openWorkflow({ kind: 'stash' })}
         onSubmitCommit={submitCommit}
@@ -1685,6 +2339,16 @@ function App() {
     if (!snapshot) return null
     if (workspaceView === 'changes') return renderChanges()
     if (workspaceView === 'pullRequests') return renderPullRequests()
+    if (workspaceView === 'review')
+      return (
+        <ReviewView
+          commands={reviewCommands}
+          desktop={desktop ?? undefined}
+          number={reviewNumber ?? selectedPullRequest?.number ?? null}
+          onSelectNumber={setReviewNumber}
+          pullRequests={visiblePullRequests}
+        />
+      )
     if (workspaceView === 'stashes') return renderStashes()
     if (workspaceView === 'diagnostics') return <DiagnosticsView snapshot={snapshot} />
     if (workspaceView === 'history')
@@ -1773,9 +2437,9 @@ function App() {
               <Badge variant="secondary">{selectedBranch.remote ? 'Remote' : 'Local'}</Badge>
             )}
             {selectedPullRequest ? (
-              <Badge variant={checksVariant(selectedPullRequest.checks)}>
+              <Badge variant={checksVariant(inspectorChecks)}>
                 <ShieldCheck className="size-3" />
-                {checkLabel(selectedPullRequest.checks)}
+                {checkLabel(inspectorChecks)}
               </Badge>
             ) : null}
           </div>
@@ -2057,6 +2721,18 @@ function App() {
                   Open on GitHub
                 </Button>
                 <Button
+                  onClick={() => {
+                    setReviewNumber(selectedPullRequest.number)
+                    setWorkspaceView('review')
+                  }}
+                  size="sm"
+                  variant="secondary"
+                  tooltip="Read this pull request's files, commits, and stack position in Git Stacks. Nothing is checked out and nothing changes on GitHub."
+                >
+                  <MessageSquareDiff className="size-3.5" />
+                  Review changes
+                </Button>
+                <Button
                   disabled={isBusy}
                   tooltip="Preview checks, reviews, and merge or close options for this pull request. Nothing changes until confirmed."
                   size="sm"
@@ -2067,6 +2743,18 @@ function App() {
                 </Button>
               </div>
             </section>
+          ) : null}
+          {selectedPullRequest ? (
+            <PullRequestChecksPanel
+              loading={checksLoading}
+              report={checksReport}
+              rerunningRunId={rerunningRunId}
+              watching={checksWatching}
+              onOpenDetails={openCheckDetails}
+              onRefresh={() => void loadChecks(selectedPullRequest.number, true)}
+              onRerun={(check) => void rerunCheck(check)}
+              onToggleWatch={() => setChecksWatching((current) => !current)}
+            />
           ) : (
             <section className="detail-section detail-section-muted">
               <h3>Pull request</h3>
@@ -2245,22 +2933,35 @@ function App() {
         <div className="onboarding-icon">
           <GitBranch className="size-7" />
         </div>
-        <h1>Open a repository</h1>
+        <h1>Start with a repository</h1>
         <p>
           Git Stacks gives you a focused view of branches, working changes, and pull requests
-          without leaving your desktop.
+          without leaving your desktop. A repository stays ordinary Git: clone it here, then keep
+          using it in your terminal, your editor, or GitHub Desktop.
         </p>
-        <Button disabled={opening} onClick={() => openRepository()} size="lg" variant="accent">
-          {opening ? (
-            <LoaderCircle className="size-4 animate-spin" />
-          ) : (
-            <FolderOpen className="size-4" />
-          )}
-          Open local repository
-        </Button>
+        <div className="onboarding-actions">
+          <Button disabled={opening || !desktop} onClick={openDiscovery} size="lg" variant="accent">
+            {opening ? (
+              <LoaderCircle aria-hidden="true" className="size-4 animate-spin" />
+            ) : (
+              <Search aria-hidden="true" className="size-4" />
+            )}
+            Search GitHub
+          </Button>
+          <Button
+            disabled={opening || !desktop}
+            onClick={() => void openRepository(undefined, 'recent')}
+            size="lg"
+            variant="secondary"
+          >
+            <FolderOpen aria-hidden="true" className="size-4" />
+            Add local repository
+          </Button>
+        </div>
+        <p className="onboarding-hint">Or drop a Git repository folder anywhere on this window.</p>
         {!desktop ? (
           <div className="desktop-notice" role="status">
-            <Terminal className="size-4" />
+            <Terminal aria-hidden="true" className="size-4" />
             <span>
               Open Git Stacks in the desktop app to access local Git repositories. This browser view
               does not include demo data.
@@ -2270,7 +2971,7 @@ function App() {
         {recentRepositories.length > 0 ? (
           <div className="onboarding-recents">
             <div className="onboarding-recents-heading">
-              <Clock3 className="size-4" />
+              <Clock3 aria-hidden="true" className="size-4" />
               <h2>Recent repositories</h2>
             </div>
             {recentRepositories.map((repository) => (
@@ -2278,19 +2979,20 @@ function App() {
                 className="onboarding-recent"
                 disabled={opening}
                 key={repository.path}
-                onClick={() => openRepository(repository.path)}
+                onClick={() => void openRepository(repository.path)}
                 type="button"
               >
-                <FolderGit2 className="size-4" />
+                <FolderGit2 aria-hidden="true" className="size-4" />
                 <span>
                   <strong>{repository.name}</strong>
                   <small>{repository.path}</small>
                 </span>
-                <ChevronRight className="size-4" />
+                <ChevronRight aria-hidden="true" className="size-4" />
               </button>
             ))}
           </div>
         ) : null}
+        <GitEnvironmentPanel failure={gitEnvironmentFailure} status={gitEnvironment} />
       </div>
     </main>
   )
@@ -2321,10 +3023,17 @@ function App() {
             {snapshot?.stackOperation ? 'Stack operation in progress' : 'Git operation in progress'}
           </Badge>
         ) : null}
+        {snapshot ? <RemoteFreshnessBadge freshness={remoteStatus ?? snapshot.remote} /> : null}
         <span className="titlebar-build">Native Git workspace</span>
       </header>
       {error ? (
-        <InlineAlert tone="error" className="global-banner" role="alert">
+        <InlineAlert
+          tone="error"
+          className="global-banner"
+          id="global-error-banner"
+          role="alert"
+          tabIndex={-1}
+        >
           <span className="global-banner-row">
             <span>{error}</span>
             <IconButton label="Dismiss error" onClick={() => setError(null)}>
@@ -2334,7 +3043,13 @@ function App() {
         </InlineAlert>
       ) : null}
       {actionError ? (
-        <InlineAlert tone="error" className="global-banner" role="alert">
+        <InlineAlert
+          tone="error"
+          className="global-banner"
+          id="global-action-error-banner"
+          role="alert"
+          tabIndex={-1}
+        >
           <span className="global-banner-row">
             <span>{actionError}</span>
             <IconButton label="Dismiss action error" onClick={() => setActionError(null)}>
@@ -2353,6 +3068,36 @@ function App() {
           </span>
         </InlineAlert>
       ) : null}
+      {(remoteStatus?.pendingMutations ?? []).map((pending) => (
+        <InlineAlert key={pending.id} tone="error" className="global-banner" role="alert">
+          <span className="global-banner-row">
+            <span>
+              {`${pending.label} did not reach GitHub and will not be retried automatically. ${pending.reason}`}
+            </span>
+            <IconButton
+              label={`Dismiss ${pending.label}`}
+              onClick={() => {
+                void desktop?.dismissPendingMutation?.(pending.id)
+                setRemoteStatus((current) =>
+                  current
+                    ? {
+                        ...current,
+                        pendingMutations: current.pendingMutations.filter(
+                          (entry) => entry.id !== pending.id,
+                        ),
+                      }
+                    : current,
+                )
+              }}
+            >
+              <X aria-hidden="true" className="size-3.5" />
+            </IconButton>
+          </span>
+        </InlineAlert>
+      ))}
+      <div aria-atomic="true" aria-live="polite" className="sr-only">
+        {announcement}
+      </div>
       {snapshot ? <section aria-label="Repository controls">{renderToolbar()}</section> : null}
       {snapshot ? (
         <OperationBanner
@@ -2380,14 +3125,44 @@ function App() {
           runAction={runAction}
           onClose={() => setWorkflow(null)}
           onRequest={openWorkflow}
+          defaults={settings}
         />
       ) : null}
+      <SettingsDialog
+        account={account}
+        desktop={desktop}
+        onAccountChange={setAccount}
+        onError={setError}
+        onSettingsChange={setSettings}
+        onShortcutBindingsChange={setShortcutBindings}
+        open={settingsOpen}
+        onOpenChange={setSettingsOpen}
+        shortcutBindings={shortcutBindings}
+      />
       <GitRuntimeDialog
         busy={gitRuntimeBusy || isBusy || operationActive}
         onOpenChange={setGitRuntimeOpen}
         onSelectSystemGit={selectGitRuntime}
         open={gitRuntimeOpen}
         status={gitRuntimeStatus}
+      />
+      <GitHubAccountDialog
+        busy={accountBusy || isBusy || operationActive}
+        onCancelSignIn={() => runAccountAction(() => desktop!.cancelGitHubSignIn!(), true)}
+        onOpenChange={setAccountOpen}
+        onOpenVerification={openDevicePage}
+        onSignIn={() => runAccountAction(() => desktop!.startGitHubSignIn!())}
+        onSignOut={() => runAccountAction(() => desktop!.signOutOfGitHub!(), true)}
+        open={accountOpen}
+        status={account}
+      />
+      <RepositoryDiscoveryDialog
+        account={account}
+        busy={isBusy || operationActive}
+        onCloned={(result) => void adoptClonedRepository(result)}
+        onOpenAccount={openAccount}
+        onOpenChange={setDiscoveryOpen}
+        open={discoveryOpen}
       />
       {conflictPath && snapshot ? (
         <ConflictResolver
@@ -2784,7 +3559,10 @@ function App() {
         open={shortcutSettingsOpen}
         onOpenChange={setShortcutSettingsOpen}
         bindings={shortcutBindings}
-        onBindingsChange={setShortcutBindings}
+        onBindingsChange={(bindings) => {
+          void persistShortcutBindings(bindings)
+        }}
+        disabledReason={shortcutLockReason}
       />
       <DirtyCheckoutGuard
         target={checkoutGuardTarget}

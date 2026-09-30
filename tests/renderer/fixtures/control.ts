@@ -6,7 +6,12 @@ import type {
   GitRuntimeInfo,
   GitRuntimeStatus,
   HistoryPage,
+  MergeProgress,
+  MergeStatus,
   PushPreview,
+  RemoteFreshness,
+  RepositorySnapshot,
+  SyncActivity,
   StackKind,
   StackPreview,
   SurgeryPreview,
@@ -16,6 +21,8 @@ import {
   conflictRegions,
   parseConflictSegments,
 } from '../../../src/shared/conflict'
+import type { ReviewHistoryDiff } from '../../../src/shared/review-snapshots'
+import type { ReviewHeadline, ReviewViewedRecord } from '../../../src/shared/review'
 import {
   fileViewFixtures,
   historyCommits,
@@ -25,13 +32,38 @@ import {
   insertSurgeryPreview,
   leasePreview,
   mergePreview,
+  mergeStatus,
+  mergeStatusQueueSentence,
   publishPreview,
   restackPreview,
   syncPreview,
 } from '../../fixtures/workflow-scenarios'
-import { scenarios } from './scenarios'
+import {
+  reviewCommits,
+  reviewFileSet,
+  reviewPermissions,
+  reviewRail,
+  reviewThreadSet,
+  stackMember,
+  textFile,
+} from './review'
+import type { ReviewFile, ReviewLine, ReviewSide } from '../../../src/shared/review'
+import type {
+  ReviewDraftRecord,
+  ReviewDraftResolution,
+  ReviewEvent,
+} from '../../../src/shared/review-threads'
+import { checksReportFor, scenarios } from './scenarios'
 import { DEFAULT_SCENARIO, type ScenarioName } from './manifest'
+import type { PullRequestChecksReport } from '../../../src/shared/pull-request-checks'
 import type { FixtureCall, FixtureCallRecord, FixtureControl, FixtureScenario } from './types'
+
+/** The review state GitHub reports back for each submitted event. */
+const REVIEW_SUBMIT_STATES: Record<ReviewEvent, string> = {
+  COMMENT: 'COMMENTED',
+  APPROVE: 'APPROVED',
+  REQUEST_CHANGES: 'CHANGES_REQUESTED',
+}
 
 /** Production labels of the controls that open a repository from the onboarding pane. */
 const OPEN_REPOSITORY_LABELS = ['Open local repository', 'Open repository']
@@ -44,6 +76,28 @@ const stackPreviewsByKind: Record<StackKind, StackPreview> = {
   publish: publishPreview,
   merge: mergePreview,
   sync: syncPreview,
+}
+
+function unresolved(id: string, reason: string): ReviewDraftResolution {
+  return { id, match: 'unresolved', side: null, line: null, startLine: null, reason }
+}
+
+/** The line a draft's address names, or null when the file set no longer has it. */
+function lineAt(
+  files: ReviewFile[],
+  path: string,
+  side: ReviewSide,
+  number: number,
+): ReviewLine | null {
+  const file = files.find((entry) => entry.path === path)
+  if (!file || file.diff.kind !== 'text') return null
+  for (const hunk of file.diff.hunks) {
+    for (const line of hunk.lines) {
+      if (line.side !== side) continue
+      if ((side === 'base' ? line.oldLine : line.newLine) === number) return line
+    }
+  }
+  return null
 }
 
 const bundledRuntime: GitRuntimeInfo = {
@@ -193,12 +247,20 @@ export function installFixtureControl(options: {
 }): FixtureControl {
   const actions: GitAction[] = []
   const externalUrls: string[] = []
+  /** Pending drafts per pull request, held for the life of the page as the real journal is. */
+  const heldDrafts = new Map<number, ReviewDraftRecord>()
   const calls: FixtureCallRecord[] = []
   const holds = new Set<FixtureCall>()
   const oneShotFailures = new Map<FixtureCall, string>()
+  const dropListeners = new Set<(paths: string[]) => void>()
   const released = new Set<FixtureCall>()
   const waiting: WaitingCall[] = []
   let startsPending = new Set<FixtureCall>()
+  let mergeStatusReads = 0
+  const mergeListeners = new Set<(progress: MergeProgress | null) => void>()
+  const publishMergeProgress = (progress: MergeProgress | null): void => {
+    for (const listener of mergeListeners) listener(progress)
+  }
 
   const scenarioFor = (name: string): FixtureScenario =>
     scenarios[name as ScenarioName] ?? scenarios[DEFAULT_SCENARIO]
@@ -256,6 +318,31 @@ export function installFixtureControl(options: {
     runAction: (action) => {
       record('runAction', [action])
       actions.push(action)
+      // A merge reports through the progress channel the way the main process does, and it
+      // reports while the run is still going: the request is accepted, GitHub is still
+      // running it, and the run returns before the result exists. What GitHub reports
+      // afterwards comes from a read, not from this.
+      if (action.type === 'executeStack' && action.mergeMethod) {
+        const layer = mergePreview.merge?.layers[0]
+        if (layer) {
+          publishMergeProgress({
+            action: 'default',
+            status: 'running',
+            message: `GitHub has not reported a result for pull request #${layer.pullRequest} yet`,
+            layers: [
+              {
+                branch: layer.branch,
+                pullRequest: layer.pullRequest,
+                status: 'pending',
+                detail: 'GitHub has not reported a result yet; refresh to read this request',
+                mergedOid: null,
+                queue: null,
+                requestUuid: 'fixture-request-1',
+              },
+            ],
+          })
+        }
+      }
       return answer<ActionResult>(
         'runAction',
         () => ({ message: actionMessage(action) }),
@@ -342,6 +429,33 @@ export function installFixtureControl(options: {
         return preview.kind === request.kind ? preview : { ...preview, kind: request.kind }
       })
     },
+    mergeStatus: () => {
+      record('mergeStatus', [])
+      return answer<MergeStatus>('mergeStatus', () => {
+        const base = scenario.mergeStatus ?? mergeStatus
+        // The queue lands the group between reads, so a refresh visibly replaces the queued
+        // layer with what GitHub now reports for it; a later read fails, standing in for a
+        // transport error that must not erase the last result GitHub reported.
+        const read = mergeStatusReads++
+        if (read === 2) throw new Error('GitHub is unreachable')
+        if (read === 0) return base
+        return {
+          ...base,
+          layers: base.layers.map((layer) =>
+            layer.status === 'enqueued'
+              ? {
+                  ...layer,
+                  status: 'merged' as const,
+                  detail: 'Merged on GitHub as 4444444444',
+                  mergedOid: '4444444444444444444444444444444444444444',
+                  queue: { ...layer.queue!, outcome: 'merged' as const },
+                }
+              : layer,
+          ),
+          message: base.message.replace(mergeStatusQueueSentence, 'Pull request #40 merged.'),
+        }
+      })
+    },
     pullRequest: (number) => {
       record('pullRequest', [number])
       return answer('pullRequest', () => {
@@ -353,10 +467,340 @@ export function installFixtureControl(options: {
         }
       })
     },
+    onMergeProgress: (listener) => {
+      mergeListeners.add(listener)
+      return () => {
+        mergeListeners.delete(listener)
+      }
+    },
+    reviewHeadline: (number) => {
+      record('reviewHeadline', [number])
+      return answer('reviewHeadline', () => {
+        const found = scenario.snapshot?.pullRequests.find((pr) => pr.number === number)
+        if (!found) throw new Error(`Pull request #${number} is not in this fixture snapshot.`)
+        // A pull request carries only its own position; the layer list comes
+        // from every pull request in the snapshot that names the same stack.
+        const membership = found.stack
+          ? (scenario.snapshot?.pullRequests
+              .filter((pr) => pr.stack?.stackNumber === found.stack?.stackNumber)
+              .map((pr) =>
+                stackMember(pr.stack?.position ?? 1, pr.number, found.stack?.size ?? 1),
+              ) ?? null)
+          : null
+        const value: ReviewHeadline = {
+          pullRequest: {
+            ...found,
+            body: `${found.title}\n\nDeterministic fixture body for pull request #${number}.`,
+          },
+          rail: reviewRail(found, membership),
+        }
+        return value
+      })
+    },
+    reviewFiles: (number) => {
+      record('reviewFiles', [number])
+      return answer('reviewFiles', () => {
+        const found = scenario.snapshot?.pullRequests.find((pr) => pr.number === number)
+        if (!found) throw new Error(`Pull request #${number} is not in this fixture snapshot.`)
+        return reviewFileSet(number, scenario.reviewHeadOid ?? found.headOid ?? `head-${number}`)
+      })
+    },
+    reviewCommits: (number) => {
+      record('reviewCommits', [number])
+      return answer('reviewCommits', () => reviewCommits(number))
+    },
+    reviewViewed: () => {
+      record('reviewViewed', [])
+      return answer('reviewViewed', () => null)
+    },
+    reviewSetViewed: (record_) => {
+      record('reviewSetViewed', [record_])
+      return answer('reviewSetViewed', () => record_ as ReviewViewedRecord)
+    },
+    reviewThreads: (number) => {
+      record('reviewThreads', [number])
+      return answer('reviewThreads', () => {
+        const found = scenario.snapshot?.pullRequests.find((pr) => pr.number === number)
+        const headOid = scenario.reviewHeadOid ?? found?.headOid ?? `head-${number}`
+        return {
+          threads: reviewThreadSet(number, headOid),
+          permissions: reviewPermissions(number, scenario.reviewPermissions),
+        }
+      })
+    },
+    reviewDrafts: (number) => {
+      record('reviewDrafts', [number])
+      // The real journal outlives the workspace, so the double keeps drafts for
+      // the life of the page: leaving the review workspace and coming back has
+      // to show the pending comments again, which is the behaviour being proven.
+      return answer('reviewDrafts', () => heldDrafts.get(number) ?? null)
+    },
+    reviewSetDrafts: (draftRecord) => {
+      record('reviewSetDrafts', [draftRecord])
+      heldDrafts.set(draftRecord.number, draftRecord)
+      return answer('reviewSetDrafts', () => draftRecord as ReviewDraftRecord)
+    },
+    reviewSubmit: (number, submission) => {
+      record('reviewSubmit', [number, submission])
+      return answer('reviewSubmit', () => ({
+        id: `review-${number}`,
+        state: REVIEW_SUBMIT_STATES[submission.event],
+        url: `https://github.com/acme/widgets/pull/${number}#pullrequestreview-1`,
+      }))
+    },
+    reviewReply: (number, threadId) => {
+      record('reviewReply', [number, threadId])
+      return answer('reviewReply', () => ({
+        id: `reply-${threadId}`,
+        state: 'COMMENTED',
+        url: `https://github.com/acme/widgets/pull/${number}#discussion_r9`,
+      }))
+    },
+    reviewSetResolved: (number, threadId, resolved) => {
+      record('reviewSetResolved', [number, threadId, resolved])
+      return answer('reviewSetResolved', () => ({
+        id: threadId,
+        state: resolved ? 'RESOLVED' : 'UNRESOLVED',
+        url: null,
+      }))
+    },
+    reviewHistory: (number) => {
+      record('reviewHistory', [number])
+      return answer('reviewHistory', () => {
+        if (scenario.reviewHistory) {
+          return typeof scenario.reviewHistory === 'function'
+            ? scenario.reviewHistory(number)
+            : scenario.reviewHistory
+        }
+        const found = scenario.snapshot?.pullRequests.find((pr) => pr.number === number)
+        const currentHead = scenario.reviewHeadOid ?? found?.headOid ?? `head-${number}`
+        const historicalHead = '1111222233334444555566667777888899990000'
+        return {
+          number,
+          current: {
+            headOid: currentHead,
+            baseOid: 'b'.repeat(40),
+            baseRef: 'main',
+          },
+          latest: {
+            headOid: currentHead,
+            baseOid: 'b'.repeat(40),
+            baseRef: 'main',
+            firstSeenAt: '2026-09-24T10:00:00.000Z',
+            lastSeenAt: '2026-09-25T12:00:00.000Z',
+            observations: 2,
+            reviewed: false,
+            reviewedAt: null,
+            reviewId: null,
+          },
+          reviewed: {
+            headOid: historicalHead,
+            baseOid: 'b'.repeat(40),
+            baseRef: 'main',
+            firstSeenAt: '2026-09-22T08:00:00.000Z',
+            lastSeenAt: '2026-09-23T09:00:00.000Z',
+            observations: 3,
+            reviewed: true,
+            reviewedAt: '2026-09-23T09:00:00.000Z',
+            reviewId: 'PRR_reviewed_1',
+          },
+          snapshots: [
+            {
+              headOid: historicalHead,
+              baseOid: 'b'.repeat(40),
+              baseRef: 'main',
+              firstSeenAt: '2026-09-22T08:00:00.000Z',
+              lastSeenAt: '2026-09-23T09:00:00.000Z',
+              observations: 3,
+              reviewed: true,
+              reviewedAt: '2026-09-23T09:00:00.000Z',
+              reviewId: 'PRR_reviewed_1',
+            },
+            {
+              headOid: currentHead,
+              baseOid: 'b'.repeat(40),
+              baseRef: 'main',
+              firstSeenAt: '2026-09-24T10:00:00.000Z',
+              lastSeenAt: '2026-09-25T12:00:00.000Z',
+              observations: 2,
+              reviewed: false,
+              reviewedAt: null,
+              reviewId: null,
+            },
+          ],
+          gap: null,
+        }
+      })
+    },
+    reviewHistoryDiff: (number, fromOid) => {
+      record('reviewHistoryDiff', [number, fromOid])
+      return answer('reviewHistoryDiff', () => {
+        if (scenario.reviewHistoryDiff) {
+          return typeof scenario.reviewHistoryDiff === 'function'
+            ? scenario.reviewHistoryDiff(number, fromOid)
+            : scenario.reviewHistoryDiff
+        }
+        const found = scenario.snapshot?.pullRequests.find((pr) => pr.number === number)
+        const currentHead = scenario.reviewHeadOid ?? found?.headOid ?? `head-${number}`
+        const fromSnapshot = {
+          headOid: fromOid,
+          baseOid: 'b'.repeat(40),
+          baseRef: 'main',
+          firstSeenAt: '2026-09-22T08:00:00.000Z',
+          lastSeenAt: '2026-09-23T09:00:00.000Z',
+          observations: 1,
+          reviewed: true,
+          reviewedAt: '2026-09-23T09:00:00.000Z',
+          reviewId: 'PRR_reviewed_1',
+        }
+        if (fromOid.startsWith('missing') || fromOid === 'deadbeef'.padEnd(40, '0')) {
+          const diff: ReviewHistoryDiff = {
+            number,
+            state: 'unavailable',
+            reason: `Historical commit ${fromOid.slice(0, 7)} is no longer in this repository (it may have been garbage-collected after a force-push).`,
+            from: fromSnapshot,
+            to: { headOid: currentHead, baseOid: 'b'.repeat(40), baseRef: 'main' },
+            mergeBaseOid: null,
+            files: [],
+            additions: 0,
+            deletions: 0,
+            truncated: false,
+          }
+          return diff
+        }
+        const diff: ReviewHistoryDiff = {
+          number,
+          state: 'files',
+          reason: '',
+          from: fromSnapshot,
+          to: { headOid: currentHead, baseOid: 'b'.repeat(40), baseRef: 'main' },
+          mergeBaseOid: 'b'.repeat(40),
+          files: [
+            textFile('src/main/review.ts', '@@ -2,2 +2,2 @@', [
+              ['-  return stagedDiff()', 2, null],
+              ['+  return transportDiff()', null, 2],
+            ]),
+          ],
+          additions: 1,
+          deletions: 1,
+          truncated: false,
+        }
+        return diff
+      })
+    },
+    reviewClearHistory: (number) => {
+      record('reviewClearHistory', [number])
+      return answer('reviewClearHistory', () => {
+        const found = scenario.snapshot?.pullRequests.find((pr) => pr.number === number)
+        const currentHead = scenario.reviewHeadOid ?? found?.headOid ?? `head-${number}`
+        return {
+          number,
+          current: { headOid: currentHead, baseOid: 'b'.repeat(40), baseRef: 'main' },
+          latest: {
+            headOid: currentHead,
+            baseOid: 'b'.repeat(40),
+            baseRef: 'main',
+            firstSeenAt: '2026-09-25T12:00:00.000Z',
+            lastSeenAt: '2026-09-25T12:00:00.000Z',
+            observations: 1,
+            reviewed: false,
+            reviewedAt: null,
+            reviewId: null,
+          },
+          reviewed: null,
+          snapshots: [
+            {
+              headOid: currentHead,
+              baseOid: 'b'.repeat(40),
+              baseRef: 'main',
+              firstSeenAt: '2026-09-25T12:00:00.000Z',
+              lastSeenAt: '2026-09-25T12:00:00.000Z',
+              observations: 1,
+              reviewed: false,
+              reviewedAt: null,
+              reviewId: null,
+            },
+          ],
+          gap: null,
+        }
+      })
+    },
+    reviewResolveDrafts: (number, drafts) => {
+      record('reviewResolveDrafts', [number, drafts])
+      return answer('reviewResolveDrafts', () => {
+        const found = scenario.snapshot?.pullRequests.find((pr) => pr.number === number)
+        const headOid = scenario.reviewHeadOid ?? found?.headOid ?? `head-${number}`
+        const files = reviewFileSet(number, headOid)
+        // The main process re-resolves each anchor against a freshly read file
+        // set; the double answers for the set it already serves, so a draft the
+        // reviewer just wrote is exact and a draft naming a line the fixture does
+        // not have is unresolved with a reason. A range is never re-anchored
+        // across a side, exactly as the real resolver refuses.
+        return drafts.map((draft) => {
+          const line = lineAt(files.files, draft.ref.path, draft.ref.side, draft.ref.line)
+          const start = draft.startRef ?? null
+          const startLine = start ? lineAt(files.files, start.path, start.side, start.line) : null
+          if (start && (start.side !== draft.ref.side || start.line > draft.ref.line)) {
+            return unresolved(
+              draft.id,
+              'The two ends of this comment are not one range on the same side of the diff.',
+            )
+          }
+          if (!line) {
+            return unresolved(
+              draft.id,
+              `${draft.ref.path} no longer holds line ${draft.ref.line} on the ${draft.ref.side}.`,
+            )
+          }
+          if (start && !startLine) {
+            return unresolved(
+              draft.id,
+              `${start.path} no longer holds the first line of this comment.`,
+            )
+          }
+          return {
+            id: draft.id,
+            match: 'exact' as const,
+            side: draft.ref.side,
+            line: draft.ref.side === 'base' ? line.oldLine : line.newLine,
+            startLine:
+              startLine && draft.startRef?.side === 'base'
+                ? startLine.oldLine
+                : (startLine?.newLine ?? null),
+            reason: '',
+          }
+        })
+      })
+    },
     openExternal: (url) => {
       record('openExternal', [url])
       externalUrls.push(url)
       return answer('openExternal', () => undefined)
+    },
+    pullRequestChecks: (number, options) => {
+      record('pullRequestChecks', [number, options])
+      return answer<PullRequestChecksReport>('pullRequestChecks', () => {
+        const report = checksReportFor(scenario, number)
+        if (!report) throw new Error(`Pull request #${number} is not in this scenario.`)
+        return report
+      })
+    },
+    rerunPullRequestCheck: (number, runId) => {
+      record('rerunPullRequestCheck', [number, runId])
+      return answer<PullRequestChecksReport>('rerunPullRequestCheck', () => {
+        const report = checksReportFor(scenario, number)
+        if (!report) throw new Error(`Pull request #${number} is not in this scenario.`)
+        if (!report.checks.some((check) => check.workflowRunId === runId)) {
+          throw new Error('That workflow run no longer belongs to this pull request head.')
+        }
+        return {
+          ...report,
+          freshness: 'live',
+          staleReason: null,
+          message: `Rerun requested for workflow run ${runId}.`,
+          checkedAt: report.checkedAt ?? report.fetchedAt,
+        }
+      })
     },
     gitRuntimeStatus: () => {
       record('gitRuntimeStatus', [])
@@ -418,6 +862,150 @@ export function installFixtureControl(options: {
         }
       })
     },
+
+    gitEnvironment: (requestId) => {
+      record('gitEnvironment', [requestId])
+      return answer('gitEnvironment', () => ({
+        ok: true as const,
+        value: {
+          identity: { name: 'Ada Lovelace', email: 'ada@example.invalid' },
+          defaultBranch: 'main',
+          httpsCredentials: { configured: true, helper: 'osxkeychain' },
+          ssh: { available: true, version: '9.8p1' },
+        },
+      }))
+    },
+    searchRepositories: (request) => {
+      record('searchRepositories', [request])
+      return answer('searchRepositories', () => {
+        const query = request.query?.trim() ?? ''
+        if (query === 'sso-error') {
+          return {
+            ok: false as const,
+            failure: {
+              reason: 'sso-denied' as const,
+              message: 'This organization requires single sign-on.',
+            },
+          }
+        }
+        const items =
+          query === 'empty-repo'
+            ? [
+                {
+                  name: 'empty-repo',
+                  fullName: 'acme/empty-repo',
+                  owner: 'acme',
+                  description: 'An empty repository with no commits yet',
+                  private: false,
+                  fork: false,
+                  archived: false,
+                  empty: true,
+                  language: null,
+                  defaultBranch: 'main',
+                  pushedAt: null,
+                  url: 'https://github.com/acme/empty-repo',
+                  httpsUrl: 'https://github.com/acme/empty-repo.git',
+                  sshUrl: 'git@github.com:acme/empty-repo.git',
+                  canPush: true,
+                  host: 'github.com',
+                },
+              ]
+            : [
+                {
+                  name: 'git-stacks',
+                  fullName: 'howarewoo/git-stacks',
+                  owner: 'howarewoo',
+                  description: 'Stacked Git pull requests on GitHub',
+                  private: false,
+                  fork: false,
+                  archived: false,
+                  empty: false,
+                  language: 'TypeScript',
+                  defaultBranch: 'main',
+                  pushedAt: '2026-09-29T00:00:00Z',
+                  url: 'https://github.com/howarewoo/git-stacks',
+                  httpsUrl: 'https://github.com/howarewoo/git-stacks.git',
+                  sshUrl: 'git@github.com:howarewoo/git-stacks.git',
+                  canPush: true,
+                  host: 'github.com',
+                },
+                {
+                  name: 'widgets',
+                  fullName: 'acme/widgets',
+                  owner: 'acme',
+                  description: 'Sample widget repository',
+                  private: true,
+                  fork: false,
+                  archived: false,
+                  empty: false,
+                  language: 'TypeScript',
+                  defaultBranch: 'main',
+                  pushedAt: '2026-09-28T00:00:00Z',
+                  url: 'https://github.com/acme/widgets',
+                  httpsUrl: 'https://github.com/acme/widgets.git',
+                  sshUrl: 'git@github.com:acme/widgets.git',
+                  canPush: true,
+                  host: 'github.com',
+                },
+              ]
+        return {
+          ok: true as const,
+          value: {
+            repositories: items,
+            query,
+            totalCount: items.length,
+            truncated: false,
+          },
+        }
+      })
+    },
+    previewCloneCommand: (request) => {
+      record('previewCloneCommand', [request])
+      const url = request.protocol === 'ssh' ? request.repository.sshUrl : request.repository.httpsUrl
+      return answer('previewCloneCommand', () => ({
+        ok: true as const,
+        value: {
+          gitCommand: `git clone ${url} "${request.parentDirectory}/${request.directoryName}"`,
+          ghCommand: `gh repo clone ${request.repository.fullName} "${request.parentDirectory}/${request.directoryName}"`,
+        },
+      }))
+    },
+    chooseDestinationDirectory: (current) => {
+      record('chooseDestinationDirectory', [current])
+      return answer('chooseDestinationDirectory', () => '/mock/workspaces')
+    },
+    cloneRepository: (request) => {
+      record('cloneRepository', [request])
+      return answer('cloneRepository', () => {
+        if (request.directoryName === 'collision') {
+          return {
+            ok: false as const,
+            failure: {
+              reason: 'destination-exists' as const,
+              message: 'collision already exists in that folder. Choose another name.',
+            },
+          }
+        }
+        return {
+          ok: true as const,
+          value: {
+            path: `${request.parentDirectory}/${request.directoryName}`,
+            name: request.directoryName,
+            empty: request.repository.empty,
+            gitCommand: `git clone https://github.com/${request.repository.fullName}.git "${request.parentDirectory}/${request.directoryName}"`,
+            ghCommand: `gh repo clone ${request.repository.fullName} "${request.parentDirectory}/${request.directoryName}"`,
+          },
+        }
+      })
+    },
+    addRepository: (path) => {
+      record('addRepository', [path])
+      return answer('addRepository', () => scenario.snapshot)
+    },
+    onRepositoryDropped: (listener) => {
+      dropListeners.add(listener)
+      return () => dropListeners.delete(listener)
+    },
   }
 
   const control: FixtureControl = {
@@ -478,6 +1066,65 @@ export function installFixtureControl(options: {
       released.clear()
       waiting.length = 0
     },
+    pushFreshness(value) {
+      push('repository:remote-status', value)
+    },
+    pushSnapshot(value) {
+      push('repository:background-snapshot', value)
+    },
+    dropRepository(paths) {
+      for (const listener of dropListeners) listener(paths)
+    },
+  }
+
+  // The main process's live-sync surface: the App subscribes to the pushes its
+  // watcher and refresh timers make, reports window activity, and can be asked
+  // for the current freshness. The control drives all of it, so a test walks the
+  // same path a real background refresh does.
+  const subscribers = new Map<string, (value: never) => void>()
+  let freshness: RemoteFreshness | null = scenario.snapshot?.remote ?? null
+  const push = (channel: string, value: unknown): void => {
+    if (channel === 'repository:remote-status') freshness = value as RemoteFreshness
+    subscribers.get(channel)?.(value as never)
+  }
+  const live = desktop as DesktopAPI & {
+    reportActivity: (activity: SyncActivity) => Promise<void>
+    remoteStatus: () => Promise<RemoteFreshness>
+    dismissPendingMutation: (id: string) => Promise<void>
+  }
+  live.reportActivity = async () => {}
+  // The main process always has a state for the open repository; before one is
+  // attached it reports the state the snapshot carried.
+  live.remoteStatus = async () =>
+    freshness ?? {
+      state: 'stale',
+      fetchedAt: null,
+      checkedAt: null,
+      detail: null,
+      rateLimitReset: null,
+      pendingMutations: [],
+    }
+  live.dismissPendingMutation = async (id: string) => {
+    if (!freshness) return
+    freshness = {
+      ...freshness,
+      pendingMutations: freshness.pendingMutations.filter((entry) => entry.id !== id),
+    }
+  }
+  const channelToMethod: Record<string, string> = {
+    'repository:background-snapshot': 'onBackgroundSnapshot',
+    'repository:background-issues': 'onBackgroundIssues',
+    'repository:remote-status': 'onRemoteStatus',
+  }
+  for (const [channel, method] of Object.entries(channelToMethod)) {
+    void ((live as unknown as Record<string, unknown>)[method] = (
+      listener: (value: never) => void,
+    ): (() => void) => {
+      subscribers.set(channel, listener)
+      return () => {
+        if (subscribers.get(channel) === listener) subscribers.delete(channel)
+      }
+    })
   }
 
   window.desktop = desktop

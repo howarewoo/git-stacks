@@ -8,6 +8,20 @@ import {
   type GitHubHarness,
 } from './fixtures/github-harness'
 import type { NativeStack, PublishLayerChoice, PullRequest } from '../src/shared/types'
+/** github.com's own context, written out so importing the host module cannot pull
+ * `git-core` (and the real `execFile`) in before this file's harness patches it. */
+const DOTCOM = {
+  host: 'github.com',
+  sshHost: 'github.com',
+  dotcom: true,
+  webOrigin: 'https://github.com',
+  apiBase: 'https://api.github.com',
+  graphqlUrl: 'https://api.github.com/graphql',
+} as const
+
+/** Every native stack call in this file is bound to github.com. */
+const HOST = DOTCOM
+const HOST_ONLY = { host: DOTCOM }
 
 // Git Stacks captures Node's spawn API when its own modules load, and the GitHub
 // harness answers `git` and `gh` on that API, so Git Stacks is loaded here.
@@ -176,7 +190,7 @@ const freshLayers = (): Record<string, PublishLayerChoice> =>
 
 test('detectNativeStacksCapability returns true when preview endpoint responds', async () => {
   await withHarness(async (harness) => {
-    const capability = await detectNativeStacksCapability('acme', 'widgets')
+    const capability = await detectNativeStacksCapability('acme', 'widgets', HOST_ONLY)
     assert.equal(capability.available, true)
 
     // Disable preview
@@ -184,9 +198,13 @@ test('detectNativeStacksCapability returns true when preview endpoint responds',
     state.stacksPreviewDisabled = true
     await harness.writeState(state)
 
-    const disabledCap = await detectNativeStacksCapability('acme', 'widgets')
+    const disabledCap = await detectNativeStacksCapability('acme', 'widgets', HOST_ONLY)
     assert.equal(disabledCap.available, false)
-    assert.match(disabledCap.message ?? '', /preview API is (?:not available|unavailable)/i)
+    // A host that does not serve the resource degrades to a state the publish
+    // path branches on: it is not an error, and it is not a claim about the
+    // host either. A host that refused the credential raises instead, which
+    // `github-host.test.ts` covers against both a real and a doubled host.
+    assert.equal(disabledCap.state, 'preview-unavailable')
   })
 })
 
@@ -195,7 +213,7 @@ test('create, list, get, add, and unstack native pull request stacks', async () 
     await setupThreeBranches(harness)
 
     // 1. Create a native stack with PRs [101, 102]
-    const created = await createPullRequestStack('acme', 'widgets', [101, 102])
+    const created = await createPullRequestStack('acme', 'widgets', [101, 102], HOST_ONLY)
     assert.equal(created.number, 1)
     assert.equal(created.pullRequests.length, 2)
     assert.equal(created.base, 'main')
@@ -208,35 +226,35 @@ test('create, list, get, add, and unstack native pull request stacks', async () 
     assert.equal(created.pullRequests[1].base, 'feature/step-1')
 
     // 2. Get the stack by number
-    const fetched = await getPullRequestStack('acme', 'widgets', 1)
+    const fetched = await getPullRequestStack('acme', 'widgets', 1, HOST_ONLY)
     assert.equal(fetched.number, 1)
     assert.equal(fetched.pullRequests.length, 2)
 
     // 3. List stacks with pagination and filter
-    const listed = await listPullRequestStacks('acme', 'widgets')
+    const listed = await listPullRequestStacks('acme', 'widgets', HOST_ONLY)
     assert.equal(listed.length, 1)
     assert.equal(listed[0].number, 1)
 
-    const filtered = await listPullRequestStacks('acme', 'widgets', { pullRequest: 102 })
+    const filtered = await listPullRequestStacks('acme', 'widgets', { host: HOST, pullRequest: 102 })
     assert.equal(filtered.length, 1)
     assert.equal(filtered[0].number, 1)
 
-    const emptyFilter = await listPullRequestStacks('acme', 'widgets', { pullRequest: 999 })
+    const emptyFilter = await listPullRequestStacks('acme', 'widgets', { host: HOST, pullRequest: 999 })
     assert.equal(emptyFilter.length, 0)
 
     // 4. Add PR 103 to the stack
-    const extended = await addPullRequestsToStack('acme', 'widgets', 1, [103])
+    const extended = await addPullRequestsToStack('acme', 'widgets', 1, [103], HOST_ONLY)
     assert.equal(extended.pullRequests.length, 3)
     assert.equal(extended.pullRequests[2].number, 103)
     assert.equal(extended.pullRequests[2].position, 3)
     assert.equal(extended.pullRequests[2].base, 'feature/step-2')
 
     // 5. Unstack pull requests
-    const unstacked = await unstackPullRequests('acme', 'widgets', 1)
+    const unstacked = await unstackPullRequests('acme', 'widgets', 1, HOST_ONLY)
     assert.equal(unstacked.dissolved, true)
     assert.equal(unstacked.stack, null)
 
-    const listAfterUnstack = await listPullRequestStacks('acme', 'widgets')
+    const listAfterUnstack = await listPullRequestStacks('acme', 'widgets', HOST_ONLY)
     assert.equal(listAfterUnstack.length, 0)
   })
 })
@@ -294,7 +312,7 @@ test('missing snapshot models are preflighted against canonical PRs before stack
     await harness.writeState(state)
 
     await assert.rejects(
-      createPullRequestStack('acme', 'widgets', [101, 102], { knownPullRequests: [known] }),
+      createPullRequestStack('acme', 'widgets', [101, 102], { host: HOST, knownPullRequests: [known] }),
       (error) =>
         error instanceof NativeStackError &&
         error.status === 'invalid-chain' &&
@@ -306,7 +324,7 @@ test('missing snapshot models are preflighted against canonical PRs before stack
     state.prs[1].headRepository = 'other/fork'
     await harness.writeState(state)
     await assert.rejects(
-      createPullRequestStack('acme', 'widgets', [101, 102]),
+      createPullRequestStack('acme', 'widgets', [101, 102], HOST_ONLY),
       (error) => error instanceof NativeStackError && error.status === 'cross-fork-head',
     )
     assert.deepEqual((await harness.readState()).stacks, [])
@@ -315,14 +333,14 @@ test('missing snapshot models are preflighted against canonical PRs before stack
     state.prs[1].state = 'CLOSED'
     await harness.writeState(state)
     await assert.rejects(
-      createPullRequestStack('acme', 'widgets', [101, 102]),
+      createPullRequestStack('acme', 'widgets', [101, 102], HOST_ONLY),
       (error) => error instanceof NativeStackError && error.status === 'closed',
     )
     assert.deepEqual((await harness.readState()).stacks, [])
 
-    await createPullRequestStack('acme', 'widgets', [101])
+    await createPullRequestStack('acme', 'widgets', [101], HOST_ONLY)
     await assert.rejects(
-      addPullRequestsToStack('acme', 'widgets', 1, [102], { knownPullRequests: [known] }),
+      addPullRequestsToStack('acme', 'widgets', 1, [102], { host: HOST, knownPullRequests: [known] }),
       (error) => error instanceof NativeStackError && error.status === 'closed',
     )
     assert.deepEqual(
@@ -334,7 +352,7 @@ test('missing snapshot models are preflighted against canonical PRs before stack
     stacked.stacks![0].open = false
     await harness.writeState(stacked)
     await assert.rejects(
-      addPullRequestsToStack('acme', 'widgets', 1, [103]),
+      addPullRequestsToStack('acme', 'widgets', 1, [103], HOST_ONLY),
       (error) => error instanceof NativeStackError && error.status === 'closed',
     )
 
@@ -343,7 +361,7 @@ test('missing snapshot models are preflighted against canonical PRs before stack
     stacked.stacks![0].pull_requests[0].merged_at = new Date().toISOString()
     await harness.writeState(stacked)
     await assert.rejects(
-      addPullRequestsToStack('acme', 'widgets', 1, [103]),
+      addPullRequestsToStack('acme', 'widgets', 1, [103], HOST_ONLY),
       (error) => error instanceof NativeStackError && error.status === 'completed',
     )
   })
@@ -355,14 +373,14 @@ test('handles 404 not found and 422 validation failure gracefully', async () => 
 
     // 404 on nonexistent stack
     await assert.rejects(
-      async () => getPullRequestStack('acme', 'widgets', 9999),
+      async () => getPullRequestStack('acme', 'widgets', 9999, HOST_ONLY),
       /Stack #9999 not found|404/u,
     )
 
     // 422 on invalid PR addition (e.g. duplicate or out of order)
-    await createPullRequestStack('acme', 'widgets', [101])
+    await createPullRequestStack('acme', 'widgets', [101], HOST_ONLY)
     await assert.rejects(
-      async () => addPullRequestsToStack('acme', 'widgets', 1, [101]),
+      async () => addPullRequestsToStack('acme', 'widgets', 1, [101], HOST_ONLY),
       /already in stack|duplicate/u,
     )
   })
@@ -373,7 +391,7 @@ test('reloads native stack from GitHub after restart without app metadata', asyn
     await setupThreeBranches(harness)
 
     // Create a native stack on origin
-    await createPullRequestStack('acme', 'widgets', [101, 102, 103])
+    await createPullRequestStack('acme', 'widgets', [101, 102, 103], HOST_ONLY)
 
     // Notice: NO branch.<name>.parent config is set in local git!
     // Verify local git has no parent config
@@ -492,7 +510,7 @@ test('publishStack automatically registers native stack on origin and reflects i
     })
     assert.match(publishRes.message, /Submitted 3 stack layers/u)
 
-    const stacks = await listPullRequestStacks('acme', 'widgets')
+    const stacks = await listPullRequestStacks('acme', 'widgets', HOST_ONLY)
     assert.equal(stacks.length, 1)
     assert.equal(stacks[0].pullRequests.length, 3)
     assert.equal(stacks[0].pullRequests[0].number, 101)
@@ -565,7 +583,7 @@ test('stack mutations re-read captured pull requests and reject concurrent drift
     retargeted.prs[0].base = 'release'
     await harness.writeState(retargeted)
     await assert.rejects(
-      createPullRequestStack('acme', 'widgets', [101, 102], { knownPullRequests: [captured] }),
+      createPullRequestStack('acme', 'widgets', [101, 102], { host: HOST, knownPullRequests: [captured] }),
       (error) =>
         error instanceof NativeStackError &&
         error.status === 'invalid-chain' &&
@@ -581,7 +599,7 @@ test('stack mutations re-read captured pull requests and reject concurrent drift
     git(harness, ['commit', '--allow-empty', '-m', 'concurrent commit'])
     git(harness, ['push', harness.bare, 'feature/step-1:refs/heads/feature/step-1'])
     await assert.rejects(
-      createPullRequestStack('acme', 'widgets', [101, 102], { knownPullRequests: [captured] }),
+      createPullRequestStack('acme', 'widgets', [101, 102], { host: HOST, knownPullRequests: [captured] }),
       (error) =>
         error instanceof NativeStackError &&
         error.status === 'invalid-chain' &&
@@ -592,6 +610,7 @@ test('stack mutations re-read captured pull requests and reject concurrent drift
     // A re-read model matches the current head, so the same publication proceeds.
     const refreshed = await getPullRequest(harness.repo, 101)
     const created = await createPullRequestStack('acme', 'widgets', [101, 102], {
+      host: HOST,
       knownPullRequests: [refreshed],
       defaultBranch: 'main',
     })
@@ -753,6 +772,7 @@ function mergeAction(token: string) {
     token,
     allowForce: false,
     mergeMethod: 'merge' as const,
+    mergeAction: 'direct_merge' as const,
   }
 }
 
@@ -896,7 +916,7 @@ test('registration rejects a selected publication that omits a middle native mem
   await withHarness(async (harness) => {
     await setupThreeBranches(harness)
     await registerOpenStack(harness)
-    const stack = (await listPullRequestStacks('acme', 'widgets'))[0]
+    const stack = (await listPullRequestStacks('acme', 'widgets', HOST_ONLY))[0]
     const selected = await Promise.all(
       [101, 103].map((number) => getPullRequest(harness.repo, number)),
     )
@@ -963,14 +983,14 @@ test('retiring legacy comments preserves human text and other authors comments',
       },
     ]
     await harness.writeState(state)
-    await retireLegacyStackComments('acme/widgets', [101])
+    await retireLegacyStackComments('acme/widgets', [101], HOST_ONLY)
     const after = await harness.readState()
     assert.equal(
       after.comments['101'][0].body,
       "Stack navigation retired; use GitHub's native stack view.\nHuman note",
     )
     assert.equal(after.comments['101'][1].body, state.comments['101'][1].body)
-    await retireLegacyStackComments('acme/widgets', [101])
+    await retireLegacyStackComments('acme/widgets', [101], HOST_ONLY)
     assert.equal((await harness.readState()).comments['101'][0].body, after.comments['101'][0].body)
   })
 })
@@ -1029,7 +1049,7 @@ test('publishStack rejects an already-registered stack another actor unstacked b
     assert.deepEqual(stackWrites, [])
     // The unstacked registration is gone and the failed publication must not recreate it.
     assert.deepEqual((await harness.readState()).stacks, [])
-    assert.equal((await listPullRequestStacks('acme', 'widgets')).length, 0)
+    assert.equal((await listPullRequestStacks('acme', 'widgets', HOST_ONLY)).length, 0)
   })
 })
 
@@ -1213,13 +1233,14 @@ test('an already-registered stack must record the current head commit of every p
     const current = await Promise.all(
       [101, 102, 103].map((number) => getPullRequest(harness.repo, number)),
     )
-    const registered = await listPullRequestStacks('acme', 'widgets')
+    const registered = await listPullRequestStacks('acme', 'widgets', HOST_ONLY)
     assert.equal(registered.length, 1)
     const revalidated = await revalidatePublishedStackRegistration(
       'acme',
       'widgets',
       registered[0],
       current,
+      HOST_ONLY,
     )
     assert.deepEqual(revalidated, { status: 'valid', valid: true })
   })
@@ -1242,14 +1263,14 @@ test('revalidating an already-registered publication rejects a pull request GitH
     // selected the registration target still reported stack #99.
     await registerOpenStack(harness, 100)
 
-    const listed = await listPullRequestStacks('acme', 'widgets')
+    const listed = await listPullRequestStacks('acme', 'widgets', HOST_ONLY)
     const matched = listed.find((stack) => stack.number === 99)
     assert.ok(matched)
     const captured = [101, 102, 103].map((number) => getPullRequest(harness.repo, number))
     const published = await Promise.all(captured)
 
     await assert.rejects(
-      revalidatePublishedStackRegistration('acme', 'widgets', matched, published),
+      revalidatePublishedStackRegistration('acme', 'widgets', matched, published, HOST_ONLY),
       (error) =>
         error instanceof NativeStackError &&
         error.status === 'duplicate-pr' &&
@@ -1313,7 +1334,7 @@ test('publishStack propagates native stack probe failures instead of reporting c
   }
 })
 
-test('publishStack propagates a native stack probe timeout', async () => {
+test('a native stack probe timeout holds the publish instead of planning an ordinary chain', async () => {
   await withHarness(async (harness) => {
     await setupThreeBranches(harness)
     const inner = createGitHubApiDouble()
@@ -1332,7 +1353,10 @@ test('publishStack propagates a native stack probe timeout', async () => {
 
     const snapshot = await getSnapshot(harness.repo)
     const preview = await previewStack(harness.repo, snapshot, 'publish', 'feature/step-2')
-    assert.deepEqual(preview.blockers, [])
+    // A host that did not answer is not a host without native stacks, so nothing
+    // is planned as an ordinary chain and the preview names what is unestablished.
+    assert.match(preview.blockers.join('\n'), /could not be established/iu)
+    assert.doesNotMatch(preview.warnings.join('\n'), /does not serve native stacks/iu)
     await assert.rejects(
       runStackAction(harness.repo, {
         type: 'submitStack',
@@ -1344,7 +1368,7 @@ test('publishStack propagates a native stack probe timeout', async () => {
           'feature/step-3': { title: 'Step 3 PR', body: '', draft: false, updateBase: true },
         },
       }),
-      /did not complete within/iu,
+      /could not be established/iu,
     )
   })
 })
@@ -1385,7 +1409,7 @@ test('a submission recovers a pull request whose creation response was lost', as
     const open = after.prs.filter((pr) => pr.state === 'OPEN')
     assert.equal(new Set(open.map((pr) => pr.head)).size, open.length)
     assert.ok(open.length > 0)
-    const stacks = await listPullRequestStacks('acme', 'widgets')
+    const stacks = await listPullRequestStacks('acme', 'widgets', HOST_ONLY)
     assert.equal(stacks.length, 1)
     assert.equal(stacks[0].pullRequests.length, open.length)
   })
@@ -1422,7 +1446,7 @@ test('a submission recovers a native stack whose creation response was lost', as
     assert.equal((await getSubmitStackProgress(harness.repo))?.status, 'completed')
 
     // The stack GitHub already holds is adopted rather than created a second time.
-    const stacks = await listPullRequestStacks('acme', 'widgets')
+    const stacks = await listPullRequestStacks('acme', 'widgets', HOST_ONLY)
     assert.equal(stacks.length, 1)
     const open = (await harness.readState()).prs.filter((pr) => pr.state === 'OPEN')
     assert.equal(stacks[0].pullRequests.length, open.length)
@@ -1470,7 +1494,72 @@ test('a resumed submission refuses to stack a head somebody else moved after the
 
     // The submission stopped at the drift instead of registering a chain over somebody
     // else's commit.
-    assert.equal((await listPullRequestStacks('acme', 'widgets')).length, 0)
+    assert.equal((await listPullRequestStacks('acme', 'widgets', HOST_ONLY)).length, 0)
+  })
+})
+
+test('a resumed ordinary chain is refused once the host serves native stacks', async () => {
+  await withHarness(async (harness) => {
+    await setupFreshBranches(harness)
+    const state = await harness.readState()
+    // The host refuses the stacks resource, so the preview plans an ordinary
+    // chain, and the answer to the first pull request never arrives, so the
+    // submission stops with layers still to publish.
+    state.stacksPreviewDisabled = true
+    state.lostResponses = [
+      { method: 'POST', pathIncludes: '/pulls', status: 502, message: 'Bad gateway' },
+    ]
+    await harness.writeState(state)
+
+    const preview = await previewStack(
+      harness.repo,
+      await getSnapshot(harness.repo),
+      'publish',
+      'feature/step-2',
+    )
+    assert.deepEqual(preview.blockers, [])
+    assert.match(preview.warnings.join('\n'), /does not serve native stacked pull requests/iu)
+    await assert.rejects(
+      runStackAction(harness.repo, {
+        type: 'submitStack',
+        token: preview.token,
+        allowForce: false,
+        layers: freshLayers(),
+      }),
+    )
+    assert.equal((await getSubmitStackProgress(harness.repo))?.status, 'failed')
+    const published = (await harness.readState()).prs.length
+
+    // The host starts serving the stacks resource while the submission waits.
+    const serving = await harness.readState()
+    serving.stacksPreviewDisabled = false
+    serving.lostResponses = []
+    await harness.writeState(serving)
+
+    await assert.rejects(
+      runStackAction(harness.repo, { type: 'submitStackRetry' }),
+      /now answers for native stacks/iu,
+    )
+    // The proof runs before the first mutating step, so the refusal published
+    // nothing: the resume is what would have opened the remaining pull requests.
+    assert.equal((await harness.readState()).prs.length, published)
+    assert.equal((await getSubmitStackProgress(harness.repo))?.status, 'failed')
+
+    // A host that still refuses it is proved again on every resume, and the
+    // submission finishes as the ordinary chain it was reviewed as.
+    const refusing = await harness.readState()
+    refusing.stacksPreviewDisabled = true
+    await harness.writeState(refusing)
+    const resumed = await runStackAction(harness.repo, { type: 'submitStackRetry' })
+    assert.match(resumed.message, /Submitted \d+ stack layer/iu)
+    assert.equal((await getSubmitStackProgress(harness.repo))?.status, 'completed')
+    // Nothing was registered as a native stack: the chain was published as the
+    // ordinary one it was reviewed as, and the host is asked again for its own
+    // answer to prove it.
+    const answering = await harness.readState()
+    answering.stacksPreviewDisabled = false
+    await harness.writeState(answering)
+    assert.equal((await listPullRequestStacks('acme', 'widgets', HOST_ONLY)).length, 0)
   })
 })
 
@@ -1529,7 +1618,7 @@ test('a recovered stack creation is not rejected when the interruption repeats',
     )
 
     // GitHub created the stack; the response never arrived.
-    const stacks = await listPullRequestStacks('acme', 'widgets')
+    const stacks = await listPullRequestStacks('acme', 'widgets', HOST_ONLY)
     assert.equal(stacks.length, 1)
     assert.equal(stacks[0].pullRequests.length, 1)
 
@@ -1552,7 +1641,7 @@ test('a recovered stack creation is not rejected when the interruption repeats',
     const resumed = await runStackAction(harness.repo, { type: 'submitStackRetry' })
     assert.match(resumed.message, /Submitted \d+ stack layer/iu)
     assert.equal((await getSubmitStackProgress(harness.repo))?.status, 'completed')
-    assert.equal((await listPullRequestStacks('acme', 'widgets')).length, 1)
+    assert.equal((await listPullRequestStacks('acme', 'widgets', HOST_ONLY)).length, 1)
   })
 })
 
@@ -1592,7 +1681,7 @@ test('a stack is never written over a head that moves after the first proof', as
         layers: freshLayers(),
       }),
     )
-    assert.equal((await listPullRequestStacks('acme', 'widgets')).length, 0)
+    assert.equal((await listPullRequestStacks('acme', 'widgets', HOST_ONLY)).length, 0)
     assert.equal((await getSubmitStackProgress(harness.repo))?.status, 'failed')
   })
 })
@@ -1657,7 +1746,7 @@ test('a recovered stack whose member pull request was closed is not reported as 
         layers: freshLayers(),
       }),
     )
-    const stacks = await listPullRequestStacks('acme', 'widgets')
+    const stacks = await listPullRequestStacks('acme', 'widgets', HOST_ONLY)
     assert.equal(stacks.length, 1)
     const memberNumber = stacks[0].pullRequests[0].number
 
@@ -2091,7 +2180,7 @@ test('retry refuses external native registration after a push failed before crea
         ?.kind,
       'push',
     )
-    const external = await createPullRequestStack('acme', 'widgets', [101, 102, 103])
+    const external = await createPullRequestStack('acme', 'widgets', [101, 102, 103], HOST_ONLY)
     const state = await harness.readState()
     state.requests = []
     await harness.writeState(state)
@@ -2151,7 +2240,7 @@ test('retry refuses external native registration after create validation failed 
       ),
       false,
     )
-    const external = await createPullRequestStack('acme', 'widgets', [101, 102, 103])
+    const external = await createPullRequestStack('acme', 'widgets', [101, 102, 103], HOST_ONLY)
     await assert.rejects(runStackAction(harness.repo, { type: 'submitStackRetry' }))
     assert.equal((await getSubmitStackProgress(harness.repo))?.status, 'failed')
     assert.deepEqual(
@@ -2466,7 +2555,7 @@ for (const outcome of ['append', 'no-add'] as const) {
         state.stacks = [saved, moved]
         await harness.writeState(state)
         // Both targets are visible; no missing-stack or malformed-chain shortcut is involved.
-        const listed = await listPullRequestStacks('acme', 'widgets')
+        const listed = await listPullRequestStacks('acme', 'widgets', HOST_ONLY)
         assert.deepEqual(
           listed.map((stack) => stack.number),
           [99, 100],
@@ -2905,5 +2994,87 @@ test('idempotent published push restores usable origin tracking', async () => {
     )
     assert.equal(git(harness, ['rev-parse', `${branch}@{upstream}`]), reviewed)
     assert.equal(bareGit(harness, ['rev-parse', `refs/heads/${branch}`]), reviewed)
+  })
+})
+
+test('a host that still refuses the stacks resource still publishes an ordinary chain', async () => {
+  await withHarness(async (harness) => {
+    await setupThreeBranches(harness)
+    const state = await harness.readState()
+    state.stacksPreviewDisabled = true
+    await harness.writeState(state)
+
+    const preview = await previewStack(
+      harness.repo,
+      await getSnapshot(harness.repo),
+      'publish',
+      'feature/step-2',
+    )
+    assert.deepEqual(preview.blockers, [])
+    assert.match(preview.warnings.join('\n'), /does not serve native stacked pull requests/iu)
+
+    // The resource is still absent when the submission runs, so the proof
+    // confirms the absence the preview recorded and the chain goes ahead.
+    const result = await runStackAction(harness.repo, {
+      type: 'submitStack',
+      token: preview.token,
+      allowForce: false,
+      layers: {
+        'feature/step-1': { title: 'Step 1 PR', body: '', draft: false, updateBase: true },
+        'feature/step-2': { title: 'Step 2 PR', body: '', draft: false, updateBase: true },
+        'feature/step-3': { title: 'Step 3 PR', body: '', draft: false, updateBase: true },
+      },
+    })
+    assert.match(result.message, /Submitted 3 stack layers/iu)
+    const after = await harness.readState()
+    assert.deepEqual(after.stacks, [], 'no stack was registered for a host that has none')
+    assert.deepEqual(
+      [...after.prs.map((pr) => pr.base)].sort(),
+      ['feature/step-1', 'feature/step-2', 'main'],
+      'each pull request is based on the one below it',
+    )
+  })
+})
+
+test('a preview made before a host served stacks is refused before anything is published', async () => {
+  await withHarness(async (harness) => {
+    await setupThreeBranches(harness)
+    const state = await harness.readState()
+    state.stacksPreviewDisabled = true
+    await harness.writeState(state)
+    const preview = await previewStack(
+      harness.repo,
+      await getSnapshot(harness.repo),
+      'publish',
+      'feature/step-2',
+    )
+    assert.deepEqual(preview.blockers, [])
+
+    // The host starts serving the resource between the preview and the run.
+    const before = await harness.readState()
+    const restored = await harness.readState()
+    restored.stacksPreviewDisabled = false
+    await harness.writeState(restored)
+
+    await assert.rejects(
+      runStackAction(harness.repo, {
+        type: 'submitStack',
+        token: preview.token,
+        allowForce: false,
+        layers: {
+          'feature/step-1': { title: 'Step 1 PR', body: '', draft: false, updateBase: true },
+          'feature/step-2': { title: 'Step 2 PR', body: '', draft: false, updateBase: true },
+          'feature/step-3': { title: 'Step 3 PR', body: '', draft: false, updateBase: true },
+        },
+      }),
+      /now answers for native stacks/iu,
+    )
+    const after = await harness.readState()
+    assert.deepEqual(
+      after.prs.map((pr) => pr.title),
+      before.prs.map((pr) => pr.title),
+      'the submission opened nothing new',
+    )
+    assert.deepEqual(after.stacks, [], 'and registered no stack')
   })
 })

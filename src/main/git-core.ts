@@ -35,8 +35,27 @@ export interface OperationState {
   operation: GitOperation | null
 }
 
+/** The host name an SSH remote is written with: a web port is not an SSH port. */
+function sshHostName(host: string): string {
+  const colon = host.lastIndexOf(':')
+  return colon === -1 ? host : host.slice(0, colon)
+}
+
 export interface ParsedRemote {
+  /**
+   * The web authority that owns the remote: a host name, plus a port only when
+   * the remote is a web URL and named one. A GitHub Enterprise Server host is
+   * commonly served from a port, and dropping it would point every request for
+   * this repository at a port that does not answer. An SSH port is never part
+   * of it, because an SSH port is not a web port.
+   */
   host: string
+  /**
+   * The host name for Git's own SSH transport, with no web port on it. A host
+   * served from port 8443 is not served from port 8443 over SSH, and writing
+   * that port into an SSH remote would name a path that does not exist.
+   */
+  sshHost: string
   owner: string
   name: string
   fullName: string
@@ -105,7 +124,12 @@ export class CommandCancelled extends Error {
 }
 
 export function isCancelled(error: unknown): boolean {
-  return error instanceof CommandCancelled
+  if (error instanceof CommandCancelled) return true
+  if (error && typeof error === 'object') {
+    if ('name' in error && error.name === 'AbortError') return true
+    if ('kind' in error && error.kind === 'cancelled') return true
+  }
+  return false
 }
 
 export interface CappedOptions {
@@ -115,6 +139,8 @@ export interface CappedOptions {
   /** Cut the retained output at the last whole occurrence of this separator. */
   boundary?: string
   signal?: AbortSignal
+  /** Overrides the per-command deadline; a clone needs longer than a status read. */
+  timeoutMs?: number
 }
 
 export interface CappedResult {
@@ -174,7 +200,10 @@ export async function executeCapped(
       if (stopped) stopped = 'abort'
       else stop('abort')
     }
-    const timer = setTimeout(() => stop('timeout'), command === 'gh' ? 20_000 : 120_000)
+    const timer = setTimeout(
+      () => stop('timeout'),
+      options.timeoutMs ?? (command === 'gh' ? 20_000 : 120_000),
+    )
     options.signal?.addEventListener('abort', onAbort, { once: true })
     if (options.signal?.aborted) onAbort()
 
@@ -559,6 +588,26 @@ export async function runGitCapped(
 }
 
 /**
+ * The capped counterpart of `tryGit`. A read that legitimately fails — an
+ * unborn HEAD, an empty repository — answers `null` rather than rejecting, so
+ * a caller can ask one whole-repository question without forking per path.
+ */
+export async function tryGitCapped(
+  repoPath: string,
+  args: string[],
+  options: CappedOptions,
+): Promise<CappedResult | null> {
+  try {
+    return await runGitCapped(repoPath, args, options)
+  } catch (error) {
+    if (isExitCode(error, 1) || isExitCode(error, 2) || isExitCode(error, 128)) {
+      return null
+    }
+    throw error
+  }
+}
+
+/**
  * The working-tree listing used by snapshots. A repository with 100k changed
  * files is cut on a whole-record boundary at `MAX_STATUS_BYTES` and reports
  * `truncated` so the renderer states the limit instead of silently dropping
@@ -648,7 +697,16 @@ export function parseRemote(urlValue: string | null): ParsedRemote | null {
       remotePath = value.slice(separator + 1)
     } else {
       const parsed = new URL(value)
-      host = parsed.hostname
+      if (parsed.protocol === 'ssh:') {
+        // An SSH port is the port Git answers on, never the port its web API is
+        // served from. Keeping it in the host would point every API request for
+        // this repository at a port where nothing serves one.
+        host = parsed.hostname
+      } else {
+        // A web remote keeps its explicit port: that is the same authority the
+        // user configured, and dropping it would aim requests at another port.
+        host = parsed.host
+      }
       remotePath = parsed.pathname
     }
   } catch {
@@ -661,7 +719,13 @@ export function parseRemote(urlValue: string | null): ParsedRemote | null {
   }
   const owner = segments[segments.length - 2]
   const name = segments[segments.length - 1]
-  return { host: host.toLowerCase(), owner, name, fullName: `${owner}/${name}` }
+  return {
+    host: host.toLowerCase(),
+    sshHost: sshHostName(host.toLowerCase()),
+    owner,
+    name,
+    fullName: `${owner}/${name}`,
+  }
 }
 
 export async function getConfigValue(

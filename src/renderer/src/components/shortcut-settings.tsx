@@ -7,26 +7,36 @@ import {
   SHORTCUT_DEFINITIONS,
   assignShortcut,
   chordFromEvent,
+  defaultShortcutBindings,
   formatChord,
   isMacPlatform,
-  resetShortcuts,
-  saveShortcuts,
   type ShortcutId,
-} from '../lib/keyboard-shortcuts'
+} from '../../../shared/shortcuts'
 
-export interface ShortcutSettingsProps {
-  open: boolean
-  onOpenChange: (open: boolean) => void
+export interface ShortcutEditorProps {
   bindings: Record<ShortcutId, string>
   onBindingsChange: (bindings: Record<ShortcutId, string>) => void
+  /** Set when a policy fixed the shortcuts, so the editor is read-only. */
+  disabledReason?: string
 }
 
-export function ShortcutSettings({
-  open,
-  onOpenChange,
+export interface ShortcutSettingsProps extends ShortcutEditorProps {
+  open: boolean
+  onOpenChange: (open: boolean) => void
+}
+
+/**
+ * The shortcut editor itself, with no dialog of its own.
+ *
+ * It is a body rather than a modal so it can be mounted inline: a second modal
+ * inside the Settings dialog traps focus behind its own overlay, leaving the
+ * parent unreachable and the editor impossible to close.
+ */
+export function ShortcutEditor({
   bindings,
   onBindingsChange,
-}: ShortcutSettingsProps) {
+  disabledReason,
+}: ShortcutEditorProps) {
   const [recordingId, setRecordingId] = React.useState<ShortcutId | null>(null)
   const [conflictMessage, setConflictMessage] = React.useState<string | null>(null)
   const [successMessage, setSuccessMessage] = React.useState<string | null>(null)
@@ -63,6 +73,11 @@ export function ShortcutSettings({
       const chord = chordFromEvent(event, isMac)
       if (!chord) return
 
+      if (disabledReason) {
+        setRecordingId(null)
+        return
+      }
+
       const result = assignShortcut(bindings, recordingId, chord)
       if (result.reserved) {
         setConflictMessage(
@@ -80,7 +95,6 @@ export function ShortcutSettings({
         setSuccessMessage(null)
       } else {
         onBindingsChange(result.bindings)
-        saveShortcuts(result.bindings)
         const def = SHORTCUT_DEFINITIONS.find((d) => d.id === recordingId)
         setSuccessMessage(
           `Updated shortcut for "${def?.label ?? recordingId}" to ${formatChord(chord, isMac)}.`,
@@ -95,7 +109,8 @@ export function ShortcutSettings({
   }, [bindings, isMac, onBindingsChange, recordingId])
 
   const handleResetAll = () => {
-    const fresh = resetShortcuts()
+    if (disabledReason) return
+    const fresh = defaultShortcutBindings()
     onBindingsChange(fresh)
     setConflictMessage(null)
     setSuccessMessage('Reset all keyboard shortcuts to their default bindings.')
@@ -113,26 +128,17 @@ export function ShortcutSettings({
   }, [])
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent
-        className="shortcut-settings-dialog max-w-xl"
-        aria-describedby="shortcut-settings-desc"
-      >
-        <DialogHeader>
-          <div className="flex items-center gap-2">
-            <Settings
-              className="size-5 text-[var(--gs-semantic-text-secondary)]"
-              aria-hidden="true"
-            />
-            <DialogTitle>Keyboard shortcuts</DialogTitle>
-          </div>
-          <DialogDescription id="shortcut-settings-desc">
-            Customize shortcuts for command palette, navigation, and view switching. Collisions are
-            detected before assignment.
-          </DialogDescription>
-        </DialogHeader>
+    <div className="shortcut-settings-editor space-y-4">
+      {disabledReason ? (
+        <div
+          className="rounded-[var(--gs-semantic-radius-control)] border border-[var(--gs-semantic-border-essential)] bg-[var(--gs-semantic-surface-inset)] p-3 text-[13px] text-[var(--gs-semantic-text-secondary)]"
+          role="status"
+        >
+          {disabledReason}
+        </div>
+      ) : null}
 
-        {conflictMessage && (
+      {conflictMessage && (
           <div
             className="flex items-center gap-2 rounded-[var(--gs-semantic-radius-control)] border border-[var(--gs-semantic-feedback-error-text)] bg-[var(--gs-semantic-feedback-error-surface)] p-3 text-[13px] text-[var(--gs-semantic-feedback-error-text)]"
             role="alert"
@@ -189,6 +195,7 @@ export function ShortcutSettings({
                         <Button
                           size="sm"
                           variant={isRecording ? 'accent' : 'secondary'}
+                          disabled={Boolean(disabledReason)}
                           onClick={() => {
                             if (isRecording) {
                               setRecordingId(null)
@@ -211,21 +218,58 @@ export function ShortcutSettings({
           ))}
         </div>
 
-        <div className="flex items-center justify-between border-t border-[var(--gs-semantic-border-essential)] pt-3">
+        <div className="flex items-center justify-end border-t border-[var(--gs-semantic-border-essential)] pt-3">
           <Button
             size="sm"
             variant="ghost"
             onClick={handleResetAll}
+            disabled={Boolean(disabledReason)}
             tooltip="Restore all shortcuts to factory defaults"
           >
             <RotateCcw className="size-3.5 mr-1" aria-hidden="true" />
             Reset all to defaults
           </Button>
-
-          <Button size="sm" variant="secondary" onClick={() => onOpenChange(false)}>
-            Done
-          </Button>
         </div>
+    </div>
+  )
+}
+
+/**
+ * The standalone shortcut dialog, still opened by its own command. It wraps the
+ * editor so there is exactly one implementation of the behaviour and one place
+ * that decides what a change does.
+ */
+export function ShortcutSettings({
+  open,
+  onOpenChange,
+  bindings,
+  onBindingsChange,
+  disabledReason,
+}: ShortcutSettingsProps) {
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent
+        className="shortcut-settings-dialog max-w-xl"
+        aria-describedby="shortcut-settings-desc"
+      >
+        <DialogHeader>
+          <div className="flex items-center gap-2">
+            <Settings
+              className="size-5 text-[var(--gs-semantic-text-secondary)]"
+              aria-hidden="true"
+            />
+            <DialogTitle>Keyboard shortcuts</DialogTitle>
+          </div>
+          <DialogDescription id="shortcut-settings-desc">
+            Customize shortcuts for command palette, navigation, and view switching. Collisions are
+            detected before assignment.
+          </DialogDescription>
+        </DialogHeader>
+        <ShortcutEditor
+          bindings={bindings}
+          onBindingsChange={onBindingsChange}
+          disabledReason={disabledReason}
+        />
       </DialogContent>
     </Dialog>
   )

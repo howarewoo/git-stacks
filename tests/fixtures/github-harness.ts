@@ -127,6 +127,92 @@ export interface GitHubFixtureStack {
     head: { ref: string; sha: string }
   }>
 }
+
+/**
+ * The three vocabularies GitHub reports a pull request's CI in, plus the two reads that
+ * decide whether a check is required and whether this account may rerun it. Every field
+ * is optional so a case states only the part of the answer it is proving.
+ */
+export interface GitHubFixtureCheckRun {
+  id: number
+  headSha: string
+  checkSuiteId?: number
+  name: string
+  status: string
+  conclusion: string | null
+  appSlug?: string | null
+  /** The app's id, which is what a required context is bound to. Defaults to 1. */
+  appId?: number
+  title?: string | null
+  detailsUrl?: string | null
+  startedAt?: string | null
+  completedAt?: string | null
+}
+
+export interface GitHubFixtureCommitStatus {
+  headSha: string
+  context: string
+  state: string
+  description?: string | null
+  targetUrl?: string | null
+}
+
+export interface GitHubFixtureWorkflowRun {
+  id: number
+  headSha: string
+  checkSuiteId?: number
+  pullRequests?: number[]
+  event?: string
+  name: string
+  status: string
+  conclusion: string | null
+  runNumber?: number
+  startedAt?: string | null
+  updatedAt?: string | null
+  htmlUrl?: string | null
+}
+
+export interface GitHubFixtureChecks {
+  checkRuns?: GitHubFixtureCheckRun[]
+  commitStatuses?: GitHubFixtureCommitStatus[]
+  workflowRuns?: GitHubFixtureWorkflowRun[]
+  /**
+   * The contexts branch protection requires on `branch`; null means no rule is readable.
+   * `appIds` binds a context to the app that must report it, the way GitHub does when a
+   * required check belongs to one integration; a context absent from it is unbound.
+   */
+  requiredStatusChecks?: {
+    branch: string
+    contexts: string[]
+    appIds?: Record<string, number>
+  } | null
+  /**
+   * The active rules GitHub reports for one exact branch, repository and organisation
+   * rulesets already matched. `forbidden` models the read GitHub refuses without
+   * administration access, which leaves the required set unknown.
+   */
+  branchRules?: {
+    branch: string
+    forbidden?: boolean
+    workflows?: boolean
+    required?: { context: string; integrationId?: number | null }[]
+  }
+  actionsEnabled?: boolean
+  /** The viewer's repository role, as `GET /repos/{o}/{r}` reports it. */
+  viewerPermissions?: {
+    admin: boolean
+    maintain: boolean
+    push: boolean
+    triage: boolean
+    pull: boolean
+  } | null
+  /** Refuses every workflow rerun, which is what a read-only viewer is answered with. */
+  rerunForbidden?: boolean
+  /** Workflow run ids the double was asked to rerun, oldest first. */
+  reruns?: number[]
+  /** Serve ETags and honour `if-none-match`, so conditional reads can be observed. */
+  conditional?: boolean
+}
 export interface GitHubFixtureState {
   version: 1
   repository: {
@@ -220,7 +306,32 @@ export interface GitHubFixtureState {
     /** Repository that owns the issue; search results expose it so foreign issues are rejected. */
     repository?: string
   }>
-  asyncMerge?: { number: number; sha: string; method: string }
+  /** A merge-queue request GitHub accepted for a base ref, which is the only proof of a queue. */
+  mergeQueue?: boolean
+  /**
+   * The terminal result a pending asynchronous merge reports when its poll is read, so a test
+   * can stand in for a queue that accepted, or refused, the group.
+   */
+  asyncMergeResult?: { status: 'merged' | 'enqueued' | 'failed'; message?: string }
+  /**
+   * Keeps an accepted request `pending` on every read, standing in for a merge GitHub is still
+   * running. Cleared again to let that same request report its result.
+   */
+  asyncMergeStaysPending?: boolean
+  /**
+   * Answers a queued merge request with the documented immediate `200` instead of a `202`:
+   * the pull request is already in the queue, so the result is terminal and carries no
+   * request UUID to poll.
+   */
+  asyncMergeAlreadyQueued?: boolean
+  asyncMerge?: {
+    number: number
+    sha: string
+    method: string
+    action: 'default' | 'direct_merge' | 'merge_queue'
+    uuid: string
+  }
+  checks?: GitHubFixtureChecks
   requests: Array<{ argv: string[]; cwd: string; at: string; body?: Record<string, unknown> }>
 }
 

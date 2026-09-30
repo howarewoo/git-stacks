@@ -21,7 +21,8 @@ export async function selectBranchInList(page: Page, branchName: string): Promis
     .locator('.branch-row')
     .filter({ has: page.locator(`.branch-name-line strong:text-is("${branchName}")`) })
   await expect(branchRow, `Branch row for ${branchName} must be listed`).toHaveCount(1)
-  await branchRow.locator('.branch-select').click()
+  // The row itself is the treeitem; clicking its name is the selection gesture.
+  await branchRow.locator('.branch-name-line strong').click()
   const inspector = page.locator('.details-pane')
   await expect(
     inspector.getByRole('heading', { level: 2, name: branchName, exact: true }),

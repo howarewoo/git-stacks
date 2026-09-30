@@ -5,6 +5,10 @@ import type {
   Commit,
   DesktopAPI,
   GitAction,
+  MergeAction,
+  MergeLayerResult,
+  MergeProgress,
+  MergeStatus,
   PublishLayerChoice,
   PublishProgress,
   PullRequest,
@@ -21,8 +25,10 @@ import type {
   LinkedIssue,
   RepositoryIssue,
 } from '../../../shared/types'
+import type { AppSettings } from '../../../shared/settings'
 import { actionBlockReason, stashRemovalBlockReason } from '../../../shared/capabilities'
 import { Button } from './ui/button'
+import { InlineAlert } from './ui/surface'
 import { Badge, type BadgeProps } from './ui/badge'
 import { Checkbox } from './ui/checkbox'
 import { Field } from './ui/field'
@@ -38,6 +44,7 @@ import {
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from './ui/dialog'
 import {
   BlockerList,
+  MergeOutcomePanel,
   OperationContext,
   OperationSteps,
   PhaseStatus,
@@ -209,7 +216,11 @@ export function previewIdentity(data: WorkflowData): string | null {
 
 export type WorkflowStackAPI = Pick<
   DesktopAPI,
-  'stackPreview' | 'submitStackProgress' | 'onSubmitStackProgress'
+  | 'stackPreview'
+  | 'submitStackProgress'
+  | 'onSubmitStackProgress'
+  | 'onMergeProgress'
+  | 'mergeStatus'
 > &
   Partial<
     Pick<DesktopAPI, 'searchIssues' | 'pullRequestIssueLinks' | 'previewIssueLink' | 'pullRequest'>
@@ -738,6 +749,7 @@ export function WorkflowDialog({
   onClose,
   onRequest,
   stackApi = window.desktop,
+  defaults,
 }: {
   request: WorkflowRequest
   snapshot: RepositorySnapshot
@@ -749,6 +761,8 @@ export function WorkflowDialog({
   onClose: () => void
   onRequest: (request: WorkflowRequest) => void
   stackApi?: WorkflowStackAPI
+  /** Stored defaults, used to seed the pull strategy and merge method. */
+  defaults?: AppSettings | null
 }) {
   const [name, setName] = React.useState(
     'branch' in request
@@ -765,13 +779,24 @@ export function WorkflowDialog({
   )
   const [message, setMessage] = React.useState('')
   const [includeUntracked, setIncludeUntracked] = React.useState(true)
-  const [strategy, setStrategy] = React.useState<'ff-only' | 'merge' | 'rebase'>('ff-only')
+  // Seeded from the app's stored defaults; the user can still change either
+  // before the operation runs.
+  const [strategy, setStrategy] = React.useState<'ff-only' | 'merge' | 'rebase'>(
+    defaults?.git.defaultPullStrategy ?? 'ff-only',
+  )
   const [mainline, setMainline] = React.useState('')
   const [confirmation, setConfirmation] = React.useState('')
   const [allowForce, setAllowForce] = React.useState(false)
   const [layerChoices, setLayerChoices] = React.useState<Record<string, PublishLayerChoice>>({})
   const [progress, setProgress] = React.useState<PublishProgress | null>(null)
-  const [mergeMethod, setMergeMethod] = React.useState<'' | 'merge' | 'squash' | 'rebase'>('')
+  const [mergeMethod, setMergeMethod] = React.useState<'' | 'merge' | 'squash' | 'rebase'>(
+    defaults?.git.defaultMergeMethod ?? '',
+  )
+  const [mergeAction, setMergeAction] = React.useState<MergeAction>('default')
+  const [mergeProgress, setMergeProgress] = React.useState<MergeProgress | null>(null)
+  const [mergeStatus, setMergeStatus] = React.useState<MergeStatus | null>(null)
+  const [mergeStatusError, setMergeStatusError] = React.useState<string | null>(null)
+  const [mergeRunning, setMergeRunning] = React.useState(false)
   const [preview, setPreview] = React.useState<StackPreview | null>(null)
   const [surgery, setSurgery] = React.useState<SurgeryPreview | null>(null)
   const [closePullRequests, setClosePullRequests] = React.useState(false)
@@ -955,6 +980,45 @@ export function WorkflowDialog({
     }
   }, [request, stackApi])
 
+  // A merge waits on GitHub's background result, so the running state is pushed rather than
+  // polled: a read would queue behind the merge that is producing it.
+  React.useEffect(() => {
+    if (request.kind !== 'stack' || request.operation !== 'merge') {
+      setMergeProgress(null)
+      return
+    }
+    const unsubscribe = stackApi.onMergeProgress?.((value) => setMergeProgress(value))
+    return () => {
+      unsubscribe?.()
+    }
+  }, [request, stackApi])
+
+  // What GitHub reported for earlier merge requests is read, never re-requested: a queue that
+  // later merged or dropped a pull request, or a request that is still running, is only
+  // visible through a read. Reopening the dialog reads it again, so a refresh replaces what
+  // the previous run left behind without another merge.
+  const readMergeStatus = React.useCallback(async () => {
+    if (!stackApi.mergeStatus) return
+    try {
+      setMergeStatus(await stackApi.mergeStatus())
+      setMergeStatusError(null)
+    } catch (error) {
+      // The last result GitHub reported is kept: a failed read is not evidence that the
+      // request or the queue changed.
+      setMergeStatusError(error instanceof Error ? error.message : String(error))
+    }
+  }, [stackApi])
+  React.useEffect(() => {
+    if (request.kind !== 'stack' || request.operation !== 'merge') {
+      setMergeStatus(null)
+      setMergeStatusError(null)
+      return
+    }
+    void readMergeStatus()
+    // A run that ends is read again: its result is what GitHub published, and a read is
+    // newer than the progress that run pushed.
+  }, [request, readMergeStatus, mergeProgress, mergeRunning])
+
   const title =
     request.kind === 'surgery'
       ? surgeryActionLabel(request.request.kind)
@@ -1012,7 +1076,7 @@ export function WorkflowDialog({
                                 ? 'Push the reviewed branches, create missing PRs, and update their bases and linked stack navigation.'
                                 : request.kind === 'stack' && request.operation === 'sync'
                                   ? 'Fetch and prune the remotes, then replay this stack bottom-to-top onto the trunk it reports. Replayed layers are pushed under the exact remote tips named below, and a conflict pauses the stack for Continue or Abort.'
-                                  : 'Merge one bottom PR into the default branch. Then explicitly restack and publish the remaining branches. No automatic merges or queue enrollment.'
+                                  : 'GitHub merges the reviewed pull requests itself, bottom-to-top, and this dialog follows the result. Local branches are never retargeted or deleted for you; restack and publish the rest afterwards.'
 
   const readProgress = async () => {
     if (request.kind !== 'stack' || request.operation !== 'publish') return
@@ -1023,6 +1087,14 @@ export function WorkflowDialog({
     }
   }
 
+  // A merge that landed some pull requests and not others is a finished run with a partial
+  // outcome. Treating it as a stopped operation would offer a retry that GitHub would reject
+  // for the pull requests that are already merged.
+  const mergePartial =
+    finished &&
+    mergeProgress !== null &&
+    mergeProgress.layers.some((layer) => layer.status !== 'merged')
+
   const run = async (action: GitAction, label: string) => {
     if (
       locked ||
@@ -1031,19 +1103,28 @@ export function WorkflowDialog({
       actionBlockReason(snapshot.capabilities, action.type)
     )
       return
+    const merging =
+      action.type === 'executeStack' && request.kind === 'stack' && request.operation === 'merge'
     const attemptRun = dispatch(async () => {
-      const success = await runAction(action, label)
-      if (!success) {
-        // A stopped submission is resumable, so read what it managed to finish
-        // before deciding the reviewed preview may or may not run again.
-        await readProgress()
-        if (identity) {
-          setRejectedIdentities((current) =>
-            current.includes(identity) ? current : [...current, identity],
-          )
+      if (merging) setMergeRunning(true)
+      try {
+        const success = await runAction(action, label)
+        if (!success) {
+          // A stopped submission is resumable, so read what it managed to finish
+          // before deciding the reviewed preview may or may not run again.
+          await readProgress()
+          if (identity) {
+            setRejectedIdentities((current) =>
+              current.includes(identity) ? current : [...current, identity],
+            )
+          }
         }
+        return success
+      } finally {
+        // The run is over: what GitHub reports from here on is a read, and that read is
+        // newer than the progress this run pushed.
+        if (merging) setMergeRunning(false)
       }
-      return success
     })
     const { dispatched, value: success } = await attemptRun
     if (!dispatched || !success) return
@@ -1084,6 +1165,7 @@ export function WorkflowDialog({
                 confirmation,
                 confirmationTarget,
                 mergeMethod,
+                mergeAction,
               }
           : null
         : request.kind === 'surgery'
@@ -1135,12 +1217,9 @@ export function WorkflowDialog({
     return run(action, workflowActionLabel(actionInput))
   }
 
-  const stackSteps =
-    preview && request.kind === 'stack'
-      ? preview.steps.filter(
-          (step) => request.operation !== 'merge' || step.branch === request.branch,
-        )
-      : []
+  // A merge review is the contiguous portion of the stack that one action lands, so every
+  // layer of it stays listed rather than only the selected branch.
+  const stackSteps = preview && request.kind === 'stack' ? preview.steps : []
   const publishOffer = preview?.publish ?? null
   // A saved submission that stopped part-way is being recovered, not planned. Its choices are
   // the ones already journalled, so the fields show them and stay locked: Resume republishes
@@ -1204,7 +1283,8 @@ export function WorkflowDialog({
     name,
     requiresMainline: request.kind === 'commitAction' && request.commit.parents.length > 1,
     mainline,
-    requiresMergeMethod: request.kind === 'stack' && request.operation === 'merge',
+    requiresMergeMethod:
+      request.kind === 'stack' && request.operation === 'merge' && mergeAction === 'direct_merge',
     mergeMethod,
     requiresLeaseApproval:
       (preview?.sync?.forcePushes.length ?? 0) > 0 || (surgery?.forcePushes.length ?? 0) > 0,
@@ -1219,8 +1299,8 @@ export function WorkflowDialog({
     busy,
     failed,
     stale,
-    finished,
-    partial: false,
+    finished: finished && !mergePartial,
+    partial: mergePartial,
     blocked: Boolean(blocker || shapeReason) && !finished,
   })
   const actionLabel =
@@ -1242,13 +1322,15 @@ export function WorkflowDialog({
           ? (error ?? (actionError as string))
           : phase === 'stale'
             ? 'This preview was already rejected. Reload it to read the current state; the rejected preview will not run again.'
-            : phase === 'succeeded'
-              ? request.kind === 'stack' && request.operation === 'merge'
-                ? 'Restack the remaining branches onto the updated base, then publish to update their pull requests.'
-                : 'Publish next to update remote branches and PR bases. Rewritten branches require your explicit force-with-lease approval.'
-              : phase === 'blocked'
-                ? (shapeReason ?? blocker?.message)
-                : undefined
+            : phase === 'partial'
+              ? 'Only part of this stack merged. Read which pull requests GitHub merged, then restack and publish the rest; nothing local changed.'
+              : phase === 'succeeded'
+                ? request.kind === 'stack' && request.operation === 'merge'
+                  ? 'Restack the remaining branches onto the updated base, then publish to update their pull requests.'
+                  : 'Publish next to update remote branches and PR bases. Rewritten branches require your explicit force-with-lease approval.'
+                : phase === 'blocked'
+                  ? (shapeReason ?? blocker?.message)
+                  : undefined
   const destructive = composition === 'destructive'
 
   const publicationRoots =
@@ -1948,9 +2030,38 @@ export function WorkflowDialog({
                     </>
                   ) : null}
                   {request.operation === 'merge' ? (
-                    <Field id="workflow-merge-method" label="Merge method" required>
+                    <Field
+                      id="workflow-merge-action"
+                      label="How GitHub lands it"
+                      description={
+                        mergeAction === 'merge_queue'
+                          ? 'The merge queue runs the repository\u2019s required checks and either merges the group or ejects it. The merge method below is not sent.'
+                          : 'GitHub merges the reviewed pull requests itself, in the background, while this dialog follows the result.'
+                      }
+                    >
                       <Select
                         data-workflow-first-field=""
+                        value={mergeAction}
+                        onChange={(event) => {
+                          markEdited()
+                          setMergeAction(event.target.value as MergeAction)
+                        }}
+                      >
+                        {(preview?.merge?.actions ?? []).map((action) => (
+                          <option key={action} value={action}>
+                            {action === 'merge_queue'
+                              ? 'Add to the merge queue'
+                              : action === 'direct_merge'
+                                ? 'Merge directly, without the queue'
+                                : 'Let the repository decide (queue when one is configured)'}
+                          </option>
+                        ))}
+                      </Select>
+                    </Field>
+                  ) : null}
+                  {request.operation === 'merge' && mergeAction === 'direct_merge' ? (
+                    <Field id="workflow-merge-method" label="Merge method" required>
+                      <Select
                         value={mergeMethod}
                         onChange={(event) => {
                           markEdited()
@@ -2154,6 +2265,51 @@ export function WorkflowDialog({
                 </>
               ) : null}
             </fieldset>
+
+            {/* Outside the fieldset on purpose: a finished run locks every control that
+                dispatches, and reading what GitHub did afterwards is not a dispatch. */}
+            {request.kind === 'stack' &&
+            request.operation === 'merge' &&
+            (mergeProgress || mergeStatus) ? (
+              <div className="grid gap-2">
+                {mergeStatusError ? (
+                  <InlineAlert tone="error">
+                    GitHub could not be read: {mergeStatusError} The last result it reported is kept
+                    until a read succeeds.
+                  </InlineAlert>
+                ) : null}
+                {/* A run in flight speaks for itself. Once it returns, a read is newer
+                          than the progress it pushed, and a read that arrives later is newer
+                          still, so the read-back is what the panel shows; the run's own result
+                          stands only until a read answers. */}
+                {mergeProgress && (mergeRunning || !mergeStatus) ? (
+                  <MergeOutcomePanel progress={mergeProgress} />
+                ) : (
+                  <MergeOutcomePanel
+                    label={`What GitHub reports now \u2014 ${mergeStatus!.layers.length} pull request${
+                      mergeStatus!.layers.length === 1 ? '' : 's'
+                    } from this and earlier merge requests`}
+                    progress={{
+                      action: 'default',
+                      status: mergeStatus!.layers.some((layer) => layer.status === 'failed')
+                        ? 'failed'
+                        : mergeStatus!.layers.some((layer) => layer.status === 'pending')
+                          ? 'running'
+                          : mergeStatus!.layers.some((layer) => layer.status === 'enqueued')
+                            ? 'queued'
+                            : 'succeeded',
+                      layers: mergeStatus!.layers,
+                      message: mergeStatus!.message,
+                    }}
+                  />
+                )}
+                <div>
+                  <Button type="button" onClick={() => void readMergeStatus()}>
+                    Refresh what GitHub reports
+                  </Button>
+                </div>
+              </div>
+            ) : null}
             {!loading &&
             (((error || actionError) && previewKinds.includes(request.kind)) ||
               (request.kind === 'surgery' && !surgery)) ? (

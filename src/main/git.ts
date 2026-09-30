@@ -27,6 +27,7 @@ import type {
   PullRequest,
   PushPreview,
   RepositorySnapshot,
+  RepositoryIssue,
   Stash,
 } from '../shared/types'
 import {
@@ -114,8 +115,18 @@ import {
   hasConflictMarkers,
   parseConflictSegments,
 } from '../shared/conflict'
-import { getGitHubData, getGitHubIssues } from './github'
-import { githubTransport } from './github-transport'
+import {
+  MERGE_TOOL_BACKENDS,
+  SUPPORTED_MERGE_TOOLS,
+  type SupportedMergeTool,
+} from '../shared/settings'
+import {
+  getGitHubData,
+  getGitHubIssues,
+  unavailableGitHubResult,
+  type GitHubResult,
+} from './github'
+import { hostTransport, remoteHostContext } from './github-host'
 import {
   getStackProgress,
   isStackAction,
@@ -2286,8 +2297,12 @@ async function runCreatePr(
   const ghBase = await baseForGh(repoPath, base, checkedBase)
   const origin = parseRemote(await getOriginUrl(repoPath))
   const headRemote = parseRemote(await runGit(repoPath, ['remote', 'get-url', remote]))
-  if (!origin || origin.host !== 'github.com' || !headRemote || headRemote.host !== 'github.com') {
-    throw new Error('PR creation requires github.com origin and upstream remotes.')
+  const host = remoteHostContext(origin)
+  const headHost = remoteHostContext(headRemote)
+  if (!origin || !host || !headRemote || !headHost || headHost.host !== host.host) {
+    throw new Error(
+      `PR creation requires origin and upstream remotes on one GitHub host; this repository spans ${host?.host ?? 'no host'} and ${headRemote ? headRemote.host : 'no host'}.`,
+    )
   }
   if (ghBase === remoteBranch && origin.fullName === headRemote.fullName) {
     throw new Error('The pull request base must differ from its head branch.')
@@ -2298,7 +2313,7 @@ async function runCreatePr(
       : `${headRemote.owner}:${remoteBranch}`
   let created: Record<string, unknown>
   try {
-    const response = await githubTransport().rest<Record<string, unknown>>({
+    const response = await hostTransport(host).rest<Record<string, unknown>>({
       method: 'POST',
       path: `repos/${origin.fullName}/pulls`,
       body: { title, head, base: ghBase, body, draft },
@@ -3806,9 +3821,95 @@ async function conflictMoves(
   return moves
 }
 
+/** The tool `git mergetool --tool=` names, the name to show, and why. */
+interface ResolvedMergeTool {
+  /** The Git tool id, or null when no tool on this machine can run. */
+  id: string | null
+  /** The name the user chose, or Git's own tool name. */
+  label: string
+  /** What the surface says about the tool, available or not. */
+  reason: string
+}
+
+/**
+ * The merge tool to run for one file, resolved from the program name the
+ * Settings surface stores.
+ *
+ * `git mergetool --tool=` takes a Git tool id, and a program name is not always
+ * one: Git's `bc3` backend is what launches `bcompare`, and Git ships no backend
+ * at all for an editor. An editor is only usable as a merge tool once the
+ * machine's own configuration defines `mergetool.<name>.cmd` for it, so that
+ * command — not the mere presence of the executable — is what makes such a tool
+ * available here. A name with no applicable backend is reported as unavailable
+ * with its reason, so the surface never offers a tool that fails the moment a
+ * conflict is resolved.
+ *
+ * A tool Git itself named (`merge.tool`, `GIT_MERGE_TOOL`) is already an id and
+ * is passed through as one.
+ */
+async function resolveMergeTool(
+  root: string,
+  configured: string | null | undefined,
+): Promise<ResolvedMergeTool> {
+  if (!configured) {
+    const fromGit = process.env.GIT_MERGE_TOOL || (await getConfigValue(root, 'merge.tool'))
+    if (!fromGit) {
+      return {
+        id: null,
+        label: '',
+        reason:
+          'No merge tool is configured. Choose one in Settings, or set merge.tool or GIT_MERGE_TOOL in Git.',
+      }
+    }
+    return {
+      id: fromGit,
+      label: fromGit,
+      reason: `Runs the merge tool ${fromGit} Git is configured with on this file.`,
+    }
+  }
+  const backend = MERGE_TOOL_BACKENDS[configured as SupportedMergeTool]
+  if (backend) {
+    return {
+      id: backend,
+      label: configured,
+      reason: `Runs ${configured} on this file as Git's ${backend} merge tool.`,
+    }
+  }
+  if (!(SUPPORTED_MERGE_TOOLS as readonly string[]).includes(configured)) {
+    return {
+      id: null,
+      label: configured,
+      reason: `${configured} is not a supported merge tool.`,
+    }
+  }
+  // A custom tool is defined by `mergetool.<name>.cmd`. `mergetool.<name>.path`
+  // only replaces the executable of a tool Git already knows how to invoke, so
+  // a name with a path and no command is not a tool Git can run: `mergetool`
+  // stops at "mergetool.<name>.cmd not set". The command is what is checked.
+  const custom = await getConfigValue(root, `mergetool.${configured}.cmd`)
+  if (!custom) {
+    return {
+      id: null,
+      label: configured,
+      reason: `Git has no ${configured} merge tool. Add mergetool.${configured}.cmd to your Git configuration, or choose a tool Git ships.`,
+    }
+  }
+  return {
+    id: configured,
+    label: configured,
+    reason: `Runs the merge tool ${configured} your Git configuration defines.`,
+  }
+}
+
+/**
+ * `toolOverride` is the merge tool the Settings surface configured. It takes
+ * precedence over the environment and over Git's own configuration, because it
+ * is the answer the user gave in this app.
+ */
 export async function getConflictView(
   repoPath: string,
   requestedPath: string,
+  toolOverride?: string | null,
 ): Promise<ConflictFile> {
   const root = await resolveRepository(repoPath)
   await recoverFileActionJournals(root)
@@ -3837,7 +3938,7 @@ export async function getConflictView(
   const worktree = identity.binary || !identity.preview ? null : identity.preview.toString('utf8')
   const segments = worktree && !identity.truncated ? parseConflictSegments(worktree) : []
   const stageNumbers = stages.map((stage) => stage.stage)
-  const tool = process.env.GIT_MERGE_TOOL || (await getConfigValue(root, 'merge.tool'))
+  const tool = await resolveMergeTool(root, toolOverride)
   const binary = identity.binary || Object.values(sides).some((side) => side.binary)
   const stagePreviewTruncated = stages
     .filter((stage) => sides[stage.stage].truncated)
@@ -3865,13 +3966,9 @@ export async function getConflictView(
     truncated: identity.truncated || stagePreviewTruncated.length > 0,
     stagePreviewTruncated,
     fingerprint: identity.fingerprint,
-    mergeTool: tool
-      ? { available: true, tool, reason: `Runs the configured merge tool ${tool} on this file.` }
-      : {
-          available: false,
-          tool: null,
-          reason: 'No merge tool is configured. Set merge.tool or GIT_MERGE_TOOL in Git.',
-        },
+    mergeTool: tool.id
+      ? { available: true, tool: tool.label, reason: tool.reason }
+      : { available: false, tool: null, reason: tool.reason },
   }
 }
 
@@ -4154,6 +4251,8 @@ export async function runConflictMergeTool(
   repoPath: string,
   filePath: string,
   fingerprint: string,
+  /** The merge tool the Settings surface configured; it wins over Git's own. */
+  toolOverride?: string | null,
 ): Promise<ActionResult> {
   const root = await resolveRepository(repoPath)
   await recoverFileActionJournals(root)
@@ -4161,10 +4260,8 @@ export async function runConflictMergeTool(
   if (!entry.conflicted) throw new Error('The selected file has no unresolved conflict')
   const relativePath = entry.path
   await safeRepositoryPath(root, relativePath)
-  const tool = process.env.GIT_MERGE_TOOL || (await getConfigValue(root, 'merge.tool'))
-  if (!tool) {
-    throw new Error('No merge tool is configured. Set merge.tool or GIT_MERGE_TOOL in Git.')
-  }
+  const tool = await resolveMergeTool(root, toolOverride)
+  if (!tool.id) throw new Error(tool.reason)
   const temporary = await fs.mkdtemp(path.join(tmpdir(), 'git-stacks-mergetool-'))
   try {
     const indexPath = path.join(temporary, 'index')
@@ -4184,7 +4281,7 @@ export async function runConflictMergeTool(
       relativePath,
       indexPath,
       worktree,
-      tool,
+      tool.id,
     )
     let result: string | null = isolatedPath
     try {
@@ -4210,8 +4307,8 @@ export async function runConflictMergeTool(
       : false
   return {
     message: markers
-      ? `${tool} left unresolved markers in ${relativePath}. Nothing was staged.`
-      : `${tool} finished with ${relativePath}. Review the result, then mark it resolved to stage it.`,
+      ? `${tool.label} left unresolved markers in ${relativePath}. Nothing was staged.`
+      : `${tool.label} finished with ${relativePath}. Review the result, then mark it resolved to stage it.`,
   }
 }
 
@@ -4533,13 +4630,73 @@ function knownAncestor(
   }
   return false
 }
+/**
+ * How a snapshot obtains its GitHub half. `live` always asks GitHub, `reuse`
+ * renders this repository's last confirmed payload without a request, and
+ * `on-failure` asks GitHub but keeps that payload when the answer is lost.
+ */
+export type SnapshotGitHubRemote = 'live' | 'reuse' | 'on-failure'
+
+interface ConfirmedGitHubPayload {
+  originUrl: string | null
+  data: GitHubResult
+  issues: { issues: RepositoryIssue[]; message: string }
+  fetchedAt: string
+  /**
+   * Where this read sat among the reads that asked GitHub. Overlapping reads
+   * answer out of order, so the payload a newer read confirmed must survive an
+   * older one that only finishes later.
+   */
+  read: number
+}
+
+// The order reads reach GitHub in, as a single counter: no per-repository
+// bookkeeping survives a payload, and a number is only ever compared against
+// the sequence the held payload was confirmed with.
+let confirmedReadOrder = 0
+
+const MAX_CONFIRMED_PAYLOADS = 8
+const confirmedPayloads = new Map<string, ConfirmedGitHubPayload>()
+
+function rememberConfirmedPayload(root: string, payload: ConfirmedGitHubPayload): void {
+  // A read that started earlier may answer after a newer one already confirmed
+  // this repository: it must not republish its older answer through the next
+  // read that does not ask GitHub.
+  const held = confirmedPayloads.get(root)
+  if (held && held.read > payload.read) return
+  confirmedPayloads.delete(root)
+  confirmedPayloads.set(root, payload)
+  while (confirmedPayloads.size > MAX_CONFIRMED_PAYLOADS) {
+    const oldest = confirmedPayloads.keys().next()
+    if (oldest.done) break
+    confirmedPayloads.delete(oldest.value)
+  }
+}
+
+/** The last GitHub payload this repository confirmed, if any. */
+export function confirmedGitHubPayload(
+  root: string,
+  originUrl?: string | null,
+): ConfirmedGitHubPayload | null {
+  const cached = confirmedPayloads.get(root) ?? null
+  if (!cached) return null
+  if (originUrl !== undefined && cached.originUrl !== originUrl) {
+    confirmedPayloads.delete(root)
+    return null
+  }
+  return cached
+}
 export async function getSnapshot(
   repoPath: string,
   signal?: AbortSignal,
   // Overridable so a test can exercise the budget with a handful of branches
   // instead of materialising SNAPSHOT_BRANCH_BUDGET of them.
   branchBudget = SNAPSHOT_BRANCH_BUDGET,
+  remote: SnapshotGitHubRemote = 'live',
 ): Promise<RepositorySnapshot> {
+  // Claimed on entry, not at the GitHub read: local Git work differs per read,
+  // so arrival at the request is not the order the reads began in.
+  const read = (confirmedReadOrder += 1)
   const root = await resolveRepository(repoPath, signal)
   await recoverStashDropForRepository(root)
   await recoverFileActionJournals(root)
@@ -4600,13 +4757,24 @@ export async function getSnapshot(
     return allowed
   }
 
-  const indexEntries = await getIndexEntries(
-    root,
-    files.flatMap((file) => (file.originalPath ? [file.path, file.originalPath] : [file.path])),
-  )
-  const headGitlinks = await getHeadGitlinks(
-    root,
-    files.map((file) => file.path),
+  // The index and the HEAD tree are independent reads, so they run together
+  // rather than one after the other. A rejected read must not leave its sibling
+  // running, so every read is awaited before the rejection escapes.
+  const classification = [
+    getIndexEntries(
+      root,
+      files.flatMap((file) => (file.originalPath ? [file.path, file.originalPath] : [file.path])),
+    ),
+    getHeadGitlinks(
+      root,
+      files.map((file) => file.path),
+    ),
+  ] as const
+  const [indexEntries, headGitlinks] = await Promise.all(classification).catch(
+    async (error: unknown) => {
+      await Promise.allSettled(classification)
+      throw error
+    },
   )
   for (const file of files) {
     const entry = indexEntries.get(file.path)
@@ -4647,10 +4815,81 @@ export async function getSnapshot(
   }
 
   const defaultBranch = await getDefaultBranch(root, refs, currentBranch, signal)
-  const [github, issueData] = await Promise.all([
-    getGitHubData(root, originUrl, signal),
-    getGitHubIssues(root, originUrl),
-  ])
+  const cached = confirmedPayloads.get(root) ?? null
+  // Bind confirmed payloads to the remote identity: if the origin URL changed,
+  // reject and drop the confirmed payload from the previous repository.
+  const confirmed = cached && cached.originUrl === originUrl ? cached : null
+  if (cached && cached.originUrl !== originUrl) {
+    confirmedPayloads.delete(root)
+  }
+  const confirmedAt = new Date().toISOString()
+  // A background refresh of local Git must not spend a GitHub request, and a
+  // refresh whose GitHub answer was lost must keep the last confirmed payload
+  // rather than emptying the pull-request and stack workspace.
+  // A local refresh ('reuse') must never hit the network, even when no confirmed
+  // payload exists yet: it preserves local independence and spends zero GitHub quota.
+  const live =
+    remote === 'reuse'
+      ? null
+      : await Promise.all([
+          getGitHubData(root, originUrl, signal),
+          getGitHubIssues(root, originUrl, signal),
+        ])
+  const answered = live !== null && live[0].available
+  // The inbox is a second read with its own outcome. A pull-request answer
+  // says nothing about it: an issue read that failed carries its reason in its
+  // message, and an empty list is then unknown, not "there are no issues".
+  const issuesAnswered = live !== null && live[1].message === ''
+  if (answered) {
+    // A failed issue read never becomes the confirmed inbox, so the last
+    // confirmed one survives a refresh that could not reach the issues.
+    rememberConfirmedPayload(root, {
+      originUrl,
+      data: live[0],
+      issues: issuesAnswered ? live[1] : (confirmed?.issues ?? live[1]),
+      fetchedAt: confirmedAt,
+      read,
+    })
+  }
+  // A live read is authoritative by definition: a caller that asked for one
+  // (a mutation preview, a publication) must never be handed an older payload
+  // wearing a fresh label. Only the background modes may fall back.
+  const mayFallBack = remote !== 'live'
+  const fallbackData = confirmed
+    ? confirmed.data
+    : unavailableGitHubResult('GitHub data has not been confirmed yet')
+  const fallbackIssues = confirmed
+    ? confirmed.issues
+    : { issues: [] as RepositoryIssue[], message: '' }
+  const github = answered
+    ? live![0]
+    : mayFallBack
+      ? fallbackData
+      : live
+        ? live[0]
+        : unavailableGitHubResult('GitHub could not be read')
+  // Without a confirmed inbox, keep the issues last confirmed and say why this
+  // read could not refresh them, rather than passing off an empty list as one.
+  const issueData =
+    live === null || !issuesAnswered
+      ? mayFallBack && confirmed
+        ? { issues: fallbackIssues.issues, message: live?.[1].message ?? '' }
+        : live
+          ? live[1]
+          : fallbackIssues
+      : live[1]
+  const githubFailure = live === null ? null : (live[0].failure ?? null)
+  const githubStale: RepositorySnapshot['githubStale'] = answered
+    ? null
+    : {
+        reason:
+          mayFallBack && confirmed
+            ? remote === 'reuse'
+              ? 'A GitHub refresh is not due yet; showing the last confirmed state'
+              : 'GitHub could not be read; showing the last confirmed state'
+            : github.message,
+        fetchedAt: confirmed?.fetchedAt ?? confirmedAt,
+      }
   const localPullRequests = new Map<string, PullRequest>()
   github.pullRequests.forEach((pullRequest, index) => {
     if (github.sameRepository(index) && !localPullRequests.has(pullRequest.head)) {
@@ -4684,6 +4923,7 @@ export async function getSnapshot(
   const defaultRef =
     refsByName.get(`refs/heads/${defaultBranch}`) ??
     refsByName.get(`refs/remotes/origin/${defaultBranch}`)
+  /** Parents of every divergent tip the batched probe below could read. */
   if (defaultRef) {
     const defaultRefs = new Set([
       `refs/heads/${defaultBranch}`,
@@ -4721,7 +4961,7 @@ export async function getSnapshot(
         branch.parentSource = 'inferred'
         return
       }
-      if (directParents.get(child.objectName)?.includes(defaultRef.objectName)) {
+      if (directParents.get(child.objectName)?.includes(defaultRef.objectName) === true) {
         branch.parent = defaultBranch
         branch.parentSource = 'inferred'
         return
@@ -4847,6 +5087,8 @@ export async function getSnapshot(
     nativeStackMessage: github.nativeStackMessage,
     limits,
     capabilities,
+    githubStale,
+    githubFailure,
   }
   // Read-only: the report compares submitted membership with the local graph
   // and never rewrites a branch, a local hint, or a pull-request base.
@@ -5382,7 +5624,12 @@ async function runDeleteBranch(
   return { message: `Deleted local branch ${name}. Remote branches were not changed.` }
 }
 
-export async function runAction(repoPath: string, value: GitAction): Promise<ActionResult> {
+export async function runAction(
+  repoPath: string,
+  value: GitAction,
+  /** The merge tool configured in Settings, which wins over Git's own. */
+  mergeToolOverride?: string | null,
+): Promise<ActionResult> {
   const runtime = await resolveGitRuntime()
   return withGitRuntime(runtime, async () => {
     const root = await resolveRepository(repoPath)
@@ -5460,7 +5707,7 @@ export async function runAction(repoPath: string, value: GitAction): Promise<Act
       case 'resolveConflict':
         return runResolveConflict(root, action.path, action.fingerprint, action.resolution)
       case 'conflictMergeTool':
-        return runConflictMergeTool(root, action.path, action.fingerprint)
+        return runConflictMergeTool(root, action.path, action.fingerprint, mergeToolOverride)
       case 'stageHunk':
       case 'unstageHunk':
         return runStageHunk(

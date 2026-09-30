@@ -21,6 +21,9 @@ import type { GitAction } from '../src/shared/types'
 // fixture shims that API, so the Git Stacks modules under test are loaded here.
 const { getFileView, getPushPreview, getSnapshot, resolveRepository, runAction } =
   await import('../src/main/git')
+// Loaded after the race fixture owns the spawn API, so the queue under test is
+// the one the window's own action handler submits Git work through.
+const { RepositoryOperations } = await import('../src/main/repository-operations')
 
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), 'git-stacks-local-actions-'))
@@ -354,6 +357,72 @@ test('merge operation recovery continues through explicit abort and cannot skip 
     await assert.rejects(readFile(operationHead), /ENOENT/u)
 
     assert.equal((await getSnapshot(repo)).operation, null)
+  } finally {
+    await cleanup(root)
+  }
+})
+
+test('a conflict is staged and continued while the view read it needs is still running', async () => {
+  const { root, repo, git } = await fixture()
+  try {
+    git('switch', '-c', 'side')
+    await writeFile(join(repo, 'shared.txt'), 'side\n')
+    git('add', '.')
+    git('commit', '-m', 'side change')
+    git('switch', 'main')
+    await writeFile(join(repo, 'shared.txt'), 'main\n')
+    git('add', '.')
+    git('commit', '-m', 'main change')
+    const mainHead = git('rev-parse', 'HEAD')
+    const sideHead = git('rev-parse', 'refs/heads/side')
+
+    // The queue the window's action handler submits through: a person resolves
+    // the conflict the merge left while the view reads that describe it are
+    // still being answered, so the stage has to run after them, not be refused.
+    const operations = new RepositoryOperations()
+    await assert.rejects(
+      operations.write(() =>
+        runAction(repo, {
+          type: 'merge',
+          ref: 'refs/heads/side',
+          expectedHead: mainHead,
+          expectedHeadRef: 'refs/heads/main',
+        }),
+      ),
+    )
+    const conflicted = await operations.read(() => getFileView(repo, 'shared.txt'))
+    assert.equal(conflicted.conflicted, true)
+
+    // The window asks for the file view again the moment the conflict is
+    // resolved, and that read is still being answered when the resolver's
+    // stage is submitted. The stage has to run after it, not be refused.
+    let reopen!: () => void
+    const viewing = new Promise<void>((resolveGate) => {
+      reopen = resolveGate
+    })
+    const reading = operations.read(async () => {
+      await viewing
+      return getFileView(repo, 'shared.txt')
+    })
+    const staging = operations.write(() =>
+      runAction(repo, {
+        type: 'resolveConflict',
+        path: 'shared.txt',
+        fingerprint: conflicted.fingerprint,
+        resolution: { kind: 'content', content: 'side\n' },
+      }),
+    )
+    reopen()
+    await staging
+    // That read still describes the conflict, which it can only do by finishing
+    // before the stage it was submitted ahead of.
+    assert.equal((await reading).conflicted, true)
+    assert.equal(await readFile(join(repo, 'shared.txt'), 'utf8'), 'side\n')
+
+    await operations.write(() => runAction(repo, { type: 'operationContinue' }))
+    assert.equal((await getSnapshot(repo)).operation, null)
+    assert.equal(git('log', '-1', '--pretty=%P'), `${mainHead} ${sideHead}`)
+    assert.equal(await readFile(join(repo, 'shared.txt'), 'utf8'), 'side\n')
   } finally {
     await cleanup(root)
   }

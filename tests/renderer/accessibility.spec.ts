@@ -311,4 +311,150 @@ test.describe('Automated accessibility audits and contrast', () => {
       )
     })
   })
+
+  test.describe('Colour-independent state', () => {
+    test('every status badge names its state in text, not colour or icon alone', async ({
+      page,
+    }) => {
+      await openGallery(page, { scenario: 'pull-requests-checks' })
+      await switchDestination(page, 'pullRequests')
+      await settle(page)
+
+      // The row's own words carry lifecycle, checks, and review independently, so
+      // removing every colour and icon would not remove the information.
+      const rows = page.locator('.pr-row')
+      const rowCount = await rows.count()
+      expect(rowCount).toBeGreaterThan(0)
+      const texts = await rows.evaluateAll((elements) =>
+        elements.map((element) => (element.textContent || '').toLowerCase()),
+      )
+      for (const text of texts) {
+        expect(text).toMatch(/(open|closed|merged|draft)/)
+        expect(text).toMatch(/checks (passing|failing|pending)|no checks/)
+        expect(text).toMatch(
+          /review approved|changes requested|review required|no review decision/,
+        )
+      }
+    })
+
+    test('branch rows state their Git status in words for a reader without colour', async ({
+      page,
+    }) => {
+      await openGallery(page, { scenario: 'ancestry-requires-restack' })
+
+      const rows = page.getByRole('tree', { name: 'Repository branches' }).getByRole('treeitem')
+      expect(await rows.count()).toBeGreaterThan(0)
+
+      const names = await rows.evaluateAll((elements) =>
+        elements.map((element) => element.getAttribute('aria-label') || ''),
+      )
+      for (const name of names) {
+        expect(name.length).toBeGreaterThan(0)
+      }
+      // A branch that needs a restack says so; the warning colour is not the message.
+      expect(names.some((name) => name.includes('requires restack'))).toBe(true)
+      expect(names.some((name) => name.includes('current branch'))).toBe(true)
+    })
+
+    test('capability support states are labelled, never colour-coded alone', async ({ page }) => {
+      await openGallery(page, { scenario: 'shell-connected' })
+      await switchDestination(page, 'diagnostics')
+      await settle(page)
+
+      const capabilityList = page.getByRole('list', { name: 'Detected capabilities' })
+      const rows = capabilityList.getByRole('listitem')
+      const rowCount = await rows.count()
+      expect(rowCount).toBeGreaterThan(0)
+      const texts = await rows.evaluateAll((elements) =>
+        elements.map((element) => (element.textContent || '').toLowerCase()),
+      )
+      for (const text of texts) {
+        expect(text).toMatch(/supported|limited|unsupported/)
+      }
+    })
+  })
+
+  test.describe('Branch tree hierarchy matches the rows a reader can reach', () => {
+    test('a connected stack states one level per reachable parent under one root set', async ({
+      page,
+    }) => {
+      await openGallery(page, { scenario: 'shell-connected' })
+
+      const base = page.getByRole('treeitem', { name: /^main,/ })
+      await expect(base).toHaveAttribute('aria-level', '1')
+      await expect(base).toHaveAttribute('aria-posinset', '1')
+      await expect(base).toHaveAttribute('aria-setsize', '1')
+      await expect(page.getByRole('treeitem', { name: /^feature\/checkout,/ })).toHaveAttribute(
+        'aria-level',
+        '2',
+      )
+      await expect(
+        page.getByRole('treeitem', { name: /^feature\/checkout-tests,/ }),
+      ).toHaveAttribute('aria-level', '3')
+    })
+
+    test('branches in a parent cycle are presented as roots of one sibling set', async ({
+      page,
+    }) => {
+      await openGallery(page, { scenario: 'ancestry-cycle' })
+
+      const rows = page.getByRole('tree', { name: 'Repository branches' }).getByRole('treeitem')
+      await expect(rows).toHaveCount(3)
+      // Neither branch can reach the other through this list, so both are roots
+      // beside `main` — three items in the one root set, not two nested singletons.
+      const hierarchy = await rows.evaluateAll((elements) =>
+        elements.map((element) => [
+          element.getAttribute('aria-level'),
+          element.getAttribute('aria-posinset'),
+          element.getAttribute('aria-setsize'),
+        ]),
+      )
+      expect(hierarchy).toEqual([
+        ['1', '1', '3'],
+        ['1', '2', '3'],
+        ['1', '3', '3'],
+      ])
+      // The cycle that produced those roots is still named in the rows themselves.
+      await expect(page.getByRole('treeitem', { name: /parent cycle/ })).toHaveCount(2)
+    })
+
+    test('a filter that hides the parent presents the row that is left as a root', async ({
+      page,
+    }) => {
+      await openGallery(page, { scenario: 'shell-connected' })
+      await getViewFilterInput(page).fill('checkout-tests')
+      await settle(page)
+
+      const rows = page.getByRole('tree', { name: 'Repository branches' }).getByRole('treeitem')
+      // `feature/checkout` is filtered away, so the surviving row is a root of what
+      // is on screen rather than a child of a parent no reader can reach.
+      await expect(rows).toHaveCount(1)
+      await expect(rows.first()).toHaveAttribute('aria-level', '1')
+      await expect(rows.first()).toHaveAttribute('aria-posinset', '1')
+      await expect(rows.first()).toHaveAttribute('aria-setsize', '1')
+    })
+
+    test('rows that each lost their parent share the one root set of the filtered list', async ({
+      page,
+    }) => {
+      await openGallery(page, { scenario: 'ancestry-cycle' })
+      await getViewFilterInput(page).fill('cycle')
+      await settle(page)
+
+      const rows = page.getByRole('tree', { name: 'Repository branches' }).getByRole('treeitem')
+      // The base is filtered away as well, and the two remaining rows cannot reach
+      // each other, so the root set is the two of them — not one singleton per row.
+      const hierarchy = await rows.evaluateAll((elements) =>
+        elements.map((element) => [
+          element.getAttribute('aria-level'),
+          element.getAttribute('aria-posinset'),
+          element.getAttribute('aria-setsize'),
+        ]),
+      )
+      expect(hierarchy).toEqual([
+        ['1', '1', '2'],
+        ['1', '2', '2'],
+      ])
+    })
+  })
 })

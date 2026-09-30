@@ -11,6 +11,7 @@ import type {
   GitRuntimeStatus,
 } from '../shared/types'
 
+import { readSettingsFile } from './settings'
 const execFileAsync = promisify(execFileCallback)
 
 /** Oldest Git the guarded ref transactions can run on (`rev-parse --show-object-format`). */
@@ -602,27 +603,14 @@ export async function requireGitCapability(
   return record
 }
 
-export async function readGitRuntimePreference(
-  settingsFile: string,
-): Promise<{ useSystemGit: boolean } | null> {
-  try {
-    const stored: unknown = JSON.parse(await fs.readFile(settingsFile, 'utf8'))
-    const value = (stored as { useSystemGit?: unknown } | null)?.useSystemGit
-    return typeof value === 'boolean' ? { useSystemGit: value } : null
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null
-    throw error
-  }
-}
-
-export async function writeGitRuntimePreference(
-  settingsFile: string,
-  value: { useSystemGit: boolean },
-): Promise<void> {
-  await fs.mkdir(dirname(settingsFile), { recursive: true })
-  const temporaryPath = `${settingsFile}.tmp`
-  await fs.writeFile(temporaryPath, JSON.stringify(value), { mode: 0o600 })
-  await fs.rename(temporaryPath, settingsFile)
+/**
+ * Whether the settings document asks for the system Git. This is one field of
+ * the unified settings file, so it is validated and policy-locked the same way
+ * as every other setting; there is no second file and no second write path.
+ */
+export async function readGitRuntimePreference(settingsFile: string): Promise<boolean> {
+  const { settings } = await readSettingsFile(settingsFile)
+  return settings.git.useSystemGit
 }
 
 /** Diagnostics retain the configured preference even if its selected executable cannot start. */
@@ -638,7 +626,7 @@ export async function gitRuntimeStatus(settingsFile: string): Promise<GitRuntime
   } catch (error) {
     return {
       runtime: null,
-      useSystemGit: (await readGitRuntimePreference(settingsFile))?.useSystemGit ?? false,
+      useSystemGit: await readGitRuntimePreference(settingsFile),
       error: error instanceof Error ? error.message : String(error),
       minimumVersion: MINIMUM_GIT_VERSION,
     }
