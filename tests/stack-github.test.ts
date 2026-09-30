@@ -878,6 +878,55 @@ test(
           [child.number, 'child'],
         ],
       )
+      const beforeMain = git(harness, ['rev-parse', 'refs/remotes/origin/main'])
+      const beforeRelease = git(harness, ['rev-parse', 'refs/remotes/origin/release/1.x'])
+      const inner = createGitHubApiDouble()
+      const transport = new DirectGitHubTransport({
+        token: 'fixture-token',
+        fetch: (async (input: RequestInfo | URL, init?: RequestInit) => {
+          const response = await inner(input, init)
+          const url = String(input instanceof Request ? input.url : input)
+          if (!url.includes('/graphql') && !url.includes('/merge-async/')) return response
+          const payload = await response.json()
+          if (url.includes('/merge-async/')) {
+            if (payload.details) delete payload.details.sha
+          } else if (payload.data?.repository?.pullRequest) {
+            payload.data.repository.pullRequest.mergeCommit = null
+          }
+          return new Response(JSON.stringify(payload), {
+            status: response.status,
+            headers: response.headers,
+          })
+        }) as typeof globalThis.fetch,
+      })
+      await withHarnessTransport(harness, transport, async () => {
+        const result = await runAction(harness.repo, {
+          type: 'executeStack',
+          token: preview.token,
+          allowForce: false,
+          mergeMethod: 'merge',
+          mergeAction: 'direct_merge',
+        })
+        assert.deepEqual(
+          result.merge?.layers.map((layer) => layer.status),
+          ['merged', 'merged'],
+        )
+      })
+      const after = await harness.readState()
+      assert.equal(prFor(after, 'parent').state, 'MERGED')
+      assert.equal(prFor(after, 'child').state, 'MERGED')
+      assert.equal(git(harness, ['rev-parse', 'refs/remotes/origin/main']), beforeMain)
+      assert.equal(remoteOid(harness, 'main'), beforeMain)
+      assert.notEqual(remoteOid(harness, 'release/1.x'), beforeRelease)
+      assert.equal(
+        git(harness, ['rev-parse', 'refs/remotes/origin/release/1.x']),
+        remoteOid(harness, 'release/1.x'),
+      )
+      assert.equal(
+        git(harness, ['config', '--get', 'branch.child.gitStacksMergedCommitOid']),
+        prFor(after, 'child').mergeOid,
+        'fallback merge-commit discovery uses the fetched release trunk',
+      )
     })
   },
 )

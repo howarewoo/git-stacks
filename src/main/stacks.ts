@@ -6219,7 +6219,7 @@ interface ConfirmedMerge {
 }
 
 /**
- * The merge commit a direct or queued merge left on the default branch, recovered from the
+ * The merge commit a direct or queued merge left on the stack trunk, recovered from the
  * fetched history when GitHub did not report one. A squash commit has a single parent, so
  * only a real merge commit is identifiable here.
  */
@@ -6654,7 +6654,7 @@ async function mergeStack(
     if ((await getOriginUrl(repoPath)) !== plan.originUrl) {
       throw new Error('Origin changed after the merge')
     }
-    for (const branch of [plan.defaultBranch, ...confirmed.map((entry) => entry.layer.branch)]) {
+    for (const branch of [plan.trunk, ...confirmed.map((entry) => entry.layer.branch)]) {
       await runGit(repoPath, [
         'fetch',
         'origin',
@@ -6667,11 +6667,7 @@ async function mergeStack(
   for (const entry of confirmed) {
     const mergeOid =
       entry.mergeOid ??
-      (await findMergeCommit(
-        repoPath,
-        `refs/remotes/origin/${plan.defaultBranch}`,
-        entry.layer.headOid,
-      ))
+      (await findMergeCommit(repoPath, `refs/remotes/origin/${plan.trunk}`, entry.layer.headOid))
     await writeMergedPrRecord(repoPath, {
       branch: entry.layer.branch,
       pr: entry.layer.pullRequest,
