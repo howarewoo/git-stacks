@@ -156,8 +156,6 @@ type BranchFilter = 'all' | 'local' | 'remote' | 'prs'
 type BranchTreeInfo = {
   /** Visual lane depth used for connector geometry only. */
   depth: number
-  /** Semantic hierarchy depth, one per resolved parent hop. Drives `aria-level`. */
-  level: number
   cycle: boolean
   missingParent: boolean
 }
@@ -176,7 +174,6 @@ function branchTreeInfo(
   const visited = new Set<string>([branch.name])
   let parent = branch.parent
   let depth = 0
-  let level = 0
   let cycle = false
   let missingParent = false
 
@@ -191,15 +188,16 @@ function branchTreeInfo(
       missingParent = true
       break
     }
-    level += 1
     if (!parentBranch.parent || (childCounts.get(parentBranch.ref) ?? 0) > 1) depth += 1
     parent = parentBranch.parent
   }
 
-  return { depth, level, cycle, missingParent }
+  return { depth, cycle, missingParent }
 }
 
 type BranchTreeRow = BranchTreeInfo & {
+  /** Presented hierarchy depth, one per reachable parent hop. Drives `aria-level`. */
+  level: number
   trunks: { lane: number; kind: 'start' | 'start-node' | 'full' | 'end-parent' | 'end-child' }[]
   elbows: { lane: number }[]
   /** 1-based position and size within the row's sibling set, for `aria-posinset`/`aria-setsize`. */
@@ -217,6 +215,7 @@ function getBranchTreeGeometry(visibleBranches: readonly Branch[], byName: Map<s
     ...branchTreeInfo(branch, byName, childCounts),
     trunks: [],
     elbows: [],
+    level: 0,
     posInSet: 1,
     setSize: 1,
   }))
@@ -279,23 +278,46 @@ function getBranchTreeGeometry(visibleBranches: readonly Branch[], byName: Map<s
     }
   }
 
-  // Screen readers need the sibling set, not just the drawn lane. A row whose
-  // parent is unresolved or cyclic forms its own set so unrelated rows never
-  // claim each other as siblings.
-  const siblingSets = new Map<string, number[]>()
+  // Screen readers need the hierarchy of the rows a reader can actually reach,
+  // not the repository's full ancestry: the connector lanes above may still
+  // draw a parent that a filter removed or a cycle makes unreachable, but
+  // `aria-level` must not announce a parent no row in this list can reach. A row
+  // with no reachable parent is therefore a root here, and every root shares the
+  // one root sibling set instead of each claiming a set of its own.
+  const presentedParents = visibleBranches.map((branch, index) => {
+    if (!branch.parent || rows[index].cycle || rows[index].missingParent) return -1
+    const parent = visibleByName.get(branch.parent)
+    const parentIndex = parent ? visibleIndex.get(parent.ref) : undefined
+    return parentIndex === undefined || parentIndex === index ? -1 : parentIndex
+  })
+  const levelOf = new Array<number>(visibleBranches.length).fill(0)
   for (let index = 0; index < visibleBranches.length; index += 1) {
-    const branch = visibleBranches[index]
-    const parent =
-      branch.parent && !rows[index].cycle && !rows[index].missingParent
-        ? (visibleByName.get(branch.parent) ?? byName.get(branch.parent))
-        : null
-    const key = parent?.ref ?? `unresolved:${branch.ref}`
+    const chain: number[] = []
+    let cursor = index
+    while (presentedParents[cursor] >= 0 && !levelOf[cursor] && chain.indexOf(cursor) < 0) {
+      chain.push(cursor)
+      cursor = presentedParents[cursor]
+    }
+    // A root ends the chain; an already-solved row lends its level to the rows
+    // beneath it. A chain that closes on itself cannot be traversed, so it is
+    // read as a root rather than as a hierarchy the reader could not follow.
+    const base = levelOf[cursor]
+    for (let step = chain.length - 1; step >= 0; step -= 1) {
+      levelOf[chain[step]] = base + chain.length - step
+    }
+  }
+  // `-1` is the root set: every presented root is a sibling of the others, and a
+  // presented parent's key holds the children a reader can reach from it.
+  const siblingSets = new Map<number, number[]>()
+  for (let index = 0; index < visibleBranches.length; index += 1) {
+    const key = presentedParents[index]
     const set = siblingSets.get(key)
     if (set) set.push(index)
     else siblingSets.set(key, [index])
   }
   for (const set of siblingSets.values()) {
     set.forEach((rowIndex, position) => {
+      rows[rowIndex].level = levelOf[rowIndex]
       rows[rowIndex].posInSet = position + 1
       rows[rowIndex].setSize = set.length
     })
@@ -795,14 +817,36 @@ function App() {
   // the same coordinate system the DOM lookup and the tabindex comparison use.
   const [branchTreeActiveIndex, setBranchTreeActiveIndex] = React.useState(0)
   const branchTreeListRef = React.useRef<HTMLDivElement>(null)
-  const focusBranchRow = (index: number) => {
-    const row = branchTreeListRef.current?.querySelectorAll<HTMLElement>('[role="treeitem"]')[index]
+  const focusBranchRow = (mountedIndex: number) => {
+    const row =
+      branchTreeListRef.current?.querySelectorAll<HTMLElement>('[role="treeitem"]')[mountedIndex]
     if (!row) return
-    setBranchTreeActiveIndex(index)
+    setBranchTreeActiveIndex(mountedIndex)
     row.focus()
+  }
+  // Home and End address the whole filtered list, so the row they name may not be
+  // mounted yet. The window is asked to reveal it and the pending index is applied
+  // once that row exists, which keeps the surface's single Tab stop with the focus.
+  const pendingBranchFocus = React.useRef<number | null>(null)
+  const focusBranchRowAt = (listIndex: number) => {
+    const mountedIndex = listIndex - branchWindow.start
+    if (mountedIndex >= 0 && mountedIndex < branchWindow.visible.length) {
+      focusBranchRow(mountedIndex)
+      return
+    }
+    pendingBranchFocus.current = listIndex
+    branchWindow.revealIndex(listIndex)
   }
   React.useEffect(() => {
     setBranchTreeActiveIndex((index) => clampRovingIndex(index, branchWindow.visible.length))
+  }, [branchWindow.start, branchWindow.visible.length])
+  React.useEffect(() => {
+    const pending = pendingBranchFocus.current
+    if (pending === null) return
+    const mountedIndex = pending - branchWindow.start
+    if (mountedIndex < 0 || mountedIndex >= branchWindow.visible.length) return
+    pendingBranchFocus.current = null
+    focusBranchRow(mountedIndex)
   }, [branchWindow.start, branchWindow.visible.length])
 
   const changeState = React.useMemo(
@@ -1143,15 +1187,21 @@ function App() {
   }, [anyModalOpen, workspaceView])
 
   // A raised error answers something the user just did, so focus is taken to it
-  // — except while a modal owns focus and presents its own inline error.
+  // — except while a modal owns focus and presents its own inline error. Only a
+  // newly raised error may take it: a banner that is already on screen must not
+  // pull focus back when a dialog closes and returns focus to its trigger.
+  const focusedErrorRef = React.useRef<string | null>(null)
   React.useEffect(() => {
-    if (anyModalOpen) return
     const raised = error ?? actionError
-    if (!raised) return
-    const banner = document.getElementById(
-      error ? 'global-error-banner' : 'global-action-error-banner',
-    )
-    banner?.focus()
+    // A dismissed banner stops standing in for an error, so the same message
+    // raised again is a new error and takes focus again.
+    if (!raised) {
+      focusedErrorRef.current = null
+      return
+    }
+    if (anyModalOpen || focusedErrorRef.current === raised) return
+    focusedErrorRef.current = raised
+    document.getElementById(error ? 'global-error-banner' : 'global-action-error-banner')?.focus()
   }, [actionError, anyModalOpen, error])
   React.useEffect(() => {
     if (
@@ -1786,14 +1836,20 @@ function App() {
                     if (!claimsRovingKey(event)) return
                     const action = rovingAction(event.key)
                     if (action) {
-                      const target = rovingTarget(
-                        action,
-                        branchIndex,
-                        branchWindow.visible.length,
-                      )
+                      // Home and End name the first and last row of the whole
+                      // filtered list, which can sit outside the mounted window;
+                      // arrows stay inside the window the reader is looking at.
+                      const target =
+                        action === 'next' || action === 'previous'
+                          ? rovingTarget(action, branchIndex, branchWindow.visible.length)
+                          : rovingTarget(
+                              action,
+                              branchIndex + branchWindow.start,
+                              visibleBranches.length,
+                            )
                       if (target === null) return
                       event.preventDefault()
-                      focusBranchRow(target)
+                      focusBranchRowAt(target)
                       return
                     }
                     if (event.key === 'Enter' || event.key === ' ') {

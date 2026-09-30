@@ -1,5 +1,6 @@
 import { expect, test } from '@playwright/test'
 import {
+  failNextDoubleCall,
   getDispatchedActions,
   getOpenedExternalUrls,
   getViewFilterInput,
@@ -167,6 +168,32 @@ test.describe('Keyboard routes and accessibility navigation', () => {
     await assertFocusRestored(page, trigger, 'closing Create a branch dialog via Escape')
   })
 
+  test('a dialog cancelled under an already-raised error keeps focus on the trigger', async ({
+    page,
+  }) => {
+    await openGallery(page, { scenario: 'shell-connected' })
+
+    // A newly raised error answers what the user just did, so it takes focus.
+    await failNextDoubleCall(page, 'runAction', 'the remote refused the fetch')
+    await page.getByRole('button', { name: 'Fetch', exact: true }).click()
+    const banner = page.locator('#global-action-error-banner')
+    await expect(banner).toContainText('the remote refused the fetch')
+    await expect(banner).toBeFocused()
+
+    // The banner is still on screen. Cancelling a dialog must hand focus back to
+    // the control that opened it, not to an error the user has already read.
+    const trigger = page.getByRole('button', { name: 'New branch', exact: true }).first()
+    const dialog = await openNewBranchDialog(page)
+    await dialog.getByRole('button', { name: 'Cancel', exact: true }).click()
+    await settle(page)
+    await expect(banner).toBeVisible()
+    await assertFocusRestored(
+      page,
+      trigger,
+      'cancelling Create a branch with an older error raised',
+    )
+  })
+
   test('destructive dialog opens on Cancel button for safety and traps focus', async ({ page }) => {
     await openGallery(page, { scenario: 'shell-connected' })
     const dialog = await openDeleteLocalBranchDialog(page, 'feature/checkout-tests')
@@ -324,7 +351,7 @@ test.describe('Keyboard routes and accessibility navigation', () => {
     ).toHaveCount(0)
   })
 
-  test('branch tree keeps one Tab stop and correct movement after the window slides', async ({
+  test('branch tree keeps one Tab stop and reaches both list ends from a slid window', async ({
     page,
   }) => {
     await openGallery(page, { scenario: 'branches-deep-chain' })
@@ -333,20 +360,19 @@ test.describe('Keyboard routes and accessibility navigation', () => {
 
     // Reveal twice more: the first reveal mounts a second page, the second slides
     // the mounted window forward. The tree must still be one Tab stop afterwards.
-    const reveal = page.getByRole('button', { name: /more branches|show more/i }).first()
+    const reveal = page.getByRole('button', { name: /more branches/i }).first()
     await reveal.click()
     await settle(page)
     await reveal.click()
     await settle(page)
 
     const rows = tree.getByRole('treeitem')
-    const mounted = await rows.count()
-    expect(mounted).toBeGreaterThan(200)
-
-    const tabbable = await rows.evaluateAll((elements) =>
-      elements.filter((element) => element.getAttribute('tabindex') === '0').length,
-    )
-    expect(tabbable).toBe(1)
+    expect(await rows.count()).toBeGreaterThan(200)
+    const tabStops = () =>
+      rows.evaluateAll(
+        (elements) => elements.filter((element) => element.getAttribute('tabindex') === '0').length,
+      )
+    expect(await tabStops()).toBe(1)
 
     // Movement is relative to the mounted window: one ArrowDown from its first
     // row lands on its second row, not two hundred rows away.
@@ -354,23 +380,30 @@ test.describe('Keyboard routes and accessibility navigation', () => {
     await page.keyboard.press('ArrowDown')
     await expect(rows.nth(1)).toBeFocused()
 
-    // Home stays at the start of the mounted window instead of wrapping to the
-    // far end of the whole list.
+    // The base of the chain is the last branch of the whole list, and this window
+    // has never mounted it.
+    const base = tree.getByRole('treeitem', { name: /^main,/ })
+    await expect(base).toHaveCount(0)
+
+    // End names the last row of the list rather than the last row of the window,
+    // and reveals the page that mounts it.
     await page.keyboard.press('End')
-    await expect(rows.nth(mounted - 1)).toBeFocused()
+    await expect(base).toBeFocused()
+    expect(await tabStops()).toBe(1)
+
+    // Home names the first row of the list, which the slid window left behind.
     await page.keyboard.press('Home')
-    await expect(rows.first()).toBeFocused()
+    await expect(tree.getByRole('treeitem', { name: /^feature\/deep-0619,/ })).toBeFocused()
+    expect(await tabStops()).toBe(1)
 
     // Paging back must not strand the surface without a Tab stop.
-    await page.getByRole('button', { name: /previous/i }).first().click()
+    const revealAgain = page.getByRole('button', { name: /more branches/i }).first()
+    await revealAgain.click()
     await settle(page)
-    expect(
-      await tree
-        .getByRole('treeitem')
-        .evaluateAll((elements) =>
-          elements.filter((element) => element.getAttribute('tabindex') === '0').length,
-        ),
-    ).toBe(1)
+    const back = page.getByRole('button', { name: /previous branches/i }).first()
+    await back.click()
+    await settle(page)
+    expect(await tabStops()).toBe(1)
   })
 
   test('branch tree rows expose level, sibling position, and state as text', async ({ page }) => {
@@ -441,6 +474,42 @@ test.describe('Keyboard routes and accessibility navigation', () => {
     await names.first().focus()
     await page.keyboard.press('ArrowDown')
     await expect(names.nth(1)).toBeFocused()
+  })
+
+  test('stack rail Home and End reach both ends of a stack longer than one page', async ({
+    page,
+  }) => {
+    await openGallery(page, { scenario: 'branches-deep-chain' })
+    await switchDestination(page, 'stacks')
+
+    const rail = page.getByRole('list', { name: 'Stack branches, children above parents' })
+    await expect(rail).toBeVisible()
+    const names = rail.locator('.stack-member-name')
+    const first = rail.getByRole('button', { name: /^feature\/deep-0619,/ })
+    const last = rail.getByRole('button', { name: /^feature\/deep-0001,/ })
+    await expect(first).toBeVisible()
+    await expect(last).toHaveCount(0)
+
+    // Two reveals slide the rail's mounted window past the last member.
+    const reveal = page.getByRole('button', { name: /more stack branches/i }).first()
+    await reveal.click()
+    await settle(page)
+    await reveal.click()
+    await settle(page)
+    await expect(last).toHaveCount(0)
+
+    await names.first().focus()
+    await page.keyboard.press('End')
+    await expect(last).toBeFocused()
+    await page.keyboard.press('Home')
+    await expect(first).toBeFocused()
+
+    expect(
+      await names.evaluateAll(
+        (elements) =>
+          elements.filter((element) => element.getAttribute('tabindex') === '0').length,
+      ),
+    ).toBe(1)
   })
 
   test('workspace navigation moves with arrow keys and announces the destination change', async ({

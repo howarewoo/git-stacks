@@ -373,4 +373,88 @@ test.describe('Automated accessibility audits and contrast', () => {
       }
     })
   })
+
+  test.describe('Branch tree hierarchy matches the rows a reader can reach', () => {
+    test('a connected stack states one level per reachable parent under one root set', async ({
+      page,
+    }) => {
+      await openGallery(page, { scenario: 'shell-connected' })
+
+      const base = page.getByRole('treeitem', { name: /^main,/ })
+      await expect(base).toHaveAttribute('aria-level', '1')
+      await expect(base).toHaveAttribute('aria-posinset', '1')
+      await expect(base).toHaveAttribute('aria-setsize', '1')
+      await expect(page.getByRole('treeitem', { name: /^feature\/checkout,/ })).toHaveAttribute(
+        'aria-level',
+        '2',
+      )
+      await expect(
+        page.getByRole('treeitem', { name: /^feature\/checkout-tests,/ }),
+      ).toHaveAttribute('aria-level', '3')
+    })
+
+    test('branches in a parent cycle are presented as roots of one sibling set', async ({
+      page,
+    }) => {
+      await openGallery(page, { scenario: 'ancestry-cycle' })
+
+      const rows = page.getByRole('tree', { name: 'Repository branches' }).getByRole('treeitem')
+      await expect(rows).toHaveCount(3)
+      // Neither branch can reach the other through this list, so both are roots
+      // beside `main` — three items in the one root set, not two nested singletons.
+      const hierarchy = await rows.evaluateAll((elements) =>
+        elements.map((element) => [
+          element.getAttribute('aria-level'),
+          element.getAttribute('aria-posinset'),
+          element.getAttribute('aria-setsize'),
+        ]),
+      )
+      expect(hierarchy).toEqual([
+        ['1', '1', '3'],
+        ['1', '2', '3'],
+        ['1', '3', '3'],
+      ])
+      // The cycle that produced those roots is still named in the rows themselves.
+      await expect(page.getByRole('treeitem', { name: /parent cycle/ })).toHaveCount(2)
+    })
+
+    test('a filter that hides the parent presents the row that is left as a root', async ({
+      page,
+    }) => {
+      await openGallery(page, { scenario: 'shell-connected' })
+      await getViewFilterInput(page).fill('checkout-tests')
+      await settle(page)
+
+      const rows = page.getByRole('tree', { name: 'Repository branches' }).getByRole('treeitem')
+      // `feature/checkout` is filtered away, so the surviving row is a root of what
+      // is on screen rather than a child of a parent no reader can reach.
+      await expect(rows).toHaveCount(1)
+      await expect(rows.first()).toHaveAttribute('aria-level', '1')
+      await expect(rows.first()).toHaveAttribute('aria-posinset', '1')
+      await expect(rows.first()).toHaveAttribute('aria-setsize', '1')
+    })
+
+    test('rows that each lost their parent share the one root set of the filtered list', async ({
+      page,
+    }) => {
+      await openGallery(page, { scenario: 'ancestry-cycle' })
+      await getViewFilterInput(page).fill('cycle')
+      await settle(page)
+
+      const rows = page.getByRole('tree', { name: 'Repository branches' }).getByRole('treeitem')
+      // The base is filtered away as well, and the two remaining rows cannot reach
+      // each other, so the root set is the two of them — not one singleton per row.
+      const hierarchy = await rows.evaluateAll((elements) =>
+        elements.map((element) => [
+          element.getAttribute('aria-level'),
+          element.getAttribute('aria-posinset'),
+          element.getAttribute('aria-setsize'),
+        ]),
+      )
+      expect(hierarchy).toEqual([
+        ['1', '1', '2'],
+        ['1', '2', '2'],
+      ])
+    })
+  })
 })

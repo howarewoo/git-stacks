@@ -126,24 +126,6 @@ test('a roving surface claims only unmodified keys so global chords still dispat
   )
 })
 
-test('roving movement stays inside the mounted window after it slides', () => {
-  // A slid window is addressed by its own rows, not by the whole list.
-  const windowed = [0, 1, 2, 3, 4]
-  assert.equal(rovingTarget('next', 0, windowed.length), 1)
-  assert.equal(rovingTarget('previous', 0, windowed.length), null)
-  assert.equal(rovingTarget('first', 3, windowed.length), 0)
-  assert.equal(rovingTarget('last', 0, windowed.length), 4)
-
-  // Landing on Home from inside the window targets the window's first row, and
-  // an index the caller keeps is always inside the mounted window — which is
-  // what stops the surface from losing its single Tab stop after a slide.
-  assert.equal(rovingTarget('first', 3, windowed.length), 0)
-  assert.equal(clampRovingIndex(0, windowed.length), 0)
-  assert.equal(rovingTarget('last', windowed.length - 1, windowed.length), null)
-  assert.equal(rovingTabIndex(0, 0), 0)
-  assert.equal(rovingTabIndex(1, 0), -1)
-})
-
 test('every workspace destination has a distinct keyboard route and a spoken label', () => {
   const views: WorkspaceView[] = [
     'branches',

@@ -898,18 +898,16 @@ export function StackView({
         : (groups.keys().next().value ?? null)
   const members = root ? (groups.get(root) ?? []) : []
   const ordered = React.useMemo(() => sortBranchesByUpdatedAt(members), [members])
-  const memberWindow = useListWindow(
-    React.useMemo(
-      () =>
-        ordered.filter((branch) =>
-          `${branch.name} ${branch.pr?.title ?? ''}`
-            .toLowerCase()
-            .includes(search.trim().toLowerCase()),
-        ),
-      [ordered, search],
-    ),
-    LIST_PAGE_SIZE,
+  const visibleMembers = React.useMemo(
+    () =>
+      ordered.filter((branch) =>
+        `${branch.name} ${branch.pr?.title ?? ''}`
+          .toLowerCase()
+          .includes(search.trim().toLowerCase()),
+      ),
+    [ordered, search],
   )
+  const memberWindow = useListWindow(visibleMembers, LIST_PAGE_SIZE)
   const stale = members.filter(
     (branch) => branch.needsRestack || (branch.parentBehind ?? 0) > 0,
   ).length
@@ -921,18 +919,38 @@ export function StackView({
   // commit history list: one Tab stop, arrow keys between members.
   const [activeMemberIndex, setActiveMemberIndex] = React.useState(0)
   const memberListRef = React.useRef<HTMLDivElement>(null)
-  const focusStackMember = (index: number) => {
-    const row = memberListRef.current?.querySelectorAll<HTMLButtonElement>('.stack-member-name')[
-      index
-    ]
+  const focusStackMember = (mountedIndex: number) => {
+    const row =
+      memberListRef.current?.querySelectorAll<HTMLButtonElement>('.stack-member-name')[mountedIndex]
     if (!row) return
-    setActiveMemberIndex(index)
+    setActiveMemberIndex(mountedIndex)
     row.focus()
+  }
+  // Home and End name the first and last member of the whole filtered rail, so a
+  // target outside the mounted window is revealed first and focused once it
+  // exists, keeping the rail's single Tab stop with the focus.
+  const pendingMemberFocus = React.useRef<number | null>(null)
+  const focusStackMemberAt = (listIndex: number) => {
+    const mountedIndex = listIndex - memberWindow.start
+    if (mountedIndex >= 0 && mountedIndex < memberWindow.visible.length) {
+      focusStackMember(mountedIndex)
+      return
+    }
+    pendingMemberFocus.current = listIndex
+    memberWindow.revealIndex(listIndex)
   }
   // The active member is tracked by its position in the mounted window, so a
   // sliding window has to re-clamp it or the tree loses its single Tab stop.
   React.useEffect(() => {
     setActiveMemberIndex((index) => clampRovingIndex(index, memberWindow.visible.length))
+  }, [memberWindow.start, memberWindow.visible.length])
+  React.useEffect(() => {
+    const pending = pendingMemberFocus.current
+    if (pending === null) return
+    const mountedIndex = pending - memberWindow.start
+    if (mountedIndex < 0 || mountedIndex >= memberWindow.visible.length) return
+    pendingMemberFocus.current = null
+    focusStackMember(mountedIndex)
   }, [memberWindow.start, memberWindow.visible.length])
   return (
     <div className="stacks-view">
@@ -1104,10 +1122,19 @@ export function StackView({
                         if (!claimsRovingKey(event)) return
                         const action = rovingAction(event.key)
                         if (!action) return
-                        const target = rovingTarget(action, memberIndex, memberWindow.visible.length)
+                        // Home and End address the whole filtered rail; arrows stay
+                        // inside the window the reader is looking at.
+                        const target =
+                          action === 'next' || action === 'previous'
+                            ? rovingTarget(action, memberIndex, memberWindow.visible.length)
+                            : rovingTarget(
+                                action,
+                                memberIndex + memberWindow.start,
+                                visibleMembers.length,
+                              )
                         if (target === null) return
                         event.preventDefault()
-                        focusStackMember(target)
+                        focusStackMemberAt(target)
                       }}
                       tabIndex={rovingTabIndex(memberIndex, activeMemberIndex)}
                     >

@@ -20,7 +20,7 @@ import {
 } from '../src/main/git-core'
 import { RepositoryOperations } from '../src/main/repository-operations'
 import { RequestRegistry } from '../src/main/request-registry'
-import { windowSlice } from '../src/renderer/src/lib/list-window'
+import { pageForIndex, windowBounds, windowSlice } from '../src/renderer/src/lib/list-window'
 import { createRequestGate } from '../src/renderer/src/lib/request-gate'
 import {
   MAX_DIFF_BYTES,
@@ -772,4 +772,17 @@ test('list windows expand once and keep deep navigation bounded', () => {
   )
   const last = windowSlice(items, 400, 49_600)
   assert.deepEqual([last.visible[0], last.hasMore, last.remaining], [49_600, false, 0])
+})
+
+test('a whole-list jump reveals a window that mounts the row it names', () => {
+  const pageSize = 200
+  // Home and End address the whole list, so the page they pick has to contain the
+  // row they name — including the first row, the last row, and every page edge.
+  for (const index of [0, 1, 199, 200, 201, 399, 400, 401, 49_998, 49_999]) {
+    const { start, end } = windowBounds(pageForIndex(index, pageSize), pageSize)
+    assert.ok(index >= start && index < end, `row ${index} is outside [${start}, ${end})`)
+  }
+  assert.deepEqual(windowBounds(pageForIndex(0, pageSize), pageSize), { start: 0, end: 200 })
+  const lastPage = windowBounds(pageForIndex(49_999, pageSize), pageSize)
+  assert.deepEqual([lastPage.start, lastPage.end], [49_600, 50_000])
 })
