@@ -25,6 +25,7 @@ import {
   mergePreview,
   publishPreview,
   restackPreview,
+  syncPreview,
 } from '../../fixtures/workflow-scenarios'
 import { scenarios } from './scenarios'
 import { DEFAULT_SCENARIO, type ScenarioName } from './manifest'
@@ -40,6 +41,7 @@ const stackPreviewsByKind: Record<StackKind, StackPreview> = {
   restack: restackPreview,
   publish: publishPreview,
   merge: mergePreview,
+  sync: syncPreview,
 }
 
 const bundledRuntime: GitRuntimeInfo = {

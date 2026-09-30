@@ -12,6 +12,7 @@ import type {
   RepositorySnapshot,
   StackKind,
   StackPreview,
+  SyncLayerState,
   IssueLinkPreview,
   IssueLinkRelation,
   LinkedIssue,
@@ -19,10 +20,10 @@ import type {
 } from '../../../shared/types'
 import { actionBlockReason, stashRemovalBlockReason } from '../../../shared/capabilities'
 import { Button } from './ui/button'
-import { Input } from './ui/input'
-import { Badge } from './ui/badge'
+import { Badge, type BadgeProps } from './ui/badge'
 import { Checkbox } from './ui/checkbox'
 import { Field } from './ui/field'
+import { Input } from './ui/input'
 import { Select } from './ui/select'
 import { Textarea } from './ui/textarea'
 import { workflowAction, workflowActionLabel, type WorkflowActionInput } from './workflow-action'
@@ -39,6 +40,7 @@ import {
   WorkflowActions,
   WorkflowFrame,
   WorkflowSection,
+  OperationFacts,
   type ContextFact,
 } from './workflow-composition'
 import {
@@ -71,7 +73,28 @@ export function workflowError(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
-const stackLabels = { restack: 'Restack', publish: 'Publish', merge: 'Merge pull request' }
+const stackLabels = { restack: 'Restack', publish: 'Publish', merge: 'Merge pull request', sync: 'Sync' }
+
+
+const SYNC_LAYER_LABELS: Record<SyncLayerState, string> = {
+  merged: 'Merged',
+  retargeted: 'Retargeted',
+  'needs-force': 'Needs force-with-lease',
+  'needs-rebase': 'Needs rebase',
+  'needs-push': 'Needs push',
+  'up-to-date': 'Up to date',
+  blocked: 'Blocked',
+}
+
+const SYNC_LAYER_BADGE: Record<SyncLayerState, BadgeProps['variant']> = {
+  merged: 'merged',
+  retargeted: 'warning',
+  'needs-force': 'warning',
+  'needs-rebase': 'info',
+  'needs-push': 'info',
+  'up-to-date': 'success',
+  blocked: 'danger',
+}
 
 /** Request kinds that read backend state before the action can be reviewed. */
 const previewKinds: readonly string[] = ['stack', 'forcePush', 'pr']
@@ -900,7 +923,9 @@ export function WorkflowDialog({
                             ? 'Rebase parent-first using each branch’s recorded boundary. Conflicts pause the stack; your original checkout is restored on completion.'
                             : request.kind === 'stack' && request.operation === 'publish'
                               ? 'Push the reviewed branches, create missing PRs, and update their bases and linked stack navigation.'
-                              : 'Merge one bottom PR into the default branch. Then explicitly restack and publish the remaining branches. No automatic merges or queue enrollment.'
+                              : request.kind === 'stack' && request.operation === 'sync'
+                                ? 'Fetch and prune the remotes, then replay this stack bottom-to-top onto the trunk it reports. Replayed layers are pushed under the exact remote tips named below, and a conflict pauses the stack for Continue or Abort.'
+                                : 'Merge one bottom PR into the default branch. Then explicitly restack and publish the remaining branches. No automatic merges or queue enrollment.'
 
   const readProgress = async () => {
     if (request.kind !== 'stack' || request.operation !== 'publish') return
@@ -1077,6 +1102,7 @@ export function WorkflowDialog({
     mainline,
     requiresMergeMethod: request.kind === 'stack' && request.operation === 'merge',
     mergeMethod,
+    requiresLeaseApproval: (preview?.sync?.forcePushes.length ?? 0) > 0,
     untitledBranches,
     pullRequestMissing: request.kind === 'pr' && !pr,
     pullRequestMerged: request.kind === 'pr' && pr?.state === 'MERGED',
@@ -1160,6 +1186,8 @@ export function WorkflowDialog({
                 { label: 'Current name', value: request.branch.name },
               ]
             : []
+
+  const syncOffer = request.kind === 'stack' ? (preview?.sync ?? null) : null
 
   return (
     <Dialog
@@ -1410,6 +1438,103 @@ export function WorkflowDialog({
                         <WarningNote key={`${index}-${warning}`}>{warning}</WarningNote>
                       ))}
                       {preview ? <BlockerList items={preview.blockers} /> : null}
+                    </>
+                  ) : null}
+                  {syncOffer ? (
+                    <>
+                      <OperationContext
+                        title={`Trunk ${syncOffer.trunk.branch}`}
+                        description={`Fetched from ${syncOffer.trunk.remote} and compared with the local ${syncOffer.trunk.branch}. A sync never rewrites the trunk itself.`}
+                        facts={[
+                          {
+                            label: 'Local trunk tip',
+                            value: syncOffer.trunk.localOid?.slice(0, 12) ?? 'Unavailable',
+                            code: true,
+                          },
+                          {
+                            label: 'Fetched trunk tip',
+                            value: syncOffer.trunk.remoteOid?.slice(0, 12) ?? 'Unavailable',
+                            code: true,
+                          },
+                          {
+                            label: 'Difference',
+                            value: syncOffer.trunk.diverged
+                              ? `Rewritten upstream: ${syncOffer.trunk.ahead} local commit(s) are not on ${syncOffer.trunk.remote}/${syncOffer.trunk.branch}`
+                              : `${syncOffer.trunk.behind} behind, ${syncOffer.trunk.ahead} ahead`,
+                          },
+                        ]}
+                      />
+                      {syncOffer.layers.map((layer) => (
+                        <WorkflowSection
+                          key={`sync-${layer.branch}`}
+                          label={`${layer.branch} → ${layer.base}`}
+                        >
+                          <div className="workflow-row">
+                            <Badge variant={SYNC_LAYER_BADGE[layer.state]}>
+                              {SYNC_LAYER_LABELS[layer.state]}
+                            </Badge>
+                            <span className="workflow-note">
+                              {layer.pullRequest === null
+                                ? 'No pull request'
+                                : `#${layer.pullRequest}${
+                                    layer.pullRequestBase
+                                      ? ` targets ${layer.pullRequestBase}`
+                                      : ''
+                                  }`}
+                            </span>
+                          </div>
+                          <p className="workflow-note">{layer.note}</p>
+                          {layer.push === 'force' ? (
+                            <OperationFacts
+                              facts={[
+                                {
+                                  label: 'Lease',
+                                  value: `origin/${layer.branch} at ${
+                                    layer.remoteOid?.slice(0, 12) ?? 'absent'
+                                  }`,
+                                  code: true,
+                                },
+                              ]}
+                            />
+                          ) : null}
+                          {layer.blockers.length > 0 ? (
+                            <BlockerList items={layer.blockers} />
+                          ) : null}
+                        </WorkflowSection>
+                      ))}
+                      {syncOffer.forcePushes.length > 0 ? (
+                        <>
+                          <Checkbox
+                            id="workflow-sync-lease"
+                            label="Replace published history on the listed branches with exact leases"
+                            checked={allowForce}
+                            onChange={(event) => {
+                              markEdited()
+                              setAllowForce(event.target.checked)
+                              setConfirmation('')
+                            }}
+                          />
+                          {allowForce ? (
+                            <>
+                              <WarningNote>
+                                Remote-only commits on {syncOffer.forcePushes.join(', ')} may be
+                                replaced. Each push names the exact tip above as its lease, so a
+                                changed remote stops the sync instead of overwriting it.
+                              </WarningNote>
+                              <TypedConfirmation
+                                id="workflow-confirm"
+                                value={confirmation}
+                                target={request.branch}
+                                onChange={(value) => {
+                                  markEdited()
+                                  setConfirmation(value)
+                                }}
+                                disabled={locked}
+                              />
+                            </>
+                          ) : null}
+                        </>
+                      ) : null}
                     </>
                   ) : null}
                   {request.operation === 'publish' && (publishOffer || recovering) ? (

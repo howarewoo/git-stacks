@@ -233,6 +233,7 @@ export const restackPreview: StackPreview = {
   blockers: [],
   mergeMethods: ['merge', 'squash', 'rebase'],
   publish: null,
+  sync: null,
 }
 
 export const blockedRestackPreview: StackPreview = {
@@ -302,6 +303,67 @@ export const mergePreview: StackPreview = {
   steps: [restackPreview.steps[1]],
   blockers: [],
   warnings: ['This merges one pull request. The remaining branches still need a restack.'],
+}
+
+export const syncPreview: StackPreview = {
+  ...restackPreview,
+  token: 'preview-sync-1',
+  kind: 'sync',
+  branch: 'feature/checkout-tests',
+  steps: [restackPreview.steps[0], restackPreview.steps[1]],
+  warnings: [
+    'Local main is 1 commit ahead of origin/main; syncing replays the layers onto the fetched remote tip and leaves the local main alone.',
+  ],
+  sync: {
+    branch: 'feature/checkout-tests',
+    trunk: {
+      branch: 'main',
+      remote: 'origin',
+      localOid: '5555555555555555555555555555555555555555',
+      remoteOid: '4444444444444444444444444444444444444444',
+      ahead: 1,
+      behind: 0,
+      diverged: false,
+      blockers: [],
+    },
+    layers: [
+      {
+        branch: 'feature/checkout',
+        base: 'main',
+        baseOid: '4444444444444444444444444444444444444444',
+        state: 'needs-force',
+        oid: '2222222222222222222222222222222222222222',
+        remoteOid: '2222222222222222222222222222222222222222',
+        commits: 2,
+        pullRequest: null,
+        pullRequestBase: null,
+        retargetedFrom: null,
+        rebase: true,
+        push: 'force',
+        note: 'Replay onto main @ 444444444444; push replaces origin/feature/checkout 222222222222 under an exact lease',
+        blockers: [],
+      },
+      {
+        branch: 'feature/checkout-tests',
+        base: 'feature/checkout',
+        baseOid: '2222222222222222222222222222222222222222',
+        state: 'up-to-date',
+        oid: '3333333333333333333333333333333333333333',
+        remoteOid: '3333333333333333333333333333333333333333',
+        commits: 1,
+        pullRequest: 41,
+        pullRequestBase: 'feature/checkout',
+        retargetedFrom: null,
+        rebase: false,
+        push: 'none',
+        note: 'Replay onto feature/checkout @ 222222222222; remote branch already matches',
+        blockers: [],
+      },
+    ],
+    forcePushes: ['feature/checkout'],
+    blockers: [],
+    warnings: [],
+  },
 }
 
 export const leasePreview: PushPreview = {

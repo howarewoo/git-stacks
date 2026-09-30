@@ -440,6 +440,92 @@ test('an inferred branch keeps its restack comparison within a one-branch budget
   }
 })
 
+test('a snapshot reports the behind count Git itself reports for every branch shape', async () => {
+  const { root, repo, git } = await repository()
+  try {
+    // A stack whose bases are one and two commits further down, a base that has
+    // moved on, a branch that has moved on, and a branch that already contains
+    // a merge of its base: the shortcut and the fallback must agree on all of
+    // them, and every one of them is compared against the count Git computes.
+    git('checkout', '-b', 'stacked/one')
+    git('commit', '--allow-empty', '-m', 'One')
+    git('checkout', '-b', 'stacked/two')
+    git('commit', '--allow-empty', '-m', 'Two')
+    git('commit', '--allow-empty', '-m', 'Two again')
+    git('checkout', '-b', 'stacked/three')
+    git('commit', '--allow-empty', '-m', 'Three')
+    git('config', 'branch.stacked/one.parent', 'main')
+    git('config', 'branch.stacked/two.parent', 'stacked/one')
+    git('config', 'branch.stacked/three.parent', 'stacked/two')
+    git('checkout', 'main')
+    git('checkout', '-b', 'feature/side')
+    git('commit', '--allow-empty', '-m', 'Side')
+    git('checkout', 'main')
+    git('commit', '--allow-empty', '-m', 'Advance one')
+    git('checkout', '-b', 'behind/one')
+    git('commit', '--allow-empty', '-m', 'Behind one')
+    git('checkout', 'main')
+    git('commit', '--allow-empty', '-m', 'Advance two')
+    git('commit', '--allow-empty', '-m', 'Advance three')
+    git('checkout', '-b', 'behind/three')
+    git('commit', '--allow-empty', '-m', 'Behind three')
+    git('checkout', 'main')
+    git('checkout', '-b', 'feature/diverged')
+    git('commit', '--allow-empty', '-m', 'Feature')
+    git('commit', '--allow-empty', '-m', 'Feature again')
+    git('checkout', 'main')
+    git('commit', '--allow-empty', '-m', 'Advance four')
+    git('checkout', '-b', 'holds-merge')
+    git('merge', '--no-ff', '-m', 'Merge side', 'feature/side')
+    git('config', 'branch.holds-merge.parent', 'main')
+    git('checkout', 'main')
+
+    const snapshot = await getSnapshot(repo)
+    const reported = new Map<string, number | null>()
+    for (const branch of snapshot.branches) {
+      if (!branch.parent) continue
+      const child = git('rev-parse', branch.ref)
+      const base = git('rev-parse', `refs/heads/${branch.parent}`)
+      const fromGit = Number(git('rev-list', '--count', `${child}..${base}`, '--'))
+      reported.set(branch.name, branch.parentBehind)
+      assert.equal(branch.parentBehind, fromGit, `${branch.name} should match git rev-list`)
+      assert.equal(branch.needsRestack, fromGit > 0, `${branch.name} restack state`)
+    }
+    // A base the branch already contains, whether it is a stack tip one commit
+    // down or a merge the branch has taken, is behind by nothing.
+    for (const name of ['stacked/two', 'stacked/three', 'holds-merge']) {
+      assert.equal(reported.get(name), 0, `${name} is up to date with its base`)
+    }
+    // The fixture has to produce both answers, or it proves nothing about the
+    // comparisons the batched evidence declines to answer.
+    const counts = [...reported.values()]
+    assert.ok(
+      counts.includes(0) && counts.some((count) => (count ?? 0) > 0),
+      `expected up-to-date and behind branches, saw ${JSON.stringify(counts)}`,
+    )
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('a batch of up-to-date branches retains exact zero behind counts and restack states', async () => {
+  const { root, repo, git } = await repository()
+  try {
+    for (let index = 0; index < 40; index += 1) {
+      git('checkout', '-b', `feature/up-${index}`, 'main')
+      git('commit', '--allow-empty', '-m', `Up ${index}`)
+    }
+    git('checkout', 'main')
+    const snapshot = await getSnapshot(repo)
+    const branches = snapshot.branches.filter((item) => item.name.startsWith('feature/up-'))
+    assert.equal(branches.length, 40)
+    assert.ok(branches.every((item) => item.parent === 'main'))
+    assert.ok(branches.every((item) => item.parentBehind === 0 && !item.needsRestack))
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 test('a snapshot states the branches its analysis budget left out', async () => {
   const { root, repo, git } = await repository()
   try {

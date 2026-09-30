@@ -83,10 +83,11 @@ export const SHORTCUT_DEFINITIONS: readonly ShortcutMetadata[] = [
   },
   {
     id: 'stack.sync',
-    label: 'Sync with remote',
+    label: 'Sync stack',
     group: 'Stack navigation',
     defaultChord: 'Mod+Shift+S',
-    description: 'Fetch remote updates without altering the working tree.',
+    description:
+      'Fetch and prune the remotes, then preview replaying this stack onto its trunk, with per-layer merged, rebase, force-with-lease, and blocked states.',
   },
   {
     id: 'stack.openPr',

@@ -58,6 +58,7 @@ const stackLabels: Record<StackKind, string> = {
   restack: 'Restack',
   publish: 'Publish',
   merge: 'Merge pull request',
+  sync: 'Sync',
 }
 
 export function stackActionLabel(operation: StackKind): string {
@@ -154,7 +155,10 @@ export function workflowAction(
       }
     case 'stack':
       if (!input.preview || input.preview.blockers.length > 0) return null
-      // Replacing remote history needs the typed name even when force is allowed.
+      // A sync that would replace published history cannot be dispatched without the
+      // explicit lease approval, and replacing it needs the typed branch name on top.
+      const forcePushes = input.preview.sync?.forcePushes ?? []
+      if (forcePushes.length > 0 && !input.allowForce) return null
       if (
         input.allowForce &&
         (input.confirmationTarget === null || input.confirmation !== input.confirmationTarget)

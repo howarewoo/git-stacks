@@ -70,6 +70,15 @@ import { canonicalRemoteName, getGitHubData, getPullRequest, pullRequestReposito
 import { GitHubTransportError, githubTransport } from './github-transport'
 import type { GitHubResult } from './github'
 import { runReconciliationRepair } from './reconciliation'
+import {
+  buildSyncPreview,
+  runSyncStack,
+  syncPushLayers,
+  syncRebaseLayers,
+  type SyncCapture,
+  type SyncLayerFacts,
+  type SyncRemoteRelation,
+} from './sync-stack'
 import { runLinkIssueAction, runUnlinkIssueAction } from './issue-links'
 
 const PLAN_TTL_MS = 5 * 60_000
@@ -112,6 +121,8 @@ interface StackPlan {
   expiresAt: number
   kind: StackKind
   branch: string
+  /** The branch the whole stack hangs from: the native stack base, or the repository default. */
+  trunk: string
   defaultBranch: string
   originUrl: string | null
   pushUrl: string | null
@@ -124,7 +135,8 @@ interface StackPlan {
   capturedParentOids: Record<string, string | null>
   capturedTips: Record<string, string>
   capturedRemoteOids: Record<string, string | null>
-  capturedPrs: Record<string, PullRequest | null>
+  /** The pull request identity every connected layer had when the preview was taken. */
+  capturedPrs: Record<string, CapturedPullRequest | null>
   /** Native stack membership, so a publish preview also detects an unstacked layer. */
   capturedStacks: CapturedStack[]
   capturedMergedHeads: Record<
@@ -134,6 +146,8 @@ interface StackPlan {
   warnings: string[]
   blockers: string[]
   mergeMethods: ('merge' | 'squash' | 'rebase')[]
+  /** Present only for a sync preview: the facts the per-layer classification rests on. */
+  sync: SyncCapture | null
 }
 
 interface JournalEntry {
@@ -152,9 +166,26 @@ interface JournalEntry {
   status: 'pending' | 'rebasing' | 'metadata' | 'completed' | 'restored'
 }
 
+interface SyncPushEntry {
+  branch: string
+  expectedRemoteOid: string | null
+  force: boolean
+  status?: 'pending' | 'completed'
+  publishedOid?: string | null
+}
+
+interface SyncPushConfig {
+  originUrl?: string
+  pushUrl: string
+  allowForce: boolean
+  branches: SyncPushEntry[]
+}
+
 interface StackJournal {
   version: 1
   id: string
+  /** Restack and sync share one journal; the label is what the recovery banner shows. */
+  kind: 'restack' | 'sync'
   repoPath: string
   originalBranch: string | null
   originalHead: string | null
@@ -162,6 +193,7 @@ interface StackJournal {
   entries: JournalEntry[]
   status: 'running' | 'conflict' | 'uncertain' | 'aborting'
   message: string
+  syncPushes?: SyncPushConfig
 }
 
 /** The native stack membership captured when a publish preview was taken. */
@@ -171,6 +203,14 @@ interface CapturedStack {
   base: string
   status: NativeStack['status']
   members: NativeStack['pullRequests']
+}
+
+/** The pull request identity a sync plan re-reads before it touches a descendant. */
+interface CapturedPullRequest {
+  number: number
+  state: PullRequest['state']
+  base: string
+  headOid: string | null
 }
 
 /** The captured local tip and remote tip a push step may still act on. */
@@ -566,6 +606,8 @@ async function readJournal(repoPath: string, signal?: AbortSignal): Promise<Stac
     if (entry.oldParent !== null) names.add(entry.oldParent)
   }
   if (parsed.originalBranch !== null) names.add(parsed.originalBranch)
+  // A journal written before sync existed restacks; the label is display-only.
+  parsed.kind = parsed.kind === 'sync' ? 'sync' : 'restack'
   if (parsed.currentBranch !== null) names.add(parsed.currentBranch)
   for (const name of names) await validateBranchName(repoPath, name)
   return parsed as unknown as StackJournal
@@ -1350,6 +1392,97 @@ function connectedBranchNames(
   return { names: [...names], blockers }
 }
 
+/**
+ * The base branch of the native stack this branch belongs to. GitHub owns stack
+ * membership, so a submitted stack hangs from the base it was registered
+ * against; a branch nobody submitted has no native stack and hangs from the
+ * repository default branch.
+ */
+function nativeStackTrunk(
+  data: GitHubResult | null,
+  selectedBranch: string,
+  snapshot: RepositorySnapshot,
+  defaultBranch: string,
+): string | null {
+  if (!data?.available) return null
+  const parents = new Map(
+    snapshot.branches
+      .filter((branch) => !branch.remote)
+      .map((branch) => [branch.name, branch.parent]),
+  )
+  const chain = new Set<string>()
+  let current: string | null | undefined = selectedBranch
+  while (current && !chain.has(current)) {
+    chain.add(current)
+    current = parents.get(current)
+  }
+  const submitted = new Set(
+    data.pullRequests.filter((pr) => chain.has(pr.head)).map((pr) => pr.number),
+  )
+  for (const stack of data.nativeStacks ?? []) {
+    if (stack.open && stack.pullRequests.some((member) => submitted.has(member.number))) {
+      return stack.base
+    }
+  }
+  return null
+}
+
+/** How the fetched remote tip of a branch compares with the local tip it was previewed against. */
+async function remoteRelation(
+  repoPath: string,
+  remote: string | null,
+  local: string,
+): Promise<SyncRemoteRelation> {
+  if (!remote) return 'absent'
+  if (remote === local) return 'equal'
+  if (await isAncestor(repoPath, remote, local)) return 'behind'
+  if (await isAncestor(repoPath, local, remote)) return 'ahead'
+  return 'diverged'
+}
+
+/**
+ * The trunk a sync hangs from and how far it has moved since the local copy. A
+ * rewritten trunk is reported rather than repaired: the sync replays the layers
+ * onto the fetched remote tip and never rewrites the trunk itself.
+ */
+async function captureSyncTrunk(
+  repoPath: string,
+  trunk: string,
+  pushUrl: string | null,
+  layers: SyncLayerFacts[],
+  fetchFailure: string | null,
+): Promise<SyncCapture> {
+  const blockers: string[] = fetchFailure ? [fetchFailure] : []
+  const localOid = await resolveCommit(repoPath, `refs/heads/${trunk}`)
+  const remoteOidValue = await resolveCommit(repoPath, `refs/remotes/origin/${trunk}`)
+  if (!localOid) blockers.push(`Local ${trunk} does not exist`)
+  if (!remoteOidValue)
+    blockers.push(
+      `No fetched origin/${trunk} to sync against; the fetch did not produce a remote trunk tip`,
+    )
+  if (!pushUrl) blockers.push('Syncing compares remote branches through the origin push URL')
+  const ahead = localOid && remoteOidValue ? await commitCount(repoPath, remoteOidValue, localOid) : 0
+  const behind =
+    localOid && remoteOidValue ? await commitCount(repoPath, localOid, remoteOidValue) : 0
+  if (ahead > 0) {
+    blockers.push(
+      `Local ${trunk} has ${ahead} commit${ahead === 1 ? '' : 's'} not on origin/${trunk}; publish or reconcile the trunk before syncing so stack branches retain those commits`,
+    )
+  }
+  const diverged = Boolean(
+    localOid &&
+      remoteOidValue &&
+      localOid !== remoteOidValue &&
+      !(await isAncestor(repoPath, localOid, remoteOidValue)) &&
+      !(await isAncestor(repoPath, remoteOidValue, localOid)),
+  )
+  return {
+    remote: 'origin',
+    trunk: { branch: trunk, localOid, remoteOid: remoteOidValue, ahead, behind, diverged, blockers },
+    layers,
+  }
+}
+
 async function capturePlan(
   repoPath: string,
   snapshot: RepositorySnapshot,
@@ -1357,6 +1490,17 @@ async function capturePlan(
   selectedBranch: string,
 ): Promise<{ plan: StackPlan; preview: StackPreview }> {
   const root = await repositoryPath(repoPath)
+  // A sync reads the remote first: the trunk it replays onto and every lease it
+  // may later spend are the tips this fetch produced.
+  let fetchFailure: string | null = null
+  if (kind === 'sync') {
+    try {
+      await ensureNoBusyOperation(root, 'sync the stack')
+      await runGit(root, ['fetch', '--all', '--prune'])
+    } catch (error) {
+      fetchFailure = `Could not fetch and prune the remotes: ${commandDetail(error)}`
+    }
+  }
   const refs = await getRefs(root)
   const currentBranch = await getCurrentBranch(root)
   const currentHead = await resolveCommit(root, 'HEAD')
@@ -1374,18 +1518,24 @@ async function capturePlan(
       }
     }
   }
-  const records = await branchRecords(root, snapshot, defaultBranch, originFullName, canonicalPrs)
+  // The stack hangs from the branch GitHub registered it against when it is a
+  // native stack, and from the repository default branch otherwise.
+  const registeredTrunk =
+    kind === 'sync' ? nativeStackTrunk(githubData, selectedBranch, snapshot, defaultBranch) : null
+  const trunk = registeredTrunk ?? defaultBranch
+  const records = await branchRecords(root, snapshot, trunk, originFullName, canonicalPrs)
   const mergedJournal = await readMergedPrJournal(root)
-  const connected = connectedBranchNames(records, selectedBranch, defaultBranch)
+  const connected = connectedBranchNames(records, selectedBranch, trunk)
   const blockers = [...connected.blockers]
+  if (fetchFailure) blockers.push(fetchFailure)
   let mergeMethods: ('merge' | 'squash' | 'rebase')[] = []
   let pushUrl: string | null = null
-  if (kind === 'publish') {
+  if (kind === 'publish' || kind === 'sync') {
     try {
       pushUrl = await getRemotePushUrl(root, 'origin')
       const pushRemote = parseRemote(pushUrl)
       if (!pushRemote || pushRemote.host !== 'github.com') {
-        blockers.push('Publishing requires a github.com origin push URL')
+        blockers.push(`${kind === 'sync' ? 'Syncing' : 'Publishing'} requires a github.com origin push URL`)
       } else if (
         originFullName &&
         pushRemote.fullName.toLowerCase() !== originFullName.toLowerCase()
@@ -1405,7 +1555,12 @@ async function capturePlan(
   if (kind !== 'restack') {
     if (!githubData || !githubData.available)
       blockers.push(githubData?.message ?? 'GitHub metadata is unavailable')
-    if (!originFullName) blockers.push('Publishing requires a github.com origin remote')
+    if (!originFullName)
+      blockers.push(
+        kind === 'sync'
+          ? 'Syncing requires a github.com origin remote'
+          : 'Publishing requires a github.com origin remote',
+      )
   }
   const operation = await getOperationState(root)
   if (operation.busy) blockers.push('A Git operation is already in progress')
@@ -1413,8 +1568,8 @@ async function capturePlan(
   if (files.length > 0) blockers.push('Commit or stash uncommitted changes before restacking')
   const selectedRecord = records.get(selectedBranch)
   if (!selectedRecord) blockers.push(`Branch ${selectedBranch} is not a local branch`)
-  if (selectedBranch === defaultBranch)
-    blockers.push('The default branch cannot be restacked or merged')
+  if (selectedBranch === trunk)
+    blockers.push(`The stack trunk ${trunk} cannot itself be restacked, synced, or merged`)
 
   const names = connected.names
   const parentMap: Record<string, string | null> = {}
@@ -1422,7 +1577,7 @@ async function capturePlan(
   const parentOidMap: Record<string, string | null> = {}
   const tips: Record<string, string> = {}
   const remoteOids: Record<string, string | null> = {}
-  const prs: Record<string, PullRequest | null> = {}
+  const prs: Record<string, CapturedPullRequest | null> = {}
   const capturedMergedHeads: Record<
     string,
     { pr: string | null; oid: string | null; commit: string | null }
@@ -1436,6 +1591,12 @@ async function capturePlan(
   }
   const entries: PlanEntry[] = []
   const skippedMerged = new Set<string>()
+  const syncLayers: SyncLayerFacts[] = []
+  const layerBlockers = new Map<string, string[]>()
+  const blockLayer = (name: string, message: string) => {
+    blockers.push(message)
+    layerBlockers.set(name, [...(layerBlockers.get(name) ?? []), message])
+  }
   for (const name of names) {
     const record = records.get(name)
     if (!record) continue
@@ -1449,15 +1610,46 @@ async function capturePlan(
       continue
     }
     const upstream = await branchUpstream(root, name)
-    remoteOids[name] = kind === 'publish' && pushUrl ? await remoteOid(root, pushUrl, name) : null
+    remoteOids[name] =
+      (kind === 'publish' || kind === 'sync') && pushUrl
+        ? await remoteOid(root, pushUrl, name)
+        : null
+    prs[name] = record.pr
+      ? {
+          number: record.pr.number,
+          state: record.pr.state,
+          base: record.pr.base,
+          headOid: record.pr.headOid ?? null,
+        }
+      : null
     if (record.pr?.state === 'MERGED') {
       skippedMerged.add(name)
       if (kind === 'merge' && name === selectedBranch) {
         blockers.push(`Branch ${name} already has a merged pull request`)
       }
+      if (kind === 'sync') {
+        const base = effectiveParent(records, name, trunk) ?? trunk
+        const baseTarget = await parentTarget(root, base, trunk, false)
+        syncLayers.push({
+          branch: name,
+          base,
+          baseOid: baseTarget?.oid ?? record.oid,
+          recordedParent: declaredParent,
+          retargetedFrom: null,
+          oid: record.oid,
+          remoteOid: remoteOids[name],
+          remoteRelation: await remoteRelation(root, remoteOids[name], record.oid),
+          commits: 0,
+          rebase: false,
+          merged: true,
+          pullRequest: prs[name],
+          blockers: [],
+          note: `Pull request #${record.pr?.number ?? '?'} merged; ${name} is left untouched`,
+        })
+      }
       continue
     }
-    const parent = effectiveParent(records, name, defaultBranch)
+    const parent = effectiveParent(records, name, trunk)
     if (!parent || parent === name) {
       blockers.push(`Branch ${name} has an invalid parent`)
       continue
@@ -1470,9 +1662,9 @@ async function capturePlan(
     if (!boundary) {
       const oldParentOid =
         oldParentRecord?.oid ??
-        (oldParent === defaultBranch
-          ? ((await resolveCommit(root, `refs/heads/${defaultBranch}`)) ??
-            (await resolveCommit(root, `refs/remotes/origin/${defaultBranch}`)))
+        (oldParent === trunk
+          ? ((await resolveCommit(root, `refs/heads/${trunk}`)) ??
+            (await resolveCommit(root, `refs/remotes/origin/${trunk}`)))
           : null)
       if (!oldParentOid) {
         blockers.push(`Cannot determine the original parent boundary for ${name}`)
@@ -1481,33 +1673,32 @@ async function capturePlan(
       boundary = await actualMergeBase(root, oldParentOid, record.oid)
       parentTipSource = 'merge-base'
       if (!boundary) {
-        blockers.push(`No common ancestor exists for ${name} and ${oldParent ?? defaultBranch}`)
+        blockers.push(`No common ancestor exists for ${name} and ${oldParent ?? trunk}`)
         continue
       }
     }
     const retargetedFrom = oldParent && oldParent !== parent ? oldParent : null
-    const preferRemoteDefault =
-      kind !== 'restack' || Boolean(retargetedFrom && parent === defaultBranch)
-    const localDefaultOid =
-      parent === defaultBranch ? await resolveCommit(root, `refs/heads/${defaultBranch}`) : null
-    const remoteDefaultOid =
-      parent === defaultBranch
-        ? await resolveCommit(root, `refs/remotes/origin/${defaultBranch}`)
-        : null
-    if (
-      localDefaultOid &&
-      remoteDefaultOid &&
-      localDefaultOid !== remoteDefaultOid &&
-      !preferRemoteDefault &&
-      !(await isAncestor(root, localDefaultOid, remoteDefaultOid)) &&
-      !(await isAncestor(root, remoteDefaultOid, localDefaultOid))
-    ) {
+    // Sync replays onto the fetched tip; captureSyncTrunk blocks unpublished
+    // local trunk commits before that replay can discard their ancestry.
+    const preferRemoteTrunk = kind !== 'restack' || Boolean(retargetedFrom && parent === trunk)
+    const localTrunkOid =
+      parent === trunk ? await resolveCommit(root, `refs/heads/${trunk}`) : null
+    const remoteTrunkOid =
+      parent === trunk ? await resolveCommit(root, `refs/remotes/origin/${trunk}`) : null
+    const trunkDiverged = Boolean(
+      localTrunkOid &&
+        remoteTrunkOid &&
+        localTrunkOid !== remoteTrunkOid &&
+        !(await isAncestor(root, localTrunkOid, remoteTrunkOid)) &&
+        !(await isAncestor(root, remoteTrunkOid, localTrunkOid)),
+    )
+    if (trunkDiverged && !preferRemoteTrunk) {
       blockers.push(
-        `Default branch ${defaultBranch} has divergent local and origin tips; refresh or reconcile it before restacking ${name}`,
+        `Trunk ${trunk} has divergent local and origin tips; refresh or reconcile it before restacking ${name}`,
       )
       continue
     }
-    const target = await parentTarget(root, parent, defaultBranch, preferRemoteDefault)
+    const target = await parentTarget(root, parent, trunk, preferRemoteTrunk)
     if (!target) {
       blockers.push(`Parent ${parent} for ${name} does not resolve locally`)
       continue
@@ -1557,9 +1748,9 @@ async function capturePlan(
         }
       }
       const boundaryIncludedInParent = await isAncestor(root, boundary, effectiveParentOid)
-      const unsafeBoundaryMessage = `Merged parent ${retargetedFrom} has no validated merge-time head for ${name} that can be used as a safe replay boundary; restacking is blocked to preserve commits`
+      const unsafeBoundaryMessage = `Merged parent ${retargetedFrom} has no validated merge-time head for ${name} that can be used as a safe replay boundary; syncing is blocked to preserve commits`
       if (!recordedMergeHead) {
-        blockers.push(unsafeBoundaryMessage)
+        blockLayer(name, unsafeBoundaryMessage)
       } else {
         const isChildTip = recordedMergeHead === record.oid
         const commitsToChild = await commitCount(root, recordedMergeHead, record.oid)
@@ -1574,7 +1765,7 @@ async function capturePlan(
             mergedJournal,
           ))
         if (!isProven) {
-          blockers.push(unsafeBoundaryMessage)
+          blockLayer(name, unsafeBoundaryMessage)
         } else if (await isAncestor(root, recordedMergeHead, record.oid)) {
           const mergeHeadIncludedInBoundary = await isAncestor(root, recordedMergeHead, boundary)
           if (!mergeHeadIncludedInBoundary || !boundaryIncludedInParent) {
@@ -1583,15 +1774,16 @@ async function capturePlan(
             boundary = recordedMergeHead
           }
         } else if (!boundaryIncludedInParent) {
-          blockers.push(unsafeBoundaryMessage)
+          blockLayer(name, unsafeBoundaryMessage)
         }
       }
     }
     const commits = await commitCount(root, boundary, record.oid)
     const mergeCount = await mergeCommitCount(root, boundary, record.oid)
     if (kind !== 'publish' && kind !== 'merge' && mergeCount > 0) {
-      blockers.push(
-        `Branch ${name} contains ${mergeCount} merge commit${mergeCount === 1 ? '' : 's'}; restack is blocked to preserve merge topology. Resolve it manually before retrying.`,
+      blockLayer(
+        name,
+        `Branch ${name} contains ${mergeCount} merge commit${mergeCount === 1 ? '' : 's'}; replaying it is blocked to preserve merge topology. Resolve it manually before retrying.`,
       )
     }
     const needsRestack =
@@ -1605,14 +1797,14 @@ async function capturePlan(
     }
     if (
       kind === 'publish' &&
-      parent === defaultBranch &&
-      localDefaultOid &&
-      remoteDefaultOid &&
-      record.parentTip === localDefaultOid &&
-      !(await isAncestor(root, localDefaultOid, remoteDefaultOid))
+      parent === trunk &&
+      localTrunkOid &&
+      remoteTrunkOid &&
+      record.parentTip === localTrunkOid &&
+      !(await isAncestor(root, localTrunkOid, remoteTrunkOid))
     ) {
       blockers.push(
-        `Publish or reconcile ${defaultBranch} with origin/${defaultBranch} first; this stack contains unpublished default-branch commits`,
+        `Publish or reconcile ${trunk} with origin/${trunk} first; this stack contains unpublished trunk commits`,
       )
     }
     if (retargetedFrom) {
@@ -1621,8 +1813,8 @@ async function capturePlan(
       )
     }
     const noteParts = [
-      kind === 'restack'
-        ? `Rebase onto ${target.ref.replace(/^refs\/(?:heads|remotes)\//u, '')} @ ${target.oid.slice(0, 12)}`
+      kind === 'restack' || kind === 'sync'
+        ? `Replay onto ${target.ref.replace(/^refs\/(?:heads|remotes)\//u, '')} @ ${target.oid.slice(0, 12)}`
         : kind === 'publish'
           ? `Push reviewed tip ${record.oid.slice(0, 12)}; PR base ${parent}`
           : `Merge only PR #${record.pr?.number ?? '?'} into ${parent}`,
@@ -1650,31 +1842,56 @@ async function capturePlan(
       retargetedFrom,
       note: noteParts.join('; '),
     })
+    if (kind === 'sync') {
+      syncLayers.push({
+        branch: name,
+        base: parent,
+        baseOid: effectiveParentOid,
+        recordedParent: oldParent,
+        retargetedFrom,
+        oid: record.oid,
+        remoteOid: remoteOids[name],
+        remoteRelation: await remoteRelation(root, remoteOids[name], record.oid),
+        commits,
+        rebase: needsRestack,
+        merged: false,
+        pullRequest: prs[name],
+        blockers: layerBlockers.get(name) ?? [],
+        note: noteParts.join('; '),
+      })
+    }
   }
   const depth = (name: string, seen = new Set<string>()): number => {
     if (seen.has(name)) return 0
     seen.add(name)
     const record = records.get(name)
-    if (!record || !record.parent || record.parent === defaultBranch) return 0
+    if (!record || !record.parent || record.parent === trunk) return 0
     return 1 + depth(record.parent, seen)
   }
   entries.sort(
     (left, right) =>
       depth(left.branch) - depth(right.branch) || left.branch.localeCompare(right.branch),
   )
+  const restackedAncestors = new Set<string>()
+  for (const entry of entries) {
+    if (entry.needsRestack || restackedAncestors.has(entry.parent)) {
+      entry.needsRestack = true
+      restackedAncestors.add(entry.branch)
+    }
+  }
   if (kind === 'merge') {
     const mergeEntry = entries.find((entry) => entry.branch === selectedBranch)
     if (!mergeEntry) blockers.push(`No unmerged stack entry exists for ${selectedBranch}`)
     else {
-      if (mergeEntry.parent !== defaultBranch)
-        blockers.push('Only the bottom pull request based on the default branch may be merged')
+      if (mergeEntry.parent !== trunk)
+        blockers.push(`Only the bottom pull request based on ${trunk} may be merged`)
       if (!mergeEntry.pr) blockers.push(`Branch ${selectedBranch} has no canonical pull request`)
       else {
-        blockers.push(...mergeBlockers(mergeEntry.pr, defaultBranch, mergeEntry.oldTip))
+        blockers.push(...mergeBlockers(mergeEntry.pr, trunk, mergeEntry.oldTip))
       }
     }
   }
-  if (kind === 'publish') {
+  if (kind === 'publish' || kind === 'sync') {
     for (const entry of entries) {
       if (entry.upstream && entry.upstream !== `origin/${entry.branch}`) {
         blockers.push(
@@ -1688,7 +1905,24 @@ async function capturePlan(
       }
     }
   }
-  if (entries.length === 0 && kind !== 'merge') {
+  syncLayers.sort(
+    (left, right) =>
+      depth(left.branch) - depth(right.branch) || left.branch.localeCompare(right.branch),
+  )
+  for (const layer of syncLayers) {
+    if (
+      !layer.merged &&
+      (restackedAncestors.has(layer.branch) ||
+        restackedAncestors.has(layer.base) ||
+        Boolean(layer.retargetedFrom))
+    ) {
+      layer.rebase = true
+      restackedAncestors.add(layer.branch)
+    }
+  }
+  const syncCapture: SyncCapture | null =
+    kind === 'sync' ? await captureSyncTrunk(root, trunk, pushUrl, syncLayers, fetchFailure) : null
+  if (entries.length === 0 && kind !== 'merge' && kind !== 'sync') {
     blockers.push(
       'No unmerged branches remain in this stack; select a remaining branch to continue',
     )
@@ -1719,6 +1953,7 @@ async function capturePlan(
     expiresAt: Date.now() + PLAN_TTL_MS,
     kind,
     branch: selectedBranch,
+    trunk,
     defaultBranch,
     originUrl,
     pushUrl,
@@ -1743,7 +1978,10 @@ async function capturePlan(
     warnings,
     blockers,
     mergeMethods,
+    sync: syncCapture,
   }
+  const syncPreview = syncCapture ? buildSyncPreview(syncCapture, selectedBranch) : null
+  if (syncPreview) blockers.push(...syncPreview.blockers.filter((reason) => !blockers.includes(reason)))
   plans.set(token, plan)
   return {
     plan,
@@ -1756,6 +1994,7 @@ async function capturePlan(
       blockers,
       mergeMethods: plan.mergeMethods,
       publish: kind === 'publish' ? await publishPreview(plan) : null,
+      sync: syncPreview,
     },
   }
 }
@@ -1771,7 +2010,7 @@ export async function previewStack(
   kind: StackKind,
   branch: string,
 ): Promise<StackPreview> {
-  if (kind !== 'restack' && kind !== 'publish' && kind !== 'merge')
+  if (kind !== 'restack' && kind !== 'publish' && kind !== 'merge' && kind !== 'sync')
     throw new Error('Invalid stack preview kind')
   requireRefInput(branch, 'branch')
   prunePlans()
@@ -2326,12 +2565,19 @@ async function revalidatePlan(repoPath: string, plan: StackPlan): Promise<void> 
     if (currentTip !== expectedTip)
       throw new Error(`Stack preview is stale: branch ${branch} changed`)
   }
+  const revalidateMergedJournal = await readMergedPrJournal(repoPath)
   for (const [branch, expected] of Object.entries(plan.capturedMergedHeads)) {
-    const [pr, oid, commit] = await Promise.all([
+    const [configPr, configOid, configCommit] = await Promise.all([
       getConfigValue(repoPath, `branch.${branch}.gitStacksMergedHeadPr`),
       getConfigValue(repoPath, `branch.${branch}.gitStacksMergedHeadOid`),
       getConfigValue(repoPath, `branch.${branch}.gitStacksMergedCommitOid`),
     ])
+    const journalEntry =
+      revalidateMergedJournal.get(branch) ??
+      (expected.pr ? revalidateMergedJournal.get(expected.pr) : null)
+    const pr = configPr ?? (journalEntry ? String(journalEntry.pr) : null)
+    const oid = configOid ?? journalEntry?.headOid ?? null
+    const commit = configCommit ?? journalEntry?.mergeOid ?? null
     if (pr !== expected.pr || oid !== expected.oid || commit !== expected.commit) {
       throw new Error(`Stack preview is stale: merged pull request boundary for ${branch} changed`)
     }
@@ -2361,12 +2607,45 @@ async function revalidatePlan(repoPath: string, plan: StackPlan): Promise<void> 
       throw new Error(`Stack preview is stale: upstream for ${entry.branch} changed`)
     }
   }
-  // A publish also writes native stack membership, so an unstack, a reorder, or a
-  // changed head invalidates the preview the same way a moved local tip does.
-  if (plan.kind !== 'publish' || plan.capturedStacks.length === 0) return
+  if (plan.sync && plan.pushUrl) {
+    const liveRemoteTrunk = await remoteOid(repoPath, plan.pushUrl, plan.sync.trunk.branch)
+    if (liveRemoteTrunk !== plan.sync.trunk.remoteOid) {
+      throw new Error(
+        `Stack preview is stale: trunk ${plan.sync.trunk.branch} moved on ${plan.sync.remote} after this preview was taken`,
+      )
+    }
+  }
+  // A publish writes native stack membership and a sync replays onto it, so an
+  // unstack, a reorder, a changed head, or a landed merge invalidates the
+  // preview the same way a moved local tip does.
+  if (plan.kind === 'restack') return
+  const hasCapturedPrs = Object.values(plan.capturedPrs).some(Boolean)
+  const hasCapturedStacks = plan.capturedStacks.length > 0
+  if (!hasCapturedPrs && !hasCapturedStacks) return
   const data = await getGitHubData(repoPath, plan.originUrl)
   if (!data.available) {
     throw new Error(`Stack preview is stale: GitHub is no longer reachable (${data.message})`)
+  }
+  // A sync re-reads every layer's pull request before it replays a descendant,
+  // so a merge, a retarget, or a push somebody else made lands as a refusal
+  // rather than as a replay onto a base that no longer describes the stack.
+  for (const [branch, captured] of Object.entries(plan.capturedPrs)) {
+    if (!captured) continue
+    const current = data.pullRequests.find((pr) => pr.number === captured.number)
+    if (!current) {
+      throw new Error(
+        `Stack preview is stale: pull request #${captured.number} for ${branch} is no longer readable`,
+      )
+    }
+    if (
+      current.state !== captured.state ||
+      current.base !== captured.base ||
+      current.headOid !== captured.headOid
+    ) {
+      throw new Error(
+        `Stack preview is stale: pull request #${captured.number} for ${branch} changed on GitHub after this preview was taken`,
+      )
+    }
   }
   for (const captured of plan.capturedStacks) {
     const current = (data.nativeStacks ?? []).find((stack) => stack.number === captured.number)
@@ -2814,17 +3093,80 @@ async function restackJournal(repoPath: string, journal: StackJournal): Promise<
     }
     await completeEntry(repoPath, journal, entry)
   }
+  let pushMessage = ''
+  if (journal.kind === 'sync' && journal.syncPushes) {
+    const origin = await currentOrigin(repoPath, true)
+    if (
+      !origin.pushUrl ||
+      origin.pushUrl !== journal.syncPushes.pushUrl ||
+      (journal.syncPushes.originUrl && origin.url !== journal.syncPushes.originUrl)
+    ) {
+      throw new Error('Sync progress is stale: the origin remote changed')
+    }
+    const { pushUrl, allowForce, branches } = journal.syncPushes
+    const pushed: string[] = []
+    for (const item of branches) {
+      const oid = await resolveCommit(repoPath, `refs/heads/${item.branch}`)
+      if (!oid) throw new Error(`Branch ${item.branch} no longer exists after the replay`)
+      if (item.status === 'completed') {
+        const currentRemote = await remoteOid(repoPath, pushUrl, item.branch)
+        if (item.publishedOid && currentRemote !== item.publishedOid) {
+          throw new Error(
+            `Stack preview is stale: remote ${item.branch} changed after it was synced`,
+          )
+        }
+        pushed.push(item.branch)
+        continue
+      }
+      if (oid === item.expectedRemoteOid) {
+        item.status = 'completed'
+        item.publishedOid = oid
+        await writeJournal(repoPath, journal)
+        continue
+      }
+      if ((await remoteOid(repoPath, pushUrl, item.branch)) === oid) {
+        await pushBranch(repoPath, item.branch, oid, oid, false, pushUrl)
+        item.status = 'completed'
+        item.publishedOid = oid
+        await writeJournal(repoPath, journal)
+        pushed.push(item.branch)
+        continue
+      }
+      await pushBranch(repoPath, item.branch, oid, item.expectedRemoteOid, allowForce, pushUrl)
+      item.status = 'completed'
+      item.publishedOid = oid
+      await writeJournal(repoPath, journal)
+      pushed.push(item.branch)
+    }
+    if (pushed.length > 0) {
+      pushMessage = `. Pushed ${pushed.join(', ')}`
+    }
+  }
   await restoreCheckout(repoPath, journal.originalBranch, journal.originalHead)
   await deleteBackups(repoPath, journal)
   await removeJournal(repoPath)
   return {
-    message: `Restacked ${journal.entries.length} stack branch${journal.entries.length === 1 ? '' : 'es'}`,
+    message:
+      journal.kind === 'sync'
+        ? `Synced ${journal.entries.length} stack branch${journal.entries.length === 1 ? '' : 'es'}${pushMessage}`
+        : `Restacked ${journal.entries.length} stack branch${journal.entries.length === 1 ? '' : 'es'}`,
   }
 }
 
-async function beginRestack(repoPath: string, plan: StackPlan): Promise<ActionResult> {
+/**
+ * Runs the bottom-to-top replay for the reviewed layers. Restack passes every
+ * planned layer; a sync passes only the layers its classification marked for
+ * replay. Both share one journal, one set of recovery refs, and one reflog proof
+ * model, so a conflict stops in the same recoverible place either way.
+ */
+async function runRestackCascade(
+  repoPath: string,
+  plan: StackPlan,
+  entries: PlanEntry[],
+  syncPushes?: SyncPushConfig,
+): Promise<ActionResult> {
   if (plan.blockers.length > 0) throw new Error(plan.blockers.join('; '))
-  if (plan.entries.length === 0) {
+  if (entries.length === 0) {
     return { message: 'No remaining unmerged stack branches require restacking' }
   }
   await ensureNoBusyOperation(repoPath, 'restack the stack')
@@ -2833,12 +3175,13 @@ async function beginRestack(repoPath: string, plan: StackPlan): Promise<ActionRe
   const id = randomUUID()
   const journal: StackJournal = {
     version: JOURNAL_VERSION,
+    kind: plan.kind === 'sync' ? 'sync' : 'restack',
     id,
     repoPath,
     originalBranch: plan.originalBranch,
     originalHead: plan.originalHead,
     currentBranch: plan.originalBranch,
-    entries: plan.entries.map((entry) => ({
+    entries: entries.map((entry) => ({
       branch: entry.branch,
       oldTip: entry.oldTip,
       newTip: null,
@@ -2854,9 +3197,74 @@ async function beginRestack(repoPath: string, plan: StackPlan): Promise<ActionRe
       status: 'pending',
     })),
     status: 'running',
-    message: 'Preparing stack restack',
+    message: plan.kind === 'sync' ? 'Preparing stack sync' : 'Preparing stack restack',
+    syncPushes,
   }
   return restackJournal(repoPath, journal)
+}
+
+/**
+ * Runs a reviewed Sync Stack: the classified layers are replayed bottom-to-top
+ * through the restack journal, then the previewed branches are pushed under the
+ * remote tips this plan captured. A push that would replace published history
+ * needs the explicit lease approval the preview asked for, and the guarded push
+ * re-checks the captured tip at its own mutation boundary.
+ */
+async function runPlanSync(
+  repoPath: string,
+  plan: StackPlan,
+  allowForce: boolean,
+): Promise<ActionResult> {
+  const capture = plan.sync
+  const pushUrl = plan.pushUrl
+  if (!capture || !pushUrl) throw new Error('This preview does not describe a stack sync')
+  if (plan.blockers.length > 0) throw new Error(plan.blockers.join('; '))
+  const preview = buildSyncPreview(capture, plan.branch)
+  if (preview.blockers.length > 0) throw new Error(preview.blockers.join('; '))
+  const rebases = syncRebaseLayers(preview)
+  const pushes = syncPushLayers(preview)
+  const forced = pushes.filter((layer) => layer.push === 'force')
+  if (forced.length > 0 && !allowForce) {
+    throw new Error(
+      `Syncing replaces published history on ${forced.map((layer) => layer.branch).join(', ')}; review the preview and approve the exact leases before running it`,
+    )
+  }
+  if (rebases.length === 0 && pushes.length === 0) {
+    return { message: `Stack is already in sync with ${preview.trunk.remote}` }
+  }
+  await ensureNoBusyOperation(repoPath, 'sync the stack')
+  await ensureClean(repoPath, 'sync the stack')
+  await revalidatePlan(repoPath, plan)
+  const syncPushes: SyncPushConfig = {
+    originUrl: plan.originUrl ?? (await getOriginUrl(repoPath)) ?? undefined,
+    pushUrl,
+    allowForce,
+    branches: pushes.map((layer) => ({
+      branch: layer.branch,
+      expectedRemoteOid: plan.capturedRemoteOids[layer.branch] ?? null,
+      force: layer.push === 'force',
+      status: 'pending',
+    })),
+  }
+  const replayed = new Set(rebases.map((layer) => layer.branch))
+  const entries = plan.entries.filter((entry) => replayed.has(entry.branch))
+  if (entries.length > 0) {
+    return runRestackCascade(repoPath, plan, entries, syncPushes)
+  }
+  const pushed: string[] = []
+  for (const item of syncPushes.branches) {
+    const oid = await resolveCommit(repoPath, `refs/heads/${item.branch}`)
+    if (!oid) throw new Error(`Branch ${item.branch} no longer exists`)
+    if (oid === item.expectedRemoteOid) continue
+    await pushBranch(repoPath, item.branch, oid, item.expectedRemoteOid, allowForce, pushUrl)
+    pushed.push(item.branch)
+  }
+  return {
+    message:
+      pushed.length > 0
+        ? `Pushed ${pushed.join(', ')}`
+        : `Stack is already in sync with ${preview.trunk.remote}`,
+  }
 }
 
 async function stackContinue(repoPath: string): Promise<ActionResult> {
@@ -2864,6 +3272,16 @@ async function stackContinue(repoPath: string): Promise<ActionResult> {
   if (!journal) throw new Error('No interrupted Git Stacks operation is available')
   if (journal.status === 'aborting')
     throw new Error('Stack rollback has started; use Abort to finish it')
+  if (journal.kind === 'sync' && journal.syncPushes) {
+    const origin = await currentOrigin(repoPath, true)
+    if (
+      !origin.pushUrl ||
+      origin.pushUrl !== journal.syncPushes.pushUrl ||
+      (journal.syncPushes.originUrl && origin.url !== journal.syncPushes.originUrl)
+    ) {
+      throw new Error('Sync progress is stale: the origin remote changed')
+    }
+  }
   const active = journal.entries.find((entry) => entry.status === 'rebasing')
   if (!active) return restackJournal(repoPath, journal)
   await verifyCompletedEntries(repoPath, journal)
@@ -3146,7 +3564,7 @@ async function withLocalBranchRefLock<T>(
   }
 }
 
-async function pushBranch(
+export async function pushBranch(
   repoPath: string,
   branch: string,
   oid: string,
@@ -4249,7 +4667,7 @@ export async function getStackProgress(
     .filter((entry) => entry.status !== 'completed')
     .map((entry) => entry.branch)
   return {
-    kind: 'restack',
+    kind: journal.kind,
     originalBranch: journal.originalBranch ?? '',
     currentBranch: journal.currentBranch,
     completed,
@@ -4295,7 +4713,8 @@ export async function runStackAction(
         throw new Error('Stack preview token is missing or expired; refresh the preview')
       if (plan.repoPath !== root) throw new Error('Stack preview belongs to a different repository')
       plans.delete(action.token)
-      if (plan.kind === 'restack') return beginRestack(root, plan)
+      if (plan.kind === 'restack') return runRestackCascade(root, plan, plan.entries)
+      if (plan.kind === 'sync') return runPlanSync(root, plan, action.allowForce)
       if (plan.kind === 'publish') {
         throw new Error(
           'Submit Stack replaced this preview action; take a fresh Submit Stack preview',

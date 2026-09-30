@@ -44,6 +44,7 @@ export const restackPreview: StackPreview = {
   blockers: [],
   mergeMethods: ['merge', 'squash', 'rebase'],
   publish: null,
+  sync: null,
 }
 
 export const publishPreview: StackPreview = {

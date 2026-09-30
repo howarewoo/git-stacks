@@ -1055,8 +1055,14 @@ function App() {
       }
       if (matchesChord(event, shortcutBindings['stack.sync'], isMac)) {
         event.preventDefault()
-        if (snapshot && !isBusy && !operationActive) {
-          void runAction({ type: 'fetch' }, 'Fetch')
+        if (
+          selectedBranch &&
+          !selectedBranch.remote &&
+          selectedBranch.name !== snapshot?.defaultBranch &&
+          !isBusy &&
+          !operationActive
+        ) {
+          openWorkflow({ kind: 'stack', operation: 'sync', branch: selectedBranch.name })
         }
         return
       }
@@ -1562,6 +1568,7 @@ function App() {
                     <TooltipTrigger asChild>
                       <span
                         className="ahead-behind relative z-[2] rounded-sm outline-none focus-visible:ring-2 focus-visible:ring-[var(--ring)]"
+                        role="group"
                         tabIndex={0}
                         aria-label={
                           branch.upstream

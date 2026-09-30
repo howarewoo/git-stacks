@@ -724,6 +724,49 @@ export async function getBranchConfigs(
   return parseBranchConfig(output ?? '')
 }
 
+/** Commits named in one `log --no-walk` batch; a wider argument list only grows the command line. */
+const DIRECT_PARENT_BATCH = 200
+
+/**
+ * The direct parents of many commits in batched reads. `log --no-walk` answers
+ * each listed commit without walking its history, so a snapshot learns a whole
+ * repository's tip topology in a handful of processes instead of one per tip.
+ * A commit Git cannot resolve is simply absent from the result, so callers
+ * that read a missing entry as "no evidence here" keep their own fallback.
+ */
+export async function readDirectParents(
+  repoPath: string,
+  oids: readonly string[],
+  signal?: AbortSignal,
+): Promise<Map<string, string[]>> {
+  const parents = new Map<string, string[]>()
+  for (let start = 0; start < oids.length; start += DIRECT_PARENT_BATCH) {
+    const output = await tryGit(
+      repoPath,
+      [
+        'log',
+        '--no-walk=unsorted',
+        '--format=%H:%P',
+        ...oids.slice(start, start + DIRECT_PARENT_BATCH),
+      ],
+      signal,
+    )
+    for (const line of (output ?? '').split('\n')) {
+      const separator = line.indexOf(':')
+      if (separator < 0) continue
+      parents.set(
+        line.slice(0, separator),
+        line
+          .slice(separator + 1)
+          .trim()
+          .split(' ')
+          .filter(Boolean),
+      )
+    }
+  }
+  return parents
+}
+
 export async function getBranchParent(repoPath: string, branch: string): Promise<string | null> {
   return getConfigValue(repoPath, `branch.${branch}.parent`)
 }

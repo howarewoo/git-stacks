@@ -277,6 +277,37 @@ export function buildPaletteItems(context: BuildPaletteContext): PaletteItem[] {
       : { kind: 'view', view: 'stacks' },
   })
 
+  items.push({
+    id: 'stack.sync',
+    label: selectedBranch ? `Sync ${selectedBranch.name} stack…` : 'Sync stack…',
+    detail:
+      'Fetch and prune the remotes, then preview this stack bottom-to-top on its trunk, with merged-layer, rebase, and force-with-lease states',
+    group: 'Stack navigation',
+    keywords: 'sync stack cascade fetch prune trunk lease rebase reconcile merged retarget',
+    shortcutId: 'stack.sync',
+    shortcutText: shortcutFor('stack.sync'),
+    disabled: !canRestack,
+    disabledReason: !snapshot
+      ? 'Open a repository first'
+      : !selectedBranch
+        ? 'Select a branch first'
+        : selectedBranch.remote
+          ? 'Cannot sync a remote branch'
+          : selectedBranch.name === snapshot.defaultBranch
+            ? 'Sync a stack above the default branch'
+            : operationActive
+              ? 'Operation in progress'
+              : isBusy
+                ? 'App is busy'
+                : undefined,
+    intent: selectedBranch
+      ? {
+          kind: 'workflow',
+          request: { kind: 'stack', operation: 'sync', branch: selectedBranch.name },
+        }
+      : { kind: 'view', view: 'stacks' },
+  })
+
   // Publish / Sync stack
   const canPublish = Boolean(
     snapshot &&
@@ -422,8 +453,6 @@ export function buildPaletteItems(context: BuildPaletteContext): PaletteItem[] {
     id: 'command.fetch',
     label: 'Fetch remote updates',
     detail: 'Fetch latest branches and commits without updating working tree',
-    shortcutId: 'stack.sync',
-    shortcutText: shortcutFor('stack.sync'),
     group: 'Commands',
     keywords: 'fetch sync pull remote download',
     disabled: !snapshot || isBusy || operationActive,

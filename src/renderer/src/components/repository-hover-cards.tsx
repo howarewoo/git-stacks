@@ -15,24 +15,32 @@ export function RepositoryHoverCardProvider({ children }: { children: React.Reac
 }
 
 function RepositoryHoverCard({
+  trigger,
   children,
   openDelay,
 }: {
+  trigger: ReactElement
   children: React.ReactNode
   openDelay: number
 }) {
   const active = React.useContext(ActiveCard)
   const id = React.useId()
+  const triggerRef = React.useRef<React.ElementRef<typeof HoverCardTrigger>>(null)
   if (!active) throw new Error('Repository hover cards require their provider')
   return (
     <HoverCard
       openDelay={openDelay}
       closeDelay={150}
       open={active.id === id}
-      onOpenChange={(open) =>
+      onOpenChange={(open) => {
+        // A delayed open must not outlive the interaction that scheduled it.
+        if (open && !triggerRef.current?.matches(':hover, :focus-within')) return
         active.setId((current) => (open ? id : current === id ? null : current))
-      }
+      }}
     >
+      <HoverCardTrigger ref={triggerRef} asChild>
+        {trigger}
+      </HoverCardTrigger>
       {children}
     </HoverCard>
   )
@@ -49,8 +57,7 @@ function ContextRow({ label, children }: { label: string; children: React.ReactN
 
 export function BranchHoverCard({ branch, children }: { branch: Branch; children: ReactElement }) {
   return (
-    <RepositoryHoverCard openDelay={650}>
-      <HoverCardTrigger asChild>{children}</HoverCardTrigger>
+    <RepositoryHoverCard trigger={children} openDelay={650}>
       <HoverCardContent>
         <strong className="block">{branch.name}</strong>
         <p className="mt-1 text-[length:var(--gs-semantic-type-metadata-size)] text-[var(--gs-semantic-text-secondary)]">
@@ -91,8 +98,7 @@ export function PullRequestHoverCard({
   children: ReactElement
 }) {
   return (
-    <RepositoryHoverCard openDelay={500}>
-      <HoverCardTrigger asChild>{children}</HoverCardTrigger>
+    <RepositoryHoverCard trigger={children} openDelay={500}>
       <HoverCardContent>
         <p className="mb-1 text-[length:var(--gs-semantic-type-metadata-size)] text-[var(--gs-semantic-text-secondary)]">
           Pull request #{pr.number} ·{' '}
