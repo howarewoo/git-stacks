@@ -461,14 +461,11 @@ test.describe('Keyboard routes and accessibility navigation', () => {
   test('a keyboard destination change moves focus to the new workspace heading', async ({ page }) => {
     await openGallery(page, { scenario: 'shell-connected' })
 
-    const branches = page
+    const diagnostics = page
       .getByRole('navigation', { name: 'Workspace destinations' })
-      .getByRole('button', { name: /^Branches/ })
-    await branches.focus()
-    await page.keyboard.press('Meta+7')
-    if (await page.getByRole('heading', { level: 1, name: 'Branches' }).isVisible()) {
-      await page.keyboard.press('Control+7')
-    }
+      .getByRole('button', { name: /^Diagnostics/ })
+    await diagnostics.focus()
+    await page.keyboard.press('Enter')
 
     const heading = page.locator('#workspace-view-heading')
     await expect(heading).toBeFocused()

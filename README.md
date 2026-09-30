@@ -25,6 +25,8 @@ typechecks these test consumers as well as the application.
 Stale-preview publishing tests assert rejection and unchanged local and remote
 refs. Diagnostic wording is not part of that behavioral contract.
 
+Destination-focus checks activate the named navigation control with Enter and
+verify heading focus and the live announcement, independently of shortcut bindings.
 ## Live local and remote freshness
 
 The open repository updates itself. Local Git work done in a terminal — a
