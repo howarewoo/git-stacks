@@ -555,8 +555,7 @@ test.describe('Keyboard routes and accessibility navigation', () => {
 
     expect(
       await names.evaluateAll(
-        (elements) =>
-          elements.filter((element) => element.getAttribute('tabindex') === '0').length,
+        (elements) => elements.filter((element) => element.getAttribute('tabindex') === '0').length,
       ),
     ).toBe(1)
   })
