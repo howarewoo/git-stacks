@@ -603,16 +603,16 @@ Sharing the file makes it a resource more than one process writes, and a
 read/modify/write over a shared file is a claim on something no single process
 owns: two windows of one app, two worktrees, or two machines on one repository
 can read the same bytes and each publish its own change over them. The last
-rename wins, and the loser's record is not merged away — it is gone, silently,
-and it was unsent words. So every update of both journals reads and writes under
-a lock file beside the journal, created with `link(2)` so exactly one process can
-take the name. It is released only by removing the exact inode that process
-created, so a lock another process has since taken is never taken from it, and a
-lock whose named holder is no longer running is broken rather than waited on for
-good. A wait that runs out **refuses** the update and says so: nothing written is
-the honest outcome, and the caller already surfaces it. An in-process queue is
-not a substitute — it would serialize two callers in one window and leave the
-second window exactly as unprotected as before.
+write wins, and the loser's record is not merged away — it is gone, silently,
+and it was unsent words.
+
+So a journal update is taken whole, by one writer at a time, across every
+process that shares the repository. Where a window cannot take its turn, it
+**refuses** the write and says so, and it writes nothing: a journal that cannot
+be updated in order has exactly one honest outcome, and the record already on
+disk stays readable and unchanged. An in-process queue is not a substitute — it
+would serialize two callers in one window and leave the second window exactly as
+unprotected, which is the case the journal exists for.
 
 Records are not evicted to keep either file small. A draft record is one pull
 request's unsent words and an unresolved write is the sole durable proof that a

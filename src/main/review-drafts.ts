@@ -48,22 +48,6 @@ interface JournalLockIdentity {
   ino: number
 }
 
-/**
- * The pid that created a lock file, or null when it cannot be read as one. The
- * owner is written before the lock name is created, so a lock that exists is a
- * lock whose holder can be asked whether it is still running.
- */
-async function lockOwnerPid(lockPath: string): Promise<number | null> {
-  try {
-    const parsed: unknown = JSON.parse(await fs.readFile(lockPath, 'utf8'))
-    if (!isRecord(parsed)) return null
-    const pid = parsed.pid
-    return typeof pid === 'number' && Number.isInteger(pid) && pid > 0 ? pid : null
-  } catch {
-    return null
-  }
-}
-
 function cancelIfAborted(signal?: AbortSignal): void {
   if (signal?.aborted) throw new CommandCancelled()
 }
@@ -86,41 +70,63 @@ function waitFor(ms: number): Promise<void> {
 }
 
 /**
- * Takes a lock whose holder is gone, so a killed process cannot wedge the
- * journal for good. The inode is confirmed twice before the rename and once
- * after it, because the only safe thing to do with a lock that turns out to
- * belong to somebody else is to put it back.
+ * Whether the process that wrote a lock is still running, and null when the
+ * lock cannot be read as one this build wrote. A lock with no readable owner
+ * has no owner to ask, so it is treated as a holder that might be alive.
  */
-async function breakStaleJournalLock(lockPath: string): Promise<boolean> {
-  const first = await fs.lstat(lockPath).catch(() => null)
-  if (first === null) return false
-  const owner = await lockOwnerPid(lockPath)
-  if (owner === null || processIsRunning(owner)) return false
-  const second = await fs.lstat(lockPath).catch(() => null)
-  if (second === null || second.dev !== first.dev || second.ino !== first.ino) return false
-
-  const claimPath = `${lockPath}.${randomUUID()}.stale`
+function lockHolderIsRunning(raw: string): boolean | null {
   try {
-    await fs.rename(lockPath, claimPath)
+    const parsed: unknown = JSON.parse(raw)
+    if (!isRecord(parsed)) return null
+    const pid = parsed.pid
+    if (typeof pid !== 'number' || !Number.isInteger(pid) || pid <= 0) return null
+    return processIsRunning(pid)
   } catch {
-    return false
+    return null
   }
-  const claimed = await fs.lstat(claimPath).catch(() => null)
-  if (claimed === null || claimed.dev !== second.dev || claimed.ino !== second.ino) {
-    // The lock was replaced between the second look and the rename, so the
-    // claimed file is a live one. Restoring it by link cannot displace whoever
-    // holds the path now, which a rename would.
-    const restored = await fs.link(claimPath, lockPath).then(
-      () => true,
-      () => false,
-    )
-    if (restored) await fs.rm(claimPath, { force: true }).catch(() => {})
-    return false
-  }
-  await fs.rm(claimPath, { force: true }).catch(() => {})
-  return true
 }
 
+/**
+ * The refusal a writer gets when it cannot take the lock. It names the file and
+ * the condition under which removing it is safe, because the one thing no
+ * process on disk can know is whether a person still has a window open.
+ */
+function journalLockRefusal(lockPath: string, running: boolean | null): Error {
+  const holder =
+    running === null
+      ? 'a lock this build did not write, whose owner cannot be identified'
+      : running
+        ? 'a window of this app that is still running'
+        : 'a window of this app that is no longer running'
+  return new Error(
+    `This repository's review journal is locked at ${lockPath} by ${holder}. Nothing was written. ` +
+      'A lock is only ever released by the process that took it, so it is never taken from its holder: ' +
+      'freeing the name would let another process enter the journal while its holder still believes it ' +
+      'owns it, which is the lost record this lock exists to prevent. Close every Git Stacks window for ' +
+      'this repository, confirm none is open, and then remove that one file — the next write takes the ' +
+      'lock itself.',
+  )
+}
+
+/**
+ * Takes the journal lock, or refuses.
+ *
+ * The lock is created with `link(2)`, which is atomic: exactly one process can
+ * create the name, and the winner owns it until it removes it. That is the whole
+ * protocol, and it is deliberately the whole protocol. A lock is never taken
+ * from its holder, because no pathname protocol can take one safely: removing
+ * or renaming the name frees it, a contender can take it and be inside the
+ * journal in the meantime, and nothing that happens afterwards can un-enter it.
+ * An open descriptor pins the inode a lock was made from, which is what tells
+ * two locks apart — it does not hold the name, and it is not ownership.
+ *
+ * So a lock whose holder is gone is not reclaimed. It blocks, and says exactly
+ * which file to remove and when it is safe to remove it, because a person
+ * closing the last window for a repository knows something no process on disk
+ * can know. A lock that cannot be read as one is refused the same way: it was
+ * not written by this protocol, and guessing at its owner is how a live lock
+ * gets deleted.
+ */
 async function acquireJournalLock(
   file: string,
   signal?: AbortSignal,
@@ -153,17 +159,35 @@ async function acquireJournalLock(
       await fs.rm(temporary, { force: true }).catch(() => {})
     }
 
-    if (await breakStaleJournalLock(lockPath)) continue
-    if (Date.now() >= deadline) {
-      throw new Error(
-        "Another Git Stacks window is writing this repository's review journal. Nothing was changed — close that window, or try again in a moment.",
-      )
+    // Someone held it a moment ago. The lock is only read, to say who, and is
+    // left exactly as it was found: it is never taken from its holder. A holder
+    // that released between the failed link and this read has simply finished,
+    // so the name is free now and the next attempt takes it.
+    const held = await fs.readFile(lockPath, 'utf8').catch(() => null)
+    if (held === null) continue
+    const running = lockHolderIsRunning(held)
+    // Only a holder known to be alive gets the wait: it is a window mid-write,
+    // and it will let go. A holder that is gone, or one this build cannot read,
+    // is refused at once — waiting cannot help either way, and only a person can
+    // clear it.
+    if (running === true && Date.now() < deadline) {
+      cancelIfAborted(signal)
+      await waitFor(JOURNAL_LOCK_POLL_MS)
+      continue
     }
-    cancelIfAborted(signal)
-    await waitFor(JOURNAL_LOCK_POLL_MS)
+    throw journalLockRefusal(lockPath, running)
   }
 }
 
+/**
+ * Releases a lock, and only the lock this process took.
+ *
+ * The name is compared against the inode recorded when it was taken, so a lock
+ * that is somehow no longer the one acquired is left alone rather than removed
+ * on its behalf. Nothing else can take the name while this process holds it:
+ * every other writer only ever creates the name, and creates fail while it is
+ * there.
+ */
 async function releaseJournalLock(file: string, identity: JournalLockIdentity): Promise<void> {
   const lockPath = `${file}.lock`
   try {

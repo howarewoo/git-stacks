@@ -4190,10 +4190,16 @@ await writeReviewDrafts(repo, {
 process.stdout.write('written\\n')
 `
 
-/** Waits for the lock a child process takes to exist, so the wait is not a guess. */
+/**
+ * Waits for the lock a child process takes to exist and carry its owner, so the
+ * wait is not a guess. The name appears before the holder has written itself
+ * into it, and a lock read in that instant names no owner at all.
+ */
 async function waitForLock(journal: string): Promise<void> {
   for (let attempt = 0; attempt < 400; attempt += 1) {
-    if (existsSync(`${journal}.lock`)) return
+    if (existsSync(`${journal}.lock`) && (await readFile(`${journal}.lock`, 'utf8')).length > 0) {
+      return
+    }
     await new Promise((resolve) => setTimeout(resolve, 10))
   }
   throw new Error('the lock holder never took the journal lock')
@@ -4327,7 +4333,7 @@ test('drafts written from another worktree and another process are both kept', a
   )
 })
 
-test('a journal lock left by a killed process is broken, not waited on forever', async (t) => {
+test('a lock left behind by a killed window is refused, not taken from whoever holds it', async (t) => {
   const workspace = await reviewWorkspace()
   t.after(workspace.dispose)
   const journal = join(workspace.repo, '.git', 'git-stacks-review-drafts.json')
@@ -4340,32 +4346,78 @@ test('a journal lock left by a killed process is broken, not waited on forever',
     nextDraftId: 2,
     updatedAt: '2026-09-23T10:00:00Z',
   })
-  // A pid that cannot be running: the lock names a process nobody can signal, so
-  // this is the state a killed writer leaves behind.
-  await writeFile(`${journal}.lock`, `${JSON.stringify({ pid: 0x7fffffff })}\n`)
+  // A pid that cannot be running: the lock names a window that was killed, so
+  // the lock outlived it.
+  const abandoned = `${JSON.stringify({ pid: 0x7fffffff, at: '2026-09-23T10:00:00Z' })}\n`
+  await writeFile(`${journal}.lock`, abandoned)
 
-  await writeReviewDrafts(workspace.repo, {
-    number: 8,
-    repo: JOURNAL_OWNER.repo,
-    viewer: JOURNAL_OWNER.viewer,
-    comparison: comparison(),
-    drafts: [draft({ id: 'd1', ref: draftRef(4), body: 'after' })],
-    nextDraftId: 2,
-    updatedAt: '2026-09-23T10:05:00Z',
-  })
+  await assert.rejects(
+    () =>
+      writeReviewDrafts(workspace.repo, {
+        number: 8,
+        repo: JOURNAL_OWNER.repo,
+        viewer: JOURNAL_OWNER.viewer,
+        comparison: comparison(),
+        drafts: [draft({ id: 'd1', ref: draftRef(4), body: 'after' })],
+        nextDraftId: 2,
+        updatedAt: '2026-09-23T10:05:00Z',
+      }),
+    (error: Error) => {
+      // The refusal has to be actionable: the reader is a person looking at an
+      // error, and the one thing no process on disk can know is whether they
+      // still have a window open.
+      assert.ok(error.message.includes(journal), 'the refusal names the lock file')
+      assert.match(error.message, /no longer running/)
+      assert.match(error.message, /Close every Git Stacks window/)
+      assert.match(error.message, /Nothing was written/)
+      return true
+    },
+  )
 
+  // Refusing is the whole behaviour: the lock is left exactly as it was found,
+  // because a lock taken from a holder that might be alive is how a live window
+  // ends up writing beside another one. And nothing was written on the way out.
+  assert.equal(
+    await readFile(`${journal}.lock`, 'utf8'),
+    abandoned,
+    'the abandoned lock is left in place rather than taken over',
+  )
+  // Reading needs no lock, so what was already journalled is still readable
+  // while the lock stands — the refusal is about writing, not about access.
   assert.equal(
     (await readReviewDrafts(workspace.repo, JOURNAL_OWNER.repo, JOURNAL_OWNER.viewer, 7))?.drafts[0]
       ?.body,
     'before',
-    'breaking the stale lock does not discard what was already journalled',
+    'a refused write leaves the record that was already journalled alone',
   )
-  assert.equal(
-    (await readReviewDrafts(workspace.repo, JOURNAL_OWNER.repo, JOURNAL_OWNER.viewer, 8))?.drafts[0]
-      ?.body,
-    'after',
+  assert.ok(
+    (await readFile(journal, 'utf8')).includes('before'),
+    'the record that was already journalled is still on disk, unchanged',
   )
-  await assert.rejects(() => readFile(`${journal}.lock`, 'utf8'), { code: 'ENOENT' })
+})
+
+test('a lock this build cannot read is refused rather than guessed at', async (t) => {
+  const workspace = await reviewWorkspace()
+  t.after(workspace.dispose)
+  const journal = join(workspace.repo, '.git', 'git-stacks-review-drafts.json')
+  // Not a lock this build wrote, so its owner is unknown — and an unknown owner
+  // is a holder that might be alive.
+  await writeFile(`${journal}.lock`, 'held by something else\n')
+
+  await assert.rejects(
+    () =>
+      writeReviewDrafts(workspace.repo, {
+        number: 7,
+        repo: JOURNAL_OWNER.repo,
+        viewer: JOURNAL_OWNER.viewer,
+        comparison: comparison(),
+        drafts: [draft({ id: 'd1', ref: draftRef(3), body: 'never sent' })],
+        nextDraftId: 2,
+        updatedAt: '2026-09-23T10:00:00Z',
+      }),
+    /whose owner cannot be identified/,
+  )
+  assert.equal(await readFile(`${journal}.lock`, 'utf8'), 'held by something else\n')
 })
 
 /** An unresolved attempt exactly as a lost review response would record it. */

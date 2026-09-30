@@ -658,10 +658,26 @@ and are re-read when the workspace opens, so navigating away to another pull
 request and back does not lose them. That file is shared by every window and
 every worktree of the repository, so each update of it is taken under a lock
 another process can see: two windows saving different pull requests at once
-cannot read the same journal and publish over each other, and a window killed
-mid-write leaves a lock that is recognised as stale and broken rather than one
-that blocks the journal for good. If the lock cannot be taken, the save is
-refused and reported instead of being written out of order. Records are never
+cannot read the same journal and publish over each other. The lock is a file
+beside the journal created with an atomic link, so exactly one process takes the
+name and the winner owns it until it removes it.
+
+A lock is only ever released by the window that took it, never taken from it.
+That is not caution, it is the only correct choice: unlinking or renaming the
+name frees it, a second process takes it and is inside the journal in the
+meantime, and nothing done afterwards can un-enter it. An open file descriptor
+pins the inode a lock was made from, which is how two locks are told apart; it
+does not hold the name and it is not ownership. So there is no automatic
+reclamation of a lock whose holder has gone.
+
+It fails closed instead. A lock held by a process that is still running is
+waited for, because that is a window mid-write and it will let go. A lock whose
+holder is gone, or one this build cannot read as its own, refuses the write at
+once and names the file and the condition under which removing it is safe:
+close every Git Stacks window for the repository, confirm none is open, then
+remove that one file, and the next write takes the lock itself. That step
+belongs to a person because whether somebody still has a window open is not a
+fact on disk. Records are never
 dropped to keep the file small — unsent words and unresolved-write guards both
 leave it only when they have been sent, cleared, or settled.
 
