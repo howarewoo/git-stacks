@@ -1,0 +1,6 @@
+interface:
+  display_name: "Flatten PR Graph"
+  short_description: "Stack selected PRs; resolve conflicts, ignore checks"
+  default_prompt: "Use $flatten-pr-graph to flatten the supplied PRs into one stack, resolving only merge conflicts and ignoring checks."
+policy:
+  allow_implicit_invocation: false
