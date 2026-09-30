@@ -368,7 +368,7 @@ it and the original tips stay recoverable.
   branch it created and the branch it removed. Continue resumes from the journal without
   repeating completed layers; Abort restores every tip, the created branch, and the
   removed branch.
-  removed branch. A removed branch stays in place until every replay and remote step has
+  A removed branch stays in place until every replay and remote step has
   finished, so an Abort that arrives earlier finds it already restored at the tip the
   preview captured.
 - The remote half of a run - the pull request retargets and closes, and the native stack
@@ -423,4 +423,3 @@ request, so a change landing between that read and the write can still be lost;
 this is a property of the API, not something the app can close. A refresh that
 follows a link change never overwrites description text the user typed while the
 refresh was in flight.
->>>>>>> 4d65928 (fix(stacks): prove every remote surgery step and publish inserted bases)
