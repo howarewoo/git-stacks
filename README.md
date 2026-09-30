@@ -1205,8 +1205,6 @@ If Git encounters conflicts during the rebase cascade:
 2. Conflicted files appear in the Changes view and conflict resolver.
 3. Once conflicts are resolved, use **Continue** to adopt the rebased commit and resume the cascade for the remaining branches.
 4. Alternatively, use **Abort** to restore all branches and their metadata to their exact pre-sync backup refs and return to the original clean checkout.
-   <<<<<<< HEAD
-   \=======
 
 ## Linked issues
 
@@ -1250,8 +1248,6 @@ request, so a change landing between that read and the write can still be lost;
 this is a property of the API, not something the app can close. A refresh that
 follows a link change never overwrites description text the user typed while the
 refresh was in flight.
-
-> > > > > > > 67a0821 (chore: format the restacked tree with the repository's own prettier)
 
 ## Stack surgery
 
