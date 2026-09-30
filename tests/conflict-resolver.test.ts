@@ -947,6 +947,24 @@ test('a supported program is reported by the Git tool id that actually runs it',
       /mergetool\.code\.cmd/u,
     )
 
+    // A path on its own is not a custom tool. Git stops at
+    // "mergetool.code.cmd not set", so offering it as available would report a
+    // tool that fails on the first conflict.
+    const codePath = join(root, 'code-editor')
+    await writeFile(codePath, `#!/bin/sh\nprintf 'from the path\\n' > "$1"\n`)
+    await chmod(codePath, 0o755)
+    git('config', 'mergetool.code.path', codePath)
+    git('config', 'mergetool.code.trustExitCode', 'true')
+    const pathOnly = await getConflictView(repo, 'shared.txt', 'code')
+    assert.equal(pathOnly.mergeTool.available, false)
+    assert.match(pathOnly.mergeTool.reason, /mergetool\.code\.cmd/u)
+    await assert.rejects(
+      runConflictMergeTool(repo, 'shared.txt', pathOnly.fingerprint, 'code'),
+      /mergetool\.code\.cmd/u,
+    )
+    // Git Stacks refused before running anything, so the conflicted bytes stand.
+    assert.match(await readFile(join(repo, 'shared.txt'), 'utf8'), /<<<<<<</u)
+    git('config', '--unset', 'mergetool.code.path')
     // The same name becomes usable the moment that configuration exists.
     git('config', 'mergetool.code.trustExitCode', 'true')
     git('config', 'mergetool.code.cmd', 'printf "from code\\n" > "$MERGED"')

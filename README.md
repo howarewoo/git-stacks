@@ -176,6 +176,46 @@ and validates; the renderer never chooses or writes that path.
 | Shortcuts                            | Chord editing with conflict detection.                                                                                                |
 
 A value is validated before use. Editors and merge tools are restricted to a supported program allowlist (`code`, `cursor`, `vim`, `nvim`, `kdiff3`, etc.); arbitrary shell interpreters or commands with arguments are refused. Editor launching enforces repository containment following symlinks. An unreadable field falls back to its default and is reported on the Settings surface; the rest of the file still applies. A file that is not valid JSON is replaced by defaults on the next save. All settings reads and modifications are serialized through an atomic transactional queue.
+
+**Merge tool names are mapped to the tool Git runs.** A program name is not
+always a `git mergetool --tool=` id: `bcompare` is launched by Git's `bc3`
+backend. Each supported program therefore resolves to the backend Git ships, and
+the conflict view names the program you chose while the action runs that id. A
+program Git ships no backend for — an editor such as `code` — becomes usable
+only once your own Git configuration defines a command for it:
+
+```sh
+git config mergetool.code.trustExitCode true
+git config mergetool.code.cmd 'code --wait "$MERGED"'
+```
+
+`mergetool.<name>.cmd` is the whole requirement. `mergetool.<name>.path` alone
+does not define a custom tool — it only replaces the executable of a tool Git
+already knows how to invoke, and `git mergetool` stops at
+`mergetool.<name>.cmd not set`. Until the command exists the conflict view
+reports the tool as unavailable and names that reason, rather than offering a
+tool that fails on the first conflict. A tool named by `merge.tool` or
+`GIT_MERGE_TOOL` is already a Git tool id and is passed through unchanged.
+
+**The one-time shortcut import.** The build before this one kept shortcuts in
+web storage. Those bindings are offered for import once, at startup, as an
+intent rather than an assignment: main commits the import only if the settings
+file still holds the untouched state the offer was decided from — the migration
+marker unset and the stored chords still the defaults. A reset or a shortcut
+edit that reaches the file first therefore wins, and the pending import is
+declined rather than restoring old bindings over a newer choice. Either outcome
+drops the stored copy: a committed import cannot run twice, and a declined one
+is a decision, not a retry. The session's write count is what tells a reset
+apart from an untouched file, because a reset restores exactly the defaults the
+import is qualified against.
+
+**Handled failures are recorded, redacted.** Every main-process request is
+registered through one place, so a failure it handles leaves a bounded in-memory
+record of the scope that failed and the message the window was about to show —
+first line only, capped, and passed through the bundle's secret redaction before
+it is ever written. Nothing else is kept: no repository, ref, file, command, or
+token. A request from outside the app is refused rather than failed, and a
+cancelled operation is the answer the user asked for, so neither is recorded.
 This build collects nothing and sends nothing: there is no telemetry endpoint
 and no crash upload, and no setting enables one. The only artifact is the
 support bundle you create yourself.
@@ -210,6 +250,18 @@ use fixed, non-destructive read commands with sanitized outputs and error codes.
 The export binds to the preview snapshot and verifies live settings immediately
 before writing: if path consent is revoked while the save dialog is open, local paths
 remain withheld in the saved bundle.
+
+The saved file is owner-only (`0600`) whether it is created or replaced. A
+mode given to a write applies only when the write creates the file, so
+exporting over an existing world-readable `git-stacks-support.txt` would
+otherwise leave it readable by everyone while its contents were replaced. The
+file is truncated first and its mode set before any content is written, so new
+content is never readable under the permissions the file arrived with.
+
+Recent failures is included only when something was recorded. It carries the
+main-process failure summaries described under **Handled failures** above, and
+they pass through the same secret and path redaction as every other field.
+
 ## Onboarding
 
 With no repository open, the window offers three ways in, and all of them end
@@ -562,15 +614,15 @@ History recovery coverage holds a commit diff while a repository refresh changes
 HEAD and fails the replacement history read; the branch picker and reload control
 must remain usable, and retrying must restore the commit list.
 
-| Area      | Gallery scenarios / exercised controls                                                                                                                                                                                                                                                                                                                               |
-| --------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Shell     | `shell-no-repository`, `shell-loading`, `shell-connected`, `shell-long-content`, `shell-offline`; the real Hide details pane control                                                                                                                                                                                                                                 |
-| Ancestry  | `ancestry-linear`, `ancestry-branching`, `ancestry-deep`, `ancestry-remote-consolidated`, `ancestry-missing-parent`, `ancestry-cycle`, `ancestry-requires-restack`                                                                                                                                                                                                   |
-| Changes   | `files-clean`, `files-staged`, `files-unstaged`, `files-renamed`, `files-untracked`, `files-conflicts`, `files-truncated`, `files-long-content`                                                                                                                                                                                                                      |
-| History   | `history-loading` (`release('history')` to finish), `history-error`                                                                                                                                                                                                                                                                                                  |
+| Area      | Gallery scenarios / exercised controls                                                                                                                                                                                                                                                                                                                                                                 |
+| --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Shell     | `shell-no-repository`, `shell-loading`, `shell-connected`, `shell-long-content`, `shell-offline`; the real Hide details pane control                                                                                                                                                                                                                                                                   |
+| Ancestry  | `ancestry-linear`, `ancestry-branching`, `ancestry-deep`, `ancestry-remote-consolidated`, `ancestry-missing-parent`, `ancestry-cycle`, `ancestry-requires-restack`                                                                                                                                                                                                                                     |
+| Changes   | `files-clean`, `files-staged`, `files-unstaged`, `files-renamed`, `files-untracked`, `files-conflicts`, `files-truncated`, `files-long-content`                                                                                                                                                                                                                                                        |
+| History   | `history-loading` (`release('history')` to finish), `history-error`                                                                                                                                                                                                                                                                                                                                    |
 | PRs       | `pull-requests-lifecycle`, `pull-requests-checks`, `pull-requests-checks-detail` (required failure, optional failure, running workflow, required context not yet reported), `pull-requests-checks-stale` (visibly stale report with rerun unavailable), `pull-requests-empty`, `pull-requests-unavailable`, `pull-requests-issue-links` (a closing-keyword link and a local contextual link on one PR) |
-| Stashes   | `stash-stable-oid`, `stash-empty`, `stash-index-shift`                                                                                                                                                                                                                                                                                                               |
-| Workflows | `workflow-preview-ready`, `workflow-preview-loading` (`release('stackPreview')`), `workflow-preview-blocked`, `workflow-preview-stale`, `workflow-action-error`, `workflow-partial-restack`, `workflow-conflict-recovery`, `workflow-operation-recovery`, `workflow-external-operation`; form validation, typed confirmation, and `hold('runAction')` for busy state |
+| Stashes   | `stash-stable-oid`, `stash-empty`, `stash-index-shift`                                                                                                                                                                                                                                                                                                                                                 |
+| Workflows | `workflow-preview-ready`, `workflow-preview-loading` (`release('stackPreview')`), `workflow-preview-blocked`, `workflow-preview-stale`, `workflow-action-error`, `workflow-partial-restack`, `workflow-conflict-recovery`, `workflow-operation-recovery`, `workflow-external-operation`; form validation, typed confirmation, and `hold('runAction')` for busy state                                   |
 
 ```sh
 npm test
@@ -1040,7 +1092,7 @@ once the search is exhaustive, the guard stands: the record says only that the a
 never heard back, which is also true of a request that never arrived, so absence is
 never taken as licence to post again automatically.
 
-The guard covers an unresolved *comment*, not an attempt. Changing the decision
+The guard covers an unresolved _comment_, not an attempt. Changing the decision
 or adding one more pending draft changes the attempt but not the comments, so
 every attempt touching any line this payload writes is reconciled first — and what
 is journalled is what is sent, so a recovery cannot re-post a comment it just
@@ -1099,8 +1151,8 @@ GitHub pull requests do not retain complete version history for arbitrary force-
 - **Selection isolation**: History reads, clears, and comparisons cannot replace another selection's history. A pending comparison clears the previous file list and counts.
 
 Run snapshot unit and integration tests with:
+
 ```sh
 npx tsx --test tests/review-snapshots.test.ts
 npx playwright test tests/renderer/review-snapshots.spec.ts
 ```
-

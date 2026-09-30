@@ -3834,11 +3834,11 @@ interface ResolvedMergeTool {
  * `git mergetool --tool=` takes a Git tool id, and a program name is not always
  * one: Git's `bc3` backend is what launches `bcompare`, and Git ships no backend
  * at all for an editor. An editor is only usable as a merge tool once the
- * machine's own configuration defines a `mergetool.<name>` entry for it, so that
- * configuration — not the mere presence of the executable — is what makes such
- * a tool available here. A name with no applicable backend is reported as
- * unavailable with its reason, so the surface never offers a tool that fails
- * the moment a conflict is resolved.
+ * machine's own configuration defines `mergetool.<name>.cmd` for it, so that
+ * command — not the mere presence of the executable — is what makes such a tool
+ * available here. A name with no applicable backend is reported as unavailable
+ * with its reason, so the surface never offers a tool that fails the moment a
+ * conflict is resolved.
  *
  * A tool Git itself named (`merge.tool`, `GIT_MERGE_TOOL`) is already an id and
  * is passed through as one.
@@ -3878,9 +3878,12 @@ async function resolveMergeTool(
       reason: `${configured} is not a supported merge tool.`,
     }
   }
+  // A custom tool is defined by `mergetool.<name>.cmd`. `mergetool.<name>.path`
+  // only replaces the executable of a tool Git already knows how to invoke, so
+  // a name with a path and no command is not a tool Git can run: `mergetool`
+  // stops at "mergetool.<name>.cmd not set". The command is what is checked.
   const custom = await getConfigValue(root, `mergetool.${configured}.cmd`)
-  const customPath = custom ? custom : await getConfigValue(root, `mergetool.${configured}.path`)
-  if (!custom && !customPath) {
+  if (!custom) {
     return {
       id: null,
       label: configured,
