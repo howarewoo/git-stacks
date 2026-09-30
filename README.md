@@ -47,6 +47,11 @@ supports it, and failures back off exponentially. A secondary rate limit parks
 the nonessential tier, a low remaining budget parks it too, and rejected
 credentials stop polling until the person refreshes.
 
+The same order also decides what a local-only refresh reuses. Reads claim their
+place when they start, so an older read that answers after a newer one cannot
+become the repository's confirmed payload: the next filesystem refresh shows the
+newer pull requests and issues, not the answer that merely arrived last.
+
 The inbox is read separately from the pull requests, so a successful issue
 refresh never reports the pull requests on screen as freshly checked. When the
 issue read fails, the last confirmed issues stay listed and the reason they are

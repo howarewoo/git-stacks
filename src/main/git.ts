@@ -4552,12 +4552,28 @@ interface ConfirmedGitHubPayload {
   data: GitHubResult
   issues: { issues: RepositoryIssue[]; message: string }
   fetchedAt: string
+  /**
+   * Where this read sat among the reads that asked GitHub. Overlapping reads
+   * answer out of order, so the payload a newer read confirmed must survive an
+   * older one that only finishes later.
+   */
+  read: number
 }
+
+// The order reads reach GitHub in, as a single counter: no per-repository
+// bookkeeping survives a payload, and a number is only ever compared against
+// the sequence the held payload was confirmed with.
+let confirmedReadOrder = 0
 
 const MAX_CONFIRMED_PAYLOADS = 8
 const confirmedPayloads = new Map<string, ConfirmedGitHubPayload>()
 
 function rememberConfirmedPayload(root: string, payload: ConfirmedGitHubPayload): void {
+  // A read that started earlier may answer after a newer one already confirmed
+  // this repository: it must not republish its older answer through the next
+  // read that does not ask GitHub.
+  const held = confirmedPayloads.get(root)
+  if (held && held.read > payload.read) return
   confirmedPayloads.delete(root)
   confirmedPayloads.set(root, payload)
   while (confirmedPayloads.size > MAX_CONFIRMED_PAYLOADS) {
@@ -4589,6 +4605,9 @@ export async function getSnapshot(
   branchBudget = SNAPSHOT_BRANCH_BUDGET,
   remote: SnapshotGitHubRemote = 'live',
 ): Promise<RepositorySnapshot> {
+  // Claimed on entry, not at the GitHub read: local Git work differs per read,
+  // so arrival at the request is not the order the reads began in.
+  const read = (confirmedReadOrder += 1)
   const root = await resolveRepository(repoPath, signal)
   await recoverStashDropForRepository(root)
   await recoverFileActionJournals(root)
@@ -4729,6 +4748,7 @@ export async function getSnapshot(
       data: live[0],
       issues: issuesAnswered ? live[1] : (confirmed?.issues ?? live[1]),
       fetchedAt: confirmedAt,
+      read,
     })
   }
   // A live read is authoritative by definition: a caller that asked for one

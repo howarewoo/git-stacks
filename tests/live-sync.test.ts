@@ -1240,6 +1240,191 @@ test('a failed issue read keeps the confirmed inbox and reports why it is unconf
   }
 })
 
+/**
+ * The overlap a person's own refresh creates, driven through the real snapshot
+ * reader: the automatic read the interval started is still answering when the
+ * manual one arrives, and the automatic one lands afterwards still carrying its
+ * older answer. Each read is identified by the signal it was handed, so the
+ * transport holds exactly the older read open instead of guessing from
+ * call order.
+ */
+test('an older overlapping read never replaces the payload a newer read confirmed', async () => {
+  const { repo, cleanup } = await disposableRepository()
+  git(repo, 'remote', 'add', 'origin', 'git@github.com:acme/widgets.git')
+  type Session = 'older' | 'newer'
+  const sessions = new WeakMap<AbortSignal, Session>()
+  const answers: Record<Session, { pullRequest: number; issue: number }> = {
+    older: { pullRequest: 100, issue: 10 },
+    newer: { pullRequest: 101, issue: 11 },
+  }
+  const olderReachedGitHub = Promise.withResolvers<void>()
+  const releaseOlder = Promise.withResolvers<void>()
+  class OverlappingTransport implements GitHubTransport {
+    readonly kind = 'direct' as const
+    async rest<T = unknown>(): Promise<GitHubRestResponse<T>> {
+      return {
+        status: 404,
+        data: {} as T,
+        rateLimit: {
+          limit: 5000,
+          remaining: 4999,
+          reset: null,
+          resource: 'core',
+          retryAfterSeconds: null,
+        },
+      }
+    }
+    async paginate<T = unknown>(): Promise<T[]> {
+      return []
+    }
+    async graphql<T = Record<string, unknown>>(
+      query: string,
+      _variables: Record<string, unknown> = {},
+      options: GitHubGraphqlOptions = {},
+    ): Promise<T> {
+      const session: Session = (options.signal && sessions.get(options.signal)) ?? 'newer'
+      const answer = answers[session]
+      const pullRequests = query.includes('pullRequests(')
+      if (session === 'older') {
+        if (pullRequests) olderReachedGitHub.resolve()
+        await releaseOlder.promise
+      }
+      return (
+        pullRequests
+          ? {
+              repository: {
+                pullRequests: {
+                  nodes: [
+                    {
+                      number: answer.pullRequest,
+                      title: `Pull request ${answer.pullRequest}`,
+                      url: `https://github.com/acme/widgets/pull/${answer.pullRequest}`,
+                      headRefName: `feature-${answer.pullRequest}`,
+                      headRefOid: `oid-${answer.pullRequest}`,
+                      baseRefName: 'main',
+                      isDraft: false,
+                      state: 'OPEN',
+                      headRepository: { nameWithOwner: 'acme/widgets' },
+                    },
+                  ],
+                  pageInfo: { hasNextPage: false, endCursor: null },
+                },
+              },
+            }
+          : {
+              repository: {
+                issues: {
+                  nodes: [
+                    {
+                      number: answer.issue,
+                      title: `Issue ${answer.issue}`,
+                      url: `https://github.com/acme/widgets/issues/${answer.issue}`,
+                    },
+                  ],
+                  pageInfo: { hasNextPage: false, endCursor: null },
+                },
+              },
+            }
+      ) as T
+    }
+  }
+  setGitHubTransport(new OverlappingTransport())
+  resetGitHubRateLimit()
+  const clock = new ManualClock()
+  const scheduler = new RepositoryScheduler()
+  const registry = new RequestRegistry()
+  const emitted: RepositorySnapshot[] = []
+  const reads = new Map<string, Promise<RepositorySnapshot>>()
+  const coordinator = new RepositorySyncCoordinator(
+    {
+      readSnapshot: (root, signal, request) =>
+        performBackgroundRead(
+          registry,
+          root,
+          signal,
+          (readSignal) => {
+            // The refresh the person asked for is the newer read; the interval's
+            // own automatic read is the older one already in flight.
+            sessions.set(readSignal, request.requestId === 'refresh' ? 'newer' : 'older')
+            const read = getSnapshot(root, readSignal, undefined, request.github.remote)
+            reads.set(request.requestId, read)
+            return read
+          },
+          request.requestId,
+        ),
+      readIssues: async () => [],
+      scheduler,
+      clock,
+    },
+    { ...DEFAULT_INTERVALS, localSettleMs: 10 },
+  )
+  /** The read the coordinator started under this request id, once it exists. */
+  const readStarted = (requestId: string): Promise<RepositorySnapshot> => {
+    const read = reads.get(requestId)
+    assert.ok(read, `the ${requestId} read started`)
+    return read
+  }
+  coordinator.onEvent((event) => {
+    if (event.kind === 'snapshot' && event.snapshot) emitted.push(event.snapshot)
+  })
+  try {
+    const initial = await getSnapshot(repo, undefined, undefined, 'reuse')
+    coordinator.attach(repo, initial)
+    await clock.advance(DEFAULT_INTERVALS.visibleMs + 1)
+    await olderReachedGitHub.promise
+    const olderRead = readStarted('sync-refresh')
+
+    // The person's own refresh answers with the newer data while the older
+    // automatic read is still waiting for its answer.
+    const manual = await coordinator.refreshNow()
+    assert.deepEqual(
+      manual.pullRequests.map((request) => request.number),
+      [101],
+    )
+    assert.deepEqual(
+      manual.issues?.map((issue) => issue.number),
+      [11],
+    )
+    assert.equal(coordinator.freshness().state, 'fresh')
+
+    // The older read answers only now, with the data that was already stale
+    // when the newer one confirmed.
+    releaseOlder.resolve()
+    await olderRead
+    await drainTurns()
+    assert.equal(
+      coordinator.freshness().state,
+      'fresh',
+      'the superseded read publishes nothing, and nothing is left half-published',
+    )
+
+    // A local-only refresh reuses what was confirmed, so it must show the newer
+    // pull requests and inbox rather than the older read that landed last.
+    coordinator.notifyLocalChange()
+    emitted.length = 0
+    await clock.advance(DEFAULT_INTERVALS.localSettleMs + 1)
+    await readStarted('sync-local')
+    await drainTurns()
+    const reused = emitted[emitted.length - 1]
+    assert.ok(reused, 'the local refresh published a snapshot')
+    assert.deepEqual(
+      reused.pullRequests.map((request) => request.number),
+      [101],
+      'the older read did not become the confirmed payload',
+    )
+    assert.deepEqual(
+      reused.issues?.map((issue) => issue.number),
+      [11],
+      'the confirmed inbox is the newer one',
+    )
+  } finally {
+    setGitHubTransport(null)
+    coordinator.detach()
+    await cleanup()
+    resetGitHubRateLimit()
+  }
+})
+
 test('the conditional cache is never consulted for a read that did not opt in', async () => {
   const requested: (string | null)[] = []
   const cache = new GitHubResponseCacheStore()
