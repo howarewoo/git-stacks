@@ -99,7 +99,14 @@ function mockTransport(handlers: {
   rest?: (request: GitHubRestRequest) => unknown
   graphql?: (query: string, variables?: Record<string, unknown>) => unknown
 }): GitHubTransport {
-  const rateLimit = { limit: 5000, remaining: 4999, reset: null, used: 1, resource: null, retryAfterSeconds: null }
+  const rateLimit = {
+    limit: 5000,
+    remaining: 4999,
+    reset: null,
+    used: 1,
+    resource: null,
+    retryAfterSeconds: null,
+  }
   return {
     kind: 'direct',
     async rest<T>(request: GitHubRestRequest): Promise<GitHubRestResponse<T>> {
@@ -183,8 +190,16 @@ test('force-push creates a new snapshot entry with distinct head OID', () => {
 })
 
 test('rebase across branches creates a new snapshot recording the new comparison base', () => {
-  const head1 = comparison({ headOid: '1111'.padEnd(40, '0'), baseRef: 'main', baseOid: 'aaaa'.padEnd(40, '0') })
-  const head2 = comparison({ headOid: '3333'.padEnd(40, '0'), baseRef: 'main', baseOid: 'bbbb'.padEnd(40, '0') })
+  const head1 = comparison({
+    headOid: '1111'.padEnd(40, '0'),
+    baseRef: 'main',
+    baseOid: 'aaaa'.padEnd(40, '0'),
+  })
+  const head2 = comparison({
+    headOid: '3333'.padEnd(40, '0'),
+    baseRef: 'main',
+    baseOid: 'bbbb'.padEnd(40, '0'),
+  })
 
   const log1 = observeReviewHead(null, {
     number: 26,
@@ -227,10 +242,7 @@ test('first open after many updates produces an explicit gap stating earlier hea
     history.gap?.message ?? '',
     /first opened #26 at 5555000 on 2026-09-23.*counted 7 commits/u,
   )
-  assert.match(
-    history.gap?.message ?? '',
-    /comparison from earlier revisions is not available/u,
-  )
+  assert.match(history.gap?.message ?? '', /comparison from earlier revisions is not available/u)
 })
 
 test('first open with 1 commit records observation gap because earlier force-pushes cannot be ruled out', () => {
@@ -444,10 +456,15 @@ test('scope isolation: distinct repository or account viewer keeps independent s
     'howarewoo/git-stacks',
     'alice',
     26,
-    'aaaa'.padEnd(40, '0'),
+    comp,
     'PRR_alice',
   )
-  const logAliceAfter = await readReviewSnapshotLog(workspace.repo, 'howarewoo/git-stacks', 'alice', 26)
+  const logAliceAfter = await readReviewSnapshotLog(
+    workspace.repo,
+    'howarewoo/git-stacks',
+    'alice',
+    26,
+  )
   const logBobAfter = await readReviewSnapshotLog(workspace.repo, 'howarewoo/git-stacks', 'bob', 26)
 
   assert.equal(logAliceAfter?.snapshots[0].reviewed, true)
@@ -466,6 +483,51 @@ test('clearReviewSnapshots wipes local journal with zero GitHub mutation', async
   await clearReviewSnapshots(workspace.repo, 'howarewoo/git-stacks', 'alice', 26)
   const after = await readReviewSnapshotLog(workspace.repo, 'howarewoo/git-stacks', 'alice', 26)
   assert.equal(after, null)
+})
+
+test('confirmed reviews restore a cleared or never-observed head without restoring cleared history', async (t) => {
+  const workspace = await createTestWorkspace()
+  t.after(workspace.dispose)
+  const prior = comparison({ headOid: '1'.repeat(40) })
+  const reviewed = comparison({ headOid: '2'.repeat(40) })
+  await recordObservedHead(workspace.repo, 'howarewoo/git-stacks', 'alice', 26, prior, 1)
+  await clearReviewSnapshots(workspace.repo, 'howarewoo/git-stacks', 'alice', 26)
+  await markReviewSnapshotReviewed(
+    workspace.repo,
+    'howarewoo/git-stacks',
+    'alice',
+    26,
+    reviewed,
+    'PRR_confirmed',
+  )
+  const restored = await readReviewSnapshotLog(workspace.repo, 'howarewoo/git-stacks', 'alice', 26)
+  assert.deepEqual(
+    restored?.snapshots.map((entry) => ({
+      headOid: entry.headOid,
+      baseOid: entry.baseOid,
+      baseRef: entry.baseRef,
+      reviewed: entry.reviewed,
+      reviewId: entry.reviewId,
+    })),
+    [{ ...reviewed, reviewed: true, reviewId: 'PRR_confirmed' }],
+  )
+  await markReviewSnapshotReviewed(
+    workspace.repo,
+    'howarewoo/git-stacks',
+    'alice',
+    26,
+    prior,
+    'PRR_adopted',
+  )
+  const adopted = await readReviewSnapshotLog(workspace.repo, 'howarewoo/git-stacks', 'alice', 26)
+  assert.equal(
+    adopted?.snapshots.find((entry) => entry.headOid === prior.headOid)?.reviewId,
+    'PRR_adopted',
+  )
+  assert.equal(
+    adopted?.snapshots.find((entry) => entry.headOid === reviewed.headOid)?.reviewId,
+    'PRR_confirmed',
+  )
 })
 
 // -----------------------------------------------------------------------------
@@ -614,7 +676,11 @@ test('main service readReviewHistoryDiff negative case: missing historical commi
       }
       if (path.includes(`/commits/${historicalHead}`)) {
         // Probing historical commit returns 404 (commit was garbage collected after force-push)
-        throw new GitHubTransportError({ kind: 'not-found', status: 404, detail: 'Commit not found' })
+        throw new GitHubTransportError({
+          kind: 'not-found',
+          status: 404,
+          detail: 'Commit not found',
+        })
       }
       return {}
     },
@@ -726,8 +792,22 @@ test('main service clearReviewHistory resets snapshot history and returns fresh 
   t.after(() => setGitHubTransport(null))
 
   // Observe multiple heads
-  await recordObservedHead(workspace.repo, 'howarewoo/git-stacks', 'tester-viewer', 26, comparison({ headOid: 'old1'.padEnd(40, '0') }), 1)
-  await recordObservedHead(workspace.repo, 'howarewoo/git-stacks', 'tester-viewer', 26, comparison({ headOid: 'old2'.padEnd(40, '0') }), 2)
+  await recordObservedHead(
+    workspace.repo,
+    'howarewoo/git-stacks',
+    'tester-viewer',
+    26,
+    comparison({ headOid: 'old1'.padEnd(40, '0') }),
+    1,
+  )
+  await recordObservedHead(
+    workspace.repo,
+    'howarewoo/git-stacks',
+    'tester-viewer',
+    26,
+    comparison({ headOid: 'old2'.padEnd(40, '0') }),
+    2,
+  )
 
   // Clear history
   const reset = await clearReviewHistory(workspace.repo, 26)
@@ -747,14 +827,14 @@ test('main service readReviewHistoryDiff uses real Git to produce faithful endpo
 
   // Commit A (old tip): adds file_reverted.txt and file_kept.txt
   await writeFile(join(repo, 'file_reverted.txt'), 'content to be reverted\n')
-  await writeFile(join(repo, 'file_kept.txt'), 'kept content\n')
+  await writeFile(join(repo, 'file\tkept.txt'), 'kept content\n')
   execFileSync('git', ['add', '.'], { cwd: repo })
   execFileSync('git', ['commit', '-m', 'commit A'], { cwd: repo })
   const oidA = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf8' }).trim()
 
   // Commit B (new tip after force-push): file_reverted.txt is removed, file_kept.txt is modified
   await rm(join(repo, 'file_reverted.txt'))
-  await writeFile(join(repo, 'file_kept.txt'), 'kept content modified\n')
+  await writeFile(join(repo, 'file\tkept.txt'), 'kept content modified\n')
   execFileSync('git', ['add', '.'], { cwd: repo })
   execFileSync('git', ['commit', '-m', 'commit B'], { cwd: repo })
   const oidB = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf8' }).trim()
@@ -813,9 +893,13 @@ test('main service readReviewHistoryDiff uses real Git to produce faithful endpo
   assert.ok(revertedFile, 'file_reverted.txt must appear in endpoint diff')
   assert.equal(revertedFile?.status, 'removed')
   // file_kept.txt must be modified
-  const keptFile = diff.files.find((f) => f.path === 'file_kept.txt')
+  const keptFile = diff.files.find((f) => f.path === 'file\tkept.txt')
   assert.ok(keptFile, 'file_kept.txt must appear in endpoint diff')
   assert.equal(keptFile?.status, 'modified')
+  assert.equal(keptFile?.additions, 1)
+  assert.equal(keptFile?.deletions, 1)
+  assert.equal(diff.additions, 1)
+  assert.equal(diff.deletions, 2)
 })
 
 test('main service readReviewHistoryDiff handles pure and edited renames with faithful hunks and zero phantom additions', async (t) => {
@@ -833,13 +917,30 @@ test('main service readReviewHistoryDiff handles pure and edited renames with fa
   // Commit B: pure rename clean.ts -> renamed_clean.ts, edited rename edited.ts -> renamed_edited.ts
   execFileSync('git', ['mv', 'clean.ts', 'renamed_clean.ts'], { cwd: repo })
   execFileSync('git', ['mv', 'edited.ts', 'renamed_edited.ts'], { cwd: repo })
-  await writeFile(join(repo, 'renamed_edited.ts'), 'line 1\nline 2 edited\nline 3\nline 4\nline 5\n')
+  await writeFile(
+    join(repo, 'renamed_edited.ts'),
+    'line 1\nline 2 edited\nline 3\nline 4\nline 5\n',
+  )
   execFileSync('git', ['add', '.'], { cwd: repo })
   execFileSync('git', ['commit', '-m', 'commit B: renames'], { cwd: repo })
   const oidB = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf8' }).trim()
 
-  await recordObservedHead(repo, 'howarewoo/git-stacks', 'tester-viewer', 26, comparison({ headOid: oidA }), 1)
-  await recordObservedHead(repo, 'howarewoo/git-stacks', 'tester-viewer', 26, comparison({ headOid: oidB }), 2)
+  await recordObservedHead(
+    repo,
+    'howarewoo/git-stacks',
+    'tester-viewer',
+    26,
+    comparison({ headOid: oidA }),
+    1,
+  )
+  await recordObservedHead(
+    repo,
+    'howarewoo/git-stacks',
+    'tester-viewer',
+    26,
+    comparison({ headOid: oidB }),
+    2,
+  )
 
   const transport = mockTransport({
     graphql: () => ({
@@ -879,7 +980,11 @@ test('main service readReviewHistoryDiff handles pure and edited renames with fa
   assert.equal(pure?.deletions, 0)
   assert.equal(pure?.diff.kind, 'text')
   if (pure?.diff.kind === 'text') {
-    assert.equal(pure.diff.hunks.length, 0, 'pure rename must have no hunks (not whole-file addition)')
+    assert.equal(
+      pure.diff.hunks.length,
+      0,
+      'pure rename must have no hunks (not whole-file addition)',
+    )
   }
 
   // Edited rename checks
@@ -916,8 +1021,22 @@ test('main service readReviewHistoryDiff preserves binary classification for bin
   execFileSync('git', ['commit', '-m', 'commit B: modified binary'], { cwd: repo })
   const oidB = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf8' }).trim()
 
-  await recordObservedHead(repo, 'howarewoo/git-stacks', 'tester-viewer', 26, comparison({ headOid: oidA }), 1)
-  await recordObservedHead(repo, 'howarewoo/git-stacks', 'tester-viewer', 26, comparison({ headOid: oidB }), 2)
+  await recordObservedHead(
+    repo,
+    'howarewoo/git-stacks',
+    'tester-viewer',
+    26,
+    comparison({ headOid: oidA }),
+    1,
+  )
+  await recordObservedHead(
+    repo,
+    'howarewoo/git-stacks',
+    'tester-viewer',
+    26,
+    comparison({ headOid: oidB }),
+    2,
+  )
 
   const transport = mockTransport({
     graphql: () => ({
@@ -970,14 +1089,23 @@ test('main service diffEndpointWithGit performs object-only fetch preserving FET
   execFileSync('git', ['init', '-b', 'main'], { cwd: local })
   execFileSync('git', ['config', 'user.name', 'Test'], { cwd: local })
   execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: local })
-  execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/howarewoo/git-stacks.git'], { cwd: local })
-  execFileSync('git', ['config', `url.file://${remote}/.insteadOf`, 'https://github.com/howarewoo/git-stacks.git'], { cwd: local })
+  execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/howarewoo/git-stacks.git'], {
+    cwd: local,
+  })
+  execFileSync(
+    'git',
+    ['config', `url.file://${remote}/.insteadOf`, 'https://github.com/howarewoo/git-stacks.git'],
+    { cwd: local },
+  )
 
   await writeFile(join(local, 'file.txt'), 'base\n')
   execFileSync('git', ['add', '.'], { cwd: local })
   execFileSync('git', ['commit', '-m', 'initial'], { cwd: local })
   execFileSync('git', ['push', '-u', 'origin', 'main'], { cwd: local })
-  const localOid = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: local, encoding: 'utf8' }).trim()
+  const localOid = execFileSync('git', ['rev-parse', 'HEAD'], {
+    cwd: local,
+    encoding: 'utf8',
+  }).trim()
 
   // Another clone pushes a new commit and tag to the remote
   const other = join(root, 'other')
@@ -987,7 +1115,10 @@ test('main service diffEndpointWithGit performs object-only fetch preserving FET
   await writeFile(join(other, 'external.txt'), 'external change\n')
   execFileSync('git', ['add', '.'], { cwd: other })
   execFileSync('git', ['commit', '-m', 'remote commit'], { cwd: other })
-  const remoteOid = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: other, encoding: 'utf8' }).trim()
+  const remoteOid = execFileSync('git', ['rev-parse', 'HEAD'], {
+    cwd: other,
+    encoding: 'utf8',
+  }).trim()
   execFileSync('git', ['tag', 'v1.0.0-sentinel-tag'], { cwd: other })
   execFileSync('git', ['push', 'origin', 'main', '--tags'], { cwd: other })
 
@@ -1031,8 +1162,22 @@ test('main service diffEndpointWithGit performs object-only fetch preserving FET
   setGitHubTransport(transport)
   t.after(() => setGitHubTransport(null))
 
-  await recordObservedHead(local, 'howarewoo/git-stacks', 'tester-viewer', 26, comparison({ headOid: localOid }), 1)
-  await recordObservedHead(local, 'howarewoo/git-stacks', 'tester-viewer', 26, comparison({ headOid: remoteOid }), 2)
+  await recordObservedHead(
+    local,
+    'howarewoo/git-stacks',
+    'tester-viewer',
+    26,
+    comparison({ headOid: localOid }),
+    1,
+  )
+  await recordObservedHead(
+    local,
+    'howarewoo/git-stacks',
+    'tester-viewer',
+    26,
+    comparison({ headOid: remoteOid }),
+    2,
+  )
 
   // Call readReviewHistoryDiff: endpoint diff between localOid and remoteOid
   const diff = await readReviewHistoryDiff(local, 26, localOid)
@@ -1043,7 +1188,11 @@ test('main service diffEndpointWithGit performs object-only fetch preserving FET
 
   // Verify sentinel FETCH_HEAD was NOT modified or overwritten!
   const fetchHeadAfter = await readFile(join(local, '.git', 'FETCH_HEAD'), 'utf8')
-  assert.equal(fetchHeadAfter, sentinelContent, 'FETCH_HEAD must be preserved with zero side-effects')
+  assert.equal(
+    fetchHeadAfter,
+    sentinelContent,
+    'FETCH_HEAD must be preserved with zero side-effects',
+  )
 
   // Verify remote tag was NOT downloaded into local repository!
   const localTags = execFileSync('git', ['tag', '-l'], { cwd: local, encoding: 'utf8' }).trim()

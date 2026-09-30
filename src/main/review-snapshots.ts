@@ -8,10 +8,7 @@ import type {
   ReviewSnapshot,
   ReviewSnapshotLog,
 } from '../shared/review-snapshots'
-import {
-  observeReviewHead,
-  withReviewedSnapshot,
-} from '../shared/review-snapshots'
+import { observeReviewHead, withReviewedSnapshot } from '../shared/review-snapshots'
 import { isRecord, runGit, stripTrailingNewline } from './git-core'
 
 interface SnapshotJournal {
@@ -170,24 +167,26 @@ export async function recordObservedHead(
 /**
  * Marks one head as reviewed by the active account.
  *
- * This only succeeds when the head was previously observed: a review cannot be
- * about a head nobody looked at, and a record of a head that was never journalled
- * is an unconfirmed write, not an anchor.
+ * A confirmed review is itself an observation, including after local history
+ * was cleared. Preserve the confirmed comparison before recording its anchor.
  */
 export async function markReviewSnapshotReviewed(
   repoPath: string,
   repo: string,
   viewer: string,
   number: number,
-  headOid: string,
+  comparison: ReviewComparison,
   reviewId: string | null,
   now: string = new Date().toISOString(),
   signal?: AbortSignal,
 ): Promise<void> {
+  if (!comparison.headOid) return
   const records = await readJournal(repoPath, signal)
-  const target = records.find((log) => matches(log, repo, viewer, number))
-  if (!target) return
-  const updated = withReviewedSnapshot(target, headOid, reviewId, now)
+  const target = records.find((log) => matches(log, repo, viewer, number)) ?? null
+  const observed = target?.snapshots.some((entry) => entry.headOid === comparison.headOid)
+    ? target
+    : observeReviewHead(target, { number, repo, viewer, comparison, commits: null, now })
+  const updated = withReviewedSnapshot(observed, comparison.headOid, reviewId, now)
   const kept = records.filter((log) => !matches(log, repo, viewer, number))
   kept.unshift(updated)
   await writeJournal(repoPath, kept, signal)

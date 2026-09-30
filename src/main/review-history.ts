@@ -1,10 +1,6 @@
 import type { ReviewComparison, ReviewFile, ReviewFileDiff } from '../shared/review'
 import { looksGenerated, sameReviewComparison } from '../shared/review'
-import type {
-  ReviewHistory,
-  ReviewHistoryDiff,
-  ReviewSnapshot,
-} from '../shared/review-snapshots'
+import type { ReviewHistory, ReviewHistoryDiff, ReviewSnapshot } from '../shared/review-snapshots'
 import { reviewHistoryOf } from '../shared/review-snapshots'
 import { isRecord, type ParsedRemote, runGit } from './git-core'
 import { GitHubTransportError, githubTransport } from './github-transport'
@@ -16,11 +12,7 @@ import {
   ReviewRevisionMovedError,
   toReviewHunk,
 } from './review'
-import {
-  clearReviewSnapshots,
-  readReviewSnapshotLog,
-  recordObservedHead,
-} from './review-snapshots'
+import { clearReviewSnapshots, readReviewSnapshotLog, recordObservedHead } from './review-snapshots'
 import { readReviewPermissions } from './review-threads'
 
 /**
@@ -100,20 +92,42 @@ async function diffEndpointWithGit(
   fromOid: string,
   toOid: string,
   signal?: AbortSignal,
-): Promise<{ files: ReviewFile[]; additions: number; deletions: number; truncated: boolean } | null> {
+): Promise<{
+  files: ReviewFile[]
+  additions: number
+  deletions: number
+  truncated: boolean
+} | null> {
   try {
-    let fromExists = await runGit(repoPath, ['cat-file', '-e', `${fromOid}^{commit}`], undefined, signal)
+    let fromExists = await runGit(
+      repoPath,
+      ['cat-file', '-e', `${fromOid}^{commit}`],
+      undefined,
+      signal,
+    )
       .then(() => true)
       .catch(() => false)
     if (!fromExists) {
       try {
         await runGit(
           repoPath,
-          ['fetch', '--no-write-fetch-head', '--no-tags', '--recurse-submodules=no', 'origin', fromOid],
+          [
+            'fetch',
+            '--no-write-fetch-head',
+            '--no-tags',
+            '--recurse-submodules=no',
+            'origin',
+            fromOid,
+          ],
           undefined,
           signal,
         )
-        fromExists = await runGit(repoPath, ['cat-file', '-e', `${fromOid}^{commit}`], undefined, signal)
+        fromExists = await runGit(
+          repoPath,
+          ['cat-file', '-e', `${fromOid}^{commit}`],
+          undefined,
+          signal,
+        )
           .then(() => true)
           .catch(() => false)
       } catch {
@@ -122,18 +136,35 @@ async function diffEndpointWithGit(
       if (!fromExists) return null
     }
 
-    let toExists = await runGit(repoPath, ['cat-file', '-e', `${toOid}^{commit}`], undefined, signal)
+    let toExists = await runGit(
+      repoPath,
+      ['cat-file', '-e', `${toOid}^{commit}`],
+      undefined,
+      signal,
+    )
       .then(() => true)
       .catch(() => false)
     if (!toExists) {
       try {
         await runGit(
           repoPath,
-          ['fetch', '--no-write-fetch-head', '--no-tags', '--recurse-submodules=no', 'origin', toOid],
+          [
+            'fetch',
+            '--no-write-fetch-head',
+            '--no-tags',
+            '--recurse-submodules=no',
+            'origin',
+            toOid,
+          ],
           undefined,
           signal,
         )
-        toExists = await runGit(repoPath, ['cat-file', '-e', `${toOid}^{commit}`], undefined, signal)
+        toExists = await runGit(
+          repoPath,
+          ['cat-file', '-e', `${toOid}^{commit}`],
+          undefined,
+          signal,
+        )
           .then(() => true)
           .catch(() => false)
       } catch {
@@ -149,7 +180,11 @@ async function diffEndpointWithGit(
       signal,
     )
     const tokens = nameStatusRaw.split('\0')
-    const statusEntries: { path: string; previousPath: string | null; status: ReviewFile['status'] }[] = []
+    const statusEntries: {
+      path: string
+      previousPath: string | null
+      status: ReviewFile['status']
+    }[] = []
     let i = 0
     while (i < tokens.length - 1) {
       const statusToken = tokens[i++]
@@ -183,20 +218,17 @@ async function diffEndpointWithGit(
     while (j < numTokens.length - 1) {
       const entry = numTokens[j++]
       if (!entry) break
-      const parts = entry.split('\t')
-      if (parts.length >= 3 && parts[2] !== '') {
-        statsMap.set(parts[2], {
-          additions: parseInt(parts[0], 10) || 0,
-          deletions: parseInt(parts[1], 10) || 0,
-        })
-      } else if (parts.length >= 2) {
-        const oldP = numTokens[j++]
-        const newP = numTokens[j++]
-        statsMap.set(newP, {
-          additions: parseInt(parts[0], 10) || 0,
-          deletions: parseInt(parts[1], 10) || 0,
-        })
+      const firstTab = entry.indexOf('\t')
+      const secondTab = entry.indexOf('\t', firstTab + 1)
+      if (firstTab < 0 || secondTab < 0) continue
+      const additions = parseInt(entry.slice(0, firstTab), 10) || 0
+      const deletions = parseInt(entry.slice(firstTab + 1, secondTab), 10) || 0
+      let filePath = entry.slice(secondTab + 1)
+      if (filePath === '') {
+        j++ // Rename preimage; the following NUL-delimited path is the destination.
+        filePath = numTokens[j++]
       }
+      statsMap.set(filePath, { additions, deletions })
     }
 
     const truncated = statusEntries.length > 300
@@ -223,13 +255,19 @@ async function diffEndpointWithGit(
               ? { kind: 'binary' }
               : { kind: 'text', hunks: [] }
         } else {
-          const block = parseHunkBlock(patch, { path: entry.path, originalPath: entry.previousPath })
+          const block = parseHunkBlock(patch, {
+            path: entry.path,
+            originalPath: entry.previousPath,
+          })
           if (block.kind === 'binary') {
             diff = { kind: 'binary' }
           } else if (block.kind === 'unreadable') {
             diff = { kind: 'unreadable', reason: 'Unreadable diff patch from Git.' }
           } else {
-            diff = { kind: 'text', hunks: block.hunks.map((hunk) => toReviewHunk(entry.path, hunk)) }
+            diff = {
+              kind: 'text',
+              hunks: block.hunks.map((hunk) => toReviewHunk(entry.path, hunk)),
+            }
           }
         }
       } catch {

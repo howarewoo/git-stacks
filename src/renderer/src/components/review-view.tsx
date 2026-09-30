@@ -58,10 +58,7 @@ import type {
   ReviewHistoryDiff,
   ReviewSnapshot,
 } from '../../../shared/review-snapshots'
-import {
-  reviewHistoryUnchangedPaths,
-  reviewSnapshotLabel,
-} from '../../../shared/review-snapshots'
+import { reviewHistoryUnchangedPaths, reviewSnapshotLabel } from '../../../shared/review-snapshots'
 
 /**
  * The four review commands the shell's global shortcuts dispatch. They are
@@ -152,6 +149,7 @@ export function ReviewView({
     setHistory(null)
     setActiveSnapshotOid(null)
     setHistoryDiff(null)
+    setClearingHistory(false)
     if (desktop?.reviewHeadline === undefined || number === null) {
       setHeadlineState('idle')
       return
@@ -218,18 +216,19 @@ export function ReviewView({
         setHistoryState('failed')
       })
     return () => {
+      claim.reset()
       void desktop.cancel?.('review-history')
     }
   }, [desktop, headline, reloadToken])
 
   React.useEffect(() => {
+    const claim = historyDiffGate.current
+    claim.reset()
+    setHistoryDiff(null)
     if (!headline || !activeSnapshotOid || desktop?.reviewHistoryDiff === undefined) {
-      setHistoryDiff(null)
       setHistoryDiffState('idle')
       return
     }
-    const claim = historyDiffGate.current
-    claim.reset()
     setHistoryDiffState('loading')
     const ticket = claim.claim()
     void desktop
@@ -246,20 +245,27 @@ export function ReviewView({
         setError(readableError(cause))
       })
     return () => {
+      claim.reset()
       void desktop.cancel?.('review-history-diff')
     }
   }, [activeSnapshotOid, desktop, headline, reloadToken])
 
   const handleClearHistory = React.useCallback(async () => {
     if (!headline || !desktop?.reviewClearHistory) return
+    const claim = historyGate.current
+    claim.reset()
+    const ticket = claim.claim()
     setClearingHistory(true)
     try {
       const reset = await desktop.reviewClearHistory(headline.pullRequest.number)
+      if (!claim.current(ticket)) return
       setHistory(reset)
       setActiveSnapshotOid(null)
       setHistoryDiff(null)
+    } catch (cause) {
+      if (claim.current(ticket)) setError(readableError(cause))
     } finally {
-      setClearingHistory(false)
+      if (claim.current(ticket)) setClearingHistory(false)
     }
   }, [desktop, headline])
 
@@ -329,7 +335,8 @@ export function ReviewView({
   // words are never discarded for being stale.
   React.useEffect(() => {
     if (!headline || !files || desktop?.reviewResolveDrafts === undefined) return
-    const drafts = draftRecord && draftRecord.number === headline.pullRequest.number ? draftRecord.drafts : []
+    const drafts =
+      draftRecord && draftRecord.number === headline.pullRequest.number ? draftRecord.drafts : []
     if (drafts.length === 0) {
       setResolutions([])
       return
@@ -379,13 +386,11 @@ export function ReviewView({
       // in-flight journal read is measured against.
       draftEdits.current += 1
       setDraftRecord(record)
-      void desktop
-        ?.reviewSetDrafts?.(record)
-        ?.catch(() => {
-          setError(
-            'The pending comments could not be saved for this repository, so they will not survive leaving this workspace.',
-          )
-        })
+      void desktop?.reviewSetDrafts?.(record)?.catch(() => {
+        setError(
+          'The pending comments could not be saved for this repository, so they will not survive leaving this workspace.',
+        )
+      })
     },
     [desktop, files, headline],
   )
@@ -408,13 +413,10 @@ export function ReviewView({
 
   // Composition follows the diff the reviewer is reading, and a thread from a
   // different revision is not allowed to steer it.
-  const selectLines = React.useCallback(
-    (next: ReviewSelection) => {
-      setSelection(next)
-      setSelectedPath(next.path)
-    },
-    [],
-  )
+  const selectLines = React.useCallback((next: ReviewSelection) => {
+    setSelection(next)
+    setSelectedPath(next.path)
+  }, [])
 
   const selectThreadLine = React.useCallback(
     (next: ReviewSelection) => {
@@ -474,7 +476,7 @@ export function ReviewView({
   const eligibleFiles = React.useMemo(() => {
     if (!isComparing) return files?.files ?? []
     if (historyDiff?.state !== 'files') {
-      return files?.files ?? []
+      return []
     }
     const diffFiles = historyDiff.files
     if (hideUnchanged) {
@@ -495,8 +497,7 @@ export function ReviewView({
   }, [files, hideUnchanged, historyDiff, isComparing])
 
   const filePaths = React.useMemo(
-    () =>
-      reviewFileRows(eligibleFiles).flatMap((row) => (row.kind === 'file' ? [row.path] : [])),
+    () => reviewFileRows(eligibleFiles).flatMap((row) => (row.kind === 'file' ? [row.path] : [])),
     [eligibleFiles],
   )
 
@@ -737,7 +738,7 @@ export function ReviewView({
                   <span className="code-region-meta">
                     {summary.changed} changed · +{historyDiff.additions} −{historyDiff.deletions}
                   </span>
-                ) : files ? (
+                ) : !isComparing && files ? (
                   <span className="code-region-meta">
                     {summary.changed} changed · +{files.additions} −{files.deletions}
                   </span>
@@ -751,7 +752,11 @@ export function ReviewView({
                 type="search"
                 value={search}
               />
-              {filesState === 'loading' ? (
+              {isComparing && historyDiffState === 'loading' ? (
+                <p className="section-empty" role="status">
+                  Loading historical files…
+                </p>
+              ) : filesState === 'loading' ? (
                 <p className="section-empty" role="status">
                   Loading changed files from GitHub…
                 </p>
@@ -873,10 +878,7 @@ export function ReviewView({
                 </p>
               ) : isComparing && historyDiff?.state === 'unavailable' ? (
                 <div style={{ padding: '16px' }}>
-                  <InlineAlert
-                    tone="warning"
-                    role="status"
-                  >
+                  <InlineAlert tone="warning" role="status">
                     <div>
                       <strong>Historical comparison unavailable</strong>
                       <p style={{ marginTop: '4px', marginBottom: '8px' }}>{historyDiff.reason}</p>
@@ -914,8 +916,8 @@ export function ReviewView({
                       <h2>File unchanged since snapshot</h2>
                       <p>
                         <code>{selected.path}</code> was not modified between{' '}
-                        <code>{shortOid(activeSnapshot?.headOid ?? null)}</code> and the
-                        current head.
+                        <code>{shortOid(activeSnapshot?.headOid ?? null)}</code> and the current
+                        head.
                       </p>
                     </EmptyState>
                   ) : (
@@ -950,15 +952,11 @@ export function ReviewView({
             />
 
             {threadsDisagree ? (
-              <InlineAlert
-                className="review-comparison-alert"
-                role="status"
-                tone="warning"
-              >
+              <InlineAlert className="review-comparison-alert" role="status" tone="warning">
                 The conversation was read at{' '}
-                {shortOid(threadRead?.threads.comparison.headOid ?? null)}, but the diff on
-                screen is {shortOid(files?.comparison.headOid ?? null)}. Reload to read both at
-                the same revision; until then a thread's line cannot be shown or commented on.
+                {shortOid(threadRead?.threads.comparison.headOid ?? null)}, but the diff on screen
+                is {shortOid(files?.comparison.headOid ?? null)}. Reload to read both at the same
+                revision; until then a thread's line cannot be shown or commented on.
                 <Button
                   className="review-comparison-reload"
                   size="sm"
@@ -974,14 +972,10 @@ export function ReviewView({
             historyDiff?.state === 'files' &&
             files?.comparison.headOid &&
             historyDiff.to.headOid !== files.comparison.headOid ? (
-              <InlineAlert
-                className="review-comparison-alert"
-                role="status"
-                tone="warning"
-              >
-                The pull request moved to {shortOid(files.comparison.headOid)} after this
-                comparison was taken against {shortOid(historyDiff.to.headOid)}. Reload to
-                compare against the latest head.
+              <InlineAlert className="review-comparison-alert" role="status" tone="warning">
+                The pull request moved to {shortOid(files.comparison.headOid)} after this comparison
+                was taken against {shortOid(historyDiff.to.headOid)}. Reload to compare against the
+                latest head.
                 <Button
                   className="review-comparison-reload"
                   size="sm"
@@ -999,7 +993,9 @@ export function ReviewView({
               files={files}
               read={threadRead}
               readError={threadError}
-              readState={threadState === 'ready' ? 'ready' : threadState === 'failed' ? 'failed' : 'loading'}
+              readState={
+                threadState === 'ready' ? 'ready' : threadState === 'failed' ? 'failed' : 'loading'
+              }
               drafts={draftRecord}
               resolutions={resolutions}
               selection={selection}
@@ -1281,9 +1277,7 @@ function ReviewHistoryBar({
 
         <Button
           size="sm"
-          variant={
-            isComparing && activeSnapshotOid === reviewed?.headOid ? 'default' : 'secondary'
-          }
+          variant={isComparing && activeSnapshotOid === reviewed?.headOid ? 'default' : 'secondary'}
           disabled={!canCompareReviewed}
           tooltip={reviewedTooltip}
           onClick={() => {
@@ -1309,11 +1303,7 @@ function ReviewHistoryBar({
                 {unchangedCount} unchanged file{unchangedCount === 1 ? '' : 's'} hidden
               </span>
             ) : null}
-            {truncated ? (
-              <Badge variant="warning">
-                Truncated at 300 files
-              </Badge>
-            ) : null}
+            {truncated ? <Badge variant="warning">Truncated at 300 files</Badge> : null}
             <Button size="sm" variant="ghost" onClick={() => onSelectSnapshot(null)}>
               Return to current diff
             </Button>

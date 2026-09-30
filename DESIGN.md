@@ -666,6 +666,8 @@ Missing historical commits (garbage-collected after force-push or deleted remote
 
 Snapshot metadata contains strictly object IDs, branch names, timestamps, counts, and review confirmation IDs — zero source code, diffs, or comments. Clearing local history wipes the journal beside the repository with zero GitHub mutations.
 
+A subsequent confirmed or adopted review is a new observation and recreates its anchor after clearing history. Async history reads and clear responses belong to their originating selection; a new comparison clears previous files and totals while it loads.
+
 ### Git runtime diagnostics
 
 The advanced Git runtime choice uses a labeled two-way control: **Bundled runtime** and **System Git**. Keep the selected choice visible even if that executable cannot start; pair the failure message with a recovery path so users can reverse the choice without guessing.

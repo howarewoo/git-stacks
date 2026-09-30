@@ -867,6 +867,8 @@ GitHub pull requests do not retain complete version history for arbitrary force-
 - **Missing commits and merge-base loss**: If a historical commit was garbage-collected after a force-push or its remote branch was deleted, or if an external rebase caused merge-base loss (unrelated histories), the workspace renders an explicit unavailable alert naming the exact cause, never a fabricated fallback diff.
 - **Bounded pruning**: Snapshot records are capped (maximum 40 entries) while strictly retaining user-visible reviewed anchors.
 - **Zero GitHub mutation**: Snapshot metadata contains no source text, diffs, or comment bodies, and clearing local history wipes only the local journal.
+- **Review after clearing**: A subsequently confirmed or adopted review records its reviewed head again, even if that head was absent from local history. Previously cleared observations remain cleared.
+- **Selection isolation**: History reads, clears, and comparisons cannot replace another selection's history. A pending comparison clears the previous file list and counts.
 
 Run snapshot unit and integration tests with:
 ```sh

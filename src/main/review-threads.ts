@@ -1010,7 +1010,7 @@ export async function submitReview(
         repo,
         permissions.viewer,
         number,
-        files.comparison.headOid,
+        files.comparison,
         settledReview?.id ?? null,
       ).catch(() => {})
     }
@@ -1111,7 +1111,7 @@ export async function submitReview(
         repo,
         permissions.viewer,
         number,
-        files.comparison.headOid,
+        files.comparison,
         settledId,
       ).catch(() => {})
     }
