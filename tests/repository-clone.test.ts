@@ -638,6 +638,7 @@ test('a cancel that lands while the clone is being registered keeps the clone an
       {
         url: remote,
         fullName: 'acme/registered',
+        host: 'github.com',
         parentDirectory: parent,
         directoryName: 'registered',
         protocol: 'https',
@@ -686,6 +687,7 @@ test('a cancel before the commit point registers nothing and leaves no folder', 
         {
           url: 'git@localhost:acme/widgets.git',
           fullName: 'acme/widgets',
+          host: 'localhost',
           parentDirectory: parent,
           directoryName: 'widgets',
           protocol: 'ssh',
