@@ -25,34 +25,48 @@
 ; completion is recorded, and the app keeps the copy.
 
 !macro customHeader
-  Var /GITSTACKS_handoffHandle
-  Var /GITSTACKS_handoffToken
-  Var /GITSTACKS_handoffPid
+  Var /GLOBAL GITSTACKS_handoffHandle
+  Var /GLOBAL GITSTACKS_handoffToken
+  Var /GLOBAL GITSTACKS_handoffPid
 !macroend
 
 ; Inserted by electron-builder at the end of the install section: after the
 ; application files, the registry and the shortcuts are in place, and before
 ; this installer starts the app and quits. Whatever this process still needs its
 ; own executable for is done by this point.
+; NSIS notes. The variables are declared with `Var /GLOBAL name` and read as
+; `$name`; `${name}` is a preprocessor define and would resolve to nothing here.
+; `FileRead` with an empty terminator reads one whole line and leaves the line
+; ending out of the value, so what comes back is the token and only the token.
+; A line ending in the answer is written `$\r$\n`, which is the two bytes a
+; Windows text file carries — a bare `$` would write a dollar sign.
 !macro customInstall
   IfFileExists "$EXEDIR\git-stacks-handoff.txt" 0 gitstacks_handoff_done
-    FileOpen ${GITSTACKS_handoffHandle} "$EXEDIR\git-stacks-handoff.txt" r
-    FileRead ${GITSTACKS_handoffHandle} ${GITSTACKS_handoffToken} ""
-    FileClose ${GITSTACKS_handoffHandle}
+    FileOpen $GITSTACKS_handoffHandle "$EXEDIR\git-stacks-handoff.txt" r
+    FileRead $GITSTACKS_handoffHandle $GITSTACKS_handoffToken ""
+    FileClose $GITSTACKS_handoffHandle
     ; The token has been read once. Leaving it behind would leave a later run a
     ; name to answer for, so it goes with this read.
     Delete "$EXEDIR\git-stacks-handoff.txt"
 
+    ; No guess is made here about what a token looks like. The token is echoed
+    ; exactly as it was found and the app compares the whole value against the
+    ; one it wrote, so a line of any other content, of any length, is not an
+    ; answer it can use and the copy stays. The read is one line, so it cannot
+    ; run away either.
     ; The id of the process doing the work now, which is this one when nothing
-    ; elevated and the elevated instance when something did.
-    System::Call 'kernel32::GetCurrentProcessId() i.r0'
-    StrCpy ${GITSTACKS_handoffPid} "$0"
+    ; elevated and the elevated instance when something did. The call returns
+    ; onto the stack and is popped into our own variable, so the register the
+    ; caller may still be using is left exactly as it was found.
+    System::Call 'kernel32::GetCurrentProcessId() i.s'
+    Pop $GITSTACKS_handoffPid
 
-    ; One field per line, each written the way this app writes the request, so
-    ; what is read back is the value and nothing else.
-    FileOpen ${GITSTACKS_handoffHandle} "$EXEDIR\git-stacks-install-complete.txt" w
-    FileWrite ${GITSTACKS_handoffHandle} "token=${GITSTACKS_handoffToken}$"
-    FileWrite ${GITSTACKS_handoffHandle} "pid=${GITSTACKS_handoffPid}$"
-    FileClose ${GITSTACKS_handoffHandle}
+    ; One field per line, each written the way this app writes the request — a
+    ; CRLF line, ASCII token, nothing else — so what is read back is the value
+    ; and nothing else.
+    FileOpen $GITSTACKS_handoffHandle "$EXEDIR\git-stacks-install-complete.txt" w
+    FileWrite $GITSTACKS_handoffHandle "token=$GITSTACKS_handoffToken$\r$\n"
+    FileWrite $GITSTACKS_handoffHandle "pid=$GITSTACKS_handoffPid$\r$\n"
+    FileClose $GITSTACKS_handoffHandle
   gitstacks_handoff_done:
 !macroend

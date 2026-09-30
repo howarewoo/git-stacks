@@ -114,10 +114,14 @@ const HANDOFF_COMPLETE = 'git-stacks-install-complete.txt'
  * this user's app can write, is what makes that answer worth reading: an echo
  * naming a different token belongs to a different attempt, and is not an
  * answer about this one.
+ *
+ * It is one ASCII line ending in CRLF, which is the line the installer reads a
+ * token out of and the line it writes its answer back in — see
+ * `build/installer.nsh`, which is the other half of this.
  */
 export async function beginHandoff(directory: string): Promise<string> {
   const token = randomBytes(16).toString('hex')
-  await writeFile(join(directory, HANDOFF_REQUEST), `token=${token}\n`, { mode: 0o600 })
+  await writeFile(join(directory, HANDOFF_REQUEST), `token=${token}\r\n`, { mode: 0o600 })
   return token
 }
 

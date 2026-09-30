@@ -628,7 +628,9 @@ that does the work runs from that same path — so no process this app starts is
 the process that finishes, and its exit says nothing about the file being free.
 The run therefore writes a token it made up into the directory it made, beside
 the copy, before the installer exists, and the installer echoes that token back
-with the process id of the instance that finished the work.
+with the process id of the instance that finished the work. Both halves speak
+one ASCII line per field, each ended CRLF: `build/installer.nsh` is the installer
+half, compiled by electron-builder at its default `nsis.include` path.
 
 The next launch of the app removes the copy, and only on evidence it can place:
 the echo has to carry that run's own token, it has to have been written inside
@@ -700,11 +702,16 @@ started is not the process that does the work. The copy is kept while the
 install is unfinished, kept when the installer has answered but is still
 running, and removed only once the answer carries that run's own token and names
 a process that has gone — and then only that directory, never anything else
-beside it. Every way of being unable to place the answer keeps the copy. What
-the NSIS installer itself does with the file in between is not proved, because
-no test process runs it: the section that answers is part of the installer this
-repository builds (`build/installer.nsh`), and installing a real signed release
-is the acceptance step.
+beside it. The stand-in writes its answer in the bytes `build/installer.nsh`
+writes, CRLF lines and all, and every way of being unable to place the answer —
+including a token one character short or one character long — keeps the copy.
+
+That installer section is compiled, not read: `makensis` builds it inside
+electron-builder's own include chain, where `customHeader` and `customInstall`
+are inserted, and it compiles with no diagnostics from it. What is not proved is
+that section *running*: no test process on any platform runs an NSIS installer,
+so what the compiled installer does with the file on a real Windows machine is
+the acceptance step, written out under Platform support below.
 
 ### Channels
 

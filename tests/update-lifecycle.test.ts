@@ -1145,6 +1145,12 @@ function installerProcesses(
  * read the token, answer with it and the process doing the work, then wait to
  * be told to go. Written into the app's own temporary data directory so it
  * leaves with the run that needed it.
+ *
+ * The answer is written exactly as `build/installer.nsh` writes it: `token=` and
+ * `pid=` on their own ASCII lines, each ended CRLF, which is what NSIS's `$\r$\n`
+ * puts in the file. The token is read the way the installer reads it — a whole
+ * line, line ending left out — so what the app compares is the installer's value
+ * and not this script's idea of one.
  */
 function writeInstallerScript(userDataPath: string): string {
   const script = join(userDataPath, 'installer-fixture.cjs')
@@ -1160,7 +1166,7 @@ function writeInstallerScript(userDataPath: string): string {
       '  if (steps === 1) {' +
       '    writeFileSync(' +
       '      dir + "/git-stacks-install-complete.txt",' +
-      '      "token=" + token + "\\npid=" + process.pid + "\\n",' +
+      '      "token=" + token + "\\r\\npid=" + process.pid + "\\r\\n",' +
       '    );' +
       '    process.stdout.write("answered\\n");' +
       '  }' +
@@ -1295,11 +1301,13 @@ test('an answer this app cannot place is kept, not acted on', async (t) => {
 
   const answers: Record<string, (token: string) => string> = {
     'no answer at all': () => '',
-    'a token from another attempt': (token) => `token=${'0'.repeat(token.length)} pid=${pid}\n`,
-    'no process named': () => 'token=PLACEHOLDER\n',
-    'a process id that is not one': () => 'token=PLACEHOLDER pid=none\n',
-    'a process id of zero': () => 'token=PLACEHOLDER pid=0\n',
-    'a file that is not an answer at all': () => 'nothing to see here\n',
+    'a token from another attempt': (token) => `token=${'0'.repeat(token.length)} pid=${pid}\r\n`,
+    'a token one character short': (token) => `token=${token.slice(0, -1)} pid=${pid}\r\n`,
+    'a token one character long': (token) => `token=${token}x pid=${pid}\r\n`,
+    'no process named': () => 'token=PLACEHOLDER\r\n',
+    'a process id that is not one': () => 'token=PLACEHOLDER pid=none\r\n',
+    'a process id of zero': () => 'token=PLACEHOLDER pid=0\r\n',
+    'a file that is not an answer at all': () => 'nothing to see here\r\n',
   }
 
   for (const [name, answer] of Object.entries(answers)) {
