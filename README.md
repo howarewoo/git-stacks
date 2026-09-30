@@ -139,6 +139,11 @@ user-to-server token expiration must stay enabled so a refresh token is issued.
 override: when one is set it is used instead of the app's own credential, is
 never written to application state, and is not removed by sign-out.
 
+Cancelling sign-in or starting a replacement retires the previous request; a
+late device-code response cannot reopen it. If saving the account record fails
+after its new credential was stored, that staged credential is removed and the
+previous account remains selected.
+
 ## Performance budgets
 
 Git Stacks is used on repositories far larger than the ones it was built
