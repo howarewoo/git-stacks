@@ -189,6 +189,7 @@ export class RepositoryWatcher {
    * belong to the directory now at the path.
    */
   private targetSettled = false
+  private settling: { gen: number; promise: Promise<void> } | undefined
   private started = false
   private stopping = false
   private generation = 0
@@ -296,6 +297,17 @@ export class RepositoryWatcher {
    * directories of a tree that is gone.
    */
   private async settleTarget(gen: number): Promise<void> {
+    if (this.settling?.gen === gen) return this.settling.promise
+    const promise = this.resolveTarget(gen)
+    this.settling = { gen, promise }
+    try {
+      await promise
+    } finally {
+      if (this.settling?.promise === promise) this.settling = undefined
+    }
+  }
+
+  private async resolveTarget(gen: number): Promise<void> {
     for (let attempt = 1; attempt <= MAX_ARM_ATTEMPTS; attempt += 1) {
       const identity = await directoryIdentity(this.root)
       if (!this.armed(gen)) return

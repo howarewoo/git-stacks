@@ -592,6 +592,10 @@ test('the sweep settles a root the arm gave up on, on the tree left at the path'
     entered: Promise.withResolvers<void>(),
     release: Promise.withResolvers<void>(),
   }))
+  const recovery = {
+    entered: Promise.withResolvers<void>(),
+    release: Promise.withResolvers<void>(),
+  }
   let lookups = 0
   const watcher = new RepositoryWatcher(repo, (event) => log.record(event.reason), {
     debounceMs: 20,
@@ -599,10 +603,13 @@ test('the sweep settles a root the arm gave up on, on the tree left at the path'
     sweepMs: 120,
     resolveGitDirectories: async (root) => {
       const directories = await linkedGitDirectory(root)
-      const gate = gates[Math.min(lookups, gates.length - 1)]
+      const gate =
+        lookups < gates.length ? gates[lookups] : lookups === gates.length ? recovery : null
       lookups += 1
-      gate.entered.resolve()
-      await gate.release.promise
+      if (gate) {
+        gate.entered.resolve()
+        await gate.release.promise
+      }
       return directories
     },
   })
@@ -617,6 +624,27 @@ test('the sweep settles a root the arm gave up on, on the tree left at the path'
     }
     await startPromise
     assert.equal(lookups, gates.length)
+
+    // The sweep and a parent-triggered check must share the recovery pass.
+    const internals = watcher as unknown as {
+      sweep: () => Promise<void>
+      checkPresence: () => Promise<void>
+      gitDirectories: string[]
+    }
+    const sweep = internals.sweep()
+    await within(recovery.entered.promise, 'the recovery Git lookup to be entered')
+    const presence = internals.checkPresence()
+    await drainTurns()
+    assert.equal(lookups, gates.length + 1, 'the presence check does not race the sweep lookup')
+    recovery.release.resolve()
+    await within(
+      Promise.all([sweep, presence]).then(() => {}),
+      'both recovery callers to finish',
+    )
+    assert.deepEqual(
+      internals.gitDirectories.map((directory) => basename(directory)),
+      ['store-3'],
+    )
 
     // The sweep is the later turn that finishes a root the arm gave up on. Each
     // branch below lands in the store of the tree left at the path, so the
