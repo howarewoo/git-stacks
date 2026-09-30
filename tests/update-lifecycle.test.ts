@@ -14,11 +14,12 @@ import {
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { createServer as createTlsServer, type Server } from 'node:https'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { once } from 'node:events'
 import { test } from 'node:test'
 import { UpdateService, type UpdateServiceOptions } from '../src/main/update/service'
 import { privateInstallHandoff, type StagedUpdate } from '../src/main/update/artifact'
+import { beginHandoff } from '../src/main/update/install'
 import type { UpdateChannel } from '../src/shared/update'
 
 /**
@@ -1079,52 +1080,140 @@ test('nothing a failed install cleans up was not this attempt’s own', async (t
   assert.equal(installed, 1, 'only the install that was supposed to run reached the installer')
 })
 
-test('a copy a detached installer still holds outlives the call, and goes when that process does', async (t) => {
+/**
+ * The Windows installer, as the two real processes it actually is: the one that
+ * was started, and — when it elevates — a second instance of the same installer
+ * that begins after the first has gone and does the work. The second reads the
+ * token this run left beside the prepared copy, writes it back with its own
+ * process id when the install is done, and only then exits. That is
+ * `build/installer.nsh`, written in NSIS.
+ *
+ * The test says when the install finishes and when it exits; nothing here
+ * decides anything by waiting.
+ */
+function installerProcesses(
+  directory: string,
+  script: string,
+): {
+  started: number | null
+  answered: Promise<void>
+  complete: () => void
+  finish: () => Promise<void>
+  /** Takes the installer, and anything it started, down: a failed run leaks nothing. */
+  kill: () => void
+} {
+  const outer = spawn(
+    process.execPath,
+    [
+      '-e',
+      'const { spawn } = require("node:child_process");' +
+        'const [script, dir] = process.argv.slice(1);' +
+        'const inner = spawn(process.execPath, [script, dir], { stdio: ["pipe", "inherit", "inherit"] });' +
+        'inner.stdin.on("error", () => {});' +
+        'process.stdin.on("data", (chunk) => inner.stdin.write(chunk));' +
+        'process.stdin.on("end", () => inner.stdin.end());' +
+        'inner.on("exit", () => process.exit(0));',
+      script,
+      directory,
+    ],
+    { detached: true, stdio: ['pipe', 'pipe', 'inherit'] },
+  )
+  return {
+    started: outer.pid ?? null,
+    answered: once(outer.stdout, 'data').then(() => undefined),
+    complete: () => outer.stdin.write('installed\n'),
+    finish: async () => {
+      const exited = once(outer, 'exit')
+      outer.stdin.end()
+      await exited
+    },
+    kill: () => {
+      if (outer.pid === undefined) return
+      try {
+        // The installer leads its own group, so this reaches the instance it
+        // started as well as the one that was started.
+        process.kill(-outer.pid, 'SIGKILL')
+      } catch {
+        outer.kill('SIGKILL')
+      }
+    },
+  }
+}
+
+/**
+ * The installer half of the protocol, in the installer this repository builds:
+ * read the token, answer with it and the process doing the work, then wait to
+ * be told to go. Written into the app's own temporary data directory so it
+ * leaves with the run that needed it.
+ */
+function writeInstallerScript(userDataPath: string): string {
+  const script = join(userDataPath, 'installer-fixture.cjs')
+  writeFileSync(
+    script,
+    'const { readFileSync, writeFileSync, rmSync } = require("node:fs");' +
+      'const dir = process.argv[2];' +
+      'const token = readFileSync(dir + "/git-stacks-handoff.txt", "utf8").trim().slice(6);' +
+      'rmSync(dir + "/git-stacks-handoff.txt");' +
+      'let steps = 0;' +
+      'process.stdin.on("data", () => {' +
+      '  steps += 1;' +
+      '  if (steps === 1) {' +
+      '    writeFileSync(' +
+      '      dir + "/git-stacks-install-complete.txt",' +
+      '      "token=" + token + "\\npid=" + process.pid + "\\n",' +
+      '    );' +
+      '    process.stdout.write("answered\\n");' +
+      '  }' +
+      '});' +
+      'process.stdin.on("end", () => process.exit(0));',
+  )
+  return script
+}
+
+/** The next launch of this app over the same data directory. */
+function relaunch(userDataPath: string, base: string, currentVersion: string): UpdateService {
+  return new UpdateService({
+    packaged: false,
+    currentVersion,
+    appPath: unsignedBundle(),
+    userDataPath,
+    platform: 'darwin',
+    arch: 'arm64',
+    env: updateEnv(base),
+    relaunch: () => undefined,
+  })
+}
+
+test('a prepared copy outlives the install, and goes only when its own installer says it finished', async (t) => {
   // A Windows installer is handed a path and this app is then closed so the
   // installer can replace the files this one is running from. It has not read
-  // that path yet at the moment it is spawned — the elevated copy that does the
-  // work runs from it afterwards — so removing the prepared copy when the call
-  // returns left the update with nothing to install from. This drives the real
-  // service over real temporary files and a real process: whether that process
-  // is running is decided by the process, not by the test.
+  // that path at the moment it is started, and the instance that does the work
+  // starts after the first one has gone — so removing the prepared copy when
+  // the call returned deleted the file the update was installing from.
+  //
+  // No process this app starts can report that it is over: that process is not
+  // the one doing it. So the installer reports it instead, and this app believes
+  // a report only when it carries this run's own token, was written inside this
+  // run's own directory, and names a process that has since gone. What this app
+  // happens to be running is not part of that decision at all.
   const feed = await startFeed()
   t.after(() => feed.close())
   feed.set({ version: '0.2.0', sequence: 1, bytes: ARTIFACT, channel: 'stable' })
-  // A real process, alive because the test holds its end open and finished
-  // because the test closes it. Nothing here decides liveness by waiting.
-  const installer = spawn(process.execPath, ['-e', 'process.stdin.resume()'], {
-    stdio: ['pipe', 'pipe', 'ignore'],
-  })
-  t.after(() => installer.kill('SIGKILL'))
-  const started = once(installer, 'spawn')
-  await started
+  /** The platform installer, once the run below has started it. */
+  const started: Array<ReturnType<typeof installerProcesses>> = []
   const app = harnessFor(feed.base, {
-    install: async (_staged, options) => {
-      const pid = installer.pid ?? null
-      const version = options.version ?? null
-      assert.notEqual(pid, null, 'the installer process is identified')
-      await options.onRetain?.({ pid, version })
-      return { installed: true, reason: 'The installer is running.', retains: { pid, version } }
+    install: async (staged, options) => {
+      const directory = dirname(staged.path)
+      const token = await beginHandoff(directory)
+      started.push(installerProcesses(directory, writeInstallerScript(app.userDataPath)))
+      // The real Windows path records what it is about to hand over before it
+      // starts the installer, because the record has to reach the disk while
+      // this app is still running and able to write it.
+      const retains = { token }
+      await options.onRetain?.(retains)
+      return { installed: true, reason: 'The installer is running.', retains }
     },
   })
-  /**
-   * The next launch of this app over the same data directory, at the version it
-   * is running: 0.1.0 is this app after an install that has not replaced it
-   * yet, 0.2.0 is this app after one that did.
-   */
-  const launch = async (userDataPath: string, currentVersion: string): Promise<void> => {
-    const next = new UpdateService({
-      packaged: false,
-      currentVersion,
-      appPath: unsignedBundle(),
-      userDataPath,
-      platform: 'darwin',
-      arch: 'arm64',
-      env: updateEnv(feed.base),
-      relaunch: () => undefined,
-    })
-    await next.start('stable')
-  }
 
   await app.service.start('stable')
   await app.service.check()
@@ -1136,54 +1225,113 @@ test('a copy a detached installer still holds outlives the call, and goes when t
   const handoffParent = join(app.userDataPath, 'handoff')
   const [held] = readdirSync(handoffParent)
   assert.ok(held, 'the directory this attempt made is still there')
-  const [prepared] = readdirSync(join(handoffParent, held))
   assert.deepEqual(
-    readFileSync(join(handoffParent, held, prepared)),
+    readFileSync(join(handoffParent, held, 'Git-Stacks-0.2.0-arm64.dmg')),
     ARTIFACT,
     'the prepared copy is readable, so the installer has something to install from',
   )
 
-  // A launch while the installer is running proves nothing about it having
-  // finished, so nothing is removed and the copy is still where it was.
-  await launch(app.userDataPath, '0.2.0')
+  // The installer has started and has not finished. Nothing about this app can
+  // tell that, on any version, so every launch keeps the copy.
+  await relaunch(app.userDataPath, feed.base, '0.2.0').start('stable')
+  await relaunch(app.userDataPath, feed.base, '0.1.0').start('stable')
   assert.deepEqual(
     readdirSync(handoffParent),
     [held],
-    'a launch while the installer is still running removes nothing',
+    'neither an unfinished install nor the version this app is on removes the copy',
   )
 
-  // Now the process this app spawned has gone, and the app is still the build it
-  // was before the install: the elevated copy that is doing the work runs after
-  // that process and reads this same file, so a gone process says nothing about
-  // the copy being free. A launcher here would be about to delete the file out
-  // from under it.
-  const finished = once(installer, 'exit')
-  installer.stdin.end()
-  await finished
-  await launch(app.userDataPath, '0.1.0')
+  // Now the installer finishes and answers, naming the process that did the
+  // work — a different process from the one that was started.
+  assert.equal(started.length, 1, 'the platform installer was started')
+  const [installer] = started
+  t.after(() => installer.kill())
+  installer.complete()
+  await installer.answered
+  const completion = readFileSync(
+    join(handoffParent, held, 'git-stacks-install-complete.txt'),
+    'utf8',
+  )
+  const answered = Number(/^pid=(\d+)$/mu.exec(completion)?.[1])
+  assert.ok(Number.isInteger(answered) && answered > 0, 'the answer names a process')
+  assert.notEqual(
+    answered,
+    installer.started,
+    'the process that finished the install is not the one that was started',
+  )
+
+  // It has said it is finished and it is still running: still not an answer.
+  await relaunch(app.userDataPath, feed.base, '0.2.0').start('stable')
   assert.deepEqual(
     readdirSync(handoffParent),
     [held],
-    'a gone installer and an app still on the old build prove nothing, and the copy is kept',
-  )
-  assert.deepEqual(
-    readFileSync(join(handoffParent, held, prepared)),
-    ARTIFACT,
-    'the copy an elevated installer still needs is left readable',
+    'a completion from a process that is still running removes nothing',
   )
 
-  // The replacement it was sent to make has happened, and nothing is holding
-  // the copy: this is the launch that may take it away, and nothing else.
+  // It has gone. That, with this run's own token in the answer, is the proof.
+  await installer.finish()
   writeFileSync(join(handoffParent, 'somebody-elses-file'), 'not ours')
-  await launch(app.userDataPath, '0.2.0')
+  await relaunch(app.userDataPath, feed.base, '0.2.0').start('stable')
   assert.deepEqual(
     readdirSync(handoffParent),
     ['somebody-elses-file'],
-    'the copy goes once the build it installs is this one and its installer has gone',
+    'the copy goes once its own installer has finished and gone, and nothing else went with it',
   )
+})
 
-  // The other kind of install still cleans up: one that hands the copy to
-  // nothing has nothing left holding it.
+test('an answer this app cannot place is kept, not acted on', async (t) => {
+  // Anything that is not this run's own token, in this run's own directory,
+  // naming a process that has gone, leaves the prepared copy exactly where it
+  // is. Each case below is a way the evidence can be absent or belong to
+  // something else, and each one is a copy that would be gone if the app
+  // believed it.
+  const feed = await startFeed()
+  t.after(() => feed.close())
+  feed.set({ version: '0.2.0', sequence: 1, bytes: ARTIFACT, channel: 'stable' })
+  const finished = spawn(process.execPath, ['-e', '0'], { stdio: 'ignore' })
+  const pid = finished.pid ?? null
+  assert.notEqual(pid, null, 'a process that has already gone')
+  await once(finished, 'exit')
+
+  const answers: Record<string, (token: string) => string> = {
+    'no answer at all': () => '',
+    'a token from another attempt': (token) => `token=${'0'.repeat(token.length)} pid=${pid}\n`,
+    'no process named': () => 'token=PLACEHOLDER\n',
+    'a process id that is not one': () => 'token=PLACEHOLDER pid=none\n',
+    'a process id of zero': () => 'token=PLACEHOLDER pid=0\n',
+    'a file that is not an answer at all': () => 'nothing to see here\n',
+  }
+
+  for (const [name, answer] of Object.entries(answers)) {
+    const app = harnessFor(feed.base, {
+      install: async (staged, options) => {
+        const directory = dirname(staged.path)
+        const token = await beginHandoff(directory)
+        writeFileSync(join(directory, 'git-stacks-install-complete.txt'), answer(token))
+        const retains = { token }
+        await options.onRetain?.(retains)
+        return { installed: true, reason: 'The installer is running.', retains }
+      },
+    })
+    await app.service.start('stable')
+    await app.service.check()
+    await app.service.download()
+    await app.service.install()
+    // Every one of these launches is on the build the install was going to put
+    // in place. That says nothing about the installer, and changes nothing.
+    await relaunch(app.userDataPath, feed.base, '0.2.0').start('stable')
+    assert.equal(
+      readdirSync(join(app.userDataPath, 'handoff')).length,
+      1,
+      `${name}: the prepared copy is kept`,
+    )
+  }
+})
+
+test('an install that handed the copy to nothing leaves none behind', async (t) => {
+  const feed = await startFeed()
+  t.after(() => feed.close())
+  feed.set({ version: '0.2.0', sequence: 1, bytes: ARTIFACT, channel: 'stable' })
   const refused = harnessFor(feed.base, {
     install: async () => ({
       installed: false,
@@ -1197,7 +1345,7 @@ test('a copy a detached installer still holds outlives the call, and goes when t
   assert.deepEqual(
     readdirSync(join(refused.userDataPath, 'handoff')),
     [],
-    'an install that left no installer running leaves no prepared copy behind',
+    'a refused install has no installer holding anything, so its copy is removed',
   )
 })
 

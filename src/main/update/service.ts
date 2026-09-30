@@ -145,12 +145,11 @@ export class UpdateService {
       // this app is running from the new one rather than from it.
       await reapReplacedBundle(target.target, this.options.userDataPath).catch(() => undefined)
     }
-    // A prepared copy that a detached installer was still holding when this app
-    // was last closed is removed here, and only once that installer has gone and
-    // the build it was installing is the build this process is running.
-    await reapRetainedHandoff(this.options.userDataPath, this.options.currentVersion).catch(
-      () => undefined,
-    )
+    // A prepared copy a detached installer was still holding when this app was
+    // last closed is removed here, and only once that installer has said it
+    // finished and has gone. Nothing about this launch's own version, and
+    // nothing about a process this app never saw, can stand in for that.
+    await reapRetainedHandoff(this.options.userDataPath).catch(() => undefined)
     const trust = trustedUpdateKeys(this.options.env, this.options.packaged)
     if (trust.keys.length === 0) {
       this.failure = {

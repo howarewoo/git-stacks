@@ -622,18 +622,27 @@ The order is the point, and it belongs to the app rather than to the feed:
    from, the app closes and the installer finishes on its own.
 
 An installer that outlives the call that started it still owns the copy it was
-handed, so that copy is not removed with the run that made it: the Windows
-installer reopens its own executable after it starts, and the elevated copy that
-does the work runs from that same path. The next launch of the app removes it,
-and only when two separate questions both come back the right way — is the
-process that was spawned still there (asked of the process, never guessed from
-how long it has been), and is this app now running the build that installer was
-putting in place. Both are needed because neither is enough: a spawned process
-that has exited proves nothing while an elevated copy may still be starting from
-the file, and an app still running the build it already had is a launch in which
-the replacement has not happened yet. Every other way out of an install,
-including a refused launch, takes the directory that run created with it as
-before.
+handed, so that copy is not removed with the run that made it. The Windows
+installer reopens its own executable after it starts, and the elevated instance
+that does the work runs from that same path — so no process this app starts is
+the process that finishes, and its exit says nothing about the file being free.
+The run therefore writes a token it made up into the directory it made, beside
+the copy, before the installer exists, and the installer echoes that token back
+with the process id of the instance that finished the work.
+
+The next launch of the app removes the copy, and only on evidence it can place:
+the echo has to carry that run's own token, it has to have been written inside
+that run's own directory, and the process it names has to be gone — asked of
+the process with signal 0, where only "no such process" counts. Everything else
+keeps the copy: no echo at all, an echo carrying another attempt's token, one
+that names no process, a process still running, or one this app is not allowed
+to signal because it runs as another user. What the app happens to be running is
+not part of the question, because an app on the new build is equally consistent
+with an install that finished and one whose installer is still starting up from
+that file. A copy kept is a file this app can clean up later; a copy removed
+early is an update installing from nothing. Every other way out of an install,
+including a refused launch and a stop before the installer starts, takes the
+directory that run created with it as before.
 
 Once the platform installer owns the files, the update cannot be stopped: a
 cancel or a channel change at that point is reported as too late rather than
@@ -685,11 +694,17 @@ about a signature is only ever exercised as far as the operating system answers.
 acceptance step, and it is written out under Platform support below. The
 handoff's directory and file modes describe POSIX protection; the equivalent
 Windows isolation is a documented limit, not something the tests establish.
-Keeping that copy is proved over a real detached process that reopens the
-prepared executable after the install call has returned, and across the next
-launch with that process running, then gone with the app still on the old build,
-then gone with the app on the installed build. What the NSIS installer itself
-does with the file in between is not proved, because no test process runs it.
+Keeping that copy is proved over the real service and real temporary files, with
+a two-process installer standing in for the Windows one: the process that is
+started is not the process that does the work. The copy is kept while the
+install is unfinished, kept when the installer has answered but is still
+running, and removed only once the answer carries that run's own token and names
+a process that has gone — and then only that directory, never anything else
+beside it. Every way of being unable to place the answer keeps the copy. What
+the NSIS installer itself does with the file in between is not proved, because
+no test process runs it: the section that answers is part of the installer this
+repository builds (`build/installer.nsh`), and installing a real signed release
+is the acceptance step.
 
 ### Channels
 
