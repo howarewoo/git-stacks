@@ -52,6 +52,28 @@ jobs:
             test -n "$APPLE_ID" && test -n "$APPLE_APP_SPECIFIC_PASSWORD" && test -n "$APPLE_TEAM_ID"
           fi
       - run: npm ci
+      - name: Put the MSVC toolchain on PATH
+        # The clone promotion helper is compiled from source at build time, and a
+        # Windows runner does not put MSVC on PATH by itself. Without this the
+        # release build stops where it has no way to promote a clone.
+        if: matrix.platform == 'win32'
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vs) { throw 'No Visual Studio C++ toolchain on this runner' }
+          $environment = cmd /c "`"$vs\VC\Auxiliary\Build\vcvars64.bat`" >nul && set"
+          $toolchain = $false
+          foreach ($line in $environment) {
+            if ($line -notmatch '^([^=]+)=(.*)$') { continue }
+            if ($matches[1] -eq 'Path') {
+              if ($matches[2] -match 'VC\\Tools\\MSVC') { $toolchain = $true }
+              $matches[2] -split ';' | Where-Object { $_ } >> $env:GITHUB_PATH
+            } else {
+              "$line" >> $env:GITHUB_ENV
+            }
+          }
+          if (-not $toolchain) { throw 'The MSVC toolchain did not reach PATH' }
       - run: npm test
       - run: npm run dist
         env:

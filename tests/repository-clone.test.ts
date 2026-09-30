@@ -519,9 +519,35 @@ test('promotion moves a staged clone into a free destination and leaves no stagi
 
     assert.deepEqual(await promoteRepository(staging, destination), { moved: true })
 
-    assert.equal(await readFile(join(destination, '.git', 'HEAD'), 'utf8'), 'ref: refs/heads/main\n')
+    assert.equal(
+      await readFile(join(destination, '.git', 'HEAD'), 'utf8'),
+      'ref: refs/heads/main\n',
+    )
     assert.equal(await readFile(join(destination, 'README.md'), 'utf8'), 'the clone\n')
     assert.deepEqual(await readdir(parent), ['widgets'])
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('a promotion carries a path that is not ASCII through the helper unchanged', async () => {
+  const root = await temporary()
+  try {
+    // Both the parent and the folder name carry characters outside ASCII, so a
+    // helper that decoded its arguments as bytes in the console's own encoding
+    // would rename a path that does not exist and refuse.
+    const parent = join(root, 'wörkspaces-日本語')
+    await mkdir(parent)
+    const staging = await stagedClone(parent, 'tökén')
+    const destination = join(parent, 'wídgets-日本')
+
+    assert.deepEqual(await promoteRepository(staging, destination), { moved: true })
+
+    assert.equal(
+      await readFile(join(destination, '.git', 'HEAD'), 'utf8'),
+      'ref: refs/heads/main\n',
+    )
+    assert.deepEqual(await readdir(parent), ['wídgets-日本'])
   } finally {
     await rm(root, { recursive: true, force: true })
   }
@@ -698,7 +724,9 @@ test('readGitEnvironment redacts secret tokens, shell commands, and absolute pat
     const configFile = join(root, 'sentinel.gitconfig')
     await writeFile(configFile, configContent, 'utf8')
 
-    const beforeHash = createHash('sha256').update(await readFile(configFile)).digest('hex')
+    const beforeHash = createHash('sha256')
+      .update(await readFile(configFile))
+      .digest('hex')
 
     const prevGlobal = process.env.GIT_CONFIG_GLOBAL
     const prevNoSystem = process.env.GIT_CONFIG_NOSYSTEM
@@ -718,7 +746,9 @@ test('readGitEnvironment redacts secret tokens, shell commands, and absolute pat
       assert.equal(serialized.includes('custom-credential-helper'), false)
 
       // The git configuration file itself remains completely unchanged (read-only)
-      const afterHash = createHash('sha256').update(await readFile(configFile)).digest('hex')
+      const afterHash = createHash('sha256')
+        .update(await readFile(configFile))
+        .digest('hex')
       assert.equal(afterHash, beforeHash)
       assert.equal(await readFile(configFile, 'utf8'), configContent)
     } finally {
@@ -749,13 +779,7 @@ test('sanitizeCredentialHelper projects known helpers and redacts custom command
   // Known helper with flags or tokens resolves to safe name without exposing flags
   assert.equal(sanitizeCredentialHelper('cache --timeout=3600'), 'cache')
   // Shell snippets, commands with secrets, or unknown binaries project to 'custom'
-  assert.equal(
-    sanitizeCredentialHelper('!f() { echo password=SECRET_TOKEN; }; f'),
-    'custom',
-  )
-  assert.equal(
-    sanitizeCredentialHelper('/usr/bin/custom-helper --secret=XYZ'),
-    'custom',
-  )
+  assert.equal(sanitizeCredentialHelper('!f() { echo password=SECRET_TOKEN; }; f'), 'custom')
+  assert.equal(sanitizeCredentialHelper('/usr/bin/custom-helper --secret=XYZ'), 'custom')
   assert.equal(sanitizeCredentialHelper('unknown-binary'), 'custom')
 })

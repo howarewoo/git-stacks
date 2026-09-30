@@ -9,6 +9,10 @@
  *   Linux   renameat2(AT_FDCWD, from, AT_FDCWD, to, RENAME_NOREPLACE)
  *   Windows MoveFileExW without MOVEFILE_REPLACE_EXISTING
  *
+ * The two arguments are absolute paths. On Windows they arrive as UTF-16
+ * through the wide entry point, so a path that is not ASCII is never decoded
+ * with the console's own code page.
+ *
  * There is deliberately no fallback. A platform or filesystem without a
  * no-replace rename is reported as unsupported (exit 4) so the caller can refuse
  * the promotion; a check-then-rename would claim a guarantee the filesystem does
@@ -31,47 +35,78 @@
 #define ENOTSUP EOPNOTSUPP
 #endif
 
+/* The exit codes this helper promises; see the header comment. */
+#define EXIT_MOVED 0
+#define EXIT_FAILED 1
+#define EXIT_USAGE 2
+#define EXIT_DESTINATION_EXISTS 3
+#define EXIT_UNSUPPORTED 4
+#define EXIT_CROSS_DEVICE 5
+
+/* How a failed rename is reported. Every platform reaches the same codes. */
+static int exit_code(int failure) {
+  switch (failure) {
+    case EEXIST:
+    case ENOTEMPTY:
+      return EXIT_DESTINATION_EXISTS;
+    /* ENOSYS is a kernel without renameat2; EINVAL and ENOTSUP are a filesystem
+     * that does not implement the flag. Neither falls back. */
+    case ENOSYS:
+    case EINVAL:
+    case ENOTSUP:
+      return EXIT_UNSUPPORTED;
+    case EXDEV:
+      return EXIT_CROSS_DEVICE;
+    default:
+      return EXIT_FAILED;
+  }
+}
+
 #if defined(_WIN32)
 
-#include <stdlib.h>
 #include <windows.h>
 
 #ifndef MOVEFILE_WRITE_THROUGH
 #define MOVEFILE_WRITE_THROUGH 0x00000008
 #endif
 
-static wchar_t *widen(const char *value) {
-  int size = MultiByteToWideChar(CP_UTF8, 0, value, -1, NULL, 0);
-  if (size <= 0) return NULL;
-  wchar_t *wide = (wchar_t *)malloc((size_t)size * sizeof(wchar_t));
-  if (wide == NULL) return NULL;
-  if (MultiByteToWideChar(CP_UTF8, 0, value, -1, wide, size) <= 0) {
-    free(wide);
-    return NULL;
-  }
-  return wide;
+/** The Win32 error behind the last refusal, kept for the diagnostic line. */
+static unsigned long promotion_failure = 0;
+
+static int rename_no_replace(const wchar_t *from, const wchar_t *to) {
+  /* Without MOVEFILE_REPLACE_EXISTING the move fails when the target exists. */
+  int moved = MoveFileExW(from, to, MOVEFILE_WRITE_THROUGH);
+  promotion_failure = moved ? 0 : (unsigned long)GetLastError();
+  if (moved) return 0;
+  if (promotion_failure == ERROR_ALREADY_EXISTS || promotion_failure == ERROR_FILE_EXISTS)
+    errno = EEXIST;
+  else if (promotion_failure == ERROR_NOT_SAME_DEVICE)
+    errno = EXDEV;
+  else if (promotion_failure == ERROR_NOT_SUPPORTED)
+    errno = ENOTSUP;
+  else
+    errno = EIO;
+  return -1;
 }
 
-static int rename_no_replace(const char *from, const char *to) {
-  wchar_t *wide_from = widen(from);
-  wchar_t *wide_to = widen(to);
-  if (wide_from == NULL || wide_to == NULL) {
-    free(wide_from);
-    free(wide_to);
-    errno = ENOMEM;
-    return -1;
+/** The diagnostic is ASCII and carries the Win32 code, not the paths: the
+ * console code page must never be mistaken for the path encoding. */
+static int run(const wchar_t *from, const wchar_t *to) {
+  if (rename_no_replace(from, to) == 0) return EXIT_MOVED;
+  fprintf(stderr, "promote-repository: rename failed (win32 error %lu)\n", promotion_failure);
+  return exit_code(errno);
+}
+
+int wmain(int argc, wchar_t **argv) {
+  /* Arguments arrive as UTF-16. A narrow entry point would be handed bytes
+   * decoded with the active code page, which corrupts a repository path that
+   * is not ASCII. Diagnostics stay ASCII so no console code page is involved
+   * on either path. */
+  if (argc != 3) {
+    fprintf(stderr, "usage: promote-repository <staging> <destination>\n");
+    return EXIT_USAGE;
   }
-  /* Without MOVEFILE_REPLACE_EXISTING the move fails when the target exists. */
-  int moved = MoveFileExW(wide_from, wide_to, MOVEFILE_WRITE_THROUGH);
-  DWORD failure = moved ? 0 : GetLastError();
-  free(wide_from);
-  free(wide_to);
-  if (moved) return 0;
-  if (failure == ERROR_ALREADY_EXISTS || failure == ERROR_FILE_EXISTS) errno = EEXIST;
-  else if (failure == ERROR_NOT_SAME_DEVICE) errno = EXDEV;
-  else if (failure == ERROR_NOT_SUPPORTED) errno = ENOTSUP;
-  else errno = EIO;
-  return -1;
+  return run(argv[1], argv[2]);
 }
 
 #elif defined(__APPLE__)
@@ -85,6 +120,22 @@ static int rename_no_replace(const char *from, const char *to) {
 
 static int rename_no_replace(const char *from, const char *to) {
   return renamex_np(from, to, RENAME_EXCL);
+}
+
+/** POSIX argv is already the byte sequence the filesystem takes, so a path is
+ * passed through without any encoding conversion. */
+static int run(const char *from, const char *to) {
+  if (rename_no_replace(from, to) == 0) return EXIT_MOVED;
+  fprintf(stderr, "%s -> %s: %s\n", from, to, strerror(errno));
+  return exit_code(errno);
+}
+
+int main(int argc, char **argv) {
+  if (argc != 3) {
+    fprintf(stderr, "usage: promote-repository <staging> <destination>\n");
+    return EXIT_USAGE;
+  }
+  return run(argv[1], argv[2]);
 }
 
 #elif defined(__linux__)
@@ -109,37 +160,35 @@ static int rename_no_replace(const char *from, const char *to) {
 #endif
 }
 
-#else
-
-static int rename_no_replace(const char *from, const char *to) {
-  (void)from;
-  (void)to;
-  errno = ENOSYS;
-  return -1;
+static int run(const char *from, const char *to) {
+  if (rename_no_replace(from, to) == 0) return EXIT_MOVED;
+  fprintf(stderr, "%s -> %s: %s\n", from, to, strerror(errno));
+  return exit_code(errno);
 }
-
-#endif
 
 int main(int argc, char **argv) {
   if (argc != 3) {
     fprintf(stderr, "usage: promote-repository <staging> <destination>\n");
-    return 2;
+    return EXIT_USAGE;
   }
-  if (rename_no_replace(argv[1], argv[2]) == 0) return 0;
-  switch (errno) {
-    case EEXIST:
-    case ENOTEMPTY:
-      return 3;
-    /* ENOSYS is a kernel without renameat2; EINVAL and ENOTSUP are a
-     * filesystem that does not implement the flag. Neither falls back. */
-    case ENOSYS:
-    case EINVAL:
-    case ENOTSUP:
-      return 4;
-    case EXDEV:
-      return 5;
-    default:
-      fprintf(stderr, "%s -> %s: %s\n", argv[1], argv[2], strerror(errno));
-      return 1;
-  }
+  return run(argv[1], argv[2]);
 }
+
+#else
+
+static int run(const char *from, const char *to) {
+  (void)from;
+  (void)to;
+  return exit_code(ENOSYS);
+}
+
+int main(int argc, char **argv) {
+  (void)argv;
+  if (argc != 3) {
+    fprintf(stderr, "usage: promote-repository <staging> <destination>\n");
+    return EXIT_USAGE;
+  }
+  return run(argv[1], argv[2]);
+}
+
+#endif

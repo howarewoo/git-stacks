@@ -20,11 +20,15 @@ function candidates() {
   // standard mode hides behind __USE_MISC.
   const posix = { prefix: ['-O2', '-std=gnu11', '-Wall', '-Wextra'], suffix: [] }
   if (process.platform === 'win32') {
-    return [
-      { command: 'clang', prefix: ['-O2', '-std=gnu11', '-Wall'], suffix: [] },
-      { command: 'gcc', prefix: ['-O2', '-std=gnu11', '-Wall'], suffix: [] },
-      { command: 'cl', prefix: ['/nologo', '/O2', '/W3'], suffix: [] },
-    ]
+    // -municode links the wmain entry point, so the two arguments reach the
+    // helper as UTF-16 instead of bytes decoded with the console code page.
+    // MSVC's linker selects wmainCRTStartup on its own when it finds wmain.
+    const mingw = { prefix: ['-O2', '-std=gnu11', '-Wall', '-Wextra', '-municode'], suffix: [] }
+    const msvc = { command: 'cl', prefix: ['/nologo', '/O2', '/W3'], suffix: [] }
+    const chosen = process.env.CC
+      ? [process.env.CC === 'cl' ? msvc : { command: process.env.CC, ...mingw }]
+      : []
+    return [...chosen, { command: 'gcc', ...mingw }, { command: 'clang', ...mingw }, msvc]
   }
   const chosen = process.env.CC ? [{ command: process.env.CC, ...posix }] : []
   return [

@@ -25,7 +25,11 @@ available on the build machine (`cc`, `gcc`, `clang`, or `cl`; set `CC` to
 choose). The helper is compiled from source at build time and copied into the
 packaged app as `resources/promote`; nothing is compiled at runtime, and a build
 that cannot compile it fails instead of shipping a build that would fall back to
-an unsafe rename.
+an unsafe rename. `npm run package` and `npm run dist` finish by running the
+helper from inside the packaged app, so a build that left it out fails there.
+The signed release workflow compiles on a runner for each target platform and
+puts the Visual Studio toolchain on `PATH` for its Windows runner, which does
+not have `cl` by default.
 
 When changing `GitAction`, update the renderer fixture's action messages in
 `tests/renderer/fixtures/control.ts` and affected test payloads. `npm run build`
