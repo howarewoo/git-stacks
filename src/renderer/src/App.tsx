@@ -1568,6 +1568,7 @@ function App() {
                     <TooltipTrigger asChild>
                       <span
                         className="ahead-behind relative z-[2] rounded-sm outline-none focus-visible:ring-2 focus-visible:ring-[var(--ring)]"
+                        role="group"
                         tabIndex={0}
                         aria-label={
                           branch.upstream

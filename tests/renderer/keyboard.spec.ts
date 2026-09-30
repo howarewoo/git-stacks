@@ -1,25 +1,30 @@
 import { expect, test } from '@playwright/test'
-import { getDispatchedActions, getOpenedExternalUrls, openGallery, settle } from './helpers/gallery'
+import {
+  getDispatchedActions,
+  getOpenedExternalUrls,
+  getViewFilterInput,
+  openGallery,
+  settle,
+} from './helpers/gallery'
 import { switchDestination } from './helpers/destinations'
 import { openDeleteLocalBranchDialog, openNewBranchDialog } from './helpers/dialogs'
 import { assertFocusRestored, assertModalDialogFocusTrap } from './helpers/keyboard'
 
 test.describe('Keyboard routes and accessibility navigation', () => {
-  test('global shortcut Cmd+K / Ctrl+K focuses repository search input', async ({ page }) => {
+  test('the search shortcut focuses the in-view filter and the palette shortcut opens the palette', async ({
+    page,
+  }) => {
     await openGallery(page, { scenario: 'shell-connected' })
-
-    const searchInput = page.getByRole('textbox', {
-      name: 'Search branches, files, and pull requests',
-    })
+    const searchInput = getViewFilterInput(page)
     await expect(searchInput).not.toBeFocused()
-
-    // Dispatch Cmd+K (macOS) or Ctrl+K
-    await page.keyboard.press('Meta+k')
-    if (!(await searchInput.evaluate((el) => el === document.activeElement))) {
-      await page.keyboard.press('Control+k')
-    }
-
+    await page.keyboard.press('/')
     await expect(searchInput).toBeFocused()
+    await searchInput.blur()
+    await page.keyboard.press('Meta+k')
+    const palette = page.getByRole('dialog', { name: 'Command palette' })
+    if (!(await palette.isVisible())) await page.keyboard.press('Control+k')
+    await expect(palette).toBeVisible()
+    await expect(palette.getByRole('combobox')).toBeFocused()
   })
 
   test('workspace navigation buttons are keyboard activatable', async ({ page }) => {

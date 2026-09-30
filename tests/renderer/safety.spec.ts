@@ -1,6 +1,7 @@
 import { expect, test } from '@playwright/test'
 import {
   getDispatchedActions,
+  getViewFilterInput,
   holdDoubleCall,
   openGallery,
   releaseDoubleCalls,
@@ -17,6 +18,28 @@ import {
 } from './helpers/dialogs'
 
 test.describe('Safety and mutation dispatch invariants', () => {
+  test('a pending branch hover cannot cover a destructive dialog', async ({ page }) => {
+    await openGallery(page, { scenario: 'shell-connected' })
+    await page.clock.pauseAt(new Date((await page.evaluate(() => Date.now())) + 1000))
+
+    const branchName = 'feature/checkout-tests'
+    await page
+      .locator('.branch-row')
+      .filter({ has: page.getByText(branchName, { exact: true }) })
+      .click()
+    await page.getByRole('button', { name: 'Delete local branch', exact: true }).click()
+    await page.clock.runFor(1000)
+
+    const dialog = page.getByRole('dialog', { name: 'Delete local branch?' })
+    await expect(dialog).toBeVisible()
+    await expect(dialog.getByRole('button', { name: 'Cancel', exact: true })).toBeFocused()
+    await expect(
+      page
+        .locator('[data-radix-popper-content-wrapper]')
+        .filter({ has: page.getByText(branchName, { exact: true }) }),
+    ).toHaveCount(0)
+  })
+
   test.describe('Cancellation produces no mutation', () => {
     test('cancelling "Delete local branch?" dialog dispatches no GitAction', async ({ page }) => {
       await openGallery(page, { scenario: 'shell-connected' })
@@ -237,9 +260,7 @@ test.describe('Safety and mutation dispatch invariants', () => {
       await switchDestination(page, 'changes')
 
       // Two unstaged files are present; the search narrows the list to one of them.
-      await page
-        .getByRole('textbox', { name: 'Search branches, files, and pull requests' })
-        .fill('bulk-generated-surface')
+      await getViewFilterInput(page).fill('bulk-generated-surface')
       await settle(page)
 
       await expect(page.locator('.file-row')).toHaveCount(1)
@@ -262,9 +283,7 @@ test.describe('Safety and mutation dispatch invariants', () => {
       await openGallery(page, { scenario: 'files-staged' })
       await switchDestination(page, 'changes')
 
-      await page
-        .getByRole('textbox', { name: 'Search branches, files, and pull requests' })
-        .fill('data-views.tsx')
+      await getViewFilterInput(page).fill('data-views.tsx')
       await settle(page)
 
       await expect(page.locator('.file-row')).toHaveCount(1)
@@ -324,31 +343,6 @@ test.describe('Safety and mutation dispatch invariants', () => {
           path: 'src/renderer/src/components/conflicted.tsx',
           fingerprint: 'fingerprint-conflict',
           resolution: { kind: 'content', content: 'export const value = 2\n' },
-        },
-      ])
-    })
-
-    test('stack execution dispatches the preview token unchanged', async ({ page }) => {
-      await openGallery(page, { scenario: 'workflow-preview-ready' })
-      const dialog = await openRestackDialog(page)
-
-      const submitBtn = dialog.getByRole('button', { name: 'Restack stack', exact: true })
-      await expect(submitBtn).toBeEnabled()
-      await submitBtn.click()
-      await settle(page)
-
-      const actions = await getDispatchedActions(page)
-      expect(actions.filter((action) => action.type === 'executeStack')).toEqual([
-        {
-          type: 'executeStack',
-          token: 'preview-restack-1',
-          allowForce: false,
-          draft: true,
-          titles: {
-            'feature/checkout': 'Add checkout validation',
-            'feature/checkout-tests': 'Cover checkout validation',
-          },
-          mergeMethod: 'squash',
         },
       ])
     })

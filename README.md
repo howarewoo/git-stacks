@@ -25,6 +25,10 @@ typechecks these test consumers as well as the application.
 Stale-preview publishing tests assert rejection and unchanged local and remote
 refs. Diagnostic wording is not part of that behavioral contract.
 
+Renderer checks distinguish the `/` in-view filter from the `Mod+K` command
+palette. The safety suite advances pending hover timers after opening a
+destructive dialog to verify that contextual cards cannot cover its warning.
+
 ## Performance budgets
 
 Git Stacks is used on repositories far larger than the ones it was built

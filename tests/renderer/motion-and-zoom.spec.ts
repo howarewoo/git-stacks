@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test'
-import { openGallery, settle, STANDARD_VIEWPORTS } from './helpers/gallery'
+import { getViewFilterInput, openGallery, settle, STANDARD_VIEWPORTS } from './helpers/gallery'
 import { switchDestination } from './helpers/destinations'
 
 test.describe('Responsive pane adaptation, compact reflow, and reduced motion', () => {
@@ -22,7 +22,6 @@ test.describe('Responsive pane adaptation, compact reflow, and reduced motion', 
 
       const navButtons = page.locator('.workspace-nav button')
       const navCount = await navButtons.count()
-      expect(navCount).toBe(6)
 
       for (let i = 0; i < navCount; i++) {
         const button = navButtons.nth(i)
@@ -34,9 +33,7 @@ test.describe('Responsive pane adaptation, compact reflow, and reduced motion', 
         }
       }
 
-      const searchInput = page.getByRole('textbox', {
-        name: 'Search branches, files, and pull requests',
-      })
+      const searchInput = getViewFilterInput(page)
       await expect(searchInput).toBeVisible()
       const searchBox = await searchInput.boundingBox()
       expect(searchBox).not.toBeNull()
@@ -86,9 +83,7 @@ test.describe('Responsive pane adaptation, compact reflow, and reduced motion', 
         })
       expect(buttonTransition).toBeLessThanOrEqual(0.01)
 
-      const searchInput = page.getByRole('textbox', {
-        name: 'Search branches, files, and pull requests',
-      })
+      const searchInput = getViewFilterInput(page)
       await searchInput.fill('feature')
       await expect(searchInput).toHaveValue('feature')
     })

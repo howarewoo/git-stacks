@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test'
-import { openGallery, settle } from './helpers/gallery'
+import { getViewFilterInput, openGallery, settle } from './helpers/gallery'
 import { DESTINATIONS, switchDestination } from './helpers/destinations'
 import {
   openDeleteLocalBranchDialog,
@@ -206,9 +206,7 @@ test.describe('Automated accessibility audits and contrast', () => {
     }) => {
       await openGallery(page, { scenario: 'shell-connected' })
 
-      const searchInput = page.getByRole('textbox', {
-        name: 'Search branches, files, and pull requests',
-      })
+      const searchInput = getViewFilterInput(page)
       const measurement = await measureFocusIndicatorContrast(page, searchInput)
       recordContrast(measurement)
 
@@ -230,10 +228,7 @@ test.describe('Automated accessibility audits and contrast', () => {
       const readings = await measureControlBorders(page, [
         {
           label: 'repository search field',
-          locator: page.getByRole('textbox', {
-            name: 'Search branches, files, and pull requests',
-            exact: true,
-          }),
+          locator: getViewFilterInput(page),
         },
         {
           label: 'Fetch secondary toolbar button',

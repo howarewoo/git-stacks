@@ -1,4 +1,4 @@
-import { expect, type Page } from '@playwright/test'
+import { expect, type Locator, type Page } from '@playwright/test'
 import { DEFAULT_SCENARIO, type GalleryRouteId, type ScenarioName } from '../fixtures/manifest'
 import type { FixtureCall, FixtureCallRecord } from '../fixtures/types'
 import { galleryUrl } from '../fixtures/urls'
@@ -22,6 +22,12 @@ export const STANDARD_VIEWPORTS = {
 } as const
 
 export type StandardViewportName = keyof typeof STANDARD_VIEWPORTS
+
+export function getViewFilterInput(page: Page): Locator {
+  return page.getByRole('textbox', {
+    name: 'Filter current view branches, files, and pull requests',
+  })
+}
 
 export interface OpenGalleryOptions {
   scenario?: ScenarioName | string

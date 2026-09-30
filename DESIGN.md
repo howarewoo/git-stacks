@@ -290,6 +290,7 @@ The renderer builds on the repository's existing [shadcn/ui](https://ui.shadcn.c
 ### Hover Cards and Tooltips
 
 - **Hover card:** White overlay, 12px utility radius, medium elevation, 16px padding, and popover z-index 70.
+- **Delayed opening:** A repository hover card opens only while its trigger is hovered or contains focus. A pending timer must not reopen it after navigation or a dialog has taken the interaction.
 - **Tooltip:** Workbench Ink background, white text, 6px utility radius, 8px/12px padding, and medium elevation at popover z-index 70.
 
 ### Git and Diff States
