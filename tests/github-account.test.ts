@@ -1865,6 +1865,34 @@ test('a host switch cannot retire the account that replaced the retiring one', a
   onGitHubFailure(null)
 })
 
+test('a successor claiming before retirement starts still removes the retired credential', async () => {
+  const { createSuccessor, first, firstVault, protector, secondChanges, stateFile, vaultFile } =
+    await hostSwitchHarness()
+  const before = JSON.parse(await readFile(stateFile, 'utf8')) as { reference: string }
+
+  const signingOut = first.signOut()
+  const successor = createSuccessor()
+  await signingOut
+
+  await assert.rejects(readFile(stateFile, 'utf8'), { code: 'ENOENT' })
+  assert.deepEqual(await firstVault.references(), [], 'the old sealed credential was retired')
+
+  await successor.signIn()
+  await waitForState(secondChanges, (status) => status.login === 'grace')
+  const after = JSON.parse(await readFile(stateFile, 'utf8')) as { host: string; reference: string }
+  assert.equal(after.host, 'ghe.example.com')
+  assert.notEqual(after.reference, before.reference)
+  const vault = new CredentialVault(vaultFile, protector)
+  assert.deepEqual(
+    (await vault.references()).map(({ reference }) => reference),
+    [after.reference],
+    'signing in on the new host leaves no orphan from the retired host',
+  )
+
+  setGitHubCredentialSource(null)
+  onGitHubFailure(null)
+})
+
 test('a restore that finishes after the account was replaced adopts nothing and reports nothing', async () => {
   const { createSuccessor, protector, secondChanges, stateFile, vaultFile } =
     await hostSwitchHarness()

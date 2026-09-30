@@ -600,16 +600,16 @@ export class GitHubAccount implements GitHubCredentialSource {
    * account for the next host may be created while one of them is still queued.
    * Clearing the whole vault and deleting the state file would take the
    * successor's credential and metadata with it, so both are done only for the
-   * reference these files name for this host — and only while this account is
-   * still the one that owns them.
+   * reference these files name for this host, even when the successor has
+   * already claimed the files but has not written its own identity yet.
    */
   private async retireStoredIdentity(): Promise<void> {
     const stored = await readAccount(this.options.stateFile)
     // Someone else's account is named here now: its credential and its metadata
     // both belong to the account that replaced this one.
-    if (this.replaced() || (stored !== null && stored.host !== this.host)) return
+    if (stored !== null && stored.host !== this.host) return
     if (stored) await this.options.vault.remove(stored.reference)
-    else await this.options.vault.clear()
+    else if (!this.replaced()) await this.options.vault.clear()
     await rm(this.options.stateFile, { force: true })
   }
 
