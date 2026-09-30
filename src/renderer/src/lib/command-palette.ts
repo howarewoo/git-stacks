@@ -4,6 +4,7 @@ import type {
   PullRequest,
   RecentRepository,
   RepositorySnapshot,
+  SurgeryRequest,
 } from '../../../shared/types'
 import type { WorkflowRequest } from '../components/workflow-dialog'
 import {
@@ -307,6 +308,104 @@ export function buildPaletteItems(context: BuildPaletteContext): PaletteItem[] {
         }
       : { kind: 'view', view: 'stacks' },
   })
+
+  // Stack surgery: insert, move, and remove a layer
+  const layerAbove = selectedBranch
+    ? (snapshot?.branches.find(
+        (branch) => !branch.remote && branch.parent === selectedBranch.name,
+      ) ?? null)
+    : null
+  const moveDownTarget = selectedBranch?.parent ?? null
+  // Moving a layer up means passing the layer above it, so that layer is the target.
+  const moveUpTarget = layerAbove?.name ?? null
+  const surgeryReason = !snapshot
+    ? 'Open a repository first'
+    : !selectedBranch
+      ? 'Select a branch first'
+      : selectedBranch.remote
+        ? 'Stack surgery only moves local branches'
+        : selectedBranch.name === snapshot.defaultBranch
+          ? 'The default branch is the stack trunk'
+          : operationActive
+            ? 'Operation in progress'
+            : isBusy
+              ? 'App is busy'
+              : undefined
+  const surgeryRequests: {
+    id: string
+    label: string
+    detail: string
+    keywords: string
+    disabledReason: string | undefined
+    request: SurgeryRequest | null
+  }[] = [
+    {
+      id: 'stack.insert',
+      label: selectedBranch ? `Insert a layer on ${selectedBranch.name}…` : 'Insert a stack layer…',
+      detail: 'Preview a new layer between two layers, with every rewrite, push and base change',
+      keywords: 'insert add new layer between stack surgery reorder',
+      disabledReason: surgeryReason,
+      request: selectedBranch
+        ? {
+            kind: 'insert',
+            branch: selectedBranch.name,
+            name: '',
+          }
+        : null,
+    },
+    {
+      id: 'stack.moveDown',
+      label: selectedBranch ? `Move ${selectedBranch.name} down a layer…` : 'Move a layer down…',
+      detail: 'Preview reparenting this layer onto the one below it',
+      keywords: 'move down reparent reorder layer stack surgery',
+      disabledReason: moveDownTarget
+        ? surgeryReason
+        : (surgeryReason ??
+          'This layer already sits directly on the trunk or has no recorded parent'),
+      request:
+        selectedBranch && moveDownTarget
+          ? { kind: 'move', branch: selectedBranch.name, target: moveDownTarget }
+          : null,
+    },
+    {
+      id: 'stack.moveUp',
+      label: selectedBranch ? `Move ${selectedBranch.name} up a layer…` : 'Move a layer up…',
+      detail: 'Preview reparenting this layer above the layer it currently sits on',
+      keywords: 'move up reparent reorder layer stack surgery',
+      disabledReason: moveUpTarget
+        ? surgeryReason
+        : (surgeryReason ?? 'No layer sits above this one'),
+      request:
+        selectedBranch && moveUpTarget
+          ? { kind: 'move', branch: selectedBranch.name, target: moveUpTarget }
+          : null,
+    },
+    {
+      id: 'stack.remove',
+      label: selectedBranch ? `Remove ${selectedBranch.name} from the stack…` : 'Remove a layer…',
+      detail:
+        'Preview deleting this local branch, retargeting the layers above it, and closing its pull request',
+      keywords: 'remove delete drop layer stack surgery unstack retarget',
+      disabledReason: layerAbove
+        ? (surgeryReason ?? 'Reorder the layers above this one first')
+        : surgeryReason,
+      request: selectedBranch ? { kind: 'remove', branch: selectedBranch.name } : null,
+    },
+  ]
+  for (const surgery of surgeryRequests) {
+    items.push({
+      id: surgery.id,
+      label: surgery.label,
+      detail: surgery.detail,
+      group: 'Stack navigation',
+      keywords: surgery.keywords,
+      disabled: Boolean(surgery.disabledReason),
+      disabledReason: surgery.disabledReason,
+      intent: surgery.request
+        ? { kind: 'workflow', request: { kind: 'surgery', request: surgery.request } }
+        : { kind: 'view', view: 'stacks' },
+    })
+  }
 
   // Publish / Sync stack
   const canPublish = Boolean(

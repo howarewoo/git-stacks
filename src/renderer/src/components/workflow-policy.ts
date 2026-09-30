@@ -19,6 +19,7 @@ export type WorkflowKind =
   | 'forcePush'
   | 'commitAction'
   | 'stack'
+  | 'surgery'
   | 'pr'
   | 'confirm'
 
@@ -176,7 +177,7 @@ function needsTypedConfirmation(input: WorkflowGuardInput): boolean {
   return (
     input.kind === 'forcePush' ||
     input.kind === 'deleteRemote' ||
-    (input.kind === 'stack' && input.allowForce)
+    ((input.kind === 'stack' || input.kind === 'surgery') && input.allowForce)
   )
 }
 
@@ -198,7 +199,7 @@ export function workflowBlocker(input: WorkflowGuardInput): WorkflowBlocker | nu
   if (input.finished) return block('completed')
   if (input.capturedPath !== input.currentPath) return block('repository-changed')
 
-  if (input.kind === 'stack') {
+  if (input.kind === 'stack' || input.kind === 'surgery') {
     if (!input.previewToken) return block('preview-missing')
     if (input.rejectedTokens.includes(input.previewToken)) return block('preview-stale')
     if (input.previewBlockers.length > 0) return block('preview-blocked')
@@ -223,7 +224,11 @@ export function workflowBlocker(input: WorkflowGuardInput): WorkflowBlocker | nu
       return block('confirmation-incomplete')
   }
 
-  if (nameKinds.includes(input.kind) && !input.name.trim()) return block('name-required')
+  if (
+    (nameKinds.includes(input.kind) || (input.kind === 'surgery' && input.requiresName)) &&
+    !input.name.trim()
+  )
+    return block('name-required')
 
   if (input.kind === 'pr') {
     if (input.previewToken && input.rejectedTokens.includes(input.previewToken))
@@ -241,6 +246,8 @@ export function workflowBlocker(input: WorkflowGuardInput): WorkflowBlocker | nu
     if (input.untitledBranches.length > 0) return block('publish-title-required')
     if (input.requiresLeaseApproval && !input.allowForce) return block('lease-approval-required')
   }
+  if (input.kind === 'surgery' && input.requiresLeaseApproval && !input.allowForce)
+    return block('lease-approval-required')
 
   return null
 }

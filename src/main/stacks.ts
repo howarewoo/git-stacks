@@ -22,6 +22,7 @@ import type {
   StackPreview,
   StackProgress,
   StackStep,
+  SurgeryPreview,
   SubmitStackAction,
 } from '../shared/types'
 import {
@@ -80,6 +81,14 @@ import {
   type SyncRemoteRelation,
 } from './sync-stack'
 import { runLinkIssueAction, runUnlinkIssueAction } from './issue-links'
+import {
+  planSurgery,
+  type SurgeryCapture,
+  type SurgeryLayerFacts,
+  type SurgeryPlan,
+  type SurgeryPullRequestPlan,
+  type SurgeryRequest,
+} from './stack-surgery'
 
 const PLAN_TTL_MS = 5 * 60_000
 const JOURNAL_VERSION = 1
@@ -148,6 +157,8 @@ interface StackPlan {
   mergeMethods: ('merge' | 'squash' | 'rebase')[]
   /** Present only for a sync preview: the facts the per-layer classification rests on. */
   sync: SyncCapture | null
+  /** A surgery re-reads pull requests and native stacks like a publish plan does. */
+  revalidateRemote?: boolean
 }
 
 interface JournalEntry {
@@ -194,6 +205,71 @@ interface StackJournal {
   status: 'running' | 'conflict' | 'uncertain' | 'aborting'
   message: string
   syncPushes?: SyncPushConfig
+  created?: CreatedBranch[]
+  removed?: RemovedBranch[]
+  surgery?: SurgeryConfig
+}
+
+/** A branch a surgery creates, tracked so an abort removes the ref it made. */
+interface CreatedBranch {
+  branch: string
+  oid: string
+  parent: string
+  parentTip: string
+}
+
+/** A branch a surgery removes, tracked so an abort restores the ref it deleted. */
+interface RemovedBranch {
+  branch: string
+  oldTip: string
+  oldParent: string | null
+  oldParentTip: string | null
+  backupRef: string
+  status: 'pending' | 'completed' | 'restored'
+}
+
+/** One pull request change a reviewed surgery makes, journalled before it is sent. */
+interface SurgeryPullRequestStep {
+  branch: string
+  number: number
+  action: 'retarget' | 'close'
+  /** The head ref and commit GitHub held when the preview was taken. */
+  headRef: string
+  capturedHeadOid: string | null
+  /** The base GitHub recorded when the preview was taken. */
+  fromBase: string
+  toBase: string
+  status: 'pending' | 'completed'
+}
+
+/**
+ * The native stack mutation a reviewed surgery makes. GitHub can only unstack
+ * a whole stack, so a changed composition is unstacked and registered again in
+ * the reviewed order, and each half is journalled so an interrupted run resumes
+ * at the first step that did not happen.
+ */
+interface SurgeryStackStep {
+  stackNumber: number
+  action: 'unstack' | 'unstack-and-create'
+  /** The membership this stack held when the preview was taken, bottom-to-top. */
+  membersBefore: number[]
+  /** The members the recreated stack must hold, bottom-to-top. */
+  members: number[]
+  trunk: string
+  unstackStatus: 'pending' | 'completed'
+  createStatus: 'pending' | 'completed' | 'skipped'
+  createRequested: boolean
+  stackNumberAfter: number | null
+}
+
+interface SurgeryConfig {
+  /** The GitHub repository the published half acts on, or null for a local-only surgery. */
+  fullName: string | null
+  originUrl?: string
+  pushUrl: string | null
+  trunk: string
+  pullRequests: SurgeryPullRequestStep[]
+  stack: SurgeryStackStep | null
 }
 
 /** The native stack membership captured when a publish preview was taken. */
@@ -564,7 +640,11 @@ async function readJournal(repoPath: string, signal?: AbortSignal): Promise<Stac
     typeof parsed.message !== 'string' ||
     !['running', 'conflict', 'uncertain', 'aborting'].includes(String(parsed.status)) ||
     !Array.isArray(parsed.entries) ||
-    parsed.entries.length === 0 ||
+    // A surgery that only takes a layer out has nothing to replay, and the
+    // branch to restore is exactly the work its journal records.
+    (parsed.entries.length === 0 &&
+      !(Array.isArray(parsed.created) && parsed.created.length > 0) &&
+      !(Array.isArray(parsed.removed) && parsed.removed.length > 0)) ||
     parsed.entries.length > 2048
   )
     throw invalid()
@@ -604,6 +684,93 @@ async function readJournal(repoPath: string, signal?: AbortSignal): Promise<Stac
     names.add(entry.branch)
     names.add(entry.newParent)
     if (entry.oldParent !== null) names.add(entry.oldParent)
+  }
+  // A surgery records the branch it creates and the branch it deletes, so an
+  // abort can undo both. These refs are written from the journal, so a corrupt
+  // record is refused rather than trusted.
+  if (parsed.created !== undefined) {
+    if (!Array.isArray(parsed.created)) throw invalid()
+    for (const created of parsed.created) {
+      if (
+        !isRecord(created) ||
+        typeof created.branch !== 'string' ||
+        !isOid(created.oid) ||
+        typeof created.parent !== 'string' ||
+        !isOid(created.parentTip)
+      )
+        throw invalid()
+      names.add(created.branch)
+      names.add(created.parent)
+    }
+  }
+  if (parsed.removed !== undefined) {
+    if (!Array.isArray(parsed.removed)) throw invalid()
+    for (const removed of parsed.removed) {
+      if (
+        !isRecord(removed) ||
+        typeof removed.branch !== 'string' ||
+        branches.has(removed.branch) ||
+        !isOid(removed.oldTip) ||
+        (removed.oldParent !== null && typeof removed.oldParent !== 'string') ||
+        (removed.oldParentTip !== null && !isOid(removed.oldParentTip)) ||
+        !['pending', 'completed', 'restored'].includes(String(removed.status)) ||
+        removed.backupRef !== backupRefFor(parsed.id, removed.branch)
+      )
+        throw invalid()
+      branches.add(removed.branch)
+      names.add(removed.branch)
+      if (removed.oldParent !== null) names.add(removed.oldParent)
+    }
+  }
+  if (parsed.surgery !== undefined) {
+    const surgery = parsed.surgery
+    if (
+      !isRecord(surgery) ||
+      // A local-only surgery records no repository: its published half is empty,
+      // which is what keeps it out of the GitHub mutation path entirely.
+      (surgery.fullName !== null && typeof surgery.fullName !== 'string') ||
+      (surgery.pushUrl !== null && typeof surgery.pushUrl !== 'string') ||
+      typeof surgery.trunk !== 'string' ||
+      !Array.isArray(surgery.pullRequests)
+    )
+      throw invalid()
+    for (const step of surgery.pullRequests) {
+      if (
+        !isRecord(step) ||
+        typeof step.branch !== 'string' ||
+        typeof step.headRef !== 'string' ||
+        (step.capturedHeadOid !== null && !isOid(step.capturedHeadOid)) ||
+        typeof step.number !== 'number' ||
+        !Number.isInteger(step.number) ||
+        step.number <= 0 ||
+        !['retarget', 'close'].includes(String(step.action)) ||
+        typeof step.fromBase !== 'string' ||
+        typeof step.toBase !== 'string' ||
+        !['pending', 'completed'].includes(String(step.status))
+      )
+        throw invalid()
+      names.add(step.branch)
+    }
+    const stack = surgery.stack
+    if (stack !== null) {
+      if (
+        !isRecord(stack) ||
+        typeof stack.stackNumber !== 'number' ||
+        !Number.isInteger(stack.stackNumber) ||
+        stack.stackNumber <= 0 ||
+        !['unstack', 'unstack-and-create'].includes(String(stack.action)) ||
+        !Array.isArray(stack.membersBefore) ||
+        stack.membersBefore.some((member: unknown) => typeof member !== 'number') ||
+        !Array.isArray(stack.members) ||
+        stack.members.some((member: unknown) => typeof member !== 'number') ||
+        typeof stack.trunk !== 'string' ||
+        !['pending', 'completed'].includes(String(stack.unstackStatus)) ||
+        !['pending', 'completed', 'skipped'].includes(String(stack.createStatus)) ||
+        typeof stack.createRequested !== 'boolean' ||
+        (stack.stackNumberAfter !== null && typeof stack.stackNumberAfter !== 'number')
+      )
+        throw invalid()
+    }
   }
   if (parsed.originalBranch !== null) names.add(parsed.originalBranch)
   // A journal written before sync existed restacks; the label is display-only.
@@ -1345,6 +1512,27 @@ function effectiveParent(
   return effectiveParent(records, record.parent, defaultBranch, visiting) ?? defaultBranch
 }
 
+/**
+ * The layers that hang from the trunk. A surgery anchored on the trunk itself has
+ * no upward walk to seed it, and the trunk can carry more than one stack, so every
+ * branch whose recorded parent chain reaches the trunk is in scope.
+ */
+function trunkStackNames(records: Map<string, BranchRecord>, trunk: string): string[] {
+  const names: string[] = []
+  let grew = true
+  while (grew) {
+    grew = false
+    for (const record of records.values()) {
+      if (record.name === trunk || names.includes(record.name)) continue
+      if (record.parent && (record.parent === trunk || names.includes(record.parent))) {
+        names.push(record.name)
+        grew = true
+      }
+    }
+  }
+  return names
+}
+
 function connectedBranchNames(
   records: Map<string, BranchRecord>,
   selected: string,
@@ -1461,7 +1649,8 @@ async function captureSyncTrunk(
       `No fetched origin/${trunk} to sync against; the fetch did not produce a remote trunk tip`,
     )
   if (!pushUrl) blockers.push('Syncing compares remote branches through the origin push URL')
-  const ahead = localOid && remoteOidValue ? await commitCount(repoPath, remoteOidValue, localOid) : 0
+  const ahead =
+    localOid && remoteOidValue ? await commitCount(repoPath, remoteOidValue, localOid) : 0
   const behind =
     localOid && remoteOidValue ? await commitCount(repoPath, localOid, remoteOidValue) : 0
   if (ahead > 0) {
@@ -1471,14 +1660,22 @@ async function captureSyncTrunk(
   }
   const diverged = Boolean(
     localOid &&
-      remoteOidValue &&
-      localOid !== remoteOidValue &&
-      !(await isAncestor(repoPath, localOid, remoteOidValue)) &&
-      !(await isAncestor(repoPath, remoteOidValue, localOid)),
+    remoteOidValue &&
+    localOid !== remoteOidValue &&
+    !(await isAncestor(repoPath, localOid, remoteOidValue)) &&
+    !(await isAncestor(repoPath, remoteOidValue, localOid)),
   )
   return {
     remote: 'origin',
-    trunk: { branch: trunk, localOid, remoteOid: remoteOidValue, ahead, behind, diverged, blockers },
+    trunk: {
+      branch: trunk,
+      localOid,
+      remoteOid: remoteOidValue,
+      ahead,
+      behind,
+      diverged,
+      blockers,
+    },
     layers,
   }
 }
@@ -1535,7 +1732,9 @@ async function capturePlan(
       pushUrl = await getRemotePushUrl(root, 'origin')
       const pushRemote = parseRemote(pushUrl)
       if (!pushRemote || pushRemote.host !== 'github.com') {
-        blockers.push(`${kind === 'sync' ? 'Syncing' : 'Publishing'} requires a github.com origin push URL`)
+        blockers.push(
+          `${kind === 'sync' ? 'Syncing' : 'Publishing'} requires a github.com origin push URL`,
+        )
       } else if (
         originFullName &&
         pushRemote.fullName.toLowerCase() !== originFullName.toLowerCase()
@@ -1681,16 +1880,15 @@ async function capturePlan(
     // Sync replays onto the fetched tip; captureSyncTrunk blocks unpublished
     // local trunk commits before that replay can discard their ancestry.
     const preferRemoteTrunk = kind !== 'restack' || Boolean(retargetedFrom && parent === trunk)
-    const localTrunkOid =
-      parent === trunk ? await resolveCommit(root, `refs/heads/${trunk}`) : null
+    const localTrunkOid = parent === trunk ? await resolveCommit(root, `refs/heads/${trunk}`) : null
     const remoteTrunkOid =
       parent === trunk ? await resolveCommit(root, `refs/remotes/origin/${trunk}`) : null
     const trunkDiverged = Boolean(
       localTrunkOid &&
-        remoteTrunkOid &&
-        localTrunkOid !== remoteTrunkOid &&
-        !(await isAncestor(root, localTrunkOid, remoteTrunkOid)) &&
-        !(await isAncestor(root, remoteTrunkOid, localTrunkOid)),
+      remoteTrunkOid &&
+      localTrunkOid !== remoteTrunkOid &&
+      !(await isAncestor(root, localTrunkOid, remoteTrunkOid)) &&
+      !(await isAncestor(root, remoteTrunkOid, localTrunkOid)),
     )
     if (trunkDiverged && !preferRemoteTrunk) {
       blockers.push(
@@ -2374,14 +2572,27 @@ async function buildPublishOperation(
 }
 
 function definitivelyRejectedCreation(error: unknown): boolean {
-  const status =
-    error instanceof GitHubTransportError
-      ? error.status
-      : error instanceof NativeStackError
-        ? error.httpStatus
-        : null
-  // Timeouts and server/transport failures can hide an accepted mutation.
-  return status !== null && status >= 400 && status < 500 && status !== 408
+  // Only the create request itself can reject a registration, so only the errors
+  // that request produces count. An error of ambiguous provenance keeps the
+  // recorded intent instead of clearing it, because a cleared intent lets a
+  // resume register the same membership a second time.
+  if (error instanceof NativeStackError) {
+    // The wrappers the create request translates its own 404 and 422 into. The
+    // same class carries the local chain check, which runs before the intent is
+    // recorded, so it can never reach this with a recorded create.
+    return (
+      (error.status === 'preview-unavailable' || error.status === 'invalid-chain') &&
+      error.httpStatus !== null &&
+      error.httpStatus >= 400 &&
+      error.httpStatus < 500
+    )
+  }
+  if (error instanceof GitHubTransportError) {
+    // Timeouts and server/transport failures can hide an accepted mutation.
+    const status = error.status
+    return status !== null && status >= 400 && status < 500 && status !== 408
+  }
+  return false
 }
 
 /**
@@ -2618,7 +2829,7 @@ async function revalidatePlan(repoPath: string, plan: StackPlan): Promise<void> 
   // A publish writes native stack membership and a sync replays onto it, so an
   // unstack, a reorder, a changed head, or a landed merge invalidates the
   // preview the same way a moved local tip does.
-  if (plan.kind === 'restack') return
+  if (plan.kind === 'restack' && !plan.revalidateRemote) return
   const hasCapturedPrs = Object.values(plan.capturedPrs).some(Boolean)
   const hasCapturedStacks = plan.capturedStacks.length > 0
   if (!hasCapturedPrs && !hasCapturedStacks) return
@@ -2697,12 +2908,28 @@ async function backupEntries(repoPath: string, journal: StackJournal): Promise<v
     }
     await runGit(repoPath, ['update-ref', entry.backupRef, entry.oldTip, ''])
   }
+  // A surgery removes a branch instead of replaying it, so its original tip
+  // needs the same recovery ref before the ref is deleted.
+  for (const removed of journal.removed ?? []) {
+    const existing = await resolveCommit(repoPath, removed.backupRef)
+    if (existing) {
+      if (existing !== removed.oldTip)
+        throw new Error(`Recovery ref for ${removed.branch} does not match its recorded tip`)
+      continue
+    }
+    await runGit(repoPath, ['update-ref', removed.backupRef, removed.oldTip, ''])
+  }
 }
 
 async function deleteBackups(repoPath: string, journal: StackJournal): Promise<void> {
   for (const entry of journal.entries) {
     if (await resolveCommit(repoPath, entry.backupRef)) {
       await runGit(repoPath, ['update-ref', '-d', entry.backupRef, entry.oldTip])
+    }
+  }
+  for (const removed of journal.removed ?? []) {
+    if (await resolveCommit(repoPath, removed.backupRef)) {
+      await runGit(repoPath, ['update-ref', '-d', removed.backupRef, removed.oldTip])
     }
   }
 }
@@ -3001,7 +3228,75 @@ async function completeEntry(
   await writeJournal(repoPath, journal)
 }
 
-async function restackJournal(repoPath: string, journal: StackJournal): Promise<ActionResult> {
+/**
+ * Creates the branch a reviewed insert adds. The journal already names it, so
+ * an interrupted run can recognise the ref as its own work and an abort can
+ * delete exactly the branch this operation made.
+ */
+async function createJournalBranches(repoPath: string, journal: StackJournal): Promise<void> {
+  for (const created of journal.created ?? []) {
+    await ensureNotCheckedOutElsewhere(repoPath, created.branch)
+    const tip = await resolveCommit(repoPath, `refs/heads/${created.branch}`)
+    if (tip !== null) {
+      if (tip !== created.oid)
+        throw new Error(`Branch ${created.branch} appeared with another tip; no branch was created`)
+      continue
+    }
+    await runGit(repoPath, ['update-ref', `refs/heads/${created.branch}`, created.oid, ''])
+    await updateParentMetadata(repoPath, created.branch, created.parent, created.parentTip)
+  }
+}
+
+/**
+ * Deletes the branch a reviewed remove took out, after its commits are proven
+ * recoverable from the recovery ref this journal created.
+ */
+async function removeJournalBranches(repoPath: string, journal: StackJournal): Promise<string> {
+  const removed = journal.removed ?? []
+  if (removed.length === 0) return ''
+  const deleted: string[] = []
+  for (const item of removed) {
+    if (item.status !== 'pending') {
+      deleted.push(item.branch)
+      continue
+    }
+    if ((await resolveCommit(repoPath, `refs/heads/${item.branch}`)) !== item.oldTip) {
+      throw new Error(`Refusing to delete ${item.branch}: its tip changed outside Git Stacks`)
+    }
+    if ((await resolveCommit(repoPath, item.backupRef)) !== item.oldTip) {
+      throw new Error(`Refusing to delete ${item.branch}: its recovery ref is not its recorded tip`)
+    }
+    if ((await getCurrentBranch(repoPath)) === item.branch) {
+      const restore =
+        journal.originalBranch && journal.originalBranch !== item.branch
+          ? journal.originalBranch
+          : null
+      if (restore && (await refExists(repoPath, `refs/heads/${restore}`))) {
+        await runGit(repoPath, ['switch', '--', restore])
+      } else {
+        await runGit(repoPath, ['switch', '--detach', item.oldTip])
+      }
+    }
+    await runGit(repoPath, ['update-ref', '-d', `refs/heads/${item.branch}`, item.oldTip])
+    await tryGit(repoPath, ['config', '--remove-section', `branch.${item.branch}`])
+    item.status = 'completed'
+    deleted.push(item.branch)
+  }
+  await writeJournal(repoPath, journal)
+  return `Deleted local branch ${deleted.join(', ')}`
+}
+
+async function restackJournal(
+  repoPath: string,
+  journal: StackJournal,
+  /**
+   * Runs after the replay and the lease-guarded pushes, while the recovery refs
+   * still exist. A restack and a sync pass nothing; a surgery uses it for the
+   * pull request and native stack changes its preview named, so a remote step
+   * that fails leaves the original branch tips recoverable.
+   */
+  afterRemote?: (journal: StackJournal) => Promise<string>,
+): Promise<ActionResult> {
   if (journal.status === 'aborting')
     throw new Error('Stack rollback has started; use Abort to finish it')
   await ensureNoBusyOperation(repoPath, 'resume the stack')
@@ -3094,14 +3389,18 @@ async function restackJournal(repoPath: string, journal: StackJournal): Promise<
     await completeEntry(repoPath, journal, entry)
   }
   let pushMessage = ''
-  if (journal.kind === 'sync' && journal.syncPushes) {
+  if (journal.syncPushes) {
     const origin = await currentOrigin(repoPath, true)
     if (
       !origin.pushUrl ||
       origin.pushUrl !== journal.syncPushes.pushUrl ||
       (journal.syncPushes.originUrl && origin.url !== journal.syncPushes.originUrl)
     ) {
-      throw new Error('Sync progress is stale: the origin remote changed')
+      throw new Error(
+        journal.surgery
+          ? 'Surgery progress is stale: the origin remote changed'
+          : 'Sync progress is stale: the origin remote changed',
+      )
     }
     const { pushUrl, allowForce, branches } = journal.syncPushes
     const pushed: string[] = []
@@ -3124,12 +3423,13 @@ async function restackJournal(repoPath: string, journal: StackJournal): Promise<
         await writeJournal(repoPath, journal)
         continue
       }
+      // A push whose response was lost left the remote at the tip this run
+      // published. Recognising that is what keeps a resumed run from re-pushing
+      // under a lease that can no longer hold.
       if ((await remoteOid(repoPath, pushUrl, item.branch)) === oid) {
-        await pushBranch(repoPath, item.branch, oid, oid, false, pushUrl)
         item.status = 'completed'
         item.publishedOid = oid
         await writeJournal(repoPath, journal)
-        pushed.push(item.branch)
         continue
       }
       await pushBranch(repoPath, item.branch, oid, item.expectedRemoteOid, allowForce, pushUrl)
@@ -3139,17 +3439,59 @@ async function restackJournal(repoPath: string, journal: StackJournal): Promise<
       pushed.push(item.branch)
     }
     if (pushed.length > 0) {
-      pushMessage = `. Pushed ${pushed.join(', ')}`
+      pushMessage = ` Pushed ${pushed.join(', ')}`
     }
   }
+  const remoteMessages: string[] = []
+  if (afterRemote) {
+    let message: string
+    try {
+      message = await afterRemote(journal)
+    } catch (error) {
+      // The remote half is resumable: its steps re-read GitHub and recognise the
+      // writes that landed, so the journal stays on disk with its original tips.
+      journal.status = 'uncertain'
+      journal.message = `${journal.surgery ? 'Surgery' : 'Stack'} stopped on a remote step: ${commandDetail(error)}`
+      await writeJournal(repoPath, journal)
+      throw error
+    }
+    if (message) remoteMessages.push(message)
+  }
+  // The branch a surgery removed is deleted only after every remote step it
+  // previewed has happened, so a failed remote step still has its commits.
+  const removed = await removeJournalBranches(repoPath, journal)
+  if (removed) remoteMessages.push(removed)
   await restoreCheckout(repoPath, journal.originalBranch, journal.originalHead)
   await deleteBackups(repoPath, journal)
   await removeJournal(repoPath)
+  const layers = journal.entries.length
+  const count = `${layers} stack branch${layers === 1 ? '' : 'es'}`
+  const parts = [
+    journal.surgery
+      ? `Applied the reviewed surgery to ${count}${pushMessage}`
+      : journal.kind === 'sync'
+        ? `Synced ${count}${pushMessage}`
+        : `Restacked ${count}${pushMessage}`,
+    ...remoteMessages,
+  ]
+  return { message: parts.join('. ') }
+}
+
+function journalEntryFor(id: string, entry: PlanEntry): JournalEntry {
   return {
-    message:
-      journal.kind === 'sync'
-        ? `Synced ${journal.entries.length} stack branch${journal.entries.length === 1 ? '' : 'es'}${pushMessage}`
-        : `Restacked ${journal.entries.length} stack branch${journal.entries.length === 1 ? '' : 'es'}`,
+    branch: entry.branch,
+    oldTip: entry.oldTip,
+    newTip: null,
+    oldParent: entry.oldParent,
+    oldParentTip: entry.oldParentTip,
+    newParent: entry.parent,
+    newParentRef: entry.parentRef,
+    newParentOid: entry.parentOid,
+    newParentTip: null,
+    boundary: entry.boundary,
+    backupRef: backupRefFor(id, entry.branch),
+    headReflogCount: null,
+    status: 'pending',
   }
 }
 
@@ -3181,26 +3523,18 @@ async function runRestackCascade(
     originalBranch: plan.originalBranch,
     originalHead: plan.originalHead,
     currentBranch: plan.originalBranch,
-    entries: entries.map((entry) => ({
-      branch: entry.branch,
-      oldTip: entry.oldTip,
-      newTip: null,
-      oldParent: entry.oldParent,
-      oldParentTip: entry.oldParentTip,
-      newParent: entry.parent,
-      newParentRef: entry.parentRef,
-      newParentOid: entry.parentOid,
-      newParentTip: null,
-      boundary: entry.boundary,
-      backupRef: backupRefFor(id, entry.branch),
-      headReflogCount: null,
-      status: 'pending',
-    })),
+    entries: entries.map((entry) => journalEntryFor(id, entry)),
     status: 'running',
     message: plan.kind === 'sync' ? 'Preparing stack sync' : 'Preparing stack restack',
     syncPushes,
   }
-  return restackJournal(repoPath, journal)
+  // A resumed surgery still owes its pull request and native stack changes, so the
+  // same remote phase runs again and skips the steps its journal already completed.
+  return restackJournal(
+    repoPath,
+    journal,
+    journal.surgery ? (pending) => runSurgeryRemote(repoPath, pending) : undefined,
+  )
 }
 
 /**
@@ -3267,30 +3601,918 @@ async function runPlanSync(
   }
 }
 
+interface SurgeryRecord {
+  token: string
+  expiresAt: number
+  plan: SurgeryPlan
+  stackPlan: StackPlan
+}
+
+const surgeryPlans = new Map<string, SurgeryRecord>()
+
+export function validateSurgeryRequest(value: unknown): SurgeryRequest {
+  if (
+    !isRecord(value) ||
+    (value.kind !== 'insert' && value.kind !== 'move' && value.kind !== 'remove')
+  ) {
+    throw new Error('Surgery request must name one of insert, move, or remove')
+  }
+  const kind = value.kind
+  const branch = requireRefInput(value.branch, 'branch')
+  if (kind === 'move') {
+    if (value.target === value.branch) throw new Error('A layer cannot be moved below itself')
+    return { kind, branch, target: requireRefInput(value.target, 'target') }
+  }
+  if (kind === 'insert') return { kind, branch, name: requireRefInput(value.name, 'name') }
+  return { kind, branch }
+}
+
+function branchDepth(records: Map<string, BranchRecord>, name: string, limit = 64): number {
+  let depth = 0
+  let current: string | undefined = name
+  while (depth < limit) {
+    const record: BranchRecord | undefined = current ? records.get(current) : undefined
+    if (!record || record.parent === null) break
+    current = record.parent
+    depth += 1
+  }
+  return depth
+}
+
+/**
+ * Reads every fact the surgery preview promises to hold, and the one stack plan
+ * that proves them again immediately before the first ref moves. A remote this
+ * repository cannot address by name leaves the remote facts empty, which the
+ * planner reports as a blocker rather than guessing.
+ */
+async function captureSurgery(
+  root: string,
+  snapshot: RepositorySnapshot,
+  request: SurgeryRequest,
+): Promise<{ plan: SurgeryPlan; stackPlan: StackPlan }> {
+  const blockers: string[] = []
+  const warnings: string[] = []
+  const anchor = request.branch
+  await validateBranchName(root, anchor)
+  if (request.kind === 'insert') await validateBranchName(root, request.name)
+  if (request.kind === 'move') await validateBranchName(root, request.target)
+  const operation = await getOperationState(root)
+  if (operation.busy) blockers.push('A Git operation is already in progress')
+  if ((await getStatus(root)).length > 0) {
+    blockers.push('Commit or stash uncommitted changes before changing a stack')
+  }
+  const currentBranch = await getCurrentBranch(root)
+  const currentHead = await resolveCommit(root, 'HEAD')
+  let fetchFailure: string | null = null
+  try {
+    await runGit(root, ['fetch', '--all', '--prune'])
+  } catch (error) {
+    fetchFailure = `Could not fetch and prune the remotes: ${commandDetail(error)}`
+    blockers.push(fetchFailure)
+  }
+  const refs = await getRefs(root)
+  const defaultBranch =
+    snapshot.defaultBranch || (await getDefaultBranch(root, refs, currentBranch))
+  const originUrl = await getOriginUrl(root)
+  const originFullName = canonicalRemoteName(originUrl)
+  let pushUrl: string | null = null
+  if (!originUrl) {
+    // No origin means nothing is published, which is not a reason to refuse a local
+    // surgery: the layers below are rewritten from Git alone.
+    warnings.push(
+      'This repository has no origin remote, so nothing can be pushed or retargeted; the plan below covers the local rewrites only.',
+    )
+  } else
+    try {
+      const candidate = await getRemotePushUrl(root, 'origin')
+      const remote = parseRemote(candidate)
+      if (!remote || remote.host !== 'github.com') {
+        if (candidate) {
+          // A stack with nothing published is still reparentable locally; the run
+          // refuses the surgery outright when a rewrite would need a GitHub push.
+          warnings.push(
+            'This origin is not a github.com repository, so nothing can be pushed or retargeted; the plan below covers the local rewrites only.',
+          )
+        }
+      } else if (originFullName && remote.fullName.toLowerCase() !== originFullName.toLowerCase()) {
+        blockers.push('The origin fetch and push URLs address different GitHub repositories')
+      } else {
+        pushUrl = candidate
+      }
+    } catch (error) {
+      blockers.push(`Could not read the origin push URL: ${commandDetail(error)}`)
+    }
+  const githubData = originFullName ? await getGitHubData(root, originUrl) : null
+  // A stack with no submitted layer needs no GitHub at all: its rewrites are local
+  // and the planner proves each one from Git. A submitted layer does need it, because
+  // its pull request base is part of what the surgery changes.
+  if (githubData && !githubData.available) {
+    warnings.push(githubData.message)
+  }
+  if (originFullName && !pushUrl) {
+    warnings.push(
+      'The published side of this surgery cannot be recorded or retried without a github.com origin push URL; the plan below shows what it would do.',
+    )
+  }
+  const trunk = nativeStackTrunk(githubData, anchor, snapshot, defaultBranch) ?? defaultBranch
+  const trunkOid = await resolveCommit(root, `refs/heads/${trunk}`)
+  if (!trunkOid)
+    throw new Error(`Trunk ${trunk} has no local ref; fetch it before changing a stack`)
+  const canonicalPrs = new Map<string, PullRequest>()
+  if (githubData?.available) {
+    for (const pr of githubData.pullRequests) {
+      if (pr.headRepository) canonicalPrs.set(`${pr.number}`, pr)
+    }
+  }
+  const records = await branchRecords(root, snapshot, trunk, originFullName, canonicalPrs)
+  const connected =
+    anchor === trunk
+      ? { names: trunkStackNames(records, trunk), blockers: [] }
+      : connectedBranchNames(records, anchor, trunk)
+  blockers.push(...connected.blockers)
+  const depth = (name: string): number => branchDepth(records, name)
+  const chain = [...connected.names]
+    .filter((name) => name !== trunk)
+    .sort((a, b) => depth(a) - depth(b))
+  const layers: SurgeryLayerFacts[] = []
+  for (const branch of chain) {
+    const record = records.get(branch) as BranchRecord
+    const declared = record.parent ?? trunk
+    const recordedParent = await getBranchParent(root, branch)
+    const recordedParentTip = await getConfigValue(root, `branch.${branch}.parentTip`)
+    const parentOid = declared === trunk ? trunkOid : records.get(declared)?.oid
+    const layerBlockers: string[] = []
+    if (record.invalidParentTip) {
+      layerBlockers.push(`Branch ${branch} records a parent tip that is not a commit`)
+    }
+    let boundary = record.parentTip
+    let boundarySource: 'recorded' | 'merge-base' = 'recorded'
+    if (!boundary && parentOid) {
+      boundary = (await actualMergeBase(root, parentOid, record.oid)) ?? null
+      boundarySource = 'merge-base'
+    }
+    if (!boundary) {
+      layerBlockers.push(`The original parent boundary of ${branch} cannot be determined`)
+    } else if (!(await isAncestor(root, boundary, record.oid))) {
+      layerBlockers.push(
+        `The recorded parent boundary of ${branch} is no longer an ancestor of its tip`,
+      )
+    }
+    if (record.parentSource === 'inferred' || !recordedParent) {
+      warnings.push(
+        `${branch} has no recorded parent tip; its replay boundary is inferred from the merge base and reviewed above`,
+      )
+    }
+    const pr = record.pr
+    if (pr?.headRepository && originFullName && pr.headRepository !== originFullName) {
+      layerBlockers.push(
+        `Pull request #${pr.number} is published from ${pr.headRepository}; surgery only replays branches of ${originFullName}`,
+      )
+    }
+    let layerRemote: string | null = null
+    if (pushUrl) {
+      try {
+        layerRemote = await remoteOid(root, pushUrl, branch)
+      } catch (error) {
+        // An unreadable remote tip cannot back a lease, so the layer is blocked
+        // rather than planned as if the branch were unpublished.
+        layerBlockers.push(`The remote tip of ${branch} could not be read: ${commandDetail(error)}`)
+      }
+    }
+    layers.push({
+      branch,
+      parent: declared,
+      recordedParent,
+      recordedParentTip,
+      oid: record.oid,
+      boundary: boundary ?? '',
+      boundarySource,
+      commits: boundary ? await commitCount(root, boundary, record.oid) : 0,
+      mergeCommits: boundary ? await mergeCommitCount(root, boundary, record.oid) : 0,
+      remoteOid: layerRemote,
+      remoteRelation: await remoteRelation(root, layerRemote, record.oid),
+      pullRequest: pr ? pr.number : null,
+      pullRequestBase: pr ? pr.base : null,
+      pullRequestState: pr ? pr.state : null,
+      headOid: pr ? (pr.headOid ?? null) : null,
+      headRepository: pr ? (pr.headRepository ?? null) : null,
+      merged: record.mergedHeadPr !== null,
+      blockers: layerBlockers,
+    })
+  }
+  const submitted = new Set(
+    layers.map((layer) => layer.pullRequest).filter((number): number is number => number !== null),
+  )
+  const nativeStack = (githubData?.nativeStacks ?? []).find(
+    (stack) => stack.open && stack.pullRequests.some((member) => submitted.has(member.number)),
+  )
+  const plan = planSurgery(
+    {
+      remote: originFullName,
+      pushUrl,
+      trunk,
+      trunkOid,
+      stack: nativeStack
+        ? {
+            number: nativeStack.number,
+            base: nativeStack.base,
+            members: nativeStack.pullRequests.map((member) => member.number),
+          }
+        : null,
+      stackCapability: githubData?.available === true ? 'available' : 'unavailable',
+      localBranches: [...records.keys()],
+      layers,
+    },
+    request,
+  )
+  const stackPlan: StackPlan = {
+    token: randomUUID(),
+    repoPath: root,
+    expiresAt: Date.now() + PLAN_TTL_MS,
+    kind: 'restack',
+    branch: anchor,
+    trunk,
+    defaultBranch,
+    originUrl,
+    pushUrl,
+    originFullName,
+    originalBranch: currentBranch,
+    originalHead: currentHead,
+    entries: await Promise.all(
+      plan.layers
+        .filter((layer) => layer.action !== 'insert')
+        .map(async (layer) => {
+          const facts = layers.find(
+            (layerFacts) => layerFacts.branch === layer.branch,
+          ) as SurgeryLayerFacts
+          const record = records.get(layer.branch) as BranchRecord
+          return {
+            branch: layer.branch,
+            parent: layer.toParent,
+            parentRef: `refs/heads/${layer.toParent}`,
+            // A parent this surgery creates carries the anchor tip, which is the
+            // exact point its first child is replayed onto.
+            parentOid:
+              plan.inserted && layer.toParent === plan.inserted.branch
+                ? plan.inserted.oid
+                : (records.get(layer.toParent)?.oid ?? trunkOid),
+            oldParent: facts.recordedParent,
+            oldTip: layer.oldTip,
+            boundary: layer.boundary,
+            oldParentTip: facts.recordedParentTip,
+            parentTipSource: layer.boundarySource,
+            needsRestack: true,
+            pr: record.pr,
+            remoteOid: layer.remoteOid,
+            upstream: await branchUpstream(root, layer.branch),
+            retargetedFrom: null,
+            note: '',
+          }
+        }),
+    ),
+    capturedParents: Object.fromEntries(
+      layers.map((layer) => [layer.branch, layer.recordedParent]),
+    ),
+    capturedParentTips: Object.fromEntries(
+      layers.map((layer) => [layer.branch, layer.recordedParentTip]),
+    ),
+    // The revalidation reads the tip of the parent this surgery will replay onto. A
+    // parent this operation creates itself has no captured tip to compare, so its
+    // entry is left uncompared and the cascade proves it from the journal instead.
+    capturedParentOids: Object.fromEntries(
+      plan.layers
+        .filter((layer) => layer.action !== 'insert')
+        .map((layer) => [
+          layer.branch,
+          plan.inserted && layer.toParent === plan.inserted.branch
+            ? null
+            : (records.get(layer.toParent)?.oid ?? trunkOid),
+        ]),
+    ),
+    capturedTips: Object.fromEntries([
+      ...chain.map((branch) => [branch, (records.get(branch) as BranchRecord).oid] as const),
+      [trunk, trunkOid] as const,
+    ]),
+    capturedRemoteOids: Object.fromEntries(layers.map((layer) => [layer.branch, layer.remoteOid])),
+    capturedPrs: Object.fromEntries(
+      layers.map((layer) => {
+        const record = records.get(layer.branch) as BranchRecord
+        return [
+          layer.branch,
+          record.pr
+            ? {
+                number: record.pr.number,
+                state: record.pr.state,
+                base: record.pr.base,
+                headOid: record.pr.headOid ?? null,
+              }
+            : null,
+        ]
+      }),
+    ),
+    capturedStacks: (githubData?.nativeStacks ?? [])
+      .filter((stack) => stack.pullRequests.some((member) => submitted.has(member.number)))
+      .map((stack) => ({
+        number: stack.number,
+        open: stack.open,
+        base: stack.base,
+        status: stack.status,
+        members: stack.pullRequests.map((member) => ({ ...member })),
+      })),
+    capturedMergedHeads: Object.fromEntries(
+      layers.map((layer) => {
+        const record = records.get(layer.branch) as BranchRecord
+        return [
+          layer.branch,
+          { pr: record.mergedHeadPr, oid: record.mergedHeadOid, commit: record.mergedCommitOid },
+        ]
+      }),
+    ),
+    // The capture reads Git and GitHub before the planner runs, and what it learned
+    // about the remote belongs in the same list the person reviews.
+    warnings: [...new Set([...plan.preview.warnings, ...warnings])],
+    blockers: [...new Set([...plan.preview.blockers, ...blockers])],
+    mergeMethods: [],
+    sync: null,
+    revalidateRemote: true,
+  }
+  if (fetchFailure) stackPlan.blockers = [fetchFailure, ...stackPlan.blockers]
+  return { plan, stackPlan }
+}
+
+export async function previewSurgery(
+  repoPath: string,
+  snapshot: RepositorySnapshot,
+  request: SurgeryRequest,
+): Promise<SurgeryPreview> {
+  const root = await repositoryPath(repoPath)
+  const { plan, stackPlan } = await captureSurgery(root, snapshot, request)
+  const { preview } = plan
+  surgeryPlans.set(stackPlan.token, {
+    token: stackPlan.token,
+    expiresAt: stackPlan.expiresAt,
+    plan,
+    stackPlan,
+  })
+  return {
+    token: stackPlan.token,
+    expiresAt: stackPlan.expiresAt,
+    kind: preview.kind,
+    branch: preview.branch,
+    trunk: preview.trunk,
+    order: preview.order,
+    layers: preview.layers,
+    forcePushes: preview.forcePushes,
+    creates: preview.creates,
+    retargets: preview.retargets,
+    closes: preview.closes,
+    nativeStack: preview.nativeStack,
+    warnings: [...new Set([...preview.warnings, ...stackPlan.warnings])],
+    blockers: [...new Set([...preview.blockers, ...stackPlan.blockers])],
+  }
+}
+
+function takeSurgeryPlan(token: string): SurgeryRecord {
+  const record = surgeryPlans.get(token)
+  surgeryPlans.delete(token)
+  if (!record) throw new Error('This surgery preview has expired; review the stack again')
+  if (record.expiresAt < Date.now())
+    throw new Error('This surgery preview has expired; review the stack again')
+  return record
+}
+
+function surgeryPullRequestStep(step: SurgeryPullRequestPlan): SurgeryPullRequestStep {
+  return {
+    branch: step.branch,
+    number: step.number,
+    action: step.action,
+    headRef: step.headRef,
+    capturedHeadOid: step.headOid,
+    fromBase: step.fromBase,
+    toBase: step.toBase,
+    status: 'pending',
+  }
+}
+
+/**
+ * Runs the remote half of a surgery: the pull request retargets, the pull
+ * requests the reviewed approval asked to close, and the native stack
+ * membership the new order needs. Every step re-reads GitHub before it writes,
+ * marks itself complete only after a read-back, and is skipped when the
+ * previewed change is already true, so a resumed run neither repeats a
+ * completed step nor trusts a lost response.
+ */
+/**
+ * The tip this surgery published for a branch, from the journal rather than from
+ * GitHub: a push that landed before its response was lost records the published
+ * commit, and a replayed branch records the tip the replay produced. A branch the
+ * surgery never moved keeps the commit the preview captured.
+ */
+function expectedPullRequestHead(
+  journal: StackJournal,
+  step: SurgeryPullRequestStep,
+): string | null {
+  const pushed = journal.syncPushes?.branches.find((branch) => branch.branch === step.branch)
+  if (pushed?.publishedOid) return pushed.publishedOid
+  const entry = journal.entries.find((candidate) => candidate.branch === step.branch)
+  if (entry?.newTip) return entry.newTip
+  return step.capturedHeadOid
+}
+
+/**
+ * The pull request identity this surgery may act on: the same pull request, the
+ * same head ref, and the head commit this run published. Anything else moved it.
+ */
+function assertPullRequestIdentity(
+  step: SurgeryPullRequestStep,
+  current: PullRequest,
+  head: string | null,
+): void {
+  if (current.number !== step.number) {
+    throw new Error(`Surgery stopped: pull request #${step.number} is no longer that pull request`)
+  }
+  if (current.head !== step.headRef) {
+    throw new Error(
+      `Pull request #${step.number} now comes from ${current.head} instead of ${step.headRef}`,
+    )
+  }
+  const observed = current.headOid ?? null
+  if (head && observed !== head) {
+    throw new Error(
+      `Pull request #${step.number} head moved to ${(observed ?? 'an unknown commit').slice(0, 12)} after this surgery published ${head.slice(0, 12)}`,
+    )
+  }
+}
+
+/**
+ * Runs the remote half of a surgery: the pull request retargets, the pull
+ * requests the reviewed approval asked to close, and the native stack
+ * membership the new order needs.
+ *
+ * Every step reads the desired state first, in full, before it writes anything.
+ * A step whose write already landed is recognised from that read and marked
+ * complete, so a lost response resumes instead of repeating the mutation, and a
+ * step whose state is neither the reviewed pre-state nor the reviewed result is
+ * refused rather than overwritten. The native stack is unstacked only while it
+ * still holds exactly the membership the preview captured, and the recreated
+ * stack is looked up before it is created, so a create whose response was lost
+ * is adopted instead of posted twice.
+ */
+async function runSurgeryRemote(root: string, journal: StackJournal): Promise<string> {
+  const surgery = journal.surgery
+  // A local-only surgery has no published half: nothing to retarget, close, or register.
+  if (!surgery || !surgery.fullName) return ''
+  const [owner, name] = surgery.fullName.split('/')
+  const parts: string[] = []
+  for (const step of surgery.pullRequests) {
+    const current = await getPullRequest(root, step.number)
+    assertPullRequestIdentity(step, current, expectedPullRequestHead(journal, step))
+    if (step.action === 'retarget') {
+      if (current.state !== 'OPEN') {
+        if (step.status === 'completed') {
+          throw new Error(
+            `Pull request #${step.number} was closed after this surgery retargeted it to ${step.toBase}`,
+          )
+        }
+        throw new Error(`Surgery stopped on pull request #${step.number}: it is no longer open`)
+      }
+      // The reviewed result first: a retarget whose response was lost is already done.
+      if (current.base === step.toBase) {
+        if (step.status !== 'completed') {
+          step.status = 'completed'
+          await writeJournal(root, journal)
+        }
+        parts.push(`Pull request #${step.number} targets ${step.toBase}`)
+        continue
+      }
+      if (step.status === 'completed') {
+        // The step already landed, so any other base is somebody's own edit after
+        // this surgery. Re-applying the reviewed base would overwrite it.
+        throw new Error(
+          `Pull request #${step.number} was moved to ${current.base} after this surgery retargeted it to ${step.toBase}`,
+        )
+      }
+      if (current.base !== step.fromBase) {
+        throw new Error(
+          `Pull request #${step.number} changed from ${step.fromBase} to ${current.base} on GitHub`,
+        )
+      }
+      await patchPullRequest(surgery.fullName, step.number, { base: step.toBase })
+      const readBack = await getPullRequest(root, step.number)
+      assertPullRequestIdentity(step, readBack, expectedPullRequestHead(journal, step))
+      if (readBack.state !== 'OPEN' || readBack.base !== step.toBase) {
+        throw new Error(`Pull request #${step.number} did not move to ${step.toBase}`)
+      }
+      parts.push(`Pull request #${step.number} retargeted to ${step.toBase}`)
+    } else {
+      if (current.state === 'CLOSED') {
+        if (step.status !== 'completed') {
+          step.status = 'completed'
+          await writeJournal(root, journal)
+        }
+        parts.push(`Pull request #${step.number} is closed`)
+        continue
+      }
+      if (current.state === 'MERGED') {
+        throw new Error(`Pull request #${step.number} merged while this surgery was running`)
+      }
+      if (step.status === 'completed') {
+        throw new Error(`Pull request #${step.number} was reopened after this surgery closed it`)
+      }
+      await patchPullRequest(surgery.fullName, step.number, { state: 'closed' })
+      const readBack = await getPullRequest(root, step.number)
+      assertPullRequestIdentity(step, readBack, expectedPullRequestHead(journal, step))
+      if (readBack.state !== 'CLOSED') {
+        throw new Error(`Pull request #${step.number} did not close`)
+      }
+      parts.push(`Closed pull request #${step.number}`)
+    }
+    step.status = 'completed'
+    await writeJournal(root, journal)
+  }
+  const stack = surgery.stack
+  if (!stack) return parts.length > 0 ? parts.join('. ') : ''
+  if (stack.unstackStatus !== 'completed') {
+    const observed = await readNativeStackMembers(owner, name, stack.stackNumber)
+    if (observed === null && (await nativeStackStillListed(owner, name, stack.stackNumber))) {
+      // GitHub answered the detail read and the listing differently, so this run
+      // cannot tell whether the stack is gone. The journal stays: an unstack it
+      // cannot prove must never be recorded as done.
+      throw new Error(
+        `GitHub reports native stack #${stack.stackNumber} as not found and as an open stack at the same time; resolve it on GitHub before continuing`,
+      )
+    }
+    const dissolved = observed === null
+    if (dissolved || observed.length === 0) {
+      // An unstack whose response was lost left the stack empty or dissolved:
+      // nothing to repeat. A 404 only counts as dissolved while the repository
+      // still answers stack reads, so an unavailable stacks API stops the run
+      // instead of quietly claiming the membership is gone.
+      parts.push(`Native stack #${stack.stackNumber} is unstacked`)
+    } else {
+      if (
+        observed.length !== stack.membersBefore.length ||
+        observed.some((member, index) => member !== stack.membersBefore[index])
+      ) {
+        throw new Error(
+          `Native stack #${stack.stackNumber} now holds ${observed.join(', ')} instead of the reviewed membership ${stack.membersBefore.join(', ')}`,
+        )
+      }
+      await unstackNativeStackAction(root, surgery.fullName, stack.stackNumber)
+      // GitHub either empties the stack or dissolves it, and only a merged pull
+      // request survives an unstack, so the proof is that no stack still holds an
+      // open member of the membership this run unstacked.
+      const stacks = await listPullRequestStacks(owner, name)
+      const holding = stacks.find((candidate) =>
+        candidate.pullRequests.some(
+          (member) => stack.membersBefore.includes(member.number) && member.state !== 'MERGED',
+        ),
+      )
+      if (holding) {
+        throw new Error(
+          `Native stack #${holding.number} still holds ${holding.pullRequests
+            .map((member) => `#${member.number}`)
+            .join(', ')} after the unstack`,
+        )
+      }
+      parts.push(`Unstacked native stack #${stack.stackNumber}`)
+    }
+    stack.unstackStatus = 'completed'
+    await writeJournal(root, journal)
+  }
+  if (stack.action === 'unstack-and-create') {
+    if (stack.createStatus === 'completed') {
+      // A checkpoint is a claim about GitHub, so it is re-proved on every
+      // resumption rather than trusted because it was written once.
+      if (stack.stackNumberAfter === null) {
+        throw new Error('The journal records a completed stack registration without a stack number')
+      }
+      const verified = await getPullRequestStack(owner, name, stack.stackNumberAfter)
+      assertRegisteredStack(stack, surgery.trunk, verified, stack.stackNumberAfter)
+      parts.push(`Native stack #${stack.stackNumberAfter} holds the new order`)
+    } else {
+      // A create whose response was lost already registered the stack. Looking it
+      // up first is what keeps a resumed run from posting the same membership twice.
+      const existing = await findNativeStack(owner, name, surgery.trunk, stack.members)
+      if (existing.conflict) {
+        throw new Error(
+          `Another native stack now holds ${existing.conflict
+            .map((number) => `#${number}`)
+            .join(', ')}; this surgery registered ${stack.members.join(', ')}`,
+        )
+      }
+      if (existing.stack) {
+        assertRegisteredStack(stack, surgery.trunk, existing.stack, existing.stack.number)
+        stack.stackNumberAfter = existing.stack.number
+        stack.createStatus = 'completed'
+        await writeJournal(root, journal)
+        parts.push(`Native stack #${existing.stack.number} holds the new order`)
+      } else if (stack.createRequested) {
+        // The first create may still be completing on GitHub, or it may have been
+        // lost entirely. Posting again risks a second stack holding the same pull
+        // requests, so the run stops and keeps its journal until it can be told.
+        throw new Error(
+          `Native stack registration for ${stack.members
+            .map((number) => `#${number}`)
+            .join(
+              ', ',
+            )} was requested and GitHub does not list it yet, so it is not sent again; the first request may still be completing. Check GitHub, then continue.`,
+        )
+      } else {
+        const capability = await detectNativeStacksCapability(owner, name)
+        if (!capability.available) {
+          throw new Error(
+            `GitHub cannot create native stacks for ${surgery.fullName}: ${capability.message}`,
+          )
+        }
+        let requested = false
+        let created: Awaited<ReturnType<typeof createPullRequestStack>>
+        try {
+          created = await createPullRequestStack(owner, name, stack.members, {
+            defaultBranch: surgery.trunk,
+            knownPullRequests: await Promise.all(
+              stack.members.map((member) => getPullRequest(root, member)),
+            ),
+            beforeCreate: async () => {
+              stack.createRequested = true
+              await writeJournal(root, journal)
+              requested = true
+            },
+          })
+        } catch (error) {
+          // Only GitHub's own answer to the create can say the request was
+          // refused. A later failure says nothing about whether the create
+          // landed, and clearing the intent on one would let a resume register
+          // the same membership a second time.
+          if (requested && definitivelyRejectedCreation(error)) {
+            stack.createRequested = false
+            await writeJournal(root, journal)
+          }
+          throw error
+        }
+        // The checkpoint follows the proof, never the other way round: a journal
+        // that claims a registration nobody verified is worse than no journal.
+        const readBack = await getPullRequestStack(owner, name, created.number)
+        assertRegisteredStack(stack, surgery.trunk, readBack, created.number)
+        stack.createStatus = 'completed'
+        stack.stackNumberAfter = created.number
+        await writeJournal(root, journal)
+        parts.push(`Registered native stack #${created.number} for the new order`)
+      }
+    }
+  }
+  return parts.length > 0 ? parts.join('. ') : ''
+}
+
+/**
+ * Proves that a native stack really holds the membership this surgery registered,
+ * on the trunk it was registered against. Every path that records or trusts that
+ * registration goes through here.
+ */
+function assertRegisteredStack(
+  stack: { members: number[] },
+  trunk: string,
+  observed: NativeStack,
+  stackNumber: number,
+): void {
+  if (!observed.open) {
+    throw new Error(
+      `Native stack #${stackNumber} is closed instead of holding the registered order`,
+    )
+  }
+  const held = observed.pullRequests.map((member) => member.number)
+  if (observed.base !== trunk) {
+    throw new Error(
+      `Native stack #${stackNumber} is based on ${observed.base} instead of the registered ${trunk}`,
+    )
+  }
+  if (held.join(',') !== stack.members.join(',')) {
+    throw new Error(
+      `Native stack #${stackNumber} holds ${held.join(', ')} instead of the reviewed order ${stack.members.join(', ')}`,
+    )
+  }
+}
+
+/**
+ * Whether the repository still lists this native stack as open. It answers the one
+ * question a 404 cannot: an unstack that dissolved the stack is gone, while a
+ * stacks API this run cannot read is not.
+ */
+async function nativeStackStillListed(
+  owner: string,
+  repo: string,
+  stackNumber: number,
+): Promise<boolean> {
+  const stacks = await listPullRequestStacks(owner, repo)
+  return stacks.some((stack) => stack.number === stackNumber && stack.open)
+}
+
+/**
+ * The members a native stack holds right now, or null once GitHub no longer has
+ * that stack at all. A stack whose unstack response was lost is dissolved, and a
+ * resumed run has to recognise that instead of failing on the 404.
+ */
+async function readNativeStackMembers(
+  owner: string,
+  repo: string,
+  stackNumber: number,
+): Promise<number[] | null> {
+  try {
+    const stack = await getPullRequestStack(owner, repo, stackNumber)
+    return stack.pullRequests.map((member) => member.number)
+  } catch (error) {
+    if (error instanceof NativeStackError && error.httpStatus === 404) return null
+    throw error
+  }
+}
+
+/**
+ * The open native stack that already holds exactly this membership, or the
+ * members of a different stack that claims part of it. Anything else means this
+ * surgery's create has not happened yet and may run.
+ */
+async function findNativeStack(
+  owner: string,
+  repo: string,
+  trunk: string,
+  members: readonly number[],
+): Promise<{ stack: NativeStack | null; conflict: number[] | null }> {
+  const stacks = await listPullRequestStacks(owner, repo)
+  let conflict: number[] | null = null
+  for (const stack of stacks) {
+    // A closed stack holds nothing: only an open one can be this surgery's result.
+    if (!stack.open) continue
+    const observed = stack.pullRequests.map((member) => member.number)
+    if (
+      stack.base === trunk &&
+      observed.length === members.length &&
+      observed.every((number, index) => number === members[index])
+    ) {
+      return { stack, conflict: null }
+    }
+    if (observed.some((member) => members.includes(member))) {
+      conflict = observed.filter((member) => members.includes(member))
+    }
+  }
+  return { stack: null, conflict }
+}
+
+/**
+ * Runs a reviewed surgery. Every fact the preview promised is re-read first,
+ * the journal is written before the first ref moves, and the replay, the
+ * lease-guarded pushes, the pull request changes and the native stack mutation
+ * all share the restack journal, so an interrupted run keeps the original tips
+ * recoverable and stops where it can be resumed or aborted.
+ */
+export async function runSurgery(
+  repoPath: string,
+  token: string,
+  allowForce: boolean,
+  closePullRequests: boolean,
+): Promise<ActionResult> {
+  const record = takeSurgeryPlan(token)
+  const { plan, stackPlan } = record
+  const preview = plan.preview
+  if (stackPlan.blockers.length > 0) throw new Error(stackPlan.blockers.join('; '))
+  if (preview.forcePushes.length > 0 && !allowForce) {
+    throw new Error(
+      'This surgery replaces published branch history; confirm the force push to continue',
+    )
+  }
+  if (preview.closes.length > 0 && !closePullRequests) {
+    throw new Error('This surgery closes submitted pull requests; confirm closing them to continue')
+  }
+  const root = await repositoryPath(repoPath)
+  await ensureNoBusyOperation(root, 'change the stack')
+  await ensureClean(root, 'change the stack')
+  await revalidatePlan(root, stackPlan)
+  const pushedLayers = plan.layers.filter((layer) => layer.push !== 'none')
+  if (pushedLayers.length > 0 && !stackPlan.pushUrl) {
+    throw new Error(
+      pushedLayers.some((layer) => layer.push === 'force')
+        ? 'A github.com origin push URL is required to replace a published branch'
+        : `A github.com origin push URL is required to publish ${pushedLayers
+            .map((layer) => layer.branch)
+            .join(', ')} on the remote`,
+    )
+  }
+  const id = randomUUID()
+  const removed = plan.removed
+  const restoreTo =
+    removed && stackPlan.originalBranch === removed.branch
+      ? (removed.recordedParent ?? plan.trunk)
+      : stackPlan.originalBranch
+  const inserted = plan.inserted
+  const created: CreatedBranch[] | undefined = inserted
+    ? [
+        {
+          branch: inserted.branch,
+          oid: inserted.oid,
+          parent: inserted.parent,
+          parentTip:
+            stackPlan.capturedTips[inserted.parent] ??
+            stackPlan.capturedTips[plan.trunk] ??
+            inserted.oid,
+        },
+      ]
+    : undefined
+  const journal: StackJournal = {
+    version: JOURNAL_VERSION,
+    kind: 'restack',
+    id,
+    repoPath: root,
+    originalBranch: restoreTo,
+    originalHead: stackPlan.originalHead,
+    currentBranch: stackPlan.originalBranch,
+    entries: stackPlan.entries.map((entry) => journalEntryFor(id, entry)),
+    status: 'running',
+    message: `Preparing ${preview.kind} of ${preview.branch}`,
+    syncPushes: stackPlan.pushUrl
+      ? {
+          originUrl: stackPlan.originUrl ?? undefined,
+          pushUrl: stackPlan.pushUrl,
+          allowForce,
+          branches: pushedLayers.map((layer) => ({
+            branch: layer.branch,
+            expectedRemoteOid: layer.remoteOid,
+            force: layer.push === 'force',
+            status: 'pending' as const,
+            publishedOid: null,
+          })),
+        }
+      : undefined,
+    created,
+    removed: removed
+      ? [
+          {
+            branch: removed.branch,
+            oldTip: removed.oid,
+            oldParent: removed.recordedParent,
+            oldParentTip: removed.recordedParentTip,
+            backupRef: backupRefFor(id, removed.branch),
+            status: 'pending' as const,
+          },
+        ]
+      : undefined,
+    // Recorded for every surgery, published or not: the journal is what a resumed
+    // run reads to know this was a reviewed surgery and not an ordinary restack.
+    surgery: {
+      fullName: stackPlan.originFullName,
+      originUrl: stackPlan.originUrl ?? undefined,
+      pushUrl: stackPlan.pushUrl,
+      trunk: plan.trunk,
+      pullRequests: plan.pullRequests.map(surgeryPullRequestStep),
+      stack: plan.stackStep
+        ? {
+            stackNumber: plan.stackStep.stackNumber,
+            action: plan.stackStep.action,
+            membersBefore: plan.stackStep.membersBefore,
+            members: plan.stackStep.members,
+            trunk: plan.trunk,
+            unstackStatus: 'pending' as const,
+            createStatus: 'pending' as const,
+            createRequested: false,
+            stackNumberAfter: null,
+          }
+        : null,
+    },
+  }
+  await writeJournal(root, journal)
+  if (journal.created) await createJournalBranches(root, journal)
+  return restackJournal(root, journal, (pending) => runSurgeryRemote(root, pending))
+}
+
 async function stackContinue(repoPath: string): Promise<ActionResult> {
   const journal = await readJournal(repoPath)
   if (!journal) throw new Error('No interrupted Git Stacks operation is available')
   if (journal.status === 'aborting')
     throw new Error('Stack rollback has started; use Abort to finish it')
-  if (journal.kind === 'sync' && journal.syncPushes) {
+  if (journal.syncPushes) {
     const origin = await currentOrigin(repoPath, true)
     if (
       !origin.pushUrl ||
       origin.pushUrl !== journal.syncPushes.pushUrl ||
       (journal.syncPushes.originUrl && origin.url !== journal.syncPushes.originUrl)
     ) {
-      throw new Error('Sync progress is stale: the origin remote changed')
+      throw new Error(
+        journal.surgery
+          ? 'Surgery progress is stale: the origin remote changed'
+          : 'Sync progress is stale: the origin remote changed',
+      )
     }
   }
+  const surgeryRemote = journal.surgery
+    ? (pending: StackJournal): Promise<string> => runSurgeryRemote(repoPath, pending)
+    : undefined
   const active = journal.entries.find((entry) => entry.status === 'rebasing')
-  if (!active) return restackJournal(repoPath, journal)
+  if (!active) return restackJournal(repoPath, journal, surgeryRemote)
   await verifyCompletedEntries(repoPath, journal)
   await verifyEntryMetadata(repoPath, active)
   if (!(await activeRebaseState(repoPath))) {
     const tip = await resolveCommit(repoPath, `refs/heads/${active.branch}`)
     await reconcileCompletedRebase(repoPath, journal, active, tip)
     await completeEntry(repoPath, journal, active)
-    return restackJournal(repoPath, journal)
+    return restackJournal(repoPath, journal, surgeryRemote)
   }
   await assertActiveRebase(repoPath, journal, active)
   if ((await resolveCommit(repoPath, `refs/heads/${active.branch}`)) !== active.oldTip) {
@@ -3318,7 +4540,7 @@ async function stackContinue(repoPath: string): Promise<ActionResult> {
     throw new Error(journal.message)
   }
   await completeEntry(repoPath, journal, active)
-  return restackJournal(repoPath, journal)
+  return restackJournal(repoPath, journal, surgeryRemote)
 }
 
 async function stackAbort(repoPath: string): Promise<ActionResult> {
@@ -3353,8 +4575,13 @@ async function stackAbort(repoPath: string): Promise<ActionResult> {
   await writeJournal(repoPath, journal)
   if (state.rebase) await runGit(repoPath, ['rebase', '--abort'])
   await ensureClean(repoPath, 'restore saved stack branches')
+  const createdNames = (journal.created ?? []).map((created) => created.branch)
   const currentBranch = await getCurrentBranch(repoPath)
-  if (currentBranch && journal.entries.some((entry) => entry.branch === currentBranch)) {
+  if (
+    currentBranch &&
+    (journal.entries.some((entry) => entry.branch === currentBranch) ||
+      createdNames.includes(currentBranch))
+  ) {
     await runGit(repoPath, ['switch', '--detach', 'HEAD'])
   }
   for (const entry of [...journal.entries].reverse()) {
@@ -3375,11 +4602,96 @@ async function stackAbort(repoPath: string): Promise<ActionResult> {
     entry.status = 'restored'
     await writeJournal(repoPath, journal)
   }
+  for (const created of journal.created ?? []) {
+    const tip = await resolveCommit(repoPath, `refs/heads/${created.branch}`)
+    if (tip === null) continue
+    if (tip !== created.oid)
+      throw new Error(`Refusing to delete ${created.branch}: it changed outside Git Stacks`)
+    await runGit(repoPath, ['update-ref', '-d', `refs/heads/${created.branch}`, created.oid])
+    await tryGit(repoPath, ['config', '--remove-section', `branch.${created.branch}`])
+  }
+  for (const removed of journal.removed ?? []) {
+    if (removed.status === 'restored') continue
+    const present = await resolveCommit(repoPath, `refs/heads/${removed.branch}`)
+    if (present !== null && present !== removed.oldTip) {
+      throw new Error(`Refusing to restore ${removed.branch}: the branch exists again`)
+    }
+    // The branch this surgery removed is deliberately left in place until every
+    // replay and remote step has finished, so an abort that arrives earlier finds
+    // it at the tip it started from. That is the restored state already, and an
+    // abort interrupted between restoring the ref and recording it lands here too.
+    if (present === removed.oldTip) {
+      await restoreRemovedMetadata(repoPath, removed)
+      removed.status = 'restored'
+      await writeJournal(repoPath, journal)
+      continue
+    }
+    const backup = await resolveCommit(repoPath, removed.backupRef)
+    if (backup !== removed.oldTip)
+      throw new Error(`Refusing to restore ${removed.branch}: its recovery ref was lost`)
+    await ensureNotCheckedOutElsewhere(repoPath, removed.branch)
+    await runGit(repoPath, ['update-ref', `refs/heads/${removed.branch}`, backup, ''])
+    await restoreRemovedMetadata(repoPath, removed)
+    removed.status = 'restored'
+    await writeJournal(repoPath, journal)
+  }
   await restoreCheckout(repoPath, journal.originalBranch, journal.originalHead)
   await deleteBackups(repoPath, journal)
   await removeJournal(repoPath)
-  return { message: 'Aborted the stack restack and restored the original branch tips' }
+  // Abort restores this repository and nothing else. What already reached GitHub
+  // stands, so the recovery report names it rather than implying it was undone.
+  const applied = appliedRemoteState(journal)
+  return {
+    message:
+      'Aborted the stack restack and restored the original branch tips' +
+      (applied.length > 0
+        ? `. GitHub keeps the changes already applied: ${applied.join('. ')}`
+        : ''),
+  }
 }
+
+/**
+ * The GitHub changes a run had already made when it was aborted. Git Stacks has no
+ * supported way to take a retarget, a close, or a native stack membership back, so
+ * the truth about them outlives the journal: this is what the recovery report says
+ * stands on GitHub.
+ */
+function appliedRemoteState(journal: StackJournal): string[] {
+  const surgery = journal.surgery
+  if (!surgery) return []
+  const applied: string[] = []
+  for (const step of surgery.pullRequests) {
+    if (step.status !== 'completed') continue
+    applied.push(
+      step.action === 'retarget'
+        ? `pull request #${step.number} targets ${step.toBase}`
+        : `pull request #${step.number} is closed`,
+    )
+  }
+  const stack = surgery.stack
+  if (stack?.unstackStatus === 'completed') {
+    applied.push(
+      stack.createStatus === 'completed' && stack.stackNumberAfter !== null
+        ? `native stack #${stack.stackNumber} was unstacked and #${stack.stackNumberAfter} holds the new order`
+        : `native stack #${stack.stackNumber} was unstacked`,
+    )
+  }
+  return applied
+}
+
+/** Puts the parent metadata a removed branch carried before the surgery took it. */
+async function restoreRemovedMetadata(
+  repoPath: string,
+  removed: { branch: string; oldParent: string | null; oldParentTip: string | null },
+): Promise<void> {
+  if (removed.oldParent)
+    await setConfig(repoPath, `branch.${removed.branch}.parent`, removed.oldParent)
+  else await unsetConfig(repoPath, `branch.${removed.branch}.parent`)
+  if (removed.oldParentTip)
+    await setConfig(repoPath, `branch.${removed.branch}.parentTip`, removed.oldParentTip)
+  else await unsetConfig(repoPath, `branch.${removed.branch}.parentTip`)
+}
+
 async function currentOrigin(
   repoPath: string,
   includePushUrl = false,
@@ -4696,6 +6008,8 @@ export async function runStackAction(
       return stackContinue(root)
     case 'stackAbort':
       return stackAbort(root)
+    case 'executeSurgery':
+      return runSurgery(root, action.token, action.allowForce, action.closePullRequests)
     case 'updatePr':
       return updatePullRequest(root, action.number, action.title, action.body, action.draft)
     case 'closePr':

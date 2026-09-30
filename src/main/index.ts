@@ -13,7 +13,13 @@ import {
   getCommitDiff,
   getPushPreview,
 } from './git'
-import { getSubmitStackProgress, onPublishProgress, previewStack } from './stacks'
+import {
+  getSubmitStackProgress,
+  onPublishProgress,
+  previewStack,
+  previewSurgery,
+  validateSurgeryRequest,
+} from './stacks'
 import { previewReconciliationRepair } from './reconciliation'
 import { getPullRequest } from './github'
 import { getPullRequestIssueLinks, previewIssueLink, searchGitHubIssues } from './issue-links'
@@ -197,6 +203,12 @@ function installHandlers() {
     validateSender(event)
     return readRepository(async (root, signal) =>
       previewStack(root, await getSnapshot(root, signal), kind, branch),
+    )
+  })
+  ipcMain.handle('repository:surgery-preview', (event, request: unknown) => {
+    validateSender(event)
+    return readRepository(async (root, signal) =>
+      previewSurgery(root, await getSnapshot(root, signal), validateSurgeryRequest(request)),
     )
   })
   ipcMain.handle('repository:reconciliation-preview', (event, stackKey: string) => {

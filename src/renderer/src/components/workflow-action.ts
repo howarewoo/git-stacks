@@ -6,6 +6,7 @@ import type {
   PushPreview,
   StackKind,
   StackPreview,
+  SurgeryPreview,
 } from '../../../shared/types'
 
 /**
@@ -47,6 +48,15 @@ export type WorkflowActionInput =
       confirmation: string
       confirmationTarget: string | null
     }
+  | {
+      kind: 'surgery'
+      preview: SurgeryPreview
+      allowForce: boolean
+      closePullRequests: boolean
+      /** Exact branch name the person typed before remote history may be replaced. */
+      confirmation: string
+      confirmationTarget: string | null
+    }
 
 /** The repository state captured when the dialog opened. */
 export interface WorkflowActionContext {
@@ -63,6 +73,16 @@ const stackLabels: Record<StackKind, string> = {
 
 export function stackActionLabel(operation: StackKind): string {
   return `${stackLabels[operation]}${operation === 'merge' ? '' : ' stack'}`
+}
+
+const surgeryLabels: Record<SurgeryPreview['kind'], string> = {
+  insert: 'Insert a stack layer',
+  move: 'Move a stack layer',
+  remove: 'Remove a stack layer',
+}
+
+export function surgeryActionLabel(operation: SurgeryPreview['kind']): string {
+  return surgeryLabels[operation]
 }
 
 export function workflowActionLabel(input: WorkflowActionInput): string {
@@ -89,6 +109,8 @@ export function workflowActionLabel(input: WorkflowActionInput): string {
       return stackActionLabel(input.operation)
     case 'submit':
       return 'Submit stack'
+    case 'surgery':
+      return surgeryActionLabel(input.preview.kind)
     case 'pr':
       return 'Update pull request'
     case 'confirm':
@@ -182,6 +204,25 @@ export function workflowAction(
         token: input.preview.token,
         allowForce: input.allowForce,
         layers: input.layers,
+      }
+    }
+    case 'surgery': {
+      if (!input.preview || input.preview.blockers.length > 0) return null
+      // Replacing published history and closing submitted pull requests are separate
+      // decisions, and each one needs its own explicit approval. The builder refuses
+      // independently so a bypassed guard still cannot dispatch an unconfirmed rewrite.
+      if (input.preview.forcePushes.length > 0 && !input.allowForce) return null
+      if (input.preview.closes.length > 0 && !input.closePullRequests) return null
+      if (
+        input.allowForce &&
+        (input.confirmationTarget === null || input.confirmation !== input.confirmationTarget)
+      )
+        return null
+      return {
+        type: 'executeSurgery',
+        token: input.preview.token,
+        allowForce: input.allowForce,
+        closePullRequests: input.closePullRequests,
       }
     }
   }

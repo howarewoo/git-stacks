@@ -316,6 +316,71 @@ If Git encounters conflicts during the rebase cascade:
 3. Once conflicts are resolved, use **Continue** to adopt the rebased commit and resume the cascade for the remaining branches.
 4. Alternatively, use **Abort** to restore all branches and their metadata to their exact pre-sync backup refs and return to the original clean checkout.
 
+## Stack surgery
+
+Stack surgery inserts a layer, moves a layer up or down, and removes a layer from a
+linear stack. Each operation is planned, previewed, and applied bottom-up with the same
+replay and recovery machinery as Sync Stack, so a conflict stops at the layer that caused
+it and the original tips stay recoverable.
+
+### What a surgery changes
+
+- **Insert a layer** creates a branch at the tip of the layer you anchor on, reparents
+  the layer that sat above it, and replays the layers above that. The new branch is
+  created with no commits of its own; the preview names the exact tip it starts at.
+- **Move a layer down** places it on the layer below, so the layer that used to sit
+  there follows it and everything above that is replayed. **Move a layer up** swaps it
+  with the layer above it: the passed layer drops onto the moved layer's parent, keeps
+  its own subtree, and both layers are replayed in that order. Moving a layer under a
+  layer it already contains is refused, because the result would be a cycle rather than
+  an ordered chain.
+- **Remove a layer** deletes the local branch and clears its recorded parent. A layer
+  that has work above it is not deleted with its work: the layer above is replayed onto
+  the removed layer's parent first. A merged pull request is never removed, because its
+  pull request cannot leave the stack; Sync Stack drops merged layers instead.
+- **Native stack membership** is GitHub's to own. Reordering submitted layers unstack
+  the native stack and registers the pull requests again in the new order; layers that
+  are not part of a native stack, and a repository that cannot use native stacks, plan a
+  local-only surgery and say so in the preview. An inserted layer has no pull request of
+  its own, so a stack whose members no longer form one chain from the trunk is unstacked
+  rather than left registered in an order GitHub cannot hold.
+- **An inserted layer that a pull request hangs from** is published to the remote before
+  the retarget, because GitHub refuses a pull request whose base branch does not exist.
+  The preview names that creation next to the retarget, and the push refuses to replace
+  a branch somebody else created. Without a GitHub origin to push to, an insert below a
+  submitted layer is blocked instead of planned.
+
+### Preview and safety
+
+- The preview lists every affected layer with its recorded parent, its new parent, the
+  exact commit it is replayed from, the pull request base that changes, and the force
+  push the run will need. A layer that only changes its recorded parent is shown as
+  reparented rather than replayed, because no commit moves.
+- A surgery is refused when a layer's replay boundary cannot be proven from Git: the
+  recorded parent tip must exist and still be an ancestor of the layer tip. Git Stacks
+  never guesses a fork point.
+- Any change between the preview and the run — a moved branch tip, a rewritten parent, a
+  changed upstream, or a different origin — invalidates the plan before a single ref
+  moves. Preview tokens are single use.
+- Force pushes need explicit consent and carry the remote tip captured during the
+  preview, so another writer's push is rejected rather than overwritten.
+- A run that stops part-way leaves the journal the recovery banner reads, including the
+  branch it created and the branch it removed. Continue resumes from the journal without
+  repeating completed layers; Abort restores every tip, the created branch, and the
+  removed branch.
+  A removed branch stays in place until every replay and remote step has
+  finished, so an Abort that arrives earlier finds it already restored at the tip the
+  preview captured.
+- The remote half of a run - the pull request retargets and closes, and the native stack
+  unstack and re-registration - is part of the same journal, and Continue runs it again
+  after a resolved conflict as well as after a lost response. Every step reads what
+  GitHub actually holds, in full, before it writes: a step whose result is already there
+  is recognised and completed instead of repeated, including a push whose ref already
+  moved, a retarget that landed, an unstack that dissolved the stack, and a stack
+  creation that was registered before the response was lost. A step whose pull request
+  head, base, or state, or whose native stack membership, differs from both the reviewed
+  pre-state and the reviewed result stops the run instead of overwriting it.
+
 ## Linked issues
 
 A pull request inspector and the pull request workflow dialog both list the issues

@@ -7,6 +7,7 @@ import type {
   RepositorySnapshot,
   StackPreview,
   StackProgress,
+  SurgeryPreview,
 } from '../../src/shared/types'
 import { EMPTY_SNAPSHOT_LIMITS } from '../../src/shared/performance'
 import type { RepositoryCapabilities } from '../../src/shared/capabilities'
@@ -396,4 +397,62 @@ export const mergeCommit: Commit = {
   subject: 'Merge branch feature/checkout',
   author: 'Ada <ada@example.com>',
   date: '2026-02-05T09:00:00.000Z',
+}
+
+/** A reviewed insert between two layers, as the surgery preview reports it. */
+export const insertSurgeryPreview: SurgeryPreview = {
+  token: 'preview-surgery-1',
+  expiresAt: Date.parse('2026-02-05T10:00:00.000Z'),
+  kind: 'insert',
+  branch: 'feature/checkout',
+  trunk: 'main',
+  order: ['feature/list', 'feature/checkout-helpers', 'feature/checkout', 'feature/audit'],
+  layers: [
+    {
+      branch: 'feature/checkout-helpers',
+      action: 'insert',
+      fromParent: null,
+      toParent: 'feature/list',
+      oid: '3333333333333333333333333333333333333333',
+      remoteOid: null,
+      commits: 0,
+      push: 'none',
+      pullRequest: null,
+      pullRequestBase: null,
+      pullRequestAction: 'none',
+      note: 'New branch at feature/list; no commits to replay',
+      blockers: [],
+    },
+    {
+      branch: 'feature/checkout',
+      action: 'retarget',
+      fromParent: 'feature/list',
+      toParent: 'feature/checkout-helpers',
+      oid: '2222222222222222222222222222222222222222',
+      remoteOid: '2222222222222222222222222222222222222222',
+      commits: 2,
+      push: 'force',
+      pullRequest: 42,
+      pullRequestBase: 'feature/list',
+      pullRequestAction: 'retarget',
+      note: 'Replay 2 commits from 111111111111 onto 333333333333; pull request #42 retargeted to feature/checkout-helpers',
+      blockers: [],
+    },
+  ],
+  forcePushes: ['feature/checkout'],
+  creates: ['feature/checkout-helpers'],
+  retargets: [
+    {
+      number: 42,
+      branch: 'feature/checkout',
+      from: 'feature/list',
+      to: 'feature/checkout-helpers',
+    },
+  ],
+  closes: [],
+  nativeStack: { number: 7, action: 'unstack-and-create', members: [41, 42] },
+  blockers: [],
+  warnings: [
+    'Pushing feature/checkout replaces published history under the exact remote tips named above.',
+  ],
 }

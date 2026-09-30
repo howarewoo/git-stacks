@@ -12,6 +12,9 @@ import type {
   RepositorySnapshot,
   StackKind,
   StackPreview,
+  SurgeryLayerAction,
+  SurgeryPreview,
+  SurgeryRequest,
   SyncLayerState,
   IssueLinkPreview,
   IssueLinkRelation,
@@ -26,7 +29,12 @@ import { Field } from './ui/field'
 import { Input } from './ui/input'
 import { Select } from './ui/select'
 import { Textarea } from './ui/textarea'
-import { workflowAction, workflowActionLabel, type WorkflowActionInput } from './workflow-action'
+import {
+  surgeryActionLabel,
+  workflowAction,
+  workflowActionLabel,
+  type WorkflowActionInput,
+} from './workflow-action'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from './ui/dialog'
 import {
   BlockerList,
@@ -59,6 +67,7 @@ export type WorkflowRequest =
   | { kind: 'pull' | 'merge' | 'stash' | 'forcePush' }
   | { kind: 'commitAction'; commit: Commit; mode: 'cherryPick' | 'revert' }
   | { kind: 'stack'; branch: string; operation: StackKind }
+  | { kind: 'surgery'; request: SurgeryRequest }
   | { kind: 'pr'; number: number }
   | {
       kind: 'confirm'
@@ -73,8 +82,12 @@ export function workflowError(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
-const stackLabels = { restack: 'Restack', publish: 'Publish', merge: 'Merge pull request', sync: 'Sync' }
-
+const stackLabels = {
+  restack: 'Restack',
+  publish: 'Publish',
+  merge: 'Merge pull request',
+  sync: 'Sync',
+}
 
 const SYNC_LAYER_LABELS: Record<SyncLayerState, string> = {
   merged: 'Merged',
@@ -96,11 +109,46 @@ const SYNC_LAYER_BADGE: Record<SyncLayerState, BadgeProps['variant']> = {
   blocked: 'danger',
 }
 
+const SURGERY_ACTION_LABELS: Record<SurgeryLayerAction, string> = {
+  insert: 'New layer',
+  rewrite: 'Replayed',
+  retarget: 'Rebased onto a new parent',
+  remove: 'Removed',
+}
+
+const SURGERY_ACTION_BADGE: Record<SurgeryLayerAction, BadgeProps['variant']> = {
+  insert: 'info',
+  rewrite: 'warning',
+  retarget: 'warning',
+  remove: 'danger',
+}
+
+const SURGERY_STACK_LABELS: Record<NonNullable<SurgeryPreview['nativeStack']>['action'], string> = {
+  none: 'Native stack membership is unchanged',
+  unstack: `Unstack the native stack, then register the pull requests in the new order`,
+  'unstack-and-create': `Unstack the native stack, then register it again in the new order`,
+}
+
 /** Request kinds that read backend state before the action can be reviewed. */
-const previewKinds: readonly string[] = ['stack', 'forcePush', 'pr']
+const previewKinds: readonly string[] = ['stack', 'surgery', 'forcePush', 'pr']
+
+/**
+ * The surgery the person asked for, with a typed branch name folded in. An insert
+ * is only reviewable once it names its branch, so the name is part of the request
+ * the preview is read for.
+ */
+export function surgeryRequestFor(
+  request: Extract<WorkflowRequest, { kind: 'surgery' }>,
+  name: string,
+): SurgeryRequest {
+  return request.request.kind === 'insert'
+    ? { ...request.request, name: name.trim() }
+    : request.request
+}
 
 type WorkflowData =
   | { kind: 'stack'; value: StackPreview }
+  | { kind: 'surgery'; value: SurgeryPreview }
   | { kind: 'forcePush'; value: PushPreview }
   | { kind: 'pr'; value: PullRequest & { body: string } }
   | { kind: 'local' }
@@ -109,6 +157,10 @@ function workflowComposition(request: WorkflowRequest): WorkflowComposition {
   if (request.kind === 'confirm') return request.destructive ? 'destructive' : 'form'
   if (request.kind === 'forcePush' || request.kind === 'deleteRemote') return 'destructive'
   if (request.kind === 'stack') return request.operation === 'merge' ? 'destructive' : 'reviewed'
+  // Removing a layer deletes a local branch and can close its pull request; the other two
+  // surgeries only rewrite the order.
+  if (request.kind === 'surgery')
+    return request.request.kind === 'remove' ? 'destructive' : 'reviewed'
   if (request.kind === 'pull' || request.kind === 'merge' || request.kind === 'commitAction')
     return 'reviewed'
   return 'form'
@@ -130,6 +182,8 @@ function requestActionType(request: WorkflowRequest): GitAction['type'] {
       return request.mode
     case 'stack':
       return 'executeStack'
+    case 'surgery':
+      return 'executeSurgery'
     case 'pr':
       return 'updatePr'
     case 'forcePush':
@@ -146,6 +200,7 @@ function requestActionType(request: WorkflowRequest): GitAction['type'] {
  */
 export function previewIdentity(data: WorkflowData): string | null {
   if (data.kind === 'stack') return `stack:${data.value.token}`
+  if (data.kind === 'surgery') return `surgery:${data.value.token}`
   if (data.kind === 'forcePush')
     return `lease:${data.value.remote}/${data.value.destination.replace(/^refs\/heads\//, '')}:${data.value.localOid}:${data.value.remoteOid ?? 'new'}`
   if (data.kind === 'pr') return `pr:${data.value.number}:${data.value.headOid ?? 'unknown'}`
@@ -704,7 +759,9 @@ export function WorkflowDialog({
           : request.kind === 'upstream'
             ? (request.branch.upstreamRef ?? '')
             : (request.branch.parent ?? snapshot.defaultBranch)
-      : '',
+      : request.kind === 'surgery' && request.request.kind === 'insert'
+        ? request.request.name
+        : '',
   )
   const [message, setMessage] = React.useState('')
   const [includeUntracked, setIncludeUntracked] = React.useState(true)
@@ -716,6 +773,8 @@ export function WorkflowDialog({
   const [progress, setProgress] = React.useState<PublishProgress | null>(null)
   const [mergeMethod, setMergeMethod] = React.useState<'' | 'merge' | 'squash' | 'rebase'>('')
   const [preview, setPreview] = React.useState<StackPreview | null>(null)
+  const [surgery, setSurgery] = React.useState<SurgeryPreview | null>(null)
+  const [closePullRequests, setClosePullRequests] = React.useState(false)
   const [push, setPush] = React.useState<PushPreview | null>(null)
   const [pr, setPr] = React.useState<(PullRequest & { body: string }) | null>(null)
   const [prTitle, setPrTitle] = React.useState('')
@@ -733,6 +792,10 @@ export function WorkflowDialog({
   const [edited, setEdited] = React.useState(false)
   const [closeNotice, setCloseNotice] = React.useState<string | null>(null)
   const hasEditedRef = React.useRef(false)
+  // The typed name is read when a preview is requested, so the insert preview is
+  // always the one for the branch actually written.
+  const nameRef = React.useRef(name)
+  nameRef.current = name
   const captured = React.useRef({
     path: snapshot.path,
     head: snapshot.headOid,
@@ -778,6 +841,8 @@ export function WorkflowDialog({
 
   React.useEffect(() => {
     let active = true
+    const requestedName =
+      request.kind === 'surgery' && request.request.kind === 'insert' ? nameRef.current : null
     setError(null)
     setIdentity(null)
     setLoading(previewKinds.includes(request.kind))
@@ -792,6 +857,14 @@ export function WorkflowDialog({
           return {
             kind: 'stack',
             value: await stackApi.stackPreview(request.operation, request.branch),
+          }
+        }
+        if (request.kind === 'surgery') {
+          return {
+            kind: 'surgery',
+            value: await window.desktop.surgeryPreview(
+              surgeryRequestFor(request, requestedName ?? ''),
+            ),
           }
         }
         if (request.kind === 'forcePush') {
@@ -826,6 +899,8 @@ export function WorkflowDialog({
               ]),
             ),
           )
+        } else if (data.kind === 'surgery') {
+          if (requestedName === null || requestedName === nameRef.current) setSurgery(data.value)
         } else if (data.kind === 'forcePush') {
           setPush(data.value)
         } else if (data.kind === 'pr') {
@@ -838,7 +913,11 @@ export function WorkflowDialog({
         }
         setLoaded(true)
         setLoading(false)
-        setIdentity(previewIdentity(data))
+        setIdentity(
+          data.kind === 'surgery' && requestedName !== null && requestedName !== nameRef.current
+            ? null
+            : previewIdentity(data),
+        )
       },
       (value) => {
         if (!active) return
@@ -877,55 +956,63 @@ export function WorkflowDialog({
   }, [request, stackApi])
 
   const title =
-    request.kind === 'stack'
-      ? `${stackLabels[request.operation]}${request.operation === 'merge' ? '' : ' stack'}`
-      : request.kind === 'confirm'
-        ? request.title
-        : request.kind === 'commitAction'
-          ? `${request.mode === 'cherryPick' ? 'Cherry-pick' : 'Revert'} commit`
-          : (
-              {
-                rename: 'Rename local branch',
-                deleteRemote: 'Delete remote branch',
-                parent: 'Set stack parent',
-                upstream: 'Set upstream',
-                pull: 'Pull changes',
-                merge: 'Merge into current branch',
-                stash: 'Stash working changes',
-                forcePush: 'Force push with lease',
-                pr: `Pull request #${request.kind === 'pr' ? request.number : ''}`,
-              } as Record<string, string>
-            )[request.kind]
+    request.kind === 'surgery'
+      ? surgeryActionLabel(request.request.kind)
+      : request.kind === 'stack'
+        ? `${stackLabels[request.operation]}${request.operation === 'merge' ? '' : ' stack'}`
+        : request.kind === 'confirm'
+          ? request.title
+          : request.kind === 'commitAction'
+            ? `${request.mode === 'cherryPick' ? 'Cherry-pick' : 'Revert'} commit`
+            : (
+                {
+                  rename: 'Rename local branch',
+                  deleteRemote: 'Delete remote branch',
+                  parent: 'Set stack parent',
+                  upstream: 'Set upstream',
+                  pull: 'Pull changes',
+                  merge: 'Merge into current branch',
+                  stash: 'Stash working changes',
+                  forcePush: 'Force push with lease',
+                  pr: `Pull request #${request.kind === 'pr' ? request.number : ''}`,
+                } as Record<string, string>
+              )[request.kind]
   const description =
-    request.kind === 'confirm'
-      ? request.description
-      : request.kind === 'rename'
-        ? 'Rename the local branch and update its recorded children. Remote branch names and PRs stay unchanged.'
-        : request.kind === 'deleteRemote'
-          ? 'Delete this branch from its remote repository. Open PRs may close. Local branches and child relationships are not changed. A changed remote tip stops deletion.'
-          : request.kind === 'parent'
-            ? 'Record the intended parent without rewriting commits. Preview Restack next to move this branch and its descendants.'
-            : request.kind === 'upstream'
-              ? 'Choose the remote branch used by Pull and Push. This does not change the stack parent.'
-              : request.kind === 'pull'
-                ? `Integrate the upstream of ${captured.current.branch ?? 'the current branch'}. Fast-forward only never creates or rewrites commits.`
-                : request.kind === 'merge'
-                  ? `Merge a selected branch into ${captured.current.branch ?? 'the current branch'}. Git stops if conflicts need attention.`
-                  : request.kind === 'stash'
-                    ? 'Save work without creating a commit. Ignored files are not included.'
-                    : request.kind === 'forcePush'
-                      ? 'Replace remote history only if its tip still matches this preview. Someone else’s newer push will be rejected.'
-                      : request.kind === 'commitAction'
-                        ? `${request.commit.subject} · ${request.commit.oid.slice(0, 10)} → ${captured.current.branch ?? 'current branch'}`
-                        : request.kind === 'pr'
-                          ? 'Manage this pull request, or open GitHub for the full review discussion.'
-                          : request.kind === 'stack' && request.operation === 'restack'
-                            ? 'Rebase parent-first using each branch’s recorded boundary. Conflicts pause the stack; your original checkout is restored on completion.'
-                            : request.kind === 'stack' && request.operation === 'publish'
-                              ? 'Push the reviewed branches, create missing PRs, and update their bases and linked stack navigation.'
-                              : request.kind === 'stack' && request.operation === 'sync'
-                                ? 'Fetch and prune the remotes, then replay this stack bottom-to-top onto the trunk it reports. Replayed layers are pushed under the exact remote tips named below, and a conflict pauses the stack for Continue or Abort.'
-                                : 'Merge one bottom PR into the default branch. Then explicitly restack and publish the remaining branches. No automatic merges or queue enrollment.'
+    request.kind === 'surgery'
+      ? request.request.kind === 'insert'
+        ? `Create ${request.request.name} on ${request.request.branch} and replay the layers above it onto the new parent.`
+        : request.request.kind === 'move'
+          ? `Reparent ${request.request.branch} onto ${request.request.target} and replay the layers above it.`
+          : `Delete the local branch ${request.request.branch} and replay the layers above it onto its parent. Its recovery ref keeps the commits until this surgery finishes.`
+      : request.kind === 'confirm'
+        ? request.description
+        : request.kind === 'rename'
+          ? 'Rename the local branch and update its recorded children. Remote branch names and PRs stay unchanged.'
+          : request.kind === 'deleteRemote'
+            ? 'Delete this branch from its remote repository. Open PRs may close. Local branches and child relationships are not changed. A changed remote tip stops deletion.'
+            : request.kind === 'parent'
+              ? 'Record the intended parent without rewriting commits. Preview Restack next to move this branch and its descendants.'
+              : request.kind === 'upstream'
+                ? 'Choose the remote branch used by Pull and Push. This does not change the stack parent.'
+                : request.kind === 'pull'
+                  ? `Integrate the upstream of ${captured.current.branch ?? 'the current branch'}. Fast-forward only never creates or rewrites commits.`
+                  : request.kind === 'merge'
+                    ? `Merge a selected branch into ${captured.current.branch ?? 'the current branch'}. Git stops if conflicts need attention.`
+                    : request.kind === 'stash'
+                      ? 'Save work without creating a commit. Ignored files are not included.'
+                      : request.kind === 'forcePush'
+                        ? 'Replace remote history only if its tip still matches this preview. Someone else’s newer push will be rejected.'
+                        : request.kind === 'commitAction'
+                          ? `${request.commit.subject} · ${request.commit.oid.slice(0, 10)} → ${captured.current.branch ?? 'current branch'}`
+                          : request.kind === 'pr'
+                            ? 'Manage this pull request, or open GitHub for the full review discussion.'
+                            : request.kind === 'stack' && request.operation === 'restack'
+                              ? 'Rebase parent-first using each branch’s recorded boundary. Conflicts pause the stack; your original checkout is restored on completion.'
+                              : request.kind === 'stack' && request.operation === 'publish'
+                                ? 'Push the reviewed branches, create missing PRs, and update their bases and linked stack navigation.'
+                                : request.kind === 'stack' && request.operation === 'sync'
+                                  ? 'Fetch and prune the remotes, then replay this stack bottom-to-top onto the trunk it reports. Replayed layers are pushed under the exact remote tips named below, and a conflict pauses the stack for Continue or Abort.'
+                                  : 'Merge one bottom PR into the default branch. Then explicitly restack and publish the remaining branches. No automatic merges or queue enrollment.'
 
   const readProgress = async () => {
     if (request.kind !== 'stack' || request.operation !== 'publish') return
@@ -960,7 +1047,8 @@ export function WorkflowDialog({
     })
     const { dispatched, value: success } = await attemptRun
     if (!dispatched || !success) return
-    if (request.kind === 'stack' && request.operation !== 'publish') setFinished(true)
+    if (request.kind === 'surgery') setFinished(true)
+    else if (request.kind === 'stack' && request.operation !== 'publish') setFinished(true)
     else onClose()
   }
 
@@ -971,7 +1059,9 @@ export function WorkflowDialog({
         ? request.branch.name
         : request.kind === 'stack' && allowForce
           ? request.branch
-          : null
+          : request.kind === 'surgery' && allowForce
+            ? (surgery?.forcePushes[0] ?? null)
+            : null
   const actionInput: WorkflowActionInput | null =
     request.kind === 'confirm'
       ? { kind: 'confirm', action: request.action, label: request.label }
@@ -996,32 +1086,43 @@ export function WorkflowDialog({
                 mergeMethod,
               }
           : null
-        : request.kind === 'pr'
-          ? { kind: 'pr', number: request.number, title: prTitle, body, draft: prDraft }
-          : request.kind === 'forcePush'
-            ? { kind: 'forcePush', push, confirmation }
-            : request.kind === 'deleteRemote'
-              ? { kind: 'deleteRemote', branch: request.branch, confirmation }
-              : request.kind === 'rename'
-                ? { kind: 'rename', branch: request.branch, name }
-                : request.kind === 'parent'
-                  ? { kind: 'parent', branch: request.branch, name }
-                  : request.kind === 'upstream'
-                    ? { kind: 'upstream', branch: request.branch, name }
-                    : request.kind === 'pull'
-                      ? { kind: 'pull', strategy }
-                      : request.kind === 'merge'
-                        ? { kind: 'merge', ref: name }
-                        : request.kind === 'stash'
-                          ? { kind: 'stash', message, includeUntracked }
-                          : request.kind === 'commitAction'
-                            ? {
-                                kind: 'commitAction',
-                                commit: request.commit,
-                                mode: request.mode,
-                                mainline,
-                              }
-                            : null
+        : request.kind === 'surgery'
+          ? surgery
+            ? {
+                kind: 'surgery',
+                preview: surgery,
+                allowForce,
+                closePullRequests,
+                confirmation,
+                confirmationTarget,
+              }
+            : null
+          : request.kind === 'pr'
+            ? { kind: 'pr', number: request.number, title: prTitle, body, draft: prDraft }
+            : request.kind === 'forcePush'
+              ? { kind: 'forcePush', push, confirmation }
+              : request.kind === 'deleteRemote'
+                ? { kind: 'deleteRemote', branch: request.branch, confirmation }
+                : request.kind === 'rename'
+                  ? { kind: 'rename', branch: request.branch, name }
+                  : request.kind === 'parent'
+                    ? { kind: 'parent', branch: request.branch, name }
+                    : request.kind === 'upstream'
+                      ? { kind: 'upstream', branch: request.branch, name }
+                      : request.kind === 'pull'
+                        ? { kind: 'pull', strategy }
+                        : request.kind === 'merge'
+                          ? { kind: 'merge', ref: name }
+                          : request.kind === 'stash'
+                            ? { kind: 'stash', message, includeUntracked }
+                            : request.kind === 'commitAction'
+                              ? {
+                                  kind: 'commitAction',
+                                  commit: request.commit,
+                                  mode: request.mode,
+                                  mainline,
+                                }
+                              : null
 
   const submit = async (event: React.FormEvent) => {
     event.preventDefault()
@@ -1089,20 +1190,24 @@ export function WorkflowDialog({
     currentPath: snapshot.path,
     previewToken: identity,
     rejectedTokens: rejectedIdentities,
-    previewBlockers: preview?.blockers ?? [],
+    previewBlockers:
+      request.kind === 'surgery' ? (surgery?.blockers ?? []) : (preview?.blockers ?? []),
     confirmationTarget,
     confirmation,
     allowForce,
     expectedOidMissing:
       (request.kind === 'deleteRemote' && !request.branch.oid) ||
       (request.kind === 'forcePush' && !push),
-    requiresName: ['rename', 'parent', 'merge'].includes(request.kind),
+    requiresName:
+      ['rename', 'parent', 'merge'].includes(request.kind) ||
+      (request.kind === 'surgery' && request.request.kind === 'insert'),
     name,
     requiresMainline: request.kind === 'commitAction' && request.commit.parents.length > 1,
     mainline,
     requiresMergeMethod: request.kind === 'stack' && request.operation === 'merge',
     mergeMethod,
-    requiresLeaseApproval: (preview?.sync?.forcePushes.length ?? 0) > 0,
+    requiresLeaseApproval:
+      (preview?.sync?.forcePushes.length ?? 0) > 0 || (surgery?.forcePushes.length ?? 0) > 0,
     untitledBranches,
     pullRequestMissing: request.kind === 'pr' && !pr,
     pullRequestMerged: request.kind === 'pr' && pr?.state === 'MERGED',
@@ -1119,13 +1224,15 @@ export function WorkflowDialog({
     blocked: Boolean(blocker || shapeReason) && !finished,
   })
   const actionLabel =
-    request.kind === 'confirm'
-      ? request.label
-      : request.kind === 'stack'
-        ? `${stackLabels[request.operation]}${request.operation === 'merge' ? '' : ' stack'}`
-        : request.kind === 'pr'
-          ? 'Save PR changes'
-          : title
+    request.kind === 'surgery'
+      ? surgeryActionLabel(request.request.kind)
+      : request.kind === 'confirm'
+        ? request.label
+        : request.kind === 'stack'
+          ? `${stackLabels[request.operation]}${request.operation === 'merge' ? '' : ' stack'}`
+          : request.kind === 'pr'
+            ? 'Save PR changes'
+            : title
   const statusMessage =
     phase === 'loading'
       ? 'Reading current repository state…'
@@ -1228,7 +1335,10 @@ export function WorkflowDialog({
           <DialogDescription>{description}</DialogDescription>
         </DialogHeader>
         <form className="workflow-form" onSubmit={submit}>
-          <WorkflowFrame composition={composition} wide={request.kind === 'stack'}>
+          <WorkflowFrame
+            composition={composition}
+            wide={request.kind === 'stack' || request.kind === 'surgery'}
+          >
             <fieldset className="workflow-fields" disabled={locked || finished}>
               {closeNotice ? <WarningNote>{closeNotice}</WarningNote> : null}
               {contextFacts.length ? <OperationContext facts={contextFacts} /> : null}
@@ -1419,6 +1529,163 @@ export function WorkflowDialog({
                 consent and the base changes the moment a fresh read fails, while Resume
                 stayed enabled. The preview-dependent parts stay gated; the saved ones do not.
               */}
+              {request.kind === 'surgery' && request.request.kind === 'insert' ? (
+                <>
+                  <Field id="workflow-surgery-name" label="New branch name" required>
+                    <Input
+                      data-workflow-first-field=""
+                      value={name}
+                      onChange={(event) => {
+                        markEdited()
+                        nameRef.current = event.target.value
+                        setName(event.target.value)
+                        setSurgery(null)
+                        setIdentity(null)
+                      }}
+                      autoComplete="off"
+                      spellCheck={false}
+                    />
+                  </Field>
+                  <WarningNote>
+                    Reload the preview after naming the branch: the reviewed rewrites, pull request
+                    bases and pushes below are the ones this exact name costs.
+                  </WarningNote>
+                </>
+              ) : null}
+              {request.kind === 'surgery' && surgery ? (
+                <>
+                  <OperationContext
+                    title={`Stack order after this ${surgery.kind}`}
+                    description={`Every layer hangs from ${surgery.trunk} in this order: ${surgery.order.join(' → ')}.`}
+                    facts={[
+                      { label: 'Anchored on', value: surgery.branch },
+                      { label: 'Trunk', value: surgery.trunk },
+                      {
+                        label: 'Layers',
+                        value: `${surgery.layers.length} of ${surgery.order.length}`,
+                      },
+                    ]}
+                  />
+                  {surgery.layers.map((layer) => (
+                    <WorkflowSection
+                      key={`surgery-${layer.branch}`}
+                      label={`${layer.branch}: ${layer.fromParent ?? 'new'} → ${layer.toParent}`}
+                    >
+                      <div className="workflow-row">
+                        <Badge variant={SURGERY_ACTION_BADGE[layer.action]}>
+                          {SURGERY_ACTION_LABELS[layer.action]}
+                        </Badge>
+                        <span className="workflow-note">
+                          {layer.pullRequest === null
+                            ? 'No pull request'
+                            : `#${layer.pullRequest}${layer.pullRequestAction === 'close' ? ' will close' : layer.pullRequestAction === 'retarget' ? ` retargeted from ${layer.pullRequestBase}` : layer.pullRequestBase ? ` targets ${layer.pullRequestBase}` : ''}`}
+                        </span>
+                      </div>
+                      <p className="workflow-note">{layer.note}</p>
+                      {layer.push === 'force' ? (
+                        <OperationFacts
+                          facts={[
+                            {
+                              label: 'Lease',
+                              value: `origin/${layer.branch} at ${layer.remoteOid?.slice(0, 12) ?? 'absent'}`,
+                              code: true,
+                            },
+                            {
+                              label: 'New tip',
+                              value: layer.oid?.slice(0, 12) ?? 'Not written yet',
+                              code: true,
+                            },
+                          ]}
+                        />
+                      ) : null}
+                      {layer.blockers.length > 0 ? <BlockerList items={layer.blockers} /> : null}
+                    </WorkflowSection>
+                  ))}
+                  {surgery.nativeStack && surgery.nativeStack.action !== 'none' ? (
+                    <OperationContext
+                      title="Native stack"
+                      description={
+                        surgery.nativeStack.number === null
+                          ? SURGERY_STACK_LABELS[surgery.nativeStack.action]
+                          : `${SURGERY_STACK_LABELS[surgery.nativeStack.action]} (stack #${
+                              surgery.nativeStack.number
+                            }${
+                              surgery.nativeStack.members.length > 0
+                                ? `, new members ${surgery.nativeStack.members
+                                    .map((number) => `#${number}`)
+                                    .join(', ')}`
+                                : ''
+                            }).`
+                      }
+                      facts={[]}
+                    />
+                  ) : null}
+                  {(surgery.creates ?? []).length > 0 ? (
+                    <WarningNote>
+                      {surgery.creates.join(', ')} {surgery.creates.length === 1 ? 'is' : 'are'}{' '}
+                      published as a new branch on the remote before the pull request above{' '}
+                      {surgery.creates.length === 1 ? 'it is' : 'them are'} retargeted onto{' '}
+                      {surgery.creates.length === 1 ? 'it' : 'them'}. That push refuses to replace a
+                      branch that already exists there.
+                    </WarningNote>
+                  ) : null}
+                  {surgery.closes.length > 0 ? (
+                    <WarningNote>
+                      Pull request {surgery.closes.map((number) => `#${number}`).join(', ')} will
+                      close. Its commits stay reachable from the local recovery ref this run
+                      creates, and no other pull request is touched.
+                    </WarningNote>
+                  ) : null}
+                  {(surgery.warnings ?? []).map((warning, index) => (
+                    <WarningNote key={`${index}-${warning}`}>{warning}</WarningNote>
+                  ))}
+                  <BlockerList items={surgery.blockers} />
+                  {surgery.forcePushes.length > 0 ? (
+                    <>
+                      <Checkbox
+                        id="workflow-surgery-lease"
+                        label="Replace published history on the listed branches with exact leases"
+                        checked={allowForce}
+                        onChange={(event) => {
+                          markEdited()
+                          setAllowForce(event.target.checked)
+                          setConfirmation('')
+                        }}
+                      />
+                      {allowForce ? (
+                        <>
+                          <WarningNote>
+                            Remote-only commits on {surgery.forcePushes.join(', ')} may be replaced.
+                            Each push names the exact tip above as its lease, so a changed remote
+                            stops the surgery instead of overwriting it.
+                          </WarningNote>
+                          <TypedConfirmation
+                            id="workflow-confirm"
+                            value={confirmation}
+                            target={confirmationTarget ?? ''}
+                            onChange={(value) => {
+                              markEdited()
+                              setConfirmation(value)
+                            }}
+                            disabled={locked}
+                          />
+                        </>
+                      ) : null}
+                    </>
+                  ) : null}
+                  {surgery.closes.length > 0 ? (
+                    <Checkbox
+                      id="workflow-surgery-close-prs"
+                      label="Close the pull requests of the removed layer"
+                      checked={closePullRequests}
+                      onChange={(event) => {
+                        markEdited()
+                        setClosePullRequests(event.target.checked)
+                      }}
+                    />
+                  ) : null}
+                </>
+              ) : null}
               {request.kind === 'stack' && (preview || recovering) ? (
                 <>
                   {!preview ? (
@@ -1477,9 +1744,7 @@ export function WorkflowDialog({
                               {layer.pullRequest === null
                                 ? 'No pull request'
                                 : `#${layer.pullRequest}${
-                                    layer.pullRequestBase
-                                      ? ` targets ${layer.pullRequestBase}`
-                                      : ''
+                                    layer.pullRequestBase ? ` targets ${layer.pullRequestBase}` : ''
                                   }`}
                             </span>
                           </div>
@@ -1889,7 +2154,9 @@ export function WorkflowDialog({
                 </>
               ) : null}
             </fieldset>
-            {!loading && (error || actionError) && previewKinds.includes(request.kind) ? (
+            {!loading &&
+            (((error || actionError) && previewKinds.includes(request.kind)) ||
+              (request.kind === 'surgery' && !surgery)) ? (
               <Button
                 variant="secondary"
                 disabled={busy}
