@@ -64,17 +64,20 @@ function cloneUrl(value: unknown, kind: 'https' | 'ssh'): string | null {
 
 /**
  * One accessible repository as onboarding needs it. Anything that is not a
- * well-formed repository the credential may act on is dropped rather than shown
- * as a broken row: a search hit the token cannot read is not a clone target.
+ * well-formed repository is dropped rather than shown as a broken row. Neither
+ * `GET /user/repos` nor search reports a repository this credential cannot
+ * read, so a well-formed hit is a clone target by construction.
  */
 export function summarizeRepository(value: unknown): GitHubRepositorySummary | null {
   if (!isRecord(value)) return null
   const owner = isRecord(value.owner) ? stringField(value.owner.login) : null
   const name = stringField(value.name)
   const fullName = stringField(value.full_name) ?? (owner && name ? `${owner}/${name}` : null)
-  // `permissions` is present exactly for repositories the caller may act on.
+  if (!owner || !name || !fullName || !FULL_NAME.test(fullName)) return null
+  // `permissions` is optional in GitHub's schema and search results usually omit
+  // it entirely. Its absence is not evidence of inaccessibility, so it is read
+  // as "push not proven" rather than as a reason to drop the hit.
   const permissions = isRecord(value.permissions) ? value.permissions : null
-  if (!owner || !name || !fullName || !permissions || !FULL_NAME.test(fullName)) return null
   return {
     fullName,
     name,
@@ -96,11 +99,16 @@ export function summarizeRepository(value: unknown): GitHubRepositorySummary | n
     httpsUrl: cloneUrl(value.clone_url, 'https') ?? `${GITHUB_HTTPS}/${fullName}.git`,
     sshUrl: cloneUrl(value.ssh_url, 'ssh') ?? `git@github.com:${fullName}.git`,
     canPush:
-      permissions.push === true || permissions.admin === true || permissions.maintain === true,
+      permissions !== null &&
+      (permissions.push === true || permissions.admin === true || permissions.maintain === true),
   }
 }
 
-/** Discards every response entry the caller has no access to, keeping input order. */
+/**
+ * Keeps every well-formed repository a response returned, in order, and drops a
+ * repeat of one already listed. Both endpoints are already scoped to the
+ * credential, so this filters malformed entries and duplicates, nothing else.
+ */
 function accessible(values: readonly unknown[]): GitHubRepositorySummary[] {
   const repositories: GitHubRepositorySummary[] = []
   const seen = new Set<string>()
@@ -219,8 +227,8 @@ export interface DiscoveryOptions {
 
 /**
  * Every repository the signed-in credential can reach, most recently pushed
- * first. A query switches to GitHub's own search, whose results are filtered
- * down to the ones the credential may actually act on.
+ * first. A query switches to GitHub's own search, which is likewise scoped to
+ * the repositories this credential can read.
  */
 export async function discoverRepositories(
   options: DiscoveryOptions = {},

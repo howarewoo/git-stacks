@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { lstat, mkdir, rename, rm, rmdir } from 'node:fs/promises'
+import { lstat, mkdir, rm } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { basename, isAbsolute, join } from 'node:path'
 import {
@@ -20,6 +20,7 @@ import {
 } from './git-runtime'
 import type { GitEnvironmentStatus, OnboardingFailureReason } from '../shared/types'
 import { assertDirectoryName, assertFullName } from './github-repositories'
+import { promoteRepository, type PromotionRefusal } from './promote-repository'
 
 /** Cloning a real repository takes longer than any read the app performs. */
 const CLONE_TIMEOUT_MS = 30 * 60_000
@@ -205,14 +206,13 @@ export async function cloneRepository(options: CloneOptions): Promise<CloneOutco
     throw new CommandCancelled()
   }
 
-  // Atomic no-clobber promotion: if another process created an empty or non-empty
-  // destination folder while the clone was running, it is preserved rather than
-  // quietly replaced.
-  try {
-    await promoteNoClobber(staging, destination, directoryName)
-  } catch (error) {
+  // Promotion is this clone's commit point, and it is not interruptible: one
+  // atomic no-replace rename decides it, and the signal is no longer consulted
+  // from here on. A refused promotion leaves the destination exactly as it was.
+  const promotion = await promoteRepository(staging, destination)
+  if (!promotion.moved) {
     await discardStaging(staging, token)
-    throw error
+    throw promotionRefusal(promotion.refusal, promotion.detail, directoryName)
   }
 
   // Git reports its working tree root on stdout with a trailing newline, which
@@ -223,44 +223,43 @@ export async function cloneRepository(options: CloneOptions): Promise<CloneOutco
 }
 
 /**
- * Promotes the finished staging folder to the destination path.
- *
- * On POSIX, `rename(staging, destination)` silently replaces an existing empty
- * directory. To make promotion atomically no-clobber across platforms, we first
- * claim the destination with `mkdir`. If the destination already exists (even if
- * empty!), `mkdir` throws `EEXIST` and preserves the user's directory. If
- * `mkdir` succeeds, `rename` replaces our newly created empty directory. On
- * Windows, `rename` naturally fails if the destination exists (empty or not).
+ * Names a promotion that moved nothing. Each refusal says what happened and
+ * what the person can do, and none of them describes a change to a destination
+ * that was not made: the rename either claimed a free path or changed nothing.
  */
-async function promoteNoClobber(
-  staging: string,
-  destination: string,
+function promotionRefusal(
+  refusal: PromotionRefusal,
+  detail: string,
   directoryName: string,
-): Promise<void> {
-  if (process.platform !== 'win32') {
-    try {
-      await mkdir(destination)
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
-        throw new CloneError(
-          'destination-exists',
-          `${directoryName} already exists in that folder. Choose another name, or open the existing folder.`,
-        )
-      }
-      throw error
-    }
-  }
-  try {
-    await rename(staging, destination)
-  } catch (error) {
-    if (process.platform !== 'win32') {
-      await rmdir(destination).catch(() => undefined)
-    }
-    throw new CloneError(
+): CloneError {
+  if (refusal === 'exists') {
+    return new CloneError(
       'destination-exists',
-      `The clone finished but ${directoryName} could not be moved into place: ${commandDetail(error)}`,
+      `${directoryName} already exists in that folder. Choose another name, or open the existing folder.`,
     )
   }
+  if (refusal === 'unsupported') {
+    return new CloneError(
+      'failed',
+      `This folder cannot hold the clone safely: this system has no atomic no-replace rename, so moving it there could destroy a folder that already exists. Nothing was written.${detail ? ` (${detail})` : ''}`,
+    )
+  }
+  if (refusal === 'cross-device') {
+    return new CloneError(
+      'failed',
+      'The chosen folder is on a different volume from the folder the clone was built in, so it cannot be moved into place atomically. Nothing was written.',
+    )
+  }
+  if (refusal === 'unavailable') {
+    return new CloneError(
+      'failed',
+      `Git Stacks could not move the clone into place because its promotion helper is unavailable. Nothing was written. ${detail}`,
+    )
+  }
+  return new CloneError(
+    'failed',
+    `The clone finished but could not be moved into place: ${detail}`,
+  )
 }
 
 /**

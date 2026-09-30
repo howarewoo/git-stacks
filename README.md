@@ -16,7 +16,16 @@ npm run build          # typecheck + production build
 npm test               # the test suite
 npm run format:check   # formatting gate
 npm run bench:performance  # large-repository benchmarks
+npm run build:promotion-helper  # build the atomic no-replace rename helper
 ```
+
+`npm run dev`, `npm run build`, `npm test`, `npm run package`, and `npm run
+dist` all build the clone promotion helper first, so a C compiler must be
+available on the build machine (`cc`, `gcc`, `clang`, or `cl`; set `CC` to
+choose). The helper is compiled from source at build time and copied into the
+packaged app as `resources/promote`; nothing is compiled at runtime, and a build
+that cannot compile it fails instead of shipping a build that would fall back to
+an unsafe rename.
 
 When changing `GitAction`, update the renderer fixture's action messages in
 `tests/renderer/fixtures/control.ts` and affected test payloads. `npm run build`
@@ -161,16 +170,43 @@ with an ordinary Git working tree:
   already open so a stray drag cannot switch workspaces.
 
 The clone is built in an isolated staging folder (`.git-stacks-clone-${token}`)
-beside the destination and promoted into place via atomic `mkdir` collision
-detection only after it reads as a finished clone. Promotion into the target
-directory is the single commit point: everything before promotion is completely
-reversible. If a cancellation arrives while the Git transfer is running, after
-the Git process exits but before promotion, or during initial repository
-activation, the staging directory is safely discarded, any promoted folder is
-removed, and no half-registered repository is ever opened or registered in recents.
-A preexisting destination (empty or non-empty) is treated as a collision and never
-clobbered or silently merged into; only the staging folder this clone created is
-ever removed.
+beside the destination, in the same filesystem, and is promoted into place only
+after it reads as a finished clone. Promotion is the single commit point, and it
+is one atomic rename that refuses to replace anything already there:
+
+- Darwin: `renamex_np(RENAME_EXCL)`
+- Linux: `renameat2(AT_FDCWD, from, AT_FDCWD, to, RENAME_NOREPLACE)`
+- Windows: `MoveFileExW` without `MOVEFILE_REPLACE_EXISTING`
+
+Node exposes none of these, so they are reached through a small helper,
+[`native/promote-repository.c`](native/promote-repository.c), compiled for the
+host by `npm run build:promotion-helper` and shipped beside the Git runtime as
+`resources/promote` in the packaged app. It does one syscall and then exits; it
+never looks at the destination before renaming, so there is no window between
+the check and the move. A destination that is already there — an empty
+directory, a populated one, a file, a symlink — makes the rename fail and is
+left exactly as it was, and the clone is refused as a collision rather than
+clobbered, merged into, or emptied.
+
+There is no fallback path. A kernel or filesystem without a no-replace rename,
+a build whose helper is missing, and a destination on another volume are each
+reported as refusals that name what happened, because the alternative —
+checking whether the destination is free and then renaming over it — would
+destroy a directory another program owns in the window between the two steps.
+Nothing is written in any of those cases, and the staging folder this clone
+minted is the only thing removed.
+
+Cancellation is honoured up to the commit point and no further. A cancel that
+arrives while the Git transfer runs, after the Git process exits, or during the
+post-clone checks discards only the staging folder this clone created — its
+name carries a random token minted for that clone — and registers nothing. Past
+the commit point the clone is a finished repository in the folder the person
+chose, so the switch that opens it and writes it to recents runs to the end: a
+cancel that lands there completes the switch and reports the clone as finished.
+Nothing removes a promoted folder afterwards, which is why recents and the
+active repository can never name a folder that was deleted under them. An
+activation that fails after the commit point is reported with the path left in
+place rather than removing a repository the person asked for.
 
 The onboarding pane also reports what this machine can already do with Git: the
 commit identity, the default branch, whether a credential helper is configured
@@ -185,6 +221,11 @@ returning `incomplete_results` (due to GitHub query timeouts) or exceeding the
 1,000-result cap surface clear inline warnings prompting the user to refine
 their search. Small non-empty repositories whose size rounds down to 0 KB are
 accurately distinguished from unborn or unpushed empty repositories.
+Neither endpoint reports a repository the credential cannot read, and a
+response that omits the optional `permissions` object is a hit, not a refusal:
+it is listed, with its push access treated as unproven and the row marked read
+only. Only a malformed entry — one that names no clonable `owner/name` — is
+dropped.
 Discovery sends one `Authorization` header to `api.github.com` and nothing
 else. Access tokens never reach a command line, a log, the renderer, or a
 remote URL: the app-signed transport is used directly from the main process.

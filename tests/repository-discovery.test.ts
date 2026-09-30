@@ -47,6 +47,12 @@ function apiRepository(index: number, overrides: Record<string, unknown> = {}) {
   }
 }
 
+/** GitHub's search results carry no `permissions`; only `/user/repos` does. */
+function withoutPermissions(repository: Record<string, unknown>): Record<string, unknown> {
+  const { permissions: _reported, ...rest } = repository
+  return rest
+}
+
 /**
  * A local HTTP server speaking GitHub's REST shapes: repository collections with
  * `Link` paging, the search envelope, and the refusals a signed-in account meets.
@@ -86,11 +92,13 @@ async function githubFixture(): Promise<Fixture> {
           ...rateLimit,
           link: `<http://127.0.0.1:${port}/user/repos?page=2&per_page=${perPage}>; rel="next"`,
         })
-        // A public repository the credential cannot act on is never a clone target.
+        // A search-shaped hit that GitHub returned without `permissions` is a
+        // clone target like any other; only a malformed entry is dropped.
         response.end(
           JSON.stringify([
             apiRepository(1),
-            apiRepository(900, { permissions: null }),
+            { ...apiRepository(900), name: 'not a repository', full_name: 'not a repository' },
+            withoutPermissions(apiRepository(902)),
             apiRepository(2),
             ...rest,
           ]),
@@ -118,10 +126,10 @@ async function githubFixture(): Promise<Fixture> {
         page === 1
           ? Array.from({ length: perPage }, (_, index) =>
               index === perPage - 1
-                ? apiRepository(500, { permissions: null })
+                ? withoutPermissions(apiRepository(502))
                 : apiRepository(index + 300),
             )
-          : [apiRepository(400)]
+          : [apiRepository(400), { ...apiRepository(600), full_name: 'acme/' }]
       response.writeHead(200, rateLimit)
       response.end(JSON.stringify({ total_count: 421, incomplete_results: false, items }))
       return
@@ -185,21 +193,25 @@ function authenticated(fixture: Fixture): DirectGitHubTransport {
   })
 }
 
-test('accessible repositories are listed across every page, without inaccessible ones', async () => {
+test('every page of the accessible list is walked, keeping hits without permissions', async () => {
   const fixture = await githubFixture()
   try {
     const discovery = await discoverRepositories({ transport: authenticated(fixture) })
 
     assert.equal(discovery.query, '')
-    // Page one is a full page holding one inaccessible entry; page two adds two.
-    assert.equal(discovery.repositories.length, 103)
+    // Page one holds one malformed entry and one hit without permissions; page two adds two.
+    assert.equal(discovery.repositories.length, 104)
     assert.equal(discovery.repositories[0].fullName, 'acme/repo-1')
-    assert.equal(discovery.repositories[1].fullName, 'acme/repo-2')
+    assert.equal(discovery.repositories[1].fullName, 'acme/repo-902')
+    assert.equal(discovery.repositories[2].fullName, 'acme/repo-2')
     assert.equal(discovery.repositories.at(-1)?.fullName, 'acme/repo-201')
     assert.equal(
       discovery.repositories.some((repository) => repository.fullName === 'acme/repo-900'),
       false,
     )
+    // `repo-902` would be pushable if the response said so; without
+    // `permissions` the access is unproven rather than absent.
+    assert.equal(discovery.repositories[1].canPush, false)
     assert.equal(discovery.repositories[0].httpsUrl, 'https://github.com/acme/repo-1.git')
     assert.equal(discovery.repositories[0].sshUrl, 'git@github.com:acme/repo-1.git')
 
@@ -215,7 +227,7 @@ test('accessible repositories are listed across every page, without inaccessible
   }
 })
 
-test('a search walks its pages and keeps only repositories the credential can reach', async () => {
+test('a search walks its pages and keeps hits that name no permissions', async () => {
   const fixture = await githubFixture()
   try {
     const discovery = await discoverRepositories({
@@ -224,14 +236,21 @@ test('a search walks its pages and keeps only repositories the credential can re
     })
 
     assert.equal(discovery.query, 'repo')
-    // A full page whose last entry is inaccessible, plus the short second page.
-    assert.equal(discovery.repositories.length, 100)
+    // A full page whose last hit has no permissions, plus a short second page
+    // carrying one malformed entry.
+    assert.equal(discovery.repositories.length, 101)
     assert.equal(discovery.repositories[0].fullName, 'acme/repo-300')
     assert.equal(discovery.repositories.at(-1)?.fullName, 'acme/repo-400')
     assert.equal(
-      discovery.repositories.some((repository) => repository.fullName === 'acme/repo-500'),
+      discovery.repositories.some((repository) => repository.fullName === 'acme/repo-600'),
       false,
     )
+    // A search hit GitHub returned without `permissions` is still a clone
+    // target; only its push access is unproven.
+    const unproven = discovery.repositories.find(
+      (repository) => repository.fullName === 'acme/repo-502',
+    )
+    assert.equal(unproven?.canPush, false)
     assert.equal(
       fixture.requests[0].url,
       '/search/repositories?q=repo&sort=updated&order=desc&per_page=100&page=1',

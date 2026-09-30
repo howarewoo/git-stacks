@@ -1,6 +1,6 @@
 import { app, BrowserWindow, dialog, ipcMain, Menu, net, protocol, session, shell } from 'electron'
 import type { IpcMainInvokeEvent } from 'electron'
-import { readFile, writeFile, mkdir, rename, rm } from 'node:fs/promises'
+import { readFile, writeFile, mkdir, rename } from 'node:fs/promises'
 import { dirname, join, resolve, sep, basename } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import {
@@ -87,6 +87,8 @@ import {
   ghCloneCommandText,
 } from './github-repositories'
 import { CloneError, cloneRepository, readGitEnvironment } from './clone-repository'
+import { runCloneRequest, type ValidatedClone } from './clone-request'
+import { configurePromotionHelper } from './promote-repository'
 import { isCancelled as isCommandCancelled } from './git-core'
 import type {
   CloneCommandPreview,
@@ -403,6 +405,12 @@ function requireCommitOid(value: unknown): string {
  * Opens a local repository and, only once its snapshot reads, registers it as a
  * recent repository. Adding a repository this way never writes to the
  * repository itself: it is read, never rewritten.
+ *
+ * The signal is honoured up to the last point where nothing has been written.
+ * Once `remember` has persisted the recent entry the switch finishes, so the
+ * recents and the active repository always describe the same folder; aborting
+ * in between would leave a recent entry for a repository that never became
+ * active, or a folder nothing names any more.
  */
 async function activateRepository(selected: string, signal?: AbortSignal) {
   if (signal?.aborted) throw new CommandCancelled()
@@ -419,6 +427,8 @@ async function activateRepository(selected: string, signal?: AbortSignal) {
       if (signal?.aborted) throw new CommandCancelled()
       const snapshot = await getSnapshot(path)
       if (signal?.aborted) throw new CommandCancelled()
+      // Past this point the recent entry is written and the switch completes:
+      // recents and the active repository must name the same folder.
       await remember(path)
       activeRepository = path
       startBackgroundSync(path, snapshot)
@@ -569,16 +579,6 @@ function cloneProtocol(value: unknown): CloneProtocol {
   return value === 'ssh' ? 'ssh' : 'https'
 }
 
-/** A clone request whose repository, folder name, and destination all passed validation. */
-interface ValidatedClone {
-  url: string
-  fullName: string
-  parentDirectory: string
-  directoryName: string
-  protocol: CloneProtocol
-  shallow: boolean
-}
-
 /**
  * Validates a clone request before anything is written. The URL is rebuilt from
  * `owner/name` and the chosen protocol, never taken from the request, so a
@@ -671,46 +671,20 @@ function installHandlers() {
       return { ok: false as const, failure: onboardingFailure(error) }
     }
   })
-  // The clone is built in a staging folder and renamed into place before it is
-  // registered, so a cancelled or failed clone leaves nothing behind to open.
+  // The clone is built in a staging folder and promoted into a destination this
+  // process claimed before it is registered, so a cancelled or failed clone
+  // leaves nothing behind to open.
   ipcMain.handle('repositories:clone', async (event, request: unknown) => {
     validateSender(event)
     const asked = (request ?? {}) as Record<string, unknown>
     try {
       const clone = validatedClone(asked)
-      const value = await onboardingRequest(readRequestId(asked.requestId), async (signal) => {
-        const outcome = await cloneRepository({ ...clone, signal })
-        if (signal.aborted) {
-          await rm(outcome.path, { recursive: true, force: true }).catch(() => undefined)
-          throw new CommandCancelled()
-        }
-        try {
-          await activateRepository(outcome.path, signal)
-        } catch (error) {
-          // If activation was cancelled or failed, ensure the unregistered clone
-          // folder is cleaned up so no half-registered repository is left behind.
-          await rm(outcome.path, { recursive: true, force: true }).catch(() => undefined)
-          if (signal.aborted || isCommandCancelled(error)) throw new CommandCancelled()
-          throw error
-        }
-        return {
-          path: outcome.path,
-          name: clone.directoryName,
-          empty: outcome.empty,
-          gitCommand: cloneCommandText(
-            clone.url,
-            clone.parentDirectory,
-            clone.directoryName,
-            clone.shallow,
-          ),
-          ghCommand: ghCloneCommandText(
-            clone.fullName,
-            clone.parentDirectory,
-            clone.directoryName,
-            clone.shallow,
-          ),
-        } satisfies RepositoryCloneResult
-      })
+      const value = await onboardingRequest(readRequestId(asked.requestId), (signal) =>
+        runCloneRequest(clone, signal, {
+          clone: cloneRepository,
+          activate: (path) => activateRepository(path),
+        }),
+      )
       return { ok: true as const, value }
     } catch (error) {
       return { ok: false as const, failure: onboardingFailure(error) }
@@ -1203,13 +1177,17 @@ app
       const path = await resolveRepository(process.env.GIT_STACKS_REPO)
       recents = [{ path, name: basename(path) }, ...recents.filter((item) => item.path !== path)]
     }
+    const resourcesRoot = app.isPackaged ? process.resourcesPath : resolve(bundleDir, '../../resources')
     const preference = await readGitRuntimePreference(settingsFile()).catch(() => null)
     configureGitRuntime({
       appVersion: app.getVersion(),
       packaged: app.isPackaged,
-      resourcesRoot: app.isPackaged ? process.resourcesPath : resolve(bundleDir, '../../resources'),
+      resourcesRoot,
       useSystemGit: preference?.useSystemGit ?? false,
     })
+    // The clone promotion helper is bundled beside the Git runtime and resolves
+    // from the same resources directory.
+    configurePromotionHelper(resourcesRoot)
     // A stored credential is restored before any handler can reach GitHub, so a
     // signed-in account works with no `gh` executable installed.
     await githubAccount()

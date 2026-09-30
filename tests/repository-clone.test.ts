@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto'
 import { watch } from 'node:fs'
 import {
   chmod,
+  lstat,
   mkdir,
   mkdtemp,
   readdir,
@@ -10,6 +11,7 @@ import {
   realpath,
   rm,
   stat,
+  symlink,
   writeFile,
 } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -24,6 +26,8 @@ import {
   readGitEnvironment,
   sanitizeCredentialHelper,
 } from '../src/main/clone-repository'
+import { runCloneRequest } from '../src/main/clone-request'
+import { configurePromotionHelper, promoteRepository } from '../src/main/promote-repository'
 import { getSnapshot, resolveRepository } from '../src/main/git'
 import { summarizeRepository } from '../src/main/github-repositories'
 
@@ -342,8 +346,12 @@ test('discovery accepts only github.com clone URLs it can build a command from',
     })?.httpsUrl,
     'https://github.com/acme/widgets.git',
   )
-  // A repository the credential cannot act on is not a clone target.
-  assert.equal(summarizeRepository({ ...base, permissions: null }), null)
+  // A search hit carries no `permissions`: it stays a clone target, with its
+  // push access simply unproven. Only a name Git cannot clone from is dropped.
+  const { permissions: _reported, ...searchHit } = base
+  const unproven = summarizeRepository(searchHit)
+  assert.equal(unproven?.fullName, 'acme/widgets')
+  assert.equal(unproven?.canPush, false)
   assert.equal(summarizeRepository({ ...base, name: '-bad-', full_name: 'acme/-bad-' }), null)
 })
 
@@ -482,6 +490,200 @@ test('cancelling after the git process completes but before promotion leaves no 
       if (previous === undefined) delete process.env.GIT_SSH_COMMAND
       else process.env.GIT_SSH_COMMAND = previous
     }
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+/** A staged clone, so a promotion can be exercised without running Git. */
+async function stagedClone(parent: string, token: string): Promise<string> {
+  const staging = join(parent, `${STAGING}${token}`)
+  await mkdir(join(staging, '.git'), { recursive: true })
+  await writeFile(join(staging, '.git', 'HEAD'), 'ref: refs/heads/main\n')
+  await writeFile(join(staging, 'README.md'), 'the clone\n')
+  return staging
+}
+
+/** Every entry below a path, so a refused promotion can be compared with it. */
+async function entries(path: string): Promise<string[]> {
+  return (await readdir(path, { recursive: true })).sort()
+}
+
+test('promotion moves a staged clone into a free destination and leaves no staging', async () => {
+  const root = await temporary()
+  try {
+    const parent = join(root, 'workspaces')
+    await mkdir(parent)
+    const staging = await stagedClone(parent, 'promoted')
+    const destination = join(parent, 'widgets')
+
+    assert.deepEqual(await promoteRepository(staging, destination), { moved: true })
+
+    assert.equal(await readFile(join(destination, '.git', 'HEAD'), 'utf8'), 'ref: refs/heads/main\n')
+    assert.equal(await readFile(join(destination, 'README.md'), 'utf8'), 'the clone\n')
+    assert.deepEqual(await readdir(parent), ['widgets'])
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('promotion refuses every occupied destination and leaves it exactly as it was', async () => {
+  const root = await temporary()
+  try {
+    const parent = join(root, 'workspaces')
+    await mkdir(parent)
+    const empty = join(parent, 'empty')
+    await mkdir(empty)
+    const occupied = join(parent, 'occupied')
+    await mkdir(occupied)
+    await writeFile(join(occupied, 'theirs.txt'), 'another program\n')
+    const file = join(parent, 'file')
+    await writeFile(file, 'another program\n')
+    const link = join(parent, 'link')
+    await symlink(occupied, link)
+
+    for (const destination of [empty, occupied, file, link]) {
+      // The symlink is inspected through its own target: the link itself is
+      // what a promotion must not replace.
+      const subject = destination === link ? occupied : destination
+      const before = (await stat(subject)).isDirectory() ? await entries(subject) : null
+      const outcome = await promoteRepository(
+        await stagedClone(parent, basename(destination)),
+        destination,
+      )
+
+      assert.equal(outcome.moved, false, `${basename(destination)} must be refused`)
+      assert.equal(
+        outcome.moved ? 'moved' : outcome.refusal,
+        'exists',
+        `${basename(destination)} must be refused as occupied`,
+      )
+      if (before) {
+        assert.deepEqual(await entries(subject), before, `${basename(destination)} changed`)
+      }
+      // The symlink is still a symlink: nothing was resolved through or replaced.
+      if (destination === link) assert.equal((await lstat(link)).isSymbolicLink(), true)
+      if (destination === file) {
+        assert.equal(await readFile(file, 'utf8'), 'another program\n')
+      }
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('a missing promotion helper refuses the promotion instead of renaming over the destination', async () => {
+  const root = await temporary()
+  const emptyResources = await temporary()
+  try {
+    const parent = join(root, 'workspaces')
+    await mkdir(parent)
+    const staging = await stagedClone(parent, 'no-helper')
+    const destination = join(parent, 'widgets')
+    await mkdir(destination)
+    await writeFile(join(destination, 'theirs.txt'), 'another program\n')
+
+    configurePromotionHelper(emptyResources)
+    const outcome = await promoteRepository(staging, destination)
+    configurePromotionHelper(null)
+
+    assert.equal(outcome.moved, false)
+    assert.equal(outcome.moved ? '' : outcome.refusal, 'unavailable')
+    assert.deepEqual(await readdir(destination), ['theirs.txt'])
+    // The staging folder is still the clone's own, so a later retry can move it.
+    assert.deepEqual((await readdir(staging)).sort(), ['.git', 'README.md'])
+  } finally {
+    configurePromotionHelper(null)
+    await rm(root, { recursive: true, force: true })
+    await rm(emptyResources, { recursive: true, force: true })
+  }
+})
+
+test('a cancel that lands while the clone is being registered keeps the clone and reports it finished', async () => {
+  const root = await temporary()
+  try {
+    const remote = await bareRemote(root, 'registered')
+    const parent = join(root, 'workspaces')
+    await mkdir(parent)
+    const recentsFile = join(root, 'recents.json')
+    const controller = new AbortController()
+
+    const result = await runCloneRequest(
+      {
+        url: remote,
+        fullName: 'acme/registered',
+        parentDirectory: parent,
+        directoryName: 'registered',
+        protocol: 'https',
+        shallow: false,
+      },
+      controller.signal,
+      {
+        clone: cloneRepository,
+        activate: async (path) => {
+          // The person pressed Cancel while the recent entry was being written.
+          await writeFile(recentsFile, JSON.stringify([{ path, name: basename(path) }]))
+          controller.abort()
+        },
+      },
+    )
+
+    assert.equal(controller.signal.aborted, true)
+    assert.equal(result.path, await realpath(join(parent, 'registered')))
+    assert.equal(result.empty, false)
+    assert.deepEqual(await stagingEntries(parent), [])
+    const recents = JSON.parse(await readFile(recentsFile, 'utf8')) as { path: string }[]
+    assert.equal(recents.length, 1)
+    // No recent entry may name a folder the request removed.
+    assert.notEqual(await stat(recents[0].path).catch(() => null), null)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('a cancel before the commit point registers nothing and leaves no folder', async () => {
+  const root = await temporary()
+  try {
+    const parent = join(root, 'workspaces')
+    await mkdir(parent)
+    const marker = join(root, 'ssh-started')
+    const stall = join(root, 'stall-request-ssh.sh')
+    await writeFile(stall, `#!/bin/sh\ntouch "${marker}"\nsleep 5\n`, 'utf8')
+    await chmod(stall, 0o755)
+    const previous = process.env.GIT_SSH_COMMAND
+    process.env.GIT_SSH_COMMAND = stall
+
+    try {
+      const controller = new AbortController()
+      let activated = false
+      const cloning = runCloneRequest(
+        {
+          url: 'git@localhost:acme/widgets.git',
+          fullName: 'acme/widgets',
+          parentDirectory: parent,
+          directoryName: 'widgets',
+          protocol: 'ssh',
+          shallow: false,
+        },
+        controller.signal,
+        {
+          clone: cloneRepository,
+          activate: async () => {
+            activated = true
+          },
+        },
+      )
+      await Promise.race([waitForFile(root, basename(marker)), cloning.catch(() => undefined)])
+      controller.abort()
+
+      await assert.rejects(cloning, /cancelled/iu)
+      assert.equal(activated, false)
+    } finally {
+      if (previous === undefined) delete process.env.GIT_SSH_COMMAND
+      else process.env.GIT_SSH_COMMAND = previous
+    }
+
+    assert.deepEqual(await readdir(parent), [])
   } finally {
     await rm(root, { recursive: true, force: true })
   }
