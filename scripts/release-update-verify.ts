@@ -29,20 +29,15 @@
 import { createPrivateKey, createPublicKey } from 'node:crypto'
 import { readFileSync, statSync } from 'node:fs'
 import { dirname, join } from 'node:path'
-import { verifyDetachedSignature } from '../src/main/update/signature'
-import {
-  evaluateUpdateManifest,
-  parseSignatureEnvelope,
-  parseUpdateManifest,
-} from '../src/shared/update'
+import { evaluateUpdateManifest } from '../src/shared/update'
 import {
   fail,
   flag,
   manifestFileName,
   parseFlags,
+  proveManifestBytes,
   releaseLocation,
   requireChannel,
-  requireInjectedKey,
   sha256Of,
   signatureFileName,
   sizeOf,
@@ -68,22 +63,18 @@ const manifestBytes = readFileSync(manifestPath)
 const signatureBytes = readFileSync(signaturePath)
 
 // The app parses the envelope, finds the key it names, and verifies the exact
-// bytes it fetched. This is that path, in the same order.
-const envelope = parseSignatureEnvelope(signatureBytes)
-if (!envelope.ok) {
-  fail(
-    `the signature envelope is one the app refuses (${envelope.failure.reason}): ${envelope.failure.message}`,
+// bytes it fetched. This is that path, in the same order, and it is the same
+// code the publishing script runs before it puts these bytes on a release.
+const { manifest, key, trusted } = proveManifestBytes(
+  manifestBytes,
+  signatureBytes,
+  channel,
+  manifestPath,
+)
+if (trusted.length > 1) {
+  console.log(
+    `release-update: the builds this release packages trust ${trusted.map((entry) => entry.keyId).join(', ')}; this manifest is signed with ${key.keyId}. A key added to a build is added before it signs anything, so an installed app can verify the release that carries it.`,
   )
-}
-const keys = requireInjectedKey()
-const key = keys.find((entry) => entry.keyId === envelope.value.keyId)
-if (!key) {
-  fail(
-    `the manifest is signed by ${envelope.value.keyId}, which is not a key this release packaged into the app (${keys.map((entry) => entry.keyId).join(', ')}). Nothing is published.`,
-  )
-}
-if (!verifyDetachedSignature(key, manifestBytes, envelope.value.signature, Date.now())) {
-  fail(`${manifestPath} is not signed by the release key ${key.keyId}. Nothing is published.`)
 }
 const secret = process.env.UPDATE_SIGNING_KEY?.trim()
 if (secret) {
@@ -107,21 +98,9 @@ if (secret) {
     'release-update: UPDATE_SIGNING_KEY is not in this job, so the signature was checked against the committed key alone.',
   )
 }
-
-const manifest = parseUpdateManifest(manifestBytes)
-if (!manifest.ok) {
-  fail(
-    `the manifest is one the app refuses (${manifest.failure.reason}): ${manifest.failure.message}`,
-  )
-}
-if (manifest.value.channel !== channel) {
-  fail(
-    `the manifest publishes the ${manifest.value.channel} channel and is being published as ${channel}.`,
-  )
-}
 const feed = releaseLocation(channel)
-for (const artifact of manifest.value.artifacts) {
-  const offer = evaluateUpdateManifest(manifest.value, {
+for (const artifact of manifest.artifacts) {
+  const offer = evaluateUpdateManifest(manifest, {
     channel,
     platform: artifact.platform,
     arch: artifact.arch,
@@ -153,5 +132,5 @@ for (const artifact of manifest.value.artifacts) {
   )
 }
 console.log(
-  `release-update: ${channel} ${manifest.value.version} sequence ${manifest.value.sequence} is signed by ${key.keyId} and every build it names verifies.`,
+  `release-update: ${channel} ${manifest.version} sequence ${manifest.sequence} is signed by ${key.keyId} and every build it names verifies.`,
 )

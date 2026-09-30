@@ -53,6 +53,10 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
           UPDATE_SIGNING_PUBLIC_KEY: ${{ secrets.UPDATE_SIGNING_PUBLIC_KEY }}
+          UPDATE_SIGNING_ADDITIONAL_KEY_ID: ${{ secrets.UPDATE_SIGNING_ADDITIONAL_KEY_ID }}
+          UPDATE_SIGNING_ADDITIONAL_PUBLIC_KEY: ${{ secrets.UPDATE_SIGNING_ADDITIONAL_PUBLIC_KEY }}
+          UPDATE_SIGNING_ADDITIONAL_VALID_FROM: ${{ secrets.UPDATE_SIGNING_ADDITIONAL_VALID_FROM }}
+          UPDATE_SIGNING_ADDITIONAL_VALID_UNTIL: ${{ secrets.UPDATE_SIGNING_ADDITIONAL_VALID_UNTIL }}
         run: |
           test "$RELEASE_TAG" = "v$(node -p 'require("./package.json").version')"
           if [[ '${{ matrix.platform }}' != linux ]]; then
@@ -66,6 +70,18 @@ jobs:
           # that has not been given them says so before anything is built.
           test -n "$UPDATE_SIGNING_KEY" || { echo '::error::the UPDATE_SIGNING_KEY repository secret is missing; this release can package the app but cannot sign an update manifest'; exit 1; }
           test -n "$UPDATE_SIGNING_PUBLIC_KEY" || { echo '::error::the UPDATE_SIGNING_PUBLIC_KEY repository secret is missing; this build would ship with no release update key and could never verify a manifest'; exit 1; }
+          # A rotation is declared with all four values or with none. Half of one
+          # is a build that carries a key nobody can name, or a key nobody
+          # retires, and it is indistinguishable from no rotation at all — so the
+          # release that meant to introduce a key would quietly ship without it.
+          declared=0
+          for name in UPDATE_SIGNING_ADDITIONAL_KEY_ID UPDATE_SIGNING_ADDITIONAL_PUBLIC_KEY UPDATE_SIGNING_ADDITIONAL_VALID_FROM UPDATE_SIGNING_ADDITIONAL_VALID_UNTIL; do
+            if [ -n "${!name}" ]; then declared=$((declared + 1)); fi
+          done
+          if [ "$declared" -ne 0 ] && [ "$declared" -ne 4 ]; then
+            echo "::error::$declared of the four UPDATE_SIGNING_ADDITIONAL_* values are set; a rotation is all four or none"
+            exit 1
+          fi
       - run: npm ci
       - name: Put the MSVC toolchain on PATH
         # The clone promotion helper is compiled from source at build time, and a
@@ -102,6 +118,10 @@ jobs:
           UPDATE_SIGNING_KEY_ID: ${{ secrets.UPDATE_SIGNING_KEY_ID }}
           UPDATE_SIGNING_KEY_VALID_FROM: ${{ secrets.UPDATE_SIGNING_KEY_VALID_FROM }}
           UPDATE_SIGNING_KEY_VALID_UNTIL: ${{ secrets.UPDATE_SIGNING_KEY_VALID_UNTIL }}
+          UPDATE_SIGNING_ADDITIONAL_KEY_ID: ${{ secrets.UPDATE_SIGNING_ADDITIONAL_KEY_ID }}
+          UPDATE_SIGNING_ADDITIONAL_PUBLIC_KEY: ${{ secrets.UPDATE_SIGNING_ADDITIONAL_PUBLIC_KEY }}
+          UPDATE_SIGNING_ADDITIONAL_VALID_FROM: ${{ secrets.UPDATE_SIGNING_ADDITIONAL_VALID_FROM }}
+          UPDATE_SIGNING_ADDITIONAL_VALID_UNTIL: ${{ secrets.UPDATE_SIGNING_ADDITIONAL_VALID_UNTIL }}
         # Before `npm run dist`, because after it the key is inside the build.
         # The committed key set stays empty: a build that is not made by a
         # release trusts nothing and fetches nothing, which is the honest state
@@ -116,6 +136,10 @@ jobs:
         env:
           UPDATE_SIGNING_PUBLIC_KEY: ${{ secrets.UPDATE_SIGNING_PUBLIC_KEY }}
           UPDATE_SIGNING_KEY_ID: ${{ secrets.UPDATE_SIGNING_KEY_ID }}
+          UPDATE_SIGNING_ADDITIONAL_KEY_ID: ${{ secrets.UPDATE_SIGNING_ADDITIONAL_KEY_ID }}
+          UPDATE_SIGNING_ADDITIONAL_PUBLIC_KEY: ${{ secrets.UPDATE_SIGNING_ADDITIONAL_PUBLIC_KEY }}
+          UPDATE_SIGNING_ADDITIONAL_VALID_FROM: ${{ secrets.UPDATE_SIGNING_ADDITIONAL_VALID_FROM }}
+          UPDATE_SIGNING_ADDITIONAL_VALID_UNTIL: ${{ secrets.UPDATE_SIGNING_ADDITIONAL_VALID_UNTIL }}
         # The key is inside the build from here on, so an empty or wrong key set
         # is a build that can never verify any manifest. This reads the injected
         # set back and fails rather than shipping that build.
@@ -464,6 +488,10 @@ jobs:
         env:
           UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
           UPDATE_SIGNING_PUBLIC_KEY: ${{ secrets.UPDATE_SIGNING_PUBLIC_KEY }}
+          UPDATE_SIGNING_ADDITIONAL_KEY_ID: ${{ secrets.UPDATE_SIGNING_ADDITIONAL_KEY_ID }}
+          UPDATE_SIGNING_ADDITIONAL_PUBLIC_KEY: ${{ secrets.UPDATE_SIGNING_ADDITIONAL_PUBLIC_KEY }}
+          UPDATE_SIGNING_ADDITIONAL_VALID_FROM: ${{ secrets.UPDATE_SIGNING_ADDITIONAL_VALID_FROM }}
+          UPDATE_SIGNING_ADDITIONAL_VALID_UNTIL: ${{ secrets.UPDATE_SIGNING_ADDITIONAL_VALID_UNTIL }}
         run: |
           if [ -z "$UPDATE_SIGNING_KEY" ]; then
             echo '::error::the UPDATE_SIGNING_KEY repository secret is missing, so this release cannot sign an update manifest. The installers are already published; the update feed is not moved.'
@@ -471,6 +499,18 @@ jobs:
           fi
           if [ -z "$UPDATE_SIGNING_PUBLIC_KEY" ]; then
             echo '::error::the UPDATE_SIGNING_PUBLIC_KEY repository secret is missing, so this release cannot prove which key a manifest was signed with.'
+            exit 1
+          fi
+          # A rotation is all four values or none, for the same reason the
+          # packaging job refuses half of one: this job's key set is compared
+          # against every packaged build's, and a key that reaches one and not
+          # the others is a rotation that half happened.
+          declared=0
+          for name in UPDATE_SIGNING_ADDITIONAL_KEY_ID UPDATE_SIGNING_ADDITIONAL_PUBLIC_KEY UPDATE_SIGNING_ADDITIONAL_VALID_FROM UPDATE_SIGNING_ADDITIONAL_VALID_UNTIL; do
+            if [ -n "${!name}" ]; then declared=$((declared + 1)); fi
+          done
+          if [ "$declared" -ne 0 ] && [ "$declared" -ne 4 ]; then
+            echo "::error::$declared of the four UPDATE_SIGNING_ADDITIONAL_* values are set; a rotation is all four or none"
             exit 1
           fi
       - name: Collect the verified artifacts and their descriptors
@@ -493,6 +533,10 @@ jobs:
           UPDATE_SIGNING_KEY_ID: ${{ secrets.UPDATE_SIGNING_KEY_ID }}
           UPDATE_SIGNING_KEY_VALID_FROM: ${{ secrets.UPDATE_SIGNING_KEY_VALID_FROM }}
           UPDATE_SIGNING_KEY_VALID_UNTIL: ${{ secrets.UPDATE_SIGNING_KEY_VALID_UNTIL }}
+          UPDATE_SIGNING_ADDITIONAL_KEY_ID: ${{ secrets.UPDATE_SIGNING_ADDITIONAL_KEY_ID }}
+          UPDATE_SIGNING_ADDITIONAL_PUBLIC_KEY: ${{ secrets.UPDATE_SIGNING_ADDITIONAL_PUBLIC_KEY }}
+          UPDATE_SIGNING_ADDITIONAL_VALID_FROM: ${{ secrets.UPDATE_SIGNING_ADDITIONAL_VALID_FROM }}
+          UPDATE_SIGNING_ADDITIONAL_VALID_UNTIL: ${{ secrets.UPDATE_SIGNING_ADDITIONAL_VALID_UNTIL }}
         run: |
           npx tsx scripts/release-trusted-keys.ts inject
           shopt -s nullglob
@@ -598,10 +642,15 @@ jobs:
               --title "Git Stacks $CHANNEL update feed" \
               --notes "Moving release for the $CHANNEL update channel. The current manifest is update-$CHANNEL.json, signed with the project release key; its installers are the assets beside it."
           fi
-          # Installers first, then the manifest that names them, then the
-          # signature: the feed is only ever complete once all three are here.
-          gh release upload "$TAG" --clobber channel-assets/* "channel-feed/update-$CHANNEL.json" "channel-feed/update-$CHANNEL.json.sig"
-          echo "published https://github.com/$REPOSITORY/releases/download/$TAG/update-$CHANNEL.json"
+          # The channel feed is published by a script, in an order that a run
+          # interrupted part way through cannot leave the channel without: the
+          # manifest and its signature are banked under names of their own
+          # first, then the installers, then the two fixed names a client
+          # fetches, and finally both fixed names are read back off the release
+          # and proved. Nothing is deleted, and nothing a client needs is only
+          # reachable after it exists somewhere that is never rewritten.
+          npx tsx scripts/release-update-publish.ts --channel "$CHANNEL" --repo "$REPOSITORY" \
+            --feed channel-feed --installers channel-assets
 
   supply-chain:
     # The dependency inventory for the packaged app, and a stop on a known

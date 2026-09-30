@@ -477,15 +477,55 @@ rebuilt:
 | `stable` | `updates-stable`   | `update-stable.json` | `update-stable.json.sig` |
 | `beta`   | `updates-beta`     | `update-beta.json`   | `update-beta.json.sig`   |
 
+Every sequence a channel issues is also written once under a name of its own —
+`history-stable-000000000007.json` and `history-stable-000000000007.json.sig` on
+`updates-stable` — which nothing ever rewrites. A release reads its history from
+those names as well as from the two fixed names above, so an interrupted
+publication cannot leave a channel looking empty.
+
 A prerelease on GitHub publishes the `beta` channel; a full release publishes
 `stable`. The moving tag only ever moves forward along this repository's history,
 and a tag that has been moved elsewhere stops the release instead of being
-overwritten. The installers are uploaded before the manifest that names them and
-the signature, so the feed is complete or it is not moved. Before any of it is
-published, the manifest and its signature are read back from disk, the signature
-is verified again with the key this release injected, every installer is
-re-hashed, each packaged build's own key set is compared with the one being
-signed with, and each artifact's provenance is verified.
+overwritten. Before any of it is published, the manifest and its signature are
+read back from disk, the signature is verified again with the key this release
+injected, every installer is re-hashed, each packaged build's own key set is
+compared with the one being signed with, and each artifact's provenance is
+verified.
+
+Those two names are the only place on the moving release where a publication
+overwrites what was there, and an upload that is interrupted between them leaves
+a manifest with no signature, a signature with no manifest, or the two
+describing different releases. So publication is ordered, and
+`scripts/release-update-publish.ts` is the only thing that performs it:
+
+1. **Bank the sequence.** The manifest and its signature are uploaded once more
+   under names derived from that sequence — `history-stable-000000000007.json`
+   and `.sig` — which nothing ever rewrites. A pair already banked at that
+   sequence with these exact bytes is this same publication re-run and is left
+   alone; a different pair means the sequence was spent by a publication that
+   did not complete, which no release may republish.
+2. **Publish the installers**, each under the name the manifest publishes it
+   as. Those names carry the version they were built from, and an installer
+   published under a name the live manifest already binds to different bytes is
+   refused rather than replaced, because a name is a URL an installation has
+   already fetched.
+3. **Move the two fixed names** onto this release: the installers are in place,
+   then the manifest that names them, then the signature that proves it.
+4. **Read both back** off the release and verify the signature over the bytes
+   that are actually there. An upload that cannot be confirmed is an upload that
+   may or may not have happened, so the only honest answer is to read the bytes
+   a client will fetch.
+
+Nothing is deleted, and nothing a client needs is only ever reachable after it
+exists somewhere immutable. A release that dies at any point leaves the previous
+release readable from its banked copy, and the next release reads that copy: a
+channel whose two fixed names are both missing, or whose pair does not verify,
+is not an empty channel, and the sequence it issues is one past the highest a
+trusted key signed anywhere on the tag. A sequence is never reused and a bank is
+never rewritten, so a cancelled publication costs a sequence, not the channel's
+history. Re-run the release to put the live pair back; the operator floor
+(`--sequence`) exists for a channel whose history is being repaired by hand, and
+it can only ever move the counter up.
 
 One channel publishes one release at a time. The publishing job takes a lock
 named after the channel it is about to move, and a run already in progress is
@@ -760,16 +800,42 @@ environment.
 A released build's trusted public key is compiled into the main bundle during
 packaging, so nothing on a user's machine can add, drop, or change it after
 installation. Rotating it is therefore a shipped change with an overlap window,
-not a switch someone can throw on an installed app. The new key is injected into
-the next release alongside the old one, and the old key stays trusted for as long
-as an artifact it signed can still be offered — a manifest stops being offered 30
-days after it was issued, so the window has to outlast the manifests in flight.
-Only then does the retiring key's `validUntil` pass, and a key outside its
-validity window is never consulted at all, so the old key stops verifying the
-moment it is retired rather than whenever someone notices. A private key is never
-compiled into a build, never committed to this repository, and never written to a
-CI log: the release job signs with a secret held by the repository owner, and a
-build only ever carries the public half of it.
+not a switch someone can throw on an installed app, and it takes three releases
+in this order:
+
+1. **The new public key is committed** to `resources/update-history-keys.json`
+   and injected into this release through `UPDATE_SIGNING_ADDITIONAL_KEY_ID`,
+   `UPDATE_SIGNING_ADDITIONAL_PUBLIC_KEY`, `UPDATE_SIGNING_ADDITIONAL_VALID_FROM`
+   and `UPDATE_SIGNING_ADDITIONAL_VALID_UNTIL` — all four or none, or the
+   release is refused. This release's manifest is still signed with the old key,
+   so every installed build can verify it and installs the build that learned
+   the new key.
+2. **The next release signs with the new key.** The overlap carries the old key
+   with an end date far enough out that no artifact it signed can still be
+   offered — a manifest stops being offered 30 days after it was issued — so
+   every build that installed step 1 can verify this one.
+3. **The release after that retires the old key** by not declaring it. Builds
+   from step 2 stop consulting it when its `validUntil` passes, and a key outside
+   its validity window is never consulted at all, so the old key stops verifying
+   then rather than whenever someone notices.
+
+`resources/update-history-keys.json` is what makes step 3 possible. A build only
+carries the keys that are current, so once the old key is retired nothing in the
+app can authenticate the manifests it signed — and the release that retired it
+could not read the history it was replacing, which would stop the channel
+outright. That file is the durable record of every public key that may sign a
+channel manifest, so a release can still prove what it published last month. A
+release refuses to publish a build carrying a key the file does not declare, and
+the key is committed there *before* it signs anything, in the same change that
+introduces it. It holds public keys only, which every packaged build already
+carries in its own bundle; a private key is never compiled into a build, never
+committed to this repository, and never written to a CI log. The release job
+signs with a secret held by the repository owner.
+
+The other half of the same discipline is the publication order above: a sequence
+is banked under a name of its own before the two fixed names move, so
+interrupting a publication costs a sequence rather than the channel's history,
+and a bank is never rewritten.
 
 ## Untrusted text
 
