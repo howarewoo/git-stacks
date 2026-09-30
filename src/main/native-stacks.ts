@@ -299,11 +299,15 @@ export function validateTopAppend(
  * Capability-detect the native stacks REST preview API. Only a confirmed missing preview
  * endpoint degrades to chained pull requests; every other failure propagates so a mutation
  * path never reports success after an unconfirmed probe.
+ *
+ * `conditional` is for the display refresh, which asks this same question on
+ * every interval and can be answered by the validator GitHub stored. A
+ * mutation's preflight leaves it unset and reads GitHub itself.
  */
 export async function detectNativeStacksCapability(
   owner: string,
   repo: string,
-  options: { signal?: AbortSignal } = {},
+  options: { signal?: AbortSignal; conditional?: boolean } = {},
 ): Promise<{ available: boolean; state: NativeStackValidationStatus; message: string }> {
   const transport = githubTransport()
   try {
@@ -312,8 +316,11 @@ export async function detectNativeStacksCapability(
       path: `repos/${owner}/${repo}/stacks?per_page=1`,
       headers: STACK_HEADERS,
       signal: options.signal,
+      cache: options.conditional === true,
     })
-    if (response.status >= 200 && response.status < 300) {
+    // A 304 means GitHub answered with the stored body, which only exists
+    // because this endpoint returned it once: the preview is still available.
+    if (response.notModified === true || (response.status >= 200 && response.status < 300)) {
       return {
         available: true,
         state: 'valid',
@@ -931,7 +938,12 @@ export async function loadRepositoryNativeStacks(
   try {
     // The read path reports an unconfirmed probe as an explicit unavailable state instead of
     // failing the whole repository snapshot; only mutations require a confirmed capability.
-    const capability = await detectNativeStacksCapability(remote.owner, remote.name, { signal })
+    // Nothing here decides whether to mutate: the snapshot only displays the
+    // capability, and it asks this same question on every refresh interval.
+    const capability = await detectNativeStacksCapability(remote.owner, remote.name, {
+      signal,
+      conditional: true,
+    })
     if (!capability.available) {
       return {
         available: false,

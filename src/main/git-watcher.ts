@@ -3,7 +3,7 @@ import { stat } from 'node:fs/promises'
 import { basename, dirname, join } from 'node:path'
 import { tryGit } from './git-core'
 
-export type RepositoryWatchReason = 'change' | 'missing' | 'restored'
+export type RepositoryWatchReason = 'change' | 'missing' | 'restored' | 'replaced'
 
 export interface RepositoryWatchEvent {
   reason: RepositoryWatchReason
@@ -84,6 +84,22 @@ async function pathExists(path: string): Promise<boolean> {
   }
 }
 
+/**
+ * Which directory this path currently is. Device and inode survive no
+ * replacement: a directory moved away and a new one put in its place keeps the
+ * path but not the identity, which is the only evidence a replacement left when
+ * no event ever showed the path missing. Creation time is the fallback for the
+ * filesystems that report no inode.
+ */
+async function directoryIdentity(path: string): Promise<string | null> {
+  try {
+    const details = await stat(path)
+    if (details.ino > 0) return `${details.dev}:${details.ino}`
+    return `${details.birthtimeMs}:${details.ctimeMs}`
+  } catch {
+    return null
+  }
+}
 async function statSignature(path: string): Promise<string | null> {
   try {
     const details = await stat(path)
@@ -137,7 +153,9 @@ async function repositoryContentSignature(root: string): Promise<string> {
  * Notices worktree, index, and ref changes made outside this window — a commit
  * typed in a terminal, a branch switch, or a background fetch — and reports one
  * coalesced event instead of one per file. Deleting or moving the repository is
- * reported too, and the watch is re-armed when it comes back.
+ * reported too, and the watch is re-armed when it comes back. A directory
+ * replaced at the same path is reported the same way, because the old
+ * subscriptions follow the tree that moved away rather than the new one.
  */
 export class RepositoryWatcher {
   private readonly root: string
@@ -152,6 +170,10 @@ export class RepositoryWatcher {
   private pendingPaths = new Set<string>()
   private signature: string | null = null
   private present = true
+  /** True while a presence check runs, so one replacement is noticed once. */
+  private checking = false
+  /** The directory the armed watches belong to; null while it is absent. */
+  private identity: string | null = null
   private started = false
   private stopping = false
   private generation = 0
@@ -220,6 +242,11 @@ export class RepositoryWatcher {
   private async arm(expectedGen?: number): Promise<void> {
     const gen = expectedGen ?? ++this.generation
     this.closeWatchers()
+    if (!this.started || this.stopping || this.generation !== gen) return
+    // The watches belong to the directory at this path from here on. Claiming
+    // that identity before the Git lookups means a replacement arriving while
+    // this arm is still working is recognised as one already being watched.
+    this.identity = await directoryIdentity(this.root)
     if (!this.started || this.stopping || this.generation !== gen) return
     const gitDirectories = await this.options.resolveGitDirectories(this.root)
     if (!this.started || this.stopping || this.generation !== gen) return
@@ -320,6 +347,7 @@ export class RepositoryWatcher {
     this.deadlineTimer = undefined
     if (!exists) {
       this.present = false
+      this.identity = null
       this.closeWatchers()
       this.pendingPaths.clear()
       if (!this.started || this.stopping || this.generation !== gen) return
@@ -331,15 +359,28 @@ export class RepositoryWatcher {
     }
     this.stopPollingForReturn()
     const restored = !this.present
+    // A different directory at the same path replaces the watched one even when
+    // nothing ever showed the path missing: the subscriptions belong to the tree
+    // that moved away, so they must be re-armed and the new tree read. The
+    // replacement is claimed before the re-arm, so the several triggers that can
+    // report one replacement re-arm it once.
+    const identity = await directoryIdentity(this.root)
+    if (!this.started || this.stopping || this.generation !== gen) return
+    const replaced = this.identity !== null && identity !== this.identity
+    if (replaced) this.identity = identity
     this.present = true
-    if (restored) {
+    if (restored || replaced) {
       await this.arm(gen)
       if (!this.started || this.stopping || this.generation !== gen) return
     }
     const paths = [...this.pendingPaths]
     this.pendingPaths.clear()
     if (!this.started || this.stopping || this.generation !== gen) return
-    this.onEvent({ reason: restored ? 'restored' : 'change', root: this.root, paths })
+    this.onEvent({
+      reason: restored ? 'restored' : replaced ? 'replaced' : 'change',
+      root: this.root,
+      paths,
+    })
   }
 
   private pollForReturn(): void {
@@ -363,12 +404,29 @@ export class RepositoryWatcher {
     this.presenceTimer = undefined
   }
   private async checkPresence(): Promise<void> {
-    if (!this.started || this.stopping) return
+    // The parent watch and the sweep both ask. One check at a time keeps a
+    // single replacement from being reported twice; whatever a running check
+    // does not see is the sweep's next turn to find.
+    if (!this.started || this.stopping || this.checking) return
+    this.checking = true
     const gen = this.generation
-    const exists = await pathExists(this.root)
-    if (!this.started || this.stopping || this.generation !== gen) return
-    if (exists === this.present) return
-    await this.emit()
+    try {
+      const exists = await pathExists(this.root)
+      if (!this.started || this.stopping || this.generation !== gen) return
+      if (exists !== this.present) {
+        await this.emit()
+        return
+      }
+      // Still here, so the only thing left that can invalidate the armed
+      // watches is a replacement at this path.
+      if (!exists || this.identity === null) return
+      const identity = await directoryIdentity(this.root)
+      if (!this.started || this.stopping || this.generation !== gen) return
+      if (identity === null || identity === this.identity) return
+      await this.emit()
+    } finally {
+      this.checking = false
+    }
   }
 
   private scheduleSweep(): void {

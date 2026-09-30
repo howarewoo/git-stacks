@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
+import { CommandCancelled } from '../src/main/git-core'
 import { RepositoryOperations } from '../src/main/repository-operations'
+import { RepositoryScheduler } from '../src/main/repository-scheduler'
 
 function gate() {
   let release!: () => void
@@ -89,7 +91,7 @@ test('a pending repository switch refuses mutations and still answers the reads 
   const operations = new RepositoryOperations()
   const finishSwitch = gate()
   let selected: string | null = null
-  const switching = operations.switchRepository(async () => {
+  const switching = operations.switchRepository('second', async () => {
     await finishSwitch.promise
     selected = 'second'
   })
@@ -112,8 +114,81 @@ test('a pending repository switch refuses mutations and still answers the reads 
   // The repository that is open now accepts the action again.
   await operations.write(async () => {
     mutated = true
-  })
+  }, 'second')
   assert.equal(mutated, true)
+})
+
+test('an action admitted after a switch completed is refused instead of reaching the repository it left', async () => {
+  const operations = new RepositoryOperations()
+  await operations.switchRepository('/repositories/second', async () => 'second')
+
+  // The queue is free when the action asks for admission: the switch it raced
+  // with finished while it was still waiting to be admitted, so nothing but the
+  // repository identity can refuse it.
+  let mutated: string | null = null
+  await assert.rejects(
+    operations.write(async () => {
+      mutated = 'first'
+    }, '/repositories/first'),
+  )
+  assert.equal(mutated, null)
+
+  // An action aimed at the repository the window shows now runs as usual.
+  await operations.write(async () => {
+    mutated = 'second'
+  }, '/repositories/second')
+  assert.equal(mutated, 'second')
+})
+
+test('a failed switch leaves the previous repository open and writable', async () => {
+  const operations = new RepositoryOperations()
+  await operations.switchRepository('/repositories/first', async () => 'first')
+  await assert.rejects(
+    operations.switchRepository('/repositories/broken', async () => {
+      throw new Error('not a repository')
+    }),
+  )
+  let mutated: string | null = null
+  await operations.write(async () => {
+    mutated = 'first'
+  }, '/repositories/first')
+  assert.equal(mutated, 'first')
+})
+
+test('an action that waited for a stalled background read is refused after the switch it raced', async () => {
+  const operations = new RepositoryOperations()
+  const scheduler = new RepositoryScheduler()
+  const first = '/repositories/first'
+  await operations.switchRepository(first, async () => 'first')
+
+  // A background read stuck on a network is why the action cannot be admitted
+  // yet, and ending it is what lets the mutation into the repository lane.
+  const inFlight = Promise.withResolvers<never>()
+  const stalled = scheduler.read(first, (signal) => {
+    signal.addEventListener(
+      'abort',
+      () => {
+        inFlight.reject(new CommandCancelled())
+      },
+      { once: true },
+    )
+    return inFlight.promise
+  })
+  const rejected = assert.rejects(stalled, (error: unknown) => error instanceof CommandCancelled)
+  await new Promise((resolve) => setImmediate(resolve))
+
+  let mutated: string | null = null
+  const action = scheduler.mutate(first, () =>
+    operations.write(async () => {
+      mutated = 'first'
+    }, first),
+  )
+  // The switch is queued on the operation lane, which the stalled read never
+  // held, so it completes while the action is still waiting to be admitted.
+  await operations.switchRepository('/repositories/second', async () => 'second')
+  await assert.rejects(action)
+  await rejected
+  assert.equal(mutated, null, 'the action must not reach the repository the window left')
 })
 
 test('runtime preference changes are serialized through repository operations and cannot disrupt an in-flight write', async () => {

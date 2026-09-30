@@ -149,6 +149,12 @@ export class RepositorySyncCoordinator {
   private remoteTimer: SyncTimer | undefined
   private localTimer: SyncTimer | undefined
   private running: Promise<unknown> | null = null
+  /**
+   * The refresh allowed to publish. Every refresh takes the next number when it
+   * starts, so a slower earlier read cannot write freshness, backoff,
+   * authorization, or the next wake-up over a newer answer.
+   */
+  private sequence = 0
   private dirtyLocal = false
   private dirtyRemoteTier: 'visible' | 'secondary' | null = null
   private failures = 0
@@ -223,6 +229,9 @@ export class RepositorySyncCoordinator {
     this.repository = null
     this.ledger = new RemoteMutationLedger()
     this.running = null
+    // An in-flight read belongs to the session that started it: reopening the
+    // same path later must not let the old session's answer publish.
+    this.sequence += 1
     this.dirtyLocal = false
     this.dirtyRemoteTier = null
     this.failures = 0
@@ -389,9 +398,14 @@ export class RepositorySyncCoordinator {
       this.clock.clearTimeout(this.remoteTimer)
       this.remoteTimer = undefined
     }
-    const work = this.execute(repository, tier, options).finally(() => {
-      this.running = null
-      if (this.repository !== repository) return
+    const sequence = ++this.sequence
+    const work = this.execute(repository, tier, options, sequence).finally(() => {
+      // A refresh owns the running lane only while it is the newest one; an
+      // older read that settles after it must not release the newer read's hold.
+      if (this.running === work) this.running = null
+      // Superseded work leaves the newest refresh's outcome and its next
+      // wake-up alone, however late it settles.
+      if (sequence !== this.sequence || this.repository !== repository) return
       if (this.dirtyLocal) {
         this.dirtyLocal = false
         this.scheduleLocal(this.intervals.localSettleMs)
@@ -413,7 +427,15 @@ export class RepositorySyncCoordinator {
     try {
       return await work
     } catch (error) {
-      if (this.repository === repository && tier !== 'local' && !isCancelled(error)) {
+      // A superseded failure says nothing about the answer already on screen: an
+      // older read must not overwrite a newer success with its own failure, its
+      // backoff, or an authorization stop that would end automatic polling.
+      if (
+        sequence === this.sequence &&
+        this.repository === repository &&
+        tier !== 'local' &&
+        !isCancelled(error)
+      ) {
         this.recordFailure(error, tier === 'secondary' ? 'inbox' : 'remote')
       }
       return null
@@ -424,8 +446,9 @@ export class RepositorySyncCoordinator {
     repository: string,
     tier: 'visible' | 'local' | 'secondary',
     options: { manual?: boolean; requestId?: string },
+    sequence: number,
   ): Promise<RepositorySnapshot | null> {
-    if (tier === 'secondary') return this.refreshInbox(repository)
+    if (tier === 'secondary') return this.refreshInbox(repository, sequence)
 
     if (tier === 'local') {
       // A filesystem event reads local Git immediately; remote health, failures,
@@ -436,7 +459,9 @@ export class RepositorySyncCoordinator {
           github: { remote: 'reuse' },
         }),
       )
-      if (this.repository !== repository) return null
+      // A newer refresh already owns the window; this answer describes worktree
+      // state the person is no longer looking at.
+      if (!this.isCurrent(sequence, repository)) return null
       this.emit({ kind: 'snapshot', snapshot: { ...snapshot, remote: this.freshness() } })
       return snapshot
     }
@@ -454,13 +479,15 @@ export class RepositorySyncCoordinator {
         }),
       )
     } catch (error) {
-      if (this.repository === repository && isCancelled(error)) {
+      if (this.isCurrent(sequence, repository) && isCancelled(error)) {
         this.state = previousState
         this.detail = previousDetail
       }
       throw error
     }
-    if (this.repository !== repository) return null
+    // Superseded: the newest refresh publishes its own answer, and this one adds
+    // nothing to it but an older view of the same repository.
+    if (!this.isCurrent(sequence, repository)) return null
     // A read that fell back to the last confirmed payload is still a failed
     // read: local Git is usable, but the backoff and the state must survive it.
     if (snapshot.githubFailure) {
@@ -487,11 +514,11 @@ export class RepositorySyncCoordinator {
     return snapshot
   }
 
-  private async refreshInbox(repository: string): Promise<null> {
+  private async refreshInbox(repository: string, sequence: number): Promise<null> {
     const issues = await this.deps.scheduler.read(repository, (signal) =>
       this.deps.readIssues(repository, signal),
     )
-    if (this.repository !== repository) return null
+    if (!this.isCurrent(sequence, repository)) return null
     this.checkedAt = this.clock.now()
     this.failures = 0
     this.secondarySuspended = false
@@ -512,6 +539,16 @@ export class RepositorySyncCoordinator {
     this.emit({ kind: 'status', freshness: this.freshness() })
     this.scheduleRemote(this.intervalFor('secondary'))
     return null
+  }
+
+  /**
+   * True while this refresh is the newest one and still answers for the
+   * repository the window is showing. Everything a refresh publishes about
+   * remote health waits on this, so a slower earlier read cannot undo a newer
+   * answer and a read from a closed session cannot publish into a reopened one.
+   */
+  private isCurrent(sequence: number, repository: string): boolean {
+    return sequence === this.sequence && this.repository === repository
   }
 
   private intervalFor(tier: 'visible' | 'secondary'): number {

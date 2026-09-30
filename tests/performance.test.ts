@@ -115,7 +115,7 @@ test('a repository switch waits for a cancelled read instead of rejecting the sw
     order.push('obsolete read')
   }, controller.signal)
   controller.abort()
-  const switched = operations.switchRepository(async () => {
+  const switched = operations.switchRepository('/tmp/next-repository', async () => {
     order.push('new repository')
   })
   release.resolve()
@@ -163,7 +163,7 @@ test('a cancelled file view keeps the next repository operation behind all its f
     ])
     assert.equal(started, 'reading')
     controller.abort()
-    const next = operations.switchRepository(async () => {
+    const next = operations.switchRepository('/tmp/next-repository', async () => {
       switched = true
     })
     await delay(150)

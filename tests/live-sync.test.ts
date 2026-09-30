@@ -11,6 +11,7 @@ import {
   DirectGitHubTransport,
   GhGitHubTransport,
   GitHubTransportError,
+  githubResponseCache,
   resetGitHubRateLimit,
   setGitHubTransport,
   type GitHubTransport,
@@ -19,6 +20,7 @@ import {
 } from '../src/main/github-transport'
 import { GitHubResponseCacheStore } from '../src/main/github-response-cache'
 import { RepositoryWatcher } from '../src/main/git-watcher'
+import { detectNativeStacksCapability, loadRepositoryNativeStacks } from '../src/main/native-stacks'
 import { RepositoryScheduler } from '../src/main/repository-scheduler'
 import {
   classifyRemoteMutation,
@@ -346,6 +348,46 @@ test('a moved repository is reported missing and picked up again when it returns
   }
 })
 
+test('a repository replaced at the same path re-arms the watch on the new directory', async () => {
+  const { root, repo, cleanup } = await disposableRepository()
+  const moved = join(root, 'moved-workspace')
+  const replacement = join(root, 'replacement-workspace')
+  await mkdir(replacement)
+  git(replacement, 'init', '-b', 'main')
+  git(replacement, 'config', 'user.name', 'Git Stacks test')
+  git(replacement, 'config', 'user.email', 'test@example.invalid')
+  await writeFile(join(replacement, 'shared.txt'), 'replacement\n')
+  git(replacement, 'add', '.')
+  git(replacement, 'commit', '-m', 'Replacement commit')
+
+  const log = new WatchLog()
+  const watcher = new RepositoryWatcher(repo, (event) => log.record(event.reason), {
+    debounceMs: 50,
+    maxDelayMs: 800,
+    sweepMs: 100,
+  })
+  try {
+    await watcher.start()
+    // The old tree is moved away and a different one takes the same path. The
+    // subscriptions in place belong to the tree that moved, and no event ever
+    // shows this path missing.
+    await rename(repo, moved)
+    await rename(replacement, repo)
+    await log.waitFor((reason) => reason === 'replaced')
+
+    // The new directory is what is watched now, so its worktree edits arrive.
+    await writeFile(join(repo, 'shared.txt'), 'edited in the replacement\n')
+    await log.waitFor((reason) => reason === 'change')
+    assert.ok(
+      !log.reasons.includes('missing'),
+      'the replacement was never absent, so nothing was reported missing',
+    )
+  } finally {
+    watcher.stop()
+    await cleanup()
+  }
+})
+
 test('background reads overlap, and a mutation ends a stalled one instead of waiting', async () => {
   const scheduler = new RepositoryScheduler(2)
   let started = 0
@@ -472,6 +514,57 @@ test('the response cache is bounded and never answers a different request shape'
   assert.equal(cache.size(), 2)
   assert.equal(cache.get('a'), null)
   assert.deepEqual(cache.get('b')?.body, 2)
+})
+
+test('a display refresh reads the native stacks capability conditionally and a preflight does not', async () => {
+  const urls: string[] = []
+  const validators: (string | null)[] = []
+  const fetchDouble = (async (url: string | URL | Request, init?: RequestInit) => {
+    urls.push(String(url))
+    const headers = new Headers(init?.headers)
+    validators.push(headers.get('if-none-match'))
+    const rate = { 'x-ratelimit-remaining': '4999' }
+    if (String(url).includes('per_page=1')) {
+      if (headers.get('if-none-match') === 'W/"stacks-1"') {
+        return new Response(null, { status: 304, headers: { etag: 'W/"stacks-1"', ...rate } })
+      }
+      return new Response('[]', {
+        status: 200,
+        headers: { etag: 'W/"stacks-1"', 'content-type': 'application/json', ...rate },
+      })
+    }
+    return new Response('[]', {
+      status: 200,
+      headers: { 'content-type': 'application/json', ...rate },
+    })
+  }) as typeof globalThis.fetch
+
+  const cache = githubResponseCache()
+  cache.clear()
+  setGitHubTransport(new DirectGitHubTransport({ token: 'token', fetch: fetchDouble, cache }))
+  const origin = 'https://github.com/acme/widgets.git'
+  try {
+    const first = await loadRepositoryNativeStacks(origin, [])
+    const second = await loadRepositoryNativeStacks(origin, [])
+    assert.equal(first.available, true)
+    assert.equal(second.available, true, 'a replayed body still reports the capability')
+    const probes = urls.flatMap((url, index) => (url.includes('per_page=1') ? [index] : []))
+    assert.equal(probes.length, 2, 'both refreshes asked the capability question')
+    assert.equal(validators[probes[0]!], null, 'the first read had no validator to send')
+    assert.equal(
+      validators[probes[1]!],
+      'W/"stacks-1"',
+      'the second refresh asked GitHub whether the capability changed',
+    )
+
+    // A mutation's preflight reads GitHub itself: nothing is replayed to it.
+    await detectNativeStacksCapability('acme', 'widgets')
+    assert.equal(validators.at(-1), null, 'an identity read never sends a stored validator')
+  } finally {
+    setGitHubTransport(null)
+    cache.clear()
+    resetGitHubRateLimit()
+  }
 })
 
 test('a lost network backs off, then recovers without the person asking', async () => {
@@ -620,6 +713,172 @@ test('edits that arrive during a refresh collapse into one trailing refresh', as
   await clock.advance(200)
   await clock.advance(200)
   assert.equal(attempts, 2, 'the burst collapsed into one trailing refresh')
+})
+
+/**
+ * Builds the overlap a person's own refresh creates: the automatic read that
+ * the interval started is still waiting when the manual one arrives, and it
+ * answers only when the test releases it.
+ */
+function overlappingRefreshes(options: {
+  /** What the older automatic read answers, once the manual one has answered. */
+  older: RepositorySnapshot | Error
+}) {
+  const clock = new ManualClock()
+  const automatic = Promise.withResolvers<RepositorySnapshot>()
+  const reads: string[] = []
+  let attempts = 0
+  const coordinator = new RepositorySyncCoordinator(
+    {
+      readSnapshot: async (_repository, _signal, request) => {
+        reads.push(request.github.remote)
+        attempts += 1
+        if (attempts === 1) return automatic.promise
+        return snapshotFixture()
+      },
+      readIssues: async () => [],
+      scheduler: new RepositoryScheduler(),
+      clock,
+    },
+    { ...DEFAULT_INTERVALS, localSettleMs: 100 },
+  )
+  return {
+    clock,
+    reads,
+    coordinator,
+    settleOlder: async () => {
+      if (options.older instanceof Error) automatic.reject(options.older)
+      else automatic.resolve(options.older)
+      await drainTurns()
+    },
+  }
+}
+
+/** What GitHub answers when the stored credentials no longer work. */
+const rejectedCredentials = new GitHubTransportError({
+  kind: 'unauthorized',
+  detail: 'Bad credentials',
+})
+
+interface RunningSlot {
+  running: Promise<unknown> | null
+}
+
+test('an older automatic failure never overwrites the newer manual refresh', async () => {
+  const refresh = overlappingRefreshes({ older: rejectedCredentials })
+  refresh.coordinator.attach('/tmp/repository', snapshotFixture())
+  await refresh.clock.advance(DEFAULT_INTERVALS.visibleMs + 1)
+  assert.deepEqual(refresh.reads, ['on-failure'], 'the automatic refresh is in flight')
+
+  // The person's own refresh answers while the older read is still waiting.
+  const manual = await refresh.coordinator.refreshNow()
+  assert.deepEqual(refresh.reads, ['on-failure', 'live'])
+  assert.equal(refresh.coordinator.freshness().state, 'fresh')
+  assert.equal(manual.currentBranch, 'main')
+
+  await refresh.settleOlder()
+  assert.equal(
+    refresh.coordinator.freshness().state,
+    'fresh',
+    'the older rejection says nothing about the answer now on screen',
+  )
+  const before = refresh.reads.length
+  await refresh.clock.advance(DEFAULT_INTERVALS.visibleMs + 1)
+  assert.equal(refresh.reads.length, before + 1, 'automatic polling must not stop')
+})
+
+test('an older failed payload never overwrites the newer manual refresh', async () => {
+  const refresh = overlappingRefreshes({
+    older: snapshotFixture({
+      githubFailure: { kind: 'unauthorized', detail: 'Bad credentials' },
+    }),
+  })
+  refresh.coordinator.attach('/tmp/repository', snapshotFixture())
+  await refresh.clock.advance(DEFAULT_INTERVALS.visibleMs + 1)
+  await refresh.coordinator.refreshNow()
+  assert.equal(refresh.coordinator.freshness().state, 'fresh')
+
+  await refresh.settleOlder()
+  assert.equal(
+    refresh.coordinator.freshness().state,
+    'fresh',
+    'a superseded read that fell back to a failed payload must not set the state',
+  )
+})
+
+test('an older read settling last does not release the newer refresh running', async () => {
+  const clock = new ManualClock()
+  const automatic = Promise.withResolvers<RepositorySnapshot>()
+  const manual = Promise.withResolvers<RepositorySnapshot>()
+  let attempts = 0
+  const coordinator = new RepositorySyncCoordinator(
+    {
+      readSnapshot: async () => {
+        attempts += 1
+        return attempts === 1 ? automatic.promise : manual.promise
+      },
+      readIssues: async () => [],
+      scheduler: new RepositoryScheduler(),
+      clock,
+    },
+    { ...DEFAULT_INTERVALS, localSettleMs: 100 },
+  )
+  const running = () => (coordinator as unknown as RunningSlot).running
+  coordinator.attach('/tmp/repository', snapshotFixture())
+  await clock.advance(DEFAULT_INTERVALS.visibleMs + 1)
+  const refreshNow = coordinator.refreshNow()
+  await drainTurns()
+  assert.notEqual(running(), null, 'the manual refresh is the running one')
+
+  // The older read finishes while the manual one is still answering.
+  automatic.resolve(snapshotFixture())
+  await drainTurns()
+  assert.notEqual(running(), null, 'a superseded read must not release the running refresh')
+
+  manual.resolve(snapshotFixture())
+  await refreshNow
+  await drainTurns()
+  assert.equal(running(), null, 'the newest refresh releases the lane it owned')
+})
+
+test('a refresh left over from a closed session cannot publish into the reopened repository', async () => {
+  const refresh = overlappingRefreshes({ older: rejectedCredentials })
+  refresh.coordinator.attach('/tmp/repository', snapshotFixture())
+  await refresh.clock.advance(DEFAULT_INTERVALS.visibleMs + 1)
+
+  // The repository is closed and opened again at the same path, so the identity
+  // the older read carries is the one the window is showing again.
+  refresh.coordinator.detach()
+  refresh.coordinator.attach('/tmp/repository', snapshotFixture())
+  await refresh.settleOlder()
+  assert.equal(
+    refresh.coordinator.freshness().state,
+    'fresh',
+    "the reopened session must not inherit the closed one's failure",
+  )
+})
+
+test('the newest failure still stops polling, so ordering never hides a real rejection', async () => {
+  const clock = new ManualClock()
+  const reads: string[] = []
+  const coordinator = new RepositorySyncCoordinator(
+    {
+      readSnapshot: async (_repository, _signal, request) => {
+        reads.push(request.github.remote)
+        throw new GitHubTransportError({ kind: 'unauthorized', detail: 'Bad credentials' })
+      },
+      readIssues: async () => [],
+      scheduler: new RepositoryScheduler(),
+      clock,
+    },
+    { ...DEFAULT_INTERVALS, localSettleMs: 100 },
+  )
+  coordinator.attach('/tmp/repository', snapshotFixture())
+  await assert.rejects(coordinator.refreshNow(), /Refresh failed/)
+  assert.equal(coordinator.freshness().state, 'unauthorized')
+  const attempts = reads.length
+  await clock.advance(DEFAULT_INTERVALS.visibleMs * 4)
+  assert.equal(reads.length, attempts, 'the newest rejection still stops automatic polling')
 })
 
 test('reconnecting never replays a high-impact mutation that lost its answer', async () => {

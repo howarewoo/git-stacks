@@ -28,8 +28,10 @@ refs. Diagnostic wording is not part of that behavioral contract.
 
 The open repository updates itself. Local Git work done in a terminal — a
 commit, a branch switch, a fetch that moves refs — is picked up by a debounced
-filesystem watch, as is a deleted or moved repository and its return. Reads for
-one repository run concurrently while mutations serialize behind them.
+filesystem watch, as is a deleted or moved repository, its return, and a
+directory replaced at the same path: the watch follows the directory's identity,
+so it re-arms on the replacement rather than on the tree that moved away. Reads
+for one repository run concurrently while mutations serialize behind them.
 
 On a platform that cannot watch a directory tree recursively, the periodic
 sweep fingerprints the worktree and ref content instead, so a nested file or a
@@ -37,11 +39,13 @@ loose ref below `refs/heads/feature/` still schedules a refresh. A mutation
 starts only after the reads its arrival cancelled have settled.
 
 GitHub is read on a focus-aware cadence: a short interval while the window is
-focused and visible, a slow inbox and repository refresh otherwise. Responses
-are read conditionally where GitHub supports it, and failures back off
-exponentially. A secondary rate limit parks the nonessential tier, a low
-remaining budget parks it too, and rejected credentials stop polling until the
-person refreshes.
+focused and visible, a slow inbox and repository refresh otherwise. A manual
+refresh overlaps the automatic read already running, and only the newest of the
+two publishes: the older one never overwrites fresher data, backoff, or the
+credentials state with its own. Responses are read conditionally where GitHub
+supports it, and failures back off exponentially. A secondary rate limit parks
+the nonessential tier, a low remaining budget parks it too, and rejected
+credentials stop polling until the person refreshes.
 
 The inbox is read separately from the pull requests, so a successful issue
 refresh never reports the pull requests on screen as freshly checked. When the
@@ -50,9 +54,11 @@ unconfirmed is shown, instead of an empty inbox that looks current.
 
 The title bar states remote freshness in words, with the age of the last
 confirmed data, and says when local Git still works. Cached responses are
-display only: review submission, publish, and force-push always re-read GitHub
-live. A high-impact mutation that lost its answer is never replayed on
-reconnect — it is listed with its reason until dismissed.
+display only: the native stacks capability the snapshot asks GitHub about on
+every interval is read with its validator, and review submission, publish,
+and force-push always re-read GitHub live. A high-impact mutation that lost
+its answer is never replayed on reconnect — it is listed with its reason until
+dismissed.
 
 Renderer checks distinguish the `/` in-view filter from the `Mod+K` command
 palette. The safety suite advances pending hover timers after opening a
@@ -181,12 +187,15 @@ never applied to the one it now shows:
   diff commands and the fingerprint task to settle before the next repository
   operation starts; mutation preflight reads remain non-cancelable.
 - A mutation is refused only while another mutation or a repository switch is
-  pending, never because a read is still being answered. Reads and writes share
-  one queue, so a mutation submitted during a read runs after it, and no other
-  write or switch can interleave with it; what the action then checks is that
-  action's own business, unchanged by the wait. A repository switch refuses
-  mutations for as long as it is pending, so an action asked for against the
-  repository being left cannot land on the one the window opens next.
+  pending, or once the repository it was asked for is no longer the one the
+  window shows — a switch can complete while the action is still waiting for
+  the background reads it ends. It is never refused because a read is still
+  being answered. Reads and writes share one queue, so a mutation submitted
+  during a read runs after it, and no other write or switch can interleave with
+  it; what the action then checks is that action's own business, unchanged by
+  the wait. A repository switch refuses mutations for as long as it is pending,
+  so an action asked for against the repository being left cannot land on the
+  one the window opens next.
 
 ### Documented limits
 

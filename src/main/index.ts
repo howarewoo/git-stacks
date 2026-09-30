@@ -255,7 +255,7 @@ function installHandlers() {
     // history/diff must not delay switching to a newly selected repository.
     if (activeRepository) readKeys.cancelRoot(activeRepository)
     stopBackgroundSync()
-    return operations.switchRepository(async () => {
+    return operations.switchRepository(path, async () => {
       const runtime = await resolveGitRuntime()
       return withGitRuntime(runtime, async () => {
         const snapshot = await getSnapshot(path)
@@ -300,10 +300,13 @@ function installHandlers() {
       // A mutation claims the repository lane: background reads end first, so a
       // stage or a commit never waits on a network that is not answering.
       return await scheduler.mutate(root, () =>
+        // Naming the repository is the admission check: a switch can complete
+        // while this action waited for the background reads it ends, and an
+        // action must never apply to the repository the window already left.
         operations.write(async () => {
           const runtime = await resolveGitRuntime()
           return withGitRuntime(runtime, () => runAction(root, action))
-        }),
+        }, root),
       )
     } catch (error) {
       // A high-impact remote mutation that lost its answer is listed, never
