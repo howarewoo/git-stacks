@@ -189,6 +189,8 @@ export class RepositoryWatcher {
    * belong to the directory now at the path.
    */
   private targetSettled = false
+  /** Root observed before an arm's lookups, retained if settling needs a later sweep. */
+  private settleIdentity: string | null = null
   private settling: { gen: number; promise: Promise<void> } | undefined
   private started = false
   private stopping = false
@@ -263,6 +265,7 @@ export class RepositoryWatcher {
     // nothing at all until then, so a replacement arriving now delivers no
     // event. The identity stays unset until the resolution holds, so a
     // presence check running alongside has nothing to claim it against.
+    this.settleIdentity = this.identity
     this.identity = null
     this.gitDirectories = []
     this.targetSettled = false
@@ -311,6 +314,7 @@ export class RepositoryWatcher {
     for (let attempt = 1; attempt <= MAX_ARM_ATTEMPTS; attempt += 1) {
       const identity = await directoryIdentity(this.root)
       if (!this.armed(gen)) return
+      if (attempt === 1 && this.settleIdentity === null) this.settleIdentity = identity
       const gitDirectories = await this.options.resolveGitDirectories(this.root)
       if (!this.armed(gen)) return
       const resolved = await directoryIdentity(this.root)
@@ -327,6 +331,10 @@ export class RepositoryWatcher {
       const signature = await this.currentSignature()
       if (!this.armed(gen)) return
       this.signature = signature
+      if (this.settleIdentity !== null && identity !== this.settleIdentity) {
+        this.noteChange(this.root)
+      }
+      this.settleIdentity = null
       return
     }
   }

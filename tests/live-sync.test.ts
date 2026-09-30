@@ -300,6 +300,8 @@ test('a terminal commit produces one refresh for the whole burst it causes', asy
   })
   try {
     await watcher.start()
+    await quietFor()
+    assert.deepEqual(log.reasons, [], 'an unchanged startup root does not trigger a refresh')
     await writeFile(join(repo, 'shared.txt'), 'edited\n')
     git(repo, 'add', '.')
     git(repo, 'commit', '-m', 'Terminal commit')
@@ -437,7 +439,7 @@ async function linkedGitWorkspace(): Promise<{
   const root = await mkdtemp(join(tmpdir(), 'git-stacks-watcher-replace-'))
   const stores = [0, 1, 2, 3].map((index) => join(root, `store-${index}`))
   const repo = join(root, 'workspace')
-  await separateGitWorktree(repo, stores[0], 'tree 0')
+  await separateGitWorktree(repo, stores[0], 'original')
   for (const [index, tree] of [0, 1, 2].map((i) => join(root, `tree-${i}`)).entries()) {
     await separateGitWorktree(tree, stores[index + 1], `tree ${index}`)
   }
@@ -457,36 +459,65 @@ async function quietFor(ms = 700): Promise<void> {
 test('a repository replaced while its Git directories are being resolved is watched on the new tree’s own Git directory', async () => {
   const { root, repo, stores, cleanup } = await linkedGitWorkspace()
   const log = new WatchLog()
+  const clock = new ManualClock()
+  const snapshots: string[] = []
+  const coordinator = new RepositorySyncCoordinator(
+    {
+      readSnapshot: async () =>
+        snapshotFixture({
+          path: repo,
+          name: (await readFile(join(repo, 'shared.txt'), 'utf8')).trim(),
+        }),
+      readIssues: async () => [],
+      scheduler: new RepositoryScheduler(),
+      clock,
+    },
+    { ...DEFAULT_INTERVALS, localSettleMs: 100 },
+  )
+  coordinator.onEvent((event) => {
+    if (event.kind === 'snapshot' && event.snapshot) snapshots.push(event.snapshot.name)
+  })
   // The settle pass parks inside this lookup, which is the window a replacement
   // lands in: nothing is subscribed yet, so the replacement delivers no event.
   const entered = Promise.withResolvers<void>()
   const release = Promise.withResolvers<void>()
   const resolvedRoots: number[] = []
   let lookups = 0
-  const watcher = new RepositoryWatcher(repo, (event) => log.record(event.reason), {
-    debounceMs: 20,
-    maxDelayMs: 200,
-    // The sweep is the safety net this repair must not lean on, so it is off.
-    sweepMs: 0,
-    resolveGitDirectories: async (root) => {
-      const directories = await linkedGitDirectory(root)
-      lookups += 1
-      resolvedRoots.push((await stat(root)).ino)
-      if (lookups === 1) {
-        entered.resolve()
-        await release.promise
-      }
-      return directories
+  const watcher = new RepositoryWatcher(
+    repo,
+    (event) => {
+      log.record(event.reason)
+      coordinator.notifyLocalChange()
     },
-  })
+    {
+      debounceMs: 20,
+      maxDelayMs: 200,
+      // The sweep is the safety net this repair must not lean on, so it is off.
+      sweepMs: 0,
+      resolveGitDirectories: async (root) => {
+        const directories = await linkedGitDirectory(root)
+        lookups += 1
+        resolvedRoots.push((await stat(root)).ino)
+        if (lookups === 1) {
+          entered.resolve()
+          await release.promise
+        }
+        return directories
+      },
+    },
+  )
 
   try {
     const startPromise = watcher.start()
     await within(entered.promise, 'the first Git lookup to be entered')
+    coordinator.attach(repo, snapshotFixture({ path: repo, name: 'original' }))
     await rename(repo, join(root, 'held-workspace'))
     await rename(join(root, 'tree-0'), repo)
     release.resolve()
     await startPromise
+    await log.waitFor((reason) => reason === 'change')
+    await clock.advance(100)
+    assert.deepEqual(snapshots, ['tree 0'], 'the replacement refreshes without a later edit')
 
     // The lookup that was in flight named the displaced tree's Git directory,
     // so the identity was rechecked and the lookup was run again for the tree
@@ -519,6 +550,7 @@ test('a repository replaced while its Git directories are being resolved is watc
     assert.equal(log.reasons.length, before, 'the displaced Git directory is not watched')
   } finally {
     watcher.stop()
+    coordinator.detach()
     await cleanup()
   }
 })
@@ -645,6 +677,8 @@ test('the sweep settles a root the arm gave up on, on the tree left at the path'
       internals.gitDirectories.map((directory) => basename(directory)),
       ['store-3'],
     )
+    await log.waitFor((reason) => reason === 'change')
+    assert.equal(log.reasons.filter((reason) => reason === 'change').length, 1)
 
     // The sweep is the later turn that finishes a root the arm gave up on. Each
     // branch below lands in the store of the tree left at the path, so the
