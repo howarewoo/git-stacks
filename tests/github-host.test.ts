@@ -11,7 +11,6 @@ import {
   hostStatus,
   GITHUB_DOTCOM_API_BASE,
   GITHUB_DOTCOM_WEB_ORIGIN,
-  EXTERNAL_LINK_REFUSAL,
   externalGitHubLink,
   githubHostContext,
   probeGitHubHost,
@@ -770,6 +769,8 @@ test('a configured enterprise host is trusted on the port it was configured with
     'https://ghe.example.com/o/r/pull/1',
     'https://ghe.example.com:9999/o/r/pull/1',
     'https://ghe.example.com:443/o/r/pull/1',
+    'https://github.com:8443/o/r/pull/1',
+    'https://github.com.evil.example/o/r/pull/1',
   ]) {
     assert.equal(
       externalGitHubLink(refused, onCustomPort).ok,
@@ -782,12 +783,11 @@ test('a configured enterprise host is trusted on the port it was configured with
     true,
     'a host configured without a port is reached on the default one',
   )
-  // Choosing an enterprise host is not choosing the public one instead.
-  assert.equal(
-    externalGitHubLink('https://github.com/howarewoo/git-stacks', onCustomPort).ok,
-    false,
-    'the public host is not a configured host here',
-  )
+  // Selecting an enterprise host must not disable canonical public GitHub links.
+  assert.deepEqual(externalGitHubLink('https://github.com/howarewoo/git-stacks', onCustomPort), {
+    ok: true,
+    href: 'https://github.com/howarewoo/git-stacks',
+  })
 })
 
 test('a repository on its own host is trusted only while that host is in the set', () => {
@@ -801,11 +801,7 @@ test('a repository on its own host is trusted only while that host is in the set
     externalGitHubLink('https://ghe.example.com/howarewoo/git-stacks', withRepository).ok,
     false,
   )
-  // An installation that speaks to no host opens nothing at all.
-  assert.deepEqual(externalGitHubLink('https://ghe.example.com:8443/x', []), {
-    ok: false,
-    message: EXTERNAL_LINK_REFUSAL,
-  })
+  assert.equal(externalGitHubLink('https://ghe.example.com:8443/x', []).ok, false)
 })
 
 test('a host that signs in again is not handed the transport of the sign-in it retired', () => {

@@ -227,7 +227,9 @@ export function externalGitHubLink(
   // against a trusted host means anything: `url.host` is the parsed name, port
   // included, so it is the same string a host context carries.
   if (!validateGitHubHostInput(url.host).ok) return REFUSE_LINK
-  if (!trusted.some((context) => context.host === url.host)) return REFUSE_LINK
+  if (url.host !== GITHUB_DOTCOM_HOST && !trusted.some((context) => context.host === url.host)) {
+    return REFUSE_LINK
+  }
   return { ok: true, href: url.href }
 }
 

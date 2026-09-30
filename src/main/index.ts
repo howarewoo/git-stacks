@@ -110,7 +110,6 @@ import {
 import { loadSettingsPolicy } from './settings-service'
 import {
   configuredHostContext,
-  EXTERNAL_LINK_REFUSAL,
   externalGitHubLink,
   forgetHost,
   GITHUB_DOTCOM_HOST,

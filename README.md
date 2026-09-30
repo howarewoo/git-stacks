@@ -188,9 +188,9 @@ a separate code path; it is the same path with a different name.
 Every **open in browser** control, the device sign-in page, and every pull
 request, issue, stack, and check link cross the same boundary in the main
 process, and the boundary is the host rather than the link. A link is opened
-only when it is HTTPS, carries no credentials, and names a host this
-installation already speaks to: the configured host, and, when a repository is
-open, the host that owns its origin. The host is compared whole, so its port is
+only when it is HTTPS, carries no credentials, and names `github.com`, the
+configured host, or the host owning an open repository's origin. Public GitHub
+links remain available when an enterprise host is selected. The host is compared whole, so its port is
 part of it: an enterprise host configured as `ghe.example.com:8443` opens links
 on that port, while the same name on another port, a look-alike that merely ends
 in a trusted name such as `github.com.evil.example`, and any other host are all
