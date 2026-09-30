@@ -432,23 +432,14 @@ const mergeLayerPresentation: Record<
   failed: { label: 'failed', tone: 'danger' },
 }
 
-/**
- * The asynchronous merge API is GitHub's only documented view of a merge queue, and its
- * `enqueued` result is final: it never changes when the queue later merges or drops the
- * group. So the text says what is known and where the answer comes from, rather than
- * inventing a queue state GitHub never published: GitHub ejects a pull request whose
- * checks fail or whose wait times out without closing it, and a still-open pull request is
- * therefore an unconfirmed membership, not one.
- */
+/** A terminal enqueue result and an open pull request do not prove current membership. */
 function queueDetail(queue: NonNullable<MergeLayerResult['queue']>): string {
   if (queue.outcome === 'merged') return 'The merge queue landed this pull request.'
   if (queue.outcome === 'dropped')
     return 'The merge queue did not land this pull request: it is closed without merging. Close it out locally and enqueue again once the failing rule is resolved.'
   if (queue.outcome === 'pending')
     return 'GitHub accepted this merge request and has not reported a result for it. Refresh to read the request again.'
-  if (queue.outcome === 'unconfirmed')
-    return 'GitHub accepted this enqueue and publishes no state after it, so an open pull request cannot be told apart from one the queue ejected. Its timeline says why it left.'
-  return 'Queued, and this pull request reports no state GitHub published.'
+  return 'GitHub accepted this enqueue, but current queue membership is unconfirmed. Check the pull request timeline on GitHub for queue updates.'
 }
 
 export function MergeOutcomePanel({

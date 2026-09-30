@@ -396,7 +396,7 @@ export const syncPreview: StackPreview = {
  * still open says nothing about membership either way.
  */
 export const mergeStatusQueueSentence =
-  'Pull request #40 joined the merge queue; whether it is still there is unconfirmed, because GitHub publishes no later state for it.'
+  'Pull request #40 joined the merge queue; current queue membership is unconfirmed.'
 
 /** What a read-only refresh reports: one pull request the queue took, one still running. */
 export const mergeStatus: MergeStatus = {

@@ -2148,8 +2148,7 @@ async function capturePlan(
         }
       }
       if (chain.layers.length > 0) {
-        // A merge queue is proven by an enqueue GitHub accepted for this base ref, because
-        // the asynchronous merge API is the only documented view of one.
+        // An accepted enqueue is evidence that this base ref has a merge queue.
         queueConfigured = queueConfiguredFor(
           await readMergeObservations(root),
           selectedEntry.pr.base,
@@ -6168,7 +6167,7 @@ function mergeStatusDetail(
   } else if (queue?.outcome === 'unconfirmed') {
     detail =
       live === null
-        ? `GitHub accepted this enqueue at ${requested} and has published no later state for it`
+        ? `GitHub accepted this enqueue at ${requested}; current queue membership is unconfirmed`
         : `GitHub accepted this enqueue at ${requested}; this pull request is still open, which does not say whether the queue still holds it`
   } else if (observation.outcome === 'failed') {
     detail = observation.message ?? 'GitHub reported that the merge request failed'
@@ -6192,7 +6191,7 @@ function mergeStatusMessage(layers: MergeLayerResult[]): string {
   if (queued.length > 0) {
     const numbers = queued.map((entry) => `#${entry.pullRequest}`).join(', ')
     parts.push(
-      `Pull request${queued.length === 1 ? '' : 's'} ${numbers} joined the merge queue; whether ${queued.length === 1 ? 'it is' : 'they are'} still there is unconfirmed, because GitHub publishes no later state for ${queued.length === 1 ? 'it' : 'them'}.`,
+      `Pull request${queued.length === 1 ? '' : 's'} ${numbers} joined the merge queue; current queue membership is unconfirmed.`,
     )
   }
   const failed = layers.filter((entry) => entry.status === 'failed')

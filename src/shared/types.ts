@@ -237,15 +237,10 @@ export type MergeAction = 'default' | 'direct_merge' | 'merge_queue'
 export type MergeMethod = 'merge' | 'squash' | 'rebase'
 
 /**
- * What Git Stacks' own last merge request for a pull request did. The asynchronous merge API
- * is the only documented view of a merge queue: an `enqueued` result means the pull request
- * joined one and, as the documentation states, that result never changes afterwards, so a
- * later read of the pull request itself is the only later signal.
- *
- * `unconfirmed` is what a pull request that is still open reports. GitHub ejects a pull
- * request from a queue after failed required checks or a timeout without closing it, so an
- * open pull request proves neither that the queue still holds it nor that it left: it is
- * reported as unconfirmed rather than as a membership that was never published.
+ * The last merge request and subsequent pull-request state observed by Git Stacks.
+ * A terminal `enqueued` result does not track later queue membership. An open pull
+ * request can still be queued or have been ejected, so membership is `unconfirmed`
+ * unless a later read confirms that the pull request merged or closed.
  */
 export type MergeQueueOutcome = 'pending' | 'unconfirmed' | 'merged' | 'dropped'
 

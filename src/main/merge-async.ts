@@ -239,10 +239,8 @@ export interface MergeQueueObservation {
   /** GitHub's message for a terminal result, kept so a reopen does not need the request. */
   message: string | null
   /**
-   * The pull request's own state as a read observed it. An enqueued result is final, so what
-   * the queue did later is only ever known from the pull request; keeping that observation
-   * means a read that cannot reach GitHub reports what was confirmed instead of quietly
-   * reporting the request as queued again.
+   * The pull request's state as last observed by this reader. Retain confirmed
+   * outcomes across failed reads instead of reverting to the earlier enqueue.
    */
   confirmed: 'merged' | 'dropped' | null
 }
@@ -329,14 +327,10 @@ export async function recordMergeObservation(
 /**
  * Read the merge-queue state of a pull request from what GitHub actually reported.
  *
- * A queue is proven by an enqueue GitHub accepted. What happened afterwards is read from the
- * pull request itself, because the documentation is explicit that an `enqueued` result is
- * final and does not change when the queue later merges or drops the group. A pull request
- * that reports itself merged was landed; one that was closed without merging was dropped by
- * the queue or closed underneath it; one still open is neither, and GitHub publishes no
- * further state for it, so membership is reported as unconfirmed instead of being guessed:
- * GitHub ejects a pull request whose required checks fail or whose wait times out without
- * closing it, and the pull request's own timeline is where it says why.
+ * The terminal enqueue result does not track subsequent queue membership. This reader
+ * uses the pull request's lifecycle: merged confirms landing, closed confirms it did
+ * not land, and open leaves membership unconfirmed because an ejected pull request
+ * can remain open.
  */
 export function mergeQueueState(
   observation: MergeQueueObservation | undefined,

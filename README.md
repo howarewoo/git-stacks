@@ -103,16 +103,13 @@ to a stack, and the operation is worth knowing about from the outside:
   pull request state a read confirmed, so a crash, a restart, an expired result,
   or a refresh that cannot reach GitHub still reports what was confirmed — merged,
   enqueued, or failed with GitHub's reason.
-- A merge queue has no published position or ejection feed, and an `enqueued`
-  result never changes afterwards, so what the queue did is read back from the
-  pull requests themselves: merged, dropped when it was closed without merging,
-  or unconfirmed while it is still open. GitHub ejects a pull request whose
-  required checks fail or whose wait times out without closing it, and it
-  publishes no membership of its own, so an open pull request is never reported
-  as one the queue is still holding. A queue is offered for a base ref once
-  GitHub has accepted an enqueue for it, and not before. A pull request that
-  GitHub could not be asked about keeps what a read last confirmed; a read that
-  failed is never reported as a queue still holding the group.
+- The asynchronous merge API's terminal `enqueued` result does not track later
+  queue membership. Git Stacks reads the pull request's lifecycle: merged,
+  dropped when closed without merging, or unconfirmed while still open.
+  An ejected pull request can remain open, so open is not proof of membership.
+  Check the pull request timeline on GitHub for queue updates. An accepted
+  enqueue is retained as evidence that its base ref has a queue. A failed
+  refresh preserves the last confirmed outcome without claiming fresh data.
 - A terminal result is written down even when GitHub returns no request UUID,
   which is what the immediate `200` for a pull request that is already merged or
   already in a queue carries. Nothing is polled for an identity GitHub never

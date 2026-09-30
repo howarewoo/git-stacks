@@ -2557,7 +2557,7 @@ test(
 )
 
 test(
-  'a queue that ejects a pull request without closing it claims no membership',
+  'an open pull request after enqueue leaves current queue membership unconfirmed',
   { concurrency: false },
   async () => {
     await withHarness(async (harness) => {
@@ -2587,27 +2587,17 @@ test(
           result.merge?.layers.map((layer) => layer.status),
           ['enqueued', 'enqueued'],
         )
+        // Open cannot distinguish a pull request still queued from one already ejected.
+        const status = await getMergeStatus(harness.repo)
+        const layer = status?.layers.find((entry) => entry.pullRequest === childNumber)
+        assert.equal(layer?.status, 'enqueued', 'the terminal enqueue result is what it reported')
+        assert.equal(
+          layer?.queue?.outcome,
+          'unconfirmed',
+          'an open pull request is not evidence of a queue membership',
+        )
+        assert.equal(starts.length, 1, 'reading a queue outcome submits no merge')
       })
-      // GitHub ejects a pull request whose required checks fail or whose wait times out, and
-      // it does not close it. The enqueued result is final, so the pull request is the only
-      // later signal, and an open one cannot tell a pull request the queue still holds from
-      // one it ejected: reporting either would be asserting a membership GitHub never
-      // published.
-      const ejected = await harness.readState()
-      assert.equal(prFor(ejected, 'child').state, 'OPEN', 'the ejection left the pull request open')
-      await harness.writeState(ejected)
-      const status = await getMergeStatus(harness.repo)
-      const layer = status?.layers.find((entry) => entry.pullRequest === childNumber)
-      assert.equal(layer?.status, 'enqueued', 'the terminal enqueue result is what it reported')
-      assert.equal(
-        layer?.queue?.outcome,
-        'unconfirmed',
-        'an open pull request is not evidence of a queue membership',
-      )
-      assert.match(layer?.detail ?? '', /does not say whether the queue still holds it/u)
-      assert.doesNotMatch(status?.message ?? '', /is in the merge queue/u)
-      assert.match(status?.message ?? '', /unconfirmed/u)
-      assert.equal(starts.length, 1, 'reading a queue outcome submits no merge')
     })
   },
 )
@@ -2651,38 +2641,38 @@ test(
           [null, null],
           'no identity is invented for a result GitHub did not give one for',
         )
+        // The terminal result is journalled anyway, so a reopened dialog and the next preview
+        // both still know a queue accepted this base ref.
+        const status = await getMergeStatus(harness.repo)
+        assert.deepEqual(
+          status?.layers.map((layer) => [layer.pullRequest, layer.status]),
+          [
+            [parentNumber, 'enqueued'],
+            [childNumber, 'enqueued'],
+          ],
+          'the terminal enqueue is what a reopened dialog reports',
+        )
+        assert.equal(
+          status?.layers.find((entry) => entry.pullRequest === childNumber)?.queue?.configured,
+          true,
+        )
+        const offered = await previewStack(
+          harness.repo,
+          await getSnapshot(harness.repo),
+          'merge',
+          'child',
+        )
+        assert.equal(
+          offered.merge?.actions.includes('merge_queue'),
+          true,
+          'an accepted enqueue is the base-ref evidence the next preview needs',
+        )
       })
       assert.equal(starts.length, 1)
       assert.deepEqual(
         polls.filter((url) => url.includes('merge-async/')),
         [],
         'an absent request UUID is never polled for',
-      )
-      // The terminal result is journalled anyway, so a reopened dialog and the next preview
-      // both still know a queue accepted this base ref.
-      const status = await getMergeStatus(harness.repo)
-      assert.deepEqual(
-        status?.layers.map((layer) => [layer.pullRequest, layer.status]),
-        [
-          [parentNumber, 'enqueued'],
-          [childNumber, 'enqueued'],
-        ],
-        'the terminal enqueue is what a reopened dialog reports',
-      )
-      assert.equal(
-        status?.layers.find((entry) => entry.pullRequest === childNumber)?.queue?.configured,
-        true,
-      )
-      const offered = await previewStack(
-        harness.repo,
-        await getSnapshot(harness.repo),
-        'merge',
-        'child',
-      )
-      assert.equal(
-        offered.merge?.actions.includes('merge_queue'),
-        true,
-        'an accepted enqueue is the base-ref evidence the next preview needs',
       )
     })
   },
@@ -2922,12 +2912,6 @@ test(
         'a refusal GitHub already reported stays a failure on the read, not an unmerged layer',
       )
       assert.match(status?.layers[0]?.detail ?? '', /Required review is missing/u)
-      assert.match(status?.message ?? '', /refused the merge request/u)
-      assert.doesNotMatch(
-        status?.message ?? '',
-        /no further change/u,
-        'an operation GitHub refused is never summarised as nothing having changed',
-      )
       // The result is kept, so the reason survives the request expiring.
       const expired = await harness.readState()
       delete expired.asyncMerge

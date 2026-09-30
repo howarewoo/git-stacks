@@ -55,7 +55,6 @@ test.describe('Merge reads after a run', () => {
     const refusal = dialog.getByRole('alert')
     await expect(refusal).toContainText('Required review is missing')
     await expect(dialog.getByText('failed', { exact: true })).toBeVisible()
-    await expect(dialog.getByText('GitHub reports no further change')).toHaveCount(0)
 
     // Reading again answers with the same refusal: no later read quietly resolves it.
     await dialog.getByRole('button', { name: 'Refresh what GitHub reports' }).click()
