@@ -438,6 +438,7 @@ async function effectiveBranchRules(
     }
     if (!Array.isArray(rules)) return { known: false, constraints: [] }
     for (const rule of rules) {
+      if (isRecord(rule) && rule.type === 'workflows') return { known: false, constraints: [] }
       if (!isRecord(rule) || rule.type !== 'required_status_checks') continue
       const parameters = isRecord(rule.parameters) ? rule.parameters : null
       const entries =
@@ -562,18 +563,34 @@ function buildReport(
   workflowRuns: unknown[][],
   requirementKnown: boolean,
   required: RequiredConstraint[],
+  number: number,
 ): BuiltReport {
   const checks: PullRequestCheckDetail[] = []
   const checkRunEntriesFlat = checkRuns.flat()
   const statusEntriesFlat = statuses.flat()
-  const workflowRunEntriesFlat = workflowRuns.flat()
-  // An Actions run and the check run it creates are one piece of work, joined by the
-  // run URL GitHub puts in the check run's details link.
-  const runIdByUrl = new Map<string, number>()
+  const belongsToPullRequest = (entry: Record<string, unknown>): boolean =>
+    Array.isArray(entry.pull_requests) &&
+    entry.pull_requests.some((pull) => isRecord(pull) && pull.number === number)
+  const workflowRunEntriesFlat = workflowRuns
+    .flat()
+    .filter(
+      (entry): entry is Record<string, unknown> =>
+        isRecord(entry) &&
+        (belongsToPullRequest(entry) ||
+          (entry.event === 'push' &&
+            Array.isArray(entry.pull_requests) &&
+            entry.pull_requests.length === 0)),
+    )
+  // A details URL is arbitrary integrator content; only Actions-owned suite IDs
+  // establish a relationship with an Actions workflow.
+  const runIdBySuite = new Map<number, number>()
   for (const entry of workflowRunEntriesFlat) {
-    if (!isRecord(entry) || typeof entry.id !== 'number') continue
-    const details = safeGitHubUrl(entry.html_url)
-    if (details) runIdByUrl.set(details, entry.id)
+    if (
+      typeof entry.id === 'number' &&
+      typeof entry.check_suite_id === 'number' &&
+      belongsToPullRequest(entry)
+    )
+      runIdBySuite.set(entry.check_suite_id, entry.id)
   }
 
   for (const entry of workflowRunEntriesFlat) {
@@ -581,7 +598,12 @@ function buildReport(
     const details = safeGitHubUrl(entry.html_url)
     if (!details) continue
     const reportedByCheckRun = checkRunEntriesFlat.some(
-      (run) => isRecord(run) && run.details_url === details,
+      (run) =>
+        isRecord(run) &&
+        checkRunAppId(run) === ACTIONS_APP_ID &&
+        isRecord(run.check_suite) &&
+        typeof entry.check_suite_id === 'number' &&
+        run.check_suite.id === entry.check_suite_id,
     )
     // A run GitHub already reported as a check run is that run, not a second check.
     if (reportedByCheckRun) continue
@@ -596,11 +618,15 @@ function buildReport(
       requirement: requirementKnown
         ? classifyRequirement(name, required, ACTIONS_APP_ID)
         : 'unknown',
-      summary: typeof entry.run_number === 'number' ? `Run #${entry.run_number}` : null,
+      summary: belongsToPullRequest(entry)
+        ? typeof entry.run_number === 'number'
+          ? `Run #${entry.run_number}`
+          : null
+        : 'Push CI for this commit; no pull request association. Rerun on GitHub.',
       detailsUrl: details,
       startedAt: typeof entry.run_started_at === 'string' ? entry.run_started_at : null,
       completedAt: typeof entry.updated_at === 'string' ? entry.updated_at : null,
-      workflowRunId: entry.id,
+      workflowRunId: belongsToPullRequest(entry) ? entry.id : null,
       expected: false,
     })
   }
@@ -627,7 +653,12 @@ function buildReport(
       detailsUrl: details,
       startedAt: typeof entry.started_at === 'string' ? entry.started_at : null,
       completedAt: typeof entry.completed_at === 'string' ? entry.completed_at : null,
-      workflowRunId: details ? (runIdByUrl.get(details) ?? null) : null,
+      workflowRunId:
+        checkRunAppId(entry) === ACTIONS_APP_ID &&
+        isRecord(entry.check_suite) &&
+        typeof entry.check_suite.id === 'number'
+          ? (runIdBySuite.get(entry.check_suite.id) ?? null)
+          : null,
       expected: false,
     })
   }
@@ -969,6 +1000,7 @@ export async function getPullRequestChecks(
         sources.workflowRuns,
         requirement.known,
         requirement.constraints,
+        number,
       )
       const confirmed: CachedReport = {
         ...remembered,
@@ -1000,6 +1032,7 @@ export async function getPullRequestChecks(
       sources.workflowRuns,
       requirement.known,
       requirement.constraints,
+      number,
     )
     // Validators come from the pages this read holds bodies for, never from a longer
     // previous cache: a validator whose page body is gone would let a later read

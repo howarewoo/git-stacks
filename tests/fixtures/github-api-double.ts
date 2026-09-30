@@ -313,8 +313,14 @@ function checkRunResponse(
       completed_at: run.completedAt ?? null,
       output: { title: run.title ?? null, summary: null, text: null, annotations_count: 0 },
       name: run.name,
-      check_suite: { id: Math.floor(run.id / 10) },
-      app: run.appSlug ? { id: run.appId ?? 1, slug: run.appSlug, name: run.appSlug } : null,
+      check_suite: { id: run.checkSuiteId ?? 1 },
+      app: run.appSlug
+        ? {
+            id: run.appId ?? (run.appSlug === 'github-actions' ? 15368 : 1),
+            slug: run.appSlug,
+            name: run.appSlug,
+          }
+        : null,
       pull_requests: [],
     })),
   }
@@ -369,13 +375,17 @@ function workflowRunsResponse(
       path: '.github/workflows/ci.yml',
       run_number: run.runNumber ?? run.id,
       run_attempt: 1,
-      event: 'pull_request',
+      event: run.event ?? 'pull_request',
+      check_suite_id: run.checkSuiteId ?? 1,
       status: run.status,
       conclusion: run.conclusion,
       workflow_id: 1,
       url: `https://api.github.com/repos/acme/widgets/actions/runs/${run.id}`,
       html_url: run.htmlUrl ?? `https://github.com/acme/widgets/actions/runs/${run.id}`,
-      pull_requests: [],
+      pull_requests: (
+        run.pullRequests ??
+        state.prs.filter((pr) => pr.headOid === run.headSha).map((pr) => pr.number)
+      ).map((number) => ({ number })),
       created_at: '2026-01-01T00:00:00Z',
       updated_at: run.updatedAt ?? '2026-01-01T00:01:00Z',
       run_started_at: run.startedAt ?? '2026-01-01T00:00:00Z',
@@ -749,11 +759,19 @@ function handleRest(state: GitHubFixtureState, request: GitHubApiDoubleRequest):
       context: entry.context,
       integration_id: entry.integrationId ?? null,
     }))
-    if (entries.length === 0) return { status: 200, body: [] }
+    if (entries.length === 0 && !rules.workflows) return { status: 200, body: [] }
     return {
       status: 200,
       body: page(
         [
+          ...(rules.workflows
+            ? [
+                {
+                  type: 'workflows',
+                  parameters: { workflows: [{ path: '.github/workflows/required.yml' }] },
+                },
+              ]
+            : []),
           {
             type: 'required_status_checks',
             ruleset_id: 9100,

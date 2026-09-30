@@ -227,7 +227,7 @@ test('an Actions run GitHub also reported as a check run is one check, not two',
           status: 'in_progress',
           conclusion: null,
           appSlug: 'github-actions',
-          detailsUrl: runUrl,
+          detailsUrl: `${runUrl}/job/123`,
         },
       ],
       workflowRuns: [
@@ -250,9 +250,99 @@ test('an Actions run GitHub also reported as a check run is one check, not two',
 
     assert.equal(report.checks.length, 1)
     assert.equal(report.checks[0]?.source, 'check-run')
-    // The run id is what a rerun needs, and it is joined through the details link.
+    // The suite identity joins the Actions job to its workflow despite different URLs.
     assert.equal(report.checks[0]?.workflowRunId, 9001)
     assert.equal(report.summary, 'pending')
+  })
+})
+
+test('same-SHA workflows require PR association and third-party URLs cannot acquire rerun identity', async () => {
+  await withHarness(async (harness) => {
+    const head = await setup(harness, (headSha) => ({
+      checkRuns: [
+        {
+          id: 80,
+          headSha,
+          name: 'Third party',
+          appSlug: 'external-ci',
+          appId: 700,
+          checkSuiteId: 44,
+          status: 'completed',
+          conclusion: 'success',
+          detailsUrl: 'https://github.com/acme/widgets/actions/runs/9800',
+        },
+      ],
+      workflowRuns: [
+        {
+          id: 9800,
+          headSha,
+          name: 'Selected PR',
+          checkSuiteId: 44,
+          pullRequests: [PR_NUMBER],
+          status: 'completed',
+          conclusion: 'failure',
+        },
+        {
+          id: 9801,
+          headSha,
+          name: 'Other PR',
+          checkSuiteId: 45,
+          pullRequests: [PR_NUMBER + 1],
+          status: 'completed',
+          conclusion: 'failure',
+        },
+        {
+          id: 9802,
+          headSha,
+          name: 'Push CI',
+          checkSuiteId: 46,
+          pullRequests: [],
+          event: 'push',
+          status: 'completed',
+          conclusion: 'success',
+        },
+      ],
+    }))
+    const report = await getPullRequestChecks(harness.repo, PR_NUMBER, {
+      headSha: head,
+      force: true,
+    })
+    assert.equal(report.checks.find((entry) => entry.name === 'Third party')?.workflowRunId, null)
+    assert.equal(report.checks.find((entry) => entry.name === 'Selected PR')?.workflowRunId, 9800)
+    assert.equal(
+      report.checks.some((entry) => entry.name === 'Other PR'),
+      false,
+    )
+    const push = report.checks.find((entry) => entry.name === 'Push CI')
+    assert.equal(push?.workflowRunId, null)
+    assert.match(push?.summary ?? '', /no pull request association/)
+    for (const id of [9801, 9802]) {
+      await assert.rejects(
+        rerunPullRequestCheck(harness.repo, PR_NUMBER, id, { headSha: head }),
+        /no longer belongs/,
+      )
+    }
+    assert.deepEqual((await harness.readState()).checks?.reruns ?? [], [])
+  })
+})
+
+test('effective required workflow rules leave requirements unknown', async () => {
+  await withHarness(async (harness) => {
+    const head = await setup(harness, (headSha) => ({
+      requiredStatusChecks: { branch: 'main', contexts: [] },
+      branchRules: { branch: 'main', workflows: true },
+      checkRuns: [
+        { id: 1, headSha, name: 'Required workflow', status: 'completed', conclusion: 'success' },
+      ],
+    }))
+    const report = await getPullRequestChecks(harness.repo, PR_NUMBER, {
+      headSha: head,
+      base: 'main',
+    })
+    assert.equal(
+      report.checks.find((entry) => entry.name === 'Required workflow')?.requirement,
+      'unknown',
+    )
   })
 })
 

@@ -136,6 +136,7 @@ export interface GitHubFixtureStack {
 export interface GitHubFixtureCheckRun {
   id: number
   headSha: string
+  checkSuiteId?: number
   name: string
   status: string
   conclusion: string | null
@@ -159,6 +160,9 @@ export interface GitHubFixtureCommitStatus {
 export interface GitHubFixtureWorkflowRun {
   id: number
   headSha: string
+  checkSuiteId?: number
+  pullRequests?: number[]
+  event?: string
   name: string
   status: string
   conclusion: string | null
@@ -190,6 +194,7 @@ export interface GitHubFixtureChecks {
   branchRules?: {
     branch: string
     forbidden?: boolean
+    workflows?: boolean
     required?: { context: string; integrationId?: number | null }[]
   }
   actionsEnabled?: boolean

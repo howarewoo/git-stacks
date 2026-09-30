@@ -344,6 +344,12 @@ reason rather than as the current state. `Refresh checks` forces a re-read,
 appears only where the read proves the account may run workflows. The fixture
 records `pullRequestChecks` and `rerunPullRequestCheck` in `window.fixture.calls`.
 
+Workflow reruns require an explicit association with the selected pull request,
+not merely a matching commit. Push-only CI remains visible without a rerun action.
+Actions check runs join workflows by their check-suite IDs, never details URLs.
+Effective required-workflow rules leave requirements unknown when their policy
+cannot be represented by status-check contexts.
+
 The conflict fixture implements `conflictView` with index stages and a captured fingerprint. The safety scenario verifies that choosing incoming content edits only the draft, then `resolveConflict` sends that content and fingerprint when the user explicitly stages it.
 History recovery coverage holds a commit diff while a repository refresh changes
 HEAD and fails the replacement history read; the branch picker and reload control
