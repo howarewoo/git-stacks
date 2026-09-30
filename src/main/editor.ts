@@ -15,14 +15,21 @@ export interface EditorInvocation {
  * used (e.g. macOS 'open -t' to force opening in the default text editor and
  * avoid executing executable scripts).
  */
-export function resolveEditorInvocation(configured: string | null, targetPath: string): {
+export function resolveEditorInvocation(
+  configured: string | null,
+  targetPath: string,
+): {
   invocation: EditorInvocation | null
   reason: string
 } {
   if (configured) {
     if ((SUPPORTED_EDITORS as readonly string[]).includes(configured)) {
       return {
-        invocation: { command: configured, args: [targetPath], reason: 'the editor configured in Settings' },
+        invocation: {
+          command: configured,
+          args: [targetPath],
+          reason: 'the editor configured in Settings',
+        },
         reason: 'the editor configured in Settings',
       }
     }
@@ -30,7 +37,11 @@ export function resolveEditorInvocation(configured: string | null, targetPath: s
   }
   if (process.platform === 'darwin') {
     return {
-      invocation: { command: 'open', args: ['-t', targetPath], reason: 'the default text editor on macOS' },
+      invocation: {
+        command: 'open',
+        args: ['-t', targetPath],
+        reason: 'the default text editor on macOS',
+      },
       reason: 'this platform’s default text editor',
     }
   }

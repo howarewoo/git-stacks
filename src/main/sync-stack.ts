@@ -78,11 +78,7 @@ function retargetNote(layer: SyncLayerFacts, pullRequest: SyncPullRequestFacts |
   return ''
 }
 
-function layerState(
-  facts: SyncLayerFacts,
-  blockers: string[],
-  push: SyncPushKind,
-): SyncLayerState {
+function layerState(facts: SyncLayerFacts, blockers: string[], push: SyncPushKind): SyncLayerState {
   if (blockers.length > 0) return 'blocked'
   if (facts.merged) return 'merged'
   if (push === 'force') return 'needs-force'

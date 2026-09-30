@@ -2,12 +2,12 @@
 /**
  * Packaged Git Stacks desktop smoke.
  *
- * Launches the real electron-builder output against a disposable environment (temporary HOME,
- * temporary Chromium user data, temporary Git repository with a local bare "remote") and drives
- * the shipped renderer UI: packaging, window chrome, real 200% zoom, sandbox/preload wiring,
- * external-link guarding, and representative Git operations (fetch, branch creation,
- * stage/commit, stash/pop, merge-conflict resolution, merge abort). Every Git assertion is
- * checked against the real `git` binary on the disposable repository, never the app snapshot.
+ * Launches the real electron-builder output against a disposable environment (temporary Chromium
+ * user data, temporary Git and gh configuration, temporary Git repository with a local bare
+ * "remote") and drives the shipped renderer UI: packaging, window chrome, real 200% zoom,
+ * sandbox/preload wiring, external-link guarding, and representative Git operations (fetch, branch
+ * creation, stage/commit, stash/pop, merge-conflict resolution, merge abort). Every Git assertion
+ * is checked against the real `git` binary on the disposable repository, never the app snapshot.
  *
  * No production code changes and no production file edits: the only injection is a runtime patch
  * of `shell.openExternal` inside the already-running main process, and the single call that
@@ -19,7 +19,7 @@
 import { spawn, spawnSync } from 'node:child_process'
 import { createWriteStream, existsSync, readFileSync, readdirSync, realpathSync } from 'node:fs'
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { basename, dirname, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { extractFile, listPackage } from '@electron/asar'
@@ -223,13 +223,23 @@ async function createWorkspace() {
 const UNSAFE_INHERITED =
   /^(GIT_|GH_|GITHUB_|GIT_STACKS_)|^NODE_OPTIONS$|^ELECTRON_RUN_AS_NODE$|^SSH_AUTH_SOCK$|(TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|COOKIE|API_?KEY)/iu
 
+/**
+ * macOS hands the packaged app the home directory the password database reports, and its sandboxed
+ * helper processes are only spawned against that one: with HOME pointed at a synthetic directory
+ * the browser process never finishes bringing those helpers up, and it stops answering on its own
+ * DevTools endpoint, so no renderer can ever be attached. The smoke therefore inherits the host
+ * home on macOS and keeps every path the app, git or gh actually reads or writes disposable.
+ */
+const INHERITED_HOME = process.platform === 'darwin'
+const homeEnvironment = (workspace) => (INHERITED_HOME ? homedir() : workspace.home)
+
 function environment(workspace) {
   const inherited = Object.fromEntries(
     Object.entries(process.env).filter(([key]) => !UNSAFE_INHERITED.test(key)),
   )
   return {
     ...inherited,
-    HOME: workspace.home,
+    HOME: homeEnvironment(workspace),
     TMPDIR: workspace.temp,
     TEMP: workspace.temp,
     TMP: workspace.temp,
@@ -447,7 +457,15 @@ return {
   userData: app.getPath('userData'),
   home: app.getPath('home'),
   temp: app.getPath('temp'),
-  env: { HOME: process.env.HOME, TMPDIR: process.env.TMPDIR, GH_CONFIG_DIR: process.env.GH_CONFIG_DIR },
+  env: {
+    HOME: process.env.HOME,
+    TMPDIR: process.env.TMPDIR,
+    GH_CONFIG_DIR: process.env.GH_CONFIG_DIR,
+    // The host home is inherited on macOS, so the git configuration the app reads is proved here
+    // rather than assumed: both values have to point away from the machine's own configuration.
+    GIT_CONFIG_GLOBAL: process.env.GIT_CONFIG_GLOBAL,
+    GIT_CONFIG_NOSYSTEM: process.env.GIT_CONFIG_NOSYSTEM,
+  },
   // Names only, never values: evidence that no inherited credential or git state reached the app.
   gitEnvKeys: Object.keys(process.env).filter((key) => /^(GIT_|GH_|GITHUB_)/iu.test(key)).sort(),
   secretKeys: Object.keys(process.env)
@@ -668,9 +686,7 @@ function ui(page) {
       page
         .getByRole('tree', { name: 'Repository branches' })
         .getByRole('treeitem', {
-          name: new RegExp(
-            `^${escapeForRegExp(name)}${current ? ', current branch' : ''}(,|$)`,
-          ),
+          name: new RegExp(`^${escapeForRegExp(name)}${current ? ', current branch' : ''}(,|$)`),
         })
         .first(),
     dialog: () => page.getByRole('dialog'),
@@ -880,7 +896,13 @@ async function run(options) {
         )
       }
       within(probe.userData, realpathSync(workspace.userData), 'app.getPath("userData")')
-      assertEqual(probe.env.HOME, workspace.home, 'The app inherited a HOME outside the workspace')
+      assertEqual(
+        probe.env.HOME,
+        homeEnvironment(workspace),
+        INHERITED_HOME
+          ? 'The macOS app did not inherit the host home its helper processes are spawned against'
+          : 'The app inherited a HOME outside the workspace',
+      )
       assertEqual(
         probe.env.TMPDIR,
         workspace.temp,
@@ -890,6 +912,21 @@ async function run(options) {
         probe.env.GH_CONFIG_DIR,
         join(workspace.home, '.config', 'gh'),
         'gh was not pointed at a disposable configuration directory',
+      )
+      assertEqual(
+        probe.env.GIT_CONFIG_GLOBAL,
+        workspace.gitconfig,
+        'git was not pointed at the disposable global configuration',
+      )
+      assertEqual(
+        probe.env.GIT_CONFIG_NOSYSTEM,
+        '1',
+        'git was left able to read the host system configuration',
+      )
+      assertEqual(
+        readFileSync(workspace.gitconfig, 'utf8'),
+        '',
+        'The disposable git configuration is not empty',
       )
       assertEqual(
         probe.secretKeys.join(','),
@@ -908,13 +945,14 @@ async function run(options) {
         `Unexpected git or gh variables reached the app: ${unexpected.join(', ')}`,
       )
       note(
-        `Inherited GIT_*/GH_*/GITHUB_* state, NODE_OPTIONS, ELECTRON_RUN_AS_NODE, and SSH_AUTH_SOCK are dropped; git reads only the empty ${workspace.gitconfig} (GIT_CONFIG_NOSYSTEM=1, GIT_CONFIG_GLOBAL set).`,
+        `Inherited GIT_*/GH_*/GITHUB_* state, NODE_OPTIONS, ELECTRON_RUN_AS_NODE, and SSH_AUTH_SOCK are dropped; git reads only the empty ${workspace.gitconfig} (GIT_CONFIG_NOSYSTEM=1, GIT_CONFIG_GLOBAL set), so the host home it inherits carries no identity, credential helper or include directive into the fixture.`,
       )
-      // macOS resolves the home and temp directories from the system rather than the environment,
-      // and the app reads neither: userData is its only app-level path, while git and gh inherit
-      // the disposable HOME, TMPDIR, and GH_CONFIG_DIR.
+      // macOS spawns the app's sandboxed helpers against the home directory the password database
+      // reports, so that one is inherited and the app reads nothing from it: userData stays the
+      // only app-level path the smoke owns, and git and gh are held to the workspace by
+      // GIT_CONFIG_NOSYSTEM, the empty GIT_CONFIG_GLOBAL, and GH_CONFIG_DIR.
       note(
-        `macOS kept app.getPath("home")=${probe.home} and app.getPath("temp")=${probe.temp}; the app reads neither.`,
+        `macOS kept HOME=${probe.env.HOME}, app.getPath("home")=${probe.home} and app.getPath("temp")=${probe.temp}; the app reads none of them.`,
       )
       assert(
         existsSync(join(probe.userData, 'repositories.json')),
@@ -1486,15 +1524,16 @@ async function run(options) {
       // A file with conflicting regions is decided one region at a time, then the
       // edited result is staged; the whole-file accept controls only exist for a
       // file with no regions.
-      await resolver
-        .getByRole('button', { name: `Accept ${incomingSide} for conflict 1` })
-        .click()
+      await resolver.getByRole('button', { name: `Accept ${incomingSide} for conflict 1` }).click()
       await withNotice(
         locators,
         () => resolver.getByRole('button', { name: 'Mark resolved and stage' }).click(),
         /^Resolved /,
       )
-      await locators.staged().getByRole('button', { name: `Inspect ${CONFLICT}` }).waitFor()
+      await locators
+        .staged()
+        .getByRole('button', { name: `Inspect ${CONFLICT}` })
+        .waitFor()
       const resolved = readFileSync(join(workspace.repo, CONFLICT), 'utf8')
       assert(
         !/^<{7}|^={7}|^>{7}/m.test(resolved),

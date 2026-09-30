@@ -2,6 +2,9 @@ import { GITHUB_DEFAULT_HOST } from './host'
 
 export { GITHUB_DEFAULT_HOST } from './host'
 import { DEFAULT_SHORTCUTS, type ShortcutId } from './shortcuts'
+import type { UpdateChannel } from './update'
+
+export { UPDATE_CHANNELS } from './update'
 
 export const SETTINGS_VERSION = 1
 /** Long enough that a closed app still refreshes, short enough to stay useful. */
@@ -120,12 +123,22 @@ export interface PrivacySettings {
   includeLocalPaths: boolean
 }
 
+export interface UpdateSettings {
+  /**
+   * Which signed release this installation follows. Stable is the default;
+   * beta is offered to people who asked for pre-release builds and is never
+   * selected for anyone else.
+   */
+  channel: UpdateChannel
+}
+
 export interface AppSettings {
   version: number
   git: GitSettings
   github: GitHubSettings
   appearance: AppearanceSettings
   privacy: PrivacySettings
+  updates: UpdateSettings
   shortcuts: Record<ShortcutId, string>
   /**
    * Which older storage locations have already been folded into this file. The
@@ -153,6 +166,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   github: { host: GITHUB_DEFAULT_HOST },
   appearance: { theme: 'system', reduceMotion: false },
   privacy: { includeLocalPaths: false },
+  updates: { channel: 'stable' },
   shortcuts: { ...DEFAULT_SHORTCUTS },
   migrated: { legacyShortcutStorage: false },
 }
@@ -173,6 +187,7 @@ export interface SettingsPatch {
    * import the caller has decided to abandon.
    */
   legacyShortcutImport?: Record<string, string> | null
+  updates?: Partial<UpdateSettings>
 }
 
 /** Why a stored value was refused, named by the key the surface shows. */

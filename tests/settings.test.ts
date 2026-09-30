@@ -11,11 +11,13 @@ import {
   readSettingsSnapshot,
   resetSettings,
   settingsPatchToWrite,
+  resetTarget,
   SETTING_KEYS,
   updateSettings,
   validateSettings,
   writeSettingsFile,
 } from '../src/main/settings'
+import { UpdateService } from '../src/main/update/service'
 import { loadSettingsPolicy, NO_POLICY } from '../src/main/settings-service'
 import { buildBundle, renderBundle, writeOwnerOnlyBundle } from '../src/main/support-bundle'
 import { recordFailure, recordedFailures } from '../src/main/failure-log'
@@ -196,6 +198,7 @@ test('a policy that cannot be read locks every managed setting instead of none',
     'github.host',
     'privacy.includeLocalPaths',
     'shortcuts',
+    'updates.channel',
   ])
 })
 
@@ -208,10 +211,7 @@ test('a policy that is not JSON locks everything rather than quietly unlocking i
     // Every managed key is locked, so the count is the key list rather than a
     // number this test would have to be edited for on every new setting.
     assert.equal(policy.locks.length, SETTING_KEYS.length)
-    assert.deepEqual(
-      policy.locks.map((lock) => lock.key).sort(),
-      [...SETTING_KEYS].sort(),
-    )
+    assert.deepEqual(policy.locks.map((lock) => lock.key).sort(), [...SETTING_KEYS].sort())
   })
 })
 
@@ -227,10 +227,7 @@ test('a policy naming a key this build does not know is held closed, not applied
     // Every managed key is locked, so the count is the key list rather than a
     // number this test would have to be edited for on every new setting.
     assert.equal(policy.locks.length, SETTING_KEYS.length)
-    assert.deepEqual(
-      policy.locks.map((lock) => lock.key).sort(),
-      [...SETTING_KEYS].sort(),
-    )
+    assert.deepEqual(policy.locks.map((lock) => lock.key).sort(), [...SETTING_KEYS].sort())
   })
 })
 
@@ -329,6 +326,66 @@ test('resetting settings restores defaults and leaves every repository untouched
       'no repository configuration was written',
     )
     assert.equal(await readFile(join(repo, 'tracked.txt'), 'utf8'), trackedContent)
+  })
+})
+
+test('a reset keeps a channel the policy fixed, in the file and in the running updater', async () => {
+  await withTempDir(async (dir) => {
+    const file = join(dir, 'settings.json')
+    const policyFile = join(dir, 'policy.json')
+    await writeFile(policyFile, JSON.stringify({ locks: { 'updates.channel': 'beta' } }))
+    const policy = await loadSettingsPolicy(policyFile)
+    assert.equal(policy.blocked, false)
+    // The administrator's channel is what this machine is on before the reset,
+    // alongside a preference of the person's own that the reset does undo.
+    await updateSettings(
+      file,
+      { updates: { channel: 'beta' }, appearance: { theme: 'dark' } },
+      NO_LOCKS,
+    )
+    assert.equal((await readSettingsSnapshot(file, policy.locks)).settings.updates.channel, 'beta')
+
+    // The app this reset arrives in is following beta, exactly as it was before.
+    const updater = new UpdateService({
+      packaged: false,
+      currentVersion: '0.1.0',
+      appPath: join(dir, 'Git Stacks.exe'),
+      userDataPath: dir,
+      platform: 'win32',
+      arch: 'arm64',
+      relaunch: () => undefined,
+    })
+    await updater.start('beta')
+    assert.equal(updater.status().channel, 'beta')
+
+    let committed = 0
+    // The channel the reset lands on is resolved from the file it is about to
+    // rewrite, inside the updater's own boundary, and the reset is written
+    // there. The two answers are one answer, and a policy that fixed the
+    // channel is not a way to reset it.
+    await updater.applyResolvedChannel(
+      async () =>
+        resetTarget((await readSettingsFile(file)).settings, policy.locks).updates.channel,
+      async () => {
+        await resetSettings(file, policy.locks)
+        committed += 1
+      },
+    )
+    assert.equal(committed, 1, 'the reset inside the boundary went through')
+    // What was written: the fixed channel kept, the person's own preference gone.
+    const stored = (await readSettingsSnapshot(file, policy.locks)).settings
+    assert.equal(stored.updates.channel, 'beta', 'the channel the policy fixed survived the reset')
+    assert.equal(
+      stored.appearance.theme,
+      DEFAULT_SETTINGS.appearance.theme,
+      'a setting the policy says nothing about is still reset',
+    )
+    // And what this process follows, which is the channel a check will fetch.
+    assert.equal(
+      updater.status().channel,
+      'beta',
+      'the running updater did not fall back to the default channel',
+    )
   })
 })
 
@@ -786,11 +843,7 @@ test('the GitHub host setting keeps a bare host name and refuses anything aimed 
       'not a host',
     ]) {
       const rejected = await updateSettings(file, { github: { host: refused } }, [])
-      assert.equal(
-        rejected.settings.github.host,
-        'ghe.example.com',
-        `${refused} was not refused`,
-      )
+      assert.equal(rejected.settings.github.host, 'ghe.example.com', `${refused} was not refused`)
       assert.ok(
         rejected.issues.some((issue) => issue.key === 'github.host'),
         `${refused} produced no issue`,

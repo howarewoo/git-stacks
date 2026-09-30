@@ -105,6 +105,7 @@ import {
   readSettingsSnapshot,
   resetSettings,
   settingsPatchToWrite,
+  resetTarget,
   updateSettings,
 } from './settings'
 import { loadSettingsPolicy } from './settings-service'
@@ -136,6 +137,7 @@ import type {
 } from '../shared/settings'
 
 import type { GitEnvironmentStatus } from '../shared/types'
+import { UpdateService } from './update/service'
 
 const readKeys = new RequestRegistry()
 const onboardingKeys = new RequestRegistry()
@@ -313,6 +315,13 @@ function credentialVault(): CredentialVault {
 }
 
 /**
+ * The update lifecycle. It runs in main because every decision about what to
+ * fetch, what to verify, and what to run happens here; the window only asks for
+ * a step and shows what happened.
+ */
+let updateService: UpdateService | null = null
+
+/**
  * The signed-in GitHub account. Its credential is sealed by the operating
  * system and never reaches the renderer: the bridge carries status only.
  */
@@ -344,16 +353,16 @@ let hostGeneration = 0
 const hostWork = new Set<AbortController>()
 
 function applySettings(settings: AppSettings): void {
-  const previous = currentSettings?.github.host ?? null
+  const previousHost = currentSettings?.github.host ?? null
   currentSettings = settings
-  if (previous === settings.github.host) return
+  if (previousHost === settings.github.host) return
   // Everything already in flight was addressed to the host that is no longer
   // selected. It is aborted, and its generation is retired, so a response that
   // arrives afterwards cannot repopulate the previous host's cache or the UI.
   for (const controller of hostWork) controller.abort()
   hostWork.clear()
   hostGeneration += 1
-  forgetHost(previous ?? undefined)
+  forgetHost(previousHost ?? undefined)
   if (account !== null && accountHost !== settings.github.host) {
     // The sign-out is not awaited, and it does not need to be: the account
     // removes only the identity the shared files hold for its own host, and
@@ -828,7 +837,6 @@ function cloneProtocol(value: unknown): CloneProtocol {
   return value === 'ssh' ? 'ssh' : 'https'
 }
 
-
 /**
  * Validates a clone request before anything is written. The URL is rebuilt from
  * `owner/name` and the chosen protocol, never taken from the request, so a
@@ -951,6 +959,45 @@ async function changeSettings(
   })
 }
 
+/**
+ * A settings change, with the update channel committed through the updater.
+ *
+ * Everything else is written and then applied. A channel change is different:
+ * the file records the channel, and the running process follows one, so the
+ * write happens inside the updater's own boundary — the change is taken, the
+ * file is written, and only then is the new channel published. An install in
+ * flight, or a write that fails, leaves both where they were, and this call
+ * reports why rather than returning a channel the app is not on.
+ */
+async function changeSettingsPatch(patch: SettingsPatch): Promise<SettingsSnapshot> {
+  const channel = patch.updates?.channel
+  const service = updateService
+  // Channel requests enter the updater queue even when they appear unchanged.
+  if (channel === undefined || !service) {
+    return changeSettings(async (file) =>
+      updateSettings(
+        file,
+        await settingsPatchToWrite(file, patch, settingsRevision),
+        settingsLocks,
+      ),
+    )
+  }
+  let committed: SettingsSnapshot | null = null
+  const status = await service.applyChannel(channel, async () => {
+    committed = await changeSettings(async (file) =>
+      updateSettings(
+        file,
+        await settingsPatchToWrite(file, patch, settingsRevision),
+        settingsLocks,
+      ),
+    )
+  })
+  if (!committed) {
+    throw new Error(status.failure?.message ?? 'The update channel was not changed.')
+  }
+  return committed
+}
+
 /** One capability report, built from the same sources the Diagnostics view shows. */
 async function currentDiagnostics(settings: AppSettings) {
   // A diagnostics report is the one place a person is told what the host does,
@@ -1010,6 +1057,10 @@ const ipcMain = {
   },
 }
 
+function requireUpdateService(): UpdateService {
+  if (!updateService) throw new Error('Updates are not available in this session.')
+  return updateService
+}
 function installHandlers() {
   // The clone destination is chosen with the platform folder picker, so the
   // renderer never composes a filesystem path of its own.
@@ -1511,7 +1562,10 @@ function installHandlers() {
     // The probe belongs to the host selected when it started: a host change
     // aborts it and refuses its answer, so a retired host's late result cannot
     // recreate the record that was just forgotten or overwrite a newer status.
-    return forSelectedHost((signal) => probeGitHubHost(selected.context, { repository, signal }), selected)
+    return forSelectedHost(
+      (signal) => probeGitHubHost(selected.context, { repository, signal }),
+      selected,
+    )
   })
   ipcMain.handle('git-runtime', async (event) => {
     validateSender(event)
@@ -1542,21 +1596,47 @@ function installHandlers() {
     if (typeof patch !== 'object' || patch === null || Array.isArray(patch)) {
       throw new Error('Settings changes must be an object of setting groups.')
     }
-    return withToolAvailability(
-      await changeSettings(async (file) =>
-        updateSettings(
-          file,
-          await settingsPatchToWrite(file, patch as SettingsPatch, settingsRevision),
-          settingsLocks,
-        ),
-      ),
-    )
+    return withToolAvailability(await changeSettingsPatch(patch as SettingsPatch))
   })
   ipcMain.handle('settings:reset', async (event) => {
     validateSender(event)
-    // Restoring defaults rewrites the settings file and nothing else: no
-    // repository, ref, or working tree is read or written.
-    return withToolAvailability(await changeSettings((file) => resetSettings(file, settingsLocks)))
+    // Restoring defaults touches this app's own settings and its own update
+    // state and nothing else: no repository, ref, or working tree is read or
+    // written. A reset carries the update channel with it, so it is decided with
+    // the updater rather than written beside it: the reset is written while the
+    // change is still undecided, and a reset refused — because an install owns
+    // the files — writes nothing at all. A reset that does go through also
+    // disposes of the update the previous channel had staged, because that staged
+    // file belongs to the channel being left and is this app's own to remove.
+    //
+    // Which channel a reset lands on is read out of the file the reset is about
+    // to rewrite, because a policy that has fixed the channel keeps it rather
+    // than resetting it. That read is the first thing this transaction asks for
+    // and its admission is the second, in that order. Reading it before asking to
+    // be admitted would let a channel change asked for a moment later be admitted
+    // first and then be overwritten by this reset, so the later choice would be
+    // the one lost; the read is made inside the boundary instead, where the
+    // reset is already next in line. Both requests go through the updater's own
+    // queue, so the order a person asked in is the order the two are written in.
+    const service = updateService
+    if (!service) {
+      return withToolAvailability(
+        await changeSettings((file) => resetSettings(file, settingsLocks)),
+      )
+    }
+    let committed: SettingsSnapshot | null = null
+    const status = await service.applyResolvedChannel(
+      async () =>
+        resetTarget((await readSettingsFile(settingsFile())).settings, settingsLocks).updates
+          .channel,
+      async () => {
+        committed = await changeSettings((file) => resetSettings(file, settingsLocks))
+      },
+    )
+    if (!committed) {
+      throw new Error(status.failure?.message ?? 'The settings were not reset.')
+    }
+    return withToolAvailability(committed)
   })
   // The capability report takes no argument, so the window cannot ask main to
   // run a command of its choosing. Main runs its own fixed allowlist.
@@ -1668,6 +1748,31 @@ function installHandlers() {
     validateSender(event)
     return accountForConfiguredHost().signOut()
   })
+
+  // The update lifecycle. Each handler takes no argument at all: the channel
+  // comes from settings main already owns, and the step comes from main's own
+  // state machine. Nothing the window can send chooses a URL, a file, or a
+  // command.
+  ipcMain.handle('update:status', (event) => {
+    validateSender(event)
+    return requireUpdateService().status()
+  })
+  ipcMain.handle('update:check', async (event) => {
+    validateSender(event)
+    return await requireUpdateService().check()
+  })
+  ipcMain.handle('update:download', async (event) => {
+    validateSender(event)
+    return await requireUpdateService().download()
+  })
+  ipcMain.handle('update:install', async (event) => {
+    validateSender(event)
+    return await requireUpdateService().install()
+  })
+  ipcMain.handle('update:cancel', (event) => {
+    validateSender(event)
+    return requireUpdateService().cancel()
+  })
 }
 
 async function createWindow() {
@@ -1684,13 +1789,27 @@ async function createWindow() {
       preload: join(bundleDir, '../preload/index.cjs'),
       contextIsolation: true,
       nodeIntegration: false,
+      nodeIntegrationInWorker: false,
+      nodeIntegrationInSubFrames: false,
       sandbox: true,
       webSecurity: true,
+      allowRunningInsecureContent: false,
+      // A dropped folder is a path the preload resolves, not a navigation, and
+      // an in-place reload of a file URL would leave the app origin entirely.
+      navigateOnDragDrop: false,
+      webviewTag: false,
+      enableBlinkFeatures: '',
+      spellcheck: false,
     },
   })
+  // Nothing in this app opens a second window or embeds a document. Both are
+  // refused rather than handed to the renderer, so a link or a payload cannot
+  // create a page that main's sender check was never written for.
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
   window.webContents.on('will-navigate', (event) => event.preventDefault())
+  window.webContents.on('will-redirect', (event) => event.preventDefault())
   window.webContents.on('will-attach-webview', (event) => event.preventDefault())
+  window.webContents.on('will-frame-navigate', (event) => event.preventDefault())
   window.on('closed', () => {
     window = null
     // Nothing watches or polls for a window that no longer exists.
@@ -1707,21 +1826,40 @@ app
       callback(false),
     )
     session.defaultSession.setPermissionCheckHandler(() => false)
+    // Every window this app creates is the app itself. A second one, a
+    // permission request from anything that did not ask through main, or a
+    // device the renderer never declared is refused here rather than left to
+    // each surface.
+    app.on('web-contents-created', (_event, contents) => {
+      contents.setWindowOpenHandler(() => ({ action: 'deny' }))
+      contents.on('will-navigate', (event) => event.preventDefault())
+      contents.on('will-attach-webview', (event) => event.preventDefault())
+    })
     session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
       callback({
         responseHeaders: {
           ...details.responseHeaders,
           'Content-Security-Policy': [
-            `default-src 'self'; script-src 'self'${devUrl ? " 'unsafe-inline'" : ''}; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'${devUrl ? ` ws://${new URL(devUrl).host}` : ''}; object-src 'none'; base-uri 'none'; frame-src 'none'`,
+            `default-src 'self'; script-src 'self'${devUrl ? " 'unsafe-inline'" : ''}; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'${devUrl ? ` ws://${new URL(devUrl).host}` : ''}; object-src 'none'; base-uri 'none'; frame-src 'none'; form-action 'none'; frame-ancestors 'none'`,
           ],
+          'X-Content-Type-Options': ['nosniff'],
+          'Referrer-Policy': ['no-referrer'],
         },
       })
     })
     const rendererRoot = resolve(bundleDir, '../renderer')
     protocol.handle('app', (request) => {
       const url = new URL(request.url)
+      // Only the bundled renderer is served, only over the one host this app
+      // registers, and only when the decoded path stays inside it: a traversal,
+      // an encoded separator, or another host is a 404 rather than a file.
       const path = resolve(rendererRoot, `.${decodeURIComponent(url.pathname)}`)
-      if (url.host !== 'git-stacks' || !path.startsWith(`${rendererRoot}${sep}`)) {
+      if (
+        url.host !== 'git-stacks' ||
+        !path.startsWith(`${rendererRoot}${sep}`) ||
+        url.pathname.includes('%2f') ||
+        url.pathname.includes('%5c')
+      ) {
         return new Response('Not found', { status: 404 })
       }
       return net.fetch(pathToFileURL(path).href)
@@ -1744,7 +1882,9 @@ app
       const path = await resolveRepository(process.env.GIT_STACKS_REPO)
       recents = [{ path, name: basename(path) }, ...recents.filter((item) => item.path !== path)]
     }
-    const resourcesRoot = app.isPackaged ? process.resourcesPath : resolve(bundleDir, '../../resources')
+    const resourcesRoot = app.isPackaged
+      ? process.resourcesPath
+      : resolve(bundleDir, '../../resources')
     // Policy is read before the first settings read, so a locked key is already
     // fixed by the time the window can ask for anything.
     const policy = await loadSettingsPolicy(process.env.GIT_STACKS_SETTINGS_POLICY)
@@ -1754,6 +1894,30 @@ app
     // The selected host is applied before anything can ask for it, so sign-in,
     // discovery, and clone commands address the host the person chose.
     applySettings((await readSettingsFile(settingsFile())).settings)
+    // The updater is started before the window exists, so the first thing the
+    // surface can ask about is already the truth: whether this build is signed,
+    // which channel it follows, and whether a staged installer is waiting.
+    updateService = new UpdateService({
+      packaged: app.isPackaged,
+      currentVersion: app.getVersion(),
+      appPath: app.getPath('exe'),
+      userDataPath: app.getPath('userData'),
+      platform: process.platform,
+      arch: process.arch,
+      relaunch: () => {
+        app.relaunch()
+        app.quit()
+      },
+      quit: () => {
+        // The installer replaces files this app is running from, so Windows
+        // gets the app closed and the installer finishes on its own.
+        app.quit()
+      },
+    })
+    updateService.onChange((status) => {
+      window?.webContents.send('update:status', status)
+    })
+    await updateService.start(currentSettings?.updates.channel ?? 'stable')
     const preference = await readGitRuntimePreference(settingsFile()).catch(() => false)
     configureGitRuntime({
       appVersion: app.getVersion(),

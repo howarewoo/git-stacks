@@ -62,6 +62,11 @@ export type FixtureCall =
   | 'chooseDestinationDirectory'
   | 'cloneRepository'
   | 'addRepository'
+  | 'updateStatus'
+  | 'checkForUpdates'
+  | 'downloadUpdate'
+  | 'installUpdate'
+  | 'cancelUpdate'
 
 /** One entry of the ordered {@link FixtureControl.calls} log. */
 export interface FixtureCallRecord {
@@ -106,8 +111,7 @@ export interface FixtureScenario {
   readonly pushPreview?: PushPreview
   readonly reviewHistory?: ReviewHistory | ((number: number) => ReviewHistory)
   readonly reviewHistoryDiff?:
-    | ReviewHistoryDiff
-    | ((number: number, fromOid: string) => ReviewHistoryDiff)
+    ReviewHistoryDiff | ((number: number, fromOid: string) => ReviewHistoryDiff)
   readonly stackPreviews?: Readonly<Partial<Record<StackKind, StackPreview>>>
   /** The surgery preview a scenario answers; insert between two layers by default. */
   readonly surgeryPreview?: SurgeryPreview

@@ -3,9 +3,9 @@
 A local-first desktop workbench for Git branches and stacked pull requests.
 
 Design rules live in [DESIGN.md](DESIGN.md). This guide covers how to run the app,
-how the large-repository work is measured, and how development and verification
-are performed; record run-specific evidence and outstanding acceptance checks in
-the associated pull request.
+how the large-repository work is measured, how development and verification are
+performed, and how a release is published and updated; record run-specific
+evidence and outstanding acceptance checks in the associated pull request.
 
 ## Commands
 
@@ -40,6 +40,7 @@ refs. Diagnostic wording is not part of that behavioral contract.
 
 Destination-focus checks activate the named navigation control with Enter and
 verify heading focus and the live announcement, independently of shortcut bindings.
+
 ## Live local and remote freshness
 
 The open repository updates itself. Local Git work done in a terminal — a
@@ -135,6 +136,15 @@ to a stack, and the operation is worth knowing about from the outside:
   or retargets a local branch for you, and any base GitHub moved is reported
   for you to restack and publish.
 
+One test is deliberately platform-scoped. The release producer's own reader
+shells out to `gh`, and the job that publishes runs on `ubuntu-24.04`, so that
+reader is exercised on POSIX with a stand-in for `gh` on the search path rather
+than with the network: every decision the producer makes about a channel's
+history — the sequence, the version, an unreadable feed, a signature with no
+manifest, a manifest with no signature — is tested on all three platforms by
+handing the helper the bytes a release would have published, because that is the
+only part of the read that talks to anything.
+
 ## GitHub sign-in
 
 Git Stacks signs in to GitHub with a GitHub App device flow, so no `gh`
@@ -201,9 +211,9 @@ refused. A refused link never reaches the operating system.
 Each host needs its own credential. Sign-in uses the GitHub App device flow, and
 the public client id is read per host:
 
-| Host         | Client id environment variable                                  |
-| ------------ | --------------------------------------------------------------- |
-| `github.com` | `GIT_STACKS_GITHUB_APP_CLIENT_ID`                               |
+| Host         | Client id environment variable                                           |
+| ------------ | ------------------------------------------------------------------------ |
+| `github.com` | `GIT_STACKS_GITHUB_APP_CLIENT_ID`                                        |
 | Any other    | `GIT_STACKS_GITHUB_APP_CLIENT_ID_<HOST>`, host as upper-case hexadecimal |
 
 `ghe.example.com` therefore reads
@@ -255,14 +265,14 @@ the CLI reads for that host — `GH_TOKEN` for github.com,
 credential exchange never follows a redirect, so a host cannot forward a
 refresh token somewhere else.
 
-| State             | Meaning                                                                   |
-| ----------------- | ------------------------------------------------------------------------- |
-| `supported`       | The host answered and offers the capability.                              |
-| `unsupported`     | The host answered and does not offer the capability.                      |
-| `unauthenticated` | The host answered, but no credential for that host is available.          |
-| `unreachable`     | The host did not answer.                                                  |
+| State             | Meaning                                                                                                              |
+| ----------------- | -------------------------------------------------------------------------------------------------------------------- |
+| `supported`       | The host answered and offers the capability.                                                                         |
+| `unsupported`     | The host answered and does not offer the capability.                                                                 |
+| `unauthenticated` | The host answered, but no credential for that host is available.                                                     |
+| `unreachable`     | The host did not answer.                                                                                             |
 | `not-configured`  | A prerequisite is missing, such as no GitHub App client id for that host, or no configured way to ask a host at all. |
-| `unknown`         | The capability has not been established, or the host answered something this build could not read. |
+| `unknown`         | The capability has not been established, or the host answered something this build could not read.                   |
 
 Repository discovery is reported from an actual discovery run, not from the
 API answering at all: a host that serves its API root and refuses a repository
@@ -300,18 +310,19 @@ Settings is reachable from the command palette (**Settings…**). Preferences ar
 stored in `settings.json` under the app's user-data directory, which main owns
 and validates; the renderer never chooses or writes that path.
 
-| Setting                              | Effect                                                                                                                                |
-| ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------- |
-| Git to run                           | Chooses the bundled runtime or the system `git` for every Git operation.                                                              |
-| GitHub host                          | The GitHub host every sign-in, discovery run, and API request addresses: `github.com` or an enterprise host name (an optional port). Each repository's own remote decides the host in use. |
-| Editor                               | Program used by **Open in editor** in the file inspector. Empty means the platform default.                                           |
-| Merge tool                           | Program Git runs to resolve a conflict. Takes precedence over `GIT_MERGE_TOOL` and `merge.tool`. Empty means Git's own configuration. |
-| Default pull strategy / merge method | Seeds the workflow dialog; still changeable per operation.                                                                            |
-| Background refresh                   | Seconds between automatic refreshes of an open repository. `Off` refreshes only on request.                                           |
-| Theme                                | `Match system`, `Light`, or `Dark`.                                                                                                   |
-| Reduce motion                        | Removes non-essential transitions regardless of the system setting.                                                                   |
-| Include local paths                  | Lets a support bundle name the Git executable path. Nothing else widens.                                                              |
-| Shortcuts                            | Chord editing with conflict detection.                                                                                                |
+| Setting                              | Effect                                                                                                                                                                                                                          |
+| ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Git to run                           | Chooses the bundled runtime or the system `git` for every Git operation.                                                                                                                                                        |
+| GitHub host                          | The GitHub host every sign-in, discovery run, and API request addresses: `github.com` or an enterprise host name (an optional port). Each repository's own remote decides the host in use.                                      |
+| Editor                               | Program used by **Open in editor** in the file inspector. Empty means the platform default.                                                                                                                                     |
+| Merge tool                           | Program Git runs to resolve a conflict. Takes precedence over `GIT_MERGE_TOOL` and `merge.tool`. Empty means Git's own configuration.                                                                                           |
+| Default pull strategy / merge method | Seeds the workflow dialog; still changeable per operation.                                                                                                                                                                      |
+| Background refresh                   | Seconds between automatic refreshes of an open repository. `Off` refreshes only on request.                                                                                                                                     |
+| Theme                                | `Match system`, `Light`, or `Dark`.                                                                                                                                                                                             |
+| Reduce motion                        | Removes non-essential transitions regardless of the system setting.                                                                                                                                                             |
+| Include local paths                  | Lets a support bundle name the Git executable path. Nothing else widens.                                                                                                                                                        |
+| Shortcuts                            | Chord editing with conflict detection.                                                                                                                                                                                          |
+| Update channel                       | The channel **Settings → Updates** follows: `stable` for signed releases for everyone, `beta` for the pre-release channel, which moves faster and changes more often. It defaults to `stable` and persists until it is changed. |
 
 The GitHub host accepts a bare host name (a pasted `https://` URL is normalized
 down to its host) and refuses a path, a query, a non-HTTPS scheme, or embedded
@@ -379,6 +390,11 @@ read or that names a setting this build does not know holds **every** managed
 setting at its current value and reports the reason, rather than reading as
 "nothing is locked".
 
+Restoring the defaults is a change like any other, so it keeps a locked
+setting's value too: a machine whose policy fixes `updates.channel` to `beta`
+resets every other preference and stays on the beta channel, both in the stored
+settings and in the updater this run follows.
+
 ```sh
 GIT_STACKS_SETTINGS_POLICY=/etc/git-stacks-policy.json npm run dev
 ```
@@ -404,6 +420,460 @@ content is never readable under the permissions the file arrived with.
 Recent failures is included only when something was recorded. It carries the
 main-process failure summaries described under **Handled failures** above, and
 they pass through the same secret and path redaction as every other field.
+
+## Signed updates
+
+A release is a signed manifest plus the artifacts that manifest names. The app
+authenticates the manifest with a release public key compiled into the build
+before it fetches anything the manifest names, and then checks the downloaded
+artifact against that same manifest before it installs anything. No repository is
+read or written on any path through this.
+
+Checking for an update sends nothing about the person or their machine. It reads
+a published file from this project's release location, and there is no telemetry
+or crash upload behind it.
+
+### What a release reads before it publishes
+
+The next manifest in a channel is minted from the manifest that channel already
+publishes, and that one is read as a signed fact or not at all: the producer
+downloads the manifest _and_ its detached signature and verifies the signature
+over the exact bytes against the release keys it trusts. An unsigned asset, a
+signature from another key, or a manifest that does not match its signature
+stops the release. It is not treated as an empty channel, because a sequence
+minted from a rewritten feed can sit below the high-water mark installations
+have already seen, and those installations could then never update again.
+
+A published manifest that has since expired is still read for its sequence and
+version. Expiry says a feed should be refreshed; it does not say the sequence it
+used never happened. Only the absence of the whole pair — a channel with no
+manifest and no signature — means the channel is new.
+
+A release that cannot read its channel does not publish. A network failure, an
+expired token, or a rate limit is not evidence that a channel is empty, and
+restarting a sequence at one would be a replay the app is right to refuse.
+
+### How a release is published
+
+Publishing a GitHub release runs
+[`.github/workflows/release-desktop.yml`](.github/workflows/release-desktop.yml)
+in three jobs. The packaging job refuses to start unless the release tag is `v`
+followed by the version in `package.json` and every signing prerequisite is
+present, injects the release update key into the build, runs the test suite, and
+packages macOS, Windows, and Linux. It uploads only what it verified: the macOS
+build must pass `codesign --verify` with a `Developer ID Application` authority, a
+`stapler`-validated notarisation ticket, and the expected team identifier, and
+the Windows installer is refused unless `Get-AuthenticodeSignature` reports
+`Valid`. Provenance is attested for the uploaded files, and a separate job
+refuses a known-vulnerable dependency and keeps a dependency inventory with the
+run.
+
+The publishing job then mints, signs, and re-verifies the channel's manifest and
+publishes it with its detached signature and the installers it names, on that
+channel's moving release tag, so a channel's feed address never has to be
+rebuilt:
+
+| Channel  | Moving release tag | Manifest             | Detached signature       |
+| -------- | ------------------ | -------------------- | ------------------------ |
+| `stable` | `updates-stable`   | `update-stable.json` | `update-stable.json.sig` |
+| `beta`   | `updates-beta`     | `update-beta.json`   | `update-beta.json.sig`   |
+
+Every sequence a channel issues is also written once under a name of its own —
+`history-stable-000000000007.json` and `history-stable-000000000007.json.sig` on
+`updates-stable` — which nothing ever rewrites. A release reads its history from
+those names as well as from the two fixed names above, so an interrupted
+publication cannot leave a channel looking empty.
+
+A prerelease on GitHub publishes the `beta` channel; a full release publishes
+`stable`. The moving tag only ever moves forward along this repository's history,
+and a tag that has been moved elsewhere stops the release instead of being
+overwritten. Before any of it is published, the manifest and its signature are
+read back from disk, the signature is verified again with the key this release
+injected, every installer is re-hashed, each packaged build's own key set is
+compared with the one being signed with, and each artifact's provenance is
+verified.
+
+Those two names are the only place on the moving release where a publication
+overwrites what was there, and an upload that is interrupted between them leaves
+a manifest with no signature, a signature with no manifest, or the two
+describing different releases. So publication is ordered, and
+`scripts/release-update-publish.ts` is the only thing that performs it:
+
+1. **Bank the sequence.** The manifest and its signature are uploaded once more
+   under names derived from that sequence — `history-stable-000000000007.json`
+   and `.sig` — which nothing ever rewrites. A pair already banked at that
+   sequence with these exact bytes is this same publication re-run and is left
+   alone; a different pair means the sequence was spent by a publication that
+   did not complete, which no release may republish.
+2. **Publish the installers**, each under the name the manifest publishes it
+   as. Those names carry the version they were built from, and an installer
+   published under a name the live manifest already binds to different bytes is
+   refused rather than replaced, because a name is a URL an installation has
+   already fetched.
+3. **Move the two fixed names** onto this release: the installers are in place,
+   then the manifest that names them, then the signature that proves it.
+4. **Read both back** off the release and verify the signature over the bytes
+   that are actually there. An upload that cannot be confirmed is an upload that
+   may or may not have happened, so the only honest answer is to read the bytes
+   a client will fetch.
+
+Nothing is deleted, and nothing a client needs is only ever reachable after it
+exists somewhere immutable. A release that dies at any point leaves the previous
+release readable from its banked copy, and the next release reads that copy: a
+channel whose two fixed names are both missing, or whose pair does not verify,
+is not an empty channel, and the sequence it issues is one past the highest a
+trusted key signed anywhere on the tag. A sequence is never reused and a bank is
+never rewritten, so a cancelled publication costs a sequence, not the channel's
+history. Re-run the release to put the live pair back; the operator floor
+(`--sequence`) exists for a channel whose history is being repaired by hand, and
+it can only ever move the counter up.
+
+One channel publishes one release at a time. The publishing job takes a lock
+named after the channel it is about to move, and a run already in progress is
+never cancelled part-way: without that lock two releases published in the same
+moment would each read the same published history, each issue the same next
+sequence for different bytes, and the feed would carry two releases claiming one
+sequence — which every app that had already taken the first would refuse for
+good, since a sequence is spent once used. A queued run waits and then reads
+the history the run before it left behind, and re-checks its own version against
+the feed, so waiting costs a queue slot and skipping the check would cost
+correctness. `stable` and `beta` hold separate locks and do not wait on each
+other.
+
+A manifest is issued, never edited in place. Its signing key is the
+`UPDATE_SIGNING_KEY` repository secret, and the packaging job injects that key's
+public half into the app it builds, so a released build is the only build that
+carries one. Nothing in the workflow generates a key, and every step that needs
+one fails closed without it: a key this repository made up would verify against
+nothing an installed build trusts, and a manifest signed by a key no build
+carries could be installed by no one. The repository itself holds no key
+material — `resources/update-trusted-keys.json` is committed empty, because a
+public key committed here would be trusted by every packaged build built from
+it. Each channel's sequence is read back from the manifest that channel already
+publishes, so it only ever rises, and each installer is published under a plain
+asset name with no spaces, because the URL the manifest names has to end in
+exactly the file name it describes.
+
+Every field is required: `schema`, `channel`, `version`, `sequence`, `issuedAt`,
+`expiresAt`, `notes`, `rollbackOf`, and `artifacts`, where each artifact carries
+its `platform`, `arch`, `kind`, `fileName`, `url`, `sha256`, and `size`. A
+manifest carrying a field this build does not know is refused rather than
+parsed, because a field the code does not check is a field a forger could use.
+
+### What the app does with a release
+
+The order is the point, and it belongs to the app rather than to the feed:
+
+1. Nothing is fetched until the build has a key to verify with. A packaged build
+   takes its keys only from the key set compiled into its own bundle, and a
+   packaged build with no such key — every one not put together by the release
+   job — reports updates as not configured and never opens a socket.
+2. The manifest and its detached signature are read, and the signature is
+   verified against the manifest bytes exactly as they arrived. Only bytes a
+   trusted key actually signed are ever parsed, so a URL, a file name, or a
+   version taken from an unsigned manifest is not read.
+3. The rules the signature does not cover are applied: the manifest publishes the
+   channel this build follows, it is inside its 30-day lifetime, it is not older
+   than the newest release sequence already offered here, it names a build for
+   this platform and architecture, its version is newer than the running build or
+   is an authorised rollback, and every URL it names is HTTPS on this project's
+   release location and under the channel's release path, ending in the file name
+   the manifest describes.
+4. The offered artifact is downloaded, and the download is discarded unless its
+   byte count and SHA-256 match what the signed manifest recorded. The file is
+   written under a temporary name and only moved into place once both match, so
+   nothing downstream can read a partial or substituted file. A redirect is
+   followed only to this project's own release location or to the one release
+   asset host GitHub serves the file from, so a signed manifest cannot send the
+   download somewhere the manifest itself could not have been fetched from.
+5. The download is proved once more, and the build handed to the platform
+   installer is copied into owner-private handoff storage: a directory in this
+   app's own state entered by its owner alone on a POSIX system, and a file
+   created exclusively, so an existing destination is refused rather than
+   written through. That reduces interference with the download between the
+   digest check and the install, and it catches a file that changed on disk in
+   that window. It is not a lock, it does not bind the check to an immutable
+   object, and it says nothing about a process running as this same user — a
+   backup or sync agent commonly is one.
+6. Before anything is run, the download must carry the platform's own signature
+   and the identity of the app that is already installed. An installer signed by
+   anybody else is refused even when its digest matches the manifest exactly.
+   The programs that answer those questions are named by absolute path —
+   `/usr/bin/codesign`, `/usr/sbin/spctl`, `/usr/bin/plutil`, `/usr/bin/hdiutil`,
+   `/usr/bin/ditto`, and on Windows the interpreter under the system directory
+   Windows itself reports — because a program named on its own is found through
+   `PATH`, and on Windows through the current directory too, which is the
+   repository the app was started in. Nothing on the install path needs Xcode or
+   any other developer tool: the architecture is read out of the Mach-O header
+   rather than asked of `lipo`, and the notarisation ticket is left to
+   Gatekeeper's own assessment rather than to `xcrun stapler`, which is a
+   developer tool. On
+   macOS the disk image is opened read-only and nothing is mounted until the
+   image itself has proved that it is this app's — a valid signature carrying
+   this app's team, and a passing Gatekeeper assessment of the image — and then
+   the application inside it has to prove the same thing again with more:
+   same bundle identifier, same version, a stapled notarisation ticket, and its
+   own Gatekeeper assessment. The copied bundle is checked a third time before it
+   replaces the running one. Nothing here is optional: an image this app cannot
+   attribute to its own team is not opened at all. An installer that cannot be started is a refusal, not an
+   install: this app stays open rather than closing with nothing to finish the
+   work. On macOS the installed bundle is moved aside rather than overwritten in
+   place, so a failure part-way through leaves a working app to go back to;
+   where the platform installer has to replace files this process is running
+   from, the app closes and the installer finishes on its own.
+
+The Windows installer retains its prepared copy after dispatch. An elevated
+install may continue in a different process, so the originally spawned PID
+exiting does not prove the executable is free.
+
+Before dispatch, the app writes a random 32-character ASCII token beside the
+copy, with no prefix or newline. `build/installer.nsh`, included by
+electron-builder at its default `nsis.include` path, echoes it after the install
+work with the actual installer's PID as `token=...` and `pid=...` CRLF lines.
+On a later launch, cleanup requires that exact token, a complete response inside
+the owned handoff directory, and `ESRCH` when probing the reported installer PID.
+Missing, malformed, foreign, still-running, or unprobeable evidence retains the
+copy. The app's version is not completion evidence. A refused launch or a stop
+before dispatch still removes the directory that attempt created.
+
+Once the platform installer owns the files, the update cannot be stopped: a
+cancel or a channel change at that point is reported as too late rather than
+pretending to have taken effect.
+
+One thing happens at a time. A check, a download, an install, and a channel
+change are each a single operation, and the second of them waits for the first
+to finish and clean up rather than running beside it. A stop is asked for
+through the operation's own signal and does not take the boundary away from it:
+the operation releases it, in its own cleanup, before the next one starts. That
+is why a result from a cancelled or superseded attempt can never land beside a
+newer one, and why a stopped download removes only the file it staged rather
+than whatever is in the staging directory at the time.
+
+A release becomes offerable only after the history that records having seen it
+is written and flushed to the disk: a temporary file of its own, flushed
+through its own handle, and then moved into place, with the directory entry
+flushed as well on macOS and Linux. Windows has no way to flush a directory
+entry from Node's standard library — `FlushFileBuffers` requires a handle
+opened for `GENERIC_WRITE`, and a writable directory handle needs
+`FILE_FLAG_BACKUP_SEMANTICS` — so there the file's own flush and the atomic
+replacement are what this code performs, and the durability of the name across a
+power loss is left to the platform rather than claimed here. A write or a
+replacement that fails is a failure: the check offers nothing. A check that cannot record what it saw
+offers nothing, revokes a build already downloaded for the same release, and
+stops every later download and install, because the replay guard is the thing
+that keeps an older release from being offered as a new one. A cancelled
+attempt leaves the release it authenticated standing, but the next download is
+a fresh decision made by a fresh check, so nothing is ever downloaded on the
+strength of a run that did not finish.
+
+A channel change is committed with the setting that records it. The updater
+takes the channel, the settings file is written while the change is still
+undecided, and only then is the new channel published; a write that fails puts
+the previous channel back, and an install in flight refuses the change
+outright. A stored channel and the channel this process is following cannot
+disagree.
+
+The updater writes only to the app's own user-data directory, and on macOS to a
+staged and a moved-aside copy of the bundle beside the installed one, both
+carrying this app's own prefix. It never reads or writes a repository.
+
+**What a fixture cannot prove.** The test suite stages an installer and runs the
+real code over it, which proves the digests, the manifest, the channel, the
+sequencing and the refusals. It cannot prove a native install: `codesign`,
+`spctl`, `hdiutil`, `Get-AuthenticodeSignature` and the NSIS installer are not
+run in a test process on any platform, so a path that asks the operating system
+about a signature is only ever exercised as far as the operating system answers. Installing a real signed release is the
+acceptance step, and it is written out under Platform support below. The
+handoff's directory and file modes describe POSIX protection; the equivalent
+Windows isolation is a documented limit, not something the tests establish.
+The lifecycle fixture uses two real processes: the process started by the app
+is not the process reporting completion. It checks retention before completion
+and while that process is running, removal after a matching answer and process
+exit, preservation of foreign siblings, and refusal of malformed evidence. The
+stand-in reads the raw request without prefix stripping and writes the same
+CRLF response fields as `build/installer.nsh`.
+
+Compile the installer hook through electron-builder's NSIS include chain to
+check its `customHeader` and `customInstall` integration. Compilation and the
+two-process fixture do not execute the Windows installer; installation of a
+real signed release on Windows remains the platform acceptance step below.
+
+### Channels
+
+`stable` follows signed releases for everyone. `beta` follows the pre-release
+channel, which moves faster and changes more often. The channel is chosen in
+**Settings → Updates** and stored as `updates.channel` in `settings.json`. It
+defaults to `stable` and only the person changes it, so a build keeps following
+the channel it was set to rather than drifting to whatever was published last;
+moving to `beta` is an explicit choice, not something a prerelease makes on your
+behalf. The newest release sequence offered on each channel is remembered
+separately, so returning to a channel cannot walk back to a manifest older than
+one this computer has already been offered there. Changing the channel starts a
+different feed with its own sequence history, and the previous offer is dropped
+rather than kept.
+
+### Rollback
+
+A rollback is a new signed release, not a reissued old one. It needs all three of:
+a release sequence higher than the newest this computer has been offered on that
+channel, a version lower than the release it replaces, and `rollbackOf` naming
+that newer release. The app then presents it as an authorised rollback of that
+version rather than as an ordinary upgrade. It is never a silent downgrade: a
+manifest whose version is not newer than the running build is refused as
+`not-newer` unless it carries exactly that authorisation, and a manifest older
+than the newest release sequence already offered on that channel is refused as
+`replayed` even when every other field matches. A manifest at the same sequence
+is offered again, so an offer that was never taken survives a restart and still
+cannot be replayed backwards. A rollback replaces the installed application and
+nothing else: it does not touch a user's repositories, working trees, branches,
+or uncommitted work.
+
+On the publishing side, a rollback is a release of an older version that names
+the version it replaces through the `UPDATE_ROLLBACK_OF` repository variable. A
+release of an older version without that variable is refused by the release job
+rather than published as a quiet downgrade, and the sequence still rises, so the
+rollback reaches the installations that have already seen what it withdraws.
+
+The release job enforces the same rule from its side: a version lower than the
+one that channel already publishes is refused unless `UPDATE_ROLLBACK_OF` names
+exactly that version, and a `rollbackOf` on a release that is not a downgrade is
+refused too. A downgrade can therefore never be published by accident, only
+chosen.
+
+### Platform support
+
+| Platform | Package                                              | Signing                                                                                              | Updated in place                                                                                                                                                                                                                                             |
+| -------- | ---------------------------------------------------- | ---------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| macOS    | `dmg`                                                | Developer ID Application for the app and for the image, notarised and stapled                        | Yes. The download is checked against the installed app's own signing identity, team, bundle identifier, version, and architecture, staged beside the running bundle and proved again there, then moved into the bundle's place and the app restarts into it. |
+| Windows  | NSIS installer                                       | Authenticode, verified before it runs                                                                | Yes. The installer's Authenticode identity is compared with the installed app's own; the installer is then started, this app closes, and the update finishes on its own.                                                                                     |
+| Linux    | AppImage, also covered by the packaged desktop smoke | No platform signature exists to check; the release's own manifest signature is what authenticates it | No. An AppImage is a single file the person runs from wherever they put it, with no installed copy to replace and no signature to check before running it, so in-place updates are unsupported there and a download is offered to run instead.               |
+
+The release states the Linux policy in its own log on every Linux build — "linux:
+best-effort artifact — built, published and signed, never updated in place by the
+app" — and the step that prints it runs the shipped code to make it true: it
+asks the installer what it supports on Linux, hands it a staged update anyway,
+and requires a refusal that writes nothing, starts nothing and restarts
+nothing. A Linux installer that appeared would make the app answer differently
+and fail that step, which is the moment the policy line has to be rewritten with
+it.
+
+Signing needs a code-signing certificate (`CSC_LINK`, `CSC_KEY_PASSWORD`), and
+macOS notarisation needs an Apple developer account (`APPLE_ID`,
+`APPLE_APP_SPECIFIC_PASSWORD`, `APPLE_TEAM_ID`). Maintainers have to configure
+those as repository secrets; the release job fails closed when any of them is
+missing, stopping before packaging rather than publishing an unsigned artifact
+under a release name. Installing a real signed release is the acceptance step,
+run on a machine that holds the real credentials, before a signed release counts
+as delivered:
+
+1. Publish a release and let the workflow run to completion. Every job must be
+   green; a failed attestation, signature, or provenance step is not a release.
+2. On macOS, confirm the shipped image and the application inside it are signed
+   by the expected team, that `xcrun stapler validate` accepts the ticket, and
+   that `spctl --assess --type open` accepts the image, on a machine that has
+   never seen the download.
+3. On Windows, confirm `Get-AuthenticodeSignature` reports `Valid` and the
+   signer's subject matches the installed app's own.
+4. Install the published release on a clean machine, then publish the next
+   pre-release and let an installed build take it: the digest re-check, the
+   native signature checks, the handoff, the replacement, and the relaunch all
+   run only there.
+5. Confirm the channel lock behaved: two releases published at once must leave
+   one sequence per channel, and the second must have read the first's history.
+
+Signing the disk image as well as the application inside it needs the private key
+a second time, after the packager has already deleted the keychain it imported
+the certificate into. The release job does that in a keychain that exists only
+for the step: created with a password generated at that moment, unlocked only
+there, given the partition list `codesign` needs, made the only keychain in the
+search path so the identity cannot come from anywhere else, and deleted by a trap
+however the step ends, with the earlier search path restored. The certificate is
+written to a file the step owns, masked in the log, and removed. The signing
+identity is the single distribution certificate in that keychain for the team the
+release claims — matched by name and team rather than by a bare team selector,
+because a selector is a search term — and none or several is a refusal rather
+than a guess.
+
+### An unsigned build is not a release
+
+`npm run dist` run locally packages the app without a certificate, so the output
+is a development package, not a release: it is not signed, not notarised, not
+attested, and not offered to anyone else. It also refuses to install updates. A
+packaged build takes its trusted keys from its own bundle and nowhere else, and a
+local package carries none because only the release job injects one, so it
+reports updates as not configured, and the app will not fetch a manifest or
+install anything. An unpackaged `npm run dev` build may instead take one key
+from `GIT_STACKS_UPDATE_KEY_ID` and `GIT_STACKS_UPDATE_PUBLIC_KEY` for fixtures,
+and **Settings → Updates** says so when it is running on such a key; that path
+does not exist in a packaged build, because whoever starts a process decides its
+environment.
+
+### Keeping the release key trusted
+
+A released build's trusted public key is compiled into the main bundle during
+packaging, so nothing on a user's machine can add, drop, or change it after
+installation. Rotating it is therefore a shipped change with an overlap window,
+not a switch someone can throw on an installed app, and it takes three releases
+in this order:
+
+1. **The new public key is committed** to `resources/update-history-keys.json`
+   and injected into this release through `UPDATE_SIGNING_ADDITIONAL_KEY_ID`,
+   `UPDATE_SIGNING_ADDITIONAL_PUBLIC_KEY`, `UPDATE_SIGNING_ADDITIONAL_VALID_FROM`
+   and `UPDATE_SIGNING_ADDITIONAL_VALID_UNTIL` — all four or none, or the
+   release is refused. This release's manifest is still signed with the old key,
+   so every installed build can verify it and installs the build that learned
+   the new key.
+2. **The next release signs with the new key.** The overlap carries the old key
+   with an end date far enough out that no artifact it signed can still be
+   offered — a manifest stops being offered 30 days after it was issued — so
+   every build that installed step 1 can verify this one.
+3. **The release after that retires the old key** by not declaring it. Builds
+   from step 2 stop consulting it when its `validUntil` passes, and a key outside
+   its validity window is never consulted at all, so the old key stops verifying
+   then rather than whenever someone notices.
+
+`resources/update-history-keys.json` is what makes step 3 possible. A build only
+carries the keys that are current, so once the old key is retired nothing in the
+app can authenticate the manifests it signed — and the release that retired it
+could not read the history it was replacing, which would stop the channel
+outright. That file is the durable record of every public key that may sign a
+channel manifest, so a release can still prove what it published last month. A
+release refuses to publish a build carrying a key the file does not declare, and
+the key is committed there _before_ it signs anything, in the same change that
+introduces it. It holds public keys only, which every packaged build already
+carries in its own bundle; a private key is never compiled into a build, never
+committed to this repository, and never written to a CI log. The release job
+signs with a secret held by the repository owner.
+
+The other half of the same discipline is the publication order above: a sequence
+is banked under a name of its own before the two fixed names move, so
+interrupting a publication costs a sequence rather than the channel's history,
+and a bank is never rewritten.
+
+## Untrusted text
+
+Text that arrives from outside this app is text, and it is shown as text. The
+values a person reads but did not write are a pull request title and branch
+name, a repository description, and a commit subject and author. They are
+rendered as React children — `data-views.tsx`, `repository-hover-cards.tsx`,
+`repository-views.tsx`, `onboarding.tsx` — so an author's angle brackets are
+characters on the screen and never markup. There is no Markdown renderer in
+this app and no sanitiser standing in for one: nothing parses a value into
+elements, and nothing writes one with `innerHTML`.
+
+`scripts/update-flow-smoke.mjs` proves that in the real window rather than
+asserting it about the source. It commits a subject that is
+`<img src=x onerror="…"> <script>…</script> <b>bold</b>`, opens the repository
+in the running app — where the branch card shows that subject as its commit
+preview — and then reads the rendered document: the characters are present, the
+deepest element containing them has no element children at all, nothing in the
+window carries an inline `on*` handler, no `img`, `object`, `embed`, or `iframe`
+appeared, and nothing the payload says ran. The commit list in **History** uses
+the same React child for the same value; that view is not exercised by this
+run, and the proof is of the surface in the screenshot. Release notes and refusal messages
+arriving over a release signature are held to the same rule, in
+`tests/release-boundary.test.ts`.
+
 ## Onboarding
 
 With no repository open, the window offers three ways in, and all of them end
@@ -565,7 +1035,6 @@ stack — is behind by exactly zero and needs no `rev-list` of its own. A base
 those edges do not prove is still counted by Git, one process per branch under
 `mapWithConcurrency`, so the number a branch reports is always the number
 `git rev-list --count <branch>..<base>` returns.
-
 **A branch-analysis budget.** `SNAPSHOT_BRANCH_BUDGET` caps per-branch
 merge-base and behind probes. A branch consumes one budget slot across both
 phases: admission for parent inference also reserves its behind comparison.
@@ -749,7 +1218,7 @@ npm run package
 npm run test:desktop
 ```
 
-The smoke launches `release/mac-arm64/Git Stacks.app` by default on macOS and `release/linux-unpacked/git-stacks` on Linux; Windows is unsupported until its process-tree cleanup can be verified. `node scripts/packaged-desktop-smoke.mjs --help` lists the explicit app-path option. It creates a disposable repository and local bare remote, isolates user-data/configuration, strips inherited Git/GitHub and credential-shaped environment variables, and cleans the temporary workspace. Reports and failure screenshots remain under `out/packaged-smoke/<timestamp>/`.
+The smoke launches `release/mac-arm64/Git Stacks.app` by default on macOS and `release/linux-unpacked/git-stacks` on Linux; Windows is unsupported until its process-tree cleanup can be verified. `node scripts/packaged-desktop-smoke.mjs --help` lists the explicit app-path option. It creates a disposable repository and local bare remote, isolates the Chromium user data, the temporary directory, the Git configuration and the gh configuration inside the workspace, strips inherited Git/GitHub and credential-shaped environment variables, and cleans the temporary workspace. On macOS the app inherits the host home directory, because the system only spawns the app's sandboxed helper processes against the home the password database reports: with a synthetic `HOME` the browser process never brings those helpers up and stops answering on its own DevTools endpoint, so the smoke can never reach the renderer. Nothing the app, git or gh reads comes from that home — user data is the redirected `--user-data-dir`, and `GIT_CONFIG_NOSYSTEM=1` with an empty `GIT_CONFIG_GLOBAL` and a disposable `GH_CONFIG_DIR` keep the machine's own Git identity, credential helpers and GitHub login out of the fixture. A `browserType.connectOverCDP` timeout on the first `/json/version` request is that dead endpoint, not a slow start. Reports and failure screenshots remain under `out/packaged-smoke/<timestamp>/`.
 
 The packaged executable, preload bridge, CSP, window lifecycle, real 200% page zoom, external-link policy, and local Git workflows are exercised rather than inferred from a dev server. No GitHub mutation or personal repository is used. Native window-state API checks are not physical title-bar-button or VoiceOver verification; record those manual boundaries separately.
 
@@ -835,6 +1304,49 @@ If Git encounters conflicts during the rebase cascade:
 3. Once conflicts are resolved, use **Continue** to adopt the rebased commit and resume the cascade for the remaining branches.
 4. Alternatively, use **Abort** to restore all branches and their metadata to their exact pre-sync backup refs and return to the original clean checkout.
 
+## Linked issues
+
+A pull request inspector and the pull request workflow dialog both list the issues
+linked to that pull request, with each issue's current state and whether the
+relationship is **closes on merge** or **related**.
+
+**Search.** The dialog searches the origin repository's issues by number or
+title. The typed text is a literal search: qualifier tokens such as `repo:` are
+stripped, and results from any other repository are rejected, so a number that
+exists in several repositories can only ever link the one this remote owns. A
+closed issue can be selected — GitHub will not close it again, and the link stays
+readable. When the transport fails or the machine is offline, the section reports
+that issues are unavailable and the rest of the pull request workflow still works.
+
+**Two kinds of link, deliberately separate.**
+
+- _Related_ is app-owned local metadata (`gitstacks.pr.<number>.relatedissue` in local
+  `git config`). It never changes anything on GitHub and is never claimed to be a
+  relationship GitHub can interpret.
+- _Closes on merge_ writes a real closing keyword (`Closes #12`) into the pull
+  request description, which is the only form GitHub acts on. Detection and
+  insertion follow GitHub's documented grammar: the keyword may be followed by a
+  colon, and every issue needs its own full keyword, so `Closes #10, #12` closes
+  only #10 and Git Stacks will still insert a complete clause for #12. Insertion
+  is idempotent: an existing recognised clause is never duplicated.
+
+**Preview, confirmation, and removal.** Both directions that touch the pull
+request description are previewed first: the dialog asks the main process for the
+resulting description and shows it, with the exact keyword that will be inserted
+or removed, and only then dispatches. Removal deletes the exact clause that was
+detected — a foreign `other/repo#12`, an unrelated `#123`, and every other word of
+the author's description survive untouched. Removing a _related_ link needs no
+confirmation because it only edits local metadata.
+
+**External edits.** Every description mutation carries the body that was previewed.
+The main process re-reads the pull request immediately before writing and refuses
+the write if the body changed in the meantime, leaving the newer text intact.
+GitHub's pull request update endpoint offers no conditional (ETag/`If-Match`)
+request, so a change landing between that read and the write can still be lost;
+this is a property of the API, not something the app can close. A refresh that
+follows a link change never overwrites description text the user typed while the
+refresh was in flight.
+
 ## Stack surgery
 
 Stack surgery inserts a layer, moves a layer up or down, and removes a layer from a
@@ -899,49 +1411,6 @@ it and the original tips stay recoverable.
   creation that was registered before the response was lost. A step whose pull request
   head, base, or state, or whose native stack membership, differs from both the reviewed
   pre-state and the reviewed result stops the run instead of overwriting it.
-
-## Linked issues
-
-A pull request inspector and the pull request workflow dialog both list the issues
-linked to that pull request, with each issue's current state and whether the
-relationship is **closes on merge** or **related**.
-
-**Search.** The dialog searches the origin repository's issues by number or
-title. The typed text is a literal search: qualifier tokens such as `repo:` are
-stripped, and results from any other repository are rejected, so a number that
-exists in several repositories can only ever link the one this remote owns. A
-closed issue can be selected — GitHub will not close it again, and the link stays
-readable. When the transport fails or the machine is offline, the section reports
-that issues are unavailable and the rest of the pull request workflow still works.
-
-**Two kinds of link, deliberately separate.**
-
-- _Related_ is app-owned local metadata (`gitstacks.pr.<number>.relatedissue` in local
-  `git config`). It never changes anything on GitHub and is never claimed to be a
-  relationship GitHub can interpret.
-- _Closes on merge_ writes a real closing keyword (`Closes #12`) into the pull
-  request description, which is the only form GitHub acts on. Detection and
-  insertion follow GitHub's documented grammar: the keyword may be followed by a
-  colon, and every issue needs its own full keyword, so `Closes #10, #12` closes
-  only #10 and Git Stacks will still insert a complete clause for #12. Insertion
-  is idempotent: an existing recognised clause is never duplicated.
-
-**Preview, confirmation, and removal.** Both directions that touch the pull
-request description are previewed first: the dialog asks the main process for the
-resulting description and shows it, with the exact keyword that will be inserted
-or removed, and only then dispatches. Removal deletes the exact clause that was
-detected — a foreign `other/repo#12`, an unrelated `#123`, and every other word of
-the author's description survive untouched. Removing a _related_ link needs no
-confirmation because it only edits local metadata.
-
-**External edits.** Every description mutation carries the body that was previewed.
-The main process re-reads the pull request immediately before writing and refuses
-the write if the body changed in the meantime, leaving the newer text intact.
-GitHub's pull request update endpoint offers no conditional (ETag/`If-Match`)
-request, so a change landing between that read and the write can still be lost;
-this is a property of the API, not something the app can close. A refresh that
-follows a link change never overwrites description text the user typed while the
-refresh was in flight.
 
 ## Review workspace
 

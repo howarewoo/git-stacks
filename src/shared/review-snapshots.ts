@@ -270,9 +270,7 @@ export function withReviewedSnapshot(
   return {
     ...log,
     snapshots: log.snapshots.map((entry) =>
-      entry.headOid === headOid
-        ? { ...entry, reviewed: true, reviewedAt: now, reviewId }
-        : entry,
+      entry.headOid === headOid ? { ...entry, reviewed: true, reviewedAt: now, reviewId } : entry,
     ),
     updatedAt: now,
   }
@@ -375,7 +373,10 @@ export function reviewHistoryUnchangedPaths(
   }
   const unchanged: string[] = []
   for (const file of current.files) {
-    if (!changedBetween.has(file.path) && (!file.previousPath || !changedBetween.has(file.previousPath))) {
+    if (
+      !changedBetween.has(file.path) &&
+      (!file.previousPath || !changedBetween.has(file.previousPath))
+    ) {
       unchanged.push(file.path)
     }
   }

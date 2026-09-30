@@ -137,9 +137,9 @@ async function writeAccount(file: string, account: StoredAccount): Promise<void>
  */
 interface AccountOwnership {
   /** Every stored-state mutation, from every account that shares these files. */
- commits: Promise<unknown>
+  commits: Promise<unknown>
   /** The newest claim handed out; every earlier account has been replaced. */
- claim: number
+  claim: number
 }
 
 const accountOwnerships = new Map<string, AccountOwnership>()
@@ -331,7 +331,7 @@ export class GitHubAccount implements GitHubCredentialSource {
    * accounts would otherwise interleave on the same vault and state file, and a
    * sign-out queued by the one being replaced could land after the account that
    * replaced it had already signed in.
- */
+   */
   private commit<T>(work: () => Promise<T>): Promise<T> {
     const result = this.shared.commits.then(work, work)
     this.shared.commits = result.then(
@@ -340,7 +340,6 @@ export class GitHubAccount implements GitHubCredentialSource {
     )
     return result
   }
-
 
   /** The state to return when nothing is in progress and no credential is active. */
   private baseline(): GitHubAccountState {
@@ -528,11 +527,7 @@ export class GitHubAccount implements GitHubCredentialSource {
             : issuedAt + session.refreshTokenExpiresIn * 1000,
         session: randomUUID(),
       }
-      const reference = await this.options.vault.stage(
-        this.host,
-        JSON.stringify(live),
-        issuedAt,
-      )
+      const reference = await this.options.vault.stage(this.host, JSON.stringify(live), issuedAt)
       // Nothing has been given up yet, so removing the staged credential and
       // putting back what these files named is enough to leave the store and
       // application state as they were. Whether the state file is rewritten at

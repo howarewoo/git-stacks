@@ -481,7 +481,7 @@ journalled **before** the request leaves — a crash between the POST and its
 response is precisely the case with no failure to write a record on, so a record
 written only after a failure would be missing for the one case the guard exists
 for. The attempt records the whole payload — every comment's body and anchor, and
-the decision — because the comments *are* the write, and any one of them alone
+the decision — because the comments _are_ the write, and any one of them alone
 is shared with a review that has nothing to do with this one.
 
 The record is not a dead end. Before refusing, the next attempt asks GitHub what
@@ -508,7 +508,7 @@ A settled write is recorded, not deleted. The evidence that GitHub holds a
 comment is the only thing standing between a retry and a duplicate, and the
 submission that recognised the write is still free to fail afterwards, or to be
 interrupted before the view drops the draft. The record therefore keeps what was
-recognised, and it is a later *payload* that retires it: the view keeps a draft in
+recognised, and it is a later _payload_ that retires it: the view keeps a draft in
 its payload precisely while it has not been told the draft was delivered, so a
 record whose comments are absent from a later submission are comments the view has
 finished with. That makes resuming after a crash idempotent without depending on a
@@ -551,7 +551,7 @@ must not lock a reviewer out of a new revision.
 A draft is named by a minted identity, not by where it sits. The revision guard
 above separates a comment about a new head from one about the old, but a
 revision does not move for everything: the reviewer can read a line, write a
-comment, send it, and write the same words on the same line of the *same* head
+comment, send it, and write the same words on the same line of the _same_ head
 while approving instead of commenting. Nothing about that second comment is
 distinguishable from the first except that it is later, and both would be
 matched by every field the settlement compares — anchor, words, decision, head.
@@ -574,7 +574,7 @@ the range alone, or the range and a small whole number — remain opaque strings
 compared only with each other, so stored drafts stay readable and submit as
 themselves, and none of those names can be minted again.
 
-The guard covers an unresolved *comment*, not an attempt id. Changing the
+The guard covers an unresolved _comment_, not an attempt id. Changing the
 decision, or adding one more pending draft, produces a different attempt over
 the same comments, and matching on the whole payload would let those comments be
 posted a second time. So every attempt touching any line this payload writes is
@@ -597,7 +597,7 @@ review posted a different comment that happened to read identically, and the
 record of it is a record about a payload the reviewer has since replaced.
 Adopting it would report the whole payload delivered, post nothing, and lose a
 decision the reviewer made after the review they had already sent. Delivery is
-therefore matched on identity *and* on what the comment says and where, so a
+therefore matched on identity _and_ on what the comment says and where, so a
 draft reworded after it was composed sends the new words rather than being
 taken for the old ones, and a comment no composition can be named for is
 evidence about nothing.
@@ -662,7 +662,7 @@ disk stays readable and unchanged. An in-process queue is not a substitute — i
 would serialize two callers in one window and leave the second window exactly as
 unprotected, which is the case the journal exists for.
 
-That refusal must be bounded and it must distinguish *why* the lock could not be
+That refusal must be bounded and it must distinguish _why_ the lock could not be
 used. Exactly one read failure means the holder is gone: the lock was not there
 when the contender looked, so the next attempt takes the name. Every other
 failure — a lock this account may not open, a path that is not a file — leaves a
@@ -716,6 +716,15 @@ The advanced Git runtime choice uses a labeled two-way control: **Bundled runtim
 Display the active source, version, executable path, minimum-version result, and capability labels as text rather than color alone. If resolution fails, say that the runtime is unavailable instead of showing stale details.
 
 Both runtime choices use the same Git operation guards. Custom `files:` reference-storage paths are decoded as native absolute file paths, including Windows drive letters; a remote host, credentials, query, fragment, malformed escape, or NUL is refused instead of treated as a local lock path. Passing local runtime tests does not establish that a signed Windows or macOS release artifact was produced; signing and shipment remain release-workflow gates.
+
+### Updates
+
+The Updates section states what this build is before it offers anything to do: the installed version, the channel it follows, which key the updater verifies with, and whether this platform is updated in place. A refused build is a stated condition, not a failure to recover from, so it is presented the way the main process reported it.
+
+- **Facts before controls:** The installed version, the channel in use, the key the updater verifies with, and whether this platform is updated in place are read from the update status and are shown before the first control, never below it and never only after a check has run. They hold in every phase, including the phases where nothing can be done, and a control that changes one of them is additional to the fact rather than a substitute for it.
+- **Only the possible step:** Each step appears only when it is the step that can actually happen, so a build with no compiled release key, a platform with no install path, and a build with no authenticated offer present nothing to click. A control that is present but unreachable is a dead end with a reason attached; the step is withheld instead.
+- **The main process's own reason:** A refusal is shown as the reason main gave, in its terms, rather than softened into a suggestion to retry, refresh, or check the connection. `not-configured`, `unsupported`, `not-newer`, `replayed`, and `bad-signature` are different answers and are never merged into one failure message, and a phase with no outcome is not dressed as success.
+- **Progress is progress:** A download in progress reports how far it has got against the size the signed manifest recorded, and stays cancellable while it does. A control that is merely disabled, or a spinner with no state behind it, is not a progress state.
 
 ### Settings, theming, and privacy
 

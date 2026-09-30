@@ -99,8 +99,10 @@ function inSelection(selection: ReviewSelection | null, path: string, line: Revi
   if (selection.side !== line.side) return false
   const number = line.side === 'base' ? line.oldLine : line.newLine
   if (number === null) return false
-  return number >= Math.min(selection.anchor, selection.head) &&
+  return (
+    number >= Math.min(selection.anchor, selection.head) &&
     number <= Math.max(selection.anchor, selection.head)
+  )
 }
 
 /**
@@ -246,7 +248,9 @@ function SplitRows({
                     className="review-split-gutter"
                     type="button"
                     onClick={(event) =>
-                      onSelect(extendSelection(selection, file.path, row.left!.line, event.shiftKey))
+                      onSelect(
+                        extendSelection(selection, file.path, row.left!.line, event.shiftKey),
+                      )
                     }
                   >
                     {row.left.number}

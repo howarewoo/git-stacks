@@ -1,3 +1,4 @@
+import type { UpdateStatus } from '../../../src/shared/update'
 import type {
   ActionResult,
   ConflictFile,
@@ -54,6 +55,7 @@ import type {
   ReviewEvent,
 } from '../../../src/shared/review-threads'
 import { checksReportFor, scenarios } from './scenarios'
+import { updateStatusFixture } from './update-status'
 import { DEFAULT_SCENARIO, type ScenarioName } from './manifest'
 import type { PullRequestChecksReport } from '../../../src/shared/pull-request-checks'
 import type { FixtureCall, FixtureCallRecord, FixtureControl, FixtureScenario } from './types'
@@ -299,6 +301,7 @@ export function installFixtureControl(options: {
     })
   }
 
+  const updateListeners = new Set<(status: UpdateStatus) => void>()
   const desktop: DesktopAPI = {
     recentRepositories: () => {
       record('recentRepositories', [])
@@ -961,7 +964,8 @@ export function installFixtureControl(options: {
     },
     previewCloneCommand: (request) => {
       record('previewCloneCommand', [request])
-      const url = request.protocol === 'ssh' ? request.repository.sshUrl : request.repository.httpsUrl
+      const url =
+        request.protocol === 'ssh' ? request.repository.sshUrl : request.repository.httpsUrl
       return answer('previewCloneCommand', () => ({
         ok: true as const,
         value: {
@@ -1005,6 +1009,30 @@ export function installFixtureControl(options: {
     onRepositoryDropped: (listener) => {
       dropListeners.add(listener)
       return () => dropListeners.delete(listener)
+    },
+    updateStatus: () => {
+      record('updateStatus', [])
+      return answer('updateStatus', () => updateStatusFixture.idle)
+    },
+    checkForUpdates: () => {
+      record('checkForUpdates', [])
+      return answer('checkForUpdates', () => updateStatusFixture.available)
+    },
+    downloadUpdate: () => {
+      record('downloadUpdate', [])
+      return answer('downloadUpdate', () => updateStatusFixture.downloaded)
+    },
+    installUpdate: () => {
+      record('installUpdate', [])
+      return answer('installUpdate', () => updateStatusFixture.downloaded)
+    },
+    cancelUpdate: () => {
+      record('cancelUpdate', [])
+      return answer('cancelUpdate', () => updateStatusFixture.cancelled)
+    },
+    onUpdateStatus: (listener) => {
+      updateListeners.add(listener)
+      return () => updateListeners.delete(listener)
     },
   }
 

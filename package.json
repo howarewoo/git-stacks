@@ -19,6 +19,7 @@
     "test:visual:update": "npm run test:visual -- --update-snapshots",
     "test:controls": "npm run build:gallery && npm run build && electron --headless --no-sandbox --disable-gpu scripts/design-system-controls-smoke.cjs",
     "test:desktop": "node scripts/packaged-desktop-smoke.mjs",
+    "test:update-flow": "node scripts/update-flow-smoke.mjs",
     "test:palette:electron": "node tests/command-palette.e2e.cjs",
     "tokens:generate": "node src/renderer/src/design-system/generate-tokens.mjs",
     "tokens:check": "node src/renderer/src/design-system/generate-tokens.mjs --check",
@@ -112,5 +113,10 @@
     "tsx": "4.23.15",
     "typescript": "7.0.2",
     "vite": "7.3.6"
+  },
+  "allowScripts": {
+    "electron@44.4.3": true,
+    "esbuild@0.25.12": true,
+    "esbuild@0.28.2": true
   }
 }

@@ -256,21 +256,14 @@ function promotionRefusal(
       `Git Stacks could not move the clone into place because its promotion helper is unavailable. Nothing was written. ${detail}`,
     )
   }
-  return new CloneError(
-    'failed',
-    `The clone finished but could not be moved into place: ${detail}`,
-  )
+  return new CloneError('failed', `The clone finished but could not be moved into place: ${detail}`)
 }
 
 /**
  * A Git read that must succeed. `tryGit` answering null is honest for a probe
  * whose value is optional, not for a working tree that has to be one.
  */
-async function requireGit(
-  root: string,
-  args: string[],
-  signal?: AbortSignal,
-): Promise<string> {
+async function requireGit(root: string, args: string[], signal?: AbortSignal): Promise<string> {
   const runtime = await resolveGitRuntime()
   return withGitRuntime(runtime, () =>
     executeCapped(runtime.executable, args, root, commandOptions(runtime, signal)),
@@ -368,7 +361,9 @@ export function sanitizeCredentialHelper(raw: string | null | undefined): string
   // Extract the executable or first argument token
   const firstToken = trimmed.split(/\s+/)[0]
   // Extract basename to safely strip any absolute/relative filesystem paths
-  const name = basename(firstToken).replace(/^git-credential-/, '').toLowerCase()
+  const name = basename(firstToken)
+    .replace(/^git-credential-/, '')
+    .toLowerCase()
 
   if (ALLOWED_HELPERS.has(name)) {
     return name

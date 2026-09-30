@@ -445,10 +445,6 @@ export function requireRefInput(value: unknown, label: string): string {
   return ref
 }
 
-export function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
-
 export async function getCurrentBranch(
   repoPath: string,
   signal?: AbortSignal,

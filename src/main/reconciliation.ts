@@ -29,7 +29,6 @@ import {
   getConfigValue,
   getCurrentBranch,
   getOriginUrl,
-  isRecord,
   parseRemote,
   refExists,
   requireRefInput,
@@ -40,6 +39,7 @@ import {
   validateBranchName,
   type BranchConfig,
 } from './git-core'
+import { isRecord } from '../shared/guards'
 import { canonicalRemoteName, getGitHubData, getPullRequest, pullRequestRepository } from './github'
 import { type GitHubHostContext, hostTransport, remoteHostContext } from './github-host'
 

@@ -9,7 +9,8 @@ import type {
   ReviewSnapshotLog,
 } from '../shared/review-snapshots'
 import { observeReviewHead, withReviewedSnapshot } from '../shared/review-snapshots'
-import { isRecord, runGit, stripTrailingNewline } from './git-core'
+import { runGit, stripTrailingNewline } from './git-core'
+import { isRecord } from '../shared/guards'
 
 interface SnapshotJournal {
   version: 1

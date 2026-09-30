@@ -275,7 +275,11 @@ async function redeem(
 ): Promise<Record<string, unknown>> {
   const clientId = text(request.clientId)
   if (!clientId) throw new GitHubAppError('not_configured')
-  return post(appEndpoints(request.host).accessToken, { ...parameters, client_id: clientId }, request)
+  return post(
+    appEndpoints(request.host).accessToken,
+    { ...parameters, client_id: clientId },
+    request,
+  )
 }
 
 export type DevicePollResult =

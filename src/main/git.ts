@@ -67,7 +67,6 @@ import {
   getStatus,
   isCancelled,
   isExitCode,
-  isRecord,
   listStatus,
   mapWithConcurrency,
   parseRemote,
@@ -85,6 +84,7 @@ import {
   tryGit,
   validateBranchName,
 } from './git-core'
+import { isRecord } from '../shared/guards'
 import type { RefRecord } from './git-core'
 import { buildHunkPatch, hunkSideUnavailable, parseHunkBlock } from './hunks'
 import {

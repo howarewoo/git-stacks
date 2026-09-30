@@ -1,5 +1,6 @@
 import { canonicalHostName } from '../shared/host'
-import { isCancelled, isRecord, type ParsedRemote } from './git-core'
+import { isCancelled, type ParsedRemote } from './git-core'
+import { isRecord } from '../shared/guards'
 import {
   GITHUB_API_VERSION,
   GITHUB_STACKS_API_VERSION,

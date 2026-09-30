@@ -2,10 +2,7 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { parseRemote } from '../src/main/git-core'
 import { discoverRepositories } from '../src/main/github-repositories'
-import {
-  ghCloneCommandText,
-  summarizeRepository,
-} from '../src/main/github-repositories'
+import { ghCloneCommandText, summarizeRepository } from '../src/main/github-repositories'
 import {
   forgetHost,
   hostStatus,
@@ -52,17 +49,16 @@ interface Recorded {
 }
 
 type Answer =
-  | { status?: number; body?: unknown; headers?: Record<string, string> }
-  | { throws: Error }
-
+  { status?: number; body?: unknown; headers?: Record<string, string> } | { throws: Error }
 
 /**
  * A `fetch` that answers by URL and keeps every request it received, so each case
  * asserts on the request the code actually made rather than on what it meant to.
  */
-function hostFetch(
-  routes: Array<[pattern: string | RegExp, answer: Answer]>,
-): { fetch: typeof globalThis.fetch; recorded: Recorded[] } {
+function hostFetch(routes: Array<[pattern: string | RegExp, answer: Answer]>): {
+  fetch: typeof globalThis.fetch
+  recorded: Recorded[]
+} {
   const recorded: Recorded[] = []
   const double = (async (input: string | URL | Request, init?: RequestInit) => {
     const url = String(input)
@@ -217,7 +213,10 @@ test('a host without the stacks endpoint reports a missing endpoint, and names t
   const context = githubHostContext(ENTERPRISE)
   const { fetch, recorded } = hostFetch([
     [`${ENTERPRISE_API}/repos/acme/widgets`, { body: { full_name: 'acme/widgets' } }],
-    [`${ENTERPRISE_API}/repos/acme/widgets/stacks?per_page=1`, { status: 404, body: { message: 'Not Found' } }],
+    [
+      `${ENTERPRISE_API}/repos/acme/widgets/stacks?per_page=1`,
+      { status: 404, body: { message: 'Not Found' } },
+    ],
   ])
   const transport = new DirectGitHubTransport({
     host: ENTERPRISE,
@@ -234,7 +233,10 @@ test('a host without the stacks endpoint reports a missing endpoint, and names t
 
   // Detection degrades to a state the publish path branches on rather than
   // raising, because a resource the host refused is a fact about the host.
-  const detected = await detectNativeStacksCapability('acme', 'widgets', { host: context, transport })
+  const detected = await detectNativeStacksCapability('acme', 'widgets', {
+    host: context,
+    transport,
+  })
   assert.equal(detected.available, false)
   assert.equal(detected.state, 'preview-unavailable')
 
@@ -261,10 +263,7 @@ test('a host that rejects this build’s GraphQL fields is reported as unknown w
   const { fetch, recorded } = hostFetch([
     [`${api}/`, { body: { current_user_url: `${api}/user` } }],
     [`${api}/meta`, { body: { installed_version: '3.9.0' } }],
-    [
-      context.graphqlUrl,
-      { body: { errors: [{ message: refusal }] } },
-    ],
+    [context.graphqlUrl, { body: { errors: [{ message: refusal }] } }],
     [`${api}/repos/acme/widgets`, { body: { full_name: 'acme/widgets' } }],
     [`${api}/repos/acme/widgets/stacks?per_page=1`, { body: [] }],
   ])
@@ -381,9 +380,7 @@ test('a host that never answered is unreachable, never unsupported', async () =>
   forgetHost()
   const context = githubHostContext('ghe-offline.example.com')
   const api = 'https://ghe-offline.example.com/api/v3'
-  const { fetch, recorded } = hostFetch([
-    [/.+/u, { throws: new TypeError('fetch failed') }],
-  ])
+  const { fetch, recorded } = hostFetch([[/.+/u, { throws: new TypeError('fetch failed') }]])
   const transport = new DirectGitHubTransport({
     host: 'ghe-offline.example.com',
     apiUrl: api,
@@ -424,7 +421,10 @@ test('a credential for one host never reaches another host, and the transport ca
   }
   const { fetch, recorded } = hostFetch([
     [`${ENTERPRISE_API}/repos/acme/widgets`, { body: { full_name: 'acme/widgets' } }],
-    ['https://other.example.com/api/v3/repos/acme/widgets', { body: { full_name: 'acme/widgets' } }],
+    [
+      'https://other.example.com/api/v3/repos/acme/widgets',
+      { body: { full_name: 'acme/widgets' } },
+    ],
   ])
 
   const own = new DirectGitHubTransport({
@@ -549,8 +549,17 @@ test('the gh clone command names a host with a qualified URL, because gh has no 
   // `gh repo clone` accepts a repository argument or a URL; a bare `owner/name`
   // is resolved on github.com. Verified against the installed CLI: `--hostname`
   // is rejected as an unknown flag, and the URL form is accepted.
-  const enterprise = ghCloneCommandText('acme/widgets', '/tmp/clone', 'widgets', false, 'https://ghe.example.com/acme/widgets.git')
-  assert.equal(enterprise, 'gh repo clone https://ghe.example.com/acme/widgets.git /tmp/clone/widgets')
+  const enterprise = ghCloneCommandText(
+    'acme/widgets',
+    '/tmp/clone',
+    'widgets',
+    false,
+    'https://ghe.example.com/acme/widgets.git',
+  )
+  assert.equal(
+    enterprise,
+    'gh repo clone https://ghe.example.com/acme/widgets.git /tmp/clone/widgets',
+  )
   assert.doesNotMatch(enterprise, /--hostname/u)
 
   const dotcom = ghCloneCommandText('howarewoo/git-stacks', '/tmp/clone', 'git-stacks', true)
@@ -659,10 +668,7 @@ test('two different hosts can never share one scoped token name', () => {
     resolveGitHubToken({ GIT_STACKS_GITHUB_TOKEN: 'dotcom-secret' }, 'github.com'),
     'dotcom-secret',
   )
-  assert.equal(
-    resolveGitHubToken({ GH_TOKEN: 'dotcom-secret' }, 'github.com'),
-    'dotcom-secret',
-  )
+  assert.equal(resolveGitHubToken({ GH_TOKEN: 'dotcom-secret' }, 'github.com'), 'dotcom-secret')
 })
 
 test('two different hosts can never share one client id, and a ported host has a name a shell accepts', () => {
@@ -928,9 +934,7 @@ test('a discovery run cancelled in flight records nothing about the host', async
   const context = githubHostContext('ghe-retired-discovery.example.com')
   const api = 'https://ghe-retired-discovery.example.com/api/v3'
   const controller = new AbortController()
-  const inner = hostFetch([
-    [/\/user\/repos\?/u, { body: [{ full_name: 'acme/widgets' }] }],
-  ])
+  const inner = hostFetch([[/\/user\/repos\?/u, { body: [{ full_name: 'acme/widgets' }] }]])
   const fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const response = await inner.fetch(input, init)
     // The run is cancelled after the host answered but before its answer is

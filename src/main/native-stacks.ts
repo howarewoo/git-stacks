@@ -6,7 +6,8 @@ import type {
   PullRequestStackMember,
   PullRequestStackMembership,
 } from '../shared/types'
-import { getOriginUrl, isCancelled, isRecord, parseRemote } from './git-core'
+import { getOriginUrl, isCancelled, parseRemote } from './git-core'
+import { isRecord } from '../shared/guards'
 import {
   hostTransport,
   type GitHubHostContext,
@@ -342,7 +343,6 @@ export async function detectNativeStacksCapability(
       state: 'preview-unavailable',
       message: `${capability.message} (${options.host.host})`,
     }
-
   }
   throw new NativeStackError('preview-unavailable', capability.message)
 }
@@ -1097,4 +1097,3 @@ export async function unstackNativeStackAction(
   }
   return { message: `Unstacked pull requests from native stack #${stackNumber} on ${host.host}` }
 }
-

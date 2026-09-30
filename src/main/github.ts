@@ -6,10 +6,10 @@ import {
   commandDetail,
   getConfigValue,
   isCancelled,
-  isRecord,
   parseRemote,
   runGit,
 } from './git-core'
+import { isRecord } from '../shared/guards'
 import {
   type GitHubHostContext,
   hostTransport,
@@ -310,7 +310,9 @@ export async function getGitHubData(
   }
   const transport = hostTransport(host)
   try {
-    const query = (conservative: boolean) => `query($owner: String!, $name: String!, $endCursor: String) {
+    const query = (
+      conservative: boolean,
+    ) => `query($owner: String!, $name: String!, $endCursor: String) {
       repository(owner: $owner, name: $name) {
         pullRequests(first: 100, after: $endCursor, states: OPEN, orderBy: {field: UPDATED_AT, direction: DESC}) {
           nodes {
@@ -418,8 +420,8 @@ function observeGraphqlFailure(host: GitHubHostContext, error: unknown): void {
           (error.kind === 'unauthorized' || error.kind === 'forbidden')
         ? 'unauthenticated'
         : /cannot query field|doesn't exist on type|could not resolve to|unknown argument|unknown field/iu.test(
-            detail,
-          )
+              detail,
+            )
           ? 'unsupported'
           : 'unknown'
   observeHostCapability(host.host, {

@@ -1,4 +1,4 @@
-import { isRecord } from './git-core'
+import { isRecord } from '../shared/guards'
 import { GitHubTransportError, type GitHubTransport } from './github-transport'
 import {
   GITHUB_DOTCOM_HOST,
@@ -51,11 +51,7 @@ function stringField(value: unknown): string | null {
  * HTTPS or in the SSH form. A response naming another host is not followed:
  * discovery must never be able to redirect a clone somewhere else.
  */
-function cloneUrl(
-  value: unknown,
-  kind: 'https' | 'ssh',
-  host: GitHubHostContext,
-): string | null {
+function cloneUrl(value: unknown, kind: 'https' | 'ssh', host: GitHubHostContext): string | null {
   const candidate = stringField(value)
   if (!candidate) return null
   if (kind === 'ssh') {

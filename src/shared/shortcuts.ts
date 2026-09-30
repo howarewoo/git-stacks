@@ -644,7 +644,8 @@ export function readLegacyShortcuts(
   const sanitized = sanitizeShortcutBindings(parsed)
   // An empty document carries nothing worth importing, and treating it as an
   // import would overwrite real stored bindings with defaults.
-  if (SHORTCUT_DEFINITIONS.every((def) => sanitized[def.id] === DEFAULT_SHORTCUTS[def.id])) return null
+  if (SHORTCUT_DEFINITIONS.every((def) => sanitized[def.id] === DEFAULT_SHORTCUTS[def.id]))
+    return null
   return sanitized
 }
 

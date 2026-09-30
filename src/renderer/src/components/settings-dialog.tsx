@@ -25,6 +25,8 @@ import {
 } from '../../../shared/settings'
 import type { ShortcutId } from '../../../shared/shortcuts'
 import type { GitHubAccountStatus } from '../../../shared/types'
+import { UPDATE_CHANNELS, type UpdateChannel, type UpdateStatus } from '../../../shared/update'
+import { UpdateFacts, UpdateNotice } from './update-summary'
 import { CAPABILITY_STATE_LABELS, type GitHubHostStatus } from '../../../shared/host'
 
 const MERGE_METHOD_LABELS: Record<MergeMethod, string> = {
@@ -64,9 +66,15 @@ export interface SettingsDialogProps {
     diagnostics?: () => Promise<DiagnosticReport>
     supportBundlePreview?: () => Promise<SupportBundlePreview>
     exportSupportBundle?: (previewId: string) => Promise<{ path: string; bytes: number }>
-    signOutOfGitHub?: () => Promise<GitHubAccountStatus>
-    githubAccountStatus?: () => Promise<GitHubAccountStatus>
     githubHostStatus?: () => Promise<GitHubHostStatus>
+    githubAccountStatus?: () => Promise<GitHubAccountStatus>
+    signOutOfGitHub?: () => Promise<GitHubAccountStatus>
+    updateStatus?: () => Promise<UpdateStatus>
+    checkForUpdates?: () => Promise<UpdateStatus>
+    downloadUpdate?: () => Promise<UpdateStatus>
+    installUpdate?: () => Promise<UpdateStatus>
+    cancelUpdate?: () => Promise<UpdateStatus>
+    onUpdateStatus?: (listener: (status: UpdateStatus) => void) => () => void
   } | null
   account: GitHubAccountStatus | null
   onAccountChange: (status: GitHubAccountStatus) => void
@@ -78,19 +86,14 @@ export interface SettingsDialogProps {
 }
 
 type Section =
-  | 'account'
-  | 'github'
-  | 'git'
-  | 'appearance'
-  | 'privacy'
-  | 'shortcuts'
-  | 'diagnostics'
+  'account' | 'github' | 'git' | 'appearance' | 'privacy' | 'shortcuts' | 'updates' | 'diagnostics'
 
 const SECTIONS: { id: Section; label: string }[] = [
   { id: 'account', label: 'Account' },
   { id: 'github', label: 'GitHub' },
   { id: 'git', label: 'Git' },
   { id: 'appearance', label: 'Appearance' },
+  { id: 'updates', label: 'Updates' },
   { id: 'shortcuts', label: 'Shortcuts' },
   { id: 'privacy', label: 'Privacy' },
   { id: 'diagnostics', label: 'Diagnostics' },
@@ -117,6 +120,34 @@ export function SettingsDialog({
   const [editorDraft, setEditorDraft] = React.useState('')
   const [mergeToolDraft, setMergeToolDraft] = React.useState('')
   const [message, setMessage] = React.useState<string | null>(null)
+  const [updates, setUpdates] = React.useState<UpdateStatus | null>(null)
+
+  /**
+   * Every update step goes through main and the answer main gives back is what
+   * is shown. The window never decides that a download finished or that an
+   * install may run.
+   */
+  const runUpdate = React.useCallback(
+    async (step: () => Promise<UpdateStatus | undefined> | undefined, busyWhile: boolean) => {
+      if (!step) return
+      if (busyWhile) setBusy(true)
+      try {
+        const next = await step()
+        if (next) setUpdates(next)
+      } catch (value) {
+        onError(value instanceof Error ? value.message : String(value))
+      } finally {
+        if (busyWhile) setBusy(false)
+      }
+    },
+    [onError],
+  )
+
+  React.useEffect(() => {
+    if (!open || section !== 'updates') return
+    if (desktop?.updateStatus) void runUpdate(() => desktop.updateStatus?.(), false)
+    return desktop?.onUpdateStatus?.((status) => setUpdates(status))
+  }, [desktop, open, runUpdate, section])
 
   const refresh = React.useCallback(async () => {
     if (!desktop?.settings) return
@@ -604,6 +635,73 @@ export function SettingsDialog({
                   />
                 </Field>
               </WorkflowSection>
+            ) : null}
+
+            {section === 'updates' && settings ? (
+              <>
+                <WorkflowSection label="Updates">
+                  <Field
+                    id="settings-update-channel"
+                    label="Channel"
+                    description="Stable follows signed releases for everyone. Beta follows the pre-release channel, which moves faster and changes more often."
+                    error={problemFor('updates.channel')}
+                  >
+                    <SegmentedControl
+                      label="Channel"
+                      value={settings.updates.channel}
+                      disabled={busy || locked('updates.channel')}
+                      options={UPDATE_CHANNELS.map((value) => ({
+                        value,
+                        label: value === 'stable' ? 'Stable' : 'Beta',
+                      }))}
+                      onValueChange={(value) =>
+                        void save(
+                          { updates: { channel: value as UpdateChannel } },
+                          `Following the ${value} channel.`,
+                        )
+                      }
+                    />
+                  </Field>
+                  <UpdateFacts status={updates} channel={settings.updates.channel} />
+                </WorkflowSection>
+                <WorkflowSection label="This build">
+                  <UpdateNotice status={updates} />
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Button
+                      variant="secondary"
+                      disabled={
+                        busy || !desktop?.checkForUpdates || updates?.phase === 'not-configured'
+                      }
+                      onClick={() => void runUpdate(() => desktop?.checkForUpdates?.(), true)}
+                    >
+                      Check for updates
+                    </Button>
+                    <Button
+                      disabled={busy || updates?.phase !== 'available' || !desktop?.downloadUpdate}
+                      onClick={() => void runUpdate(() => desktop?.downloadUpdate?.(), false)}
+                    >
+                      {updates?.phase === 'downloading'
+                        ? `Downloading ${updates.progress ?? 0}%`
+                        : 'Download update'}
+                    </Button>
+                    <Button
+                      disabled={busy || !updates?.readyToInstall || !desktop?.installUpdate}
+                      onClick={() => void runUpdate(() => desktop?.installUpdate?.(), true)}
+                    >
+                      Install and restart
+                    </Button>
+                    {(updates?.phase === 'checking' || updates?.phase === 'downloading') &&
+                    desktop?.cancelUpdate ? (
+                      <Button
+                        variant="secondary"
+                        onClick={() => void runUpdate(() => desktop?.cancelUpdate?.(), false)}
+                      >
+                        Cancel
+                      </Button>
+                    ) : null}
+                  </div>
+                </WorkflowSection>
+              </>
             ) : null}
 
             {section === 'shortcuts' ? (
