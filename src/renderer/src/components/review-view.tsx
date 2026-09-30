@@ -111,6 +111,13 @@ export function ReviewView({
   const filesGate = React.useRef(createRequestGate())
   const commitsGate = React.useRef(createRequestGate())
   const threadsGate = React.useRef(createRequestGate())
+  /**
+   * How many times a draft has been edited in this view. The journal read is
+   * asynchronous and this is not, so a read that began before an edit is
+   * answering for an older state of the drafts; the counter is how that read
+   * learns it is no longer the newest thing to have happened to them.
+   */
+  const draftEdits = React.useRef(0)
 
   // Progressive loading: the headline answers first, and only then are the files
   // and commits requested. Each stage carries its own request id so leaving for
@@ -201,18 +208,30 @@ export function ReviewView({
   // Pending comments are the reviewer's unsent words. They are read from the
   // repository's own journal, so leaving for another workspace and coming back
   // finds them exactly as they were left.
+  //
+  // The read is asynchronous and the diff it waits for is not: lines can be
+  // selected and commented on as soon as the files are on screen, which can be
+  // before the journal has answered. That answer describes the drafts as they
+  // were when the read began, so applying it afterwards would replace words
+  // the reviewer has just typed with the older snapshot, and put that snapshot
+  // back on disk at the next edit. An edit therefore outranks any read already
+  // in flight: a read that began before an edit is dropped rather than allowed
+  // to overwrite it.
   React.useEffect(() => {
     if (!headline || desktop?.reviewDrafts === undefined) return
     let live = true
+    const editsAtReadStart = draftEdits.current
     setDraftRecord(null)
     setResolutions([])
     void desktop
       .reviewDrafts?.(headline.pullRequest.number)
       .then((record) => {
-        if (live) setDraftRecord(record)
+        if (!live || draftEdits.current !== editsAtReadStart) return
+        setDraftRecord(record)
       })
       .catch(() => {
-        if (live) setDraftRecord(null)
+        if (!live || draftEdits.current !== editsAtReadStart) return
+        setDraftRecord(null)
       })
     return () => {
       live = false
@@ -271,6 +290,11 @@ export function ReviewView({
         nextDraftId,
         updatedAt: new Date().toISOString(),
       }
+      // The record is installed optimistically, so what the reviewer sees is
+      // what they just typed rather than the last thing read back from disk.
+      // That makes this the newest fact about the drafts, which is what an
+      // in-flight journal read is measured against.
+      draftEdits.current += 1
       setDraftRecord(record)
       void desktop
         ?.reviewSetDrafts?.(record)

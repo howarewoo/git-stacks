@@ -108,13 +108,6 @@ export interface ReviewDraftRecord {
  */
 export const REVIEW_DRAFTS_MAX = 200
 
-/**
- * Ceiling on remembered unresolved writes. Each one blocks a button, so the
- * list is small by nature; the cap only stops the file growing without bound if
- * a connection fails repeatedly, and the newest are the ones kept.
- */
-export const REVIEW_UNCERTAIN_MAX = 50
-
 /** What one draft resolves to against a particular head, for display and for submit. */
 export interface ReviewDraftResolution {
   id: string
@@ -382,8 +375,7 @@ export interface ReviewUncertainWrite {
  * else's review, so `unknown` holds and is never a licence to adopt.
  */
 export type ReviewBoundary =
-  | { kind: 'complete'; latestReviewId: string | null }
-  | { kind: 'unknown' }
+  { kind: 'complete'; latestReviewId: string | null } | { kind: 'unknown' }
 
 /** A boundary that was never established, for the writes that establish none. */
 export const UNKNOWN_REVIEW_BOUNDARY: ReviewBoundary = { kind: 'unknown' }

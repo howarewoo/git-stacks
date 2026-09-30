@@ -655,7 +655,17 @@ shift extends the range to a multi-line comment, which becomes GitHub's
 Drafts are local. They are journalled to the repository's own storage under the
 app's data directory — GitHub has no "pending comments" resource to hold them —
 and are re-read when the workspace opens, so navigating away to another pull
-request and back does not lose them. A draft record carries the whole comparison
+request and back does not lose them. That file is shared by every window and
+every worktree of the repository, so each update of it is taken under a lock
+another process can see: two windows saving different pull requests at once
+cannot read the same journal and publish over each other, and a window killed
+mid-write leaves a lock that is recognised as stale and broken rather than one
+that blocks the journal for good. If the lock cannot be taken, the save is
+refused and reported instead of being written out of order. Records are never
+dropped to keep the file small — unsent words and unresolved-write guards both
+leave it only when they have been sent, cleared, or settled.
+
+A draft record carries the whole comparison
 it was written at, plus the repository and the signed-in account it belongs to:
 the journal is shared by every worktree of a repository, so the record rather
 than the file is the boundary, and drafts written for another repository or by
@@ -696,6 +706,14 @@ and hands the same words back to a live button. The attempt is journalled
 covered rather than being the one case with no record. It records the whole
 payload: every comment's body and anchor, the decision, and the newest review
 the pull request already held when the attempt began.
+
+An unresolved attempt is never dropped to keep the journal short, however many
+accumulate. It is the only proof that a request went out: if it did land and the
+record is gone, reopening that draft and submitting again posts a second review
+instead of reconciling the first. A record leaves only once GitHub's own state
+settles it, or once a later submission's payload no longer carries its comments.
+A submission that cannot record its attempt is refused rather than sent without
+one.
 
 The journal is not a dead end. Pressing Submit asks GitHub what it actually
 holds, and every part of the attempt is checked — the review is newer than the

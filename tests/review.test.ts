@@ -7,10 +7,13 @@
  * the rail offers at the ends of a stack, and when a viewed mark stops counting.
  */
 import assert from 'node:assert/strict'
-import { execFileSync } from 'node:child_process'
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { randomUUID } from 'node:crypto'
+import { execFile, execFileSync } from 'node:child_process'
+import { existsSync, writeFileSync } from 'node:fs'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import test from 'node:test'
 import {
   GitHubTransportError,
@@ -32,13 +35,21 @@ import {
   setThreadResolved,
   submitReview,
 } from '../src/main/review-threads'
-import { readReviewDrafts, writeReviewDrafts } from '../src/main/review-drafts'
+import {
+  readReviewDrafts,
+  readUncertainWrites,
+  recordUncertainWrite,
+  writeReviewDrafts,
+  retireSettledWrites,
+} from '../src/main/review-drafts'
 import {
   reviewDraftsAt,
   reviewThreadState,
   type ReviewThread,
   type ReviewDraft,
   type ReviewDraftRecord,
+  type ReviewUncertainWrite,
+  type UncertainComment,
 } from '../src/shared/review-threads'
 import {
   parseReviewFileEntry,
@@ -156,7 +167,6 @@ function fileSet(entry: ReviewFile): ReviewFileSet {
 
 /** The repository and account the draft journal is keyed by, as the workspace sees them. */
 const JOURNAL_OWNER = { repo: 'acme/widgets', viewer: 'ada' }
-
 
 test('a replaced line is addressed on the side it belongs to, with both numbers', () => {
   const [hunk] = hunks(['@@ -4,3 +4,3 @@ export function f() {', ' a', '-b', '+c', ' d'].join('\n'))
@@ -585,7 +595,11 @@ function scriptedTransport(
 ): { transport: GitHubTransport; calls: string[] } {
   const calls: string[] = []
   let identityRead = 0
-  const reply = <T>(data: T): GitHubRestResponse<T> => ({ status: 200, rateLimit: rateLimit(), data })
+  const reply = <T>(data: T): GitHubRestResponse<T> => ({
+    status: 200,
+    rateLimit: rateLimit(),
+    data,
+  })
   return {
     calls,
     transport: {
@@ -1045,7 +1059,10 @@ const STATE_FOR_EVENT: Record<string, string> = {
  * for. GitHub returns these oldest first, and a page shorter than `per_page` is
  * the last one — which is what tells a paged read it has seen everything.
  */
-function restPage(path: string, rows: Array<Record<string, unknown>>): Array<Record<string, unknown>> {
+function restPage(
+  path: string,
+  rows: Array<Record<string, unknown>>,
+): Array<Record<string, unknown>> {
   const query = new URLSearchParams(path.split('?')[1] ?? '')
   const perPage = Number(query.get('per_page') ?? '30')
   const page = Number(query.get('page') ?? '1')
@@ -1053,7 +1070,6 @@ function restPage(path: string, rows: Array<Record<string, unknown>>): Array<Rec
   const index = Number.isFinite(page) && page > 0 ? page : 1
   return rows.slice((index - 1) * size, index * size)
 }
-
 
 interface DoubleOptions {
   head?: string
@@ -1115,7 +1131,7 @@ interface DoubleOptions {
    */
   reviewsAfterApply?: (applied: HeldReview) => Array<Omit<HeldReview, 'id'>>
   /**
- * Whether a submitted review is stored at all. The default is yes, because a
+   * Whether a submitted review is stored at all. The default is yes, because a
    * request that left usually was applied; setting it to false models the one
    * case a lost response cannot rule out — the request arrived and was dropped.
    */
@@ -1175,8 +1191,14 @@ const GRAPHQL_SCHEMA: Record<
   { fields: readonly string[]; returns?: Record<string, string> }
 > = {
   Query: {
-    fields: ['viewer', 'repository', 'node', 'addPullRequestReviewThreadReply',
-      'resolveReviewThread', 'unresolveReviewThread'],
+    fields: [
+      'viewer',
+      'repository',
+      'node',
+      'addPullRequestReviewThreadReply',
+      'resolveReviewThread',
+      'unresolveReviewThread',
+    ],
     // The type a field's own selection is made on. This is what the schema says
     // the field returns, and it is the whole point: `repository` returns a
     // Repository, so a field named on that Repository is checked against
@@ -1217,8 +1239,17 @@ const GRAPHQL_SCHEMA: Record<
   // document GitHub refuses to execute at all — which is how a query that can
   // never succeed past a first submission ends up looking tested.
   PullRequestReviewComment: {
-    fields: ['id', 'url', 'body', 'viewerDidAuthor', 'createdAt', 'path', 'line',
-      'startLine', 'author'],
+    fields: [
+      'id',
+      'url',
+      'body',
+      'viewerDidAuthor',
+      'createdAt',
+      'path',
+      'line',
+      'startLine',
+      'author',
+    ],
     returns: { author: 'User' },
   },
   PageInfo: { fields: ['hasNextPage', 'endCursor', 'hasPreviousPage', 'startCursor'] },
@@ -1548,7 +1579,11 @@ function threadDouble(options: DoubleOptions = {}): {
               }
             }
           }
-          return { status: 200, rateLimit: rateLimit(), data: restPage(path, reviews) } as GitHubRestResponse<T>
+          return {
+            status: 200,
+            rateLimit: rateLimit(),
+            data: restPage(path, reviews),
+          } as GitHubRestResponse<T>
         }
         if (path.includes('/pulls/7/comments')) {
           return {
@@ -1558,12 +1593,20 @@ function threadDouble(options: DoubleOptions = {}): {
           } as GitHubRestResponse<T>
         }
         if (path.includes('/files')) {
-          return { status: 200, rateLimit: rateLimit(), data: options.files ?? [] } as GitHubRestResponse<T>
+          return {
+            status: 200,
+            rateLimit: rateLimit(),
+            data: options.files ?? [],
+          } as GitHubRestResponse<T>
         }
         if (path.endsWith('/pulls/7')) {
           return { status: 200, rateLimit: rateLimit(), data: identity } as GitHubRestResponse<T>
         }
-        return { status: 404, rateLimit: rateLimit(), data: { message: 'Not Found' } } as GitHubRestResponse<T>
+        return {
+          status: 404,
+          rateLimit: rateLimit(),
+          data: { message: 'Not Found' },
+        } as GitHubRestResponse<T>
       },
       async paginate<T>(request: GitHubRestRequest): Promise<T[]> {
         return ((request.path ?? '').includes('/files') ? (options.files ?? []) : []) as T[]
@@ -1621,7 +1664,9 @@ function threadDouble(options: DoubleOptions = {}): {
             text: '',
           })
           return {
-            addPullRequestReviewThreadReply: { comment: { id: 'IC_1', url: 'https://github.com/c/1' } },
+            addPullRequestReviewThreadReply: {
+              comment: { id: 'IC_1', url: 'https://github.com/c/1' },
+            },
           } as T
         }
         if (operation === 'resolveReviewThread' || operation === 'unresolveReviewThread') {
@@ -1634,7 +1679,9 @@ function threadDouble(options: DoubleOptions = {}): {
             text: '',
           })
           return {
-            [operation]: { thread: { id: threadId, isResolved: operation === 'resolveReviewThread' } },
+            [operation]: {
+              thread: { id: threadId, isResolved: operation === 'resolveReviewThread' },
+            },
           } as T
         }
         if (operation === 'threadComments') {
@@ -1781,7 +1828,11 @@ test('several pending comments are written as one review, not one request each',
     // review must be pinned to.
     comparison: comparison(),
     drafts: [
-      draft({ id: 'd1', ref: refFor(hunk, hunk.lines.indexOf(added[0])), body: 'this needs a name' }),
+      draft({
+        id: 'd1',
+        ref: refFor(hunk, hunk.lines.indexOf(added[0])),
+        body: 'this needs a name',
+      }),
       draft({ id: 'd2', ref: refFor(hunk, hunk.lines.indexOf(added[1])), body: 'so does this' }),
     ],
   })
@@ -1833,7 +1884,10 @@ test('a comment on a removed line is sent on the left, where the line it names i
   setGitHubTransport(transport)
   t.after(() => setGitHubTransport(null))
   const hunk = textHunk(entry, 0)
-  const removed = refFor(hunk, hunk.lines.findIndex((line) => line.side === 'base'))
+  const removed = refFor(
+    hunk,
+    hunk.lines.findIndex((line) => line.side === 'base'),
+  )
 
   await submitReview(workspace.repo, 7, {
     event: 'COMMENT',
@@ -1855,10 +1909,14 @@ test('a draft whose line a force-push removed submits nothing at all', async (t)
     diff: { kind: 'text', hunks: hunks('@@ -5,3 +5,3 @@\n keep\n-warn\n+other\n tail') },
   })
   const hunk = textHunk(written, 0)
-  const removed = refFor(hunk, hunk.lines.findIndex((line) => line.side === 'base'))
+  const removed = refFor(
+    hunk,
+    hunk.lines.findIndex((line) => line.side === 'base'),
+  )
   // The same comment still resolves against the head it was written for.
   assert.equal(
-    resolveReviewDrafts(fileSet(written), [draft({ id: 'd1', ref: removed, body: 'why' })])[0].match,
+    resolveReviewDrafts(fileSet(written), [draft({ id: 'd1', ref: removed, body: 'why' })])[0]
+      .match,
     'exact',
   )
   // A force-push rewrote the line, so there is nothing left to anchor to.
@@ -1901,13 +1959,17 @@ test('a draft whose line merely moved is posted at the line it now occupies', as
     diff: { kind: 'text', hunks: hunks('@@ -1,3 +1,3 @@\n keep\n-old\n+new\n tail') },
   })
   const hunk = textHunk(written, 0)
-  const original = refFor(hunk, hunk.lines.findIndex((line) => line.side === 'head'))
+  const original = refFor(
+    hunk,
+    hunk.lines.findIndex((line) => line.side === 'head'),
+  )
   // A line inserted above shifts the commented line down by one without
   // changing it, which is the case re-anchoring exists for.
   const shiftedPatch = '@@ -1,3 +1,4 @@\n+inserted\n keep\n-old\n+new\n tail'
-  const resolutions = resolveReviewDrafts(fileSet(file({ diff: { kind: 'text', hunks: hunks(shiftedPatch) } })), [
-    draft({ id: 'd1', ref: original, body: 'why warn here' }),
-  ])
+  const resolutions = resolveReviewDrafts(
+    fileSet(file({ diff: { kind: 'text', hunks: hunks(shiftedPatch) } })),
+    [draft({ id: 'd1', ref: original, body: 'why warn here' })],
+  )
   assert.equal(resolutions[0].match, 'moved')
   assert.notEqual(resolutions[0].line, original.line, 'the fixture must actually move the line')
 
@@ -1933,8 +1995,14 @@ test('a range whose ends land on different sides is refused, and nothing is post
   const patch = '@@ -5,3 +5,3 @@\n keep\n-warn\n+other\n tail'
   const entry = file({ diff: { kind: 'text', hunks: hunks(patch) } })
   const hunk = textHunk(entry, 0)
-  const baseLine = refFor(hunk, hunk.lines.findIndex((line) => line.side === 'base'))
-  const headLine = refFor(hunk, hunk.lines.findIndex((line) => line.side === 'head'))
+  const baseLine = refFor(
+    hunk,
+    hunk.lines.findIndex((line) => line.side === 'base'),
+  )
+  const headLine = refFor(
+    hunk,
+    hunk.lines.findIndex((line) => line.side === 'head'),
+  )
   const { transport, writes } = threadDouble({ files: [apiFile({ patch })] })
   setGitHubTransport(transport)
   t.after(() => setGitHubTransport(null))
@@ -2048,7 +2116,14 @@ test('a thread read returns the line, the range, and whether it is resolved or o
   const { transport } = threadDouble({
     threads: [
       threadNode({ id: 'PRRT_1', line: 12, comments: [] }),
-      threadNode({ id: 'PRRT_2', line: 30, startLine: 28, startSide: 'RIGHT', resolved: true, comments: [] }),
+      threadNode({
+        id: 'PRRT_2',
+        line: 30,
+        startLine: 28,
+        startSide: 'RIGHT',
+        resolved: true,
+        comments: [],
+      }),
       threadNode({ id: 'PRRT_3', line: 44, outdated: true, comments: [] }),
       threadNode({ id: 'PRRT_4', line: 51, side: 'LEFT', comments: [] }),
     ],
@@ -2132,7 +2207,10 @@ test("a thread's later comment pages are read, and a short one is marked short",
         },
       ],
       PRRT_2: [
-        { after: commentCursor('PRRT_2', 1), nodes: [{ id: 'c2', author: 'grace', body: 'one more' }] },
+        {
+          after: commentCursor('PRRT_2', 1),
+          nodes: [{ id: 'c2', author: 'grace', body: 'one more' }],
+        },
       ],
     },
   })
@@ -2210,7 +2288,11 @@ test('a write whose outcome GitHub never confirms is not replayed into a duplica
         })
       }
       if (path.endsWith('/files')) {
-        return { status: 200, rateLimit: rateLimit(), data: [apiFile({ patch })] } as GitHubRestResponse<T>
+        return {
+          status: 200,
+          rateLimit: rateLimit(),
+          data: [apiFile({ patch })],
+        } as GitHubRestResponse<T>
       }
       return {
         status: 200,
@@ -2353,9 +2435,7 @@ test('an older review of the same commit is not adopted for a later attempt', as
         body: '',
         commit_id: comparison().headOid,
         user: { login: 'ada' },
-        comments: [
-          { path: 'src/app.ts', line: 1, side: 'RIGHT', body: 'needs a name' },
-        ],
+        comments: [{ path: 'src/app.ts', line: 1, side: 'RIGHT', body: 'needs a name' }],
       },
     ],
     // GitHub holds the earlier review and nothing else: this attempt's own
@@ -2923,7 +3003,11 @@ test('a settled comment is not posted again after the view drops it late', async
   // is still in the payload, and the recovery settles it from what GitHub holds
   // — reporting the comment as delivered so the view can drop it.
   const recovered = await submitReview(workspace.repo, 7, submission)
-  assert.deepEqual(recovered.delivered, ['d1'], 'the delivered comment is named so the view drops it')
+  assert.deepEqual(
+    recovered.delivered,
+    ['d1'],
+    'the delivered comment is named so the view drops it',
+  )
   assert.equal(writes.length, 1, 'nothing was posted again')
 
   // The reviewer then edits the review's summary on the web, which is
@@ -3064,7 +3148,11 @@ test('a settled review for an older head is not a delivery on the new one', asyn
   const again = await submitReview(workspace.repo, 7, on(second))
   assert.equal(writes.length, 2, 'a new revision gets its own review')
   assert.deepEqual(again.delivered, ['d1'], 'and the draft is posted, not treated as already sent')
-  assert.equal(again.state, 'APPROVED', 'the decision asked for on the new head is the one recorded')
+  assert.equal(
+    again.state,
+    'APPROVED',
+    'the decision asked for on the new head is the one recorded',
+  )
 })
 
 test('a review that never landed on an older head does not hold the new one', async (t) => {
@@ -3106,7 +3194,11 @@ test('a review that never landed on an older head does not hold the new one', as
   setHead(moved)
   const fresh = await submitReview(workspace.repo, 7, on(second))
   assert.equal(writes.length, 2, 'the new revision is not held by an unanswered old one')
-  assert.deepEqual(fresh.delivered, ['d1'], 'and its comment is sent, not reported as already there')
+  assert.deepEqual(
+    fresh.delivered,
+    ['d1'],
+    'and its comment is sent, not reported as already there',
+  )
 })
 
 test('more reviews than the walk reads make the boundary null, not low', async (t) => {
@@ -3611,7 +3703,14 @@ test('an uncertain record of another repository does not block this pull request
   })
   execFileSync(
     'git',
-    ['-C', linked, 'config', '--worktree', 'remote.origin.url', 'https://github.com/other/place.git'],
+    [
+      '-C',
+      linked,
+      'config',
+      '--worktree',
+      'remote.origin.url',
+      'https://github.com/other/place.git',
+    ],
     { encoding: 'utf8' },
   )
 
@@ -3825,7 +3924,12 @@ test('pending comments survive leaving the workspace and are bound to the head t
 
   await writeReviewDrafts(workspace.repo, record)
   // A second read stands in for leaving for another workspace and coming back.
-  const reopened = await readReviewDrafts(workspace.repo, JOURNAL_OWNER.repo, JOURNAL_OWNER.viewer, 7)
+  const reopened = await readReviewDrafts(
+    workspace.repo,
+    JOURNAL_OWNER.repo,
+    JOURNAL_OWNER.viewer,
+    7,
+  )
 
   assert.ok(reopened, 'the drafts must be found again')
   assert.equal(reopened.number, 7)
@@ -3842,7 +3946,9 @@ test('pending comments survive leaving the workspace and are bound to the head t
 test("one pull request's drafts are not another's", async (t) => {
   const workspace = await reviewWorkspace()
   t.after(workspace.dispose)
-  const entry = file({ diff: { kind: 'text', hunks: hunks('@@ -1,2 +1,3 @@\n keep\n+added\n tail') } })
+  const entry = file({
+    diff: { kind: 'text', hunks: hunks('@@ -1,2 +1,3 @@\n keep\n+added\n tail') },
+  })
   const hunk = textHunk(entry, 0)
   const added = hunk.lines.findIndex((line) => line.side === 'head' && line.newLine !== null)
   const line = refFor(hunk, added)
@@ -3867,11 +3973,13 @@ test("one pull request's drafts are not another's", async (t) => {
   })
 
   assert.equal(
-    (await readReviewDrafts(workspace.repo, JOURNAL_OWNER.repo, JOURNAL_OWNER.viewer, 7))?.drafts[0].body,
+    (await readReviewDrafts(workspace.repo, JOURNAL_OWNER.repo, JOURNAL_OWNER.viewer, 7))?.drafts[0]
+      .body,
     'on seven',
   )
   assert.equal(
-    (await readReviewDrafts(workspace.repo, JOURNAL_OWNER.repo, JOURNAL_OWNER.viewer, 8))?.drafts[0].body,
+    (await readReviewDrafts(workspace.repo, JOURNAL_OWNER.repo, JOURNAL_OWNER.viewer, 8))?.drafts[0]
+      .body,
     'on eight',
   )
   assert.equal(
@@ -3883,7 +3991,9 @@ test("one pull request's drafts are not another's", async (t) => {
 test('drafts are kept apart by repository and by account, not by pull request number', async (t) => {
   const workspace = await reviewWorkspace()
   t.after(workspace.dispose)
-  const entry = file({ diff: { kind: 'text', hunks: hunks('@@ -1,2 +1,3 @@\n keep\n+added\n tail') } })
+  const entry = file({
+    diff: { kind: 'text', hunks: hunks('@@ -1,2 +1,3 @@\n keep\n+added\n tail') },
+  })
   const hunk = textHunk(entry, 0)
   const added = hunk.lines.findIndex((line) => line.side === 'head' && line.newLine !== null)
   const line = refFor(hunk, added)
@@ -3913,7 +4023,8 @@ test('drafts are kept apart by repository and by account, not by pull request nu
     'another account must not be offered this reviewer pending words',
   )
   assert.equal(
-    (await readReviewDrafts(workspace.repo, JOURNAL_OWNER.repo, JOURNAL_OWNER.viewer, 7))?.drafts[0].body,
+    (await readReviewDrafts(workspace.repo, JOURNAL_OWNER.repo, JOURNAL_OWNER.viewer, 7))?.drafts[0]
+      .body,
     'mine',
     'the account that wrote them still finds them',
   )
@@ -3922,7 +4033,9 @@ test('drafts are kept apart by repository and by account, not by pull request nu
 test('writing an empty list is what retires a sent review, so it is not offered again', async (t) => {
   const workspace = await reviewWorkspace()
   t.after(workspace.dispose)
-  const entry = file({ diff: { kind: 'text', hunks: hunks('@@ -1,2 +1,3 @@\n keep\n+added\n tail') } })
+  const entry = file({
+    diff: { kind: 'text', hunks: hunks('@@ -1,2 +1,3 @@\n keep\n+added\n tail') },
+  })
   const hunk = textHunk(entry, 0)
   const added = hunk.lines.findIndex((line) => line.side === 'head' && line.newLine !== null)
   await writeReviewDrafts(workspace.repo, {
@@ -3957,7 +4070,9 @@ test('writing an empty list is what retires a sent review, so it is not offered 
 })
 
 test('a draft is not offered again once the base branch moves under a fixed head', () => {
-  const entry = file({ diff: { kind: 'text', hunks: hunks('@@ -1,2 +1,3 @@\n keep\n+added\n tail') } })
+  const entry = file({
+    diff: { kind: 'text', hunks: hunks('@@ -1,2 +1,3 @@\n keep\n+added\n tail') },
+  })
   const hunk = textHunk(entry, 0)
   const added = hunk.lines.findIndex((line) => line.side === 'head' && line.newLine !== null)
   const written = comparison()
@@ -4016,4 +4131,335 @@ test('a thread that is both resolved and outdated keeps both facts, because a pu
   assert.equal(reviewThreadState({ ...base, resolved: false, outdated: true }), 'outdated')
   assert.equal(reviewThreadState({ ...base, resolved: true, outdated: false }), 'resolved')
   assert.equal(reviewThreadState({ ...base, resolved: false, outdated: false }), 'open')
+})
+
+/** A draft anchor on one line of the example file, for journal-only assertions. */
+function draftRef(line: number): ReviewLineRef {
+  return {
+    path: 'src/app.ts',
+    line,
+    side: 'head',
+    hunkId: 'h1',
+    anchor: 'anchor',
+    context: 'context',
+  }
+}
+
+// The draft journal lives in the Git common directory, so two windows of the app,
+// two worktrees, or two machines sharing one repository all read and write one
+// file. These tests use real child processes rather than concurrent promises
+// here, because the guarantee being pinned cannot be produced inside a single
+// process at all: an in-process queue would serialize two callers in one window
+// and pass, while the second window the bug is about is a separate OS process
+// that never sees the queue.
+//
+// LOCK_HOLDER_SCRIPT is a child that holds the journal's lock file the way a real
+// writer does — created with its own live pid, released on request — so a write in
+// another process has a genuine cross-process holder to contend with.
+const LOCK_HOLDER_SCRIPT = `
+import { rmSync, writeFileSync } from 'node:fs'
+const journal = process.argv.at(-1)
+writeFileSync(journal + '.lock', JSON.stringify({ pid: process.pid, at: new Date().toISOString() }) + '\\n')
+process.stdout.write('locked\\n')
+await new Promise((resolve) => process.stdin.once('data', resolve))
+rmSync(journal + '.lock', { force: true })
+process.stdout.write('released\\n')
+`
+
+/** A child process that writes one pull request's drafts in its own worktree. */
+const DRAFT_WRITER_SCRIPT = `
+const [modulePath, repo, number, body] = process.argv.slice(2)
+const { writeReviewDrafts } = await import(modulePath)
+await writeReviewDrafts(repo, {
+  number: Number(number),
+  repo: 'acme/widgets',
+  viewer: 'ada',
+  comparison: { headOid: 'a'.repeat(40), baseOid: 'b'.repeat(40), baseRef: 'main' },
+  drafts: [
+    {
+      id: 'd1',
+      ref: { path: 'src/app.ts', line: 3, side: 'head', anchor: 'a', context: 'c' },
+      startRef: null,
+      body,
+      createdAt: '2026-09-23T10:00:00Z',
+    },
+  ],
+  nextDraftId: 2,
+  updatedAt: '2026-09-23T10:00:00Z',
+})
+process.stdout.write('written\\n')
+`
+
+/** Waits for the lock a child process takes to exist, so the wait is not a guess. */
+async function waitForLock(journal: string): Promise<void> {
+  for (let attempt = 0; attempt < 400; attempt += 1) {
+    if (existsSync(`${journal}.lock`)) return
+    await new Promise((resolve) => setTimeout(resolve, 10))
+  }
+  throw new Error('the lock holder never took the journal lock')
+}
+
+/** Writes a child script beside the repository it will be pointed at. */
+function scriptPath(at: string, source: string): string {
+  writeFileSync(at, source)
+  return at
+}
+
+/** Runs `script` as its own OS process, with the repository source on its path. */
+function journalChild(
+  script: string,
+  repo: string,
+  args: readonly string[],
+): { exited: Promise<void>; release: () => void; kill: () => void } {
+  const { promise, resolve, reject } = Promise.withResolvers<void>()
+  const child = execFile(
+    process.execPath,
+    [
+      '--import',
+      fileURLToPath(new URL('../node_modules/tsx/dist/loader.mjs', import.meta.url)),
+      scriptPath(join(repo, `journal-child-${randomUUID()}.mjs`), script),
+      fileURLToPath(new URL('../src/main/review-drafts.ts', import.meta.url)),
+      ...args,
+    ],
+    { encoding: 'utf8' },
+    (error) => (error ? reject(error) : resolve()),
+  )
+  return {
+    exited: promise,
+    // Ending the stream rather than only writing to it: a child's stdin held
+    // open by the parent is a live socket, and it would keep this process alive
+    // long after the child itself has gone.
+    release: () => {
+      child.stdin?.end('release\n')
+    },
+    kill: () => child.kill('SIGKILL'),
+  }
+}
+
+test('a journal update waits for the lock another process holds instead of publishing over it', async (t) => {
+  const workspace = await reviewWorkspace()
+  t.after(workspace.dispose)
+  const journal = join(workspace.repo, '.git', 'git-stacks-review-drafts.json')
+  await writeReviewDrafts(workspace.repo, {
+    number: 7,
+    repo: JOURNAL_OWNER.repo,
+    viewer: JOURNAL_OWNER.viewer,
+    comparison: comparison(),
+    drafts: [draft({ id: 'd1', ref: draftRef(3), body: 'before' })],
+    nextDraftId: 2,
+    updatedAt: '2026-09-23T10:00:00Z',
+  })
+
+  const holder = journalChild(LOCK_HOLDER_SCRIPT, workspace.repo, [journal])
+  t.after(() => holder.kill())
+  await waitForLock(journal)
+  const pending = writeReviewDrafts(workspace.repo, {
+    number: 8,
+    repo: JOURNAL_OWNER.repo,
+    viewer: JOURNAL_OWNER.viewer,
+    comparison: comparison(),
+    drafts: [draft({ id: 'd1', ref: draftRef(4), body: 'after' })],
+    nextDraftId: 2,
+    updatedAt: '2026-09-23T10:05:00Z',
+  })
+
+  // The holder is a live process, so its lock is not stale and must not be
+  // broken. An unlocked journal would finish this write while the holder still
+  // had it, and the record it published would then be exactly what the holder
+  // overwrites when it releases.
+  await new Promise((resolve) => setTimeout(resolve, 400))
+  assert.equal(
+    await readReviewDrafts(workspace.repo, JOURNAL_OWNER.repo, JOURNAL_OWNER.viewer, 8),
+    null,
+    'a second process does not write the journal while another process holds it',
+  )
+  holder.release()
+
+  await pending
+  await holder.exited
+  assert.equal(
+    (await readReviewDrafts(workspace.repo, JOURNAL_OWNER.repo, JOURNAL_OWNER.viewer, 7))?.drafts[0]
+      ?.body,
+    'before',
+    'the record already on disk survives the wait',
+  )
+  assert.equal(
+    (await readReviewDrafts(workspace.repo, JOURNAL_OWNER.repo, JOURNAL_OWNER.viewer, 8))?.drafts[0]
+      ?.body,
+    'after',
+    'the blocked write lands once the lock is free',
+  )
+})
+
+test('drafts written from another worktree and another process are both kept', async (t) => {
+  const workspace = await reviewWorkspace()
+  t.after(workspace.dispose)
+  // A linked worktree resolves the same Git common directory, so this is the
+  // second workspace of one repository finding the first one's journal.
+  const linked = join(workspace.repo, '..', 'linked')
+  execFileSync('git', ['-C', workspace.repo, 'worktree', 'add', '-b', 'other', linked], {
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  t.after(() => rm(linked, { recursive: true, force: true }))
+
+  const fromLinked = journalChild(DRAFT_WRITER_SCRIPT, workspace.repo, [linked, '8', 'on eight'])
+  const fromMain = journalChild(DRAFT_WRITER_SCRIPT, workspace.repo, [
+    workspace.repo,
+    '7',
+    'on seven',
+  ])
+  t.after(() => {
+    fromLinked.kill()
+    fromMain.kill()
+  })
+  await Promise.all([fromLinked.exited, fromMain.exited])
+
+  assert.equal(
+    (await readReviewDrafts(workspace.repo, JOURNAL_OWNER.repo, JOURNAL_OWNER.viewer, 7))?.drafts[0]
+      ?.body,
+    'on seven',
+    'the main worktree keeps its own record',
+  )
+  assert.equal(
+    (await readReviewDrafts(linked, JOURNAL_OWNER.repo, JOURNAL_OWNER.viewer, 8))?.drafts[0]?.body,
+    'on eight',
+    'the other worktree keeps the record it wrote, whichever process published last',
+  )
+})
+
+test('a journal lock left by a killed process is broken, not waited on forever', async (t) => {
+  const workspace = await reviewWorkspace()
+  t.after(workspace.dispose)
+  const journal = join(workspace.repo, '.git', 'git-stacks-review-drafts.json')
+  await writeReviewDrafts(workspace.repo, {
+    number: 7,
+    repo: JOURNAL_OWNER.repo,
+    viewer: JOURNAL_OWNER.viewer,
+    comparison: comparison(),
+    drafts: [draft({ id: 'd1', ref: draftRef(3), body: 'before' })],
+    nextDraftId: 2,
+    updatedAt: '2026-09-23T10:00:00Z',
+  })
+  // A pid that cannot be running: the lock names a process nobody can signal, so
+  // this is the state a killed writer leaves behind.
+  await writeFile(`${journal}.lock`, `${JSON.stringify({ pid: 0x7fffffff })}\n`)
+
+  await writeReviewDrafts(workspace.repo, {
+    number: 8,
+    repo: JOURNAL_OWNER.repo,
+    viewer: JOURNAL_OWNER.viewer,
+    comparison: comparison(),
+    drafts: [draft({ id: 'd1', ref: draftRef(4), body: 'after' })],
+    nextDraftId: 2,
+    updatedAt: '2026-09-23T10:05:00Z',
+  })
+
+  assert.equal(
+    (await readReviewDrafts(workspace.repo, JOURNAL_OWNER.repo, JOURNAL_OWNER.viewer, 7))?.drafts[0]
+      ?.body,
+    'before',
+    'breaking the stale lock does not discard what was already journalled',
+  )
+  assert.equal(
+    (await readReviewDrafts(workspace.repo, JOURNAL_OWNER.repo, JOURNAL_OWNER.viewer, 8))?.drafts[0]
+      ?.body,
+    'after',
+  )
+  await assert.rejects(() => readFile(`${journal}.lock`, 'utf8'), { code: 'ENOENT' })
+})
+
+/** An unresolved attempt exactly as a lost review response would record it. */
+function uncertain(id: string, number: number): ReviewUncertainWrite {
+  const comments: UncertainComment[] = [
+    {
+      draftId: `${id}#1`,
+      path: 'src/app.ts',
+      side: 'head',
+      line: 3,
+      startLine: null,
+      startSide: null,
+      body: id,
+    },
+  ]
+  return {
+    id,
+    number,
+    kind: 'review',
+    summary: 'two nits',
+    threadId: null,
+    headOid: 'a'.repeat(40),
+    comparison: comparison(),
+    draftIds: [`${id}#1`],
+    event: 'COMMENT',
+    at: `2026-09-23T10:00:${String(number % 60).padStart(2, '0')}Z`,
+    repo: JOURNAL_OWNER.repo,
+    viewer: JOURNAL_OWNER.viewer,
+    comments,
+    boundary: { kind: 'complete', latestReviewId: null },
+    threadCommentIds: [],
+    settled: null,
+  }
+}
+
+test('more than fifty unresolved writes are all retained, because each is the only guard', async (t) => {
+  const workspace = await reviewWorkspace()
+  t.after(workspace.dispose)
+  // Each record is the sole proof that one request went out. If it landed and the
+  // record is gone, reopening that draft and retrying posts a second review
+  // instead of reconciling the first — so nothing may be evicted to keep the
+  // list short, however many accumulate.
+  const total = 60
+  for (let index = 0; index < total; index += 1) {
+    await recordUncertainWrite(workspace.repo, uncertain(`attempt-${index}`, 7))
+  }
+
+  const writes = await readUncertainWrites(
+    workspace.repo,
+    JOURNAL_OWNER.repo,
+    7,
+    JOURNAL_OWNER.viewer,
+  )
+
+  assert.equal(
+    writes.length,
+    total,
+    'every unresolved guard survives, including the ones past any former ceiling',
+  )
+  for (let index = 0; index < total; index += 1) {
+    assert.ok(
+      writes.some((entry) => entry.id === `attempt-${index}`),
+      `the guard for attempt-${index} is still on disk`,
+    )
+  }
+})
+
+test('a settled write is still forgotten when its payload no longer carries it', async (t) => {
+  const workspace = await reviewWorkspace()
+  t.after(workspace.dispose)
+  const write = uncertain('attempt-1', 7)
+  await recordUncertainWrite(workspace.repo, write)
+  await recordUncertainWrite(workspace.repo, {
+    ...write,
+    settled: { reviewId: '99', state: 'COMMENTED', url: null, at: '2026-09-23T10:01:00Z' },
+  })
+  assert.equal(
+    (await readUncertainWrites(workspace.repo, JOURNAL_OWNER.repo, 7, JOURNAL_OWNER.viewer)).length,
+    1,
+    'precondition: the settled attempt is on disk as delivery evidence',
+  )
+
+  await retireSettledWrites(
+    workspace.repo,
+    JOURNAL_OWNER.repo,
+    7,
+    JOURNAL_OWNER.viewer,
+    comparison(),
+    [],
+  )
+
+  assert.deepEqual(
+    await readUncertainWrites(workspace.repo, JOURNAL_OWNER.repo, 7, JOURNAL_OWNER.viewer),
+    [],
+    'an unanswered payload is what retires the evidence, and only that',
+  )
 })

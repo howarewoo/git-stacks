@@ -11,12 +11,183 @@ import type {
   ReviewUncertainWrite,
   UncertainComment,
 } from '../shared/review-threads'
-import {
-  nextReviewDraftNumber,
-  REVIEW_DRAFTS_MAX,
-  REVIEW_UNCERTAIN_MAX,
-} from '../shared/review-threads'
-import { isRecord, runGit, stripTrailingNewline } from './git-core'
+import { nextReviewDraftNumber, REVIEW_DRAFTS_MAX } from '../shared/review-threads'
+import { CommandCancelled, isRecord, runGit, stripTrailingNewline } from './git-core'
+
+/**
+ * Both journals are read, changed, and written back by every process that has
+ * this repository open: two windows of one app, two worktrees, or two copies of
+ * Git Stacks. A read/modify/write over a shared file is therefore a claim on
+ * something no process owns on its own, and the window between the read and the
+ * rename is wide enough for a second process to read the same bytes and publish
+ * its own change over them. The result is not a merge: the last rename wins and
+ * the other's record — unsent words, or a guard against a duplicate review —
+ * is silently gone.
+ *
+ * The claim is a lock file beside the journal, created with `link(2)`, which is
+ * atomic: exactly one process can create the name, and the winner owns it until
+ * it removes it. Creating it with content already written means a process that
+ * finds the lock never reads a half-written owner, so "is the holder still
+ * alive?" is answerable. A lock is released only by removing the exact inode it
+ * created, so a lock another process has since taken over is never taken away
+ * from it.
+ *
+ * A holder that was killed cannot release its own lock, so a lock whose owner
+ * is not running is broken — but only after the same inode has been observed
+ * twice, and only after the file the rename produced is confirmed to be that
+ * inode. A lock created in between is restored rather than taken from whoever
+ * owns it now. A wait that runs out refuses the update instead of writing over
+ * a live one: the honest outcome for a journal that cannot be updated in order
+ * is that nothing was written, which the caller already reports.
+ */
+const JOURNAL_LOCK_POLL_MS = 20
+const JOURNAL_LOCK_WAIT_MS = 15_000
+
+interface JournalLockIdentity {
+  dev: number
+  ino: number
+}
+
+/**
+ * The pid that created a lock file, or null when it cannot be read as one. The
+ * owner is written before the lock name is created, so a lock that exists is a
+ * lock whose holder can be asked whether it is still running.
+ */
+async function lockOwnerPid(lockPath: string): Promise<number | null> {
+  try {
+    const parsed: unknown = JSON.parse(await fs.readFile(lockPath, 'utf8'))
+    if (!isRecord(parsed)) return null
+    const pid = parsed.pid
+    return typeof pid === 'number' && Number.isInteger(pid) && pid > 0 ? pid : null
+  } catch {
+    return null
+  }
+}
+
+function cancelIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) throw new CommandCancelled()
+}
+
+function processIsRunning(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    // A process owned by another user reports EPERM rather than ESRCH: it is
+    // running, this process just may not signal it.
+    return (error as NodeJS.ErrnoException).code === 'EPERM'
+  }
+}
+
+function waitFor(ms: number): Promise<void> {
+  const { promise, resolve } = Promise.withResolvers<void>()
+  setTimeout(resolve, ms)
+  return promise
+}
+
+/**
+ * Takes a lock whose holder is gone, so a killed process cannot wedge the
+ * journal for good. The inode is confirmed twice before the rename and once
+ * after it, because the only safe thing to do with a lock that turns out to
+ * belong to somebody else is to put it back.
+ */
+async function breakStaleJournalLock(lockPath: string): Promise<boolean> {
+  const first = await fs.lstat(lockPath).catch(() => null)
+  if (first === null) return false
+  const owner = await lockOwnerPid(lockPath)
+  if (owner === null || processIsRunning(owner)) return false
+  const second = await fs.lstat(lockPath).catch(() => null)
+  if (second === null || second.dev !== first.dev || second.ino !== first.ino) return false
+
+  const claimPath = `${lockPath}.${randomUUID()}.stale`
+  try {
+    await fs.rename(lockPath, claimPath)
+  } catch {
+    return false
+  }
+  const claimed = await fs.lstat(claimPath).catch(() => null)
+  if (claimed === null || claimed.dev !== second.dev || claimed.ino !== second.ino) {
+    // The lock was replaced between the second look and the rename, so the
+    // claimed file is a live one. Restoring it by link cannot displace whoever
+    // holds the path now, which a rename would.
+    const restored = await fs.link(claimPath, lockPath).then(
+      () => true,
+      () => false,
+    )
+    if (restored) await fs.rm(claimPath, { force: true }).catch(() => {})
+    return false
+  }
+  await fs.rm(claimPath, { force: true }).catch(() => {})
+  return true
+}
+
+async function acquireJournalLock(
+  file: string,
+  signal?: AbortSignal,
+): Promise<JournalLockIdentity> {
+  const lockPath = `${file}.lock`
+  await fs.mkdir(path.dirname(file), { recursive: true })
+  const deadline = Date.now() + JOURNAL_LOCK_WAIT_MS
+  for (;;) {
+    cancelIfAborted(signal)
+    const temporary = `${lockPath}.${randomUUID()}.tmp`
+    const handle = await fs.open(temporary, 'wx', 0o600)
+    let identity: JournalLockIdentity
+    try {
+      const stat = await handle.stat()
+      identity = { dev: stat.dev, ino: stat.ino }
+      await handle.writeFile(
+        `${JSON.stringify({ pid: process.pid, at: new Date().toISOString() })}\n`,
+        'utf8',
+      )
+      await handle.sync()
+    } finally {
+      await handle.close()
+    }
+    try {
+      await fs.link(temporary, lockPath)
+      return identity
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+    } finally {
+      await fs.rm(temporary, { force: true }).catch(() => {})
+    }
+
+    if (await breakStaleJournalLock(lockPath)) continue
+    if (Date.now() >= deadline) {
+      throw new Error(
+        "Another Git Stacks window is writing this repository's review journal. Nothing was changed — close that window, or try again in a moment.",
+      )
+    }
+    cancelIfAborted(signal)
+    await waitFor(JOURNAL_LOCK_POLL_MS)
+  }
+}
+
+async function releaseJournalLock(file: string, identity: JournalLockIdentity): Promise<void> {
+  const lockPath = `${file}.lock`
+  try {
+    const stat = await fs.lstat(lockPath)
+    if (stat.dev !== identity.dev || stat.ino !== identity.ino) return
+    await fs.rm(lockPath, { force: true })
+  } catch {
+    // A lock already gone needs no release.
+  }
+}
+
+/** Runs an update of one journal with no other process able to interleave. */
+async function withJournalLock<T>(
+  file: string,
+  run: () => Promise<T>,
+  signal?: AbortSignal,
+): Promise<T> {
+  const identity = await acquireJournalLock(file, signal)
+  try {
+    return await run()
+  } finally {
+    await releaseJournalLock(file, identity)
+  }
+}
 
 interface DraftJournal {
   version: 1
@@ -222,7 +393,8 @@ function parseDraft(value: unknown): ReviewDraft | null {
   if (!isRecord(value) || typeof value.id !== 'string' || value.id === '') return null
   const ref = parseRef(value.ref)
   if (!ref) return null
-  const startRef = value.startRef === null || value.startRef === undefined ? null : parseRef(value.startRef)
+  const startRef =
+    value.startRef === null || value.startRef === undefined ? null : parseRef(value.startRef)
   if (value.startRef !== null && value.startRef !== undefined && startRef === null) return null
   return {
     id: value.id,
@@ -284,9 +456,9 @@ function sameOwner(record: ReviewDraftRecord, repo: string, viewer: string): boo
   return record.repo === repo && record.viewer === viewer
 }
 
-async function readJournal(repoPath: string, signal?: AbortSignal): Promise<ReviewDraftRecord[]> {
+async function readJournal(file: string): Promise<ReviewDraftRecord[]> {
   try {
-    const raw = await fs.readFile(await draftsPath(repoPath, signal), 'utf8')
+    const raw = await fs.readFile(file, 'utf8')
     const parsed: unknown = JSON.parse(raw)
     if (!isRecord(parsed) || parsed.version !== 1 || !Array.isArray(parsed.records)) return []
     return parsed.records
@@ -297,13 +469,19 @@ async function readJournal(repoPath: string, signal?: AbortSignal): Promise<Revi
   }
 }
 
-async function writeJournal(
-  repoPath: string,
-  records: ReviewDraftRecord[],
-  signal?: AbortSignal,
-): Promise<void> {
-  const file = await draftsPath(repoPath, signal)
-  const journal: DraftJournal = { version: 1, records: records.slice(0, 50) }
+/**
+ * Publishes the whole journal at once, so a reader sees either every record or
+ * none of them and never a half-written one.
+ *
+ * Records are never evicted to make room. A record is one pull request's unsent
+ * words, so dropping one to keep the file small would discard work the
+ * reviewer has not sent and still believes is kept; a record leaves the journal
+ * only when its own owner sends or clears it. Each record is separately bounded
+ * by `REVIEW_DRAFTS_MAX`, so a single pull request cannot grow the file without
+ * limit either.
+ */
+async function writeJournalFile(file: string, records: ReviewDraftRecord[]): Promise<void> {
+  const journal: DraftJournal = { version: 1, records }
   await fs.mkdir(path.dirname(file), { recursive: true })
   const temporary = `${file}.${randomUUID()}.tmp`
   const handle = await fs.open(temporary, 'wx', 0o600)
@@ -335,7 +513,7 @@ export async function readReviewDrafts(
   signal?: AbortSignal,
 ): Promise<ReviewDraftRecord | null> {
   return (
-    (await readJournal(repoPath, signal)).find(
+    (await readJournal(await draftsPath(repoPath, signal))).find(
       (record) => record.number === number && sameOwner(record, repo, viewer),
     ) ?? null
   )
@@ -350,34 +528,49 @@ export async function readReviewDrafts(
  * reviewer just sent are not offered again afterwards. Replacement is scoped
  * the same way lookup is, so saving here never overwrites another repository's
  * or another account's record for the same number.
+ *
+ * The read and the write happen under the journal's cross-process lock, so a
+ * second window or worktree saving its own pull request cannot read the state
+ * before this save and publish over it.
  */
 export async function writeReviewDrafts(
   repoPath: string,
   record: ReviewDraftRecord,
   signal?: AbortSignal,
 ): Promise<ReviewDraftRecord> {
-  const records = await readJournal(repoPath, signal)
-  const kept = records.filter(
-    (entry) =>
-      entry.number !== record.number ||
-      !sameOwner(entry, record.repo, record.viewer),
+  const file = await draftsPath(repoPath, signal)
+  return withJournalLock(
+    file,
+    async () => {
+      const records = await readJournal(file)
+      const kept = records.filter(
+        (entry) => entry.number !== record.number || !sameOwner(entry, record.repo, record.viewer),
+      )
+      // A record is kept while it has drafts, and afterwards for as long as its
+      // counter is still to come. The counter is what keeps a draft's identity
+      // unique: it names the second comment written on a line after the first was
+      // sent, which no amount of reading the words or the anchor can tell from the
+      // first. Dropping the record the moment the drafts are gone would restart the
+      // count and hand the next draft an identity this account has already used, so
+      // the count outlives the drafts. An account that never wrote a draft still
+      // leaves nothing behind.
+      if (record.drafts.length > 0 || record.nextDraftId > 1) {
+        kept.unshift({ ...record, drafts: record.drafts.slice(0, REVIEW_DRAFTS_MAX) })
+      }
+      await writeJournalFile(file, kept)
+      return record
+    },
+    signal,
   )
-  // A record is kept while it has drafts, and afterwards for as long as its
-  // counter is still to come. The counter is what keeps a draft's identity
-  // unique: it names the second comment written on a line after the first was
-  // sent, which no amount of reading the words or the anchor can tell from the
-  // first. Dropping the record the moment the drafts are gone would restart the
-  // count and hand the next draft an identity this account has already used, so
-  // the count outlives the drafts. An account that never wrote a draft still
-  // leaves nothing behind.
-  if (record.drafts.length > 0 || record.nextDraftId > 1) {
-    kept.unshift({ ...record, drafts: record.drafts.slice(0, REVIEW_DRAFTS_MAX) })
-  }
-  await writeJournal(repoPath, kept, signal)
-  return record
 }
 
-/** Drops the drafts of one pull request, used after GitHub has accepted them. */
+/**
+ * Drops the drafts of one pull request, used after GitHub has accepted them.
+ *
+ * Clearing is an update like any other and runs under the same lock, so it
+ * cannot read the journal before another window's save and publish a version
+ * that still holds drafts the reviewer has just sent.
+ */
 export async function clearReviewDrafts(
   repoPath: string,
   repo: string,
@@ -385,12 +578,16 @@ export async function clearReviewDrafts(
   number: number,
   signal?: AbortSignal,
 ): Promise<void> {
-  const records = await readJournal(repoPath, signal)
-  await writeJournal(
-    repoPath,
-    records.filter(
-      (entry) => entry.number !== number || !sameOwner(entry, repo, viewer),
-    ),
+  const file = await draftsPath(repoPath, signal)
+  await withJournalLock(
+    file,
+    async () => {
+      const records = await readJournal(file)
+      await writeJournalFile(
+        file,
+        records.filter((entry) => entry.number !== number || !sameOwner(entry, repo, viewer)),
+      )
+    },
     signal,
   )
 }
@@ -403,6 +600,17 @@ export async function clearReviewDrafts(
  * disabled comes back with the same words still in it. The attempt survives
  * reload, so the next identical write can be refused until somebody has looked
  * at what GitHub holds.
+ *
+ * A guard is never evicted to make room. Dropping the oldest record would drop
+ * the only durable proof that a request went out, so reopening that draft and
+ * retrying it would post a second review instead of reconciling the first —
+ * the exact duplicate this journal exists to prevent. A record leaves only when
+ * GitHub's own state settles it, and a submission that cannot journal its
+ * attempt refuses rather than sending unguarded.
+ *
+ * The read and the write run under the journal's cross-process lock: two
+ * processes attempting writes at once must both end up recorded, because losing
+ * one is indistinguishable from never having guarded it.
  */
 export async function recordUncertainWrite(
   repoPath: string,
@@ -410,19 +618,25 @@ export async function recordUncertainWrite(
   signal?: AbortSignal,
 ): Promise<void> {
   const file = await uncertainPath(repoPath, signal)
-  const existing = await readUncertain(file)
-  // Replacement is scoped by the same complete owner identity as lookup and
-  // clearing. An attempt id is not unique across accounts, so matching on it
-  // alone would let one account's record delete another's guard.
-  const kept = existing.filter(
-    (entry) =>
-      entry.number !== write.number ||
-      entry.kind !== write.kind ||
-      entry.id !== write.id ||
-      entry.repo !== write.repo ||
-      entry.viewer !== write.viewer,
+  await withJournalLock(
+    file,
+    async () => {
+      const existing = await readUncertain(file)
+      // Replacement is scoped by the same complete owner identity as lookup and
+      // clearing. An attempt id is not unique across accounts, so matching on it
+      // alone would let one account's record delete another's guard.
+      const kept = existing.filter(
+        (entry) =>
+          entry.number !== write.number ||
+          entry.kind !== write.kind ||
+          entry.id !== write.id ||
+          entry.repo !== write.repo ||
+          entry.viewer !== write.viewer,
+      )
+      await writeUncertain(file, [write, ...kept], signal)
+    },
+    signal,
   )
-  await writeUncertain(file, [write, ...kept].slice(0, REVIEW_UNCERTAIN_MAX), signal)
 }
 
 /** The unresolved writes of one pull request, oldest first. */
@@ -435,13 +649,17 @@ export async function readUncertainWrites(
 ): Promise<ReviewUncertainWrite[]> {
   const entries = await readUncertain(await uncertainPath(repoPath, signal))
   return entries
-    .filter(
-      (entry) => entry.number === number && entry.viewer === viewer && entry.repo === repo,
-    )
+    .filter((entry) => entry.number === number && entry.viewer === viewer && entry.repo === repo)
     .sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : 0))
 }
 
-/** Forgets one write once GitHub's own record has settled what happened to it. */
+/**
+ * Forgets one write once GitHub's own record has settled what happened to it.
+ *
+ * Like every other update, this reads and writes under the lock, so a settling
+ * clear cannot read the journal before a concurrent attempt records itself and
+ * then publish a version that no longer holds that guard.
+ */
 export async function clearUncertainWrite(
   repoPath: string,
   repo: string,
@@ -451,18 +669,24 @@ export async function clearUncertainWrite(
   signal?: AbortSignal,
 ): Promise<void> {
   const file = await uncertainPath(repoPath, signal)
-  const existing = await readUncertain(file)
-  await writeUncertain(
+  await withJournalLock(
     file,
-    existing.filter(
-      (entry) =>
-        !(
-          entry.number === number &&
-          entry.id === id &&
-          entry.viewer === viewer &&
-          entry.repo === repo
+    async () => {
+      const existing = await readUncertain(file)
+      await writeUncertain(
+        file,
+        existing.filter(
+          (entry) =>
+            !(
+              entry.number === number &&
+              entry.id === id &&
+              entry.viewer === viewer &&
+              entry.repo === repo
+            ),
         ),
-    ),
+        signal,
+      )
+    },
     signal,
   )
 }
@@ -505,21 +729,27 @@ export async function retireSettledWrites(
   signal?: AbortSignal,
 ): Promise<void> {
   const file = await uncertainPath(repoPath, signal)
-  const existing = await readUncertain(file)
-  const kept = existing.filter((entry) => {
-    if (
-      entry.number !== number ||
-      entry.viewer !== viewer ||
-      entry.repo !== repo ||
-      entry.settled === null
-    ) {
-      return true
-    }
-    if (!sameReviewComparison(entry.comparison, comparison)) return false
-    return entry.draftIds.some((theirs) => draftIds.includes(theirs))
-  })
-  if (kept.length === existing.length) return
-  await writeUncertain(file, kept, signal)
+  await withJournalLock(
+    file,
+    async () => {
+      const existing = await readUncertain(file)
+      const kept = existing.filter((entry) => {
+        if (
+          entry.number !== number ||
+          entry.viewer !== viewer ||
+          entry.repo !== repo ||
+          entry.settled === null
+        ) {
+          return true
+        }
+        if (!sameReviewComparison(entry.comparison, comparison)) return false
+        return entry.draftIds.some((theirs) => draftIds.includes(theirs))
+      })
+      if (kept.length === existing.length) return
+      await writeUncertain(file, kept, signal)
+    },
+    signal,
+  )
 }
 
 /** Whether two comments name the same line of the same file, whatever they say. */

@@ -599,6 +599,35 @@ unsent words — so a record belonging to another repository, or to another
 account, stays on disk and is not offered. The owner is stamped by the main
 process from Git and GitHub, never taken from the caller's payload.
 
+Sharing the file makes it a resource more than one process writes, and a
+read/modify/write over a shared file is a claim on something no single process
+owns: two windows of one app, two worktrees, or two machines on one repository
+can read the same bytes and each publish its own change over them. The last
+rename wins, and the loser's record is not merged away — it is gone, silently,
+and it was unsent words. So every update of both journals reads and writes under
+a lock file beside the journal, created with `link(2)` so exactly one process can
+take the name. It is released only by removing the exact inode that process
+created, so a lock another process has since taken is never taken from it, and a
+lock whose named holder is no longer running is broken rather than waited on for
+good. A wait that runs out **refuses** the update and says so: nothing written is
+the honest outcome, and the caller already surfaces it. An in-process queue is
+not a substitute — it would serialize two callers in one window and leave the
+second window exactly as unprotected as before.
+
+Records are not evicted to keep either file small. A draft record is one pull
+request's unsent words and an unresolved write is the sole durable proof that a
+request went out; evicting the oldest to make room discards exactly the evidence
+that stops a retry from posting a second review, which is worse than a file that
+grew. A record leaves only when its owner sends or clears it, when a payload that
+no longer carries its comments retires it, or when GitHub's own state settles it.
+
+The renderer treats its own journal read as the older fact it is. Lines can be
+selected and commented on as soon as the diff renders, which can be before the
+journal read answers, so a draft edit is journalled optimistically and counted;
+a read that began before an edit is dropped rather than allowed to replace words
+just typed with the snapshot it read, which would then be written back on the
+next edit.
+
 The permissions query asks for `viewer` at the query root. GitHub's schema has no
 `Repository.viewer`, and a selection that nests it there fails the whole query
 with `undefinedField` before any review is written — which is exactly the kind of
