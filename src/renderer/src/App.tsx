@@ -407,6 +407,12 @@ function App() {
   const [gitEnvironmentFailure, setGitEnvironmentFailure] =
     React.useState<OnboardingFailure | null>(null)
   const accountRequest = React.useRef(0)
+  /**
+   * The legacy import is offered once. Main decides at write time whether it
+   * still applies, and a declined import leaves the stored bindings alone, so
+   * asking again would only repeat a decision that has already been made.
+   */
+  const legacyImportOffered = React.useRef(false)
   const workflowSequence = React.useRef(0)
 
   const [paletteOpen, setPaletteOpen] = React.useState(false)
@@ -574,7 +580,6 @@ function App() {
     }
   }, [desktop])
 
-
   // Settings are read once at startup so the window opens in the appearance and
   // with the shortcuts the user last chose. Main owns the file.
   React.useEffect(() => {
@@ -597,30 +602,35 @@ function App() {
   }, [desktop])
 
   // The build before this one kept shortcuts in web storage. Those bindings
-  // belong to the user, so they are folded into the settings file once, before
-  // anything saves over them with defaults. The document records that the
-  // import happened, so it cannot run a second time and cannot be re-triggered
-  // by an old copy of the key reappearing.
+  // belong to the user, so they are offered for import once, before anything
+  // saves over them with defaults.
+  //
+  // The import is an intent, not an assignment. Main commits it only if the
+  // settings file still holds the untouched state this offer was decided from,
+  // so a reset or a shortcut edit that lands while this write is in flight is
+  // never overwritten by bindings the user has moved on from. Either way the
+  // stored copy is dropped afterwards: a committed import cannot run again, and
+  // a declined one is a decision, not a failure to retry.
   React.useEffect(() => {
-    if (!desktop?.updateSettings || !settings || settings.migrated.legacyShortcutStorage) return
-    let cancelled = false
+    if (!desktop?.updateSettings || !settings || legacyImportOffered.current) return
+    if (settings.migrated.legacyShortcutStorage) return
     const legacy = readLegacyShortcuts()
     if (!legacy) return
+    legacyImportOffered.current = true
+    let cancelled = false
     desktop
-      .updateSettings({
-        shortcuts: legacy,
-        migrated: { legacyShortcutStorage: true },
-      })
+      .updateSettings({ legacyShortcutImport: legacy })
       .then((snapshot) => {
+        clearLegacyShortcuts()
         if (cancelled) return
         setSettings(snapshot.settings)
         setSettingsLocks(snapshot.locks)
         setShortcutBindings(snapshot.settings.shortcuts)
-        clearLegacyShortcuts()
       })
       .catch(() => {
-        // A migration that cannot be written is left undone rather than marked
-        // done, so it is retried instead of silently losing the bindings.
+        // A migration that could not be written is left undone rather than
+        // marked done, so the stored copy is kept for the next window.
+        legacyImportOffered.current = false
       })
     return () => {
       cancelled = true

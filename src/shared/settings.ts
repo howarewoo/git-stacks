@@ -50,6 +50,30 @@ export type PullStrategy = (typeof PULL_STRATEGIES)[number]
 export type MergeMethod = (typeof MERGE_METHODS)[number]
 export type ThemePreference = (typeof THEMES)[number]
 
+/**
+ * The `git mergetool --tool=` id each supported program runs as, or null when
+ * Git ships no backend for it. The two names are often the same but not
+ * always — `bcompare` is the program Git's `bc3` backend launches — and an
+ * editor is not a merge tool at all until the machine's own configuration
+ * defines a `mergetool.<name>` entry for it. Passing the program name straight
+ * through would offer a tool that fails the moment a conflict is resolved.
+ */
+export const MERGE_TOOL_BACKENDS: Record<SupportedMergeTool, string | null> = {
+  kdiff3: 'kdiff3',
+  meld: 'meld',
+  opendiff: 'opendiff',
+  p4merge: 'p4merge',
+  vimdiff: 'vimdiff',
+  nvimdiff: 'nvimdiff',
+  code: null,
+  diffmerge: 'diffmerge',
+  bcompare: 'bc3',
+  emerge: 'emerge',
+  smerge: 'smerge',
+  araxis: 'araxis',
+  winmerge: 'winmerge',
+}
+
 export interface GitSettings {
   /**
    * Runs the Git the operating system provides instead of the copy bundled with
@@ -124,7 +148,15 @@ export interface SettingsPatch {
   appearance?: Partial<AppearanceSettings>
   privacy?: Partial<PrivacySettings>
   shortcuts?: Record<string, string>
-  migrated?: Partial<SettingsMigrations>
+  /**
+   * Shortcut bindings an earlier build kept outside this file, offered once for
+   * import. It is an intent, not an assignment: the import commits only if the
+   * state this file holds when the write happens is still the untouched one it
+   * was decided from, so a reset or a shortcut edit that landed first is never
+   * overwritten by bindings the user has already moved on from. `null` drops an
+   * import the caller has decided to abandon.
+   */
+  legacyShortcutImport?: Record<string, string> | null
 }
 
 /** Why a stored value was refused, named by the key the surface shows. */

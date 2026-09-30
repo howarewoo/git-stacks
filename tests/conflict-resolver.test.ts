@@ -915,6 +915,51 @@ test('the external merge tool runs without staging, and its result can still be 
   }
 })
 
+test('a supported program is reported by the Git tool id that actually runs it', async () => {
+  const { root, repo, git, gitExpectedFailure } = await fixture()
+  try {
+    await writeFile(join(repo, 'shared.txt'), 'base\n')
+    git('add', '.')
+    git('commit', '-m', 'Initial commit')
+    git('checkout', '-b', 'topic')
+    await writeFile(join(repo, 'shared.txt'), 'topic\n')
+    git('commit', '-am', 'Topic edit')
+    git('checkout', 'main')
+    await writeFile(join(repo, 'shared.txt'), 'main\n')
+    git('commit', '-am', 'Main edit')
+    gitExpectedFailure('merge', 'topic')
+
+    // `bcompare` is the program; `bc3` is the backend Git ships that launches it.
+    // The conflict view names the program the user chose and the action runs
+    // the id Git understands.
+    const bcompare = await getConflictView(repo, 'shared.txt', 'bcompare')
+    assert.equal(bcompare.mergeTool.available, true)
+    assert.equal(bcompare.mergeTool.tool, 'bcompare')
+    assert.match(bcompare.mergeTool.reason, /bc3/u)
+
+    // An editor is not a Git merge tool until the machine's own configuration
+    // defines one, so an installed `code` is not offered as available.
+    const code = await getConflictView(repo, 'shared.txt', 'code')
+    assert.equal(code.mergeTool.available, false)
+    assert.match(code.mergeTool.reason, /mergetool\.code\.cmd/u)
+    await assert.rejects(
+      runConflictMergeTool(repo, 'shared.txt', code.fingerprint, 'code'),
+      /mergetool\.code\.cmd/u,
+    )
+
+    // The same name becomes usable the moment that configuration exists.
+    git('config', 'mergetool.code.trustExitCode', 'true')
+    git('config', 'mergetool.code.cmd', 'printf "from code\\n" > "$MERGED"')
+    const configured = await getConflictView(repo, 'shared.txt', 'code')
+    assert.equal(configured.mergeTool.available, true)
+    assert.equal(configured.mergeTool.tool, 'code')
+    await runConflictMergeTool(repo, 'shared.txt', configured.fingerprint, 'code')
+    assert.equal(await readFile(join(repo, 'shared.txt'), 'utf8'), 'from code\n')
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 test('an environment-selected merge tool overrides merge.tool in native Git dispatch', async () => {
   const { root, repo, git, gitExpectedFailure } = await fixture()
   const previous = process.env.GIT_MERGE_TOOL

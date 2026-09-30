@@ -1,4 +1,14 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu, net, protocol, session, shell } from 'electron'
+import {
+  app,
+  BrowserWindow,
+  dialog,
+  ipcMain as electronIpcMain,
+  Menu,
+  net,
+  protocol,
+  session,
+  shell,
+} from 'electron'
 import type { IpcMainInvokeEvent } from 'electron'
 import { readFile, writeFile, mkdir, rename } from 'node:fs/promises'
 import { dirname, join, resolve, sep, basename } from 'node:path'
@@ -26,12 +36,7 @@ import {
 } from './stacks'
 import { previewReconciliationRepair } from './reconciliation'
 import { getPullRequestIssueLinks, previewIssueLink, searchGitHubIssues } from './issue-links'
-import {
-  originRemote,
-  readReviewCommits,
-  readReviewFiles,
-  readReviewHeadline,
-} from './review'
+import { originRemote, readReviewCommits, readReviewFiles, readReviewHeadline } from './review'
 import { readViewedRecord, writeViewedRecord } from './review-viewed'
 import { clearReviewHistory, readReviewHistory, readReviewHistoryDiff } from './review-history'
 import { readReviewDrafts, writeReviewDrafts } from './review-drafts'
@@ -95,10 +100,16 @@ import type {
   OnboardingFailure,
   RepositoryCloneResult,
 } from '../shared/types'
-import { readSettingsFile, readSettingsSnapshot, resetSettings, updateSettings } from './settings'
+import {
+  readSettingsFile,
+  readSettingsSnapshot,
+  resetSettings,
+  settingsPatchToWrite,
+  updateSettings,
+} from './settings'
 import { loadSettingsPolicy } from './settings-service'
 import { detectRefFormat, runDiagnostics } from './diagnostics'
-import { buildBundle, renderBundle } from './support-bundle'
+import { buildBundle, renderBundle, writeOwnerOnlyBundle } from './support-bundle'
 import { locateTool, openInEditor } from './editor'
 import { recordFailure, recordedFailures } from './failure-log'
 import type {
@@ -260,6 +271,14 @@ let account: GitHubAccount | null = null
  */
 let settingsLocks: SettingsLock[] = []
 let settingsPolicyError: string | null = null
+
+/**
+ * This machine's Git facts as the last successful environment read found them:
+ * commit identity, the configured default branch, the HTTPS credential helper,
+ * and whether an SSH client is present. The capability report measures from
+ * here, so a read that has not happened leaves every line it feeds unavailable
+ * rather than filled in from what this build usually finds.
+ */
 let gitEnvironment: GitEnvironmentStatus | null = null
 
 /**
@@ -278,17 +297,24 @@ function githubAccount() {
   return account
 }
 
+/**
+ * A request from somewhere the app does not recognise. It is refused before
+ * any work starts and is named as its own kind, so the failure log does not
+ * fill with a page that is not this window probing every channel.
+ */
+class UntrustedRequestError extends Error {}
+
 function validateSender(event: IpcMainInvokeEvent) {
   if (
     !window ||
     event.sender !== window.webContents ||
     event.senderFrame !== window.webContents.mainFrame
   ) {
-    throw new Error('Untrusted application request.')
+    throw new UntrustedRequestError('Untrusted application request.')
   }
   const url = new URL(event.senderFrame.url)
   const origin = url.protocol === 'app:' ? `${url.protocol}//${url.host}` : url.origin
-  if (origin !== trustedOrigin) throw new Error('Untrusted application origin.')
+  if (origin !== trustedOrigin) throw new UntrustedRequestError('Untrusted application origin.')
 }
 
 function repository() {
@@ -482,10 +508,21 @@ function onboardingRequest<T>(requestId: string, operation: (signal: AbortSignal
   )
 }
 
-function onboardingFailure(error: unknown): OnboardingFailure {
-  if (error instanceof CloneError) return { reason: error.reason, message: error.message }
-  if (isCommandCancelled(error)) return { reason: 'cancelled', message: 'The clone was cancelled.' }
-  return classifyTransportFailure(error)
+/**
+ * An onboarding call answers with a named outcome rather than a thrown error,
+ * so a failure handled this way never reaches the handler registration below.
+ * Recording it here is what puts a failed search or clone into the bundle. A
+ * cancellation is the answer the user asked for, so it is not a failure.
+ */
+function onboardingFailure(scope: string, error: unknown): OnboardingFailure {
+  const failure: OnboardingFailure =
+    error instanceof CloneError
+      ? { reason: error.reason, message: error.message }
+      : isCommandCancelled(error)
+        ? { reason: 'cancelled', message: 'The clone was cancelled.' }
+        : classifyTransportFailure(error)
+  if (failure.reason !== 'cancelled') recordFailure(scope, failure.message)
+  return failure
 }
 
 function readRequestId(value: unknown): string {
@@ -733,6 +770,34 @@ async function currentDiagnostics(settings: AppSettings) {
     settings,
   })
 }
+
+/**
+ * Every handler is registered through this, so a failure main handled leaves
+ * the one record a support bundle can carry: the scope that failed and the
+ * message the window is about to show for it. Nothing else is kept — the
+ * thrown value is re-raised unchanged, so the window still decides what to do.
+ *
+ * A request from outside the app is refused rather than failed, and a cancelled
+ * operation is the answer the user asked for, so neither is recorded.
+ */
+const ipcMain = {
+  handle<Args extends unknown[]>(
+    channel: string,
+    listener: (event: IpcMainInvokeEvent, ...args: Args) => unknown,
+  ): void {
+    electronIpcMain.handle(channel, (event, ...args: Args) =>
+      Promise.resolve()
+        .then(() => listener(event, ...args))
+        .catch((error: unknown) => {
+          if (!(error instanceof UntrustedRequestError) && !isCommandCancelled(error)) {
+            recordFailure(channel, error instanceof Error ? error.message : String(error))
+          }
+          throw error
+        }),
+    )
+  },
+}
+
 function installHandlers() {
   // The clone destination is chosen with the platform folder picker, so the
   // renderer never composes a filesystem path of its own.
@@ -781,9 +846,12 @@ function installHandlers() {
       const value = await onboardingRequest(readRequestId(requestId), (signal) =>
         readGitEnvironment(signal),
       )
+      // The capability report measures the HTTPS helper and the SSH client from
+      // this read, so the result is kept for it to report from.
+      gitEnvironment = value
       return { ok: true as const, value }
     } catch (error) {
-      return { ok: false as const, failure: onboardingFailure(error) }
+      return { ok: false as const, failure: onboardingFailure('git-environment', error) }
     }
   })
   ipcMain.handle('repositories:search', async (event, request: unknown) => {
@@ -796,7 +864,7 @@ function installHandlers() {
       )
       return { ok: true as const, value }
     } catch (error) {
-      return { ok: false as const, failure: onboardingFailure(error) }
+      return { ok: false as const, failure: onboardingFailure('repositories:search', error) }
     }
   })
   // The clone is built in a staging folder and promoted into a destination this
@@ -815,7 +883,7 @@ function installHandlers() {
       )
       return { ok: true as const, value }
     } catch (error) {
-      return { ok: false as const, failure: onboardingFailure(error) }
+      return { ok: false as const, failure: onboardingFailure('repositories:clone', error) }
     }
   })
   // The same commands without running anything, so the clone can be reproduced
@@ -842,7 +910,7 @@ function installHandlers() {
         } satisfies CloneCommandPreview,
       }
     } catch (error) {
-      return { ok: false as const, failure: onboardingFailure(error) }
+      return { ok: false as const, failure: onboardingFailure('repositories:clone-preview', error) }
     }
   })
   ipcMain.handle('repository:refresh', async (event) => {
@@ -1242,7 +1310,13 @@ function installHandlers() {
       throw new Error('Settings changes must be an object of setting groups.')
     }
     return withToolAvailability(
-      await changeSettings((file) => updateSettings(file, patch as SettingsPatch, settingsLocks)),
+      await changeSettings(async (file) =>
+        updateSettings(
+          file,
+          await settingsPatchToWrite(file, patch as SettingsPatch, settingsRevision),
+          settingsLocks,
+        ),
+      ),
     )
   })
   ipcMain.handle('settings:reset', async (event) => {
@@ -1322,7 +1396,7 @@ function installHandlers() {
         )
       }
 
-      await writeFile(target.filePath, snapshot.renderedBody, { mode: 0o600 })
+      await writeOwnerOnlyBundle(target.filePath, snapshot.renderedBody)
       return {
         path: target.filePath,
         bytes: snapshot.bytes,

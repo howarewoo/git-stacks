@@ -116,6 +116,11 @@ import {
   parseConflictSegments,
 } from '../shared/conflict'
 import {
+  MERGE_TOOL_BACKENDS,
+  SUPPORTED_MERGE_TOOLS,
+  type SupportedMergeTool,
+} from '../shared/settings'
+import {
   getGitHubData,
   getGitHubIssues,
   unavailableGitHubResult,
@@ -3812,6 +3817,83 @@ async function conflictMoves(
   return moves
 }
 
+/** The tool `git mergetool --tool=` names, the name to show, and why. */
+interface ResolvedMergeTool {
+  /** The Git tool id, or null when no tool on this machine can run. */
+  id: string | null
+  /** The name the user chose, or Git's own tool name. */
+  label: string
+  /** What the surface says about the tool, available or not. */
+  reason: string
+}
+
+/**
+ * The merge tool to run for one file, resolved from the program name the
+ * Settings surface stores.
+ *
+ * `git mergetool --tool=` takes a Git tool id, and a program name is not always
+ * one: Git's `bc3` backend is what launches `bcompare`, and Git ships no backend
+ * at all for an editor. An editor is only usable as a merge tool once the
+ * machine's own configuration defines a `mergetool.<name>` entry for it, so that
+ * configuration — not the mere presence of the executable — is what makes such
+ * a tool available here. A name with no applicable backend is reported as
+ * unavailable with its reason, so the surface never offers a tool that fails
+ * the moment a conflict is resolved.
+ *
+ * A tool Git itself named (`merge.tool`, `GIT_MERGE_TOOL`) is already an id and
+ * is passed through as one.
+ */
+async function resolveMergeTool(
+  root: string,
+  configured: string | null | undefined,
+): Promise<ResolvedMergeTool> {
+  if (!configured) {
+    const fromGit = process.env.GIT_MERGE_TOOL || (await getConfigValue(root, 'merge.tool'))
+    if (!fromGit) {
+      return {
+        id: null,
+        label: '',
+        reason:
+          'No merge tool is configured. Choose one in Settings, or set merge.tool or GIT_MERGE_TOOL in Git.',
+      }
+    }
+    return {
+      id: fromGit,
+      label: fromGit,
+      reason: `Runs the merge tool ${fromGit} Git is configured with on this file.`,
+    }
+  }
+  const backend = MERGE_TOOL_BACKENDS[configured as SupportedMergeTool]
+  if (backend) {
+    return {
+      id: backend,
+      label: configured,
+      reason: `Runs ${configured} on this file as Git's ${backend} merge tool.`,
+    }
+  }
+  if (!(SUPPORTED_MERGE_TOOLS as readonly string[]).includes(configured)) {
+    return {
+      id: null,
+      label: configured,
+      reason: `${configured} is not a supported merge tool.`,
+    }
+  }
+  const custom = await getConfigValue(root, `mergetool.${configured}.cmd`)
+  const customPath = custom ? custom : await getConfigValue(root, `mergetool.${configured}.path`)
+  if (!custom && !customPath) {
+    return {
+      id: null,
+      label: configured,
+      reason: `Git has no ${configured} merge tool. Add mergetool.${configured}.cmd to your Git configuration, or choose a tool Git ships.`,
+    }
+  }
+  return {
+    id: configured,
+    label: configured,
+    reason: `Runs the merge tool ${configured} your Git configuration defines.`,
+  }
+}
+
 /**
  * `toolOverride` is the merge tool the Settings surface configured. It takes
  * precedence over the environment and over Git's own configuration, because it
@@ -3849,8 +3931,7 @@ export async function getConflictView(
   const worktree = identity.binary || !identity.preview ? null : identity.preview.toString('utf8')
   const segments = worktree && !identity.truncated ? parseConflictSegments(worktree) : []
   const stageNumbers = stages.map((stage) => stage.stage)
-  const tool =
-    toolOverride || process.env.GIT_MERGE_TOOL || (await getConfigValue(root, 'merge.tool'))
+  const tool = await resolveMergeTool(root, toolOverride)
   const binary = identity.binary || Object.values(sides).some((side) => side.binary)
   const stagePreviewTruncated = stages
     .filter((stage) => sides[stage.stage].truncated)
@@ -3878,13 +3959,9 @@ export async function getConflictView(
     truncated: identity.truncated || stagePreviewTruncated.length > 0,
     stagePreviewTruncated,
     fingerprint: identity.fingerprint,
-    mergeTool: tool
-      ? { available: true, tool, reason: `Runs the configured merge tool ${tool} on this file.` }
-      : {
-          available: false,
-          tool: null,
-          reason: 'No merge tool is configured. Set merge.tool or GIT_MERGE_TOOL in Git.',
-        },
+    mergeTool: tool.id
+      ? { available: true, tool: tool.label, reason: tool.reason }
+      : { available: false, tool: null, reason: tool.reason },
   }
 }
 
@@ -4176,13 +4253,8 @@ export async function runConflictMergeTool(
   if (!entry.conflicted) throw new Error('The selected file has no unresolved conflict')
   const relativePath = entry.path
   await safeRepositoryPath(root, relativePath)
-  const tool =
-    toolOverride || process.env.GIT_MERGE_TOOL || (await getConfigValue(root, 'merge.tool'))
-  if (!tool) {
-    throw new Error(
-      'No merge tool is configured. Choose one in Settings, or set merge.tool or GIT_MERGE_TOOL in Git.',
-    )
-  }
+  const tool = await resolveMergeTool(root, toolOverride)
+  if (!tool.id) throw new Error(tool.reason)
   const temporary = await fs.mkdtemp(path.join(tmpdir(), 'git-stacks-mergetool-'))
   try {
     const indexPath = path.join(temporary, 'index')
@@ -4202,7 +4274,7 @@ export async function runConflictMergeTool(
       relativePath,
       indexPath,
       worktree,
-      tool,
+      tool.id,
     )
     let result: string | null = isolatedPath
     try {
@@ -4228,8 +4300,8 @@ export async function runConflictMergeTool(
       : false
   return {
     message: markers
-      ? `${tool} left unresolved markers in ${relativePath}. Nothing was staged.`
-      : `${tool} finished with ${relativePath}. Review the result, then mark it resolved to stage it.`,
+      ? `${tool.label} left unresolved markers in ${relativePath}. Nothing was staged.`
+      : `${tool.label} finished with ${relativePath}. Review the result, then mark it resolved to stage it.`,
   }
 }
 

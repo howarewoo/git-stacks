@@ -48,7 +48,10 @@ async function probe(
  * version number so build metadata, wrapper paths, or arbitrary surrounding
  * text cannot leak into diagnostic reports or support bundles.
  */
-export function parseGitVersion(output: string): { value: string; status: 'confirmed' | 'unavailable' } {
+export function parseGitVersion(output: string): {
+  value: string
+  status: 'confirmed' | 'unavailable'
+} {
   const match = output.match(/\bgit version (\d+\.\d+(?:\.\d+)?)\b/)
   if (match) {
     return { value: `git version ${match[1]}`, status: 'confirmed' }
@@ -71,7 +74,10 @@ const KNOWN_BUILD_FLAGS = [
  * capability tokens from an allowlist; never admits compiler flags, shell
  * paths, or raw build strings.
  */
-export function parseGitBuildOptions(output: string): { value: string; status: 'confirmed' | 'unavailable' } {
+export function parseGitBuildOptions(output: string): {
+  value: string
+  status: 'confirmed' | 'unavailable'
+} {
   const flags = KNOWN_BUILD_FLAGS.filter((flag) => new RegExp(`\\b${flag}\\b`, 'i').test(output))
   if (flags.length > 0) {
     return { value: flags.join(', '), status: 'confirmed' }
@@ -184,7 +190,12 @@ function accountEntries(account: GitHubAccountStatus | null): DiagnosticEntry[] 
     {
       source: 'credentials',
       label: 'App permissions',
-      value: account.permissions.length > 0 ? account.permissions.join(', ') : 'none reported',
+      // Each entry is a { permission, access, feature } object, so it is
+      // rendered the way the Account section names it rather than joined.
+      value:
+        account.permissions.length > 0
+          ? account.permissions.map((entry) => `${entry.permission} (${entry.access})`).join(', ')
+          : 'none reported',
       status: 'confirmed',
     },
   ]
@@ -201,7 +212,13 @@ function accountEntries(account: GitHubAccountStatus | null): DiagnosticEntry[] 
 
 function safeHelperIdentifier(helper: string): string {
   const trimmed = helper.trim()
-  if (!trimmed || trimmed.includes(' ') || trimmed.includes('/') || trimmed.includes('\\') || trimmed.includes('!')) {
+  if (
+    !trimmed ||
+    trimmed.includes(' ') ||
+    trimmed.includes('/') ||
+    trimmed.includes('\\') ||
+    trimmed.includes('!')
+  ) {
     return 'custom helper'
   }
   return trimmed.slice(0, 32)

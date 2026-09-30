@@ -1,3 +1,4 @@
+import { open } from 'node:fs/promises'
 import type {
   AppSettings,
   BundleSection,
@@ -221,10 +222,30 @@ export function renderBundle(preview: SupportBundlePreview, includeLocalPaths: b
     .map((section) => {
       const content = section.fields
         ? renderFields(section.title, section.fields, includeLocalPaths)
-        : (includeLocalPaths ? section.content : sanitizePaths(section.content))
+        : includeLocalPaths
+          ? section.content
+          : sanitizePaths(section.content)
       return `${content}\n\nWhy this is here: ${section.reason}`
     })
   return `${[...header, ...body].join('\n')}\n`
+}
+
+/**
+ * Writes the bundle so that only its owner can read it, whether the chosen file
+ * is new or one that already exists. A mode passed to `open` applies only when
+ * it creates the file, so an export replacing a world-readable one would keep
+ * the permissions it already had. The file is truncated before its mode is
+ * changed, so no new content is ever readable under the permissions it
+ * arrived with.
+ */
+export async function writeOwnerOnlyBundle(filePath: string, body: string): Promise<void> {
+  const file = await open(filePath, 'w', 0o600)
+  try {
+    await file.chmod(0o600)
+    await file.writeFile(body)
+  } finally {
+    await file.close()
+  }
 }
 
 export { HOME_PREFIXES, NEVER_COLLECTED }

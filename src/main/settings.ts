@@ -14,7 +14,7 @@ import {
   type SettingsPatch,
   type SettingsSnapshot,
 } from '../shared/settings'
-import { sanitizeShortcutBindings } from '../shared/shortcuts'
+import { sanitizeShortcutBindings, type ShortcutId } from '../shared/shortcuts'
 import { isRecord } from './git-core'
 
 /**
@@ -138,7 +138,10 @@ export function validateSettings(value: unknown): {
       booleanField(git.useSystemGit, DEFAULT_SETTINGS.git.useSystemGit),
     ] as const,
     'git.editor': [git.editor, toolName(git.editor, SUPPORTED_EDITORS, 'editor')] as const,
-    'git.mergeTool': [git.mergeTool, toolName(git.mergeTool, SUPPORTED_MERGE_TOOLS, 'merge tool')] as const,
+    'git.mergeTool': [
+      git.mergeTool,
+      toolName(git.mergeTool, SUPPORTED_MERGE_TOOLS, 'merge tool'),
+    ] as const,
     'git.defaultPullStrategy': [
       git.defaultPullStrategy,
       oneOf(git.defaultPullStrategy, PULL_STRATEGIES, DEFAULT_SETTINGS.git.defaultPullStrategy),
@@ -250,24 +253,47 @@ export function validatePolicy(value: unknown): {
 }
 
 /**
+ * Whether stored settings still hold the state an import of legacy shortcuts
+ * was decided from. Two conditions, both about the bindings themselves: the
+ * marker must not already be set, and the stored chords must still be the
+ * defaults. A file that has moved on in either way is not a file an import may
+ * write over, however the import was requested.
+ */
+export function qualifiesForLegacyShortcutImport(current: AppSettings): boolean {
+  if (current.migrated.legacyShortcutStorage) return false
+  const defaults = DEFAULT_SETTINGS.shortcuts
+  return (Object.keys(defaults) as ShortcutId[]).every(
+    (id) => current.shortcuts[id] === defaults[id],
+  )
+}
+
+/**
  * A validated patch: the same field rules as a whole file, applied over the
  * current settings. A rejected field is reported and left at its current value
  * rather than silently reverted, so a bad edit never discards a good setting.
+ *
+ * An import of legacy shortcuts is the one change decided from a state the
+ * caller read earlier, so it commits here — against the settings this call was
+ * handed — only while that state still qualifies. The import is therefore
+ * conditional on the persisted state at write time rather than on the marker
+ * alone, which is all a plain shortcut patch could ever check.
  */
 export function applyPatch(
   current: AppSettings,
   patch: SettingsPatch,
 ): { settings: AppSettings; issues: SettingsIssue[] } {
   let shortcuts = patch.shortcuts ?? current.shortcuts
-  if (current.migrated.legacyShortcutStorage && patch.migrated?.legacyShortcutStorage === true) {
-    shortcuts = current.shortcuts
+  let legacyShortcutStorage = current.migrated.legacyShortcutStorage
+  if (patch.legacyShortcutImport && qualifiesForLegacyShortcutImport(current)) {
+    shortcuts = patch.legacyShortcutImport
+    legacyShortcutStorage = true
   }
   const merged: Record<string, unknown> = {
     git: { ...current.git, ...(isRecord(patch.git) ? patch.git : {}) },
     appearance: { ...current.appearance, ...(isRecord(patch.appearance) ? patch.appearance : {}) },
     privacy: { ...current.privacy, ...(isRecord(patch.privacy) ? patch.privacy : {}) },
     shortcuts,
-    migrated: { ...current.migrated, ...(isRecord(patch.migrated) ? patch.migrated : {}) },
+    migrated: { legacyShortcutStorage },
   }
   const result = validateSettings(merged)
 
@@ -281,6 +307,33 @@ export function applyPatch(
     restore(settings, issue.key, current)
   }
   return { settings, issues: result.issues }
+}
+
+/**
+ * The patch as it is allowed to be written, decided from the file as it stands
+ * at the moment the write happens.
+ *
+ * An import of legacy shortcuts is the one change decided from a state the
+ * caller read earlier, so it is the one change that can arrive after the file
+ * has moved on. Two things are checked here, and each covers a way the import
+ * would otherwise undo a newer choice. The stored bindings must still be the
+ * defaults an untouched file holds, and the calling session must not have
+ * written settings already — a reset restores exactly those defaults, so only
+ * `writesApplied` separates "nothing has been written yet" from "the user asked
+ * for defaults just now". A refused import arrives as `null`, which changes
+ * nothing; a patch with no import is returned exactly as it came.
+ */
+export async function settingsPatchToWrite(
+  file: string,
+  patch: SettingsPatch,
+  writesApplied: number,
+): Promise<SettingsPatch> {
+  if (!patch.legacyShortcutImport) return patch
+  const current = await readSettingsFile(file)
+  if (writesApplied > 0 || !qualifiesForLegacyShortcutImport(current.settings)) {
+    return { ...patch, legacyShortcutImport: null }
+  }
+  return patch
 }
 
 /** Whether a patch named a key, so a rejected value is the user's edit and not a default. */
@@ -497,7 +550,13 @@ export async function resetSettings(
   const settings = structuredClone(DEFAULT_SETTINGS)
   for (const lock of locks) preserveLocked(settings, current.settings, lock.key)
   await writeSettingsFile(file, settings)
-  return { settings, locks: [...locks], issues: [...current.issues], recovered: current.recovered, file }
+  return {
+    settings,
+    locks: [...locks],
+    issues: [...current.issues],
+    recovered: current.recovered,
+    file,
+  }
 }
 
 /** Puts back the value a lock fixed, so a reset cannot quietly clear it. */

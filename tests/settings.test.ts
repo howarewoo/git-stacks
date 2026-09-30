@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -9,14 +9,20 @@ import {
   readSettingsFile,
   readSettingsSnapshot,
   resetSettings,
+  settingsPatchToWrite,
   updateSettings,
   validateSettings,
   writeSettingsFile,
 } from '../src/main/settings'
 import { loadSettingsPolicy, NO_POLICY } from '../src/main/settings-service'
-import { buildBundle, renderBundle } from '../src/main/support-bundle'
-import { locateTool, resolveEditorCommand, resolveEditorInvocation, resolveInsideRepository } from '../src/main/editor'
-import { parseGitBuildOptions, parseGitVersion } from '../src/main/diagnostics'
+import { buildBundle, renderBundle, writeOwnerOnlyBundle } from '../src/main/support-bundle'
+import {
+  locateTool,
+  resolveEditorCommand,
+  resolveEditorInvocation,
+  resolveInsideRepository,
+} from '../src/main/editor'
+import { parseGitBuildOptions, parseGitVersion, runDiagnostics } from '../src/main/diagnostics'
 import { DEFAULT_SETTINGS } from '../src/shared/settings'
 import type { AppSettings, DiagnosticReport } from '../src/shared/settings'
 
@@ -553,18 +559,66 @@ test('Git version probe parses strictly semantic version and strips build paths 
   assert.equal(parsedBuild.value.includes('shell-path'), false)
 })
 
-test('redundant legacy shortcut migration does not overwrite existing user shortcuts', () => {
-  const current: AppSettings = {
+test('a legacy shortcut import lands on an untouched file and is then refused', () => {
+  const legacy = { ...DEFAULT_SETTINGS.shortcuts, 'stack.selectChild': 's' }
+
+  const imported = applyPatch(DEFAULT_SETTINGS, { legacyShortcutImport: legacy })
+  assert.equal(imported.settings.shortcuts['stack.selectChild'], 's')
+  assert.equal(imported.settings.migrated.legacyShortcutStorage, true)
+
+  // The same import arriving a second time, or after the user has moved on, is
+  // refused against the state main reads when the write happens.
+  const again = applyPatch(imported.settings, { legacyShortcutImport: legacy })
+  assert.equal(again.settings.shortcuts['stack.selectChild'], 's')
+
+  const edited: AppSettings = {
     ...DEFAULT_SETTINGS,
     shortcuts: { ...DEFAULT_SETTINGS.shortcuts, 'stack.selectChild': 'b' },
-    migrated: { legacyShortcutStorage: true },
   }
-  const patch = {
-    shortcuts: { ...DEFAULT_SETTINGS.shortcuts, 'stack.selectChild': 's' },
-    migrated: { legacyShortcutStorage: true },
-  }
-  const result = applyPatch(current, patch)
-  assert.equal(result.settings.shortcuts['stack.selectChild'], 'b')
+  const afterEdit = applyPatch(edited, { legacyShortcutImport: legacy })
+  assert.equal(afterEdit.settings.shortcuts['stack.selectChild'], 'b')
+  assert.equal(afterEdit.settings.migrated.legacyShortcutStorage, false)
+})
+
+test('a pending legacy import cannot restore old bindings over a reset or an edit', async () => {
+  await withTempDir(async (dir) => {
+    const file = join(dir, 'settings.json')
+    const legacy = { ...DEFAULT_SETTINGS.shortcuts, 'stack.selectChild': 's' }
+
+    // Nothing has been written this session and the file is untouched, so the
+    // import is the change the window asked for.
+    const allowed = await settingsPatchToWrite(file, { legacyShortcutImport: legacy }, 0)
+    assert.deepEqual(allowed, { legacyShortcutImport: legacy })
+
+    // The user resets while the import is still in flight. The reset restores
+    // exactly the defaults the import is qualified against, so the write count
+    // is the only thing that separates the two.
+    await resetSettings(file, NO_LOCKS)
+    const afterReset = await updateSettings(
+      file,
+      await settingsPatchToWrite(file, { legacyShortcutImport: legacy }, 1),
+      NO_LOCKS,
+    )
+    assert.equal(
+      afterReset.settings.shortcuts['stack.selectChild'],
+      DEFAULT_SETTINGS.shortcuts['stack.selectChild'],
+    )
+    assert.equal(afterReset.settings.migrated.legacyShortcutStorage, false)
+
+    // A shortcut edited before the import reached the file is left alone too.
+    await updateSettings(
+      file,
+      { shortcuts: { ...DEFAULT_SETTINGS.shortcuts, 'stack.selectChild': 'b' } },
+      NO_LOCKS,
+    )
+    const afterEdit = await updateSettings(
+      file,
+      await settingsPatchToWrite(file, { legacyShortcutImport: legacy }, 2),
+      NO_LOCKS,
+    )
+    assert.equal(afterEdit.settings.shortcuts['stack.selectChild'], 'b')
+    assert.equal(afterEdit.settings.migrated.legacyShortcutStorage, false)
+  })
 })
 
 test('the advertised notepad++ editor is accepted and persisted', async () => {
@@ -583,4 +637,73 @@ test('terminal editors like vim and nano are rejected by the GUI editor allowlis
     assert.equal(snapshot.settings.git.editor, null)
     assert.ok(snapshot.issues.some((issue) => issue.key === 'git.editor'))
   })
+})
+
+test('an exported bundle is owner-only even when it replaces a world-readable file', async () => {
+  await withTempDir(async (dir) => {
+    const file = join(dir, 'git-stacks-support.txt')
+    await writeFile(file, 'an earlier export anybody could read\n')
+    await chmod(file, 0o644)
+
+    await writeOwnerOnlyBundle(file, renderBundle(buildBundle(REPORT, DEFAULT_SETTINGS, []), false))
+    if (process.platform !== 'win32') {
+      assert.equal((await stat(file)).mode & 0o777, 0o600)
+    }
+    assert.match(await readFile(file, 'utf8'), /# Git Stacks support bundle/u)
+  })
+})
+
+test('the capability report names the app permissions and the measured environment', async () => {
+  const report = await runDiagnostics({
+    runtime: { runtime: null, error: null, minimumVersion: '2.45.0', useSystemGit: false },
+    account: {
+      state: 'signed-in',
+      reference: 'opaque',
+      host: 'github.com',
+      login: 'octocat',
+      permissions: [
+        { permission: 'Contents', access: 'read', feature: 'Pull request commits' },
+        { permission: 'Pull requests', access: 'write', feature: 'Native stacks' },
+      ],
+      expiresAt: null,
+      refreshExpiresAt: null,
+      store: { available: true, name: 'system store', reason: null },
+      externalCredential: false,
+      signingIn: false,
+      challenge: null,
+      message: null,
+    },
+    environment: {
+      identity: { name: 'Ada', email: 'ada@example.com' },
+      defaultBranch: 'main',
+      httpsCredentials: { configured: true, helper: 'osxkeychain' },
+      ssh: { available: true, version: 'OpenSSH_9.6' },
+    },
+    host: { platform: 'darwin', release: '23.0', arch: 'arm64', electron: '30.0.0' },
+    filesystem: { refFormat: 'files', error: null },
+    appVersion: '0.1.0',
+    settings: DEFAULT_SETTINGS,
+  })
+  const measured = Object.fromEntries(report.entries.map((entry) => [entry.label, entry]))
+  assert.equal(measured['App permissions']?.value, 'Contents (read), Pull requests (write)')
+  assert.equal(measured['Git HTTPS helper']?.status, 'confirmed')
+  assert.equal(measured['Git HTTPS helper']?.value, 'a helper is configured')
+  assert.equal(measured['SSH client']?.status, 'confirmed')
+  assert.equal(measured['SSH client']?.value, 'available')
+
+  // The same lines with nothing measured stay unavailable rather than filled in.
+  const unmeasured = await runDiagnostics({
+    runtime: { runtime: null, error: null, minimumVersion: '2.45.0', useSystemGit: false },
+    account: null,
+    environment: null,
+    host: { platform: 'darwin', release: '23.0', arch: 'arm64', electron: '30.0.0' },
+    filesystem: { refFormat: null, error: 'storage unavailable' },
+    appVersion: '0.1.0',
+    settings: DEFAULT_SETTINGS,
+  })
+  const statuses = Object.fromEntries(
+    unmeasured.entries.map((entry) => [entry.label, entry.status]),
+  )
+  assert.equal(statuses['Git HTTPS helper'], 'unavailable')
+  assert.equal(statuses['SSH client'], 'unavailable')
 })
