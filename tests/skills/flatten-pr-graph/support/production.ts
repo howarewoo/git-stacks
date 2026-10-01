@@ -379,6 +379,7 @@ export interface PublishOptions {
   resume?: boolean
   /** `null` names no task-owned run at all, which the contract does not allow. */
   preparationRunDirectory?: string | null
+  repository?: string
 }
 
 /** Everything a production case needs, over one disposable real Git world. */
@@ -537,8 +538,16 @@ export class Production {
   /** The publication document as the helper receives it, for a case that edits it. */
   publishInput(prepared: PreparedRun, options: PublishOptions): Record<string, unknown> {
     const branches = options.branches ?? BRANCHES
+    // The repository and the run directory name the same task-owned storage. A publication
+    // pointed at a different preparation run directory than the one whose storage it is
+    // reading is looking for prepared commits that were never written there.
+    // `null` names no task-owned run at all, which the contract does not allow; it is kept
+    // on the document so the helper can refuse it in its own words, and the storage path
+    // falls back to the default so nothing is read from a directory this driver invented.
+    const preparationRunDirectory =
+      options.preparationRunDirectory == null ? this.prepareRun() : options.preparationRunDirectory
     return {
-      repository: this.storage(),
+      repository: options.repository ?? join(preparationRunDirectory, 'storage.git'),
       remote: this.world.remote,
       runDirectory: options.runDirectory ?? this.publishRun(),
       root: options.root ?? { ref: ROOT_REF, oid: this.root() },

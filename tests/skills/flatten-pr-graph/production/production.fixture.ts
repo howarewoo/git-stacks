@@ -132,11 +132,15 @@ interface Stack {
 async function preparedStack(
   production: Production,
   numbers: number[],
-  options: SeedOptions & { script?: ProviderScript } = {},
+  options: SeedOptions & { script?: ProviderScript; runDirectory?: string } = {},
 ): Promise<Stack> {
   const originalHeads = await seedStack(production, numbers, options)
   const root = production.root()
-  const prepared = production.prepare({ order: numbers, originalHeads })
+  const prepared = production.prepare({
+    order: numbers,
+    originalHeads,
+    runDirectory: options.runDirectory,
+  })
   assert.equal(prepared.ok, true, JSON.stringify(prepared.errors))
   const pullRequests = Object.fromEntries(
     numbers.map((number) => [
@@ -355,14 +359,16 @@ define({
     )
     const tipBranch = branches[3]
     for (const arm of [12, 13, 14]) {
-      assert.ok(
-        tipBranch.retainedOriginalCommits.includes(originalHeads[arm]),
-        `#${arm} survives under the fan-in`,
-      )
+      // Reachability first: that is the invariant that matters, and it is what the
+      // prepared tree can be checked against directly.
       assert.equal(
         production.storageAncestor(originalHeads[arm], tipBranch.preparedHead),
         true,
         `#${arm} keeps its contribution reachable from the fan-in`,
+      )
+      assert.ok(
+        tipBranch.retainedOriginalCommits.includes(originalHeads[arm]),
+        `#${arm} is declared retained under the fan-in, not merely still reachable by accident`,
       )
     }
     for (let index = 1; index < branches.length; index += 1) {
@@ -547,7 +553,10 @@ define({
   area: 'preparation',
   criteria: ['#87 a semantic decision needs explicit intent and reason'],
   findings: [],
-  expect: { status: 'partial', codes: ['invalid-input'], mentions: ['intent'] },
+  // `blocked`, not `partial`: the plan carries a resolution that can never be applied, so it
+  // is refused while the plan is being read - before a run directory exists and before any
+  // branch is integrated. `partial` would claim preparation happened.
+  expect: { status: 'blocked', codes: ['invalid-input'], mentions: ['intent'] },
   async run(production) {
     const originalHeads = await seedStack(production, [12, 13], {
       rootFiles: { 'shared.txt': 'seed\n' },
@@ -590,11 +599,15 @@ const structuralCases: StructuralCase[] = [
       production.world.gitIn(renamer.path, 'mv', 'moves/old.txt', 'moves/new.txt')
       const a = renamer.commit('move the file')
       renamer.push(BRANCHES[12], { force: true })
+      // Both sides move the same file to a different name. Git cannot merge that without
+      // choosing a name, and a helper that picks one is picking for the author; an edit in
+      // place would not do, because rename detection folds that in cleanly and there is
+      // then nothing to refuse.
       const editor = await production.scratch('rename-13')
       editor.fetch()
       editor.checkout(DEFAULT_BRANCH)
-      production.writeBytes(editor.path, 'moves/old.txt', Buffer.from('edited in place\n'))
-      const b = editor.commit('edit where it was')
+      production.world.gitIn(editor.path, 'mv', 'moves/old.txt', 'moves/other.txt')
+      const b = editor.commit('move it somewhere else')
       editor.push(BRANCHES[13], { force: true })
       return { 12: a, 13: b }
     },
@@ -785,7 +798,7 @@ for (const structural of structuralCases) {
       assert.equal(
         (blocked.preparation?.branches ?? []).some((branch) => branch.number === 13),
         false,
-        'a refused conflict must not manufacture a prepared head',
+        `a refused conflict must not manufacture a prepared head; the report was ${JSON.stringify(blocked.errors)}`,
       )
       return preparedOutcome(blocked)
     },
@@ -1709,25 +1722,32 @@ define({
   async run(production) {
     const stack = await preparedStack(production, [12, 13])
     const preparedHeads = preparedHeadsOf(stack.prepared)
-    // The snapshot already records this run's own prepared state, as it would after a lost
-    // acknowledgement, while the remote still holds the originals.
+    // The snapshot already records #12's own prepared state, as it would after a lost
+    // acknowledgement, while the remote still holds the original. #12's prepared head
+    // equals its original - nothing had to be integrated into it - so the branch that
+    // still needs a refspec is #13, and that is the write this case is about.
     const observedRefs = { ...production.refs() }
     observedRefs[`refs/heads/${BRANCHES[12]}`] = preparedHeads[12]
+    assert.notEqual(
+      preparedHeads[13],
+      stack.originalHeads[13],
+      'the fixture needs a branch whose prepared head is genuinely new',
+    )
     const result = await production.publish(stack.prepared, {
       ...publishArgs(stack),
       observedRefs,
     })
     assert.equal(result.status, 'published', JSON.stringify(result.errors))
     assert.equal(
-      production.refs()[`refs/heads/${BRANCHES[12]}`],
-      preparedHeads[12],
+      production.refs()[`refs/heads/${BRANCHES[13]}`],
+      preparedHeads[13],
       'the verified prepared commit is what lands, whatever the recorded observation said',
     )
     const headAttempt = result.publication.attempts.find(
-      (attempt) => attempt.target === `refs/heads/${BRANCHES[12]}`,
+      (attempt) => attempt.target === `refs/heads/${BRANCHES[13]}`,
     )
-    assert.equal(headAttempt?.to, preparedHeads[12])
-    assert.equal(headAttempt?.lease?.expectedRemote, stack.originalHeads[12])
+    assert.equal(headAttempt?.to, preparedHeads[13])
+    assert.equal(headAttempt?.lease?.expectedRemote, stack.originalHeads[13])
     return publicationOutcome(result)
   },
 })
@@ -2153,10 +2173,14 @@ define({
   area: 'publication',
   criteria: ['#88 unselected refs outside the write set are reconciled'],
   findings: ['B12 Admit journaled prepared heads during snapshot reconciliation'],
+  // `partial`: the stranger moves during the run's own read-back, after the selected heads
+  // were already pushed. Something really was written, so `blocked` - which says nothing
+  // was - would be the wrong description of the same facts.
   expect: {
-    status: 'blocked',
+    status: 'partial',
     codesAny: ['stale-snapshot', 'conflicting-environment-control'],
-    mentions: ['refs/heads/stranger'],  },
+    mentions: ['refs/heads/stranger'],
+  },
   async run(production) {
     const stack = await preparedStack(production, [12, 13])
     await production.seedBranch('stranger', { 'stranger.txt': 'not selected\n' })
@@ -2249,6 +2273,9 @@ define({
     // comparison is between two real runs and not between one run and its own reseed.
     const labelled = await preparedStack(production, [12, 13], {
       rootFiles: { 'root.txt': 'the root branch moves on again\n' },
+      // Its own run directory: a second plan against a moved root is a different plan, and
+      // one run directory owns exactly one of them.
+      runDirectory: join(production.world.root, 'prepare-run-labelled'),
     })
     for (const number of [12, 13]) {
       labelled.pullRequests[number] = {
@@ -2261,6 +2288,7 @@ define({
     const labelledResult = await production.publish(labelled.prepared, {
       ...publishArgs(labelled),
       providerModule: labelledAdapter.module,
+      preparationRunDirectory: join(production.world.root, 'prepare-run-labelled'),
     })
     assert.equal(labelledResult.status, 'published', JSON.stringify(labelledResult.errors))
     assert.deepEqual(

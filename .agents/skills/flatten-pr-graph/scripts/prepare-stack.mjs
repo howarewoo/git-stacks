@@ -491,6 +491,22 @@ function readUserFingerprint(userWorkspace) {
 }
 
 /**
+ * Whether a tree holds a blob with this id at any path.
+ *
+ * Used only to decide whether a contributed path was carried to a new name, so it is
+ * deliberately content-addressed: it never guesses a rename, it asks whether the exact
+ * content this pull request contributed is present in the prepared tree at all.
+ */
+function blobPresentAtAnyPath(storage, treeish, oid) {
+  const listed = runGit(storage, ['ls-tree', '-r', '-z', '--format=%(objectname)', treeish], {
+    allowFailure: true,
+  })
+  if (!listed.ok) return false
+  // `-z` separates with NUL, which `lines` does not split on.
+  return listed.stdout.split('\u0000').includes(oid)
+}
+
+/**
  * Named differences between two fingerprints of the same checkout.
  *
  * Comparing a path list or a stash *count* would call a rewritten file or a replaced stash
@@ -612,6 +628,22 @@ function verifyPlan(raw) {
       reason: typeof entry?.reason === 'string' ? entry.reason : '',
     }),
   )
+  // A resolution is a decision the agent made and has to account for. One without a stated
+  // intent or a stated reason is refused here, while the plan is still being read, rather
+  // than after a run directory exists and the branches before it have been integrated: a
+  // plan that can never complete should not leave half a preparation behind.
+  for (const [index, resolution] of resolutions.entries()) {
+    if (resolution.path === null) {
+      throw new InputError('invalid-input', `resolutions[${index}].path must name a path`, 'received no path')
+    }
+    if (resolution.intent.trim() === '' || resolution.reason.trim() === '') {
+      throw new InputError(
+        'invalid-input',
+        `resolutions[${index}] for #${resolution.number} ${resolution.path} carries no stated intent or reason`,
+        `intent ${JSON.stringify(resolution.intent)}, reason ${JSON.stringify(resolution.reason)}`,
+      )
+    }
+  }
   const justifiedDrops = (Array.isArray(raw.justifiedDrops) ? raw.justifiedDrops : []).map(
     (entry, index) => ({
       number: requirePositiveInteger(entry?.number, `justifiedDrops[${index}].number`),
@@ -1581,7 +1613,18 @@ function preparePosition(options) {
   recordPreparedHead(storage, workspace, number, preparedHead)
   void preparedRefs
 
-  const retained = reachableCommits(storage, originalOid, baseOid)
+  // Every selected original this prepared head actually keeps, not only the commits this
+  // branch itself contributed. In a diamond the tip's original history already contains
+  // both arms and their shared parent, and a list naming only the tip's own commits
+  // understates what was retained - which is the one thing this field exists to say.
+  const retained = [
+    ...new Set([
+      ...reachableCommits(storage, originalOid, baseOid),
+      ...input.order
+        .map((selected) => input.originalHeads[String(selected)] ?? input.originalHeads[selected])
+        .filter((oid) => typeof oid === 'string' && oid !== '' && isAncestor(storage, oid, preparedHead)),
+    ]),
+  ].sort()
   const verification = []
   if (!isAncestor(storage, originalOid, preparedHead)) {
     errors.push({
@@ -1609,6 +1652,13 @@ function preparePosition(options) {
       `${preparedHead}:${path}`,
     ])
     if (origBlob && origBlob === prepBlob) return false
+    // The contribution can also have been carried to a different path. Git's rename
+    // detection folds an edit of `moves/old.txt` into the `moves/new.txt` that replaced
+    // it, and the content is then present under the new name while the contributed path is
+    // legitimately gone - calling that a loss refuses every correct run that renamed a
+    // file somebody else had edited. The test is content, not name: the prepared tree must
+    // hold this pull request's version of the contribution at some other path.
+    if (origBlob && blobPresentAtAnyPath(storage, preparedHead, origBlob)) return false
     return true
   })
   const unjustified = dropped.filter(
