@@ -10,7 +10,7 @@
  */
 
 import { execFileSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -89,31 +89,31 @@ function seedEnvironment() {
   const prsPath = join(root, 'prs.json')
   writeFileSync(
     prsPath,
-    JSON.stringify([
+    JSON.stringify(
       [
-        12,
+        [12, 'feat-a'],
+        [13, 'feat-b'],
+      ].map(([number, headRef]) => [
+        number,
         {
-          number: 12,
+          number,
           state: 'OPEN',
           draft: false,
           baseRef: 'main',
-          headRef: 'feat-a',
+          headRef,
           headRepository: 'test/repo',
+          title: `PR ${headRef}`,
+          body: 'smoke fixture',
+          labels: [],
+          reviewers: [],
+          autoMergeRequest: { enabled: false, method: null },
         },
-      ],
-      [
-        13,
-        {
-          number: 13,
-          state: 'OPEN',
-          draft: false,
-          baseRef: 'main',
-          headRef: 'feat-b',
-          headRepository: 'test/repo',
-        },
-      ],
-    ]),
+      ]),
+    ),
   )
+  const pullRequests = JSON.parse(readFileSync(prsPath, 'utf8'))
+    .map(([number, pr]) => [String(number), pr])
+    .reduce((acc, [number, pr]) => Object.assign(acc, { [number]: pr }), {})
   const providerPath = join(root, 'provider.mjs')
   writeFileSync(
     providerPath,
@@ -139,7 +139,7 @@ export function updatePullRequestBase(number, base, expectedBase) {
 `,
   )
 
-  return { root, repo, remote, runDir, rootSha, aSha, bSha, providerPath }
+  return { root, repo, remote, runDir, rootSha, aSha, bSha, providerPath, pullRequests, prsPath }
 }
 
 function main() {
@@ -203,6 +203,7 @@ function main() {
         13: 'feat-a',
       },
       preparation: prepResult.preparation,
+      pullRequests: env.pullRequests,
       authority: {
         intent: 'execute',
         selection: [12, 13],
@@ -263,6 +264,32 @@ function main() {
 
     if (repubResult.status !== 'no-op') {
       failures.push(`republication did not report status 'no-op': ${repubResult.status}`)
+    }
+
+    // 5. Independent read-back of the provider's own state. The helper's claim about a
+    //    base it wrote is not evidence; the file the double persists is.
+    const afterBase = new Map(JSON.parse(readFileSync(env.prsPath, 'utf8')))
+    observations.push({
+      step: 'provider-readback',
+      bases: [...afterBase.entries()].map(([number, pr]) => `${number}=${pr.baseRef}`).join(' '),
+    })
+    if (afterBase.get(13)?.baseRef !== 'feat-a') {
+      failures.push(`#13 does not build on feat-a: ${afterBase.get(13)?.baseRef}`)
+    }
+
+    // 6. Resume boundary: the same plan against the run directory that already published
+    //    is not a new attempt, and must not write again.
+    const resumed = helper('publish-stack.mjs', { ...pubInput, resume: true })
+    const resumedRefUpdates =
+      resumed.publication?.attempts?.filter((attempt) => attempt.kind === 'ref-update').length ?? 0
+    observations.push({
+      step: 'resume-boundary',
+      status: resumed.status,
+      refUpdatesAttempted: resumedRefUpdates,
+      durationMs: resumed.durationMs,
+    })
+    if (resumedRefUpdates > 0) {
+      failures.push('a resume of a completed publication attempted another ref update')
     }
   } catch (error) {
     failures.push(`the smoke run threw: ${error.stack ?? error.message}`)

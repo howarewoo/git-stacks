@@ -69,6 +69,15 @@ interface PublicationRun {
   recovery: null | { unconfirmedAttempts: string[] }
 }
 
+/** The publication document, with the fields a test narrows or overrides typed. */
+interface PublicationDocument extends Record<string, unknown> {
+  authority: { intent: string; selection: number[]; granted: string[]; hostVerified: boolean }
+  preparation: PreparedRun['preparation']
+  order: number[]
+  heads: Record<number, string>
+  intendedBases: Record<number, string>
+}
+
 const BRANCHES: Record<number, string> = {
   12: 'feat-a',
   13: 'feat-b',
@@ -166,7 +175,7 @@ function publicationDocument(
   prepared: PreparedRun,
   numbers: number[],
   overrides: Record<string, unknown> = {},
-): Record<string, unknown> {
+): PublicationDocument {
   const root = world.remoteRefs()['refs/heads/main']
   return {
     runDirectory: join(world.root, 'publication'),
@@ -184,8 +193,33 @@ function publicationDocument(
     ),
     root: { ref: 'refs/heads/main', oid: root },
     observedRefs: { 'refs/heads/main': root },
+    pullRequests: Object.fromEntries(
+      numbers.map((number) => [number, pinnedPullRequest(number, BRANCHES[number])]),
+    ),
     provider: { module: providerModule(world, {}) },
     ...overrides,
+  }
+}
+
+/**
+ * The authorized snapshot of one pull request, in the shape a publication pins.
+ *
+ * It is the same value the provider double starts from, so a document that pins it is
+ * asserting what was authorized rather than what the run would like to see.
+ */
+function pinnedPullRequest(number: number, branch: string): Record<string, unknown> {
+  return {
+    number,
+    state: 'OPEN',
+    draft: false,
+    baseRef: 'main',
+    headRef: branch,
+    headRepository: 'acme/widgets',
+    title: 'Feature',
+    body: 'body',
+    labels: [],
+    reviewers: [],
+    autoMergeRequest: { enabled: false, method: null },
   }
 }
 
@@ -194,19 +228,7 @@ function providerModule(world: World, behaviour: Record<string, string>): string
   const path = join(world.root, `provider-${Math.random().toString(36).slice(2)}.mjs`)
   const seeded = Object.entries(BRANCHES).map(([number, branch]) => [
     Number(number),
-    {
-      number: Number(number),
-      state: 'OPEN',
-      draft: false,
-      baseRef: 'main',
-      headRef: branch,
-      headRepository: 'acme/widgets',
-      title: 'Feature',
-      body: 'body',
-      labels: [],
-      reviewers: [],
-      autoMergeRequest: { enabled: false, method: null },
-    },
+    pinnedPullRequest(Number(number), branch),
   ])
   writeFileSync(
     path,
@@ -396,11 +418,7 @@ test('a caller-supplied resolution produces a prepared state the next run verifi
   const branch = resolved.preparation?.branches.find((entry) => entry.number === 15)
   assert.ok(branch)
   assert.equal(
-    world.isAncestor(
-      join(runDirectory, 'storage.git'),
-      conflicting,
-      branch.preparedHead,
-    ),
+    world.isAncestor(join(runDirectory, 'storage.git'), conflicting, branch.preparedHead),
     true,
   )
 })
@@ -840,7 +858,7 @@ test('publication pushes write.to even if backup ref was changed to unrelated co
   assert.equal(result.status, 'published')
   assert.equal(
     world.remoteRefs()[`refs/heads/${BRANCHES[12]}`],
-    prepared.preparation.branches[0].preparedHead,
+    prepared.preparation?.branches[0].preparedHead,
   )
 })
 
@@ -861,12 +879,10 @@ test('publication retargets non-contiguous PR numbers correctly by number', asyn
   assert.equal(result.status, 'published')
   const calls = providerCalls(world)
   // PR 12 was already on main, so it is skipped; PR 15 was retargeted to feat-a
-  assert.deepEqual(calls, [
-    { number: 15, base: BRANCHES[12] },
-  ])
+  assert.deepEqual(calls, [{ number: 15, base: BRANCHES[12] }])
 })
 
-test('missing base grant with successful head push reports partial with recovery', async (t) => {
+test('a base write without its grant is refused before the head push, not after it', async (t) => {
   const world = await createWorld('publish-ref-only-grant')
   t.after(() => world.cleanup())
   const a = await seedBranch(world, BRANCHES[12], { 'a.txt': 'a\n' })
@@ -879,13 +895,21 @@ test('missing base grant with successful head push reports partial with recovery
   const doc = publicationDocument(world, prepared, [12])
   doc.intendedBases = { 12: 'other-base' }
   doc.authority.granted = ['ref-update']
+  const before = world.remoteRefs()
 
   const result = await runPublish(world, doc)
-  assert.equal(result.status, 'partial')
+
+  // The whole write set is known before the first remote operation, so a missing grant
+  // for any part of it stops the run with nothing written - not after the heads landed.
+  assert.equal(result.status, 'blocked')
   assert.equal(result.ok, false)
-  assert.ok(result.recovery)
-  assert.ok(result.publication.confirmed.some((c) => c.kind === 'ref-update'))
-  assert.ok(result.errors.some((e) => e.code === 'missing-permission'))
+  assert.ok(
+    result.errors.some((error) => error.code === 'missing-permission'),
+    JSON.stringify(result.errors),
+  )
+  assert.deepEqual(result.publication.attempts, [])
+  assert.deepEqual(world.remoteRefs(), before)
+  assert.deepEqual(providerCalls(world), [])
 })
 
 test('repeated PR numbers in order are rejected before remote conversations', async (t) => {
@@ -915,7 +939,9 @@ test('unauthorized invocation leaves existing recovery journal intact', async (t
   const initialJournal = {
     contractVersion: 'flatten-pr-graph/1',
     state: 'partial',
-    attempts: [{ sequence: 1, kind: 'ref-update', target: 'refs/heads/feat-a', outcome: 'unknown' }],
+    attempts: [
+      { sequence: 1, kind: 'ref-update', target: 'refs/heads/feat-a', outcome: 'unknown' },
+    ],
     confirmed: [],
     unconfirmed: [{ kind: 'ref-update', target: 'refs/heads/feat-a', why: 'unknown' }],
   }

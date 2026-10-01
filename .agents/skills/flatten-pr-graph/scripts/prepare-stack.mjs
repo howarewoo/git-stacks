@@ -72,6 +72,14 @@ import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 const CONTRACT_VERSION = 'flatten-pr-graph/1'
 const GIT_TIMEOUT_MS = 300_000
 const MAX_EVIDENCE_CHARS = 4_000
+/**
+ * Where pinned source refs are copied inside task-owned storage. A namespace of its own
+ * keeps them apart from `refs/heads/prepared/*`, so a cached copy from an earlier run can
+ * never stand in for a ref the source no longer publishes.
+ */
+const SNAPSHOT_PREFIX = 'refs/flatten-snapshot/'
+/** The file that records which run owns a task directory. */
+const OWNERSHIP_FILE = 'task-owner.json'
 
 class InputError extends Error {
   constructor(code, detail, evidence) {
@@ -272,6 +280,48 @@ function requireTaskDirectory(value, where, repository, userWorkspace) {
   }
   mkdirSync(path, { recursive: true })
   return path
+}
+
+/**
+ * Exclusive ownership of a task directory, recorded once and checked on every later run.
+ *
+ * A directory that already holds task storage but no ownership record was created by
+ * something else - or by an older run - and writing into it would put a fetch, a workspace,
+ * and a journal inside a repository nobody authorised. Storage is claimed before anything
+ * is created in it, so the claim is a statement of intent rather than a description.
+ */
+function claimTaskDirectory(path, repository) {
+  const marker = join(path, OWNERSHIP_FILE)
+  if (existsSync(marker)) {
+    let recorded = null
+    try {
+      recorded = JSON.parse(readFileSync(marker, 'utf8'))
+    } catch {
+      recorded = null
+    }
+    if (!isPlainObject(recorded) || recorded.contractVersion !== CONTRACT_VERSION) {
+      throw new InputError(
+        'conflicting-environment-control',
+        'the task run directory is already in use and its ownership record cannot be read',
+        `${marker} does not name a ${CONTRACT_VERSION} run`,
+      )
+    }
+    return recorded
+  }
+  if (existsSync(join(path, 'storage.git')) || existsSync(join(path, 'workspaces'))) {
+    throw new InputError(
+      'conflicting-environment-control',
+      'the task run directory already holds task-owned storage that this run did not create',
+      `${path} contains storage.git or workspaces without an ownership record`,
+    )
+  }
+  const claim = {
+    contractVersion: CONTRACT_VERSION,
+    repository: repository ?? null,
+    claimed: true,
+  }
+  writeFileSync(marker, `${JSON.stringify(claim, null, 2)}\n`)
+  return claim
 }
 
 function digest(text) {
@@ -521,14 +571,16 @@ function seedStorage(input) {
     )
   }
 
-  // One read-only copy of every published head. Nothing is pushed into the user's
-  // repository from here, and the root is captured at the pinned commit id.
+  // Every pinned ref is fetched into its own snapshot namespace rather than into the same
+  // names it has at the source. A wildcard fetch into `refs/heads/...` leaves the previous
+  // run's destination ref in place when the source ref has since been deleted, so a
+  // deleted selected head would still verify against storage it never came from.
   const refspecs = Array.from(new Set([input.root.ref, ...Object.values(input.heads)])).map(
-    (ref) => `+${ref}:${ref}`,
+    (ref) => `+${ref}:${SNAPSHOT_PREFIX}${ref}`,
   )
   const fetch = runGit(
     input.runDirectory,
-    ['--git-dir', storage, 'fetch', '--quiet', input.repository, ...refspecs],
+    ['--git-dir', storage, 'fetch', '--quiet', '--prune', input.repository, ...refspecs],
     { allowFailure: true },
   )
   if (!fetch.ok) {
@@ -539,6 +591,15 @@ function seedStorage(input) {
     )
   }
   return { storage, works }
+}
+
+/** Where a pinned source ref is copied inside task-owned storage. */
+function snapshotRef(ref) {
+  return `${SNAPSHOT_PREFIX}${ref}`
+}
+
+function snapshotOid(storage, ref) {
+  return gitOut(storage, ['rev-parse', '--verify', '--quiet', `${snapshotRef(ref)}^{commit}`])
 }
 
 function storageOid(storage, ref) {
@@ -556,61 +617,62 @@ function isAncestor(storage, ancestor, descendant) {
   }).ok
 }
 
+/**
+ * The pinned snapshot, checked against the source repository itself.
+ *
+ * A ref deleted at the source since the plan was authorized must be a blocker, and
+ * storage is not allowed to answer for it: a destination ref left over from an earlier
+ * fetch is exactly the evidence that would hide the deletion. The source's own
+ * `ls-remote` is the only authority for whether a pinned ref still exists, and its commit
+ * id is compared with the pinned one so a moved head is caught as well.
+ */
 function verifySnapshot(input, storage) {
   const errors = []
   const sourceLs = runGit(input.runDirectory, ['ls-remote', '--heads', input.repository], {
     allowFailure: true,
   })
+  if (!sourceLs.ok) {
+    errors.push({
+      code: 'stale-snapshot',
+      detail: 'the source repository could not be listed',
+      evidence: sourceLs.stderr.trim().slice(0, 400),
+    })
+    return { errors, observedHeads: {} }
+  }
   const sourceRefs = {}
-  if (sourceLs.ok) {
-    for (const line of lines(sourceLs.stdout)) {
-      const [oid, ref] = line.split(/\s+/)
-      if (ref && oid) sourceRefs[ref] = oid
-    }
-  }
-  if (sourceLs.ok && !sourceRefs[input.root.ref]) {
-    errors.push({
-      code: 'stale-snapshot',
-      detail: `the root ref ${input.root.ref} is absent from the source repository`,
-      evidence: `source repository holds ${Object.keys(sourceRefs).length} branches`,
-    })
-  }
-  const rootOid = storageOid(storage, input.root.ref)
-  if (rootOid !== input.root.oid) {
-    errors.push({
-      code: 'stale-snapshot',
-      detail: `the root ${input.root.ref} moved since the plan was authorized`,
-      evidence: `pinned ${input.root.oid}, storage holds ${rootOid ?? 'nothing'}`,
-    })
+  for (const line of lines(sourceLs.stdout)) {
+    const [oid, ref] = line.split(/\s+/)
+    if (ref && oid) sourceRefs[ref] = oid
   }
   const observedHeads = {}
-  for (const number of input.order) {
-    const ref = input.heads[number]
-    if (sourceLs.ok && !sourceRefs[ref]) {
+  for (const ref of [input.root.ref, ...input.order.map((number) => input.heads[number])]) {
+    const number = input.order.find((entry) => input.heads[entry] === ref) ?? null
+    const isRoot = ref === input.root.ref
+    const pinned = isRoot ? input.root.oid : input.originalHeads[number]
+    if (!sourceRefs[ref]) {
       errors.push({
         code: 'stale-snapshot',
-        detail: `the head branch ${ref} of #${number} is absent from the source repository`,
-        evidence: `pinned ${input.originalHeads[number]}`,
+        detail: `${isRoot ? 'the root ref' : `the head branch ${ref} of #${number}`} is absent from the source repository`,
+        evidence: `pinned ${pinned}; the source holds ${Object.keys(sourceRefs).length} branches`,
       })
       continue
     }
-    const observed = storageOid(storage, ref)
-    observedHeads[number] = observed
-    if (observed === null) {
+    if (sourceRefs[ref] !== pinned) {
       errors.push({
         code: 'stale-snapshot',
-        detail: `the head branch ${ref} of #${number} is not present in storage`,
-        evidence: `pinned ${input.originalHeads[number]}`,
+        detail: `${ref} moved since the plan was authorized`,
+        evidence: `pinned ${pinned}, source holds ${sourceRefs[ref]}`,
       })
-      continue
     }
-    if (observed !== input.originalHeads[number]) {
+    const fetched = snapshotOid(storage, ref)
+    if (fetched !== sourceRefs[ref]) {
       errors.push({
         code: 'stale-snapshot',
-        detail: `the head branch ${ref} of #${number} moved since the plan was authorized`,
-        evidence: `pinned ${input.originalHeads[number]}, storage holds ${observed}`,
+        detail: `task-owned storage does not hold what the source published for ${ref}`,
+        evidence: `source ${sourceRefs[ref]}, storage ${fetched ?? 'nothing'}`,
       })
     }
+    if (number !== null) observedHeads[number] = sourceRefs[ref]
   }
   return { errors, observedHeads }
 }
@@ -633,43 +695,42 @@ function readJournal(input) {
   }
 }
 
+/**
+ * The journal belongs to one immutable plan, and only that plan.
+ *
+ * Selection, order, source repository, root, head refs, and every original commit id are
+ * part of it: a changed original commit id under an existing journal means the work has
+ * moved on, and returning the recorded prepared heads would describe a stack that no
+ * longer contains what the caller asked for.
+ */
 function sameIdentity(journal, input) {
-  const recorded = journal?.selection ?? []
-  const rootRef = journal?.root?.ref
-  const rootOid = journal?.root?.oid
+  if (!isPlainObject(journal)) return false
+  const recorded = journal.selection ?? []
   if (
     recorded.length !== input.selection.length ||
     !recorded.every((number) => input.selection.includes(number)) ||
-    rootRef !== input.root.ref ||
-    rootOid !== input.root.oid
+    journal.root?.ref !== input.root.ref ||
+    journal.root?.oid !== input.root.oid
   ) {
     return false
   }
-  if (journal.order && JSON.stringify(journal.order) !== JSON.stringify(input.order)) {
-    return false
-  }
-  if (journal.repository && journal.repository !== input.repository) {
-    return false
-  }
-  if (journal.heads) {
-    for (const number of input.order) {
-      if (journal.heads[number] !== input.heads[number]) return false
-    }
-  }
-  if (journal.originalHeads) {
-    for (const number of input.order) {
-      if (journal.originalHeads[number] !== input.originalHeads[number]) return false
-    }
+  if (JSON.stringify(journal.order ?? null) !== JSON.stringify(input.order)) return false
+  if ((journal.repository ?? null) !== input.repository) return false
+  for (const number of input.order) {
+    if ((journal.heads?.[number] ?? null) !== input.heads[number]) return false
+    if ((journal.originalHeads?.[number] ?? null) !== input.originalHeads[number]) return false
   }
   return true
 }
 
-function writeJournal(path, journal) {
-  mkdirSync(dirname(path), { recursive: true })
-  writeFileSync(path, `${JSON.stringify(journal, null, 2)}\n`)
-}
-
-/** A prepared head is recoverable only while its original commits are still reachable. */
+/**
+ * The workspace for one position: created fresh, or the one an interrupted run left.
+ *
+ * Reusing it is only safe when the recorded evidence still holds - the workspace is
+ * really at the original head this run pinned, and any operation it has in progress is the
+ * merge this run is about to finish. Anything else means a different plan is sitting in
+ * this directory, and deleting it would destroy the only copy of a conflict decision.
+ */
 function cloneWorkspace(storage, number, originalOid, resume = false) {
   const workspace = join(storage, '..', 'workspaces', `pr-${number}`)
   if (existsSync(workspace)) {
@@ -680,11 +741,52 @@ function cloneWorkspace(storage, number, originalOid, resume = false) {
         `${workspace} was not recreated; inspect it and pass resume`,
       )
     }
+    const head = gitOut(workspace, ['rev-parse', '--verify', '--quiet', 'HEAD'])
+    if (head !== originalOid) {
+      throw new InputError(
+        'stale-snapshot',
+        `the workspace for #${number} is not at the original head this run pinned`,
+        `${workspace} is at ${head ?? 'nothing'}, the plan pins ${originalOid}; it was not recreated and its conflict evidence was not discarded`,
+      )
+    }
     return workspace
   }
-  runGit(storage, ['clone', '--quiet', '--no-hardlinks', storage, workspace])
+  // Nothing is checked out yet, deliberately. A clone that writes a working tree runs
+  // smudge filters over every path and can fire template-installed checkout hooks, and the
+  // whole point of the admission check below is that no such thing may happen before this
+  // run has decided it is safe. `--no-checkout` leaves an empty tree and no hook runs.
+  runGit(storage, ['clone', '--quiet', '--no-hardlinks', '--no-checkout', storage, workspace])
+  const driverControls = attributedDriverControls(
+    storage,
+    originalOid,
+    treePaths(storage, originalOid),
+    workspace,
+  )
+  const blocked = driverControls.filter((control) => control.blocking)
+  if (blocked.length > 0) {
+    throw new InputError(
+      'conflicting-environment-control',
+      `#${number} cannot be checked out: a tracked attribute assigns an executable driver to a path this run would write`,
+      blocked
+        .map((control) => `${control.control} = ${control.value}; ${control.effect}`)
+        .join(' | '),
+    )
+  }
   runGit(workspace, ['checkout', '--quiet', '-B', `prepared/${number}`, originalOid])
   return workspace
+}
+
+/** Every path a tree holds, so a checkout is admitted for all of it and not a sample. */
+function treePaths(storage, oid) {
+  const result = runGit(storage, ['ls-tree', '-r', '-z', '--name-only', oid], {
+    allowFailure: true,
+  })
+  return result.ok ? result.stdout.split('\0').filter(Boolean) : []
+}
+
+function writeJournal(path, journal) {
+  mkdirSync(dirname(path), { recursive: true })
+  writeFileSync(path, `${JSON.stringify(journal, null, 2)}\n`)
 }
 
 function stagedEntries(workspace) {
@@ -988,7 +1090,57 @@ function preparePosition(options) {
     }
   }
 
-  const alreadyInMerge = operationsInProgress(workspace).includes('MERGE_HEAD')
+  // A conflicted workspace left by an interrupted run is the same merge only if it is
+  // merging the same base. Otherwise its unmerged stages, merge base, and any content
+  // already staged describe a different integration, and every conflict decision read from
+  // them would be a decision about the wrong content.
+  const pendingMergeHead = gitOut(workspace, ['rev-parse', '--verify', '--quiet', 'MERGE_HEAD'])
+  const alreadyInMerge = pendingMergeHead !== null
+  if (alreadyInMerge && pendingMergeHead !== baseOid) {
+    return {
+      branch: null,
+      outcome: 'blocked',
+      workspace,
+      conflicts: [],
+      decisions,
+      errors: [
+        {
+          code: 'stale-snapshot',
+          detail: `the workspace for #${number} is in the middle of a different merge`,
+          evidence: `its MERGE_HEAD is ${pendingMergeHead}; this run integrates ${baseOid}; the workspace was left untouched so its staged content is not discarded`,
+        },
+      ],
+      predecessor: predecessor?.number ?? null,
+    }
+  }
+
+  // Decided before the merge, not after: a driver that keeps one side produces a clean
+  // merge that silently drops the other side's content, and there is nothing to detect
+  // afterwards. The merge materialises the base's files into the worktree, so the base
+  // tree is admitted in full - every path it holds, not only the ones a diff names - and
+  // the attributes are read in the workspace where the merge will run.
+  const driverControls = alreadyInMerge
+    ? []
+    : attributedDriverControls(storage, baseOid, treePaths(storage, baseOid), workspace)
+  if (driverControls.some((control) => control.blocking)) {
+    return {
+      branch: null,
+      outcome: 'blocked',
+      workspace,
+      conflicts: [],
+      decisions,
+      errors: driverControls
+        .filter((control) => control.blocking)
+        .map((control) => ({
+          code: 'conflicting-environment-control',
+          detail: `${control.control} would run over a path this merge writes`,
+          evidence: control.effect,
+        })),
+      predecessor: predecessor?.number ?? null,
+      controls: driverControls,
+    }
+  }
+
   const merge = alreadyInMerge
     ? {
         ok: false,
@@ -1263,75 +1415,77 @@ function commitWithControls(workspace, message) {
 }
 
 /**
- * Controls the source repository enforces, read from it rather than assumed.
+ * Controls that could change what a merge or a commit actually does, read from the source
+ * repository before anything is created.
  *
- * Cloning copies objects and refs, not local configuration or hooks, so a signing,
- * hook, filter, or driver policy the source enforces can quietly stop applying to the
- * integration commit. This helper reports what it found and what task storage will not
- * inherit; it never weakens any of it, and it never runs an install, a driver, a
- * submodule fetch, or a lifecycle command to make the work easier.
+ * Cloning copies objects and refs, not local configuration or hooks, so a signing, hook,
+ * filter, or driver policy the source enforces can quietly stop applying to the
+ * integration commit - and a task clone does inherit global and environment
+ * configuration, so an inherited `merge.<name>.driver` referenced by a tracked
+ * `.gitattributes` runs *in* the merge. Anything that would execute, or whose absence in
+ * task storage would silently drop a mandatory requirement, is a blocker decided before
+ * the first clone. Nothing here is weakened, and no install, driver, submodule fetch, or
+ * lifecycle command is ever run to make the work easier.
  */
 function inspectControls(repository) {
   const controls = []
-  const config = runGit(
-    repository,
+
+  // `git config --get-regexp` exits 1 for "no match" and something else for "could not be
+  // read". Only the first is an answer; the second means the absence of a control cannot be
+  // claimed, so it blocks.
+  const readConfig = (args, where) => {
+    const result = runGit(repository, ['config', ...args], { allowFailure: true })
+    if (result.ok || result.status === 1) return lines(result.stdout)
+    controls.push({
+      control: `config.read${where}`,
+      value: result.stderr.trim().slice(0, 200) || `git config exited ${result.status}`,
+      inTaskStorage: 'inherited',
+      blocking: true,
+      effect: `the ${where} configuration could not be read, so the absence of a control cannot be claimed`,
+    })
+    return []
+  }
+
+  for (const line of readConfig(
     [
-      'config',
-      '--local',
       '--get-regexp',
       '^(commit\\.gpgsign|tag\\.gpgsign|gpg\\.format|user\\.signingkey|core\\.hooksPath|core\\.fsmonitor|diff\\.external|merge\\.tool|core\\.autocrlf|core\\.eol|credential\\.helper)$',
     ],
-    {
-      allowFailure: true,
-    },
-  )
-  if (config.ok) {
-    for (const line of lines(config.stdout)) {
-      const space = line.indexOf(' ')
-      const key = line.slice(0, space)
-      const value = line.slice(space + 1)
-      const isSigning = key.toLowerCase() === 'commit.gpgsign' && value.toLowerCase() === 'true'
-      const isHooks = key.toLowerCase() === 'core.hookspath'
-      const blocking = isSigning || isHooks
-      controls.push({
-        control: key,
-        value,
-        inTaskStorage: 'not-copied',
-        blocking,
-        effect: isSigning
-          ? 'the source requires signed commits; task storage does not inherit signing configuration, so preparation stops before creating unverified commits'
-          : isHooks
-            ? 'the source configures a mandatory core.hooksPath; task storage does not inherit hooks, so preparation stops before bypassing controls'
-            : 'reported, never overridden',
-      })
-    }
+    '(local)',
+  )) {
+    const space = line.indexOf(' ')
+    const key = line.slice(0, space)
+    const value = line.slice(space + 1)
+    const lowered = key.toLowerCase()
+    const isSigning = lowered === 'commit.gpgsign' && value.toLowerCase() === 'true'
+    const isHooks = lowered === 'core.hookspath'
+    const blocking = isSigning || isHooks
+    controls.push({
+      control: key,
+      value,
+      inTaskStorage: 'not-copied',
+      blocking,
+      effect: isSigning
+        ? 'the source requires signed commits; task storage does not inherit signing configuration, so preparation stops before creating unverified commits'
+        : isHooks
+          ? 'the source configures a mandatory core.hooksPath; task storage does not inherit hooks, so preparation stops before bypassing controls'
+          : 'reported, never overridden',
+    })
   }
-  const drivers = runGit(
-    repository,
-    [
-      'config',
-      '--local',
-      '--get-regexp',
-      '^(filter\\..*\\.(clean|smudge|process)|merge\\..*\\.driver)$',
-    ],
-    {
-      allowFailure: true,
-    },
-  )
-  const globalDrivers = runGit(
-    repository,
-    [
-      'config',
-      '--get-regexp',
-      '^merge\\..*\\.driver$',
-    ],
-    {
-      allowFailure: true,
-    },
-  )
+
+  // A driver that no tracked `.gitattributes` names for any path is reported and left
+  // alone: the environment commonly configures tools such as git-lfs globally, and
+  // refusing every run because of them would make the helper unusable rather than safe.
+  // Whether one applies to this merge is decided per path, before the merge, by
+  // `attributedDriverControls`.
   const driverLines = new Set([
-    ...(drivers.ok ? lines(drivers.stdout) : []),
-    ...(globalDrivers.ok ? lines(globalDrivers.stdout) : []),
+    ...readConfig(
+      [
+        '--get-regexp',
+        '^(filter\\..*\\.(clean|smudge|process)|merge\\..*\\.driver|diff\\..*\\.command|diff\\.external)$',
+      ],
+      '(effective)',
+    ),
   ])
   for (const line of driverLines) {
     const space = line.indexOf(' ')
@@ -1340,20 +1494,33 @@ function inspectControls(repository) {
     controls.push({
       control: key,
       value,
-      inTaskStorage: 'not-copied',
-      blocking: true,
+      inTaskStorage: 'inherited',
+      blocking: false,
       effect:
-        'a custom clean/smudge filter or merge driver in the source repository cannot be executed safely: preparation stops before running untrusted or bypassed drivers',
+        'reported, never overridden; whether it applies to a merged path is decided per path before the merge',
     })
   }
+
+  // Git resolves a relative `core.hooksPath` against the repository, not the caller's
+  // directory, so the effective directory is asked of Git rather than assembled here.
   const hooksConfig = gitOut(repository, ['config', '--get', 'core.hooksPath'])
-  const hooksDir = hooksConfig
-    ? isAbsolute(hooksConfig)
-      ? hooksConfig
-      : resolve(repository, hooksConfig)
+  const resolvedHooks = gitOut(repository, ['rev-parse', '--git-path', 'hooks'])
+  const hooksDir = resolvedHooks
+    ? isAbsolute(resolvedHooks)
+      ? resolvedHooks
+      : resolve(repository, resolvedHooks)
     : existsSync(join(repository, '.git', 'hooks'))
       ? join(repository, '.git', 'hooks')
       : join(repository, 'hooks')
+  if (!hooksConfig) {
+    controls.push({
+      control: 'hooks.path',
+      value: resolvedHooks ?? hooksDir,
+      inTaskStorage: 'resolved',
+      blocking: false,
+      effect: "no core.hooksPath is configured; Git's default hook directory applies",
+    })
+  }
   const hooks = existsSync(hooksDir)
     ? readdirSync(hooksDir)
         .filter((name) => !name.endsWith('.sample'))
@@ -1381,6 +1548,71 @@ function inspectControls(repository) {
         ? 'an executable policy hook in the source repository is not inherited into task storage: preparation stops before bypassing mandatory hooks'
         : 'the source hook is not executable, left inactive',
     })
+  }
+  return controls
+}
+
+/**
+ * Whether an effective clean/smudge filter, merge driver, or textconv command is
+ * attributed to any path a tree about to be written actually holds.
+ *
+ * Two properties make the answer a fact rather than a guess about the environment. Git
+ * runs a driver only for a path whose tracked `.gitattributes` names it, so a globally
+ * configured tool that no attribute references is provably unused here; and attributes
+ * are read with `--source=<oid>` from a tree that has not been written to disk, so no
+ * checkout, filter, hook, or driver has run in order to find this out. A tree is admitted
+ * whole - every path in it, not a sample - and in chunks, because a real repository can
+ * hold more paths than one command line will carry.
+ */
+function attributedDriverControls(storage, sourceOid, paths, cwd = storage) {
+  const controls = []
+  const targets = [...new Set(paths.filter(Boolean))]
+  if (targets.length === 0) return controls
+  const KEYS = {
+    filter: (name) => [`filter.${name}.clean`, `filter.${name}.smudge`, `filter.${name}.process`],
+    merge: (name) => [`merge.${name}.driver`],
+    diff: (name) => [`diff.${name}.command`],
+  }
+  const CHUNK = 256
+  const seen = new Set()
+  for (let start = 0; start < targets.length; start += CHUNK) {
+    const chunk = targets.slice(start, start + CHUNK)
+    const read = runGit(cwd, ['check-attr', '-z', '--all', '--source', sourceOid, '--', ...chunk], {
+      allowFailure: true,
+    })
+    if (!read.ok) {
+      return [
+        {
+          control: 'attributes.read',
+          value: read.stderr.trim().slice(0, 200) || `git check-attr exited ${read.status}`,
+          inTaskStorage: 'not-copied',
+          blocking: true,
+          effect:
+            'the tracked attributes for the paths this run would write could not be read, so it cannot be claimed that no driver would run',
+        },
+      ]
+    }
+    const fields = read.stdout.split('\0').filter(Boolean)
+    for (let index = 0; index + 2 < fields.length; index += 3) {
+      const path = fields[index]
+      const keys = KEYS[fields[index + 1]]?.(fields[index + 2])
+      if (!keys) continue
+      for (const key of keys) {
+        const command = gitOut(cwd, ['config', '--get', key])
+        if (!command) continue
+        const id = `${path}:${key}`
+        if (seen.has(id)) continue
+        seen.add(id)
+        controls.push({
+          control: key,
+          value: `${path} -> ${command}`,
+          inTaskStorage: 'inherited',
+          blocking: true,
+          effect:
+            'a tracked attribute assigns this executable driver to a path this run would write; it may combine, rewrite, or discard content, so preparation stops before running it',
+        })
+      }
+    }
   }
   return controls
 }
@@ -1426,6 +1658,29 @@ function prepareStackInner(raw) {
         detail: `mandatory control ${c.control} cannot be enforced or safely run in task workspaces`,
         evidence: c.effect,
       })),
+      run: null,
+      preparation: null,
+      verification: [],
+      continuation: { prepared: [], remaining: input.order, resumeFrom: null },
+      conflicts: [],
+      controls,
+      userWorkspace: userBefore,
+    }
+  }
+
+  // Claimed only once the controls are known to be safe to run, so a refused run leaves
+  // nothing behind in a directory it does not own.
+  try {
+    claimTaskDirectory(input.runDirectory, input.repository)
+  } catch (error) {
+    return {
+      contractVersion: CONTRACT_VERSION,
+      ok: false,
+      errors: [
+        error instanceof InputError
+          ? error
+          : new InputError('invalid-input', String(error?.message ?? error), 'task directory'),
+      ],
       run: null,
       preparation: null,
       verification: [],

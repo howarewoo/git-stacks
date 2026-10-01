@@ -20,6 +20,10 @@
  * branch-protection read here, and no code path that could be extended into one by
  * configuration: the endpoint, the verb, and the field names are literals.
  *
+ * The repository is never inferred. `FLATTEN_PR_REPOSITORY` must name `owner/name`, and
+ * every endpoint carries it literally; there is no `gh repo view`, no working-directory
+ * fallback, and no `GH_REPO` substitution.
+ *
  * Base retargets are guarded by an immediate read-before-write check, and the publication
  * result explicitly documents `residualMetadataRace: true`.
  *
@@ -38,35 +42,51 @@ function gh(args) {
 }
 
 /**
- * The repository `gh` is pointed at. Uses the pinned repository from environment if
- * available, otherwise falls back to inspecting the configured repository.
+ * The repository every operation addresses, taken from the environment and nothing else.
+ *
+ * A fallback to `gh repo view` or to the caller's working directory would let an ambient
+ * checkout decide which repository gets its pull requests retargeted, which is exactly the
+ * "assume `origin`" the skill forbids. A missing or malformed pin is a refusal, not a
+ * guess.
  */
 function repositoryCoordinates() {
-  const envRepo = process.env.FLATTEN_PR_REPOSITORY || process.env.GH_REPO
-  if (envRepo && envRepo.includes('/')) {
-    const parts = envRepo.trim().split('/')
-    if (parts.length === 2 && parts[0] && parts[1]) {
-      return { owner: parts[0], name: parts[1] }
-    }
+  const pinned = process.env.FLATTEN_PR_REPOSITORY
+  if (typeof pinned !== 'string' || pinned.trim().length === 0) {
+    throw new Error(
+      'FLATTEN_PR_REPOSITORY must be set to "owner/name"; this provider never infers a repository from the working directory',
+    )
   }
-  const parsed = JSON.parse(gh(['repo', 'view', '--json', 'owner,name']))
-  return { owner: parsed.owner.login, name: parsed.name }
+  const parts = pinned.trim().split('/')
+  if (parts.length !== 2 || !parts[0] || !parts[1]) {
+    throw new Error(
+      `FLATTEN_PR_REPOSITORY must be "owner/name"; received ${JSON.stringify(pinned)}`,
+    )
+  }
+  return { owner: parts[0], name: parts[1] }
 }
 
 function ghJson(args) {
   return JSON.parse(gh(args))
 }
 
+/**
+ * One REST pull request, in the contract's own vocabulary.
+ *
+ * REST spells the state lowercase (`open`) and the contract says `OPEN`; normalising here
+ * is what lets the publisher's state check work against a real server rather than only
+ * against a fixture that already used the contract's spelling. The commits are named
+ * `headRefOid`/`baseRefOid` because an attempt records commits, not branch names.
+ */
 function toPullRequest(raw) {
   return {
     number: raw.number,
     state: typeof raw.state === 'string' ? raw.state.toUpperCase() : null,
     draft: raw.draft ?? false,
     headRef: raw.head?.ref ?? null,
-    headSha: raw.head?.sha ?? null,
+    headRefOid: raw.head?.sha ?? null,
     headRepository: raw.head?.repo?.full_name ?? null,
     baseRef: raw.base?.ref ?? null,
-    baseSha: raw.base?.sha ?? null,
+    baseRefOid: raw.base?.sha ?? null,
     title: raw.title,
     body: raw.body,
     labels: (raw.labels ?? []).map((label) => label.name),
@@ -88,16 +108,9 @@ export function capabilities() {
 
 export function readPullRequest(number) {
   const { owner, name } = repositoryCoordinates()
-  const raw = ghJson([
-    'api',
-    '-R',
-    `${owner}/${name}`,
-    '--method',
-    'GET',
-    `repos/${owner}/${name}/pulls/${number}`,
-    '-f',
-    'per_page=1',
-  ])
+  // `gh api` has no `-R/--repo`: the endpoint below already names the repository
+  // explicitly, and `GH_REPO` only fills endpoint placeholders.
+  const raw = ghJson(['api', '--method', 'GET', `repos/${owner}/${name}/pulls/${number}`])
   return { ok: true, pullRequest: toPullRequest(raw) }
 }
 
@@ -105,8 +118,6 @@ export function updatePullRequestBase(number, base) {
   const { owner, name } = repositoryCoordinates()
   const raw = ghJson([
     'api',
-    '-R',
-    `${owner}/${name}`,
     '--method',
     'PATCH',
     `repos/${owner}/${name}/pulls/${number}`,
@@ -116,6 +127,9 @@ export function updatePullRequestBase(number, base) {
   return {
     ok: true,
     applied: raw?.base?.ref === base,
+    // GitHub's PATCH documents no server-side precondition, so the outcome is only ever
+    // known by re-reading. Saying `null` keeps the caller from claiming an enforcement
+    // this interface does not provide.
     preconditionMet: null,
     provider: 'github',
   }

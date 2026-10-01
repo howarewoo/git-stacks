@@ -24,8 +24,10 @@
  * `authority.source`.
  *
  * Provider interface. `provider.module` is a module this helper imports and calls with one
- * operation object per call; it must not print anything else to stdout. Three operations,
- * and nothing else is ever requested:
+ * operation object per call; it must not print anything else to stdout. Every operation
+ * may be synchronous or return a promise - the helper awaits all of them, so a promise is
+ * the general case and a plain value is simply already resolved. Three operations, and
+ * nothing else is ever requested:
  *
  *   capabilities()            -> { operations, compareAndSwap, provider }
  *   readPullRequest(number)   -> { ok, pullRequest: { number, state, draft, headRef,
@@ -73,12 +75,15 @@
  *     "resume": false, "now": "2026-10-01T09:00:00.000Z"
  *   }
  *
- * `pullRequests` is the authorized snapshot of the selected pull requests: identity,
- * head repository, and base are compared before anything is written, because a fork pull
- * request with the same branch name and a base somebody else already moved are not the
- * plan this document claims to publish. `remote` may be a remote name; it is resolved to
- * exactly one push endpoint in task-owned storage, and reads and writes then use that one
- * endpoint.
+ * `pullRequests` is not optional. It is the authorized snapshot of the selected pull
+ * requests - number, state, draft, headRef, headRepository, baseRef, headRefOid,
+ * baseRefOid, title, body, labels, reviewers, autoMergeRequest - and every one of those
+ * fields is compared against the freshest read, because a fork pull request with the same
+ * branch name, a base somebody else already moved, and a title edited mid-run are all
+ * things this document does not claim to publish. A document missing one of the selected
+ * entries is refused before any remote conversation. `remote` may be a remote name; it is
+ * resolved to exactly one push endpoint in task-owned storage, and reads and writes then
+ * use that one endpoint.
  *
  * Output JSON on stdout: `{ contractVersion, ok, status, errors, publication, capability,
  * controls, authority, provider, rootAdvance, unselectedDependents, verification,
@@ -87,7 +92,7 @@
  */
 
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
@@ -95,6 +100,12 @@ const CONTRACT_VERSION = 'flatten-pr-graph/1'
 const GIT_TIMEOUT_MS = 300_000
 const MAX_EVIDENCE_CHARS = 4_000
 const WRITE_KINDS = ['ref-update', 'pr-base-update']
+/**
+ * Transports this helper will drive. A remote helper (`ext::`, `git-remote-<name>`) or
+ * a wrapper command executes a program before any authorization question is asked, so it
+ * is refused by name rather than discovered by running it.
+ */
+const PERMITTED_PUSH_SCHEMES = new Set(['file', 'ssh', 'https', 'http', 'git'])
 
 class InputError extends Error {
   constructor(code, detail, evidence) {
@@ -199,19 +210,79 @@ function requireRemote(value, where) {
       `received ${JSON.stringify(value)}`,
     )
   }
-  if (value.startsWith('ext::') || value.includes('::')) {
+  // `ext::` and any other helper transport run an arbitrary program as part of merely
+  // addressing the remote, so it is refused before discovery rather than found out
+  // during it. A bare name or `/path` is Git's own shorthand for file transport.
+  if (value.includes('::')) {
     throw new InputError(
       'conflicting-environment-control',
-      `${where} specifies an ext or custom remote transport, which is not permitted`,
+      `${where} specifies a remote-helper transport, which executes a program this helper will not run`,
+      value,
+    )
+  }
+  const scheme = /^([A-Za-z][A-Za-z0-9+.-]*):\/\//.exec(value)
+  if (scheme && !PERMITTED_PUSH_SCHEMES.has(scheme[1].toLowerCase())) {
+    throw new InputError(
+      'conflicting-environment-control',
+      `${where} uses the unsupported transport ${scheme[1]}://`,
       value,
     )
   }
   return value
 }
 
+/**
+ * One push destination, resolved once and used for every read and every write.
+ *
+ * `remote` may be a configured remote name or a path. A name is resolved through task
+ * storage's own configuration, because that is where the push will run: `remote.url`
+ * for a plain path or transport, `remote.pushurl` when it is set, and every configured
+ * push URL must agree. Several destinations are a blocker - a push that fans out to
+ * multiple remotes is not one atomic transaction, and reads run somewhere else again.
+ */
+function resolvePushEndpoint(repository, remote) {
+  const configured = runGit(repository, ['remote', 'get-url', '--all', '--push', remote], {
+    allowFailure: true,
+  })
+  if (!configured.ok) return { endpoint: remote, evidence: `${remote} is addressed directly` }
+  const urls = lines(configured.stdout)
+  if (urls.length === 0) {
+    throw new InputError(
+      'invalid-input',
+      `remote ${remote} has no push url`,
+      'git remote get-url --all --push returned nothing',
+    )
+  }
+  if (urls.length > 1) {
+    throw new InputError(
+      'conflicting-environment-control',
+      `remote ${remote} has more than one push destination, so no single atomic transaction covers it`,
+      urls.join(', '),
+    )
+  }
+  const url = urls[0]
+  if (url.includes('::')) {
+    throw new InputError(
+      'conflicting-environment-control',
+      `remote ${remote} resolves to a remote-helper transport, which executes a program this helper will not run`,
+      url,
+    )
+  }
+  const scheme = /^([A-Za-z][A-Za-z0-9+.-]*):\/\//.exec(url)
+  if (scheme && !PERMITTED_PUSH_SCHEMES.has(scheme[1].toLowerCase())) {
+    throw new InputError(
+      'conflicting-environment-control',
+      `remote ${remote} uses the unsupported transport ${scheme[1]}://`,
+      url,
+    )
+  }
+  return { endpoint: url, evidence: `one push destination: ${url}` }
+}
+
 function verifyInput(raw) {
   const repository = requireExistingDirectory(raw.repository, 'repository')
   const remote = requireRemote(raw.remote, 'remote')
+  const pushEndpoint = resolvePushEndpoint(repository, remote)
   const runDirectory = resolve(
     typeof raw.runDirectory === 'string' && isAbsolute(raw.runDirectory)
       ? raw.runDirectory
@@ -308,28 +379,54 @@ function verifyInput(raw) {
   if (isPlainObject(raw.pullRequests)) {
     for (const number of numbers) {
       const pinned = raw.pullRequests?.[String(number)] ?? raw.pullRequests?.[number]
-      if (pinned) {
-        if (
-          !isPlainObject(pinned) ||
-          typeof pinned.headRef !== 'string' ||
-          typeof pinned.headRepository !== 'string' ||
-          typeof pinned.baseRef !== 'string'
-        ) {
-          throw new InputError(
-            'invalid-input',
-            `pullRequests[${number}] must carry the authorized headRef, headRepository, and baseRef of that pull request`,
-            `received ${JSON.stringify(pinned)}`,
-          )
-        }
-        pullRequests[number] = {
-          state: typeof pinned.state === 'string' ? pinned.state : null,
-          headRef: pinned.headRef,
-          headRepository: pinned.headRepository,
-          baseRef: pinned.baseRef,
-          headRefOid: typeof pinned.headRefOid === 'string' ? pinned.headRefOid : null,
-        }
+      if (!pinned) continue
+      if (
+        !isPlainObject(pinned) ||
+        typeof pinned.headRef !== 'string' ||
+        typeof pinned.headRepository !== 'string' ||
+        typeof pinned.baseRef !== 'string'
+      ) {
+        throw new InputError(
+          'invalid-input',
+          `pullRequests[${number}] must carry the authorized headRef, headRepository, and baseRef of that pull request`,
+          `received ${JSON.stringify(pinned)}`,
+        )
+      }
+      // Every field this run treats as admissible is pinned here, not only the three it
+      // compares today: identity, base, auto-merge, and the fields a base retarget must
+      // not disturb. A snapshot that cannot be compared cannot protect the write.
+      pullRequests[number] = {
+        number,
+        state: typeof pinned.state === 'string' ? pinned.state : null,
+        draft: typeof pinned.draft === 'boolean' ? pinned.draft : null,
+        headRef: pinned.headRef,
+        headRepository: pinned.headRepository,
+        baseRef: pinned.baseRef,
+        headRefOid: typeof pinned.headRefOid === 'string' ? pinned.headRefOid : null,
+        baseRefOid: typeof pinned.baseRefOid === 'string' ? pinned.baseRefOid : null,
+        title: typeof pinned.title === 'string' ? pinned.title : null,
+        body: typeof pinned.body === 'string' ? pinned.body : null,
+        labels: Array.isArray(pinned.labels) ? pinned.labels.map(String) : null,
+        reviewers: Array.isArray(pinned.reviewers) ? pinned.reviewers.map(String) : null,
+        autoMergeRequest: isPlainObject(pinned.autoMergeRequest)
+          ? {
+              enabled: pinned.autoMergeRequest.enabled === true,
+              method:
+                typeof pinned.autoMergeRequest.method === 'string'
+                  ? pinned.autoMergeRequest.method
+                  : null,
+            }
+          : null,
       }
     }
+  }
+  const missingPinned = numbers.filter((number) => !pullRequests[number])
+  if (missingPinned.length > 0) {
+    throw new InputError(
+      'invalid-input',
+      `the authorized snapshot names no pullRequests entry for ${missingPinned.map((n) => `#${n}`).join(', ')}`,
+      'a publication that cannot compare the selected pull requests against a pinned snapshot is refused',
+    )
   }
   const preparationRunDirectory =
     typeof raw.preparationRunDirectory === 'string' && isAbsolute(raw.preparationRunDirectory)
@@ -338,6 +435,7 @@ function verifyInput(raw) {
   return {
     repository,
     remote,
+    pushEndpoint,
     runDirectory,
     root,
     branches,
@@ -406,12 +504,26 @@ function emptyPublication() {
 function inspectControls(repository) {
   const controls = []
   // Git prints a multi-part key with its middle section lowercased, so the read is
-  // unrestricted and every comparison uses the canonical lowercase spelling.
-  const read = () =>
-    lines(
-      runGit(repository, ['config', '--get-regexp', '^(push|core)\\.'], { allowFailure: true })
-        .stdout,
-    )
+  // unrestricted and every comparison uses the canonical lowercase spelling. A read that
+  // fails is not the absence of a control: `git config --get-regexp` exits 1 for "no
+  // match" and something else for "could not be read", and only the first is an answer.
+  const read = () => {
+    const result = runGit(repository, ['config', '--get-regexp', '^(push|core)\\.'], {
+      allowFailure: true,
+    })
+    if (!result.ok && result.status !== 1) {
+      controls.push({
+        control: 'config.read',
+        value: result.stderr.trim().slice(0, 200) || `git config exited ${result.status}`,
+        inTaskStorage: 'inherited',
+        blocking: true,
+        effect:
+          'the Git configuration that could widen this push could not be read, so its absence cannot be claimed',
+      })
+      return []
+    }
+    return lines(result.stdout)
+  }
   const WATCHED = new Set([
     'push.followtags',
     'push.recursesubmodules',
@@ -439,11 +551,14 @@ function inspectControls(repository) {
         : 'left exactly as configured',
     })
   }
-  const hooksPath = gitOut(repository, ['config', '--get', 'core.hooksPath'])
-  const hooksDir = hooksPath
-    ? isAbsolute(hooksPath)
-      ? hooksPath
-      : resolve(repository, hooksPath)
+  // Git resolves a relative `core.hooksPath` against the repository, not against the
+  // directory the caller happens to be in, and a push from task storage runs its hooks
+  // there. Asking Git is the only answer that matches what the push will do.
+  const resolvedHooks = gitOut(repository, ['rev-parse', '--git-path', 'hooks'])
+  const hooksDir = resolvedHooks
+    ? isAbsolute(resolvedHooks)
+      ? resolvedHooks
+      : resolve(repository, resolvedHooks)
     : join(repository, 'hooks')
   const prePush = join(hooksDir, 'pre-push')
   controls.push({
@@ -481,8 +596,8 @@ function detectAtomicRefTransaction(repository, remote, refspecs, leases) {
   return { supported: null, evidence: stderr.trim().slice(0, MAX_EVIDENCE_CHARS) }
 }
 
-function remoteRefs(remote, repository = process.cwd()) {
-  const output = runGit(repository, ['ls-remote', '--heads', remote], { allowFailure: true })
+function remoteRefs(repository, endpoint) {
+  const output = runGit(repository, ['ls-remote', '--heads', endpoint], { allowFailure: true })
   const refs = {}
   if (output.ok) {
     for (const line of lines(output.stdout)) {
@@ -507,7 +622,7 @@ const GIT_CONVERSATIONS = {
     runGit(repository, ['push', '--atomic', ...leases, remote, ...refspecs], {
       allowFailure: true,
     }),
-  readRemoteRefs: (remote, repository) => remoteRefs(remote, repository).refs,
+  readRemoteRefs: (repository, endpoint) => remoteRefs(repository, endpoint).refs,
 }
 
 /**
@@ -522,6 +637,10 @@ function verifyPreparedSet(input, refs) {
   const errors = []
   const checked = []
   const byNumber = new Map(input.branches.map((branch) => [branch.number, branch]))
+  const isAncestor = (ancestor, descendant) =>
+    runGit(input.repository, ['merge-base', '--is-ancestor', ancestor, descendant], {
+      allowFailure: true,
+    }).ok
   for (const [index, number] of input.order.entries()) {
     const branch = byNumber.get(number)
     const local = gitOut(input.repository, [
@@ -538,13 +657,14 @@ function verifyPreparedSet(input, refs) {
       })
       continue
     }
-    // Check if the committed tree retains conflict markers (Finding 10)
+    // A committed tree can hold conflict markers and still be a valid object, so ancestry
+    // checks alone would accept a resolution that was never finished.
     const markerCheck = runGit(
       input.repository,
       ['grep', '-I', '-l', '-e', '<<<<<<<', branch.preparedHead, '--'],
       { allowFailure: true },
     )
-    if (markerCheck.ok && lines(markerCheck.stdout).length > 0) {
+    if (lines(markerCheck.stdout).length > 0) {
       errors.push({
         code: 'unresolved-conflict',
         detail: `the prepared head of #${number} retains conflict markers in its committed tree`,
@@ -552,83 +672,64 @@ function verifyPreparedSet(input, refs) {
       })
       continue
     }
-    const retained =
-      gitOut(input.repository, [
-        'merge-base',
-        '--is-ancestor',
-        branch.originalHead,
-        branch.preparedHead,
-      ]) !== null
-    if (!retained) {
-      const ancestor = runGit(
-        input.repository,
-        ['merge-base', '--is-ancestor', branch.originalHead, branch.preparedHead],
-        { allowFailure: true },
-      ).ok
-      if (!ancestor) {
-        errors.push({
-          code: 'lost-original-commit',
-          detail: `the original head of #${number} is not reachable from its prepared head`,
-          evidence: `original ${branch.originalHead}, prepared ${branch.preparedHead}`,
-        })
-        continue
-      }
+    if (!isAncestor(branch.originalHead, branch.preparedHead)) {
+      errors.push({
+        code: 'lost-original-commit',
+        detail: `the original head of #${number} is not reachable from its prepared head`,
+        evidence: `original ${branch.originalHead}, prepared ${branch.preparedHead}`,
+      })
+      continue
     }
+    // The first position has no predecessor in the order, so its predecessor is the pinned
+    // root. Checking only the recorded `basedOn` would accept a head that names the right
+    // parent and descends from the wrong history.
     const predecessor = index > 0 ? byNumber.get(input.order[index - 1]) : null
-    if (index === 0) {
-      const rootReachable = runGit(
-        input.repository,
-        ['merge-base', '--is-ancestor', input.root.oid, branch.preparedHead],
-        { allowFailure: true },
-      ).ok
-      if (!rootReachable || branch.basedOn !== input.root.oid) {
-        errors.push({
-          code: 'stale-snapshot',
-          detail: `#${number} does not contain or is not based on the pinned root commit ${input.root.oid}`,
-          evidence: `root ${input.root.oid}, prepared ${branch.preparedHead}, basedOn ${branch.basedOn}`,
-        })
-        continue
-      }
-    } else if (predecessor) {
-      const cumulative = runGit(
-        input.repository,
-        ['merge-base', '--is-ancestor', predecessor.preparedHead, branch.preparedHead],
-        { allowFailure: true },
-      ).ok
-      if (!cumulative || branch.basedOn !== predecessor.preparedHead) {
-        errors.push({
-          code: 'stale-snapshot',
-          detail: `#${number} no longer contains or is based on the prepared state of #${predecessor.number}`,
-          evidence: `${predecessor.preparedHead} is not an ancestor of ${branch.preparedHead} or basedOn mismatch`,
-        })
-        continue
-      }
+    const expectedBase = predecessor ? predecessor.preparedHead : input.root.oid
+    if (branch.basedOn !== expectedBase || !isAncestor(expectedBase, branch.preparedHead)) {
+      errors.push({
+        code: 'stale-snapshot',
+        detail: predecessor
+          ? `#${number} no longer contains or is based on the prepared state of #${predecessor.number}`
+          : `#${number} does not contain or is not based on the pinned root commit ${input.root.oid}`,
+        evidence: `expected base ${expectedBase}, prepared ${branch.preparedHead}, basedOn ${branch.basedOn}`,
+      })
+      continue
     }
     checked.push({ number, branch, predecessor, index })
   }
 
-  // Check preparation index state and unresolved list (Finding 10)
-  if (input.preparation?.indexState) {
-    const unmerged = input.preparation.indexState.unmergedEntries ?? []
-    const ops = input.preparation.indexState.operationsInProgress ?? []
-    const mks = input.preparation.indexState.conflictMarkersInTree ?? []
-    if (unmerged.length > 0 || ops.length > 0 || mks.length > 0) {
+  // The handoff's own integrity fields are a claim; the workspaces are the evidence. Both
+  // are checked, because either alone can be wrong while the other looks clean.
+  const indexState = input.preparation?.indexState
+  if (isPlainObject(indexState)) {
+    const unmerged = indexState.unmergedEntries ?? []
+    const ops = indexState.operationsInProgress ?? []
+    const markers = indexState.conflictMarkersInTree ?? []
+    if (unmerged.length > 0 || ops.length > 0 || markers.length > 0) {
       errors.push({
         code: 'unresolved-conflict',
-        detail: 'preparation handoff records unresolved conflicts, ongoing operations, or conflict markers',
-        evidence: `unmerged=${unmerged.join(',')} ops=${ops.join(',')} markers=${mks.join(',')}`,
+        detail:
+          'the preparation handoff records unresolved index entries, operations, or conflict markers',
+        evidence: `unmerged=${unmerged.join(',')} ops=${ops.join(',')} markers=${markers.join(',')}`,
       })
     }
   }
   if (Array.isArray(input.preparation?.unresolved) && input.preparation.unresolved.length > 0) {
     errors.push({
       code: 'unresolved-conflict',
-      detail: 'preparation handoff lists unresolved paths',
+      detail: 'the preparation handoff lists unresolved paths',
       evidence: input.preparation.unresolved.join(', '),
     })
   }
+  if (input.preparationRunDirectory) {
+    errors.push(...inspectPreparationWorkspaces(input.preparationRunDirectory))
+  }
 
-  // Snapshot reconciliation: admit journaled prepared heads for selected head refs (Finding 12)
+  // Snapshot reconciliation. A selected head may legitimately hold this run's own prepared
+  // commit (a lost acknowledgement, or a rerun of an accepted push), so those refs are
+  // checked against the journaled original or prepared value instead of equality with the
+  // snapshot. Every other ref is compared exactly, and a ref that appeared since the
+  // snapshot is as unauthorised as one that moved.
   const selectedHeadMap = new Map(input.order.map((n) => [input.heads[n], byNumber.get(n)]))
   for (const [ref, pinned] of Object.entries(input.observedRefs)) {
     if (ref === input.root.ref) continue
@@ -644,15 +745,47 @@ function verifyPreparedSet(input, refs) {
       }
       continue
     }
-    if (now !== undefined && now !== pinned) {
+    if (now !== pinned) {
       errors.push({
         code: 'stale-snapshot',
         detail: `ref ${ref} moved since the run observed it`,
-        evidence: `observed ${pinned}, remote now holds ${now}`,
+        evidence: `observed ${pinned ?? 'absent'}, remote now holds ${now ?? 'absent'}`,
       })
     }
   }
   return { errors, checked }
+}
+
+/**
+ * The preparation workspaces, read before anything is written. A workspace left mid-merge
+ * holds an unmerged index and an operation in progress, and one whose committed tree still
+ * carries markers is not a finished integration - neither is discoverable from the
+ * manifest alone.
+ */
+function inspectPreparationWorkspaces(preparationRunDirectory) {
+  const errors = []
+  const workspaces = join(preparationRunDirectory, 'workspaces')
+  if (!existsSync(workspaces)) return errors
+  for (const entry of readdirSync(workspaces, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue
+    const workspace = join(workspaces, entry.name)
+    const unmerged = lines(gitOut(workspace, ['diff', '--name-only', '--diff-filter=U']) ?? '')
+    const operations = [
+      'MERGE_HEAD',
+      'REBASE_HEAD',
+      'CHERRY_PICK_HEAD',
+      'rebase-merge',
+      'rebase-apply',
+    ].filter((marker) => existsSync(join(workspace, '.git', marker)))
+    if (unmerged.length > 0 || operations.length > 0) {
+      errors.push({
+        code: 'unresolved-conflict',
+        detail: `preparation workspace ${entry.name} is not in a finished state`,
+        evidence: `unmerged=${unmerged.join(',') || 'none'} operations=${operations.join(',') || 'none'}`,
+      })
+    }
+  }
+  return errors
 }
 
 async function loadProvider(modulePath, pinnedModule) {
@@ -690,6 +823,11 @@ async function loadProvider(modulePath, pinnedModule) {
   return loaded
 }
 
+/**
+ * Everything a base retarget must leave alone, plus the identity and base the pinned
+ * snapshot established. A field absent from the pinned snapshot is not compared: an
+ * unpinned field cannot prove divergence, and inventing a default would manufacture one.
+ */
 const PRESERVED_FIELDS = [
   'state',
   'draft',
@@ -709,6 +847,75 @@ function preserved(pr) {
 
 function sameJson(left, right) {
   return JSON.stringify(left) === JSON.stringify(right)
+}
+
+/**
+ * Reads one selected pull request through the provider, recording a structured failure
+ * rather than throwing: a pull request that cannot be read is a blocker, not a crash and
+ * not a licence to assume its state.
+ */
+async function readSelectedPullRequest(provider, number, errors) {
+  let read
+  try {
+    read = await provider.readPullRequest(number)
+  } catch (error) {
+    errors.push({
+      code: 'stale-snapshot',
+      detail: `the provider could not be read for #${number}: ${String(error?.message ?? error)}`,
+      evidence: 'a pull request that cannot be re-read is not written',
+    })
+    return null
+  }
+  const pr = isPlainObject(read) ? read.pullRequest : null
+  if (!isPlainObject(pr)) {
+    errors.push({
+      code: 'unsupported-input',
+      detail: `#${number} is not present in the provider`,
+      evidence: `the provider returned ${JSON.stringify(read)}`,
+    })
+    return null
+  }
+  return pr
+}
+
+/**
+ * Every way an observed pull request differs from the pinned one, named field by field.
+ *
+ * Comparing all of them is the point: a read of only `headRef` and `state` would happily
+ * overwrite a base somebody else moved, or a head repository that is now a fork, because
+ * neither is in the subset it looked at.
+ */
+function compareAdmissible(pinned, observed, options = {}) {
+  const divergences = []
+  const intendedBase = options.intendedBase ?? null
+  const compare = (field, read = (pr) => pr?.[field] ?? null) => {
+    const pinnedValue = read(pinned)
+    if (pinnedValue === null || pinnedValue === undefined) return
+    const observedValue = read(observed)
+    // The one admissible difference is this run's own base write. A resumed run re-reads
+    // a pull request a previous attempt already retargeted, and treating that as somebody
+    // else's concurrent edit would refuse a publication that is actually reconciled.
+    if (field === 'baseRef' && intendedBase !== null && observedValue === intendedBase) return
+    if (!sameJson(pinnedValue, observedValue)) {
+      divergences.push(
+        `${field}: authorized ${JSON.stringify(pinnedValue)}, observed ${JSON.stringify(observedValue)}`,
+      )
+    }
+  }
+  compare('number', (pr) => (isPlainObject(pr) && Number.isInteger(pr.number) ? pr.number : null))
+  compare('state')
+  compare('draft')
+  compare('headRef')
+  compare('headRepository')
+  compare('baseRef')
+  compare('headRefOid')
+  compare('baseRefOid')
+  compare('title')
+  compare('body')
+  compare('labels')
+  compare('reviewers')
+  compare('autoMergeRequest')
+  return divergences
 }
 
 function classifyPushFailure(stderr) {
@@ -774,19 +981,24 @@ export async function publishStack(raw, conversations = {}) {
   }
 
   const { path: journalFile, journal: existingJournal } = readJournal(input.runDirectory)
-  const journal = existingJournal ?? {
-    contractVersion: CONTRACT_VERSION,
-    runId: `publish-${input.root.oid.slice(0, 12)}-${input.order.join('-')}`,
-    state: 'publishing',
-    startedAt: input.now,
-    updatedAt: input.now,
-    selection: input.numbers,
-    order: input.order,
-    root: input.root,
-    attempts: [],
-    observedRefs: input.observedRefs,
-    secrets: 'none; this journal records commit ids, branches, and outcomes only',
-  }
+  // The journal in the run directory is the only record of an interrupted write, so this
+  // run works on its own copy: a request that is refused before any write leaves that
+  // record exactly as the interrupted run left it.
+  const journal = existingJournal
+    ? { ...existingJournal }
+    : {
+        contractVersion: CONTRACT_VERSION,
+        runId: `publish-${input.root.oid.slice(0, 12)}-${input.order.join('-')}`,
+        state: 'publishing',
+        startedAt: input.now,
+        updatedAt: input.now,
+        selection: input.numbers,
+        order: input.order,
+        root: input.root,
+        attempts: [],
+        observedRefs: input.observedRefs,
+        secrets: 'none; this journal records commit ids, branches, and outcomes only',
+      }
   const controls = inspectControls(input.repository)
   const blockedControls = controls.filter((control) => control.blocking)
 
@@ -812,10 +1024,41 @@ export async function publishStack(raw, conversations = {}) {
     }
   }
 
+  /**
+   * A journal that cannot be written is itself a fault, but it is not a fault that undoes
+   * what the remote already accepted. The recorded outcomes are returned with the failure
+   * attached, so an acknowledged write is never reported as "nothing was written".
+   */
   const finish = (extra) => {
     journal.updatedAt = input.now
-    writeJournal(journalFile, journal)
-    return returnWithoutJournal(extra)
+    let journalError = null
+    try {
+      writeJournal(journalFile, journal)
+    } catch (error) {
+      journalError = {
+        code: 'unfinished-run',
+        detail: 'the publication journal could not be written after remote operations',
+        evidence: `${journalFile}: ${String(error?.message ?? error)}`,
+      }
+    }
+    if (!journalError) return returnWithoutJournal(extra)
+    return returnWithoutJournal({
+      ...extra,
+      status: extra.status === 'published' || extra.status === 'no-op' ? 'partial' : extra.status,
+      ok: false,
+      errors: [...(extra.errors ?? []), journalError],
+      recovery: {
+        acknowledgedChanges: (extra.publication?.confirmed ?? []).map(
+          (entry) => `${entry.kind} ${entry.target}`,
+        ),
+        unconfirmedAttempts: [
+          ...(extra.publication?.unconfirmed ?? []).map((entry) => `${entry.kind} ${entry.target}`),
+          'the recovery journal itself is missing or stale',
+        ],
+        recommended:
+          're-read the remote before retrying; the acknowledged steps above did happen, and the journal cannot be trusted to record the rest',
+      },
+    })
   }
 
   // 1. Authority. Nothing below runs without it, and it is checked against the exact
@@ -909,13 +1152,15 @@ export async function publishStack(raw, conversations = {}) {
         errors: [
           {
             code: 'stale-snapshot',
-            detail: 'cannot resume publication under a mutated plan; selection, order, root, heads, or prepared state changed',
+            detail:
+              'cannot resume publication under a mutated plan; selection, order, root, heads, or prepared state changed',
             evidence: 'journal plan differs from input plan',
           },
         ],
         status: 'blocked',
         nextSafeAction: {
-          action: 'start a new publication run with a clean run directory, or restore the original plan',
+          action:
+            'start a new publication run with a clean run directory, or restore the original plan',
           requires: ['matching-plan'],
         },
       })
@@ -926,7 +1171,7 @@ export async function publishStack(raw, conversations = {}) {
 
   // 3. Re-read the remote, verify the prepared set against it, and decide the write set.
   const observed = {
-    refs: git.readRemoteRefs(input.remote, input.repository),
+    refs: git.readRemoteRefs(input.repository, input.pushEndpoint.endpoint),
     ok: true,
     stderr: '',
   }
@@ -1042,20 +1287,147 @@ export async function publishStack(raw, conversations = {}) {
     })
   }
 
-  if (refWrites.length > 0 && !granted.has('ref-update')) {
+  // 5. The provider is loaded and every selected pull request is read *before* any grant is
+  //    acted on, because the write set is only knowable once the bases are known. A run
+  //    that pushed heads first and discovered a missing base grant afterwards would leave
+  //    the remote half-migrated to report it.
+  let provider = null
+  const prBefore = new Map()
+  const prErrors = []
+  try {
+    provider = await loadProvider(input.providerModule, process.env.FLATTEN_PR_PROVIDER_MODULE)
+  } catch (error) {
+    prErrors.push(
+      error instanceof InputError
+        ? { code: error.code, detail: error.detail, evidence: error.evidence }
+        : {
+            code: 'invalid-input',
+            detail: String(error?.message ?? error),
+            evidence: 'the provider module could not be loaded',
+          },
+    )
+  }
+  let providerCapabilities = null
+  if (provider) {
+    try {
+      providerCapabilities = await provider.capabilities()
+    } catch (error) {
+      prErrors.push({
+        code: 'invalid-input',
+        detail: `the provider did not report its capabilities: ${String(error?.message ?? error)}`,
+        evidence: 'a provider whose capabilities cannot be read is not used for writes',
+      })
+    }
+    if (!isPlainObject(providerCapabilities)) {
+      prErrors.push({
+        code: 'invalid-input',
+        detail: 'the provider returned no capability document',
+        evidence:
+          'without it this run cannot tell which operations exist, so no permission check and no pull request read can be trusted',
+      })
+      providerCapabilities = null
+    }
+    if (providerCapabilities) {
+      if (!Array.isArray(providerCapabilities.operations)) {
+        prErrors.push({
+          code: 'invalid-input',
+          detail: 'the provider capability document lists no operations',
+          evidence: `received ${JSON.stringify(providerCapabilities)}`,
+        })
+      }
+      for (const kind of ['update-pull-request-base']) {
+        if (!providerCapabilities.operations?.includes(kind)) {
+          prErrors.push({
+            code: 'missing-permission',
+            detail: `the provider does not offer ${kind}`,
+            evidence: `operations ${(providerCapabilities.operations ?? []).join(', ')}`,
+          })
+        }
+      }
+      for (const number of input.order) {
+        const observed = await readSelectedPullRequest(provider, number, prErrors)
+        if (!observed) continue
+        prBefore.set(number, observed)
+        // The pinned snapshot is the authority for identity, base, and every field this
+        // run must not disturb. A same-named fork, a retarget somebody else already made,
+        // or a state change is a changed plan, never something to adopt.
+        const pinned = input.pullRequests[number]
+        const divergences = compareAdmissible(pinned, observed, {
+          intendedBase: input.intendedBases[number],
+        })
+        if (divergences.length > 0) {
+          prErrors.push({
+            code: 'stale-snapshot',
+            detail: `#${number} no longer matches the authorized snapshot`,
+            evidence: divergences.join('; '),
+          })
+        }
+        if (observed.state !== 'OPEN') {
+          prErrors.push({
+            code: 'unsupported-input',
+            detail: `#${number} is ${observed.state}`,
+            evidence: `the provider reports state ${observed.state}`,
+          })
+        }
+        if (observed.autoMergeRequest?.enabled === true) {
+          prErrors.push({
+            code: 'active-landing-arrangement',
+            detail: `#${number} carries its own active auto-merge request`,
+            evidence: `provider reports autoMergeRequest.enabled with method ${observed.autoMergeRequest.method ?? 'unspecified'}`,
+          })
+        }
+      }
+    }
+  }
+  if (prErrors.length > 0) {
     journal.state = 'blocked'
     return finish({
-      errors: [
-        {
-          code: 'missing-permission',
-          detail: 'no grant permits pushing prepared heads to the remote',
-          evidence: `pending head writes: ${refWrites.map((w) => w.ref).join(', ')}; granted: ${input.authority.granted.join(', ') || 'nothing'}`,
-        },
-      ],
+      errors: prErrors,
       status: 'blocked',
+      provider: providerCapabilities
+        ? { name: providerCapabilities.provider ?? 'unnamed', trust: 'host-pinned' }
+        : null,
       nextSafeAction: {
-        action: 'ask for an explicit execute grant naming ref-update for the prepared heads',
-        requires: ['ref-update'],
+        action: 'report the blocker before any write; no ref or metadata was changed',
+        requires: prErrors.map((error) => error.detail),
+      },
+    })
+  }
+
+  // The complete write set, decided from what was actually observed. Every kind it names
+  // must be granted before the first remote operation, not when its turn comes.
+  const pendingBases = input.order
+    .filter((number) => prBefore.get(number).baseRef !== input.intendedBases[number])
+    .map((number) => ({
+      number,
+      from: prBefore.get(number).baseRef,
+      to: input.intendedBases[number],
+    }))
+  const requiredKinds = []
+  if (refWrites.length > 0) requiredKinds.push('ref-update')
+  if (pendingBases.length > 0) requiredKinds.push('pr-base-update')
+  const missingKinds = requiredKinds.filter((kind) => !granted.has(kind))
+  if (missingKinds.length > 0) {
+    journal.state = 'blocked'
+    return finish({
+      errors: missingKinds.map((kind) => ({
+        code: 'missing-permission',
+        detail:
+          kind === 'ref-update'
+            ? 'no grant permits pushing the prepared heads to the remote'
+            : 'no grant permits retargeting the selected pull request bases',
+        evidence:
+          kind === 'ref-update'
+            ? `pending head writes: ${refWrites.map((w) => w.ref).join(', ')}`
+            : `pending base writes: ${pendingBases.map((b) => `#${b.number}`).join(', ')}`,
+      })),
+      status: 'blocked',
+      provider: providerCapabilities
+        ? { name: providerCapabilities.provider ?? 'unnamed', trust: 'host-pinned' }
+        : null,
+      nextSafeAction: {
+        action: `ask for an explicit execute grant naming ${missingKinds.join(' and ')}`,
+        requires: missingKinds,
       },
     })
   }
@@ -1064,7 +1436,12 @@ export async function publishStack(raw, conversations = {}) {
   const leases = refWrites.map((write) => `--force-with-lease=${write.ref}:${write.from}`)
   let atomic = { supported: null, evidence: 'no ref write was needed' }
   if (refWrites.length > 0) {
-    atomic = git.detectAtomicRefTransaction(input.repository, input.remote, refspecs, leases)
+    atomic = git.detectAtomicRefTransaction(
+      input.repository,
+      input.pushEndpoint.endpoint,
+      refspecs,
+      leases,
+    )
     if (atomic.supported !== true) {
       journal.state = 'blocked'
       return finish({
@@ -1092,169 +1469,47 @@ export async function publishStack(raw, conversations = {}) {
     }
   }
 
-  // 5. Load the provider, read the selected pull requests, and check each pull request's
-  //    own auto-merge request - the one preflight fact that blocks.
-  let provider = null
-  const prBefore = new Map()
-  const prErrors = []
-  try {
-    provider = await loadProvider(input.providerModule, process.env.FLATTEN_PR_PROVIDER_MODULE)
-  } catch (error) {
-    prErrors.push(
-      error instanceof InputError
-        ? { code: error.code, detail: error.detail, evidence: error.evidence }
-        : {
-            code: 'invalid-input',
-            detail: String(error?.message ?? error),
-            evidence: 'the provider module could not be loaded',
-          },
-    )
-  }
-  let providerCapabilities = null
-  if (provider) {
-    try {
-      providerCapabilities = provider.capabilities()
-    } catch (error) {
-      prErrors.push({
-        code: 'invalid-input',
-        detail: `the provider did not report its capabilities: ${String(error?.message ?? error)}`,
-        evidence: 'a provider whose capabilities cannot be read is not used for writes',
-      })
-    }
-    if (providerCapabilities) {
-      for (const kind of ['update-pull-request-base']) {
-        if (!providerCapabilities.operations?.includes(kind)) {
-          prErrors.push({
-            code: 'missing-permission',
-            detail: `the provider does not offer ${kind}`,
-            evidence: `operations ${(providerCapabilities.operations ?? []).join(', ')}`,
-          })
-        }
-      }
-      for (const number of input.order) {
-        let read
-        try {
-          read = provider.readPullRequest(number)
-        } catch (error) {
-          prErrors.push({
-            code: 'stale-snapshot',
-            detail: `the provider could not be read for #${number}: ${String(error?.message ?? error)}`,
-            evidence: 'a pull request that cannot be re-read is not written',
-          })
-          continue
-        }
-        const pr = read?.pullRequest
-        if (!pr) {
-          prErrors.push({
-            code: 'unsupported-input',
-            detail: `#${number} is not present in the provider`,
-            evidence: 'the provider returned no pull request',
-          })
-          continue
-        }
-        prBefore.set(number, pr)
-        if (pr.headRef !== input.heads[number].replace('refs/heads/', '')) {
-          prErrors.push({
-            code: 'stale-snapshot',
-            detail: `#${number} now points at a different head branch`,
-            evidence: `provider head ${pr.headRef}, authorized ${input.heads[number]}`,
-          })
-        }
-        if (pr.state !== 'OPEN') {
-          prErrors.push({
-            code: 'unsupported-input',
-            detail: `#${number} is ${pr.state}`,
-            evidence: `the provider reports state ${pr.state}`,
-          })
-        }
-        if (pr.autoMergeRequest?.enabled === true) {
-          prErrors.push({
-            code: 'active-landing-arrangement',
-            detail: `#${number} carries its own active auto-merge request`,
-            evidence: `provider reports autoMergeRequest.enabled with method ${pr.autoMergeRequest.method ?? 'unspecified'}`,
-          })
-        }
-      }
-    }
-  }
-  if (prErrors.length > 0) {
-    journal.state = 'blocked'
-    return finish({
-      errors: prErrors,
-      status: 'blocked',
-      capability: {
-        ...base.capability,
-        atomicRefTransaction:
-          atomic.supported === true ? 'supported' : base.capability.atomicRefTransaction,
-        providerCompareAndSwap: providerCapabilities
-          ? providerCapabilities.compareAndSwap === true
-          : null,
-        baseWritesGuardedBy:
-          providerCapabilities?.compareAndSwap === true ? 'compare-and-swap' : 'read-before-write',
-        residualMetadataRace: providerCapabilities
-          ? providerCapabilities.compareAndSwap !== true
-          : null,
-      },
-      provider: providerCapabilities
-        ? { name: providerCapabilities.provider ?? 'unnamed', trust: 'host-pinned' }
-        : null,
-      nextSafeAction: {
-        action: 'report the blocker before any write; no ref or metadata was changed',
-        requires: prErrors.map((error) => error.detail),
-      },
-    })
-  }
-
   const compareAndSwap = providerCapabilities?.compareAndSwap === true
   const publication = emptyPublication()
   publication.concurrency.leaseHeld = refWrites.length > 0
   const verification = []
   let sequence = 0
+  let stuck = []
+  // The freshest observation of the remote: the preflight read, replaced wholesale by the
+  // post-push read-back once there is one.
+  let latestRefs = observed.refs
 
-  // 6. One atomic, lease-guarded push of exactly the selected refs that still need it.
-  if (refWrites.length > 0) {
-    sequence += 1
-    journal.attempts.push({
-      sequence,
-      kind: 'ref-update',
-      target: 'selected-heads',
-      detail: refWrites.map(
-        (write) => `${write.ref} ${write.from.slice(0, 12)} -> ${write.to.slice(0, 12)}`,
-      ),
-      at: input.now,
-      outcome: 'attempted',
-    })
-    writeJournal(journalFile, journal)
-    const push = git.push(input.repository, input.remote, refspecs, leases)
-    const after = git.readRemoteRefs(input.remote, input.repository)
-    const landed = refWrites.filter((write) => after[write.ref] === write.to)
-    const stuck = refWrites.filter((write) => after[write.ref] !== write.to)
-    if (push.ok || landed.length === refWrites.length) {
-      for (const write of refWrites) {
-        publication.attempts.push({
-          sequence: sequence++,
-          kind: 'ref-update',
-          target: write.ref,
-          from: write.from,
-          to: write.to,
-          acknowledged: after[write.ref] === write.to,
-          lease: { expectedRemote: write.from, usedForceWithLease: true },
-          outcome: after[write.ref] === write.to ? 'acknowledged' : 'unknown',
-        })
-        if (after[write.ref] === write.to) {
-          publication.confirmed.push({ kind: 'ref-update', target: write.ref, oid: write.to })
-        } else {
-          publication.unconfirmed.push({
-            kind: 'ref-update',
-            target: write.ref,
-            why: 'the push did not report success and the ref does not hold the prepared head',
-          })
-        }
-      }
-    } else {
-      const outcome = classifyPushFailure(push.stderr)
+  // From here on the remote may already have accepted something, so a fault thrown by any
+  // later step is reported with the attempts, confirmations, and uncertainties this run
+  // actually recorded. Letting it escape would replace those with "nothing was written",
+  // which is the one description that is certainly wrong.
+  let payload
+  try {
+    // 6. One atomic, lease-guarded push of exactly the selected refs that still need it.
+    if (refWrites.length > 0) {
+      sequence += 1
+      journal.attempts.push({
+        sequence,
+        kind: 'ref-update',
+        target: 'selected-heads',
+        detail: refWrites.map(
+          (write) => `${write.ref} ${write.from.slice(0, 12)} -> ${write.to.slice(0, 12)}`,
+        ),
+        at: input.now,
+        outcome: 'attempted',
+      })
+      writeJournal(journalFile, journal)
+      const push = git.push(input.repository, input.pushEndpoint.endpoint, refspecs, leases)
+      const after = git.readRemoteRefs(input.repository, input.pushEndpoint.endpoint)
+      latestRefs = after
+      stuck = refWrites.filter((write) => after[write.ref] !== write.to)
+      // The read-back decides, not the push's exit status. A push that reports failure can
+      // still have landed - a lost acknowledgement is the normal case - and a push that
+      // reports success can still not have: only the remote's own ref says which.
+      const failure = push.ok ? 'unknown' : classifyPushFailure(push.stderr)
       for (const write of refWrites) {
         const acknowledged = after[write.ref] === write.to
+        const outcome = acknowledged ? 'acknowledged' : failure
         publication.attempts.push({
           sequence: sequence++,
           kind: 'ref-update',
@@ -1263,7 +1518,7 @@ export async function publishStack(raw, conversations = {}) {
           to: write.to,
           acknowledged,
           lease: { expectedRemote: write.from, usedForceWithLease: true },
-          outcome: acknowledged ? 'acknowledged' : outcome === 'unknown' ? 'unknown' : 'rejected',
+          outcome,
         })
         if (acknowledged) {
           publication.confirmed.push({ kind: 'ref-update', target: write.ref, oid: write.to })
@@ -1271,7 +1526,9 @@ export async function publishStack(raw, conversations = {}) {
           publication.unconfirmed.push({
             kind: 'ref-update',
             target: write.ref,
-            why: `the atomic push failed: ${push.stderr.trim().slice(0, 300) || 'no message'}`,
+            why: push.ok
+              ? 'the push reported success but the ref does not hold the prepared head'
+              : `the atomic push failed: ${push.stderr.trim().slice(0, 300) || 'no message'}`,
           })
           publication.denials.push({
             kind: 'ref-update',
@@ -1280,370 +1537,474 @@ export async function publishStack(raw, conversations = {}) {
             acknowledged: false,
           })
         }
-      }
-      journal.attempts[journal.attempts.length - 1].outcome = outcome
-      journal.attempts[journal.attempts.length - 1].stderr = push.stderr
-        .trim()
-        .slice(0, MAX_EVIDENCE_CHARS)
-    }
-    publication.interrupted = publication.attempts.some((attempt) => attempt.outcome === 'unknown')
-    for (const write of refWrites) {
-      publication.remoteClaims.push({
-        kind: 'ref-oid',
-        target: write.ref,
-        observed: after[write.ref] ?? '',
-        observedAt: input.now,
-      })
-    }
-    verification.push({
-      invariant: 'preservation.original-commits',
-      method: 'git ls-remote read-back plus merge-base in task-owned storage',
-      observed: refWrites
-        .map((write) => `${write.ref}=${(after[write.ref] ?? 'absent').slice(0, 12)}`)
-        .join(' '),
-      result: stuck.length === 0 ? 'pass' : 'fail',
-    })
-    verification.push({
-      invariant: 'atomic-ref-transaction',
-      method: 'git push --atomic --dry-run capability probe, then one guarded push',
-      observed: atomic.evidence,
-      result: 'pass',
-    })
-  } else {
-    verification.push({
-      invariant: 'atomic-ref-transaction',
-      method: 'no ref write was required, so no transaction was attempted',
-      observed:
-        alreadyPublished.length > 0
-          ? `already at their prepared heads: ${alreadyPublished.map((entry) => entry.ref).join(', ')}`
-          : 'no selected head needed an update',
-      result: 'pass',
-    })
-  }
-
-  // 7. Base retargeting in dependency order, each one re-read before and verified after.
-  const resolveBaseSha = (refName) => {
-    const rawName = String(refName ?? '')
-    const stripped = rawName.replace(/^refs\/heads\//, '')
-    if (stripped === input.root.ref.replace(/^refs\/heads\//, '') || rawName === input.root.ref) {
-      return input.root.oid
-    }
-    for (const b of input.branches) {
-      const bRef = input.heads[b.number]
-      if (bRef === rawName || bRef?.replace(/^refs\/heads\//, '') === stripped) {
-        return b.preparedHead
-      }
-    }
-    if (observed.refs[rawName]) return observed.refs[rawName]
-    if (observed.refs[`refs/heads/${stripped}`]) return observed.refs[`refs/heads/${stripped}`]
-    const resolved =
-      gitOut(input.repository, ['rev-parse', '--verify', '--quiet', `${rawName}^{commit}`]) ??
-      gitOut(input.repository, ['rev-parse', '--verify', '--quiet', `refs/heads/${stripped}^{commit}`])
-    if (resolved) return resolved
-    return input.root.oid
-  }
-
-  const baseWrites = []
-  const baseFailures = []
-  const headPushFailed =
-    refWrites.length > 0 &&
-    (publication.unconfirmed.some((u) => u.kind === 'ref-update') ||
-      publication.denials.some((d) => d.kind === 'ref-update') ||
-      (typeof stuck !== 'undefined' && stuck.length > 0))
-
-  if (!headPushFailed) {
-    for (const [index, number] of input.order.entries()) {
-      let currentPr = null
-      try {
-        currentPr = provider.readPullRequest(number)?.pullRequest ?? null
-      } catch {
-        currentPr = null
-      }
-      if (!currentPr) {
-        baseFailures.push({
-          code: 'stale-snapshot',
-          detail: `the provider could not be read for #${number} before base update`,
-          evidence: 'pull request read failed',
+        journal.attempts.push({
+          sequence,
+          kind: 'ref-update',
+          target: write.ref,
+          at: input.now,
+          outcome,
         })
-        break
       }
-      const before = prBefore.get(number) ?? currentPr
-      if (currentPr.headRef !== before.headRef || currentPr.state !== 'OPEN') {
-        baseFailures.push({
-          code: 'stale-snapshot',
-          detail: `PR #${number} state changed before base update`,
-          evidence: `headRef=${currentPr.headRef} state=${currentPr.state}`,
-        })
-        break
+      if (!push.ok) {
+        journal.attempts[journal.attempts.length - refWrites.length].outcome = failure
+        journal.attempts[journal.attempts.length - refWrites.length].stderr = push.stderr
+          .trim()
+          .slice(0, MAX_EVIDENCE_CHARS)
       }
-      const intended = input.intendedBases[number]
-      const alreadyCorrect = currentPr.baseRef === intended
-      if (alreadyCorrect) {
-        baseWrites.push({ number, intended, skipped: true })
-        continue
-      }
-      if (!granted.has('pr-base-update')) {
-        baseFailures.push({
-          code: 'missing-permission',
-          detail: `no grant permits retargeting #${number}`,
-          evidence: `granted ${input.authority.granted.join(', ') || 'nothing'}`,
-        })
-        break
-      }
-      const fromSha = resolveBaseSha(currentPr.baseRef)
-      const toSha = resolveBaseSha(intended)
-
-      sequence += 1
-      journal.attempts.push({
-        sequence,
-        kind: 'pr-base-update',
-        target: String(number),
-        detail: `${currentPr.baseRef} -> ${intended}`,
-        at: input.now,
-        outcome: 'attempted',
-      })
-      writeJournal(journalFile, journal)
-      let response = null
-      let callError = null
-      try {
-        response = provider.updatePullRequestBase(
-          number,
-          intended,
-          compareAndSwap ? currentPr.baseRef : null,
-        )
-      } catch (error) {
-        callError = String(error?.message ?? error)
-      }
-      let readBack = null
-      try {
-        readBack = provider.readPullRequest(number)?.pullRequest ?? null
-      } catch {
-        readBack = null
-      }
-      const applied = readBack?.baseRef === intended
-      const drifted =
-        readBack !== null && !sameJson(preserved(currentPr), preserved(readBack))
-      const outcome = applied
-        ? 'acknowledged'
-        : readBack === null
-          ? 'unknown'
-          : callError || response?.ok === false
-            ? 'denied'
-            : 'unknown'
-      if (outcome === 'unknown') {
-        publication.interrupted = true
-      }
-      publication.attempts.push({
-        sequence: sequence++,
-        kind: 'pr-base-update',
-        target: String(number),
-        from: fromSha,
-        to: toSha,
-        acknowledged: applied,
-        lease: compareAndSwap
-          ? {
-              expectedRemote: readBack?.headOid ?? currentPr.headOid ?? '0'.repeat(40),
-              usedForceWithLease: false,
-            }
-          : null,
-        outcome,
-      })
-      if (applied) {
-        publication.confirmed.push({ kind: 'pr-base-update', target: String(number), oid: toSha })
-      } else {
-        publication.unconfirmed.push({
-          kind: 'pr-base-update',
-          target: String(number),
-          why: callError
-            ? `the provider call failed and the base does not read back as intended: ${callError.slice(0, 200)}`
-            : readBack === null
-              ? 'the provider call completed but re-reading the pull request failed; base state is unknown'
-              : 'the base does not read back as intended after the write',
-        })
-        if (outcome === 'denied') {
-          publication.denials.push({
-            kind: 'pr-base-update',
-            target: String(number),
-            reason: 'provider-refused',
-            acknowledged: false,
-          })
-        }
-      }
-      baseWrites.push({ number, intended, skipped: false, applied })
-      if (readBack !== null) {
-        const observedBase = readBack.baseRef
+      publication.interrupted = publication.attempts.some(
+        (attempt) => attempt.outcome === 'unknown',
+      )
+      for (const write of refWrites) {
         publication.remoteClaims.push({
-          kind: 'pr-base',
-          target: String(number),
-          observed: observedBase.startsWith('refs/heads/') ? observedBase : `refs/heads/${observedBase}`,
+          kind: 'ref-oid',
+          target: write.ref,
+          observed: after[write.ref] ?? '',
           observedAt: input.now,
         })
       }
-      if (drifted) {
-        errors.push({
-          code: 'stale-snapshot',
-          detail: `#${number} changed in a field this run never writes`,
-          evidence: `before ${JSON.stringify(preserved(currentPr))}; after ${JSON.stringify(preserved(readBack))}`,
-        })
-        break
-      }
-      if (!applied) {
-        break
-      }
-    }
-  }
-  verification.push({
-    invariant: 'remote.claims-match',
-    method: 'provider re-read immediately after each metadata write',
-    observed: baseWrites
-      .map(
-        (write) =>
-          `#${write.number}=${write.skipped ? 'unchanged' : write.applied ? 'applied' : 'unconfirmed'}`,
-      )
-      .join(' '),
-    result: baseWrites.every((write) => write.skipped || write.applied) ? 'pass' : 'fail',
-  })
-  verification.push({
-    invariant: 'metadata.concurrent-write-guard',
-    method: compareAndSwap
-      ? 'the provider enforced its own precondition on every base write'
-      : 'read-before-write only: not compare-and-swap, and a concurrent write in that window is not detectable here',
-    observed: compareAndSwap ? 'compare-and-swap' : 'read-before-write',
-    result: compareAndSwap ? 'pass' : 'unautomated',
-  })
-
-  // 8. Final read-back of the whole chain, and the root reported against its pinned id.
-  const finalRefs = git.readRemoteRefs(input.remote, input.repository)
-  for (const entry of verified.checked) {
-    const ref = input.heads[entry.number]
-    if (
-      !publication.remoteClaims.some((claim) => claim.kind === 'ref-oid' && claim.target === ref)
-    ) {
-      publication.remoteClaims.push({
-        kind: 'ref-oid',
-        target: ref,
-        observed: finalRefs[ref] ?? '',
-        observedAt: input.now,
+      verification.push({
+        invariant: 'preservation.original-commits',
+        method: 'git ls-remote read-back plus merge-base in task-owned storage',
+        observed: refWrites
+          .map((write) => `${write.ref}=${(after[write.ref] ?? 'absent').slice(0, 12)}`)
+          .join(' '),
+        result: stuck.length === 0 ? 'pass' : 'fail',
+      })
+      verification.push({
+        invariant: 'atomic-ref-transaction',
+        method: 'git push --atomic --dry-run capability probe, then one guarded push',
+        observed: atomic.evidence,
+        result: 'pass',
+      })
+    } else {
+      verification.push({
+        invariant: 'atomic-ref-transaction',
+        method: 'no ref write was required, so no transaction was attempted',
+        observed:
+          alreadyPublished.length > 0
+            ? `already at their prepared heads: ${alreadyPublished.map((entry) => entry.ref).join(', ')}`
+            : 'no selected head needed an update',
+        result: 'pass',
       })
     }
-  }
-  let chainHolds = true
-  for (const [index, number] of input.order.entries()) {
-    const ref = input.heads[number]
-    const oid = finalRefs[ref] ?? null
-    if (oid !== input.branches.find((branch) => branch.number === number).preparedHead) {
-      chainHolds = false
-    }
-    const pr = (() => {
-      try {
-        return provider.readPullRequest(number)?.pullRequest ?? null
-      } catch {
-        return null
+
+    // 7. Base retargeting in dependency order, each one re-read immediately before its own
+    //    write and verified immediately after.
+
+    /**
+     * The commit a branch name currently points at, from the freshest evidence available.
+     *
+     * Returns null when the branch cannot be resolved: an attempt records commit ids, and a
+     * guessed root commit id would put a plausible-looking but invented value in a
+     * SHA-typed field. An unresolvable base is a blocker, not a fallback.
+     */
+    const resolveBaseOid = (branchName) => {
+      const raw = String(branchName ?? '')
+      const ref = raw.startsWith('refs/heads/') ? raw : `refs/heads/${raw}`
+      if (ref === input.root.ref) return input.root.oid
+      for (const branch of input.branches) {
+        if (input.heads[branch.number] === ref) return branch.preparedHead
       }
-    })()
-    if (!pr || pr.baseRef !== input.intendedBases[number]) chainHolds = false
-  }
-  verification.push({
-    invariant: 'topology.chain',
-    method: 're-read every selected head and base after the last write',
-    observed: `chain ${input.order.map((number) => `#${number}`).join(' <- ')}`,
-    result: chainHolds ? 'pass' : 'fail',
-  })
-  if (rootAdvance && !chainHolds) {
-    // A newer root is reported against the pinned snapshot and never as integrated.
-    rootAdvance.note = `the published chain is integrated against the pinned root ${input.root.oid.slice(0, 12)}; the newer root ${rootAdvance.observed.slice(0, 12)} was not integrated`
-  }
-  if (finalRefs[input.root.ref] !== input.root.oid) {
-    const note = rootAdvance ?? {
-      pinned: input.root.oid,
-      observed: finalRefs[input.root.ref] ?? '',
-      integrated: false,
+      if (latestRefs[ref]) return latestRefs[ref]
+      return (
+        gitOut(input.repository, ['rev-parse', '--verify', '--quiet', `${ref}^{commit}`]) ?? null
+      )
+    }
+    const baseWrites = []
+    const baseFailures = []
+
+    // Metadata never starts until every selected head this run intended to publish is
+    // observed at its prepared commit. Retargeting a base onto a head that never landed
+    // would build a chain on a branch nobody can see.
+    const headsUnreconciled =
+      stuck.length > 0 || publication.unconfirmed.some((entry) => entry.kind === 'ref-update')
+    if (headsUnreconciled) {
+      baseFailures.push({
+        code: 'stale-snapshot',
+        detail: 'the selected heads have not all been confirmed at their prepared commits',
+        evidence:
+          stuck.length > 0
+            ? `not at the prepared head: ${stuck.map((write) => write.ref).join(', ')}`
+            : 'a head write has an unknown acknowledgement; the remote is re-read before any retry',
+      })
+    } else {
+      for (const number of input.order) {
+        const readErrors = []
+        const currentPr = await readSelectedPullRequest(provider, number, readErrors)
+        if (!currentPr) {
+          baseFailures.push({
+            code: 'stale-snapshot',
+            detail: `the provider could not be read for #${number} immediately before its base update`,
+            evidence:
+              readErrors.map((error) => error.detail).join('; ') || 'pull request read failed',
+          })
+          break
+        }
+        // The pinned snapshot, not the batch preflight, is what this write is authorised
+        // against: the head push and every earlier metadata write happened in between.
+        const divergences = compareAdmissible(input.pullRequests[number], currentPr, {
+          intendedBase: input.intendedBases[number],
+        })
+        if (divergences.length > 0) {
+          baseFailures.push({
+            code: 'stale-snapshot',
+            detail: `#${number} changed since the authorized snapshot, before its base update`,
+            evidence: divergences.join('; '),
+          })
+          break
+        }
+        if (currentPr.state !== 'OPEN') {
+          baseFailures.push({
+            code: 'stale-snapshot',
+            detail: `#${number} is ${currentPr.state} immediately before its base update`,
+            evidence: `the provider reports state ${currentPr.state}`,
+          })
+          break
+        }
+        const intended = input.intendedBases[number]
+        if (currentPr.baseRef === intended) {
+          baseWrites.push({ number, intended, skipped: true, applied: true })
+          continue
+        }
+        const fromOid = resolveBaseOid(currentPr.baseRef)
+        const toOid = resolveBaseOid(intended)
+        if (!fromOid || !toOid) {
+          baseFailures.push({
+            code: 'stale-snapshot',
+            detail: `#${number} names a base this run cannot resolve to a commit`,
+            evidence: `from ${currentPr.baseRef} -> ${fromOid ?? 'unresolved'}, to ${intended} -> ${toOid ?? 'unresolved'}`,
+          })
+          break
+        }
+
+        sequence += 1
+        journal.attempts.push({
+          sequence,
+          kind: 'pr-base-update',
+          target: String(number),
+          detail: `${currentPr.baseRef} ${fromOid.slice(0, 12)} -> ${intended} ${toOid.slice(0, 12)}`,
+          at: input.now,
+          outcome: 'attempted',
+        })
+        try {
+          writeJournal(journalFile, journal)
+        } catch (error) {
+          baseFailures.push({
+            code: 'unfinished-run',
+            detail: `the publication journal could not record the attempt for #${number} before its write`,
+            evidence: String(error?.message ?? error),
+          })
+          break
+        }
+        let response = null
+        let callError = null
+        try {
+          response = await provider.updatePullRequestBase(
+            number,
+            intended,
+            compareAndSwap ? fromOid : null,
+          )
+        } catch (error) {
+          callError = String(error?.message ?? error)
+        }
+        const afterErrors = []
+        const readBack = await readSelectedPullRequest(provider, number, afterErrors)
+        const applied = readBack !== null && readBack.baseRef === intended
+        // Drift is compared independently of whether the base landed: a write that changed
+        // somebody else's state succeeded and still destroyed work this run was told to keep.
+        const drifted = readBack !== null && !sameJson(preserved(currentPr), preserved(readBack))
+        const refused = readBack !== null && !applied && (callError || response?.ok === false)
+        // An exception from the provider does not prove the write did not happen, and a read
+        // that fails after a call proves nothing either. Unknown stays unknown.
+        const outcome = applied
+          ? 'acknowledged'
+          : readBack === null
+            ? 'unknown'
+            : refused
+              ? 'denied'
+              : 'unknown'
+        if (outcome === 'unknown') publication.interrupted = true
+        publication.attempts.push({
+          sequence: sequence++,
+          kind: 'pr-base-update',
+          target: String(number),
+          from: fromOid,
+          to: toOid,
+          acknowledged: applied,
+          lease: { expectedRemote: fromOid, usedForceWithLease: false },
+          outcome,
+        })
+        if (applied) {
+          publication.confirmed.push({ kind: 'pr-base-update', target: String(number), oid: toOid })
+        } else {
+          publication.unconfirmed.push({
+            kind: 'pr-base-update',
+            target: String(number),
+            why:
+              readBack === null
+                ? `the provider call ${callError ? `failed (${callError.slice(0, 200)}) ` : 'completed '}and the pull request could not be re-read, so whether the base moved is unknown`
+                : refused
+                  ? `the provider refused the write: ${(callError ?? 'reported ok:false').slice(0, 200)}`
+                  : 'the base does not read back as the intended branch after the write',
+          })
+          if (outcome === 'denied') {
+            publication.denials.push({
+              kind: 'pr-base-update',
+              target: String(number),
+              reason: 'provider-refused',
+              acknowledged: false,
+            })
+          }
+        }
+        baseWrites.push({ number, intended, skipped: false, applied })
+        if (readBack !== null) {
+          publication.remoteClaims.push({
+            kind: 'pr-base',
+            target: String(number),
+            observed: readBack.baseRef.startsWith('refs/heads/')
+              ? readBack.baseRef
+              : `refs/heads/${readBack.baseRef}`,
+            observedAt: input.now,
+          })
+        }
+        if (drifted) {
+          baseFailures.push({
+            code: 'stale-snapshot',
+            detail: `#${number} changed in a field this run never writes`,
+            evidence: `before ${JSON.stringify(preserved(currentPr))}; after ${JSON.stringify(preserved(readBack))}`,
+          })
+          break
+        }
+        // A base whose outcome is unknown or refused stops the chain: the next pull request's
+        // base would name a predecessor whose state is not what this run believed.
+        if (!applied) break
+      }
     }
     verification.push({
-      invariant: 'preservation.root',
-      method: 'git ls-remote read-back of the root ref',
-      observed: `pinned ${input.root.oid.slice(0, 12)}, observed ${(finalRefs[input.root.ref] ?? 'absent').slice(0, 12)}; reported against the pinned snapshot and not integrated`,
-      result: note.integrated ? 'pass' : 'unautomated',
+      invariant: 'remote.claims-match',
+      method: 'provider re-read immediately after each metadata write',
+      observed: baseWrites
+        .map(
+          (write) =>
+            `#${write.number}=${write.skipped ? 'unchanged' : write.applied ? 'applied' : 'unconfirmed'}`,
+        )
+        .join(' '),
+      result: baseWrites.every((write) => write.skipped || write.applied) ? 'pass' : 'fail',
+    })
+    verification.push({
+      invariant: 'metadata.concurrent-write-guard',
+      method: compareAndSwap
+        ? 'the provider enforced its own precondition on every base write'
+        : 'read-before-write only: not compare-and-swap, and a concurrent write in that window is not detectable here',
+      observed: compareAndSwap ? 'compare-and-swap' : 'read-before-write',
+      result: compareAndSwap ? 'pass' : 'unautomated',
+    })
+
+    // 8. Final read-back of the whole chain, and the root reported against its pinned id.
+    const finalRefs = git.readRemoteRefs(input.repository, input.pushEndpoint.endpoint)
+    for (const entry of verified.checked) {
+      const ref = input.heads[entry.number]
+      if (
+        !publication.remoteClaims.some((claim) => claim.kind === 'ref-oid' && claim.target === ref)
+      ) {
+        publication.remoteClaims.push({
+          kind: 'ref-oid',
+          target: ref,
+          observed: finalRefs[ref] ?? '',
+          observedAt: input.now,
+        })
+      }
+    }
+    // Success is a claim about the observed chain, not about the writes this run intended.
+    // Every selected head must be at its prepared commit, every selected base must name the
+    // intended branch, and every pull request must still be readable - an unreadable one
+    // cannot be called correct.
+    const chainProblems = []
+    for (const number of input.order) {
+      const ref = input.heads[number]
+      const expected = input.branches.find((branch) => branch.number === number).preparedHead
+      if ((finalRefs[ref] ?? null) !== expected) {
+        chainProblems.push(`${ref} is ${finalRefs[ref] ?? 'absent'}, expected ${expected}`)
+      }
+      const readErrors = []
+      const pr = await readSelectedPullRequest(provider, number, readErrors)
+      if (!pr) {
+        chainProblems.push(
+          `#${number} could not be re-read: ${readErrors[0]?.detail ?? 'no response'}`,
+        )
+        continue
+      }
+      if (pr.baseRef !== input.intendedBases[number]) {
+        chainProblems.push(
+          `#${number} builds on ${pr.baseRef}, expected ${input.intendedBases[number]}`,
+        )
+      }
+    }
+    const chainHolds = chainProblems.length === 0
+    verification.push({
+      invariant: 'topology.chain',
+      method: 're-read every selected head and base after the last write',
+      observed: chainHolds
+        ? `chain ${input.order.map((number) => `#${number}`).join(' <- ')} verified by re-read`
+        : chainProblems.join('; '),
+      result: chainHolds ? 'pass' : 'fail',
+    })
+    if (rootAdvance && !chainHolds) {
+      // A newer root is reported against the pinned snapshot and never as integrated.
+      rootAdvance.note = `the published chain is integrated against the pinned root ${input.root.oid.slice(0, 12)}; the newer root ${rootAdvance.observed.slice(0, 12)} was not integrated`
+    }
+    if (finalRefs[input.root.ref] !== input.root.oid) {
+      const note = rootAdvance ?? {
+        pinned: input.root.oid,
+        observed: finalRefs[input.root.ref] ?? '',
+        integrated: false,
+      }
+      verification.push({
+        invariant: 'preservation.root',
+        method: 'git ls-remote read-back of the root ref',
+        observed: `pinned ${input.root.oid.slice(0, 12)}, observed ${(finalRefs[input.root.ref] ?? 'absent').slice(0, 12)}; reported against the pinned snapshot and not integrated`,
+        result: note.integrated ? 'pass' : 'unautomated',
+      })
+    }
+
+    const unconfirmedCount = publication.unconfirmed.length
+    // Every required write and every final observation has to hold. A denied base, a base
+    // this run skipped for want of permission, and a final chain that did not verify all
+    // mean the same thing to a reader: this is not a published stack.
+    const failedFinalRead = chainProblems.some((problem) =>
+      problem.includes('could not be re-read'),
+    )
+    const status =
+      unconfirmedCount === 0 && errors.length === 0 && baseFailures.length === 0 && chainHolds
+        ? publication.attempts.length === 0
+          ? 'no-op'
+          : 'published'
+        : publication.confirmed.length > 0
+          ? 'partial'
+          : 'blocked'
+    journal.state = status === 'published' || status === 'no-op' ? 'published' : status
+    journal.publication = publication
+    journal.rootAdvance = rootAdvance
+
+    const uncertain = publication.attempts.filter((attempt) => attempt.outcome === 'unknown')
+    payload = finish({
+      ok: status === 'published' || status === 'no-op',
+      status,
+      errors: [
+        ...errors,
+        ...baseFailures,
+        ...(failedFinalRead
+          ? chainProblems
+              .filter((problem) => problem.includes('could not be re-read'))
+              .map((problem) => ({
+                code: 'stale-snapshot',
+                detail: 'the final read-back of a selected pull request failed',
+                evidence: problem,
+              }))
+          : []),
+        ...(status === 'partial' || status === 'blocked'
+          ? publication.unconfirmed.map((entry) => ({
+              code: entry.why.includes('refused') ? 'missing-permission' : 'stale-snapshot',
+              detail: `${entry.kind} ${entry.target} is unconfirmed`,
+              evidence: entry.why,
+            }))
+          : []),
+      ],
+      publication,
+      rootAdvance,
+      unselectedDependents: input.unselectedDependents,
+      capability: {
+        atomicRefTransaction:
+          atomic.supported === true
+            ? 'supported'
+            : refWrites.length === 0
+              ? 'not-required'
+              : 'unknown',
+        providerCompareAndSwap: compareAndSwap,
+        baseWritesGuardedBy: compareAndSwap ? 'compare-and-swap' : 'read-before-write',
+        residualMetadataRace: baseWrites.length > 0 && !compareAndSwap,
+      },
+      provider: {
+        name: providerCapabilities?.provider ?? 'unnamed',
+        compareAndSwap,
+        trust: process.env.FLATTEN_PR_PROVIDER_MODULE ? 'host-pinned' : 'caller-declared',
+      },
+      verification,
+      recovery:
+        status === 'partial' || unconfirmedCount > 0 || uncertain.length > 0
+          ? {
+              acknowledgedChanges: publication.confirmed.map(
+                (entry) => `${entry.kind} ${entry.target}`,
+              ),
+              unconfirmedAttempts: [
+                ...publication.unconfirmed.map((entry) => `${entry.kind} ${entry.target}`),
+                ...baseFailures.map((f) => `pr-base-update ${f.detail}`),
+              ],
+              recommended:
+                're-read the affected refs and bases before retrying; an unknown acknowledgement may already have landed, and nothing is rolled back automatically',
+            }
+          : null,
+      nextSafeAction:
+        status === 'published'
+          ? {
+              action:
+                're-read the chain and record the ignored-checks statement; application correctness is unvalidated',
+              requires: [],
+            }
+          : {
+              action:
+                status === 'no-op'
+                  ? 'nothing was written; the chain already matched the plan'
+                  : 'reconcile the unconfirmed steps from fresh observations before any retry',
+              requires: [],
+            },
+    })
+  } catch (error) {
+    payload = finish({
+      ok: false,
+      status: publication.confirmed.length > 0 ? 'partial' : 'blocked',
+      errors: [
+        {
+          code: 'unfinished-run',
+          detail: 'publication stopped on an unexpected error after remote operations began',
+          evidence: String(error?.message ?? error),
+        },
+      ],
+      publication,
+      rootAdvance,
+      unselectedDependents: input.unselectedDependents,
+      capability: {
+        ...base.capability,
+        atomicRefTransaction: atomic.supported === true ? 'supported' : 'unknown',
+        providerCompareAndSwap: compareAndSwap,
+        baseWritesGuardedBy: compareAndSwap ? 'compare-and-swap' : 'read-before-write',
+        residualMetadataRace: !compareAndSwap,
+      },
+      provider: {
+        name: providerCapabilities?.provider ?? 'unnamed',
+        compareAndSwap,
+        trust: process.env.FLATTEN_PR_PROVIDER_MODULE ? 'host-pinned' : 'caller-declared',
+      },
+      verification,
+      recovery: {
+        acknowledgedChanges: publication.confirmed.map((entry) => `${entry.kind} ${entry.target}`),
+        unconfirmedAttempts: [
+          ...publication.unconfirmed.map((entry) => `${entry.kind} ${entry.target}`),
+          ...publication.attempts.map(
+            (attempt) => `${attempt.kind} ${attempt.target} (${attempt.outcome})`,
+          ),
+          'the run stopped before this journal could record what happened next',
+        ],
+        recommended:
+          're-read the remote before retrying; the acknowledged steps above did happen, and nothing is rolled back automatically',
+      },
+      nextSafeAction: {
+        action: 'reconcile the recorded steps from fresh observations before any retry',
+        requires: [],
+      },
     })
   }
-
-  const unconfirmedCount = publication.unconfirmed.length
-  const status =
-    unconfirmedCount === 0 && errors.length === 0 && baseFailures.length === 0 && chainHolds
-      ? publication.attempts.length === 0
-        ? 'no-op'
-        : 'published'
-      : publication.confirmed.length > 0
-        ? 'partial'
-        : 'blocked'
-  journal.state = status === 'published' || status === 'no-op' ? 'published' : status
-  journal.publication = publication
-  journal.rootAdvance = rootAdvance
-
-  const uncertain = publication.attempts.filter((attempt) => attempt.outcome === 'unknown')
-  return finish({
-    ok: status === 'published' || status === 'no-op',
-    status,
-    errors: [
-      ...errors,
-      ...baseFailures,
-      ...(status === 'partial' || status === 'blocked'
-        ? publication.unconfirmed.map((entry) => ({
-            code: entry.why.includes('provider') ? 'missing-permission' : 'stale-snapshot',
-            detail: `${entry.kind} ${entry.target} is unconfirmed`,
-            evidence: entry.why,
-          }))
-        : []),
-    ],
-    publication,
-    rootAdvance,
-    unselectedDependents: input.unselectedDependents,
-    capability: {
-      atomicRefTransaction:
-        atomic.supported === true
-          ? 'supported'
-          : refWrites.length === 0
-            ? 'not-required'
-            : 'unknown',
-      providerCompareAndSwap: compareAndSwap,
-      baseWritesGuardedBy: compareAndSwap ? 'compare-and-swap' : 'read-before-write',
-      residualMetadataRace: baseWrites.length > 0 && !compareAndSwap,
-    },
-    provider: {
-      name: providerCapabilities?.provider ?? 'unnamed',
-      compareAndSwap,
-      trust: process.env.FLATTEN_PR_PROVIDER_MODULE ? 'host-pinned' : 'caller-declared',
-    },
-    verification,
-    recovery:
-      status === 'partial' || unconfirmedCount > 0 || uncertain.length > 0
-        ? {
-            acknowledgedChanges: publication.confirmed.map(
-              (entry) => `${entry.kind} ${entry.target}`,
-            ),
-            unconfirmedAttempts: [
-              ...publication.unconfirmed.map((entry) => `${entry.kind} ${entry.target}`),
-              ...baseFailures.map((f) => `pr-base-update ${f.detail}`),
-            ],
-            recommended:
-              're-read the affected refs and bases before retrying; an unknown acknowledgement may already have landed, and nothing is rolled back automatically',
-          }
-        : null,
-    nextSafeAction:
-      status === 'published'
-        ? {
-            action:
-              're-read the chain and record the ignored-checks statement; application correctness is unvalidated',
-            requires: [],
-          }
-        : {
-            action:
-              status === 'no-op'
-                ? 'nothing was written; the chain already matched the plan'
-                : 'reconcile the unconfirmed steps from fresh observations before any retry',
-            requires: [],
-          },
-  })
+  return payload
 }
 
 function readInput(argv) {
@@ -1707,7 +2068,11 @@ async function main() {
       status: 'blocked',
       errors: [failure],
       publication: emptyPublication(),
-      nextSafeAction: { action: 'report the refusal; nothing was written', requires: [] },
+      nextSafeAction: {
+        action:
+          're-read the remote before concluding anything; this failure happened before the run began recording remote operations, but the remote is not assumed unchanged',
+        requires: [],
+      },
     }
   }
   process.stdout.write(`${JSON.stringify(result, null, 2)}\n`)
