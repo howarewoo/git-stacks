@@ -1,0 +1,136 @@
+name: Disposable GitHub end-to-end
+
+# Manual only, on the default branch's own code. There is no `pull_request`,
+# `pull_request_target`, `push` or `schedule` trigger and no workflow input,
+# because this workflow spends a credential that creates and deletes repositories:
+# every automatic trigger is a way for a branch somebody else controls to run it,
+# and an input is a way for a run's own code to be swapped for another ref.
+on:
+  workflow_dispatch:
+
+# Read-only is the whole permission set. Nothing here needs to write to the
+# repository, and the disposable repositories are created with the environment's
+# own token, not with the workflow's.
+permissions:
+  contents: read
+
+# One run at a time on one account. Two overlapping runs would create disposable
+# repositories under the same owner, and a run that cleans up by name could
+# remove the other's while it is still using it.
+concurrency:
+  group: live-github-e2e
+  cancel-in-progress: false
+
+env:
+  NODE_VERSION: '24'
+
+jobs:
+  # The controlled target stands the API double and Git's smart HTTP protocol up
+  # on one real TLS socket with a certificate generated for the run, and points
+  # the production transport at it. Nothing in it names github.com, so this job
+  # needs no credential, authorizes nothing, and creates nothing to clean up on a
+  # real account.
+  controlled:
+    runs-on: [self-hosted, linux, arm64]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          # The trusted tree, named rather than inherited: a dispatch can be made
+          # from any branch, and the code that runs must be the default branch's.
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+      - name: Prove the checkout is the tree that was fetched
+        # The suite runs against what was checked out, so the code it runs is
+        # checked here: HEAD is the commit the trusted ref resolved to, and
+        # nothing in the working tree was changed after it was fetched.
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$(git rev-parse FETCH_HEAD)" || {
+            echo '::error::the checkout is not the commit that was fetched'
+            exit 1
+          }
+          git diff --quiet HEAD -- || { echo '::error::the working tree was changed'; exit 1; }
+      - name: Run the live suite against a controlled GitHub over real Git and TLS
+        run: npx tsx tests/live/cli.ts --controlled
+
+  # The authorized target. It creates a repository under a named account, runs
+  # the same scenarios against real GitHub, and deletes what it created.
+  live:
+    # Secrets and the owner name come from a protected environment, which a
+    # repository owner configures separately: required reviewers, a wait timer,
+    # branch restrictions, and the two tokens as environment secrets. Naming the
+    # environment here does not create that protection — a repository that has
+    # not configured the environment has no gate, and the gate below is what
+    # makes an unconfigured repository refuse rather than guess.
+    environment: live-github-e2e
+    runs-on: [self-hosted, linux, arm64]
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - name: Refuse to run without an authorized disposable account
+        # Before anything is installed, let alone created. The suite itself also
+        # refuses an unset owner or token, but a repository with no
+        # configuration should say so here rather than after a checkout, a
+        # dependency install, and a run that stops for the same reason.
+        shell: bash
+        env:
+          GIT_STACKS_LIVE_GITHUB_OWNER: ${{ vars.GIT_STACKS_LIVE_GITHUB_OWNER }}
+          GIT_STACKS_LIVE_GITHUB_TOKEN: ${{ secrets.GIT_STACKS_LIVE_GITHUB_TOKEN }}
+          GIT_STACKS_LIVE_GITHUB_REVIEWER_TOKEN: ${{ secrets.GIT_STACKS_LIVE_GITHUB_REVIEWER_TOKEN }}
+        run: |
+          set -euo pipefail
+          missing=0
+          for name in \
+            GIT_STACKS_LIVE_GITHUB_OWNER \
+            GIT_STACKS_LIVE_GITHUB_TOKEN \
+            GIT_STACKS_LIVE_GITHUB_REVIEWER_TOKEN; do
+            if [ -z "${!name:-}" ]; then
+              echo "::error::$name is not configured on the live-github-e2e environment"
+              missing=$((missing + 1))
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            echo "::error::refusing to run: a live run creates and deletes a repository, and $missing required value(s) are unset"
+            exit 1
+          fi
+      - run: npm ci
+      - name: Run the live suite against the authorized disposable repository
+        # The run id names every resource it creates and is stamped on each one,
+        # so a leftover from a killed run is attributable and deletable. The
+        # suite removes what it created in a finally that runs whatever happened,
+        # including a scenario failure and a startup failure, and exits non-zero
+        # if anything is still standing.
+        env:
+          GIT_STACKS_LIVE_GITHUB_OWNER: ${{ vars.GIT_STACKS_LIVE_GITHUB_OWNER }}
+          GIT_STACKS_LIVE_GITHUB_TOKEN: ${{ secrets.GIT_STACKS_LIVE_GITHUB_TOKEN }}
+          GIT_STACKS_LIVE_GITHUB_REVIEWER_TOKEN: ${{ secrets.GIT_STACKS_LIVE_GITHUB_REVIEWER_TOKEN }}
+          GIT_STACKS_LIVE_GITHUB_RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
+          GIT_STACKS_LIVE_GITHUB_RECEIPT: live-github-e2e-receipt.json
+        run: npx tsx tests/live/cli.ts --github
+      - name: Publish the sanitized receipt
+        # The receipt is written before each resource is created and updated
+        # after every change, so it names what is still standing even when a run
+        # is killed. It holds handles, timestamps, and refusal reasons — never a
+        # request body, a diff, or a credential — and it is the only file taken
+        # off this runner.
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: live-github-e2e-receipt
+          path: live-github-e2e-receipt.json
+          if-no-files-found: warn
+          retention-days: 7

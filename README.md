@@ -57,6 +57,7 @@ npm ci                 # install
 npm run dev            # run the app
 npm run build          # typecheck + production build
 npm test               # the test suite
+npm run test:live       # the disposable GitHub end-to-end suite (no credentials)
 npm run format:check   # formatting gate
 npm run bench:performance  # large-repository benchmarks
 npm run build:promotion-helper  # build the atomic no-replace rename helper
@@ -1330,6 +1331,162 @@ Use the packaged build and only disposable fixture repositories. `npm run test:d
 10. Record findings and platform limits in the pull request. Sign off only after blocking keyboard, contrast, state-truthfulness, and safety-dispatch findings are resolved.
 
 Real GitHub mutations require a separately designated test repository and explicit authorization; none is included in routine fixtures or CI.
+
+## Disposable GitHub end-to-end suite
+
+`tests/live` is the suite that runs against a real GitHub instead of a double in
+process: real Git, a real HTTPS transport, and a repository that exists for the
+length of one run. It exists for the behaviour mocks cannot prove — a native
+stack created twice, a merge requested twice, a review written against a
+comparison that moved, a check the host reports differently than we expect.
+
+```sh
+npm run test:live                  # the controlled target: no credentials, no network
+npx tsx tests/live/cli.ts --list   # every scenario, its title, and what it needs
+```
+
+### The controlled target
+
+`--controlled` stands the API double and Git's smart HTTP protocol up on one
+real TLS socket with a certificate generated for the run, and points the
+production transport at it. The clone's `origin` is a real HTTPS URL the
+application resolves a host and a repository from, so its fetches, pushes, and
+API reads all cross the same boundary they cross against github.com. The
+certificate is verified rather than trusted blindly, and nothing in the run
+names `github.com`, so the run cannot reach the real service even by accident.
+
+This is the target that needs no authorization, and it is the one CI runs. It is
+not a mock: the scenarios exercise the production services, the production
+transport, and real `git`, and the only thing stood in for GitHub is GitHub.
+
+### The authorized target
+
+`--github` runs the same scenarios against a repository it creates on a real
+host and deletes afterwards. There is no default: a run with no owner, no
+token, and no run id is refused, and the refusal names the variables to set. A
+credential is never inherited from an ambient `gh` session and never read from a
+variable the application itself uses — the suite spends a credential somebody
+gave it for a disposable repository, or it does not run.
+
+| Variable                                   | Meaning                                                                                                                     |
+| ------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------- |
+| `GIT_STACKS_LIVE_GITHUB_OWNER`             | The account the disposable repository is created under. Required.                                                           |
+| `GIT_STACKS_LIVE_GITHUB_TOKEN`             | That account's token. Required; never defaulted.                                                                            |
+| `GIT_STACKS_LIVE_GITHUB_REVIEWER_TOKEN`    | A second account that can approve and reply. Optional; without it the scenarios that need a reviewer fail rather than skip. |
+| `GIT_STACKS_LIVE_GITHUB_REPOSITORY_PREFIX` | Prefix of the disposable repository. Defaults to `git-stacks-live-e2e`.                                                     |
+| `GIT_STACKS_LIVE_GITHUB_RUN_ID`            | Id stamped on everything the run creates. Defaults to a per-run digest.                                                     |
+| `GIT_STACKS_LIVE_GITHUB_RECEIPT`           | Where the cleanup receipt is written.                                                                                       |
+
+The account needs permission to create and delete a repository, to administer
+its rule sets, and to merge. Anything the host cannot do is discovered by
+probing, not assumed: the native stack surface is asked through the product's
+own detector, review threads are asked about a real pull request, a merge queue
+is configured and read back off the rule set that declares it, and a credential
+is answered by sending a write and seeing whether the host takes it. What could
+not be observed becomes a note in the report, and a scenario whose capability is
+missing is a **failure**, not a skip — a suite that quietly stops covering merge
+queues would report green while the thing it exists to catch goes uncaught.
+
+### What it covers
+
+`--list` is the authoritative catalogue. In outline: native stack create, extend,
+unstack, invalid chains, fork heads, and cross-repository numbers; single-line,
+multi-line, and reply review threads, resolve and unresolve, a review against a
+moved comparison, and a second account approving what the author cannot; check
+and status rollup, rerun refusal, and a spent rate limit; required-check and
+required-approval rule sets; direct and queued asynchronous merges; external
+mutation between preview and submit (force-push, retarget, merge, branch deletion,
+stack membership); network, rate-limit, and credential faults at the adapter
+boundary; and a schema-drift check against the committed fixture.
+
+Faults are injected at the transport boundary rather than in a server, which is
+what makes them usable against a real host. A lost response is the one fault a
+fixture cannot stage honestly and a live host must not be asked to produce: the
+request really is sent, GitHub really does apply it, and only the answer is
+discarded — the exact state a person is in when a merge may or may not have been
+requested, and the only way to prove a retry does not create a second merge,
+stack, or pull request. A refused write is the opposite: the host never sees it.
+
+### Cleanup and receipts
+
+Every resource the run creates carries the marker `git-stacks-live-e2e:<run id>`
+in its own description. Cleanup reads the marker back off the repository before
+it deletes anything, and refuses every resource — reporting what is still
+standing — when the marker cannot be proven. A name collision, a hand-made
+repository, or a previous run's leftover is never removed on a guess. Cleanup
+runs in a `finally` that covers workspace setup, the capability probe, the
+scenarios, and schema generation, so a startup failure and a scenario failure
+both clean up; a run that left anything behind exits non-zero.
+
+The receipt is written before each resource is created and updated after every
+change, so a run that dies between creating something and deleting it still
+leaves the list of what to clean up by hand. It holds handles, timestamps, and
+refusal reasons — never a request body, a diff, or a credential. Progress
+lines, failure messages, stack traces, and request summaries are all rendered
+through the redactor first: configured credential literals (longest first, so a
+secret containing another is removed whole), the credential shapes the
+application already knows, any `user:password@` in a URL, and local paths.
+
+Exit codes are `0` passed, `1` a scenario or cleanup failed, `2` the run was
+refused before it started.
+
+### The committed schema fixture
+
+`tests/fixtures/live-github-observed-schema.json` is the contract the mock
+fixtures are held to. It records the shape the host was observed to answer —
+paths and JSON types only, no values, no repository name, no identifier — and
+`schema/observed-responses-match-the-committed-fixture` fails when a field the
+parsers depend on is missing or has changed type. Regenerate it deliberately
+with `--write-schema`, which prepares a real subject (a diff, a submitted review
+with a comment, a two-layer stack, a check run, and a commit status) before
+observing, because a probe over an empty pull request observes no fields at all.
+
+**Its provenance is controlled, not captured from github.com.** The committed
+document was written by `--controlled`, so it is a claim about the API shape the
+double serves, and its `source` field records which runtime produced it. Live
+acceptance — the same scenarios, and this fixture, observed against the real
+host — belongs to the authorized run and is recorded in that run's evidence. No
+live GitHub run has been performed for this suite, so nothing here claims that
+the real host answers exactly this.
+
+### The workflow
+
+`.github/workflows/live-github-e2e.yml` runs both targets, and it can only be
+started by hand (`workflow_dispatch`) with no inputs. There is no
+`pull_request`, `pull_request_target`, `push`, or `schedule` trigger, because
+every automatic trigger is a way for a branch somebody else controls to spend
+the disposable account's credential. Both jobs check out
+`github.event.repository.default_branch` explicitly — not the ref the dispatch
+happened from — with `persist-credentials: false`, pinned action SHAs,
+`contents: read` and no write scope, and one run at a time on the account so two
+runs cannot clean up each other's repositories.
+
+The `live` job reads its owner from an environment variable and its two tokens
+from secrets on the `live-github-e2e` environment, and refuses to install or run
+anything when any of them is unset — a repository that has not been configured
+says so and exits non-zero rather than starting with a guess. **Naming the
+environment in the workflow does not configure its protection.** A repository
+owner has to create the environment and, separately, require reviewers, set a
+wait timer, restrict it to the default branch, and add the two tokens as
+environment secrets; until they do, no protection exists and only the
+fail-closed gate stands between a dispatch and a run. The only file taken off
+the runner is the receipt; the credential is passed to one command and never
+written, echoed, or uploaded.
+
+An ordinary failure or a failing scenario cleans up in process. A job killed at
+its `timeout-minutes` cannot, and that is a real limit: the run id in the run
+log identifies the repository left behind, since every resource carries the
+marker, and such a repository can be deleted by hand once it has been confirmed
+to be the one that run created.
+
+### Acceptance boundary
+
+The live target's coverage — real native stacks, a real merge queue, a real
+second account, a real token — is **unobserved**. It needs a disposable account
+this repository has not been given, so those scenarios are runnable and
+unexercised, and the evidence for this suite is the controlled run: the whole
+catalogue green against a real Git, a real TLS host, and the production
+services. Recording a live pass is a separate, explicitly authorized act.
 
 ## Changes workspace
 

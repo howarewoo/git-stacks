@@ -2,6 +2,8 @@ import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { readFileSync, renameSync, writeFileSync } from 'node:fs'
 import type { GitHubFixtureState } from './github-harness'
+import { HttpError, type RestResult } from './github-rest'
+import { handleSurfaceGraphql, handleSurfaceRest, ruleSetRefusal } from './github-review-surface'
 
 /**
  * Transport test double: serves the same fixture state the `gh` CLI fixture serves, but as
@@ -12,6 +14,12 @@ export interface GitHubApiDoubleRequest {
   path: string
   body: Record<string, unknown>
   headers: Record<string, string>
+  /**
+   * The account this request authenticated as. The live end-to-end suite signs a
+   * second account in to approve and reply, and GitHub decides `viewerDidAuthor`
+   * from exactly this, so it travels with the request rather than living in state.
+   */
+  viewer: string
 }
 
 const statePath = () => {
@@ -107,6 +115,10 @@ function restPullRequest(state: GitHubFixtureState, pr: GitHubFixtureState['prs'
       base: position === 1 ? stack.base.ref : stack.pull_requests[position - 2].head.ref,
     }
   }
+  // The fields a parser reads to decide whether a merge is even possible. `mergeable_state`
+  // is derived from the same rules the merge endpoint enforces, so the read and the write
+  // cannot disagree about a blocked pull request.
+  const blocked = !merged && ruleSetRefusal(state, pr, currentHead(pr) ?? '') !== null
   return {
     number: pr.number,
     title: pr.title,
@@ -114,8 +126,19 @@ function restPullRequest(state: GitHubFixtureState, pr: GitHubFixtureState['prs'
     body: pr.body || '',
     state: merged ? 'closed' : pr.state.toLowerCase(),
     draft: pr.draft === true,
+    user: actor(pr.author ?? state.currentUser),
+    created_at: '2026-01-01T00:00:00Z',
+    updated_at: '2026-01-01T00:00:00Z',
     head: { ref: pr.head, sha: currentHead(pr), repo: { full_name: pr.headRepository } },
-    base: { ref: pr.base },
+    // Both ends carry a commit. The application pins a paginated read by comparing the
+    // comparison before and after it, and a base with no sha is unreadable rather than
+    // unchanged, so a double that omitted it would fail every diff read for the wrong
+    // reason.
+    base: { ref: pr.base, sha: bareRef(`refs/heads/${pr.base}`) },
+    merged,
+    merged_at: pr.mergedAt,
+    mergeable: !blocked,
+    mergeable_state: merged ? 'unknown' : blocked ? 'blocked' : 'clean',
     merge_commit_sha: pr.mergeOid || null,
     ...(stackObj ? { stack: stackObj } : {}),
   }
@@ -184,7 +207,11 @@ function mergePullRequest(
   if (!allowed[method])
     return { merged: false, message: `merge method ${method} is disabled`, sha: null }
   const head = currentHead(pr)
-  if (!head || requestedSha !== head)
+  // GitHub's `sha` is the commit the head "must match" for the merge to be allowed, and
+  // it is optional: a request that names no sha merges the head the pull request has
+  // now. Requiring one would refuse a merge GitHub performs, which is how a scenario
+  // that merges outside the app comes to be impossible to stage.
+  if (!head || (requestedSha !== undefined && requestedSha !== head))
     return { merged: false, message: 'head SHA no longer matches', sha: null }
   if (pr.state !== 'OPEN') return { merged: false, message: 'pull request is not open', sha: null }
   // A stacked merge lands every pull request of the group on the branch the bottom one
@@ -254,19 +281,6 @@ function mergeStackedPullRequest(
   }
   return last
 }
-
-class HttpError extends Error {
-  constructor(
-    readonly status: number,
-    readonly reason: string,
-    message: string,
-    readonly headers: Record<string, string> = {},
-  ) {
-    super(message)
-  }
-}
-
-type RestResult = { status: number; body: unknown; headers?: Record<string, string> }
 
 function etagFor(body: unknown): string {
   return `"${createHash('sha1').update(JSON.stringify(body)).digest('hex')}"`
@@ -424,7 +438,11 @@ function stacksFailure(state: GitHubFixtureState): HttpError | null {
   )
 }
 
-function createPullRequest(state: GitHubFixtureState, body: Record<string, unknown>) {
+function createPullRequest(
+  state: GitHubFixtureState,
+  body: Record<string, unknown>,
+  viewer: string,
+) {
   const head = String(body.head || '')
   const separator = head.indexOf(':')
   const owner = separator >= 0 ? head.slice(0, separator) : state.repository.owner
@@ -451,6 +469,7 @@ function createPullRequest(state: GitHubFixtureState, body: Record<string, unkno
     headOid,
     mergeOid: null as string | null,
     mergedAt: null as string | null,
+    author: viewer,
   }
   state.prs.push(pr)
   if (!state.comments) state.comments = {}
@@ -476,6 +495,11 @@ function handleRest(state: GitHubFixtureState, request: GitHubApiDoubleRequest):
   if (path === 'user') return { status: 200, body: actor(state.currentUser) }
   const [rawPath, rawQuery] = path.split('?')
   const queryParams = new URLSearchParams(rawQuery ?? '')
+  // The review, thread, ruleset, and ref routes belong to the live suite's surface
+  // module. A route it does not recognise falls through to the handlers below, so
+  // the original double keeps every route it already owned.
+  const surface = handleSurfaceRest(state, request, request.viewer)
+  if (surface) return surface
   if (rawPath.startsWith(`${prefix}/stacks`)) {
     if (state.stacksPreviewDisabled) {
       throw new HttpError(404, 'Not Found', 'Not Found: stacks preview unavailable')
@@ -676,6 +700,11 @@ function handleRest(state: GitHubFixtureState, request: GitHubApiDoubleRequest):
       status: 200,
       body: {
         full_name: repository,
+        // The ownership marker a disposable run stamps on the repository it created
+        // lives here, so cleanup reads it back through the endpoint GitHub exposes
+        // rather than through anything the run kept to itself.
+        description: state.repository.description ?? null,
+        topics: { names: state.repository.topics ?? [] },
         default_branch: state.repository.defaultBranch,
         allow_merge_commit: state.repository.allowMergeCommit === true,
         allow_squash_merge: state.repository.allowSquashMerge === true,
@@ -713,6 +742,49 @@ function handleRest(state: GitHubFixtureState, request: GitHubApiDoubleRequest):
   if (checkRuns) {
     if (method !== 'GET') throw new HttpError(405, 'Method Not Allowed', 'check runs are read-only')
     return checkRunResponse(state, request, decodeURIComponent(checkRuns[1]))
+  }
+  const statusCreate = new RegExp(`^${prefix}/statuses/([^/]+)$`, 'u').exec(rawPath)
+  if (statusCreate) {
+    // The real endpoint a CI system writes to, kept here so the combined-status shape
+    // the product reads can be observed with a record in it rather than an empty list.
+    if (method !== 'POST')
+      throw new HttpError(405, 'Method Not Allowed', 'a commit status is created with POST')
+    const headSha = decodeURIComponent(statusCreate[1])
+    if (!bareRef(headSha))
+      throw new HttpError(422, 'Unprocessable Entity', `No commit found for SHA ${headSha}`)
+    const context = typeof body.context === 'string' ? body.context : 'default'
+    const status = typeof body.state === 'string' ? body.state : 'pending'
+    if (!['error', 'failure', 'pending', 'success'].includes(status))
+      throw new HttpError(422, 'Unprocessable Entity', `Invalid state ${status}`)
+    const kept = (state.checks?.commitStatuses ?? []).filter(
+      (entry) => !(entry.headSha === headSha && entry.context === context),
+    )
+    state.checks = {
+      ...state.checks,
+      commitStatuses: [
+        ...kept,
+        {
+          headSha,
+          context,
+          state: status,
+          description: typeof body.description === 'string' ? body.description : null,
+          targetUrl: typeof body.target_url === 'string' ? body.target_url : null,
+        },
+      ],
+    }
+    return {
+      status: 201,
+      body: {
+        id: 900_000,
+        node_id: 'CS_1',
+        state: status,
+        context,
+        target_url: typeof body.target_url === 'string' ? body.target_url : null,
+        url: `https://api.github.com/repos/acme/widgets/statuses/900000`,
+        created_at: '2026-01-01T00:00:00Z',
+        updated_at: '2026-01-01T00:00:00Z',
+      },
+    }
   }
   const commitStatus = new RegExp(`^${prefix}/commits/([^/]+)/status$`, 'u').exec(rawPath)
   if (commitStatus) {
@@ -812,7 +884,7 @@ function handleRest(state: GitHubFixtureState, request: GitHubApiDoubleRequest):
     throw new HttpError(405, 'Method Not Allowed', `unsupported pull request method ${method}`)
   }
   if (method === 'POST' && path === `${prefix}/pulls`) {
-    const pr = createPullRequest(state, body)
+    const pr = createPullRequest(state, body, request.viewer)
     return {
       status: 201,
       body: { ...restPullRequest(state, pr), number: pr.number, html_url: pr.url },
@@ -827,7 +899,14 @@ function handleRest(state: GitHubFixtureState, request: GitHubApiDoubleRequest):
       )
     )
       throw new HttpError(405, 'Method Not Allowed', 'stacked pull requests require merge-async')
-    return { status: 200, body: mergePullRequest(state, findPr(state, Number(merge[1])), body) }
+    // A ruleset the fixture is enforcing is the only thing allowed to refuse a
+    // merge here. Without this the rule set scenarios would agree with the client
+    // instead of proving the rules were ever applied.
+    const merged = findPr(state, Number(merge[1]))
+    const refusal = ruleSetRefusal(state, merged, String(body.sha ?? ''))
+    if (refusal !== null)
+      throw new HttpError(405, 'Method Not Allowed', `merge blocked by ruleset: ${refusal}`)
+    return { status: 200, body: mergePullRequest(state, merged, body) }
   }
   const asyncMerge = new RegExp(`^${prefix}/pulls/(\\d+)/merge-async(?:/([^/]+))?$`, 'u').exec(path)
   if (asyncMerge) {
@@ -837,6 +916,13 @@ function handleRest(state: GitHubFixtureState, request: GitHubApiDoubleRequest):
       const action = String(body.merge_action || 'default')
       if (action !== 'default' && action !== 'direct_merge' && action !== 'merge_queue')
         throw new HttpError(422, 'Unprocessable Entity', 'merge_action must be a documented value')
+      if (pr.state !== 'OPEN' || pr.draft)
+        throw new HttpError(400, 'Bad Request', 'Pull request is not ready to be merged')
+      // A ruleset the fixture is enforcing refuses an asynchronous merge the same
+      // way it refuses a direct one, so the queue permutations prove something.
+      const queuedRefusal = ruleSetRefusal(state, pr, String(body.sha ?? ''))
+      if (queuedRefusal !== null)
+        throw new HttpError(405, 'Method Not Allowed', `merge blocked by ruleset: ${queuedRefusal}`)
       if (pr.state !== 'OPEN' || pr.draft)
         throw new HttpError(400, 'Bad Request', 'Pull request is not ready to be merged')
       // A second request for a pull request that already has one is refused with that
@@ -964,9 +1050,17 @@ function handleRest(state: GitHubFixtureState, request: GitHubApiDoubleRequest):
   throw new HttpError(404, 'Not Found', `Not Found: ${path}`)
 }
 
-function handleGraphql(state: GitHubFixtureState, body: Record<string, unknown>): RestResult {
+function handleGraphql(
+  state: GitHubFixtureState,
+  body: Record<string, unknown>,
+  viewer: string,
+): RestResult {
   const query = String(body.query || '')
   const variables = (body.variables ?? {}) as Record<string, unknown>
+  // The review thread, reply, resolve, and permission operations belong to the live
+  // suite's surface module; anything it does not recognise falls through below.
+  const surface = handleSurfaceGraphql(state, body, viewer)
+  if (surface) return surface
   const field = query.includes('convertPullRequestToDraft')
     ? 'convertPullRequestToDraft'
     : query.includes('markPullRequestReadyForReview')
@@ -1139,9 +1233,15 @@ export function createGitHubApiDouble(): typeof globalThis.fetch {
         return json(400, { message: 'Problems parsing JSON' })
       }
     }
-    if (headers.authorization !== 'Bearer fixture-token')
+    // Two tokens stand in for two accounts, because the review and approval
+    // scenarios have to act as somebody other than the author. GitHub decides
+    // `viewerDidAuthor` from the credential that made the request, so the token
+    // resolves to a login here rather than to a flag in the shared state.
+    const token = (headers.authorization ?? '').replace(/^Bearer /u, '')
+    if (token !== 'fixture-token' && token !== 'fixture-reviewer-token')
       return json(401, { message: 'Bad credentials' })
     const state = loadState()
+    const viewer = token === 'fixture-reviewer-token' ? 'reviewer' : state.currentUser
     if (!Array.isArray(state.requests)) state.requests = []
     const path = (url.pathname + url.search).replace(/^\//u, '')
     state.requests.push({
@@ -1150,7 +1250,7 @@ export function createGitHubApiDouble(): typeof globalThis.fetch {
       at: new Date().toISOString(),
       ...(Object.keys(body).length > 0 ? { body } : {}),
     })
-    const request: GitHubApiDoubleRequest = { method, path, body, headers }
+    const request: GitHubApiDoubleRequest = { method, path, body, headers, viewer }
     const lost = (state.lostResponses ?? []).findIndex((rule) => {
       if (rule.method !== method || !request.path.includes(rule.pathIncludes)) return false
       if (rule.pathEndsWith !== undefined && !request.path.endsWith(rule.pathEndsWith)) return false
@@ -1168,7 +1268,9 @@ export function createGitHubApiDouble(): typeof globalThis.fetch {
     })
     try {
       const result =
-        request.path === 'graphql' ? handleGraphql(state, body) : handleRest(state, request)
+        request.path === 'graphql'
+          ? handleGraphql(state, body, request.viewer)
+          : handleRest(state, request)
       // Somebody else pushes and closes a pull request after the response above was built but
       // before the caller sees it. The listing the caller is holding is now a stale snapshot,
       // which is the window a single earlier read cannot cover.

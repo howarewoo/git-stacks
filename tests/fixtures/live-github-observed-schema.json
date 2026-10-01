@@ -1,0 +1,598 @@
+{
+  "version": 1,
+  "source": "controlled runtime",
+  "probes": {
+    "check-runs": [
+      {
+        "path": "check_runs",
+        "type": "array"
+      },
+      {
+        "path": "check_runs[]",
+        "type": "object"
+      },
+      {
+        "path": "check_runs[].app",
+        "type": "object"
+      },
+      {
+        "path": "check_runs[].app.id",
+        "type": "number"
+      },
+      {
+        "path": "check_runs[].app.name",
+        "type": "string"
+      },
+      {
+        "path": "check_runs[].app.slug",
+        "type": "string"
+      },
+      {
+        "path": "check_runs[].check_suite",
+        "type": "object"
+      },
+      {
+        "path": "check_runs[].check_suite.id",
+        "type": "number"
+      },
+      {
+        "path": "check_runs[].completed_at",
+        "type": "string"
+      },
+      {
+        "path": "check_runs[].conclusion",
+        "type": "string"
+      },
+      {
+        "path": "check_runs[].details_url",
+        "type": "null"
+      },
+      {
+        "path": "check_runs[].external_id",
+        "type": "null"
+      },
+      {
+        "path": "check_runs[].head_sha",
+        "type": "string"
+      },
+      {
+        "path": "check_runs[].html_url",
+        "type": "string"
+      },
+      {
+        "path": "check_runs[].id",
+        "type": "number"
+      },
+      {
+        "path": "check_runs[].name",
+        "type": "string"
+      },
+      {
+        "path": "check_runs[].node_id",
+        "type": "string"
+      },
+      {
+        "path": "check_runs[].output",
+        "type": "object"
+      },
+      {
+        "path": "check_runs[].output.annotations_count",
+        "type": "number"
+      },
+      {
+        "path": "check_runs[].output.summary",
+        "type": "null"
+      },
+      {
+        "path": "check_runs[].output.text",
+        "type": "null"
+      },
+      {
+        "path": "check_runs[].output.title",
+        "type": "null"
+      },
+      {
+        "path": "check_runs[].pull_requests",
+        "type": "array"
+      },
+      {
+        "path": "check_runs[].started_at",
+        "type": "string"
+      },
+      {
+        "path": "check_runs[].status",
+        "type": "string"
+      },
+      {
+        "path": "check_runs[].url",
+        "type": "string"
+      },
+      {
+        "path": "total_count",
+        "type": "number"
+      }
+    ],
+    "combined-status": [
+      {
+        "path": "sha",
+        "type": "string"
+      },
+      {
+        "path": "state",
+        "type": "string"
+      },
+      {
+        "path": "statuses",
+        "type": "array"
+      },
+      {
+        "path": "statuses[]",
+        "type": "object"
+      },
+      {
+        "path": "statuses[].context",
+        "type": "string"
+      },
+      {
+        "path": "statuses[].created_at",
+        "type": "string"
+      },
+      {
+        "path": "statuses[].description",
+        "type": "string"
+      },
+      {
+        "path": "statuses[].id",
+        "type": "number"
+      },
+      {
+        "path": "statuses[].node_id",
+        "type": "string"
+      },
+      {
+        "path": "statuses[].state",
+        "type": "string"
+      },
+      {
+        "path": "statuses[].target_url",
+        "type": "string"
+      },
+      {
+        "path": "statuses[].updated_at",
+        "type": "string"
+      },
+      {
+        "path": "statuses[].url",
+        "type": "string"
+      },
+      {
+        "path": "total_count",
+        "type": "number"
+      }
+    ],
+    "native-stacks": [
+      {
+        "path": "[]",
+        "type": "object"
+      },
+      {
+        "path": "[].base",
+        "type": "object"
+      },
+      {
+        "path": "[].base.ref",
+        "type": "string"
+      },
+      {
+        "path": "[].created_at",
+        "type": "string"
+      },
+      {
+        "path": "[].id",
+        "type": "number"
+      },
+      {
+        "path": "[].node_id",
+        "type": "string"
+      },
+      {
+        "path": "[].number",
+        "type": "number"
+      },
+      {
+        "path": "[].open",
+        "type": "boolean"
+      },
+      {
+        "path": "[].pull_requests",
+        "type": "array"
+      },
+      {
+        "path": "[].pull_requests[]",
+        "type": "object"
+      },
+      {
+        "path": "[].pull_requests[].draft",
+        "type": "boolean"
+      },
+      {
+        "path": "[].pull_requests[].head",
+        "type": "object"
+      },
+      {
+        "path": "[].pull_requests[].head.ref",
+        "type": "string"
+      },
+      {
+        "path": "[].pull_requests[].head.sha",
+        "type": "string"
+      },
+      {
+        "path": "[].pull_requests[].merged_at",
+        "type": "null"
+      },
+      {
+        "path": "[].pull_requests[].number",
+        "type": "number"
+      },
+      {
+        "path": "[].pull_requests[].state",
+        "type": "string"
+      },
+      {
+        "path": "[].url",
+        "type": "string"
+      }
+    ],
+    "pull-request": [
+      {
+        "path": "base",
+        "type": "object"
+      },
+      {
+        "path": "base.ref",
+        "type": "string"
+      },
+      {
+        "path": "base.sha",
+        "type": "string"
+      },
+      {
+        "path": "body",
+        "type": "string"
+      },
+      {
+        "path": "created_at",
+        "type": "string"
+      },
+      {
+        "path": "draft",
+        "type": "boolean"
+      },
+      {
+        "path": "head",
+        "type": "object"
+      },
+      {
+        "path": "head.ref",
+        "type": "string"
+      },
+      {
+        "path": "head.repo",
+        "type": "object"
+      },
+      {
+        "path": "head.repo.full_name",
+        "type": "string"
+      },
+      {
+        "path": "head.sha",
+        "type": "string"
+      },
+      {
+        "path": "html_url",
+        "type": "string"
+      },
+      {
+        "path": "merge_commit_sha",
+        "type": "null"
+      },
+      {
+        "path": "mergeable",
+        "type": "boolean"
+      },
+      {
+        "path": "mergeable_state",
+        "type": "string"
+      },
+      {
+        "path": "merged",
+        "type": "boolean"
+      },
+      {
+        "path": "merged_at",
+        "type": "null"
+      },
+      {
+        "path": "number",
+        "type": "number"
+      },
+      {
+        "path": "stack",
+        "type": "object"
+      },
+      {
+        "path": "stack.base",
+        "type": "string"
+      },
+      {
+        "path": "stack.id",
+        "type": "number"
+      },
+      {
+        "path": "stack.number",
+        "type": "number"
+      },
+      {
+        "path": "stack.position",
+        "type": "number"
+      },
+      {
+        "path": "stack.size",
+        "type": "number"
+      },
+      {
+        "path": "stack.url",
+        "type": "string"
+      },
+      {
+        "path": "state",
+        "type": "string"
+      },
+      {
+        "path": "title",
+        "type": "string"
+      },
+      {
+        "path": "updated_at",
+        "type": "string"
+      },
+      {
+        "path": "user",
+        "type": "object"
+      },
+      {
+        "path": "user.id",
+        "type": "number"
+      },
+      {
+        "path": "user.login",
+        "type": "string"
+      }
+    ],
+    "pull-request-comments": [
+      {
+        "path": "[]",
+        "type": "object"
+      },
+      {
+        "path": "[].body",
+        "type": "string"
+      },
+      {
+        "path": "[].commit_id",
+        "type": "string"
+      },
+      {
+        "path": "[].created_at",
+        "type": "string"
+      },
+      {
+        "path": "[].html_url",
+        "type": "string"
+      },
+      {
+        "path": "[].id",
+        "type": "number"
+      },
+      {
+        "path": "[].line",
+        "type": "number"
+      },
+      {
+        "path": "[].node_id",
+        "type": "string"
+      },
+      {
+        "path": "[].path",
+        "type": "string"
+      },
+      {
+        "path": "[].pull_request_review_id",
+        "type": "number"
+      },
+      {
+        "path": "[].side",
+        "type": "string"
+      },
+      {
+        "path": "[].start_line",
+        "type": "null"
+      },
+      {
+        "path": "[].start_side",
+        "type": "null"
+      },
+      {
+        "path": "[].user",
+        "type": "object"
+      },
+      {
+        "path": "[].user.login",
+        "type": "string"
+      }
+    ],
+    "pull-request-files": [
+      {
+        "path": "[]",
+        "type": "object"
+      },
+      {
+        "path": "[].additions",
+        "type": "number"
+      },
+      {
+        "path": "[].blob_url",
+        "type": "string"
+      },
+      {
+        "path": "[].changes",
+        "type": "number"
+      },
+      {
+        "path": "[].contents_url",
+        "type": "string"
+      },
+      {
+        "path": "[].deletions",
+        "type": "number"
+      },
+      {
+        "path": "[].filename",
+        "type": "string"
+      },
+      {
+        "path": "[].patch",
+        "type": "string"
+      },
+      {
+        "path": "[].raw_url",
+        "type": "string"
+      },
+      {
+        "path": "[].sha",
+        "type": "string"
+      },
+      {
+        "path": "[].status",
+        "type": "string"
+      }
+    ],
+    "pull-request-reviews": [
+      {
+        "path": "[]",
+        "type": "object"
+      },
+      {
+        "path": "[].body",
+        "type": "string"
+      },
+      {
+        "path": "[].commit_id",
+        "type": "string"
+      },
+      {
+        "path": "[].event",
+        "type": "string"
+      },
+      {
+        "path": "[].html_url",
+        "type": "string"
+      },
+      {
+        "path": "[].id",
+        "type": "number"
+      },
+      {
+        "path": "[].state",
+        "type": "string"
+      },
+      {
+        "path": "[].submitted_at",
+        "type": "string"
+      },
+      {
+        "path": "[].user",
+        "type": "object"
+      },
+      {
+        "path": "[].user.id",
+        "type": "number"
+      },
+      {
+        "path": "[].user.login",
+        "type": "string"
+      },
+      {
+        "path": "[].user.type",
+        "type": "string"
+      },
+      {
+        "path": "[].user.url",
+        "type": "string"
+      }
+    ],
+    "repository": [
+      {
+        "path": "allow_merge_commit",
+        "type": "boolean"
+      },
+      {
+        "path": "allow_rebase_merge",
+        "type": "boolean"
+      },
+      {
+        "path": "allow_squash_merge",
+        "type": "boolean"
+      },
+      {
+        "path": "default_branch",
+        "type": "string"
+      },
+      {
+        "path": "description",
+        "type": "string"
+      },
+      {
+        "path": "full_name",
+        "type": "string"
+      },
+      {
+        "path": "permissions",
+        "type": "object"
+      },
+      {
+        "path": "permissions.admin",
+        "type": "boolean"
+      },
+      {
+        "path": "permissions.maintain",
+        "type": "boolean"
+      },
+      {
+        "path": "permissions.pull",
+        "type": "boolean"
+      },
+      {
+        "path": "permissions.push",
+        "type": "boolean"
+      },
+      {
+        "path": "permissions.triage",
+        "type": "boolean"
+      },
+      {
+        "path": "topics",
+        "type": "object"
+      },
+      {
+        "path": "topics.names",
+        "type": "array"
+      },
+      {
+        "path": "topics.names[]",
+        "type": "string"
+      }
+    ]
+  }
+}

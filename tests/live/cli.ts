@@ -1,0 +1,328 @@
+import { writeFile } from 'node:fs/promises'
+import { describeThrown, LiveRedactor, renderRunSummary } from './diagnostics'
+import { LIVE_ENV, LiveConfigurationError, readLiveRunConfig } from './config'
+import { observeSchema, prepareSchemaSubject, renderSchema } from './observed-schema'
+import { runLiveSuite, type LiveRunReport } from './runner'
+import { findScenario, LIVE_SCENARIOS } from './scenarios'
+import { ControlledLiveTarget, GitHubLiveTarget } from './targets'
+import type { LiveCleanupReport, LiveTarget, LiveWorkspace } from './contract'
+
+/**
+ * The live suite's command line.
+ *
+ * Every refusal here is deliberate. There is no default target, no default credential,
+ * and no default that lets a run proceed against a repository nobody named. A suite that
+ * can be started by accident against somebody's account is not a test suite, it is a
+ * hazard with a green checkmark, so the run refuses and says which variable is missing.
+ *
+ * The controlled target is the one a repository can run without anybody's credentials:
+ * it stands the same double up on a real TLS socket and points the production transport
+ * at it. The `github` target is only ever started with an explicit owner and token.
+ */
+
+export interface CliOptions {
+  readonly argv: readonly string[]
+  readonly env: NodeJS.ProcessEnv
+  readonly out: (line: string) => void
+  readonly err: (line: string) => void
+  /** Injected so a test can run the command without standing a host up. */
+  readonly startControlled?: () => Promise<LiveTarget>
+  readonly startGitHub?: () => Promise<LiveTarget>
+}
+
+/** Exit codes a workflow step can act on without parsing anything. */
+export const EXIT_OK = 0
+export const EXIT_FAILED = 1
+/** The run was refused before it started: no target, no credential, no capability. */
+export const EXIT_REFUSED = 2
+
+interface ParsedCommand {
+  readonly target: 'controlled' | 'github' | null
+  readonly only: readonly string[]
+  readonly list: boolean
+  readonly help: boolean
+  readonly writeSchema: boolean
+  readonly schemaPath: string | null
+  readonly json: boolean
+  readonly problem: string | null
+}
+
+export function parseCommand(argv: readonly string[]): ParsedCommand {
+  let target: ParsedCommand['target'] = null
+  const only: string[] = []
+  let list = false
+  let help = false
+  let writeSchema = false
+  let schemaPath: string | null = null
+  let json = false
+  for (let index = 0; index < argv.length; index += 1) {
+    const argument = argv[index]
+    switch (argument) {
+      case '--controlled':
+        target = 'controlled'
+        break
+      case '--github':
+        target = 'github'
+        break
+      case '--list':
+        list = true
+        break
+      case '--help':
+      case '-h':
+        help = true
+        break
+      case '--json':
+        json = true
+        break
+      case '--only':
+        index += 1
+        if (index >= argv.length) return refused('--only needs at least one scenario id')
+        only.push(
+          ...String(argv[index])
+            .split(',')
+            .filter((id) => id !== ''),
+        )
+        break
+      case '--write-schema':
+        writeSchema = true
+        break
+      case '--schema-path':
+        index += 1
+        if (index >= argv.length) return refused('--schema-path needs a file path')
+        schemaPath = String(argv[index])
+        break
+      default:
+        return refused(`unknown argument ${String(argument)}`)
+    }
+  }
+  return { target, only, list, help, writeSchema, schemaPath, json, problem: null }
+}
+
+function refused(problem: string): ParsedCommand {
+  return {
+    target: null,
+    only: [],
+    list: false,
+    help: false,
+    writeSchema: false,
+    schemaPath: null,
+    json: false,
+    problem,
+  }
+}
+
+const USAGE = `git-stacks live GitHub suite
+
+  tsx tests/live/cli.ts --controlled [--only <id,...>] [--json]
+  tsx tests/live/cli.ts --github    [--only <id,...>] [--json]
+
+  --list              print every scenario and what each one needs, then exit
+  --write-schema      regenerate the observed-schema fixture from the target, then exit
+  --schema-path <p>   where --write-schema writes (default: the committed fixture)
+  --only <id,...>     run only these scenarios
+
+A run must name its target. --github additionally requires:
+  ${LIVE_ENV.owner}          the account the disposable repository is created under
+  ${LIVE_ENV.token}          a token for that account; never inherited from gh
+  ${LIVE_ENV.repositoryPrefix}  the prefix of the disposable repository (optional)
+  ${LIVE_ENV.runId}          the run id stamped on everything created (optional)
+  ${LIVE_ENV.receipt}        where the cleanup receipt is written (optional)
+  ${LIVE_ENV.reviewerToken}  a second account that can approve and reply (optional)
+
+Exit codes: 0 passed, 1 a scenario or cleanup failed, 2 the run was refused.
+`
+
+/**
+ * Runs the command line and answers with the exit code a workflow step should use.
+ *
+ * Refusal and failure are different answers. A refusal means nothing was created and
+ * nothing should be retried without changing the environment; a failure means the suite
+ * ran and something is wrong that a person has to look at.
+ */
+export async function runCli(options: CliOptions): Promise<number> {
+  const command = parseCommand(options.argv)
+  if (command.help) {
+    options.out(USAGE)
+    return EXIT_OK
+  }
+  if (command.problem !== null) {
+    options.err(command.problem)
+    options.err(USAGE)
+    return EXIT_REFUSED
+  }
+  if (command.list) {
+    options.out(renderCatalogue())
+    return EXIT_OK
+  }
+  if (command.target === null) {
+    options.err(
+      'A live run must name its target. Pass --controlled for the runtime in this repository, ' +
+        'or --github for an authorized disposable repository. There is no default: an unstated ' +
+        'target is a fact about the environment that only a person can settle.',
+    )
+    return EXIT_REFUSED
+  }
+  for (const id of command.only) {
+    if (findScenario(id) === undefined) {
+      options.err(`No scenario is registered under ${id}. Run with --list to see the catalogue.`)
+      return EXIT_REFUSED
+    }
+  }
+
+  const redactor = new LiveRedactor(readSecrets(options.env))
+  let target: LiveTarget
+  try {
+    target =
+      command.target === 'controlled'
+        ? await (options.startControlled ?? defaultControlled)()
+        : await (options.startGitHub ?? defaultGitHub)(options.env)
+  } catch (error) {
+    if (error instanceof LiveConfigurationError) {
+      options.err(error.message)
+      return EXIT_REFUSED
+    }
+    options.err(redactor.text(`the target could not be started: ${describeThrown(error)}`))
+    return EXIT_REFUSED
+  }
+
+  // Everything from here on is inside this guard. A run that starts a target and then
+  // fails on its way to a verdict has still provisioned a repository on somebody's
+  // account, and the only thing standing between a failed run and a leftover is this
+  // finally. The cleanup result is reported rather than thrown so a startup failure is
+  // not lost behind the cleanup that follows it, and a cleanup that itself fails does
+  // not replace the reason the run stopped.
+  let exit = EXIT_FAILED
+  try {
+    if (command.writeSchema) {
+      const rendered = await writeObservedSchema(
+        target,
+        await target.workspace(),
+        command.schemaPath,
+      )
+      options.out(redactor.text(rendered))
+      exit = EXIT_OK
+    } else {
+      const report = await runLiveSuite({
+        target,
+        redactor,
+        only: command.only,
+        onResult: (result) => {
+          options.out(
+            redactor.text(
+              `${result.outcome === 'passed' ? 'pass' : 'FAIL'} ${result.id} (${result.durationMs}ms)`,
+            ),
+          )
+          for (const line of result.failure?.exchanges ?? [])
+            options.err(redactor.text(`    ${line}`))
+        },
+      })
+      options.out('')
+      options.out(report.summary)
+      exit = report.passed ? EXIT_OK : EXIT_FAILED
+      if (command.json) options.out(redactor.text(JSON.stringify(report, null, 2)))
+    }
+  } catch (error) {
+    options.err(redactor.text(`the run did not finish: ${describeThrown(error)}`))
+    exit = EXIT_FAILED
+  }
+
+  // The report is emitted after cleanup so the lines below describe what was actually
+  // removed rather than what was still there a moment ago.
+  const cleanup = await settle(target, redactor)
+  if (!cleanup.complete) {
+    options.err(
+      redactor.text(
+        `cleanup left ${cleanup.remaining.length} resource(s) behind; the receipt is at ${target.receipt}`,
+      ),
+    )
+    for (const entry of cleanup.refused) {
+      options.err(redactor.text(`  refused ${entry.handle}: ${entry.reason}`))
+    }
+    exit = EXIT_FAILED
+  }
+  return exit
+}
+
+/** Cleanup that reports instead of throwing, so the receipt is always printed. */
+async function settle(target: LiveTarget, redactor: LiveRedactor): Promise<LiveCleanupReport> {
+  try {
+    return await target.cleanup()
+  } catch (error) {
+    return {
+      removed: [],
+      refused: [{ handle: target.runId, reason: redactor.text(describeThrown(error)) }],
+      remaining: [target.marker],
+      complete: false,
+    }
+  }
+}
+
+/** Every scenario, its title, and what it needs, so `--only` can be chosen honestly. */
+export function renderCatalogue(): string {
+  const lines = ['live GitHub scenarios:']
+  for (const scenario of LIVE_SCENARIOS) {
+    const requires = scenario.requires.length > 0 ? scenario.requires.join(', ') : 'nothing'
+    lines.push(`  ${scenario.id}`, `      ${scenario.title}`, `      requires: ${requires}`)
+  }
+  return lines.join('\n')
+}
+
+/**
+ * Regenerates the observed-schema fixture from whatever the target actually answers.
+ *
+ * The document holds paths and types only: no values, no repository name, no identifier.
+ * A response body is never committed, because the file is published as a reviewable
+ * artifact and a token-shaped value in it would outlive the run that wrote it.
+ */
+async function writeObservedSchema(
+  target: LiveTarget,
+  workspace: LiveWorkspace,
+  schemaPath: string | null,
+): Promise<string> {
+  const subject = await prepareSchemaSubject({
+    target,
+    workspace,
+    defaultBranch: 'main',
+  })
+  const observed = await observeSchema(target.transport(), subject, `${target.kind} runtime`)
+  const path = schemaPath ?? committedSchemaPath()
+  await writeFile(path, renderSchema(observed), 'utf8')
+  // The probe's branches, pull requests, review, and stack live inside the disposable
+  // repository this run owns, so the repository's own deletion takes them with it.
+  // Deleting them one at a time would leave the same end state through more calls.
+  return `wrote the observed schema to ${path}`
+}
+
+function committedSchemaPath(): string {
+  return new URL('../fixtures/live-github-observed-schema.json', import.meta.url).pathname
+}
+
+async function defaultControlled(): Promise<LiveTarget> {
+  return ControlledLiveTarget.start()
+}
+
+async function defaultGitHub(env: NodeJS.ProcessEnv): Promise<LiveTarget> {
+  return GitHubLiveTarget.start(readLiveRunConfig(env))
+}
+
+/** The secrets of this run, read the same way for every command. */
+function readSecrets(env: NodeJS.ProcessEnv): string[] {
+  const secrets = [env[LIVE_ENV.token], env[LIVE_ENV.reviewerToken]]
+    .filter((value): value is string => typeof value === 'string' && value.trim() !== '')
+    .map((value) => value.trim())
+  return [...new Set(secrets)]
+}
+
+export type { LiveRunReport }
+export { renderRunSummary }
+
+// The module is a command, not a library, when it is run directly. Importing it — which
+// the behavioural tests do — has no side effects at all.
+if (process.argv[1] !== undefined && import.meta.url === `file://${process.argv[1]}`) {
+  process.exitCode = await runCli({
+    argv: process.argv.slice(2),
+    env: process.env,
+    out: (line) => process.stdout.write(`${line}\n`),
+    err: (line) => process.stderr.write(`${line}\n`),
+  })
+}

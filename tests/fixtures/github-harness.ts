@@ -2,7 +2,7 @@ import { accessSync, constants as fsConstants, statSync } from 'node:fs'
 import { mkdtemp, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
-import { basename, delimiter, join } from 'node:path'
+import { basename, delimiter, dirname, join } from 'node:path'
 import { promisify } from 'node:util'
 import type {
   execFileSync as execFileSyncFunction,
@@ -109,6 +109,8 @@ export interface GitHubFixturePullRequest {
   headOid: string | null
   mergeOid: string | null
   mergedAt: string | null
+  /** The account that opened it, which is what `viewerDidAuthor` is decided from. */
+  author?: string
 }
 
 export interface GitHubFixtureStack {
@@ -222,6 +224,13 @@ export interface GitHubFixtureState {
     allowMergeCommit: boolean
     allowSquashMerge: boolean
     allowRebaseMerge: boolean
+    /**
+     * What `GET /repos/{owner}/{name}` reports about the repository's own description and
+     * topics. A disposable run stamps its ownership marker here, and cleanup reads it back
+     * through the same endpoint before it deletes anything.
+     */
+    description?: string | null
+    topics?: string[]
   }
   currentUser: string
   nextNumber: number
@@ -308,6 +317,8 @@ export interface GitHubFixtureState {
   }>
   /** A merge-queue request GitHub accepted for a base ref, which is the only proof of a queue. */
   mergeQueue?: boolean
+  /** Base refs a merge queue is configured on, which the live suite probes for. */
+  mergeQueueRefs?: string[]
   /**
    * The terminal result a pending asynchronous merge reports when its poll is read, so a test
    * can stand in for a queue that accepted, or refused, the group.
@@ -332,7 +343,81 @@ export interface GitHubFixtureState {
     uuid: string
   }
   checks?: GitHubFixtureChecks
+  /**
+   * Review threads, keyed by pull request number, and the reviews that opened them.
+   * The live end-to-end suite needs a real conversation to reply to and resolve; a
+   * fixture state without these fields behaves exactly as it did before.
+   */
+  reviewThreads?: Record<string, FixtureThread[]>
+  reviews?: Record<string, FixtureReview[]>
+  nextThreadId?: number
+  nextReviewId?: number
+  /** Branch rulesets, which is how a required check or approval gates a merge here. */
+  ruleSets?: FixtureRuleSet[]
+  nextRuleSetId?: number
   requests: Array<{ argv: string[]; cwd: string; at: string; body?: Record<string, unknown> }>
+}
+
+/** One review comment inside a thread, as the fixture records it. */
+export interface FixtureThreadComment {
+  id: string
+  body: string
+  createdAt: string
+  url: string
+  viewerDidAuthor: boolean
+  author: { login: string }
+  /**
+   * The review that wrote this comment, or null for a reply, which belongs to no review.
+   * GitHub reports it as `pull_request_review_id`, and a lost-write reconciliation groups
+   * a review's comments by it.
+   */
+  reviewId: number | null
+}
+
+/** One review thread, addressed by path and side the way GitHub addresses a comment. */
+export interface FixtureThread {
+  id: string
+  path: string
+  side: string
+  diffSide: string
+  line: number | null
+  startLine: number | null
+  startDiffSide: string | null
+  subjectType: string
+  isResolved: boolean
+  isCollapsed: boolean
+  isOutdated: boolean
+  viewerCanReply: boolean
+  viewerCanResolve: boolean
+  viewerCanUnresolve: boolean
+  comments: FixtureThreadComment[]
+}
+
+/** One submitted review, which is what an approval rule counts. */
+export interface FixtureReview {
+  id: number
+  /** The outcome GitHub recorded, which is not the verb the request carried. */
+  state: string
+  /** The verb the request carried, kept so the two can be told apart. */
+  event: string
+  body: string
+  commit_id: string
+  submitted_at: string
+  user: { login: string }
+  html_url: string
+}
+
+/** A branch rule set, reduced to what a merge of this fixture is actually gated by. */
+export interface FixtureRuleSet {
+  id: number
+  name: string
+  enforcement: string
+  target?: string
+  conditions?: Record<string, unknown>
+  rules?: Array<{ type?: string }>
+  queue_rules?: Array<Record<string, unknown>>
+  _requiredStatusChecks: string[]
+  _requiredApprovals: number
 }
 
 /**
@@ -607,10 +692,23 @@ const initialState = (): GitHubFixtureState => ({
   requests: [],
 })
 
-export async function createGitHubHarness(): Promise<GitHubHarness> {
+export interface GitHubHarnessOptions {
+  /**
+   * Where the bare repository is created, relative to the harness root. A host that
+   * serves Git over HTTP resolves a request path against a projects directory, so a run
+   * that needs the bare repository to be reachable as `/<owner>/<name>.git` names that
+   * layout here rather than moving the repository afterwards. The default is what every
+   * other test in this repository expects.
+   */
+  readonly barePath?: string
+}
+
+export async function createGitHubHarness(
+  options: GitHubHarnessOptions = {},
+): Promise<GitHubHarness> {
   const root = await mkdtemp(join(tmpdir(), 'git-stacks-github-harness-'))
   const repo = join(root, 'repo')
-  const bare = join(root, 'remote.git')
+  const bare = join(root, options.barePath ?? 'remote.git')
   const statePath = join(root, 'github-state.json')
   const transportLog = join(root, 'git-transport.jsonl')
   const realGit = resolveRealGit()
@@ -619,6 +717,7 @@ export async function createGitHubHarness(): Promise<GitHubHarness> {
     await mkdir(repo)
     await writeFile(statePath, `${JSON.stringify(initialState(), null, 2)}\n`, 'utf8')
     await writeFile(transportLog, '', 'utf8')
+    await mkdir(dirname(bare), { recursive: true })
     await runRealGit(realGit, root, ['init', '--bare', bare])
     await runBareGit(realGit, bare, ['config', 'user.name', 'GitHub Fixture'])
     await runBareGit(realGit, bare, ['config', 'user.email', 'github-fixture@example.invalid'])
@@ -711,7 +810,11 @@ export async function createGitHubHarness(): Promise<GitHubHarness> {
         if (isClosed) return
         isClosed = true
         if (active?.statePath === statePath) active = null
-        await rm(root, { recursive: true, force: true })
+        // A retry is not belt and braces: a file the fixture writes while the tree is
+        // being removed is reported as ENOTEMPTY unless the removal is allowed to try
+        // again, and a run that failed while deleting its own scratch space is not a run
+        // whose cleanup result means anything.
+        await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })
       },
     }
   } catch (error) {
