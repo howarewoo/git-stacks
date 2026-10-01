@@ -3577,7 +3577,7 @@ function App() {
         <InlineAlert key={pending.id} tone="error" className="global-banner" role="alert">
           <span className="global-banner-row">
             <span>
-              {`${pending.label} did not reach GitHub and will not be retried automatically. ${pending.reason}`}
+              {`${pending.label} was sent once and its outcome is unknown: GitHub may have applied it and the answer was lost, so this app does not claim it failed and does not send it again on its own. ${pending.reason}`}
             </span>
             <IconButton
               label={`Dismiss ${pending.label}`}

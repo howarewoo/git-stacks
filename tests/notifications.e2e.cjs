@@ -159,7 +159,57 @@ function startGitHubHost() {
       repository: { name: 'widgets', owner: { login: 'acme' } },
       updated_at: '2026-09-22T09:39:00Z',
     },
+    {
+      // A commit is a subject this build has to resolve into a page rather than
+      // hand over as an API URL, and it is served from this host's own base, so
+      // the run can say which page a person would have been taken to.
+      id: '103',
+      unread: true,
+      reason: 'subscribed',
+      subject: {
+        title: 'Record the stack ordering rules',
+        url: `${SELF}api/v3/repos/acme/widgets/commits/9f1c0b7`,
+        type: 'Commit',
+      },
+      repository: { name: 'widgets', owner: { login: 'acme' } },
+      updated_at: '2026-09-22T09:37:00Z',
+    },
+    {
+      // A subject kind this build does not know. It stays in the inbox under the
+      // label for what it could not name, and it keeps the operations that do
+      // not need to understand it.
+      id: '104',
+      unread: true,
+      reason: 'subscribed',
+      subject: {
+        title: 'Something this build has no name for',
+        url: `${SELF}api/v3/repos/acme/widgets/check-suites/104`,
+        type: 'CheckSuite',
+      },
+      repository: { name: 'widgets', owner: { login: 'acme' } },
+      updated_at: '2026-09-22T09:35:00Z',
+    },
+    {
+      // Already read, so marking it read again is a change GitHub has nothing
+      // to do, which it answers without touching the list.
+      id: '105',
+      unread: false,
+      reason: 'subscribed',
+      subject: {
+        title: 'Settle the review queue ordering',
+        url: `${SELF}api/v3/repos/acme/widgets/pulls/105`,
+        type: 'PullRequest',
+      },
+      repository: { name: 'widgets', owner: { login: 'acme' } },
+      updated_at: '2026-09-22T09:30:00Z',
+    },
   ]
+  // GitHub hands the validator out with every answer and expects it back
+  // unchanged, and it only answers 304 while nothing has changed. Every write
+  // this host accepts moves the list, so the list it serves afterwards is a
+  // different one and carries a later validator.
+  let changes = 0
+  const issued = () => new Date(Date.parse(LAST_MODIFIED) + changes * 1_000).toUTCString()
   const server = createServer(
     {
       key: readFileSync(join(certificate, 'key.pem')),
@@ -180,39 +230,65 @@ function startGitHubHost() {
           response.writeHead(status, { 'content-type': 'application/json', ...headers })
           response.end(body === null ? '' : JSON.stringify(body))
         }
-        // A host that answers anything with 205 would let a wrong verb, a wrong
-        // path, and a right one all pass this run. Each request is answered the
-        // way GitHub documents it, and anything else is a failure the run
-        // reports rather than absorbs.
+        // A host that answers anything with a success code would let a wrong
+        // verb, a wrong path, and a right one all pass this run. Each request is
+        // answered the way GitHub documents it, and anything else is a failure
+        // the run reports rather than absorbs.
         if (url.pathname === '/api/v3/user') return answer(200, { login: 'octo' })
-        if (request.method === 'DELETE' && url.pathname.endsWith('/subscription')) {
-          threads = threads.filter(
-            (thread) => url.pathname.indexOf(`/threads/${thread.id}/`) === -1,
+        const singleThread = /^\/api\/v3\/notifications\/threads\/([^/]+)$/.exec(url.pathname)
+        const subscribed = /^\/api\/v3\/notifications\/threads\/([^/]+)\/subscription$/.exec(
+          url.pathname,
+        )
+        if (request.method === 'PUT' && subscribed) {
+          // Ignore is a subscription GitHub keeps: the thread stays in the
+          // inbox and stops arriving.
+          threads = threads.map((thread) =>
+            thread.id === subscribed[1] ? { ...thread, unread: false } : thread,
           )
+          changes += 1
+          return answer(200, {}, {})
+        }
+        if (request.method === 'DELETE' && subscribed) {
+          threads = threads.filter((thread) => thread.id !== subscribed[1])
+          changes += 1
           return answer(204, null, {})
         }
-        // Mark all read is PUT /notifications; marking one thread read is
-        // PATCH /notifications/threads/{thread_id}. Both end at 205.
-        const singleThread = /^\/api\/v3\/notifications\/threads\/([^/]+)$/.exec(url.pathname)
+        // Done is the thread itself and not its subscription: the conversation
+        // stays watched and the thread leaves the inbox.
+        if (request.method === 'DELETE' && singleThread) {
+          threads = threads.filter((thread) => thread.id !== singleThread[1])
+          changes += 1
+          return answer(204, null, {})
+        }
+        // Mark all read is PUT /notifications and is accepted rather than
+        // finished: GitHub answers 202 and does the work on its own time, so the
+        // rows it has already changed are only confirmed by a later read.
         if (request.method === 'PUT' && url.pathname === '/api/v3/notifications') {
           threads = threads.map((thread) => ({ ...thread, unread: false }))
-          return answer(205, null, {})
+          changes += 1
+          return answer(202, { message: 'Notifications will be marked as read.' })
         }
+        // Marking one thread read is PATCH /notifications/threads/{thread_id},
+        // and a thread GitHub already has read is answered 304 with no change.
         if (request.method === 'PATCH' && singleThread) {
+          const held = threads.find((thread) => thread.id === singleThread[1])
+          if (!held) return answer(404, { message: 'Not Found' })
+          if (!held.unread) return answer(304, null, {})
           threads = threads.map((thread) =>
             thread.id === singleThread[1] ? { ...thread, unread: false } : thread,
           )
+          changes += 1
           return answer(205, null, {})
         }
         if (request.method !== 'GET') return answer(405, { message: 'Method Not Allowed' })
         if (url.pathname.startsWith('/api/v3/notifications')) {
           // A conditional read is answered the way GitHub answers one: nothing
           // changed, so there is no body to send and only the validator.
-          if (request.headers['if-modified-since'] === LAST_MODIFIED) {
+          if (request.headers['if-modified-since'] === issued()) {
             return answer(304, null, { 'x-poll-interval': '60' })
           }
           return answer(200, threads, {
-            'last-modified': LAST_MODIFIED,
+            'last-modified': issued(),
             'x-poll-interval': '60',
           })
         }
@@ -230,7 +306,7 @@ function startGitHubHost() {
         ...thread,
         subject: { ...thread.subject, url: thread.subject.url.replace(SELF, origin) },
       }))
-      resolve({ server, asked, threads: () => threads })
+      resolve({ server, asked, threads: () => threads, validator: () => issued() })
     })
   })
 }
@@ -559,27 +635,69 @@ async function main() {
       )
       return previous
     }
-    /** Every box a person has to reach, in CSS pixels, at the current zoom. */
-    const unclipped = async (selector) => {
-      const boxes = await page(
-        `[...document.querySelectorAll(${JSON.stringify(selector)})].map((el) => {
-          const box = el.getBoundingClientRect()
-          return { text: (el.innerText || el.getAttribute('aria-label') || '').slice(0, 40), left: box.left, right: box.right, width: window.innerWidth }
-        })`,
-      )
-      for (const box of boxes) {
-        assert.ok(
-          box.left >= -1 && box.right <= box.width + 1,
-          `"${box.text}" runs outside the viewport at this zoom: ${JSON.stringify(box)}`,
-        )
-      }
-      return boxes.length
-    }
     const key = async (keyName, code, virtual, modifiers = 0) => {
       const options = { key: keyName, code, windowsVirtualKeyCode: virtual, modifiers }
       await send('Input.dispatchKeyEvent', { ...options, type: 'keyDown' })
       await send('Input.dispatchKeyEvent', { ...options, type: 'keyUp' })
     }
+    /** The box of the element an expression finds, in CSS pixels, or null. */
+    const boxOf = async (expression) =>
+      page(`(() => {
+        const el = ${expression}
+        if (!el) return null
+        const box = el.getBoundingClientRect()
+        return { x: box.x, y: box.y, width: box.width, height: box.height }
+      })()`)
+    /**
+     * A real pointer press at a real point. The press travels the same path a
+     * person's does, so a control that was scrolled out of the viewport or
+     * covered by something else is reported as unreachable rather than being
+     * pressed anyway by a click that never went through the window.
+     */
+    const press = async (expression, description) => {
+      const box = await boxOf(expression)
+      if (!box) {
+        throw new Error(`no ${description} on screen: ${await page('document.body.innerText')}`)
+      }
+      const viewport = await page('({ width: window.innerWidth, height: window.innerHeight })')
+      assert.ok(
+        box.x >= 0 &&
+          box.y >= 0 &&
+          box.x + box.width <= viewport.width + 1 &&
+          box.y + box.height <= viewport.height + 1,
+        `${description} is not inside the viewport a person presses in: ${JSON.stringify({ box, viewport })}`,
+      )
+      const x = box.x + box.width / 2
+      const y = box.y + box.height / 2
+      await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y })
+      await send('Input.dispatchMouseEvent', {
+        type: 'mousePressed',
+        x,
+        y,
+        button: 'left',
+        buttons: 1,
+        clickCount: 1,
+      })
+      await send('Input.dispatchMouseEvent', {
+        type: 'mouseReleased',
+        x,
+        y,
+        button: 'left',
+        buttons: 0,
+        clickCount: 1,
+      })
+    }
+    /** Scrolls a control into the viewport the way a person scrolls to it. */
+    const reveal = async (expression, description) => {
+      const scrolled = await page(
+        `(() => { const el = ${expression}; if (!el) return false; el.scrollIntoView({ block: 'center' }); return true })()`,
+      )
+      assert.equal(scrolled, true, `no ${description} to scroll to`)
+      await delay(300)
+    }
+    /** A control on the row that names this thread, labelled as it is on screen. */
+    const control = (title, label) =>
+      `[...document.querySelectorAll('[role="listitem"]')].find((r) => r.innerText.includes(${JSON.stringify(title)}))?.querySelector('[aria-label=${JSON.stringify(label)}]')`
 
     // The window starts in onboarding with this run's repository among its
     // recents, and opening it from there is the same path a person takes.
@@ -760,48 +878,40 @@ async function main() {
     const standard = await screenshot('notifications-standard')
 
     // Opening a thread hands the operating system a page, not an API endpoint.
-    // The host this run is pinned to is the only origin allowed, and the
-    // subject has to arrive there as the pull request a person can read.
+    // The host this run is pinned to is the only origin allowed, and each
+    // subject has to arrive there as the page a person can read: a pull request
+    // and a commit are different subjects with different pages, so one of them
+    // resolving to the other's address would pass a run that only ever saw one.
     assert.deepEqual(
       await main.evaluate(`(${MAIN_EXTERNAL})('install')`),
       { installed: true },
       'the run could not intercept the links this app opens',
     )
-    await page(
-      `(() => {
-        const row = [...document.querySelectorAll('[role="listitem"]')].find((r) => r.innerText.includes('Tidy the stack ordering rules'))
-        if (!row) throw new Error('no row names this thread: ' + document.body.innerText)
-        const open = [...row.querySelectorAll('button')].find((b) => (b.getAttribute('aria-label') || '').startsWith('Open '))
-        if (!open) throw new Error('this row offers no Open control: ' + row.innerText)
-        open.click()
-        return true
-      })()`,
-    )
-    let opened = []
-    for (let attempt = 0; attempt < 100 && opened.length === 0; attempt += 1) {
-      await delay(100)
-      opened = await main.evaluate(`(${MAIN_EXTERNAL})('calls')`)
+    const openedPages = async (title, label) => {
+      await reveal(control(title, label), `the Open control for ${title}`)
+      await press(control(title, label), `the Open control for ${title}`)
+      let calls = []
+      const before = await main.evaluate(`(${MAIN_EXTERNAL})('calls')`)
+      for (let attempt = 0; attempt < 100 && calls.length === before.length; attempt += 1) {
+        await delay(100)
+        calls = await main.evaluate(`(${MAIN_EXTERNAL})('calls')`)
+      }
+      return calls.slice(before.length)
     }
     assert.deepEqual(
-      opened,
+      await openedPages(
+        'Tidy the stack ordering rules',
+        'Open Tidy the stack ordering rules on GitHub',
+      ),
       [`https://${hostName}/acme/widgets/pull/101`],
-      'the subject API URL was resolved to a page on the host this module is pinned to',
+      'the pull request API URL was resolved to a page on the host this module is pinned to',
+    )
+    assert.deepEqual(
+      await openedPages('Record the stack ordering rules', 'Open Record the stack ordering rules on GitHub'),
+      [`https://${hostName}/acme/widgets/commit/9f1c0b7`],
+      'a commit subject resolves to the commit page, singular, and not to an API URL or a plural tree',
     )
     await main.evaluate(`(${MAIN_EXTERNAL})('restore')`)
-
-    // Marking one thread read writes to this host once and updates the row.
-    await page(
-      `[...document.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Mark read').click()`,
-    )
-    await until(
-      'the first thread to be marked read',
-      `document.querySelector('[role="listitem"]')?.innerText.includes('Read')`,
-      600,
-    )
-    const writes = host.asked.filter((entry) => entry.method === 'PATCH')
-    assert.equal(writes.length, 1, `marking read is sent once: ${JSON.stringify(writes)}`)
-    assert.equal(writes[0].path, '/api/v3/notifications/threads/101')
-
     /** What the window says each row is: the badge, not the button's wording. */
     const rowsOnScreen = async () =>
       page(
@@ -810,14 +920,62 @@ async function main() {
           state: row.querySelector('[class*="badge"]')?.textContent.trim()
             ?? [...row.querySelectorAll('span')].map((s) => s.textContent.trim()).find((t) => t === 'Read' || t === 'Unread')
             ?? null,
+          controls: [...row.querySelectorAll('button')].map((b) => ({
+            name: b.getAttribute('aria-label') ?? b.textContent.trim(),
+            enabled: !b.disabled,
+          })),
         }))`,
       )
 
-    // Mark all read is the bulk operation, which GitHub documents as
-    // PUT /notifications, and it is judged by the inbox it leaves behind rather
-    // than by the request alone.
-    await page(
-      `[...document.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Mark all read').click()`,
+
+    // Marking one thread read writes to this host once and updates the row. The
+    // control is the one on the row it acts on, pressed with a real pointer.
+    await reveal(
+      control('Tidy the stack ordering rules', 'Mark Tidy the stack ordering rules as read'),
+      'the mark read control',
+    )
+    await press(
+      control('Tidy the stack ordering rules', 'Mark Tidy the stack ordering rules as read'),
+      'the mark read control',
+    )
+    await until(
+      'the first thread to be marked read',
+      `[...document.querySelectorAll('[role="listitem"]')].some((r) => r.innerText.includes('Tidy the stack ordering rules') && !r.innerText.includes('Unread'))`,
+      600,
+    )
+    const writes = host.asked.filter((entry) => entry.method === 'PATCH')
+    assert.equal(writes.length, 1, `marking read is sent once: ${JSON.stringify(writes)}`)
+    assert.equal(writes[0].path, '/api/v3/notifications/threads/101')
+
+
+    // A thread GitHub already has read is a change it has nothing to do, and it
+    // says so with 304 rather than pretending the row changed.
+    assert.equal(
+      (await rowsOnScreen()).find((row) => row.title.includes('Settle the review queue ordering'))
+        ?.state,
+      'Read',
+      'a thread this host already had read is on screen as read',
+    )
+    assert.equal(
+      (await rowsOnScreen()).find(
+        (row) => row.title.includes('Settle the review queue ordering'),
+      )?.controls.find((entry) => entry.name === 'Mark Settle the review queue ordering as read')
+        ?.enabled,
+      false,
+      'and this app offers no read to repeat for a row that is already read',
+    )
+
+    // Mark all read is the bulk operation GitHub documents as PUT /notifications,
+    // and it is the one operation GitHub accepts without finishing: the answer
+    // is 202 and the rows keep the state they were last confirmed in until a
+    // later read says what GitHub did.
+    await reveal(
+      `[...document.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Mark all read')`,
+      'the mark all read control',
+    )
+    await press(
+      `[...document.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Mark all read')`,
+      'the mark all read control',
     )
     const bulkDeadline = Date.now() + 10_000
     let bulk = host.asked.filter((entry) => entry.method === 'PUT')
@@ -828,30 +986,38 @@ async function main() {
     assert.deepEqual(
       bulk.map((entry) => `${entry.method} ${entry.path}`),
       ['PUT /api/v3/notifications'],
-      'marking the whole inbox read is the documented bulk request',
+      'marking the whole inbox read is the documented bulk request, sent once',
     )
     await until(
-      'every thread to be marked read',
-      `[...document.querySelectorAll('[role="list"][aria-label="GitHub notification threads"] [role="listitem"]')].length > 0 && [...document.querySelectorAll('[role="list"][aria-label="GitHub notification threads"] [role="listitem"]')].every((row) => row.innerText.includes('Read') && !row.innerText.includes('Unread'))`,
+      'the accepted change to be announced',
+      `Boolean(document.querySelector('[role="note"]'))`,
       600,
     )
-    const afterBulk = await rowsOnScreen()
-    assert.equal(
-      afterBulk.every((row) => row.state === 'Read'),
-      true,
-      `the inbox on screen agrees with the host's state after the bulk write: ${JSON.stringify(afterBulk)}`,
+    const accepted = await page(`document.querySelector('[role="note"]')?.innerText ?? ''`)
+    assert.ok(
+      !/failed|did not|unsuccessful|not applied/i.test(accepted),
+      `an accepted change is not reported as a failure: ${accepted}`,
+    )
+    const stillUnread = (await rowsOnScreen()).filter((row) => row.state === 'Unread')
+    assert.ok(
+      stillUnread.length > 0,
+      `an accepted change leaves the rows as they were last confirmed: ${JSON.stringify(await rowsOnScreen())}`,
     )
     assert.equal(
-      host.threads().every((thread) => thread.unread === false),
-      true,
-      'the host really did mark every thread read',
+      await page(
+        `[...document.querySelectorAll('button')].filter((b) => b.textContent.trim() === 'Mark all read').some((b) => !b.disabled)`,
+      ),
+      false,
+      'and the same change is not offered again while it is still unconfirmed',
     )
 
     // The interval GitHub asked for is a floor a person cannot outrun either:
-    // asking again straight away sends nothing and changes nothing.
+    // asking again straight away sends nothing, so the accepted change is still
+    // waiting to be confirmed rather than quietly becoming confirmed.
     const readsBefore = host.asked.length
-    await page(
-      `[...document.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Refresh').click()`,
+    await press(
+      `[...document.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Refresh')`,
+      'the refresh control',
     )
     await delay(1_000)
     assert.equal(
@@ -860,64 +1026,112 @@ async function main() {
       'a read asked for inside the interval GitHub named is not sent at all',
     )
     assert.equal(
-      (await rowsOnScreen()).every((row) => row.state === 'Read'),
-      true,
-      'and the list GitHub last confirmed is still the one on screen, reads and all',
+      (await rowsOnScreen()).filter((row) => row.state === 'Unread').length,
+      stillUnread.length,
+      'and nothing is claimed as confirmed on the strength of a read that was never sent',
     )
 
-    // Once the interval has passed, the read is conditional, and a host that
-    // says nothing changed keeps the whole list rather than replacing it with
-    // the page that answered.
+    // Once the interval has passed, the read is sent and it is conditional. The
+    // host has changed since the last list, so it answers with the list it now
+    // holds rather than 304, and that answer is what confirms the accepted bulk
+    // change: the notice goes away because GitHub's own list says it is done,
+    // not because this app decided to call it done.
     await delay(62_000)
-    await page(
-      `[...document.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Refresh').click()`,
+    const readsBeforeConfirmation = host.asked.length
+    await press(
+      `[...document.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Refresh')`,
+      'the refresh control',
     )
-    for (let attempt = 0; attempt < 200 && host.asked.length === readsBefore; attempt += 1) {
+    for (
+      let attempt = 0;
+      attempt < 200 && host.asked.length === readsBeforeConfirmation;
+      attempt += 1
+    ) {
       await delay(50)
     }
-    const conditional = host.asked.at(-1)
+    const confirming = host.asked.at(-1)
     assert.equal(
-      conditional.ifModifiedSince,
-      LAST_MODIFIED,
-      'the validator sent back is the one GitHub issued, unchanged',
+      confirming.ifModifiedSince,
+      host.validator(),
+      'the validator sent back is the one this host last issued, unchanged',
     )
     assert.equal(
       host.asked.length,
-      readsBefore + 1,
-      'a 304 ends the read rather than asking for another page',
+      readsBeforeConfirmation + 1,
+      'a changed list ends the read rather than asking for another page',
+    )
+    await until(
+      'the accepted change to be confirmed by what GitHub holds',
+      `[...document.querySelectorAll('[role="list"][aria-label="GitHub notification threads"] [role="listitem"]')].length > 0 && [...document.querySelectorAll('[role="list"][aria-label="GitHub notification threads"] [role="listitem"]')].every((row) => row.innerText.includes('Read') && !row.innerText.includes('Unread'))`,
+      600,
     )
     assert.equal(
-      (await page(`document.body.innerText`)).includes('Tidy the stack ordering rules'),
-      true,
-      'the list is replayed whole, not replaced by whatever page answered',
+      await page(`Boolean(document.querySelector('[role="note"]'))`),
+      false,
+      'the accepted notice is gone once a read says what GitHub did',
     )
-    // A conditional read replays what the module last saw, and what it last saw
-    // is after the writes this run performed. Replaying a pre-write list would
-    // put acknowledged reads back in front of the person who acknowledged them.
     assert.equal(
       (await rowsOnScreen()).every((row) => row.state === 'Read'),
       true,
-      'the acknowledged read marks survive the conditional read: ' +
+      'the inbox on screen agrees with the host after the bulk change: ' +
         JSON.stringify(await rowsOnScreen()),
     )
+
+    // A subject kind this build does not know stays in the inbox. It keeps every
+    // operation that addresses the thread by its own id, and it is the only one
+    // with no Open, because there is no page for it to open.
+    const unnamed = (await rowsOnScreen()).find(
+      (row) => row.title.includes('Something this build has no name for'),
+    )
+    assert.ok(unnamed, 'a subject this build cannot name is still in the inbox')
+    assert.deepEqual(
+      unnamed.controls.map((entry) => entry.name),
+      [
+        'Mark Something this build has no name for as read',
+        'Mark Something this build has no name for as done',
+        'Open Something this build has no name for on GitHub',
+        'Ignore Something this build has no name for',
+        'Unsubscribe from Something this build has no name for',
+      ],
+      'every thread offers its own operations, and only the browser link needs a page',
+    )
     assert.equal(
-      host.threads().every((thread) => thread.unread === false),
-      true,
-      'and the host agrees the inbox is read',
+      unnamed.controls.find((entry) => entry.name.startsWith('Open ')).enabled,
+      false,
+      'and the one operation that would need a page this host named is not offered',
+    )
+
+    // Done is the thread and not the subscription: the row leaves the inbox, the
+    // request is the thread's own, and no subscription is touched by it.
+    await reveal(
+      control('Record the stack ordering rules', 'Mark Record the stack ordering rules as done'),
+      'the done control',
+    )
+    await press(
+      control('Record the stack ordering rules', 'Mark Record the stack ordering rules as done'),
+      'the done control',
+    )
+    await until(
+      'the completed thread to leave the inbox',
+      `!document.body.innerText.includes('Record the stack ordering rules') && document.body.innerText.includes('Tidy the stack ordering rules')`,
+      600,
+    )
+    assert.equal(
+      host.threads().some((thread) => thread.id === '103'),
+      false,
+      'the host removed that thread itself',
     )
 
     // Unsubscribing is per thread, so the named row's own control is the one
     // used: the row that leaves the list is the row that was acted on, and the
     // host is the one that decides it left.
-    await page(
-      `(() => {
-        const row = [...document.querySelectorAll('[role="listitem"]')].find((r) => r.innerText.includes('Release checklist'))
-        if (!row) throw new Error('no row names this thread: ' + document.body.innerText)
-        const button = [...row.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Unsubscribe')
-        if (!button) throw new Error('this row offers no unsubscribe: ' + row.innerText)
-        button.click()
-        return true
-      })()`,
+    await reveal(
+      control('Mentioned in "Release checklist"', 'Unsubscribe from Mentioned in "Release checklist"'),
+      'the unsubscribe control',
+    )
+    await press(
+      control('Mentioned in "Release checklist"', 'Unsubscribe from Mentioned in "Release checklist"'),
+      'the unsubscribe control',
     )
     await until(
       'the unsubscribed thread to leave the list',
@@ -926,8 +1140,42 @@ async function main() {
     )
     assert.deepEqual(
       host.asked.filter((entry) => entry.method === 'DELETE').map((entry) => entry.path),
-      ['/api/v3/notifications/threads/102/subscription'],
-      'exactly the subscription the row names was removed, and only that one',
+      [
+        '/api/v3/notifications/threads/103',
+        '/api/v3/notifications/threads/102/subscription',
+      ],
+      'Done and Unsubscribe are two different requests, and each took the thread it named with it',
+    )
+
+    // The conditional read that follows a list nothing changed keeps that list
+    // whole rather than replacing it with whatever page answered, so the
+    // acknowledged reads and the removals stay on screen.
+    await delay(62_000)
+    const readsBeforeReplay = host.asked.length
+    await press(
+      `[...document.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Refresh')`,
+      'the refresh control',
+    )
+    for (let attempt = 0; attempt < 200 && host.asked.length === readsBeforeReplay; attempt += 1) {
+      await delay(50)
+    }
+    assert.equal(host.asked.length, readsBeforeReplay + 1, 'a 304 ends the read')
+    await delay(500)
+    const replayed = await rowsOnScreen()
+    assert.equal(
+      replayed.some((row) => row.title.includes('Record the stack ordering rules')),
+      false,
+      'a completed thread does not come back on the replay of an unchanged list',
+    )
+    assert.equal(
+      replayed.every((row) => row.state === 'Read'),
+      true,
+      'the acknowledged read marks survive the conditional read: ' + JSON.stringify(replayed),
+    )
+    assert.equal(
+      replayed.length,
+      host.threads().length,
+      'and the list on screen is the list the host holds',
     )
 
     // The keyboard route reaches the view and the dialog, without a pointer.
@@ -946,7 +1194,9 @@ async function main() {
 
     // Real 200% zoom, applied by the process that owns the window. More
     // screenshot pixels would only be the same layout at a higher density, so
-    // what is checked here is the halved CSS viewport and what still fits in it.
+    // what is checked here is the halved CSS viewport, and then the rows and
+    // their controls being brought into it and used there: a camera pointed at
+    // a layout that only exists off screen says nothing about using it.
     const baselineWidth = await page('window.innerWidth')
     const originalZoom = await zoom(2, Math.round(baselineWidth / 2))
     assert.equal(
@@ -954,62 +1204,273 @@ async function main() {
       false,
       'the view reflows at 200% zoom rather than forcing a horizontal scrollbar',
     )
-    const rowsAtZoom = await unclipped(
-      '[role="list"][aria-label="GitHub notification threads"] [role="listitem"]',
+    const viewportOf = () => page('({ width: window.innerWidth, height: window.innerHeight })')
+    /** Whether the box is really inside the viewport a person is looking at. */
+    const inView = async (expression, description) => {
+      const box = await boxOf(expression)
+      assert.ok(box, `no ${description} on screen`)
+      const viewport = await viewportOf()
+      assert.ok(
+        box.x >= 0 &&
+          box.y >= 0 &&
+          box.x + box.width <= viewport.width + 1 &&
+          box.y + box.height <= viewport.height + 1,
+        `${description} is on screen but not inside the viewport: ${JSON.stringify({ box, viewport })}`,
+      )
+      return box
+    }
+    const remainingRows = (await rowsOnScreen()).filter((row) =>
+      row.title.includes('Tidy the stack ordering rules') ||
+      row.title.includes('Something this build has no name for') ||
+      row.title.includes('Settle the review queue ordering'),
     )
-    assert.ok(rowsAtZoom > 0, `the inbox is on screen at 200% zoom: ${rowsAtZoom} rows`)
-    const controlsAtZoom = await unclipped('.list-toolbar button, .capability-row button')
+    assert.ok(remainingRows.length === 3, `the inbox still holds its threads: ${remainingRows.length}`)
+    const rowTitles = remainingRows.map((row) => row.title.trim())
+    let zoomedInbox = null
+    for (const title of rowTitles) {
+      await reveal(
+        `[...document.querySelectorAll('[role="listitem"]')].find((r) => r.innerText.includes(${JSON.stringify(title)}))`,
+        `the row for ${title}`,
+      )
+      await inView(
+        `[...document.querySelectorAll('[role="listitem"]')].find((r) => r.innerText.includes(${JSON.stringify(title)}))`,
+        `the row for ${title}`,
+      )
+      for (const name of [
+        `Mark ${title} as read`,
+        `Mark ${title} as done`,
+        `Open ${title} on GitHub`,
+        `Ignore ${title}`,
+        `Unsubscribe from ${title}`,
+      ]) {
+        const controlOnThisRow = `[...document.querySelectorAll('[role="listitem"]')].find((r) => r.innerText.includes(${JSON.stringify(title)}))?.querySelector('[aria-label=${JSON.stringify(name)}]')`
+        await inView(controlOnThisRow, `the ${name} control at 200% zoom`)
+      }
+      zoomedInbox ??= await screenshot(`notifications-zoom-200-row`, { viewportOnly: true })
+    }
+    const firstRowTitle = rowTitles[0]
+    // A row action is pressed at the zoom, with a real pointer, and what it
+    // does is read back off the host rather than off the wording of a button.
+    const ignoreLabel = `Ignore ${firstRowTitle}`
+    await reveal(control(firstRowTitle, ignoreLabel), `the ${ignoreLabel} control`)
+    await press(control(firstRowTitle, ignoreLabel), `the ${ignoreLabel} control`)
+    await until(
+      'the ignored thread to be read on the host',
+      `document.querySelector('[aria-label=${JSON.stringify(ignoreLabel)}]')?.closest('[role="listitem"]')?.innerText.includes('Read')`,
+      600,
+    )
     assert.ok(
-      controlsAtZoom >= 4,
-      `the inbox's own controls survive 200% zoom: ${controlsAtZoom} buttons`,
+      host.asked.some((entry) => entry.method === 'PUT' && entry.path.endsWith('/subscription')),
+      'ignoring a thread is the subscription change GitHub documents, sent once',
     )
-    const zoomedInbox = await screenshot('notifications-zoom-200', { viewportOnly: true })
-
-    // The consent step has to stay reachable and unclipped at the same zoom:
-    // it is the one control that cannot be reached by resizing the window.
+    const zoomedAction = await screenshot('notifications-zoom-200-action', { viewportOnly: true })
+    // The same row is reached with the keyboard alone, from the control that is
+    // already focused, and the outcome is the host's answer to that press.
     await page(
-      `(() => {
-        const button = [...document.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Remove credential')
-        if (button) button.click()
-        return true
-      })()`,
+      `document.querySelector('[aria-label=${JSON.stringify(`Unsubscribe from ${firstRowTitle}`)}]')?.focus()`,
+    )
+    await key('Enter', 'Enter', 13)
+    await until(
+      'the keyboard to unsubscribe the focused thread',
+      `!document.body.innerText.includes(${JSON.stringify(firstRowTitle)})`,
+      600,
+    )
+    assert.ok(
+      host.asked.some(
+        (entry) => entry.method === 'DELETE' && entry.path.endsWith('/subscription'),
+      ),
+      'the keyboard reached the same subscription control a pointer reaches',
+    )
+    const zoomedKeyboard = await screenshot('notifications-zoom-200-keyboard', { viewportOnly: true })
+
+    // The consent step has to stay reachable at the same zoom: it is the one
+    // control that cannot be reached by resizing the window, so its input, its
+    // consent, and its submit are scrolled to, pressed, and used there.
+    await reveal(
+      `[...document.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Remove credential')`,
+      'the remove credential control',
+    )
+    await press(
+      `[...document.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Remove credential')`,
+      'the remove credential control',
     )
     await until(
       'the module to be back to needing a credential',
       `document.body.innerText.includes('No credential stored')`,
       600,
     )
-    await page(
-      `[...document.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Authorize notifications').click()`,
+    await reveal(
+      `[...document.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Authorize notifications')`,
+      'the authorize control',
+    )
+    await press(
+      `[...document.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Authorize notifications')`,
+      'the authorize control',
     )
     await until(
       'the credential dialog at 200% zoom',
       `document.querySelector('[aria-label="GitHub Notifications credential"]')`,
     )
-    const dialogAtZoom = await unclipped('[aria-label="GitHub Notifications credential"] *')
-    assert.ok(dialogAtZoom > 0, 'the consent dialog is laid out at 200% zoom')
-    await unclipped('[aria-label="GitHub Notifications credential"] button')
+    const dialog = (part) =>
+      `document.querySelector('[aria-label="GitHub Notifications credential"] ${part}')`
+    await inView(dialog('*'), 'the consent dialog')
+    await reveal(dialog('input:not([type="checkbox"])'), 'the token field at 200% zoom')
+    await inView(dialog('input:not([type="checkbox"])'), 'the token field at 200% zoom')
+    await page(`(() => { const input = ${dialog('input:not([type="checkbox"])')}; input.focus(); return true })()`)
+    for (const character of TOKEN) {
+      await send('Input.dispatchKeyEvent', { type: 'keyDown', text: character })
+      await send('Input.dispatchKeyEvent', { type: 'keyUp', text: character })
+    }
+    await reveal(
+      dialog('input[type="checkbox"], [role="checkbox"]'),
+      'the consent control at 200% zoom',
+    )
+    await inView(
+      dialog('input[type="checkbox"], [role="checkbox"]'),
+      'the consent control',
+    )
+    await press(
+      dialog('input[type="checkbox"], [role="checkbox"]'),
+      'the consent control at 200% zoom',
+    )
     const zoomedConsent = await screenshot('notifications-zoom-200-consent', { viewportOnly: true })
-    await page(
-      `[...document.querySelectorAll('[aria-label="GitHub Notifications credential"] button')].find((b) => b.textContent.trim() === 'Cancel').click()`,
+    await reveal(
+      `[...document.querySelectorAll('[aria-label="GitHub Notifications credential"] button')].find((b) => b.textContent.trim() === 'Authorize')`,
+      'the consent submit at 200% zoom',
+    )
+    await press(
+      `[...document.querySelectorAll('[aria-label="GitHub Notifications credential"] button')].find((b) => b.textContent.trim() === 'Authorize')`,
+      'the consent submit at 200% zoom',
     )
     await until(
-      'the credential dialog to close',
-      `!document.querySelector('[aria-label="GitHub Notifications credential"]')`,
+      'the list this credential is for, read at 200% zoom',
+      `document.body.innerText.includes('Something this build has no name for')`,
+      1200,
     )
     await zoom(originalZoom, baselineWidth)
     await resize(1024, 768)
 
-    const afterRemoval = await page(`document.body.innerText`)
+    // The in-place host change a person makes in Settings, with this app's own
+    // account still absent and no push anything: the inbox this window is
+    // showing belongs to one host, and changing the host in place has to
+    // replace it rather than leave the previous host's private threads in a
+    // window that is now pointed somewhere else.
+    const second = await startGitHubHost()
+    const secondName = `127.0.0.1:${second.server.address().port}`
+    await key('k', 'KeyK', 75, 4)
+    await until('the command palette', `document.querySelector('[aria-label^="Search actions"]')`)
+    for (const character of 'Settings') {
+      await send('Input.dispatchKeyEvent', { type: 'keyDown', text: character })
+      await send('Input.dispatchKeyEvent', { type: 'keyUp', text: character })
+    }
+    await until(
+      'the settings command',
+      `[...document.querySelectorAll('[aria-label="Command suggestions"] [role="option"]')].some((b) => b.textContent.includes('Settings'))`,
+    )
+    await page(
+      `[...document.querySelectorAll('[aria-label="Command suggestions"] [role="option"]')].find((b) => b.textContent.includes('Settings')).click()`,
+    )
+    await until(
+      'the settings dialog',
+      `document.querySelector('nav[aria-label="Settings sections"]')`,
+    )
+    await page(
+      `[...document.querySelectorAll('nav[aria-label="Settings sections"] button')].find((b) => b.textContent.trim() === 'GitHub').click()`,
+    )
+    await until('the host field', `document.querySelector('#settings-github-host')`)
+    await page(
+      `(() => { const field = document.querySelector('#settings-github-host'); const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set; setter.call(field, ${JSON.stringify(secondName)}); field.dispatchEvent(new Event('input', { bubbles: true })); return true })()`,
+    )
+    await reveal(
+      `[...document.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Use this host')`,
+      'the use this host control',
+    )
+    await press(
+      `[...document.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Use this host')`,
+      'the use this host control',
+    )
+    await until(
+      'the new host to be stored',
+      `document.body.innerText.includes(${JSON.stringify(`GitHub host set to ${secondName}`)})`,
+      900,
+    )
+    await key('Escape', 'Escape', 27)
+    await until(
+      'the settings dialog to close',
+      `!document.querySelector('nav[aria-label="Settings sections"]')`,
+    )
+    await until(
+      'the inbox to belong to the host that was just selected',
+      `document.body.innerText.includes('No credential stored') && !document.body.innerText.includes('Tidy the stack ordering rules')`,
+      1200,
+    )
     assert.equal(
-      afterRemoval.includes('Tidy the stack ordering rules'),
-      false,
-      'the list read with that credential is gone',
+      (await rowsOnScreen()).length,
+      0,
+      "the previous host's threads are gone from a window that is not pointed at that host",
+    )
+    // The credential is per host, so the new host has none until it is given
+    // one, and asking for it is the whole of what this window can offer now.
+    await press(
+      `[...document.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Authorize notifications')`,
+      'the authorize control for the new host',
+    )
+    await until(
+      'the consent dialog for the new host',
+      `document.querySelector('[aria-label="GitHub Notifications credential"]')`,
+    )
+    const secondBoundary = await page(
+      `(() => {
+        const box = document.querySelector('[aria-label="GitHub Notifications credential"]')
+        const terms = [...box.querySelectorAll('dt')].map((dt) => dt.textContent.trim())
+        const values = [...box.querySelectorAll('dd')].map((dd) => dd.textContent.trim())
+        return terms.indexOf('Host') === -1 ? null : values[terms.indexOf('Host')]
+      })()`,
+    )
+    assert.equal(
+      secondBoundary,
+      secondName,
+      'the consent names the host the window is now pointed at, not the one it came from',
+    )
+    await page(`(() => { const input = document.querySelector('[aria-label="GitHub Notifications credential"] input'); input.focus(); return true })()`)
+    for (const character of TOKEN) {
+      await send('Input.dispatchKeyEvent', { type: 'keyDown', text: character })
+      await send('Input.dispatchKeyEvent', { type: 'keyUp', text: character })
+    }
+    await page(
+      `(() => { const box = document.querySelector('[aria-label="GitHub Notifications credential"] [role="checkbox"]') || [...document.querySelectorAll('[aria-label="GitHub Notifications credential"] input')].find((i) => i.type === 'checkbox'); box.click(); return true })()`,
+    )
+    await press(
+      `[...document.querySelectorAll('[aria-label="GitHub Notifications credential"] button')].find((b) => b.textContent.includes('Authorize'))`,
+      'the consent submit for the new host',
+    )
+    await until(
+      "the new host's own threads",
+      `document.body.innerText.includes('Tidy the stack ordering rules')`,
+      1200,
+    )
+    const afterCutover = await rowsOnScreen()
+    assert.equal(
+      afterCutover.every((row) => row.title.includes('acme/widgets')),
+      true,
+      'the inbox now holds what the selected host serves',
+    )
+    assert.ok(
+      second.asked.every((entry) => entry.authorization === `Bearer ${TOKEN}`),
+      'and every read of it went to that host over this module’s own credential',
     )
     assert.equal(
       existsSync(join(userData, 'github-account.json')),
       false,
-      "the application's own GitHub sign-in was never involved and is still absent",
+      "the application's own GitHub sign-in is still absent through the host change",
+    )
+    const afterCutoverShot = await screenshot('notifications-host-cutover')
+
+    const afterRemoval = await page(`document.body.innerText`)
+    assert.equal(
+      afterRemoval.includes('Tidy the stack ordering rules'),
+      true,
+      'the list read with the credential the selected host was given is on screen',
     )
 
     console.log(
@@ -1020,8 +1481,12 @@ async function main() {
           standard,
           minimum,
           zoomedInbox,
+          zoomedAction,
+          zoomedKeyboard,
           zoomedConsent,
+          afterCutover: afterCutoverShot,
           hostRequests: host.asked.map((entry) => `${entry.method} ${entry.path}`),
+          cutoverRequests: second.asked.map((entry) => `${entry.method} ${entry.path}`),
           secretInFiles: stored.includes(TOKEN),
           rendererErrors,
         },
@@ -1029,6 +1494,8 @@ async function main() {
         2,
       ),
     )
+    second.server.close()
+    second.server.closeAllConnections()
     socket.close()
   } finally {
     if (socket && socket.readyState !== WebSocket.CLOSED) socket.close()
