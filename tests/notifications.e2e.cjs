@@ -127,6 +127,13 @@ function startGitHubHost() {
   // The threads the host holds, so a write the run performs is a write the host
   // really has: a mark-read that the host forgot would make the list disagree
   // with the requests, and the point of this run is that the two agree.
+  //
+  // A subject URL is served by the same host the module is pinned to, on that
+  // host's own API base. `SELF` stands for the origin this run's server
+  // actually listened on, filled in below: a subject from another origin is not
+  // this module's business, and one this host never served says nothing about
+  // where its page lives.
+  const SELF = '\u0000'
   let threads = [
     {
       id: '101',
@@ -134,7 +141,7 @@ function startGitHubHost() {
       reason: 'review_requested',
       subject: {
         title: 'Tidy the stack ordering rules',
-        url: 'https://api.github.com/repos/acme/widgets/pulls/101',
+        url: `${SELF}api/v3/repos/acme/widgets/pulls/101`,
         type: 'PullRequest',
       },
       repository: { name: 'widgets', owner: { login: 'acme' } },
@@ -146,7 +153,7 @@ function startGitHubHost() {
       reason: 'mention',
       subject: {
         title: 'Mentioned in "Release checklist"',
-        url: 'https://api.github.com/repos/acme/widgets/issues/102',
+        url: `${SELF}api/v3/repos/acme/widgets/issues/102`,
         type: 'Issue',
       },
       repository: { name: 'widgets', owner: { login: 'acme' } },
@@ -214,7 +221,17 @@ function startGitHubHost() {
     },
   )
   return new Promise((resolve) => {
-    server.listen(0, '127.0.0.1', () => resolve({ server, asked, threads: () => threads }))
+    server.listen(0, '127.0.0.1', () => {
+      // The subject URLs name the origin this server really answered on, so
+      // the fixture is shaped like the host the module is pinned to rather than
+      // like a public one that is not in this run at all.
+      const origin = `https://127.0.0.1:${server.address().port}/`
+      threads = threads.map((thread) => ({
+        ...thread,
+        subject: { ...thread.subject, url: thread.subject.url.replace(SELF, origin) },
+      }))
+      resolve({ server, asked, threads: () => threads })
+    })
   })
 }
 
