@@ -160,6 +160,122 @@ export const reviewScenarios: readonly LiveScenario[] = [
     },
   },
   {
+    id: 'reviews/a-lost-review-write-is-reconciled-from-a-later-page',
+    title:
+      'a review whose answer was lost is reconciled out of a page the read has to follow to reach',
+    requires: ['reviewThreads'],
+    async run(ctx) {
+      const layer = await reviewLayer(ctx, 'review-lost-multipage')
+      const files = await readReviewFilesFrom(await originRemote(ctx.workspace.path), layer.number)
+
+      // GitHub pages the review list, and production asks for a hundred at a time. Enough
+      // earlier reviews that the review this case loses is not on the first page it is sent
+      // for: a reader that never follows the host's next link finds nothing and reports the
+      // write as undelivered, leaving the comment to be sent a second time on the next
+      // attempt. These are real reviews on the host, written through the documented
+      // endpoint, and none of them carries a comment.
+      const page = 100
+      for (let at = 0; at < page; at += 1) {
+        const written = await ctx.transport.rest<{ id?: number }>({
+          method: 'POST',
+          path: `repos/${ctx.repository}/pulls/${layer.number}/reviews`,
+          body: {
+            body: `A review that only makes the history longer. ${at}`,
+            event: 'COMMENT',
+            commit_id: layer.headSha,
+          },
+        })
+        assert(
+          typeof written.data.id === 'number',
+          `the host accepted filler review ${at} without giving it an id`,
+        )
+      }
+
+      const summary = 'A comment sent once, whatever the network or the page count does.'
+      const drafts = anchorsFrom(files, REVIEW_FILE).slice(0, 1)
+      const send = (): Promise<unknown> =>
+        submitReview(ctx.workspace.path, layer.number, {
+          event: 'COMMENT',
+          body: summary,
+          drafts,
+          comparison: files.comparison,
+        }).then(
+          () => null,
+          (error: unknown) => error,
+        )
+
+      // The mutation really reaches the host and the host really applies it; only the
+      // answer is discarded.
+      ctx.faults.loseOnce({
+        method: 'POST',
+        pathIncludes: `repos/${ctx.repository}/pulls/${layer.number}/reviews`,
+      })
+      const first = await send()
+      assert(
+        first === null || first instanceof ReviewOutcomeUnknownError,
+        `the lost review surfaced as ${String(first)}, which is neither a delivery nor an unknown outcome`,
+      )
+
+      // The retry is what walks the history. It has to reach past the page the earlier
+      // reviews filled to find this one.
+      const second = await send()
+      assert(
+        first === null || second === null,
+        `the retry after an unknown outcome failed: ${String(second)}`,
+      )
+
+      // What the host holds is the whole claim: the review, who wrote it, what it recorded
+      // as its decision, and the one comment inside it. The read follows the same pages the
+      // host pages this list into, because the review being looked for is deliberately not
+      // on the first of them — a read that stopped at page one would report nothing here
+      // however well the reconciliation itself worked.
+      const mine: { id?: number; user?: unknown; state?: unknown; body?: unknown }[] = []
+      for (let at = 1; ; at += 1) {
+        const held = await ctx.transport.rest<
+          { id?: number; user?: unknown; state?: unknown; body?: unknown }[]
+        >({
+          method: 'GET',
+          path: `repos/${ctx.repository}/pulls/${layer.number}/reviews?per_page=${page}&page=${at}`,
+        })
+        const rows = Array.isArray(held.data) ? held.data : []
+        mine.push(...rows.filter((review) => review.body === summary))
+        if (rows.length < page) break
+      }
+      assert(
+        mine.length === 1,
+        `the host holds ${mine.length} reviews with the sent summary across ${page}-sized pages, not 1`,
+      )
+      const recorded = mine[0] as { id: number; state?: unknown; user?: { login?: unknown } }
+      assert(
+        typeof recorded.id === 'number' && recorded.id > page,
+        `the reconciled review is #${String(recorded.id)}, which is not past the ${page} reviews before it`,
+      )
+      assert(
+        recorded.state === 'COMMENTED',
+        `the review the host recorded says ${String(recorded.state)} rather than COMMENTED`,
+      )
+      assert(
+        recorded.user?.login === ctx.target.primary.login,
+        `the reconciled review is attributed to ${String(recorded.user?.login)} rather than to this account`,
+      )
+
+      const comments = await ctx.transport.rest<{ id?: unknown; body?: unknown }[]>({
+        method: 'GET',
+        path: `repos/${ctx.repository}/pulls/${layer.number}/comments`,
+      })
+      const carried = (Array.isArray(comments.data) ? comments.data : []).filter(
+        (comment) => comment.body === drafts[0]?.body,
+      )
+      assert(
+        carried.length === 1,
+        `the host holds ${carried.length} copies of the reconciled review's comment, not 1`,
+      )
+      ctx.log(
+        `review #${recorded.id} was reconciled from the page after ${page} earlier reviews, with one comment and no duplicate`,
+      )
+    },
+  },
+  {
     id: 'reviews/reply-after-lost-response-is-not-duplicated',
     title: 'a reply whose answer was lost is reconciled, never written twice',
     requires: ['reviewThreads'],

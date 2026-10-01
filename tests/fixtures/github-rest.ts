@@ -87,10 +87,14 @@ export function withHostRepository<T>(repository: HostRepository, run: () => T):
 }
 
 /** Runs Git against the repository being served, and answers through its alternates. */
-export function hostGit(args: string[], env?: NodeJS.ProcessEnv): string {
+export function hostGit(args: string[], env?: NodeJS.ProcessEnv, quiet = false): string {
   const alternates = served?.alternates ?? []
   return execFileSync(realGit(), ['--git-dir', hostBarePath(), ...args], {
     encoding: 'utf8',
+    // A caller that tolerates Git's refusal already treats the failure as an answer, so
+    // Git's complaint about it is not news. Letting it through put `fatal:` lines in the
+    // middle of a run that was passing, which reads as a failure that never happened.
+    ...(quiet ? { stdio: ['ignore', 'pipe', 'ignore'] as const } : {}),
     env: {
       ...process.env,
       ...(alternates.length > 0
@@ -104,7 +108,7 @@ export function hostGit(args: string[], env?: NodeJS.ProcessEnv): string {
 /** The same Git command, or `null` when Git refused it the way a missing ref does. */
 export function hostGitOrNull(args: string[], env?: NodeJS.ProcessEnv): string | null {
   try {
-    return hostGit(args, env) || null
+    return hostGit(args, env, true) || null
   } catch {
     return null
   }

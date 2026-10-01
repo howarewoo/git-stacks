@@ -9,7 +9,7 @@ import {
   clearPullRequestChecksCache,
   getPullRequestChecks,
 } from '../../../src/main/pull-request-checks'
-import { pollAsyncMerge } from '../../../src/main/merge-async'
+import { pollAsyncMerge, startAsyncMerge } from '../../../src/main/merge-async'
 import { submitReview } from '../../../src/main/review-threads'
 import type { ReviewFile } from '../../../src/shared/review'
 import { previewStack } from '../../../src/main/stacks'
@@ -27,7 +27,7 @@ import {
   type ObservedSchema,
 } from '../observed-schema'
 import { readCommittedSchema } from '../schema-fixture'
-import { pushLayer } from '../layers'
+import { pushCommit, pushLayer } from '../layers'
 import { mergeThroughProduction, mergeableLayer, requestMerge } from './merge-support'
 import {
   anchorsFrom,
@@ -145,6 +145,36 @@ function withAlteredField(
     },
   }
 }
+/**
+ * A probe's observation with one declared nullable field answered only `null`, or with a
+ * form added beside the ones it already answered.
+ *
+ * The field is named by the caller from what the probe itself declares nullable, so the
+ * case is about the declared reader rather than about a path picked to make an assertion
+ * hold. A collection can answer the same field on more than one row, so the alteration
+ * replaces one row and leaves the rest of the probe exactly as it was.
+ */
+function withNullableObservation(
+  schema: ObservedSchema,
+  probeId: string,
+  path: string,
+  alteration: (field: ObservedField) => ObservedField[],
+): ObservedSchema {
+  const fields = schema.probes[probeId] ?? []
+  const index = fields.findIndex((field) => field.path === path)
+  assert(index >= 0, `the ${probeId} probe does not carry ${path}`)
+  return {
+    ...schema,
+    probes: {
+      ...schema.probes,
+      [probeId]: [
+        ...fields.slice(0, index),
+        ...alteration(fields[index] as ObservedField),
+        ...fields.slice(index + 1),
+      ],
+    },
+  }
+}
 
 /** The other type a field could answer with, so the alteration is a real change. */
 const otherType = (type: string): string => (type === 'array' ? 'string' : 'array')
@@ -170,6 +200,44 @@ function trackRuleSet(ctx: LiveScenarioContext, id: number): string {
     createdAt: new Date().toISOString(),
   })
   return full
+}
+
+/**
+ * A rule set created through the documented endpoint with its ref condition stated exactly
+ * as GitHub takes it.
+ *
+ * The admin helper takes the refs a rule set protects and nothing else, and the conditions
+ * this case is about are ones it has no shape for: an `exclude` list, and patterns whose
+ * meaning is in their wildcards. Sending the documented creation body is what stages them.
+ */
+async function createRefConditionRuleSet(
+  ctx: LiveScenarioContext,
+  input: { name: string; include: readonly string[]; exclude?: readonly string[]; context: string },
+): Promise<number> {
+  const created = await ctx.transport.rest<{ id?: number }>({
+    method: 'POST',
+    path: `repos/${ctx.repository}/rulesets`,
+    body: {
+      name: `${input.name} (${ctx.marker})`,
+      target: 'branch',
+      enforcement: 'active',
+      conditions: {
+        ref_name: { include: [...input.include], exclude: [...(input.exclude ?? [])] },
+      },
+      rules: [
+        {
+          type: 'required_status_checks',
+          parameters: {
+            required_status_checks: [{ context: input.context, integration_id: null }],
+            strict_required_status_checks_policy: false,
+          },
+        },
+      ],
+    },
+  })
+  const id = created.data.id
+  assert(typeof id === 'number', `the host created ${input.name} without an id`)
+  return id
 }
 
 /**
@@ -206,6 +274,249 @@ async function mergeAsDocumented(
 }
 
 export const ruleAndFaultScenarios: readonly LiveScenario[] = [
+  {
+    id: 'rules/a-queue-past-the-first-listing-page-is-still-discovered',
+    title: 'an active merge queue configured past the first page of rule sets is still discovered',
+    requires: [],
+    async run(ctx) {
+      const trunk = ctx.target.defaultBranch
+      const created: number[] = []
+      try {
+        const before = await ctx.admin.mergeQueues(ctx.repository)
+        assert(
+          !before.includes(trunk),
+          `the host reports a merge queue on ${trunk} before any rule set configures one`,
+        )
+        // A full page of rule sets that configure no queue, so the one that does is the
+        // first entry a single-page read cannot see. This is the shape that made an active
+        // queue invisible while the repository held few rule sets and visible once it
+        // held many: the queue did not change, the conversation with the host did.
+        const page = 30
+        for (let at = 0; at < page; at += 1) {
+          const decoy = await ctx.admin.createRuleSet({
+            name: `git-stacks-live-e2e pagination decoy ${at}`,
+            enforcement: 'active',
+            baseRefs: [`refs/heads/${trunk}-decoy-${at}`],
+          })
+          trackRuleSet(ctx, decoy.id)
+          created.push(decoy.id)
+        }
+        const queue = await ctx.admin.createRuleSet({
+          name: 'git-stacks-live-e2e queue past the first page',
+          enforcement: 'active',
+          baseRefs: [`refs/heads/${trunk}`],
+          mergeQueue: true,
+        })
+        trackRuleSet(ctx, queue.id)
+        created.push(queue.id)
+
+        const queues = await ctx.admin.mergeQueues(ctx.repository)
+        assert(
+          queues.includes(trunk),
+          `an active merge queue on ${trunk} was not discovered among ${created.length} rule sets: ${
+            queues.join(', ') || 'none'
+          }`,
+        )
+        ctx.log(
+          `the queue on ${trunk} was found behind ${page} other rule sets, which is the first entry past one page`,
+        )
+      } finally {
+        for (const id of created) await ctx.admin.deleteRuleSet(ctx.repository, id)
+      }
+    },
+  },
+  {
+    id: 'rules/a-ref-condition-matches-the-documented-pathname-globs',
+    title:
+      'include, exclude, a single star, a globstar and a character set each decide which refs a required context guards',
+    requires: [],
+    async run(ctx) {
+      const trunk = ctx.target.defaultBranch
+      const created: number[] = []
+      try {
+        // The base branches are real and sit behind the head, because the answer being
+        // read is the host's answer for a pull request's own base: a ref nothing exists
+        // under, or one with no commit to merge, is one no pull request can be opened
+        // against and no condition can be told apart on.
+        const seed = await pushCommit(ctx.workspace, {
+          branch: 'fnmatch-seed',
+          parent: `origin/${trunk}`,
+          file: 'fnmatch-seed.txt',
+          contents: 'the commit every probe base sits at\n',
+          message: 'fnmatch: a commit for the probe bases to share',
+        })
+        // One head per probe base. GitHub holds one open pull request per head and base,
+        // and a head already proposed against another base cannot be proposed again.
+        const heads = new Map<string, string>()
+        for (const [at, branch] of ['qa/direct', 'qa/nested/deep', 'qa/7', 'qa/x'].entries()) {
+          const head = await pushCommit(ctx.workspace, {
+            branch: `fnmatch-head-${at}`,
+            parent: seed,
+            file: `fnmatch-head-${at}.txt`,
+            contents: `the commit for probe ${at}\n`,
+            message: `fnmatch: the head for probe ${at}`,
+          })
+          heads.set(branch, head)
+          await ctx.admin.createBranch(ctx.repository, branch, seed)
+        }
+        const layer = await pushLayer(ctx, {
+          branch: 'fnmatch-layer',
+          parent: `origin/${trunk}`,
+          base: trunk,
+          file: 'fnmatch.txt',
+          contents: 'fnmatch\n',
+          message: 'fnmatch: a layer whose base is read through the rule conditions',
+        })
+        const conditions: readonly {
+          name: string
+          include: readonly string[]
+          exclude?: readonly string[]
+          context: string
+        }[] = [
+          { name: 'fnmatch trunk only', include: [`refs/heads/${trunk}`], context: 'fnmatch/base' },
+          {
+            name: 'fnmatch trunk excluded from itself',
+            include: [`refs/heads/${trunk}`],
+            exclude: [`refs/heads/${trunk}`],
+            context: 'fnmatch/excluded',
+          },
+          // The documented globstar: a doubled star followed by a separator spans zero or
+          // more whole segments, so this names a direct child as well as a deep one.
+          { name: 'fnmatch globstar', include: ['qa/**/*'], context: 'fnmatch/globstar' },
+          // One star is one segment and stops at a separator.
+          { name: 'fnmatch single star', include: ['refs/heads/qa/*'], context: 'fnmatch/star' },
+          { name: 'fnmatch digit set', include: ['refs/heads/qa/[0-9]'], context: 'fnmatch/digit' },
+        ]
+        for (const entry of conditions) {
+          const id = await createRefConditionRuleSet(ctx, entry)
+          trackRuleSet(ctx, id)
+          created.push(id)
+        }
+
+        const guards: Record<string, readonly string[]> = {
+          // The excluded rule set protects nothing, and the one that names only the trunk
+          // is the whole of what guards it.
+          [trunk]: ['fnmatch/base'],
+          // A globstar still names a direct child; one star names only this segment.
+          'qa/direct': ['fnmatch/globstar', 'fnmatch/star'],
+          'qa/nested/deep': ['fnmatch/globstar'],
+          'qa/7': ['fnmatch/digit', 'fnmatch/globstar', 'fnmatch/star'],
+          'qa/x': ['fnmatch/globstar', 'fnmatch/star'],
+        }
+        // One pull request per base, because a required context belongs to the base a
+        // pull request merges onto. Reading the trunk's answer five times would prove
+        // nothing about the four other refs.
+        for (const [base, wanted] of Object.entries(guards)) {
+          const headBranch = heads.get(base)
+          const pull =
+            base === trunk
+              ? layer
+              : await ctx.admin.createPullRequest({
+                  fullName: ctx.repository,
+                  head: `fnmatch-head-${['qa/direct', 'qa/nested/deep', 'qa/7', 'qa/x'].indexOf(base)}`,
+                  base,
+                  title: `fnmatch probe: ${base}`,
+                  body: `Opened by the live GitHub suite for run ${ctx.runId}.`,
+                })
+          clearPullRequestChecksCache()
+          const report = await getPullRequestChecks(ctx.workspace.path, pull.number, {
+            headSha: base === trunk ? layer.headSha : (headBranch ?? ''),
+            force: true,
+          })
+          assert(
+            report.base === base,
+            `#${pull.number} reports base ${String(report.base)} rather than the ${base} this case opened it against`,
+          )
+          const guarded = report.checks
+            .filter((check) => check.requirement === 'required' && check.expected)
+            .map((check) => check.name)
+            .sort()
+          const expected = [...wanted].sort()
+          assert(
+            guarded.join('|') === expected.join('|'),
+            `#${pull.number} onto ${base} is guarded by ${guarded.join(', ') || 'nothing'} rather than ${
+              expected.join(', ') || 'nothing'
+            }; the rule sets present were ${created.length}`,
+          )
+          ctx.log(`${base} is guarded by exactly ${expected.join(', ') || 'nothing'}`)
+        }
+      } finally {
+        for (const id of created) await ctx.admin.deleteRuleSet(ctx.repository, id)
+      }
+    },
+  },
+  {
+    id: 'merge/a-head-moved-after-the-request-fails-it',
+    title:
+      'a merge request whose captured head moves before it runs fails, and the host merges nothing',
+    requires: ['asyncMerge', 'canMerge'],
+    async run(ctx) {
+      const layer = await mergeableLayer(ctx, 'merge-head-moved')
+      // The head this request is made for, exactly as the application sends it.
+      const started = await startAsyncMerge({
+        fullName: ctx.repository,
+        number: layer.number,
+        sha: layer.headSha,
+        mergeMethod: 'merge',
+        mergeAction: 'direct_merge',
+        host: ctx.host,
+      })
+      assert(
+        started.kind === 'result' && started.result.uuid !== null,
+        `the host did not accept the merge request: ${started.kind}`,
+      )
+      const uuid = started.result.uuid as string
+
+      // The head moves after the request was accepted and before it runs, which is what
+      // the request's captured head is for. Nothing about the request changes; only what
+      // it was made for does.
+      await pushCommit(ctx.workspace, {
+        parent: layer.headSha,
+        branch: layer.branch,
+        file: 'merge-head-moved.txt',
+        contents: 'pushed after the merge request was accepted\n',
+        message: 'merge-head-moved: a commit the request never saw',
+      })
+      const settled = await pollAsyncMerge(
+        { fullName: ctx.repository, number: layer.number, uuid, host: ctx.host },
+        { maxAttempts: 30, intervalMs: 1_000 },
+      )
+      assert(
+        settled.status === 'failed',
+        `a request whose head moved settled as ${settled.status}: ${settled.message ?? 'no reason given'}`,
+      )
+      const pull = await mergedOnHost(ctx, layer.number)
+      assert(
+        !pull.merged,
+        `#${layer.number} merged at ${String(pull.sha)} even though the request was made for a head that has since moved`,
+      )
+
+      // The failed request is gone rather than left standing: what the host holds now is
+      // nothing, so the second request is answered by accepting it rather than by handing
+      // back the first one as a conflict. An adopted request would still be made for the
+      // head that has since moved.
+      const again = await startAsyncMerge({
+        fullName: ctx.repository,
+        number: layer.number,
+        sha: layer.headSha,
+        mergeMethod: 'merge',
+        mergeAction: 'direct_merge',
+        host: ctx.host,
+      })
+      assert(
+        again.kind === 'result' && again.result.status === 'pending',
+        `the host answered a second request with ${again.kind} and ${again.kind === 'result' ? again.result.status : ''} rather than accepting a new one`,
+      )
+      const stillUnmerged = await mergedOnHost(ctx, layer.number)
+      assert(
+        !stillUnmerged.merged,
+        `#${layer.number} merged at ${String(stillUnmerged.sha)} once a new request was accepted`,
+      )
+      ctx.log(
+        `the request for ${layer.headSha.slice(0, 8)} failed once the head moved, and the host adopted nothing`,
+      )
+    },
+  },
   {
     id: 'rules/an-active-required-check-refuses-until-it-passes',
     title: 'an active required check refuses the merge until it passes, and then lets it land',
@@ -731,6 +1042,78 @@ export const ruleAndFaultScenarios: readonly LiveScenario[] = [
     },
   },
   {
+    id: 'schema/a-nullable-answering-only-null-is-not-drift',
+    title:
+      'a nullable field answering only null is a narrow answer, and a form no parser reads beside it is drift',
+    requires: [],
+    async run(ctx) {
+      const committed = readCommittedSchema()
+      // Every probe that declares a nullable field, in turn. Which fields those are is the
+      // declaration's business, not this case's: a review comment's line and a check run's
+      // conclusion are both nullable, and both are read by a parser that has a reader for
+      // the null and for the string or number beside it.
+      const declared = SCHEMA_PROBES.filter((probe) => probe.nullable !== undefined)
+      assert(
+        declared.length > 1,
+        `only ${declared.length} probe declares a nullable field, so there is no declared reader to compare`,
+      )
+      for (const probe of declared) {
+        const nullable = probe.nullable ?? {}
+        // Every nullable field the probe declares, one at a time. Which fields those are
+        // is the declaration's business: a review comment's line, its start line, its
+        // start side, its review id, and a check run's conclusion are all nullable, and
+        // each is read by a parser that has a reader for the null and for the value.
+        for (const [path, readable] of Object.entries(nullable)) {
+          assert(
+            readable.length > 0,
+            `the ${probe.id} probe declares ${path} with no readable form`,
+          )
+          const recorded = (committed.probes[probe.id] ?? []).filter((field) => field.path === path)
+          assert(
+            recorded.length > 0,
+            `the committed schema records no answer at all for ${path} on ${probe.id}`,
+          )
+          const value = readable[0] as string
+
+          // Every row of the field is null now: nothing is in progress and nothing is
+          // outdated. The field still answers, in a form the declaration reads. Which is
+          // the point for a field the committed schema pinned as a value, and also for one
+          // it only ever saw as null — both are a real host narrowing, not a missing field.
+          const onlyNull = withNullableObservation(committed, probe.id, path, (field) => [
+            { ...field, type: 'null' },
+          ])
+          const narrowed = breakingDrift(compareSchemas(committed, onlyNull))
+          assert(
+            narrowed.length === 0,
+            `${path} answering only null on ${probe.id} was reported as breaking drift:\n${renderDrift(narrowed, new LiveRedactor([]))}`,
+          )
+
+          // The same field also answering the value it is declared to read, plus a form
+          // nothing reads. A union that still holds the old type does not excuse the added
+          // one: the answer is a list, and the parser has no reader for an element of it.
+          const withUnreadable = withNullableObservation(committed, probe.id, path, (field) => [
+            { ...field, type: value },
+            { path, type: 'object' },
+          ])
+          const added = breakingDrift(compareSchemas(committed, withUnreadable)).filter(
+            (entry) => entry.path === path && entry.kind === 'type-changed',
+          )
+          assert(
+            added.length > 0,
+            `${path} answering an object beside the ${readable.join('|')} it always answered was not reported as drift`,
+          )
+          assert(
+            added.some((entry) => entry.detail.includes('object')),
+            `the report does not name the unreadable form: ${added.map((entry) => entry.detail).join('; ')}`,
+          )
+          ctx.log(
+            `${path} on ${probe.id} narrows to null without drift and rejects an object beside ${readable.join('|')}`,
+          )
+        }
+      }
+    },
+  },
+  {
     id: 'fields/hosted-file-status-comes-from-the-host',
     title: 'the review file list names the added, removed, and renamed files the host reports',
     requires: [],
@@ -740,20 +1123,41 @@ export const ruleAndFaultScenarios: readonly LiveScenario[] = [
       // host, so all of it has to be committed and pushed. A worktree that was never
       // pushed describes nothing the reviewer's window can read, and reading the local
       // status instead would prove the local status surface works.
-      const layer = await pushLayer(ctx, {
-        branch: `${prefix}-layer`,
+      // The base branch carries both files this pull request then changes, so each status
+      // is a change to something the base really had: a file added and removed inside the
+      // same pull request is not a deletion of anything, and Git is right to report no
+      // change for it.
+      await pushCommit(ctx.workspace, {
+        branch: `${prefix}-base`,
         parent: `origin/${ctx.target.defaultBranch}`,
-        base: ctx.target.defaultBranch,
         file: `${prefix}.txt`,
         contents: `${prefix}\n`,
-        message: `${prefix}: a layer whose hosted files are read`,
+        message: `${prefix}: the base the hosted file statuses are read against`,
       })
-      ctx.workspace.git(['checkout', layer.branch])
       await ctx.workspace.commit(`${prefix}-doomed.txt`, 'doomed\n', `${prefix}: a file to remove`)
+      // The head the base really holds, which is the commit those two files are in.
+      const base = await ctx.workspace.push(`${prefix}-base`)
+      const head = await pushCommit(ctx.workspace, {
+        branch: `${prefix}-layer`,
+        parent: base,
+        file: `${prefix}-head.txt`,
+        contents: 'a commit the change below is made on top of\n',
+        message: `${prefix}: the layer whose hosted files are read`,
+      })
+      const pull = await ctx.admin.createPullRequest({
+        fullName: ctx.repository,
+        head: `${prefix}-layer`,
+        base: `${prefix}-base`,
+        title: `${prefix}: the hosted file statuses the host reports`,
+        body: `Opened by the live GitHub suite for run ${ctx.runId}.`,
+      })
+      ctx.workspace.git(['checkout', `${prefix}-layer`])
       ctx.workspace.git(['mv', '--', `${prefix}.txt`, `${prefix}-renamed.txt`])
       ctx.workspace.git(['rm', '-q', '--', `${prefix}-doomed.txt`])
-      await ctx.workspace.commit(`${prefix}-added.txt`, 'added\n', `${prefix}: the final change`)
-      await ctx.workspace.push(layer.branch)
+      await ctx.workspace.commit(`${prefix}-added.txt`, 'added\n', `${prefix}: the change`)
+      await ctx.workspace.push(`${prefix}-layer`)
+      assert(head !== null, 'the layer was pushed without a head to compare against')
+      const layer = { number: pull.number, headSha: head, branch: `${prefix}-layer` }
 
       const files = await readReviewFilesFrom(await originRemote(ctx.workspace.path), layer.number)
       const byPath: Record<string, ReviewFile> = {}
@@ -855,6 +1259,12 @@ export const ruleAndFaultScenarios: readonly LiveScenario[] = [
             message: 'You have exceeded a secondary rate limit and have been temporarily blocked',
           },
         )
+        // Only the inbox is this read's to publish. The local tier keeps running on its
+        // own timers throughout, so a snapshot and a status arriving here are the local
+        // work this scenario is about rather than anything the refused read did. An empty
+        // inbox published before this point says nothing either: this repository holds no
+        // issues, so a healthy poll publishes an empty list too.
+        const publishedBefore = events.length
         await coordinator.refreshNow().then(
           () => null,
           (error: unknown) => error,
@@ -868,10 +1278,11 @@ export const ruleAndFaultScenarios: readonly LiveScenario[] = [
           limited.detail !== null && /secondary rate limit/iu.test(limited.detail),
           `the reported reason does not name the limit the host gave: ${String(limited.detail)}`,
         )
-        const emptied = events.filter(
-          (event) => event.kind === 'issues' && (event.issues?.length ?? 0) === 0,
+        const inbox = events.slice(publishedBefore).filter((event) => event.kind === 'issues')
+        assert(
+          inbox.length === 0,
+          `a rate-limited read published ${inbox.length} inboxes, one of them holding ${String((inbox[0]?.issues ?? []).length)} issues`,
         )
-        assert(emptied.length === 0, 'a rate-limited read published an empty inbox')
 
         // The same due background poll, under the limit. The coordinator is left parked
         // for the production backoff, so waiting long enough for several of these
