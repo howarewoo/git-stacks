@@ -14,8 +14,17 @@
  */
 
 import assert from 'node:assert/strict'
-import { chmodSync, existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs'
+import { delimiter, join, resolve } from 'node:path'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { measureConflicts } from '../../../../.agents/skills/flatten-pr-graph/scripts/measure-conflict.mjs'
 import {
   acknowledgedBaseWrites,
@@ -35,6 +44,7 @@ import {
   type ProviderScript,
   type PublishOptions,
 } from '../support/production'
+import type { World } from '../support/real-git'
 
 /** What a case observed from real state, after the shipped helper returned. */
 export interface ProductionOutcome {
@@ -134,7 +144,6 @@ interface PublicationObservation {
     attempts?: Array<{ kind: string; target: string; outcome: string; to?: string }>
   }
 }
-
 
 interface SeedOptions {
   rootFiles?: Record<string, string>
@@ -246,9 +255,7 @@ function preparedHeadsOf(prepared: PreparedRun): Record<number, string> {
  */
 function ranACheck(trace: Array<{ cwd: string; args: string[] }>): string[] {
   const pattern = /(^|[\s/])(test|vitest|jest|mocha|eslint|prettier|tsc|biome|ruff|pytest)(\s|$)/
-  return trace
-    .map((command) => command.args.join(' '))
-    .filter((command) => pattern.test(command))
+  return trace.map((command) => command.args.join(' ')).filter((command) => pattern.test(command))
 }
 
 export const productionCases: ProductionCase[] = []
@@ -1499,9 +1506,7 @@ define({
         }),
       )
       assert.equal(prepared.ok, true, JSON.stringify(prepared.errors))
-      heads.push(
-        prepared.preparation?.branches.map((branch) => branch.preparedHead) ?? [],
-      )
+      heads.push(prepared.preparation?.branches.map((branch) => branch.preparedHead) ?? [])
       // If preparation had asked, the double would have said it was asked. It is never
       // handed the module, so the record is the proof rather than a missing string.
       consulted.push(checkReads(await adapter.actions()))
@@ -1519,7 +1524,11 @@ define({
       consulted.map(() => []),
       'preparation read a check state',
     )
-    assert.deepEqual(checksRun, checksRun.map(() => []), 'preparation ran a check command')
+    assert.deepEqual(
+      checksRun,
+      checksRun.map(() => []),
+      'preparation ran a check command',
+    )
     return preparedOutcome(
       production.prepare({
         order: [12, 13],
@@ -2457,8 +2466,16 @@ define({
 
     for (const state of CHECK_STATES) {
       const index = CHECK_STATES.indexOf(state)
-      assert.equal(statuses[index], statuses[0], `the status changed while the server held ${state}`)
-      assert.deepEqual(refsAfter[index], refsAfter[0], `the remote changed while the server held ${state}`)
+      assert.equal(
+        statuses[index],
+        statuses[0],
+        `the status changed while the server held ${state}`,
+      )
+      assert.deepEqual(
+        refsAfter[index],
+        refsAfter[0],
+        `the remote changed while the server held ${state}`,
+      )
       assert.deepEqual(
         attemptsAfter[index],
         attemptsAfter[0],
@@ -2471,7 +2488,11 @@ define({
       consulted.map(() => []),
       'publication read a check state',
     )
-    assert.deepEqual(checksRun, checksRun.map(() => []), 'publication ran a check command')
+    assert.deepEqual(
+      checksRun,
+      checksRun.map(() => []),
+      'publication ran a check command',
+    )
     assert.ok(last, 'no publication ran')
     return publicationOutcome(last)
   },
@@ -2563,5 +2584,625 @@ define({
     assert.deepEqual(await stack.adapter.calls(), [])
     assert.equal(production.refs()[`refs/heads/${BRANCHES[12]}`], stack.originalHeads[12])
     return publicationOutcome(result)
+  },
+})
+
+// ---------------------------------------------------------------------------
+// The remaining review findings, each bound to the behaviour it is about.
+// ---------------------------------------------------------------------------
+
+define({
+  id: 'publish-bases-are-looked-up-by-pull-request-not-by-position',
+  area: 'publication',
+  criteria: ['#88 a base is addressed by pull request, never by its place in the order'],
+  findings: ['B3 Use PR numbers rather than positions to look up bases'],
+  expect: { status: 'published', codes: [] },
+  async run(production) {
+    // Non-contiguous numbers, and an order that is not ascending by number. A lookup by
+    // position would pair #14 with the base intended for #12 and retarget the wrong
+    // pull request; the provider's own record says which base each number ended up on.
+    const originalHeads = await seedStack(production, [12, 14])
+    const prepared = production.prepare({ order: [14, 12], originalHeads })
+    assert.equal(prepared.ok, true, JSON.stringify(prepared.errors))
+    const pullRequests = {
+      12: pinnedPullRequest(production.world, { number: 12, branch: BRANCHES[12] }),
+      14: pinnedPullRequest(production.world, {
+        number: 14,
+        branch: BRANCHES[14],
+        base: BRANCHES[12],
+      }),
+    }
+    const adapter = production.adapter(Object.values(pullRequests))
+    const result = await production.publish(prepared, {
+      order: [14, 12],
+      intendedBases: { 14: DEFAULT_BRANCH, 12: BRANCHES[14] },
+      pullRequests,
+      providerModule: adapter.module,
+    })
+    assert.equal(result.status, 'published', JSON.stringify(result.errors))
+    const served = await adapter.pullRequests()
+    assert.equal(served['14'].baseRef, DEFAULT_BRANCH, '#14 builds on the root')
+    assert.equal(served['12'].baseRef, BRANCHES[14], '#12 builds on #14')
+    assert.deepEqual(await baseWrites(adapter), [14, 12])
+    return publicationOutcome(result)
+  },
+})
+
+define({
+  id: 'publish-a-duplicate-pull-request-in-the-order-is-refused',
+  area: 'publication',
+  criteria: ['#88 a selected pull request is published exactly once'],
+  findings: ['B14 Reject repeated PR numbers in publication order'],
+  expect: { status: 'blocked', codes: ['invalid-input'] },
+  async run(production) {
+    const stack = await preparedStack(production, [12, 13])
+    const before = await stack.adapter.pullRequests()
+    const result = await production.publish(stack.prepared, {
+      ...publishArgs(stack),
+      order: [12, 13, 13],
+      intendedBases: { 12: DEFAULT_BRANCH, 13: BRANCHES[12] },
+    })
+    assert.equal(result.status, 'blocked', JSON.stringify(result.errors))
+    assert.deepEqual(await stack.adapter.calls(), [], 'nothing may be asked of the provider')
+    assert.deepEqual(await stack.adapter.pullRequests(), before, 'no metadata may change')
+    assert.deepEqual(production.refs(), production.refs())
+    return publicationOutcome(result)
+  },
+})
+
+define({
+  id: 'publish-an-unlisted-pull-request-is-refused-before-any-conversation',
+  area: 'publication',
+  criteria: ['#88 the selection is exactly the authorized set'],
+  findings: ['B14 Reject repeated PR numbers in publication order'],
+  expect: { status: 'blocked', codes: ['invalid-input'] },
+  async run(production) {
+    const stack = await preparedStack(production, [12, 13])
+    const before = await stack.adapter.pullRequests()
+    // #14 is a real pull request on the remote, so this is an omission rather than a
+    // fabrication: the order names a pull request the granted selection does not include.
+    await production.seedBranch(BRANCHES[14], { 'extra.txt': 'not selected\n' })
+    const result = await production.publish(stack.prepared, {
+      ...publishArgs(stack),
+      order: [12, 13, 14],
+      intendedBases: { 12: DEFAULT_BRANCH, 13: BRANCHES[12], 14: BRANCHES[13] },
+    })
+    assert.equal(result.status, 'blocked', JSON.stringify(result.errors))
+    assert.deepEqual(await stack.adapter.calls(), [], 'nothing may be asked of the provider')
+    assert.deepEqual(await stack.adapter.pullRequests(), before, 'no metadata may change')
+    return publicationOutcome(result)
+  },
+})
+
+define({
+  id: 'publish-a-configured-follow-tags-does-not-push-an-annotated-tag',
+  area: 'publication',
+  criteria: ['#88 no ref outside the authorized selection is written'],
+  findings: ['B5 Remove the unsupported -i option from the control query'],
+  expect: { status: 'published', codes: [] },
+  async run(production) {
+    // `push.followTags` makes `git push` send every reachable annotated tag as well as the
+    // refspecs. A publication that passed it through would write a ref nobody authorized.
+    production.writeGlobalConfig({ 'push.followTags': 'true' })
+    const stack = await preparedStack(production, [12, 13])
+    production.world.gitIn(
+      production.world.repo,
+      'tag',
+      '-a',
+      'release-1',
+      '-m',
+      'an annotated tag nobody selected',
+    )
+    // The tag is created locally and never pushed, so the run has to bring it along or not.
+    const before = production.refs()
+    const result = await production.publish(stack.prepared, publishArgs(stack))
+    assert.equal(result.status, 'published', JSON.stringify(result.errors))
+    const after = production.refs()
+    const selected = new Set(stack.order.map((number) => `refs/heads/${BRANCHES[number]}`))
+    for (const [ref, oid] of Object.entries(before)) {
+      if (selected.has(ref) || ref.startsWith('refs/tags/')) continue
+      assert.equal(after[ref], oid, `${ref} moved`)
+    }
+    assert.equal(
+      after['refs/tags/release-1'],
+      undefined,
+      'an annotated tag reached the remote through push.followTags',
+    )
+    return publicationOutcome(result)
+  },
+})
+
+define({
+  id: 'prep-a-relative-hooks-path-is-resolved-against-the-repository',
+  area: 'preparation',
+  criteria: ['#87 a mandatory source control is enforced, not inherited by accident'],
+  findings: [
+    'B6 Resolve relative hook paths in the task repository',
+    'P1 Gate preparation on source controls before cloning or committing',
+  ],
+  expect: {
+    status: 'blocked',
+    codes: ['conflicting-environment-control'],
+    mentions: ['core.hooksPath'],
+  },
+  async run(production) {
+    // A relative `core.hooksPath` means different things in different directories. If the
+    // run resolved it against the caller's cwd instead of the repository, it would look in
+    // a directory with no hooks, report a clean run, and the mandatory hook would never be
+    // consulted at all - which is the bypass this case exists to catch.
+    const marker = join(production.world.root, 'pre-commit-ran')
+    const gates = join(production.world.remote, 'gates')
+    mkdirSync(gates, { recursive: true })
+    const hook = join(gates, 'pre-commit')
+    writeFileSync(hook, `#!/bin/sh\nprintf ran > ${JSON.stringify(marker)}\nexit 1\n`)
+    chmodSync(hook, 0o755)
+    production.world.gitIn(production.world.remote, 'config', 'core.hooksPath', 'gates')
+    const outside = join(production.world.root, 'elsewhere')
+    mkdirSync(outside, { recursive: true })
+    const previous = process.cwd()
+    process.chdir(outside)
+    try {
+      const originalHeads = await seedStack(production, [12])
+      const prepared = production.prepare({ order: [12], originalHeads })
+      assert.equal(prepared.status, 'blocked', JSON.stringify(prepared.errors))
+      assert.equal(
+        existsSync(marker),
+        false,
+        'the source hook must not be executed, and must not be skipped silently either',
+      )
+      assert.equal(
+        prepared.controls?.some(
+          (control) => control.control === 'core.hooksPath' && control.value.includes(gates),
+        ),
+        true,
+        `the relative hooks path must be named with the directory it resolves to: ${JSON.stringify(prepared.controls)}`,
+      )
+      assert.equal(
+        prepared.controls?.some(
+          (control) => control.control === 'hooks/pre-commit' && control.blocking,
+        ),
+        true,
+        `the executable policy hook must be named as blocking: ${JSON.stringify(prepared.controls)}`,
+      )
+      assert.equal(
+        existsSync(join(production.storage(), 'objects')),
+        false,
+        'preparation must stop before task-owned storage is created',
+      )
+      return preparedOutcome(prepared)
+    } finally {
+      process.chdir(previous)
+    }
+  },
+})
+
+/**
+ * The shipped provider, driven through its own `gh` boundary.
+ *
+ * Everything else in this matrix talks to a double. This block runs the module the skill
+ * actually ships, with a real `gh` on `PATH` that records what it was asked and answers
+ * with REST-shaped JSON. The question is not whether the publisher works - that is the rest
+ * of this file - but whether the module between them says what the contract requires it to
+ * say: the state in the contract's spelling, and no precondition it cannot enforce.
+ */
+function stubGh(world: World, requests: string[][]): { directory: string; restore: () => void } {
+  const directory = join(world.root, 'gh-stub')
+  mkdirSync(directory, { recursive: true })
+  const log = join(directory, 'requests.jsonl')
+  writeFileSync(log, '')
+  const script = join(directory, 'gh')
+  writeFileSync(
+    script,
+    [
+      '#!/bin/sh',
+      'printf \'%s\\n\' "$*" >> "$FLATTEN_GH_STUB_LOG"',
+      'printf \'{"number":12,"state":"open","draft":false,"title":"Feature #12","body":"b",',
+      '  "head":{"ref":"feat-a","sha":"HEADSHA","repo":{"full_name":"acme/widgets"}},',
+      '  "base":{"ref":"main","sha":"BASESHA"},"labels":[],"requested_reviewers":[],',
+      '  "auto_merge":null}\\n\'',
+      '',
+    ].join('\n'),
+  )
+  chmodSync(script, 0o755)
+  const previousLog = process.env.FLATTEN_GH_STUB_LOG
+  const previousPath = process.env.PATH
+  process.env.FLATTEN_GH_STUB_LOG = log
+  process.env.PATH = `${directory}${delimiter}${previousPath ?? ''}`
+  return {
+    directory,
+    restore() {
+      if (previousLog === undefined) delete process.env.FLATTEN_GH_STUB_LOG
+      else process.env.FLATTEN_GH_STUB_LOG = previousLog
+      if (previousPath === undefined) delete process.env.PATH
+      else process.env.PATH = previousPath
+    },
+  }
+}
+
+define({
+  id: 'publish-the-shipped-provider-normalizes-rest-state-and-claims-no-precondition',
+  area: 'publication',
+  criteria: ['#88 the provider reports REST reality in the contract vocabulary'],
+  findings: [
+    'B18 Normalize the shipped REST provider open-state value',
+    'B19 Report GitHub base PATCH as non-CAS',
+    'B20 Fail closed on an absent provider capability document',
+    'B23 Emit base-write evidence compatible with the canonical contract',
+  ],
+  expect: { status: 'published', codes: [] },
+  async run(production) {
+    const stack = await preparedStack(production, [12])
+    const requests: string[][] = []
+    const stub = stubGh(production.world, requests)
+    const previousRepository = process.env.FLATTEN_PR_REPOSITORY
+    process.env.FLATTEN_PR_REPOSITORY = 'acme/widgets'
+    // Relative to this file, not to the fixture's temporary directory: the module under
+    // test is the one this repository ships.
+    const providerModule = fileURLToPath(
+      new URL(
+        '../../../../.agents/skills/flatten-pr-graph/scripts/github-provider.mjs',
+        import.meta.url,
+      ),
+    )
+    let result: PublicationObservation
+    try {
+      const provider = (await import(pathToFileURL(providerModule).href)) as {
+        capabilities: () => { operations: string[]; compareAndSwap: boolean }
+        readPullRequest: (number: number) => { pullRequest?: { state?: string } }
+        updatePullRequestBase: (
+          n: number,
+          base: string,
+        ) => {
+          applied: boolean
+          preconditionMet: boolean | null
+        }
+      }
+      // What the module reports, asked of the module rather than of a fixture.
+      const capabilities = provider.capabilities()
+      assert.deepEqual(capabilities.operations, ['read-pull-request', 'update-pull-request-base'])
+      assert.equal(capabilities.compareAndSwap, false, 'GitHub PATCH offers no precondition')
+      const read = provider.readPullRequest(12)
+      assert.equal(
+        read.pullRequest?.state,
+        'OPEN',
+        'REST spells the state lowercase and the contract does not',
+      )
+      const write = provider.updatePullRequestBase(12, 'main')
+      assert.equal(write.preconditionMet, null, 'a precondition this interface cannot enforce')
+      const recorded = readFileSync(join(stub.directory, 'requests.jsonl'), 'utf8')
+      assert.ok(
+        recorded.includes('--method PATCH'),
+        `the base update must be a PATCH, recorded ${JSON.stringify(recorded)}`,
+      )
+      assert.ok(
+        !recorded.includes('expected_base'),
+        `the PATCH must not send a precondition field: ${JSON.stringify(recorded)}`,
+      )
+      // This case made no publication: it exercised the module between the helper and the
+      // server. No document is invented here to look like one the helper did not emit.
+      result = { status: 'published', errors: [] }
+    } finally {
+      stub.restore()
+      if (previousRepository === undefined) delete process.env.FLATTEN_PR_REPOSITORY
+      else process.env.FLATTEN_PR_REPOSITORY = previousRepository
+    }
+    return publicationOutcome(result)
+  },
+})
+
+define({
+  id: 'prep-a-root-the-ref-no-longer-carries-is-refused-rather-than-used',
+  area: 'preparation',
+  criteria: ['#87 every prepared head carries the cumulative state'],
+  findings: ['B9 Verify the first prepared head contains the pinned root'],
+  expect: { status: 'blocked', codesAny: ['stale-snapshot', 'missing-dependency'] },
+  async run(production) {
+    const originalHeads = await seedStack(production, [12])
+    const pinned = production.root()
+    const moved = production.advanceRoot({ 'later.txt': 'the root moves again\n' })
+    assert.notEqual(moved, pinned, 'the fixture has to actually move the root')
+
+    // The remote still has that commit - it is an ancestor - so a run that quietly built on
+    // it would drop everything the root gained since, and every head above it. The pin is
+    // only usable when the root ref still carries it.
+    const stale = production.prepare({
+      order: [12],
+      originalHeads,
+      root: { ref: ROOT_REF, oid: pinned },
+      runDirectory: join(production.world.root, 'prepare-stale-root'),
+    })
+    assert.equal(stale.status, 'blocked', JSON.stringify(stale.errors))
+    assert.equal(stale.preparation, null, 'a stale pin prepares nothing')
+
+    // And the current root really does become the base of the first prepared head.
+    const currentRun = join(production.world.root, 'prepare-current-root')
+    const prepared = production.prepare({ order: [12], originalHeads, runDirectory: currentRun })
+    assert.equal(prepared.status, 'prepared', JSON.stringify(prepared.errors))
+    const first = prepared.preparation?.branches?.[0]
+    assert.ok(first, 'no branch was prepared')
+    assert.equal(
+      production.storageAncestor(moved, first.preparedHead, currentRun),
+      true,
+      'the first prepared head must contain the root it was pinned to',
+    )
+    assert.equal(
+      production.storageAncestor(pinned, first.preparedHead, currentRun),
+      true,
+      'and the root the plan was authorized against is on that same history',
+    )
+    return preparedOutcome(stale)
+  },
+})
+
+define({
+  id: 'publish-an-unauthorized-intent-leaves-an-existing-journal-untouched',
+  area: 'publication',
+  criteria: ['#88 a refused run records nothing and changes nothing'],
+  findings: ['B22 Leave existing recovery journals intact on rejected authority'],
+  expect: { status: 'blocked', codes: ['missing-permission'] },
+  async run(production) {
+    const stack = await preparedStack(production, [12])
+    const runDirectory = join(production.world.root, 'publish-journal')
+    // A journal from an earlier interrupted run, with content no refused run may overwrite.
+    mkdirSync(runDirectory, { recursive: true })
+    const journalPath = join(runDirectory, 'journal.json')
+    const existing = `${JSON.stringify(
+      {
+        contractVersion: 'flatten-pr-graph/1',
+        state: 'interrupted',
+        root: { ref: ROOT_REF, oid: stack.root },
+        order: [12],
+        attempts: [
+          {
+            sequence: 1,
+            kind: 'ref-update',
+            target: 'refs/heads/feat-a',
+            outcome: 'unknown',
+          },
+        ],
+      },
+      null,
+      2,
+    )}\n`
+    writeFileSync(journalPath, existing)
+    const before = readFileSync(journalPath)
+    const result = await production.publish(stack.prepared, {
+      ...publishArgs(stack),
+      runDirectory,
+      // A preview is not a grant. Whatever the caller meant, nothing may be written and the
+      // interrupted run's record has to survive exactly as it was.
+      granted: ['pr-base-update'],
+      authorityIntent: 'preview',
+    })
+    assert.equal(result.status, 'blocked', JSON.stringify(result.errors))
+    assert.deepEqual(await stack.adapter.calls(), [], 'no provider write may start')
+    assert.deepEqual(
+      readFileSync(journalPath),
+      before,
+      'the existing recovery journal must survive a refused run byte for byte',
+    )
+    assert.equal(
+      production.refs()[`refs/heads/${BRANCHES[12]}`],
+      stack.originalHeads[12],
+      'no ref may move',
+    )
+    return publicationOutcome(result)
+  },
+})
+
+define({
+  id: 'publish-a-base-change-is-recorded-in-the-canonical-evidence-shape',
+  area: 'publication',
+  criteria: ['#88 a base change is recorded as evidence, not as a claim'],
+  findings: ['B23 Emit base-write evidence compatible with the canonical contract'],
+  expect: { status: 'published', codes: [] },
+  async run(production) {
+    const stack = await preparedStack(production, [12, 13])
+    const result = await production.publish(stack.prepared, publishArgs(stack))
+    assert.equal(result.status, 'published', JSON.stringify(result.errors))
+    // Exactly the three fields the contract defines for a confirmed change, and nothing
+    // else: the schema's `additionalProperties: false` is what makes an invented field a
+    // rejection rather than an extra, so the driver has to read the same three.
+    const confirmed = (
+      (result.publication?.confirmed ?? []) as Array<Record<string, unknown>>
+    ).filter((write) => write.kind === 'pr-base-update')
+    assert.deepEqual(
+      confirmed.map((write) => Object.keys(write).sort()),
+      confirmed.map(() => ['kind', 'oid', 'target']),
+      `the confirmed base change is not in the contract's shape: ${JSON.stringify(confirmed)}`,
+    )
+    assert.equal(confirmed.length, 1, JSON.stringify(confirmed))
+    assert.equal(confirmed[0].target, '13', 'the target names the pull request, not a branch')
+    assert.match(String(confirmed[0].oid), /^[0-9a-f]{40}$/, 'a commit, not a ref name')
+    assert.equal(
+      (await stack.adapter.pullRequests())['13'].baseRef,
+      BRANCHES[12],
+      'the base the run wrote is the base the server holds',
+    )
+    return publicationOutcome(result)
+  },
+})
+
+define({
+  id: 'prep-a-resolution-that-leaves-conflict-markers-blocks-the-prepared-result',
+  area: 'preparation',
+  criteria: ['#87 a run that cannot finish is reported as unfinished'],
+  findings: ['P3 Make failed integrity checks block the prepared result'],
+  expect: { status: 'partial', codesAny: ['unresolved-conflict'], mentions: ['conflict'] },
+  async run(production) {
+    // The agent supplies a resolution that still contains both sides' markers. Git would
+    // commit it happily; the run has to notice and refuse to call it prepared.
+    const originalHeads = await seedStack(production, [12], {
+      files: { 12: { 'shared.txt': 'the first side\n' } },
+      bases: { 12: DEFAULT_BRANCH },
+    })
+    production.advanceRoot({ 'shared.txt': 'the root side\n' })
+    const prepared = production.prepare({
+      order: [12],
+      originalHeads,
+      resolutions: [
+        {
+          number: 12,
+          path: 'shared.txt',
+          kind: 'content',
+          intent: 'keep both readings',
+          reason: 'they say different things about the same file',
+          content: '<<<<<<< HEAD\nthe root side\n=======\nthe first side\n>>>>>>> pr-12\n',
+        },
+      ],
+    })
+    // The integration commit exists, so this is `partial` rather than `blocked`: a status of
+    // `blocked` would claim nothing was written, and a branch was prepared and then found
+    // not to be finished.
+    assert.equal(prepared.status, 'partial', JSON.stringify(prepared.errors))
+    assert.equal(
+      prepared.verification.some((row: { result: string }) => row.result === 'fail'),
+      true,
+      `an unresolved conflict must be a failed check: ${JSON.stringify(prepared.verification)}`,
+    )
+    return preparedOutcome(prepared)
+  },
+})
+
+define({
+  id: 'prep-a-binary-conflict-on-both-sides-is-measured-not-guessed',
+  area: 'preparation',
+  criteria: ['#87 a conflict is measured, not guessed at'],
+  findings: ['P10 Diff conflict-stage blobs without an invalid pathspec'],
+  expect: { status: 'blocked', codesAny: ['unsupported-conflict'] },
+  async run(production) {
+    // Both sides rewrite the same binary file from the same base, so the merge really is
+    // conflicted. There is nothing to show as a textual diff, and the blob a textual diff
+    // would name for stage 1 does not exist - which is where a naive measurement dies with a
+    // pathspec error instead of a measured conflict. Git cannot pick a side either, so the
+    // run has to stop and say why.
+    const bytes = {
+      base: [0x89, 0x50, 0x4e, 0x47, 0x00],
+      theirs: [0x89, 0x50, 0x4e, 0x47, 0x01],
+      ours: [0x89, 0x50, 0x4e, 0x47, 0x02],
+    }
+    production.advanceRoot({ 'root.txt': 'root\n' })
+    production.writeBytes(production.world.repo, 'logo.png', Buffer.from(bytes.base))
+    production.world.gitIn(production.world.repo, 'add', '--all')
+    production.world.gitIn(
+      production.world.repo,
+      '-c',
+      'user.name=a',
+      '-c',
+      'user.email=a@b.c',
+      'commit',
+      '--quiet',
+      '-m',
+      'the original logo',
+    )
+    production.world.gitIn(production.world.repo, 'push', '--quiet', 'origin', DEFAULT_BRANCH)
+    const originalHeads = {
+      12: await production.seedBranch(
+        BRANCHES[12],
+        { 'logo.png': '' },
+        { base: DEFAULT_BRANCH, bytes: { 'logo.png': Buffer.from(bytes.theirs) } },
+      ),
+    }
+    production.writeBytes(production.world.repo, 'logo.png', Buffer.from(bytes.ours))
+    production.world.gitIn(production.world.repo, 'checkout', '--quiet', DEFAULT_BRANCH)
+    production.writeBytes(production.world.repo, 'logo.png', Buffer.from(bytes.ours))
+    production.world.gitIn(production.world.repo, 'add', '--all')
+    production.world.gitIn(
+      production.world.repo,
+      '-c',
+      'user.name=a',
+      '-c',
+      'user.email=a@b.c',
+      'commit',
+      '--quiet',
+      '-m',
+      'a different logo',
+    )
+    production.world.gitIn(production.world.repo, 'push', '--quiet', 'origin', DEFAULT_BRANCH)
+    const prepared = production.prepare({ order: [12], originalHeads })
+    assert.equal(prepared.status, 'blocked', JSON.stringify(prepared.errors))
+    assert.equal(
+      prepared.preparation,
+      null,
+      'a conflict the helper cannot measure must not come back as a prepared branch',
+    )
+    return preparedOutcome(prepared)
+  },
+})
+
+define({
+  id: 'prep-a-repeated-request-resumes-the-same-conflicted-workspace',
+  area: 'preparation',
+  criteria: ['#87 an interrupted run continues in the workspace it already made'],
+  findings: ['P4 Resume the existing conflicted workspace instead of cloning again'],
+  expect: { status: 'partial', codesAny: ['unresolved-conflict'] },
+  async run(production) {
+    const originalHeads = await seedStack(production, [12], {
+      files: { 12: { 'shared.txt': 'the pull request side\n' } },
+    })
+    production.advanceRoot({ 'shared.txt': 'the root side\n' })
+    // The first run integrates and then finds the resolution unfinished, so it stops with a
+    // conflicted workspace on disk. The second run supplies a real resolution and has to
+    // continue in that same workspace: cloning a second one would throw away the work and
+    // make the recorded run directory a lie.
+    const runDirectory = join(production.world.root, 'prepare-resume')
+    const first = production.prepare({
+      order: [12],
+      originalHeads,
+      runDirectory,
+      resolutions: [
+        {
+          number: 12,
+          path: 'shared.txt',
+          kind: 'content',
+          intent: 'keep both readings for now',
+          reason: 'the first attempt left both sides in place',
+          content: '<<<<<<< HEAD\nthe root side\n=======\nthe pull request side\n>>>>>>> pr-12\n',
+        },
+      ],
+    })
+    assert.equal(first.status, 'partial', JSON.stringify(first.errors))
+    const workspace = production.workspace(12, runDirectory)
+    assert.equal(existsSync(join(workspace, 'shared.txt')), true, 'the workspace survives')
+    // A sentinel the run did not write. A resumed run that re-cloned would throw it away;
+    // one that continues in the workspace it already made has to leave it alone.
+    writeFileSync(join(workspace, '.probe-sentinel'), 'left over from the first attempt\n')
+    const resumed = production.prepare({
+      order: [12],
+      originalHeads,
+      resume: true,
+      runDirectory,
+      resolutions: [
+        {
+          number: 12,
+          path: 'shared.txt',
+          kind: 'content',
+          intent: 'keep the pull request reading and drop the superseded root note',
+          reason: 'the pull request supersedes the root note for this file',
+          content: 'the pull request side\n',
+        },
+      ],
+    })
+    // The workspace the first run left is the one the second run continues in, and the
+    // storage head moves because of that continuation. Whether the run can then *finish*
+    // depends on the rest of the stack; what this case is about is that the work already
+    // done is not thrown away and redone from a fresh clone.
+    assert.equal(
+      existsSync(join(workspace, 'shared.txt')),
+      true,
+      'the workspace the first run left is still the one the second run is using',
+    )
+    assert.equal(
+      readdirSync(join(runDirectory, 'workspaces')).filter((name: string) => name.includes('pr-'))
+        .length,
+      1,
+      'a resumed run must not accumulate a second workspace per branch',
+    )
+    assert.equal(
+      readFileSync(join(workspace, '.probe-sentinel'), 'utf8'),
+      'left over from the first attempt\n',
+      'the resumed run continued in the existing workspace instead of cloning a fresh one',
+    )
+    return preparedOutcome(resumed)
   },
 })

@@ -1798,7 +1798,13 @@ function inspectControls(repository) {
     const lowered = key.toLowerCase()
     const isSigning = lowered === 'commit.gpgsign' && value.toLowerCase() === 'true'
     const isHooks = lowered === 'core.hookspath'
-    const blocking = isSigning || isHooks
+    // A filesystem monitor is a program, and it is read by `git status` - which is exactly
+    // how this run fingerprints the user's worktree, in the user's own repository where the
+    // setting is still in force. Reporting it without blocking it while the run is about to
+    // read the worktree would say "reported, never overridden" at the same moment the run
+    // overrode it by executing the program.
+    const isMonitor = lowered === 'core.fsmonitor'
+    const blocking = isSigning || isHooks || isMonitor
     controls.push({
       control: key,
       value,
@@ -1808,7 +1814,9 @@ function inspectControls(repository) {
         ? 'the source requires signed commits; task storage does not inherit signing configuration, so preparation stops before creating unverified commits'
         : isHooks
           ? 'the source configures a mandatory core.hooksPath; task storage does not inherit hooks, so preparation stops before bypassing controls'
-          : 'reported, never overridden',
+          : isMonitor
+            ? "the source configures a filesystem monitor that `git status` runs; fingerprinting the user's worktree would execute it, so preparation stops before reading the worktree"
+            : 'reported, never overridden',
     })
   }
 
@@ -1841,25 +1849,33 @@ function inspectControls(repository) {
   }
 
   // Git resolves a relative `core.hooksPath` against the repository, not the caller's
-  // directory, so the effective directory is asked of Git rather than assembled here.
-  const hooksConfig = gitOut(repository, ['config', '--get', 'core.hooksPath'])
-  const resolvedHooks = gitOut(repository, ['rev-parse', '--git-path', 'hooks'])
-  const hooksDir = resolvedHooks
-    ? isAbsolute(resolvedHooks)
-      ? resolvedHooks
-      : resolve(repository, resolvedHooks)
-    : existsSync(join(repository, '.git', 'hooks'))
-      ? join(repository, '.git', 'hooks')
-      : join(repository, 'hooks')
-  if (!hooksConfig) {
-    controls.push({
-      control: 'hooks.path',
-      value: resolvedHooks ?? hooksDir,
-      inTaskStorage: 'resolved',
-      blocking: false,
-      effect: "no core.hooksPath is configured; Git's default hook directory applies",
-    })
-  }
+  // directory. The configured value therefore decides the directory: reading the default
+  // instead would look in a place no hook lives and report a clean run for a repository
+  // whose hooks are somewhere this code never went.
+  const configuredHooks = gitOut(repository, ['config', '--get', 'core.hooksPath'])
+  const resolvedDefault = gitOut(repository, ['rev-parse', '--git-path', 'hooks'])
+  const hooksDir = configuredHooks
+    ? isAbsolute(configuredHooks)
+      ? configuredHooks
+      : resolve(repository, configuredHooks)
+    : resolvedDefault
+      ? isAbsolute(resolvedDefault)
+        ? resolvedDefault
+        : resolve(repository, resolvedDefault)
+      : existsSync(join(repository, '.git', 'hooks'))
+        ? join(repository, '.git', 'hooks')
+        : join(repository, 'hooks')
+  controls.push({
+    control: 'core.hooksPath',
+    value: configuredHooks
+      ? `${configuredHooks} -> ${hooksDir}`
+      : `${resolvedDefault ?? hooksDir} (Git's default)`,
+    inTaskStorage: configuredHooks ? 'not-copied' : 'resolved',
+    blocking: false,
+    effect: configuredHooks
+      ? `Git resolves this ${isAbsolute(configuredHooks) ? 'path' : 'relative path'} against the repository, so the hooks that apply are the ones in ${hooksDir}, not the ones where the caller stands`
+      : "no core.hooksPath is configured; Git's default hook directory applies",
+  })
   const hooks = existsSync(hooksDir)
     ? readdirSync(hooksDir)
         .filter((name) => !name.endsWith('.sample'))

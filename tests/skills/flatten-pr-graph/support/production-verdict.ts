@@ -162,12 +162,16 @@ export function actionViolations(
   for (const claim of confirmed) {
     const branch = claim.target.replace(/^refs\/heads\//, '')
     if (claim.kind === 'pr-base-update') {
-      const base = provider.actions.find((action) => action.kind === 'update-pr-base' && action.target === branch)
+      const base = provider.actions.find(
+        (action) => action.kind === 'update-pr-base' && action.target === branch,
+      )
       if (base?.outcome === 'acknowledged') continue
       violations.push({
         invariant: 'remote.claims-match' as const,
         detail: `the document confirms a base update of #${branch} that the server never acknowledged`,
-        observed: base ? `the provider recorded it as ${base.outcome}` : 'the provider recorded no such write',
+        observed: base
+          ? `the provider recorded it as ${base.outcome}`
+          : 'the provider recorded no such write',
         expected: 'a confirmed base update is backed by an acknowledged provider action',
       })
       continue
@@ -244,7 +248,8 @@ export function statusViolations(
     violations.push({
       invariant: 'status.legality' as const,
       detail: `the run reports ${reported.status} while ${ref} is not at the prepared commit`,
-      observed: observed === undefined ? `${ref} is absent from the remote` : `${ref} is at ${observed}`,
+      observed:
+        observed === undefined ? `${ref} is absent from the remote` : `${ref} is at ${observed}`,
       expected: 'a reported completion has every selected head at its prepared commit',
     })
   }

@@ -473,13 +473,15 @@ export function __state() {
 export interface PrepareOptions {
   order: number[]
   originalHeads: Record<number, string>
-  justifiedDrops?: unknown[]
+  /** The root this run is pinned to; the remote's current tip when the case says nothing. */
+  root?: { ref: string; oid: string }
   selection?: number[]
   branches?: Record<number, string>
   heads?: Record<number, string>
   runDirectory?: string
   userWorkspace?: string | null
   resolutions?: unknown[]
+  justifiedDrops?: unknown[]
   resume?: boolean
   /**
    * The clock the helper stamps its commits with. Pinned by default so two runs over the
@@ -497,6 +499,8 @@ export interface PublishOptions {
   intendedBases: Record<number, string>
   pullRequests: Record<number, PinnedPullRequest>
   providerModule: string
+  /** What the caller is asking for. Only `execute` authorises a write. */
+  authorityIntent?: string
   granted?: string[]
   selection?: number[]
   observedRefs?: Record<string, string>
@@ -528,12 +532,12 @@ export class Production {
     return join(this.world.root, 'publish-run')
   }
 
-  storage(): string {
-    return join(this.prepareRun(), 'storage.git')
+  storage(runDirectory: string = this.prepareRun()): string {
+    return join(runDirectory, 'storage.git')
   }
 
-  workspace(number: number): string {
-    return join(this.prepareRun(), 'workspaces', `pr-${number}`)
+  workspace(number: number, runDirectory: string = this.prepareRun()): string {
+    return join(runDirectory, 'workspaces', `pr-${number}`)
   }
 
   root(): string {
@@ -544,8 +548,13 @@ export class Production {
     return this.world.remoteRefs()
   }
 
-  storageAncestor(ancestor: string, descendant: string): boolean {
-    return this.world.isAncestor(this.storage(), ancestor, descendant)
+  /**
+   * Ancestry inside task-owned storage, which is where prepared commits live. The run
+   * directory is named because a case may prepare more than once; asking about a commit in
+   * the wrong storage would answer `false` for everything.
+   */
+  storageAncestor(ancestor: string, descendant: string, runDirectory?: string): boolean {
+    return this.world.isAncestor(this.storage(runDirectory), ancestor, descendant)
   }
 
   remoteAncestor(ancestor: string, descendant: string): boolean {
@@ -573,7 +582,7 @@ export class Production {
   async seedBranch(
     branch: string,
     files: Record<string, string>,
-    options: { base?: string } = {},
+    options: { base?: string; bytes?: Record<string, Buffer> } = {},
   ): Promise<string> {
     seedCounter += 1
     // The name carries a counter because a case may seed the same branch twice - to move
@@ -584,6 +593,11 @@ export class Production {
     scratch.checkout(options.base ?? DEFAULT_BRANCH)
     for (const [path, content] of Object.entries(files)) {
       this.writeBytes(scratch.path, path, Buffer.from(content, 'utf8'))
+    }
+    // Binary content cannot go through the string writer, and a case about binary
+    // conflicts needs the real bytes rather than a base64 stand-in Git would merge happily.
+    for (const [path, bytes] of Object.entries(options.bytes ?? {})) {
+      this.writeBytes(scratch.path, path, bytes)
     }
     const oid = scratch.commit(`work on ${branch}`)
     scratch.push(branch, { force: true })
@@ -661,7 +675,9 @@ export class Production {
   /**
    * Traces the helper call `run` makes, and only that one. The shim is built once per world.
    */
-  async traceNextCall<T>(run: () => Promise<T> | T): Promise<{ result: T; trace: NativeCommand[] }> {
+  async traceNextCall<T>(
+    run: () => Promise<T> | T,
+  ): Promise<{ result: T; trace: NativeCommand[] }> {
     this.traceNext = true
     try {
       const result = await run()
@@ -734,7 +750,9 @@ export class Production {
         repository: this.world.remote,
         userWorkspace: options.userWorkspace ?? null,
         runDirectory: options.runDirectory ?? this.prepareRun(),
-        root: { ref: ROOT_REF, oid: this.root() },
+        // The root this run is pinned to, not the one the remote holds now. A case that
+        // pins an older commit is testing what the helper does with that pin.
+        root: options.root ?? { ref: ROOT_REF, oid: this.root() },
         selection: options.selection ?? options.order,
         order: options.order,
         // `git check-ref-format` refuses a one-level name unless `--allow-onelevel` is
@@ -788,7 +806,7 @@ export class Production {
       ),
       intendedBases: options.intendedBases,
       authority: {
-        intent: 'execute',
+        intent: options.authorityIntent ?? 'execute',
         selection: options.selection ?? options.order,
         granted: options.granted ?? ['ref-update', 'pr-base-update'],
         hostVerified: true,
@@ -893,8 +911,7 @@ export class Production {
   }> {
     const pinned = this.lastPinned
     const refs = this.world.remoteRefs()
-    const head = (number: number): string | undefined =>
-      refs[`refs/heads/${BRANCHES[number]}`]
+    const head = (number: number): string | undefined => refs[`refs/heads/${BRANCHES[number]}`]
     const edges: Array<{ before: number; after: number; source: string; evidence: string }> = []
     for (const after of options.order) {
       for (const before of options.order) {

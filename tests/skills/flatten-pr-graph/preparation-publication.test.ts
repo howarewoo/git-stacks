@@ -259,7 +259,7 @@ let refusals = 0
 const callLog = ${JSON.stringify(join(world.root, 'provider-calls.jsonl'))}
 const pullRequests = new Map(${JSON.stringify(seeded)})
 export function capabilities() {
-  return { operations: ['update-pull-request-base'], compareAndSwap: false, provider: 'double' }
+  return { operations: ['read-pull-request', 'update-pull-request-base'], compareAndSwap: false, provider: 'double' }
 }
 export function readPullRequest(number) {
   const pullRequest = pullRequests.get(number)

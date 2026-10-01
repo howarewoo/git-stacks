@@ -1532,12 +1532,17 @@ manifest is never published on its own authority.
 
 Preparation additionally refuses, before writing anything, when the source repository
 enforces a policy the task workspaces cannot inherit: `commit.gpgsign`, a local
-`core.hooksPath`, an executable source hook, a tracked `.gitattributes` entry naming a
-configured `filter`/`merge`/`diff` command, or an executable hook installed in the task
-workspace Git itself resolves. Git repository-routing variables in the caller's
-environment (`GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`, the `GIT_CONFIG_*` family,
-`GIT_TEMPLATE_DIR`, and the rest) are removed from every Git child this run starts and
-reported under `controls`, so a task-owned working directory is real isolation. A resumed
+`core.hooksPath`, a `core.fsmonitor` command (a filesystem monitor is a program, and this
+run fingerprints the user's worktree with `git status`, which would execute it), an
+executable source hook, a tracked `.gitattributes` entry naming a configured
+`filter`/`merge`/`diff` command, or an executable hook installed in the task workspace Git
+itself resolves. A relative `core.hooksPath` is resolved against the repository, the way
+Git resolves it, and `controls` names that resolved directory; reading the default hook
+directory instead would report a clean run for a repository whose hooks live somewhere else.
+Git repository-routing variables in the caller's environment (`GIT_DIR`, `GIT_WORK_TREE`,
+`GIT_INDEX_FILE`, the `GIT_CONFIG_*` family, `GIT_TEMPLATE_DIR`, and the rest) are removed
+from every Git child this run starts and reported under `controls`, so a task-owned working
+directory is real isolation. A resumed
 run adopts content only when its own journal recorded the decision; a staged resolution
 nobody recorded is reported, not committed.
 

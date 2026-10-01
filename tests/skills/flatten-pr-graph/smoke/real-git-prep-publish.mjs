@@ -122,7 +122,7 @@ const file = ${JSON.stringify(prsPath)}
 function load() { return new Map(JSON.parse(readFileSync(file, 'utf8'))) }
 function save(map) { writeFileSync(file, JSON.stringify([...map.entries()])) }
 export function capabilities() {
-  return { operations: ['update-pull-request-base'], compareAndSwap: false, provider: 'smoke-double' }
+  return { operations: ['read-pull-request', 'update-pull-request-base'], compareAndSwap: false, provider: 'smoke-double' }
 }
 export function readPullRequest(number) {
   const pr = load().get(number)
