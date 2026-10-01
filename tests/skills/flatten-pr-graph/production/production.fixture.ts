@@ -217,7 +217,7 @@ define({
   id: 'prep-independent-pair-integrates-each-predecessor',
   area: 'preparation',
   criteria: ['#87 whole graph', '#87 new predecessor', '#87 original commit retention'],
-  findings: ['P1 lost original commit', 'P6 compatible contributions treated as loss'],
+  findings: ['P8 Distinguish already-present contributions from lost paths', 'P13 Verify pinned-root containment when reusing recorded prepared heads'],
   expect: { status: 'prepared', codes: [] },
   async run(production) {
     const numbers = [12, 13]
@@ -322,31 +322,56 @@ define({
   id: 'prep-diamond-fan-in-keeps-the-shared-commit',
   area: 'preparation',
   criteria: ['#87 diamond and fan-in over shared commits'],
-  findings: ['P6'],
+  findings: ['P8 Distinguish already-present contributions from lost paths'],
   expect: { status: 'prepared', codes: [] },
   async run(production) {
-    const numbers = [12, 13, 14]
-    const originalHeads = await seedStack(production, numbers, {
-      bases: { 13: BRANCHES[12], 14: BRANCHES[12] },
+    production.advanceRoot({ 'root.txt': 'the root branch moves on\n' })
+    // A -> B, A -> C, and D branched from B with C merged in: a real four-node diamond
+    // whose tip has to integrate both arms of the fan-out.
+    const a = await production.seedBranch(BRANCHES[12], { 'a.txt': 'the shared arm\n' })
+    const b = await production.seedBranch(BRANCHES[13], { 'b.txt': 'the upper arm\n' }, {
+      base: BRANCHES[12],
     })
+    const c = await production.seedBranch(BRANCHES[14], { 'c.txt': 'the lower arm\n' }, {
+      base: BRANCHES[12],
+    })
+    const tip = await production.scratch('diamond-d')
+    tip.fetch()
+    tip.checkout(BRANCHES[13])
+    tip.merge(BRANCHES[14])
+    production.writeBytes(tip.path, 'd.txt', Buffer.from('the fan-in\n'))
+    const d = tip.commit('merge the lower arm in')
+    tip.push(BRANCHES[15], { force: true })
+
+    const numbers = [12, 13, 14, 15]
+    const originalHeads = { 12: a, 13: b, 14: c, 15: d }
     const prepared = production.prepare({ order: numbers, originalHeads })
     assert.equal(prepared.ok, true, JSON.stringify(prepared.errors))
     const branches = prepared.preparation?.branches ?? []
-    for (const branch of branches.slice(1)) {
+    assert.deepEqual(
+      branches.map((branch) => branch.number),
+      numbers,
+      'the whole graph, not the three nodes that branch off the root',
+    )
+    const tipBranch = branches[3]
+    for (const arm of [12, 13, 14]) {
       assert.ok(
-        branch.retainedOriginalCommits.includes(originalHeads[12]),
-        'the shared ancestor stays reachable under every successor',
+        tipBranch.retainedOriginalCommits.includes(originalHeads[arm]),
+        `#${arm} survives under the fan-in`,
       )
       assert.equal(
-        production.storageAncestor(branches[0].preparedHead, branch.preparedHead),
+        production.storageAncestor(originalHeads[arm], tipBranch.preparedHead),
         true,
-        'each successor integrates the shared prepared state',
+        `#${arm} keeps its contribution reachable from the fan-in`,
       )
+    }
+    for (let index = 1; index < branches.length; index += 1) {
       assert.equal(
-        production.storageAncestor(originalHeads[12], branch.preparedHead),
+        production.storageAncestor(branches[index - 1].preparedHead, branches[index].preparedHead),
         true,
-        `#${branch.number} keeps the shared contribution`,
+        `#${branches[index].number} integrates the prepared state before it`,
       )
+      assert.equal(branches[index].basedOn, branches[index - 1].preparedHead)
     }
     assert.deepEqual(prepared.preparation?.lostOriginalCommits, [])
     return preparedOutcome(prepared)
@@ -775,7 +800,7 @@ define({
   id: 'prep-dirty-user-workspace-is-preserved-byte-for-byte',
   area: 'preparation',
   criteria: ['#87 staged, unstaged and untracked user checkout preserved'],
-  findings: ['P2 user workspace mutated'],
+  findings: ['P5 Capture and compare content-complete workspace fingerprints'],
   expect: { status: 'prepared', codes: [] },
   async run(production) {
     const originalHeads = await seedStack(production, [12, 13])
@@ -811,7 +836,7 @@ define({
   id: 'prep-detached-user-workspace-is-preserved',
   area: 'preparation',
   criteria: ['#87 a detached user checkout is preserved'],
-  findings: ['P2'],
+  findings: ['P5 Capture and compare content-complete workspace fingerprints'],
   expect: { status: 'prepared', codes: [] },
   async run(production) {
     const originalHeads = await seedStack(production, [12])
@@ -831,7 +856,7 @@ define({
   id: 'prep-stash-fingerprint-separates-what-porcelain-cannot',
   area: 'preparation',
   criteria: ['#87 a changed stash object id is detected'],
-  findings: ['P3 a replaced stash at the same count'],
+  findings: ['P5 Capture and compare content-complete workspace fingerprints'],
   expect: { status: 'prepared', codes: [] },
   async run(production) {
     const originalHeads = await seedStack(production, [12])
@@ -866,7 +891,7 @@ define({
   id: 'prep-run-directory-inside-the-user-checkout-is-refused',
   area: 'preparation',
   criteria: ['#87 the task-owned run location is never the user checkout'],
-  findings: ['P4 an overlapping run directory'],
+  findings: ['P2 Verify task-directory ownership and containment before writing'],
   expect: { status: 'blocked', codes: ['invalid-input'] },
   async run(production) {
     const originalHeads = await seedStack(production, [12])
@@ -894,7 +919,7 @@ define({
   id: 'prep-run-directory-containing-the-repository-is-refused',
   area: 'preparation',
   criteria: ['#87 the task-owned run location never contains a repository'],
-  findings: ['P4 an overlapping run directory'],
+  findings: ['P2 Verify task-directory ownership and containment before writing'],
   expect: { status: 'blocked', codes: ['invalid-input'] },
   async run(production) {
     const originalHeads = await seedStack(production, [12])
@@ -917,7 +942,7 @@ define({
   id: 'prep-storage-symlink-into-another-repository-is-refused',
   area: 'preparation',
   criteria: ['#87 task-owned storage is exclusively claimed'],
-  findings: ['P4 a storage symlink redirect'],
+  findings: ['P2 Verify task-directory ownership and containment before writing'],
   expect: { status: 'blocked', codes: [] },
   async run(production) {
     const originalHeads = await seedStack(production, [12])
@@ -943,7 +968,7 @@ define({
   id: 'prep-an-unclaimed-run-directory-with-storage-is-refused',
   area: 'preparation',
   criteria: ['#87 task-owned storage is exclusively claimed'],
-  findings: ['P4 adopting storage this run did not create'],
+  findings: ['P2 Verify task-directory ownership and containment before writing'],
   expect: { status: 'blocked', codes: ['conflicting-environment-control'] },
   async run(production) {
     const originalHeads = await seedStack(production, [12])
@@ -971,7 +996,7 @@ define({
   id: 'prep-source-required-signing-blocks-before-any-commit',
   area: 'preparation',
   criteria: ['#87 source-local mandatory signing is never bypassed'],
-  findings: ['P9 a mandatory control bypassed'],
+  findings: ['P9 Preflight inherited executable Git controls before integration'],
   expect: {
     status: 'blocked',
     codes: ['conflicting-environment-control'],
@@ -994,7 +1019,7 @@ define({
   id: 'prep-source-hooks-path-blocks-before-any-commit',
   area: 'preparation',
   criteria: ['#87 hooks are never bypassed'],
-  findings: ['P9'],
+  findings: ['P9 Preflight inherited executable Git controls before integration'],
   expect: {
     status: 'blocked',
     codes: ['conflicting-environment-control'],
@@ -1015,7 +1040,7 @@ define({
   id: 'prep-attributed-merge-driver-is-never-executed',
   area: 'preparation',
   criteria: ['#87 no executable the helper cannot account for'],
-  findings: ['P11 an attributed merge driver executed'],
+  findings: ['P9 Preflight inherited executable Git controls before integration'],
   expect: {
     status: 'blocked',
     codes: ['conflicting-environment-control'],
@@ -1055,7 +1080,7 @@ define({
   id: 'prep-unattributed-driver-configuration-does-not-block',
   area: 'preparation',
   criteria: ['#87 a configured but unattributed driver is not a false positive'],
-  findings: ['P11 refusing every configured driver'],
+  findings: ['P9 Preflight inherited executable Git controls before integration'],
   expect: { status: 'prepared', codes: [] },
   async run(production) {
     const originalHeads = await seedStack(production, [12, 13])
@@ -1088,7 +1113,7 @@ define({
   id: 'prep-user-index-override-is-not-written-through',
   area: 'preparation',
   criteria: ['#87 repository-routing environment is not inherited'],
-  findings: ['P8 an inherited index redirect'],
+  findings: ['P14 Isolate inherited Git repository-selection environment variables'],
   expect: { status: 'prepared', codes: [] },
   async run(production) {
     const originalHeads = await seedStack(production, [12, 13])
@@ -1121,7 +1146,7 @@ define({
   id: 'prep-literal-glob-filename-is-resolved-as-itself',
   area: 'preparation',
   criteria: ['#87 literal glob and magic filenames'],
-  findings: ['P12 literal path expansion'],
+  findings: ['P12 Treat conflict filenames as literal Git pathspecs'],
   expect: { status: 'prepared', codes: [] },
   async run(production) {
     const originalHeads = await seedStack(production, [12, 13], {
@@ -1169,7 +1194,7 @@ define({
   id: 'prep-symlink-conflict-leaves-its-external-target-untouched',
   area: 'preparation',
   criteria: ['#87 a symlink target outside the workspace is never modified'],
-  findings: ['P13 a symlink followed out of the workspace'],
+  findings: ['P7 Reject symlink conflict targets before writing resolution content'],
   expect: { status: 'partial', codesAny: CONFLICT_CODES, mentions: ['link.txt'] },
   async run(production) {
     const outside = join(production.world.root, 'outside-target.txt')
@@ -1207,7 +1232,7 @@ define({
   id: 'prep-selected-head-deleted-at-the-source-blocks',
   area: 'preparation',
   criteria: ['#87 a stale snapshot is refused'],
-  findings: ['P7 a deleted source ref hidden by storage'],
+  findings: ['P11 Validate pinned refs against the source rather than retained fetch refs'],
   expect: { status: 'blocked', codes: ['stale-snapshot'] },
   async run(production) {
     const numbers = [12, 13]
@@ -1268,7 +1293,7 @@ define({
   id: 'prep-journal-is-bound-to-one-selection',
   area: 'preparation',
   criteria: ['#87 a run directory owns exactly one plan'],
-  findings: ['P5 a journal overwritten by a different plan'],
+  findings: ['P6 Bind recovery journals to the complete immutable plan'],
   expect: { status: 'blocked', codes: ['unfinished-run'] },
   async run(production) {
     const first = await seedStack(production, [12, 13])
@@ -1333,7 +1358,7 @@ define({
   id: 'prep-check-state-never-reaches-preparation',
   area: 'preparation',
   criteria: ['#87 four check states, one preparation decision'],
-  findings: ['P10 a check state consulted or reported'],
+  findings: [],
   expect: { status: 'prepared', codes: [] },
   async run(production) {
     const originalHeads = await seedStack(production, [12, 13])
@@ -1386,7 +1411,7 @@ define({
   id: 'probe-attributed-merge-driver-is-never-executed',
   area: 'probe',
   criteria: ['#87 the probe must not execute a configured driver'],
-  findings: ['P11 an attributed merge driver executed by git merge-tree'],
+  findings: ['P9 Preflight inherited executable Git controls before integration'],
   expect: { status: 'unknown', codes: [] },
   async run(production) {
     await seedStack(production, [12, 13], {
@@ -1416,7 +1441,7 @@ define({
   id: 'probe-unused-driver-and-git-lfs-configuration-do-not-block',
   area: 'probe',
   criteria: ['#87 a configured but unattributed driver is not a false positive'],
-  findings: ['P11 refusing every configured driver'],
+  findings: ['P9 Preflight inherited executable Git controls before integration'],
   expect: { status: 'measured-merge', codes: [] },
   async run(production) {
     await seedStack(production, [12, 13], {
@@ -1453,7 +1478,7 @@ define({
     '#88 per-ref SHA leases',
     '#88 root and unselected refs untouched',
   ],
-  findings: ['B1 a branch name in a SHA field', 'B7 a base write retried after a failure'],
+  findings: ['B2 Push the independently verified prepared SHA'],
   expect: { status: 'published', codes: [] },
   async run(production) {
     const stack = await preparedStack(production, [12, 13])
@@ -1523,7 +1548,7 @@ define({
   id: 'publish-without-a-task-owned-preparation-run-is-refused',
   area: 'publication',
   criteria: ['#88 publication is bound to the run that prepared it'],
-  findings: ['B4 preparation integrity skipped when no run directory was named'],
+  findings: ['B4 Stop metadata writes until all required heads are confirmed'],
   expect: {
     status: 'blocked',
     codesAny: ['invalid-input', 'conflicting-environment-control'],
@@ -1558,7 +1583,7 @@ for (const mutation of journalMutations) {
     id: `publish-resume-under-a-mutated-${mutation.id}-is-refused`,
     area: 'publication',
     criteria: ['#88 an incompatible journal root, selection, order or prepared commit is refused'],
-    findings: ['B3 a resume adopted a mutated plan'],
+    findings: ['B11 Bind resume to the journal's immutable publication plan'],
     expect: { status: 'blocked', codes: ['stale-snapshot'] },
     async run(production) {
       const stack = await preparedStack(production, [12, 13], {
@@ -1596,7 +1621,7 @@ define({
   id: 'publish-resume-under-a-mutated-order-is-refused',
   area: 'publication',
   criteria: ['#88 a resume under a mutated order is refused'],
-  findings: ['B3 a resume adopted a mutated plan'],
+  findings: ['B11 Bind resume to the journal\'s immutable publication plan'],
   expect: { status: 'blocked', codes: ['stale-snapshot'] },
   async run(production) {
     const stack = await preparedStack(production, [12, 13, 14], {
@@ -1632,7 +1657,7 @@ define({
   id: 'publish-preparation-workspace-left-mid-merge-is-refused',
   area: 'publication',
   criteria: ['#88 a prepared workspace must be in a finished state'],
-  findings: ['B2 a conflicted workspace published over'],
+  findings: ['B10 Verify prepared-tree and workspace integrity before publication'],
   expect: { status: 'blocked', codes: ['unresolved-conflict'] },
   async run(production) {
     const stack = await preparedStack(production, [12, 13])
@@ -1654,7 +1679,7 @@ define({
   id: 'publish-observed-head-that-is-neither-original-nor-prepared-is-refused',
   area: 'publication',
   criteria: ['#88 the recorded observation must be a state this plan may publish from'],
-  findings: ['B10 a lease taken against the observed value instead of the verified one'],
+  findings: ['B12 Admit journaled prepared heads during snapshot reconciliation'],
   expect: { status: 'blocked', codes: ['stale-snapshot'] },
   async run(production) {
     const stack = await preparedStack(production, [12, 13])
@@ -1675,7 +1700,7 @@ define({
   id: 'publish-mismatched-mutable-backup-ref-still-publishes-the-verified-commit',
   area: 'publication',
   criteria: ['#88 a mismatched mutable backup ref publishes the verified SHA'],
-  findings: ['B10'],
+  findings: ['B12 Admit journaled prepared heads during snapshot reconciliation'],
   expect: { status: 'published', codes: [] },
   async run(production) {
     const stack = await preparedStack(production, [12, 13])
@@ -1770,7 +1795,7 @@ for (const grant of grantCases) {
     id: `publish-${grant.id}-blocks-before-the-push`,
     area: 'publication',
     criteria: ['#88 every required mutation kind is granted before any remote operation'],
-    findings: ['B1 a ref-update grant not required for pending heads'],
+  findings: ['B1 Require the ref-update grant before probing or pushing'],
     expect: { status: 'blocked', codes: ['missing-permission'], mentions: [grant.detail] },
     async run(production) {
       const stack = await preparedStack(production, [12, 13])
@@ -1824,7 +1849,7 @@ define({
   id: 'publish-a-pull-request-somebody-else-retargeted-is-refused',
   area: 'publication',
   criteria: ['#88 a changed base is never overwritten'],
-  findings: ['B5 a base overwritten after a concurrent move'],
+  findings: ['B17 Validate PR repository identity and base against pinned snapshots'],
   expect: { status: 'blocked', codes: ['stale-snapshot'], mentions: ['baseRef'] },
   async run(production) {
     const stack = await preparedStack(production, [12, 13])
@@ -1846,7 +1871,7 @@ define({
   id: 'publish-a-fork-head-repository-is-refused',
   area: 'publication',
   criteria: ['#88 a same-named fork is never the selected head'],
-  findings: ['B5 a fork adopted'],
+  findings: ['B17 Validate PR repository identity and base against pinned snapshots'],
   expect: { status: 'blocked', codes: ['stale-snapshot'], mentions: ['headRepository'] },
   async run(production) {
     const stack = await preparedStack(production, [12, 13])
@@ -1867,7 +1892,7 @@ define({
   id: 'publish-a-pull-request-edited-mid-run-is-reported-not-repaired',
   area: 'publication',
   criteria: ['#88 a changed field a base retarget must not disturb is reported'],
-  findings: ['B5 unrelated state destroyed'],
+  findings: ['B16 Report preserved-field drift even when the base landed'],
   expect: {
     status: 'partial',
     codes: ['stale-snapshot'],
@@ -1893,7 +1918,7 @@ define({
   id: 'publish-provider-refusal-stops-the-chain-at-that-pull-request',
   area: 'publication',
   criteria: ['#88 a metadata failure after a base stops the chain'],
-  findings: ['B7 the chain continued past a failed base'],
+  findings: ['B4 Stop metadata writes until all required heads are confirmed'],
   expect: { status: 'partial', codes: ['missing-permission'] },
   async run(production) {
     const stack = await preparedStack(production, [12, 13, 14], {
@@ -1922,7 +1947,7 @@ define({
   id: 'publish-applied-then-lost-acknowledgement-is-reconciled-without-a-retry',
   area: 'publication',
   criteria: ['#88 applied then lost ack is reread, never retried'],
-  findings: ['B6 a lost acknowledgement turned into a duplicate write'],
+  findings: ['B21 Preserve remote outcomes when an exception follows mutation'],
   expect: { status: 'published', codes: [] },
   async run(production) {
     const stack = await preparedStack(production, [12, 13], { script: { applyThenThrow: true } })
@@ -1944,7 +1969,7 @@ define({
   id: 'publish-applied-then-unreadable-stays-unknown',
   area: 'publication',
   criteria: ['#88 applied then read failure is unknown, never fabricated'],
-  findings: ['B6 an unread answer reported as success'],
+  findings: ['B15 Keep metadata acknowledgement unknown when read-back fails'],
   expect: { status: 'partial', mentions: ['is unconfirmed'] },
   async run(production) {
     const stack = await preparedStack(production, [12, 13], {
@@ -1969,7 +1994,7 @@ define({
   id: 'publish-final-pull-request-read-failure-is-not-success',
   area: 'publication',
   criteria: ['#88 a final read failure is never success'],
-  findings: ['B9 unread state reported as published'],
+  findings: ['B13 Make success depend on denied work and final chain verification'],
   expect: { status: 'partial', mentions: ['final read-back'] },
   async run(production) {
     const stack = await preparedStack(production, [12, 13], { script: { failReadAfter: 5 } })
@@ -1992,7 +2017,7 @@ define({
   id: 'publish-a-push-that-lies-and-a-readback-that-fails-is-unconfirmed',
   area: 'publication',
   criteria: ['#88 an unknown push acknowledgement plus a failed read is unknown'],
-  findings: ['B6 a successful-looking push believed on its exit status'],
+  findings: ['B21 Preserve remote outcomes when an exception follows mutation'],
   expect: { status: 'blocked', codes: ['stale-snapshot'] },
   async run(production) {
     const stack = await preparedStack(production, [12, 13])
@@ -2017,7 +2042,7 @@ define({
   id: 'publish-concurrent-push-rejects-the-lease-and-overwrites-nothing',
   area: 'publication',
   criteria: ['#88 an immediate concurrent selected SHA lease is rejected'],
-  findings: ['B8 a lease checked before the concurrent push'],
+  findings: ['B8 Re-read and reconcile each PR immediately before its base edit'],
   expect: { status: 'blocked', codes: ['stale-snapshot'] },
   async run(production) {
     const stack = await preparedStack(production, [12, 13])
@@ -2071,7 +2096,7 @@ define({
   id: 'publish-a-root-that-moves-during-the-writes-is-reported-against-the-pin',
   area: 'publication',
   criteria: ['#88 a root that advanced after the writes is reported, not integrated'],
-  findings: ['B9 a root advance reported as integrated'],
+  findings: ['B13 Make success depend on denied work and final chain verification'],
   expect: { status: 'published', codes: [] },
   async run(production) {
     const stack = await preparedStack(production, [12, 13])
@@ -2105,7 +2130,7 @@ define({
   id: 'publish-an-unselected-ref-moved-during-the-run-is-reported',
   area: 'publication',
   criteria: ['#88 unselected refs outside the write set are reconciled'],
-  findings: ['B8 a ref that moved during the run was never re-read'],
+  findings: ['B12 Admit journaled prepared heads during snapshot reconciliation'],
   expect: {
     status: 'blocked',
     codesAny: ['stale-snapshot', 'conflicting-environment-control'],
@@ -2134,7 +2159,7 @@ define({
   id: 'publish-a-failed-journal-write-keeps-the-acknowledged-outcomes',
   area: 'publication',
   criteria: ['#88 a journal write that fails does not erase acknowledged outcomes'],
-  findings: ['B6 acknowledged writes reported as "nothing was written"'],
+  findings: ['B21 Preserve remote outcomes when an exception follows mutation'],
   expect: { status: 'partial', codes: ['unfinished-run'] },
   async run(production) {
     const stack = await preparedStack(production, [12, 13])
@@ -2191,7 +2216,7 @@ define({
   id: 'publish-check-state-never-reaches-the-decision',
   area: 'publication',
   criteria: ['#88 four check states, one publication decision'],
-  findings: ['P10 a check state consulted or reported'],
+  findings: [],
   expect: { status: 'published', codes: [] },
   async run(production) {
     const control = await preparedStack(production, [12, 13])
@@ -2231,7 +2256,7 @@ define({
   id: 'publish-a-remote-helper-transport-is-refused-by-name',
   area: 'publication',
   criteria: ['#88 no program is executed by merely addressing a remote'],
-  findings: ['B11 a remote helper executed'],
+  findings: ['B24 Block executable custom transports before discovery'],
   expect: {
     status: 'blocked',
     codes: ['conflicting-environment-control'],
@@ -2253,7 +2278,7 @@ define({
   id: 'publish-a-remote-with-two-push-destinations-is-refused',
   area: 'publication',
   criteria: ['#88 one push destination covers the whole transaction'],
-  findings: ['B11 a fan-out push treated as one transaction'],
+  findings: ['B7 Pin one endpoint for both remote reads and writes'],
   expect: {
     status: 'blocked',
     codes: ['conflicting-environment-control'],
@@ -2290,7 +2315,7 @@ define({
   id: 'publish-a-repository-that-does-not-exist-is-refused',
   area: 'publication',
   criteria: ['#88 the repository is named, never inferred'],
-  findings: ['B11 an origin guessed from configuration'],
+  findings: [],
   expect: {
     status: 'blocked',
     codes: ['invalid-input'],

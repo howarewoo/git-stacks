@@ -200,6 +200,7 @@ export function pinnedPullRequest(
   request: { number: number; branch: string; base?: string; state?: 'OPEN' | 'CLOSED' | 'MERGED' },
 ): PinnedPullRequest {
   const base = request.base ?? DEFAULT_BRANCH
+  const live = world.remoteRefs()
   return {
     number: request.number,
     state: request.state ?? 'OPEN',
@@ -207,11 +208,10 @@ export function pinnedPullRequest(
     headRef: request.branch,
     headRepository: `${REPOSITORY.owner}/${REPOSITORY.name}`,
     baseRef: base,
-    // The optional object ids are left unpinned on purpose: a snapshot that omits a field
-    // cannot prove divergence in it, and the ref reconciliation compares the real object
-    // ids directly instead.
-    headRefOid: null,
-    baseRefOid: null,
+    // The real object ids the remote holds now, so the pinned snapshot records the state
+    // this run was authorized against and a divergence in either id is detectable.
+    headRefOid: live[`refs/heads/${request.branch}`] ?? null,
+    baseRefOid: live[`refs/heads/${base}`] ?? null,
     title: `Feature #${request.number}`,
     body: `the body of #${request.number}`,
     labels: [],
@@ -237,15 +237,35 @@ function writeProviderModule(
   providerCounter += 1
   const module = join(world.root, `provider-${providerCounter}.mjs`)
   const seeded = Object.fromEntries(pinned.map((pr) => [pr.number, pr]))
-  const branchOids = Object.fromEntries(
-    Object.entries(world.remoteRefs()).map(([ref, oid]) => [ref.replace('refs/heads/', ''), oid]),
-  )
+  const remotePath = world.remote
   writeFileSync(
     module,
-    `const seeded = ${JSON.stringify(seeded)}
-const branchOids = ${JSON.stringify(branchOids)}
+    `import { execFileSync } from 'node:child_process'
+const remotePath = ${JSON.stringify(remotePath)}
+const seeded = ${JSON.stringify(seeded)}
 const script = ${JSON.stringify(script)}
 const pullRequests = new Map(Object.entries(seeded).map(([number, pr]) => [Number(number), structuredClone(pr)]))
+/** The remote's own refs, so every served id is read state and never a remembered one. */
+function liveOids() {
+  const stdout = execFileSync('git', ['ls-remote', '--heads', remotePath], {
+    encoding: 'utf8',
+    env: { PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? '/tmp' },
+  })
+  const oids = {}
+  for (const line of stdout.split('\n')) {
+    const [oid, ref] = line.trim().split(/\s+/)
+    if (oid && ref) oids[ref.replace('refs/heads/', '')] = oid
+  }
+  return oids
+}
+function refresh() {
+  const oids = liveOids()
+  for (const pullRequest of pullRequests.values()) {
+    if (oids[pullRequest.headRef] !== undefined) pullRequest.headRefOid = oids[pullRequest.headRef]
+    if (oids[pullRequest.baseRef] !== undefined) pullRequest.baseRefOid = oids[pullRequest.baseRef]
+  }
+}
+refresh()
 const calls = []
 let reads = 0
 let writes = 0
@@ -266,7 +286,7 @@ export function readPullRequest(number) {
     record('readPullRequest', number, null, 'unreadable')
     throw new Error('the provider could not be reached')
   }
-  const pullRequest = pullRequests.get(number)
+  refresh()
   record('readPullRequest', number, pullRequest?.baseRef ?? null, pullRequest ? 'observed' : 'absent')
   return { ok: true, pullRequest: pullRequest ? structuredClone(pullRequest) : null }
 }
@@ -280,8 +300,14 @@ export function updatePullRequestBase(number, base, expectedBase) {
     record('updatePullRequestBase', number, base, 'denied')
     return { ok: false, applied: false }
   }
+  const preconditionMet =
+    expectedBase === undefined || expectedBase === null ? null : expectedBase === pullRequest.baseRef
+  if (preconditionMet === false) {
+    record('updatePullRequestBase', number, base, 'precondition-failed')
+    return { ok: false, applied: false, preconditionMet: false }
+  }
   pullRequest.baseRef = base
-  pullRequest.baseRefOid = branchOids[base] ?? null
+  refresh()
   writes += 1
   record('updatePullRequestBase', number, base, 'acknowledged')
   if (script.driftTitleAfterWrite !== undefined && writes === script.driftTitleAfterWrite) {
@@ -290,7 +316,7 @@ export function updatePullRequestBase(number, base, expectedBase) {
   if (script.applyThenThrow === true) {
     throw new Error('the acknowledgement was lost in transit')
   }
-  return { ok: true, applied: true, preconditionMet: expectedBase ? true : null }
+  return { ok: true, applied: true, preconditionMet }
 }
 export function __calls() {
   return calls
