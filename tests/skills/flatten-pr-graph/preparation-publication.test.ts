@@ -1336,9 +1336,13 @@ test('an ssh wrapper is reported and never run, before the first remote conversa
     .map((control) => `${control.control}=${control.value}`)
   assert.ok(
     named.some((entry) => entry.startsWith('GIT_SSH_COMMAND=') && entry.includes(wrapper)),
-    `the ssh wrapper must be named as a control, got ${JSON.stringify(named)}`,
+    `the ssh wrapper must be named as a control, got ${JSON.stringify(named)}; errors ${JSON.stringify(blocked.errors)}`,
   )
-  assert.equal(existsSync(marker), false, 'the ssh wrapper must not have been executed')
+  assert.equal(
+    existsSync(marker),
+    false,
+    `the ssh wrapper must not have been executed; status ${blocked.status} errors ${JSON.stringify(blocked.errors)} controls ${JSON.stringify(blocked.controls)}`,
+  )
   assert.deepEqual(blocked.publication.attempts, [])
 })
 
@@ -1381,7 +1385,6 @@ test('a mandatory control in the caller environment stops preparation before it 
   t.after(() => world.cleanup())
   const a = await seedBranch(world, BRANCHES[12], { 'a.txt': 'a\n' })
   const runDirectory = join(world.root, 'run')
-  await advanceRoot(world, { 'root.txt': 'root moves on\n' })
 
   // Stripping routing variables is what makes a task directory a task directory, but
   // `GIT_CONFIG_*` carries policy. Dropping a mandatory one would commit under weaker

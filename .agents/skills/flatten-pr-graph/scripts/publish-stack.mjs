@@ -1197,7 +1197,8 @@ export async function publishStack(raw, conversations = {}) {
     callerEnv,
     // Only the destination decides which transports are reachable. The refspecs are ref
     // names inside the destination repository, not URLs, so they add no transport.
-    endpointTransports(input.pushEndpoint),
+    // `pushEndpoint` is a resolved record; the transport belongs to the URL it carries.
+    endpointTransports(input.pushEndpoint.endpoint),
   )
   const controls = [...inherited, ...inspectControls(input.repository)]
   const blockedControls = controls.filter((control) => control.blocking)
@@ -1260,6 +1261,26 @@ export async function publishStack(raw, conversations = {}) {
       },
     })
   }
+  // Before the first remote conversation, not after the preflight. An ssh wrapper, a
+  // credential helper, or a permitted custom transport is executed by the *read* as much
+  // as by the push, so a gate that runs once the preflight is over has already let it run
+  // and then reported that it would not. Nothing has been written at this point, so the
+  // journal the interrupted run left is left exactly as it was.
+  if (blockedControls.length > 0) {
+    return returnWithoutJournal({
+      errors: blockedControls.map((control) => ({
+        code: 'conflicting-environment-control',
+        detail: `${control.control} would change this push beyond the authorised write set`,
+        evidence: control.effect,
+      })),
+      status: 'blocked',
+      nextSafeAction: {
+        action: 'report the configuration or hook that blocks publication; it is not disabled here',
+        requires: blockedControls.map((control) => `${control.control}=${control.value}`),
+      },
+    })
+  }
+
 
   // 1. Authority. Nothing below runs without it, and it is checked against the exact
   //    selection the prepared set names rather than against anything a caller asserts.
@@ -1498,22 +1519,6 @@ export async function publishStack(raw, conversations = {}) {
 
   // 5. Controls first, then the atomic capability question. A push is never attempted
   //    before both answers are known, because either can end the run without a write.
-  if (blockedControls.length > 0) {
-    journal.state = 'blocked'
-    return finish({
-      errors: blockedControls.map((control) => ({
-        code: 'conflicting-environment-control',
-        detail: `${control.control} would change this push beyond the authorised write set`,
-        evidence: control.effect,
-      })),
-      status: 'blocked',
-      nextSafeAction: {
-        action: 'report the configuration or hook that blocks publication; it is not disabled here',
-        requires: blockedControls.map((control) => `${control.control}=${control.value}`),
-      },
-    })
-  }
-
   // 6. The provider is loaded and every selected pull request is read *before* any grant is
   //    acted on, because the write set is only knowable once the bases are known. A run
   //    that pushed heads first and discovered a missing base grant afterwards would leave
