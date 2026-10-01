@@ -742,6 +742,16 @@ export interface DirectGitHubTransportOptions {
   host?: string
   /** Validators for conditional reads; omitted means every GET is a full read. */
   cache?: GitHubResponseCache
+  /**
+   * Whether a rejected request is reported to the process-wide account
+   * listener. On by default, because a stored App credential must learn that
+   * GitHub refused it. A transport that authenticates as a credential owned by
+   * one optional module turns it off: that credential's rejection is that
+   * module's own to report, and letting it reach the account would let a
+   * notifications token revoke or policy-block the sign-in that pull requests,
+   * stacks, and reviews depend on.
+   */
+  reportFailures?: boolean
 }
 
 /** Authenticated REST/GraphQL access to GitHub over HTTP; it never spawns `gh`. */
@@ -1013,7 +1023,9 @@ export class DirectGitHubTransport implements GitHubTransport {
       }
     } catch (error) {
       if (error instanceof GitHubTransportError) {
-        await reportFailure(error, credential)
+        if (this.options.reportFailures !== false) {
+          await reportFailure(error, credential)
+        }
         throw error
       }
       if (timedOut) {

@@ -1,6 +1,7 @@
 import * as React from 'react'
 import {
   Archive,
+  Bell,
   Files,
   GitBranch,
   GitPullRequest,
@@ -25,6 +26,7 @@ export type WorkspaceView =
   | 'review'
   | 'stashes'
   | 'diagnostics'
+  | 'notifications'
 
 /**
  * Every destination heading carries this id so a keyboard-driven destination
@@ -59,6 +61,7 @@ const workspaceDestinations: readonly WorkspaceDestination[] = [
   { id: 'review', label: 'Review', icon: MessageSquareDiff },
   { id: 'stashes', label: 'Stashes', icon: Archive },
   { id: 'diagnostics', label: 'Diagnostics', icon: SlidersHorizontal },
+  { id: 'notifications', label: 'GitHub Notifications', icon: Bell },
 ]
 
 /** The spoken name of a destination, used for the workspace-change announcement. */
@@ -80,6 +83,7 @@ export const WORKSPACE_VIEW_SHORTCUTS: readonly (readonly [ShortcutId, Workspace
   ['view.diagnostics', 'diagnostics'],
   ['view.review', 'review'],
   ['view.prInbox', 'prInbox'],
+  ['view.notifications', 'notifications'],
 ]
 
 export function WorkspaceNavigation({

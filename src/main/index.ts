@@ -83,6 +83,7 @@ import {
 import { CredentialVault } from './credentials'
 import { safeStorageProtector } from './secret-storage'
 import { GitHubAccount } from './github-account'
+import { NotificationCenter } from './notifications'
 import {
   assertDirectoryName,
   assertFullName,
@@ -510,6 +511,75 @@ function githubAccount() {
 }
 
 /**
+ * The optional GitHub Notifications Center.
+ *
+ * It is created for the host that is configured and replaced when that host
+ * changes, because its credential, its transport, and its list all belong to
+ * one host. Each host also keeps its own files: a credential and a cached list
+ * are named for the host they were read for, so a host change can neither serve
+ * one host's notifications under another's name nor destroy the credential the
+ * person stored for the host they are returning to.
+ */
+let notifications: NotificationCenter | null = null
+let notificationHost: string | null = null
+
+/** The file name suffix that keeps one host's stored state out of another's. */
+function notificationScope(host: string): string {
+  return Buffer.from(host, 'utf8').toString('hex')
+}
+
+function notificationCenter(): NotificationCenter {
+  const context = configuredHost()
+  if (notifications !== null && notificationHost !== context.host) {
+    // The retired center is stopped and emptied, never asked to clean up after
+    // itself: its stored credential stays sealed and its stored list stays on
+    // disk, and no thread, validator, or poll clock crosses to the new host.
+    notifications.forget()
+    notifications = null
+    notificationHost = null
+  }
+  const scope = notificationScope(context.host)
+  notifications ??= new NotificationCenter({
+    host: context,
+    vault: credentialVault(),
+    credentialFile: join(app.getPath('userData'), `github-notifications.${scope}.json`),
+    cacheFile: join(app.getPath('userData'), `github-notifications-cache.${scope}.json`),
+    consent: () => ({
+      enabled: currentSettings?.notifications.enabled === true,
+      policyDisabled: settingsLocks.some((lock) => lock.key === 'notifications.enabled'),
+    }),
+    onChange: (inbox) => window?.webContents.send('notifications', inbox),
+  })
+  notificationHost = context.host
+  syncNotificationModule()
+  return notifications
+}
+
+/**
+ * Whether the Notification Center's poll loop may run at all. Consent and this
+ * computer's policy are the only two answers, and the module is only created
+ * once a surface has actually asked about it.
+ */
+function notificationsAllowed(): boolean {
+  return (
+    currentSettings?.notifications.enabled === true &&
+    !settingsLocks.some((lock) => lock.key === 'notifications.enabled')
+  )
+}
+
+/**
+ * Arms or stops the poll for the module this process already has, and does
+ * nothing when no surface has asked about notifications yet. Policy or consent
+ * that turns the module off stops the loop here rather than waiting for the
+ * next interval, so a disabled module asks GitHub for nothing.
+ */
+function syncNotificationModule(): void {
+  if (notifications === null) return
+  if (notificationsAllowed()) notifications.start()
+  else notifications.stop()
+}
+
+/**
  * A request from somewhere the app does not recognise. It is refused before
  * any work starts and is named as its own kind, so the failure log does not
  * fill with a page that is not this window probing every channel.
@@ -528,6 +598,9 @@ const hostWork = new Set<AbortController>()
 function applySettings(settings: AppSettings): void {
   const previousHost = currentSettings?.github.host ?? null
   currentSettings = settings
+  // Consent and policy both live in settings, so a change to either has to
+  // reach the module that polls with them now rather than at its next read.
+  syncNotificationModule()
   if (previousHost === settings.github.host) return
   // Everything already in flight was addressed to the host that is no longer
   // selected. It is aborted, and its generation is retired, so a response that
@@ -1203,6 +1276,7 @@ async function currentDiagnostics(settings: AppSettings) {
     appVersion: app.getVersion(),
     settings,
     githubHost,
+    notifications: notifications === null ? null : await notifications.status().catch(() => null),
   })
 }
 
@@ -2007,6 +2081,54 @@ function installHandlers() {
     validateSender(event)
     return accountForConfiguredHost().signOut()
   })
+
+  // The optional Notification Center. Like authentication, it never touches a
+  // repository: a GitHub that will not answer notifications must not block
+  // local Git work, and removing its credential must not disturb the sign-in
+  // the rest of the app reads through.
+  ipcMain.handle('notifications:status', async (event) => {
+    validateSender(event)
+    return notificationCenter().status()
+  })
+  ipcMain.handle('notifications:inbox', async (event) => {
+    validateSender(event)
+    return notificationCenter().inbox()
+  })
+  // The refresh takes no arguments at all. The floor it waits for is GitHub's,
+  // so nothing the window can send — not a flag, not a count — can outrun it.
+  ipcMain.handle('notifications:refresh', async (event) => {
+    validateSender(event)
+    return notificationCenter().refresh()
+  })
+  ipcMain.handle('notifications:cancel', (event) => {
+    validateSender(event)
+    notifications?.cancel()
+  })
+  // The token arrives once, here, and leaves this process only as a sealed
+  // value in the operating system's store. The reply is a status object, so no
+  // handler, log, failure record, or support bundle can carry it back out.
+  ipcMain.handle(
+    'notifications:save-credential',
+    async (event, token: unknown, consent: unknown) => {
+      validateSender(event)
+      return notificationCenter().saveCredential(token, consent)
+    },
+  )
+  ipcMain.handle('notifications:remove-credential', async (event) => {
+    validateSender(event)
+    return notificationCenter().removeCredential()
+  })
+  ipcMain.handle('notifications:mark-read', async (event, threadId: unknown) => {
+    validateSender(event)
+    return notificationCenter().markRead(threadId)
+  })
+  ipcMain.handle(
+    'notifications:subscription',
+    async (event, threadId: unknown, action: unknown) => {
+      validateSender(event)
+      return notificationCenter().setSubscription(threadId, action)
+    },
+  )
 
   // The update lifecycle. Each handler takes no argument at all: the channel
   // comes from settings main already owns, and the step comes from main's own

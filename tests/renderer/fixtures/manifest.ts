@@ -87,6 +87,10 @@ export const SCENARIO_NAMES = [
   'workflow-conflict-recovery',
   'workflow-operation-recovery',
   'workflow-external-operation',
+  // Optional notification center
+  'notifications-awaiting-credential',
+  'notifications-ready',
+  'notifications-stale',
 ] as const
 
 export type ScenarioName = (typeof SCENARIO_NAMES)[number]
@@ -158,6 +162,11 @@ export const SCENARIO_GROUPS = {
     'workflow-conflict-recovery',
     'workflow-operation-recovery',
     'workflow-external-operation',
+  ],
+  notifications: [
+    'notifications-awaiting-credential',
+    'notifications-ready',
+    'notifications-stale',
   ],
 } as const satisfies Record<string, readonly ScenarioName[]>
 

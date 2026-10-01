@@ -218,6 +218,70 @@ late device-code response cannot reopen it. If saving the account record fails
 after its new credential was stored, that staged credential is removed and the
 previous account remains selected.
 
+## GitHub Notifications
+
+The GitHub Notifications inbox is a separate, optional module, not part of the
+pull request inbox. It is off by default and nothing about sign-in, pull
+requests, stacks, or reviews changes when it is off, held off by policy, or
+stripped of its credential.
+
+GitHub serves its notifications endpoints to a classic personal access token
+rather than to a GitHub App credential, so this module authorizes one of its
+own. The order is deliberate and the UI follows it:
+
+1. **Settings › Notifications** explains what authorizing adds — the credential
+   kind, the `notifications` scope, the key store it is sealed in, and the fact
+   that removing it affects nothing else — before the switch is touched.
+2. **GitHub Notifications › Authorize notifications** opens a dialog that repeats
+   the boundary, names the host and the account the token belongs to, and
+   requires the acknowledgement before anything is stored.
+3. The token is sealed in this computer's operating-system key store. Only an
+   opaque reference is written to application state; the value crosses the
+   preload bridge once, is never read back, and appears in no log, status object,
+   diagnostic report, support bundle, or screenshot.
+
+The module polls conditionally. It sends GitHub's own `Last-Modified` value back
+as `If-Modified-Since`, honours `X-Poll-Interval` as a floor, and never asks for
+more than one page of 50. A 304 replays the whole list rather than replacing it
+with the page that answered. That floor applies to a person pressing Refresh
+too: an early refresh returns what is already known and sends nothing.
+
+Marking a thread read and changing a subscription are sent once and never
+replayed, because a second attempt could repeat a change GitHub already applied.
+When the host cannot be reached, the last list GitHub confirmed stays on screen
+marked stale with the reason, rather than being shown as current or discarded.
+
+Each host keeps its own credential reference and cached list, and each credential
+belongs to one host and one account: a host change, an account change, or a
+replacement credential ends any read still in flight, so no list is ever
+published or written under another host's or account's name.
+
+### Verifying the notification center
+
+```sh
+npx tsx --test tests/notifications.test.ts
+GIT_STACKS_NOTIFICATION_EVIDENCE="$PWD/test-results/notifications" node tests/notifications.e2e.cjs
+```
+
+`tests/notifications.test.ts` drives the module over a real TLS socket with a
+certificate generated for the run and pinned in the transport it is given, so
+verification is on; one test proves it by presenting a second, untrusted
+certificate for the same address and observing the refusal.
+
+`tests/notifications.e2e.cjs` launches the built Electron app against that same
+kind of controlled host, trusts only that run's certificate, and drives the real
+window: it opens a recent repository, turns the module on in Settings,
+authorizes through the consent dialog, and then reads the requests the host
+actually served. It writes its screenshots to `GIT_STACKS_NOTIFICATION_EVIDENCE`
+when that is set, and cleans up its own processes, profile, and repository
+otherwise. It is complementary to the [packaged desktop smoke](#packaged-desktop-smoke),
+not a substitute for it.
+
+The renderer surface is also exercised in the [gallery](#renderer-verification):
+`notifications-awaiting-credential`, `notifications-ready`, and
+`notifications-stale` cover the states a person meets before, during, and after
+authorization.
+
 ## GitHub hosts
 
 Git Stacks addresses one GitHub host at a time. `github.com` is the default, and

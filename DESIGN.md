@@ -902,3 +902,14 @@ the read that met it, and kept even by a refresh that kept no rows. The wait
 belongs to the host, so a refusal an ordinary repository read met delays the
 next refresh exactly as a refusal the queue met does; another host's wait is
 never its own.
+
+### Optional notification center
+
+GitHub serves the notifications endpoints to classic personal access tokens, not to GitHub App credentials, so reading an inbox is a second, separately authorized thing. It is a module with its own consent, its own sealed credential, its own transport pinned to one host, and its own conditional cache, and those rules follow from that separation:
+
+- **Nothing here widens the App sign-in.** With notifications disabled the App credential is unchanged, and no environment or `gh` override can serve this module. Removing the notification credential removes only that credential; the App session, and every pull request, stack, and review read, keep working on what they already had.
+- **Consent is stated before a token exists.** The surface that asks for a token names the credential kind, the scope, the host, and what leaving it behind means, and a value that arrives without that acknowledgement is refused rather than stored. The token crosses the bridge once, in the request, and is never returned to a listener, written to a file, logged, or included in a support bundle.
+- **The host's poll interval is a floor, not a preference.** `Last-Modified` is stored and sent back verbatim, a 304 replays the whole list rather than the page the transport recorded, pages are followed only on the API origin this host owns, and no read — automatic or asked for by a person — runs before the interval GitHub named. A failure backs off from that same interval.
+- **A stale list says so.** An unanswered question is never presented as a fresh one: the last confirmed list stays on screen with the reason it is no longer current, and a module that is off, held by policy, or without its credential reports no list at all.
+- **A boundary moves on.** Replacing, removing, or forgetting a credential ends everything in flight and opens a new generation, and work started under the previous one publishes nothing, writes nothing, and never reaches the network. A stored list belongs to the host and account it was read for and is checked against both before it is shown.
+- **A write is sent once.** Marking read and the subscription controls address only the endpoints GitHub documents, and an answer that never arrives is not resent: a second attempt could repeat a change GitHub already applied, so a failure leaves the list as it was and names what it could not do.

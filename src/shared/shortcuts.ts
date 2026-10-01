@@ -18,6 +18,7 @@ export type ShortcutId =
   | 'view.review'
   | 'view.diagnostics'
   | 'view.prInbox'
+  | 'view.notifications'
   | 'review.nextFile'
   | 'review.previousFile'
   | 'review.nextLayer'
@@ -197,6 +198,16 @@ export const SHORTCUT_DEFINITIONS: readonly ShortcutMetadata[] = [
     defaultChord: 'Mod+9',
     description:
       'Switch to the GitHub-derived pull request queue across your registered repositories.',
+  },
+  {
+    id: 'view.notifications',
+    label: 'Go to GitHub Notifications',
+    group: 'Views',
+    // `Mod+9` opens the pull-request inbox, so this module takes the next free
+    // view chord. It opens the surface that explains the credential boundary
+    // when the module is off, rather than an empty list.
+    defaultChord: 'Mod+0',
+    description: 'Switch to the optional GitHub Notifications inbox.',
   },
 ]
 

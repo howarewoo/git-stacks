@@ -70,6 +70,7 @@ import { updateStatusFixture } from './update-status'
 import { DEFAULT_SCENARIO, type ScenarioName } from './manifest'
 import type { PullRequestChecksReport } from '../../../src/shared/pull-request-checks'
 import type { FixtureCall, FixtureCallRecord, FixtureControl, FixtureScenario } from './types'
+import type { NotificationInbox } from '../../../src/shared/notifications'
 
 /** The review state GitHub reports back for each submitted event. */
 const REVIEW_SUBMIT_STATES: Record<ReviewEvent, string> = {
@@ -332,6 +333,32 @@ export function installFixtureControl(options: {
    * repository it already opened until it opens or refreshes one itself.
    */
   let active: RepositorySnapshot | null = scenario.snapshot
+
+  const disabledNotifications = (): NotificationInbox => ({
+    host: 'github.com',
+    state: 'disabled',
+    enabled: false,
+    policyDisabled: false,
+    reference: null,
+    login: null,
+    store: { available: true, name: 'Keychain', reason: null },
+    message: null,
+    threads: [],
+    unreadCount: 0,
+    poll: {
+      fetchedAt: null,
+      checkedAt: null,
+      nextPollAt: null,
+      pollIntervalSeconds: 60,
+      lastModified: null,
+      unchanged: false,
+    },
+    stale: false,
+    staleReason: null,
+  })
+  let current: NotificationInbox | null = scenario.notifications ?? null
+  let notificationListener: ((inbox: NotificationInbox) => void) | null = null
+  const currentNotifications = (): NotificationInbox => current ?? disabledNotifications()
   const desktop: DesktopAPI = {
     recentRepositories: () => {
       record('recentRepositories', [])
@@ -358,6 +385,91 @@ export function installFixtureControl(options: {
       return answer('refresh', () => {
         if (!active) throw new Error('No repository is open in this fixture.')
         return active
+      })
+    },
+    // The optional Notification Center answers on its own calls, with its own
+    // state: the fixture never borrows the pull request inbox for it.
+    notifications: () => {
+      record('notifications', [])
+      return answer('notifications', () => scenario.notifications ?? disabledNotifications())
+    },
+    notificationsStatus: () => {
+      record('notifications', [])
+      return answer('notifications', () => {
+        const {
+          threads: _threads,
+          unreadCount: _count,
+          poll: _poll,
+          stale: _stale,
+          staleReason: _reason,
+          ...status
+        } = scenario.notifications ?? disabledNotifications()
+        return status
+      })
+    },
+    onNotifications: (listener) => {
+      notificationListener = listener
+      return () => {
+        notificationListener = null
+      }
+    },
+    refreshNotifications: () => {
+      record('notificationRefresh', [])
+      return answer('notificationRefresh', () => currentNotifications())
+    },
+    cancelNotifications: () => {
+      record('notifications', [])
+      return Promise.resolve()
+    },
+    saveNotificationCredential: (token) => {
+      record('notifications', [token])
+      return answer('notifications', () => {
+        current = {
+          ...(current ?? disabledNotifications()),
+          state: 'ready',
+          enabled: true,
+          message: null,
+        }
+        return current
+      })
+    },
+    removeNotificationCredential: () => {
+      record('notifications', [])
+      return answer('notifications', () => {
+        current = {
+          ...(current ?? disabledNotifications()),
+          state: 'disabled',
+          enabled: false,
+          reference: null,
+        }
+        return current
+      })
+    },
+    markNotificationRead: (threadId) => {
+      record('notificationMarkRead', [threadId])
+      return answer('notificationMarkRead', () => {
+        const inbox = current ?? disabledNotifications()
+        const threads = inbox.threads.map((thread) =>
+          threadId === 'all' || thread.id === threadId ? { ...thread, unread: false } : thread,
+        )
+        current = { ...inbox, threads, unreadCount: threads.filter((t) => t.unread).length }
+        notificationListener?.(current)
+        return current
+      })
+    },
+    setNotificationSubscription: (threadId, action) => {
+      record('notificationSubscription', [threadId, action])
+      return answer('notificationSubscription', () => {
+        const inbox = current ?? disabledNotifications()
+        const threads =
+          action === 'ignore'
+            ? inbox.threads.map((thread) =>
+                thread.id === threadId ? { ...thread, unread: false } : thread,
+              )
+            : inbox.threads.filter((thread) => thread.id !== threadId)
+        current = { ...inbox, threads, unreadCount: threads.filter((t) => t.unread).length }
+        notificationListener?.(current)
+        return current
       })
     },
     runAction: (action) => {

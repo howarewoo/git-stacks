@@ -29,7 +29,7 @@ import {
 } from '../../../src/renderer/src/design-system/data-fixtures'
 import { EMPTY_SNAPSHOT_LIMITS } from '../../../src/shared/performance'
 import { DEFAULT_SETTINGS } from '../../../src/shared/settings'
-
+import type { NotificationInbox } from '../../../src/shared/notifications'
 import {
   deriveCheckRollup,
   summariseChecks,
@@ -1189,6 +1189,74 @@ const inboxMembershipUnknown = inboxReport(inboxMembershipUnknownRead, inboxMemb
   detail: 'Some repositories could not be read.',
 })
 
+
+/**
+ * The module's own state, kept apart from the pull request inbox: a host, an
+ * account, a sealed reference, and the threads GitHub sent with their own
+ * reasons. The reference is opaque, because the real one is.
+ */
+const notificationStatus = {
+  host: 'github.com',
+  state: 'ready' as const,
+  enabled: true,
+  policyDisabled: false,
+  reference: 'keychain://git-stacks/notifications/octo',
+  login: 'octo',
+  store: { available: true, name: 'Keychain', reason: null },
+  message: null,
+}
+
+const notificationThreads: NotificationInbox['threads'] = [
+  {
+    id: '101',
+    unread: true,
+    reason: 'review_requested',
+    title: 'Tidy the stack ordering rules',
+    url: 'https://github.com/acme/widgets/pull/101',
+    kind: 'pull_request',
+    repository: { owner: 'acme', name: 'widgets' },
+    updatedAt: UPDATED,
+  },
+  {
+    id: '102',
+    unread: true,
+    reason: 'mention',
+    title: 'Mentioned in “Release checklist”',
+    url: 'https://github.com/acme/widgets/issues/102',
+    kind: 'issue',
+    repository: { owner: 'acme', name: 'widgets' },
+    updatedAt: EARLIER,
+  },
+  {
+    id: '103',
+    unread: false,
+    reason: 'ci_activity',
+    title: 'Checks failed on “Add checkout validation”',
+    url: 'https://github.com/acme/widgets/pull/98',
+    kind: 'pull_request',
+    repository: { owner: 'acme', name: 'widgets' },
+    updatedAt: EARLIER,
+  },
+]
+
+function notificationInbox(overrides: Partial<NotificationInbox> = {}): NotificationInbox {
+  return {
+    ...notificationStatus,
+    threads: notificationThreads,
+    unreadCount: notificationThreads.filter((thread) => thread.unread).length,
+    poll: {
+      fetchedAt: UPDATED,
+      checkedAt: UPDATED,
+      nextPollAt: UPDATED,
+      pollIntervalSeconds: 60,
+      lastModified: 'Tue, 22 Sep 2026 09:41:07 GMT',
+      unchanged: false,
+    },
+    stale: false,
+    staleReason: null,
+    ...overrides,
+  }
+}
 export const scenarios: Record<ScenarioName, FixtureScenario> = {
   'shell-no-repository': {
     name: 'shell-no-repository',
@@ -1764,5 +1832,43 @@ export const scenarios: Record<ScenarioName, FixtureScenario> = {
         externalCredential: false,
       },
     },
+  },
+  'notifications-awaiting-credential': {
+    name: 'notifications-awaiting-credential',
+    summary: 'The module is on and has no token: authorization is offered, polling has not begun.',
+    snapshot: connected,
+    recentRepositories,
+    notifications: {
+      ...notificationStatus,
+      state: 'credential-missing',
+      enabled: true,
+      threads: [],
+      unreadCount: 0,
+      poll: {
+        fetchedAt: null,
+        checkedAt: null,
+        nextPollAt: null,
+        pollIntervalSeconds: 60,
+        lastModified: null,
+        unchanged: false,
+      },
+      stale: false,
+      staleReason: null,
+    },
+  },
+  'notifications-ready': {
+    name: 'notifications-ready',
+    summary: 'A live GitHub inbox: threads with GitHub’s own reasons, one already read.',
+    snapshot: connected,
+    recentRepositories,
+    notifications: notificationInbox({ stale: false }),
+  },
+  'notifications-stale': {
+    name: 'notifications-stale',
+    summary:
+      'GitHub could not be reached; the last confirmed list stands, marked stale with the reason.',
+    snapshot: connected,
+    recentRepositories,
+    notifications: notificationInbox({ stale: true, staleReason: 'offline' }),
   },
 }

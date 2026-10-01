@@ -132,6 +132,16 @@ export interface UpdateSettings {
   channel: UpdateChannel
 }
 
+export interface NotificationSettings {
+  /**
+   * Whether this computer has agreed to let Git Stacks read a GitHub
+   * Notifications inbox. Off by default: the endpoints are served to a classic
+   * personal access token rather than to the GitHub App credential, so the
+   * consent is separate from sign-in and says so before it is given.
+   */
+  enabled: boolean
+}
+
 export interface AppSettings {
   version: number
   git: GitSettings
@@ -146,6 +156,7 @@ export interface AppSettings {
    * so it stays done after the old location is cleared.
    */
   migrated: SettingsMigrations
+  notifications: NotificationSettings
 }
 
 export interface SettingsMigrations {
@@ -164,6 +175,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
     fetchIntervalSeconds: 120,
   },
   github: { host: GITHUB_DEFAULT_HOST },
+  notifications: { enabled: false },
   appearance: { theme: 'system', reduceMotion: false },
   privacy: { includeLocalPaths: false },
   updates: { channel: 'stable' },
@@ -178,6 +190,7 @@ export interface SettingsPatch {
   appearance?: Partial<AppearanceSettings>
   privacy?: Partial<PrivacySettings>
   shortcuts?: Record<string, string>
+  notifications?: Partial<NotificationSettings>
   /**
    * Shortcut bindings an earlier build kept outside this file, offered once for
    * import. It is an intent, not an assignment: the import commits only if the

@@ -19,6 +19,7 @@ import type { PullRequestChecksReport } from '../../../src/shared/pull-request-c
 import type { PullRequestInboxReport } from '../../../src/shared/pr-inbox'
 import type { AppSettings } from '../../../src/shared/settings'
 import type { GitHubAccountStatus } from '../../../src/shared/types'
+import type { NotificationInbox } from '../../../src/shared/notifications'
 
 /** Every promise-returning `DesktopAPI` method the fixture double can intercept. */
 export type FixtureCall =
@@ -76,6 +77,10 @@ export type FixtureCall =
   | 'settings'
   | 'updateSettings'
   | 'githubAccountStatus'
+  | 'notifications'
+  | 'notificationMarkRead'
+  | 'notificationSubscription'
+  | 'notificationRefresh'
 
 /** One entry of the ordered {@link FixtureControl.calls} log. */
 export interface FixtureCallRecord {
@@ -162,6 +167,11 @@ export interface FixtureScenario {
    * unconfigured GitHub does rather than answering an invented queue.
    */
   readonly inbox?: PullRequestInboxReport
+  /**
+   * The Notification Center's own inbox. It is separate from the pull request
+   * inbox, so a scenario states it on its own rather than deriving it.
+   */
+  readonly notifications?: NotificationInbox
 }
 
 /** Typed gallery control surface. Every field is plain serializable data. */

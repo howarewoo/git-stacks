@@ -157,6 +157,13 @@ type WorkspaceView =
   | 'review'
   | 'stashes'
   | 'diagnostics'
+  | 'notifications'
+
+import type { NotificationInbox, NotificationThread } from '../../shared/notifications'
+import {
+  NotificationCenterView,
+  NotificationCredentialDialog,
+} from './components/notification-center-view'
 
 /**
  * The one request id every queue read claims. A later refresh supersedes the
@@ -1026,6 +1033,94 @@ function App() {
     if (!desktop || !uri) return
     desktop.openExternal(uri).catch((value) => setError(readableError(value)))
   }, [account, desktop])
+
+  // The optional Notification Center. Its own state, its own error, and its own
+  // request counter: a failed notification read must not report itself as a
+  // failed repository operation, and it must not borrow the sign-in's panel.
+  const [notificationInbox, setNotificationInbox] = React.useState<NotificationInbox | null>(null)
+  const [notificationBusy, setNotificationBusy] = React.useState(false)
+  const [notificationDialogOpen, setNotificationDialogOpen] = React.useState(false)
+  const [notificationError, setNotificationError] = React.useState<string | null>(null)
+  const notificationRequest = React.useRef(0)
+
+  // The poll pushes the inbox; this only asks for what is already known, so
+  // opening the view never turns into a read GitHub did not ask for.
+  React.useEffect(() => {
+    if (!desktop) return
+    const stop = desktop.onNotifications?.(setNotificationInbox)
+    desktop
+      .notifications?.()
+      .then((value) => value && setNotificationInbox(value))
+      .catch(() => undefined)
+    return stop
+  }, [desktop])
+
+  /**
+   * One notification call at a time. The bridge method is looked up rather than
+   * assumed, so a window talking to an older main process reports the missing
+   * capability instead of dereferencing `undefined` inside a render.
+   */
+  const notificationCall = React.useCallback(
+    <T,>(method: keyof DesktopAPI, ...args: unknown[]): Promise<T> => {
+      const call = desktop?.[method] as ((...values: unknown[]) => Promise<T>) | undefined
+      if (typeof call !== 'function') {
+        return Promise.reject(new Error('This build of Git Stacks cannot read notifications.'))
+      }
+      return call(...args)
+    },
+    [desktop],
+  )
+
+  const runNotification = React.useCallback(
+    async (action: () => Promise<NotificationInbox>) => {
+      if (!desktop || notificationBusy) return
+      const request = ++notificationRequest.current
+      setNotificationBusy(true)
+      try {
+        const next = await action()
+        if (request === notificationRequest.current) setNotificationInbox(next)
+      } catch (value) {
+        if (request === notificationRequest.current) setNotificationError(readableError(value))
+      } finally {
+        if (request === notificationRequest.current) setNotificationBusy(false)
+      }
+    },
+    [desktop, notificationBusy],
+  )
+
+  /**
+   * Consent first, then the credential. Both steps go through the boundary that
+   * owns them: the setting main validates and policy can refuse, and the token
+   * is handed over once, together with the acknowledgement the consent text
+   * asked for, and never read back.
+   */
+  const saveNotificationCredential = React.useCallback(
+    async (token: string, accepted: boolean) => {
+      if (!desktop) return
+      const request = ++notificationRequest.current
+      setNotificationBusy(true)
+      setNotificationError(null)
+      try {
+        await desktop.updateSettings?.({ notifications: { enabled: true } })
+        await notificationCall('saveNotificationCredential', token, accepted)
+        const next = await notificationCall<NotificationInbox>('notifications')
+        if (request === notificationRequest.current) setNotificationInbox(next)
+        setNotificationDialogOpen(false)
+      } catch (value) {
+        if (request === notificationRequest.current) setNotificationError(readableError(value))
+      } finally {
+        if (request === notificationRequest.current) setNotificationBusy(false)
+      }
+    },
+    [desktop, notificationCall],
+  )
+
+  const removeNotificationCredential = React.useCallback(() => {
+    void runNotification(async () => {
+      await notificationCall('removeNotificationCredential')
+      return notificationCall<NotificationInbox>('notifications')
+    })
+  }, [notificationCall, runNotification])
 
   const openDiscovery = React.useCallback(() => {
     if (!desktop || isBusy || operationActive) return
@@ -2608,6 +2703,43 @@ function App() {
     )
   }
 
+  const renderNotifications = () => {
+    if (!desktop) return null
+    return (
+      <NotificationCenterView
+        busy={notificationBusy}
+        inbox={notificationInbox}
+        onMarkAllRead={() => {
+          void runNotification(() =>
+            notificationCall<NotificationInbox>('markNotificationRead', 'all'),
+          )
+        }}
+        onMarkRead={(threadId) => {
+          void runNotification(() =>
+            notificationCall<NotificationInbox>('markNotificationRead', threadId),
+          )
+        }}
+        onOpenCredential={() => {
+          setNotificationError(null)
+          setNotificationDialogOpen(true)
+        }}
+        onOpenThread={(thread) => {
+          if (!thread.url) return
+          desktop.openExternal(thread.url).catch((value) => setError(readableError(value)))
+        }}
+        onRefresh={() => {
+          void runNotification(() => notificationCall<NotificationInbox>('refreshNotifications'))
+        }}
+        onRemoveCredential={removeNotificationCredential}
+        onSubscribe={(thread, action) => {
+          void runNotification(() =>
+            notificationCall<NotificationInbox>('setNotificationSubscription', thread.id, action),
+          )
+        }}
+      />
+    )
+  }
+
   const renderMainContent = () => {
     // The queue is the one destination that is useful with no repository open:
     // it reads every registered repository rather than the one on screen.
@@ -2626,6 +2758,7 @@ function App() {
         />
       )
     if (workspaceView === 'stashes') return renderStashes()
+    if (workspaceView === 'notifications') return renderNotifications()
     if (workspaceView === 'diagnostics') return <DiagnosticsView snapshot={snapshot} />
     if (workspaceView === 'history')
       return (
@@ -3435,6 +3568,15 @@ function App() {
         onSignOut={() => runAccountAction(() => desktop!.signOutOfGitHub!(), true)}
         open={accountOpen}
         status={account}
+      />
+      <NotificationCredentialDialog
+        busy={notificationBusy}
+        error={notificationError}
+        host={notificationInbox?.host ?? 'github.com'}
+        login={notificationInbox?.login ?? null}
+        onOpenChange={setNotificationDialogOpen}
+        onSubmit={(token, accepted) => void saveNotificationCredential(token, accepted)}
+        open={notificationDialogOpen}
       />
       <RepositoryDiscoveryDialog
         account={account}

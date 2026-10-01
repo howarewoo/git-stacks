@@ -42,6 +42,7 @@ export const SETTING_KEYS = [
   'privacy.includeLocalPaths',
   'updates.channel',
   'shortcuts',
+  'notifications.enabled',
 ] as const
 
 export type SettingKey = (typeof SETTING_KEYS)[number]
@@ -134,6 +135,7 @@ export function validateSettings(value: unknown): {
   const appearance = isRecord(value.appearance) ? value.appearance : {}
   const privacy = isRecord(value.privacy) ? value.privacy : {}
   const updates = isRecord(value.updates) ? value.updates : {}
+  const notifications = isRecord(value.notifications) ? value.notifications : {}
 
   // A field the file did not supply is absent, not invalid: only a value that is
   // present and wrong is reported, so a sparse file does not report every default.
@@ -171,6 +173,10 @@ export function validateSettings(value: unknown): {
       updates.channel,
       oneOf(updates.channel, UPDATE_CHANNELS, DEFAULT_SETTINGS.updates.channel),
     ] as const,
+    'notifications.enabled': [
+      notifications.enabled,
+      booleanField(notifications.enabled, DEFAULT_SETTINGS.notifications.enabled),
+    ] as const,
   }
   for (const [key, [raw, result]] of Object.entries(fields)) {
     if (raw !== undefined && result.issue) issues.push({ key, message: result.issue })
@@ -182,6 +188,7 @@ export function validateSettings(value: unknown): {
   const theme = fields['appearance.theme'][1].value
   const reduceMotion = fields['appearance.reduceMotion'][1].value
   const includeLocalPaths = fields['privacy.includeLocalPaths'][1].value
+  const notificationsEnabled = fields['notifications.enabled'][1].value
   const updateChannel = fields['updates.channel'][1].value
 
   let fetchInterval = DEFAULT_SETTINGS.git.fetchIntervalSeconds
@@ -238,6 +245,7 @@ export function validateSettings(value: unknown): {
         fetchIntervalSeconds: fetchInterval,
       },
       github: { host: githubHost },
+      notifications: { enabled: notificationsEnabled },
       appearance: { theme, reduceMotion },
       privacy: { includeLocalPaths },
       updates: { channel: updateChannel },
@@ -319,6 +327,10 @@ export function applyPatch(
     updates: { ...current.updates, ...(isRecord(patch.updates) ? patch.updates : {}) },
     shortcuts,
     migrated: { legacyShortcutStorage },
+    notifications: {
+      ...current.notifications,
+      ...(isRecord(patch.notifications) ? patch.notifications : {}),
+    },
   }
   const result = validateSettings(merged)
 
@@ -370,6 +382,9 @@ function touchedBy(key: string, patch: SettingsPatch): boolean {
   const field = key.slice(separator + 1)
   if (group === 'github') return isRecord(patch.github) && field in patch.github
   if (group === 'git') return isRecord(patch.git) && field in patch.git
+  if (group === 'notifications') {
+    return isRecord(patch.notifications) && field in patch.notifications
+  }
   if (group === 'appearance') return isRecord(patch.appearance) && field in patch.appearance
   if (group === 'privacy') return isRecord(patch.privacy) && field in patch.privacy
   return false
@@ -379,6 +394,9 @@ function restore(settings: AppSettings, key: string, current: AppSettings): void
   switch (key) {
     case 'github.host':
       settings.github.host = current.github.host
+      return
+    case 'notifications.enabled':
+      settings.notifications.enabled = current.notifications.enabled
       return
     case 'git.useSystemGit':
       settings.git.useSystemGit = current.git.useSystemGit
@@ -606,6 +624,9 @@ function preserveLocked(target: AppSettings, current: AppSettings, key: string):
   switch (key) {
     case 'github.host':
       target.github.host = current.github.host
+      return
+    case 'notifications.enabled':
+      target.notifications.enabled = current.notifications.enabled
       return
     case 'git.useSystemGit':
       target.git.useSystemGit = current.git.useSystemGit

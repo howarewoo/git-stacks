@@ -8,6 +8,7 @@ import type {
   RepositoryIssue,
   RepositorySnapshot,
 } from '../shared/types'
+import type { NotificationInbox } from '../shared/notifications'
 import type { UpdateStatus } from '../shared/update'
 
 /**
@@ -146,6 +147,25 @@ const desktop: DesktopAPI = {
     ipcRenderer.on('github-account', handler)
     return () => {
       ipcRenderer.removeListener('github-account', handler)
+    }
+  },
+  notificationsStatus: () => ipcRenderer.invoke('notifications:status'),
+  notifications: () => ipcRenderer.invoke('notifications:inbox'),
+  refreshNotifications: () => ipcRenderer.invoke('notifications:refresh'),
+  cancelNotifications: () => ipcRenderer.invoke('notifications:cancel'),
+  // The token crosses the bridge exactly once, in the request. Nothing in this
+  // file returns it, holds it, or forwards it to a listener.
+  saveNotificationCredential: (token, consent) =>
+    ipcRenderer.invoke('notifications:save-credential', token, consent),
+  removeNotificationCredential: () => ipcRenderer.invoke('notifications:remove-credential'),
+  markNotificationRead: (threadId) => ipcRenderer.invoke('notifications:mark-read', threadId),
+  setNotificationSubscription: (threadId, action) =>
+    ipcRenderer.invoke('notifications:subscription', threadId, action),
+  onNotifications: (listener: (inbox: NotificationInbox) => void) => {
+    const handler = (_event: unknown, inbox: NotificationInbox): void => listener(inbox)
+    ipcRenderer.on('notifications', handler)
+    return () => {
+      ipcRenderer.removeListener('notifications', handler)
     }
   },
   githubHostStatus: () => ipcRenderer.invoke('github:host-status'),
