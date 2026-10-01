@@ -139,7 +139,7 @@ during the run is reported and the result is not `published`.
 
 If the root advanced after the plan was authorized, say so against the **pinned** snapshot:
 the prepared chain integrates the pinned root, and the newer root work is not part of it.
-A root that moves *after* the last write is reported the same way, with
+A root that moves _after_ the last write is reported the same way, with
 `preservation.root: fail` and `rootAdvance.integrated: false` - never as a chain that is
 current against work nothing here merged.
 

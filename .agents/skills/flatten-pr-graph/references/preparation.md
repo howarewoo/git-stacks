@@ -49,7 +49,7 @@ decided mechanically, and what a recoverable partial state looks like.
    arrives through `resolutions` - but a path that has already left the unmerged set was
    resolved by somebody and staged, and committing it would attribute it to a decision
    this run never made.
-8. Compare the user's fingerprint against the one the *first* run journalled, not only
+8. Compare the user's fingerprint against the one the _first_ run journalled, not only
    against this run's own start, so a change made between two runs is a fact about the
    user's work rather than something folded into this run's preservation claim.
 

@@ -221,7 +221,10 @@ define({
   id: 'prep-independent-pair-integrates-each-predecessor',
   area: 'preparation',
   criteria: ['#87 whole graph', '#87 new predecessor', '#87 original commit retention'],
-  findings: ['P8 Distinguish already-present contributions from lost paths', 'P13 Verify pinned-root containment when reusing recorded prepared heads'],
+  findings: [
+    'P8 Distinguish already-present contributions from lost paths',
+    'P13 Verify pinned-root containment when reusing recorded prepared heads',
+  ],
   expect: { status: 'prepared', codes: [] },
   async run(production) {
     const numbers = [12, 13]
@@ -333,12 +336,20 @@ define({
     // A -> B, A -> C, and D branched from B with C merged in: a real four-node diamond
     // whose tip has to integrate both arms of the fan-out.
     const a = await production.seedBranch(BRANCHES[12], { 'a.txt': 'the shared arm\n' })
-    const b = await production.seedBranch(BRANCHES[13], { 'b.txt': 'the upper arm\n' }, {
-      base: BRANCHES[12],
-    })
-    const c = await production.seedBranch(BRANCHES[14], { 'c.txt': 'the lower arm\n' }, {
-      base: BRANCHES[12],
-    })
+    const b = await production.seedBranch(
+      BRANCHES[13],
+      { 'b.txt': 'the upper arm\n' },
+      {
+        base: BRANCHES[12],
+      },
+    )
+    const c = await production.seedBranch(
+      BRANCHES[14],
+      { 'c.txt': 'the lower arm\n' },
+      {
+        base: BRANCHES[12],
+      },
+    )
     const tip = await production.scratch('diamond-d')
     tip.fetch()
     tip.checkout(BRANCHES[13])
@@ -483,10 +494,7 @@ define({
     const request = { order: [12, 13] as number[], originalHeads }
     const blocked = production.prepare(request)
     assert.equal(blocked.ok, false, 'the same path on both sides needs a stated decision')
-    assert.equal(
-      blocked.conflicts.find((entry) => entry.number === 13)?.needsDecision,
-      true,
-    )
+    assert.equal(blocked.conflicts.find((entry) => entry.number === 13)?.needsDecision, true)
 
     const resolved = production.prepare({
       ...request,
@@ -591,7 +599,8 @@ interface StructuralCase {
 const structuralCases: StructuralCase[] = [
   {
     id: 'rename',
-    detail: 'rename-conflict',    async seed(production) {
+    detail: 'rename-conflict',
+    async seed(production) {
       production.advanceRoot({ 'root.txt': 'moves on\n', 'moves/old.txt': 'the original\n' })
       const renamer = await production.scratch('rename-12')
       renamer.fetch()
@@ -614,7 +623,8 @@ const structuralCases: StructuralCase[] = [
   },
   {
     id: 'modify-delete',
-    detail: 'modify-delete',    async seed(production) {
+    detail: 'modify-delete',
+    async seed(production) {
       production.advanceRoot({ 'root.txt': 'moves on\n', 'gone.txt': 'the original\n' })
       const editor = await production.scratch('modify-delete-12')
       editor.fetch()
@@ -633,7 +643,8 @@ const structuralCases: StructuralCase[] = [
   },
   {
     id: 'delete-modify',
-    detail: 'delete-modify',    async seed(production) {
+    detail: 'delete-modify',
+    async seed(production) {
       production.advanceRoot({ 'root.txt': 'moves on\n', 'gone.txt': 'the original\n' })
       const deleter = await production.scratch('delete-modify-12')
       deleter.fetch()
@@ -652,8 +663,9 @@ const structuralCases: StructuralCase[] = [
   },
   {
     id: 'file-directory',
-    detail: 'file-directory',    async seed(production) {
-      production.advanceRoot({ 'root.txt': 'moves on\n', 'thing': 'a file\n' })
+    detail: 'file-directory',
+    async seed(production) {
+      production.advanceRoot({ 'root.txt': 'moves on\n', thing: 'a file\n' })
       const filer = await production.scratch('file-directory-12')
       filer.fetch()
       filer.checkout(DEFAULT_BRANCH)
@@ -672,7 +684,8 @@ const structuralCases: StructuralCase[] = [
   },
   {
     id: 'binary',
-    detail: 'binary',    async seed(production) {
+    detail: 'binary',
+    async seed(production) {
       production.advanceRoot({ 'root.txt': 'moves on\n', 'blob.bin': 'seed\n' })
       const first = await production.scratch('binary-12')
       first.fetch()
@@ -699,7 +712,8 @@ const structuralCases: StructuralCase[] = [
   },
   {
     id: 'submodule',
-    detail: 'submodule',    async seed(production) {
+    detail: 'submodule',
+    async seed(production) {
       production.advanceRoot({ 'root.txt': 'moves on\n' })
       const first = await production.scratch('submodule-12')
       first.fetch()
@@ -732,7 +746,8 @@ const structuralCases: StructuralCase[] = [
   },
   {
     id: 'lockfile',
-    detail: 'lockfile',    async seed(production) {
+    detail: 'lockfile',
+    async seed(production) {
       const lock = `${JSON.stringify({ name: 'fixture', lockfileVersion: 3 })}\n`
       production.advanceRoot({ 'root.txt': 'moves on\n', 'package-lock.json': lock })
       const first = await production.scratch('lockfile-12')
@@ -760,7 +775,8 @@ const structuralCases: StructuralCase[] = [
   },
   {
     id: 'generated',
-    detail: 'generated',    async seed(production) {
+    detail: 'generated',
+    async seed(production) {
       production.advanceRoot({ 'root.txt': 'moves on\n', 'dist/bundle.js': 'seed\n' })
       const first = await production.scratch('generated-12')
       first.fetch()
@@ -1013,7 +1029,8 @@ define({
   expect: {
     status: 'blocked',
     codes: ['conflicting-environment-control'],
-    mentions: ['commit.gpgsign'],  },
+    mentions: ['commit.gpgsign'],
+  },
   async run(production) {
     const originalHeads = await seedStack(production, [12, 13])
     production.world.gitIn(production.world.remote, 'config', 'commit.gpgsign', 'true')
@@ -1036,7 +1053,8 @@ define({
   expect: {
     status: 'blocked',
     codes: ['conflicting-environment-control'],
-    mentions: ['core.hooksPath'],  },
+    mentions: ['core.hooksPath'],
+  },
   async run(production) {
     const originalHeads = await seedStack(production, [12, 13])
     const hooks = join(production.world.root, 'policy-hooks')
@@ -1057,7 +1075,8 @@ define({
   expect: {
     status: 'blocked',
     codes: ['conflicting-environment-control'],
-    mentions: ['merge.fixture.driver'],  },
+    mentions: ['merge.fixture.driver'],
+  },
   async run(production) {
     const originalHeads = await seedStack(production, [12, 13], {
       rootFiles: {
@@ -1135,11 +1154,7 @@ define({
     process.env.GIT_INDEX_FILE = userIndex
     try {
       production.world.gitIn(production.world.repo, 'read-tree', 'HEAD')
-      const before = production.world.tryGitIn(
-        production.world.repo,
-        'status',
-        '--porcelain',
-      )
+      const before = production.world.tryGitIn(production.world.repo, 'status', '--porcelain')
       const prepared = production.prepare({ order: [12, 13], originalHeads })
       assert.equal(prepared.ok, true, JSON.stringify(prepared.errors))
       assert.equal(
@@ -1222,11 +1237,7 @@ define({
     const second = await production.scratch('symlink-13')
     second.fetch()
     second.checkout(DEFAULT_BRANCH)
-    production.writeBytes(
-      second.path,
-      'link.txt',
-      Buffer.from('a real file with the same name\n'),
-    )
+    production.writeBytes(second.path, 'link.txt', Buffer.from('a real file with the same name\n'))
     const b = second.commit('replace the link with a file')
     second.push(BRANCHES[13], { force: true })
 
@@ -1478,7 +1489,10 @@ define({
       ),
     )
     assert.notEqual(estimate.kind, 'unknown', 'an unattributed driver must not block a real pair')
-    assert.ok((estimate.value ?? 0) >= 1, 'a genuinely conflicting pair still costs resolution work')
+    assert.ok(
+      (estimate.value ?? 0) >= 1,
+      'a genuinely conflicting pair still costs resolution work',
+    )
     return outcome(estimate.kind, [], [])
   },
 })
@@ -1499,7 +1513,9 @@ define({
   expect: { status: 'published', codes: [] },
   async run(production) {
     const stack = await preparedStack(production, [12, 13])
-    const unrelated = await production.seedBranch('unrelated', { 'unrelated.txt': 'not selected\n' })
+    const unrelated = await production.seedBranch('unrelated', {
+      'unrelated.txt': 'not selected\n',
+    })
     const before = production.refs()
 
     const result = await production.publish(stack.prepared, publishArgs(stack))
@@ -1569,7 +1585,8 @@ define({
   expect: {
     status: 'blocked',
     codesAny: ['invalid-input', 'conflicting-environment-control'],
-    mentions: ['preparationRunDirectory'],  },
+    mentions: ['preparationRunDirectory'],
+  },
   async run(production) {
     const stack = await preparedStack(production, [12, 13])
     const result = await production.publish(stack.prepared, {
@@ -1591,7 +1608,10 @@ const journalMutations: Array<{
   { id: 'selection', mutate: (plan) => void (plan.selection = [12]) },
   { id: 'order', mutate: (plan) => void (plan.order = [13, 12]) },
   { id: 'root', mutate: (plan) => void (plan.rootOid = 'f'.repeat(40)) },
-  { id: 'intended-bases', mutate: (plan) => void (plan.intendedBases = { 12: 'main', 13: 'main' }) },
+  {
+    id: 'intended-bases',
+    mutate: (plan) => void (plan.intendedBases = { 12: 'main', 13: 'main' }),
+  },
   { id: 'prepared-heads', mutate: (plan) => void (plan.preparedHeads = { 12: 'a'.repeat(40) }) },
 ]
 
@@ -1638,7 +1658,7 @@ define({
   id: 'publish-resume-under-a-mutated-order-is-refused',
   area: 'publication',
   criteria: ['#88 a resume under a mutated order is refused'],
-  findings: ['B11 Bind resume to the journal\'s immutable publication plan'],
+  findings: ["B11 Bind resume to the journal's immutable publication plan"],
   expect: { status: 'blocked', codes: ['stale-snapshot'] },
   async run(production) {
     const stack = await preparedStack(production, [12, 13, 14], {
@@ -1810,7 +1830,12 @@ define({
 
 const grantCases: Array<{ id: string; granted: string[]; detail: string; zeroCalls: boolean }> = [
   { id: 'empty-grant', granted: [], detail: 'no recognised mutation kind', zeroCalls: true },
-  { id: 'base-only-grant', granted: ['pr-base-update'], detail: 'pending head writes', zeroCalls: false },
+  {
+    id: 'base-only-grant',
+    granted: ['pr-base-update'],
+    detail: 'pending head writes',
+    zeroCalls: false,
+  },
   { id: 'ref-only-grant', granted: ['ref-update'], detail: 'retargeting', zeroCalls: false },
 ]
 
@@ -1819,7 +1844,7 @@ for (const grant of grantCases) {
     id: `publish-${grant.id}-blocks-before-the-push`,
     area: 'publication',
     criteria: ['#88 every required mutation kind is granted before any remote operation'],
-  findings: ['B1 Require the ref-update grant before probing or pushing'],
+    findings: ['B1 Require the ref-update grant before probing or pushing'],
     expect: { status: 'blocked', codes: ['missing-permission'], mentions: [grant.detail] },
     async run(production) {
       const stack = await preparedStack(production, [12, 13])
@@ -1837,7 +1862,11 @@ for (const grant of grantCases) {
       )
       assert.equal(result.status, 'blocked', JSON.stringify(result.errors))
       assert.deepEqual(result.publication.attempts, [])
-      assert.deepEqual(await baseWrites(stack.adapter), [], 'a missing grant must not become a write')
+      assert.deepEqual(
+        await baseWrites(stack.adapter),
+        [],
+        'a missing grant must not become a write',
+      )
       if (grant.zeroCalls) {
         assert.deepEqual(await stack.adapter.calls(), [], 'no provider conversation may start')
       }
@@ -2344,7 +2373,13 @@ define({
     // The helper reads the destination from the repository it was pointed at, so the two
     // push urls have to live there; a remote configured in some other repository would
     // test nothing about the run.
-    production.world.gitIn(production.world.remote, 'remote', 'add', 'mirror', production.world.remote)
+    production.world.gitIn(
+      production.world.remote,
+      'remote',
+      'add',
+      'mirror',
+      production.world.remote,
+    )
     production.world.gitIn(
       production.world.remote,
       'remote',

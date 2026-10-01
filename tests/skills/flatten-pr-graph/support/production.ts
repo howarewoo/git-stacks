@@ -65,7 +65,11 @@ export interface PreparedRun {
     workspaceKind: string
     branches: PreparedBranch[]
     lostOriginalCommits: string[]
-    cumulativeIntegration: Array<{ number: number; integratedPreparedStateOf: number; evidence: string }>
+    cumulativeIntegration: Array<{
+      number: number
+      integratedPreparedStateOf: number
+      evidence: string
+    }>
     conflicts: Array<{ number: number; path: string; resolution: string }>
     unresolved: string[]
     indexState: {
@@ -160,7 +164,9 @@ export interface ProviderAdapter {
   /** Every operation the helper asked for, in order, including refusals. */
   calls(): Promise<ProviderCall[]>
   /** The pull-request metadata the double currently serves. */
-  pullRequests(): Promise<Record<string, { number: number; baseRef: string; headRef: string; title: string }>>
+  pullRequests(): Promise<
+    Record<string, { number: number; baseRef: string; headRef: string; title: string }>
+  >
 }
 
 export interface PinnedPullRequest {
@@ -481,7 +487,10 @@ export class Production {
   writeGlobalConfig(entries: Record<string, string>): void {
     const config = join(this.world.root, 'gitconfig')
     const lines = Object.entries(entries).map(([key, value]) => `[${key}]\n\t${value}\n`)
-    writeFileSync(config, `${existsSync(config) ? readFileSync(config, 'utf8') : ''}${lines.join('')}`)
+    writeFileSync(
+      config,
+      `${existsSync(config) ? readFileSync(config, 'utf8') : ''}${lines.join('')}`,
+    )
   }
 
   /** The real `git push` the helper would run, for a fault at an exact moment. */
@@ -618,9 +627,7 @@ export class Production {
 }
 
 /** The provider operations that actually changed remote state, in the order they were asked. */
-export async function acknowledgedBaseWrites(
-  adapter: ProviderAdapter,
-): Promise<number[]> {
+export async function acknowledgedBaseWrites(adapter: ProviderAdapter): Promise<number[]> {
   const calls = await adapter.calls()
   return calls
     .filter((call) => call.op === 'updatePullRequestBase' && call.outcome === 'acknowledged')

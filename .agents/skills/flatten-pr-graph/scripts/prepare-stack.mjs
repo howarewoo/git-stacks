@@ -163,10 +163,7 @@ const ROUTING_ENV_VARS = [
 
 /** `GIT_CONFIG_KEY_<n>` / `GIT_CONFIG_VALUE_<n>` are a numbered family, not fixed names. */
 function isRoutingEnvVar(name) {
-  return (
-    ROUTING_ENV_VARS.includes(name) ||
-    /^GIT_CONFIG_(KEY|VALUE)_\d+$/.test(name)
-  )
+  return ROUTING_ENV_VARS.includes(name) || /^GIT_CONFIG_(KEY|VALUE)_\d+$/.test(name)
 }
 
 function routingOverrides() {
@@ -398,7 +395,9 @@ function userWorktreeDigest(repo) {
       const stat = lstatSync(full)
       parts.push(
         relativePath,
-        stat.isSymbolicLink() ? `link:${readlinkSync(full)}` : `file:${hashBytes(readFileSync(full))}`,
+        stat.isSymbolicLink()
+          ? `link:${readlinkSync(full)}`
+          : `file:${hashBytes(readFileSync(full))}`,
       )
     } catch {
       parts.push(relativePath, 'unreadable')
@@ -538,7 +537,9 @@ function fingerprintDrift(before, after) {
   const beforeOperations = (before.operationsInProgress ?? []).join(',')
   const afterOperations = (after.operationsInProgress ?? []).join(',')
   if (beforeOperations !== afterOperations) {
-    drift.push(`operationsInProgress: journalled ${beforeOperations || 'none'}, now ${afterOperations || 'none'}`)
+    drift.push(
+      `operationsInProgress: journalled ${beforeOperations || 'none'}, now ${afterOperations || 'none'}`,
+    )
   }
   return drift
 }
@@ -634,7 +635,11 @@ function verifyPlan(raw) {
   // plan that can never complete should not leave half a preparation behind.
   for (const [index, resolution] of resolutions.entries()) {
     if (resolution.path === null) {
-      throw new InputError('invalid-input', `resolutions[${index}].path must name a path`, 'received no path')
+      throw new InputError(
+        'invalid-input',
+        `resolutions[${index}].path must name a path`,
+        'received no path',
+      )
     }
     if (resolution.intent.trim() === '' || resolution.reason.trim() === '') {
       throw new InputError(
@@ -1622,7 +1627,9 @@ function preparePosition(options) {
       ...reachableCommits(storage, originalOid, baseOid),
       ...input.order
         .map((selected) => input.originalHeads[String(selected)] ?? input.originalHeads[selected])
-        .filter((oid) => typeof oid === 'string' && oid !== '' && isAncestor(storage, oid, preparedHead)),
+        .filter(
+          (oid) => typeof oid === 'string' && oid !== '' && isAncestor(storage, oid, preparedHead),
+        ),
     ]),
   ].sort()
   const verification = []
@@ -2117,7 +2124,13 @@ function prepareStackInner(raw) {
             evidence: drift.join('; '),
           },
         ],
-        run: { runId, runDirectory: input.runDirectory, journalPath, workspaces: [], backupRefs: [] },
+        run: {
+          runId,
+          runDirectory: input.runDirectory,
+          journalPath,
+          workspaces: [],
+          backupRefs: [],
+        },
         preparation: null,
         verification: [],
         continuation: existing.continuation ?? {

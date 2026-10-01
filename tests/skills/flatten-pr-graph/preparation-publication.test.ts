@@ -1041,8 +1041,7 @@ test('a resume does not adopt a staged resolution the journal never recorded', a
   assert.equal(resumed.ok, false)
   assert.ok(
     resumed.errors.some(
-      (error) =>
-        error.code === 'unfinished-run' && /never decided/.test(error.detail) === true,
+      (error) => error.code === 'unfinished-run' && /never decided/.test(error.detail) === true,
     ),
     JSON.stringify(resumed.errors),
   )
@@ -1227,7 +1226,7 @@ test('an unselected ref that moves during publication is reported, not published
       }
       // Somebody else's push lands after the pre-flight read and before the final one.
       if (reads >= 2) refs['refs/heads/unrelated'] = mover
- return refs
+      return refs
     },
   })
 
@@ -1256,22 +1255,18 @@ test('a root that moves after the writes is reported against the pinned snapshot
   const moved = await seedBranch(world, 'root-moved-later', { 'r.txt': 'r\n' })
   let reads = 0
 
-  const published = await runPublish(
-    world,
-    publicationDocument(world, prepared, [12]),
-    {
-      readRemoteRefs: (repository: string, endpoint: string) => {
-        reads += 1
-        const refs: Record<string, string> = {}
-        for (const line of world.gitIn(repository, 'ls-remote', '--heads', endpoint).split('\n')) {
-          const [oid, ref] = line.trim().split(/\s+/)
-          if (oid && ref) refs[ref] = oid
-        }
-        if (reads >= 2) refs['refs/heads/main'] = moved
-        return refs
-      },
+  const published = await runPublish(world, publicationDocument(world, prepared, [12]), {
+    readRemoteRefs: (repository: string, endpoint: string) => {
+      reads += 1
+      const refs: Record<string, string> = {}
+      for (const line of world.gitIn(repository, 'ls-remote', '--heads', endpoint).split('\n')) {
+        const [oid, ref] = line.trim().split(/\s+/)
+        if (oid && ref) refs[ref] = oid
+      }
+      if (reads >= 2) refs['refs/heads/main'] = moved
+      return refs
     },
-  )
+  })
 
   assert.equal(published.status, 'published', JSON.stringify(published.errors))
   assert.ok(published.rootAdvance, 'the root advance must be reported')
@@ -1372,10 +1367,7 @@ test('a custom transport helper is refused before discovery and never executed',
   )
 
   assert.equal(blocked.status, 'blocked')
-  assert.match(
-    blocked.errors.map((error) => error.detail).join('; '),
-    /remote-helper transport/,
-  )
+  assert.match(blocked.errors.map((error) => error.detail).join('; '), /remote-helper transport/)
   assert.equal(existsSync(marker), false, 'the ext helper must not have been executed')
   assert.deepEqual(blocked.publication.attempts, [])
 })

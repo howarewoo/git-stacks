@@ -36,10 +36,7 @@
 import { execFileSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 import { isAbsolute } from 'node:path'
-import {
-  attributedDriverControls,
-  treePaths,
-} from './git-controls.mjs'
+import { attributedDriverControls, treePaths } from './git-controls.mjs'
 
 const CONTRACT_VERSION = 'flatten-pr-graph/1'
 const GIT_TIMEOUT_MS = 120_000

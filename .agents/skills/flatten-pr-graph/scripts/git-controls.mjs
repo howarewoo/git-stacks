@@ -89,8 +89,7 @@ function attributedDrivers(git, cwd, source, paths) {
       ok: false,
       found: [],
       reason:
-        (read.stderr || read.stdout).trim().slice(0, 200) ||
-        `git check-attr exited ${read.status}`,
+        (read.stderr || read.stdout).trim().slice(0, 200) || `git check-attr exited ${read.status}`,
     }
   }
   const fields = read.stdout.split('\0').filter(Boolean)
@@ -219,10 +218,14 @@ const EXECUTABLE_CONFIG = [
     why: 'every commit this repository makes is signed, and the signing program is not inherited',
     when: 'always',
   },
-  { match: /^gpg\.(format|program)$/i, why: 'signing or verification runs this program', when: 'always' },
+  {
+    match: /^gpg\.(format|program)$/i,
+    why: 'signing or verification runs this program',
+    when: 'always',
+  },
   {
     match: /^core\.fsmonitor$/i,
-    why: 'git status and git diff run the filesystem monitor this names, or spawn Git\'s own daemon for it',
+    why: "git status and git diff run the filesystem monitor this names, or spawn Git's own daemon for it",
     when: 'always',
   },
   {
@@ -293,7 +296,9 @@ export function canonicalControlKey(key) {
 }
 
 function isEnabled(value) {
-  const normalized = String(value ?? '').trim().toLowerCase()
+  const normalized = String(value ?? '')
+    .trim()
+    .toLowerCase()
   return normalized !== '' && normalized !== 'false' && normalized !== '0' && normalized !== 'off'
 }
 
@@ -319,7 +324,9 @@ export function executableControls(git, cwd, env = {}, transports = new Set()) {
   if (!listed.ok) {
     controls.push({
       control: 'config.read',
-      value: (listed.stderr || listed.stdout).trim().slice(0, 200) || `git config --list exited ${listed.status}`,
+      value:
+        (listed.stderr || listed.stdout).trim().slice(0, 200) ||
+        `git config --list exited ${listed.status}`,
       inTaskStorage: 'inherited',
       blocking: true,
       effect:
@@ -363,4 +370,3 @@ export function executableControls(git, cwd, env = {}, transports = new Set()) {
   }
   return controls
 }
-

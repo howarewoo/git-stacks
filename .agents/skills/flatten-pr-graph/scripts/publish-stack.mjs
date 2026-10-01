@@ -340,7 +340,8 @@ function effectiveUrl(repository, url) {
     throw new InputError(
       'conflicting-environment-control',
       `the effective destination for ${url} could not be resolved, so its transport is unknown`,
-      (resolved.stderr || resolved.stdout).trim().slice(0, 200) || `git ls-remote --get-url exited ${resolved.status}`,
+      (resolved.stderr || resolved.stdout).trim().slice(0, 200) ||
+        `git ls-remote --get-url exited ${resolved.status}`,
     )
   }
   return lines(resolved.stdout)[0] ?? url
@@ -1281,7 +1282,6 @@ export async function publishStack(raw, conversations = {}) {
     })
   }
 
-
   // 1. Authority. Nothing below runs without it, and it is checked against the exact
   //    selection the prepared set names rather than against anything a caller asserts.
   const authorityErrors = []
@@ -1886,7 +1886,10 @@ export async function publishStack(raw, conversations = {}) {
             ? `not at the prepared head: ${stuck.map((write) => write.ref).join(', ')}`
             : drifted.length > 0
               ? `a selected head this run did not need to write has moved: ${drifted
-                  .map((entry) => `${entry.ref} is ${String(entry.observed).slice(0, 12)}, prepared at ${String(entry.expected).slice(0, 12)}`)
+                  .map(
+                    (entry) =>
+                      `${entry.ref} is ${String(entry.observed).slice(0, 12)}, prepared at ${String(entry.expected).slice(0, 12)}`,
+                  )
                   .join(', ')}`
               : 'a head write has an unknown acknowledgement; the remote is re-read before any retry',
       })
@@ -2152,8 +2155,7 @@ export async function publishStack(raw, conversations = {}) {
         integrated: false,
       }
       advance.observed = finalRoot ?? ''
-      advance.note =
-        `the published chain is integrated against the pinned root ${input.root.oid.slice(0, 12)}; the root read back as ${(finalRoot ?? 'absent').slice(0, 12)} after the last write and that newer work is not part of this chain`
+      advance.note = `the published chain is integrated against the pinned root ${input.root.oid.slice(0, 12)}; the root read back as ${(finalRoot ?? 'absent').slice(0, 12)} after the last write and that newer work is not part of this chain`
       verification.push({
         invariant: 'preservation.root',
         method: 'git ls-remote read-back of the root ref after the last write',
