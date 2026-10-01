@@ -344,7 +344,7 @@ define({
     tip.push(BRANCHES[15], { force: true })
 
     const numbers = [12, 13, 14, 15]
-    const originalHeads = { 12: a, 13: b, 14: c, 15: d }
+    const originalHeads: Record<number, string> = { 12: a, 13: b, 14: c, 15: d }
     const prepared = production.prepare({ order: numbers, originalHeads })
     assert.equal(prepared.ok, true, JSON.stringify(prepared.errors))
     const branches = prepared.preparation?.branches ?? []
@@ -1583,7 +1583,7 @@ for (const mutation of journalMutations) {
     id: `publish-resume-under-a-mutated-${mutation.id}-is-refused`,
     area: 'publication',
     criteria: ['#88 an incompatible journal root, selection, order or prepared commit is refused'],
-    findings: ['B11 Bind resume to the journal's immutable publication plan'],
+    findings: ["B11 Bind resume to the journal's immutable publication plan"],
     expect: { status: 'blocked', codes: ['stale-snapshot'] },
     async run(production) {
       const stack = await preparedStack(production, [12, 13], {
@@ -2046,19 +2046,22 @@ define({
   expect: { status: 'blocked', codes: ['stale-snapshot'] },
   async run(production) {
     const stack = await preparedStack(production, [12, 13])
-    const concurrent = await production.seedBranch(
-      BRANCHES[12],
-      { 'concurrent.txt': 'somebody else\n' },
-      { base: BRANCHES[12] },
-    )
+    let concurrent = ''
     const result = await production.publish(stack.prepared, publishArgs(stack), {
-      // Somebody else lands a push between the preflight read and the write. The push that
-      // follows is the real one, so the lease rejection is Git's own answer.
-      push: (repository: string, endpoint: string, refspecs: string[], leases: string[]) => {
-        production.world.moveRemoteRef(BRANCHES[12], concurrent)
+      // The concurrent push happens HERE, inside the seam, after the preflight has already
+      // read the selected head and accepted it. Publishing it beforehand would let the
+      // preflight itself refuse the run, which proves the snapshot check and nothing about
+      // the lease. The push that follows is the real one, so the rejection is Git's answer.
+      push: async (repository: string, endpoint: string, refspecs: string[], leases: string[]) => {
+        concurrent = await production.seedBranch(
+          BRANCHES[12],
+          { 'concurrent.txt': 'somebody else\n' },
+          { base: BRANCHES[12] },
+        )
         return production.realPush(repository, endpoint, refspecs, leases)
       },
     })
+    assert.notEqual(concurrent, '', 'the concurrent push really landed in the seam')
     assert.notEqual(result.status, 'published', JSON.stringify(result.errors))
     assert.equal(
       production.refs()[`refs/heads/${BRANCHES[12]}`],
@@ -2100,25 +2103,32 @@ define({
   expect: { status: 'published', codes: [] },
   async run(production) {
     const stack = await preparedStack(production, [12, 13])
-    const newer = await production.seedBranch(DEFAULT_BRANCH, { 'later.txt': 'root moves late\n' })
     let reads = 0
+    let newer = ''
     const result = await production.publish(
       stack.prepared,
       { ...publishArgs(stack), root: { ref: ROOT_REF, oid: stack.root } },
       {
+        // The root advances here, after the preflight has already accepted the pinned id,
+        // and it advances for real: the refs handed back are read from the remote, not
+        // assembled here. Moving it before the run would only re-test the snapshot check.
         readRemoteRefs: (repository: string, endpoint: string) => {
           reads += 1
-          const refs = realRemoteRefs(production, endpoint)
-          if (reads === 2) {
-            production.world.moveRemoteRef(DEFAULT_BRANCH, newer)
-            return { ...refs, [ROOT_REF]: newer }
-          }
-          return refs
+          if (reads === 2) newer = production.advanceRoot({ 'later.txt': 'root moves late\n' })
+          return realRemoteRefs(production, endpoint)
         },
       },
     )
+    assert.notEqual(newer, '', 'the root really moved after the preflight')
+    assert.notEqual(newer, stack.root, 'the root moved somewhere else')
+    assert.equal(
+      production.refs()[ROOT_REF],
+      newer,
+      'what is reported as advanced is what the remote actually holds',
+    )
     assert.equal(result.status, 'published', JSON.stringify(result.errors))
     assert.notEqual(result.rootAdvance?.integrated, true, 'newer root work is never claimed')
+    assert.equal(result.rootAdvance?.pinned, stack.root)
     const rootRow = result.verification.find((row) => row.invariant === 'preservation.root')
     assert.equal(rootRow !== undefined, true, 'the newer root is reported at all')
     assert.notEqual(rootRow?.result, 'pass', 'an unintegrated root is not a passing check')
