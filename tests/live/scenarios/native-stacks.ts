@@ -1,5 +1,4 @@
 import { getSnapshot, runAction } from '../../../src/main/git'
-import { getGitHubData } from '../../../src/main/github'
 import {
   addPullRequestsToStack,
   createPullRequestStack,
@@ -97,36 +96,59 @@ async function stacksHolding(ctx: LiveScenarioContext, numbers: readonly number[
 }
 
 /**
- * The real pull request of a subject this run does not own, read the way the
- * application reads one.
+ * The real pull request of a subject this run does not own, read the way the stack
+ * path reads one.
  *
- * The metadata comes from the production reader and parser through the URL the
- * host reports for the pull request, so the head repository in the result is the
- * one the host really has rather than a name this scenario chose.
+ * The read is the request the application's own chain validation makes, sent
+ * through the configured transport to the repository the pull request really lives
+ * in, so the head repository in the result is the one the host reports rather than
+ * a name this scenario chose.
  */
 async function readForeignPullRequest(
   ctx: LiveScenarioContext,
-  subject: { fullName: string; number: number; url: string },
+  subject: { fullName: string; number: number; url: string | null },
 ): Promise<PullRequest> {
-  const data = await getGitHubData(ctx.workspace.path, subject.url)
+  assert(subject.url !== null, 'the host reported no address for this pull request')
+  const [owner, repo] = subject.fullName.split('/')
+  const read = await ctx.transport.rest<Record<string, unknown>>({
+    method: 'GET',
+    path: `repos/${owner}/${repo}/pulls/${subject.number}`,
+  })
+  const head = isRecord(read.data.head) ? read.data.head : null
+  const headRepo = head !== null && isRecord(head.repo) ? head.repo : null
+  const base = isRecord(read.data.base) ? read.data.base : null
   assert(
-    data.available,
-    `the application could not read ${subject.fullName}#${subject.number}: ${data.message}`,
-  )
-  const found = data.pullRequests.find((entry) => entry.number === subject.number)
-  assert(
-    found !== undefined,
-    `the host does not report pull request #${subject.number} at ${subject.fullName}`,
+    typeof headRepo?.full_name === 'string' && headRepo.full_name.length > 0,
+    `the host did not report a head repository for ${subject.fullName}#${subject.number}`,
   )
   assert(
-    (found.headRepository ?? '').toLowerCase() === subject.fullName.toLowerCase(),
-    `#${subject.number} was read with head repository ${String(found.headRepository)}, not ${subject.fullName}`,
+    typeof head?.ref === 'string' && typeof base?.ref === 'string',
+    `the host did not report both refs for ${subject.fullName}#${subject.number}`,
   )
   assert(
-    (found.headRepository ?? '').toLowerCase() !== ctx.repository.toLowerCase(),
-    `#${subject.number} claims to live in ${ctx.repository}, so it is not a foreign subject at all`,
+    headRepo.full_name.toLowerCase() !== ctx.repository.toLowerCase(),
+    `#${subject.number} reads with head repository ${headRepo.full_name}, which is this repository itself, so it is not a foreign subject`,
   )
-  return found
+  assert(
+    String(read.data.html_url) === subject.url,
+    `the host answers ${subject.fullName}#${subject.number} with the address ${String(read.data.html_url)}, not ${subject.url}`,
+  )
+  return {
+    number: subject.number,
+    title: typeof read.data.title === 'string' ? read.data.title : '',
+    url: String(read.data.html_url),
+    head: head.ref,
+    base: base.ref,
+    headRepository: headRepo.full_name,
+    state:
+      typeof read.data.merged_at === 'string'
+        ? 'MERGED'
+        : read.data.state === 'open'
+          ? 'OPEN'
+          : 'CLOSED',
+    draft: read.data.draft === true,
+    checks: 'none',
+  }
 }
 
 export const nativeStackScenarios: readonly LiveScenario[] = [
