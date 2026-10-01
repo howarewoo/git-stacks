@@ -152,7 +152,7 @@ function startGitHubHost() {
       unread: true,
       reason: 'mention',
       subject: {
-        title: 'Mentioned in the release checklist',
+        title: 'Mentioned in "Release checklist"',
         url: `${SELF}api/v3/repos/acme/widgets/issues/102`,
         type: 'Issue',
       },
@@ -214,6 +214,9 @@ function startGitHubHost() {
   // send back: the newest one would only be the answer this host has not given
   // yet.
   let answered = issued()
+  // The interval this host declares in its own answers, which is the floor the
+  // app keeps for a person's press as well as for its own poll.
+  let pollInterval = 0
   // A write this host applies and then loses the answer to. GitHub can accept a
   // change and still leave the client without an answer, and the only honest
   // thing the client can then say is that it does not know, so this host does
@@ -235,8 +238,10 @@ function startGitHubHost() {
           ifModifiedSince: request.headers['if-modified-since'] ?? null,
           authorization: request.headers.authorization ?? null,
           validatorAtArrival: answered,
+          at: Date.now(),
         })
         const answer = (status, body, headers) => {
+          if (headers?.['x-poll-interval']) pollInterval = Number(headers['x-poll-interval'])
           response.writeHead(status, { 'content-type': 'application/json', ...headers })
           response.end(body === null ? '' : JSON.stringify(body))
         }
@@ -333,6 +338,7 @@ function startGitHubHost() {
         asked,
         threads: () => threads,
         validator: () => answered,
+        pollInterval: () => pollInterval,
         loseNextWrite: () => {
           loseNextWrite = true
         },
@@ -602,7 +608,9 @@ async function main() {
         userGesture: true,
       })
       if (result.exceptionDetails) {
-        throw new Error(`${result.exceptionDetails.text}: ${JSON.stringify(expression)}`)
+        throw new Error(
+          `${result.exceptionDetails.exception?.description ?? result.exceptionDetails.text}: ${JSON.stringify(expression)}`,
+        )
       }
       return result.result.value
     }
@@ -727,7 +735,7 @@ async function main() {
     }
     /** A control on the row that names this thread, labelled as it is on screen. */
     const control = (title, label) =>
-      `[...document.querySelectorAll('[role="listitem"]')].find((r) => r.innerText.includes(${JSON.stringify(title)}))?.querySelector('[aria-label=${JSON.stringify(label)}]')`
+      `(() => { const row = [...document.querySelectorAll('[role="listitem"]')].find((r) => r.innerText.includes(${JSON.stringify(title)})); return row ? [...row.querySelectorAll('[aria-label]')].find((b) => b.getAttribute('aria-label') === ${JSON.stringify(label)}) ?? null : null })()`
     const viewportOf = () => page('({ width: window.innerWidth, height: window.innerHeight })')
     /** Whether the box is really inside the viewport a person is looking at. */
     const inView = async (expression, description) => {
@@ -1098,21 +1106,22 @@ async function main() {
     // not because this app decided to call it done.
     const readsBeforeConfirmation = host.asked.length
     const refreshControl = `[...document.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Refresh')`
-    // The interval GitHub named is a floor this app keeps even for a person
-    // pressing Refresh, and the module's own poll may already have read inside
-    // it, so the control is pressed until one read actually reaches the host
-    // rather than assuming a fixed wait lines up with the floor.
+    // The floor is the one this host declared, measured from its last read, and
+    // the control is pressed once after it: this is a person asking again, not
+    // the run retrying the API around the app's rule.
+    const lastRead = host.asked.filter((entry) => entry.path.startsWith('/api/v3/notifications')).at(-1)
+    const floor = Math.max(0, (lastRead?.at ?? 0) + host.pollInterval() * 1000 - Date.now())
+    if (floor > 0) await delay(floor)
+    await reveal(refreshControl, 'the refresh control')
+    await press(refreshControl, 'the refresh control')
     let confirmedRead = null
-    for (let attempt = 0; attempt < 90 && confirmedRead === null; attempt += 1) {
-      await reveal(refreshControl, 'the refresh control')
-      await press(refreshControl, 'the refresh control')
-      await delay(1_000)
+    for (let attempt = 0; attempt < 300 && confirmedRead === null; attempt += 1) {
+      await delay(50)
       confirmedRead =
         host.asked
           .slice(readsBeforeConfirmation)
-          .find(
-            (entry) => entry.method === 'GET' && entry.path.startsWith('/api/v3/notifications'),
-          ) ?? null
+          .find((entry) => entry.method === 'GET' && entry.path.startsWith('/api/v3/notifications')) ??
+        null
     }
     assert.ok(confirmedRead !== null, 'a read of the changed list really reached the host')
     assert.equal(
@@ -1152,7 +1161,8 @@ async function main() {
         'Mark Something this build has no name for as read',
         'Unsubscribe from Something this build has no name for',
       ],
-      'every operation that needs no page is offered, and only the browser link is absent',
+      'every operation that needs no page is offered, and only the browser link is absent: ' +
+        JSON.stringify(unnamed.controls.map((entry) => entry.name)),
     )
     assert.equal(
       unnamed.controls.some((entry) => entry.name.startsWith('Open ')),
@@ -1185,16 +1195,16 @@ async function main() {
     // used: the row that leaves the list is the row that was acted on, and the
     // host is the one that decides it left.
     await reveal(
-      control('Mentioned in the release checklist', 'Unsubscribe from Mentioned in the release checklist'),
+      control('Mentioned in "Release checklist"', 'Unsubscribe from Mentioned in "Release checklist"'),
       'the unsubscribe control',
     )
     await press(
-      control('Mentioned in the release checklist', 'Unsubscribe from Mentioned in the release checklist'),
+      control('Mentioned in "Release checklist"', 'Unsubscribe from Mentioned in "Release checklist"'),
       'the unsubscribe control',
     )
     await until(
       'the unsubscribed thread to leave the list',
-      `!document.body.innerText.includes('release checklist') && document.body.innerText.includes('Tidy the stack ordering rules')`,
+      `!document.body.innerText.includes('Release checklist') && document.body.innerText.includes('Tidy the stack ordering rules')`,
       600,
     )
     assert.deepEqual(
@@ -1287,7 +1297,7 @@ async function main() {
         `Ignore ${title}`,
         `Unsubscribe from ${title}`,
       ]) {
-        const controlOnThisRow = `[...document.querySelectorAll('[role="listitem"]')].find((r) => r.innerText.includes(${JSON.stringify(title)}))?.querySelector('[aria-label=${JSON.stringify(name)}]')`
+        const controlOnThisRow = `(() => { const row = [...document.querySelectorAll('[role="listitem"]')].find((r) => r.innerText.includes(${JSON.stringify(title)})); return row ? [...row.querySelectorAll('[aria-label]')].find((b) => b.getAttribute('aria-label') === ${JSON.stringify(name)}) ?? null : null })()`
         await inView(controlOnThisRow, `the ${name} control at 200% zoom`)
       }
       zoomedInbox ??= await screenshot(`notifications-zoom-200-row`, { viewportOnly: true })
@@ -1390,7 +1400,7 @@ async function main() {
     )
     const zoomedAction = await screenshot('notifications-zoom-200-action', { viewportOnly: true })
     await page(
-      `document.querySelector('[aria-label=${JSON.stringify(`Unsubscribe from ${firstRowTitle}`)}]')?.focus()`,
+      `[...document.querySelectorAll('[aria-label]')].find((b) => b.getAttribute('aria-label') === ${JSON.stringify(`Unsubscribe from ${firstRowTitle}`)})?.focus()`,
     )
     await key('Enter', 'Enter', 13)
     await until(
@@ -1666,7 +1676,7 @@ async function main() {
     // must not do is call it failed, or send it again, or mark the row either way
     // on a guess.
     second.loseNextWrite()
-    const lostRowTitle = 'Mentioned in the release checklist'
+    const lostRowTitle = 'Mentioned in "Release checklist"'
     const lostLabel = `Mark ${lostRowTitle} as read`
     await reveal(control(lostRowTitle, lostLabel), `the ${lostLabel} control`)
     const beforeLost = second.asked.length
@@ -1698,7 +1708,7 @@ async function main() {
       `an unknown outcome says so plainly: ${unknownOutcome}`,
     )
     assert.equal(
-      (await rowsOnScreen()).find((row) => row.title.includes('release checklist'))?.state,
+      (await rowsOnScreen()).find((row) => row.title.includes('Release checklist'))?.state,
       'Unread',
       'and the row keeps the state it was last confirmed in rather than one this window guessed',
     )
