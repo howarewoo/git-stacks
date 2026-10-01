@@ -43,6 +43,15 @@ export interface LiveRunConfig {
   readonly receiptPath: string
   /** Secrets that must never reach a log, a report, or an artifact. */
   readonly secrets: readonly string[]
+  /**
+   * The branch this run's repository is to treat as its default.
+   *
+   * Named here and asked for when the repository is created, rather than assumed from
+   * the answer afterwards: a host whose own default is not this name would otherwise be
+   * seeded on a branch it does not consider default, and every merge, ruleset and
+   * base-ref question the suite asks would then be about a branch that is not one.
+   */
+  readonly defaultBranch: string
 }
 
 export const LIVE_ENV = {
@@ -53,6 +62,7 @@ export const LIVE_ENV = {
   repositoryPrefix: 'GIT_STACKS_LIVE_GITHUB_REPOSITORY_PREFIX',
   runId: 'GIT_STACKS_LIVE_GITHUB_RUN_ID',
   receipt: 'GIT_STACKS_LIVE_GITHUB_RECEIPT',
+  defaultBranch: 'GIT_STACKS_LIVE_GITHUB_DEFAULT_BRANCH',
 } as const
 
 /**
@@ -98,12 +108,18 @@ export function readLiveRunConfig(env: NodeJS.ProcessEnv = process.env): LiveRun
   const repositoryPrefix = (env[LIVE_ENV.repositoryPrefix] ?? 'git-stacks-live-e2e').trim()
   const runId = (env[LIVE_ENV.runId] ?? '').trim() || newRunId()
   const receiptPath = (env[LIVE_ENV.receipt] ?? '').trim() || defaultReceiptPath(runId)
+  // Named, not defaulted to a literal. A host whose own default branch is not `main`
+  // answers with something else, and the run would then seed a branch the repository
+  // does not treat as its default and ask every merge, ruleset and base-ref question
+  // about it. One variable is the whole cost of not guessing.
+  const defaultBranch = (env[LIVE_ENV.defaultBranch] ?? '').trim()
 
   const missing: string[] = []
   if (!OWNER.test(owner)) missing.push(LIVE_ENV.owner)
   if (!HOST.test(host)) missing.push(LIVE_ENV.host)
   if (!token) missing.push(LIVE_ENV.token)
   if (!repositoryPrefix) missing.push(LIVE_ENV.repositoryPrefix)
+  if (!defaultBranch) missing.push(LIVE_ENV.defaultBranch)
   if (missing.length > 0) throw new LiveConfigurationError(missing)
 
   // Both endpoints come from the host, never from the environment. The transport
@@ -119,6 +135,7 @@ export function readLiveRunConfig(env: NodeJS.ProcessEnv = process.env): LiveRun
     reviewerToken,
     repositoryPrefix,
     runId,
+    defaultBranch,
     receiptPath,
     secrets: reviewerToken ? [token, reviewerToken] : [token],
   }

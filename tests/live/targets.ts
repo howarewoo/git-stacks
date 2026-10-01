@@ -16,6 +16,7 @@ import {
   claimLiveTools,
   createGitHubHarness,
   WRITING_ROLES,
+  type GitHubFixtureState,
   type GitHubHarness,
 } from '../fixtures/github-harness'
 import { startControlledGitHubHost, type ControlledGitHubHost } from '../fixtures/live-github-tls'
@@ -43,7 +44,7 @@ import type {
   LiveWorkspace,
 } from './contract'
 import { FaultInjectingTransport } from './transport'
-import { LocalGitWorkspace } from './workspace'
+import { GIT_TIMEOUT_MS, LocalGitWorkspace } from './workspace'
 
 /**
  * The two disposable targets, written once.
@@ -675,7 +676,7 @@ export class ControlledLiveTarget extends DisposableTarget {
   readonly kind = 'controlled' as const
   readonly admin: LiveAdmin
   readonly reviewer: LiveReviewer
-  private readonly harness: GitHubHarness
+  private readonly harnessInstance: GitHubHarness
   private readonly server: ControlledGitHubHost
   private readonly workspaceInstance: LocalGitWorkspace
   private readonly productionTransport: GitHubTransport
@@ -689,7 +690,7 @@ export class ControlledLiveTarget extends DisposableTarget {
     },
   ) {
     super(setup)
-    this.harness = setup.harness
+    this.harnessInstance = setup.harness
     this.server = setup.server
     this.workspaceInstance = setup.workspace as LocalGitWorkspace
     this.productionTransport = setup.productionTransport
@@ -953,7 +954,7 @@ export class ControlledLiveTarget extends DisposableTarget {
         'A fork subject needs a second account, and this run was not given one to fork with',
       )
     }
-    const subject = await this.harness.provisionForeignSubject({
+    const subject = await this.harnessInstance.provisionForeignSubject({
       kind,
       owner: actor?.login ?? this.primary.login,
       name: `${this.fullName.split('/')[1]}-${kind}`,
@@ -984,8 +985,16 @@ export class ControlledLiveTarget extends DisposableTarget {
     // its own fork" from an assumption into something this host checked.
     await this.extendGitCredentials(
       this.server.cloneUrl(subject.fullName),
-      kind === 'fork' ? this.harness.reviewer.token : this.harness.primaryToken,
+      kind === 'fork' ? this.harnessInstance.reviewer.token : this.harnessInstance.primaryToken,
     )
+    // The extended environment was built from the one installed before this host's own
+    // keys existed, so installing it puts those keys back where they were rather than
+    // where the host needs them. The API double reads its state from the environment,
+    // and the fork's pull request is opened over that same double.
+    Object.assign(process.env, this.harnessInstance.ownedEnvironment, {
+      GIT_STACKS_GITHUB_API_URL: this.server.url,
+      GIT_STACKS_GITHUB_TRANSPORT: 'direct',
+    })
     await createForeignRepository({
       path: foreignPath,
       remote: this.server.cloneUrl(subject.fullName),
@@ -994,7 +1003,7 @@ export class ControlledLiveTarget extends DisposableTarget {
     })
     const clone = new LocalGitWorkspace({
       path: foreignPath,
-      git: this.harness.env.GIT_STACKS_REAL_GIT as string,
+      git: this.harnessInstance.env.GIT_STACKS_REAL_GIT as string,
       origin: this.server.cloneUrl(subject.fullName),
       cloneSource: this.server.cloneUrl(subject.fullName),
       certificatePath: this.server.certificatePath,
@@ -1029,6 +1038,51 @@ export class ControlledLiveTarget extends DisposableTarget {
   }
 
   /**
+   * The credentials this host knows, so a run can ask the authorizer about each of them
+   * rather than only about the one its own remote happens to use.
+   *
+   * A boundary that has only ever been crossed by the right key has not been shown to
+   * refuse the wrong one. This is how the refusal is exercised at all: the host's own
+   * decision, on this host's own accounts, with the answer the host would give a Git.
+   */
+  get harnessState(): () => Promise<GitHubFixtureState> {
+    return this.harnessInstance.readState
+  }
+
+  get harness(): GitHubHarness {
+    return this.harnessInstance
+  }
+
+  /** The clone URL of this run's own repository, so a request can be made against it. */
+  cloneUrlForTest(): string {
+    return this.server.cloneUrl(this.fullName)
+  }
+
+  /**
+   * One real request to this host's own Git endpoint, over its own socket.
+   *
+   * The host's fetch is used rather than a new client so the certificate this run
+   * generated is the one that is verified: a probe that disabled checking to reach the
+   * host would prove nothing about a boundary whose whole point is that checking.
+   * Nothing here calls the authorizer — the answer comes from the request handler.
+   */
+  async wireGitRequestForTest(
+    repository: string,
+    credential: string | undefined,
+  ): Promise<number> {
+    const url = new URL(`${this.server.url}/${repository}.git/info/refs`)
+    url.searchParams.set('service', 'git-upload-pack')
+    const answer = await this.server.fetch(url, {
+      headers:
+        credential === undefined
+          ? {}
+          : { authorization: `basic ${Buffer.from(`x-access-token:${credential}`).toString('base64')}` },
+    })
+    await answer.arrayBuffer()
+    return answer.status
+  }
+
+  /**
    * There is no remote to clean up here: this run's host is this process.
    *
    * Everything the run opened is released by `releaseLocal` instead, which the guard
@@ -1045,7 +1099,7 @@ export class ControlledLiveTarget extends DisposableTarget {
   protected async releaseLocal(): Promise<void> {
     this.workspaceInstance.close()
     await this.server.close()
-    await this.harness.close()
+    await this.harnessInstance.close()
     await rm(this.root, { recursive: true, force: true })
   }
 }
@@ -1199,6 +1253,12 @@ export class GitHubLiveTarget extends DisposableTarget {
         pending: true,
         actor: primary.login,
       })
+      // The branch this repository is to treat as its default is named here and asked
+      // for in the create request, rather than guessed at from the answer. A host whose
+      // own default is not this name would otherwise be reported as having a different
+      // default branch from the one the run then seeds and asks every merge, ruleset and
+      // base-ref question about.
+      const defaultBranch = config.defaultBranch
       let identity: LiveRepositoryIdentity
       try {
         identity = await admin.createRepository({
@@ -1206,6 +1266,7 @@ export class GitHubLiveTarget extends DisposableTarget {
           name,
           description: `Disposable target for the Git Stacks live suite, run ${config.runId}.`,
           marker,
+          defaultBranch,
         })
       } catch (error) {
         // The answer was lost, or the host refused. Either way the repository may or
@@ -1235,7 +1296,7 @@ export class GitHubLiveTarget extends DisposableTarget {
         fullName,
         root,
         remote,
-        defaultBranch: identity.defaultBranch ?? 'main',
+        defaultBranch,
         git: git.env,
       })
       // The reviewer is let in before the run is handed on, and its access is read back
@@ -1255,7 +1316,7 @@ export class GitHubLiveTarget extends DisposableTarget {
         marker,
         receiptPath,
         fullName,
-        defaultBranch: identity.defaultBranch ?? 'main',
+        defaultBranch,
         host: githubHostContext(config.host),
         primary,
         ledger,
@@ -1350,6 +1411,7 @@ export class GitHubLiveTarget extends DisposableTarget {
             name,
             description: `Disposable foreign subject for the Git Stacks live suite, run ${this.runId}.`,
             marker: this.marker,
+            defaultBranch: this.defaultBranch,
           })
     // One entry for this handle. `confirm` completes the journal written before the
     // request, records the id the host named, and takes the pending flag off — so
@@ -1642,6 +1704,7 @@ async function readRepositoryIdentity(
   }
 }
 
+
 /**
  * The repository a foreign branch is pushed from, created before anything points a
  * remote at it.
@@ -1734,9 +1797,14 @@ async function seedRemoteClone(input: {
   // No credential is in the URL and none is in this repository's configuration: the
   // header the run installed is inherited by every Git started from here, the
   // application included, so a push the product makes is authorized the same way.
+  // Bounded, because this is the first request this run makes to a host over a network it
+  // does not control, and it happens immediately after the repository was created. A
+  // bound turns a host that never answers into a failure the guard already knows how to
+  // report and clean up, rather than a run that waits for that socket for ever.
   execFileSync(git, ['-C', clone, 'push', 'origin', `HEAD:refs/heads/${input.defaultBranch}`], {
     stdio: ['ignore', 'pipe', 'pipe'],
     env: input.git,
+    timeout: GIT_TIMEOUT_MS,
   })
   return new LocalGitWorkspace({
     path: clone,
@@ -1792,10 +1860,21 @@ async function authorizeControlledGit(
   // The primary repository is the one entry the registry never holds: it was created
   // before this harness existed and is served from its own bare, so its name is read
   // off that bare — the way the host itself resolves the path — rather than off the
-  // state, whose owner is whatever the API double answers with.
+  // state, whose owner is whatever the API double answers with. The name has already
+  // had the `.git` a remote URL ends in taken off it by the boundary, so this is a
+  // plain comparison and not a guess about suffixes.
   const primary = relative(harness.projectsRoot, harness.bare).replace(/\.git$/u, '')
   if (fullName.toLowerCase() === primary.toLowerCase()) {
-    return { login: actor.login }
+    // Written by the account this run itself created the repository as, which is not
+    // the repository's `owner` field: a disposable repository under an organization is
+    // owned by the organization and created by a user credential that administers it.
+    // Comparing against the owner refuses the one account that is meant to be able to
+    // push to it; comparing against a login would admit any credential minted for that
+    // name. The grant that matters here is the one this run made, so it is compared
+    // against the credential that made it.
+    return token === harness.primaryToken
+      ? { login: actor.login }
+      : { status: 403, message: `${actor.login} did not create ${fullName}\n` }
   }
   const registry = (state.repositories ?? []).find(
     (entry) => entry.fullName.toLowerCase() === fullName.toLowerCase(),

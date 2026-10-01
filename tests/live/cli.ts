@@ -11,6 +11,7 @@ import {
   type RecoveryOutcome,
   type RecoverySurface,
 } from './provisioning'
+import { NODE_TRANSPORT_VARIABLES } from './git-environment'
 import { FaultInjectingTransport } from './transport'
 import {
   DirectGitHubTransport,
@@ -151,6 +152,7 @@ A run must name its target. --github additionally requires:
   ${LIVE_ENV.repositoryPrefix}  the prefix of the disposable repository (optional)
   ${LIVE_ENV.runId}          the run id stamped on everything created (optional)
   ${LIVE_ENV.receipt}        where the cleanup receipt is written (optional)
+  ${LIVE_ENV.defaultBranch}  the branch the repository is asked to treat as its default
   ${LIVE_ENV.reviewerToken}  a second account that can approve and reply (optional)
 
 --recover is a different command, not a run: it names no target and creates nothing. It
@@ -210,7 +212,7 @@ export async function runCli(options: CliOptions): Promise<number> {
         : await (options.startGitHub ?? defaultGitHub)(options.env)
   } catch (error) {
     if (error instanceof LiveConfigurationError) {
-      options.err(error.message)
+      options.err(redactor.text(error.message))
       return EXIT_REFUSED
     }
     // A provisioning failure is not a refusal. It means the run created something and
@@ -276,7 +278,7 @@ export async function runCli(options: CliOptions): Promise<number> {
         },
       })
       options.out('')
-      options.out(report.summary)
+      options.out(redactor.text(report.summary))
       exit = report.passed ? EXIT_OK : EXIT_FAILED
       if (command.json) options.out(redactor.text(JSON.stringify(report, null, 2)))
     }
@@ -328,15 +330,19 @@ async function runRecovery(receiptPath: string, options: CliOptions): Promise<nu
   const host = String(options.env[LIVE_ENV.host] ?? '').trim()
   if (host === '') {
     options.err(
-      `A recovery run has to be told which host. Set ${LIVE_ENV.host} to the host the receipt ` +
-        `names (${receipt.host}).`,
+      redactor.text(
+        `A recovery run has to be told which host. Set ${LIVE_ENV.host} to the host the receipt ` +
+          `names (${receipt.host}).`,
+      ),
     )
     return EXIT_REFUSED
   }
   if (host.toLowerCase() !== receipt.host.toLowerCase()) {
     options.err(
-      `The receipt at ${receiptPath} is for ${receipt.host}, and this run was pointed at ${host}. ` +
-        'Nothing was removed.',
+      redactor.text(
+        `The receipt at ${receiptPath} is for ${receipt.host}, and this run was pointed at ${host}. ` +
+          'Nothing was removed.',
+      ),
     )
     return EXIT_REFUSED
   }
@@ -371,16 +377,25 @@ async function runRecovery(receiptPath: string, options: CliOptions): Promise<nu
   // holding a live token for the rest of the process.
   let outcome: RecoveryOutcome | undefined
   try {
+    // No global transport, and none restored afterwards. Everything this command does
+    // is handed its surface explicitly, so installing one into the process would put a
+    // live credential where the whole application can reach it — and taking it away
+    // afterwards would remove whatever was installed before this command ran rather than
+    // put that back. A credential that belongs to one deletion never has to be global.
     const primary = pinnedTransport(host, primaryToken)
     transports.push(primary)
-    setGitHubTransport(primary)
 
     const who = async (transport: GitHubTransport): Promise<string> => {
       try {
         return await new GitHubAdmin(transport, receipt.owner, receipt.marker).viewer()
       } catch (error) {
+        // Redacted where it is built, not where it is printed: the detail is a host's own
+        // words about a request that carried a credential, and this refusal can travel
+        // further than the one print site that would have redacted it.
         throw new RecoveryRefusal(
-          `The credential supplied could not be asked who it belongs to: ${describeThrown(error)}`,
+          redactor.text(
+            `The credential supplied could not be asked who it belongs to: ${describeThrown(error)}`,
+          ),
         )
       }
     }
@@ -388,9 +403,11 @@ async function runRecovery(receiptPath: string, options: CliOptions): Promise<nu
     const primaryLogin = await who(primary)
     if (!actors.has(primaryLogin.toLowerCase())) {
       options.err(
+        redactor.text(
         `This receipt records ${[...actors].join(', ')} as the account${actors.size === 1 ? '' : 's'} ` +
           `that created what it names, and the credential supplied belongs to ${primaryLogin}. ` +
           'Nothing was removed.',
+        ),
       )
       return EXIT_REFUSED
     }
@@ -413,8 +430,10 @@ async function runRecovery(receiptPath: string, options: CliOptions): Promise<nu
       // worse than one that declined.
       if (login.toLowerCase() === primaryLogin.toLowerCase()) {
         options.err(
-          `The reviewer credential also belongs to ${login}, so there is only one account ` +
-            'here and not the two a run needs. Nothing was removed.',
+          redactor.text(
+            `The reviewer credential also belongs to ${login}, so there is only one account ` +
+              'here and not the two a run needs. Nothing was removed.',
+          ),
         )
         return EXIT_REFUSED
       }
@@ -428,15 +447,10 @@ async function runRecovery(receiptPath: string, options: CliOptions): Promise<nu
     })
   } catch (error) {
     if (error instanceof RecoveryRefusal) {
-      options.err(`${error.message}. Nothing was removed.`)
+      options.err(redactor.text(`${error.message}. Nothing was removed.`))
       return EXIT_REFUSED
     }
     throw error
-  } finally {
-    // The process keeps neither credential: this command ends the moment it is done,
-    // and anything else running in it has no business holding a token that was only
-    // supplied for one deletion.
-    setGitHubTransport(null)
   }
   options.out(redactor.text(renderRecovery(outcome)))
   return outcome.complete ? EXIT_OK : EXIT_FAILED
@@ -492,6 +506,13 @@ function sanitizedEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   delete clean.GH_TOKEN
   delete clean.GITHUB_TOKEN
   delete clean.GIT_STACKS_GITHUB_TOKEN
+  // Node's own transport switches come out with the rest. A credential is sent in an
+  // authorization header to whatever certificate the socket presented, so a process
+  // that inherited `NODE_TLS_REJECT_UNAUTHORIZED=0` would authenticate to a host nothing
+  // vouches for — and the first thing this command asks over that socket is who the
+  // credential belongs to. The same list the run's Git isolation retires governs it, so
+  // there is one answer to "may this process skip certificate checking" rather than two.
+  for (const name of NODE_TRANSPORT_VARIABLES) delete clean[name]
   return clean
 }
 

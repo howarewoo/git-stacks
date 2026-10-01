@@ -232,6 +232,8 @@ export class GitHubAdmin implements LiveAdmin {
     description: string
     marker: string
     private?: boolean
+    /** The branch this repository is to treat as its default, asked for rather than assumed. */
+    defaultBranch: string
   }): Promise<LiveRepositoryIdentity> {
     const resolved = await this.resolveOwner(input.owner)
     const { data } = await this.call<CreatedRepositoryProbe>({
@@ -249,6 +251,13 @@ export class GitHubAdmin implements LiveAdmin {
         description: markedDescription(input.description, input.marker),
         private: input.private !== false,
         auto_init: false,
+        // Asked for, rather than guessed at afterwards. A repository created with no
+        // initial commit reports whatever the host's own setting is, and on a host whose
+        // default is `master` a run that assumed `main` would seed a branch the host did
+        // not call the default — and then every merge-queue, ruleset and base-ref check
+        // would be asking about a branch the repository does not have. This is the one
+        // branch name in the run that is not an assumption.
+        default_branch: input.defaultBranch,
         // A queue and a ruleset are configured after the repository exists; asking
         // for them here would hide a refusal behind a failed create.
         has_issues: false,

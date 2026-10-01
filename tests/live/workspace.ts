@@ -91,7 +91,7 @@ const REMOTE_SUBCOMMANDS: Record<string, true> = {
  * as the platform allows. A bound turns that into an ordinary failure the run's own
  * cleanup path handles.
  */
-const GIT_TIMEOUT_MS = 120_000
+export const GIT_TIMEOUT_MS = 120_000
 
 /** One Git command that may reach the remote, with the outcome raised rather than printed. */
 function runGitRemote(

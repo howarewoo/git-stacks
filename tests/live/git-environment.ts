@@ -158,7 +158,10 @@ const TRACING_VARIABLES = [
  * of how the process was launched, and no environment installed afterwards can
  * take them back out.
  */
-const NODE_TRANSPORT_VARIABLES = ['NODE_TLS_REJECT_UNAUTHORIZED', 'NODE_EXTRA_CA_CERTS'] as const
+export const NODE_TRANSPORT_VARIABLES = [
+  'NODE_TLS_REJECT_UNAUTHORIZED',
+  'NODE_EXTRA_CA_CERTS',
+] as const
 
 /**
  * Takes Node's own transport switches out of this process, and hands back the

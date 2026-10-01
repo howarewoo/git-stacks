@@ -254,7 +254,12 @@ async function decideGitRequest(
   if (credential === null) {
     return { status: 401, message: 'this repository needs a credential\n' }
   }
-  return options.authorizeGit(fullName, credential)
+  // The name out of a Git request still carries the `.git` a remote URL ends in, because
+  // that is the directory this host serves. The repository it names is the name without
+  // it, and that is the form every authorizer is handed: a name that matched here but
+  // not against a permission map keyed by repository name would refuse the owner of the
+  // very repository the request was for.
+  return options.authorizeGit(fullName.replace(/\.git$/u, ''), credential)
 }
 
 /**
