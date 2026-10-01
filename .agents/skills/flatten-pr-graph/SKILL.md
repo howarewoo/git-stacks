@@ -30,7 +30,7 @@ bypass it or run them as part of flattening.
 1. **Scope and inspect.** Deduplicate numbers/URLs by repository and PR identity;
    resolve one repository and read applicable instructions. Use the supplied root
    or discover the default branch. Read each PR's open state, head/base refs and
-   SHAs, head repository, history, and diffs with Git and GitHub/`gh`.
+   SHAs, head repository, auto-merge configuration, history, and diffs.
    Require distinct writable heads in that repository, none equal to the root.
    Report unsupported, closed, forked, inaccessible, or ambiguous inputs without
    dropping or substituting them. Record original refs/SHAs and bases before work.
@@ -68,11 +68,15 @@ bypass it or run them as part of flattening.
 
 4. **Publish the chain.** Re-read remote root/head SHAs and PR states/bases against
    the captured snapshot before any write; stop on changed state, do not refresh
-   expectations merely to overwrite it. Push only selected prepared heads with
-   explicit refspecs and expected-old-SHA protection, e.g. explicit
+   expectations merely to overwrite it. Verify auto-merge is disabled for every
+   selected PR; stop with a blocker if enabled or unverifiable. Never disable it
+   or rely on later base retargeting to prevent a merge into the old base.
+   Push only selected prepared heads with explicit refspecs and expected-old-SHA
+   protection, e.g. explicit
    `--force-with-lease=refs/heads/<head>:<captured-sha>` only after proving that
    captured head is an ancestor of the prepared head. Never rewrite history.
-   Recheck relevant heads/bases immediately before each write. Retarget only bases
+   Recheck relevant heads/bases and every selected PR's auto-merge immediately
+   before each write, applying the same blocker rule. Retarget only bases
    to form `root <- PR A <- PR B <- PR C`, using the predecessor's head branch.
    Skip unchanged refs/bases. Respect tool permissions and repository restrictions;
    a rejection is a blocker, not permission to bypass protections. Multi-PR pushes
