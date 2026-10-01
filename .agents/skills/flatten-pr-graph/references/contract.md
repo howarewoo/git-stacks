@@ -1,9 +1,13 @@
 # flatten-pr-graph conditional contract
 
 **Contract version:** `flatten-pr-graph/1`
-**Status:** contract only. No executable skill entry point, no planner, no publisher, and no
-optimizer exist in this increment.
-**Parent scope:** issue #83. This reference implements issue #84.
+**Status:** the conditional contract plus two later increments. `#85` added the portable
+core (`../SKILL.md`), `#86` added the ordering reference (`ordering.md`) and three
+deterministic helpers under `../scripts/`. There is still no publisher and no harness
+adapter, so phases 4-6 of the core are unavailable to a harness that lacks the
+capability and report an honest `planned` or `blocked` result.
+**Parent scope:** issue #83. This file implements issue #84 and remains authoritative for
+what every later increment must agree on.
 
 This is a _conditional_ reference. Read it when the requested work touches PR-graph
 flattening; it is not standing repository instruction and it does not run anything by
@@ -239,8 +243,9 @@ probes estimate one merge; they do not prove a cumulative minimum across a chain
 | `best-found`                   | a search with a declared budget ran, and the budget was exhausted or pruned by a declared rule |
 | `heuristic`                    | ordering came from a rule, with no search claim                                                |
 
-Algorithm and budget selection belong to `#86`; this reference fixes only the objective, the
-labels, and the honesty rules.
+Algorithm and budget selection belong to `ordering.md` (`#86`); this reference fixes only
+the objective, the labels, and the honesty rules. The completion oracle's invariant list
+and the check behind each one live in `oracle.md`.
 
 ### 9.2 Statuses and legal transitions
 
@@ -307,9 +312,12 @@ nothing on the real provider, and are never invoked by a flattening run.
 Fixture code that manufactures repository and provider state is scaffolding, not integration
 policy: it seeds the state the oracle inspects and deliberately implements none of §7.2.
 
-## 12. Non-goals of this increment
+## 12. Increment boundaries
 
-No `SKILL.md`, no planner, no optimizer, no publisher, no harness adapter, no application
-feature or runtime dependency, no live PR mutation, no permission grant, and no root `docs/`.
-Development instructions live in the root `README.md`; run-specific evidence lives in the
-pull request.
+This reference is the contract, and it stays authoritative. The increments that consume
+it each own one thing: `#85` the portable core at `../SKILL.md`, `#86` `ordering.md` and
+the helpers under `../scripts/`, `#87` cumulative integration, `#88` publication and
+recovery, `#89` harness adapters, `#90` the complete-skill evaluation. No increment owns
+a root `docs/`, an application feature or runtime dependency, a live pull request graph,
+or a permission grant. Development instructions live in the root `README.md`; run-specific
+evidence lives in the pull request.

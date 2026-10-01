@@ -58,7 +58,18 @@
       "stashCount": 0,
       "configDigest": "sha256:0d1a2b3c"
     },
-    "history": { "complete": true, "shallow": false, "grafted": 0 },
+    "externalPrerequisites": [],
+    "unselectedDependents": [],
+    "capabilityLimitations": [
+      { "limitation": "none observed", "effect": "no capability limited this result" }
+    ],
+    "history": {
+      "complete": true,
+      "shallow": false,
+      "grafted": 0,
+      "unrelated": [],
+      "reconciliation": []
+    },
     "landing": {
       "autoMergeEnabledOn": [13]
     }
@@ -85,11 +96,31 @@
         "stable-tie-break"
       ],
       "estimates": [],
+      "componentTotals": {
+        "estimatedConflictResolutionWork": 0,
+        "historyDisruption": 0,
+        "unknownEstimates": 0
+      },
+      "cumulative": {
+        "kind": "pairwise-only",
+        "value": null,
+        "why": "planning stopped before any probe; no estimate exists to report"
+      },
       "qualification": "heuristic",
-      "budget": { "probes": 0, "exhausted": false },
+      "budget": {
+        "probes": 0,
+        "exhausted": false,
+        "ordersEnumerated": 0,
+        "orderEvaluations": 0,
+        "orderEvaluationLimit": 200,
+        "search": "stable-topological-baseline"
+      },
       "unknownTreatedAsZero": false
     },
     "proposedWrites": [],
+    "capabilityLimitations": [
+      { "limitation": "none observed", "effect": "no capability limited this result" }
+    ],
     "prohibitedActivitiesNotPerformed": [
       {
         "activity": "disable-auto-merge",

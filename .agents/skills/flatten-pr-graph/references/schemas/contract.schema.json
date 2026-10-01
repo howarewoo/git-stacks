@@ -198,7 +198,7 @@
     "history": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["complete", "shallow", "grafted"],
+      "required": ["complete", "shallow", "grafted", "unrelated", "reconciliation"],
       "properties": {
         "complete": {
           "type": "boolean"
@@ -209,6 +209,42 @@
         "grafted": {
           "type": "integer",
           "minimum": 0
+        },
+        "unrelated": {
+          "description": "Refs observed whose history shares no merge base with the root; they make ancestry undecidable rather than negative.",
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "reconciliation": {
+          "description": "How the SHA each provider observation reported was reconciled against what task-owned storage actually holds.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/shaReconciliation"
+          }
+        }
+      }
+    },
+    "shaReconciliation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ref", "observed", "fetched", "state"],
+      "properties": {
+        "ref": {
+          "type": "string",
+          "minLength": 1
+        },
+        "observed": {
+          "$ref": "#/$defs/sha"
+        },
+        "fetched": {
+          "type": ["string", "null"],
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "state": {
+          "enum": ["agreed", "provider-ahead", "storage-ahead", "unreachable"]
         }
       }
     },
@@ -225,6 +261,64 @@
         }
       }
     },
+    "externalPrerequisite": {
+      "description": "A head a selected pull request needs that is not itself selected. Satisfaction is proven by original ancestry or recorded landing evidence, never by similar patch text.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ref", "state", "satisfiedBy", "evidence"],
+      "properties": {
+        "ref": {
+          "type": "string",
+          "minLength": 1
+        },
+        "state": {
+          "enum": ["satisfied", "unsatisfied", "unknown"]
+        },
+        "satisfiedBy": {
+          "enum": ["selected-root-ancestry", "recorded-landing", "none"]
+        },
+        "evidence": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "unselectedDependent": {
+      "description": "A pull request outside the selection that depends on a selected head. It is reported so the write scope stays explicit; it is never flattened, closed, or retargeted.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["number", "dependsOn", "basis", "reportedOnly"],
+      "properties": {
+        "number": {
+          "$ref": "#/$defs/prNumber"
+        },
+        "dependsOn": {
+          "$ref": "#/$defs/prNumber"
+        },
+        "basis": {
+          "enum": ["declared-base", "strict-ancestry"]
+        },
+        "reportedOnly": {
+          "const": true
+        }
+      }
+    },
+    "capabilityLimitation": {
+      "description": "Something the run could not observe or do. An incomplete enumeration is a limitation, never a silently smaller graph.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["limitation", "effect"],
+      "properties": {
+        "limitation": {
+          "type": "string",
+          "minLength": 1
+        },
+        "effect": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
     "snapshot": {
       "type": "object",
       "additionalProperties": false,
@@ -238,6 +332,9 @@
         "refs",
         "userWorkspace",
         "history",
+        "externalPrerequisites",
+        "unselectedDependents",
+        "capabilityLimitations",
         "landing"
       ],
       "properties": {
@@ -307,6 +404,24 @@
               }
             }
           }
+        },
+        "externalPrerequisites": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/externalPrerequisite"
+          }
+        },
+        "unselectedDependents": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/unselectedDependent"
+          }
+        },
+        "capabilityLimitations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/capabilityLimitation"
+          }
         }
       }
     },
@@ -357,7 +472,15 @@
     "objective": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["declared", "estimates", "qualification", "budget", "unknownTreatedAsZero"],
+      "required": [
+        "declared",
+        "estimates",
+        "componentTotals",
+        "cumulative",
+        "qualification",
+        "budget",
+        "unknownTreatedAsZero"
+      ],
       "properties": {
         "declared": {
           "type": "array",
@@ -376,13 +499,59 @@
             "$ref": "#/$defs/estimate"
           }
         },
+        "componentTotals": {
+          "description": "Per-component totals over the chosen order. `unknownEstimates` counts estimates the probes could not produce; it is never folded into a numeric total of zero.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["estimatedConflictResolutionWork", "historyDisruption", "unknownEstimates"],
+          "properties": {
+            "estimatedConflictResolutionWork": {
+              "type": "number",
+              "minimum": 0
+            },
+            "historyDisruption": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "unknownEstimates": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        },
+        "cumulative": {
+          "description": "What is known about conflicts in the prepared cumulative stack. A pairwise optimum is not a cumulative measurement, so this is never a fabricated number.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "value", "why"],
+          "properties": {
+            "kind": {
+              "enum": ["pairwise-only", "measured-cumulative"]
+            },
+            "value": {
+              "type": ["number", "null"],
+              "minimum": 0
+            },
+            "why": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
         "qualification": {
           "$ref": "#/$defs/qualification"
         },
         "budget": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["probes", "exhausted"],
+          "required": [
+            "probes",
+            "exhausted",
+            "ordersEnumerated",
+            "orderEvaluations",
+            "orderEvaluationLimit",
+            "search"
+          ],
           "properties": {
             "probes": {
               "type": "integer",
@@ -390,6 +559,21 @@
             },
             "exhausted": {
               "type": "boolean"
+            },
+            "ordersEnumerated": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "orderEvaluations": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "orderEvaluationLimit": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "search": {
+              "enum": ["stable-topological-baseline", "conflict-aware", "exhaustive"]
             }
           }
         },
@@ -430,7 +614,8 @@
         "ambiguities",
         "objective",
         "proposedWrites",
-        "prohibitedActivitiesNotPerformed"
+        "prohibitedActivitiesNotPerformed",
+        "capabilityLimitations"
       ],
       "properties": {
         "contractVersion": {
@@ -505,6 +690,12 @@
           "minItems": 1,
           "items": {
             "$ref": "#/$defs/prohibitedActivity"
+          }
+        },
+        "capabilityLimitations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/capabilityLimitation"
           }
         }
       }

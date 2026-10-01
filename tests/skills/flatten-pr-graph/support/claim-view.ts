@@ -18,10 +18,14 @@ export interface ClaimView {
   order: number[]
   dependencies: Array<[number, number]>
   proposedWriteChanges: string[]
+  /** Each write the plan proposes, so an edge a retarget would create is recognisable. */
+  proposedWrites: Array<{ kind: string; target: string; change: string }>
   remoteClaims: Array<{ kind: string; target: string; observed: unknown }>
   confirmed: Array<{ kind: string; target: string; oid: string }>
   blockedCodes: string[]
   preparationPresent: boolean
+  /** Each declared dependency with the evidence source it names, or null when unnamed. */
+  dependencySources: Array<[number, number, string | null]>
   publicationPresent: boolean
   recoveryPresent: boolean
   checksExecuted: string[]
@@ -72,6 +76,16 @@ function dependencies(value: unknown): Array<[number, number]> {
   return pairs
 }
 
+function dependencySources(value: unknown): Array<[number, number, string | null]> {
+  const entries: Array<[number, number, string | null]> = []
+  for (const entry of array(value)) {
+    const before = number(record(entry).before)
+    const after = number(record(entry).after)
+    if (before !== null && after !== null) entries.push([before, after, text(record(entry).source)])
+  }
+  return entries
+}
+
 export function viewClaim(claim: unknown): ClaimView {
   const root = record(claim)
   const snapshot = record(root.snapshot)
@@ -104,9 +118,16 @@ export function viewClaim(claim: unknown): ClaimView {
       return value === null ? [] : [value]
     }),
     dependencies: dependencies(plan.hardDependencies),
+    dependencySources: dependencySources(plan.hardDependencies),
     proposedWriteChanges: array(plan.proposedWrites).flatMap((entry) => {
       const value = text(record(entry).change)
       return value ? [value] : []
+    }),
+    proposedWrites: array(plan.proposedWrites).flatMap((entry) => {
+      const kind = text(record(entry).kind)
+      const target = text(record(entry).target)
+      const change = text(record(entry).change)
+      return kind && target ? [{ kind, target, change: change ?? '' }] : []
     }),
     remoteClaims: array(publication.remoteClaims).flatMap((entry) => {
       const kind = text(record(entry).kind)

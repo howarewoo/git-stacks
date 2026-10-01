@@ -46,7 +46,18 @@
       "stashCount": 0,
       "configDigest": "sha256:0d1a2b3c"
     },
-    "history": { "complete": true, "shallow": false, "grafted": 0 },
+    "history": {
+      "complete": true,
+      "shallow": false,
+      "grafted": 0,
+      "unrelated": [],
+      "reconciliation": []
+    },
+    "externalPrerequisites": [],
+    "unselectedDependents": [],
+    "capabilityLimitations": [
+      { "limitation": "none observed", "effect": "no capability limited this result" }
+    ],
     "landing": { "autoMergeEnabledOn": [] }
   },
   "plan": {
@@ -64,8 +75,25 @@
         "stable-tie-break"
       ],
       "estimates": [],
+      "componentTotals": {
+        "estimatedConflictResolutionWork": 0,
+        "historyDisruption": 0,
+        "unknownEstimates": 0
+      },
+      "cumulative": {
+        "kind": "pairwise-only",
+        "value": null,
+        "why": "the chain is already correct, so nothing was prepared and nothing was measured"
+      },
       "qualification": "heuristic",
-      "budget": { "probes": 0, "exhausted": false },
+      "budget": {
+        "probes": 0,
+        "exhausted": false,
+        "ordersEnumerated": 1,
+        "orderEvaluations": 1,
+        "orderEvaluationLimit": 200,
+        "search": "stable-topological-baseline"
+      },
       "unknownTreatedAsZero": false
     },
     "proposedWrites": [
@@ -75,6 +103,9 @@
         "change": "none",
         "reason": "PR #12 already sits directly on the root; no write is required"
       }
+    ],
+    "capabilityLimitations": [
+      { "limitation": "none observed", "effect": "no capability limited this result" }
     ],
     "prohibitedActivitiesNotPerformed": [
       {

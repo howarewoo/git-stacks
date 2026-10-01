@@ -110,7 +110,15 @@ export function observedHardEdges(
         edges.push({ from: source.number, to: target.number, basis: 'declared-base' })
         continue
       }
-      if (sourceHead && targetHead && context.world.isRemoteAncestor(sourceHead, targetHead)) {
+      // Git reports a commit as its own ancestor, so two heads at one commit would
+      // otherwise produce a reciprocal edge in each direction. Strict ancestry means a
+      // different, earlier commit: equal heads are redundant, not dependent.
+      if (
+        sourceHead &&
+        targetHead &&
+        sourceHead !== targetHead &&
+        context.world.isRemoteAncestor(sourceHead, targetHead)
+      ) {
         edges.push({ from: source.number, to: target.number, basis: 'strict-ancestry' })
       }
     }
@@ -456,10 +464,11 @@ export function judge(input: OracleInput): OracleVerdict {
   }
 
   const positions = new Map(view.order.map((number, index) => [number, index]))
-  // Only a result that claims to have published something owes a dependency declaration;
-  // a blocked or no-op result makes no chain claim to check.
-  const claimsPublication = view.status === 'published' || view.status === 'partial'
-  for (const edge of claimsPublication ? baseline.hardEdges : []) {
+  // Every result that carries a chain owes the dependency evidence the pre-run state
+  // already proved. A plan that omits an observed edge has failed exactly as a
+  // published chain that ignores one has; "it only planned" is not an exemption.
+  const claimsAnOrder = view.order.length > 0
+  for (const edge of claimsAnOrder ? baseline.hardEdges : []) {
     if (!selected.includes(edge.from) || !selected.includes(edge.to)) continue
     const declared = view.dependencies.some(
       ([before, after]) => before === edge.from && after === edge.to,
@@ -493,6 +502,48 @@ export function judge(input: OracleInput): OracleVerdict {
         expected: `#${before} before #${after}`,
       })
     }
+  }
+
+  // A dependency the pre-run evidence does not support is not a dependency, unless the
+  // run itself made it true. An execute run integrates each successor into its
+  // predecessor's prepared state, so that ancestry is established by the run and can
+  // be observed in the resulting refs; a planning run has no such excuse, and neither
+  // has a verified prerequisite, which is an explicit human fact Git cannot prove.
+  for (const [before, after, source] of view.dependencySources) {
+    const supported = baseline.hardEdges.some((edge) => edge.from === before && edge.to === after)
+    if (supported || source === 'verified-prerequisite') continue
+    const beforePr = provider.pullRequest(before)
+    const afterPr = provider.pullRequest(after)
+    const beforeHead = beforePr ? refs[branchRef(beforePr.head)] : undefined
+    const afterHead = afterPr ? refs[branchRef(afterPr.head)] : undefined
+    const establishedByRun =
+      intent === 'execute' &&
+      Boolean(beforeHead) &&
+      Boolean(afterHead) &&
+      beforeHead !== afterHead &&
+      world.isRemoteAncestor(beforeHead as string, afterHead as string)
+    if (establishedByRun) continue
+    // A base relationship the plan is about to create is a claim about the write, not
+    // about the pre-run world. It counts when the plan says so structurally: the
+    // successor immediately follows the predecessor in the reported order and the plan
+    // proposes exactly that base change. Whether the write then happened is judged by
+    // the publication and integrity invariants, not here.
+    const immediatelyFollows =
+      view.order[view.order.indexOf(after) - 1] === before && view.order.indexOf(after) > 0
+    const proposesTheRetarget = view.proposedWrites.some(
+      (write) =>
+        write.kind === 'pr-base-update' &&
+        write.target === String(after) &&
+        write.change === 'base-change',
+    )
+    if (immediatelyFollows && proposesTheRetarget) continue
+    violations.push({
+      invariant: 'topology.dependencies',
+      detail: 'a declared dependency names an edge no observed state supports',
+      observed: `#${before} -> #${after} declared as ${source ?? 'no source'}`,
+      expected:
+        'an original base relationship, strict ancestry, a verified explicit prerequisite, or an integration this run actually performed',
+    })
   }
 
   const beforeRoot = baseline.refsBefore[rootRef]

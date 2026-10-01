@@ -60,7 +60,37 @@
     "stashCount": 1,
     "configDigest": "sha256:0d1a2b3c"
   },
-  "history": { "complete": true, "shallow": false, "grafted": 0 },
+  "history": {
+    "complete": true,
+    "shallow": false,
+    "grafted": 0,
+    "unrelated": [],
+    "reconciliation": [
+      {
+        "ref": "refs/heads/feat-b",
+        "observed": "3b2c4d6e8f00112233445566778899aabbccddee",
+        "fetched": "3b2c4d6e8f00112233445566778899aabbccddee",
+        "state": "agreed"
+      }
+    ]
+  },
+  "externalPrerequisites": [
+    {
+      "ref": "refs/heads/platform",
+      "state": "satisfied",
+      "satisfiedBy": "recorded-landing",
+      "evidence": "PR #14 records that platform landed as 9f8e7d6 before this snapshot"
+    }
+  ],
+  "unselectedDependents": [
+    { "number": 15, "dependsOn": 13, "basis": "declared-base", "reportedOnly": true }
+  ],
+  "capabilityLimitations": [
+    {
+      "limitation": "the listing returns two pull requests per page and only the first page was read",
+      "effect": "unselected dependents may be under-reported; the graph is not known to be complete"
+    }
+  ],
   "landing": {
     "autoMergeEnabledOn": []
   }

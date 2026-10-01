@@ -59,7 +59,25 @@
       "stashCount": 1,
       "configDigest": "sha256:0d1a2b3c"
     },
-    "history": { "complete": true, "shallow": false, "grafted": 0 },
+    "history": {
+      "complete": true,
+      "shallow": false,
+      "grafted": 0,
+      "unrelated": [],
+      "reconciliation": [
+        {
+          "ref": "refs/heads/feat-b",
+          "observed": "3b2c4d6e8f00112233445566778899aabbccddee",
+          "fetched": "3b2c4d6e8f00112233445566778899aabbccddee",
+          "state": "agreed"
+        }
+      ]
+    },
+    "externalPrerequisites": [],
+    "unselectedDependents": [],
+    "capabilityLimitations": [
+      { "limitation": "none observed", "effect": "no capability limited this result" }
+    ],
     "landing": { "autoMergeEnabledOn": [] }
   },
   "plan": {
@@ -93,8 +111,25 @@
       "estimates": [
         { "pair": [12, 13], "kind": "measured-merge", "value": 0, "confidence": "high" }
       ],
+      "componentTotals": {
+        "estimatedConflictResolutionWork": 0,
+        "historyDisruption": 2,
+        "unknownEstimates": 0
+      },
+      "cumulative": {
+        "kind": "pairwise-only",
+        "value": null,
+        "why": "pairwise probes estimate one merge each; the cumulative stack is measured later"
+      },
       "qualification": "best-found",
-      "budget": { "probes": 6, "exhausted": true },
+      "budget": {
+        "probes": 6,
+        "exhausted": true,
+        "ordersEnumerated": 2,
+        "orderEvaluations": 2,
+        "orderEvaluationLimit": 200,
+        "search": "conflict-aware"
+      },
       "unknownTreatedAsZero": false
     },
     "proposedWrites": [
@@ -110,6 +145,9 @@
         "change": "base-change",
         "reason": "retarget PR #13 onto the head of PR #12"
       }
+    ],
+    "capabilityLimitations": [
+      { "limitation": "none observed", "effect": "no capability limited this result" }
     ],
     "prohibitedActivitiesNotPerformed": [
       {

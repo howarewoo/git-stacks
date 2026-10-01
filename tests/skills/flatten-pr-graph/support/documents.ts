@@ -55,6 +55,13 @@ export function captureSnapshot(
     intent: Intent
     capturedAt: string
     selection: string[]
+    /** Provider state the snapshot could not establish, recorded rather than assumed. */
+    historyFacts?: { shallow: boolean; grafted: number }
+    /** Provider-observed SHAs to reconcile against what task-owned storage holds. */
+    reconcile?: Array<{ ref: string; observed: string }>
+    externalPrerequisites?: Snapshot['externalPrerequisites']
+    unselectedDependents?: Snapshot['unselectedDependents']
+    capabilityLimitations?: Snapshot['capabilityLimitations']
     rootSource?: Snapshot['root']['source']
   },
 ): Snapshot {
@@ -121,9 +128,42 @@ export function captureSnapshot(
       complete: !history.shallow && history.grafted === 0,
       shallow: history.shallow,
       grafted: history.grafted,
+      // Task-owned storage holds everything published to the bare remote, so an
+      // unrelated history is a property the discovery helper decides, not this builder.
+      unrelated: [],
+      reconciliation: reconcileRefs(refs, identities, options.reconcile ?? []),
     },
+    externalPrerequisites: options.externalPrerequisites ?? [],
+    unselectedDependents: options.unselectedDependents ?? [],
+    capabilityLimitations: options.capabilityLimitations ?? [],
     landing,
   }
+}
+
+/**
+ * Reconciles the SHA each provider observation reported against what task-owned
+ * storage actually holds. A disagreement is recorded as such; it is never smoothed
+ * into agreement.
+ */
+function reconcileRefs(
+  refs: Record<string, string>,
+  identities: PrIdentity[],
+  overrides: Array<{ ref: string; observed: string }>,
+): Snapshot['history']['reconciliation'] {
+  const observed = new Map(overrides.map((entry) => [entry.ref, entry.observed]))
+  return identities.map((identity) => {
+    const provider = observed.get(identity.headRef) ?? identity.headOid
+    const fetched = refs[identity.headRef] ?? null
+    const state: Snapshot['history']['reconciliation'][number]['state'] =
+      fetched === null
+        ? 'unreachable'
+        : fetched === provider
+          ? 'agreed'
+          : provider === ZERO_OID
+            ? 'storage-ahead'
+            : 'provider-ahead'
+    return { ref: identity.headRef, observed: provider, fetched, state }
+  })
 }
 
 const NOT_PERFORMED_EVIDENCE: Record<string, string> = {
@@ -165,11 +205,29 @@ export function basePlan(intent: Intent): Plan {
         'stable-tie-break',
       ],
       estimates: [],
+      componentTotals: {
+        estimatedConflictResolutionWork: 0,
+        historyDisruption: 0,
+        unknownEstimates: 0,
+      },
+      cumulative: {
+        kind: 'pairwise-only',
+        value: null,
+        why: 'no probe ran, so nothing is known about either the pairwise or the cumulative cost',
+      },
       qualification: 'heuristic',
-      budget: { probes: 0, exhausted: false },
+      budget: {
+        probes: 0,
+        exhausted: false,
+        ordersEnumerated: 0,
+        orderEvaluations: 0,
+        orderEvaluationLimit: 200,
+        search: 'stable-topological-baseline',
+      },
       unknownTreatedAsZero: false,
     },
     proposedWrites: [],
+    capabilityLimitations: [],
     prohibitedActivitiesNotPerformed: notPerformed(),
   }
 }

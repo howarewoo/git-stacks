@@ -46,8 +46,25 @@
         "confidence": "unknown"
       }
     ],
+    "componentTotals": {
+      "estimatedConflictResolutionWork": 0,
+      "historyDisruption": 2,
+      "unknownEstimates": 1
+    },
+    "cumulative": {
+      "kind": "pairwise-only",
+      "value": null,
+      "why": "only pairwise probes ran; the prepared cumulative stack is measured in #87, not here"
+    },
     "qualification": "best-found",
-    "budget": { "probes": 6, "exhausted": true },
+    "budget": {
+      "probes": 6,
+      "exhausted": true,
+      "ordersEnumerated": 4,
+      "orderEvaluations": 4,
+      "orderEvaluationLimit": 200,
+      "search": "conflict-aware"
+    },
     "unknownTreatedAsZero": false
   },
   "proposedWrites": [
@@ -79,6 +96,12 @@
       "activity": "disable-auto-merge",
       "performed": false,
       "evidence": "landing preflight read no enabled auto-merge; nothing was disabled"
+    }
+  ],
+  "capabilityLimitations": [
+    {
+      "limitation": "two of the nine selected pairs could not be probed because their merge base is outside the fetched history",
+      "effect": "their cost is reported as unknown and never as zero"
     }
   ]
 }

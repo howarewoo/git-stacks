@@ -70,7 +70,18 @@
       "stashCount": 0,
       "configDigest": "sha256:0d1a2b3c"
     },
-    "history": { "complete": true, "shallow": false, "grafted": 0 },
+    "history": {
+      "complete": true,
+      "shallow": false,
+      "grafted": 0,
+      "unrelated": [],
+      "reconciliation": []
+    },
+    "externalPrerequisites": [],
+    "unselectedDependents": [],
+    "capabilityLimitations": [
+      { "limitation": "none observed", "effect": "no capability limited this result" }
+    ],
     "landing": { "autoMergeEnabledOn": [] }
   },
   "plan": {
@@ -102,8 +113,25 @@
         "stable-tie-break"
       ],
       "estimates": [],
+      "componentTotals": {
+        "estimatedConflictResolutionWork": 0,
+        "historyDisruption": 1,
+        "unknownEstimates": 0
+      },
+      "cumulative": {
+        "kind": "pairwise-only",
+        "value": null,
+        "why": "pairwise probes estimate one merge each; the cumulative stack is measured later"
+      },
       "qualification": "heuristic",
-      "budget": { "probes": 0, "exhausted": false },
+      "budget": {
+        "probes": 0,
+        "exhausted": false,
+        "ordersEnumerated": 1,
+        "orderEvaluations": 1,
+        "orderEvaluationLimit": 200,
+        "search": "conflict-aware"
+      },
       "unknownTreatedAsZero": false
     },
     "proposedWrites": [
@@ -119,6 +147,9 @@
         "change": "base-change",
         "reason": "chain onto PR #13"
       }
+    ],
+    "capabilityLimitations": [
+      { "limitation": "none observed", "effect": "no capability limited this result" }
     ],
     "prohibitedActivitiesNotPerformed": [
       {

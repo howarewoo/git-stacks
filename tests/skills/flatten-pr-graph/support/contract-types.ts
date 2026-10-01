@@ -65,7 +65,33 @@ export interface Snapshot {
     stashCount: number
     configDigest: string
   }
-  history: { complete: boolean; shallow: boolean; grafted: number }
+  history: {
+    complete: boolean
+    shallow: boolean
+    grafted: number
+    /** Refs sharing no merge base with the root; ancestry there is undecidable, not negative. */
+    unrelated: string[]
+    /** Provider-observed SHAs reconciled against what task-owned storage actually holds. */
+    reconciliation: Array<{
+      ref: string
+      observed: string
+      fetched: string | null
+      state: 'agreed' | 'provider-ahead' | 'storage-ahead' | 'unreachable'
+    }>
+  }
+  externalPrerequisites: Array<{
+    ref: string
+    state: 'satisfied' | 'unsatisfied' | 'unknown'
+    satisfiedBy: 'selected-root-ancestry' | 'recorded-landing' | 'none'
+    evidence: string
+  }>
+  unselectedDependents: Array<{
+    number: number
+    dependsOn: number
+    basis: 'declared-base' | 'strict-ancestry'
+    reportedOnly: true
+  }>
+  capabilityLimitations: Array<{ limitation: string; effect: string }>
   landing: {
     /** Selected pull requests whose own auto-merge request is active, by number. */
     autoMergeEnabledOn: number[]
@@ -110,12 +136,35 @@ export interface Plan {
       value: number | null
       confidence: 'high' | 'medium' | 'low' | 'unknown'
     }>
+    componentTotals: {
+      /** Sum of measured pairwise conflict work over the chosen order. */
+      estimatedConflictResolutionWork: number
+      /** Base retargets plus integration pushes the chosen order requires. */
+      historyDisruption: number
+      /** Estimates that could not be produced. Never folded into a zero total. */
+      unknownEstimates: number
+    }
+    /** What is known about the prepared cumulative stack, which pairwise probes cannot measure. */
+    cumulative: {
+      kind: 'pairwise-only' | 'measured-cumulative'
+      value: number | null
+      why: string
+    }
     qualification: Qualification
-    budget: { probes: number; exhausted: boolean }
+    budget: {
+      probes: number
+      exhausted: boolean
+      ordersEnumerated: number
+      orderEvaluations: number
+      orderEvaluationLimit: number
+      search: 'stable-topological-baseline' | 'conflict-aware' | 'exhaustive'
+    }
     unknownTreatedAsZero: false
   }
   proposedWrites: PlanWrite[]
   prohibitedActivitiesNotPerformed: ProhibitedActivity[]
+  /** Something this plan could not observe or do; an incomplete graph is never silent. */
+  capabilityLimitations: Array<{ limitation: string; effect: string }>
 }
 
 export interface Preparation {

@@ -26,6 +26,8 @@ export interface ProviderScript {
   perPage?: number
   deniedWrites?: string[]
   autoMergeEnabledOn?: number[]
+  /** Check state per pull request, varied by fixtures to prove planning ignores it. */
+  checkStates?: Record<string, 'passing' | 'failing' | 'pending' | 'unavailable'>
 }
 
 const DEFAULT_OWNER = 'acme'
@@ -40,6 +42,7 @@ export function defineProvider(context: FixtureContext, script: ProviderScript):
     perPage: script.perPage ?? 2,
     deniedWrites: script.deniedWrites ?? [],
     autoMergeEnabledOn: script.autoMergeEnabledOn ?? [],
+    checkStates: script.checkStates ?? {},
     pullRequests: script.pullRequests,
   })
 }
@@ -166,10 +169,28 @@ export function planFrom(
         'stable-tie-break',
       ],
       estimates: [],
+      componentTotals: {
+        estimatedConflictResolutionWork: 0,
+        historyDisruption: chain.length,
+        unknownEstimates: 0,
+      },
+      cumulative: {
+        kind: 'pairwise-only',
+        value: null,
+        why: 'no probe ran; the prepared cumulative stack is measured during preparation, not here',
+      },
       qualification: 'heuristic',
-      budget: { probes: 0, exhausted: false },
+      budget: {
+        probes: 0,
+        exhausted: false,
+        ordersEnumerated: 1,
+        orderEvaluations: 1,
+        orderEvaluationLimit: 200,
+        search: 'stable-topological-baseline',
+      },
       unknownTreatedAsZero: false,
     },
+    capabilityLimitations: [],
     proposedWrites,
     prohibitedActivitiesNotPerformed: [],
     ...overrides,

@@ -61,6 +61,37 @@ const EMPTY_PROVIDER_STATE: ProviderState = {
   pullRequests: [],
   deniedWrites: [],
   autoMergeEnabledOn: [],
+  checkStates: {},
+}
+
+/**
+ * A disposable world and the context that addresses it, for a test that exercises a
+ * helper directly rather than through a declared fixture. The caller still owns cleanup.
+ */
+export async function createFixtureContext(label: string): Promise<{
+  context: FixtureContext
+  provider: FakeGitHub
+  world: World
+  scratches: ScratchWorkspace[]
+}> {
+  const world = await createWorld(label)
+  const provider = new FakeGitHub({ ...EMPTY_PROVIDER_STATE })
+  const claimedCommands: string[] = []
+  const scratches: ScratchWorkspace[] = []
+  const context: FixtureContext = {
+    world,
+    provider,
+    claimedCommands,
+    recordCommand(command: string) {
+      claimedCommands.push(command)
+    },
+    async scratch(name: string) {
+      const created = await world.createScratch(name)
+      scratches.push(created)
+      return created
+    },
+  }
+  return { context, provider, world, scratches }
 }
 
 /**

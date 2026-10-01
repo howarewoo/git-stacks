@@ -38,9 +38,23 @@ export const FORBIDDEN_ACTIONS = [
   'expand-selection',
 ] as const
 
+/**
+ * Reading check state is outside the permitted vocabulary rather than inside the
+ * forbidden one: check state is not something this run is allowed to consult at all,
+ * so a planner that queries it is caught as an out-of-vocabulary action rather than as
+ * a check it ran.
+ */
+export const CHECK_STATE_ACTIONS = [
+  'read-check-state',
+  'read-approval-state',
+  'read-queue-state',
+] as const
+
+export type CheckStateAction = (typeof CHECK_STATE_ACTIONS)[number]
+
 export type PermittedAction = (typeof PERMITTED_ACTIONS)[number]
 export type ForbiddenAction = (typeof FORBIDDEN_ACTIONS)[number]
-export type PrActionKind = PermittedAction | ForbiddenAction
+export type PrActionKind = PermittedAction | ForbiddenAction | CheckStateAction
 
 export function isPermitted(kind: string): kind is PermittedAction {
   return (PERMITTED_ACTIONS as readonly string[]).includes(kind)

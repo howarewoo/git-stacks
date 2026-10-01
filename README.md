@@ -21,6 +21,38 @@ npm run bench:performance  # large-repository benchmarks
 npm run build:promotion-helper  # build the atomic no-replace rename helper
 ```
 
+The `flatten-pr-graph` skill has its own authoring checks, kept out of `npm test` because
+they seed real Git repositories. The regression gate is deterministic and costs no model
+calls:
+
+```sh
+npm run test:skills   # fixtures, the independent oracle, and the activation contract
+```
+
+Agent behaviour is a separate, explicit evaluation, because it costs model calls, varies
+between runs, and has no business failing an unrelated edit's gate:
+
+```sh
+npm run test:skills:activation -- --out /tmp/activation.json   # run it
+FLATTEN_ACTIVATION_EVIDENCE=/tmp/activation.json \
+  npx tsx --test tests/skills/flatten-pr-graph/activation/activation.test.ts
+```
+
+The second command judges the recorded verdicts against the contract, and reports agent
+behaviour as unverified when no evidence document is given. Two more scripts produce
+evidence for a pull request rather than assertions about it; both exit non-zero when what
+they observe contradicts the claim they are checking:
+
+```sh
+node tests/skills/flatten-pr-graph/smoke/real-git-planner.mjs  # helpers against real Git
+node tests/skills/flatten-pr-graph/smoke/metric-evidence.mjs    # metric, budget, and timing
+```
+
+The activation evaluation needs an `omp` on `PATH` with a configured endpoint. When it
+cannot run, every scenario is recorded `unverified` and the command fails: an unavailable
+harness is a blocker to report, never a pass. Run-specific evidence - transcripts, timings,
+and the activation document - belongs in the pull request, not in the repository.
+
 `npm run dev`, `npm run build`, `npm test`, `npm run package`, and `npm run
 dist` all build the clone promotion helper first, so a C compiler must be
 available on the build machine (`cc`, `gcc`, `clang`, or `cl`; set `CC` to

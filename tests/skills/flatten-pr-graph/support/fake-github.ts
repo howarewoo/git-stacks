@@ -35,6 +35,13 @@ export interface ProviderState {
   deniedWrites: string[]
   /** Pull requests carrying an enabled auto-merge arrangement. */
   autoMergeEnabledOn: number[]
+  /**
+   * Check state per pull request, in the four states a planning run must treat
+   * identically: passing, failing, pending, and unavailable. The provider serves it so
+   * a fixture can vary it; a run that asks for it is recorded as an out-of-vocabulary
+   * action, because check state is never a planning input.
+   */
+  checkStates: Record<string, 'passing' | 'failing' | 'pending' | 'unavailable'>
 }
 
 export type ProviderOutcome = 'observed' | 'acknowledged' | 'denied'
@@ -58,12 +65,29 @@ export class FakeGitHub {
     this.state = state
   }
 
+  /**
+   * Serves the recorded check state and records the read. The record is the finding:
+   * a planning run that consults check state has already left its contract, whatever
+   * the value it then decided on.
+   */
+  readCheckState(number: number): 'passing' | 'failing' | 'pending' | 'unavailable' | null {
+    const state = this.state.checkStates[String(number)]
+    this.record('read-check-state', String(number), state ? 'observed' : 'denied')
+    return state ?? null
+  }
+
+  /** How many pages a full listing needs, so pagination is a real property. */
+  pageCount(perPage = this.state.perPage): number {
+    return Math.max(1, Math.ceil(this.state.pullRequests.length / perPage))
+  }
+
   /** Installs the fixture's provider state before the run starts. */
   configure(state: ProviderState): void {
     this.state.pullRequests = state.pullRequests.map((pr) => ({ ...pr }))
     this.state.perPage = state.perPage
     this.state.deniedWrites = [...state.deniedWrites]
     this.state.autoMergeEnabledOn = [...state.autoMergeEnabledOn]
+    this.state.checkStates = { ...state.checkStates }
   }
 
   get repository(): { owner: string; name: string; defaultBranch: string } {
