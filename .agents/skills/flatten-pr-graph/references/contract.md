@@ -1,11 +1,14 @@
 # flatten-pr-graph conditional contract
 
 **Contract version:** `flatten-pr-graph/1`
-**Status:** the conditional contract plus two later increments. `#85` added the portable
+**Status:** the conditional contract plus four later increments. `#85` added the portable
 core (`../SKILL.md`), `#86` added the ordering reference (`ordering.md`) and three
-deterministic helpers under `../scripts/`. There is still no publisher and no harness
-adapter, so phases 4-6 of the core are unavailable to a harness that lacks the
-capability and report an honest `planned` or `blocked` result.
+deterministic helpers under `../scripts/`, `#87` added cumulative integration
+(`preparation.md`, `scripts/prepare-stack.mjs`), and `#88` added scoped publication and
+recovery (`publication.md`, `scripts/publish-stack.mjs`, `scripts/github-provider.mjs`).
+Harness enablement is still a later increment, so a harness that lacks Git access or a
+host-pinned provider module must report an honest `planned` or `blocked` result.
+
 **Parent scope:** issue #83. This file implements issue #84 and remains authoritative for
 what every later increment must agree on.
 

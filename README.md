@@ -39,13 +39,14 @@ FLATTEN_ACTIVATION_EVIDENCE=/tmp/activation.json \
 ```
 
 The second command judges the recorded verdicts against the contract, and reports agent
-behaviour as unverified when no evidence document is given. Two more scripts produce
-evidence for a pull request rather than assertions about it; both exit non-zero when what
+behaviour as unverified when no evidence document is given. Three more scripts produce
+evidence for a pull request rather than assertions about it; all exit non-zero when what
 they observe contradicts the claim they are checking:
 
 ```sh
-node tests/skills/flatten-pr-graph/smoke/real-git-planner.mjs  # helpers against real Git
-node tests/skills/flatten-pr-graph/smoke/metric-evidence.mjs    # metric, budget, and timing
+node tests/skills/flatten-pr-graph/smoke/real-git-planner.mjs      # planning helpers against real Git
+node tests/skills/flatten-pr-graph/smoke/real-git-prep-publish.mjs  # preparation and publication against real Git and local bare remote
+node tests/skills/flatten-pr-graph/smoke/metric-evidence.mjs        # metric, budget, and timing
 ```
 
 The activation evaluation needs an `omp` on `PATH` with a configured endpoint. When it
@@ -1471,8 +1472,9 @@ it and the original tips stay recoverable.
 
 ## Flatten PR graph contract authoring
 
-The `flatten-pr-graph` skill has no runtime yet. What exists today is its versioned
-contract and the disposable fixture/oracle foundation that later increments consume:
+The `flatten-pr-graph` skill has no application runtime. What exists today is its
+versioned contract, its deterministic helpers, and the disposable fixture/oracle
+foundation that later increments consume:
 
 - `.agents/skills/flatten-pr-graph/references/contract.md` - the versioned conditional
   contract (`flatten-pr-graph/1`): inputs, support envelope, preview versus execution,
@@ -1486,6 +1488,48 @@ contract and the disposable fixture/oracle foundation that later increments cons
 - `tests/skills/flatten-pr-graph/` - the fake GitHub boundary (pagination, refs, heads,
   bases, denials, action recording), disposable real Git workspaces, the independent
   state oracle, the initial fixture matrix, and the mutated-oracle sensitivities.
+
+### Preparing and publishing a flattened stack
+
+The skill ships two deterministic helpers for the local and remote halves, plus one
+provider module. Each is a plain Node script: JSON in on stdin or `--input <file>`, JSON
+out on stdout, exit `0` for success or no-op, `2` for a refused input, `3` for a blocker
+or a partial outcome.
+
+- `scripts/prepare-stack.mjs` takes an authorized plan (`repository`, `runDirectory`,
+  `root`, `selection`, `order`, `heads`, `originalHeads`, and optional `resolutions`,
+  `justifiedDrops`, `resume`). It works only in `<runDirectory>/storage.git` and
+  `<runDirectory>/workspaces/<n>`, integrates each original head onto its predecessor's
+  _prepared_ head cumulatively, leaves unresolved conflicts in place with both sides'
+  blobs, the merge base, and both diffs as evidence, and returns `preparation`,
+  `verification`, `continuation`, and `journalPath`. It never pushes, never touches the
+  user's checkout, and never resolves a conflict itself.
+- `scripts/publish-stack.mjs` takes that prepared set plus `authority` (`intent: "execute"`,
+  the exact `selection`, `granted` mutation kinds), `remote`, `heads`, `intendedBases`,
+  and `provider.module`. It re-verifies the prepared set against the remote, stops before
+  writing when configuration or a hook would widen the push or the remote cannot do an
+  atomic ref transaction, then performs one `--atomic` push of explicit refspecs with
+  per-ref `--force-with-lease`, followed by ordered base retargeting. It returns the
+  contract's `publication` document plus `capability`, `controls`, `authority`,
+  `recovery`, and `nextSafeAction`.
+- `scripts/github-provider.mjs` is the GitHub implementation of the three provider
+  operations (`capabilities`, `readPullRequest`, `updatePullRequestBase`). Its base
+  writes carry GitHub's `expected_base`, so they are a genuine compare-and-swap; a
+  provider without one is reported as read-before-write with a residual race.
+
+```sh
+# Local preparation from a task-owned run directory
+node .agents/skills/flatten-pr-graph/scripts/prepare-stack.mjs --input plan.json > prepared.json
+
+# Publication, only with an explicit execute grant for that exact selection
+FLATTEN_PR_PROVIDER_MODULE="$PWD/.agents/skills/flatten-pr-graph/scripts/github-provider.mjs" \
+  node .agents/skills/flatten-pr-graph/scripts/publish-stack.mjs --input publication.json
+```
+
+Publication needs real Git write access, `gh` authenticated for the adapter, and the
+selectors above. Where any of those is missing the run reports `blocked` rather than
+implying a provider exists. Conflict intent stays a human decision: the helpers produce
+evidence and records, never the judgement that a resolution is correct.
 
 Run the authoring checks with:
 

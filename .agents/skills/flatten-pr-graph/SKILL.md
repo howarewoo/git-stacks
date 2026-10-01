@@ -171,28 +171,42 @@ with resolved. This procedure makes no application-correctness claim.
 
 Load these conditionally, when their trigger occurs - not on every invocation.
 
-| Read                                             | When                                                                        |
-| ------------------------------------------------ | --------------------------------------------------------------------------- |
-| [references/contract.md](references/contract.md) | phase 1, always for a flattening request                                    |
-| [references/ordering.md](references/ordering.md) | phase 2 or 3, or whenever a dependency, order, or objective question arises |
-| [references/oracle.md](references/oracle.md)     | phase 5, or before claiming any success status                              |
+| Read                                                   | When                                                                        |
+| ------------------------------------------------------ | --------------------------------------------------------------------------- |
+| [references/contract.md](references/contract.md)       | phase 1, always for a flattening request                                    |
+| [references/ordering.md](references/ordering.md)       | phase 2 or 3, or whenever a dependency, order, or objective question arises |
+| [references/oracle.md](references/oracle.md)           | phase 5, or before claiming any success status                              |
+| [references/preparation.md](references/preparation.md) | phase 4, before any local integration is attempted                          |
+| [references/publication.md](references/publication.md) | phase 6, before any remote write is authorized or attempted                 |
 
 The scripts under [scripts/](scripts/) are optional deterministic helpers. Each answers
 one narrow brittle question with real evidence, takes structured input, returns
 structured output or a structured error, and never evaluates a ref name, a number, or
 pull-request text.
 
-| Helper                              | Answers                                                                         |
-| ----------------------------------- | ------------------------------------------------------------------------------- |
-| `scripts/discover-dependencies.mjs` | which hard edges real ancestry, base, and prerequisite evidence support         |
-| `scripts/measure-conflict.mjs`      | what one pairwise integration would cost, and whether it is unknown             |
-| `scripts/plan-order.mjs`            | which order the declared objective prefers, and how far that claim is qualified |
+| Helper                              | Answers                                                                                       |
+| ----------------------------------- | --------------------------------------------------------------------------------------------- |
+| `scripts/discover-dependencies.mjs` | which hard edges real ancestry, base, and prerequisite evidence support                       |
+| `scripts/measure-conflict.mjs`      | what one pairwise integration would cost, and whether it is unknown                           |
+| `scripts/plan-order.mjs`            | which order the declared objective prefers, and how far that claim is qualified               |
+| `scripts/prepare-stack.mjs`         | what an authorized plan integrates into, in isolated task-owned storage, and what it retained |
+| `scripts/publish-stack.mjs`         | what one scoped, lease-guarded publication of a prepared set actually changed                 |
+| `scripts/github-provider.mjs`       | the three provider operations the publisher calls, against a real GitHub server               |
 
-Read `references/ordering.md` before using them.
+Read `references/ordering.md` before using the planning helpers, and the phase reference
+before using the preparation or publication helper. Each is a helper, not a policy: the
+conflict decision, the authorization, and every claim still belong to the agent.
 
 ## What is not here yet
 
-There is no publisher in this increment. Phases 4 to 6 are a procedure an agent follows
-with the permissions its harness actually has, not a program that runs them. Where the
-harness cannot prepare or publish, say so and stop at `planned` or `blocked`. No prose here
-enforces a permission, and none of it is evidence that this skill has flattened anything.
+Harness enablement and the end-to-end skill evaluation are a later increment. Phases 4 to
+6 run through the helpers above when the host provides the permissions they need - real Git
+access for preparation and publication, and a provider module the host has pinned for
+metadata. Where the harness cannot prepare or publish, say so and stop at `planned` or
+`blocked`. No prose here enforces a permission, no document here is evidence that this
+skill has flattened anything, and the semantic review behind a conflict decision stays
+outside both helpers.
+
+`scripts/github-provider.mjs` is one implementation of the provider interface, not a
+default: publication requires a module the host has chosen
+(`FLATTEN_PR_PROVIDER_MODULE`), so the shipped path cannot be swapped by configuration.

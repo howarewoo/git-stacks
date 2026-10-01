@@ -1,0 +1,788 @@
+import { test } from 'node:test'
+import assert from 'node:assert/strict'
+import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { createWorld, type World } from './support/real-git'
+import { prepareStack } from '../../../.agents/skills/flatten-pr-graph/scripts/prepare-stack.mjs'
+import { publishStack } from '../../../.agents/skills/flatten-pr-graph/scripts/publish-stack.mjs'
+
+/**
+ * Issue #87's cumulative preparation and issue #88's scoped publication.
+ *
+ * Every assertion here is made against Git's own state - `ls-remote`, ancestry, the
+ * unmerged index - rather than against a field the helper reports about itself. A helper
+ * that claimed success while the remote disagreed would fail here.
+ */
+
+interface PrepareInput {
+  runDirectory: string
+  order: number[]
+  heads: Record<number, string>
+  originalHeads: Record<number, string>
+  root?: { ref: string; oid: string }
+  rootFiles?: Record<string, string>
+  resolutions?: Array<{
+    number: number
+    path: string
+    content: string
+    intent: string
+    reason: string
+  }>
+  resume?: boolean
+}
+
+interface PreparedRun {
+  ok: boolean
+  status?: string
+  errors: Array<{ code: string; detail: string; evidence: string }>
+  conflicts: Array<{ number: number; path: string; kind: string; needsDecision: boolean }>
+  preparation: null | {
+    branches: Array<{
+      number: number
+      originalHead: string
+      preparedHead: string
+      basedOn: string
+      retainedOriginalCommits: string[]
+      historyPolicy: string
+    }>
+    lostOriginalCommits: string[]
+  }
+  verification: Array<{ invariant: string; observed: string; result: string }>
+  continuation: { prepared: number[]; remaining: number[]; resumeFrom: number | null }
+  journalPath: string
+  repeated?: boolean
+}
+
+interface PublicationRun {
+  ok: boolean
+  status: string
+  errors: Array<{ code: string; detail: string; evidence: string }>
+  publication: {
+    attempts: Array<{ kind: string; target: string; acknowledged: boolean; outcome: string }>
+    confirmed: Array<{ kind: string; target: string }>
+    unconfirmed: Array<{ kind: string; target: string }>
+    interrupted: boolean
+  }
+  capability: Record<string, unknown>
+  rootAdvance: null | { pinned: string; observed: string; integrated: boolean }
+  recovery: null | { unconfirmedAttempts: string[] }
+}
+
+const BRANCHES = { 12: 'feat-a', 13: 'feat-b', 14: 'feat-c', 15: 'feat-conflict', 16: 'feat-lock' }
+
+function planInput(world: World, input: PrepareInput): Record<string, unknown> {
+  return {
+    contractVersion: 'flatten-pr-graph/1',
+    repository: world.remote,
+    runDirectory: input.runDirectory,
+    root: input.root ?? { ref: 'refs/heads/main', oid: world.remoteRefs()['refs/heads/main'] },
+    selection: input.order,
+    order: input.order,
+    heads: input.heads,
+    originalHeads: input.originalHeads,
+    resolutions: input.resolutions ?? [],
+    resume: input.resume ?? false,
+    now: '2026-10-01T09:00:00.000Z',
+  }
+}
+
+const advancedRoots = new WeakSet<World>()
+
+async function runPrepare(world: World, input: PrepareInput): Promise<PreparedRun> {
+  // A branch seeded from `main` already contains that commit, so preparation would only
+  // ever fast-forward. Moving the root first gives every scenario the real case: a base
+  // the pull request branched before.
+  if (!input.root && !advancedRoots.has(world)) {
+    advancedRoots.add(world)
+    await advanceRoot(world, input.rootFiles ?? { 'root.txt': 'root moves on\n' })
+  }
+  return (await prepareStack(planInput(world, input))) as unknown as PreparedRun
+}
+
+function runPublish(
+  world: World,
+  document: Record<string, unknown>,
+  conversations?: Record<string, unknown>,
+): Promise<PublicationRun> {
+  return publishStack(
+    {
+      contractVersion: 'flatten-pr-graph/1',
+      repository: join(world.root, 'run', 'storage.git'),
+      remote: world.remote,
+      now: '2026-10-01T09:05:00.000Z',
+      ...document,
+    },
+    conversations as never,
+  ) as Promise<PublicationRun>
+}
+
+let scratchCounter = 0
+
+async function seedBranch(
+  world: World,
+  branch: string,
+  files: Record<string, string>,
+  base = 'main',
+): Promise<string> {
+  scratchCounter += 1
+  const scratch = await world.createScratch(`seed-${branch}-${scratchCounter}`)
+  scratch.fetch()
+  scratch.checkout(base)
+  for (const [path, content] of Object.entries(files)) {
+    await scratch.write(path, content)
+  }
+  const oid = scratch.commit(`work on ${branch}`)
+  scratch.push(branch, { force: true })
+  return oid
+}
+
+/**
+ * Moves the default branch on. A branch seeded before this no longer contains the pinned
+ * root, so preparation has to produce real integration commits and publication has real
+ * work to do.
+ */
+async function advanceRoot(world: World, files: Record<string, string>): Promise<string> {
+  scratchCounter += 1
+  const scratch = await world.createScratch(`root-${scratchCounter}`)
+  scratch.fetch()
+  scratch.checkout('main')
+  for (const [path, content] of Object.entries(files)) {
+    await scratch.write(path, content)
+  }
+  const oid = scratch.commit('root moves on')
+  scratch.push('main')
+  return oid
+}
+
+function publicationDocument(
+  world: World,
+  prepared: PreparedRun,
+  numbers: number[],
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
+  const root = world.remoteRefs()['refs/heads/main']
+  return {
+    runDirectory: join(world.root, 'publication'),
+    authority: {
+      intent: 'execute',
+      selection: numbers,
+      granted: ['ref-update', 'pr-base-update'],
+      hostVerified: true,
+    },
+    preparation: prepared.preparation,
+    order: numbers,
+    heads: Object.fromEntries(numbers.map((number) => [number, `refs/heads/${BRANCHES[number]}`])),
+    intendedBases: Object.fromEntries(
+      numbers.map((number, index) => [number, index === 0 ? 'main' : BRANCHES[numbers[index - 1]]]),
+    ),
+    root: { ref: 'refs/heads/main', oid: root },
+    observedRefs: { 'refs/heads/main': root },
+    provider: { module: providerModule(world, {}) },
+    ...overrides,
+  }
+}
+
+/** Writes a provider double with the same three operations the contract allows. */
+function providerModule(world: World, behaviour: Record<string, string>): string {
+  const path = join(world.root, `provider-${Math.random().toString(36).slice(2)}.mjs`)
+  const seeded = Object.entries(BRANCHES).map(([number, branch]) => [
+    Number(number),
+    {
+      number: Number(number),
+      state: 'OPEN',
+      draft: false,
+      baseRef: 'main',
+      headRef: branch,
+      headRepository: 'acme/widgets',
+      title: 'Feature',
+      body: 'body',
+      labels: [],
+      reviewers: [],
+      autoMergeRequest: { enabled: false, method: null },
+    },
+  ])
+  writeFileSync(
+    path,
+    `import { appendFileSync } from 'node:fs'
+let refusals = 0
+const callLog = ${JSON.stringify(join(world.root, 'provider-calls.jsonl'))}
+const pullRequests = new Map(${JSON.stringify(seeded)})
+export function capabilities() {
+  return { operations: ['update-pull-request-base'], compareAndSwap: false, provider: 'double' }
+}
+export function readPullRequest(number) {
+  const pullRequest = pullRequests.get(number)
+  return { ok: true, pullRequest: pullRequest ? structuredClone(pullRequest) : null }
+}
+export function updatePullRequestBase(number, base, expectedBase) {
+  ${behaviour.refuseBase ?? ''}
+  const pullRequest = pullRequests.get(number)
+  if (!pullRequest) return { ok: false, applied: false }
+  pullRequest.baseRef = base
+  appendFileSync(callLog, JSON.stringify({ number, base }) + '\\n')
+  ${behaviour.loseAck ?? ''}
+  return { ok: true, applied: true, preconditionMet: expectedBase ? true : null }
+}
+`,
+  )
+  return path
+}
+
+/** What the provider double was actually asked to write, in the order it was asked. */
+function providerCalls(world: World): Array<{ number: number; base: string }> {
+  const log = join(world.root, 'provider-calls.jsonl')
+  return existsSync(log)
+    ? readFileSync(log, 'utf8')
+        .split('\n')
+        .filter(Boolean)
+        .map((line) => JSON.parse(line) as { number: number; base: string })
+    : []
+}
+
+test('preparation integrates each original head onto its predecessor prepared head', async (t) => {
+  const world = await createWorld('prepare-chain')
+  t.after(() => world.cleanup())
+  const a = await seedBranch(world, BRANCHES[12], { 'a.txt': 'a\n' })
+  const b = await seedBranch(world, BRANCHES[13], { 'b.txt': 'b\n' })
+
+  const prepared = await runPrepare(world, {
+    runDirectory: join(world.root, 'run'),
+    order: [12, 13],
+    heads: { 12: `refs/heads/${BRANCHES[12]}`, 13: `refs/heads/${BRANCHES[13]}` },
+    originalHeads: { 12: a, 13: b },
+  })
+
+  assert.equal(prepared.ok, true, JSON.stringify(prepared.errors))
+  const branches = prepared.preparation?.branches ?? []
+  assert.deepEqual(
+    branches.map((branch) => branch.number),
+    [12, 13],
+  )
+  const storage = join(world.root, 'run', 'storage.git')
+  assert.equal(world.isAncestor(storage, a, branches[0].preparedHead), true)
+  assert.equal(world.isAncestor(storage, branches[0].preparedHead, branches[1].preparedHead), true)
+  assert.equal(branches[1].basedOn, branches[0].preparedHead)
+  for (const [index, oid] of [a, b].entries()) {
+    assert.ok(
+      branches[index].retainedOriginalCommits.includes(oid),
+      `#${branches[index].number} retained`,
+    )
+  }
+  assert.deepEqual(prepared.preparation?.lostOriginalCommits, [])
+  assert.ok(
+    prepared.verification.every((row) => row.result === 'pass'),
+    JSON.stringify(prepared.verification),
+  )
+  // Preparation never writes to a remote: both head refs still hold the originals.
+  const refs = world.remoteRefs()
+  assert.equal(refs[`refs/heads/${BRANCHES[12]}`], a)
+  assert.equal(refs[`refs/heads/${BRANCHES[13]}`], b)
+})
+
+test('a repeated preparation request is answered without producing new commits', async (t) => {
+  const world = await createWorld('prepare-repeat')
+  t.after(() => world.cleanup())
+  const a = await seedBranch(world, BRANCHES[12], { 'a.txt': 'a\n' })
+  const b = await seedBranch(world, BRANCHES[13], { 'b.txt': 'b\n' })
+  const request: PrepareInput = {
+    runDirectory: join(world.root, 'run'),
+    order: [12, 13],
+    heads: { 12: `refs/heads/${BRANCHES[12]}`, 13: `refs/heads/${BRANCHES[13]}` },
+    originalHeads: { 12: a, 13: b },
+  }
+  const first = await runPrepare(world, request)
+  const second = await runPrepare(world, request)
+
+  assert.equal(second.ok, true, JSON.stringify(second.errors))
+  assert.equal(second.repeated, true)
+  assert.deepEqual(
+    second.preparation?.branches.map((branch) => branch.preparedHead),
+    first.preparation?.branches.map((branch) => branch.preparedHead),
+  )
+})
+
+test('a conflict blocks preparation with both sides and a resume point', async (t) => {
+  const world = await createWorld('prepare-conflict')
+  t.after(() => world.cleanup())
+  // The root carries the file first, so both pull requests edit it and the merge is a
+  // genuine content conflict rather than two branches independently adding one.
+  const rootOid = await advanceRoot(world, { 'shared.txt': 'seed\n' })
+  const a = await seedBranch(world, BRANCHES[12], { 'shared.txt': 'ours\n' })
+  const conflicting = await seedBranch(world, BRANCHES[15], { 'shared.txt': 'theirs\n' })
+
+  const blocked = await runPrepare(world, {
+    runDirectory: join(world.root, 'run'),
+    order: [12, 15],
+    heads: { 12: `refs/heads/${BRANCHES[12]}`, 15: `refs/heads/${BRANCHES[15]}` },
+    originalHeads: { 12: a, 15: conflicting },
+    root: { ref: 'refs/heads/main', oid: rootOid },
+  })
+
+  assert.equal(blocked.ok, false)
+  assert.equal(blocked.status, 'partial')
+  assert.deepEqual(
+    blocked.preparation?.branches.map((branch) => branch.number),
+    [12],
+  )
+  const conflict = blocked.conflicts.find((entry) => entry.number === 15)
+  assert.ok(conflict, JSON.stringify(blocked.errors))
+  assert.equal(conflict.path, 'shared.txt')
+  assert.equal(conflict.needsDecision, true)
+  assert.equal(blocked.continuation.resumeFrom, 15)
+  assert.equal(blocked.continuation.prepared.includes(12), true)
+  // A blocked preparation leaves the remote exactly where it was.
+  assert.equal(world.remoteRefs()[`refs/heads/${BRANCHES[15]}`], conflicting)
+})
+
+test('two branches adding the same path is refused without a stated decision', async (t) => {
+  const world = await createWorld('prepare-add-add')
+  t.after(() => world.cleanup())
+  const a = await seedBranch(world, BRANCHES[12], { 'added-twice.txt': 'ours\n' })
+  const conflicting = await seedBranch(world, BRANCHES[15], { 'added-twice.txt': 'theirs\n' })
+
+  const blocked = await runPrepare(world, {
+    runDirectory: join(world.root, 'run'),
+    order: [12, 15],
+    heads: { 12: `refs/heads/${BRANCHES[12]}`, 15: `refs/heads/${BRANCHES[15]}` },
+    originalHeads: { 12: a, 15: conflicting },
+  })
+
+  assert.equal(blocked.ok, false)
+  const conflict = blocked.conflicts.find((entry) => entry.number === 15)
+  assert.equal(conflict?.kind, 'add-add')
+  assert.equal(blocked.decisions.length, 0)
+})
+
+test('a caller-supplied resolution produces a prepared state the next run verifies', async (t) => {
+  const world = await createWorld('prepare-resolve')
+  t.after(() => world.cleanup())
+  const rootOid = await advanceRoot(world, { 'shared.txt': 'seed\n' })
+  const a = await seedBranch(world, BRANCHES[12], { 'shared.txt': 'ours\n' })
+  const conflicting = await seedBranch(world, BRANCHES[15], { 'shared.txt': 'theirs\n' })
+  const runDirectory = join(world.root, 'run')
+  const request: PrepareInput = {
+    runDirectory,
+    order: [12, 15],
+    heads: { 12: `refs/heads/${BRANCHES[12]}`, 15: `refs/heads/${BRANCHES[15]}` },
+    originalHeads: { 12: a, 15: conflicting },
+    root: { ref: 'refs/heads/main', oid: rootOid },
+  }
+  const blocked = await runPrepare(world, request)
+  const evidence = blocked.errors.find((error) => error.code === 'unresolved-conflict')
+  assert.ok(evidence, JSON.stringify(blocked.errors))
+
+  const resolved = await runPrepare(world, {
+    ...request,
+    runDirectory: join(world.root, 'run-resolved'),
+    resolutions: [
+      {
+        number: 15,
+        path: 'shared.txt',
+        content: 'seed\nours\ntheirs\n',
+        intent: 'keep the root text and the change #15 states',
+        reason: 'both sides stated; neither is a strict superset',
+      },
+    ],
+  })
+
+  assert.equal(resolved.ok, true, JSON.stringify(resolved.errors))
+  assert.ok(resolved.conflicts.some((conflict) => conflict.number === 15))
+  const branch = resolved.preparation?.branches.find((entry) => entry.number === 15)
+  assert.ok(branch)
+  assert.equal(
+    world.isAncestor(
+      join(world.root, 'run-resolved', 'storage.git'),
+      conflicting,
+      branch.preparedHead,
+    ),
+    true,
+  )
+})
+
+test('preparation leaves a dirty, staged, untracked user checkout untouched', async (t) => {
+  const world = await createWorld('prepare-user-state')
+  t.after(() => world.cleanup())
+  const a = await seedBranch(world, BRANCHES[12], { 'a.txt': 'a\n' })
+  const b = await seedBranch(world, BRANCHES[13], { 'b.txt': 'b\n' })
+  world.gitIn(world.repo, 'checkout', '-q', 'main')
+  world.gitIn(world.repo, 'checkout', '-q', '-b', 'wip')
+  writeFileSync(join(world.repo, 'dirty.txt'), 'uncommitted\n')
+  writeFileSync(join(world.repo, 'staged.txt'), 'staged\n')
+  world.gitIn(world.repo, 'add', 'staged.txt')
+  const before = world.userFingerprint()
+
+  const prepared = await runPrepare(world, {
+    runDirectory: join(world.root, 'run'),
+    order: [12, 13],
+    heads: { 12: `refs/heads/${BRANCHES[12]}`, 13: `refs/heads/${BRANCHES[13]}` },
+    originalHeads: { 12: a, 13: b },
+  })
+
+  assert.equal(prepared.ok, true, JSON.stringify(prepared.errors))
+  assert.deepEqual(world.userFingerprint(), before)
+})
+
+test('a lockfile conflict is refused instead of being resolved by a rule', async (t) => {
+  const world = await createWorld('prepare-lockfile')
+  t.after(() => world.cleanup())
+  const a = await seedBranch(world, BRANCHES[12], { 'package-lock.json': '{"v":1}\n' })
+  const conflicting = await seedBranch(world, BRANCHES[16], { 'package-lock.json': '{"v":2}\n' })
+
+  const blocked = await runPrepare(world, {
+    runDirectory: join(world.root, 'run'),
+    order: [12, 16],
+    heads: { 12: `refs/heads/${BRANCHES[12]}`, 16: `refs/heads/${BRANCHES[16]}` },
+    originalHeads: { 12: a, 16: conflicting },
+    resolutions: [
+      {
+        number: 16,
+        path: 'package-lock.json',
+        content: '{"v":3}\n',
+        intent: 'invented',
+        reason: 'invented',
+      },
+    ],
+  })
+
+  assert.equal(blocked.ok, false)
+  assert.equal(blocked.status, 'partial')
+  assert.ok(
+    blocked.errors.some((error) => /lockfile|generated/i.test(`${error.detail} ${error.evidence}`)),
+    JSON.stringify(blocked.errors),
+  )
+})
+
+test('publication pushes the prepared heads atomically and retargets bases in order', async (t) => {
+  const world = await createWorld('publish-happy')
+  t.after(() => world.cleanup())
+  const a = await seedBranch(world, BRANCHES[12], { 'a.txt': 'a\n' })
+  const b = await seedBranch(world, BRANCHES[13], { 'b.txt': 'b\n' })
+  const prepared = await runPrepare(world, {
+    runDirectory: join(world.root, 'run'),
+    order: [12, 13],
+    heads: { 12: `refs/heads/${BRANCHES[12]}`, 13: `refs/heads/${BRANCHES[13]}` },
+    originalHeads: { 12: a, 13: b },
+  })
+  assert.equal(prepared.ok, true, JSON.stringify(prepared.errors))
+
+  const published = await runPublish(world, publicationDocument(world, prepared, [12, 13]))
+
+  assert.equal(published.status, 'published', JSON.stringify(published.errors))
+  const refs = world.remoteRefs()
+  assert.equal(refs[`refs/heads/${BRANCHES[12]}`], prepared.preparation?.branches[0].preparedHead)
+  assert.equal(refs[`refs/heads/${BRANCHES[13]}`], prepared.preparation?.branches[1].preparedHead)
+  assert.equal(refs['refs/heads/main'], world.remoteRefs()['refs/heads/main'])
+  // #12 already builds on the root, so only the second base needs writing; the double
+  // records what it was actually asked to write, in the order it was asked.
+  assert.deepEqual(providerCalls(world), [{ number: 13, base: BRANCHES[12] }])
+  assert.deepEqual(
+    published.publication.attempts
+      .filter((attempt) => attempt.kind === 'pr-base-update')
+      .map((attempt) => attempt.target),
+    ['13'],
+  )
+  assert.ok(published.publication.attempts.every((attempt) => attempt.acknowledged))
+  assert.equal(published.capability.atomicRefTransaction, 'supported')
+  assert.equal(published.capability.baseWritesGuardedBy, 'read-before-write')
+  assert.equal(published.capability.residualMetadataRace, true)
+})
+
+test('republishing an already published chain reports a no-op with no attempts', async (t) => {
+  const world = await createWorld('publish-noop')
+  t.after(() => world.cleanup())
+  const a = await seedBranch(world, BRANCHES[12], { 'a.txt': 'a\n' })
+  const prepared = await runPrepare(world, {
+    runDirectory: join(world.root, 'run'),
+    order: [12],
+    heads: { 12: `refs/heads/${BRANCHES[12]}` },
+    originalHeads: { 12: a },
+  })
+  const first = await runPublish(world, publicationDocument(world, prepared, [12]))
+  assert.equal(first.status, 'published', JSON.stringify(first.errors))
+  const refsAfterFirst = world.remoteRefs()
+
+  const again = await runPublish(
+    world,
+    publicationDocument(world, prepared, [12], { runDirectory: join(world.root, 'publication-2') }),
+  )
+
+  assert.equal(again.status, 'no-op')
+  assert.deepEqual(again.publication.attempts, [])
+  assert.deepEqual(world.remoteRefs(), refsAfterFirst)
+})
+
+test('a preview intent publishes nothing', async (t) => {
+  const world = await createWorld('publish-preview')
+  t.after(() => world.cleanup())
+  const a = await seedBranch(world, BRANCHES[12], { 'a.txt': 'a\n' })
+  const prepared = await runPrepare(world, {
+    runDirectory: join(world.root, 'run'),
+    order: [12],
+    heads: { 12: `refs/heads/${BRANCHES[12]}` },
+    originalHeads: { 12: a },
+  })
+  const before = world.remoteRefs()
+
+  const preview = await runPublish(
+    world,
+    publicationDocument(world, prepared, [12], {
+      authority: { intent: 'preview', selection: [12], granted: [], hostVerified: false },
+    }),
+  )
+
+  assert.equal(preview.status, 'blocked')
+  assert.deepEqual(preview.publication.attempts, [])
+  assert.deepEqual(world.remoteRefs(), before)
+})
+
+test('a remote without atomic ref transactions is refused before any write', async (t) => {
+  const world = await createWorld('publish-atomic')
+  t.after(() => world.cleanup())
+  const a = await seedBranch(world, BRANCHES[12], { 'a.txt': 'a\n' })
+  const prepared = await runPrepare(world, {
+    runDirectory: join(world.root, 'run'),
+    order: [12],
+    heads: { 12: `refs/heads/${BRANCHES[12]}` },
+    originalHeads: { 12: a },
+  })
+  const before = world.remoteRefs()
+
+  const refused = await runPublish(world, publicationDocument(world, prepared, [12]), {
+    detectAtomicRefTransaction: () => ({
+      supported: false,
+      evidence: 'the remote refuses --atomic',
+    }),
+    push: () => {
+      throw new Error('a write was attempted after the capability answer')
+    },
+  })
+
+  assert.equal(refused.status, 'blocked')
+  assert.equal(refused.publication.attempts.length, 0)
+  assert.deepEqual(world.remoteRefs(), before)
+})
+
+test('a root that moved after planning stops the run before the capability question', async (t) => {
+  const world = await createWorld('publish-root-drift')
+  t.after(() => world.cleanup())
+  const a = await seedBranch(world, BRANCHES[12], { 'a.txt': 'a\n' })
+  const prepared = await runPrepare(world, {
+    runDirectory: join(world.root, 'run'),
+    order: [12],
+    heads: { 12: `refs/heads/${BRANCHES[12]}` },
+    originalHeads: { 12: a },
+  })
+  const document = publicationDocument(world, prepared, [12])
+  const pinnedRoot = (document.root as { oid: string }).oid
+  const movedRoot = await seedBranch(world, 'later-root-work', { 'c.txt': 'c\n' })
+  world.moveRemoteRef('main', movedRoot)
+  const before = world.remoteRefs()
+
+  const drift = await runPublish(world, document, {
+    detectAtomicRefTransaction: () => {
+      throw new Error('the capability question was asked after the root had moved')
+    },
+    push: () => {
+      throw new Error('a write was attempted after the root had moved')
+    },
+  })
+
+  assert.equal(drift.status, 'blocked')
+  assert.ok(
+    drift.errors.some(
+      (error) => /root/i.test(error.detail) && error.evidence.includes(pinnedRoot.slice(0, 12)),
+    ),
+    JSON.stringify(drift.errors),
+  )
+  assert.deepEqual(world.remoteRefs(), before)
+  assert.equal(drift.rootAdvance?.observed, movedRoot)
+  assert.equal(drift.rootAdvance?.integrated, false)
+})
+
+test('a head branch that moved is never overwritten', async (t) => {
+  const world = await createWorld('publish-head-move')
+  t.after(() => world.cleanup())
+  const a = await seedBranch(world, BRANCHES[12], { 'a.txt': 'a\n' })
+  const prepared = await runPrepare(world, {
+    runDirectory: join(world.root, 'run'),
+    order: [12],
+    heads: { 12: `refs/heads/${BRANCHES[12]}` },
+    originalHeads: { 12: a },
+  })
+  const concurrent = await seedBranch(world, 'feat-a', { 'concurrent.txt': 'theirs\n' })
+  const before = world.remoteRefs()
+
+  const blocked = await runPublish(world, publicationDocument(world, prepared, [12]), {
+    push: () => {
+      throw new Error('a write was attempted although the head had moved')
+    },
+  })
+
+  assert.equal(blocked.status, 'blocked')
+  assert.deepEqual(world.remoteRefs(), before)
+  assert.equal(world.remoteRefs()[`refs/heads/${BRANCHES[12]}`], concurrent)
+})
+
+test('a move that lands between the check and the push loses to the lease', async (t) => {
+  const world = await createWorld('publish-lease-race')
+  t.after(() => world.cleanup())
+  const a = await seedBranch(world, BRANCHES[12], { 'a.txt': 'a\n' })
+  const prepared = await runPrepare(world, {
+    runDirectory: join(world.root, 'run'),
+    order: [12],
+    heads: { 12: `refs/heads/${BRANCHES[12]}` },
+    originalHeads: { 12: a },
+  })
+  // A commit somebody else will push, kept off the head branch so the run's own check sees
+  // the state it expects until the move lands mid-push.
+  const concurrent = await seedBranch(world, 'concurrent-work', { 'concurrent.txt': 'theirs\n' })
+
+  const raced = await runPublish(world, publicationDocument(world, prepared, [12]), {
+    push: (repository: string, remote: string, refspecs: string[], leases: string[]) => {
+      world.moveRemoteRef(BRANCHES[12], concurrent)
+      world.tryGitIn(repository, 'push', '--atomic', ...leases, remote, ...refspecs)
+      return {
+        ok: false,
+        status: 1,
+        stdout: '',
+        stderr: 'the lease did not match the value the push pinned',
+      }
+    },
+  })
+
+  // The ref write lost its lease, and #12 already had the right base, so nothing landed:
+  // the run reports exactly that rather than calling the base write a success.
+  assert.equal(raced.status, 'blocked')
+  const refAttempt = raced.publication.attempts.find((attempt) => attempt.kind === 'ref-update')
+  assert.equal(refAttempt?.acknowledged, false)
+  assert.equal(refAttempt?.outcome, 'rejected')
+  assert.equal(world.remoteRefs()[`refs/heads/${BRANCHES[12]}`], concurrent)
+  assert.deepEqual(
+    raced.publication.unconfirmed.map((entry) => entry.kind),
+    ['ref-update'],
+  )
+})
+
+test('a refused second base is reported as partial, and a resume finishes it', async (t) => {
+  const world = await createWorld('publish-resume')
+  t.after(() => world.cleanup())
+  const a = await seedBranch(world, BRANCHES[12], { 'a.txt': 'a\n' })
+  const b = await seedBranch(world, BRANCHES[13], { 'b.txt': 'b\n' })
+  const c = await seedBranch(world, BRANCHES[14], { 'c.txt': 'c\n' })
+  const prepared = await runPrepare(world, {
+    runDirectory: join(world.root, 'run'),
+    order: [12, 13, 14],
+    heads: {
+      12: `refs/heads/${BRANCHES[12]}`,
+      13: `refs/heads/${BRANCHES[13]}`,
+      14: `refs/heads/${BRANCHES[14]}`,
+    },
+    originalHeads: { 12: a, 13: b, 14: c },
+  })
+  // The double refuses the first attempt on #13 and answers afterwards: the module is
+  // imported once per process, so the resume sees the same provider state the partial run
+  // left behind.
+  const refusing = providerModule(world, {
+    refuseBase: 'if (number === 14 && refusals++ === 0) return { ok: false, applied: false }',
+  })
+  const runDirectory = join(world.root, 'publication')
+  const document = publicationDocument(world, prepared, [12, 13, 14], {
+    provider: { module: refusing },
+    runDirectory,
+  })
+
+  const partial = await runPublish(world, document)
+  assert.equal(partial.status, 'partial', JSON.stringify(partial.errors))
+  assert.equal(
+    partial.publication.confirmed.filter((entry) => entry.kind === 'pr-base-update').length,
+    1,
+  )
+  assert.equal(
+    partial.publication.unconfirmed.filter((entry) => entry.kind === 'pr-base-update').length,
+    1,
+  )
+  assert.ok(partial.recovery)
+
+  const resumed = await runPublish(world, { ...document, resume: true })
+  assert.equal(resumed.status, 'published', JSON.stringify(resumed.errors))
+  assert.deepEqual(
+    resumed.publication.attempts
+      .filter((attempt) => attempt.kind === 'pr-base-update')
+      .map((attempt) => attempt.target),
+    ['14'],
+  )
+})
+
+test('an acknowledgement lost after the write is reconciled by re-reading, not by retrying', async (t) => {
+  const world = await createWorld('publish-lost-ack')
+  t.after(() => world.cleanup())
+  const a = await seedBranch(world, BRANCHES[12], { 'a.txt': 'a\n' })
+  const b = await seedBranch(world, BRANCHES[13], { 'b.txt': 'b\n' })
+  const prepared = await runPrepare(world, {
+    runDirectory: join(world.root, 'run'),
+    order: [12, 13],
+    heads: { 12: `refs/heads/${BRANCHES[12]}`, 13: `refs/heads/${BRANCHES[13]}` },
+    originalHeads: { 12: a, 13: b },
+  })
+  const lossy = providerModule(world, {
+    loseAck: 'if (number === 13) throw new Error("connection reset after the write")',
+  })
+
+  const published = await runPublish(
+    world,
+    publicationDocument(world, prepared, [12, 13], { provider: { module: lossy } }),
+  )
+
+  assert.equal(published.status, 'published', JSON.stringify(published.errors))
+  const second = published.publication.attempts.find((attempt) => attempt.target === '13')
+  assert.equal(second?.acknowledged, true)
+  assert.equal(published.publication.unconfirmed.length, 0)
+})
+
+test('a pre-push hook stops publication instead of being bypassed', async (t) => {
+  const world = await createWorld('publish-hook')
+  t.after(() => world.cleanup())
+  const a = await seedBranch(world, BRANCHES[12], { 'a.txt': 'a\n' })
+  const prepared = await runPrepare(world, {
+    runDirectory: join(world.root, 'run'),
+    order: [12],
+    heads: { 12: `refs/heads/${BRANCHES[12]}` },
+    originalHeads: { 12: a },
+  })
+  const storage = join(world.root, 'run', 'storage.git')
+  writeFileSync(join(storage, 'hooks', 'pre-push'), '#!/bin/sh\nexit 0\n', { mode: 0o755 })
+  const before = world.remoteRefs()
+
+  const blocked = await runPublish(world, publicationDocument(world, prepared, [12]))
+
+  assert.equal(blocked.status, 'blocked')
+  assert.ok(
+    blocked.capability.blockedControls?.toString().includes('pre-push'),
+    JSON.stringify(blocked.capability),
+  )
+  assert.deepEqual(world.remoteRefs(), before)
+})
+
+test('configuration that would push extra refs stops publication', async (t) => {
+  const world = await createWorld('publish-followtags')
+  t.after(() => world.cleanup())
+  const a = await seedBranch(world, BRANCHES[12], { 'a.txt': 'a\n' })
+  const prepared = await runPrepare(world, {
+    runDirectory: join(world.root, 'run'),
+    order: [12],
+    heads: { 12: `refs/heads/${BRANCHES[12]}` },
+    originalHeads: { 12: a },
+  })
+  const storage = join(world.root, 'run', 'storage.git')
+  world.gitIn(storage, 'config', 'push.followTags', 'true')
+  const before = world.remoteRefs()
+
+  const blocked = await runPublish(world, publicationDocument(world, prepared, [12]))
+
+  assert.equal(blocked.status, 'blocked')
+  assert.ok(
+    /followtags/i.test(`${blocked.capability.blockedControls?.join(',')}`),
+    JSON.stringify(blocked.capability),
+  )
+  assert.deepEqual(world.remoteRefs(), before)
+})
