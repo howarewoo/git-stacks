@@ -83,7 +83,7 @@ import {
 import { CredentialVault } from './credentials'
 import { safeStorageProtector } from './secret-storage'
 import { GitHubAccount } from './github-account'
-import { NotificationCenter } from './notifications'
+import { NotificationCenter, notificationCredentialStore } from './notifications'
 import {
   assertDirectoryName,
   assertFullName,
@@ -528,20 +528,40 @@ function notificationScope(host: string): string {
   return Buffer.from(host, 'utf8').toString('hex')
 }
 
+/**
+ * Ends the Notification Center for the host that is no longer selected.
+ *
+ * The boundary closes where the host changes, not at the next notification
+ * request: the retired center's timer, its read, and its credential are all
+ * addressed to a host this app no longer speaks to. What it stored stays on
+ * disk, sealed and named for that host, for whoever selects it again — what it
+ * holds in memory, and what it publishes, end here.
+ */
+function retireNotificationCenter(): void {
+  if (notifications === null) return
+  notifications.forget()
+  notifications = null
+  notificationHost = null
+}
+
 function notificationCenter(): NotificationCenter {
   const context = configuredHost()
-  if (notifications !== null && notificationHost !== context.host) {
-    // The retired center is stopped and emptied, never asked to clean up after
-    // itself: its stored credential stays sealed and its stored list stays on
-    // disk, and no thread, validator, or poll clock crosses to the new host.
-    notifications.forget()
-    notifications = null
-    notificationHost = null
-  }
+  // A center belongs to one host, so a host that is no longer selected retires
+  // the one that was built for it rather than being asked to serve another.
+  if (notificationHost !== null && notificationHost !== context.host) retireNotificationCenter()
   const scope = notificationScope(context.host)
   notifications ??= new NotificationCenter({
     host: context,
-    vault: credentialVault(),
+    // This module's own sealed file, never the application's: signing out, a
+    // host change, or a whole-store cleanup on the account side cannot reach a
+    // notification token, and a notification token can never be read as the
+    // credential pull requests, stacks, and reviews depend on. One store and one
+    // queue per host, kept across centers, so a change this host's files are
+    // still making cannot be lost to the one that comes after it.
+    store: notificationCredentialStore(
+      join(app.getPath('userData'), `github-notifications-vault.${scope}.json`),
+      safeStorageProtector,
+    ),
     credentialFile: join(app.getPath('userData'), `github-notifications.${scope}.json`),
     cacheFile: join(app.getPath('userData'), `github-notifications-cache.${scope}.json`),
     consent: () => ({
@@ -598,10 +618,12 @@ const hostWork = new Set<AbortController>()
 function applySettings(settings: AppSettings): void {
   const previousHost = currentSettings?.github.host ?? null
   currentSettings = settings
-  // Consent and policy both live in settings, so a change to either has to
-  // reach the module that polls with them now rather than at its next read.
-  syncNotificationModule()
-  if (previousHost === settings.github.host) return
+  if (previousHost === settings.github.host) {
+    // Consent and policy both live in settings, so a change to either has to
+    // reach the module that polls with them now rather than at its next read.
+    syncNotificationModule()
+    return
+  }
   // Everything already in flight was addressed to the host that is no longer
   // selected. It is aborted, and its generation is retired, so a response that
   // arrives afterwards cannot repopulate the previous host's cache or the UI.
@@ -612,6 +634,12 @@ function applySettings(settings: AppSettings): void {
   // arrive without an account status to announce it.
   retireInboxIdentity(`host:${settings.github.host}`)
   forgetHost(previousHost ?? undefined)
+  // The notification inbox belongs to the host it was read from, and the window
+  // is holding it. The old center is retired here, where the host changed, and
+  // the new host's is opened and published at once: its old timer never runs
+  // again, and what the window shows is never the previous host's answer.
+  const hadNotificationCenter = notifications !== null
+  retireNotificationCenter()
   if (account !== null && accountHost !== settings.github.host) {
     // The sign-out is not awaited, and it does not need to be: the account
     // removes only the identity the shared files hold for its own host, and
@@ -621,6 +649,7 @@ function applySettings(settings: AppSettings): void {
     account = null
     accountHost = null
   }
+  if (hadNotificationCenter) notificationCenter()
 }
 
 /**

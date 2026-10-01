@@ -60,6 +60,13 @@ export interface GitHubTransportFailure {
    */
   body?: unknown
   authority?: string | null
+  /**
+   * Whether this failure's rate-limit metadata becomes the process-wide report
+   * every other caller budgets against. Off for a transport that keeps its own
+   * accounting to itself: an optional module's exhausted token would otherwise
+   * park an unrelated, healthy credential against a wall it never hit.
+   */
+  publish?: boolean
 }
 
 /** Every transport failure carries a typed kind plus the rate-limit metadata GitHub returned. */
@@ -84,7 +91,8 @@ export class GitHubTransportError extends Error {
     this.rateLimit = failure.rateLimit ?? emptyRateLimit()
     this.body = failure.body
     this.authority = failure.authority ?? null
-    publishRateLimit(this.rateLimit, failure.kind, null, this.authority)
+    if (failure.publish !== false)
+      publishRateLimit(this.rateLimit, failure.kind, null, this.authority)
   }
 }
 
@@ -654,6 +662,7 @@ function graphqlData<T>(
   rateLimit: GitHubRateLimit,
   authority: string,
   onRefusal?: (rateLimit: GitHubRateLimit, kind: GitHubErrorKind) => void,
+  publish: boolean = true,
 ): T {
   const errors = graphqlMessages(body)
   if (errors) {
@@ -665,6 +674,7 @@ function graphqlData<T>(
       detail: errors,
       rateLimit,
       authority,
+      publish,
     })
   }
   if (!isRecord(body) || !isRecord(body.data)) {
@@ -674,12 +684,13 @@ function graphqlData<T>(
       detail: 'GitHub returned a GraphQL response without data',
       rateLimit,
       authority,
+      publish,
     })
   }
   return body.data as T
 }
 
-function parseJsonBody(text: string): unknown {
+function parseJsonBody(text: string, publish: boolean = true): unknown {
   if (!text.trim()) return null
   try {
     return JSON.parse(text)
@@ -687,6 +698,7 @@ function parseJsonBody(text: string): unknown {
     throw new GitHubTransportError({
       kind: 'invalid-response',
       detail: 'GitHub returned a response that is not valid JSON',
+      publish,
     })
   }
 }
@@ -752,6 +764,16 @@ export interface DirectGitHubTransportOptions {
    * stacks, and reviews depend on.
    */
   reportFailures?: boolean
+  /**
+   * Whether this transport's rate-limit metadata becomes the process-wide
+   * report the rest of the app budgets against. On by default. An optional
+   * module that authenticates as its own credential turns it off for the same
+   * reason it turns off `reportFailures`: one token's exhausted budget must
+   * not park pull requests, stacks, and reviews behind a wall this module hit
+   * alone. Its own deadlines are unaffected — every response still carries the
+   * metadata to whoever asked for it.
+   */
+  reportRateLimit?: boolean
 }
 
 /** Authenticated REST/GraphQL access to GitHub over HTTP; it never spawns `gh`. */
@@ -770,6 +792,22 @@ export class DirectGitHubTransport implements GitHubTransport {
 
   constructor(options: DirectGitHubTransportOptions = {}) {
     this.options = options
+  }
+
+  /** Whether this transport's rate-limit metadata is reported process-wide. */
+  private get reportsRateLimit(): boolean {
+    return this.options.reportRateLimit !== false
+  }
+
+  /**
+   * A failure of this transport's own, reported to the process-wide listener
+   * only when this transport is allowed to report what it saw.
+   */
+  private failure(failure: Omit<GitHubTransportFailure, 'publish'>): GitHubTransportError {
+    return new GitHubTransportError({
+      ...failure,
+      publish: this.options.reportRateLimit !== false,
+    })
   }
 
   private get env(): NodeJS.ProcessEnv {
@@ -904,7 +942,7 @@ export class DirectGitHubTransport implements GitHubTransport {
   ): Promise<{ headers: Headers; origin: GitHubCredentialFailure; token: string }> {
     const access = await this.accessCredential()
     if (!access) {
-      throw new GitHubTransportError({
+      throw this.failure({
         kind: 'unauthorized',
         detail: this.options.credential
           ? 'sign in to GitHub from the account panel'
@@ -963,7 +1001,7 @@ export class DirectGitHubTransport implements GitHubTransport {
       credential = access.origin
       requestAuthority = hostCredentialAuthority(this.host ?? GITHUB_HOST, access.token)
       if (controller.signal.aborted) {
-        throw new GitHubTransportError(
+        throw this.failure(
           timedOut
             ? { kind: 'timeout', detail: `request did not complete within ${timeoutMs}ms` }
             : { kind: 'cancelled', detail: 'the request was cancelled' },
@@ -983,7 +1021,8 @@ export class DirectGitHubTransport implements GitHubTransport {
       // A 304 is the answer to a conditional request, not a failure: the stored
       // body stands, and `response.ok` would otherwise report it as unknown.
       if (response.status === 304) {
-        publishRateLimit(rateLimit, null, this.destinationHost, requestAuthority, initiatedAt)
+        if (this.reportsRateLimit)
+          publishRateLimit(rateLimit, null, this.destinationHost, requestAuthority, initiatedAt)
         return {
           status: 304,
           body: null,
@@ -992,9 +1031,9 @@ export class DirectGitHubTransport implements GitHubTransport {
           authority: requestAuthority,
         }
       }
-      const body = parseJsonBody(await response.text())
+      const body = parseJsonBody(await response.text(), this.reportsRateLimit)
       if (!response.ok) {
-        const failure = new GitHubTransportError({
+        const failure = this.failure({
           kind: statusKind(response.status, rateLimit, apiMessage(body)),
           status: response.status,
           detail: apiMessage(body) ?? response.statusText ?? 'request failed',
@@ -1004,16 +1043,18 @@ export class DirectGitHubTransport implements GitHubTransport {
         })
         // Recorded against this host as the refusal it is, so a consumer that
         // budgets per host sees the wait this answer named.
-        publishRateLimit(
-          rateLimit,
-          failure.kind,
-          this.destinationHost,
-          requestAuthority,
-          initiatedAt,
-        )
+        if (this.reportsRateLimit)
+          publishRateLimit(
+            rateLimit,
+            failure.kind,
+            this.destinationHost,
+            requestAuthority,
+            initiatedAt,
+          )
         throw failure
       }
-      publishRateLimit(rateLimit, null, this.destinationHost, requestAuthority, initiatedAt)
+      if (this.reportsRateLimit)
+        publishRateLimit(rateLimit, null, this.destinationHost, requestAuthority, initiatedAt)
       return {
         status: response.status,
         body,
@@ -1029,15 +1070,15 @@ export class DirectGitHubTransport implements GitHubTransport {
         throw error
       }
       if (timedOut) {
-        throw new GitHubTransportError({
+        throw this.failure({
           kind: 'timeout',
           detail: `request did not complete within ${timeoutMs}ms`,
         })
       }
       if (request.signal?.aborted) {
-        throw new GitHubTransportError({ kind: 'cancelled', detail: 'the request was cancelled' })
+        throw this.failure({ kind: 'cancelled', detail: 'the request was cancelled' })
       }
-      throw new GitHubTransportError({
+      throw this.failure({
         kind: 'network',
         detail: commandDetail(error),
       })
@@ -1086,7 +1127,7 @@ export class DirectGitHubTransport implements GitHubTransport {
     )
     if (status === 304) {
       if (!cached)
-        throw new GitHubTransportError({
+        throw this.failure({
           status,
           kind: 'invalid-response',
           detail: 'GitHub answered 304 without a stored response',
@@ -1116,7 +1157,7 @@ export class DirectGitHubTransport implements GitHubTransport {
         request,
       )
       if (!Array.isArray(body)) {
-        throw new GitHubTransportError({
+        throw this.failure({
           kind: 'invalid-response',
           status,
           detail: 'GitHub returned an unexpected pagination response',
@@ -1133,7 +1174,7 @@ export class DirectGitHubTransport implements GitHubTransport {
       currentUrl = resolved.origin === origin ? resolved.toString() : null
     }
     if (currentUrl !== null) {
-      throw new GitHubTransportError({
+      throw this.failure({
         kind: 'invalid-response',
         detail: `GitHub returned more than ${MAX_PAGES} pages`,
       })
@@ -1152,8 +1193,15 @@ export class DirectGitHubTransport implements GitHubTransport {
       { query, variables },
       options,
     )
-    return graphqlData<T>(body, status, rateLimit, authority, (limit, kind) =>
-      publishRateLimit(limit, kind, this.destinationHost, authority),
+    return graphqlData<T>(
+      body,
+      status,
+      rateLimit,
+      authority,
+      this.reportsRateLimit
+        ? (limit, kind) => publishRateLimit(limit, kind, this.destinationHost, authority)
+        : undefined,
+      this.reportsRateLimit,
     )
   }
 

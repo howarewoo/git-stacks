@@ -8,8 +8,22 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, test } from 'node:test'
 import { CredentialVault, type SecretProtector } from '../src/main/credentials'
-import { githubHostContext, type GitHubHostContext } from '../src/main/github-host'
-import { NotificationCenter } from '../src/main/notifications'
+import {
+  externalGitHubLink,
+  githubHostContext,
+  type GitHubHostContext,
+} from '../src/main/github-host'
+import {
+  DirectGitHubTransport,
+  lastGitHubRateLimit,
+  onGitHubRateLimit,
+  type GitHubRateLimitReport,
+} from '../src/main/github-transport'
+import {
+  NotificationCenter,
+  notificationCredentialStore,
+  notificationSubjectUrl,
+} from '../src/main/notifications'
 import type { NotificationInbox } from '../src/shared/notifications'
 
 /**
@@ -246,26 +260,45 @@ after(async () => {
   )
 })
 
-/** One installation's storage: the shared sealed vault plus this module's files. */
+/**
+ * One installation's storage.
+ *
+ * The notification store is built through the module's own factory, exactly as
+ * the app builds it, so what these tests exercise is the production wiring: one
+ * sealed file of its own, held per host across centers. The application's own
+ * store is a separate file again, which is what makes the two provably
+ * independent rather than merely differently named.
+ */
 async function installation() {
   const root = await mkdtemp(join(tmpdir(), 'git-stacks-notifications-state-'))
   roots.push(root)
   return {
     root,
-    vault: new CredentialVault(join(root, 'credentials.vault.json'), sealingProtector()),
+    store: notificationCredentialStore(
+      join(root, 'github-notifications-vault.json'),
+      sealingProtector(),
+    ),
+    appVault: new CredentialVault(join(root, 'credentials.vault.json'), sealingProtector()),
     credentialFile: join(root, 'github-notifications.json'),
     cacheFile: join(root, 'github-notifications-cache.json'),
   }
 }
 
-function thread(id: string, overrides: Record<string, unknown> = {}) {
+/**
+ * One thread as GitHub sends it, addressed to the host that sent it.
+ *
+ * `subject.url` is an API URL on GitHub's own API origin — `api.github.com` for
+ * the public host, and the host's `/api/v3` for an enterprise one — which is
+ * what a fixture that used a browser URL would fail to exercise.
+ */
+function thread(host: Host, id: string, overrides: Record<string, unknown> = {}) {
   return {
     id,
     unread: true,
     reason: 'review_requested',
     subject: {
       title: `Thread ${id}`,
-      url: `https://github.com/acme/widgets/pull/${id}`,
+      url: `${host.context.apiBase}/repos/acme/widgets/issues/${id}`,
       type: 'PullRequest',
     },
     repository: { name: 'widgets', owner: { login: 'acme' } },
@@ -299,13 +332,13 @@ test('a host this run cannot verify is never read from, so the rest of this file
   certificates.push(impostor.directory)
   const host = await startHost(
     (wire) =>
-      wire.path === '/api/v3/user' ? { body: { login: 'octo' } } : { body: [thread('1')] },
+      wire.path === '/api/v3/user' ? { body: { login: 'octo' } } : { body: [thread(host, '1')] },
     impostor,
   )
   const center = new NotificationCenter({
     host: host.context,
     fetch: verifiedFetch,
-    vault: store.vault,
+    store: store.store,
     credentialFile: store.credentialFile,
     cacheFile: store.cacheFile,
     consent: () => ({ enabled: true, policyDisabled: false }),
@@ -342,12 +375,12 @@ test("a conditional read sends GitHub's own validator back, replays the whole li
   let clock = Date.parse('2026-09-22T10:00:00.000Z')
   const host = await startHost((wire) => {
     if (wire.path === '/api/v3/user') return { body: { login: 'octo' } }
-    return pagedInbox(host, wire, [thread('1'), thread('2')], [thread('3')])
+    return pagedInbox(host, wire, [thread(host, '1'), thread(host, '2')], [thread(host, '3')])
   })
   const center = new NotificationCenter({
     host: host.context,
     fetch: verifiedFetch,
-    vault: store.vault,
+    store: store.store,
     credentialFile: store.credentialFile,
     cacheFile: store.cacheFile,
     consent: () => ({ enabled: true, policyDisabled: false }),
@@ -413,14 +446,14 @@ test('a host that asks for a longer interval is waited out in full, by the timer
   const host = await startHost((wire) => {
     if (wire.path === '/api/v3/user') return { body: { login: 'octo' } }
     return {
-      body: [thread('1')],
+      body: [thread(host, '1')],
       headers: { 'last-modified': LAST_MODIFIED, 'x-poll-interval': '7200' },
     }
   })
   const center = new NotificationCenter({
     host: host.context,
     fetch: verifiedFetch,
-    vault: store.vault,
+    store: store.store,
     credentialFile: store.credentialFile,
     cacheFile: store.cacheFile,
     consent: () => ({ enabled: true, policyDisabled: false }),
@@ -461,14 +494,14 @@ test('the interval a stored list was read under survives a restart', async () =>
   const host = await startHost((wire) => {
     if (wire.path === '/api/v3/user') return { body: { login: 'octo' } }
     return {
-      body: [thread('1')],
+      body: [thread(host, '1')],
       headers: { 'last-modified': LAST_MODIFIED, 'x-poll-interval': '600' },
     }
   })
   const center = new NotificationCenter({
     host: host.context,
     fetch: verifiedFetch,
-    vault: store.vault,
+    store: store.store,
     credentialFile: store.credentialFile,
     cacheFile: store.cacheFile,
     consent: () => ({ enabled: true, policyDisabled: false }),
@@ -482,7 +515,7 @@ test('the interval a stored list was read under survives a restart', async () =>
     const restarted = new NotificationCenter({
       host: host.context,
       fetch: verifiedFetch,
-      vault: store.vault,
+      store: store.store,
       credentialFile: store.credentialFile,
       cacheFile: store.cacheFile,
       consent: () => ({ enabled: true, policyDisabled: false }),
@@ -518,13 +551,15 @@ test('a credential stored for one host is never opened, or sent, by another host
   let clock = Date.parse('2026-09-22T10:00:00.000Z')
   const first = await startHost((wire) => {
     if (wire.path === '/api/v3/user') return { body: { login: 'octo' } }
-    return { body: [thread('1')], headers: { 'last-modified': LAST_MODIFIED } }
+    return { body: [thread(first, '1')], headers: { 'last-modified': LAST_MODIFIED } }
   })
-  const second = await startHost(() => ({ body: [thread('9')] }))
+  // The other host is answered for nothing here: this test is about what its
+  // neighbour's credential may not reach, not about its own inbox.
+  const second = await startHost(() => ({ body: [] }))
   const other = new NotificationCenter({
     host: second.context,
     fetch: verifiedFetch,
-    vault: store.vault,
+    store: store.store,
     // The same file the first host's credential is stored in: a credential
     // belongs to a host, and the file it was written to does not make it shared.
     credentialFile: store.credentialFile,
@@ -535,7 +570,7 @@ test('a credential stored for one host is never opened, or sent, by another host
   const original = new NotificationCenter({
     host: first.context,
     fetch: verifiedFetch,
-    vault: store.vault,
+    store: store.store,
     credentialFile: store.credentialFile,
     cacheFile: store.cacheFile,
     consent: () => ({ enabled: true, policyDisabled: false }),
@@ -575,14 +610,14 @@ test("an account switch drops the previous account's list instead of showing it 
     const token = (wire.authorization ?? '').replace('Bearer ', '')
     if (wire.path === '/api/v3/user') return { body: { login: logins[token] ?? 'nobody' } }
     return {
-      body: [thread(token === 'ghp_octo' ? '1' : '7')],
+      body: [thread(host, token === 'ghp_octo' ? '1' : '7')],
       headers: { 'last-modified': LAST_MODIFIED, 'x-poll-interval': '60' },
     }
   })
   const center = new NotificationCenter({
     host: host.context,
     fetch: verifiedFetch,
-    vault: store.vault,
+    store: store.store,
     credentialFile: store.credentialFile,
     cacheFile: store.cacheFile,
     consent: () => ({ enabled: true, policyDisabled: false }),
@@ -609,43 +644,56 @@ test("an account switch drops the previous account's list instead of showing it 
   }
 })
 
-test("removing the notification credential leaves the application's own credential sealed and working", async () => {
+test("this module's credential and the application's own are sealed separately, and neither cleanup touches the other", async () => {
   const store = await installation()
   let clock = Date.parse('2026-09-22T10:00:00.000Z')
   const host = await startHost((wire) => {
     if (wire.path === '/api/v3/user') return { body: { login: 'octo' } }
-    return { body: [thread('1')], headers: { 'last-modified': LAST_MODIFIED } }
+    return { body: [thread(host, '1')], headers: { 'last-modified': LAST_MODIFIED } }
   })
   const center = new NotificationCenter({
     host: host.context,
     fetch: verifiedFetch,
-    vault: store.vault,
+    store: store.store,
     credentialFile: store.credentialFile,
     cacheFile: store.cacheFile,
     consent: () => ({ enabled: true, policyDisabled: false }),
     now: () => clock,
   })
   try {
-    // The credential the rest of the app signs in with, sealed in the same vault.
-    const appReference = await store.vault.stage('127.0.0.1', 'gho_application_session', clock)
+    // The credential the rest of the app signs in with, sealed in the store the
+    // account side owns and clears wholesale when it has no identity left.
+    const appReference = await store.appVault.stage('127.0.0.1', 'gho_application_session', clock)
     const notification = await center.saveCredential('ghp_notifications_token', true)
     assert.equal(notification.state, 'ready')
+    assert.equal(
+      await store.appVault.open(appReference, '127.0.0.1'),
+      'gho_application_session',
+      'the application credential is sealed in its own store, untouched by this module',
+    )
+
+    // What the account side does when no App identity is left: it empties the
+    // whole store it owns. Nothing it does can reach a notification token, and
+    // nothing this module does can have reached the sign-in in the first place.
+    await store.appVault.clear()
+    assert.deepEqual(await store.appVault.references(), [], 'the application store is emptied')
+    clock += 61_000
+    const stillReading = await center.refresh()
+    assert.equal(stillReading.state, 'ready', 'the notification token is not the app store to lose')
+    assert.deepEqual(
+      stillReading.threads.map((entry) => entry.id),
+      ['1'],
+      'the inbox still reads with the credential this module sealed for itself',
+    )
 
     const afterRemoval = await center.removeCredential()
     assert.equal(afterRemoval.state, 'credential-missing')
     assert.equal(afterRemoval.reference, null)
-
-    const sealed = await store.vault.references()
-    const references = sealed.map((entry) => entry.reference)
-    assert.ok(
-      references.includes(appReference),
-      'the application credential is still sealed where it was',
+    assert.deepEqual(
+      await store.store.vault.references(),
+      [],
+      'only this module credential was removed, and nothing of the app was in this store',
     )
-    assert.ok(
-      !references.includes(String(notification.reference)),
-      "only this module's credential was removed",
-    )
-    assert.equal(await store.vault.open(appReference, '127.0.0.1'), 'gho_application_session')
     assert.deepEqual((await center.inbox()).threads, [], 'the list read with it is gone')
   } finally {
     center.forget()
@@ -659,12 +707,12 @@ test('policy holds this module off without asking GitHub anything, and policy or
   const consent = () => ({ enabled: true, policyDisabled: locked })
   const host = await startHost((wire) => {
     if (wire.path === '/api/v3/user') return { body: { login: 'octo' } }
-    return { body: [thread('1')], headers: { 'last-modified': LAST_MODIFIED } }
+    return { body: [thread(host, '1')], headers: { 'last-modified': LAST_MODIFIED } }
   })
   const center = new NotificationCenter({
     host: host.context,
     fetch: verifiedFetch,
-    vault: store.vault,
+    store: store.store,
     credentialFile: store.credentialFile,
     cacheFile: store.cacheFile,
     consent,
@@ -696,7 +744,7 @@ test('the token never reaches a file, a status object, or an error', async () =>
   const center = new NotificationCenter({
     host: host.context,
     fetch: verifiedFetch,
-    vault: store.vault,
+    store: store.store,
     credentialFile: store.credentialFile,
     cacheFile: store.cacheFile,
     consent: () => ({ enabled: true, policyDisabled: false }),
@@ -729,14 +777,14 @@ test('an unreachable host leaves the last confirmed list standing, marked stale 
     if (!reachable) return { status: 500, body: { message: 'unreachable' } }
     if (wire.path === '/api/v3/user') return { body: { login: 'octo' } }
     return {
-      body: [thread('1')],
+      body: [thread(host, '1')],
       headers: { 'last-modified': LAST_MODIFIED, 'x-poll-interval': '60' },
     }
   })
   const center = new NotificationCenter({
     host: host.context,
     fetch: verifiedFetch,
-    vault: store.vault,
+    store: store.store,
     credentialFile: store.credentialFile,
     cacheFile: store.cacheFile,
     consent: () => ({ enabled: true, policyDisabled: false }),
@@ -772,14 +820,14 @@ test('a write whose answer never arrives is sent once and never replayed', async
       return { status: 500, body: { message: 'the answer was lost' } }
     }
     return {
-      body: [thread('1')],
+      body: [thread(host, '1')],
       headers: { 'last-modified': LAST_MODIFIED, 'x-poll-interval': '60' },
     }
   })
   const center = new NotificationCenter({
     host: host.context,
     fetch: verifiedFetch,
-    vault: store.vault,
+    store: store.store,
     credentialFile: store.credentialFile,
     cacheFile: store.cacheFile,
     consent: () => ({ enabled: true, policyDisabled: false }),
@@ -823,16 +871,17 @@ test('mark read and subscription controls address exactly the endpoints GitHub d
   let clock = Date.parse('2026-09-22T10:00:00.000Z')
   const host = await startHost((wire) => {
     if (wire.path === '/api/v3/user') return { body: { login: 'octo' } }
+    if (wire.ifModifiedSince === LAST_MODIFIED) return { status: 304, body: null }
     if (wire.method !== 'GET') return { status: 205, body: {} }
     return {
-      body: [thread('1'), thread('2')],
+      body: [thread(host, '1'), thread(host, '2')],
       headers: { 'last-modified': LAST_MODIFIED, 'x-poll-interval': '60' },
     }
   })
   const center = new NotificationCenter({
     host: host.context,
     fetch: verifiedFetch,
-    vault: store.vault,
+    store: store.store,
     credentialFile: store.credentialFile,
     cacheFile: store.cacheFile,
     consent: () => ({ enabled: true, policyDisabled: false }),
@@ -845,8 +894,17 @@ test('mark read and subscription controls address exactly the endpoints GitHub d
     assert.equal(one.threads.find((entry) => entry.id === '1')?.unread, false)
     assert.equal(one.threads.find((entry) => entry.id === '2')?.unread, true)
 
-    await center.markRead('all')
-    assert.equal(one.unreadCount, 1, 'marking one thread read leaves the rest alone')
+    const all: NotificationInbox = await center.markRead('all')
+    assert.equal(
+      all.unreadCount,
+      0,
+      'marking the whole inbox read is answered by what that request did, not by an earlier snapshot',
+    )
+    assert.deepEqual(
+      all.threads.map((entry) => entry.unread),
+      [false, false],
+      'every thread the bulk request covered is read afterwards',
+    )
 
     const ignored = await center.setSubscription('2', 'ignore')
     assert.equal(ignored.threads.length, 2, 'an ignored thread leaves the inbox it was in')
@@ -865,11 +923,46 @@ test('mark read and subscription controls address exactly the endpoints GitHub d
         .map((entry) => `${entry.method} ${entry.path}`),
       [
         'PATCH /api/v3/notifications/threads/1',
-        'PATCH /api/v3/notifications',
+        // GitHub documents the inbox-wide operation as `PUT`; only one thread
+        // is a `PATCH`. The bulk request is a different operation.
+        'PUT /api/v3/notifications',
         'PUT /api/v3/notifications/threads/2/subscription',
         'DELETE /api/v3/notifications/threads/2/subscription',
       ],
     )
+
+    // What this module acknowledged has to survive the conditional read that
+    // follows it and the restart after that: the 304 replays the list GitHub
+    // confirmed, and the acknowledgement is part of that list now.
+    clock += 61_000
+    const unchanged = await center.refresh()
+    assert.equal(unchanged.poll.unchanged, true, 'GitHub answered 304 about the list')
+    assert.deepEqual(
+      unchanged.threads.map((entry) => entry.id),
+      ['1'],
+      'a thread unsubscribed after the last full read does not come back on 304',
+    )
+    const restarted = new NotificationCenter({
+      host: host.context,
+      fetch: verifiedFetch,
+      store: store.store,
+      credentialFile: store.credentialFile,
+      cacheFile: store.cacheFile,
+      consent: () => ({ enabled: true, policyDisabled: false }),
+      now: () => clock,
+    })
+    const restored = await restarted.inbox()
+    assert.deepEqual(
+      restored.threads.map((entry) => entry.id),
+      ['1'],
+      'the stored list is what the next run reads, acknowledged changes included',
+    )
+    assert.equal(
+      restored.threads[0]?.unread,
+      false,
+      'a thread marked read before the restart is still read after it',
+    )
+    restarted.forget()
   } finally {
     center.forget()
     await host.close()
@@ -902,19 +995,19 @@ test('a read in flight when the credential is replaced publishes nothing of the 
     if (armed && token === 'ghp_octo' && !wire.path.includes('page=2')) {
       await gate.settled
       return {
-        body: [thread('slow')],
+        body: [thread(host, 'slow')],
         headers: { 'last-modified': LAST_MODIFIED, 'x-poll-interval': '60' },
       }
     }
     return {
-      body: [thread('7')],
+      body: [thread(host, '7')],
       headers: { 'last-modified': LAST_MODIFIED, 'x-poll-interval': '60' },
     }
   })
   const center = new NotificationCenter({
     host: host.context,
     fetch: verifiedFetch,
-    vault: store.vault,
+    store: store.store,
     credentialFile: store.credentialFile,
     cacheFile: store.cacheFile,
     consent: () => ({ enabled: true, policyDisabled: false }),
@@ -963,22 +1056,22 @@ test('a credential replaced while the key store is answering never reaches the n
   let clock = Date.parse('2026-09-22T10:00:00.000Z')
   const gate = deferred()
   let slowOpen = false
-  const open = store.vault.open.bind(store.vault)
-  store.vault.open = async (...args: Parameters<CredentialVault['open']>) => {
+  const open = store.store.vault.open.bind(store.store.vault)
+  store.store.vault.open = async (...args: Parameters<CredentialVault['open']>) => {
     if (slowOpen) await gate.settled
     return open(...args)
   }
   const host = await startHost((wire) => {
     if (wire.path === '/api/v3/user') return { body: { login: 'octo' } }
     return {
-      body: [thread('1')],
+      body: [thread(host, '1')],
       headers: { 'last-modified': LAST_MODIFIED, 'x-poll-interval': '60' },
     }
   })
   const center = new NotificationCenter({
     host: host.context,
     fetch: verifiedFetch,
-    vault: store.vault,
+    store: store.store,
     credentialFile: store.credentialFile,
     cacheFile: store.cacheFile,
     consent: () => ({ enabled: true, policyDisabled: false }),
@@ -1022,19 +1115,19 @@ test('two reads asked at once produce one request', async () => {
       first = false
       await gate.settled
       return {
-        body: [thread('2')],
+        body: [thread(host, '2')],
         headers: { 'last-modified': LAST_MODIFIED, 'x-poll-interval': '60' },
       }
     }
     return {
-      body: [thread('1')],
+      body: [thread(host, '1')],
       headers: { 'last-modified': LAST_MODIFIED, 'x-poll-interval': '60' },
     }
   })
   const center = new NotificationCenter({
     host: host.context,
     fetch: verifiedFetch,
-    vault: store.vault,
+    store: store.store,
     credentialFile: store.credentialFile,
     cacheFile: store.cacheFile,
     consent: () => ({ enabled: true, policyDisabled: false }),
@@ -1070,5 +1163,814 @@ test('two reads asked at once produce one request', async () => {
   } finally {
     center.forget()
     await host.close()
+  }
+})
+
+/** A center over one installation's files, on the host it addresses. */
+function centerFor(
+  store: Awaited<ReturnType<typeof installation>>,
+  host: Host,
+  clock: () => number,
+  consent: () => { enabled: boolean; policyDisabled: boolean } = () => ({
+    enabled: true,
+    policyDisabled: false,
+  }),
+): NotificationCenter {
+  return new NotificationCenter({
+    host: host.context,
+    fetch: verifiedFetch,
+    store: store.store,
+    credentialFile: store.credentialFile,
+    cacheFile: store.cacheFile,
+    consent,
+    now: clock,
+  })
+}
+
+/** Waits for something a test cannot know the exact turn of, and says if it never came. */
+async function eventually(established: () => boolean, detail: string): Promise<void> {
+  for (let attempt = 0; attempt < 400; attempt += 1) {
+    if (established()) return
+    await new Promise((resolve) => setTimeout(resolve, 5))
+  }
+  throw new Error(`timed out waiting: ${detail}`)
+}
+
+const READY = { enabled: true, policyDisabled: false }
+
+/**
+ * Starts work this test settles later.
+ *
+ * The outcome is claimed now, so a failure that arrives while the test is
+ * arranging the conditions that cause it is reported as that test's outcome
+ * rather than as an unhandled rejection of nothing.
+ */
+function settling<T>(work: Promise<T>): () => Promise<{ value: T | null; error: unknown }> {
+  const claimed = work.then(
+    (value) => ({ value, error: null as unknown }),
+    (error: unknown) => ({ value: null, error }),
+  )
+  return () => claimed
+}
+
+test('the stored list is restored as what was written, through a 304 and across a restart', async () => {
+  const store = await installation()
+  let clock = Date.parse('2026-09-22T10:00:00.000Z')
+  const host = await startHost((wire) => {
+    if (wire.path === '/api/v3/user') return { body: { login: 'octo' } }
+    if (wire.ifModifiedSince === LAST_MODIFIED) return { status: 304, body: null }
+    return {
+      body: [thread(host, '1')],
+      headers: { 'last-modified': LAST_MODIFIED, 'x-poll-interval': '60' },
+    }
+  })
+  const center = centerFor(store, host, () => clock)
+  try {
+    await center.saveCredential('ghp_notifications_token', true)
+    const read = (await center.inbox()).threads[0]
+    assert.ok(read, 'the host answered with one thread')
+
+    // The file is this build's own schema, so what a restart reads back is
+    // decidable from the file itself rather than inferred from a row count.
+    const stored = JSON.parse(await readFile(store.cacheFile, 'utf8')) as {
+      threads: Record<string, unknown>[]
+    }
+    assert.deepEqual(
+      stored.threads[0],
+      read,
+      'the stored row is the thread this build shows, field for field',
+    )
+
+    clock += 61_000
+    const restarted = centerFor(store, host, () => clock)
+    assert.deepEqual(
+      (await restarted.inbox()).threads[0],
+      read,
+      'a restart restores every field, not an untitled row with no repository',
+    )
+    const unchanged = await restarted.refresh()
+    assert.equal(
+      unchanged.poll.unchanged,
+      true,
+      'the restart read was conditional and answered 304',
+    )
+    assert.deepEqual(unchanged.threads[0], read, 'a 304 replays what was stored, field for field')
+    restarted.forget()
+  } finally {
+    center.forget()
+    await host.close()
+  }
+})
+
+test('a read GitHub acknowledged is still read after a 304 and after a restart', async () => {
+  const store = await installation()
+  let clock = Date.parse('2026-09-22T10:00:00.000Z')
+  const host = await startHost((wire) => {
+    if (wire.path === '/api/v3/user') return { body: { login: 'octo' } }
+    if (wire.method === 'PUT' || wire.method === 'PATCH') return { status: 205 }
+    if (wire.ifModifiedSince === LAST_MODIFIED) return { status: 304, body: null }
+    return {
+      body: [thread(host, '1'), thread(host, '2')],
+      headers: { 'last-modified': LAST_MODIFIED, 'x-poll-interval': '60' },
+    }
+  })
+  const center = centerFor(store, host, () => clock)
+  try {
+    await center.saveCredential('ghp_notifications_token', true)
+    assert.equal((await center.inbox()).unreadCount, 2, 'the host answered with two unread threads')
+
+    const marked = await center.markRead('all')
+    assert.equal(
+      marked.unreadCount,
+      0,
+      'the inbox the call returns is the one the change left behind',
+    )
+    assert.equal(
+      host.wire.filter((entry) => entry.method === 'PUT').length,
+      1,
+      'marking the whole inbox read is one request, and it is the documented one',
+    )
+    assert.equal(
+      host.wire.some((entry) => entry.path === '/api/v3/notifications' && entry.method === 'PUT'),
+      true,
+      'sent as the inbox-wide endpoint rather than a thread at a time',
+    )
+
+    clock += 61_000
+    const conditional = await center.refresh()
+    assert.equal(conditional.poll.unchanged, true, 'the next read was conditional and answered 304')
+    assert.deepEqual(
+      conditional.threads.map((entry) => entry.unread),
+      [false, false],
+      'a 304 replays what GitHub now holds, not what it held before the change',
+    )
+
+    const restarted = centerFor(store, host, () => clock)
+    assert.deepEqual(
+      (await restarted.inbox()).threads.map((entry) => entry.unread),
+      [false, false],
+      'and the restart this build reads from the same store still knows they are read',
+    )
+    restarted.forget()
+  } finally {
+    center.forget()
+    await host.close()
+  }
+})
+
+test('a notification subject becomes a page on the host that sent it, and only that', () => {
+  const dotcom = githubHostContext('github.com')
+  assert.equal(
+    notificationSubjectUrl('https://api.github.com/repos/acme/widgets/issues/123', dotcom),
+    'https://github.com/acme/widgets/issues/123',
+    "the public host's API URL is the page a person reads",
+  )
+  const enterprise = githubHostContext('github.example')
+  assert.equal(
+    notificationSubjectUrl('https://github.example/api/v3/repos/acme/widgets/pulls/7', enterprise),
+    'https://github.example/acme/widgets/pull/7',
+    "an enterprise host's API path is moved onto its own web route, singular where GitHub's web route is",
+  )
+  assert.equal(
+    notificationSubjectUrl(
+      'https://github.example/api/v3/repos/acme/widgets/issues/102',
+      enterprise,
+    ),
+    'https://github.example/acme/widgets/issues/102',
+    'a subject whose web route matches its API path keeps it',
+  )
+  assert.equal(
+    notificationSubjectUrl('https://api.github.com/repos/acme/widgets/pulls/101', enterprise),
+    null,
+    "another host's API is not this host's to interpret: its repository path is not this host's page either",
+  )
+  assert.equal(
+    notificationSubjectUrl('https://api.elsewhere.example/repos/acme/widgets/pulls/1', enterprise),
+    null,
+    'and an origin that serves no GitHub API at all is refused the same way',
+  )
+  assert.equal(
+    notificationSubjectUrl('https://github.example/acme/widgets/pulls/101', enterprise),
+    null,
+    'a subject that is not this host API URL is not rewritten into one',
+  )
+  assert.equal(
+    notificationSubjectUrl('https://github.example/api/v3/users/octo', enterprise),
+    null,
+    'a subject that is not a repository gets no link rather than a broken one',
+  )
+
+  // The point of the rewrite is that what the inbox exposes is the page, on this
+  // host, and that the gate the renderer opens links through accepts it.
+  const resolved = notificationSubjectUrl(
+    'https://github.example/api/v3/repos/acme/widgets/pulls/7',
+    enterprise,
+  )
+  assert.deepEqual(
+    externalGitHubLink(resolved, [enterprise]),
+    { ok: true, href: 'https://github.example/acme/widgets/pull/7' },
+    'the link the inbox exposes is a page on this host, and the gate opens it',
+  )
+  assert.equal(
+    externalGitHubLink('https://api.github.com/repos/acme/widgets/pulls/101', [enterprise]).ok,
+    false,
+    'while the API URL GitHub sent is refused by that same gate, which is why it is resolved first',
+  )
+})
+
+test('a thread read from a host is published with a page on that host, not the API URL', async () => {
+  const store = await installation()
+  const clock = Date.parse('2026-09-22T10:00:00.000Z')
+  const host = await startHost((wire) => {
+    if (wire.path === '/api/v3/user') return { body: { login: 'octo' } }
+    return {
+      body: [
+        thread(host, '101', {
+          subject: {
+            title: 'A pull request',
+            url: `${host.context.apiBase}/repos/acme/widgets/pulls/101`,
+            type: 'PullRequest',
+          },
+        }),
+        thread(host, '102'),
+      ],
+      headers: { 'last-modified': LAST_MODIFIED, 'x-poll-interval': '60' },
+    }
+  })
+  const center = centerFor(store, host, () => clock)
+  try {
+    await center.saveCredential('ghp_notifications_token', true)
+    const inbox = await center.inbox()
+    assert.deepEqual(
+      inbox.threads.map((entry) => entry.url),
+      [
+        `https://${host.host}/acme/widgets/pull/101`,
+        `https://${host.host}/acme/widgets/issues/102`,
+      ],
+      'each thread is published as the page a person opens on this host',
+    )
+    assert.deepEqual(
+      inbox.threads.map((entry) => externalGitHubLink(entry.url, [host.context]).ok),
+      [true, true],
+      'and every published link is one this installation is willing to open',
+    )
+  } finally {
+    center.forget()
+    await host.close()
+  }
+})
+
+test('an empty inbox nobody can confirm any more is stale, not a current answer', async () => {
+  const store = await installation()
+  let clock = Date.parse('2026-09-22T10:00:00.000Z')
+  const host = await startHost((wire) => {
+    if (wire.path === '/api/v3/user') return { body: { login: 'octo' } }
+    return { body: [], headers: { 'last-modified': LAST_MODIFIED, 'x-poll-interval': '60' } }
+  })
+  const center = centerFor(store, host, () => clock)
+  try {
+    await center.saveCredential('ghp_notifications_token', true)
+    const confirmed = await center.inbox()
+    assert.deepEqual(confirmed.threads, [], 'the host confirmed an empty inbox')
+    assert.equal(confirmed.stale, false, 'a confirmed empty answer is current')
+    assert.equal(confirmed.staleReason, null)
+
+    await host.close()
+    clock += 61_000
+    const offline = await center.refresh()
+    assert.deepEqual(offline.threads, [], 'there is nothing to show either way')
+    assert.equal(
+      offline.stale,
+      true,
+      'an empty result that is no longer confirmed is stale, whatever it holds',
+    )
+    assert.equal(offline.staleReason, 'offline', 'and it says why')
+  } finally {
+    center.forget()
+  }
+})
+
+test('a rate-limited host is asked again no sooner than it said, by the timer and by a person', async () => {
+  const store = await installation()
+  let clock = Date.parse('2026-09-22T10:00:00.000Z')
+  // GitHub's own refusal, in the two forms it uses: a wait to count out, and a
+  // time at which the budget returns.
+  const resetAt = Math.floor(Date.parse('2026-09-22T10:20:00.000Z') / 1000)
+  let refusal: Answer = { status: 503, body: { message: 'not asked yet' } }
+  const refused = (wait: string | null, reset: string | null): Answer => ({
+    status: 429,
+    body: { message: 'API rate limit exceeded' },
+    headers: {
+      'x-poll-interval': '60',
+      'x-ratelimit-limit': '5000',
+      'x-ratelimit-remaining': '0',
+      ...(reset === null ? {} : { 'x-ratelimit-reset': reset }),
+      ...(wait === null ? {} : { 'retry-after': wait }),
+    },
+  })
+  // The first read establishes the interval; the refusals come after it, which
+  // is the case that decides the next attempt.
+  let ask = false
+  const host = await startHost((wire) => {
+    if (wire.path === '/api/v3/user') return { body: { login: 'octo' } }
+    return ask ? refusal : { body: [thread(host, '1')] }
+  })
+  const center = centerFor(store, host, () => clock)
+  try {
+    await center.saveCredential('ghp_notifications_token', true)
+    assert.equal((await center.inbox()).poll.pollIntervalSeconds, 60)
+    ask = true
+    refusal = refused('600', null)
+    clock += 61_000
+    await center.refresh()
+    const limited = await center.inbox()
+    assert.equal(limited.state, 'ready', 'a rate-limited read is not a rejected credential')
+    assert.equal(
+      Date.parse(String(limited.poll.nextPollAt)),
+      clock + 600_000,
+      'the Retry-After the host sent is the floor, not the interval it named',
+    )
+    assert.equal(limited.staleReason, 'failed')
+
+    const asked = host.wire.filter((entry) => entry.path.includes('/notifications')).length
+    clock += 599_000
+    await center.refresh()
+    assert.equal(
+      host.wire.filter((entry) => entry.path.includes('/notifications')).length,
+      asked,
+      'a person asking does not outrun what the host said to wait',
+    )
+
+    ask = false
+    clock += 2_000
+    const read = await center.refresh()
+    assert.equal(read.threads.length, 1, 'the read runs once the host said it would answer')
+
+    // A refusal that names a reset time instead of a wait is held to that time.
+    refusal = refused(null, String(resetAt))
+    ask = true
+    clock += 61_000
+    await center.refresh()
+    const resetOnly = await center.inbox()
+    assert.equal(
+      Date.parse(String(resetOnly.poll.nextPollAt)),
+      resetAt * 1000,
+      'the reset time in the headers is a floor of its own',
+    )
+  } finally {
+    center.forget()
+    await host.close()
+  }
+})
+
+test('a partial walk keeps the interval page one named, and backs off from it', async () => {
+  const store = await installation()
+  let clock = Date.parse('2026-09-22T10:00:00.000Z')
+  let armed = false
+  const host = await startHost((wire) => {
+    if (wire.path === '/api/v3/user') return { body: { login: 'octo' } }
+    if (!armed) {
+      return {
+        body: [thread(host, '1')],
+        headers: { 'last-modified': LAST_MODIFIED, 'x-poll-interval': '60' },
+      }
+    }
+    if (wire.path.includes('page=2')) return { status: 500, body: { message: 'Server Error' } }
+    return {
+      body: [thread(host, '1')],
+      headers: {
+        'last-modified': LAST_MODIFIED,
+        'x-poll-interval': '7200',
+        link: `<https://${host.host}/api/v3/notifications?per_page=50&all=true&page=2>; rel="next"`,
+      },
+    }
+  })
+  const center = centerFor(store, host, () => clock)
+  try {
+    await center.saveCredential('ghp_notifications_token', true)
+    armed = true
+    clock += 61_000
+    const failed = await center.refresh()
+    assert.equal(
+      failed.poll.pollIntervalSeconds,
+      7200,
+      'a page two that failed cannot un-teach this build the interval page one asked for',
+    )
+    assert.equal(
+      Date.parse(String(failed.poll.nextPollAt)),
+      clock + 7_200_000,
+      'the next read is floored by the interval the host named',
+    )
+  } finally {
+    center.forget()
+    await host.close()
+  }
+})
+
+test('this module spends its own rate budget and never moves the application', async () => {
+  const store = await installation()
+  let clock = Date.parse('2026-09-22T10:00:00.000Z')
+  const host = await startHost((wire) => {
+    if (wire.path === '/api/v3/user') return { body: { login: 'octo' } }
+    return {
+      status: 429,
+      body: { message: 'API rate limit exceeded' },
+      headers: {
+        'x-ratelimit-limit': '5000',
+        'x-ratelimit-remaining': '0',
+        'retry-after': '600',
+      },
+    }
+  })
+  const reports: GitHubRateLimitReport[] = []
+  const listen = onGitHubRateLimit((report) => reports.push(report))
+  try {
+    // What the rest of the app does with its own credential, which is what a
+    // healthy process-wide budget looks like.
+    await new DirectGitHubTransport({
+      apiUrl: host.context.apiBase,
+      host: host.host,
+      env: {},
+      fetch: verifiedFetch,
+      token: 'gho_application_session',
+    }).rest({ path: 'user' })
+    assert.equal(reports.length, 1, "the application's own request is what reported")
+    const budget = lastGitHubRateLimit()
+
+    const center = centerFor(store, host, () => clock)
+    try {
+      await center.saveCredential('ghp_notifications_token', true)
+      await center.refresh()
+      assert.equal(
+        reports.length,
+        1,
+        "this module's reads, its refusals, and its rate limit are none of the app's business",
+      )
+      assert.equal(
+        lastGitHubRateLimit().at,
+        budget.at,
+        'the budget every other caller reads is exactly the one it was',
+      )
+      assert.equal(
+        Date.parse(String((await center.inbox()).poll.nextPollAt)),
+        clock + 600_000,
+        'its own floor is still honoured locally, without being published anywhere',
+      )
+    } finally {
+      center.forget()
+    }
+  } finally {
+    listen()
+    await host.close()
+  }
+})
+
+test('a token still being identified when this inbox changes is never stored or left sealed', async () => {
+  for (const boundary of ['removed', 'replaced', 'turned off'] as const) {
+    const store = await installation()
+    let clock = Date.parse('2026-09-22T10:00:00.000Z')
+    const gate = deferred()
+    let armed = false
+    const logins: Record<string, string> = {
+      ghp_octo: 'octo',
+      ghp_hubot: 'hubot',
+      ghp_pending: 'hubot',
+    }
+    const host = await startHost(async (wire) => {
+      const token = (wire.authorization ?? '').replace('Bearer ', '')
+      if (wire.path === '/api/v3/user') {
+        // Only this token is slow to identify, so a boundary the test creates
+        // after it is free to commit the one that is not being held.
+        if (token === 'ghp_pending' && armed) await gate.settled
+        return { body: { login: logins[token] ?? 'nobody' } }
+      }
+      return {
+        body: [thread(host, token === 'ghp_octo' ? '1' : '7')],
+        headers: { 'last-modified': LAST_MODIFIED, 'x-poll-interval': '60' },
+      }
+    })
+    let consent = READY
+    const center = centerFor(
+      store,
+      host,
+      () => clock,
+      () => consent,
+    )
+    try {
+      if (boundary !== 'removed') {
+        await center.saveCredential('ghp_octo', true)
+        assert.equal((await center.status()).login, 'octo')
+      }
+      // The credential this module already holds, which the boundary may retire,
+      // replace, or leave where it is — and which the abandoned save must not.
+      const seeded = (await center.status()).reference
+      armed = true
+      const pending = settling(center.saveCredential('ghp_pending', true))
+      await eventually(
+        () =>
+          host.wire.some(
+            (entry) =>
+              entry.path === '/api/v3/user' && entry.authorization === 'Bearer ghp_pending',
+          ),
+        'the second token reached the host to be identified',
+      )
+
+      if (boundary === 'removed') await center.removeCredential()
+      else if (boundary === 'replaced') await center.saveCredential('ghp_hubot', true)
+      else {
+        consent = { enabled: false, policyDisabled: false }
+        center.stop()
+      }
+      gate.release()
+      const outcome = await pending()
+      assert.match(
+        String(outcome.error),
+        /was not stored/u,
+        `a save that lost its boundary (${boundary})`,
+      )
+
+      // Whatever this module still holds is the one and only sealed secret: the
+      // abandoned save left nothing beside it, and took nothing away with it.
+      const surviving = (await center.status()).reference
+      const sealed = await store.store.vault.references()
+      assert.deepEqual(
+        sealed.map((entry) => entry.reference),
+        surviving === null ? [] : [surviving],
+        `nothing the abandoned save sealed is left beside the credential this module kept (${boundary})`,
+      )
+      if (boundary === 'replaced') {
+        assert.notEqual(
+          surviving,
+          seeded,
+          'a replacement is the credential that survives, not the one it superseded',
+        )
+        assert.equal(
+          (await center.status()).login,
+          'hubot',
+          'and it is the one this module reads with',
+        )
+      } else {
+        assert.equal(
+          surviving,
+          seeded,
+          boundary === 'turned off'
+            ? 'turning the module off leaves the credential it already had'
+            : 'a removed credential is not left sealed',
+        )
+      }
+    } finally {
+      center.forget()
+      await host.close()
+    }
+  }
+})
+
+test('a replacement retires the secret it superseded, and a write in flight changes nothing', async () => {
+  const store = await installation()
+  let clock = Date.parse('2026-09-22T10:00:00.000Z')
+  const held = deferred()
+  let armed = false
+  const logins: Record<string, string> = { ghp_octo: 'octo', ghp_hubot: 'hubot' }
+  const host = await startHost(async (wire) => {
+    const token = (wire.authorization ?? '').replace('Bearer ', '')
+    if (wire.path === '/api/v3/user') return { body: { login: logins[token] ?? 'nobody' } }
+    if (armed && wire.method === 'PATCH') {
+      // GitHub receives the change and the answer never comes back: what is
+      // left to this module is an unknown, which is never retried.
+      await held.settled
+      return { status: 401, body: { message: 'Bad credentials' } }
+    }
+    return {
+      body: [thread(host, token === 'ghp_octo' ? '1' : '7')],
+      headers: { 'last-modified': LAST_MODIFIED, 'x-poll-interval': '60' },
+    }
+  })
+  const center = centerFor(store, host, () => clock)
+  try {
+    const first = await center.saveCredential('ghp_octo', true)
+    const superseded = String(first.reference)
+    assert.equal((await store.store.vault.references()).length, 1)
+
+    armed = true
+    const writing = settling(center.markRead('1'))
+    await eventually(
+      () => host.wire.some((entry) => entry.method === 'PATCH'),
+      'the change reached GitHub',
+    )
+    // The credential is replaced while that change is unanswered. Its outcome
+    // belongs to a token this module is no longer using.
+    const switched = await center.saveCredential('ghp_hubot', true)
+    held.release()
+    const outcome = await writing()
+    assert.equal(outcome.value, null, 'the change was not applied to anything on screen')
+    assert.match(String(outcome.error), /was not sent again/u)
+
+    const status = await center.status()
+    assert.equal(status.login, 'hubot', 'the credential in use is the replacement')
+    assert.equal(
+      status.state,
+      'ready',
+      'a refusal that arrives after the replacement is not this credential being refused',
+    )
+    assert.deepEqual(
+      (await store.store.vault.references()).map((entry) => entry.reference),
+      [String(switched.reference)],
+      'the superseded secret is retired, not left sealed beside its replacement',
+    )
+    assert.notEqual(switched.reference, superseded)
+    assert.deepEqual(
+      (await center.inbox()).threads.map((entry) => entry.id),
+      ['7'],
+      'the list belongs to the credential that is in use',
+    )
+    assert.equal(
+      host.wire.filter((entry) => entry.method === 'PATCH').length,
+      1,
+      'the change was sent once and never replayed',
+    )
+  } finally {
+    center.forget()
+    await host.close()
+  }
+})
+
+test('a write waiting on the key store is not sent after consent is withdrawn', async () => {
+  const store = await installation()
+  let clock = Date.parse('2026-09-22T10:00:00.000Z')
+  const gate = deferred()
+  let slowOpen = false
+  let opening = false
+  const open = store.store.vault.open.bind(store.store.vault)
+  store.store.vault.open = async (...args: Parameters<CredentialVault['open']>) => {
+    if (slowOpen) {
+      opening = true
+      await gate.settled
+    }
+    return open(...args)
+  }
+  const host = await startHost((wire) => {
+    if (wire.path === '/api/v3/user') return { body: { login: 'octo' } }
+    return {
+      body: [thread(host, '1')],
+      headers: { 'last-modified': LAST_MODIFIED, 'x-poll-interval': '60' },
+    }
+  })
+  let consent = READY
+  const center = centerFor(
+    store,
+    host,
+    () => clock,
+    () => consent,
+  )
+  try {
+    await center.saveCredential('ghp_notifications_token', true)
+    const before = host.wire.filter((entry) => entry.method !== 'GET').length
+
+    slowOpen = true
+    const writing = settling(center.markRead('1'))
+    await eventually(() => opening, 'the change is waiting on the key store')
+    consent = { enabled: false, policyDisabled: false }
+    center.stop()
+    gate.release()
+    const outcome = await writing()
+    assert.equal(outcome.value, null)
+    assert.match(String(outcome.error), /was not sent/u)
+
+    assert.equal(
+      host.wire.filter((entry) => entry.method !== 'GET').length,
+      before,
+      'nothing reached GitHub after the module was turned off',
+    )
+    assert.equal((await center.status()).state, 'disabled')
+    consent = READY
+  } finally {
+    center.forget()
+    await host.close()
+  }
+})
+
+test('a list being written when its credential went away does not come back on disk', async () => {
+  const store = await installation()
+  let clock = Date.parse('2026-09-22T10:00:00.000Z')
+  const answer = deferred()
+  const holding = deferred()
+  let armed = false
+  const host = await startHost(async (wire) => {
+    if (wire.path === '/api/v3/user') return { body: { login: 'octo' } }
+    if (wire.ifModifiedSince === LAST_MODIFIED) return { status: 304, body: null }
+    if (armed) await answer.settled
+    return {
+      body: [thread(host, '1')],
+      headers: { 'last-modified': LAST_MODIFIED, 'x-poll-interval': '60' },
+    }
+  })
+  const center = centerFor(store, host, () => clock)
+  try {
+    await center.saveCredential('ghp_notifications_token', true)
+    clock += 61_000
+    armed = true
+    const reading = center.refresh()
+    await eventually(
+      () => host.wire.some((entry) => entry.ifModifiedSince === LAST_MODIFIED),
+      'the conditional read reached the host',
+    )
+    // Every change to this module's files takes its turn on this file's queue,
+    // and the queue is held here so the write below and the removal after it
+    // are ordered the way a slow disk would order them.
+    const blocking = store.store.serialize(() => holding.settled)
+    const removing = center.removeCredential()
+    await new Promise((resolve) => setImmediate(resolve))
+    answer.release()
+    holding.release()
+    await blocking
+    await removing
+    await reading
+
+    await assert.rejects(
+      () => readFile(store.cacheFile, 'utf8'),
+      /ENOENT/u,
+      'the list a removed credential was read for is not left behind by a late write',
+    )
+  } finally {
+    center.forget()
+    await host.close()
+  }
+})
+
+test('a host selected again finds the store and the queue its predecessor left', async () => {
+  const store = await installation()
+  let clock = Date.parse('2026-09-22T10:00:00.000Z')
+  const gate = deferred()
+  const logins: Record<string, string> = { ghp_octo: 'octo', ghp_hubot: 'hubot' }
+  const host = await startHost((wire) => {
+    const token = (wire.authorization ?? '').replace('Bearer ', '')
+    if (wire.path === '/api/v3/user') return { body: { login: logins[token] ?? 'nobody' } }
+    return {
+      body: [thread(host, token === 'ghp_octo' ? '1' : '7')],
+      headers: { 'last-modified': LAST_MODIFIED, 'x-poll-interval': '60' },
+    }
+  })
+  const elsewhere = await startHost(() => ({ body: [] }))
+  const first = centerFor(store, host, () => clock)
+  try {
+    await first.saveCredential('ghp_octo', true)
+    const kept = (await first.status()).reference
+
+    // A stage this center left running when it is retired: it has passed the
+    // check that admits it and is sealing the token as the app moves on.
+    const stage = store.store.vault.stage.bind(store.store.vault)
+    let staging = false
+    let holding = false
+    store.store.vault.stage = async (...args: Parameters<CredentialVault['stage']>) => {
+      const reference = await stage(...args)
+      if (staging) holding = true
+      if (staging) await gate.settled
+      return reference
+    }
+    staging = true
+    const abandoned = settling(first.saveCredential('ghp_hubot', true))
+    await eventually(() => holding, 'the retired center reached its stage')
+
+    // The app moves to another host and back. The store is keyed by its file,
+    // so this is the same store, the same queue, and the same entries, and the
+    // change still running on it takes its turn with the one that replaces it.
+    first.forget()
+    const other = centerFor(store, elsewhere, () => clock)
+    assert.equal((await other.status()).state, 'credential-missing')
+    other.forget()
+    const returned = centerFor(store, host, () => clock)
+    assert.equal(
+      notificationCredentialStore(
+        join(store.root, 'github-notifications-vault.json'),
+        sealingProtector(),
+      ),
+      store.store,
+      'one store and one queue per file, across every center this host has had',
+    )
+
+    staging = false
+    gate.release()
+    const outcome = await abandoned()
+    assert.match(String(outcome.error), /was not stored/u)
+
+    const status = await returned.status()
+    assert.equal(status.state, 'ready', 'the credential the host had before is still usable')
+    assert.equal(status.reference, kept)
+    assert.deepEqual(
+      (await store.store.vault.references()).map((entry) => entry.reference),
+      [kept],
+      'the abandoned save left nothing sealed, and superseded nothing',
+    )
+    clock += 61_000
+    assert.deepEqual(
+      (await returned.refresh()).threads.map((entry) => entry.id),
+      ['1'],
+      'the host this app came back to reads its own inbox',
+    )
+    returned.forget()
+  } finally {
+    first.forget()
+    await host.close()
+    await elsewhere.close()
   }
 })
