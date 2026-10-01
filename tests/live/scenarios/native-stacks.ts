@@ -10,7 +10,8 @@ import {
   validateNativeStackChain,
 } from '../../../src/main/native-stacks'
 import { getSubmitStackProgress, previewStack } from '../../../src/main/stacks'
-import { isRecord } from '../../../src/shared/guards'
+import { getGitHubData } from '../../../src/main/github'
+import { getOriginUrl, parseRemote } from '../../../src/main/git-core'
 import { threeLayerStack, twoLayerStack, unpublishedStack } from '../layers'
 import { assert, publishChoices, type LiveScenario, type LiveScenarioContext } from '../scenario'
 import type { PullRequest, StackPreview } from '../../../src/shared/types'
@@ -34,15 +35,23 @@ async function stackMembers(ctx: LiveScenarioContext, stackNumber: number): Prom
   return stack.pullRequests.map((member) => member.number).sort((left, right) => left - right)
 }
 
-/** How many pull requests the host currently has open for a head branch. */
+/**
+ * The open pull requests the host currently reports for a head branch, read by the
+ * production reader and identified by what it parsed.
+ *
+ * A recovery case has to know which pull requests exist without knowing which
+ * numbers to ask for: the whole point is that the host assigned them. Reading the
+ * repository's own conversation through the application is what turns that into an
+ * answer rather than a guess.
+ */
 async function openPullRequestsFor(ctx: LiveScenarioContext, branch: string): Promise<number[]> {
-  const listed = await ctx.transport.paginate<Record<string, unknown>>({
-    method: 'GET',
-    path: `repos/${ctx.repository}/pulls`,
-  })
-  return listed
-    .filter((entry) => isRecord(entry.head) && entry.head.ref === branch)
-    .map((entry) => Number(entry.number))
+  const remote = await getOriginUrl(ctx.workspace.path)
+  assert(remote !== null, 'the clone has no origin remote to read the conversation from')
+  const data = await getGitHubData(ctx.workspace.path, remote)
+  assert(data.available, `the application could not read this repository: ${data.message}`)
+  return data.pullRequests
+    .filter((entry) => entry.head === branch)
+    .map((entry) => entry.number)
     .sort((left, right) => left - right)
 }
 
@@ -96,59 +105,48 @@ async function stacksHolding(ctx: LiveScenarioContext, numbers: readonly number[
 }
 
 /**
- * The real pull request of a subject this run does not own, read the way the stack
- * path reads one.
+ * The real pull request of a subject this run does not own, read the way the
+ * application reads one.
  *
- * The read is the request the application's own chain validation makes, sent
- * through the configured transport to the repository the pull request really lives
- * in, so the head repository in the result is the one the host reports rather than
- * a name this scenario chose.
+ * `getGitHubData` is pointed at the repository the pull request really lives in,
+ * through an origin derived from the host this run talks to and that repository's
+ * own name. The pull request is then picked out of what the production reader
+ * parsed, so the head repository in the result is the one the host reported rather
+ * than a name this scenario chose, and no part of the response is assembled here.
  */
 async function readForeignPullRequest(
   ctx: LiveScenarioContext,
   subject: { fullName: string; number: number; url: string | null },
 ): Promise<PullRequest> {
-  assert(subject.url !== null, 'the host reported no address for this pull request')
-  const [owner, repo] = subject.fullName.split('/')
-  const read = await ctx.transport.rest<Record<string, unknown>>({
-    method: 'GET',
-    path: `repos/${owner}/${repo}/pulls/${subject.number}`,
-  })
-  const head = isRecord(read.data.head) ? read.data.head : null
-  const headRepo = head !== null && isRecord(head.repo) ? head.repo : null
-  const base = isRecord(read.data.base) ? read.data.base : null
+  const remote = `${ctx.host.webOrigin}/${subject.fullName}.git`
+  const parsed = parseRemote(remote)
   assert(
-    typeof headRepo?.full_name === 'string' && headRepo.full_name.length > 0,
-    `the host did not report a head repository for ${subject.fullName}#${subject.number}`,
+    parsed !== null && parsed.fullName.toLowerCase() === subject.fullName.toLowerCase(),
+    `the origin derived for ${subject.fullName} is not that repository: ${String(parsed?.fullName ?? 'unparseable')}`,
   )
   assert(
-    typeof head?.ref === 'string' && typeof base?.ref === 'string',
-    `the host did not report both refs for ${subject.fullName}#${subject.number}`,
+    parsed.host === ctx.host.host,
+    `the origin for ${subject.fullName} points at ${parsed.host}, not the host this run talks to`,
+  )
+  const data = await getGitHubData(ctx.workspace.path, remote)
+  assert(
+    data.available,
+    `the application could not read ${subject.fullName}: ${data.message}`,
+  )
+  const found = data.pullRequests.find((entry) => entry.number === subject.number)
+  assert(
+    found !== undefined,
+    `the host does not report open pull request #${subject.number} in ${subject.fullName}`,
   )
   assert(
-    headRepo.full_name.toLowerCase() !== ctx.repository.toLowerCase(),
-    `#${subject.number} reads with head repository ${headRepo.full_name}, which is this repository itself, so it is not a foreign subject`,
+    (found.headRepository ?? '').length > 0,
+    `the host reports no head repository for ${subject.fullName}#${subject.number}`,
   )
   assert(
-    String(read.data.html_url) === subject.url,
-    `the host answers ${subject.fullName}#${subject.number} with the address ${String(read.data.html_url)}, not ${subject.url}`,
+    (found.headRepository ?? '').toLowerCase() !== ctx.repository.toLowerCase(),
+    `#${subject.number} reads with head repository ${String(found.headRepository)}, which is this repository itself, so it is not a foreign subject`,
   )
-  return {
-    number: subject.number,
-    title: typeof read.data.title === 'string' ? read.data.title : '',
-    url: String(read.data.html_url),
-    head: head.ref,
-    base: base.ref,
-    headRepository: headRepo.full_name,
-    state:
-      typeof read.data.merged_at === 'string'
-        ? 'MERGED'
-        : read.data.state === 'open'
-          ? 'OPEN'
-          : 'CLOSED',
-    draft: read.data.draft === true,
-    checks: 'none',
-  }
+  return found
 }
 
 export const nativeStackScenarios: readonly LiveScenario[] = [
@@ -413,8 +411,8 @@ export const nativeStackScenarios: readonly LiveScenario[] = [
 
       // This pull request belongs to another repository, so it cannot be named in
       // this repository's stack request at all. What can be asked is whether the
-      // guard that stack entry point uses refuses a chain holding it, given the
-      // metadata the application's own reader produced from the host.
+      // guard that stack entry point uses refuses a chain holding a pull request
+      // the production reader parsed out of that repository's own conversation.
       const result = validateNativeStackChain([foreign], {
         targetRepository: ctx.repository,
         defaultBranch: ctx.target.defaultBranch,
