@@ -2237,7 +2237,11 @@ define({
     const controlResult = await production.publish(control.prepared, publishArgs(control))
     assert.equal(controlResult.status, 'published', JSON.stringify(controlResult.errors))
 
-    const labelled = await preparedStack(production, [12, 13])
+    // A second stack over the same remote, seeded from a root that has moved again, so the
+    // comparison is between two real runs and not between one run and its own reseed.
+    const labelled = await preparedStack(production, [12, 13], {
+      rootFiles: { 'root.txt': 'the root branch moves on again\n' },
+    })
     for (const number of [12, 13]) {
       labelled.pullRequests[number] = {
         ...labelled.pullRequests[number],

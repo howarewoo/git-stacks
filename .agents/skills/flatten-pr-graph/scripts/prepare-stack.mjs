@@ -1111,6 +1111,28 @@ function classifyConflict(workspace, entries, renamed) {
   // merge leaving both unresolved, so the pair is reported as a file/directory conflict.
   const directories = new Set(merged.map((entry) => entry.path.split('/').slice(0, -1).join('/')))
   const fileDirectory = new Set()
+
+  // A file/directory conflict is the one shape Git does not leave as a pair of stages. It
+  // parks the directory under a placeholder name - `thing~HEAD`, `thing~<oid>` - and leaves
+  // that placeholder itself as a regular-file conflict, so a stage-mode check cannot see it
+  // and it would otherwise be reported as the modify/delete it resembles. What identifies
+  // it is present in the worktree Git just wrote: the placeholder is a file, and the path it
+  // was parked under is a real directory. A file genuinely named `thing~HEAD` does not also
+  // put a directory at `thing`, so this cannot misfire on an ordinary name.
+  for (const entry of merged) {
+    if (entry.kind === 'file-directory') continue
+    const parked = entry.path.slice(0, entry.path.lastIndexOf('~'))
+    if (parked === '' || parked === entry.path) continue
+    try {
+      if (!statSync(join(workspace, entry.path)).isFile()) continue
+      if (!statSync(join(workspace, parked)).isDirectory()) continue
+    } catch {
+      continue
+    }
+    entry.kind = 'file-directory'
+    entry.structural = true
+    fileDirectory.add(entry.path)
+  }
   for (const entry of merged) {
     if (directories.has(entry.path) && entry.path.length > 0) fileDirectory.add(entry.path)
   }
@@ -1806,7 +1828,12 @@ function inspectControls(repository) {
  * order to find this out.
  */
 function attributedDriverControls(storage, sourceOid, paths, cwd = storage) {
-  return readAttributedDriverControls(controlProbe, cwd, [sourceOid], paths)
+  return readAttributedDriverControls(controlProbe, cwd, [sourceOid], paths, (probeCwd, args) =>
+    // The caller's own environment, which is `process.env` because narrowing happens per
+    // child process and never by mutating this one. Reading the configuration any other
+    // way reports the caller's drivers as unconfigured.
+    runGit(probeCwd, args, { allowFailure: true, env: { ...process.env } }),
+  )
 }
 
 /**

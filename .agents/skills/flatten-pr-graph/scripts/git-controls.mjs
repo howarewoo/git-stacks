@@ -122,11 +122,18 @@ export function treePaths(git, cwd, treeish) {
  *
  * Each control is `{ control, value, inTaskStorage, blocking, effect }`.
  */
-export function attributedDriverControls(git, cwd, sources, paths) {
+export function attributedDriverControls(git, cwd, sources, paths, configGit = git) {
   const targets = [...new Set(paths.filter(Boolean))]
   if (targets.length === 0) return []
 
-  const config = configuredDrivers(git, cwd)
+  // The configuration is read through `configGit` and the tree through `git`, because the
+  // two have to answer different questions. Which attributes a path carries is a fact
+  // about the trees this run would write. Which drivers those names resolve to is a fact
+  // about the configuration the caller has - and reading it through a probe whose
+  // environment has already had `GIT_CONFIG_COUNT` and the `GIT_CONFIG_KEY_<n>` family
+  // removed would report a driver the caller's own Git would have run as unconfigured,
+  // which is the bypass this function exists to prevent.
+  const config = configuredDrivers(configGit, cwd)
   if (!config.ok) {
     return [
       {
