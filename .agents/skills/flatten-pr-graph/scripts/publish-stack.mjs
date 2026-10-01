@@ -2218,15 +2218,38 @@ export async function publishStack(raw, conversations = {}) {
       rootAdvance = advance
     }
 
+    // An advanced root is a fact about the repository that no amount of correct publishing
+    // resolves. This run pushes nothing to the root, so the writes it did make stand and
+    // are not rolled back - but the stack they landed on is not the stack somebody merged,
+    // and calling that `published` would hand the caller a success it cannot rely on. It is
+    // a partial result whenever this run wrote anything, and blocked when it wrote nothing
+    // it could reconcile, with the advance named as an unresolved step.
+    const rootAdvanced = rootAdvance !== null && rootAdvance.integrated !== true
+    const rootAdvanceFailure = rootAdvanced
+      ? [
+          {
+            code: 'stale-snapshot',
+            detail:
+              'the root advanced after the authorization and the newer work is not integrated into this chain',
+            evidence: rootAdvance.note,
+          },
+        ]
+      : []
+
     const unconfirmedCount = publication.unconfirmed.length
     // Every required write and every final observation has to hold. A denied base, a base
-    // this run skipped for want of permission, and a final chain that did not verify all
-    // mean the same thing to a reader: this is not a published stack.
+    // this run skipped for want of permission, a final chain that did not verify, and a
+    // root that moved underneath the plan all mean the same thing to a reader: this is not
+    // a published stack.
     const failedFinalRead = chainProblems.some((problem) =>
       problem.includes('could not be re-read'),
     )
     const status =
-      unconfirmedCount === 0 && errors.length === 0 && baseFailures.length === 0 && chainHolds
+      unconfirmedCount === 0 &&
+      errors.length === 0 &&
+      baseFailures.length === 0 &&
+      chainHolds &&
+      !rootAdvanced
         ? publication.attempts.length === 0
           ? 'no-op'
           : 'published'
@@ -2260,6 +2283,7 @@ export async function publishStack(raw, conversations = {}) {
               evidence: entry.why,
             }))
           : []),
+        ...rootAdvanceFailure,
       ],
       publication,
       rootAdvance,
@@ -2290,9 +2314,13 @@ export async function publishStack(raw, conversations = {}) {
               unconfirmedAttempts: [
                 ...publication.unconfirmed.map((entry) => `${entry.kind} ${entry.target}`),
                 ...baseFailures.map((f) => `pr-base-update ${f.detail}`),
+                ...(rootAdvanced
+                  ? ['root-advance the root moved and the newer work is not integrated']
+                  : []),
               ],
-              recommended:
-                're-read the affected refs and bases before retrying; an unknown acknowledgement may already have landed, and nothing is rolled back automatically',
+              recommended: rootAdvanced
+                ? 'the writes this run acknowledged are real and are not rolled back; re-prepare the stack against the current root and re-read the affected refs and bases before retrying, because an unknown acknowledgement may already have landed and the newer root work is not integrated'
+                : 're-read the affected refs and bases before retrying; an unknown acknowledgement may already have landed, and nothing is rolled back automatically',
             }
           : null,
       nextSafeAction:
@@ -2306,7 +2334,9 @@ export async function publishStack(raw, conversations = {}) {
               action:
                 status === 'no-op'
                   ? 'nothing was written; the chain already matched the plan'
-                  : 'reconcile the unconfirmed steps from fresh observations before any retry',
+                  : rootAdvanced
+                    ? 're-prepare against the current root before retrying; the acknowledged writes stand and the newer root work is not integrated'
+                    : 'reconcile the unconfirmed steps from fresh observations before any retry',
               requires: [],
             },
     })

@@ -1536,8 +1536,13 @@ concurrent edit, so they are admissible: the base it is about to retarget, the h
 pushed for that pull request, and the commit a base branch names once this run has pushed
 that branch itself. Any other difference - a fork by the same name, a state change, an edit
 to any field a retarget must not disturb - is refused. The root is reported rather than
-refused: this run pushes nothing to it, so an advanced root is named in `rootAdvance` and
-fails the `preservation.root` check instead of blocking the base writes.
+refused mid-run: this run pushes nothing to it, so an advanced root is named in `rootAdvance`
+and fails the `preservation.root` check instead of blocking the base writes. An advanced
+root still makes the result non-successful. The writes that landed are real, are
+acknowledged, and are not rolled back, but the stack they landed on is not the stack
+somebody merged, so the run returns `partial` (or `blocked` when it wrote nothing), names
+the advance as an unresolved step in `recovery`, and tells the caller to re-prepare against
+the current root.
 
 A resumed preparation adopts a journalled branch only when that branch actually passed its
 own checks - no conflict markers in its prepared head, no operation left in flight in its

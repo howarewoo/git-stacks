@@ -77,7 +77,11 @@ interface PublicationRun {
   }
   capability: Record<string, unknown> & { blockedControls?: string[] }
   rootAdvance: null | { pinned: string; observed: string; integrated: boolean }
-  recovery: null | { unconfirmedAttempts: string[] }
+  recovery: null | {
+    acknowledgedChanges: string[]
+    unconfirmedAttempts: string[]
+    recommended: string
+  }
   controls: Array<{
     control: string
     value: string
@@ -1268,7 +1272,17 @@ test('a root that moves after the writes is reported against the pinned snapshot
     },
   })
 
-  assert.equal(published.status, 'published', JSON.stringify(published.errors))
+  // A root that moved after the writes cannot make this a published stack: the writes are
+  // real and stand, and the newer root work is not part of the chain this run produced, so
+  // the result has to say so and hand back what is unresolved.
+  assert.equal(published.status, 'partial', JSON.stringify(published.errors))
+  assert.equal(published.ok, false)
+  assert.ok(published.recovery, 'an unintegrated root leaves the run to recover')
+  assert.ok(
+    published.recovery?.unconfirmedAttempts.some((entry) => entry.includes('root-advance')),
+    JSON.stringify(published.recovery?.unconfirmedAttempts),
+  )
+  assert.match(published.recovery?.recommended ?? '', /against the current root/)
   assert.ok(published.rootAdvance, 'the root advance must be reported')
   assert.equal(published.rootAdvance?.integrated, false)
   assert.equal(published.rootAdvance?.pinned, pinned)

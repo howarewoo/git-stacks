@@ -2302,7 +2302,12 @@ define({
   area: 'publication',
   criteria: ['#88 a root that advanced after the writes is reported, not integrated'],
   findings: ['B13 Make success depend on denied work and final chain verification'],
-  expect: { status: 'published', codes: [] },
+  // The root moves after real writes have landed. Every one of them is correct and is
+  // preserved, and none of them makes the stack current: the newer root work is not part
+  // of this chain and nothing here merged it. A `published` status here would hand the
+  // caller a success it cannot rely on, so the run reports the advance as an unresolved
+  // step and hands back the recovery instead.
+  expect: { status: 'partial', codes: ['stale-snapshot'], mentions: ['root'] },
   async run(production) {
     const stack = await preparedStack(production, [12, 13])
     let reads = 0
@@ -2328,12 +2333,45 @@ define({
       newer,
       'what is reported as advanced is what the remote actually holds',
     )
-    assert.equal(result.status, 'published', JSON.stringify(result.errors))
+    assert.equal(result.status, 'partial', JSON.stringify(result.errors))
+    assert.equal(result.ok, false, 'an unintegrated root is not a success')
     assert.notEqual(result.rootAdvance?.integrated, true, 'newer root work is never claimed')
     assert.equal(result.rootAdvance?.pinned, stack.root)
     const rootRow = result.verification.find((row) => row.invariant === 'preservation.root')
     assert.equal(rootRow !== undefined, true, 'the newer root is reported at all')
     assert.notEqual(rootRow?.result, 'pass', 'an unintegrated root is not a passing check')
+    // Nothing is rolled back: the writes that really landed are still acknowledged, and the
+    // remote still holds them. The residual metadata race is reported as it always was.
+    const preparedHeads = preparedHeadsOf(stack.prepared)
+    for (const [number, head] of Object.entries(preparedHeads)) {
+      assert.equal(
+        production.refs()[`refs/heads/${BRANCHES[Number(number)]}`],
+        head,
+        `#${number} still stands`,
+      )
+    }
+    // Nothing is rolled back. The retarget that was needed is still acknowledged and the
+    // bases still read back as the plan intended; the residual metadata race is reported as
+    // it always was, because base writes were never compare-and-swap protected.
+    assert.deepEqual(
+      await baseWrites(stack.adapter),
+      [13],
+      'the base write that was needed is preserved, not undone',
+    )
+    const served = await stack.adapter.pullRequests()
+    assert.equal(served['12'].baseRef, DEFAULT_BRANCH)
+    assert.equal(served['13'].baseRef, BRANCHES[12])
+    assert.equal(result.capability?.residualMetadataRace, true)
+    // The recovery has to name the advance, or a caller cannot tell what to redo.
+    const recovery = result.recovery
+    assert.ok(recovery, 'an unintegrated root leaves the run to recover')
+    assert.equal(
+      recovery.unconfirmedAttempts.some((entry) => entry.includes('root-advance')),
+      true,
+      `the advance is an unresolved step: ${JSON.stringify(recovery.unconfirmedAttempts)}`,
+    )
+    assert.match(recovery.recommended, /re-prepare the stack against the current root/)
+    assert.match(result.nextSafeAction?.action ?? '', /re-prepare against the current root/)
     return publicationOutcome(result)
   },
 })
