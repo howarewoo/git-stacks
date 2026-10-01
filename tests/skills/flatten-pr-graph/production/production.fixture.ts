@@ -2047,7 +2047,11 @@ define({
   area: 'publication',
   criteria: ['#88 an immediate concurrent selected SHA lease is rejected'],
   findings: ['B8 Re-read and reconcile each PR immediately before its base edit'],
-  expect: { status: 'blocked', codes: ['stale-snapshot'] },
+  // `partial`, not `blocked`: the lease did its job for the branch that carried a refspec,
+  // but the other selected branch's prepared head equalled its original, so it had no
+  // refspec and no lease - and the concurrent push to it landed. The run wrote that branch
+  // before noticing, so something really was written and the status has to say so.
+  expect: { status: 'partial', codes: ['stale-snapshot'], mentions: ['feat-a'] },
   async run(production) {
     const stack = await preparedStack(production, [12, 13])
     let concurrent = ''
@@ -2065,7 +2069,11 @@ define({
         return production.realPush(repository, endpoint, refspecs, leases)
       },
     })
-    assert.notEqual(concurrent, '', 'the concurrent push really landed in the seam')
+    assert.notEqual(
+      concurrent,
+      '',
+      `the concurrent push really landed in the seam; the run stopped before it: ${JSON.stringify(result.errors)}`,
+    )
     assert.notEqual(result.status, 'published', JSON.stringify(result.errors))
     assert.equal(
       production.refs()[`refs/heads/${BRANCHES[12]}`],

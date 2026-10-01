@@ -933,18 +933,37 @@ function treePaths(storage, oid) {
  */
 function inheritedExecutableControls(callerEnv, input) {
   const probe = (cwd, args, env) => runGit(cwd, args, { allowFailure: true, env: env ?? callerEnv })
-  const repositories = [input.repository, input.userWorkspace].filter(
-    (repository) => typeof repository === 'string' && repository !== '',
-  )
+  // A user workspace that IS the source is one repository, not two. Reading it twice
+  // produced the same control twice and named the same repository twice, so the report
+  // read as two findings where there is exactly one.
+  const repositories = [
+    ...new Set(
+      [input.repository, input.userWorkspace].filter(
+        (repository) => typeof repository === 'string' && repository !== '',
+      ),
+    ),
+  ]
   // Preparation copies pinned refs from a local source path and never opens a transport,
   // so only the always-reachable controls apply here.
-  const controls = repositories.flatMap((repository) =>
-    readExecutableControls(probe, repository, callerEnv, new Set(['file'])),
-  )
-  return controls.map((control, index) => ({
-    ...control,
-    value: `${control.value} (${repositories[index] === input.repository ? 'source' : 'user workspace'})`,
-  }))
+  const controls = []
+  const seen = new Set()
+  for (const repository of repositories) {
+    for (const control of readExecutableControls(probe, repository, callerEnv, new Set(['file']))) {
+      // Deduplicated on the control and its value together: one control configured twice
+      // with different values is two facts, and the same fact read twice is one. The
+      // control's `blocking` is carried through untouched, so the report cannot describe a
+      // control as non-blocking while an error says the run stopped because of it.
+      const key = `${control.control} ${control.value}`
+      if (seen.has(key)) continue
+      seen.add(key)
+      controls.push({
+        ...control,
+        repository: repository === input.repository ? 'source' : 'user workspace',
+        repositoryPath: repository,
+      })
+    }
+  }
+  return controls
 }
 
 function writeJournal(path, journal) {
@@ -1954,7 +1973,7 @@ function prepareStackInner(raw) {
       errors: blockingInherited.map((control) => ({
         code: 'conflicting-environment-control',
         detail: `the caller's environment or configuration imposes ${control.control}, which this run will not strip and will not run`,
-        evidence: `${control.control} = ${control.value}; ${control.effect}`,
+        evidence: `${control.control} = ${control.value} (${control.repository ?? 'caller'}); ${control.effect}`,
       })),
       run: null,
       preparation: null,

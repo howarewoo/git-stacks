@@ -1398,7 +1398,7 @@ export async function publishStack(raw, conversations = {}) {
 
   // 4. Re-read the remote, verify the prepared set against it, and decide the write set.
   const observed = {
-    refs: git.readRemoteRefs(input.repository, input.pushEndpoint.endpoint),
+    refs: await git.readRemoteRefs(input.repository, input.pushEndpoint.endpoint),
     ok: true,
     stderr: '',
   }
@@ -1665,7 +1665,7 @@ export async function publishStack(raw, conversations = {}) {
   const selectedRefs = new Set(input.order.map((number) => input.heads[number]))
   let atomic = { supported: null, evidence: 'no ref write was needed' }
   if (refWrites.length > 0) {
-    atomic = git.detectAtomicRefTransaction(
+    atomic = await git.detectAtomicRefTransaction(
       input.repository,
       input.pushEndpoint.endpoint,
       refspecs,
@@ -1728,8 +1728,12 @@ export async function publishStack(raw, conversations = {}) {
         outcome: 'attempted',
       })
       writeJournal(journalFile, journal)
-      const push = git.push(input.repository, input.pushEndpoint.endpoint, refspecs, leases)
-      const after = git.readRemoteRefs(input.repository, input.pushEndpoint.endpoint)
+      // Awaited, because these are the two conversations a caller may inject and an
+      // injected one is asynchronous. Reading `push.ok` off a pending promise is undefined
+      // rather than false, so the run reported a rejection it never received and then
+      // failed on the promise's missing `stderr`.
+      const push = await git.push(input.repository, input.pushEndpoint.endpoint, refspecs, leases)
+      const after = await git.readRemoteRefs(input.repository, input.pushEndpoint.endpoint)
       latestRefs = after
       stuck = refWrites.filter((write) => after[write.ref] !== write.to)
       // The read-back decides, not the push's exit status. A push that reports failure can
@@ -1849,8 +1853,25 @@ export async function publishStack(raw, conversations = {}) {
     // Metadata never starts until every selected head this run intended to publish is
     // observed at its prepared commit. Retargeting a base onto a head that never landed
     // would build a chain on a branch nobody can see.
+    // A selected head this run had no reason to write still has to be confirmed. When a
+    // prepared head equals the branch's original head there is no refspec for it, so a
+    // concurrent push to that branch raises no lease and no failed write - and the chain
+    // would otherwise be built on a branch that moved after the prepared heads were made.
+    const drifted = input.order
+      .map((number) => {
+        const ref = input.heads[number]
+        const branch = input.branches.find((candidate) => candidate.number === number)
+        const expected = branch ? branch.preparedHead : null
+        const observedOid = latestRefs[ref]
+        return observedOid !== undefined && expected !== null && observedOid !== expected
+          ? { ref, expected, observed: observedOid }
+          : null
+      })
+      .filter(Boolean)
     const headsUnreconciled =
-      stuck.length > 0 || publication.unconfirmed.some((entry) => entry.kind === 'ref-update')
+      stuck.length > 0 ||
+      drifted.length > 0 ||
+      publication.unconfirmed.some((entry) => entry.kind === 'ref-update')
     if (headsUnreconciled) {
       baseFailures.push({
         code: 'stale-snapshot',
@@ -1858,7 +1879,11 @@ export async function publishStack(raw, conversations = {}) {
         evidence:
           stuck.length > 0
             ? `not at the prepared head: ${stuck.map((write) => write.ref).join(', ')}`
-            : 'a head write has an unknown acknowledgement; the remote is re-read before any retry',
+            : drifted.length > 0
+              ? `a selected head this run did not need to write has moved: ${drifted
+                  .map((entry) => `${entry.ref} is ${String(entry.observed).slice(0, 12)}, prepared at ${String(entry.expected).slice(0, 12)}`)
+                  .join(', ')}`
+              : 'a head write has an unknown acknowledgement; the remote is re-read before any retry',
       })
     } else {
       for (const number of input.order) {
@@ -2034,7 +2059,7 @@ export async function publishStack(raw, conversations = {}) {
     })
 
     // 9. Final read-back of the whole chain, and the root reported against its pinned id.
-    const finalRefs = git.readRemoteRefs(input.repository, input.pushEndpoint.endpoint)
+    const finalRefs = await git.readRemoteRefs(input.repository, input.pushEndpoint.endpoint)
     for (const entry of verified.checked) {
       const ref = input.heads[entry.number]
       if (
