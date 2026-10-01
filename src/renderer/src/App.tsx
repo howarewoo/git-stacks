@@ -160,6 +160,7 @@ type WorkspaceView =
   | 'notifications'
 
 import type { NotificationInbox, NotificationThread } from '../../shared/notifications'
+import { canonicalHostName, GITHUB_DEFAULT_HOST } from '../../shared/host'
 import {
   NotificationCenterView,
   NotificationCredentialDialog,
@@ -201,6 +202,19 @@ function readableError(value: unknown): string {
   if (value instanceof Error && value.message) return value.message
   if (typeof value === 'string' && value) return value
   return 'The operation failed. Check the repository and try again.'
+}
+
+/**
+ * Whether an inbox answer is about the host this window is pointed at.
+ *
+ * A notification inbox is one host's private list, read with that host's own
+ * credential, so an answer naming another host is not a slower version of this
+ * one: it is another host's rows. A window with no authoritative host to
+ * compare against (a main process that reports no settings) adopts the first
+ * answer and fences nothing, because nothing has been established to fence on.
+ */
+function inboxForHost(inbox: NotificationInbox, host: string | null): boolean {
+  return host === null || canonicalHostName(inbox.host) === host
 }
 
 function branchTreeInfo(
@@ -1053,17 +1067,64 @@ function App() {
   const [notificationActionError, setNotificationActionError] = React.useState<string | null>(null)
   const notificationRequest = React.useRef(0)
 
+  /**
+   * The host this window's notification state is allowed to be about. It is the
+   * host the settings say this installation works against, canonicalized the
+   * same way every other boundary canonicalizes a host, because the center main
+   * publishes belongs to the selected one and an answer for another host is
+   * another host's inbox rather than a slower version of this one. `null` means
+   * nothing authoritative has been established yet, and claims nothing.
+   */
+  const notificationHost = settings ? canonicalHostName(settings.github.host) : null
+  /** The same host, for continuations that outlive the render that started them. */
+  const notificationHostRef = React.useRef<string | null>(null)
+  React.useEffect(() => {
+    notificationHostRef.current = notificationHost
+  }, [notificationHost])
+
+  /**
+   * Whether a reply still belongs to the window that asked for it.
+   *
+   * The counter refuses a reply that a newer request has already superseded;
+   * the host refuses the ones a host change superseded, which no counter inside
+   * this window would notice on its own — a settings change is not something
+   * this window's own actions did.
+   */
+  const notificationClaim = React.useCallback(
+    (request: number, host: string | null): boolean =>
+      request === notificationRequest.current &&
+      (host === null || host === notificationHostRef.current),
+    [],
+  )
+
   // The poll pushes the inbox; this only asks for what is already known, so
-  // opening the view never turns into a read GitHub did not ask for.
+  // opening the view never turns into a read GitHub did not ask for. A change
+  // of host re-runs the whole thing: the previous host's rows, its errors, and
+  // a dialog opened for it are that host's private state, and the host now
+  // selected is read from what main already stored rather than by asking GitHub
+  // for anything on the strength of a settings change.
   React.useEffect(() => {
     if (!desktop) return
-    const stop = desktop.onNotifications?.(setNotificationInbox)
+    const host = notificationHost
+    const request = ++notificationRequest.current
+    const stop = desktop.onNotifications?.((value) => {
+      if (inboxForHost(value, notificationHostRef.current)) setNotificationInbox(value)
+    })
+    setNotificationInbox(null)
+    setNotificationActionError(null)
+    setNotificationBusy(false)
+    setNotificationDialogOpen(false)
+    setNotificationDialogError(null)
     desktop
       .notifications?.()
-      .then((value) => value && setNotificationInbox(value))
+      .then((value) => {
+        if (notificationClaim(request, host) && inboxForHost(value, host)) {
+          setNotificationInbox(value)
+        }
+      })
       .catch(() => undefined)
     return stop
-  }, [desktop])
+  }, [desktop, notificationClaim, notificationHost])
 
   /**
    * One notification call at a time. The bridge method is looked up rather than
@@ -1085,19 +1146,19 @@ function App() {
     async (action: () => Promise<NotificationInbox>) => {
       if (!desktop || notificationBusy) return
       const request = ++notificationRequest.current
+      const host = notificationHostRef.current
       setNotificationBusy(true)
       setNotificationActionError(null)
       try {
         const next = await action()
-        if (request === notificationRequest.current) setNotificationInbox(next)
+        if (notificationClaim(request, host) && inboxForHost(next, host)) setNotificationInbox(next)
       } catch (value) {
-        if (request === notificationRequest.current)
-          setNotificationActionError(readableError(value))
+        if (notificationClaim(request, host)) setNotificationActionError(readableError(value))
       } finally {
-        if (request === notificationRequest.current) setNotificationBusy(false)
+        if (notificationClaim(request, host)) setNotificationBusy(false)
       }
     },
-    [desktop, notificationBusy],
+    [desktop, notificationBusy, notificationClaim],
   )
 
   /**
@@ -1107,25 +1168,41 @@ function App() {
    * asked for, and never read back.
    */
   const saveNotificationCredential = React.useCallback(
-    async (token: string, accepted: boolean) => {
+    async (token: string, accepted: boolean, consentedHost: string) => {
       if (!desktop) return
       const request = ++notificationRequest.current
+      const host = canonicalHostName(consentedHost)
       setNotificationBusy(true)
       setNotificationDialogError(null)
+      // The token was typed against the host this dialog named and the
+      // acknowledgement was given for it, so the host travels with it and every
+      // step re-asks whether that is still the host this window is pointed at.
+      // A step already in flight cannot be called back, which is why the check
+      // sits between the steps and why main validates the same host again.
+      const stillTheHost = (): boolean => {
+        if (notificationClaim(request, host)) return true
+        setNotificationDialogError(
+          'The selected GitHub host changed while this was being entered, so it was not sent to any host. Enter the token again to authorize the host that is selected now.',
+        )
+        return false
+      }
       try {
         await desktop.updateSettings?.({ notifications: { enabled: true } })
-        await notificationCall('saveNotificationCredential', token, accepted)
+        if (!stillTheHost()) return
+        await notificationCall('saveNotificationCredential', token, accepted, consentedHost)
+        if (!stillTheHost()) return
         const next = await notificationCall<NotificationInbox>('notifications')
-        if (request === notificationRequest.current) setNotificationInbox(next)
-        setNotificationDialogOpen(false)
+        if (notificationClaim(request, host) && inboxForHost(next, host)) {
+          setNotificationInbox(next)
+          setNotificationDialogOpen(false)
+        }
       } catch (value) {
-        if (request === notificationRequest.current)
-          setNotificationDialogError(readableError(value))
+        if (notificationClaim(request, host)) setNotificationDialogError(readableError(value))
       } finally {
-        if (request === notificationRequest.current) setNotificationBusy(false)
+        if (notificationClaim(request, host)) setNotificationBusy(false)
       }
     },
-    [desktop, notificationCall],
+    [desktop, notificationCall, notificationClaim],
   )
 
   const removeNotificationCredential = React.useCallback(() => {
@@ -2729,6 +2806,11 @@ function App() {
             notificationCall<NotificationInbox>('markNotificationRead', 'all'),
           )
         }}
+        onMarkDone={(threadId) => {
+          void runNotification(() =>
+            notificationCall<NotificationInbox>('markNotificationDone', threadId),
+          )
+        }}
         onMarkRead={(threadId) => {
           void runNotification(() =>
             notificationCall<NotificationInbox>('markNotificationRead', threadId),
@@ -2756,9 +2838,9 @@ function App() {
   }
 
   const renderMainContent = () => {
-    // The queue is the one destination that is useful with no repository open:
-    // it reads every registered repository rather than the one on screen.
-    if (workspaceNeedsNoRepository(workspaceView)) return renderPrInbox()
+    // Both cross-repository inboxes stay reachable before a repository is open.
+    if (workspaceView === 'prInbox') return renderPrInbox()
+    if (workspaceView === 'notifications') return renderNotifications()
     if (!snapshot) return null
     if (workspaceView === 'changes') return renderChanges()
     if (workspaceView === 'pullRequests') return renderPullRequests()
@@ -2773,7 +2855,6 @@ function App() {
         />
       )
     if (workspaceView === 'stashes') return renderStashes()
-    if (workspaceView === 'notifications') return renderNotifications()
     if (workspaceView === 'diagnostics') return <DiagnosticsView snapshot={snapshot} />
     if (workspaceView === 'history')
       return (
@@ -3587,10 +3668,16 @@ function App() {
       <NotificationCredentialDialog
         busy={notificationBusy}
         error={notificationDialogError}
-        host={notificationInbox?.host ?? 'github.com'}
-        login={notificationInbox?.login ?? null}
+        host={settings?.github.host ?? notificationInbox?.host ?? GITHUB_DEFAULT_HOST}
+        login={
+          notificationInbox && inboxForHost(notificationInbox, notificationHost)
+            ? notificationInbox.login
+            : null
+        }
         onOpenChange={setNotificationDialogOpen}
-        onSubmit={(token, accepted) => void saveNotificationCredential(token, accepted)}
+        onSubmit={(token, accepted, host) =>
+          void saveNotificationCredential(token, accepted, host)
+        }
         open={notificationDialogOpen}
       />
       <RepositoryDiscoveryDialog

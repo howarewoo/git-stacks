@@ -3,6 +3,7 @@ import {
   Bell,
   BellOff,
   CheckCheck,
+  CircleCheck,
   ExternalLink,
   LoaderCircle,
   RefreshCw,
@@ -57,24 +58,31 @@ function pollSubtitle(inbox: NotificationInbox): string {
 
 /**
  * One thread, and only the controls GitHub actually offers for it: reading it,
- * opening it on the host, ignoring it, and unsubscribing from it. A host that
- * offers no subscription link renders no subscription control rather than one
- * that would fail.
+ * marking it done, opening it on the host, ignoring it, and unsubscribing from
+ * it.
+ *
+ * Those controls are decided separately, because GitHub offers them
+ * separately. `Done` and the subscription controls address the thread by its
+ * own id, so they exist whether or not this build can open the subject in a
+ * browser; only `Open` depends on there being a subject page, and its absence
+ * says this build has no link rather than that the thread has no operations.
  */
 function NotificationRow({
   busy,
+  onMarkDone,
   onMarkRead,
   onOpen,
   onSubscribe,
   thread,
 }: {
   busy: boolean
+  onMarkDone: (threadId: string) => void
   onMarkRead: (threadId: string) => void
   onOpen: (thread: NotificationThread) => void
   onSubscribe: (thread: NotificationThread, action: 'ignore' | 'unsubscribe') => void
   thread: NotificationThread
 }) {
-  const subscribable = thread.url !== null
+  const openable = thread.url !== null
   return (
     <div className="capability-row notification-thread-row" role="listitem">
       <span className="capability-copy">
@@ -103,42 +111,53 @@ function NotificationRow({
         Mark read
       </Button>
       <Button
+        aria-label={`Mark ${thread.title} as done`}
+        disabled={busy}
+        onClick={() => onMarkDone(thread.id)}
+        size="sm"
+        tooltip="Mark this thread done on GitHub, which clears it from the inbox. It is not unsubscribing: the conversation's subscription is untouched."
+        variant="ghost"
+      >
+        <CircleCheck className="size-3.5" />
+        Done
+      </Button>
+      <Button
         aria-label={`Open ${thread.title} on GitHub`}
-        disabled={busy || !thread.url}
+        disabled={busy || !openable}
         onClick={() => onOpen(thread)}
         size="sm"
-        tooltip="Opens the subject on GitHub in your browser. This window never loads it."
+        tooltip={
+          openable
+            ? 'Opens the subject on GitHub in your browser. This window never loads it.'
+            : 'This host offered no page for this subject, so there is nothing to open. Reading it, marking it done, and its subscription are still available.'
+        }
         variant="ghost"
       >
         <ExternalLink className="size-3.5" />
         Open
       </Button>
-      {subscribable ? (
-        <>
-          <Button
-            aria-label={`Ignore ${thread.title}`}
-            disabled={busy}
-            onClick={() => onSubscribe(thread, 'ignore')}
-            size="sm"
-            tooltip="Ignore this thread on GitHub. You stop receiving it; it is not deleted."
-            variant="ghost"
-          >
-            <BellOff className="size-3.5" />
-            Ignore
-          </Button>
-          <Button
-            aria-label={`Unsubscribe from ${thread.title}`}
-            disabled={busy}
-            onClick={() => onSubscribe(thread, 'unsubscribe')}
-            size="sm"
-            tooltip="Unsubscribe from this thread on GitHub. The thread itself stays."
-            variant="ghost"
-          >
-            <Bell className="size-3.5" />
-            Unsubscribe
-          </Button>
-        </>
-      ) : null}
+      <Button
+        aria-label={`Ignore ${thread.title}`}
+        disabled={busy}
+        onClick={() => onSubscribe(thread, 'ignore')}
+        size="sm"
+        tooltip="Ignore this thread on GitHub. You stop receiving it; it is not deleted."
+        variant="ghost"
+      >
+        <BellOff className="size-3.5" />
+        Ignore
+      </Button>
+      <Button
+        aria-label={`Unsubscribe from ${thread.title}`}
+        disabled={busy}
+        onClick={() => onSubscribe(thread, 'unsubscribe')}
+        size="sm"
+        tooltip="Unsubscribe from this thread on GitHub. The thread itself stays."
+        variant="ghost"
+      >
+        <Bell className="size-3.5" />
+        Unsubscribe
+      </Button>
     </div>
   )
 }
@@ -147,6 +166,11 @@ function NotificationRow({
  * The consent step. It names the credential boundary in full before anything is
  * typed, and the token field is a password input that is cleared the moment the
  * dialog closes — the value crosses the bridge once and is never read back.
+ *
+ * The host it displays is submitted with the token, because that is the host
+ * the person acknowledged on screen. A token entered against one host must
+ * never be identified against another, and the only place that fact is known is
+ * here, where the host was named and the acknowledgement was given.
  */
 export function NotificationCredentialDialog({
   busy,
@@ -162,7 +186,7 @@ export function NotificationCredentialDialog({
   host: string
   login: string | null
   onOpenChange: (open: boolean) => void
-  onSubmit: (token: string, accepted: boolean) => void
+  onSubmit: (token: string, accepted: boolean, host: string) => void
   open: boolean
 }) {
   const [token, setToken] = React.useState('')
@@ -243,7 +267,7 @@ export function NotificationCredentialDialog({
               loading={busy}
               onClick={() => {
                 const value = token.trim()
-                onSubmit(value, accepted)
+                onSubmit(value, accepted, host)
                 setToken('')
               }}
             >
@@ -274,6 +298,7 @@ export function NotificationCenterView({
   inbox,
   onDismissError,
   onMarkAllRead,
+  onMarkDone,
   onMarkRead,
   onOpenCredential,
   onOpenThread,
@@ -287,6 +312,7 @@ export function NotificationCenterView({
   inbox: NotificationInbox | null
   onDismissError: () => void
   onMarkAllRead: () => void
+  onMarkDone: (threadId: string) => void
   onMarkRead: (threadId: string) => void
   onOpenCredential: () => void
   onOpenThread: (thread: NotificationThread) => void
@@ -320,6 +346,13 @@ export function NotificationCenterView({
    * the stored reference rather than whether polling is currently allowed.
    */
   const hasStoredCredential = status !== null && typeof status.reference === 'string'
+  /**
+   * GitHub can accept a bulk mark-read and finish it asynchronously, so the
+   * threads on screen are still the last list it confirmed. The request is
+   * never sent again while that is true, and the wait is announced rather than
+   * shown as a completed change.
+   */
+  const awaitingConfirmation = polls && status.markAllReadPending === true
 
   return (
     <div className="diagnostics-view">
@@ -356,10 +389,14 @@ export function NotificationCenterView({
                 Refresh
               </Button>
               <Button
-                disabled={busy || status.unreadCount === 0}
+                disabled={busy || status.unreadCount === 0 || awaitingConfirmation}
                 onClick={onMarkAllRead}
                 size="sm"
-                tooltip="Mark every unread thread read on GitHub."
+                tooltip={
+                  awaitingConfirmation
+                    ? 'GitHub accepted this change and has not confirmed it yet. It is never sent a second time; the next read shows what it actually did.'
+                    : 'Mark every unread thread read on GitHub.'
+                }
                 variant="secondary"
               >
                 Mark all read
@@ -394,8 +431,12 @@ export function NotificationCenterView({
         </div>
         {status?.message ? <InlineAlert tone={tone}>{status.message}</InlineAlert> : null}
         {error ? (
-          <InlineAlert role="alert" title="That change did not reach GitHub" tone="error">
+          <InlineAlert role="alert" title="That change was not confirmed" tone="error">
             <p className="m-0">{error}</p>
+            <p className="m-0 mt-1">
+              This app cannot tell from the answer alone whether GitHub applied it, so it says so
+              rather than guessing. The change is not sent again; a refresh shows what GitHub holds.
+            </p>
             <div className="mt-2">
               <Button onClick={onDismissError} size="sm" variant="secondary">
                 Dismiss
@@ -438,12 +479,24 @@ export function NotificationCenterView({
             It is not a live answer.
           </InlineAlert>
         ) : null}
+        {awaitingConfirmation ? (
+          <InlineAlert
+            role="status"
+            title="GitHub accepted this and is still finishing it"
+            tone="info"
+          >
+            GitHub takes the whole-inbox change asynchronously, so it has not confirmed it yet.
+            The rows below are still the last list GitHub confirmed, this request is not sent
+            again, and the next read shows what it actually did.
+          </InlineAlert>
+        ) : null}
         {polls && status.threads.length > 0 ? (
           <div className="capability-list" role="list" aria-label="GitHub notification threads">
             {status.threads.map((thread) => (
               <NotificationRow
                 busy={busy}
                 key={thread.id}
+                onMarkDone={onMarkDone}
                 onMarkRead={onMarkRead}
                 onOpen={onOpenThread}
                 onSubscribe={onSubscribe}

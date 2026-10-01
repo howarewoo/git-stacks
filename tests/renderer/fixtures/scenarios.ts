@@ -1204,6 +1204,9 @@ const notificationStatus = {
   login: 'octo',
   store: { available: true, name: 'Keychain', reason: null },
   message: null,
+  // A bulk change GitHub has accepted but not confirmed is the only thing that
+  // sets this, so every scenario that is not that state says so explicitly.
+  markAllReadPending: false,
 }
 
 const notificationThreads: NotificationInbox['threads'] = [
@@ -1259,6 +1262,7 @@ export function notificationInbox(overrides: Partial<NotificationInbox> = {}): N
     },
     stale: false,
     staleReason: null,
+    markAllReadPending: false,
     ...overrides,
   }
 }
@@ -1944,5 +1948,75 @@ export const scenarios: Record<ScenarioName, FixtureScenario> = {
       ],
       unreadCount: 2,
     },
+  },
+  'notifications-no-repository': {
+    name: 'notifications-no-repository',
+    summary:
+      'The Notification Center with no repository open: the inbox belongs to a host, not to a checkout.',
+    snapshot: null,
+    recentRepositories,
+    notifications: notificationInbox({ stale: false }),
+  },
+  'notifications-mark-all-accepted': {
+    name: 'notifications-mark-all-accepted',
+    summary:
+      'GitHub accepted the whole-inbox change and has not confirmed it yet, so the rows are still the last ones it confirmed.',
+    snapshot: connected,
+    recentRepositories,
+    notifications: notificationInbox({ stale: false, markAllReadPending: true }),
+  },
+  'notifications-no-subject-link': {
+    name: 'notifications-no-subject-link',
+    summary:
+      'A subject kind and reason this build has no name for, and a commit, with the controls each of them still has.',
+    snapshot: connected,
+    recentRepositories,
+    notifications: {
+      ...notificationInbox({ stale: false }),
+      threads: [
+        {
+          id: '301',
+          unread: true,
+          // A host can name a reason or a subject this build has no label for.
+          // The row is still a thread with an id, so its own operations are
+          // still operations on it.
+          reason: 'unknown',
+          title: 'Something this build has no name for',
+          // No page this build will open for it. That is a fact about the
+          // subject, not about what may be done to the thread.
+          url: null,
+          kind: 'unknown',
+          repository: null,
+          updatedAt: UPDATED,
+        },
+        {
+          id: '302',
+          unread: true,
+          reason: 'subscribed',
+          title: 'Pushed “Record the stack ordering rules”',
+          // The one-commit page, which is the commit itself and its comments,
+          // rather than the history of the branch it landed on.
+          url: 'https://github.com/acme/widgets/commit/9f1c2b7d4e5a',
+          kind: 'commit',
+          repository: { owner: 'acme', name: 'widgets' },
+          updatedAt: UPDATED,
+        },
+      ],
+      unreadCount: 2,
+    },
+  },
+  'notifications-turned-off': {
+    name: 'notifications-turned-off',
+    summary:
+      'Consent was withdrawn while a credential is still sealed: the module is off, and the token is still there to discard.',
+    snapshot: connected,
+    recentRepositories,
+    notifications: notificationInbox({
+      state: 'disabled',
+      enabled: false,
+      threads: [],
+      unreadCount: 0,
+      message: 'GitHub Notifications is off.',
+    }),
   },
 }

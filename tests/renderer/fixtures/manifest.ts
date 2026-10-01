@@ -94,6 +94,10 @@ export const SCENARIO_NAMES = [
   'notifications-rejected',
   'notifications-policy-disabled',
   'notifications-other-host',
+  'notifications-no-repository',
+  'notifications-mark-all-accepted',
+  'notifications-no-subject-link',
+  'notifications-turned-off',
 ] as const
 
 export type ScenarioName = (typeof SCENARIO_NAMES)[number]
@@ -173,6 +177,10 @@ export const SCENARIO_GROUPS = {
     'notifications-rejected',
     'notifications-policy-disabled',
     'notifications-other-host',
+    'notifications-no-repository',
+    'notifications-mark-all-accepted',
+    'notifications-no-subject-link',
+    'notifications-turned-off',
   ],
 } as const satisfies Record<string, readonly ScenarioName[]>
 

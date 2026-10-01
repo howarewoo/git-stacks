@@ -469,7 +469,7 @@ export function SettingsDialog({
                 <Field
                   id="settings-notifications"
                   label={<span className="sr-only">Read a GitHub Notifications inbox</span>}
-                  description={`Optional and separate from sign-in. Reading this inbox needs a ${NOTIFICATION_CREDENTIAL_KIND} with the ${NOTIFICATION_CREDENTIAL_SCOPE} scope, stored only in this computer's key store. Turning it off stops the polling and hides the list; it does not remove that token, and it changes nothing about pull requests, stacks, or reviews.`}
+                  description={`Optional and separate from sign-in. Reading this inbox needs a ${NOTIFICATION_CREDENTIAL_KIND} with the ${NOTIFICATION_CREDENTIAL_SCOPE} scope. It is entered here, crosses the bridge to the main process once, and is kept sealed by the operating system's own protection in a vault file this module owns; ordinary application state holds only an opaque reference to it, and the stored credential is never sent back to this window. Turning it off stops the polling and hides the list; it does not remove that token, and it changes nothing about pull requests, stacks, or reviews.`}
                   error={problemFor('notifications.enabled')}
                 >
                   <Checkbox

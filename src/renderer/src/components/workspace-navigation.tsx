@@ -36,13 +36,12 @@ export type WorkspaceView =
 export const WORKSPACE_VIEW_HEADING_ID = 'workspace-view-heading'
 
 /**
- * Destinations that read across every registered repository rather than the
- * one that is open, so they stay useful with no repository open at all. The
- * shell asks this instead of testing a destination name, so a cross-repository
- * workspace cannot render as a repository that does not exist.
+ * Destinations that address registered repositories or a GitHub host rather
+ * than the repository that is open, so they stay useful with none open. The
+ * shell asks this instead of assuming every workspace needs a repository.
  */
 export function workspaceNeedsNoRepository(view: WorkspaceView): boolean {
-  return view === 'prInbox'
+  return view === 'prInbox' || view === 'notifications'
 }
 
 type WorkspaceDestination = {

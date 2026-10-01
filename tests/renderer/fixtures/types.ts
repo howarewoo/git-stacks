@@ -81,6 +81,8 @@ export type FixtureCall =
   | 'notificationMarkRead'
   | 'notificationSubscription'
   | 'notificationRefresh'
+  | 'notificationDone'
+  | 'notificationSettings'
 
 /** One entry of the ordered {@link FixtureControl.calls} log. */
 export interface FixtureCallRecord {
@@ -231,12 +233,18 @@ export interface FixtureControl {
   /** Simulates dropping folders onto the window, dispatching to preload listeners. */
   dropRepository?(paths: string[]): void
   /**
-   * Retires the mounted module's host and publishes the named scenario's
-   * notification state, exactly as a settings change does: the old host's
-   * inbox ends and the new host's is pushed to the mounted window, which is
-   * still showing the previous one.
+   * Installs the named scenario's inbox as what the named host serves, the way
+   * the main process restores the files that belong to a host it has just been
+   * pointed at. It publishes nothing: the window reaches the new host's inbox
+   * by asking for it, and a push that happened to carry it would prove nothing.
    */
-  cutoverNotificationHost(name: string): void
+  serveNotificationHost(host: string, name: string): void
+  /**
+   * Publishes the named scenario's inbox as a late arrival from a center that
+   * has already been retired. The window is holding the new host's inbox and
+   * must refuse rows belonging to a host it is no longer pointed at.
+   */
+  publishRetiredHostInbox(name: string): void
 }
 
 declare global {
