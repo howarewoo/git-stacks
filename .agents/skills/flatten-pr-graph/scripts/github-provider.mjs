@@ -8,7 +8,7 @@
  *
  * It exposes exactly the surface the contract allows:
  *
- *   capabilities()          -> reports supported operations, and sets
+ *   capabilities()          -> reports both operations this module implements, and sets
  *                              `compareAndSwap: false` because GitHub's REST API
  *                              (`PATCH /repos/{owner}/{repo}/pulls/{n}`) does not offer
  *                              a server-side precondition check for base updates
@@ -100,7 +100,10 @@ function toPullRequest(raw) {
 export function capabilities() {
   const { owner, name } = repositoryCoordinates()
   return {
-    operations: ['update-pull-request-base'],
+    // Both operations this module implements. A capability list that omits a read the
+    // module can perform would let a caller believe the publication never looked at the
+    // pull request it is about to retarget.
+    operations: ['read-pull-request', 'update-pull-request-base'],
     compareAndSwap: false,
     provider: `github:${owner}/${name}`,
   }

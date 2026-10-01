@@ -15,8 +15,16 @@
  */
 
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs'
+import { delimiter, dirname, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { prepareStack } from '../../../../.agents/skills/flatten-pr-graph/scripts/prepare-stack.mjs'
 import { publishStack } from '../../../../.agents/skills/flatten-pr-graph/scripts/publish-stack.mjs'
@@ -27,6 +35,14 @@ export const CONTRACT_VERSION = 'flatten-pr-graph/1'
 export const DEFAULT_BRANCH = 'main'
 export const ROOT_REF = 'refs/heads/main'
 export const REPOSITORY = { owner: 'acme', name: 'widgets' }
+
+/**
+ * The instant every fixture run stamps its commits and attempts with.
+ *
+ * Git derives a commit id from its timestamps, so a wall clock would give two identical
+ * runs different objects and make any comparison between them a comparison of the clock.
+ */
+export const FIXED_CLOCK = '2026-10-01T09:00:00.000Z'
 
 /** The head branch each pull request in this matrix publishes. */
 export const BRANCHES: Record<number, string> = {
@@ -149,6 +165,25 @@ export interface ProviderScript {
   failReadAfter?: number
   /** Change the title server-side after this many acknowledged base writes. */
   driftTitleAfterWrite?: number
+  /**
+   * Somebody else changes the base between this run's read-before-write and its PATCH.
+   *
+   * GitHub's `PATCH /repos/{owner}/{repo}/pulls/{n}` documents no server-side precondition,
+   * so the retarget is applied over whatever the base has become. That is the residual
+   * race `residualMetadataRace: true` names, and modelling it is the only honest way to
+   * exercise the path: a double that refused on a base mismatch would be enforcing a
+   * precondition its own capability document denies it has.
+   */
+  driftBaseBeforeWrite?: Record<number, string>
+  /**
+   * The check state the server holds for each pull request.
+   *
+   * The shipped provider has no operation that returns one, so the module still answers a
+   * `readCheckState` call and records that it was asked. A case that varies this field over
+   * an otherwise identical fixture can then say the decision did not depend on it, and can
+   * say it from the provider's own record rather than from an absence of the word.
+   */
+  checkStates?: Record<number, 'passing' | 'failing' | 'pending' | 'unavailable'>
 }
 
 export interface ProviderCall {
@@ -159,10 +194,52 @@ export interface ProviderCall {
   outcome: string
 }
 
+/**
+ * The shim's log, read back into one record per invocation.
+ *
+ * `CWD` opens a record, `ARG` lines carry the arguments, `END` closes it. An argument that
+ * contains a tab would break this, and no Git argument this driver produces does; a
+ * separator that an argument can imitate would have been the worse choice.
+ */
+function parseNativeTrace(recorded: string): NativeCommand[] {
+  const records: NativeCommand[] = []
+  let current: NativeCommand | null = null
+  for (const line of recorded.split('\n')) {
+    if (line === 'END') {
+      if (current) records.push(current)
+      current = null
+      continue
+    }
+    const tab = line.indexOf('\t')
+    if (tab < 0) continue
+    const tag = line.slice(0, tab)
+    const value = line.slice(tab + 1)
+    if (tag === 'CWD') current = { cwd: value, args: [] }
+    else if (tag === 'ARG' && current) current.args.push(value)
+  }
+  if (current) records.push(current)
+  return records
+}
+
+/** One native process the helper started, as the shim observed it. */
+export interface NativeCommand {
+  cwd: string
+  args: string[]
+}
+
+/** One provider-side action, in the vocabulary the #84 oracle judges writes by. */
+export interface ProviderAction {
+  kind: 'update-pr-base' | 'push-selected-head' | 'read-check-state'
+  target: string
+  outcome: 'observed' | 'acknowledged' | 'denied'
+}
+
 export interface ProviderAdapter {
   module: string
   /** Every operation the helper asked for, in order, including refusals. */
   calls(): Promise<ProviderCall[]>
+  /** The server's own record of what it did, independent of anything the helper reports. */
+  actions(): Promise<ProviderAction[]>
   /** The pull-request metadata the double currently serves. */
   pullRequests(): Promise<
     Record<string, { number: number; baseRef: string; headRef: string; title: string }>
@@ -279,6 +356,10 @@ function refresh() {
 }
 refresh()
 const calls = []
+const actions = []
+const checkStates = new Map(
+  Object.entries(script.checkStates ?? {}).map(([number, state]) => [Number(number), state]),
+)
 let reads = 0
 let writes = 0
 function record(op, number, base, outcome) {
@@ -288,9 +369,28 @@ export function capabilities() {
   record('capabilities', null, null, 'observed')
   return {
     operations: ['read-pull-request', 'update-pull-request-base'],
+    // The same answer the shipped provider gives: GitHub's PATCH documents no server-side
+    // precondition for a base update, so nothing here may pretend to check one.
     compareAndSwap: false,
     provider: 'production-double',
   }
+}
+/**
+ * Not part of the shipped provider's surface, and deliberately not in capabilities().
+ *
+ * It exists so a run that reaches for a check state is caught: the call is answered with
+ * whatever the server holds, and recorded as an action, so the boundary is tested by
+ * whether it was consulted rather than by what it then decided.
+ */
+export function readCheckState(number) {
+  const state = checkStates.get(number) ?? null
+  actions.push({
+    kind: 'read-check-state',
+    target: String(number),
+    outcome: state ? 'observed' : 'denied',
+  })
+  record('readCheckState', number, null, state ?? 'unknown')
+  return state
 }
 export function readPullRequest(number) {
   reads += 1
@@ -303,36 +403,46 @@ export function readPullRequest(number) {
   record('readPullRequest', number, pullRequest?.baseRef ?? null, pullRequest ? 'observed' : 'absent')
   return { ok: true, pullRequest: pullRequest ? structuredClone(pullRequest) : null }
 }
-export function updatePullRequestBase(number, base, expectedBase) {
+export function updatePullRequestBase(number, base) {
   const pullRequest = pullRequests.get(number)
   if (!pullRequest) {
     record('updatePullRequestBase', number, base, 'missing')
-    return { ok: false, applied: false }
+    actions.push({ kind: 'update-pr-base', target: String(number), outcome: 'denied' })
+    return { ok: false, applied: false, preconditionMet: null }
   }
   if ((script.refuseBaseUpdate ?? []).includes(number)) {
     record('updatePullRequestBase', number, base, 'denied')
-    return { ok: false, applied: false }
+    actions.push({ kind: 'update-pr-base', target: String(number), outcome: 'denied' })
+    return { ok: false, applied: false, preconditionMet: null }
   }
-  const preconditionMet =
-    expectedBase === undefined || expectedBase === null ? null : expectedBase === pullRequest.baseRef
-  if (preconditionMet === false) {
-    record('updatePullRequestBase', number, base, 'precondition-failed')
-    return { ok: false, applied: false, preconditionMet: false }
+  // A concurrent base change lands here, between the caller's read-before-write and this
+  // PATCH. There is nothing to reject: GitHub applies the retarget over it.
+  const concurrent = (script.driftBaseBeforeWrite ?? {})[number]
+  if (concurrent !== undefined && concurrent !== pullRequest.baseRef) {
+    pullRequest.baseRef = concurrent
+    record('updatePullRequestBase', number, base, 'concurrent-base-drift')
   }
   pullRequest.baseRef = base
   refresh()
   writes += 1
   record('updatePullRequestBase', number, base, 'acknowledged')
+  actions.push({ kind: 'update-pr-base', target: String(number), outcome: 'acknowledged' })
   if (script.driftTitleAfterWrite !== undefined && writes === script.driftTitleAfterWrite) {
     pullRequest.title = pullRequest.title + ' (edited by somebody else)'
   }
   if (script.applyThenThrow === true) {
+    // The write happened; only its acknowledgement was lost. The action record above is
+    // the server's own, and it survives the exception.
+    actions.push({ kind: 'update-pr-base', target: String(number), outcome: 'denied' })
     throw new Error('the acknowledgement was lost in transit')
   }
-  return { ok: true, applied: true, preconditionMet }
+  return { ok: true, applied: true, preconditionMet: null, provider: 'github' }
 }
 export function __calls() {
   return calls
+}
+export function __actions() {
+  return actions
 }
 export function __state() {
   return Object.fromEntries(
@@ -349,6 +459,9 @@ export function __state() {
     async calls() {
       return (await loaded()).__calls() as unknown as Promise<ProviderCall[]>
     },
+    async actions() {
+      return (await loaded()).__actions() as Promise<ProviderAction[]>
+    },
     async pullRequests() {
       return (await loaded()).__state() as unknown as Awaited<
         ReturnType<ProviderAdapter['pullRequests']>
@@ -360,14 +473,20 @@ export function __state() {
 export interface PrepareOptions {
   order: number[]
   originalHeads: Record<number, string>
+  justifiedDrops?: unknown[]
   selection?: number[]
   branches?: Record<number, string>
   heads?: Record<number, string>
   runDirectory?: string
   userWorkspace?: string | null
   resolutions?: unknown[]
-  justifiedDrops?: unknown[]
   resume?: boolean
+  /**
+   * The clock the helper stamps its commits with. Pinned by default so two runs over the
+   * same immutable input produce byte-identical objects and can be compared; a case that
+   * wants a different clock says so.
+   */
+  now?: string
 }
 
 export interface PublishOptions {
@@ -386,6 +505,8 @@ export interface PublishOptions {
   /** `null` names no task-owned run at all, which the contract does not allow. */
   preparationRunDirectory?: string | null
   repository?: string
+  /** The clock the helper stamps its attempts with; pinned so runs are comparable. */
+  now?: string
 }
 
 /** Everything a production case needs, over one disposable real Git world. */
@@ -518,30 +639,130 @@ export class Production {
     }
   }
 
+  /**
+   * The helper's own native `git` processes, in order, with the directory each ran in.
+   *
+   * `world.commands` records what the *driver* ran, and the helpers spawn their own Git,
+   * so "no check was run" or "no fetch happened" cannot be answered from it. A `git` shim
+   * placed ahead of the real executable on `PATH` records each process the helper started
+   * and then execs the real Git, so the trace is an observation of the process table and
+   * not a re-derivation of what the code says.
+   *
+   * It is opt-in because it costs a shell per Git invocation. A run makes hundreds of them,
+   * and with the shim always on a three-second case took thirty. Only the cases that assert
+   * on what the helper executed ask for it, and they pay for it.
+   */
+  private tracePath = ''
+  private traceRecords: NativeCommand[] = []
+  private traceNext = false
+  private shimPath = ''
+  private driverPath: string | undefined
+
+  /**
+   * Traces the helper call `run` makes, and only that one. The shim is built once per world.
+   */
+  async traceNextCall<T>(run: () => Promise<T> | T): Promise<{ result: T; trace: NativeCommand[] }> {
+    this.traceNext = true
+    try {
+      const result = await run()
+      return { result, trace: this.traceRecords }
+    } finally {
+      this.traceNext = false
+    }
+  }
+
+  nativeTrace(): NativeCommand[] {
+    return this.traceRecords
+  }
+
+  private ensureShim(): string {
+    if (this.shimPath) return this.shimPath
+    const shim = join(this.world.root, 'native-shim')
+    mkdirSync(shim, { recursive: true })
+    const realGit = execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim()
+    const script = join(shim, 'git')
+    // One tab-separated record per invocation, terminated by END, so an argument
+    // containing spaces or a quote cannot be mistaken for a record boundary.
+    writeFileSync(
+      script,
+      [
+        '#!/bin/sh',
+        '{ printf "CWD\\t%s\\n" "$PWD"',
+        '  for a in "$@"; do printf "ARG\\t%s\\n" "$a"; done',
+        '  printf "END\\n"; } >> "$FLATTEN_NATIVE_TRACE"',
+        `exec ${JSON.stringify(realGit)} "$@"`,
+        '',
+      ].join('\n'),
+    )
+    chmodSync(script, 0o755)
+    this.shimPath = shim
+    return shim
+  }
+
+  private beginTrace(): void {
+    if (!this.traceNext) return
+    this.tracePath = join(this.world.root, 'native-trace.txt')
+    writeFileSync(this.tracePath, '')
+    process.env.FLATTEN_NATIVE_TRACE = this.tracePath
+    this.driverPath = process.env.PATH
+    process.env.PATH = `${this.ensureShim()}${delimiter}${this.driverPath ?? ''}`
+  }
+
+  private endTrace(): void {
+    if (!this.traceNext) return
+    const recorded = this.tracePath ? readFileSync(this.tracePath, 'utf8') : ''
+    this.traceRecords = parseNativeTrace(recorded)
+    delete process.env.FLATTEN_NATIVE_TRACE
+    if (this.driverPath) process.env.PATH = this.driverPath
+  }
+
+  /**
+   * The provider's own action log, read out of the double after the run it describes.
+   * Nothing here is taken from the helper's report.
+   */
+  private lastActions: ProviderAction[] = []
+
+  observedActions(): ProviderAction[] {
+    return this.lastActions
+  }
+
   prepare(options: PrepareOptions): PreparedRun {
     const branches = options.branches ?? BRANCHES
-    return prepareStack({
-      repository: this.world.remote,
-      userWorkspace: options.userWorkspace ?? null,
-      runDirectory: options.runDirectory ?? this.prepareRun(),
-      root: { ref: ROOT_REF, oid: this.root() },
-      selection: options.selection ?? options.order,
-      order: options.order,
-      // `git check-ref-format` refuses a one-level name unless `--allow-onelevel` is
-      // passed, and the helper asks Git itself rather than inventing a looser rule. The
-      // plan therefore carries fully qualified refs, as the shipped example does.
-      heads: Object.fromEntries(
-        options.order.map((number) => [
-          number,
-          qualify(options.heads?.[number] ?? branches[number]),
-        ]),
-      ),
-      originalHeads: options.originalHeads,
-      hardDependencies: [],
-      resolutions: options.resolutions ?? [],
-      justifiedDrops: options.justifiedDrops ?? [],
-      resume: options.resume === true,
-    }) as PreparedRun
+    this.beginTrace()
+    try {
+      return prepareStack({
+        repository: this.world.remote,
+        userWorkspace: options.userWorkspace ?? null,
+        runDirectory: options.runDirectory ?? this.prepareRun(),
+        root: { ref: ROOT_REF, oid: this.root() },
+        selection: options.selection ?? options.order,
+        order: options.order,
+        // `git check-ref-format` refuses a one-level name unless `--allow-onelevel` is
+        // passed, and the helper asks Git itself rather than inventing a looser rule. The
+        // plan therefore carries fully qualified refs, as the shipped example does.
+        heads: Object.fromEntries(
+          options.order.map((number) => [
+            number,
+            qualify(options.heads?.[number] ?? branches[number]),
+          ]),
+        ),
+        originalHeads: options.originalHeads,
+        // The dependency edges the pre-run evidence actually implied, not an empty list.
+        // Preparation refuses an order that contradicts a hard edge, and a driver that
+        // declared none would let every order through - the run would never be asked the
+        // question it exists to answer.
+        hardDependencies: this.hardDependencies(options),
+        resolutions: options.resolutions ?? [],
+        justifiedDrops: options.justifiedDrops ?? [],
+        resume: options.resume === true,
+        // A fixed clock, so preparing the same immutable input twice produces the same
+        // objects. Git derives a commit id from its timestamps, so a wall clock would make
+        // two identical runs differ and any comparison of them meaningless.
+        now: options.now ?? FIXED_CLOCK,
+      }) as PreparedRun
+    } finally {
+      this.endTrace()
+    }
   }
 
   /** The publication document as the helper receives it, for a case that edits it. */
@@ -580,18 +801,47 @@ export class Production {
           ? this.prepareRun()
           : options.preparationRunDirectory,
       resume: options.resume === true,
+      now: options.now ?? FIXED_CLOCK,
     }
   }
 
-  publish(
+  async publish(
     prepared: PreparedRun,
     options: PublishOptions,
     conversations: PublicationConversations = {},
   ): Promise<PublicationResult> {
-    return publishStack(
-      this.publishInput(prepared, options) as never,
-      conversations as never,
-    ) as Promise<PublicationResult>
+    // Publication is traced unconditionally. A confirmed write is a claim about the
+    // remote, and the only thing that backs it is a push this run actually issued and the
+    // commit the remote now carries - so every publication case needs the process trace,
+    // not only the ones that remembered to ask. It is cheap here: a publication starts tens
+    // of Git processes where a preparation starts hundreds.
+    this.traceNext = true
+    this.beginTrace()
+    let result: unknown
+    try {
+      result = await publishStack(
+        this.publishInput(prepared, options) as never,
+        conversations as never,
+      )
+    } finally {
+      this.endTrace()
+      this.traceNext = false
+    }
+    // Read the server's log back out of the double itself once the run is over, so the
+    // action oracle compares the document against the provider and not against a copy.
+    if (options.providerModule) {
+      try {
+        const module = (await import(pathToFileURL(options.providerModule).href)) as {
+          __actions?: () => ProviderAction[]
+        }
+        this.lastActions = module.__actions?.() ?? []
+      } catch {
+        this.lastActions = []
+      }
+    } else {
+      this.lastActions = []
+    }
+    return result as PublicationResult
   }
 
   /** Publishes a document the case built or edited itself. */
@@ -623,6 +873,55 @@ export class Production {
   adapter(pullRequests: PinnedPullRequest[], script: ProviderScript = {}): ProviderAdapter {
     this.lastPinned = pullRequests
     return writeProviderModule(this.world, pullRequests, script)
+  }
+
+  /**
+   * The hard dependency edges this selection really implies, read off the remote as it is
+   * *now* - that is, before this run has prepared anything.
+   *
+   * Two kinds, both facts about the authorized order rather than choices: `pr-base` when
+   * one pull request's base is another selected pull request's head, and `ancestry` when
+   * one selected head is a strict ancestor of another. They are derived from the state the
+   * run was authorized against, so preparing the same selection twice derives them twice
+   * and they never depend on the run under test.
+   */
+  private hardDependencies(options: PrepareOptions): Array<{
+    before: number
+    after: number
+    source: string
+    evidence: string
+  }> {
+    const pinned = this.lastPinned
+    const refs = this.world.remoteRefs()
+    const head = (number: number): string | undefined =>
+      refs[`refs/heads/${BRANCHES[number]}`]
+    const edges: Array<{ before: number; after: number; source: string; evidence: string }> = []
+    for (const after of options.order) {
+      for (const before of options.order) {
+        if (before === after) continue
+        const base = pinned.find((pr) => pr.number === after)?.baseRef
+        if (base !== undefined && base === BRANCHES[before]) {
+          edges.push({
+            before,
+            after,
+            source: 'pr-base',
+            evidence: `#${after} is based on #${before}`,
+          })
+          continue
+        }
+        const source = head(before)
+        const target = head(after)
+        if (source === undefined || target === undefined || source === target) continue
+        if (!this.world.isRemoteAncestor(source, target)) continue
+        edges.push({
+          before,
+          after,
+          source: 'ancestry',
+          evidence: `${source} is an ancestor of ${target}`,
+        })
+      }
+    }
+    return edges
   }
 }
 

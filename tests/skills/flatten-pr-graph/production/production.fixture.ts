@@ -44,6 +44,17 @@ export interface ProductionOutcome {
   /** The documents the helper actually produced, for the independent schema verdict. */
   preparation?: unknown
   publication?: unknown
+  /**
+   * The writes the document says the server confirmed, and where each selected head was
+   * supposed to land. Both feed the action and status oracles; neither is a claim the
+   * driver accepts on trust.
+   */
+  confirmed?: Array<{ kind: string; target: string }>
+  preparedHeads?: Record<number, string>
+  /** Every provider action the server recorded, read back out of the double. */
+  providerActions?: Array<{ kind: string; target: string; outcome: string }>
+  /** The helper's own native Git processes, read back from the PATH shim. */
+  nativeTrace?: Array<{ cwd: string; args: string[] }>
 }
 
 /** What a conforming implementation must produce, frozen before execution. */
@@ -87,12 +98,43 @@ function preparedOutcome(prepared: PreparedRun): ProductionOutcome {
   return outcome(prepared.status, prepareCodes(prepared), describeErrors(prepared.errors))
 }
 
-function publicationOutcome(result: {
+/**
+ * The outcome, plus what the run *claims* the server confirmed.
+ *
+ * `confirmed` is taken from the document's own attempts on purpose: it is the claim under
+ * test, and the independent verdict is what decides whether the provider and the remote
+ * back it. `providerActions` is read back out of the double after the run, so it is a
+ * record rather than a report.
+ */
+function publicationOutcome(
+  result: PublicationObservation,
+  production?: Production,
+  preparedHeads?: Record<number, string>,
+): ProductionOutcome {
+  const attempts = result.publication?.attempts ?? []
+  const base: ProductionOutcome = outcome(
+    result.status,
+    publishCodes(result as never),
+    describeErrors(result.errors),
+  )
+  base.publication = result.publication
+  base.confirmed = attempts
+    .filter((attempt) => attempt.outcome === 'acknowledged')
+    .map((attempt) => ({ kind: attempt.kind, target: attempt.target, to: attempt.to }))
+  base.preparedHeads = preparedHeads
+  if (production) base.providerActions = production.observedActions()
+  return base
+}
+
+/** What a publication run hands back, in the fields the outcome and the oracles read. */
+interface PublicationObservation {
   status: string
   errors: Array<{ code: string; detail: string; evidence?: string }>
-}): ProductionOutcome {
-  return outcome(result.status, publishCodes(result as never), describeErrors(result.errors))
+  publication?: {
+    attempts?: Array<{ kind: string; target: string; outcome: string; to?: string }>
+  }
 }
+
 
 interface SeedOptions {
   rootFiles?: Record<string, string>
@@ -195,12 +237,19 @@ function preparedHeadsOf(prepared: PreparedRun): Record<number, string> {
   )
 }
 
-/** Every Git command this run attempted, so "no check was run" is a fact and not a claim. */
-function ranACommand(production: Production, program: RegExp): boolean {
-  return production.world.commands.some((record) => program.test(record.args.join(' ')))
+/**
+ * The check-running commands a helper actually started.
+ *
+ * Read from the PATH shim, not from `world.commands`: that array is the driver's own Git,
+ * so a case that asked it "did this run a test runner" was reading its own setup back to
+ * itself and proving nothing about the helper.
+ */
+function ranACheck(trace: Array<{ cwd: string; args: string[] }>): string[] {
+  const pattern = /(^|[\s/])(test|vitest|jest|mocha|eslint|prettier|tsc|biome|ruff|pytest)(\s|$)/
+  return trace
+    .map((command) => command.args.join(' '))
+    .filter((command) => pattern.test(command))
 }
-
-const A_CHECK = /(^|[\s/])(test|vitest|jest|mocha|eslint|prettier|tsc|biome|ruff|pytest)(\s|$)/
 
 export const productionCases: ProductionCase[] = []
 
@@ -230,7 +279,9 @@ define({
     const numbers = [12, 13]
     const originalHeads = await seedStack(production, numbers)
     const root = production.root()
-    const prepared = production.prepare({ order: numbers, originalHeads })
+    const { result: prepared, trace } = await production.traceNextCall(() =>
+      production.prepare({ order: numbers, originalHeads }),
+    )
     assert.equal(prepared.ok, true, JSON.stringify(prepared.errors))
     const branches = prepared.preparation?.branches ?? []
     assert.deepEqual(
@@ -270,7 +321,7 @@ define({
       false,
       JSON.stringify(prepared.verification),
     )
-    assert.equal(ranACommand(production, A_CHECK), false)
+    assert.deepEqual(ranACheck(trace), [], 'preparation started a check runner')
     return preparedOutcome(prepared)
   },
 })
@@ -1382,6 +1433,40 @@ define({
   },
 })
 
+/**
+ * Puts the remote back exactly as the baseline found it.
+ *
+ * The driver owns this fixture, so restoring it is the driver's business and not the
+ * helper's: four publications have to start from one immutable state for their outcomes
+ * to be comparable, and the alternative - letting the first one change the remote the next
+ * three read - would compare a publish against a no-op.
+ */
+function restoreRemote(production: Production, snapshot: Record<string, string>): void {
+  const { world } = production
+  for (const ref of Object.keys(world.remoteRefs())) {
+    if (!(ref in snapshot)) world.gitIn(world.remote, 'update-ref', '-d', ref)
+  }
+  for (const [ref, oid] of Object.entries(snapshot)) {
+    world.gitIn(world.remote, 'update-ref', ref, oid)
+  }
+}
+
+/** The four states the provider can hold, and the only four the case varies. */
+const CHECK_STATES = ['passing', 'failing', 'pending', 'unavailable'] as const
+
+/**
+ * The check states the provider was asked for, and nothing else.
+ *
+ * A successful publication performs base writes, so "the provider recorded an action" is
+ * not a finding. Only a read of a check state is, because the contract forbids consulting
+ * one whatever the run then decides.
+ */
+function checkReads(actions: Array<{ kind: string; target: string }>): string[] {
+  return actions
+    .filter((action) => action.kind === 'read-check-state')
+    .map((action) => `#${action.target}`)
+}
+
 define({
   id: 'prep-check-state-never-reaches-preparation',
   area: 'preparation',
@@ -1390,21 +1475,58 @@ define({
   expect: { status: 'prepared', codes: [] },
   async run(production) {
     const originalHeads = await seedStack(production, [12, 13])
-    const first = production.prepare({ order: [12, 13], originalHeads })
-    assert.equal(first.ok, true, JSON.stringify(first.errors))
-    const second = production.prepare({ order: [12, 13], originalHeads })
+    // One provider double, held at each of the four states in turn. Preparation is not given
+    // the provider at all - the document has no field for it - so what is under test is that
+    // the decision is the same whatever the server holds, and that nothing went looking.
+    const heads: Array<Array<string | undefined>> = []
+    const consulted: string[][] = []
+    const checksRun: string[][] = []
+    for (const state of CHECK_STATES) {
+      const adapter = production.adapter(
+        [12, 13].map((number) =>
+          pinnedPullRequest(production.world, { number, branch: BRANCHES[number] }),
+        ),
+        { checkStates: { 12: state, 13: state } },
+      )
+      const { result: prepared, trace } = await production.traceNextCall(() =>
+        production.prepare({
+          order: [12, 13],
+          originalHeads,
+          // The same run directory path in every state. A merge commit records where it
+          // was made, so four different directories would give four different objects and
+          // the comparison would be measuring the path rather than the check state.
+          runDirectory: join(production.world.root, 'prepare-check-state'),
+        }),
+      )
+      assert.equal(prepared.ok, true, JSON.stringify(prepared.errors))
+      heads.push(
+        prepared.preparation?.branches.map((branch) => branch.preparedHead) ?? [],
+      )
+      // If preparation had asked, the double would have said it was asked. It is never
+      // handed the module, so the record is the proof rather than a missing string.
+      consulted.push(checkReads(await adapter.actions()))
+      checksRun.push(ranACheck(trace))
+    }
+    for (const state of CHECK_STATES) {
+      assert.deepEqual(
+        heads[CHECK_STATES.indexOf(state)],
+        heads[0],
+        `the prepared heads differ while the server holds ${state}`,
+      )
+    }
     assert.deepEqual(
-      second.preparation?.branches.map((branch) => branch.preparedHead),
-      first.preparation?.branches.map((branch) => branch.preparedHead),
-      'preparation has no check-state input, so it cannot have one',
+      consulted,
+      consulted.map(() => []),
+      'preparation read a check state',
     )
-    assert.equal(ranACommand(production, A_CHECK), false, 'preparation must not run a check')
-    assert.equal(
-      JSON.stringify(second).toLowerCase().includes('check state'),
-      false,
-      'no check state may appear anywhere in the preparation result',
+    assert.deepEqual(checksRun, checksRun.map(() => []), 'preparation ran a check command')
+    return preparedOutcome(
+      production.prepare({
+        order: [12, 13],
+        originalHeads,
+        runDirectory: join(production.world.root, 'prepare-final'),
+      }),
     )
-    return preparedOutcome(second)
   },
 })
 
@@ -1518,7 +1640,9 @@ define({
     })
     const before = production.refs()
 
-    const result = await production.publish(stack.prepared, publishArgs(stack))
+    const { result, trace } = await production.traceNextCall(() =>
+      production.publish(stack.prepared, publishArgs(stack)),
+    )
     assert.equal(result.status, 'published', JSON.stringify(result.errors))
     const after = production.refs()
     const preparedHeads = preparedHeadsOf(stack.prepared)
@@ -1547,7 +1671,7 @@ define({
       if (attempt.kind === 'ref-update') assert.equal(attempt.lease?.usedForceWithLease, true)
     }
     assert.deepEqual(await baseWrites(stack.adapter), [13])
-    assert.equal(ranACommand(production, A_CHECK), false)
+    assert.deepEqual(ranACheck(trace), [], 'publication started a check runner')
     return publicationOutcome(result)
   },
 })
@@ -2294,44 +2418,62 @@ define({
   findings: [],
   expect: { status: 'published', codes: [] },
   async run(production) {
-    const control = await preparedStack(production, [12, 13])
-    const controlResult = await production.publish(control.prepared, publishArgs(control))
-    assert.equal(controlResult.status, 'published', JSON.stringify(controlResult.errors))
+    // One prepared stack, one snapshot of the remote, four providers that differ in exactly
+    // one thing: the check state the server holds. Everything else - the prepared heads, the
+    // intended bases, the pinned snapshot, the immutable fixture - is the same object each
+    // time, and the remote is put back between runs so no run reads another's result.
+    const stack = await preparedStack(production, [12, 13])
+    const snapshot = production.refs()
+    const statuses: string[] = []
+    const refsAfter: Array<Record<string, string>> = []
+    const attemptsAfter: string[][] = []
+    const consulted: string[][] = []
+    const checksRun: string[][] = []
+    let last: PublicationObservation | null = null
 
-    // A second stack over the same remote, seeded from a root that has moved again, so the
-    // comparison is between two real runs and not between one run and its own reseed.
-    const labelled = await preparedStack(production, [12, 13], {
-      rootFiles: { 'root.txt': 'the root branch moves on again\n' },
-      // Its own run directory: a second plan against a moved root is a different plan, and
-      // one run directory owns exactly one of them.
-      runDirectory: join(production.world.root, 'prepare-run-labelled'),
-    })
-    for (const number of [12, 13]) {
-      labelled.pullRequests[number] = {
-        ...labelled.pullRequests[number],
-        labels: ['ci/failing'],
-        title: `Feature #${number} (failing checks)`,
-      }
+    for (const state of CHECK_STATES) {
+      restoreRemote(production, snapshot)
+      const adapter = production.adapter(Object.values(stack.pullRequests), {
+        checkStates: { 12: state, 13: state },
+      })
+      const { result, trace } = await production.traceNextCall(() =>
+        production.publish(stack.prepared, {
+          ...publishArgs(stack),
+          providerModule: adapter.module,
+          runDirectory: join(production.world.root, `publish-${state}`),
+        }),
+      )
+      last = result
+      statuses.push(result.status)
+      refsAfter.push(production.refs())
+      attemptsAfter.push(
+        (result.publication?.attempts ?? [])
+          .map((attempt) => `${attempt.kind} ${attempt.target}`)
+          .sort(),
+      )
+      consulted.push(checkReads(await adapter.actions()))
+      checksRun.push(ranACheck(trace))
     }
-    const labelledAdapter = production.adapter(Object.values(labelled.pullRequests))
-    const labelledResult = await production.publish(labelled.prepared, {
-      ...publishArgs(labelled),
-      providerModule: labelledAdapter.module,
-      preparationRunDirectory: join(production.world.root, 'prepare-run-labelled'),
-    })
-    assert.equal(labelledResult.status, 'published', JSON.stringify(labelledResult.errors))
+
+    for (const state of CHECK_STATES) {
+      const index = CHECK_STATES.indexOf(state)
+      assert.equal(statuses[index], statuses[0], `the status changed while the server held ${state}`)
+      assert.deepEqual(refsAfter[index], refsAfter[0], `the remote changed while the server held ${state}`)
+      assert.deepEqual(
+        attemptsAfter[index],
+        attemptsAfter[0],
+        `the writes changed while the server held ${state}`,
+      )
+    }
+    assert.equal(statuses[0], 'published', `the runs did not publish: ${JSON.stringify(statuses)}`)
     assert.deepEqual(
-      labelledResult.publication.attempts.map((attempt) => attempt.target).sort(),
-      controlResult.publication.attempts.map((attempt) => attempt.target).sort(),
-      'a check state is not an input to this decision',
+      consulted,
+      consulted.map(() => []),
+      'publication read a check state',
     )
-    assert.equal(
-      JSON.stringify(labelledResult).toLowerCase().includes('check state'),
-      false,
-      'no check state may appear anywhere in the publication result',
-    )
-    assert.equal(ranACommand(production, A_CHECK), false, 'publication must not run a check')
-    return publicationOutcome(labelledResult)
+    assert.deepEqual(checksRun, checksRun.map(() => []), 'publication ran a check command')
+    assert.ok(last, 'no publication ran')
+    return publicationOutcome(last)
   },
 })
 

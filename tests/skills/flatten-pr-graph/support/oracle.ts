@@ -97,9 +97,19 @@ export interface OracleInput {
  */
 export function observedHardEdges(
   context: FixtureContext,
+  /**
+   * The remote as it stood before the run, when the caller froze it.
+   *
+   * Reading the live remote here makes the baseline a function of what the run did: the
+   * ancestry a run publishes would define the edges it is then judged against, and an edge
+   * it destroyed would vanish from the comparison rather than fail it. Ancestry itself is
+   * a property of the objects, which a run cannot rewrite, so only the ref-to-oid view has
+   * to come from the caller.
+   */
+  preRunRefs?: Record<string, string>,
 ): Array<{ from: number; to: number; basis: 'declared-base' | 'strict-ancestry' }> {
   const provider = context.provider
-  const refs = context.world.remoteRefs()
+  const refs = preRunRefs ?? context.world.remoteRefs()
   const edges: Array<{ from: number; to: number; basis: 'declared-base' | 'strict-ancestry' }> = []
   for (const target of provider.allPullRequests()) {
     for (const source of provider.allPullRequests()) {

@@ -20,7 +20,22 @@ import {
   type ProductionOutcome,
 } from './production/production.fixture'
 import { Production } from './support/production'
-import { edgeViolations, schemaViolations, type PinnedEdge } from './support/production-verdict'
+import {
+  actionViolations,
+  checkStateViolations,
+  edgeViolations,
+  schemaViolations,
+  statusViolations,
+  type PinnedEdge,
+} from './support/production-verdict'
+import { FakeGitHub, type ProviderState } from './support/fake-github'
+import type { ProviderAction } from './support/production'
+
+/** What the evidence said before the case ran anything. */
+interface ProductionBaseline {
+  pinned: PinnedEdge[]
+  refs: Record<string, string>
+}
 import { loadContractSchema } from './support/harness'
 import { createWorld, type World } from './support/real-git'
 
@@ -73,8 +88,9 @@ function independent(
   testCase: ProductionCase,
   world: World,
   observed: ProductionOutcome,
-  pinned: PinnedEdge[],
+  baseline: ProductionBaseline,
 ): void {
+  const pinned = baseline.pinned
   const schemaFailures = schemaViolations(schema, testCase.area, {
     preparation: observed.preparation,
     publication: observed.publication,
@@ -84,12 +100,68 @@ function independent(
     [],
     `${testCase.id}: the produced document does not satisfy the contract schema`,
   )
-  const edges = edgeViolations(world, pinned)
+  const edges = edgeViolations(world, baseline)
   assert.deepEqual(
     edges.map((edge) => `${edge.invariant}: ${edge.detail} (${edge.observed})`),
     [],
     `${testCase.id}: a hard dependency edge the authorized snapshot implied no longer holds`,
   )
+
+  if (!observed.confirmed) return
+
+  // Every write the document says the server confirmed, checked against the provider's own
+  // action log and the remote. This is the low-level action oracle: it is not a result
+  // document check, and it does not pretend the raw helpers produce one.
+  const refs = world.remoteRefs()
+  const actions = actionViolations(observed.confirmed, {
+    actions: (observed.providerActions ?? []) as ProviderAction[],
+    refs,
+    trace: observed.nativeTrace ?? [],
+  })
+  assert.deepEqual(
+    actions.map((action) => `${action.invariant}: ${action.detail} (${action.observed})`),
+    [],
+    `${testCase.id}: the run confirms a write the server or the remote does not record`,
+  )
+
+  if (observed.preparedHeads) {
+    const status = statusViolations(
+      { status: observed.status },
+      { preparedHeads: observed.preparedHeads, branches: productionBranches(pinned) },
+      refs,
+    )
+    assert.deepEqual(
+      status.map((entry) => `${entry.invariant}: ${entry.detail} (${entry.observed})`),
+      [],
+      `${testCase.id}: the reported status is one the remote contradicts`,
+    )
+  }
+
+  // No check state, merge queue, ruleset, or branch protection may be read at all. A run
+  // that looked and then ignored the answer has still crossed the line.
+  const checker = new FakeGitHub({
+    owner: 'fixture',
+    name: 'stacks',
+    defaultBranch: 'main',
+    perPage: 30,
+    pullRequests: [],
+    deniedWrites: [],
+    autoMergeEnabledOn: [],
+    checkStates: {},
+  } as ProviderState)
+  for (const action of observed.providerActions ?? []) {
+    checker.recordAction(action.kind as never, action.target, action.outcome as never)
+  }
+  assert.deepEqual(
+    checkStateViolations(checker).map((entry) => `${entry.detail} (${entry.observed})`),
+    [],
+    `${testCase.id}: the run read a check state`,
+  )
+}
+
+/** The branch each pinned pull request publishes, keyed by its number. */
+function productionBranches(pinned: PinnedEdge[]): Record<number, string> {
+  return Object.fromEntries(pinned.map((pr) => [pr.number, pr.head]))
 }
 
 function register(productionCase: ProductionCase): void {
@@ -98,9 +170,28 @@ function register(productionCase: ProductionCase): void {
     const world = await createWorld(`production-${productionCase.area}-${productionCase.id}`)
     worlds.push(world)
     const production = new Production(world)
+    // Frozen before the case runs anything. The edges this run has to keep are the ones
+    // the pre-run evidence implied; reading them off the remote after the run would let the
+    // run's own new ancestry define its baseline, and an edge it destroyed would disappear
+    // from the comparison along with the evidence that it was destroyed.
+    const baseline: ProductionBaseline = {
+      pinned: production.pinned(),
+      refs: world.remoteRefs(),
+    }
     const observed = await productionCase.run(production)
     report(productionCase, productionCase.expect, observed)
-    independent(productionCase, world, observed, production.pinned())
+    independent(
+      productionCase,
+      world,
+      {
+        ...observed,
+        // Read out of the provider double and the process shim by the driver, so neither
+        // depends on the case remembering to hand them over.
+        providerActions: observed.providerActions ?? production.observedActions(),
+        nativeTrace: production.nativeTrace(),
+      },
+      baseline,
+    )
   })
 }
 

@@ -155,7 +155,7 @@ function runGit(cwd, args, { allowFailure = false, env = sanitizedEnv() } = {}) 
       cwd,
       encoding: 'utf8',
       timeout: GIT_TIMEOUT_MS,
-      maxBuffer: 32 * 1024 * 1034,
+      maxBuffer: 32 * 1024 * 1024,
       env,
       ...(allowFailure ? { stdio: ['ignore', 'pipe', 'pipe'] } : {}),
     })
@@ -1567,7 +1567,10 @@ export async function publishStack(raw, conversations = {}) {
           evidence: `received ${JSON.stringify(providerCapabilities)}`,
         })
       }
-      for (const kind of ['update-pull-request-base']) {
+      // Every selected pull request is read before any write, so a provider that offers the
+      // retarget but not the read cannot be used: the run would perform an operation the
+      // capability document never claimed it performs.
+      for (const kind of ['read-pull-request', 'update-pull-request-base']) {
         if (!providerCapabilities.operations?.includes(kind)) {
           prErrors.push({
             code: 'missing-permission',
