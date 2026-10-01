@@ -1063,7 +1063,11 @@ function createRepositoryFor(
   if (repositoryEntry(state, fullName)) {
     throw new HttpError(422, 'Unprocessable Entity', `repository ${fullName} already exists`)
   }
-  const defaultBranch = typeof body.default_branch === 'string' ? body.default_branch : 'main'
+  // The create endpoint documents no way to choose the branch a repository starts on:
+  // `default_branch` is a field of the answer, not of the request. So this host picks, and
+  // a `default_branch` sent in the body is not honoured and not stored — a caller that
+  // believed it chose would be answering from a branch that does not exist.
+  const defaultBranch = state.repository.defaultBranch
   const bare = join(servedProjectsRoot(), `${fullName}.git`)
   mkdirSync(dirname(bare), { recursive: true })
   createServedBareRepository({ git: realGit(), bare, defaultBranch })

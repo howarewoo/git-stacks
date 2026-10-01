@@ -328,7 +328,7 @@ export const ruleAndFaultScenarios: readonly LiveScenario[] = [
   {
     id: 'rules/a-ref-condition-matches-the-documented-pathname-globs',
     title:
-      'include, exclude, a single star, a globstar and a character set each decide which refs a required context guards',
+      'each documented ref-name glob, read against the branch it names, decides which pull requests a required context guards',
     requires: [],
     async run(ctx) {
       const trunk = ctx.target.defaultBranch
@@ -338,6 +338,7 @@ export const ruleAndFaultScenarios: readonly LiveScenario[] = [
         // read is the host's answer for a pull request's own base: a ref nothing exists
         // under, or one with no commit to merge, is one no pull request can be opened
         // against and no condition can be told apart on.
+        const bases = ['qa/direct', 'qa/nested/deep', 'qa/7', 'qa/x', 'qa/z', 'qa/xy', 'qa/x+']
         const seed = await pushCommit(ctx.workspace, {
           branch: 'fnmatch-seed',
           parent: `origin/${trunk}`,
@@ -348,7 +349,7 @@ export const ruleAndFaultScenarios: readonly LiveScenario[] = [
         // One head per probe base. GitHub holds one open pull request per head and base,
         // and a head already proposed against another base cannot be proposed again.
         const heads = new Map<string, string>()
-        for (const [at, branch] of ['qa/direct', 'qa/nested/deep', 'qa/7', 'qa/x'].entries()) {
+        for (const [at, branch] of bases.entries()) {
           const head = await pushCommit(ctx.workspace, {
             branch: `fnmatch-head-${at}`,
             parent: seed,
@@ -373,19 +374,46 @@ export const ruleAndFaultScenarios: readonly LiveScenario[] = [
           exclude?: readonly string[]
           context: string
         }[] = [
-          { name: 'fnmatch trunk only', include: [`refs/heads/${trunk}`], context: 'fnmatch/base' },
+          { name: 'the trunk only', include: [`refs/heads/${trunk}`], context: 'fnmatch/base' },
           {
-            name: 'fnmatch trunk excluded from itself',
+            name: 'the trunk, excluded from itself',
             include: [`refs/heads/${trunk}`],
             exclude: [`refs/heads/${trunk}`],
-            context: 'fnmatch/excluded',
+            context: 'fnmatch/nowhere',
           },
-          // The documented globstar: a doubled star followed by a separator spans zero or
-          // more whole segments, so this names a direct child as well as a deep one.
-          { name: 'fnmatch globstar', include: ['qa/**/*'], context: 'fnmatch/globstar' },
-          // One star is one segment and stops at a separator.
-          { name: 'fnmatch single star', include: ['refs/heads/qa/*'], context: 'fnmatch/star' },
-          { name: 'fnmatch digit set', include: ['refs/heads/qa/[0-9]'], context: 'fnmatch/digit' },
+          // The documented globstar is a doubled star followed by a separator: it spans
+          // zero or more whole directories, so this names a direct child as well as a
+          // deep one. A doubled star anywhere else is only a star, which is what the next
+          // rule set is for: `qa/**` reaches one segment and no further.
+          {
+            name: 'a doubled star with a separator',
+            include: ['qa/**/*'],
+            context: 'fnmatch/globstar',
+          },
+          {
+            name: 'a doubled star without one',
+            include: ['refs/heads/qa/**'],
+            context: 'fnmatch/segment',
+          },
+          { name: 'one star', include: ['refs/heads/qa/*'], context: 'fnmatch/star' },
+          {
+            name: 'one star, minus one branch',
+            include: ['refs/heads/qa/*'],
+            exclude: ['refs/heads/qa/x'],
+            context: 'fnmatch/star-minus-x',
+          },
+          // `?` is one character and not a quantifier, so it names `qa/z` and neither the
+          // two characters of `qa/xy` nor the plus in `qa/x+`.
+          { name: 'one character', include: ['refs/heads/qa/?'], context: 'fnmatch/one-character' },
+          { name: 'a digit', include: ['refs/heads/qa/[0-9]'], context: 'fnmatch/digit' },
+          {
+            name: 'anything but a digit',
+            include: ['refs/heads/qa/[!0-9]'],
+            context: 'fnmatch/letter',
+          },
+          // `+` is a character and not a repetition of the one before it, so this names
+          // the branch with a plus in it and nothing else.
+          { name: 'a literal plus', include: ['refs/heads/qa/x+'], context: 'fnmatch/plus' },
         ]
         for (const entry of conditions) {
           const id = await createRefConditionRuleSet(ctx, entry)
@@ -397,15 +425,53 @@ export const ruleAndFaultScenarios: readonly LiveScenario[] = [
           // The excluded rule set protects nothing, and the one that names only the trunk
           // is the whole of what guards it.
           [trunk]: ['fnmatch/base'],
-          // A globstar still names a direct child; one star names only this segment.
-          'qa/direct': ['fnmatch/globstar', 'fnmatch/star'],
+          'qa/direct': [
+            'fnmatch/globstar',
+            'fnmatch/segment',
+            'fnmatch/star',
+            'fnmatch/star-minus-x',
+          ],
+          // Nothing else reaches this one: a star stops at the separator, and a doubled
+          // star that is not a segment of its own does not cross one either.
           'qa/nested/deep': ['fnmatch/globstar'],
-          'qa/7': ['fnmatch/digit', 'fnmatch/globstar', 'fnmatch/star'],
-          'qa/x': ['fnmatch/globstar', 'fnmatch/star'],
+          'qa/7': [
+            'fnmatch/globstar',
+            'fnmatch/segment',
+            'fnmatch/star',
+            'fnmatch/star-minus-x',
+            'fnmatch/digit',
+            'fnmatch/one-character',
+          ],
+          'qa/x': [
+            'fnmatch/globstar',
+            'fnmatch/segment',
+            'fnmatch/star',
+            'fnmatch/one-character',
+            'fnmatch/letter',
+          ],
+          'qa/z': [
+            'fnmatch/globstar',
+            'fnmatch/segment',
+            'fnmatch/star',
+            'fnmatch/star-minus-x',
+            'fnmatch/one-character',
+            'fnmatch/letter',
+          ],
+          // A class is one character, so it names the single-character branches and not
+          // these two: `xy` is two characters, and `x+` has a second character after the
+          // `x` whatever the class said about the first.
+          'qa/xy': ['fnmatch/globstar', 'fnmatch/segment', 'fnmatch/star', 'fnmatch/star-minus-x'],
+          'qa/x+': [
+            'fnmatch/globstar',
+            'fnmatch/segment',
+            'fnmatch/star',
+            'fnmatch/star-minus-x',
+            'fnmatch/plus',
+          ],
         }
         // One pull request per base, because a required context belongs to the base a
-        // pull request merges onto. Reading the trunk's answer five times would prove
-        // nothing about the four other refs.
+        // pull request merges onto. Reading the trunk's answer over and over would prove
+        // nothing about the other refs.
         for (const [base, wanted] of Object.entries(guards)) {
           const headBranch = heads.get(base)
           const pull =
@@ -413,7 +479,7 @@ export const ruleAndFaultScenarios: readonly LiveScenario[] = [
               ? layer
               : await ctx.admin.createPullRequest({
                   fullName: ctx.repository,
-                  head: `fnmatch-head-${['qa/direct', 'qa/nested/deep', 'qa/7', 'qa/x'].indexOf(base)}`,
+                  head: `fnmatch-head-${bases.indexOf(base)}`,
                   base,
                   title: `fnmatch probe: ${base}`,
                   body: `Opened by the live GitHub suite for run ${ctx.runId}.`,

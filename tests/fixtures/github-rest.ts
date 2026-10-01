@@ -87,14 +87,10 @@ export function withHostRepository<T>(repository: HostRepository, run: () => T):
 }
 
 /** Runs Git against the repository being served, and answers through its alternates. */
-export function hostGit(args: string[], env?: NodeJS.ProcessEnv, quiet = false): string {
+export function hostGit(args: string[], env?: NodeJS.ProcessEnv): string {
   const alternates = served?.alternates ?? []
   return execFileSync(realGit(), ['--git-dir', hostBarePath(), ...args], {
     encoding: 'utf8',
-    // A caller that tolerates Git's refusal already treats the failure as an answer, so
-    // Git's complaint about it is not news. Letting it through put `fatal:` lines in the
-    // middle of a run that was passing, which reads as a failure that never happened.
-    ...(quiet ? { stdio: ['ignore', 'pipe', 'ignore'] as const } : {}),
     env: {
       ...process.env,
       ...(alternates.length > 0
@@ -105,10 +101,15 @@ export function hostGit(args: string[], env?: NodeJS.ProcessEnv, quiet = false):
   }).trim()
 }
 
-/** The same Git command, or `null` when Git refused it the way a missing ref does. */
+/**
+ * The same Git command, or `null` when Git refused it the way a missing ref does.
+ *
+ * Git says why on its own stderr and that stays: a tolerated refusal is a deliberate
+ * question, and its answer is worth reading rather than having been hidden.
+ */
 export function hostGitOrNull(args: string[], env?: NodeJS.ProcessEnv): string | null {
   try {
-    return hostGit(args, env, true) || null
+    return hostGit(args, env) || null
   } catch {
     return null
   }
@@ -205,106 +206,145 @@ export function fullyQualifiedRef(name: string, context: RefContext): string {
   return `refs/heads/${trimmed}`
 }
 
-/** Escaping inside a character class, where `u`-mode allows only these four. */
-function escapeInClass(char: string): string {
-  return /[\\\]^]/u.test(char) ? `\\${char}` : char
-}
-
-/** One character of a class, and where the next one starts. `\` makes the next literal. */
-function classCharacter(pattern: string, at: number): { char: string; next: number } | null {
-  const escaped = pattern[at] === '\\'
-  const char = escaped ? pattern[at + 1] : pattern[at]
-  if (char === undefined) return null
-  return { char, next: at + (escaped ? 2 : 1) }
-}
+/** One thing a ref-name pattern asks for, in the syntax GitHub documents for it. */
+type PatternPart =
+  | { readonly kind: 'literal'; readonly matches: (char: string) => boolean }
+  | { readonly kind: 'class'; readonly matches: (char: string) => boolean }
+  | { readonly kind: 'star' }
+  | { readonly kind: 'any' }
+  | { readonly kind: 'directories' }
 
 /**
- * One `[...]` class as a regular expression, or null when the bracket never closes and
- * is therefore a literal `[`.
+ * One `[...]` class, or null when the bracket never closes and is therefore a `[`.
  *
- * GitHub documents a class as "one character listed in the brackets or included in
- * ranges", with `!` at the front negating it and `\` escaping. Pathname semantics still
- * hold inside it, so the whole class is guarded against the `/` separator rather than only
- * its ranges.
+ * GitHub documents a class as one character listed in the brackets or included in its
+ * ranges, with `!` at the front negating it. `^` is not documented as negating anything,
+ * so it is a character like any other in here. Pathname semantics hold inside the class
+ * too: no class matches the separator, whether or not it was negated.
  */
-function characterClass(pattern: string, at: number): { source: string; end: number } | null {
+function classPart(
+  pattern: string,
+  at: number,
+): { readonly part: PatternPart; readonly end: number } | null {
   let index = at + 1
-  const negated = pattern[index] === '!' || pattern[index] === '^'
+  const negated = pattern[index] === '!'
   if (negated) index += 1
-  let body = ''
+  const members: { from: string; to: string }[] = []
   while (index < pattern.length && pattern[index] !== ']') {
-    const start = classCharacter(pattern, index)
-    if (start === null) return null
-    index = start.next
-    const rangeEnd =
-      pattern[index] === '-' && pattern[index + 1] !== undefined && pattern[index + 1] !== ']'
-        ? classCharacter(pattern, index + 1)
-        : null
-    if (rangeEnd === null) {
-      body += escapeInClass(start.char)
+    const from = pattern[index] as string
+    if (pattern[index + 1] === '-' && pattern[index + 2] !== undefined) {
+      members.push({ from, to: pattern[index + 2] as string })
+      index += 3
       continue
     }
-    body += `${escapeInClass(start.char)}-${escapeInClass(rangeEnd.char)}`
-    index = rangeEnd.next
+    members.push({ from, to: from })
+    index += 1
   }
   if (index >= pattern.length) return null
-  return { source: `(?!/)${negated ? `[^${body}]` : `[${body}]`}`, end: index + 1 }
+  return {
+    part: {
+      kind: 'class',
+      matches: (char) => {
+        if (char === '/') return false
+        const inside = members.some(({ from, to }) =>
+          from === to ? char === from : char >= from && char <= to,
+        )
+        return negated ? !inside : inside
+      },
+    },
+    end: index + 1,
+  }
 }
 
 /**
- * A ref-name pattern as GitHub's documented fnmatch reads it.
+ * A ref-name pattern read the way GitHub's documented fnmatch reads it.
  *
- * The documented syntax is pathname-aware: a single star stops at a separator, a doubled
- * star crosses one, and a doubled star followed by a separator spans zero or more whole
- * segments — so the documented `qa` globstar pattern still names a direct child. `?`
- * and `+` are quantifiers on the character before them, `[a-z]` is a set, and a leading
- * `!` negates one. Escaping every literal keeps a branch named `release/1.0` from
- * matching a pattern that means `release/1x0`.
+ * The documentation names Ruby's pathname `fnmatch`, so a star matches a run of characters
+ * inside one segment and stops at the separator, `?` is exactly one of those characters,
+ * `[a-z]` and `[!a-z]` are one character from a set or from everything outside it, and `+`
+ * is an ordinary character. A doubled star is only more than that when it is a segment of
+ * its own, a doubled star followed by a separator, which spans zero or more whole
+ * directories; anywhere else, as in a trailing `qa/**`, it is a star where a star is.
+ * Backslash quoting is not supported, so a backslash matches a backslash.
  */
-function fnmatchSource(pattern: string): string {
-  const parts: string[] = []
+function patternParts(pattern: string): PatternPart[] {
+  const parts: PatternPart[] = []
   let index = 0
   while (index < pattern.length) {
     const char = pattern[index] as string
     if (char === '*') {
-      if (pattern[index + 1] === '*') {
-        parts.push(pattern[index + 2] === '/' ? '(?:[^/]*/)*' : '.*')
-        index += pattern[index + 2] === '/' ? 3 : 2
+      const doubled = pattern[index + 1] === '*'
+      if (doubled && pattern[index + 2] === '/') {
+        parts.push({ kind: 'directories' })
+        index += 3
         continue
       }
-      parts.push('[^/]*')
+      parts.push({ kind: 'star' })
+      index += doubled ? 2 : 1
+      continue
+    }
+    if (char === '?') {
+      parts.push({ kind: 'any' })
       index += 1
       continue
     }
     if (char === '[') {
-      const parsed = characterClass(pattern, index)
+      const parsed = classPart(pattern, index)
       if (parsed !== null) {
-        parts.push(parsed.source)
+        parts.push(parsed.part)
         index = parsed.end
         continue
       }
     }
-    if (char === '\\' && pattern[index + 1] !== undefined) {
-      parts.push((pattern[index + 1] as string).replace(/[.*+?^${}()|[\]\\]/gu, '\\$&'))
-      index += 2
-      continue
-    }
-    if ((char === '?' || char === '+') && parts.length > 0) {
-      parts[parts.length - 1] = `(?:${parts[parts.length - 1]})${char === '?' ? '?' : '+'}`
-      index += 1
-      continue
-    }
-    parts.push(char.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&'))
+    parts.push({ kind: 'literal', matches: (candidate) => candidate === char })
     index += 1
   }
-  return parts.join('')
+  return parts
+}
+
+/**
+ * Whether the ref name matches every part of the pattern from `index` on, starting at
+ * `at` in the name.
+ *
+ * A part that takes a run of characters tries every length that run could have, from
+ * empty upwards, and asks the same question of what is left: a star as far as the
+ * separator, a doubled-star segment as far as each whole segment or not at all. Matching
+ * everything but the end is still a refusal, because a pattern names a whole ref.
+ */
+function partsMatch(
+  parts: readonly PatternPart[],
+  index: number,
+  ref: string,
+  at: number,
+): boolean {
+  if (index >= parts.length) return at === ref.length
+  const part = parts[index] as PatternPart
+  if (part.kind === 'directories') {
+    if (partsMatch(parts, index + 1, ref, at)) return true
+    for (let next = ref.indexOf('/', at); next !== -1; next = ref.indexOf('/', next + 1)) {
+      if (partsMatch(parts, index + 1, ref, next + 1)) return true
+    }
+    return false
+  }
+  if (part.kind === 'star') {
+    for (let end = at; ; end += 1) {
+      if (partsMatch(parts, index + 1, ref, end)) return true
+      if (end >= ref.length || ref[end] === '/') return false
+    }
+  }
+  if (part.kind === 'any') {
+    if (at >= ref.length || ref[at] === '/') return false
+    return partsMatch(parts, index + 1, ref, at + 1)
+  }
+  if (at >= ref.length || !part.matches(ref[at] as string)) return false
+  return partsMatch(parts, index + 1, ref, at + 1)
 }
 
 function refPatternMatches(pattern: string, ref: string, context: RefContext): boolean {
   if (pattern === '~ALL') return true
   if (pattern === '~DEFAULT_BRANCH')
     return context.defaultBranch !== undefined && ref === `refs/heads/${context.defaultBranch}`
-  return new RegExp(`^${fnmatchSource(fullyQualifiedRef(pattern, context))}$`, 'u').test(ref)
+  return partsMatch(patternParts(fullyQualifiedRef(pattern, context)), 0, ref, 0)
 }
 
 /**
