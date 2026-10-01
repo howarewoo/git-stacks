@@ -53,6 +53,27 @@ cannot run, every scenario is recorded `unverified` and the command fails: an un
 harness is a blocker to report, never a pass. Run-specific evidence - transcripts, timings,
 and the activation document - belongs in the pull request, not in the repository.
 
+What an activation record does and does not establish, so it is not read as more than it
+is:
+
+- The disposable directory is not a sandbox. The run keeps the full tool set and this
+  environment; `--approval-mode always-ask` is harness configuration, not an enforcement
+  boundary, and no verdict depends on it. An enforced write boundary belongs to issues
+  #89 and #90.
+- A scenario passes only when the run completed: exit zero, the harness's own terminal
+  event, and named provider and model per turn. A timeout, a refused endpoint, or a
+  truncated stream is `unverified` with the reason.
+- Verdicts come from structured tool-call traces, which show what was recognised. The
+  classifier is a denylist over tool and command text, not a complete oracle over what a
+  process can do; an unfamiliar tool or an evaluation step can change state without
+  matching a pattern.
+- For a `consult-then-decline` case the observable is the retrieval and the absence of
+  recorded forbidden activity. Whether the agent's prose actually declines is not
+  reviewed, and the record says so.
+- Raw per-turn event streams are written beside the evidence document as
+  `/tmp/activation.json.traces/<scenario>.turnN.jsonl`, and every record names its own
+  streams and the skill digest it was given.
+
 `npm run dev`, `npm run build`, `npm test`, `npm run package`, and `npm run
 dist` all build the clone promotion helper first, so a C compiler must be
 available on the build machine (`cc`, `gcc`, `clang`, or `cl`; set `CC` to

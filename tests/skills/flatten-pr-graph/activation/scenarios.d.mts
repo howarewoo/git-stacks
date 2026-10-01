@@ -9,7 +9,14 @@ export interface Scenario {
   id: string
   /** The case this scenario exists to cover, named so a dropped case is visible. */
   covers: string
-  request: string
+  /** A single-turn scenario's prompt. Absent when the scenario runs two turns. */
+  request?: string
+  /**
+   * Two real user turns in one retained conversation, for a mid-conversation change. Only
+   * the last turn is judged: the promise is that the change stops the run, so the earlier
+   * turn's authorised work is not a violation of it.
+   */
+  turns?: [string, string]
   expect: { activation: Activation; writes: 'never' | 'allowed' }
   /** Only for cases where the observable is what the agent said, never what it did. */
   mustAskFor?: RegExp
@@ -38,6 +45,8 @@ export interface JudgedTrace {
   forbiddenAttempts: string[]
   checkCommands: string[]
   toolCallCount: number
+  /** What this record establishes, and what it does not. */
+  established: string
   problems: string[]
 }
 

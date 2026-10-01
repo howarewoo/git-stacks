@@ -138,12 +138,17 @@ acknowledged operations, never one atomic transaction.
 
 ## Stop conditions
 
-Stop with a blocker, not a workaround, when: the selection is missing; a fork, a
-closed/merged input, a duplicate head, or one branch serving two identities is
-unsupported; an external prerequisite is unsatisfied; history is shallow or unrelated; the
-graph is cyclic or contradictory; a ref moved since the snapshot; a conflicting change's
-intent is ambiguous; a permission is denied; a mandatory control blocks the work; or a
-phase's capability is unavailable.
+Stop with a blocker, not a workaround, when: the selection is missing; a fork or a
+closed/merged input is unsupported; **one head branch serves two selected identities**;
+an external prerequisite is unsatisfied; history is shallow or unrelated; the graph is
+cyclic or contradictory; a ref moved since the snapshot; a conflicting change's intent is
+ambiguous; a permission is denied; a mandatory control blocks the work; or a phase's
+capability is unavailable.
+
+One head **branch** serving two identities is unsupported, because one branch cannot hold
+two positions in a chain. Two **distinct branches at the same commit** are different: neither
+contains the other, so there is no edge between them, and the redundancy is reported for a
+human to resolve rather than treated as a blocker or silently collapsed.
 
 An unavailable execution capability makes phases 4-6 unavailable. Report the honest
 `planned` or `blocked` result; never imply a publisher exists when it does not.
