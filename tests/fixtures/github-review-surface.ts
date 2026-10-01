@@ -7,7 +7,9 @@ import {
   hostGit,
   hostGitOrNull,
   hostRefSha,
+  nextPageHeaders,
   paginate,
+  restPage,
   queryStringOf,
   refConditionMatches,
   ruleSetIdentity,
@@ -408,7 +410,17 @@ export function handleSurfaceRest(
       // page with the whole collection would repeat the same rows up to the client's bound
       // and then report the read as truncated, so a review that GitHub holds would look
       // like one the read never reached.
-      return { status: 200, body: paginate(recorded, queryStringOf(path)) }
+      const page = restPage(recorded, queryStringOf(path))
+      return {
+        status: 200,
+        body: page.entries,
+        headers: nextPageHeaders(
+          request.origin,
+          `${prefix}/pulls/${number}/reviews`,
+          queryStringOf(path),
+          page.nextPage,
+        ),
+      }
     }
     if (method !== 'POST')
       throw new HttpError(405, 'Method Not Allowed', 'unsupported reviews method')
@@ -488,7 +500,17 @@ export function handleSurfaceRest(
         html_url: comment.url,
       })),
     )
-    return { status: 200, body: paginate(flat, queryStringOf(path)) }
+    const page = restPage(flat, queryStringOf(path))
+    return {
+      status: 200,
+      body: page.entries,
+      headers: nextPageHeaders(
+        request.origin,
+        `${prefix}/pulls/${number}/comments`,
+        queryStringOf(path),
+        page.nextPage,
+      ),
+    }
   }
 
   if (rawPath === `${prefix}/git/refs`) {
@@ -500,6 +522,12 @@ export function handleSurfaceRest(
     }
     if (hostRefSha(ref) !== null)
       throw new HttpError(422, 'Unprocessable Entity', `${ref} already exists`)
+    // GitHub documents `sha` as "the SHA1 value of the commit object", so a branch name
+    // is not a value this endpoint accepts. Accepting one would answer 201 for a request
+    // the real API refuses, which is how a caller that creates a branch from a ref name
+    // instead of a commit is never told it is wrong.
+    if (!/^[0-9a-f]{40}$/u.test(sha))
+      throw new HttpError(422, 'Unprocessable Entity', `${sha} is not a commit SHA`)
     if (hostRefSha(sha) === null)
       throw new HttpError(422, 'Unprocessable Entity', `${sha} is unknown`)
     hostGit(['update-ref', ref, sha])
@@ -522,12 +550,29 @@ export function handleSurfaceRest(
       // The listing answers identities. `conditions` and `rules` are not required members
       // of a listed rule set, so a reader that decides what a rule set protects from this
       // response has to fetch the detail, which is where GitHub keeps the configuration.
+      //
+      // The listing is paged the way every other collection here is, and says so in the
+      // header. A reader that stops at the first page sees an active rule set on a later
+      // page as no rule set at all, which is the difference between a merge queue that is
+      // reported and one that is silently missing once a repository holds more than a
+      // page of them.
+      const page = restPage(
+        recorded.map((entry) => ruleSetIdentity(entry, repository)),
+        queryStringOf(path),
+      )
       return {
         status: 200,
-        body: paginate(
-          recorded.map((entry) => ruleSetIdentity(entry, repository)),
-          queryStringOf(path),
-        ),
+        body: page.entries,
+        ...(page.nextPage === null
+          ? {}
+          : {
+              headers: nextPageHeaders(
+                request.origin,
+                `${prefix}/rulesets`,
+                queryStringOf(path),
+                page.nextPage,
+              ),
+            }),
       }
     }
     if (method !== 'POST')
@@ -560,8 +605,10 @@ export function handleSurfaceRest(
       if (rule.type === 'merge_queue') queues.push(rule)
     }
     // The conditions and the rules are stored the way GitHub returns them, because a queue
-    // is only proven by reading it back off the rule set that declares it. A host that kept
-    // a flag instead would agree with whatever the client hoped for.
+    // is only proven by reading it back off the rule set that declares it, and because the
+    // effective branch rules are the rule parameters themselves: a stored rule reduced to
+    // its type would answer "no context is required here" for a rule set that blocks the
+    // merge for exactly one named context.
     const conditions = isRecord(body.conditions) ? body.conditions : {}
     const created: FixtureRuleSet = {
       id: (state.nextRuleSetId ?? 0) + 1,
@@ -569,7 +616,10 @@ export function handleSurfaceRest(
       target: String(body.target ?? 'branch'),
       enforcement: String(body.enforcement ?? 'active'),
       conditions,
-      rules: rules.map((rule) => ({ type: String(rule.type ?? '') })),
+      rules: rules.map((rule) => ({
+        type: String(rule.type ?? ''),
+        parameters: isRecord(rule.parameters) ? rule.parameters : {},
+      })),
       queue_rules: queues,
       _requiredStatusChecks: requiredChecks,
       _requiredApprovals: requiredApprovals,

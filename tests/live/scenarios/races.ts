@@ -141,8 +141,16 @@ export const raceScenarios: readonly LiveScenario[] = [
       // ever executing anything. A release branch stands in for that other base:
       // the layer is moved onto it first, so the preview records a base change it
       // is being asked to approve.
+      //
+      // The preview still intends to write `trunk`, which is the parent this stack
+      // records for its bottom layer. The outside actor below therefore retargets to
+      // a third ref: moving the pull request to `trunk` would set it to the very base
+      // the approved submit is going to write, and the preservation assertion would
+      // hold whether or not the submit overwrote the outside retarget at all.
       const side = `${one.branch}-elsewhere`
-      await ctx.admin.createBranch(ctx.repository, side, trunk)
+      await ctx.admin.createBranch(ctx.repository, side, await remoteHead(ctx, trunk))
+      const outside = `${one.branch}-moved-outside`
+      await ctx.admin.createBranch(ctx.repository, outside, await remoteHead(ctx, trunk))
       await ctx.transport.rest<Record<string, unknown>>({
         method: 'PATCH',
         path: `repos/${ctx.repository}/pulls/${one.number}`,
@@ -164,17 +172,32 @@ export const raceScenarios: readonly LiveScenario[] = [
         `the preview did not record ${one.branch} as based on the wrong ref`,
       )
 
-      // Now the real race: the layer is retargeted to the trunk, outside anything
-      // the application wrote, while the preview still holds the old base.
+      // Now the real race: the layer is retargeted outside anything the application
+      // wrote, to a ref that is neither the base it is on nor the base this preview is
+      // going to write, while the preview still holds what it captured.
       await ctx.transport.rest<Record<string, unknown>>({
         method: 'PATCH',
         path: `repos/${ctx.repository}/pulls/${one.number}`,
-        body: { base: trunk },
+        body: { base: outside },
       })
       const outsideBase = await baseOf(ctx, one.number)
       assert(
-        outsideBase === trunk && outsideBase !== capturedBase,
+        outsideBase === outside && outsideBase !== capturedBase,
         `the retarget did not change the base: it went from ${String(capturedBase)} to ${String(outsideBase)}`,
+      )
+      // The distinction has to hold before the submit runs, and not merely after it.
+      // An approved submit whose intended base were the outside base would leave the
+      // pull request where it found it whether it honoured the lease or ignored it.
+      const intendedBase = preview.publish?.layers.find(
+        (layer) => layer.branch === one.branch,
+      )?.base
+      assert(
+        intendedBase === trunk,
+        `the captured submit intends to write ${String(intendedBase)} rather than ${trunk}, so this race cannot detect it overwriting the outside base`,
+      )
+      assert(
+        outsideBase !== intendedBase,
+        `the outside base ${String(outsideBase)} is the base the captured submit already intends to write`,
       )
 
       // The base change is approved on screen, so the submit really does try to move

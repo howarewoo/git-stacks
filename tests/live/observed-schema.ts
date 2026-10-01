@@ -35,6 +35,22 @@ export interface SchemaProbe {
    * `dependsOn`, and from then on a host that stops answering one is real drift.
    */
   readonly unpinned?: readonly { readonly path: string; readonly reason: string }[]
+  /**
+   * The forms a parser reads for a field that may legitimately be absent, and the
+   * forms it reads when the field is there.
+   *
+   * `null` is the documented alternative for every path listed here, so the list
+   * holds the remaining forms the parser can use. Declaring it is what lets the
+   * comparison tell three things apart that look identical in a type list: a
+   * collection whose rows happened to hold the null form is a valid answer, a
+   * form the parser has no reader for is drift even when the union still contains
+   * a form it can read, and a field that answers `null` where the committed
+   * contract recorded a value is narrowing, not a field that stopped answering.
+   *
+   * A path that is not listed is never null for its consumer, so nothing is
+   * inferred for it.
+   */
+  readonly nullable?: Readonly<Record<string, readonly string[]>>
 }
 
 export const SCHEMA_PROBES: readonly SchemaProbe[] = [
@@ -100,6 +116,19 @@ export const SCHEMA_PROBES: readonly SchemaProbe[] = [
         reason: 'the observed comments all sit on one line, so only the null form was ever seen',
       },
     ],
+    // A comment the host no longer shows in the diff answers `null` for `line` and the
+    // reader drops that row, which is what a commit outside the diff's history means. A
+    // comment attached to no review answers `null` for the review it belongs to, and the
+    // reconciliation skips it. `start_line` and `start_side` are null for a comment on a
+    // single line and carry a number and a side for a range. All four are documented
+    // absences the parsers already read, so a collection that holds only the null form of
+    // one of them is a valid answer rather than a lost field.
+    nullable: {
+      '[].line': ['number'],
+      '[].pull_request_review_id': ['number'],
+      '[].start_line': ['number'],
+      '[].start_side': ['string'],
+    },
   },
   {
     id: 'pull-request-reviews',
@@ -123,6 +152,9 @@ export const SCHEMA_PROBES: readonly SchemaProbe[] = [
         reason: 'only completed runs were observed; an in-progress run answers null there',
       },
     ],
+    // GitHub fills `conclusion` in only once a run is completed, so an in-progress run
+    // answers `null` there and the rollup reads the run as still running.
+    nullable: { 'check_runs[].conclusion': ['string'] },
   },
   {
     id: 'combined-status',
@@ -444,15 +476,18 @@ const BREAKING_KINDS: Record<SchemaDrift['kind'], boolean> = {
  *
  * An addition is reported, not failed: GitHub ships fields continuously, and a
  * suite that fails on every one of them trains people to ignore it. A field a
- * parser reads disappearing, or changing from a type the parser can use to one it
- * cannot, is a failure — that is the drift that silently turns a merge button
- * into a no-op.
+ * parser reads disappearing, or answering a form no parser can read, is a
+ * failure — that is the drift that silently turns a merge button into a no-op.
  *
- * Direction matters. A host that narrows a nullable field to a value is not drift,
- * and neither is one that answers null somewhere the committed contract saw a
- * value: both are forms the parsers already handle, and failing on them would be
- * the same noise as failing on an addition. What is drift is the other direction,
- * a field that was there and is now something a parser cannot read.
+ * Direction matters, and it is decided by what the consumer declared rather than
+ * by what the host happened to send. A host that narrows a declared nullable
+ * field to its documented null form is not drift: a collection whose rows are all
+ * outdated, or a check run still in progress, both answer null where a completed
+ * record answered a value, and the parsers read both. What is drift is the other
+ * direction, and the third thing a type list alone cannot show: a host that
+ * answers a form the parser has no reader for is drift even when the same field
+ * also answered a form it does, so a union that still holds the old type does not
+ * excuse an added one.
  */
 export function compareSchemas(expected: ObservedSchema, observed: ObservedSchema): SchemaDrift[] {
   const drift: SchemaDrift[] = []
@@ -475,8 +510,23 @@ export function compareSchemas(expected: ObservedSchema, observed: ObservedSchem
         })
         continue
       }
+      const readable = probe.nullable?.[path]
+      if (readable !== undefined) {
+        const unreadable = [...found].filter((type) => type !== 'null' && !readable.includes(type))
+        if (unreadable.length > 0) {
+          drift.push({
+            probe: probe.id,
+            kind: 'type-changed',
+            path,
+            detail: `the host answered ${unreadable.sort().join('|')} and no parser reads that form of a field whose readable forms are ${readable.join('|')} or null`,
+          })
+        }
+      }
+      // A field that answered only its documented null form narrowed; it did not stop
+      // answering. Anything else that disappeared is a form the parser can no longer use.
+      const narrowedToNull = readable !== undefined && found.size === 1 && found.has('null')
       const lost = [...wanted].filter((type) => type !== 'null' && !found.has(type))
-      if (lost.length > 0) {
+      if (lost.length > 0 && !narrowedToNull) {
         drift.push({
           probe: probe.id,
           kind: 'type-changed',

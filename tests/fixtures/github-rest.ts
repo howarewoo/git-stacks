@@ -136,17 +136,51 @@ export function queryStringOf(path: string): string {
 }
 
 /**
- * One page of a REST list, the way GitHub serves it. The host keeps the whole list and
- * answers `per_page`/`page`, so a reader that never follows pages really does lose
- * entries instead of silently receiving everything. A page past the end is empty, which
- * is how a client learns that a full page was the last one.
+ * One page of a REST list, and the page after it when the host holds more.
+ *
+ * The host keeps the whole list and answers `per_page`/`page`, so a reader that never
+ * follows pages really does lose entries instead of silently receiving everything. A page
+ * past the end is empty, which is how a client learns that a full page was the last one.
  */
-export function paginate<T>(entries: T[], rawQuery: string | undefined, defaultPerPage = 30): T[] {
+export function restPage<T>(
+  entries: readonly T[],
+  rawQuery: string | undefined,
+  defaultPerPage = 30,
+): { entries: T[]; nextPage: number | null } {
   const queryParams = new URLSearchParams(rawQuery ?? '')
   const perPage = Math.max(1, Number(queryParams.get('per_page')) || defaultPerPage)
   const number = Math.max(1, Number(queryParams.get('page')) || 1)
   const start = (number - 1) * perPage
-  return entries.slice(start, start + perPage)
+  const slice = entries.slice(start, start + perPage)
+  return { entries: slice, nextPage: start + perPage < entries.length ? number + 1 : null }
+}
+
+/** One page of a list, for a reader that has no pages to follow. */
+export function paginate<T>(entries: T[], rawQuery: string | undefined, defaultPerPage = 30): T[] {
+  return restPage(entries, rawQuery, defaultPerPage).entries
+}
+
+/**
+ * The `Link` header a real host answers a paged list with.
+ *
+ * A collection that has more to say names its next page in this header, and the caller
+ * stops reading when it is absent — so a listing without one is a shorter conversation
+ * than the host holds: invisible while a run holds few entries, and a missing answer once
+ * it holds many. The next page is named as an absolute URL on the host the request arrived
+ * on, because that is the only host a client may follow it to.
+ */
+export function nextPageHeaders(
+  origin: string,
+  path: string,
+  rawQuery: string | undefined,
+  nextPage: number | null,
+  defaultPerPage = 30,
+): Record<string, string> {
+  if (nextPage === null) return {}
+  const query = new URLSearchParams(rawQuery ?? '')
+  query.set('per_page', String(Math.max(1, Number(query.get('per_page')) || defaultPerPage)))
+  query.set('page', String(nextPage))
+  return { link: `<${origin}/${path}?${query.toString()}>; rel="next"` }
 }
 
 /** A repository's default branch, which is what `~DEFAULT_BRANCH` resolves to. */
@@ -167,19 +201,106 @@ export function fullyQualifiedRef(name: string, context: RefContext): string {
   return `refs/heads/${trimmed}`
 }
 
+/** Escaping inside a character class, where `u`-mode allows only these four. */
+function escapeInClass(char: string): string {
+  return /[\\\]^]/u.test(char) ? `\\${char}` : char
+}
+
+/** One character of a class, and where the next one starts. `\` makes the next literal. */
+function classCharacter(pattern: string, at: number): { char: string; next: number } | null {
+  const escaped = pattern[at] === '\\'
+  const char = escaped ? pattern[at + 1] : pattern[at]
+  if (char === undefined) return null
+  return { char, next: at + (escaped ? 2 : 1) }
+}
+
+/**
+ * One `[...]` class as a regular expression, or null when the bracket never closes and
+ * is therefore a literal `[`.
+ *
+ * GitHub documents a class as "one character listed in the brackets or included in
+ * ranges", with `!` at the front negating it and `\` escaping. Pathname semantics still
+ * hold inside it, so the whole class is guarded against the `/` separator rather than only
+ * its ranges.
+ */
+function characterClass(pattern: string, at: number): { source: string; end: number } | null {
+  let index = at + 1
+  const negated = pattern[index] === '!' || pattern[index] === '^'
+  if (negated) index += 1
+  let body = ''
+  while (index < pattern.length && pattern[index] !== ']') {
+    const start = classCharacter(pattern, index)
+    if (start === null) return null
+    index = start.next
+    const rangeEnd =
+      pattern[index] === '-' && pattern[index + 1] !== undefined && pattern[index + 1] !== ']'
+        ? classCharacter(pattern, index + 1)
+        : null
+    if (rangeEnd === null) {
+      body += escapeInClass(start.char)
+      continue
+    }
+    body += `${escapeInClass(start.char)}-${escapeInClass(rangeEnd.char)}`
+    index = rangeEnd.next
+  }
+  if (index >= pattern.length) return null
+  return { source: `(?!/)${negated ? `[^${body}]` : `[${body}]`}`, end: index + 1 }
+}
+
+/**
+ * A ref-name pattern as GitHub's documented fnmatch reads it.
+ *
+ * The documented syntax is pathname-aware: a single star stops at a separator, a doubled
+ * star crosses one, and a doubled star followed by a separator spans zero or more whole
+ * segments — so the documented `qa` globstar pattern still names a direct child. `?`
+ * and `+` are quantifiers on the character before them, `[a-z]` is a set, and a leading
+ * `!` negates one. Escaping every literal keeps a branch named `release/1.0` from
+ * matching a pattern that means `release/1x0`.
+ */
+function fnmatchSource(pattern: string): string {
+  const parts: string[] = []
+  let index = 0
+  while (index < pattern.length) {
+    const char = pattern[index] as string
+    if (char === '*') {
+      if (pattern[index + 1] === '*') {
+        parts.push(pattern[index + 2] === '/' ? '(?:[^/]*/)*' : '.*')
+        index += pattern[index + 2] === '/' ? 3 : 2
+        continue
+      }
+      parts.push('[^/]*')
+      index += 1
+      continue
+    }
+    if (char === '[') {
+      const parsed = characterClass(pattern, index)
+      if (parsed !== null) {
+        parts.push(parsed.source)
+        index = parsed.end
+        continue
+      }
+    }
+    if (char === '\\' && pattern[index + 1] !== undefined) {
+      parts.push((pattern[index + 1] as string).replace(/[.*+?^${}()|[\]\\]/gu, '\\$&'))
+      index += 2
+      continue
+    }
+    if ((char === '?' || char === '+') && parts.length > 0) {
+      parts[parts.length - 1] = `(?:${parts[parts.length - 1]})${char === '?' ? '?' : '+'}`
+      index += 1
+      continue
+    }
+    parts.push(char.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&'))
+    index += 1
+  }
+  return parts.join('')
+}
+
 function refPatternMatches(pattern: string, ref: string, context: RefContext): boolean {
   if (pattern === '~ALL') return true
   if (pattern === '~DEFAULT_BRANCH')
     return context.defaultBranch !== undefined && ref === `refs/heads/${context.defaultBranch}`
-  const qualified = fullyQualifiedRef(pattern, context)
-  // GitHub matches these names the way its own patterns do: `*` and `?` are the only
-  // wildcards, and everything else is literal. Escaping first keeps a branch named
-  // `release/1.0` from matching a pattern that means `release/1x0`.
-  const source = qualified
-    .replace(/[.+^${}()|[\]\\]/gu, '\\$&')
-    .replace(/\*/gu, '.*')
-    .replace(/\?/gu, '.')
-  return new RegExp(`^${source}$`, 'u').test(ref)
+  return new RegExp(`^${fnmatchSource(fullyQualifiedRef(pattern, context))}$`, 'u').test(ref)
 }
 
 /**

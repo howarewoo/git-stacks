@@ -116,7 +116,7 @@ function repositoryEntry(
     owner: primary.owner,
     name: primary.name,
     bare,
-    private: false,
+    private: primary.private === true,
     defaultBranch: primary.defaultBranch,
     description: primary.description ?? null,
     topics: primary.topics ?? [],
@@ -1735,6 +1735,23 @@ function serveRepositoryRoutes(
       const action = String(body.merge_action || 'default')
       if (action !== 'default' && action !== 'direct_merge' && action !== 'merge_queue')
         throw new HttpError(422, 'Unprocessable Entity', 'merge_action must be a documented value')
+      // GitHub answers a retry for an already-merged pull request with the terminal `200`
+      // and the merge commit, and this is checked before the open-state admission rules:
+      // a merge that already landed is the completed result, not a pull request that is
+      // not ready, and refusing it with 400 makes a successful recovery look like a fault.
+      // The answer carries no request identity, because there is no request left to read.
+      if (pr.state === 'MERGED') {
+        return {
+          status: 200,
+          body: {
+            status: 'merged',
+            details: {
+              message: 'Pull Request successfully merged',
+              sha: pr.mergeOid,
+            },
+          },
+        }
+      }
       if (pr.state !== 'OPEN' || pr.draft)
         throw new HttpError(400, 'Bad Request', 'Pull request is not ready to be merged')
       // Mergeability is Git's own answer, and GitHub refuses the request before it is ever
@@ -1826,6 +1843,25 @@ function serveRepositoryRoutes(
           body: { status: 'failed', details: { message: canned.message ?? 'merge failed' } },
         }
       }
+      // The lease, checked before either outcome is resolved. GitHub's contract for this
+      // endpoint is that the supplied head must match and that the request is cancelled if
+      // the head moves before the request runs, so an accepted request whose head has
+      // since moved answers a terminal failure — never an enqueue, which is evidence that
+      // this exact head is on its way onto the base, and never a merge of whatever is there
+      // now.
+      const leasedHead = currentHead(state, pr)
+      if (leasedHead === null || leasedHead !== pending.sha) {
+        clearScopedFact(state, 'asyncMerge')
+        return {
+          status: 200,
+          body: {
+            status: 'failed',
+            details: {
+              message: `head SHA ${String(leasedHead)} no longer matches the ${pending.sha} this request was made for`,
+            },
+          },
+        }
+      }
       // This is where the rules are evaluated. A request that was admitted and is then
       // blocked produces a terminal failed result rather than a request that was never
       // accepted, which is what GitHub does and what a client polling for the outcome has
@@ -1854,8 +1890,7 @@ function serveRepositoryRoutes(
           },
         }
       }
-      const head = currentHead(state, pr)
-      const refusal = ruleSetRefusal(state, pr, head ?? pending.sha)
+      const refusal = ruleSetRefusal(state, pr, pending.sha)
       if (refusal !== null) {
         clearScopedFact(state, 'asyncMerge')
         return {

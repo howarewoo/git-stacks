@@ -1,4 +1,7 @@
+import { getSnapshot, runAction } from '../../../src/main/git'
 import { GitHubTransportError, type GitHubErrorKind } from '../../../src/main/github-transport'
+import { previewStack } from '../../../src/main/stacks'
+import { assert } from '../scenario'
 import {
   pollAsyncMerge,
   startAsyncMerge,
@@ -98,5 +101,35 @@ export function mergeableLayer(ctx: LiveScenarioContext, prefix: string) {
     file: `${prefix}.txt`,
     contents: `${prefix}\n`,
     message: `${prefix}: a layer to merge`,
+  })
+}
+
+/**
+ * The merge the production path would run, driven the way the view drives it.
+ *
+ * A terminal result and the journal entry that says so are only evidence about the
+ * host when they were written by the merge path itself. Driving the preview and the
+ * action the preview belongs to is what makes the observation the application's
+ * rather than the scenario's, and the same helper serves every case whose claim is
+ * that production did the thing.
+ */
+export async function mergeThroughProduction(
+  ctx: LiveScenarioContext,
+  branch: string,
+  mergeAction: 'default' | 'direct_merge' | 'merge_queue',
+): Promise<{ message: string }> {
+  const snapshot = await getSnapshot(ctx.workspace.path)
+  const preview = await previewStack(ctx.workspace.path, snapshot, 'merge', branch)
+  assert(preview.merge !== null, `the merge preview for ${branch} carried no plan`)
+  assert(
+    preview.merge.actions.includes(mergeAction),
+    `the preview offers ${preview.merge.actions.join(', ')}, not ${mergeAction}`,
+  )
+  return runAction(ctx.workspace.path, {
+    type: 'executeStack',
+    token: preview.token,
+    allowForce: false,
+    mergeAction,
+    mergeMethod: 'merge',
   })
 }

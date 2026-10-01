@@ -11,7 +11,7 @@ import {
   readMergeObservations,
   startAsyncMerge,
 } from '../../../src/main/merge-async'
-import { mergeableLayer, requestMerge } from './merge-support'
+import { mergeableLayer, mergeThroughProduction, requestMerge } from './merge-support'
 import { assert, type LiveScenario, type LiveScenarioContext } from '../scenario'
 
 export const checkScenarios: readonly LiveScenario[] = [
@@ -152,35 +152,6 @@ export const checkScenarios: readonly LiveScenario[] = [
     },
   },
 ]
-
-/**
- * The merge the production path would run, and the journal it wrote.
- *
- * A queue enqueue is only evidence that a base ref has a queue when GitHub reports
- * the terminal `enqueued` result, and the journal entry that says so is written by
- * the merge path itself. Driving the preview and the action the view drives is what
- * makes the observation the application's rather than the scenario's.
- */
-async function mergeThroughProduction(
-  ctx: LiveScenarioContext,
-  branch: string,
-  mergeAction: 'default' | 'direct_merge' | 'merge_queue',
-): Promise<{ message: string }> {
-  const snapshot = await getSnapshot(ctx.workspace.path)
-  const preview = await previewStack(ctx.workspace.path, snapshot, 'merge', branch)
-  assert(preview.merge !== null, `the merge preview for ${branch} carried no plan`)
-  assert(
-    preview.merge.actions.includes(mergeAction),
-    `the preview offers ${preview.merge.actions.join(', ')}, not ${mergeAction}`,
-  )
-  return runAction(ctx.workspace.path, {
-    type: 'executeStack',
-    token: preview.token,
-    allowForce: false,
-    mergeAction,
-    mergeMethod: 'merge',
-  })
-}
 
 export const mergeScenarios: readonly LiveScenario[] = [
   {

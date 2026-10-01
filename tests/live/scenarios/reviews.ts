@@ -25,8 +25,8 @@ const REVIEW_BODY = ['alpha', 'bravo', 'charlie', 'delta', 'echo', 'foxtrot', 'g
 async function reviewLayer(ctx: Parameters<LiveScenario['run']>[0], prefix: string) {
   return pushLayer(ctx, {
     branch: `${prefix}-layer`,
-    parent: 'origin/main',
-    base: 'main',
+    parent: `origin/${ctx.target.defaultBranch}`,
+    base: ctx.target.defaultBranch,
     file: REVIEW_FILE,
     contents: `${REVIEW_BODY}\nindia\njuliett\n`,
     message: `${prefix}: a reviewable change`,
