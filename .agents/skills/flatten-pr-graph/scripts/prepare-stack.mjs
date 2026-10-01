@@ -68,6 +68,10 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
+import {
+  attributedDriverControls as readAttributedDriverControls,
+  treePaths as readTreePaths,
+} from './git-controls.mjs'
 
 const CONTRACT_VERSION = 'flatten-pr-graph/1'
 const GIT_TIMEOUT_MS = 300_000
@@ -847,12 +851,16 @@ function cloneWorkspace(storage, number, originalOid, resume = false) {
   return workspace
 }
 
-/** Every path a tree holds, so a checkout is admitted for all of it and not a sample. */
+/**
+ * Every path a tree holds, so a checkout is admitted for all of it and not a sample.
+ *
+ * The read goes through the same `git` adapter the control probes use, so it is taken in
+ * the same environment and under the same policy as the command it is gating.
+ */
+const controlProbe = (cwd, args) => runGit(cwd, args, { allowFailure: true })
+
 function treePaths(storage, oid) {
-  const result = runGit(storage, ['ls-tree', '-r', '-z', '--name-only', oid], {
-    allowFailure: true,
-  })
-  return result.ok ? result.stdout.split('\0').filter(Boolean) : []
+  return readTreePaths(controlProbe, storage, oid)
 }
 
 function writeJournal(path, journal) {
@@ -1697,65 +1705,16 @@ function inspectControls(repository) {
  * Whether an effective clean/smudge filter, merge driver, or textconv command is
  * attributed to any path a tree about to be written actually holds.
  *
- * Two properties make the answer a fact rather than a guess about the environment. Git
- * runs a driver only for a path whose tracked `.gitattributes` names it, so a globally
- * configured tool that no attribute references is provably unused here; and attributes
- * are read with `--source=<oid>` from a tree that has not been written to disk, so no
- * checkout, filter, hook, or driver has run in order to find this out. A tree is admitted
- * whole - every path in it, not a sample - and in chunks, because a real repository can
- * hold more paths than one command line will carry.
+ * The reading itself lives in `git-controls.mjs`, shared with the measurement helper
+ * that probes the same way: the configuration Git would use is read in full rather than
+ * one key at a time, so a driver configured only in an included file, only in the global
+ * config, or only through a `GIT_CONFIG_*` variable in the caller's environment is still
+ * a driver this run would execute. Attributes are read with `--source=<oid>` from a tree
+ * that has not been written to disk, so no checkout, filter, hook, or driver has run in
+ * order to find this out.
  */
 function attributedDriverControls(storage, sourceOid, paths, cwd = storage) {
-  const controls = []
-  const targets = [...new Set(paths.filter(Boolean))]
-  if (targets.length === 0) return controls
-  const KEYS = {
-    filter: (name) => [`filter.${name}.clean`, `filter.${name}.smudge`, `filter.${name}.process`],
-    merge: (name) => [`merge.${name}.driver`],
-    diff: (name) => [`diff.${name}.command`],
-  }
-  const CHUNK = 256
-  const seen = new Set()
-  for (let start = 0; start < targets.length; start += CHUNK) {
-    const chunk = targets.slice(start, start + CHUNK)
-    const read = runGit(cwd, ['check-attr', '-z', '--all', '--source', sourceOid, '--', ...chunk], {
-      allowFailure: true,
-    })
-    if (!read.ok) {
-      return [
-        {
-          control: 'attributes.read',
-          value: read.stderr.trim().slice(0, 200) || `git check-attr exited ${read.status}`,
-          inTaskStorage: 'not-copied',
-          blocking: true,
-          effect:
-            'the tracked attributes for the paths this run would write could not be read, so it cannot be claimed that no driver would run',
-        },
-      ]
-    }
-    const fields = read.stdout.split('\0').filter(Boolean)
-    for (let index = 0; index + 2 < fields.length; index += 3) {
-      const path = fields[index]
-      const keys = KEYS[fields[index + 1]]?.(fields[index + 2])
-      if (!keys) continue
-      for (const key of keys) {
-        const command = gitOut(cwd, ['config', '--get', key])
-        if (!command) continue
-        const id = `${path}:${key}`
-        if (seen.has(id)) continue
-        seen.add(id)
-        controls.push({
-          control: key,
-          value: `${path} -> ${command}`,
-          inTaskStorage: 'inherited',
-          blocking: true,
-          effect:
-            'a tracked attribute assigns this executable driver to a path this run would write; it may combine, rewrite, or discard content, so preparation stops before running it',
-        })
-      }
-    }
-  }
-  return controls
+  return readAttributedDriverControls(controlProbe, cwd, [sourceOid], paths)
 }
 
 /**

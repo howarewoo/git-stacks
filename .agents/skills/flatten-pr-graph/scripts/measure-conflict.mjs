@@ -36,6 +36,10 @@
 import { execFileSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 import { isAbsolute } from 'node:path'
+import {
+  attributedDriverControls,
+  treePaths,
+} from './git-controls.mjs'
 
 const CONTRACT_VERSION = 'flatten-pr-graph/1'
 const GIT_TIMEOUT_MS = 120_000
@@ -168,8 +172,43 @@ function shallowRepository(repository) {
  * A clean merge exits 0; a real content conflict exits 1 and names the conflicted
  * paths; any other failure means the probe could not run, which is an unknown, not a
  * clean result.
+ *
+ * It is not, however, free of the repository's configuration. A three-way merge runs the
+ * merge driver a tracked `.gitattributes` entry assigns to a conflicting path, so a pair
+ * whose `.gitattributes` names `merge=<name>` executes `merge.<name>.driver` - a program
+ * named by configuration the task-owned storage inherited rather than one it holds, and
+ * one whose side effects this probe cannot predict or undo. A driver that keeps one side
+ * of the conflict returns a clean tree with the other side's content dropped, and a
+ * high-confidence `0` for a pair that actually conflicts.
+ *
+ * So the configuration is read before the merge, not after it: a driver that is
+ * configured *and* attributed to a path either side of this pair holds is reported, and
+ * the pair is left unmeasured. Nothing is disabled and no configuration is overridden -
+ * turning the driver off would measure a merge Git never performed. An unreadable
+ * configuration or an unreadable set of attributes is the same answer, because "this
+ * pair merges cleanly" is a claim those reads would have to support.
+ *
+ * Hooks are not consulted here, and that is a fact rather than an omission:
+ * `git merge-tree` runs no hook, so a hook control would name a command this probe never
+ * invokes.
  */
 function probePair(repository, beforeRef, afterRef) {
+  const pairPaths = [
+    ...new Set([...treePaths(git, repository, beforeRef), ...treePaths(git, repository, afterRef)]),
+  ]
+  const controls = attributedDriverControls(git, repository, [beforeRef, afterRef], pairPaths)
+  if (controls.length > 0) {
+    return {
+      kind: 'unknown',
+      value: null,
+      confidence: 'unknown',
+      conflictingPaths: [],
+      controls,
+      reason: `the pair was not measured: ${controls
+        .map((control) => `${control.control} = ${control.value}`)
+        .join('; ')}`,
+    }
+  }
   const run = git(repository, [
     'merge-tree',
     '--write-tree',
