@@ -332,7 +332,6 @@ test('a capability probe that cannot answer leaves no pull request or branch beh
   const capabilities = await run.target.probeCapabilities()
   assert.equal(capabilities.reviewThreads, false, 'the refused probe did not take effect')
 
-  const state = hostState(run)
   // The probe pull request is closed rather than deleted, so what matters is
   // that no open probe pull request is left standing on the host.
   assert.equal(
