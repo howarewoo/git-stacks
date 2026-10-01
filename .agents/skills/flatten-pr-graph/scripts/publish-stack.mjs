@@ -85,6 +85,13 @@
  * resolved to exactly one push endpoint in task-owned storage, and reads and writes then
  * use that one endpoint.
  *
+ * `preparationRunDirectory` is required, not optional. It names the task-owned run that
+ * produced the manifest, and the run reads it: the journal must exist, name this
+ * contract, record a *complete* preparation of exactly this selection, order, root, heads,
+ * and prepared commits, and still own a workspace per selected pull request with no
+ * unmerged entry, operation, or committed conflict marker. An absent run directory used to
+ * mean "skip the local integrity checks and publish"; it now means the run does not start.
+ *
  * Output JSON on stdout: `{ contractVersion, ok, status, errors, publication, capability,
  * controls, authority, provider, rootAdvance, unselectedDependents, verification,
  * recovery, nextSafeAction, journalPath }`, where `publication` is the contract's
@@ -428,10 +435,23 @@ function verifyInput(raw) {
       'a publication that cannot compare the selected pull requests against a pinned snapshot is refused',
     )
   }
-  const preparationRunDirectory =
-    typeof raw.preparationRunDirectory === 'string' && isAbsolute(raw.preparationRunDirectory)
-      ? resolve(raw.preparationRunDirectory)
-      : null
+  // Required, not optional. The manifest is a claim; the task-owned run directory that
+  // produced it is the evidence, and without it there is nothing to inspect for unmerged
+  // entries, an operation in progress, or a committed conflict marker. An absent
+  // `preparationRunDirectory` used to mean "skip the local integrity checks and publish",
+  // which is exactly the claim this helper must never make.
+  if (
+    typeof raw.preparationRunDirectory !== 'string' ||
+    !isAbsolute(raw.preparationRunDirectory) ||
+    !existsSync(raw.preparationRunDirectory)
+  ) {
+    throw new InputError(
+      'invalid-input',
+      'preparationRunDirectory must name the existing task-owned run directory that produced this manifest',
+      `received ${JSON.stringify(raw.preparationRunDirectory)}`,
+    )
+  }
+  const preparationRunDirectory = resolve(raw.preparationRunDirectory)
   return {
     repository,
     remote,
@@ -698,8 +718,9 @@ function verifyPreparedSet(input, refs) {
     checked.push({ number, branch, predecessor, index })
   }
 
-  // The handoff's own integrity fields are a claim; the workspaces are the evidence. Both
-  // are checked, because either alone can be wrong while the other looks clean.
+  // The handoff's own integrity fields are a claim. The task-owned workspaces that back
+  // them are the evidence, and `verifyPreparationHandoff` has already read both this
+  // journal and those workspaces before this function ran.
   const indexState = input.preparation?.indexState
   if (isPlainObject(indexState)) {
     const unmerged = indexState.unmergedEntries ?? []
@@ -721,10 +742,6 @@ function verifyPreparedSet(input, refs) {
       evidence: input.preparation.unresolved.join(', '),
     })
   }
-  if (input.preparationRunDirectory) {
-    errors.push(...inspectPreparationWorkspaces(input.preparationRunDirectory))
-  }
-
   // Snapshot reconciliation. A selected head may legitimately hold this run's own prepared
   // commit (a lost acknowledgement, or a rerun of an accepted push), so those refs are
   // checked against the journaled original or prepared value instead of equality with the
@@ -736,6 +753,19 @@ function verifyPreparedSet(input, refs) {
     const branchForRef = selectedHeadMap.get(ref)
     const now = refs[ref]
     if (branchForRef) {
+      // A snapshot value for a selected head is admissible only in one of two states: the
+      // original commit this plan was authorized against, or this run's own prepared
+      // commit, which is what a lost acknowledgement or an accepted rerun leaves behind.
+      // Anything else means the caller is asking this run to adopt a change it never
+      // authorized, and having read it back is not the same as having authorized it.
+      if (pinned !== branchForRef.originalHead && pinned !== branchForRef.preparedHead) {
+        errors.push({
+          code: 'stale-snapshot',
+          detail: `the recorded observation of selected ref ${ref} is not a state this plan may publish from`,
+          evidence: `observed ${pinned}, which is neither the original head ${branchForRef.originalHead} nor the prepared head ${branchForRef.preparedHead}`,
+        })
+        continue
+      }
       if (now !== undefined && now !== pinned && now !== branchForRef.preparedHead) {
         errors.push({
           code: 'stale-snapshot',
@@ -757,15 +787,99 @@ function verifyPreparedSet(input, refs) {
 }
 
 /**
+ * The preparation run this manifest came from, read before anything is written.
+ *
+ * A manifest handed over on its own is a claim; the task-owned run directory that produced
+ * it is the evidence. This binds the two together: the journal must exist, name this
+ * contract, record a *complete* preparation of exactly this plan, and still own a
+ * workspace per selected pull request. Anything else is a blocker, because the alternative
+ * is publishing a set whose unresolved state nobody has actually looked at.
+ */
+function verifyPreparationHandoff(input, plan) {
+  const errors = []
+  const journalFile = join(input.preparationRunDirectory, 'journal.json')
+  if (!existsSync(journalFile)) {
+    errors.push({
+      code: 'stale-snapshot',
+      detail: 'the identified preparation run directory holds no preparation journal',
+      evidence: `${journalFile} is absent; the manifest's local integrity was never recorded`,
+    })
+    return { errors }
+  }
+  let journal = null
+  try {
+    journal = JSON.parse(readFileSync(journalFile, 'utf8'))
+  } catch (error) {
+    errors.push({
+      code: 'stale-snapshot',
+      detail: 'the preparation journal could not be read',
+      evidence: `${journalFile}: ${String(error?.message ?? error)}`,
+    })
+    return { errors }
+  }
+  if (!isPlainObject(journal) || journal.contractVersion !== CONTRACT_VERSION) {
+    errors.push({
+      code: 'stale-snapshot',
+      detail: 'the preparation journal does not name this contract version',
+      evidence: `${journalFile} holds ${JSON.stringify(journal?.contractVersion ?? null)}`,
+    })
+    return { errors }
+  }
+  if (journal.state !== 'prepared') {
+    errors.push({
+      code: 'stale-snapshot',
+      detail: `the identified preparation is ${journal.state ?? 'of unknown state'}, not a complete prepared set`,
+      evidence: `journal state ${journal.state ?? 'absent'}; prepared ${(journal.preparation?.branches ?? []).length} of ${plan.selection.length} positions`,
+    })
+  }
+  const recorded = [
+    ['selection', journal.selection, plan.selection],
+    ['order', journal.order, plan.order],
+    ['root.ref', journal.root?.ref, plan.rootRef],
+    ['root.oid', journal.root?.oid, plan.rootOid],
+    ['heads', journal.heads, plan.heads],
+    ['originalHeads', journal.originalHeads, plan.originalHeads],
+    ['preparedHeads', journal.preparedHeads, plan.preparedHeads],
+  ]
+  for (const [name, was, is] of recorded) {
+    if (sameJson(was ?? null, is ?? null)) continue
+    errors.push({
+      code: 'stale-snapshot',
+      detail: `the preparation journal was written for a different ${name}`,
+      evidence: `journal ${JSON.stringify(was ?? null)}, this publication ${JSON.stringify(is ?? null)}`,
+    })
+  }
+  errors.push(...inspectPreparationWorkspaces(input.preparationRunDirectory, plan.selection))
+  return { errors }
+}
+
+/**
  * The preparation workspaces, read before anything is written. A workspace left mid-merge
  * holds an unmerged index and an operation in progress, and one whose committed tree still
  * carries markers is not a finished integration - neither is discoverable from the
- * manifest alone.
+ * manifest alone. An absent workspace directory, or a missing one for a selected pull
+ * request, is the same kind of gap: the integrity claim cannot be checked at all.
  */
-function inspectPreparationWorkspaces(preparationRunDirectory) {
+function inspectPreparationWorkspaces(preparationRunDirectory, numbers) {
   const errors = []
   const workspaces = join(preparationRunDirectory, 'workspaces')
-  if (!existsSync(workspaces)) return errors
+  if (!existsSync(workspaces)) {
+    errors.push({
+      code: 'stale-snapshot',
+      detail: 'the identified preparation run directory holds no task-owned workspaces',
+      evidence: `${workspaces} is absent, so no workspace index or operation state can be inspected`,
+    })
+    return errors
+  }
+  for (const number of numbers) {
+    if (!existsSync(join(workspaces, `pr-${number}`))) {
+      errors.push({
+        code: 'stale-snapshot',
+        detail: `the identified preparation run directory holds no workspace for #${number}`,
+        evidence: `${join(workspaces, `pr-${number}`)} is absent`,
+      })
+    }
+  }
   for (const entry of readdirSync(workspaces, { withFileTypes: true })) {
     if (!entry.isDirectory()) continue
     const workspace = join(workspaces, entry.name)
@@ -1117,6 +1231,12 @@ export async function publishStack(raw, conversations = {}) {
     intendedBases: input.intendedBases,
     preparedHeads: Object.fromEntries(input.branches.map((b) => [b.number, b.preparedHead])),
     originalHeads: Object.fromEntries(input.branches.map((b) => [b.number, b.originalHead])),
+    // The pull-request snapshot is part of what was authorized, not a fresh reading: a
+    // resume that carries a different identity, state, base, title, or draft state is a
+    // different plan, not a continuation. The resolved destination is part of it too,
+    // because "resume" against another endpoint is a different repository.
+    pullRequests: input.pullRequests,
+    pushEndpoint: input.pushEndpoint.endpoint,
   }
 
   // 2. An unfinished publication owns this journal until it is resumed or replanned.
@@ -1146,7 +1266,9 @@ export async function publishStack(raw, conversations = {}) {
       sameJson(existingJournal.plan.heads, currentPlan.heads) &&
       sameJson(existingJournal.plan.intendedBases, currentPlan.intendedBases) &&
       sameJson(existingJournal.plan.originalHeads, currentPlan.originalHeads) &&
-      sameJson(existingJournal.plan.preparedHeads, currentPlan.preparedHeads)
+      sameJson(existingJournal.plan.preparedHeads, currentPlan.preparedHeads) &&
+      sameJson(existingJournal.plan.pullRequests ?? null, currentPlan.pullRequests) &&
+      (existingJournal.plan.pushEndpoint ?? null) === currentPlan.pushEndpoint
     if (!planMatches) {
       return returnWithoutJournal({
         errors: [
@@ -1169,7 +1291,26 @@ export async function publishStack(raw, conversations = {}) {
 
   journal.plan = currentPlan
 
-  // 3. Re-read the remote, verify the prepared set against it, and decide the write set.
+  // 3. The prepared set's own evidence, checked before the remote is even listed. A
+  //    manifest whose task-owned run directory does not vouch for it is not published on
+  //    the strength of the manifest alone.
+  const handoff = verifyPreparationHandoff(input, currentPlan)
+  if (handoff.errors.length > 0) {
+    journal.state = 'blocked'
+    return finish({
+      errors: handoff.errors,
+      status: 'blocked',
+      nextSafeAction: {
+        action:
+          'prepare the stack again, or point preparationRunDirectory at the task-owned run that produced this manifest; nothing was written',
+        requires: [
+          'a complete prepared journal for this exact selection, order, root, heads, and prepared commits',
+        ],
+      },
+    })
+  }
+
+  // 4. Re-read the remote, verify the prepared set against it, and decide the write set.
   const observed = {
     refs: git.readRemoteRefs(input.repository, input.pushEndpoint.endpoint),
     ok: true,
@@ -1178,7 +1319,7 @@ export async function publishStack(raw, conversations = {}) {
   const verified = verifyPreparedSet(input, observed.refs)
   const errors = [...verified.errors]
   const observedRoot = observed.refs[input.root.ref] ?? null
-  const rootAdvance =
+  let rootAdvance =
     observedRoot && observedRoot !== input.root.oid
       ? {
           pinned: input.root.oid,
@@ -1269,7 +1410,7 @@ export async function publishStack(raw, conversations = {}) {
     })
   }
 
-  // 4. Controls first, then the atomic capability question. A push is never attempted
+  // 5. Controls first, then the atomic capability question. A push is never attempted
   //    before both answers are known, because either can end the run without a write.
   if (blockedControls.length > 0) {
     journal.state = 'blocked'
@@ -1287,7 +1428,7 @@ export async function publishStack(raw, conversations = {}) {
     })
   }
 
-  // 5. The provider is loaded and every selected pull request is read *before* any grant is
+  // 6. The provider is loaded and every selected pull request is read *before* any grant is
   //    acted on, because the write set is only knowable once the bases are known. A run
   //    that pushed heads first and discovered a missing base grant afterwards would leave
   //    the remote half-migrated to report it.
@@ -1434,6 +1575,8 @@ export async function publishStack(raw, conversations = {}) {
 
   const refspecs = refWrites.map((write) => `${write.to}:${write.ref}`)
   const leases = refWrites.map((write) => `--force-with-lease=${write.ref}:${write.from}`)
+  /** Exactly the refs this run is authorized to move; everything else must not move. */
+  const selectedRefs = new Set(input.order.map((number) => input.heads[number]))
   let atomic = { supported: null, evidence: 'no ref write was needed' }
   if (refWrites.length > 0) {
     atomic = git.detectAtomicRefTransaction(
@@ -1485,7 +1628,7 @@ export async function publishStack(raw, conversations = {}) {
   // which is the one description that is certainly wrong.
   let payload
   try {
-    // 6. One atomic, lease-guarded push of exactly the selected refs that still need it.
+    // 7. One atomic, lease-guarded push of exactly the selected refs that still need it.
     if (refWrites.length > 0) {
       sequence += 1
       journal.attempts.push({
@@ -1588,7 +1731,7 @@ export async function publishStack(raw, conversations = {}) {
       })
     }
 
-    // 7. Base retargeting in dependency order, each one re-read immediately before its own
+    // 8. Base retargeting in dependency order, each one re-read immediately before its own
     //    write and verified immediately after.
 
     /**
@@ -1601,11 +1744,15 @@ export async function publishStack(raw, conversations = {}) {
     const resolveBaseOid = (branchName) => {
       const raw = String(branchName ?? '')
       const ref = raw.startsWith('refs/heads/') ? raw : `refs/heads/${raw}`
+      // The freshest read of the remote wins, always. The pinned root and this run's own
+      // prepared heads are fallbacks for a branch the remote listing does not carry; they
+      // are never used in place of an observation that exists, because an attempt's `from`
+      // and `to` are records of what the base actually pointed at.
+      if (latestRefs[ref]) return latestRefs[ref]
       if (ref === input.root.ref) return input.root.oid
       for (const branch of input.branches) {
         if (input.heads[branch.number] === ref) return branch.preparedHead
       }
-      if (latestRefs[ref]) return latestRefs[ref]
       return (
         gitOut(input.repository, ['rev-parse', '--verify', '--quiet', `${ref}^{commit}`]) ?? null
       )
@@ -1800,7 +1947,7 @@ export async function publishStack(raw, conversations = {}) {
       result: compareAndSwap ? 'pass' : 'unautomated',
     })
 
-    // 8. Final read-back of the whole chain, and the root reported against its pinned id.
+    // 9. Final read-back of the whole chain, and the root reported against its pinned id.
     const finalRefs = git.readRemoteRefs(input.repository, input.pushEndpoint.endpoint)
     for (const entry of verified.checked) {
       const ref = input.heads[entry.number]
@@ -1840,6 +1987,34 @@ export async function publishStack(raw, conversations = {}) {
         )
       }
     }
+    // Every ref the snapshot covered and this run did not authorize is re-read after the
+    // last write. A pre-flight comparison proves nothing about a push that landed in
+    // between, and an unselected ref that moved during the run is a fact about the
+    // repository that a `published` result must not paper over.
+    const unselectedDrift = []
+    for (const [ref, pinned] of Object.entries(input.observedRefs)) {
+      if (ref === input.root.ref || selectedRefs.has(ref)) continue
+      const now = finalRefs[ref]
+      if (now !== pinned) {
+        unselectedDrift.push(`${ref} is ${now ?? 'absent'}, expected ${pinned}`)
+      }
+    }
+    for (const drift of unselectedDrift) {
+      errors.push({
+        code: 'stale-snapshot',
+        detail: 'a ref outside the authorized write set moved while this run was writing',
+        evidence: drift,
+      })
+    }
+    verification.push({
+      invariant: 'preservation.unselected-refs',
+      method: 'git ls-remote read-back of every observed ref outside the authorized write set',
+      observed:
+        unselectedDrift.length === 0
+          ? `${Object.keys(input.observedRefs).length} observed ref(s) outside the write set are unchanged`
+          : unselectedDrift.join('; '),
+      result: unselectedDrift.length === 0 ? 'pass' : 'fail',
+    })
     const chainHolds = chainProblems.length === 0
     verification.push({
       invariant: 'topology.chain',
@@ -1849,22 +2024,27 @@ export async function publishStack(raw, conversations = {}) {
         : chainProblems.join('; '),
       result: chainHolds ? 'pass' : 'fail',
     })
-    if (rootAdvance && !chainHolds) {
-      // A newer root is reported against the pinned snapshot and never as integrated.
-      rootAdvance.note = `the published chain is integrated against the pinned root ${input.root.oid.slice(0, 12)}; the newer root ${rootAdvance.observed.slice(0, 12)} was not integrated`
-    }
-    if (finalRefs[input.root.ref] !== input.root.oid) {
-      const note = rootAdvance ?? {
+    // A root that moved between the authorization and the final read is reported against
+    // the pinned commit id and recorded as a failure of `preservation.root`. It is never
+    // absorbed into a "this chain is current" claim, and the newer root work is never
+    // described as integrated - nothing here merged it.
+    const finalRoot = finalRefs[input.root.ref] ?? null
+    if (finalRoot !== input.root.oid) {
+      const advance = rootAdvance ?? {
         pinned: input.root.oid,
-        observed: finalRefs[input.root.ref] ?? '',
+        observed: finalRoot ?? '',
         integrated: false,
       }
+      advance.observed = finalRoot ?? ''
+      advance.note =
+        `the published chain is integrated against the pinned root ${input.root.oid.slice(0, 12)}; the root read back as ${(finalRoot ?? 'absent').slice(0, 12)} after the last write and that newer work is not part of this chain`
       verification.push({
         invariant: 'preservation.root',
-        method: 'git ls-remote read-back of the root ref',
-        observed: `pinned ${input.root.oid.slice(0, 12)}, observed ${(finalRefs[input.root.ref] ?? 'absent').slice(0, 12)}; reported against the pinned snapshot and not integrated`,
-        result: note.integrated ? 'pass' : 'unautomated',
+        method: 'git ls-remote read-back of the root ref after the last write',
+        observed: `pinned ${input.root.oid}, observed ${finalRoot ?? 'absent'}; reported against the pinned snapshot and not integrated`,
+        result: advance.integrated ? 'pass' : 'fail',
       })
+      rootAdvance = advance
     }
 
     const unconfirmedCount = publication.unconfirmed.length

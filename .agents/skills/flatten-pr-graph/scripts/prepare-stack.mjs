@@ -110,6 +110,18 @@ function lines(text) {
     .filter(Boolean)
 }
 
+/**
+ * Environment variables that decide *which* repository, index, object store, or
+ * configuration a Git child process talks to.
+ *
+ * A task-owned `cwd` is not isolation while these survive: `GIT_INDEX_FILE` would send
+ * every `add` to the user's index, `GIT_DIR`/`GIT_WORK_TREE` would redirect the workspace
+ * commands into the user's repository, and the `GIT_CONFIG_*`/`GIT_TEMPLATE_DIR` family
+ * would move the configuration and the installed hooks a clone inherits. They are removed
+ * rather than honoured, so the run sees the machine's real policy - including any signing
+ * or hook requirement - instead of a redirect the caller chose. The removed names are
+ * reported in `controls` so the removal is visible rather than silent.
+ */
 const ROUTING_ENV_VARS = [
   'GIT_DIR',
   'GIT_WORK_TREE',
@@ -117,11 +129,33 @@ const ROUTING_ENV_VARS = [
   'GIT_OBJECT_DIRECTORY',
   'GIT_ALTERNATE_OBJECT_DIRECTORIES',
   'GIT_GRAFT_FILE',
+  'GIT_COMMON_DIR',
+  'GIT_CEILING_DIRECTORIES',
+  'GIT_CONFIG_GLOBAL',
+  'GIT_CONFIG_SYSTEM',
+  'GIT_CONFIG_COUNT',
+  'GIT_TEMPLATE_DIR',
+  'GIT_EXTERNAL_DIFF',
+  'GIT_DIFF_OPTS',
 ]
+
+/** `GIT_CONFIG_KEY_<n>` / `GIT_CONFIG_VALUE_<n>` are a numbered family, not fixed names. */
+function isRoutingEnvVar(name) {
+  return (
+    ROUTING_ENV_VARS.includes(name) ||
+    /^GIT_CONFIG_(KEY|VALUE)_\d+$/.test(name)
+  )
+}
+
+function routingOverrides() {
+  return Object.keys(process.env).filter(isRoutingEnvVar).sort()
+}
 
 function sanitizedEnv() {
   const env = { ...process.env }
-  for (const v of ROUTING_ENV_VARS) delete env[v]
+  for (const name of Object.keys(env)) {
+    if (isRoutingEnvVar(name)) delete env[name]
+  }
   return env
 }
 
@@ -394,6 +428,43 @@ export function readUserFingerprint(userWorkspace) {
     operationsInProgress: operations,
     shallow: gitOut(path, ['rev-parse', '--is-shallow-repository']) === 'true',
   }
+}
+
+/**
+ * Named differences between two fingerprints of the same checkout.
+ *
+ * Comparing a path list or a stash *count* would call a rewritten file or a replaced stash
+ * unchanged, so every field here is content: the staged diff digest, the worktree diff
+ * plus untracked contents, the stash object ids themselves, the local configuration, and
+ * the identity that would sign a commit. The names are returned so a report says what
+ * moved rather than only that something did.
+ */
+function fingerprintDrift(before, after) {
+  if (!before || !after) return []
+  const drift = []
+  for (const field of [
+    'headOid',
+    'headRef',
+    'status',
+    'indexDigest',
+    'worktreeDigest',
+    'stashOids',
+    'stashCount',
+    'configDigest',
+    'identity',
+  ]) {
+    if ((before[field] ?? null) !== (after[field] ?? null)) {
+      drift.push(
+        `${field}: journalled ${JSON.stringify(before[field] ?? null)}, now ${JSON.stringify(after[field] ?? null)}`,
+      )
+    }
+  }
+  const beforeOperations = (before.operationsInProgress ?? []).join(',')
+  const afterOperations = (after.operationsInProgress ?? []).join(',')
+  if (beforeOperations !== afterOperations) {
+    drift.push(`operationsInProgress: journalled ${beforeOperations || 'none'}, now ${afterOperations || 'none'}`)
+  }
+  return drift
 }
 
 function verifyPlan(raw) {
@@ -756,17 +827,17 @@ function cloneWorkspace(storage, number, originalOid, resume = false) {
   // whole point of the admission check below is that no such thing may happen before this
   // run has decided it is safe. `--no-checkout` leaves an empty tree and no hook runs.
   runGit(storage, ['clone', '--quiet', '--no-hardlinks', '--no-checkout', storage, workspace])
-  const driverControls = attributedDriverControls(
-    storage,
-    originalOid,
-    treePaths(storage, originalOid),
-    workspace,
-  )
-  const blocked = driverControls.filter((control) => control.blocking)
+  // Both admissions are decided here, after the clone has installed whatever hooks it
+  // inherits and before the first working-tree write: `--no-checkout` deferred one
+  // command, not the run.
+  const blocked = [
+    ...attributedDriverControls(storage, originalOid, treePaths(storage, originalOid), workspace),
+    ...workspaceHookControls(workspace),
+  ].filter((control) => control.blocking)
   if (blocked.length > 0) {
     throw new InputError(
       'conflicting-environment-control',
-      `#${number} cannot be checked out: a tracked attribute assigns an executable driver to a path this run would write`,
+      `#${number} cannot be checked out: an executable control would run over this workspace`,
       blocked
         .map((control) => `${control.control} = ${control.value}; ${control.effect}`)
         .join(' | '),
@@ -805,6 +876,34 @@ function stagedEntries(workspace) {
     entries.set(path, current)
   }
   return [...entries.values()].sort((left, right) => left.path.localeCompare(right.path))
+}
+
+/**
+ * Content a workspace holds that no recorded decision accounts for.
+ *
+ * Porcelain status is the index's own record, so a path that is still unmerged is a
+ * decision this run has not been told yet - the documented continuation - while a path
+ * that has left the unmerged set has been *staged*, which means somebody resolved it and
+ * this run did not. Reporting the difference keeps a resumed run from adopting somebody
+ * else's resolution under its own `prepared` status.
+ */
+function unrecordedWorkspaceChanges(workspace, number, recordedDecisions) {
+  const recorded = new Set(
+    recordedDecisions.filter((decision) => decision.number === number).map((d) => d.path),
+  )
+  const unmerged = new Set(
+    lines(gitOut(workspace, ['diff', '--name-only', '--diff-filter=U']) ?? ''),
+  )
+  const stray = []
+  for (const entry of lines(
+    gitOut(workspace, ['status', '--porcelain=v1', '--untracked-files=no']) ?? '',
+  )) {
+    const path = entry.slice(3)
+    if (path.length === 0) continue
+    if (unmerged.has(path) || recorded.has(path)) continue
+    stray.push(path)
+  }
+  return stray
 }
 
 function isBlobBinary(workspace, oid) {
@@ -1119,25 +1218,53 @@ function preparePosition(options) {
   // afterwards. The merge materialises the base's files into the worktree, so the base
   // tree is admitted in full - every path it holds, not only the ones a diff names - and
   // the attributes are read in the workspace where the merge will run.
+  const hookControls = workspaceHookControls(workspace)
   const driverControls = alreadyInMerge
     ? []
     : attributedDriverControls(storage, baseOid, treePaths(storage, baseOid), workspace)
-  if (driverControls.some((control) => control.blocking)) {
+  const admissionControls = [...driverControls, ...hookControls]
+  const blockingControls = admissionControls.filter((control) => control.blocking)
+  if (blockingControls.length > 0) {
     return {
       branch: null,
       outcome: 'blocked',
       workspace,
       conflicts: [],
       decisions,
-      errors: driverControls
-        .filter((control) => control.blocking)
-        .map((control) => ({
-          code: 'conflicting-environment-control',
-          detail: `${control.control} would run over a path this merge writes`,
-          evidence: control.effect,
-        })),
+      errors: blockingControls.map((control) => ({
+        code: 'conflicting-environment-control',
+        detail: `${control.control} would run over this merge or its commit`,
+        evidence: control.effect,
+      })),
       predecessor: predecessor?.number ?? null,
-      controls: driverControls,
+      controls: admissionControls,
+    }
+  }
+
+  // Resuming adopts content only when this run's own journal says it decided that content.
+  // A staged resolution nobody recorded - a hand-run `git add`, an editor's save-and-stage,
+  // a previous run's decision that was never journalled - would otherwise be committed
+  // under this run's `prepared` status and attributed to a decision it never made. A file
+  // still in conflict is deliberately not "unrecorded": that is the continuation this
+  // document describes, where the decision arrives through `resolutions`.
+  if (alreadyInMerge) {
+    const stray = unrecordedWorkspaceChanges(workspace, number, options.recordedDecisions ?? [])
+    if (stray.length > 0) {
+      return {
+        branch: null,
+        outcome: 'blocked',
+        workspace,
+        conflicts: [],
+        decisions,
+        errors: [
+          {
+            code: 'unfinished-run',
+            detail: `the workspace for #${number} holds staged content this run never decided`,
+            evidence: `${stray.join(', ')} is staged in ${workspace} but absent from the journal's recorded decisions; it was not committed and not discarded - supply the resolution instead of staging it`,
+          },
+        ],
+        predecessor: predecessor?.number ?? null,
+      }
     }
   }
 
@@ -1429,6 +1556,20 @@ function commitWithControls(workspace, message) {
  */
 function inspectControls(repository) {
   const controls = []
+  // The environment routing every Git child would otherwise inherit is reported, not
+  // applied: these names were removed from each child's environment so a task-owned cwd
+  // is real isolation, and a run launched under an override deserves to see that it was.
+  const overrides = routingOverrides()
+  if (overrides.length > 0) {
+    controls.push({
+      control: 'env.routing',
+      value: overrides.join(','),
+      inTaskStorage: 'removed',
+      blocking: false,
+      effect:
+        'these variables chose which repository, index, object store, configuration, or template directory a Git child would talk to; they were removed from every Git child this run starts, so the machine\u2019s real policy applies',
+    })
+  }
 
   // `git config --get-regexp` exits 1 for "no match" and something else for "could not be
   // read". Only the first is an answer; the second means the absence of a control cannot be
@@ -1618,6 +1759,78 @@ function attributedDriverControls(storage, sourceOid, paths, cwd = storage) {
 }
 
 /**
+ * The hooks a task workspace would actually run, read from the workspace itself.
+ *
+ * `git clone --no-checkout` keeps the *first* checkout from running, and it is not
+ * enough on its own: the clone still installs whatever `init.templateDir` holds, an
+ * inherited `core.hooksPath` can point somewhere else entirely, and every later
+ * `checkout`, `merge`, and `commit` in this workspace runs `post-checkout`,
+ * `pre-merge-commit`/`merge-commit`, `pre-commit`, `prepare-commit-msg`, `commit-msg`, and
+ * `post-commit` without asking. Git is asked which directory it would use, in the
+ * repository the command would run in, so a relative `core.hooksPath` resolves the way it
+ * resolves at push time rather than against the caller's directory.
+ *
+ * An installed hook is a mandatory control this helper must not bypass - and whose side
+ * effects (a check runner, a formatter, a network call) it cannot prove - so it blocks.
+ * Nothing here is disabled or overridden.
+ */
+function workspaceHookControls(cwd) {
+  const controls = []
+  const resolved = gitOut(cwd, ['rev-parse', '--git-path', 'hooks'])
+  const hooksDir = resolved
+    ? isAbsolute(resolved)
+      ? resolved
+      : resolve(cwd, resolved)
+    : join(cwd, '.git', 'hooks')
+  controls.push({
+    control: 'hooks.path',
+    value: hooksDir,
+    inTaskStorage: 'resolved',
+    blocking: false,
+    effect:
+      'Git resolves this directory for every hook this workspace would run; it is read from Git rather than assembled here',
+  })
+  if (!existsSync(hooksDir)) return controls
+  let entries = []
+  try {
+    entries = readdirSync(hooksDir)
+  } catch {
+    controls.push({
+      control: 'hooks.directory',
+      value: hooksDir,
+      inTaskStorage: 'resolved',
+      blocking: true,
+      effect:
+        'the hook directory this workspace would use could not be listed, so it cannot be claimed that no hook would run',
+    })
+    return controls
+  }
+  for (const entry of entries) {
+    if (entry.endsWith('.sample')) continue
+    const full = join(hooksDir, entry)
+    let executable = false
+    let isFile = false
+    try {
+      const stat = lstatSync(full)
+      isFile = stat.isFile()
+      executable = (stat.mode & 0o111) !== 0
+    } catch {
+      continue
+    }
+    if (!isFile || !executable) continue
+    controls.push({
+      control: `hooks/${entry}`,
+      value: 'installed in this task workspace',
+      inTaskStorage: 'inherited',
+      blocking: true,
+      effect:
+        'an executable hook is installed where this checkout, merge, and commit would run it; its side effects cannot be proved, so preparation stops instead of bypassing it',
+    })
+  }
+  return controls
+}
+
+/**
  * Prepares the whole selection in dependency order.
  *
  * Emits the contract's `preparation` document plus the recovery facts a blocked run needs:
@@ -1709,6 +1922,39 @@ function prepareStackInner(raw) {
       verification: [],
       continuation: { prepared: [], remaining: input.order, resumeFrom: null },
       conflicts: [],
+    }
+  }
+
+  // A resumed run inherits the baseline the first run journalled, not only the state it
+  // happens to find. The user's checkout is not this run's to move, and a difference that
+  // appeared between the two runs is a fact about their work, not something to fold into
+  // this run's preservation claim.
+  if (existing && input.resume && userBefore && existing.userWorkspaceBaseline) {
+    const drift = fingerprintDrift(existing.userWorkspaceBaseline, userBefore)
+    if (drift.length > 0) {
+      return {
+        contractVersion: CONTRACT_VERSION,
+        ok: false,
+        errors: [
+          {
+            code: 'conflicting-environment-control',
+            detail:
+              "the user's checkout, index, stash, or configuration changed between the journalled run and this resume",
+            evidence: drift.join('; '),
+          },
+        ],
+        run: { runId, runDirectory: input.runDirectory, journalPath, workspaces: [], backupRefs: [] },
+        preparation: null,
+        verification: [],
+        continuation: existing.continuation ?? {
+          prepared: [],
+          remaining: input.order,
+          resumeFrom: null,
+        },
+        conflicts: existing.conflicts ?? [],
+        userWorkspace: userBefore,
+        controls,
+      }
     }
   }
   // The journal-state gate runs once task-owned storage exists, so a completed run can be
@@ -1920,6 +2166,7 @@ function prepareStackInner(raw) {
         predecessor,
         preparedRefs: null,
         resolutionIndex,
+        recordedDecisions: journal.decisions,
       })
     } catch (error) {
       const failure =
@@ -2043,23 +2290,26 @@ function prepareStackInner(raw) {
   }
 
   const userAfter = readUserFingerprint(input.userWorkspace)
-  if (userBefore && userAfter) {
-    const changed =
-      userAfter.headOid !== userBefore.headOid ||
-      userAfter.status !== userBefore.status ||
-      userAfter.indexDigest !== userBefore.indexDigest ||
-      userAfter.worktreeDigest !== userBefore.worktreeDigest ||
-      userAfter.stashOids !== userBefore.stashOids ||
-      userAfter.stashCount !== userBefore.stashCount ||
-      userAfter.configDigest !== userBefore.configDigest ||
-      userAfter.identity !== userBefore.identity
-    if (changed) {
-      errors.push({
-        code: 'conflicting-environment-control',
-        detail: "the user's checkout, index, stash, or configuration changed during preparation",
-        evidence: `status before=${userBefore.status}, after=${userAfter.status}`,
-      })
-    }
+  const userDrift = fingerprintDrift(userBefore, userAfter)
+  if (userDrift.length > 0) {
+    errors.push({
+      code: 'conflicting-environment-control',
+      detail: "the user's checkout, index, stash, or configuration changed during preparation",
+      evidence: userDrift.join('; '),
+    })
+  }
+  // Only when a workspace was actually named: with nothing to preserve there is no
+  // observation to record, and an `unautomated` row here would read as a check that was
+  // skipped rather than one that had no subject.
+  if (userBefore) {
+    verification.push({
+      invariant: 'preservation.user-worktree',
+      observed:
+        userDrift.length === 0
+          ? 'HEAD, porcelain status, staged diff, worktree diff, untracked contents, stash object ids, local config, and identity are unchanged'
+          : userDrift.join('; '),
+      result: userDrift.length === 0 ? 'pass' : 'fail',
+    })
   }
 
   const status =

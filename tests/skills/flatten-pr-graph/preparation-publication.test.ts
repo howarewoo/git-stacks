@@ -48,7 +48,7 @@ interface PreparedRun {
     }>
     lostOriginalCommits: string[]
   }
-  verification: Array<{ invariant: string; observed: string; result: string }>
+  run: null | { runDirectory: string; journalPath: string; storage?: string }
   continuation: { prepared: number[]; remaining: number[]; resumeFrom: number | null }
   journalPath: string
   repeated?: boolean
@@ -193,6 +193,9 @@ function publicationDocument(
     ),
     root: { ref: 'refs/heads/main', oid: root },
     observedRefs: { 'refs/heads/main': root },
+    // The manifest alone is a claim; publication reads the task-owned run that produced it,
+    // so every publication in this file names the run its preparation wrote.
+    preparationRunDirectory: prepared.run?.runDirectory,
     pullRequests: Object.fromEntries(
       numbers.map((number) => [number, pinnedPullRequest(number, BRANCHES[number])]),
     ),
@@ -963,4 +966,309 @@ test('unauthorized invocation leaves existing recovery journal intact', async (t
   const readBack = JSON.parse(readFileSync(journalPath, 'utf8'))
   assert.equal(readBack.state, 'partial')
   assert.equal(readBack.attempts[0].outcome, 'unknown')
+})
+
+test('a source ref deleted after preparation invalidates the recorded run', async (t) => {
+  const world = await createWorld('prepare-deleted-source-ref')
+  t.after(() => world.cleanup())
+  const a = await seedBranch(world, BRANCHES[12], { 'a.txt': 'a\n' })
+  const request: PrepareInput = {
+    runDirectory: join(world.root, 'run'),
+    order: [12],
+    heads: { 12: `refs/heads/${BRANCHES[12]}` },
+    originalHeads: { 12: a },
+  }
+  const first = await runPrepare(world, request)
+  assert.equal(first.ok, true, JSON.stringify(first.errors))
+
+  // The task-owned snapshot namespace still holds the deleted ref; only the source knows.
+  world.gitIn(world.remote, 'update-ref', '-d', `refs/heads/${BRANCHES[12]}`)
+  const repeat = await runPrepare(world, request)
+
+  assert.equal(repeat.ok, false)
+  assert.equal(repeat.preparation, null)
+  assert.ok(
+    repeat.errors.some((error) => error.code === 'stale-snapshot'),
+    JSON.stringify(repeat.errors),
+  )
+})
+
+test('a resume does not adopt a staged resolution the journal never recorded', async (t) => {
+  const world = await createWorld('prepare-unrecorded-resolution')
+  t.after(() => world.cleanup())
+  const rootOid = await advanceRoot(world, { 'shared.txt': 'seed\n' })
+  const a = await seedBranch(world, BRANCHES[12], { 'shared.txt': 'ours\n' })
+  const conflicting = await seedBranch(world, BRANCHES[15], { 'shared.txt': 'theirs\n' })
+  const runDirectory = join(world.root, 'run')
+  const request: PrepareInput = {
+    runDirectory,
+    order: [12, 15],
+    heads: { 12: `refs/heads/${BRANCHES[12]}`, 15: `refs/heads/${BRANCHES[15]}` },
+    originalHeads: { 12: a, 15: conflicting },
+    root: { ref: 'refs/heads/main', oid: rootOid },
+  }
+  const blocked = await runPrepare(world, request)
+  assert.equal(blocked.status, 'partial')
+
+  // Somebody resolves the conflict by hand and stages it. The index now records content
+  // this run never decided, so continuing would attribute it to a decision nobody made.
+  const workspace = join(runDirectory, 'workspaces', 'pr-15')
+  writeFileSync(join(workspace, 'shared.txt'), 'seed\nours\ntheirs\n')
+  world.gitIn(workspace, 'add', 'shared.txt')
+  const staged = world.resolveIn(workspace, 'HEAD')
+
+  const resumed = await runPrepare(world, { ...request, resume: true })
+
+  assert.equal(resumed.ok, false)
+  assert.ok(
+    resumed.errors.some(
+      (error) =>
+        error.code === 'unfinished-run' && /never decided/.test(error.detail) === true,
+    ),
+    JSON.stringify(resumed.errors),
+  )
+  // Nothing was committed on the strength of the unrecorded content.
+  assert.equal(world.resolveIn(workspace, 'HEAD'), staged)
+})
+
+test('an executable hook installed in a task workspace stops the resumed merge', async (t) => {
+  const world = await createWorld('prepare-workspace-hook')
+  t.after(() => world.cleanup())
+  const rootOid = await advanceRoot(world, { 'shared.txt': 'seed\n' })
+  const a = await seedBranch(world, BRANCHES[12], { 'shared.txt': 'ours\n' })
+  const conflicting = await seedBranch(world, BRANCHES[15], { 'shared.txt': 'theirs\n' })
+  const runDirectory = join(world.root, 'run')
+  const request: PrepareInput = {
+    runDirectory,
+    order: [12, 15],
+    heads: { 12: `refs/heads/${BRANCHES[12]}`, 15: `refs/heads/${BRANCHES[15]}` },
+    originalHeads: { 12: a, 15: conflicting },
+    root: { ref: 'refs/heads/main', oid: rootOid },
+  }
+  const blocked = await runPrepare(world, request)
+  assert.equal(blocked.status, 'partial')
+
+  const workspace = join(runDirectory, 'workspaces', 'pr-15')
+  const hooksDir = join(workspace, '.git', 'hooks')
+  mkdirSync(hooksDir, { recursive: true })
+  writeFileSync(join(hooksDir, 'pre-commit'), '#!/bin/sh\nexit 1\n', { mode: 0o755 })
+  const before = world.resolveIn(workspace, 'HEAD')
+
+  const resumed = await runPrepare(world, {
+    ...request,
+    resume: true,
+    resolutions: [
+      {
+        number: 15,
+        path: 'shared.txt',
+        content: 'seed\nours\ntheirs\n',
+        intent: 'keep the root text and the change #15 states',
+        reason: 'both sides stated; neither is a strict superset',
+      },
+    ],
+  })
+
+  assert.equal(resumed.ok, false)
+  assert.ok(
+    resumed.errors.some(
+      (error) =>
+        error.code === 'conflicting-environment-control' && /hooks\/pre-commit/.test(error.detail),
+    ),
+    JSON.stringify(resumed.errors),
+  )
+  assert.equal(world.resolveIn(workspace, 'HEAD'), before)
+})
+
+test('publication refuses a manifest with no task-owned run behind it', async (t) => {
+  const world = await createWorld('publish-no-handoff')
+  t.after(() => world.cleanup())
+  const a = await seedBranch(world, BRANCHES[12], { 'a.txt': 'a\n' })
+  const prepared = await runPrepare(world, {
+    runDirectory: join(world.root, 'run'),
+    order: [12],
+    heads: { 12: `refs/heads/${BRANCHES[12]}` },
+    originalHeads: { 12: a },
+  })
+  assert.equal(prepared.ok, true, JSON.stringify(prepared.errors))
+  const before = world.remoteRefs()
+  const document = publicationDocument(world, prepared, [12])
+  document.preparationRunDirectory = join(world.root, 'somewhere-else')
+
+  const refused = await runPublish(world, document, {
+    readRemoteRefs: () => {
+      throw new Error('the remote was listed before the local handoff was checked')
+    },
+  })
+
+  assert.equal(refused.status, 'blocked')
+  assert.deepEqual(refused.publication.attempts, [])
+  assert.deepEqual(world.remoteRefs(), before)
+  assert.deepEqual(providerCalls(world), [])
+})
+
+test('publication refuses a preparation journal written for a different plan', async (t) => {
+  const world = await createWorld('publish-mutated-journal')
+  t.after(() => world.cleanup())
+  const a = await seedBranch(world, BRANCHES[12], { 'a.txt': 'a\n' })
+  const runDirectory = join(world.root, 'run')
+  const prepared = await runPrepare(world, {
+    runDirectory,
+    order: [12],
+    heads: { 12: `refs/heads/${BRANCHES[12]}` },
+    originalHeads: { 12: a },
+  })
+  assert.equal(prepared.ok, true, JSON.stringify(prepared.errors))
+
+  // The journal still says `prepared`, but for a selection this publication is not making.
+  const journalFile = join(runDirectory, 'journal.json')
+  const journal = JSON.parse(readFileSync(journalFile, 'utf8'))
+  journal.selection = [12, 99]
+  journal.preparedHeads['99'] = a
+  writeFileSync(journalFile, JSON.stringify(journal))
+  const before = world.remoteRefs()
+
+  const refused = await runPublish(world, publicationDocument(world, prepared, [12]))
+
+  assert.equal(refused.status, 'blocked')
+  assert.ok(
+    refused.errors.some((error) => /different selection/.test(error.detail)),
+    JSON.stringify(refused.errors),
+  )
+  assert.deepEqual(refused.publication.attempts, [])
+  assert.deepEqual(world.remoteRefs(), before)
+})
+
+test('a resume under a different pull-request snapshot is refused', async (t) => {
+  const world = await createWorld('publish-resume-mutated-snapshot')
+  t.after(() => world.cleanup())
+  const a = await seedBranch(world, BRANCHES[12], { 'a.txt': 'a\n' })
+  const b = await seedBranch(world, BRANCHES[13], { 'b.txt': 'b\n' })
+  const prepared = await runPrepare(world, {
+    runDirectory: join(world.root, 'run'),
+    order: [12, 13],
+    heads: { 12: `refs/heads/${BRANCHES[12]}`, 13: `refs/heads/${BRANCHES[13]}` },
+    originalHeads: { 12: a, 13: b },
+  })
+  assert.equal(prepared.ok, true, JSON.stringify(prepared.errors))
+  const runDirectory = join(world.root, 'publication')
+  const document = publicationDocument(world, prepared, [12, 13], { runDirectory })
+
+  const refusing = providerModule(world, {
+    refuseBase: 'if (number === 13) return { ok: false, applied: false }',
+  })
+  const partial = await runPublish(world, {
+    ...document,
+    provider: { module: refusing },
+  })
+  assert.equal(partial.status, 'partial', JSON.stringify(partial.errors))
+  const refsAfterPartial = world.remoteRefs()
+
+  // A resume that quietly re-declares #13 as a draft is a different authorization, and
+  // adopting it would let the run write metadata the original grant never covered.
+  const mutated = JSON.parse(JSON.stringify(document)) as PublicationDocument
+  mutated.provider = { module: refusing }
+  ;(mutated.pullRequests as Record<string, Record<string, unknown>>)['13'].draft = true
+  const refused = await runPublish(world, { ...mutated, resume: true })
+
+  assert.equal(refused.status, 'blocked')
+  assert.deepEqual(refused.publication.attempts, [])
+  assert.deepEqual(world.remoteRefs(), refsAfterPartial)
+})
+
+test('an unselected ref that moves during publication is reported, not published over', async (t) => {
+  const world = await createWorld('publish-unselected-drift')
+  t.after(() => world.cleanup())
+  const a = await seedBranch(world, BRANCHES[12], { 'a.txt': 'a\n' })
+  const b = await seedBranch(world, BRANCHES[13], { 'b.txt': 'b\n' })
+  const unrelated = await seedBranch(world, 'unrelated', { 'u.txt': 'u\n' })
+  const prepared = await runPrepare(world, {
+    runDirectory: join(world.root, 'run'),
+    order: [12, 13],
+    heads: { 12: `refs/heads/${BRANCHES[12]}`, 13: `refs/heads/${BRANCHES[13]}` },
+    originalHeads: { 12: a, 13: b },
+  })
+  assert.equal(prepared.ok, true, JSON.stringify(prepared.errors))
+  const root = world.remoteRefs()['refs/heads/main']
+  const document = publicationDocument(world, prepared, [12, 13], {
+    observedRefs: {
+      'refs/heads/main': root,
+      'refs/heads/unrelated': unrelated,
+    },
+  })
+
+  let reads = 0
+  const mover = await seedBranch(world, 'unrelated-next', { 'u2.txt': 'u2\n' })
+  const drifted = await runPublish(world, document, {
+    readRemoteRefs: (repository: string, endpoint: string) => {
+      reads += 1
+      const refs: Record<string, string> = {}
+      for (const line of world.gitIn(repository, 'ls-remote', '--heads', endpoint).split('\n')) {
+        const [oid, ref] = line.trim().split(/\s+/)
+        if (oid && ref) refs[ref] = oid
+      }
+      // Somebody else's push lands after the pre-flight read and before the final one.
+      if (reads >= 2) refs['refs/heads/unrelated'] = mover
+ return refs
+    },
+  })
+
+  assert.notEqual(drifted.status, 'published')
+  assert.ok(
+    drifted.verification.some(
+      (row) => row.invariant === 'preservation.unselected-refs' && row.result === 'fail',
+    ),
+    JSON.stringify(drifted.verification),
+  )
+  assert.equal(world.remoteRefs()['refs/heads/unrelated'], unrelated)
+})
+
+test('a root that moves after the writes is reported against the pinned snapshot', async (t) => {
+  const world = await createWorld('publish-post-write-root')
+  t.after(() => world.cleanup())
+  const a = await seedBranch(world, BRANCHES[12], { 'a.txt': 'a\n' })
+  const prepared = await runPrepare(world, {
+    runDirectory: join(world.root, 'run'),
+    order: [12],
+    heads: { 12: `refs/heads/${BRANCHES[12]}` },
+    originalHeads: { 12: a },
+  })
+  assert.equal(prepared.ok, true, JSON.stringify(prepared.errors))
+  const pinned = world.remoteRefs()['refs/heads/main']
+  const moved = await seedBranch(world, 'root-moved-later', { 'r.txt': 'r\n' })
+  let reads = 0
+
+  const published = await runPublish(
+    world,
+    publicationDocument(world, prepared, [12]),
+    {
+      readRemoteRefs: (repository: string, endpoint: string) => {
+        reads += 1
+        const refs: Record<string, string> = {}
+        for (const line of world.gitIn(repository, 'ls-remote', '--heads', endpoint).split('\n')) {
+          const [oid, ref] = line.trim().split(/\s+/)
+          if (oid && ref) refs[ref] = oid
+        }
+        if (reads >= 2) refs['refs/heads/main'] = moved
+        return refs
+      },
+    },
+  )
+
+  assert.equal(published.status, 'published', JSON.stringify(published.errors))
+  assert.ok(published.rootAdvance, 'the root advance must be reported')
+  assert.equal(published.rootAdvance?.integrated, false)
+  assert.equal(published.rootAdvance?.pinned, pinned)
+  assert.equal(published.rootAdvance?.observed, moved)
+  assert.ok(
+    published.verification.some(
+      (row) => row.invariant === 'preservation.root' && row.result === 'fail',
+    ),
+    JSON.stringify(published.verification),
+  )
+  // The head really did land, and the real root really did not move.
+  assert.equal(
+    world.remoteRefs()[`refs/heads/${BRANCHES[12]}`],
+    prepared.preparation?.branches[0].preparedHead,
+  )
+  assert.equal(world.remoteRefs()['refs/heads/main'], pinned)
 })

@@ -38,6 +38,27 @@ Nothing from the preparation document is taken on trust. Before any write the ru
    auto-merge request. A pull request that has been closed, retargeted at another branch,
    or had auto-merge enabled is a blocker, not a repair job.
 
+## 2.1 The prepared set's own evidence
+
+`preparationRunDirectory` is required, not optional. Before the remote is even listed the
+run reads the task-owned directory that produced the manifest: its `journal.json` must
+name the contract, record a state of `prepared` for exactly this selection, order, root
+ref and commit, head refs, original heads, and prepared commits, and still own a
+`workspaces/pr-<n>` for every selected pull request with no unmerged index entry, no Git
+operation in progress, and no conflict marker in a committed tree. A manifest handed over
+without that directory behind it is a claim, and a claim is not what gets published; the
+run stops with `stale-snapshot` and writes nothing.
+
+The recorded observation of a selected head is admissible in one of two states only: the
+original commit the plan was authorized against, or this run's own prepared commit, which
+is what a lost acknowledgement or an accepted rerun leaves behind. Anything else means the
+request is asking the run to adopt a change it never authorized.
+
+Resume is bound to the same immutable plan, now including the full `pullRequests` snapshot
+and the single resolved push endpoint. A resume that carries a different identity, state,
+base, title, or draft state - or that addresses another destination - is a different
+authorization, not a continuation, and it is refused before any read or write.
+
 ## 3. Controls, then capability, then the write
 
 Nothing is attempted until both of these are answered:
@@ -111,9 +132,17 @@ acknowledged and what is not.
 
 ## 6. After the last write
 
-Re-read every selected head and every selected base and report the chain as observed. If
-the root advanced after the plan was authorized, say so against the **pinned** snapshot:
+Re-read every selected head and every selected base and report the chain as observed. Every
+ref the snapshot covered outside the authorized write set is re-read too, because a
+pre-flight comparison proves nothing about a push that landed in between; a ref that moved
+during the run is reported and the result is not `published`.
+
+If the root advanced after the plan was authorized, say so against the **pinned** snapshot:
 the prepared chain integrates the pinned root, and the newer root work is not part of it.
+A root that moves *after* the last write is reported the same way, with
+`preservation.root: fail` and `rootAdvance.integrated: false` - never as a chain that is
+current against work nothing here merged.
+
 If an unselected pull request depends on one of the retargeted branches, report that it
 still points at the old base - a fact about the repository, not a decision to fix it.
 

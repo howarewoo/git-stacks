@@ -1498,30 +1498,55 @@ or a partial outcome.
 
 - `scripts/prepare-stack.mjs` takes an authorized plan (`repository`, `runDirectory`,
   `root`, `selection`, `order`, `heads`, `originalHeads`, and optional `resolutions`,
-  `justifiedDrops`, `resume`). It works only in `<runDirectory>/storage.git` and
-  `<runDirectory>/workspaces/<n>`, integrates each original head onto its predecessor's
-  _prepared_ head cumulatively, leaves unresolved conflicts in place with both sides'
-  blobs, the merge base, and both diffs as evidence, and returns `preparation`,
-  `verification`, `continuation`, and `journalPath`. It never pushes, never touches the
-  user's checkout, and never resolves a conflict itself.
+  `justifiedDrops`, `resume`). It is **synchronous** - every Git call it makes is a real
+  `git` child process, and it has no provider boundary. It works only in
+  `<runDirectory>/storage.git` and `<runDirectory>/workspaces/<n>`, integrates each original
+  head onto its predecessor's _prepared_ head cumulatively, leaves unresolved conflicts in
+  place with both sides' blobs, the merge base, and both diffs as evidence, and returns
+  `preparation`, `verification`, `continuation`, and `journalPath`. It never pushes, never
+  touches the user's checkout, and never resolves a conflict itself.
 - `scripts/publish-stack.mjs` takes that prepared set plus `authority` (`intent: "execute"`,
   the exact `selection`, `granted` mutation kinds), `remote`, `heads`, `intendedBases`,
-  and `provider.module`. It re-verifies the prepared set against the remote, stops before
-  writing when configuration or a hook would widen the push or the remote cannot do an
-  atomic ref transaction, then performs one `--atomic` push of explicit refspecs with
-  per-ref `--force-with-lease`, followed by ordered base retargeting. It returns the
-  contract's `publication` document plus `capability`, `controls`, `authority`,
-  `recovery`, and `nextSafeAction`.
+  the full `pullRequests` snapshot, `observedRefs`, and `provider.module`. It is
+  **asynchronous** because the provider module may answer with a promise. It re-verifies
+  the prepared set against the remote, stops before writing when configuration or a hook
+  would widen the push or the remote cannot do an atomic ref transaction, then performs one
+  `--atomic` push of explicit refspecs with per-ref `--force-with-lease`, followed by
+  ordered base retargeting. It returns the contract's `publication` document plus
+  `capability`, `controls`, `authority`, `recovery`, and `nextSafeAction`.
 - `scripts/github-provider.mjs` is the GitHub implementation of the three provider
-  operations (`capabilities`, `readPullRequest`, `updatePullRequestBase`). Its base
-  writes carry GitHub's `expected_base`, so they are a genuine compare-and-swap; a
-  provider without one is reported as read-before-write with a residual race.
+  operations (`capabilities`, `readPullRequest`, `updatePullRequestBase`). GitHub's
+  `PATCH /repos/{owner}/{repo}/pulls/{n}` documents no server-side precondition, so the
+  provider reports `compareAndSwap: false` and publication records base writes as
+  `baseWritesGuardedBy: "read-before-write"` with `residualMetadataRace: true`. A read
+  before a write is not an atomic compare-and-swap and a concurrent edit inside that
+  window is not detectable from here.
+
+Publication takes one required input beyond the manifest: `preparationRunDirectory`, the
+task-owned run that produced it. The run reads that directory - its `journal.json` must
+name the contract, record a complete `prepared` preparation of exactly this selection,
+order, root, heads, and prepared commits, and still own a `workspaces/pr-<n>` per selected
+pull request with no unmerged entry, operation, or committed conflict marker. An absent or
+mismatched run directory stops the publication before the remote is even listed; a
+manifest is never published on its own authority.
+
+Preparation additionally refuses, before writing anything, when the source repository
+enforces a policy the task workspaces cannot inherit: `commit.gpgsign`, a local
+`core.hooksPath`, an executable source hook, a tracked `.gitattributes` entry naming a
+configured `filter`/`merge`/`diff` command, or an executable hook installed in the task
+workspace Git itself resolves. Git repository-routing variables in the caller's
+environment (`GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`, the `GIT_CONFIG_*` family,
+`GIT_TEMPLATE_DIR`, and the rest) are removed from every Git child this run starts and
+reported under `controls`, so a task-owned working directory is real isolation. A resumed
+run adopts content only when its own journal recorded the decision; a staged resolution
+nobody recorded is reported, not committed.
 
 ```sh
 # Local preparation from a task-owned run directory
 node .agents/skills/flatten-pr-graph/scripts/prepare-stack.mjs --input plan.json > prepared.json
 
-# Publication, only with an explicit execute grant for that exact selection
+# Publication, only with an explicit execute grant for that exact selection and the
+# preparationRunDirectory the manifest came from
 FLATTEN_PR_PROVIDER_MODULE="$PWD/.agents/skills/flatten-pr-graph/scripts/github-provider.mjs" \
   node .agents/skills/flatten-pr-graph/scripts/publish-stack.mjs --input publication.json
 ```

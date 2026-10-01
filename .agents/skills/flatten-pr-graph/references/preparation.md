@@ -25,12 +25,41 @@ decided mechanically, and what a recoverable partial state looks like.
    state, and never stash, reset, clean, or checkout anything in the user's worktree.
 4. Fetch nothing from a remote. The run copies the branches the plan pinned.
 
-`scripts/prepare-stack.mjs` performs steps 1-4 as a deterministic helper: it owns
+5. Admit the environment before the first working-tree write. A source that enforces
+   `commit.gpgsign`, a local `core.hooksPath`, or an executable policy hook cannot have
+   that policy inherited by a task clone, so it is reported and the run stops rather than
+   committing under weaker rules. A tracked `.gitattributes` entry that names a configured
+   `filter`, `merge` driver, or `diff` command for any path the checkout or merge would
+   write is the same case: the decision is made before the merge, because a driver that
+   keeps one side leaves a clean-looking result with the other side's content dropped.
+   `git clone --no-checkout` only defers the first checkout, so the task workspace's own
+   hook directory - asked of Git, so a relative `core.hooksPath` resolves where the push
+   would resolve it - is admitted too. Repository-routing variables in the caller's
+   environment (`GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`, `GIT_OBJECT_DIRECTORY`,
+   `GIT_ALTERNATE_OBJECT_DIRECTORIES`, `GIT_COMMON_DIR`, `GIT_CEILING_DIRECTORIES`, the
+   `GIT_CONFIG_*` family, `GIT_TEMPLATE_DIR`, `GIT_EXTERNAL_DIFF`, `GIT_DIFF_OPTS`) are
+   removed from every Git child and named in `controls`, because a task-owned working
+   directory is not isolation while any of them survives.
+6. Read the pinned refs from the source itself, not from a cached copy in task storage.
+   A ref deleted at the source since the plan was authorized is a blocker, even though the
+   previous run's fetch left a destination ref behind that would otherwise satisfy the
+   snapshot check.
+7. On resume, adopt staged content only when this run's journal recorded the decision for
+   that path. A file still in conflict is the documented continuation - the decision
+   arrives through `resolutions` - but a path that has already left the unmerged set was
+   resolved by somebody and staged, and committing it would attribute it to a decision
+   this run never made.
+8. Compare the user's fingerprint against the one the *first* run journalled, not only
+   against this run's own start, so a change made between two runs is a fact about the
+   user's work rather than something folded into this run's preservation claim.
+
+`scripts/prepare-stack.mjs` performs steps 1-8 as a deterministic helper: it owns
 `<runDirectory>/storage.git`, `<runDirectory>/workspaces/<n>`, and
 `<runDirectory>/journal.json`, and it never writes into the user's checkout, config, refs,
 or stash list. Its `verification` array is read back from Git - ancestry, cumulative
-containment, contributed-versus-prepared paths, `integrity.clean` - not from its own
-claim fields.
+containment, contributed-versus-prepared paths, `integrity.clean`,
+`preservation.user-worktree` - not from its own claim fields. The helper is synchronous:
+every Git call it makes is a real child process and it has no provider boundary.
 
 ## 2. Cumulative integration, position by position
 
