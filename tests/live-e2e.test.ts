@@ -28,14 +28,6 @@ import { readCommittedSchema } from './live/schema-fixture'
 import { pushCommit } from './live/layers'
 import { ControlledLiveTarget, resolveRealGit } from './live/targets'
 
-/**
- * The variable naming the default branch the disposable repository is created with.
- *
- * Named here rather than through `LIVE_ENV` so this file states the whole environment a
- * run needs, which is what the configuration case below is about.
- */
-const DEFAULT_BRANCH_ENV = 'GIT_STACKS_LIVE_GITHUB_DEFAULT_BRANCH'
-
 const execFileAsync = promisify(execFile)
 
 /**
@@ -237,15 +229,7 @@ test('the configuration names every variable it is missing and refuses an owner 
       // The host is required alongside the owner and the token. A run that inherits
       // one has inherited a fact about the environment that decides where a real
       // disposable-account credential is sent, and only a person can settle that.
-      // The default branch is required alongside the owner, the host and the token: it is
-      // what the disposable repository is created with, and a run that guessed it would
-      // create a repository whose first commit is on a branch nobody asked for.
-      assert.deepEqual(error.missing, [
-        LIVE_ENV.owner,
-        LIVE_ENV.host,
-        LIVE_ENV.token,
-        DEFAULT_BRANCH_ENV,
-      ])
+      assert.deepEqual(error.missing, [LIVE_ENV.owner, LIVE_ENV.host, LIVE_ENV.token])
       return true
     },
   )
@@ -256,22 +240,11 @@ test('the configuration names every variable it is missing and refuses an owner 
           [LIVE_ENV.owner]: owner,
           [LIVE_ENV.host]: 'github.com',
           [LIVE_ENV.token]: 'configured',
-          [DEFAULT_BRANCH_ENV]: 'main',
         }),
       LiveConfigurationError,
       `owner ${JSON.stringify(owner)} would name a repository that is not this run's`,
     )
   }
-  assert.throws(
-    () =>
-      readLiveRunConfig({
-        [LIVE_ENV.owner]: 'acme',
-        [LIVE_ENV.host]: 'github.com',
-        [LIVE_ENV.token]: 'configured',
-      }),
-    LiveConfigurationError,
-    'a run without a default branch was accepted rather than told which variable to set',
-  )
   // Both endpoints are derived from that one host, and neither is taken from the
   // environment when it is not stated: a machine set up for local development would
   // otherwise decide where the run's credential authenticates.
@@ -279,7 +252,6 @@ test('the configuration names every variable it is missing and refuses an owner 
     [LIVE_ENV.owner]: 'acme',
     [LIVE_ENV.host]: 'github.enterprise.example',
     [LIVE_ENV.token]: 'primary-token',
-    [DEFAULT_BRANCH_ENV]: 'main',
   })
   assert.equal(enterprise.apiUrl, 'https://github.enterprise.example/api/v3')
   assert.equal(enterprise.graphqlUrl, 'https://github.enterprise.example/api/graphql')
@@ -287,7 +259,6 @@ test('the configuration names every variable it is missing and refuses an owner 
     [LIVE_ENV.owner]: 'acme',
     [LIVE_ENV.host]: 'github.com',
     [LIVE_ENV.token]: 'primary-token',
-    [DEFAULT_BRANCH_ENV]: 'main',
   })
   assert.equal(dotCom.apiUrl, 'https://api.github.com')
   assert.equal(dotCom.graphqlUrl, 'https://api.github.com/graphql')
@@ -297,7 +268,6 @@ test('the configuration names every variable it is missing and refuses an owner 
     [LIVE_ENV.owner]: 'acme',
     [LIVE_ENV.host]: 'github.com',
     [LIVE_ENV.token]: 'primary-token',
-    [DEFAULT_BRANCH_ENV]: 'main',
     [LIVE_ENV.reviewerToken]: 'reviewer-token',
   })
   assert.deepEqual([...configured.secrets].sort(), ['primary-token', 'reviewer-token'])
