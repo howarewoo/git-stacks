@@ -27,6 +27,18 @@ export interface IsolatedGitEnvironment {
   /** The environment every Git command in this run is executed with. */
   readonly env: NodeJS.ProcessEnv
   /**
+   * Puts this environment into the process, exactly.
+   *
+   * `Object.assign(process.env, ...)` cannot do this on its own: it adds and
+   * overwrites but never removes, so every variable this environment retires —
+   * an inherited `GIT_DIR`, a `credential.helper`, a `GIT_TRACE_CURL`, the
+   * `GIT_STACKS_GITHUB_TOKEN` somebody else configured — would stay in the process
+   * for the whole run and still be read by every Git the application's own services
+   * start. That is the difference between an environment object and an installed one,
+   * so it is spelled out rather than left to the caller to get right.
+   */
+  install(): void
+  /**
    * Puts the process back the way the run found it. Every variable this installed is
    * removed and every variable it replaced is restored, whether the run succeeded,
    * failed, or was killed mid-command.
@@ -141,6 +153,25 @@ export async function installIsolatedGitEnvironment(
   await mkdir(template, { recursive: true })
   await writeFile(join(home, '.gitconfig'), '', 'utf8')
 
+  // The process exactly as this run found it. Isolation is only honest if it can be
+  // undone, and it cannot be undone without knowing what was there: a variable this
+  // run retires is one the ambient configuration may legitimately have set, and
+  // restoring "the sanitized set" instead of this would both keep the run's own
+  // credential headers installed and lose the ambient values for good.
+  const original: NodeJS.ProcessEnv = { ...process.env }
+
+  /**
+   * Makes the process environment match `wanted` in both directions.
+   *
+   * Cleared and rewritten rather than merged in one pass, because merging cannot be
+   * exact: a variable this run retired and then `Object.assign`ed back lands at the
+   * end of the environment instead of where it was, so "the process is as it was"
+   * would be true of the values and false of the object.
+   */
+  const replaceEnvironment = (wanted: NodeJS.ProcessEnv): void => {
+    for (const key of Object.keys(process.env)) delete process.env[key]
+    Object.assign(process.env, wanted)
+  }
   const env: NodeJS.ProcessEnv = { ...process.env }
   for (const name of [...AMBIENT_GIT_VARIABLES, ...TRACING_VARIABLES]) delete env[name]
   // A run cannot reach github.com through an API base somebody else configured, and
@@ -198,11 +229,9 @@ export async function installIsolatedGitEnvironment(
 
   return {
     env,
-    restore: () => {
-      for (const key of Object.keys(process.env)) {
-        if (process.env[key] !== env[key]) delete process.env[key]
-      }
-      Object.assign(process.env, env)
-    },
+    install: () => replaceEnvironment(env),
+    // An exact inverse of `install`: the run's credential headers and its counted
+    // GIT_CONFIG pairs go, and the ambient values the run overwrote come back.
+    restore: () => replaceEnvironment(original),
   }
 }

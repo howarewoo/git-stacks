@@ -83,7 +83,7 @@ const RECEIPT_MARKER = 'git-stacks-live-e2e#marker-1'
 
 async function writeReceipt(
   seed: (ledger: ResourceLedger) => void,
-): Promise<{ receipt: LiveReceipt; discard: () => Promise<void> }> {
+): Promise<{ receipt: LiveReceipt; path: string; discard: () => Promise<void> }> {
   const directory = await mkdtemp(join(tmpdir(), 'git-stacks-live-recovery-'))
   const path = join(directory, 'receipt.json')
   const ledger = new ResourceLedger({
@@ -98,6 +98,7 @@ async function writeReceipt(
   await ledger.flush()
   return {
     receipt: await readLiveReceiptSync(path),
+    path,
     discard: async () => {
       await rm(directory, { recursive: true, force: true })
     },
@@ -681,6 +682,103 @@ test("recovery removes what still carries the run's id and marker, and creates n
   await written.discard()
 })
 
+test('an organization-owned receipt recovers through the account that created it', async () => {
+  // The owner and the actor are different people whenever a run is pointed at an
+  // organization, because a user account creates the repository and the organization
+  // owns it. Requiring the credential to be the owner would refuse exactly the runs
+  // that most need recovering, so what authenticates here is the recorded actor.
+  const written = await writeReceipt((ledger) => {
+    void ledger.intent({
+      kind: 'repository',
+      handle: 'acme-org/widgets',
+      marker: RECEIPT_MARKER,
+      createdAt: new Date().toISOString(),
+      pending: true,
+      actor: 'alice',
+    })
+  })
+  const deleted: string[] = []
+  const outcome = await recover({
+    receipt: { ...written.receipt, owner: 'acme-org' },
+    repositories: {
+      'acme-org/widgets': {
+        id: RECEIPTED_ID,
+        description: `Disposable target\n\n${RECEIPT_MARKER}\n`,
+        topics: [],
+      },
+    },
+    surfaces: ['alice'],
+    onDelete: (fullName) => deleted.push(fullName),
+  })
+  assert.deepEqual(outcome.refused, [])
+  assert.deepEqual(outcome.removed, ['acme-org/widgets'])
+  assert.equal(outcome.complete, true)
+  assert.deepEqual(deleted, ['acme-org/widgets'])
+  await written.discard()
+})
+
+test('recovery refuses when the only credential is not the account that created it', async () => {
+  const written = await writeReceipt((ledger) => {
+    void ledger.intent({
+      kind: 'repository',
+      handle: 'acme-org/widgets',
+      marker: RECEIPT_MARKER,
+      createdAt: new Date().toISOString(),
+      pending: true,
+      actor: 'alice',
+    })
+  })
+  const deleted: string[] = []
+  const outcome = await recover({
+    receipt: { ...written.receipt, owner: 'acme-org' },
+    repositories: {
+      'acme-org/widgets': {
+        id: RECEIPTED_ID,
+        description: `Disposable target\n\n${RECEIPT_MARKER}\n`,
+        topics: [],
+      },
+    },
+    surfaces: ['mallory'],
+    onDelete: (fullName) => deleted.push(fullName),
+  })
+  assert.deepEqual(deleted, [], 'an account with no right to the resource deleted it anyway')
+  assert.equal(outcome.complete, false)
+  assert.equal(outcome.refused.length, 1)
+  // The refusal names the account it needed rather than the one it was handed, because
+  // that is the one a person has to go and find.
+  assert.match(outcome.refused[0].reason, /alice/)
+  await written.discard()
+})
+
+test('a recovery with no credential refuses before it can delete anything', async () => {
+  const written = await writeReceipt((ledger) => {
+    void ledger.intent({
+      kind: 'repository',
+      handle: 'acme/widgets',
+      marker: RECEIPT_MARKER,
+      createdAt: new Date().toISOString(),
+      pending: true,
+      actor: 'acme-runner',
+    })
+  })
+  const err: string[] = []
+  const out: string[] = []
+  // The host is the one the receipt names, so this really would reach github.com if the
+  // refusal were not first. That is the point: with no credential there is nothing to
+  // ask and nothing to install, and the run says so instead of dialling out.
+  const code = await runCli({
+    argv: ['--recover', written.path],
+    env: { [LIVE_ENV.host]: written.receipt.host },
+    out: (line) => out.push(line),
+    err: (line) => err.push(line),
+  })
+  assert.equal(code, EXIT_REFUSED)
+  assert.match(err.join('\n'), new RegExp(LIVE_ENV.token))
+  assert.match(err.join('\n'), /Nothing was removed/)
+  assert.equal(out.join('\n'), '', 'a refused recovery printed a result')
+  await written.discard()
+})
+
 test('recovery reports a host it could not ask as unknown, not as removed or absent', async () => {
   const written = await writeReceipt((ledger) => {
     void ledger.intent({
@@ -805,6 +903,91 @@ test("the run's Git environment is exactly the process's again once it is restor
     before,
     'the process environment was not restored',
   )
+})
+
+test('the process boundary holds during the run and closes afterwards', async () => {
+  // The recipe the targets actually use, in a child process of its own. A copy of the
+  // environment object cannot show this: the defect was that merging that object into
+  // `process.env` never removed anything, so the object was correct and the process was
+  // not. Only the process can observe the difference.
+  //
+  // The comparison is against a snapshot the child takes itself, because the ambient
+  // environment is not ours to assume: this machine already sets `GIT_CONFIG_COUNT`
+  // with a counted pair of its own, so a test that asserted "no GIT_CONFIG_COUNT after
+  // restore" would pass on a machine with a clean environment and fail here for
+  // correctly putting back what was there.
+  const HELPER_URL = new URL('./live/git-environment.ts', import.meta.url).href
+  const script = `
+    import { mkdtemp } from 'node:fs/promises'
+    import { tmpdir } from 'node:os'
+    import { join } from 'node:path'
+    import { installIsolatedGitEnvironment } from '${HELPER_URL}'
+
+    const home = await mkdtemp(join(tmpdir(), 'live-env-'))
+    const original = { ...process.env }
+
+    const git = await installIsolatedGitEnvironment({
+      home,
+      author: { name: 'Live', email: 'live@git-stacks.invalid' },
+      credentials: [
+        { url: 'https://github.invalid/acme/widgets.git', header: 'AUTHORIZATION: basic c2VjcmV0' },
+      ],
+    })
+    // Exactly what tests/live/targets.ts does.
+    git.install()
+
+    const count = Number(process.env.GIT_CONFIG_COUNT)
+    const values = []
+    for (let index = 0; index < count; index += 1) values.push(process.env['GIT_CONFIG_VALUE_' + index])
+    const during = {
+      retired: {
+        redirect: process.env.GIT_DIR === undefined,
+        token: process.env.GITHUB_TOKEN === undefined,
+        trace: process.env.GIT_TRACE_CURL === undefined,
+      },
+      // The run's own counted configuration is what is installed now: its credential
+      // header is one of the values, which the ambient pair never was.
+      ownsConfig: values.includes('AUTHORIZATION: basic c2VjcmV0'),
+      hooksPath: process.env.GIT_CONFIG_KEY_0 === 'core.hooksPath',
+    }
+
+    git.restore()
+
+    const after = { exact: JSON.stringify(process.env) === JSON.stringify(original) }
+    const leaked = Object.keys(process.env).filter(
+      (key) => original[key] === undefined && String(process.env[key]).includes('c2VjcmV0'),
+    )
+    after.credentialGone = leaked.length === 0
+    process.stdout.write(JSON.stringify({ during, after }))
+  `
+  const directory = await mkdtemp(join(tmpdir(), 'live-boundary-'))
+  const file = join(directory, 'boundary.mts')
+  writeFileSync(file, script, 'utf8')
+  try {
+    const output = execFileSync(process.execPath, ['--import', 'tsx', file], {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        PATH: process.env.PATH ?? '',
+        GIT_DIR: '/somewhere/else/.git',
+        GITHUB_TOKEN: 'ambient-token',
+        GIT_TRACE_CURL: '1',
+      },
+    })
+    const observed = JSON.parse(output) as {
+      during: { retired: Record<string, boolean>; ownsConfig: boolean; hooksPath: boolean }
+      after: { exact: boolean; credentialGone: boolean }
+    }
+    assert.deepEqual(observed.during, {
+      retired: { redirect: true, token: true, trace: true },
+      ownsConfig: true,
+      hooksPath: true,
+    })
+    assert.equal(observed.after.exact, true, 'the process environment was not exactly restored')
+    assert.equal(observed.after.credentialGone, true, "the run's credential outlived the run")
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
 })
 
 /** The environment, in a form two snapshots can be compared as. */

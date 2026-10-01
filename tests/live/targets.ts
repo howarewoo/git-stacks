@@ -687,8 +687,11 @@ export class ControlledLiveTarget extends DisposableTarget {
       gitTlsCaInfo: server.certificatePath,
     })
     opened.git = git
-    Object.assign(process.env, git.env, {
-      ...harness.env,
+    // `install`, not `Object.assign`: merging adds and overwrites but never removes,
+    // so the retired variables would still be in the process while every Git the
+    // application's own services start inherits them.
+    git.install()
+    Object.assign(process.env, harness.env, {
       GIT_STACKS_GITHUB_API_URL: server.url,
       GIT_STACKS_GITHUB_TRANSPORT: 'direct',
     })
@@ -949,7 +952,7 @@ export class GitHubLiveTarget extends DisposableTarget {
       // scoped to this repository's URL is in none of them.
       credentials: [{ url: remote, header: `AUTHORIZATION: basic ${basicAuth(config.token)}` }],
     })
-    Object.assign(process.env, git.env)
+    git.install()
     setGitHubTransport(faults)
 
     // Everything past this point can create something. From here on, a failure is

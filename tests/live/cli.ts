@@ -229,9 +229,12 @@ export async function runCli(options: CliOptions): Promise<number> {
             `${error.report.remaining.length} resource(s) are still on the host: ${error.report.remaining.join(', ')}`,
           ),
         )
+        options.err(redactor.text(`Recover them with:`))
+        options.err(redactor.text(`  ${recoveryCommand(error.receipt)}`))
         options.err(
           redactor.text(
-            `Recover them with: tsx tests/live/cli.ts --recover ${error.receipt} --host <the host in that receipt>`,
+            `  which is ${LIVE_ENV.host}=<the host named in that receipt> and ` +
+              `${LIVE_ENV.token}=<a token for the account that created them>.`,
           ),
         )
       }
@@ -342,45 +345,93 @@ async function runRecovery(receiptPath: string, options: CliOptions): Promise<nu
   const transports: GitHubTransport[] = []
   const primaryToken = String(options.env[LIVE_ENV.token] ?? '').trim()
   const reviewerToken = String(options.env[LIVE_ENV.reviewerToken] ?? '').trim()
-  const previous = pinnedTransport(host, primaryToken)
-  transports.push(previous)
-  setGitHubTransport(previous)
-  const primaryLogin = await new GitHubAdmin(previous, receipt.owner, receipt.marker)
-    .viewer()
-    .catch((error: unknown) => {
-      throw new Error(
-        `The credential supplied could not be asked who it belongs to: ${describeThrown(error)}`,
-      )
-    })
-  if (primaryLogin.toLowerCase() !== receipt.owner.toLowerCase()) {
+  if (primaryToken === '') {
     options.err(
-      `The receipt was written by ${receipt.owner}, but the credential supplied belongs to ` +
-        `${primaryLogin}. Nothing was removed.`,
+      `A recovery run deletes repositories, so it has to be told a credential. Set ` +
+        `${LIVE_ENV.token} to a token for an account this receipt names as the actor that ` +
+        'created something. Nothing was removed.',
     )
     return EXIT_REFUSED
   }
-  surfaces.set(primaryLogin, new GitHubAdmin(previous, receipt.owner, receipt.marker))
-  if (reviewerToken !== '') {
-    const reviewer = new DirectGitHubTransport({
-      token: reviewerToken,
-      host,
-      apiUrl: host === 'github.com' ? 'https://api.github.com' : `https://${host}/api/v3`,
-      graphqlUrl:
-        host === 'github.com' ? 'https://api.github.com/graphql' : `https://${host}/api/graphql`,
-      env: sanitizedEnv(options.env),
-    })
-    transports.push(reviewer)
-    const login = await new GitHubAdmin(reviewer, receipt.owner, receipt.marker).viewer()
-    surfaces.set(login, new GitHubAdmin(reviewer, receipt.owner, receipt.marker))
-  }
 
-  let outcome: RecoveryOutcome
+  // The accounts this run has to be able to act as are the ones the receipt recorded
+  // creating things — not the owner. Those are frequently different people: a run is
+  // pointed at an organization, and an organization's repositories are created by a user
+  // account acting for it, so demanding that the credential be the organization would
+  // refuse the exact run that most needs recovering.
+  const actors = new Set<string>()
+  for (const entry of receipt.resources) {
+    if (typeof entry.actor === 'string' && entry.actor !== '') actors.add(entry.actor.toLowerCase())
+  }
+  if (actors.size === 0) actors.add(receipt.owner.toLowerCase())
+
+  // Everything from here installs a credential into this process, so everything from
+  // here is inside the `finally` that takes it back out. A refusal or a failed
+  // preflight used to return or throw from outside it, which left a global transport
+  // holding a live token for the rest of the process.
+  let outcome: RecoveryOutcome | undefined
   try {
+    const primary = pinnedTransport(host, primaryToken)
+    transports.push(primary)
+    setGitHubTransport(primary)
+
+    const who = async (transport: GitHubTransport): Promise<string> => {
+      try {
+        return await new GitHubAdmin(transport, receipt.owner, receipt.marker).viewer()
+      } catch (error) {
+        throw new RecoveryRefusal(
+          `The credential supplied could not be asked who it belongs to: ${describeThrown(error)}`,
+        )
+      }
+    }
+
+    const primaryLogin = await who(primary)
+    if (!actors.has(primaryLogin.toLowerCase())) {
+      options.err(
+        `This receipt records ${[...actors].join(', ')} as the account${actors.size === 1 ? '' : 's'} ` +
+          `that created what it names, and the credential supplied belongs to ${primaryLogin}. ` +
+          'Nothing was removed.',
+      )
+      return EXIT_REFUSED
+    }
+    surfaces.set(primaryLogin, new GitHubAdmin(primary, receipt.owner, receipt.marker))
+
+    if (reviewerToken !== '') {
+      const reviewer = new DirectGitHubTransport({
+        token: reviewerToken,
+        host,
+        apiUrl: host === 'github.com' ? 'https://api.github.com' : `https://${host}/api/v3`,
+        graphqlUrl:
+          host === 'github.com' ? 'https://api.github.com/graphql' : `https://${host}/api/graphql`,
+        env: sanitizedEnv(options.env),
+      })
+      transports.push(reviewer)
+      const login = await who(reviewer)
+      // Refused before anything is deleted rather than after: a reviewer credential
+      // that turns out to be the primary account was supplied by mistake, and a
+      // recovery that deleted under it while believing two accounts had checked is
+      // worse than one that declined.
+      if (login.toLowerCase() === primaryLogin.toLowerCase()) {
+        options.err(
+          `The reviewer credential also belongs to ${login}, so there is only one account ` +
+            'here and not the two a run needs. Nothing was removed.',
+        )
+        return EXIT_REFUSED
+      }
+      surfaces.set(login, new GitHubAdmin(reviewer, receipt.owner, receipt.marker))
+    }
+
     outcome = await recoverLiveResources({
       receipt,
       surfaces,
       primaryLogin,
     })
+  } catch (error) {
+    if (error instanceof RecoveryRefusal) {
+      options.err(`${error.message}. Nothing was removed.`)
+      return EXIT_REFUSED
+    }
+    throw error
   } finally {
     // The process keeps neither credential: this command ends the moment it is done,
     // and anything else running in it has no business holding a token that was only
@@ -389,6 +440,25 @@ async function runRecovery(receiptPath: string, options: CliOptions): Promise<nu
   }
   options.out(redactor.text(renderRecovery(outcome)))
   return outcome.complete ? EXIT_OK : EXIT_FAILED
+}
+
+/** A refusal this command can report as a refusal rather than as a crash. */
+class RecoveryRefusal extends Error {}
+
+/**
+ * A recovery invocation that would actually work if it were pasted.
+ *
+ * The parser takes `--recover <path>` and nothing else, so a printed `--host` would be
+ * refused by the very command it tells a person to run — and the host and the credential
+ * are the two things a recovery cannot go without, so a command line without them is not
+ * a recovery at all. They are named as the environment they are rather than as flags they
+ * are not, and the path is quoted because a receipt reaches a temporary directory.
+ */
+function recoveryCommand(receiptPath: string): string {
+  const quoted = /^[-A-Za-z0-9_./:@=]+$/.test(receiptPath)
+    ? receiptPath
+    : `'${receiptPath.replace(/'/g, `'\\''`)}'`
+  return `npx tsx tests/live/cli.ts --recover ${quoted}`
 }
 
 /** What a recovery run removed, and everything it did not, in a form a person reads. */

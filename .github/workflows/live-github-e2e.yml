@@ -46,9 +46,14 @@ jobs:
           cache: npm
       - run: npm ci
       - name: Prove the checkout is the tree that was fetched
-        # The suite runs against what was checked out, so the code it runs is
-        # checked here: HEAD is the commit the trusted ref resolved to, and
-        # nothing in the working tree was changed after it was fetched.
+        # What this actually proves, stated plainly because the difference matters:
+        # HEAD is the commit the trusted ref resolved to and the working tree was not
+        # edited after the fetch. It says nothing about whether that commit is trusted.
+        # The workflow file itself came from the ref the run was dispatched on, and a
+        # `workflow_dispatch` event can be made from any branch — so the gate that
+        # establishes trust is the environment's branch restriction and its required
+        # reviewers, configured outside this file. Without those, this step is a
+        # statement about a tree, not an authorization to run it.
         shell: bash
         run: |
           set -euo pipefail
@@ -66,9 +71,14 @@ jobs:
     # Secrets and the owner name come from a protected environment, which a
     # repository owner configures separately: required reviewers, a wait timer,
     # branch restrictions, and the two tokens as environment secrets. Naming the
-    # environment here does not create that protection — a repository that has
-    # not configured the environment has no gate, and the gate below is what
-    # makes an unconfigured repository refuse rather than guess.
+    # environment here does not create that protection, and the gate below cannot
+    # stand in for it: it proves the three values are non-empty, and a repository
+    # that has also set same-named repository secrets or variables passes it
+    # without any environment protection at all. What is protected, and what this
+    # file cannot enforce, is the branch restriction and the approval — which is
+    # why the dispatch guard below refuses a run that was not started from the
+    # default branch, and why a repository that wants the tokens to mean something
+    # must configure the environment's reviewers and restrictions itself.
     environment: live-github-e2e
     runs-on: [self-hosted, linux, arm64]
     timeout-minutes: 45
@@ -107,6 +117,38 @@ jobs:
             echo "::error::refusing to run: a live run creates and deletes a repository, and $missing required value(s) are unset"
             exit 1
           fi
+      - name: Refuse a run that was not dispatched from the default branch
+        # `workflow_dispatch` can be started from any branch, and the workflow that runs
+        # is the one on that branch. Without this, a branch could carry a modified copy
+        # of this file and have it run with the environment's credentials. This is the
+        # in-file half of that protection; the environment's own branch restriction,
+        # configured by an owner, is the other half.
+        shell: bash
+        env:
+          DISPATCH_REF: ${{ github.ref }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          if [ "$DISPATCH_REF" != "refs/heads/$DEFAULT_BRANCH" ]; then
+            echo "::error::refusing to run: dispatched from $DISPATCH_REF, and this workflow reaches the environment's credentials"
+            exit 1
+          fi
+        run: |
+          set -euo pipefail
+          missing=0
+          for name in \
+            GIT_STACKS_LIVE_GITHUB_OWNER \
+            GIT_STACKS_LIVE_GITHUB_TOKEN \
+            GIT_STACKS_LIVE_GITHUB_REVIEWER_TOKEN; do
+            if [ -z "${!name:-}" ]; then
+              echo "::error::$name is not configured on the live-github-e2e environment"
+              missing=$((missing + 1))
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            echo "::error::refusing to run: a live run creates and deletes a repository, and $missing required value(s) are unset"
+            exit 1
+          fi
       - run: npm ci
       - name: Run the live suite against the authorized disposable repository
         # The run id names every resource it creates and is stamped on each one,
@@ -118,6 +160,11 @@ jobs:
           GIT_STACKS_LIVE_GITHUB_OWNER: ${{ vars.GIT_STACKS_LIVE_GITHUB_OWNER }}
           GIT_STACKS_LIVE_GITHUB_TOKEN: ${{ secrets.GIT_STACKS_LIVE_GITHUB_TOKEN }}
           GIT_STACKS_LIVE_GITHUB_REVIEWER_TOKEN: ${{ secrets.GIT_STACKS_LIVE_GITHUB_REVIEWER_TOKEN }}
+          # Pinned here rather than left to the runner. The suite requires a host and
+          # refuses without one, so omitting it would make this job always refuse; and
+          # inheriting whatever the runner happened to export would decide, for a
+          # credential this job supplies, where that credential gets sent.
+          GIT_STACKS_LIVE_GITHUB_HOST: github.com
           GIT_STACKS_LIVE_GITHUB_RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
           # The receipt is written to a durable directory on the runner, not only to
           # the workspace. A job that is killed never reaches its own cleanup step, and
@@ -148,6 +195,12 @@ jobs:
   # runs when the live job did not succeed — it takes the receipt the live job left on
   # the runner and removes only what that receipt names, after the host has confirmed
   # both the id the run created and the marker it stamped.
+  # The receipt comes from this run's own artifact rather than from a path on the
+  # runner the live job happened to use. Those are different promises: a self-hosted
+  # label matches every machine carrying it, so a path under `runner.temp` on one of
+  # them says nothing about the next one. The artifact is the one route that genuinely
+  # crosses a job boundary, and the live job already publishes it with `if: always()`.
+  # Where no receipt was published the job says so and fails.
   #
   # It needs no more than the live job needed, and no more than that is granted: the
   # same two account credentials from the same protected environment, and the receipt
@@ -168,6 +221,11 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
       - run: npm ci
+      - name: Take the receipt this run published
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: live-github-e2e-receipt
+          path: ${{ runner.temp }}/receipt
       - name: Remove what the killed run left behind
         shell: bash
         env:
@@ -177,14 +235,13 @@ jobs:
           GIT_STACKS_LIVE_GITHUB_HOST: github.com
         run: |
           set -euo pipefail
-          receipt="${{ runner.temp }}/../git-stacks-live-receipts/${{ github.run_id }}-${{ github.run_attempt }}.json"
-          # No receipt means there is nothing this run could have created, or that the
-          # runner that had it is gone. Either way the answer is to say so, not to look
-          # for repositories whose names resemble what this run would have used: a
-          # prefix is not evidence of ownership, and acting on one is how somebody
-          # else's repository gets deleted.
-          if [ ! -f "$receipt" ]; then
-            echo '::error::no receipt for this run is on the runner, so nothing can be recovered'
+          # No receipt means this run never got as far as creating anything it could
+          # not describe. The answer is to say so, not to look for repositories whose
+          # names resemble what this run would have used: a prefix is not evidence of
+          # ownership, and acting on one is how somebody else's repository gets deleted.
+          receipt="$(find "${{ runner.temp }}/receipt" -name '*.json' -type f | head -n 1)"
+          if [ -z "$receipt" ]; then
+            echo '::error::this run published no receipt, so nothing can be recovered'
             exit 1
           fi
           npx tsx tests/live/cli.ts --recover "$receipt"
