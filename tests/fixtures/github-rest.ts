@@ -215,21 +215,13 @@ function invalid(message: string): never {
   throw new HttpError(422, 'Unprocessable Entity', message)
 }
 
-function requireBoolean(
-  parameters: Record<string, unknown>,
-  key: string,
-  rule: string,
-): void {
+function requireBoolean(parameters: Record<string, unknown>, key: string, rule: string): void {
   if (typeof parameters[key] !== 'boolean') {
     invalid(`${rule} requires the boolean ${key}`)
   }
 }
 
-function requireNumber(
-  parameters: Record<string, unknown>,
-  key: string,
-  rule: string,
-): void {
+function requireNumber(parameters: Record<string, unknown>, key: string, rule: string): void {
   const value = parameters[key]
   if (typeof value !== 'number' || !Number.isFinite(value)) {
     invalid(`${rule} requires the number ${key}`)
@@ -286,7 +278,10 @@ export function validateRuleSetCreation(body: unknown): void {
       if (!MERGE_QUEUE_METHODS.includes(method as (typeof MERGE_QUEUE_METHODS)[number])) {
         invalid('merge_queue requires merge_method MERGE, SQUASH or REBASE')
       }
-      if (parameters.grouping_strategy !== 'ALLGREEN' && parameters.grouping_strategy !== 'HEADGREEN') {
+      if (
+        parameters.grouping_strategy !== 'ALLGREEN' &&
+        parameters.grouping_strategy !== 'HEADGREEN'
+      ) {
         invalid('merge_queue requires grouping_strategy ALLGREEN or HEADGREEN')
       }
     }
@@ -343,7 +338,14 @@ export interface RuleSetIdentity {
  * configuration is read from.
  */
 export function ruleSetIdentity(
-  ruleset: { id?: number; name?: unknown; target?: unknown; enforcement?: unknown; created_at?: unknown; updated_at?: unknown },
+  ruleset: {
+    id?: number
+    name?: unknown
+    target?: unknown
+    enforcement?: unknown
+    created_at?: unknown
+    updated_at?: unknown
+  },
   repository: string,
 ): RuleSetIdentity {
   const id = Number(ruleset.id)

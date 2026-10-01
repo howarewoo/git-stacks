@@ -48,6 +48,13 @@ export interface GitHubApiDoubleRequest {
    * from exactly this, so it travels with the request rather than living in state.
    */
   viewer: string
+  /**
+   * Where this request was sent. A collection that has more to say names its next page
+   * in a `Link` header, and a real host writes that as an absolute URL on the host the
+   * caller is already talking to — so a client that follows it has to be handed the
+   * origin the request arrived on, not the one GitHub uses on the internet.
+   */
+  origin: string
 }
 
 const statePath = () => {
@@ -96,17 +103,25 @@ function repositoryEntry(
   // repository serves it: refusing it here would let a request for a repository this host
   // does have fall through to the network.
   const bare = process.env.GIT_STACKS_FIXTURE_BARE ?? ''
+  // The grants and the invitations this repository holds are the ones a request mutates,
+  // so they are read and written on the state that gets saved, the same way its pull
+  // requests are. A pair of copies taken per request would answer the second account's own
+  // read with the repository as it was before it was let in, which is a host that silently
+  // forgets every access it ever granted.
+  const primary = state.repository
+  primary.permissions ??= {}
+  primary.invitations ??= []
   return {
     fullName,
-    owner: state.repository.owner,
-    name: state.repository.name,
+    owner: primary.owner,
+    name: primary.name,
     bare,
     private: false,
-    defaultBranch: state.repository.defaultBranch,
-    description: state.repository.description ?? null,
-    topics: state.repository.topics ?? [],
-    permissions: {},
-    invitations: [],
+    defaultBranch: primary.defaultBranch,
+    description: primary.description ?? null,
+    topics: primary.topics ?? [],
+    permissions: primary.permissions,
+    invitations: primary.invitations,
     pulls: primaryPulls(state),
   }
 }
@@ -170,10 +185,7 @@ function primaryPulls(state: GitHubFixtureState): GitHubFixtureRepositoryState {
  * bare repository of its own has no commits, and saying so keeps an unregistered
  * repository from being answered out of somebody else's objects.
  */
-function hostFor(
-  repository: GitHubFixtureRepository,
-  state: GitHubFixtureState,
-): HostRepository {
+function hostFor(repository: GitHubFixtureRepository, state: GitHubFixtureState): HostRepository {
   if (repository.bare) {
     const host: HostRepository = {
       fullName: repository.fullName,
@@ -181,9 +193,7 @@ function hostFor(
     }
     // A fork reads its parent's objects, the way GitHub's fork network does, so the
     // comparison across the fork boundary is still Git's own.
-    const parent = repository.forkOf
-      ? repositoryEntry(state, repository.forkOf)
-      : null
+    const parent = repository.forkOf ? repositoryEntry(state, repository.forkOf) : null
     if (parent?.bare) host.alternates = [parent.bare]
     return host
   }
@@ -196,10 +206,7 @@ function hostFor(
  * The role an account holds on a repository: the owner administers it, a grant names the
  * role, and anybody else has none of them at all.
  */
-function roleOf(
-  repository: GitHubFixtureRepository,
-  login: string,
-): GitHubFixtureRole | null {
+function roleOf(repository: GitHubFixtureRepository, login: string): GitHubFixtureRole | null {
   if (repository.owner.toLowerCase() === login.toLowerCase()) return 'admin'
   const granted = repository.permissions[login.toLowerCase()]
   if (granted) return granted
@@ -249,6 +256,21 @@ function scopeState(
 }
 
 /**
+ * Clearing one repository-scoped fact, the way every other mutation here reaches the
+ * state that gets saved.
+ *
+ * `delete` cannot do this job: these routes answer from a scoped view whose keys are
+ * accessors onto the repository's own slice, and deleting removes the accessor from the
+ * view rather than the value behind it. The request then answers from a merge that no
+ * longer exists while the state that is saved still holds one enqueued, which is the
+ * host disagreeing with itself a moment later. Assigning `undefined` writes through the
+ * accessor, and a key whose value is undefined is not serialized at all.
+ */
+function clearScopedFact(state: GitHubFixtureState, key: string): void {
+  ;(state as unknown as Record<string, unknown>)[key] = undefined
+}
+
+/**
  * The scoped state one account's request is served from, with that account's real role.
  *
  * A repository the fixture manages permissions for reports the role the account actually
@@ -277,9 +299,7 @@ function currentHead(
     pr.headOid = null
     return null
   }
-  const oid = withHostRepository(hostFor(head, state), () =>
-    hostRefSha(`refs/heads/${pr.head}`),
-  )
+  const oid = withHostRepository(hostFor(head, state), () => hostRefSha(`refs/heads/${pr.head}`))
   pr.headOid = oid
   return oid
 }
@@ -431,9 +451,10 @@ function accountId(login: string): number {
 
 /** Whether an account is an organization or a person, which GitHub reports per account. */
 function actorType(state: GitHubFixtureState, login: string): 'User' | 'Organization' {
-  return (state.actors ?? []).find(
-    (entry) => entry.login.toLowerCase() === login.toLowerCase(),
-  )?.type ?? 'User'
+  return (
+    (state.actors ?? []).find((entry) => entry.login.toLowerCase() === login.toLowerCase())?.type ??
+    'User'
+  )
 }
 
 /** Whether an account administers an organization, which is what creating for one needs. */
@@ -444,7 +465,8 @@ function administersOrganization(state: GitHubFixtureState, login: string, org: 
   return (
     (entry?.organizations ?? []).some(
       (organization) => organization.toLowerCase() === org.toLowerCase(),
-    ) || entry?.type === 'Organization' && entry.login.toLowerCase() === org.toLowerCase()
+    ) ||
+    (entry?.type === 'Organization' && entry.login.toLowerCase() === org.toLowerCase())
   )
 }
 
@@ -454,9 +476,7 @@ function repositoryId(fullName: string): number {
 }
 
 /** The booleans GitHub reports for a repository role. */
-function roleFlags(
-  role: GitHubFixtureRole | null,
-): {
+function roleFlags(role: GitHubFixtureRole | null): {
   admin: boolean
   maintain: boolean
   push: boolean
@@ -779,12 +799,10 @@ function createPullRequest(
   }
   const headHost = hostFor(headRepository, state)
   const headOid = withHostRepository(headHost, () => hostRefSha(`refs/heads/${branch}`))
-  if (!headOid)
-    throw new HttpError(422, 'Unprocessable Entity', `head branch ${branch} is missing`)
+  if (!headOid) throw new HttpError(422, 'Unprocessable Entity', `head branch ${branch} is missing`)
   const base = String(body.base || '')
   const baseOid = hostRefSha(`refs/heads/${base}`)
-  if (!baseOid)
-    throw new HttpError(422, 'Unprocessable Entity', `base branch ${base} is missing`)
+  if (!baseOid) throw new HttpError(422, 'Unprocessable Entity', `base branch ${base} is missing`)
   // A pull request is the commits its head has that its base does not. Both refs existing
   // says nothing about that: a branch cut from the base and left alone has both refs and
   // no commits at all, which GitHub refuses with `No commits between base and head`. The
@@ -807,11 +825,7 @@ function createPullRequest(
     )
   }
   if (state.prs.some((pr) => pr.head === branch && pr.state === 'OPEN'))
-    throw new HttpError(
-      422,
-      'Unprocessable Entity',
-      `a pull request for ${branch} already exists`,
-    )
+    throw new HttpError(422, 'Unprocessable Entity', `a pull request for ${branch} already exists`)
   const number = nextNumber(state)
   const pr = {
     number,
@@ -955,14 +969,18 @@ function handleAccountRoutes(
     const id = Number(invitations[1])
     const target = pending.find((entry) => entry.id === id)
     if (!target) throw new HttpError(404, 'Not Found', `Invitation ${id} not found`)
-    const repository = repositoryEntry(state, String((target.repository as { full_name: string }).full_name))
+    const repository = repositoryEntry(
+      state,
+      String((target.repository as { full_name: string }).full_name),
+    )
     const invitation = repository?.invitations.find((entry) => entry.id === id)
     if (!repository || !invitation) {
       throw new HttpError(404, 'Not Found', `Invitation ${id} not found`)
     }
     // Accepting grants the role the invitation named. Until it is accepted the account can
     // still not read the repository, which is the whole point of an invitation.
-    const permission = body.permissions === undefined ? invitation.permission : String(body.permissions)
+    const permission =
+      body.permissions === undefined ? invitation.permission : String(body.permissions)
     repository.permissions[viewer] = permission as GitHubFixtureRole
     invitation.state = 'accepted'
     return { status: 204, body: null }
@@ -1114,12 +1132,16 @@ function serveRepositoryRoutes(
     'u',
   ).exec(rawPath)
   if (collaborators) {
-    if (!served || role !== 'admin') {
+    // Reading who holds what needs access to the repository, and changing who holds what
+    // needs administration of it. GitHub answers the read for a collaborator who was let
+    // in with push and refuses the write, so a host that refused both would make a second
+    // reviewer unable to prove it can read a repository it has already been given.
+    if (!served) throw new HttpError(404, 'Not Found', `Not Found: ${rawPath}`)
+    if (method === 'GET' ? role === null : role !== 'admin') {
       throw new HttpError(403, 'Forbidden', 'Must have admin rights to Repository.')
     }
     if (!collaborators[1]) {
-      if (method !== 'GET')
-        throw new HttpError(405, 'Method Not Allowed', 'collaborators are read')
+      if (method !== 'GET') throw new HttpError(405, 'Method Not Allowed', 'collaborators are read')
       return {
         status: 200,
         body: Object.entries(served.permissions).map(([login, permission]) => ({
@@ -1133,7 +1155,9 @@ function serveRepositoryRoutes(
     if (collaborators[2]) {
       if (method !== 'GET')
         throw new HttpError(405, 'Method Not Allowed', 'a permission is read with GET')
-      const held = served.permissions[login]
+      // A grant is looked up the way every other role on this host is looked up, so a
+      // login written in either case names the same account.
+      const held = served.permissions[login.toLowerCase()]
       if (!held) throw new HttpError(404, 'Not Found', `Not Found: ${rawPath}`)
       return { status: 200, body: { permission: held, role_name: held, user: actor(login) } }
     }
@@ -1142,8 +1166,15 @@ function serveRepositoryRoutes(
       if (!(permission in WRITING_ROLES)) {
         throw new HttpError(422, 'Unprocessable Entity', `unknown permission ${permission}`)
       }
-      if (served.permissions[login]) {
-        served.permissions[login] = permission
+      // The account this host answers as administers the repository. A repository whose
+      // access came only from the "no grants registered yet" shortcut would lose that
+      // administration the instant any grant is written down, which is how letting a
+      // second reviewer in silently locked the owner out of their own repository.
+      if (Object.keys(served.permissions).length === 0) {
+        served.permissions[state.currentUser.toLowerCase()] = 'admin'
+      }
+      if (served.permissions[login.toLowerCase()]) {
+        served.permissions[login.toLowerCase()] = permission
         return { status: 204, body: null }
       }
       // An account that has not accepted holds nothing yet: the invitation exists, and the
@@ -1164,7 +1195,7 @@ function serveRepositoryRoutes(
       }
     }
     if (method === 'DELETE') {
-      delete served.permissions[login]
+      delete served.permissions[login.toLowerCase()]
       served.invitations = served.invitations.filter(
         (entry) => entry.login.toLowerCase() !== login.toLowerCase(),
       )
@@ -1458,15 +1489,12 @@ function serveRepositoryRoutes(
     throw new HttpError(404, 'Not Found', `Not Found: ${path}`)
   if (rawPath === prefix && method === 'GET') {
     const served = repositoryEntry(state, repository)
-    const parent = served?.forkOf
-      ? repositoryEntry(state, served.forkOf)
-      : null
+    const parent = served?.forkOf ? repositoryEntry(state, served.forkOf) : null
     // A state that names the viewer's role reports that role; otherwise the role is
     // decided from the repository's own permissions, which is what a private repository
     // and an accepted invitation change.
     const role =
-      state.checks?.viewerPermissions ??
-      roleFlags(served ? roleOf(served, request.viewer) : null)
+      state.checks?.viewerPermissions ?? roleFlags(served ? roleOf(served, request.viewer) : null)
     return {
       status: 200,
       body: {
@@ -1693,8 +1721,7 @@ function serveRepositoryRoutes(
     const merged = findPr(state, Number(merge[1]))
     if (mergeConflict(state, merged))
       throw new HttpError(405, 'Method Not Allowed', 'Pull Request is not mergeable')
-    const expectedHead =
-      body.sha === undefined ? currentHead(state, merged) : String(body.sha)
+    const expectedHead = body.sha === undefined ? currentHead(state, merged) : String(body.sha)
     const refusal = ruleSetRefusal(state, merged, expectedHead ?? '')
     if (refusal !== null)
       throw new HttpError(405, 'Method Not Allowed', `merge blocked by ruleset: ${refusal}`)
@@ -1739,8 +1766,7 @@ function serveRepositoryRoutes(
       // is admitted and then fails, because that is what an accepted request GitHub cannot
       // complete looks like; answering `enqueued` would be inventing the evidence.
       const queued =
-        action === 'merge_queue' ||
-        (action === 'default' && mergeQueueFor(state, pr.base))
+        action === 'merge_queue' || (action === 'default' && mergeQueueFor(state, pr.base))
       // The documented `200`: this pull request is already in a merge queue, so the result
       // is terminal and GitHub hands back no request identity to read it through.
       if (queued && state.asyncMergeAlreadyQueued) {
@@ -1784,7 +1810,7 @@ function serveRepositoryRoutes(
       const canned = state.asyncMergeResult
       const pr = findPr(state, number)
       if (canned?.status === 'enqueued') {
-        delete state.asyncMerge
+        clearScopedFact(state, 'asyncMerge')
         return {
           status: 200,
           body: {
@@ -1794,7 +1820,7 @@ function serveRepositoryRoutes(
         }
       }
       if (canned?.status === 'failed') {
-        delete state.asyncMerge
+        clearScopedFact(state, 'asyncMerge')
         return {
           status: 200,
           body: { status: 'failed', details: { message: canned.message ?? 'merge failed' } },
@@ -1806,7 +1832,7 @@ function serveRepositoryRoutes(
       // to be able to read.
       if (pending.action === 'merge_queue') {
         if (!mergeQueueFor(state, pr.base)) {
-          delete state.asyncMerge
+          clearScopedFact(state, 'asyncMerge')
           return {
             status: 200,
             body: {
@@ -1819,7 +1845,7 @@ function serveRepositoryRoutes(
         }
         // An enqueued result is terminal and means the pull request joined a queue, not
         // that it merged; the queue itself is not simulated further.
-        delete state.asyncMerge
+        clearScopedFact(state, 'asyncMerge')
         return {
           status: 200,
           body: {
@@ -1831,14 +1857,14 @@ function serveRepositoryRoutes(
       const head = currentHead(state, pr)
       const refusal = ruleSetRefusal(state, pr, head ?? pending.sha)
       if (refusal !== null) {
-        delete state.asyncMerge
+        clearScopedFact(state, 'asyncMerge')
         return {
           status: 200,
           body: { status: 'failed', details: { message: `merge blocked by ruleset: ${refusal}` } },
         }
       }
       const result = mergeStackedPullRequest(state, pr, pending.sha, pending.method)
-      delete state.asyncMerge
+      clearScopedFact(state, 'asyncMerge')
       return {
         status: 200,
         body: result.merged
@@ -1876,7 +1902,6 @@ function serveRepositoryRoutes(
   }
   throw new HttpError(404, 'Not Found', `Not Found: ${path}`)
 }
-
 
 function handleGraphql(
   state: GitHubFixtureState,
@@ -2121,7 +2146,14 @@ export function createGitHubApiDouble(): typeof globalThis.fetch {
       at: new Date().toISOString(),
       ...(Object.keys(body).length > 0 ? { body } : {}),
     })
-    const request: GitHubApiDoubleRequest = { method, path, body, headers, viewer }
+    const request: GitHubApiDoubleRequest = {
+      method,
+      path,
+      body,
+      headers,
+      viewer,
+      origin: url.origin,
+    }
     const lost = (state.lostResponses ?? []).findIndex((rule) => {
       if (rule.method !== method || !request.path.includes(rule.pathIncludes)) return false
       if (rule.pathEndsWith !== undefined && !request.path.endsWith(rule.pathEndsWith)) return false

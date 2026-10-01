@@ -99,9 +99,7 @@ const CHANGE_STATUS: Record<string, GitFileChange['status']> = {
  * path the reviewer saw. The counts are counted from the hunks that are actually sent, so
  * a binary change reports no lines and no patch instead of an invented one.
  */
-function gitFileChanges(
-  pr: GitHubFixtureState['prs'][number],
-): GitFileChange[] {
+function gitFileChanges(pr: GitHubFixtureState['prs'][number]): GitFileChange[] {
   const head = hostRefSha(`refs/heads/${pr.head}`)
   const base = hostRefSha(`refs/heads/${pr.base}`)
   if (head === null || base === null) return []
@@ -110,15 +108,13 @@ function gitFileChanges(
   const names = hostGit(['diff', '--no-color', '--name-status', '-M', '-z', mergeBase, head])
   const fields = names.split('\0').filter((field) => field !== '')
   const changes: GitFileChange[] = []
-  for (let index = 0; index < fields.length; ) {
+  for (let index = 0; index < fields.length;) {
     const status = fields[index][0]
     if (status === 'R' || status === 'C') {
       const previousFilename = fields[index + 1]
       const filename = fields[index + 2]
       index += 3
-      changes.push(
-        changeEntry(mergeBase, head, CHANGE_STATUS[status], filename, previousFilename),
-      )
+      changes.push(changeEntry(mergeBase, head, CHANGE_STATUS[status], filename, previousFilename))
       continue
     }
     const filename = fields[index + 1]
@@ -183,7 +179,6 @@ function fileEntries(state: GitHubFixtureState, pr: GitHubFixtureState['prs'][nu
     }
   })
 }
-
 
 const RECORDED_REVIEW_STATES: Record<string, string> = {
   APPROVE: 'APPROVED',
@@ -287,6 +282,9 @@ export function handleSurfaceRest(
     })
     const perPage = Number(query.get('per_page')) || 30
     const index = (Number(query.get('page')) || 1) - 1
+    const next = new URLSearchParams(query)
+    next.set('per_page', String(perPage))
+    next.set('page', String(index + 2))
     return {
       status: 200,
       body: matching.slice(index * perPage, index * perPage + perPage).map((pr) => ({
@@ -303,6 +301,17 @@ export function handleSurfaceRest(
         base: { ref: pr.base, sha: hostRefSha(`refs/heads/${pr.base}`) },
         user: { login: pr.author ?? state.currentUser },
       })),
+      // A real host says in the header that there is more, on every collection it
+      // serves. A caller that pages reads that header and stops when it is absent, so a
+      // listing without one is a shorter conversation than the host holds: invisible
+      // while a run has few pull requests, and a missing answer once it has many.
+      ...(index * perPage + perPage < matching.length
+        ? {
+            headers: {
+              link: `<${request.origin}/${prefix}/pulls?${next}>; rel="next"`,
+            },
+          }
+        : {}),
     }
   }
 
@@ -491,7 +500,8 @@ export function handleSurfaceRest(
     }
     if (hostRefSha(ref) !== null)
       throw new HttpError(422, 'Unprocessable Entity', `${ref} already exists`)
-    if (hostRefSha(sha) === null) throw new HttpError(422, 'Unprocessable Entity', `${sha} is unknown`)
+    if (hostRefSha(sha) === null)
+      throw new HttpError(422, 'Unprocessable Entity', `${sha} is unknown`)
     hostGit(['update-ref', ref, sha])
     return { status: 201, body: { ref, node_id: `REF_${ref}`, object: { sha, type: 'commit' } } }
   }
@@ -769,10 +779,7 @@ function ruleSetDetail(rules: FixtureRuleSet, repository: string) {
  * keeps the merge gate, the effective branch-rule read and the queue dispatcher agreeing
  * about which branch a rule protects.
  */
-export function applicableRuleSets(
-  state: GitHubFixtureState,
-  base: string,
-): FixtureRuleSet[] {
+export function applicableRuleSets(state: GitHubFixtureState, base: string): FixtureRuleSet[] {
   const defaultBranch = state.repository.defaultBranch
   return (state.ruleSets ?? []).filter(
     (rules) =>

@@ -55,7 +55,7 @@ export interface ControlledGitHubHostOptions {
   /** The one real `git` this run resolved, whose `git-http-backend` serves the protocol. */
   readonly git: string
 }
-interface GeneratedCertificate {
+export interface GeneratedCertificate {
   key: Buffer
   cert: Buffer
   /** The certificate as a file, because Git is told which file to trust. */
@@ -63,7 +63,14 @@ interface GeneratedCertificate {
   directory: string
 }
 
-function generateCertificate(): GeneratedCertificate {
+/**
+ * A self-signed certificate for 127.0.0.1, generated per call.
+ *
+ * Exported because the boundary a test has to observe is a certificate *nothing* vouches
+ * for: this run's own host is pinned to the certificate it generated, so a client that
+ * reaches it can be reaching it by trust or by a switch that skipped the question.
+ */
+export function generateCertificate(): GeneratedCertificate {
   const directory = mkdtempSync(join(tmpdir(), 'git-stacks-live-e2e-'))
   const key = join(directory, 'key.pem')
   const cert = join(directory, 'cert.pem')
@@ -287,7 +294,12 @@ export async function startControlledGitHubHost(
         }
         void (async () => {
           try {
-            const answered = await api(`https://127.0.0.1${request.url ?? '/'}`, {
+            // The port this socket is actually on, not a guessed one. A collection that
+            // has more to give names its next page by absolute URL, and a host naming a
+            // different origin than the caller reached sends every client that follows
+            // it somewhere else.
+            const reached = `https://127.0.0.1:${request.socket.localPort ?? 443}${request.url ?? '/'}`
+            const answered = await api(reached, {
               method: request.method,
               headers: new Headers(
                 Object.fromEntries(
