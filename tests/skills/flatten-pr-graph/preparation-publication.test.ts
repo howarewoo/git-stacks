@@ -1424,7 +1424,6 @@ test('a filesystem monitor is refused before the fingerprint runs git status', a
   const world = await createWorld('prepare-fsmonitor')
   t.after(() => world.cleanup())
   const a = await seedBranch(world, BRANCHES[12], { 'a.txt': 'a\n' })
-  await advanceRoot(world, { 'root.txt': 'root moves on\n' })
 
   // A recording monitor that exits 0: a run that executed it would report itself prepared
   // and leave no trace that anything external ran, so only the marker's absence tells the

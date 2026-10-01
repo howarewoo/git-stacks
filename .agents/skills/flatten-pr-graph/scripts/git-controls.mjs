@@ -297,9 +297,12 @@ export function executableControls(git, cwd, env = {}, transports = new Set()) {
       const value = entry.slice(newline + 1)
       const rule = EXECUTABLE_CONFIG.find((candidate) => candidate.match.test(key))
       if (!rule || !applies(rule, transports)) continue
-      // A permission that refuses everything is not a permission, and an explicitly false
-      // filesystem monitor is the one way to name the monitor without enabling it.
-      if (/^(protocol\.|core\.fsmonitor$)/i.test(key) && !isEnabled(value)) continue
+      // Naming a control is not imposing it. `commit.gpgsign=false`, `core.fsmonitor=false`,
+      // and a protocol permission set to deny all are the configurations in which the
+      // program does not run; reporting those as an unrunnable executable would make the
+      // report wrong in the safe direction, and would stop every run launched from a
+      // repository that had deliberately turned the control off.
+      if (!isEnabled(value)) continue
       controls.push({
         control: key,
         value,

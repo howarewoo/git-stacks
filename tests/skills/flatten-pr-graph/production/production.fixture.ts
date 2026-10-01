@@ -1299,7 +1299,11 @@ define({
     const first = await seedStack(production, [12, 13])
     const prepared = production.prepare({ order: [12, 13], originalHeads: first })
     assert.equal(prepared.ok, true, JSON.stringify(prepared.errors))
-    const second = await seedStack(production, [14])
+    // A second plan over the same run directory, seeded from a root that has moved again,
+    // so the refusal is about the plan that was recorded and not about an empty seed.
+    const second = await seedStack(production, [14], {
+      rootFiles: { 'root.txt': 'the root branch moves on again\n' },
+    })
     const refused = production.prepare({ order: [14], originalHeads: second })
     assert.equal(refused.ok, false)
     assert.equal(

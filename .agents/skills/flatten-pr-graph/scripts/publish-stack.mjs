@@ -1181,7 +1181,9 @@ export async function publishStack(raw, conversations = {}) {
     (cwd, args, env) => runGit(cwd, args, { allowFailure: true, env: env ?? callerEnv }),
     input.repository,
     callerEnv,
-    endpointTransports(input.pushEndpoint, ...input.heads.map((head) => head.ref)),
+    // Only the destination decides which transports are reachable. The refspecs are ref
+    // names inside the destination repository, not URLs, so they add no transport.
+    endpointTransports(input.pushEndpoint),
   )
   const controls = [...inherited, ...inspectControls(input.repository)]
   const blockedControls = controls.filter((control) => control.blocking)

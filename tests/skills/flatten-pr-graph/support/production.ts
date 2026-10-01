@@ -226,6 +226,7 @@ export function pinnedPullRequest(
 }
 
 let providerCounter = 0
+let seedCounter = 0
 
 /**
  * Writes a provider double with exactly the three operations the contract allows.
@@ -257,7 +258,7 @@ function liveOids() {
     env: { PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? '/tmp' },
   })
   const oids = {}
-  for (const line of stdout.split('\n')) {
+  for (const line of stdout.split('\\n')) {
     const [oid, ref] = line.trim().split(/\s+/)
     if (oid && ref) oids[ref.replace('refs/heads/', '')] = oid
   }
@@ -292,6 +293,7 @@ export function readPullRequest(number) {
     throw new Error('the provider could not be reached')
   }
   refresh()
+  const pullRequest = pullRequests.get(number)
   record('readPullRequest', number, pullRequest?.baseRef ?? null, pullRequest ? 'observed' : 'absent')
   return { ok: true, pullRequest: pullRequest ? structuredClone(pullRequest) : null }
 }
@@ -445,7 +447,11 @@ export class Production {
     files: Record<string, string>,
     options: { base?: string } = {},
   ): Promise<string> {
-    const scratch = await this.world.createScratch(`seed-${branch}`)
+    seedCounter += 1
+    // The name carries a counter because a case may seed the same branch twice - to move
+    // it after planning, or to build a second plan - and a second clone into the same
+    // directory fails for a reason that has nothing to do with the case.
+    const scratch = await this.world.createScratch(`seed-${branch}-${seedCounter}`)
     scratch.fetch()
     scratch.checkout(options.base ?? DEFAULT_BRANCH)
     for (const [path, content] of Object.entries(files)) {
