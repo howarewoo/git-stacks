@@ -310,8 +310,6 @@ export interface LiveAdmin {
     description: string
     marker: string
     private?: boolean
-    /** The branch the host is asked to treat as the default, rather than one assumed. */
-    defaultBranch: string
   }): Promise<LiveRepositoryIdentity>
   /**
    * Forks `parent` with this transport's own account, so the fork belongs to a

@@ -3,7 +3,7 @@ import { accessSync, constants as fsConstants, statSync } from 'node:fs'
 import { mkdtemp, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { createRequire, syncBuiltinESMExports } from 'node:module'
 import { tmpdir } from 'node:os'
-import { basename, delimiter, dirname, join } from 'node:path'
+import { basename, delimiter, dirname, join, resolve, sep } from 'node:path'
 import { promisify } from 'node:util'
 import type {
   execFileSync as execFileSyncFunction,
@@ -699,7 +699,7 @@ const realExecFileSync = childProcess.execFileSync
 let active: ActiveHarness | null = null
 
 /**
- * The live run that owns this process's real `git` and `gh`, if one does.
+ * The live run that owns this process's real `git`, if one does.
  *
  * The interception below is installed by importing this module, which every test in
  * this repository does — including the one that runs against an authorized disposable
@@ -712,35 +712,69 @@ let active: ActiveHarness | null = null
  * the tests deliberately do after importing this fixture, so a patch applied at harness
  * creation is applied too late to be seen by the very code it exists to answer.
  *
- * So the refusal stands and the way past it is explicit. A live run says out loud
- * that it owns a real host and is asking for the real tool, and only for as long as it
- * holds that claim. Nothing else reaches the real tools: a `git` with no harness and
- * no live claim is still refused, which is what keeps a broken interception from
- * leaving for github.com.
+ * So the refusal stands and the way past it is explicit, narrow, and owned. A live run
+ * claims the real `git` for the directory it created and for as long as it holds that
+ * claim. Nothing else reaches the real tool: a `git` outside the claimed root is
+ * refused, a `gh` is refused outright whether or not anything is claimed, and a `git`
+ * with no claim at all is refused as before. That is what keeps a broken interception
+ * from leaving for github.com, and it is deliberately not a claim on the real tools of
+ * the whole process — a run that asked for that would be asking for every repository
+ * on the machine, which is not what it needs.
  */
-let liveOwner: symbol | null = null
+let liveGit: { root: string } | null = null
 
 /**
- * Claims the real `git` and `gh` for one live run, and answers how to give the claim
- * back.
+ * Whether a repository path lies inside the root this live run created.
  *
- * Refused while a harness is answering, because the two are opposites: one run cannot
- * both own the real tools and expect every command in it to be answered by a fixture.
- * Releasing the claim a second time is a no-op rather than an error, so a cleanup that
- * runs twice cannot take it away from a run that still holds it.
+ * A prefix comparison on the string would be wrong in the way these things always are:
+ * a root ending in `run-1` would claim `run-12`. The resolved paths are compared as
+ * paths, so only a real descendant counts.
  */
-export function claimLiveTools(): { release: () => void } {
+function insideRoot(root: string, candidate: string): boolean {
+  const from = resolve(root)
+  const to = resolve(candidate)
+  return to === from || to.startsWith(from.endsWith(sep) ? from : `${from}${sep}`)
+}
+
+/**
+ * The directory a `git` command would act on, as the caller named it.
+ *
+ * `-C <path>` is the form the run's own workspace uses, and it comes before anything
+ * else on the command line, so it is read first. An explicit `cwd` in the options is
+ * next, because that is where the child would start. With neither, the command acts on
+ * this process's directory, which is what `process.cwd()` reports and what the claim
+ * is then measured against.
+ */
+function targetDirectory(args: readonly string[], options: ExecFileOptions): string {
+  const index = args.indexOf('-C')
+  if (index !== -1 && typeof args[index + 1] === 'string') return args[index + 1]
+  const fromArgs = args.indexOf('--git-dir')
+  if (fromArgs !== -1 && typeof args[fromArgs + 1] === 'string') return args[fromArgs + 1]
+  return typeof options.cwd === 'string' ? options.cwd : process.cwd()
+}
+
+/**
+ * Claims the real `git` for one directory, and answers how to give the claim back.
+ *
+ * Scoped to the root rather than to the process on purpose: this run pushes from the
+ * workspace and the foreign clone it created, and needs nothing else. Refused while a
+ * harness is answering, because the two are opposites — one run cannot both own a real
+ * host and expect every command in it to be answered by a fixture. Releasing the claim a
+ * second time is a no-op rather than an error, so a cleanup that runs twice cannot take
+ * it away from a run that still holds it.
+ */
+export function claimLiveGit(root: string): { release: () => void } {
   if (active !== null) {
-    throw new Error('a run cannot use the real git and gh while a GitHub harness is answering them')
+    throw new Error('a run cannot use a real git while a GitHub harness is answering them')
   }
-  if (liveOwner !== null) {
-    throw new Error('another live run already owns the real git and gh in this process')
+  if (liveGit !== null) {
+    throw new Error('another live run already owns a real git in this process')
   }
-  const owner = Symbol('git-stacks live run')
-  liveOwner = owner
+  const owner = { root: resolve(root) }
+  liveGit = owner
   return {
     release: () => {
-      if (liveOwner === owner) liveOwner = null
+      if (liveGit === owner) liveGit = null
     },
   }
 }
@@ -878,11 +912,27 @@ function runFixtureCommand(
   if (command === 'git' || command === 'gh') {
     // A `git` or `gh` request that reaches this boundary without a harness to answer it
     // is a request for the real tools. Running it for real is how an interception failure
-    // reaches github.com instead of failing, so the fixture refuses it and says why —
-    // unless a live run has claimed the real tools, which is the one request that is
-    // meant to reach them.
+    // reaches github.com instead of failing, so the fixture refuses it and says why.
     if (!harness) {
-      if (liveOwner !== null) return realPromisifiedExecFile(file, args, options)
+      // The one request that is meant to reach the real tool: a live run's own `git`, in
+      // the directory that run created. Anything else is refused, including a `gh` —
+      // nothing in the live path shells out to one, since the API surface is reached
+      // through an explicit transport, and a claim that let `gh` through would be a claim
+      // on the installed credential tooling that no caller needs.
+      if (command === 'git' && liveGit !== null) {
+        const directory = targetDirectory(args, options)
+        if (insideRoot(liveGit.root, directory)) {
+          return realPromisifiedExecFile(file, args, options)
+        }
+        return Promise.reject(
+          commandError(
+            file,
+            args,
+            2,
+            `a live run claimed a real git for ${liveGit.root}, and ${directory} is not inside it\n`,
+          ),
+        )
+      }
       return Promise.reject(
         commandError(file, args, 2, `the GitHub fixture has no harness to answer ${command}\n`),
       )
@@ -903,12 +953,20 @@ childProcess.execFile = Object.assign(
   ): ChildProcess {
     if (typeof callback === 'function') {
       const command = commandName(file)
-      // A `gh` or `git` request that bypasses the promisified boundary would
-      // reach the real tools, so it fails here instead of answering from the
-      // wrong process. The same refusal applies with no harness at all, because
-      // that is the shape an interception failure takes, and it is the case this
-      // branch used to fall straight through to the real `execFile`.
-      if (['git', 'gh'].includes(command) && (active !== null || liveOwner === null)) {
+      // A `gh` or `git` request that bypasses the promisified boundary would reach the
+      // real tools, so it fails here instead of answering from the wrong process. The
+      // same refusal applies with no harness at all, because that is the shape an
+      // interception failure takes, and it is the case this branch used to fall
+      // straight through to the real `execFile`.
+      //
+      // `gh` is refused outright: nothing in the live path reaches for it, so there is
+      // no request on this boundary that ought to be let past. A `git` is let past only
+      // inside the directory a live run claimed.
+      const passes =
+        command === 'git' &&
+        liveGit !== null &&
+        insideRoot(liveGit.root, targetDirectory(args ?? [], options ?? {}))
+      if (!passes) {
         throw new Error(
           `The GitHub harness answers ${file} only through the promisified execFile boundary`,
         )
@@ -1000,12 +1058,16 @@ function newActorToken(): string {
   return `fixture-${randomUUID()}`
 }
 
-const initialState = (): GitHubFixtureState => ({
+const initialState = (defaultBranch: string): GitHubFixtureState => ({
   version: 1,
   repository: {
     owner: 'acme',
     name: 'widgets',
-    defaultBranch: 'main',
+    // The host's own default, and the only place it is decided. A run reads this back
+    // out of what the host reports rather than assuming a name, so a controlled host that
+    // is configured for anything other than `main` exercises the same path a real one
+    // with that setting would.
+    defaultBranch,
     allowMergeCommit: true,
     allowSquashMerge: true,
     allowRebaseMerge: true,
@@ -1067,12 +1129,15 @@ export interface GitHubHarnessOptions {
    * A caller-supplied root is still this harness's to fill in and to remove on close.
    */
   readonly root?: string
+  /** The branch this host treats as the repository's default, as a real host's setting. */
+  readonly defaultBranch?: string
 }
 
 export async function createGitHubHarness(
   options: GitHubHarnessOptions = {},
 ): Promise<GitHubHarness> {
   const root = options.root ?? (await mkdtemp(join(tmpdir(), 'git-stacks-github-harness-')))
+  const defaultBranch = options.defaultBranch ?? 'main'
   const repo = join(root, 'repo')
   const bare = join(root, options.barePath ?? 'remote.git')
   const statePath = join(root, 'github-state.json')
@@ -1081,13 +1146,17 @@ export async function createGitHubHarness(
   let isClosed = false
   try {
     await mkdir(repo)
-    await writeFile(statePath, `${JSON.stringify(initialState(), null, 2)}\n`, 'utf8')
+    await writeFile(
+      statePath,
+      `${JSON.stringify(initialState(options.defaultBranch ?? 'main'), null, 2)}\n`,
+      'utf8',
+    )
     await writeFile(transportLog, '', 'utf8')
     await mkdir(dirname(bare), { recursive: true })
     await runRealGit(realGit, root, ['init', '--bare', bare])
     await runBareGit(realGit, bare, ['config', 'user.name', 'GitHub Fixture'])
     await runBareGit(realGit, bare, ['config', 'user.email', 'github-fixture@example.invalid'])
-    await runRealGit(realGit, repo, ['init', '-b', 'main'])
+    await runRealGit(realGit, repo, ['init', '-b', defaultBranch])
     await runRealGit(realGit, repo, ['config', 'user.name', 'Git Stacks GitHub fixture'])
     await runRealGit(realGit, repo, [
       'config',
@@ -1097,8 +1166,12 @@ export async function createGitHubHarness(
     await writeFile(join(repo, 'base.txt'), 'base\n', 'utf8')
     await runRealGit(realGit, repo, ['add', '--', 'base.txt'])
     await runRealGit(realGit, repo, ['commit', '-m', 'Fixture baseline'])
-    await runRealGit(realGit, repo, ['push', bare, 'refs/heads/main:refs/heads/main'])
-    await runBareGit(realGit, bare, ['symbolic-ref', 'HEAD', 'refs/heads/main'])
+    await runRealGit(realGit, repo, [
+      'push',
+      bare,
+      `refs/heads/${defaultBranch}:refs/heads/${defaultBranch}`,
+    ])
+    await runBareGit(realGit, bare, ['symbolic-ref', 'HEAD', `refs/heads/${defaultBranch}`])
     await runRealGit(realGit, repo, [
       'remote',
       'add',
@@ -1112,12 +1185,21 @@ export async function createGitHubHarness(
       'origin',
       'https://github.com/acme/widgets.git',
     ])
-    await runRealGit(realGit, repo, ['fetch', bare, `refs/heads/main:refs/remotes/origin/main`])
-    await runRealGit(realGit, repo, ['branch', '--set-upstream-to=origin/main', 'main'])
+    await runRealGit(realGit, repo, [
+      'fetch',
+      bare,
+      `refs/heads/${defaultBranch}:refs/remotes/origin/${defaultBranch}`,
+    ])
+    await runRealGit(realGit, repo, [
+      'branch',
+      '--set-upstream-to',
+      `origin/${defaultBranch}`,
+      defaultBranch,
+    ])
     await runRealGit(realGit, repo, [
       'symbolic-ref',
       'refs/remotes/origin/HEAD',
-      'refs/remotes/origin/main',
+      `refs/remotes/origin/${defaultBranch}`,
     ])
 
     const fixture: ActiveHarness = {

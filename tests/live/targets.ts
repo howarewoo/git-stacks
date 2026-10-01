@@ -13,7 +13,7 @@ import { githubHostContext, type GitHubHostContext } from '../../src/main/github
 import { detectNativeStacksCapability } from '../../src/main/native-stacks'
 import { startAsyncMerge } from '../../src/main/merge-async'
 import {
-  claimLiveTools,
+  claimLiveGit,
   createGitHubHarness,
   WRITING_ROLES,
   type GitHubFixtureState,
@@ -711,7 +711,9 @@ export class ControlledLiveTarget extends DisposableTarget {
    * same one, so a request that went anywhere else would fail rather than be believed.
    * Nothing in the run can reach github.com, because nothing in the run names it.
    */
-  static async start(options: { receiptPath?: string } = {}): Promise<ControlledLiveTarget> {
+  static async start(
+    options: { receiptPath?: string; defaultBranch?: string } = {},
+  ): Promise<ControlledLiveTarget> {
     // From the very first statement this run owns something, and the guard below is
     // open before it owns anything. That ordering is the whole point: the harness runs
     // real Git to create and seed the repository this host serves, so a caller that
@@ -749,6 +751,10 @@ export class ControlledLiveTarget extends DisposableTarget {
       const harness = await createGitHubHarness({
         barePath: 'projects/acme/widgets.git',
         root: opened.root,
+        // The host's own default, not this run's assumption about it. A controlled host
+        // configured for another name has to be able to say so, or a suite that reads
+        // the branch back from the host would still never meet one that is not `main`.
+        defaultBranch: options.defaultBranch,
       })
       opened.harness = harness
       const server = await startControlledGitHubHost({
@@ -1201,12 +1207,14 @@ export class GitHubLiveTarget extends DisposableTarget {
     })
     git.install()
     setGitHubTransport(faults)
-    // This run is the one that owns a real host, so it is the one that may use the real
-    // `git` and `gh`. The fixture's interception refuses anything it has no harness to
-    // answer, which is what keeps a controlled run from ever leaving for github.com —
-    // and which would otherwise refuse this run's own first push. Saying so explicitly,
-    // for exactly as long as this target exists, is what separates the two.
-    const liveTools = claimLiveTools()
+    // This run is the one that owns a real host, so it is the one that may use a real
+    // `git` — and only over the directory it just created. The fixture's interception
+    // refuses anything it has no harness to answer, which is what keeps a controlled run
+    // from ever leaving for github.com, and which would otherwise refuse this run's own
+    // first push. The claim is scoped rather than process-wide on purpose: the run needs
+    // its own workspace and its own foreign clone, and a claim over every git on the
+    // machine would be more than it asked for.
+    const liveTools = claimLiveGit(root)
 
     // Everything past this point can create something. From here on, a failure is
     // reported with what it left behind rather than as a bare refusal.
@@ -1255,20 +1263,20 @@ export class GitHubLiveTarget extends DisposableTarget {
         pending: true,
         actor: primary.login,
       })
-      // The branch this repository is to treat as its default is named here and asked
-      // for in the create request, rather than guessed at from the answer. A host whose
-      // own default is not this name would otherwise be reported as having a different
-      // default branch from the one the run then seeds and asks every merge, ruleset and
-      // base-ref question about.
-      const defaultBranch = config.defaultBranch
+      // The branch this repository treats as its default is the host's own setting, read
+      // out of the answer the host gave. The create endpoint takes no such parameter, so
+      // there is nothing to ask for: every merge, ruleset and base-ref question below is
+      // asked about the branch that answer names. A host that names none is refused
+      // rather than guessed for, because a guess here means seeding a branch the
+      // repository has no evidence of having and then asking questions about it.
       let identity: LiveRepositoryIdentity
+      let defaultBranch: string
       try {
         identity = await admin.createRepository({
           owner: config.owner,
           name,
           description: `Disposable target for the Git Stacks live suite, run ${config.runId}.`,
           marker,
-          defaultBranch,
         })
       } catch (error) {
         // The answer was lost, or the host refused. Either way the repository may or
@@ -1287,6 +1295,13 @@ export class GitHubLiveTarget extends DisposableTarget {
         if (existing === null) throw error
         identity = existing
       }
+      if (identity.defaultBranch === null) {
+        throw new Error(
+          `GitHub created ${identity.fullName} without naming a default branch, so this run ` +
+            'cannot tell which branch the repository treats as its trunk. Nothing was seeded.',
+        )
+      }
+      defaultBranch = identity.defaultBranch
       // One entry for this handle. `confirm` completes the journal that was already
       // written before the request; recording the same repository again would leave a
       // second entry that every later update misses, and that stays outstanding for
@@ -1413,7 +1428,8 @@ export class GitHubLiveTarget extends DisposableTarget {
             name,
             description: `Disposable foreign subject for the Git Stacks live suite, run ${this.runId}.`,
             marker: this.marker,
-            defaultBranch: this.defaultBranch,
+            // The foreign subject takes whatever default the host gives it, reported
+            // back by the host; nothing here chooses one.
           })
     // One entry for this handle. `confirm` completes the journal written before the
     // request, records the id the host named, and takes the pending flag off — so
@@ -1459,7 +1475,14 @@ export class GitHubLiveTarget extends DisposableTarget {
     const pull = await this.admin.createPullRequest({
       fullName: openOn,
       head,
-      base: identity.defaultBranch ?? this.defaultBranch,
+      // The base belongs to the repository the pull request is opened against, which
+      // for a fork is the repository it was forked from rather than the fork. So this
+      // reads the default branch of whichever repository the pull request lives in, and
+      // each from the host that reported it, rather than one branch reused for both.
+      base:
+        openOn === this.fullName
+          ? this.defaultBranch
+          : (identity.defaultBranch ?? this.defaultBranch),
       title: `git-stacks live e2e foreign subject (${kind})`,
       body: `Opened by the live GitHub suite for run ${this.runId}.`,
     })

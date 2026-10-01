@@ -11,7 +11,7 @@ import {
   type RecoveryOutcome,
   type RecoverySurface,
 } from './provisioning'
-import { NODE_TRANSPORT_VARIABLES } from './git-environment'
+import { NODE_TRANSPORT_VARIABLES, retireNodeTransportBypass } from './git-environment'
 import { FaultInjectingTransport } from './transport'
 import {
   DirectGitHubTransport,
@@ -152,7 +152,6 @@ A run must name its target. --github additionally requires:
   ${LIVE_ENV.repositoryPrefix}  the prefix of the disposable repository (optional)
   ${LIVE_ENV.runId}          the run id stamped on everything created (optional)
   ${LIVE_ENV.receipt}        where the cleanup receipt is written (optional)
-  ${LIVE_ENV.defaultBranch}  the branch the repository is asked to treat as its default
   ${LIVE_ENV.reviewerToken}  a second account that can approve and reply (optional)
 
 --recover is a different command, not a run: it names no target and creates nothing. It
@@ -371,10 +370,23 @@ async function runRecovery(receiptPath: string, options: CliOptions): Promise<nu
   }
   if (actors.size === 0) actors.add(receipt.owner.toLowerCase())
 
-  // Everything from here installs a credential into this process, so everything from
-  // here is inside the `finally` that takes it back out. A refusal or a failed
-  // preflight used to return or throw from outside it, which left a global transport
-  // holding a live token for the rest of the process.
+  // Everything from here makes an authenticated request over a socket this process
+  // opens, so everything from here is inside the `finally` that takes the process back
+  // the way it was found.
+  //
+  // The retirement happens against the real `process.env`, not against a copy of it.
+  // That is the whole substance of it: `DirectGitHubTransport` resolves its base URL
+  // and its credential from the environment it is handed, but the socket it then opens
+  // is `fetch` in this process, and Node reads `NODE_TLS_REJECT_UNAUTHORIZED` from
+  // `process.env` at connection time. Handing the transport a sanitized copy therefore
+  // changed which host was derived, and left the certificate decision exactly as
+  // unverified as it had been — with an authorization header on the request. This runs
+  // before the first transport exists, not after, because a bypass is read when the
+  // connection opens: removing it once a credential is already on the wire protects
+  // nothing. `retireNodeTransportBypass` captures the prior values rather than assuming
+  // them, so an absent variable is restored as absent and a process that had `0` gets
+  // `0` back.
+  const nodeTransport = retireNodeTransportBypass()
   let outcome: RecoveryOutcome | undefined
   try {
     // No global transport, and none restored afterwards. Everything this command does
@@ -451,6 +463,12 @@ async function runRecovery(receiptPath: string, options: CliOptions): Promise<nu
       return EXIT_REFUSED
     }
     throw error
+  } finally {
+    // Restored on the refusal path, on the failure path, and on the path that reports a
+    // result — not only where a request happened to succeed. A process left with a
+    // certificate bypass it did not start with is a process that will authenticate to
+    // whatever it is next asked to talk to.
+    nodeTransport.restore()
   }
   options.out(redactor.text(renderRecovery(outcome)))
   return outcome.complete ? EXIT_OK : EXIT_FAILED
@@ -499,6 +517,14 @@ function renderRecovery(outcome: RecoveryOutcome): string {
  * permits an environment-configured base to be where a supplied credential is sent, so
  * leaving a variable like this one in place would let a machine configured for local
  * development decide which host a recovery credential authenticates against.
+ *
+ * This is what the transport derives an endpoint and a credential from. It is NOT what
+ * governs whether a certificate is checked: the request goes out over `fetch` in this
+ * process, and Node reads that switch from `process.env` when it opens the connection.
+ * A copy handed to a transport cannot reach it, which is why the process itself is
+ * retired before the first request rather than by anything in here. The two are kept
+ * separate on purpose — this function must not be read as evidence that the socket
+ * verified anything.
  */
 function sanitizedEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const clean = { ...env }
@@ -506,12 +532,9 @@ function sanitizedEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   delete clean.GH_TOKEN
   delete clean.GITHUB_TOKEN
   delete clean.GIT_STACKS_GITHUB_TOKEN
-  // Node's own transport switches come out with the rest. A credential is sent in an
-  // authorization header to whatever certificate the socket presented, so a process
-  // that inherited `NODE_TLS_REJECT_UNAUTHORIZED=0` would authenticate to a host nothing
-  // vouches for — and the first thing this command asks over that socket is who the
-  // credential belongs to. The same list the run's Git isolation retires governs it, so
-  // there is one answer to "may this process skip certificate checking" rather than two.
+  // Still removed here, and still for a different reason than the one above: the
+  // transport hands this environment to the children it spawns, and a child that
+  // inherited an extra authority would trust it.
   for (const name of NODE_TRANSPORT_VARIABLES) delete clean[name]
   return clean
 }
@@ -575,7 +598,10 @@ async function writeObservedSchema(
   const subject = await prepareSchemaSubject({
     target,
     workspace,
-    defaultBranch: 'main',
+    // The branch the repository really has, as the host reported it. A literal here
+    // would quietly mis-document the fixture on any host whose default is named
+    // something else.
+    defaultBranch: target.defaultBranch,
   })
   const observed = await observeSchema(target.transport(), subject, `${target.kind} runtime`)
   const path = schemaPath ?? committedSchemaPath()
