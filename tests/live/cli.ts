@@ -4,7 +4,20 @@ import { LIVE_ENV, LiveConfigurationError, readLiveRunConfig } from './config'
 import { observeSchema, prepareSchemaSubject, renderSchema } from './observed-schema'
 import { runLiveSuite, type LiveRunReport } from './runner'
 import { findScenario, LIVE_SCENARIOS } from './scenarios'
-import { ControlledLiveTarget, GitHubLiveTarget } from './targets'
+import { GitHubAdmin } from './github-admin'
+import {
+  readLiveReceipt,
+  recoverLiveResources,
+  type RecoveryOutcome,
+  type RecoverySurface,
+} from './provisioning'
+import { FaultInjectingTransport } from './transport'
+import {
+  DirectGitHubTransport,
+  setGitHubTransport,
+  type GitHubTransport,
+} from '../../src/main/github-transport'
+import { ControlledLiveTarget, GitHubLiveTarget, LiveProvisioningFailure } from './targets'
 import type { LiveCleanupReport, LiveTarget, LiveWorkspace } from './contract'
 
 /**
@@ -44,6 +57,8 @@ interface ParsedCommand {
   readonly writeSchema: boolean
   readonly schemaPath: string | null
   readonly json: boolean
+  /** The receipt a recovery run acts on, or null when this is not a recovery run. */
+  readonly recover: string | null
   readonly problem: string | null
 }
 
@@ -55,6 +70,7 @@ export function parseCommand(argv: readonly string[]): ParsedCommand {
   let writeSchema = false
   let schemaPath: string | null = null
   let json = false
+  let recover: string | null = null
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index]
     switch (argument) {
@@ -83,6 +99,11 @@ export function parseCommand(argv: readonly string[]): ParsedCommand {
             .filter((id) => id !== ''),
         )
         break
+      case '--recover':
+        index += 1
+        if (index >= argv.length) return refused('--recover needs the path of a cleanup receipt')
+        recover = String(argv[index])
+        break
       case '--write-schema':
         writeSchema = true
         break
@@ -95,7 +116,7 @@ export function parseCommand(argv: readonly string[]): ParsedCommand {
         return refused(`unknown argument ${String(argument)}`)
     }
   }
-  return { target, only, list, help, writeSchema, schemaPath, json, problem: null }
+  return { target, only, list, help, writeSchema, schemaPath, json, recover, problem: null }
 }
 
 function refused(problem: string): ParsedCommand {
@@ -107,6 +128,7 @@ function refused(problem: string): ParsedCommand {
     writeSchema: false,
     schemaPath: null,
     json: false,
+    recover: null,
     problem,
   }
 }
@@ -115,6 +137,8 @@ const USAGE = `git-stacks live GitHub suite
 
   tsx tests/live/cli.ts --controlled [--only <id,...>] [--json]
   tsx tests/live/cli.ts --github    [--only <id,...>] [--json]
+
+  --recover <receipt> remove what a killed run left behind, from that receipt alone
 
   --list              print every scenario and what each one needs, then exit
   --write-schema      regenerate the observed-schema fixture from the target, then exit
@@ -128,6 +152,11 @@ A run must name its target. --github additionally requires:
   ${LIVE_ENV.runId}          the run id stamped on everything created (optional)
   ${LIVE_ENV.receipt}        where the cleanup receipt is written (optional)
   ${LIVE_ENV.reviewerToken}  a second account that can approve and reply (optional)
+
+--recover is a different command, not a run: it names no target and creates nothing. It
+reads the receipt, uses the credentials supplied now, and removes only handles the
+receipt already names, after the host has confirmed both the id this run created and the
+marker it stamped. It never lists an account to find something that looks similar.
 
 Exit codes: 0 passed, 1 a scenario or cleanup failed, 2 the run was refused.
 `
@@ -153,6 +182,9 @@ export async function runCli(options: CliOptions): Promise<number> {
   if (command.list) {
     options.out(renderCatalogue())
     return EXIT_OK
+  }
+  if (command.recover !== null) {
+    return await runRecovery(command.recover, options)
   }
   if (command.target === null) {
     options.err(
@@ -180,6 +212,30 @@ export async function runCli(options: CliOptions): Promise<number> {
     if (error instanceof LiveConfigurationError) {
       options.err(error.message)
       return EXIT_REFUSED
+    }
+    // A provisioning failure is not a refusal. It means the run created something and
+    // could not finish, and the report it carries is the only thing that says what is
+    // still standing. Reporting it as a refusal told an operator that nothing had been
+    // created while their account was holding a private repository with this run's
+    // marker in its description.
+    if (error instanceof LiveProvisioningFailure) {
+      options.err(redactor.text(`the target could not be started: ${error.message}`))
+      for (const entry of error.report.refused) {
+        options.err(redactor.text(`  refused ${entry.handle}: ${entry.reason}`))
+      }
+      if (error.report.remaining.length > 0) {
+        options.err(
+          redactor.text(
+            `${error.report.remaining.length} resource(s) are still on the host: ${error.report.remaining.join(', ')}`,
+          ),
+        )
+        options.err(
+          redactor.text(
+            `Recover them with: tsx tests/live/cli.ts --recover ${error.receipt} --host <the host in that receipt>`,
+          ),
+        )
+      }
+      return EXIT_FAILED
     }
     options.err(redactor.text(`the target could not be started: ${describeThrown(error)}`))
     return EXIT_REFUSED
@@ -241,6 +297,152 @@ export async function runCli(options: CliOptions): Promise<number> {
     exit = EXIT_FAILED
   }
   return exit
+}
+
+/**
+ * Removes what a killed run left behind, from its receipt and nothing else.
+ *
+ * The credential is supplied now, not inherited. A run that died cannot have left a
+ * process environment behind for this command to read, and a recovery command that
+ * accepted whatever happened to be in `gh`'s configuration would be acting as somebody
+ * other than the person who asked for it — which is the one mistake this whole
+ * mechanism exists to prevent.
+ *
+ * The receipt has to name the host too, and the host this command is pointed at has to
+ * be that one. A receipt written by a run against a different host describes names that
+ * mean nothing here, and a recovery run that deleted whatever answered to them would be
+ * deleting on this account what the receipt was about elsewhere.
+ */
+async function runRecovery(receiptPath: string, options: CliOptions): Promise<number> {
+  const redactor = new LiveRedactor(readSecrets(options.env))
+  let receipt
+  try {
+    receipt = await readLiveReceipt(receiptPath)
+  } catch (error) {
+    options.err(redactor.text(describeThrown(error)))
+    return EXIT_REFUSED
+  }
+  const host = String(options.env[LIVE_ENV.host] ?? '').trim()
+  if (host === '') {
+    options.err(
+      `A recovery run has to be told which host. Set ${LIVE_ENV.host} to the host the receipt ` +
+        `names (${receipt.host}).`,
+    )
+    return EXIT_REFUSED
+  }
+  if (host.toLowerCase() !== receipt.host.toLowerCase()) {
+    options.err(
+      `The receipt at ${receiptPath} is for ${receipt.host}, and this run was pointed at ${host}. ` +
+        'Nothing was removed.',
+    )
+    return EXIT_REFUSED
+  }
+
+  const surfaces = new Map<string, RecoverySurface>()
+  const transports: GitHubTransport[] = []
+  const primaryToken = String(options.env[LIVE_ENV.token] ?? '').trim()
+  const reviewerToken = String(options.env[LIVE_ENV.reviewerToken] ?? '').trim()
+  const previous = pinnedTransport(host, primaryToken)
+  transports.push(previous)
+  setGitHubTransport(previous)
+  const primaryLogin = await new GitHubAdmin(previous, receipt.owner, receipt.marker)
+    .viewer()
+    .catch((error: unknown) => {
+      throw new Error(
+        `The credential supplied could not be asked who it belongs to: ${describeThrown(error)}`,
+      )
+    })
+  if (primaryLogin.toLowerCase() !== receipt.owner.toLowerCase()) {
+    options.err(
+      `The receipt was written by ${receipt.owner}, but the credential supplied belongs to ` +
+        `${primaryLogin}. Nothing was removed.`,
+    )
+    return EXIT_REFUSED
+  }
+  surfaces.set(primaryLogin, new GitHubAdmin(previous, receipt.owner, receipt.marker))
+  if (reviewerToken !== '') {
+    const reviewer = new DirectGitHubTransport({
+      token: reviewerToken,
+      host,
+      apiUrl: host === 'github.com' ? 'https://api.github.com' : `https://${host}/api/v3`,
+      graphqlUrl:
+        host === 'github.com' ? 'https://api.github.com/graphql' : `https://${host}/api/graphql`,
+      env: sanitizedEnv(options.env),
+    })
+    transports.push(reviewer)
+    const login = await new GitHubAdmin(reviewer, receipt.owner, receipt.marker).viewer()
+    surfaces.set(login, new GitHubAdmin(reviewer, receipt.owner, receipt.marker))
+  }
+
+  let outcome: RecoveryOutcome
+  try {
+    outcome = await recoverLiveResources({
+      receipt,
+      surfaces,
+      primaryLogin,
+    })
+  } finally {
+    // The process keeps neither credential: this command ends the moment it is done,
+    // and anything else running in it has no business holding a token that was only
+    // supplied for one deletion.
+    setGitHubTransport(null)
+  }
+  options.out(redactor.text(renderRecovery(outcome)))
+  return outcome.complete ? EXIT_OK : EXIT_FAILED
+}
+
+/** What a recovery run removed, and everything it did not, in a form a person reads. */
+function renderRecovery(outcome: RecoveryOutcome): string {
+  const lines = [`recovery for run ${outcome.runId}:`]
+  for (const handle of outcome.removed) lines.push(`  removed ${handle}`)
+  for (const handle of outcome.absent) lines.push(`  already gone ${handle}`)
+  for (const entry of outcome.refused) lines.push(`  refused ${entry.handle}: ${entry.reason}`)
+  for (const handle of outcome.unknown) {
+    lines.push(`  unknown ${handle}: the host could not be asked, so nothing was decided about it`)
+  }
+  lines.push(
+    outcome.complete
+      ? 'nothing from this receipt is left standing'
+      : 'some of this receipt is still standing; the refusals above say which and why',
+  )
+  return lines.join('\n')
+}
+
+/**
+ * The environment a recovery credential is allowed to see.
+ *
+ * The API base is taken out of it entirely. The application's transport deliberately
+ * permits an environment-configured base to be where a supplied credential is sent, so
+ * leaving a variable like this one in place would let a machine configured for local
+ * development decide which host a recovery credential authenticates against.
+ */
+function sanitizedEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const clean = { ...env }
+  delete clean.GIT_STACKS_GITHUB_API_URL
+  delete clean.GH_TOKEN
+  delete clean.GITHUB_TOKEN
+  delete clean.GIT_STACKS_GITHUB_TOKEN
+  return clean
+}
+
+/** A credential pinned to the host the receipt names, never to anything in the environment. */
+function pinnedTransport(host: string, token: string): GitHubTransport {
+  if (token.trim() === '') {
+    throw new Error(
+      `A recovery run needs ${LIVE_ENV.token}. It cannot inherit a credential from gh or from the ` +
+        'environment of a process that no longer exists.',
+    )
+  }
+  return new FaultInjectingTransport(
+    new DirectGitHubTransport({
+      token,
+      host,
+      apiUrl: host === 'github.com' ? 'https://api.github.com' : `https://${host}/api/v3`,
+      graphqlUrl:
+        host === 'github.com' ? 'https://api.github.com/graphql' : `https://${host}/api/graphql`,
+      env: sanitizedEnv(process.env),
+    }),
+  )
 }
 
 /** Cleanup that reports instead of throwing, so the receipt is always printed. */

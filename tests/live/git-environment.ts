@@ -1,0 +1,208 @@
+import { mkdir, writeFile } from 'node:fs/promises'
+import { join } from 'node:path'
+
+/**
+ * A Git environment this run owns, and the process variables that make every Git
+ * in it behave the way the run means it to.
+ *
+ * The problem this exists for is not tidiness. A Git command reads more than its
+ * arguments: it reads the home directory, the system and global configuration, the
+ * template directory it copies hooks out of, whatever `GIT_DIR` and
+ * `GIT_WORK_TREE` happen to say, any `credential.helper` a developer configured,
+ * and any tracing that is switched on. A live run is the one place in this
+ * repository where a real personal credential is in the environment, and a run
+ * that lets an inherited `core.hooksPath` execute during its own setup has handed
+ * that credential to a program nobody in the run chose. So the boundary is drawn
+ * here, before the first Git command, and it is drawn for every Git: the ones this
+ * suite starts, the ones an external clone starts, and the ones the application's
+ * own services start — which is why the isolation is installed into the process
+ * environment rather than passed as an argument nobody else passes.
+ *
+ * Nothing here is weakened to make a run work. Hooks are pointed at a directory
+ * this run created and left empty, templates likewise, signing is off, helpers are
+ * cleared, and tracing is off. The one credential that is added is the run's own,
+ * scoped by URL to the disposable repository it is for.
+ */
+export interface IsolatedGitEnvironment {
+  /** The environment every Git command in this run is executed with. */
+  readonly env: NodeJS.ProcessEnv
+  /**
+   * Puts the process back the way the run found it. Every variable this installed is
+   * removed and every variable it replaced is restored, whether the run succeeded,
+   * failed, or was killed mid-command.
+   */
+  restore(): void
+  /**
+   * More than one credential, when the run acts as more than one account.
+   *
+   * Each is scoped to the URL of the repository it is for, and Git presents only the
+   * header whose URL prefix matches the remote in hand. That is what lets one run
+   * clone the primary's repository and the reviewer's fork in the same clone
+   * directory without either account's token ever being offered to the other's
+   * remote.
+   */
+  readonly credentials?: ReadonlyArray<{ readonly url: string; readonly header: string }>
+}
+
+/**
+ * Variables that redirect Git away from the clone it was pointed at, or that carry
+ * a credential into a command the run did not authorise. Each is removed rather
+ * than overridden, because an empty value is not the same as an absent one: Git
+ * reads an empty `GIT_DIR` as an empty directory name.
+ */
+const AMBIENT_GIT_VARIABLES = [
+  'GIT_DIR',
+  'GIT_WORK_TREE',
+  'GIT_COMMON_DIR',
+  'GIT_INDEX_FILE',
+  'GIT_OBJECT_DIRECTORY',
+  'GIT_ALTERNATE_OBJECT_DIRECTORIES',
+  'GIT_NAMESPACE',
+  'GIT_PREFIX',
+  'GIT_CEILING_DIRECTORIES',
+  'GIT_DISCOVERY_ACROSS_FILESYSTEM',
+  'GIT_CONFIG',
+  'GIT_CONFIG_PARAMETERS',
+  'GIT_CONFIG_COUNT',
+  'GIT_TEMPLATE_DIR',
+  'GIT_ATTR_NOSYSTEM',
+  'GIT_CREDENTIAL_HELPER',
+  'GIT_ASKPASS',
+  'SSH_ASKPASS',
+  'GIT_SSH',
+  'GIT_SSH_COMMAND',
+  'GIT_PROXY_COMMAND',
+  'GIT_EXTERNAL_DIFF',
+  'GIT_DIFF_OPTS',
+  'GIT_EDITOR',
+  'GIT_SEQUENCE_EDITOR',
+  'GIT_PAGER',
+  'GIT_LFS_SKIP_SMUDGE',
+  'GIT_AUTHOR_NAME',
+  'GIT_AUTHOR_EMAIL',
+  'GIT_AUTHOR_DATE',
+  'GIT_COMMITTER_NAME',
+  'GIT_COMMITTER_EMAIL',
+  'GIT_COMMITTER_DATE',
+] as const
+
+/**
+ * Every way Git can be asked to narrate itself, including the setting that decides
+ * whether what it narrates is redacted. A trace is the single most likely way a
+ * credential reaches a log: the authorization header this run installs is exactly
+ * the value a `GIT_TRACE_CURL` prints.
+ */
+const TRACING_VARIABLES = [
+  'GIT_TRACE',
+  'GIT_TRACE_SETUP',
+  'GIT_TRACE_SHALLOW',
+  'GIT_TRACE_CURL',
+  'GIT_TRACE_CURL_NO_DATA',
+  'GIT_TRACE_PACKET',
+  'GIT_TRACE_PERFORMANCE',
+  'GIT_TRACE_REDACT',
+  'GIT_TRACE2',
+  'GIT_TRACE2_EVENT',
+  'GIT_TRACE2_PERF',
+  'GIT_TRACE2_BRIEF',
+] as const
+
+export interface GitEnvironmentInput {
+  /** A directory this run owns and may write into. */
+  readonly home: string
+  /**
+   * The credentials this run authorizes, each scoped to the URL prefix of the
+   * repository it is for, exactly as Git will see that URL.
+   *
+   * Scoping is what keeps two accounts apart in one clone: Git presents only the
+   * header whose URL matches the remote in hand, so the reviewer's token is never
+   * offered to the primary's remote, and no token is ever written into a URL where
+   * `git remote -v`, `.git/config` and every diagnostic would show it.
+   */
+  readonly credentials?: ReadonlyArray<{ readonly url: string; readonly header: string }>
+  /** Extra `-c` configuration this run needs on every command. */
+  readonly config?: ReadonlyArray<readonly [string, string]>
+  /** The identity commits and clones are made with, so a diff has an author. */
+  readonly author: { readonly name: string; readonly email: string }
+  /** Git's own host key checking, left to Git, for any transport that uses it. */
+  readonly gitTlsCaInfo?: string
+}
+
+export async function installIsolatedGitEnvironment(
+  input: GitEnvironmentInput,
+): Promise<IsolatedGitEnvironment> {
+  // A home and a template directory of this run's own, both empty. Home is what
+  // Git reads global configuration and credential helpers out of; the template
+  // directory is what Git copies hooks out of when it creates a repository. Empty
+  // means there is nothing in either to inherit.
+  const home = join(input.home, 'git-home')
+  const template = join(input.home, 'git-template')
+  await mkdir(home, { recursive: true })
+  await mkdir(template, { recursive: true })
+  await writeFile(join(home, '.gitconfig'), '', 'utf8')
+
+  const env: NodeJS.ProcessEnv = { ...process.env }
+  for (const name of [...AMBIENT_GIT_VARIABLES, ...TRACING_VARIABLES]) delete env[name]
+  // A run cannot reach github.com through an API base somebody else configured, and
+  // cannot inherit a token this suite was not given. The live target pins its own
+  // endpoints explicitly; the controlled target sets the base it is standing up.
+  delete env.GIT_STACKS_GITHUB_API_URL
+  delete env.GIT_STACKS_GITHUB_TOKEN
+  delete env.GIT_STACKS_GITHUB_CREDENTIAL
+  delete env.GH_TOKEN
+  delete env.GITHUB_TOKEN
+  delete env.GITHUB_ENTERPRISE_TOKEN
+  for (const key of Object.keys(env)) {
+    if (key.startsWith('GIT_STACKS_GITHUB_TOKEN_')) delete env[key]
+  }
+
+  // Every `GIT_CONFIG_*` knob is now set by this run, not inherited, and the count
+  // form is how several of them are supplied at once. `credential.helper` is set to
+  // the empty string rather than removed, because an empty value is how Git is told
+  // to have no helper at all; removing it would let the system configuration supply
+  // one.
+  const config: Array<[string, string]> = [
+    // Hooks, if any run at all, run out of a directory this run created and left
+    // empty. `core.hooksPath` is absolute, so a repository-local setting cannot
+    // override it and a relative one cannot escape it.
+    ['core.hooksPath', template],
+    ['commit.gpgsign', 'false'],
+    ['tag.gpgsign', 'false'],
+    ['credential.helper', ''],
+    ['core.askPass', ''],
+    ['gpg.format', 'openpgp'],
+  ]
+  if (input.gitTlsCaInfo !== undefined) {
+    config.push(['http.sslCAInfo', input.gitTlsCaInfo], ['http.sslVerify', 'true'])
+  }
+  for (const credential of input.credentials ?? []) {
+    config.push([`http.${credential.url}.extraheader`, credential.header])
+  }
+  for (const [key, value] of input.config ?? []) config.push([key, value])
+
+  env.HOME = home
+  env.XDG_CONFIG_HOME = home
+  env.GIT_CONFIG_GLOBAL = join(home, '.gitconfig')
+  env.GIT_CONFIG_NOSYSTEM = '1'
+  env.GIT_TEMPLATE_DIR = template
+  env.GIT_TERMINAL_PROMPT = '0'
+  env.GIT_AUTHOR_NAME = input.author.name
+  env.GIT_AUTHOR_EMAIL = input.author.email
+  env.GIT_COMMITTER_NAME = input.author.name
+  env.GIT_COMMITTER_EMAIL = input.author.email
+  env.GIT_CONFIG_COUNT = String(config.length)
+  config.forEach(([key, value], index) => {
+    env[`GIT_CONFIG_KEY_${index}`] = key
+    env[`GIT_CONFIG_VALUE_${index}`] = value
+  })
+
+  return {
+    env,
+    restore: () => {
+      for (const key of Object.keys(process.env)) {
+        if (process.env[key] !== env[key]) delete process.env[key]
+      }
+      Object.assign(process.env, env)
+    },
+  }
+}

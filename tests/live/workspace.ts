@@ -30,10 +30,25 @@ import type { LiveWorkspace } from './contract'
 const nodeRequire = createRequire(import.meta.url)
 
 /** One Git invocation, answered asynchronously by whichever boundary answers Git here. */
+/**
+ * The `execFile` this process answers Git on.
+ *
+ * The options are stated rather than inferred because `promisify` takes its type from
+ * whichever callback overload it finds first, and that overload has no `timeout` and no
+ * `signal` — the two things that let a Git command this process is serving stop at all.
+ * A command with no deadline, against a host this process itself serves, is the one that
+ * hangs the run.
+ */
 type GitCommand = (
   file: string,
   args: readonly string[],
-  options: { encoding: 'utf8'; env?: NodeJS.ProcessEnv; maxBuffer?: number },
+  options: {
+    encoding: 'utf8'
+    env?: NodeJS.ProcessEnv
+    maxBuffer?: number
+    timeout?: number
+    signal?: AbortSignal
+  },
 ) => Promise<{ stdout: string; stderr: string }>
 
 const childProcess = nodeRequire('node:child_process') as {
@@ -41,7 +56,13 @@ const childProcess = nodeRequire('node:child_process') as {
   execFileSync: (
     file: string,
     args: readonly string[],
-    options: { encoding: 'utf8'; cwd?: string; env?: NodeJS.ProcessEnv; stdio: 'ignore' | 'pipe' },
+    options: {
+      encoding: 'utf8'
+      cwd?: string
+      env?: NodeJS.ProcessEnv
+      stdio: 'ignore' | 'pipe'
+      timeout?: number
+    },
   ) => string
 }
 
@@ -61,16 +82,38 @@ const REMOTE_SUBCOMMANDS: Record<string, true> = {
   submodule: true,
 }
 
+/**
+ * How long any one Git command may take before the run gives up on it.
+ *
+ * Unbounded is how a run that has already created a repository gets killed by a
+ * job timeout with the receipt half-written and no cleanup ever entered: a remote
+ * that accepts the connection and then says nothing holds the process for as long
+ * as the platform allows. A bound turns that into an ordinary failure the run's own
+ * cleanup path handles.
+ */
+const GIT_TIMEOUT_MS = 120_000
+
 /** One Git command that may reach the remote, with the outcome raised rather than printed. */
-function runGitRemote(git: string, args: readonly string[]): Promise<string> {
+function runGitRemote(
+  git: string,
+  args: readonly string[],
+  env: NodeJS.ProcessEnv,
+  signal?: AbortSignal,
+): Promise<string> {
   // `promisify` is applied where the command runs rather than once at module load,
   // because what it wraps is `child_process.execFile` as it stands by then: the boundary
   // the rest of this process answers Git on. A Git command that reached the real tools
   // directly would be running against a different world than the application's own
   // commands, which is the one thing this suite cannot do.
   const run = promisify(childProcess.execFile)
-  return run(git, args, { encoding: 'utf8', env: process.env, maxBuffer: 32 * 1024 * 1024 }).then(
-    (result) => String(result.stdout).trim(),
+  return run(git, args, {
+    encoding: 'utf8',
+    env,
+    maxBuffer: 32 * 1024 * 1024,
+    timeout: GIT_TIMEOUT_MS,
+    ...(signal ? { signal } : {}),
+  }).then(
+    (result) => result.stdout.trim(),
     (error: unknown) => {
       const written =
         error !== null &&
@@ -119,6 +162,16 @@ export interface LocalWorkspaceOptions {
   readonly author: { name: string; email: string }
   /** A temporary directory this workspace owns and removes when it closes. */
   readonly root: string
+  /**
+   * The environment every Git command is run with, and the same one installed into
+   * the process for the application's own services.
+   *
+   * Passing it explicitly is not a second boundary; it is the same one, held where
+   * it can be checked. A workspace that fell back to `process.env` would be correct
+   * only as long as nothing else changed the process, which is exactly the assumption
+   * that leaks a credential through an inherited hook or helper.
+   */
+  readonly env?: NodeJS.ProcessEnv
 }
 
 export class LocalGitWorkspace implements LiveWorkspace {
@@ -130,7 +183,19 @@ export class LocalGitWorkspace implements LiveWorkspace {
   private readonly certificatePath: string | undefined
   private readonly author: { name: string; email: string }
   private readonly root: string
+  /**
+   * The environment every Git command below runs with: the run's isolated one.
+   *
+   * It is the same environment the application's own services have installed into the
+   * process, so a command issued here and a command issued by the product see the
+   * same Git configuration. Anything else would mean this suite proved something
+   * about a configuration the product never runs under.
+   */
+  readonly env: NodeJS.ProcessEnv
   private closed = false
+  private cancelled = false
+  /** Aborts the Git commands that are still running when a run is cancelled. */
+  private readonly abort = new AbortController()
 
   constructor(options: LocalWorkspaceOptions) {
     this.path = options.path
@@ -141,8 +206,14 @@ export class LocalGitWorkspace implements LiveWorkspace {
     this.certificatePath = options.certificatePath
     this.author = options.author
     this.root = options.root
+    this.env = options.env ?? process.env
     this.pointOriginAt(options.origin)
     this.trustCertificate(options.certificatePath)
+  }
+
+  cancel(): void {
+    this.cancelled = true
+    this.abort.abort()
   }
 
   /**
@@ -181,6 +252,7 @@ export class LocalGitWorkspace implements LiveWorkspace {
    */
   git(args: readonly string[]): string {
     if (this.closed) throw new Error('this live workspace has already been closed')
+    if (this.cancelled) throw new Error('this live run was cancelled')
     const remote = args.find(
       (argument) => !argument.startsWith('-') && argument in REMOTE_SUBCOMMANDS,
     )
@@ -194,8 +266,9 @@ export class LocalGitWorkspace implements LiveWorkspace {
     return childProcess
       .execFileSync(this.gitBinary, ['-C', this.path, ...args], {
         encoding: 'utf8',
-        env: process.env,
+        env: this.env,
         stdio: 'pipe',
+        timeout: GIT_TIMEOUT_MS,
       })
       .trim()
   }
@@ -210,7 +283,8 @@ export class LocalGitWorkspace implements LiveWorkspace {
    */
   async gitNetwork(args: readonly string[]): Promise<string> {
     if (this.closed) throw new Error('this live workspace has already been closed')
-    return runGitRemote(this.gitBinary, ['-C', this.path, ...args])
+    if (this.cancelled) throw new Error('this live run was cancelled')
+    return runGitRemote(this.gitBinary, ['-C', this.path, ...args], this.env, this.abort.signal)
   }
 
   async commit(path: string, contents: string, message: string): Promise<string> {
@@ -262,13 +336,16 @@ export class LocalGitWorkspace implements LiveWorkspace {
       this.certificatePath === undefined
         ? []
         : ['-c', `http.sslCAInfo=${this.certificatePath}`, '-c', 'http.sslVerify=true']
-    await runGitRemote(this.gitBinary, [
-      ...trust,
-      'clone',
-      ...this.cloneArgs,
-      this.cloneSource,
-      directory,
-    ])
+    await runGitRemote(
+      this.gitBinary,
+      [...trust, 'clone', ...this.cloneArgs, this.cloneSource, directory],
+      this.env,
+      this.abort.signal,
+    )
+    // The actor runs the same Git the run does — same isolation, same credential
+    // scope, same identity. An external clone that reached the remote by some other
+    // route would be testing a configuration the races are supposed to be staged
+    // against, and would be the one part of the run holding an unisolated credential.
     const workspace = new LocalGitWorkspace({
       path: directory,
       git: this.gitBinary,
@@ -278,6 +355,7 @@ export class LocalGitWorkspace implements LiveWorkspace {
       certificatePath: this.certificatePath,
       author: this.author,
       root: this.root,
+      env: this.env,
     })
     workspace.git(['config', 'user.name', this.author.name])
     workspace.git(['config', 'user.email', this.author.email])

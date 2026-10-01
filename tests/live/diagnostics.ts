@@ -23,8 +23,8 @@ export class LiveRedactor {
   }
 
   /**
-   * Removes configured secrets, then the shapes the application already knows, then any
-   * credential that happened to be part of a URL.
+   * Removes configured secrets, then the shapes the application already knows, then
+   * anything credential-shaped that survived both.
    *
    * A remote URL is the one place a credential turns up that is not the credential: a
    * Git remote carries `user:password@host`, and a failure report that quotes the remote
@@ -39,6 +39,35 @@ export class LiveRedactor {
       result = result.split(literal).join('[REDACTED_SECRET]')
     }
     result = result.replace(/:\/\/[^\s/@]+:[^\s/@]*@/gu, '://[REDACTED_CREDENTIAL]@')
+    // The run's own Git credential is sent as a base64 `x-access-token:<token>` pair in
+    // an authorization header, so the literal forms of the secrets do not appear in a
+    // trace at all — and a redactor keyed only on those literals would happily publish
+    // the reversible encoding instead. The whole header value is removed: there is
+    // nothing worth keeping in a credential, and the scheme is kept only so a reader
+    // can tell that an authorization header was involved at all.
+    //
+    // The scheme and the credential are matched as one run, because they are one value.
+    // Matching only the first token after the colon redacts the word `basic` and leaves
+    // the base64 credential sitting in the published artifact verbatim — the credential
+    // a reader could base64-decode in one step, and the only form it ever appears in
+    // when Git is the one presenting it. The scheme is kept because it is the part
+    // that distinguishes an authorization failure from every other kind.
+    result = result.replace(
+      /((?:^|[\s'";=(,])?(?:http\.)?(?:extraheader\s*[=:]\s*)?)authorization\s*[:=]\s*(?:'([^']*)'|"([^"]*)"|([A-Za-z][\w+.-]*)[ \t]+([^\s,;)\]}]+)|([^\s,;)\]}]+))/giu,
+      (
+        _match,
+        prefix: string,
+        single: string | undefined,
+        double: string | undefined,
+        scheme: string | undefined,
+        value: string | undefined,
+        bare: string | undefined,
+      ) => {
+        const whole = single ?? double ?? (value === undefined ? bare : `${scheme} ${value}`)
+        const named = scheme !== undefined && value !== undefined ? scheme : undefined
+        return `${prefix}authorization: [REDACTED_CREDENTIAL${named === undefined ? '' : ` ${named}`}]`
+      },
+    )
     return sanitizePaths(sanitizeSecrets(result))
   }
 

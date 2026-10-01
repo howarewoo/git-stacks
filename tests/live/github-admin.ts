@@ -4,33 +4,73 @@ import {
   type GitHubRestResponse,
 } from '../../src/main/github-transport'
 import { isRecord } from '../../src/shared/guards'
-import type { LiveAdmin, LiveRuleSet } from './contract'
-import { markedDescription } from './provisioning'
+import type {
+  LiveActor,
+  LiveAdmin,
+  LiveCollaboratorPermission,
+  LiveOwnerKind,
+  LiveRepositoryIdentity,
+  LiveRuleSet,
+} from './contract'
+import { markedDescription, markerOnRepository, ownsMarker } from './provisioning'
 
 /** The parts of a repository read the ownership check and capability probes need. */
 interface RepositoryProbe {
+  id?: number
   description: string | null
-  topics?: { names?: string[] }
+  /** GitHub returns topics as an array of strings, not as an object wrapping one. */
+  topics?: string[]
   permissions?: Record<string, boolean>
   default_branch?: string
+  owner?: { login?: string; type?: string }
 }
 
 interface PullRequestProbe {
   number: number
   head: { sha: string; ref: string }
   base: { ref: string }
+  /** The address the host itself reports, which is the only one worth publishing. */
+  html_url?: string
 }
 
 interface RulesetProbe {
   id: number
   name: string
   enforcement?: string
-  conditions?: { ref_name?: { include?: string[] } }
+  conditions?: { ref_name?: { include?: string[]; exclude?: string[] } }
   rules?: Array<{ type?: string }>
+}
+
+/** GitHub's own shorthands for "the default branch" and "every branch". */
+const DEFAULT_BRANCH_CONDITION = '~DEFAULT_BRANCH'
+const ALL_BRANCHES_CONDITION = '~ALL'
+
+/**
+ * The identity fields a creation response carries, in the shape both the personal
+ * and the organization route answer with.
+ */
+interface CreatedRepositoryProbe {
+  id?: number
+  full_name?: string
+  default_branch?: string | null
+  name?: string
+  owner?: { login?: string; type?: string }
 }
 
 function refName(branch: string): string {
   return branch.startsWith('refs/heads/') ? branch : `refs/heads/${branch}`
+}
+
+/**
+ * The branch a fully qualified ref names, or the shorthand itself.
+ *
+ * Queue discovery compares what it read against a base branch, and the two arrive
+ * in different spellings: the rule set says `refs/heads/trunk`, the repository says
+ * `trunk`. Comparing those as strings decides they are different, and a configured
+ * queue is then reported as absent.
+ */
+function branchOfRef(ref: string): string {
+  return ref.startsWith('refs/heads/') ? ref.slice('refs/heads/'.length) : ref
 }
 
 /**
@@ -87,9 +127,61 @@ export class GitHubAdmin implements LiveAdmin {
     })
   }
 
+  /**
+   * The account this transport authenticates as, or a refusal.
+   *
+   * An empty login is not an answer. A host that answered `/user` with something
+   * else, or refused outright, has told this run it does not know who it is — and a
+   * suite that carried on from there would create resources on an account it cannot
+   * name and then report a capability it cannot attribute to anyone.
+   */
   async viewer(): Promise<string> {
     const { data } = await this.call<{ login?: string }>({ method: 'GET', path: 'user' })
-    return typeof data?.login === 'string' ? data.login : ''
+    const login = data?.login
+    if (typeof login !== 'string' || login.trim() === '') {
+      throw new Error('GitHub did not answer which account this credential belongs to')
+    }
+    return login
+  }
+
+  /**
+   * Resolves the configured owner against the credential about to spend it, and
+   * answers which route may create there.
+   *
+   * An owner equal to the authenticated login is that account's own space. Anything
+   * else is only usable if the credential is an active member of the organization of
+   * that name, which GitHub answers and a non-member cannot. A name that is neither
+   * is refused here, before a single mutation: discovering it afterwards — by posting
+   * to the personal route and then failing to read the configured name — leaves the
+   * repository that really was created in nobody's receipt, which is exactly the
+   * leftover this suite exists not to leave behind.
+   */
+  async resolveOwner(owner: string): Promise<LiveActor> {
+    const login = await this.viewer()
+    if (login.toLowerCase() === owner.toLowerCase()) {
+      return { login, kind: 'user' }
+    }
+    const membership = await this.call<{ state?: string }>({
+      method: 'GET',
+      path: `user/memberships/orgs/${encodeURIComponent(owner)}`,
+    }).catch((error: unknown) => {
+      if (
+        error instanceof GitHubTransportError &&
+        (error.status === 404 || error.kind === 'not-found')
+      ) {
+        return null
+      }
+      throw error
+    })
+    if (membership === null || membership.data?.state !== 'active') {
+      throw new Error(
+        `The configured owner ${owner} is neither this credential's account (${login}) nor an ` +
+          'organization it is an active member of. Sending it to the personal creation route ' +
+          'would create the repository under a different account than the receipt names, so the ' +
+          'run is refused before anything is created.',
+      )
+    }
+    return { login: owner, kind: 'organization' }
   }
 
   /** The commit a ref points at, which is what a check run and a merge both attach to. */
@@ -114,18 +206,36 @@ export class GitHubAdmin implements LiveAdmin {
     return isRecord(data) ? data : null
   }
 
+  /**
+   * Creates the disposable repository under the resolved owner, through the route
+   * that owner requires, and keeps the identity the host answered with.
+   *
+   * The personal route and the organization route are different endpoints, and
+   * sending an organization's name to the personal one does not fail — it creates
+   * the repository under the caller's own account instead. So the route follows the
+   * resolved kind, the response is checked against what was asked for, and the
+   * marker is read back: a repository the host names differently, or one that does
+   * not carry this run's marker, is a refusal rather than something to clean up
+   * later on the strength of a name.
+   */
   async createRepository(input: {
+    owner: string
     name: string
     description: string
     marker: string
-  }): Promise<void> {
-    await this.call({
+    private?: boolean
+  }): Promise<LiveRepositoryIdentity> {
+    const actor = await this.resolveOwner(input.owner)
+    const { data } = await this.call<CreatedRepositoryProbe>({
       method: 'POST',
-      path: 'user/repos',
+      path:
+        actor.kind === 'organization'
+          ? `orgs/${encodeURIComponent(actor.login)}/repos`
+          : 'user/repos',
       body: {
         name: input.name,
         description: markedDescription(input.description, input.marker),
-        private: true,
+        private: input.private !== false,
         auto_init: false,
         // A queue and a ruleset are configured after the repository exists; asking
         // for them here would hide a refusal behind a failed create.
@@ -135,6 +245,178 @@ export class GitHubAdmin implements LiveAdmin {
         has_discussions: false,
       },
     })
+    const identity = this.identityFrom(data, `${actor.login}/${input.name}`)
+    if (
+      !ownsMarker(markerOnRepository(await this.readRepository(identity.fullName)), input.marker)
+    ) {
+      throw new Error(
+        `${identity.fullName} does not carry this run's ownership marker, so this run will not delete it`,
+      )
+    }
+    return identity
+  }
+
+  /**
+   * Forks a repository with this transport's own account.
+   *
+   * The fork is created through the credential of the account that will own it, so
+   * it genuinely belongs to somebody other than the repository it was forked from —
+   * which is what makes a fork head foreign in fact rather than in appearance.
+   * GitHub's fork route takes an organization and nothing else, so the marker is
+   * stamped immediately afterwards and read back: a fork that would not carry it is
+   * one this run does not own and will not delete.
+   */
+  async createFork(input: { parent: string; marker: string }): Promise<LiveRepositoryIdentity> {
+    const { data } = await this.call<CreatedRepositoryProbe>({
+      method: 'POST',
+      path: `repos/${input.parent}/forks`,
+      body: {},
+    })
+    const identity = this.identityFrom(data, null)
+    await this.call({
+      method: 'PATCH',
+      path: `repos/${identity.fullName}`,
+      body: {
+        description: markedDescription(
+          'Disposable fork for the Git Stacks live suite.',
+          input.marker,
+        ),
+      },
+    })
+    if (
+      !ownsMarker(markerOnRepository(await this.readRepository(identity.fullName)), input.marker)
+    ) {
+      throw new Error(
+        `${identity.fullName} did not accept this run's ownership marker, so this run will not delete it`,
+      )
+    }
+    return identity
+  }
+
+  /**
+   * The identity a creation response reported.
+   *
+   * The id is kept because it is the one thing a name cannot be: a later read of
+   * that name may resolve to a different repository, and a deletion aimed at a name
+   * is aimed at whatever answers to it at the time. `expected` is what the run
+   * believes it created, and a host that names something else is refused rather
+   * than accommodated.
+   */
+  private identityFrom(data: unknown, expected: string | null): LiveRepositoryIdentity {
+    if (!isRecord(data) || typeof data.id !== 'number' || typeof data.full_name !== 'string') {
+      throw new Error('GitHub did not return the identity of the repository it created')
+    }
+    const created = data as CreatedRepositoryProbe
+    const fullName = created.full_name as string
+    if (expected !== null && fullName.toLowerCase() !== expected.toLowerCase()) {
+      throw new Error(
+        `GitHub created ${fullName} when this run asked for ${expected}; refusing to treat it as owned`,
+      )
+    }
+    return {
+      id: created.id as number,
+      fullName,
+      defaultBranch: typeof created.default_branch === 'string' ? created.default_branch : null,
+      owner: created.owner?.login ?? fullName.split('/')[0] ?? '',
+      ownerKind: created.owner?.type === 'Organization' ? 'organization' : 'user',
+    }
+  }
+
+  /**
+   * Lets a second account in, and answers whether it still has to accept an invitation.
+   *
+   * A token does not confer membership: a repository created a moment ago has one
+   * member, and a second account holding a valid credential still cannot read a private
+   * pull request until it has been let in.
+   *
+   * One route does both jobs and its status says which happened.
+   * `PUT /repos/{owner}/{repo}/collaborators/{username}` answers **201 Created** with a
+   * repository invitation when the account is not yet a collaborator and had to be
+   * invited, and **204 No Content** with no body when the account was already a
+   * collaborator, is already an organization member, or was granted directly. So 204
+   * means access exists now and there is nothing to accept, while 201 hands back an
+   * invitation whose id the invited account has to accept before it holds anything.
+   * Treating both as success-and-move-on is what produces a run that reports a second
+   * reviewer and then answers 404 on every read that reviewer makes. There is no
+   * separate route for creating one: the invitations endpoints only list, patch and
+   * delete invitations that already exist.
+   */
+  async inviteCollaborator(
+    fullName: string,
+    login: string,
+    permission: LiveCollaboratorPermission,
+  ): Promise<number | null> {
+    const { status, data } = await this.call<{ id?: number }>({
+      method: 'PUT',
+      path: `repos/${fullName}/collaborators/${encodeURIComponent(login)}`,
+      body: { permission },
+    })
+    if (status === 204) return null
+    if (status !== 201) {
+      throw new Error(
+        `GitHub answered ${status} when asked to let ${login} into ${fullName}, which is neither ` +
+          'an invitation nor a grant',
+      )
+    }
+    if (!isRecord(data) || typeof data.id !== 'number') {
+      throw new Error(
+        `GitHub invited ${login} to ${fullName} without naming the invitation, so there is nothing ` +
+          'for that account to accept',
+      )
+    }
+    return data.id
+  }
+
+  /** The invitations waiting for this credential, which only it can see. */
+  async pendingInvitations(): Promise<Array<{ id: number; repository: { full_name?: string } }>> {
+    const { data } = await this.call<unknown>({
+      method: 'GET',
+      path: 'user/repository_invitations',
+    })
+    if (!Array.isArray(data)) return []
+    return data.flatMap((entry) => {
+      if (!isRecord(entry) || typeof entry.id !== 'number' || !isRecord(entry.repository)) {
+        return []
+      }
+      const fullName = entry.repository.full_name
+      return [
+        {
+          id: entry.id,
+          repository: { ...(typeof fullName === 'string' ? { full_name: fullName } : {}) },
+        },
+      ]
+    })
+  }
+
+  /**
+   * Accepts an invitation as the account it was addressed to.
+   *
+   * `PATCH /user/repository_invitations/{invitation_id}` takes the id in the path and
+   * nothing else, and it is the invited credential's own acceptance, never the
+   * inviter's.
+   */
+  async acceptInvitation(id: number): Promise<void> {
+    await this.call({
+      method: 'PATCH',
+      path: `user/repository_invitations/${id}`,
+    })
+  }
+
+  /**
+   * The permission an account actually holds, read from the host's own answer.
+   *
+   * This is what turns a second credential into a capability. An invitation sent and
+   * never accepted, or accepted for some other repository, is answered here as the
+   * absence it is — so nothing downstream can treat a token as if it were access.
+   */
+  async collaboratorPermission(fullName: string, login: string): Promise<string | null> {
+    const { data } = await this.call<{ permission?: string }>({
+      method: 'GET',
+      path: `repos/${fullName}/collaborators/${encodeURIComponent(login)}/permission`,
+    })
+    return typeof data?.permission === 'string' && data.permission.trim() !== ''
+      ? data.permission
+      : null
   }
 
   async deleteRepository(fullName: string): Promise<boolean> {
@@ -202,7 +484,7 @@ export class GitHubAdmin implements LiveAdmin {
     title: string
     body: string
     draft?: boolean
-  }): Promise<{ number: number; headSha: string }> {
+  }): Promise<{ number: number; headSha: string; url: string | null }> {
     const { data } = await this.call<PullRequestProbe>({
       method: 'POST',
       path: `repos/${input.fullName}/pulls`,
@@ -217,7 +499,14 @@ export class GitHubAdmin implements LiveAdmin {
     if (!isRecord(data) || typeof data.number !== 'number') {
       throw new Error(`GitHub did not return a pull request for ${input.fullName}`)
     }
-    return { number: data.number, headSha: data.head?.sha ?? '' }
+    return {
+      number: data.number,
+      headSha: data.head?.sha ?? '',
+      // The address is whatever the host said, or nothing at all. Composing one from
+      // the host and the number would make it the only value in a run that could not
+      // be wrong, and therefore the one a report would be least able to stand behind.
+      url: typeof data.html_url === 'string' ? data.html_url : null,
+    }
   }
 
   async readPullRequest(fullName: string, number: number): Promise<Record<string, unknown>> {
@@ -259,7 +548,36 @@ export class GitHubAdmin implements LiveAdmin {
     return data.id
   }
 
+  /**
+   * Creates a branch rule set, in the shape GitHub's ruleset contract documents.
+   *
+   * Three things here are not stylistic. The ref condition is required and fully
+   * qualified, because a rule set with no condition governs the whole repository —
+   * which is how a required check ends up refusing the topic branch push that was
+   * supposed to satisfy it, before the scenario has asserted anything. The merge
+   * queue's parameters are the documented required set with the documented enum,
+   * because an incomplete queue rule is rejected by the host for the account that is
+   * perfectly allowed to configure one. And the review-thread-resolution policy is
+   * stated explicitly as `false`, because the permutation under test is about
+   * approvals: leaving it unstated would either be an invalid request or, read the
+   * other way, quietly add a conversation-resolution requirement nobody asked for.
+   *
+   * No bypass actor is invented. A run has no real app, team or organization admin
+   * id to name, so it creates the rule fully enforced and says so.
+   */
   async createRuleSet(input: LiveRuleSet): Promise<{ id: number }> {
+    if (input.baseRefs.length === 0) {
+      throw new Error(
+        `The rule set ${input.name} names no refs; a rule set with no ref condition governs ` +
+          'every branch on the repository, which is not what any of these permutations mean',
+      )
+    }
+    const include = input.baseRefs.map((ref) => refName(ref))
+    if (include.includes(ALL_BRANCHES_CONDITION)) {
+      throw new Error(
+        `The rule set ${input.name} would apply to ${ALL_BRANCHES_CONDITION}; name the refs it protects instead`,
+      )
+    }
     const { data } = await this.call<RulesetProbe>({
       method: 'POST',
       path: `repos/${this.fullName}/rulesets`,
@@ -273,33 +591,31 @@ export class GitHubAdmin implements LiveAdmin {
         // can observe.
         target: 'branch',
         enforcement: input.enforcement,
-        bypass_actors: (input.mergeActors ?? []).map((actor) => ({
-          actor_id: Number(actor),
-          bypass_mode: 'always',
+        bypass_actors: (input.bypassActors ?? []).map((actor) => ({
+          actor_id: actor.actorId,
+          actor_type: actor.actorType,
+          bypass_mode: actor.bypassMode,
         })),
-        // A queue belongs to a base ref rather than to every branch, so a ruleset that
-        // asks for one names exactly the refs it queues.
-        conditions: {
-          ref_name: {
-            include:
-              input.mergeQueueBaseRefs && input.mergeQueueBaseRefs.length > 0
-                ? input.mergeQueueBaseRefs
-                : ['~ALL'],
-            exclude: [],
-          },
-        },
+        conditions: { ref_name: { include, exclude: [] } },
         rules: [
-          ...(input.mergeQueueBaseRefs && input.mergeQueueBaseRefs.length > 0
+          ...(input.mergeQueue === true
             ? [
                 {
                   type: 'merge_queue',
                   parameters: {
                     queue_type: 'base',
-                    merge_method: 'merge',
+                    merge_method: 'MERGE',
                     merge_commit_message: 'queued from the live GitHub suite',
                     merge_commit_title: 'queued from the live GitHub suite',
                     min_entries_to_merge: 0,
                     max_entries_to_merge: 5,
+                    // The three fields GitHub's contract requires and this request
+                    // used to omit. Without them the rule is invalid for every
+                    // account, including one allowed to configure queues, so a probe
+                    // sending it learns nothing about the account.
+                    min_entries_to_merge_wait_minutes: 0,
+                    max_entries_to_build: 5,
+                    check_response_timeout_minutes: 5,
                     grouping_strategy: 'ALLGREEN',
                   },
                 },
@@ -311,12 +627,12 @@ export class GitHubAdmin implements LiveAdmin {
                   type: 'required_status_checks',
                   parameters: {
                     required_status_checks: [
-                      {
-                        context: input.requiredStatusCheck,
-                        integration_id: null,
-                      },
+                      { context: input.requiredStatusCheck, integration_id: null },
                     ],
                     strict_required_status_checks_policy: false,
+                    // The check gates merges onto the refs this rule set names; it is
+                    // not a reason to refuse creating the branch that will carry the
+                    // check, which is how the rule would block its own subject.
                     do_not_enforce_on_create: false,
                   },
                 },
@@ -331,16 +647,11 @@ export class GitHubAdmin implements LiveAdmin {
                     dismiss_stale_reviews_on_push: false,
                     require_code_owner_review: false,
                     require_last_push_approval: false,
+                    // Required by the ruleset contract, and false on purpose: the
+                    // permutation is about approvals, not about conversation threads.
+                    required_review_thread_resolution: false,
                     allowed_merge_methods: ['merge', 'squash', 'rebase'],
                   },
-                },
-              ]
-            : []),
-          ...(input.mergeActors?.length
-            ? [
-                {
-                  type: 'bypass_pull_request_allowances',
-                  parameters: { bypass_mode: 'always', bypass_actors: input.mergeActors },
                 },
               ]
             : []),
@@ -371,39 +682,86 @@ export class GitHubAdmin implements LiveAdmin {
     }
   }
 
-  /** Every rule set the host reports, which is the only place a queue is configured. */
-  private async listRuleSets(fullName: string): Promise<RulesetProbe[]> {
-    const { data } = await this.call<unknown>({ method: 'GET', path: `repos/${fullName}/rulesets` })
-    if (!Array.isArray(data)) return []
-    return data.filter(
-      (entry): entry is RulesetProbe => isRecord(entry) && typeof entry.id === 'number',
-    )
+  /**
+   * The rule sets the host lists, as summaries.
+   *
+   * The list response is a summary and nothing more: GitHub does not promise that
+   * each entry carries `rules` or `conditions`, and one that does not is not a rule
+   * set with no rules, it is a rule set this run has not read yet. So the listing is
+   * used for identities only, and every one of those is hydrated through the detail
+   * route before anything is concluded from it.
+   */
+  private async listRuleSetIds(fullName: string): Promise<number[]> {
+    const listed = await this.transport.paginate<unknown>({
+      method: 'GET',
+      path: `repos/${fullName}/rulesets`,
+    })
+    return listed
+      .filter((entry): entry is { id: number } => isRecord(entry) && typeof entry.id === 'number')
+      .map((entry) => entry.id)
+  }
+
+  /** One rule set with its conditions and rules, as the detail route reports them. */
+  private async readRuleSet(fullName: string, id: number): Promise<RulesetProbe | null> {
+    const response = await this.call<unknown>({
+      method: 'GET',
+      path: `repos/${fullName}/rulesets/${id}`,
+    }).catch((error: unknown) => {
+      // A rule set deleted between the listing and the read is not a queue that was
+      // never configured; it is one that is gone, which is the same answer.
+      if (
+        error instanceof GitHubTransportError &&
+        (error.status === 404 || error.kind === 'not-found')
+      ) {
+        return null
+      }
+      throw error
+    })
+    if (response === null) return null
+    const data = response.data
+    if (!isRecord(data) || typeof data.id !== 'number') return null
+    return {
+      id: data.id,
+      name: typeof data.name === 'string' ? data.name : String(data.id),
+      ...(typeof data.enforcement === 'string' ? { enforcement: data.enforcement } : {}),
+      conditions: isRecord(data.conditions)
+        ? (data.conditions as RulesetProbe['conditions'])
+        : undefined,
+      rules: Array.isArray(data.rules) ? (data.rules as RulesetProbe['rules']) : [],
+    }
   }
 
   /**
-   * The base refs a merge queue is configured on, read from the rule sets themselves
-   * rather than from a flag the run set itself. A queue the run has not configured is
-   * the difference between a scenario that proves a queue and one that only proves it
-   * can send the request, so this is a read and never an assumption.
+   * The branches a merge queue is configured on, read from the rule sets themselves
+   * rather than from a flag this run set. A queue it has not configured is the
+   * difference between a scenario that proves a queue and one that only proves it
+   * can send the request, so this is always a read.
+   *
+   * Two normalizations make the answer comparable to the base branch the rest of the
+   * suite uses. Refs come back fully qualified, or as GitHub's `~DEFAULT_BRANCH`
+   * shorthand, and the repository names its default branch; comparing those spellings
+   * as strings would call a configured queue absent. And `~ALL` is not a branch — it
+   * is every branch, which is a repository-wide queue rather than one on a base the
+   * scenarios can name, so it is reported as such rather than folded into the list.
    */
   async mergeQueues(fullName: string): Promise<string[]> {
-    const fallback = (
-      await this.readRepository(fullName).catch(() => ({ default_branch: undefined }))
+    const defaultBranch = (
+      await this.readRepository(fullName).catch((): RepositoryProbe => ({ description: null }))
     ).default_branch
     const bases = new Set<string>()
-    for (const rules of await this.listRuleSets(fullName)) {
-      const queued = (rules.rules ?? []).some((rule) => rule.type === 'merge_queue')
-      if (!queued) continue
-      for (const ref of rules.conditions?.ref_name?.include ?? []) {
-        if (ref === '~DEFAULT_BRANCH') {
-          if (fallback) bases.add(fallback)
+    for (const id of await this.listRuleSetIds(fullName)) {
+      const ruleset = await this.readRuleSet(fullName, id)
+      if (ruleset === null) continue
+      if (!(ruleset.rules ?? []).some((rule) => rule.type === 'merge_queue')) continue
+      for (const ref of ruleset.conditions?.ref_name?.include ?? []) {
+        if (ref === DEFAULT_BRANCH_CONDITION) {
+          if (defaultBranch) bases.add(defaultBranch)
           continue
         }
-        if (ref === '~ALL') continue
-        bases.add(ref)
+        bases.add(branchOfRef(ref))
       }
     }
-    return [...bases].sort()
+    return [...bases].filter((branch) => branch !== ALL_BRANCHES_CONDITION).sort()
   }
 
   /**
@@ -480,14 +838,18 @@ export class GitHubAdmin implements LiveAdmin {
 
   /**
    * Whether this account may configure rulesets here. GitHub exposes no read-only
-   * probe for the permission, so an empty rule set is created and removed again;
-   * if either step is refused, the account does not have the scope.
+   * probe for the permission, so an empty rule set is created on the named default
+   * branch and removed again; if either step is refused, the account does not have the
+   * scope. The branch is named rather than left open, because a rule set with no ref
+   * condition governs the whole repository and would leave a standing rule behind on
+   * every branch of it.
    */
-  async canManageRuleSets(fullName: string): Promise<boolean> {
+  async canManageRuleSets(fullName: string, defaultBranch: string): Promise<boolean> {
     try {
       const created = await this.createRuleSet({
         name: 'git-stacks-live-e2e capability probe',
         enforcement: 'disabled',
+        baseRefs: [`refs/heads/${defaultBranch}`],
       })
       await this.deleteRuleSet(fullName, created.id)
       return true
