@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import { accessSync, constants as fsConstants, statSync } from 'node:fs'
 import { mkdtemp, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
@@ -9,6 +10,115 @@ import type {
   ChildProcess,
   ExecFileOptions,
 } from 'node:child_process'
+
+import { repositoryIdentity } from './github-rest'
+
+/** The repository role GitHub decides what an account may do from. */
+export type GitHubFixtureRole = 'admin' | 'maintain' | 'push' | 'triage' | 'pull'
+
+/** Whether a role includes writing to the repository, which GitHub decides the same way. */
+export const WRITING_ROLES: Record<GitHubFixtureRole, boolean> = {
+  admin: true,
+  maintain: true,
+  push: true,
+  triage: false,
+  pull: false,
+}
+
+/**
+ * One account this host knows, and the credential that authenticates it.
+ *
+ * The token is minted by this run and is only ever compared against the fixture state, so
+ * a request signed with a real credential is refused rather than served, and two accounts
+ * are two genuinely different identities on the wire rather than one login behind a flag.
+ */
+export interface GitHubFixtureActor {
+  login: string
+  token: string
+  /** The OAuth scopes the credential carries, which the host reports per request. */
+  scopes: string[]
+  type: 'User' | 'Organization'
+  /** Organizations this account administers, which is what creates a repository for one. */
+  organizations?: string[]
+}
+
+/** A collaborator invitation, which grants its role only once it is accepted. */
+export interface GitHubFixtureInvitation {
+  id: number
+  repository: string
+  login: string
+  permission: GitHubFixtureRole
+  state: 'pending' | 'accepted'
+}
+
+/**
+ * The pull request, review and rule set state of exactly one repository.
+ *
+ * Number spaces, reviews and rules are per repository on GitHub, so a second repository is
+ * not another view of the first one's state: it is a separate slice with its own counters,
+ * and the same number can name unrelated pull requests in each.
+ */
+export interface GitHubFixtureRepositoryState {
+  prs: GitHubFixturePullRequest[]
+  comments: Record<string, GitHubFixtureComment[]>
+  stacks?: GitHubFixtureStack[]
+  issues?: Array<{
+    number: number
+    title: string
+    url: string
+    state: 'OPEN' | 'CLOSED'
+    repository?: string
+  }>
+  reviews?: Record<string, FixtureReview[]>
+  reviewThreads?: Record<string, FixtureThread[]>
+  nextNumber?: number
+  nextCommentId?: number
+  nextStackNumber?: number
+  nextReviewId?: number
+  nextThreadId?: number
+  ruleSets?: FixtureRuleSet[]
+  nextRuleSetId?: number
+  checks?: GitHubFixtureChecks
+  /** The legacy queue switch: a merge queue this fixture is serving on its base branch. */
+  mergeQueue?: boolean
+  mergeQueueRefs?: string[]
+  asyncMerge?: {
+    number: number
+    sha: string
+    method: string
+    action: 'default' | 'direct_merge' | 'merge_queue'
+    uuid: string
+  }
+  asyncMergeResult?: { status: 'merged' | 'enqueued' | 'failed'; message?: string }
+  asyncMergeStaysPending?: boolean
+  asyncMergeAlreadyQueued?: boolean
+}
+
+/**
+ * A repository this host serves, and the real bare Git repository behind it.
+ *
+ * Every repository names its own bare repository, so a fork, or a repository that belongs
+ * to somebody else entirely, has its own refs, its own objects and its own pull request
+ * numbers. Serving those requests out of the default repository would make a foreign pull
+ * request indistinguishable from a local one, which is the boundary the negatives exist to
+ * prove.
+ */
+export interface GitHubFixtureRepository {
+  fullName: string
+  owner: string
+  name: string
+  bare: string
+  private: boolean
+  defaultBranch: string
+  /** The repository this one was forked from, when it is a fork. */
+  forkOf?: string
+  description?: string | null
+  topics?: string[]
+  /** The role each account holds here. */
+  permissions: Record<string, GitHubFixtureRole>
+  invitations: GitHubFixtureInvitation[]
+  pulls: GitHubFixtureRepositoryState
+}
 
 const nodeRequire = createRequire(import.meta.url)
 const childProcess = nodeRequire('node:child_process') as {
@@ -355,6 +465,20 @@ export interface GitHubFixtureState {
   /** Branch rulesets, which is how a required check or approval gates a merge here. */
   ruleSets?: FixtureRuleSet[]
   nextRuleSetId?: number
+  /**
+   * Every account this run minted a credential for. The host resolves the token a request
+   * carried to exactly one of these logins and refuses anything else, so two accounts are
+   * two real identities on the wire and a real credential never authenticates here. A
+   * state without this list is answered by the two accounts the harness has always had.
+   */
+  actors?: GitHubFixtureActor[]
+  /**
+   * Every repository this host serves besides the one the harness created first. Each is
+   * backed by its own real bare repository, and the harness repository itself appears here
+   * when a test gives it a visibility or a permission map.
+   */
+  repositories?: GitHubFixtureRepository[]
+  nextInvitationId?: number
   requests: Array<{ argv: string[]; cwd: string; at: string; body?: Record<string, unknown> }>
 }
 
@@ -414,10 +538,15 @@ export interface FixtureRuleSet {
   enforcement: string
   target?: string
   conditions?: Record<string, unknown>
-  rules?: Array<{ type?: string }>
+  /** The rules as they were created, because the detail read returns them verbatim. */
+  rules?: Array<Record<string, unknown>>
   queue_rules?: Array<Record<string, unknown>>
   _requiredStatusChecks: string[]
   _requiredApprovals: number
+  /** Whether the pull request rule also demands every conversation be resolved. */
+  _requiresThreadResolution?: boolean
+  created_at?: string
+  updated_at?: string
 }
 
 /**
@@ -449,6 +578,57 @@ export interface GitHubHarness {
   bare: string
   statePath: string
   env: NodeJS.ProcessEnv
+  /**
+   * The directory whose `<owner>/<name>.git` subdirectories a host serving Git over HTTP
+   * resolves a request path against. Every repository this harness creates is created
+   * here, so one host serves the clone, a fork and a foreign repository.
+   */
+  readonly projectsRoot: string
+  /**
+   * Adds an account and mints the only credential that authenticates it. The token is
+   * generated for this run, is never a real credential, and is the only one that resolves
+   * to this login.
+   */
+  addActor(input: {
+    login: string
+    scopes?: string[]
+    type?: 'User' | 'Organization'
+    organizations?: string[]
+  }): Promise<GitHubFixtureActor>
+  /**
+   * Creates a repository this host serves, with its own real bare repository and its own
+   * pull request number space. `forkOf` seeds it from that repository's refs, which is
+   * what a fork is: the same history under a different owner.
+   */
+  createRepository(input: {
+    fullName: string
+    private?: boolean
+    forkOf?: string
+    permissions?: Record<string, GitHubFixtureRole>
+    defaultBranch?: string
+    description?: string | null
+    topics?: string[]
+  }): Promise<GitHubFixtureRepository>
+  /**
+   * The credential that authenticates the owner of the primary repository, and the second
+   * account the review scenarios need. Both tokens are minted for this run and resolve to
+   * exactly the login they name.
+   */
+  readonly primaryToken: string
+  readonly reviewer: { readonly login: string; readonly token: string }
+  /**
+   * Serves a second repository this run owns, with its own real bare repository under the
+   * projects root so a clone and a push over Git reach it. `kind: 'fork'` makes it a fork
+   * of the primary repository, seeded from its history and recording the parent.
+   */
+  provisionForeignSubject(request: {
+    kind: 'repository' | 'fork'
+    owner: string
+    name: string
+    marker: string
+  }): Promise<{ id: number; fullName: string; owner: string; defaultBranch: string }>
+  /** Removes a repository this harness created, its bare directory included. */
+  deleteRepository(fullName: string): Promise<boolean>
   /** Installs `override`; later overrides are consulted first. */
   overrideGit(override: GitOverride): void
   /** Installs `hook`, which the test keeps a handle on so it can disarm it. */
@@ -671,6 +851,59 @@ async function runBareGit(realGit: string, bare: string, args: string[]): Promis
   return runRealGit(realGit, process.cwd(), ['--git-dir', bare, ...args])
 }
 
+/**
+ * Creates one bare repository this host serves, and gives it real history.
+ *
+ * A served repository is a real Git repository rather than a projection of the default
+ * one: a fork is seeded by fetching the parent's refs, and a repository nobody forked is
+ * given its own baseline commit, so both have a default branch with a commit on it and a
+ * pull request against it is a comparison of two real commits. The API double calls this
+ * too, because a fork created through `POST /repos/{o}/{n}/forks` has to be as real as one
+ * a test asked for directly.
+ */
+export function createServedBareRepository(input: {
+  git: string
+  bare: string
+  defaultBranch: string
+  forkOf?: string
+  seed?: boolean
+}): void {
+  const git = (args: string[], stdin?: string) =>
+    realExecFileSync(input.git, ['--git-dir', input.bare, ...args], {
+      encoding: 'utf8',
+      input: stdin ?? '',
+      env: {
+        ...process.env,
+        GIT_AUTHOR_NAME: 'GitHub Fixture',
+        GIT_AUTHOR_EMAIL: 'github-fixture@example.invalid',
+        GIT_COMMITTER_NAME: 'GitHub Fixture',
+        GIT_COMMITTER_EMAIL: 'github-fixture@example.invalid',
+        GIT_AUTHOR_DATE: '2026-01-01T00:00:00Z',
+        GIT_COMMITTER_DATE: '2026-01-01T00:00:00Z',
+      },
+    }).trim()
+  realExecFileSync(input.git, ['init', '--bare', input.bare], { encoding: 'utf8' })
+  git(['config', 'user.name', 'GitHub Fixture'])
+  git(['config', 'user.email', 'github-fixture@example.invalid'])
+  if (input.forkOf) {
+    // A fork carries the history it was made from, so its objects are the parent's until
+    // somebody pushes to it. Fetching the parent's refs is what makes a pull request from
+    // a fork a comparison across two repositories rather than a fabricated one.
+    git(['fetch', '--no-tags', input.forkOf, '+refs/*:refs/*'])
+  } else if (input.seed !== false) {
+    const blob = git(['hash-object', '-w', '--stdin'], 'served repository baseline\n')
+    const tree = git(['mktree'], `100644 blob ${blob}\tbase.txt\n`)
+    const commit = git(['commit-tree', tree, '-m', 'Served repository baseline'])
+    git(['update-ref', `refs/heads/${input.defaultBranch}`, commit])
+  }
+  git(['symbolic-ref', 'HEAD', `refs/heads/${input.defaultBranch}`])
+}
+
+/** A credential minted for one account of this run. */
+function newActorToken(): string {
+  return `fixture-${randomUUID()}`
+}
+
 const initialState = (): GitHubFixtureState => ({
   version: 1,
   repository: {
@@ -689,8 +922,31 @@ const initialState = (): GitHubFixtureState => ({
   comments: {},
   stacks: [],
   issues: [],
+  actors: initialActors('fixture-user'),
   requests: [],
 })
+
+/**
+ * The two accounts the harness has always had.
+ *
+ * Their tokens are fixture credentials scoped to this run's state file, never real ones,
+ * and they exist so every test written before accounts were registered keeps the same two
+ * identities: the owner that pushes, and the reviewer that approves and replies.
+ */
+const initialActors = (currentUser: string): GitHubFixtureActor[] => [
+  {
+    login: currentUser,
+    token: 'fixture-token',
+    scopes: ['repo', 'workflow'],
+    type: 'User',
+  },
+  {
+    login: 'reviewer',
+    token: 'fixture-reviewer-token',
+    scopes: ['repo'],
+    type: 'User',
+  },
+]
 
 export interface GitHubHarnessOptions {
   /**
@@ -778,12 +1034,39 @@ export async function createGitHubHarness(
       GH_TOKEN: 'fixture-token',
       GH_REPO: 'acme/widgets',
     }
+    // The directory a host serving `/<owner>/<name>.git` resolves against. The repository
+    // this harness created first already lives here, and every repository created after it
+    // is created beside it, so one socket serves all of them.
+    const projectsRoot = join(root, dirname(options.barePath ?? 'remote.git'))
 
-    return {
+    const readFixtureState = async (): Promise<GitHubFixtureState> =>
+      JSON.parse(await readFile(statePath, 'utf8')) as GitHubFixtureState
+    const writeFixtureState = async (state: GitHubFixtureState): Promise<void> => {
+      const temporary = `${statePath}.${process.pid}.write.tmp`
+      await writeFile(temporary, `${JSON.stringify(state, null, 2)}\n`, 'utf8')
+      await rename(temporary, statePath)
+    }
+    const registryOf = (state: GitHubFixtureState): GitHubFixtureRepository[] =>
+      (state.repositories ??= [])
+    // The two principals every controlled run has, and the credentials that authenticate
+    // them: the account that owns the primary repository, and the account that reviews
+    // other people's pull requests. These are the accounts this harness has always served,
+    // so a run that already drives them keeps its meaning, and they are two identities on
+    // the wire rather than one login behind a flag.
+    const primaryName = (state: GitHubFixtureState): string =>
+      `${state.repository.owner}/${state.repository.name}`
+    const principals = initialActors('fixture-user')
+    const owner = principals.find((entry) => entry.login === principals[0]?.login)
+    if (!owner) throw new Error('the fixture must register an owner account')
+    const reviewer = principals[1]
+    if (!reviewer) throw new Error('the fixture must register a reviewer account')
+
+    const harness: GitHubHarness = {
       root,
       repo,
       bare,
       statePath,
+      projectsRoot,
       env,
       overrideGit(override) {
         fixture.overrides.unshift(override)
@@ -798,13 +1081,103 @@ export async function createGitHubHarness(
           stdio: ['ignore', 'pipe', 'pipe'],
         }).trim()
       },
-      async readState() {
-        return JSON.parse(await readFile(statePath, 'utf8')) as GitHubFixtureState
+      primaryToken: owner.token,
+      reviewer: { login: reviewer.login, token: reviewer.token },
+      async provisionForeignSubject(request) {
+        const fullName = `${request.owner}/${request.name}`
+        const state = await readFixtureState()
+        const served = await harness.createRepository({
+          fullName,
+          ...(request.kind === 'fork' ? { forkOf: primaryName(state) } : {}),
+          description: request.marker,
+        })
+        return {
+          id: repositoryIdentity(served.fullName),
+          fullName: served.fullName,
+          owner: served.owner,
+          defaultBranch: served.defaultBranch,
+        }
       },
-      async writeState(state) {
-        const temporary = `${statePath}.${process.pid}.write.tmp`
-        await writeFile(temporary, `${JSON.stringify(state, null, 2)}\n`, 'utf8')
-        await rename(temporary, statePath)
+      readState: readFixtureState,
+      writeState: writeFixtureState,
+      async addActor(input) {
+        const state = await readFixtureState()
+        const existing = (state.actors ??= initialActors(state.currentUser)).find(
+          (actor) => actor.login === input.login,
+        )
+        if (existing) return existing
+        const actor: GitHubFixtureActor = {
+          login: input.login,
+          token: newActorToken(),
+          scopes: input.scopes ?? ['repo'],
+          type: input.type ?? 'User',
+          ...(input.organizations ? { organizations: input.organizations } : {}),
+        }
+        state.actors.push(actor)
+        await writeFixtureState(state)
+        return actor
+      },
+      async createRepository(input) {
+        const state = await readFixtureState()
+        const registry = registryOf(state)
+        const existing = registry.find(
+          (entry) => entry.fullName.toLowerCase() === input.fullName.toLowerCase(),
+        )
+        if (existing) return existing
+        const separator = input.fullName.indexOf('/')
+        if (separator < 1) throw new Error(`a repository needs an owner: ${input.fullName}`)
+        const owner = input.fullName.slice(0, separator)
+        const name = input.fullName.slice(separator + 1)
+        const primaryFullName = `${state.repository.owner}/${state.repository.name}`
+        const isPrimary = input.fullName.toLowerCase() === primaryFullName.toLowerCase()
+        const defaultBranch = input.defaultBranch ?? state.repository.defaultBranch
+        const barePath = isPrimary ? bare : join(projectsRoot, `${input.fullName}.git`)
+        const forkOfBare = input.forkOf
+          ? registry.find(
+              (entry) => entry.fullName.toLowerCase() === input.forkOf?.toLowerCase(),
+            )?.bare
+          : undefined
+        if (input.forkOf && !forkOfBare) {
+          throw new Error(`a fork needs a served repository to fork: ${input.forkOf}`)
+        }
+        if (!isPrimary) {
+          await mkdir(dirname(barePath), { recursive: true })
+          createServedBareRepository({
+            git: realGit,
+            bare: barePath,
+            defaultBranch,
+            ...(forkOfBare ? { forkOf: forkOfBare } : {}),
+          })
+        }
+        const repository: GitHubFixtureRepository = {
+          fullName: input.fullName,
+          owner,
+          name,
+          bare: barePath,
+          private: input.private ?? false,
+          defaultBranch,
+          ...(input.forkOf ? { forkOf: input.forkOf } : {}),
+          description: input.description ?? null,
+          topics: input.topics ?? [],
+          permissions: input.permissions ?? { [owner]: 'admin' },
+          invitations: [],
+          pulls: { prs: [], comments: {}, stacks: [], issues: [], nextNumber: 1, nextCommentId: 1 },
+        }
+        registry.push(repository)
+        await writeFixtureState(state)
+        return repository
+      },
+      async deleteRepository(fullName) {
+        const state = await readFixtureState()
+        const registry = registryOf(state)
+        const index = registry.findIndex(
+          (entry) => entry.fullName.toLowerCase() === fullName.toLowerCase(),
+        )
+        if (index === -1) return false
+        const [removed] = registry.splice(index, 1)
+        await writeFixtureState(state)
+        if (removed.bare !== bare) await rm(removed.bare, { recursive: true, force: true })
+        return true
       },
       async close() {
         if (isClosed) return
@@ -817,6 +1190,8 @@ export async function createGitHubHarness(
         await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })
       },
     }
+    return harness
+
   } catch (error) {
     await rm(root, { recursive: true, force: true })
     throw error

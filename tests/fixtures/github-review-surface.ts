@@ -1,8 +1,20 @@
-import { execFileSync } from 'node:child_process'
 import { isRecord } from '../../src/shared/guards'
-import type { FixtureThread, GitHubFixtureState } from './github-harness'
+import type { FixtureRuleSet, FixtureThread, GitHubFixtureState } from './github-harness'
 import type { GitHubApiDoubleRequest } from './github-api-double'
-import { HttpError, type RestResult } from './github-rest'
+import {
+  HttpError,
+  aggregateReviewDecision,
+  hostGit,
+  hostGitOrNull,
+  hostRefSha,
+  paginate,
+  queryStringOf,
+  refConditionMatches,
+  ruleSetIdentity,
+  standingReviewDecisions,
+  validateRuleSetCreation,
+  type RestResult,
+} from './github-rest'
 
 /**
  * The parts of GitHub the live end-to-end suite needs that the original transport
@@ -19,36 +31,6 @@ import { HttpError, type RestResult } from './github-rest'
  * suite's own arithmetic, so the patch has to be the patch the application is going
  * to read.
  */
-function barePath(): string {
-  const value = process.env.GIT_STACKS_FIXTURE_BARE
-  if (!value) throw new Error('GIT_STACKS_FIXTURE_BARE is required by the GitHub review surface')
-  return value
-}
-
-function realGit(): string {
-  return process.env.GIT_STACKS_REAL_GIT || '/usr/bin/git'
-}
-
-function bareGit(args: string[]): string {
-  return execFileSync(realGit(), ['--git-dir', barePath(), ...args], {
-    encoding: 'utf8',
-    env: process.env,
-    stdio: ['ignore', 'pipe', 'pipe'],
-  }).trim()
-}
-
-/**
- * A ref that does not exist is a `null`, not a failure. `git rev-parse` exits non-zero
- * for a ref it cannot resolve, and that is GitHub's own 404 rather than a broken fixture.
- */
-function refSha(ref: string): string | null {
-  try {
-    return bareGit(['rev-parse', '--verify', '--end-of-options', ref]) || null
-  } catch {
-    return null
-  }
-}
-
 function pullRequestOf(state: GitHubFixtureState, number: number) {
   const pull = state.prs.find((entry) => entry.number === number)
   if (!pull) throw new HttpError(404, 'Not Found', `No pull request found for number ${number}`)
@@ -68,79 +50,141 @@ function nextId(state: GitHubFixtureState, field: 'nextThreadId' | 'nextReviewId
   return current
 }
 
+/**
+ * The repository role the GraphQL surface reports for the account asking.
+ *
+ * A reader with no write access cannot resolve a conversation, and a host that answered
+ * `WRITE` to everybody would let a read-only reviewer be treated as somebody who can.
+ * A state that names no role keeps the answer this fixture has always given.
+ */
+function viewerPermissionOf(state: GitHubFixtureState): string {
+  const permissions = state.checks?.viewerPermissions
+  if (!permissions) return 'WRITE'
+  if (permissions.admin) return 'ADMIN'
+  if (permissions.maintain) return 'MAINTAIN'
+  if (permissions.push) return 'WRITE'
+  return permissions.triage ? 'TRIAGE' : 'READ'
+}
+
 function actor(login: string): { login: string; id: number; type: string; url: string } {
   return { login, id: 1, type: 'User', url: `https://github.com/${login}` }
 }
 
+/** One changed path, as Git itself reports the change against the merge base. */
+interface GitFileChange {
+  status: 'added' | 'removed' | 'renamed' | 'modified'
+  filename: string
+  previousFilename: string | null
+  additions: number
+  deletions: number
+  /** The hunk headers and lines GitHub sends as `patch`, or null for a binary change. */
+  patch: string | null
+}
+
+const CHANGE_STATUS: Record<string, GitFileChange['status']> = {
+  A: 'added',
+  D: 'removed',
+  M: 'modified',
+  T: 'modified',
+  R: 'renamed',
+  C: 'modified',
+}
+
 /**
- * GitHub's diff for a pull request: head against the merge base of head and base.
- * A ref that does not exist has no diff, and saying so is what keeps a missing
- * branch from being reported as a pull request with no changes.
+ * What Git says changed between the merge base and the head.
+ *
+ * The status and the previous filename come from Git's own name-status output rather than
+ * from a guess: labelling every entry `modified` reports a file the pull request added as
+ * one it changed, and a rename without its previous filename cannot be matched against the
+ * path the reviewer saw. The counts are counted from the hunks that are actually sent, so
+ * a binary change reports no lines and no patch instead of an invented one.
  */
-function patchFor(pr: GitHubFixtureState['prs'][number]): string {
-  const head = refSha(`refs/heads/${pr.head}`)
-  const base = refSha(`refs/heads/${pr.base}`)
-  if (head === null || base === null) return ''
-  const mergeBase = bareGit(['merge-base', base, head])
-  if (mergeBase === '') return ''
-  // Two-tree `git diff` has no preamble: its first line is the first file's own
-  // `diff --git` header, which the API does send. Dropping a line here would silently
-  // lose the first file of every diff.
-  return bareGit(['diff', '--no-color', '--unified=3', mergeBase, head]).replace(/\n$/u, '')
+function gitFileChanges(
+  pr: GitHubFixtureState['prs'][number],
+): GitFileChange[] {
+  const head = hostRefSha(`refs/heads/${pr.head}`)
+  const base = hostRefSha(`refs/heads/${pr.base}`)
+  if (head === null || base === null) return []
+  const mergeBase = hostGitOrNull(['merge-base', base, head])
+  if (mergeBase === null) return []
+  const names = hostGit(['diff', '--no-color', '--name-status', '-M', '-z', mergeBase, head])
+  const fields = names.split('\0').filter((field) => field !== '')
+  const changes: GitFileChange[] = []
+  for (let index = 0; index < fields.length; ) {
+    const status = fields[index][0]
+    if (status === 'R' || status === 'C') {
+      const previousFilename = fields[index + 1]
+      const filename = fields[index + 2]
+      index += 3
+      changes.push(
+        changeEntry(mergeBase, head, CHANGE_STATUS[status], filename, previousFilename),
+      )
+      continue
+    }
+    const filename = fields[index + 1]
+    index += 2
+    changes.push(changeEntry(mergeBase, head, CHANGE_STATUS[status] ?? 'modified', filename, null))
+  }
+  return changes
+}
+
+function changeEntry(
+  mergeBase: string,
+  head: string,
+  status: GitFileChange['status'],
+  filename: string,
+  previousFilename: string | null,
+): GitFileChange {
+  const paths = previousFilename ? ['--', previousFilename, filename] : ['--', filename]
+  const raw = hostGit(['diff', '--no-color', '--unified=3', '-M', mergeBase, head, ...paths])
+  // Only the hunks belong in the patch GitHub sends: the blob headers and the index line
+  // are part of Git's output, not part of the text a reviewer reads.
+  const hunks: string[] = []
+  let inHunk = false
+  for (const line of raw.split('\n')) {
+    if (line.startsWith('@@')) {
+      inHunk = true
+      hunks.push(line)
+      continue
+    }
+    if (!inHunk) continue
+    hunks.push(line)
+  }
+  const patch = hunks.join('\n').replace(/\n+$/u, '')
+  const lines = patch === '' ? [] : patch.split('\n')
+  return {
+    status,
+    filename,
+    previousFilename,
+    additions: lines.filter((line) => line.startsWith('+')).length,
+    deletions: lines.filter((line) => line.startsWith('-')).length,
+    patch: patch === '' ? null : patch,
+  }
 }
 
 /** The `filename`/`patch` entries GitHub returns for a pull request's files. */
 function fileEntries(state: GitHubFixtureState, pr: GitHubFixtureState['prs'][number]): unknown[] {
-  const patch = patchFor(pr)
-  if (!patch) return []
-  const entries: Array<Record<string, unknown>> = []
-  let filename: string | null = null
-  let body: string[] = []
-  const head = refSha(`refs/heads/${pr.head}`) ?? ''
-  const flush = () => {
-    if (filename === null) return
-    const text = body.join('\n')
-    const lines = text.split('\n')
-    const additions = lines.filter((line) => line.startsWith('+')).length
-    const deletions = lines.filter((line) => line.startsWith('-')).length
-    entries.push({
+  const head = hostRefSha(`refs/heads/${pr.head}`)
+  if (head === null) return []
+  return gitFileChanges(pr).map((change) => {
+    const filename = change.filename
+    return {
       sha: head,
       filename,
-      status: 'modified',
-      additions,
-      deletions,
-      changes: additions + deletions,
+      status: change.status,
+      ...(change.previousFilename ? { previous_filename: change.previousFilename } : {}),
+      additions: change.additions,
+      deletions: change.deletions,
+      changes: change.additions + change.deletions,
       blob_url: `https://github.com/${state.repository.owner}/${state.repository.name}/blob/main/${filename}`,
       raw_url: `https://github.com/${state.repository.owner}/${state.repository.name}/raw/main/${filename}`,
       contents_url: `https://api.github.com/repos/${state.repository.owner}/${state.repository.name}/contents/${filename}`,
-      patch: text,
-    })
-    filename = null
-    body = []
-  }
-  for (const line of patch.split('\n')) {
-    if (line.startsWith('diff --git ')) {
-      flush()
-      filename = /^diff --git a\/.+? b\/(.+)$/u.exec(line)?.[1] ?? ''
-      continue
+      ...(change.patch === null ? {} : { patch: change.patch }),
     }
-    // A hunk header belongs in the patch; the rest of the git preamble does not.
-    if (line.startsWith('@@')) body.push(line)
-    else if (line.startsWith('index ') || line.startsWith('--- ') || line.startsWith('+++ '))
-      continue
-    else body.push(line)
-  }
-  flush()
-  return entries
+  })
 }
 
-/**
- * The outcome GitHub records for each review verb.
- *
- * The two are not the same word: a request asks to `APPROVE` and the review is then read
- * back as `APPROVED`. Every reconciliation in the application matches on the recorded
- * outcome, so a host that echoed the verb would make a settled review unrecognisable.
- */
+
 const RECORDED_REVIEW_STATES: Record<string, string> = {
   APPROVE: 'APPROVED',
   REQUEST_CHANGES: 'CHANGES_REQUESTED',
@@ -253,10 +297,10 @@ export function handleSurfaceRest(
         html_url: pr.url,
         head: {
           ref: pr.head,
-          sha: refSha(`refs/heads/${pr.head}`) ?? '',
+          sha: hostRefSha(`refs/heads/${pr.head}`) ?? '',
           repo: { full_name: pr.headRepository },
         },
-        base: { ref: pr.base, sha: refSha(`refs/heads/${pr.base}`) },
+        base: { ref: pr.base, sha: hostRefSha(`refs/heads/${pr.base}`) },
         user: { login: pr.author ?? state.currentUser },
       })),
     }
@@ -269,7 +313,7 @@ export function handleSurfaceRest(
   if (writeCheckRun) {
     if (method !== 'POST') return null
     const headSha = String(body.head_sha ?? '')
-    if (refSha(headSha) === null) {
+    if (hostRefSha(headSha) === null) {
       throw new HttpError(422, 'Unprocessable Entity', `No commit found for SHA ${headSha}`)
     }
     const existing = state.checks?.checkRuns ?? []
@@ -315,7 +359,7 @@ export function handleSurfaceRest(
   if (commit) {
     if (method !== 'GET') return null
     const wanted = decodeURIComponent(commit[1])
-    const sha = refSha(wanted) ?? refSha(`refs/heads/${wanted}`)
+    const sha = hostRefSha(wanted) ?? hostRefSha(`refs/heads/${wanted}`)
     if (sha === null) {
       throw new HttpError(404, 'Not Found', `No commit found for SHA: ${wanted}`)
     }
@@ -350,7 +394,13 @@ export function handleSurfaceRest(
     const key = String(number)
     if (!Array.isArray(state.reviews[key])) state.reviews[key] = []
     const recorded = state.reviews[key]
-    if (method === 'GET') return { status: 200, body: recorded }
+    if (method === 'GET') {
+      // GitHub orders reviews oldest first and pages them. A host that answered every
+      // page with the whole collection would repeat the same rows up to the client's bound
+      // and then report the read as truncated, so a review that GitHub holds would look
+      // like one the read never reached.
+      return { status: 200, body: paginate(recorded, queryStringOf(path)) }
+    }
     if (method !== 'POST')
       throw new HttpError(405, 'Method Not Allowed', 'unsupported reviews method')
     if (pr.state !== 'OPEN') {
@@ -397,8 +447,10 @@ export function handleSurfaceRest(
       for (const stored of thread.comments) stored.reviewId = review.id
       threads.push(thread)
     }
-    pr.reviewDecision =
-      event === 'APPROVE' ? 'APPROVED' : event === 'REQUEST_CHANGES' ? 'CHANGES_REQUESTED' : null
+    // A comment is not a decision, so it neither approves nor requests changes and it
+    // does not clear what a reviewer last decided. The aggregate is derived from every
+    // reviewer's most recent non-comment review, which is also what the merge gate counts.
+    pr.reviewDecision = aggregateReviewDecision(standingReviewDecisions(recorded))
     return { status: 200, body: review }
   }
 
@@ -407,7 +459,7 @@ export function handleSurfaceRest(
     if (method !== 'GET')
       throw new HttpError(405, 'Method Not Allowed', 'comments is read-only here')
     const number = Number(reviewComments[1])
-    const head = refSha(`refs/heads/${pullRequestOf(state, number).head}`) ?? ''
+    const head = hostRefSha(`refs/heads/${pullRequestOf(state, number).head}`) ?? ''
     const flat = threadsOf(state, number).flatMap((thread) =>
       thread.comments.map((comment) => ({
         id: Number(String(comment.id).replace(/\D+/gu, '')),
@@ -427,7 +479,7 @@ export function handleSurfaceRest(
         html_url: comment.url,
       })),
     )
-    return { status: 200, body: flat }
+    return { status: 200, body: paginate(flat, queryStringOf(path)) }
   }
 
   if (rawPath === `${prefix}/git/refs`) {
@@ -437,10 +489,10 @@ export function handleSurfaceRest(
     if (!ref.startsWith('refs/heads/')) {
       throw new HttpError(422, 'Unprocessable Entity', 'only branch refs are supported')
     }
-    if (refSha(ref) !== null)
+    if (hostRefSha(ref) !== null)
       throw new HttpError(422, 'Unprocessable Entity', `${ref} already exists`)
-    if (refSha(sha) === null) throw new HttpError(422, 'Unprocessable Entity', `${sha} is unknown`)
-    bareGit(['update-ref', ref, sha])
+    if (hostRefSha(sha) === null) throw new HttpError(422, 'Unprocessable Entity', `${sha} is unknown`)
+    hostGit(['update-ref', ref, sha])
     return { status: 201, body: { ref, node_id: `REF_${ref}`, object: { sha, type: 'commit' } } }
   }
 
@@ -449,19 +501,35 @@ export function handleSurfaceRest(
     if (method !== 'DELETE')
       throw new HttpError(405, 'Method Not Allowed', 'git refs requires DELETE')
     const ref = `refs/heads/${decodeURIComponent(refDelete[1])}`
-    if (refSha(ref) === null) return { status: 204, body: null }
-    bareGit(['update-ref', '-d', ref])
+    if (hostRefSha(ref) === null) return { status: 204, body: null }
+    hostGit(['update-ref', '-d', ref])
     return { status: 204, body: null }
   }
 
   if (rawPath === `${prefix}/rulesets`) {
     const recorded = (state.ruleSets ??= [])
-    if (method === 'GET') return { status: 200, body: recorded }
+    if (method === 'GET') {
+      // The listing answers identities. `conditions` and `rules` are not required members
+      // of a listed rule set, so a reader that decides what a rule set protects from this
+      // response has to fetch the detail, which is where GitHub keeps the configuration.
+      return {
+        status: 200,
+        body: paginate(
+          recorded.map((entry) => ruleSetIdentity(entry, repository)),
+          queryStringOf(path),
+        ),
+      }
+    }
     if (method !== 'POST')
       throw new HttpError(405, 'Method Not Allowed', 'unsupported rulesets method')
+    // GitHub refuses a body that is missing a required rule parameter, so a request that
+    // names a merge queue without the fields the queue needs never becomes a rule set, and
+    // a probe cannot read back a capability it never had.
+    validateRuleSetCreation(body)
     const rules = Array.isArray(body.rules) ? (body.rules as Array<Record<string, unknown>>) : []
     const requiredChecks: string[] = []
     let requiredApprovals = 0
+    let requiresThreadResolution = false
     const queues: Array<Record<string, unknown>> = []
     for (const rule of rules) {
       const parameters = isRecord(rule.parameters) ? rule.parameters : {}
@@ -477,27 +545,31 @@ export function handleSurfaceRest(
       if (rule.type === 'pull_request') {
         const count = Number(parameters.required_approving_review_count)
         if (Number.isFinite(count)) requiredApprovals = Math.max(requiredApprovals, count)
+        if (parameters.required_review_thread_resolution === true) requiresThreadResolution = true
       }
       if (rule.type === 'merge_queue') queues.push(rule)
     }
-    // The conditions and the rules are echoed back the way GitHub returns them, because a
-    // queue is only proven by reading it back off the rule set that declares it. A double
-    // that stored a flag instead would agree with whatever the client hoped for.
+    // The conditions and the rules are stored the way GitHub returns them, because a queue
+    // is only proven by reading it back off the rule set that declares it. A host that kept
+    // a flag instead would agree with whatever the client hoped for.
     const conditions = isRecord(body.conditions) ? body.conditions : {}
-    const created = {
+    const created: FixtureRuleSet = {
       id: (state.nextRuleSetId ?? 0) + 1,
       name: String(body.name ?? `rule set ${(state.nextRuleSetId ?? 0) + 1}`),
       target: String(body.target ?? 'branch'),
       enforcement: String(body.enforcement ?? 'active'),
       conditions,
-      rules,
+      rules: rules.map((rule) => ({ type: String(rule.type ?? '') })),
       queue_rules: queues,
       _requiredStatusChecks: requiredChecks,
       _requiredApprovals: requiredApprovals,
+      _requiresThreadResolution: requiresThreadResolution,
+      created_at: '2026-01-01T00:00:00Z',
+      updated_at: '2026-01-01T00:00:00Z',
     }
     state.nextRuleSetId = created.id
     recorded.push(created)
-    return { status: 201, body: created }
+    return { status: 201, body: ruleSetDetail(created, repository) }
   }
 
   const ruleSet = new RegExp(`^${prefix}/rulesets/(\\d+)$`, 'u').exec(rawPath)
@@ -511,7 +583,7 @@ export function handleSurfaceRest(
     }
     if (method !== 'GET')
       throw new HttpError(405, 'Method Not Allowed', 'unsupported rule set method')
-    return { status: 200, body: recorded[index] }
+    return { status: 200, body: ruleSetDetail(recorded[index], repository) }
   }
 
   return null
@@ -584,7 +656,7 @@ export function handleSurfaceGraphql(
       body: {
         data: {
           repository: {
-            viewerPermission: 'WRITE',
+            viewerPermission: viewerPermissionOf(state),
             pullRequest: {
               state: pr.state,
               viewerDidAuthor: pr.author === undefined ? true : pr.author === viewer,
@@ -609,7 +681,7 @@ export function handleSurfaceGraphql(
         data: {
           viewer: { login: viewer },
           repository: {
-            viewerPermission: 'WRITE',
+            viewerPermission: viewerPermissionOf(state),
             pullRequest: {
               state: pr.state,
               viewerDidAuthor: pr.author === undefined ? true : pr.author === viewer,
@@ -678,20 +750,112 @@ export function handleSurfaceGraphql(
   )
 }
 
+/** One rule set, as the endpoints that read configuration back store it. */
+function ruleSetDetail(rules: FixtureRuleSet, repository: string) {
+  return {
+    ...ruleSetIdentity(rules, repository),
+    bypass_actors: [],
+    current_user_can_bypass: 'never',
+    conditions: rules.conditions ?? {},
+    rules: rules.rules ?? [],
+  }
+}
+
 /**
- * What the active rules say about merging this pull request, or null when nothing
- * blocks it. The ruleset scenarios are only meaningful if the runtime actually
- * refuses the merges the rules forbid, rather than agreeing with whatever the
- * client hoped would happen.
+ * The rule sets that are enforced for one base branch.
+ *
+ * A rule set whose ref-name condition excludes this branch, or includes a different one,
+ * does not apply to a pull request that targets it. Evaluating the condition here is what
+ * keeps the merge gate, the effective branch-rule read and the queue dispatcher agreeing
+ * about which branch a rule protects.
+ */
+export function applicableRuleSets(
+  state: GitHubFixtureState,
+  base: string,
+): FixtureRuleSet[] {
+  const defaultBranch = state.repository.defaultBranch
+  return (state.ruleSets ?? []).filter(
+    (rules) =>
+      rules.enforcement === 'active' &&
+      refConditionMatches(rules.conditions, { branch: base, defaultBranch }),
+  )
+}
+
+/**
+ * Whether a merge queue is configured for one base branch, which is what makes a default
+ * merge enqueue rather than merge directly. A queue belongs to a base ref, so a rule set
+ * that protects another branch says nothing about this one.
+ */
+export function mergeQueueFor(state: GitHubFixtureState, base: string): boolean {
+  const configured = applicableRuleSets(state, base).some(
+    (rules) => (rules.queue_rules ?? []).length > 0,
+  )
+  if (configured) return true
+  // The fixture's own switch names a queue on the default branch, or on the refs it lists.
+  if (state.mergeQueue !== true) return false
+  const refs = state.mergeQueueRefs
+  return !refs || refs.length === 0 || refs.includes(base)
+}
+
+/**
+ * The effective rules `GET /repos/{owner}/{repo}/rules/branches/{branch}` answers with,
+ * projected from the rule sets that were created through the API.
+ *
+ * A rule set stored by this host but never routed into this read would leave the consumer
+ * reporting that no context is required while the merge gate refuses the very same merge
+ * for that context. The projection is the rule as GitHub reports it, with the rule set it
+ * came from.
+ */
+export function ruleSetBranchRules(state: GitHubFixtureState, branch: string): unknown[] {
+  const entries: unknown[] = []
+  for (const rules of applicableRuleSets(state, branch)) {
+    for (const rule of rules.rules ?? []) {
+      if (rule.type === 'required_status_checks') {
+        const parameters = isRecord(rule.parameters) ? rule.parameters : {}
+        const required = Array.isArray(parameters.required_status_checks)
+          ? parameters.required_status_checks
+          : []
+        entries.push({
+          type: 'required_status_checks',
+          ruleset_id: rules.id,
+          ruleset_source: 'Repository',
+          ruleset_source_type: 'Repository',
+          parameters: {
+            required_status_checks: required
+              .filter(isRecord)
+              .filter((check) => typeof check.context === 'string')
+              .map((check) => ({
+                context: check.context,
+                integration_id:
+                  typeof check.integration_id === 'number' ? check.integration_id : null,
+              })),
+          },
+        })
+      }
+    }
+  }
+  return entries
+}
+
+/**
+ * What the active rules say about merging this pull request, or null when nothing blocks
+ * it. The rule set scenarios are only meaningful if the host actually refuses the merges
+ * the rules forbid, rather than agreeing with whatever the client hoped would happen.
+ *
+ * The rules that apply are the ones whose ref-name condition covers this pull request's
+ * base, the approvals are counted from each reviewer's current decision rather than from
+ * the history of reviews, and a reviewer who has asked for changes blocks the merge until
+ * they approve again.
  */
 export function ruleSetRefusal(
   state: GitHubFixtureState,
   pr: GitHubFixtureState['prs'][number],
   headSha: string,
 ): string | null {
-  for (const rules of state.ruleSets ?? []) {
-    if (rules.enforcement !== 'active') continue
-    const head = refSha(`refs/heads/${pr.head}`)
+  const recorded = state.reviews?.[String(pr.number)] ?? []
+  const decisions = standingReviewDecisions(recorded)
+  for (const rules of applicableRuleSets(state, pr.base)) {
+    const head = hostRefSha(`refs/heads/${pr.head}`)
     if (head !== headSha) return 'head SHA no longer matches'
     for (const context of rules._requiredStatusChecks) {
       const run = (state.checks?.checkRuns ?? []).find(
@@ -702,18 +866,25 @@ export function ruleSetRefusal(
         return `required status check ${context} is not successful`
       }
     }
-    if (rules._requiredApprovals > 0) {
-      const recorded = state.reviews?.[String(pr.number)] ?? []
-      // The recorded outcome is `APPROVED`, not the verb the request carried, so the
-      // rule counts the same word the reviews read reports. A gate that counted the
-      // verb would refuse every merge on a repository where approvals exist.
-      const approvals = recorded.filter(
-        (review) => review.state === RECORDED_REVIEW_STATES.APPROVE,
-      ).length
-      if (approvals < rules._requiredApprovals) {
-        return `required approving reviews: ${approvals} of ${rules._requiredApprovals}`
+    if (rules._requiresThreadResolution === true) {
+      const open = threadsOf(state, pr.number).filter((thread) => !thread.isResolved)
+      if (open.length > 0) {
+        return `all conversations must be resolved: ${open.length} unresolved`
       }
     }
+    // An author does not approve their own pull request, so their approval is not one of
+    // the reviewers a gate counts. Counting historical rows instead would let the same
+    // person satisfy a two-reviewer gate by approving twice.
+    const approvals = decisions.filter(
+      (decision) =>
+        decision.state === 'APPROVED' &&
+        decision.login.toLowerCase() !== (pr.author ?? '').toLowerCase(),
+    ).length
+    if (approvals < rules._requiredApprovals) {
+      return `required approving reviews: ${approvals} of ${rules._requiredApprovals}`
+    }
+    const blocked = decisions.find((decision) => decision.state === 'CHANGES_REQUESTED')
+    if (blocked) return `changes requested by ${blocked.login}`
   }
   return null
 }
