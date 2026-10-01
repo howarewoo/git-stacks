@@ -45,6 +45,11 @@ export interface IsolatedGitEnvironment {
    */
   restore(): void
   /**
+   * The process as it was before this run installed anything, kept so an extension
+   * of this environment still restores the process rather than this one.
+   */
+  readonly original: NodeJS.ProcessEnv
+  /**
    * More than one credential, when the run acts as more than one account.
    *
    * Each is scoped to the URL of the repository it is for, and Git presents only the
@@ -138,18 +143,65 @@ const TRACING_VARIABLES = [
 /**
  * Node's own answer to the same question, which Git's list cannot reach.
  *
- * The API transport is `fetch` in this process, and Node reads these two variables when
- * it opens the TLS connection rather than when a transport is built: `fetch` reached a
- * host whose certificate nothing vouches for while `NODE_TLS_REJECT_UNAUTHORIZED` was
- * `0`, carrying the authorization header a live run installs. Retiring `GIT_SSL_NO_VERIFY`
- * secures the Git children and leaves that request exactly as unverified as it was, so
- * these are removed in the same install, which runs before the first authenticated
- * request rather than after it. `NODE_EXTRA_CA_CERTS` is the opposite switch and is
- * retired with them: a run that has to reach a host has to name the authority itself.
+ * The API transport is `fetch` in this process, and `NODE_TLS_REJECT_UNAUTHORIZED`
+ * is a decision Node reads when it opens the connection: a process that inherited
+ * it as `0` reaches a host whose certificate nothing vouches for while carrying
+ * the authorization header a live run installs. Retiring `GIT_SSL_NO_VERIFY`
+ * secures the Git children and leaves that request exactly as unverified as it was,
+ * so this one is removed in the same install, which runs before the first
+ * authenticated request rather than after it.
+ *
+ * `NODE_EXTRA_CA_CERTS` is retired with them, and the claim for it is narrower
+ * than the retirement: it is read once, when the process starts, so deleting the
+ * variable stops this run's children from inheriting an extra authority and stops
+ * nothing about the authorities this process already loaded. Those are a property
+ * of how the process was launched, and no environment installed afterwards can
+ * take them back out.
  */
 const NODE_TRANSPORT_VARIABLES = ['NODE_TLS_REJECT_UNAUTHORIZED', 'NODE_EXTRA_CA_CERTS'] as const
 
+/**
+ * Takes Node's own transport switches out of this process, and hands back the
+ * exact inverse.
+ *
+ * This is the whole of what a command that makes no Git — a recovery run reading a
+ * receipt and deleting what it names — needs, and it needs it before its first
+ * authenticated request rather than after: a bypass is a decision the connection
+ * reads, so removing it once a credential has already gone over the wire has
+ * protected nothing.
+ *
+ * The prior values are captured rather than assumed, so restoring puts back a
+ * variable the caller set as well as one this took away. An absent variable is
+ * restored as absent; a process that had `0` gets `0` back.
+ */
+export function retireNodeTransportBypass(): { restore: () => void } {
+  const prior: Record<string, string | undefined> = {}
+  for (const name of NODE_TRANSPORT_VARIABLES) prior[name] = process.env[name]
+  for (const name of NODE_TRANSPORT_VARIABLES) delete process.env[name]
+  return {
+    restore: () => {
+      for (const name of NODE_TRANSPORT_VARIABLES) {
+        const value = prior[name]
+        if (value === undefined) delete process.env[name]
+        else process.env[name] = value
+      }
+    },
+  }
+}
+
+
 export interface GitEnvironmentInput {
+  /**
+   * The environment this run already installed, to add to rather than start over.
+   *
+   * A run that learns something about its own environment after the first install —
+   * the certificate authority of a host it had to stand up first — extends that
+   * environment instead of installing a second one over it. Two installs would each
+   * have captured a different "as it was found", so restoring the second would put
+   * back the first's isolation rather than the process, and every variable the run
+   * had already retired would stay retired for good.
+   */
+  readonly extend?: IsolatedGitEnvironment
   /** A directory this run owns and may write into. */
   readonly home: string
   /**
@@ -188,7 +240,8 @@ export async function installIsolatedGitEnvironment(
   // run retires is one the ambient configuration may legitimately have set, and
   // restoring "the sanitized set" instead of this would both keep the run's own
   // credential headers installed and lose the ambient values for good.
-  const original: NodeJS.ProcessEnv = { ...process.env }
+  const original: NodeJS.ProcessEnv =
+    input.extend === undefined ? { ...process.env } : { ...input.extend.original }
 
   /**
    * Makes the process environment match `wanted` in both directions.
@@ -202,7 +255,10 @@ export async function installIsolatedGitEnvironment(
     for (const key of Object.keys(process.env)) delete process.env[key]
     Object.assign(process.env, wanted)
   }
-  const env: NodeJS.ProcessEnv = { ...process.env }
+  // An extension builds on the environment the earlier install produced rather than on
+  // whatever the process is carrying now, so what it adds is what it says it adds and
+  // nothing that changed in between rides along with it.
+  const env: NodeJS.ProcessEnv = { ...(input.extend?.env ?? process.env) }
   for (const name of [...AMBIENT_GIT_VARIABLES, ...TRACING_VARIABLES, ...NODE_TRANSPORT_VARIABLES])
     delete env[name]
   // A run cannot reach github.com through an API base somebody else configured, and
@@ -272,7 +328,10 @@ export async function installIsolatedGitEnvironment(
     env,
     install: () => replaceEnvironment(env),
     // An exact inverse of `install`: the run's credential headers and its counted
-    // GIT_CONFIG pairs go, and the ambient values the run overwrote come back.
+    // GIT_CONFIG pairs go, and the ambient values the run overwrote come back. An
+    // extension restores the same original its parent captured, so however many
+    // installs a run layered, one restore puts the process back where it started.
     restore: () => replaceEnvironment(original),
+    original,
   }
 }

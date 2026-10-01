@@ -20,15 +20,27 @@ export type LiveOwnerKind = 'user' | 'organization'
  * One authenticated account, resolved from the credential before anything is
  * created.
  *
- * A login that reads back empty is not an account. A suite that treated one as
- * a second reviewer would hand a private pull request to a credential it cannot
+ * A login that reads back empty is not an account. A suite that treated one as a
+ * second reviewer would hand a private pull request to a credential it cannot
  * identify, and a suite that created a repository without one would not know
  * which account it had just spent. So the identity is resolved, or the run is
  * refused before the first mutation.
+ *
+ * The account that spends the credential and the account the repository belongs
+ * to are two different answers, and collapsing them is what makes a run
+ * unrecoverable. An organization's repositories are created by a user acting for
+ * it: the `POST` that creates one is made as that user, the receipt has to name
+ * that user because that is the only credential that can delete what was
+ * created, and a second reviewer has to be a different account from the user
+ * rather than from the organization. So `login` is always the authenticated
+ * account, and `owner` is where this credential is allowed to create — used for
+ * the creation route and nothing else.
  */
 export interface LiveActor {
   readonly login: string
   readonly kind: LiveOwnerKind
+  readonly owner: string
+  readonly ownerKind: LiveOwnerKind
 }
 
 /**
@@ -277,9 +289,11 @@ export interface LiveAdmin {
    * Resolves the configured owner against the credential about to spend it, and
    * answers which route may create there.
    *
-   * An owner that is neither the authenticated account nor an organization this
-   * credential may create in is refused before a single mutation is sent, rather
-   * than discovered when a read of the configured name comes back empty.
+   * The two answers are kept apart: `login` is the account `/user` named, and
+   * `owner` is the configured name this credential may create under. An owner that
+   * is neither the authenticated account nor an organization this credential may
+   * create in is refused before a single mutation is sent, rather than discovered
+   * when a read of the configured name comes back empty.
    */
   resolveOwner(owner: string): Promise<LiveActor>
   /**

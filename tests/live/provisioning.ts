@@ -34,18 +34,43 @@ export class ResourceLedger implements LiveResources {
   /** Set once the run is over, so a queued write cannot recreate a directory. */
   private closed = false
 
+  /**
+   * What this receipt is allowed to publish.
+   *
+   * The default is an honest one and says so: a receipt written with no redactor
+   * publishes its refusal reasons as they arrived. Every caller that holds a
+   * credential has one to hand, so this default exists for the runs that hold none
+   * and never for one that does.
+   */
+  private readonly scrub: (value: string) => string
+
+  /**
+   * The same redaction this receipt writes with, for text that is about to be shown to
+   * whoever has to clean up after a failure.
+   *
+   * A refusal is the host's own words: a lost response is reported as the body that
+   * came back, and a token that reached a URL is in that body. The receipt and the
+   * error a command prints are two sinks for the same text, so they get the same
+   * treatment from the same configured rule.
+   */
+  redact(value: string): string {
+    return this.scrub(value)
+  }
+
   constructor(input: {
     runId: string
     marker: string
     receiptPath: string
     host: string
     owner: string
+    redact?: (value: string) => string
   }) {
     this.runId = input.runId
     this.marker = input.marker
     this.receiptLocation = input.receiptPath
     this.host = input.host
     this.owner = input.owner
+    this.scrub = input.redact ?? ((value) => value)
   }
 
   /**
@@ -60,13 +85,31 @@ export class ResourceLedger implements LiveResources {
     return this.entries
   }
 
+  /**
+   * The one entry this receipt holds for a handle, or -1 when it holds none.
+   *
+   * A handle names one resource, and the receipt holds one entry per handle. Two
+   * entries for one handle are two records of the same repository, and every update
+   * after the first settles the earlier one: a deletion marks the first deleted,
+   * the second stays outstanding for ever, and the published artifact then lists a
+   * repository that is gone while the run reports a complete cleanup. Looking a
+   * handle up by its first match is what makes that happen, so the entries are
+   * kept one-to-one and a second record of a handle updates the entry that is
+   * already there.
+   */
+  private indexOf(handle: string): number {
+    return this.entries.findIndex((candidate) => candidate.handle === handle)
+  }
+
   record(resource: LiveResource): void {
     if (resource.marker !== this.marker) {
       throw new Error(
         `Refusing to record ${resource.handle}: it does not carry this run's ownership marker`,
       )
     }
-    this.entries.push(resource)
+    const index = this.indexOf(resource.handle)
+    if (index === -1) this.entries.push(resource)
+    else this.entries[index] = resource
     this.scheduleFlush()
   }
 
@@ -81,9 +124,16 @@ export class ResourceLedger implements LiveResources {
    * first means the receipt names the exact owner, name and marker to go and look
    * for, and the reconciliation that follows reads the host rather than re-sending
    * a creation whose outcome is unknown.
+   *
+   * A handle that already has an entry keeps it and is re-journalled in place, for
+   * the reason `indexOf` gives: the journal and the record that follows it are one
+   * resource, and writing them as two leaves one of them unsettleable.
    */
   async intent(resource: LiveResource): Promise<void> {
-    this.entries.push({ ...resource, pending: true })
+    const index = this.indexOf(resource.handle)
+    const existing = index === -1 ? undefined : this.entries[index]
+    if (existing === undefined) this.entries.push({ ...resource, pending: true })
+    else this.entries[index] = { ...existing, ...resource, pending: true }
     await this.flush()
   }
 
@@ -95,11 +145,10 @@ export class ResourceLedger implements LiveResources {
    * and stop depending on the name still resolving to the same repository.
    */
   confirm(handle: string, remoteId?: number): void {
-    const entry = this.entries.find((candidate) => candidate.handle === handle)
-    if (!entry) return
-    const index = this.entries.indexOf(entry)
+    const index = this.indexOf(handle)
+    if (index === -1) return
     this.entries[index] = {
-      ...entry,
+      ...this.entries[index],
       pending: undefined,
       ...(remoteId === undefined ? {} : { remoteId }),
     }
@@ -107,17 +156,17 @@ export class ResourceLedger implements LiveResources {
   }
 
   release(handle: string, at: Date = new Date()): void {
-    const entry = this.entries.find((candidate) => candidate.handle === handle)
-    if (!entry) return
-    entry.deletedAt = at.toISOString()
-    delete entry.refused
+    const index = this.indexOf(handle)
+    if (index === -1) return
+    this.entries[index].deletedAt = at.toISOString()
+    delete this.entries[index].refused
     this.scheduleFlush()
   }
 
   refuse(handle: string, reason: string): void {
-    const entry = this.entries.find((candidate) => candidate.handle === handle)
-    if (!entry) return
-    entry.refused = reason
+    const index = this.indexOf(handle)
+    if (index === -1) return
+    this.entries[index].refused = reason
     this.scheduleFlush()
   }
 
@@ -188,6 +237,14 @@ export class ResourceLedger implements LiveResources {
       // The receipt carries no credential, ever: it is the file a workflow publishes,
       // and it names the host, the owner, and the run so a recovery run can re-establish
       // all three before it acts on a single handle in it.
+      //
+      // A refusal reason is the one field here that arrives from outside, and it is
+      // reduced on the way in rather than trusted on the way out. Cleanup quotes what a
+      // read or a delete said about the failure, and what a host says can be whatever
+      // the endpoint it answered with chose to say — including an authorization header
+      // echoed back, in a form this run's own credential is recognisable by. The
+      // configured redactor runs here, at the publication sink, because a caller that
+      // remembers to redact is exactly the caller that eventually forgets.
       const receipt = {
         version: 2 as const,
         runId: this.runId,
@@ -195,7 +252,9 @@ export class ResourceLedger implements LiveResources {
         host: this.host,
         owner: this.owner,
         writtenAt: new Date().toISOString(),
-        resources: this.entries,
+        resources: this.entries.map((entry) =>
+          entry.refused === undefined ? entry : { ...entry, refused: this.scrub(entry.refused) },
+        ),
       }
       await mkdir(dirname(this.receiptLocation), { recursive: true })
       const temporary = `${this.receiptLocation}.${process.pid}.${this.sequence++}.tmp`
@@ -224,12 +283,42 @@ export class ResourceLedger implements LiveResources {
 /**
  * Whether the host still shows this run's marker on the resource.
  *
+ * The marker is matched whole, at a line boundary, and never as a fragment of a
+ * longer string. A run's marker is one run's name: `git-stacks-live-e2e:r1` is a
+ * prefix of `git-stacks-live-e2e:r10` and of any description that happens to
+ * mention it in a sentence, so a substring test answers "yes" for a repository
+ * another run created — and a refusal to delete is the only thing standing between
+ * a name collision and somebody else's repository. A marker written on its own
+ * line, or set as a topic in its own right, is a marker; anything else is not.
+ *
  * A marker that cannot be read is not a match. Refusing to delete something whose
  * ownership cannot be proven is the whole point of the check, so an unreadable
  * marker and an absent one are answered the same way.
  */
 export function ownsMarker(observed: string | null | undefined, marker: string): boolean {
-  return typeof observed === 'string' && observed.includes(marker)
+  if (typeof observed !== 'string' || marker === '') return false
+  return observed.split('\n').some((line) => line.trim() === marker)
+}
+
+/**
+ * Whether what the host reports is the exact resource this run created.
+ *
+ * The marker is necessary and not sufficient on its own, because a marker can be
+ * copied: a repository forked from this one, or a name deleted and recreated with
+ * the same description, would answer it too. So when the host has already named
+ * this resource — every confirmed creation records the id the host returned — that
+ * id has to be the id standing at the name now. A pending creation has no id yet
+ * and is judged on its marker alone, which is the strongest thing the receipt can
+ * say about it.
+ */
+export function ownsCreatedResource(
+  probe: OwnedResourceProbe,
+  marker: string,
+  recordedId?: number,
+): boolean {
+  if (!ownsMarker(markerOnRepository(probe), marker)) return false
+  if (recordedId === undefined) return true
+  return probe.id === recordedId
 }
 
 /** The description a repository is created with, carrying the marker and nothing else. */
@@ -251,6 +340,11 @@ export function markedDescription(summary: string, marker: string): string {
 export interface OwnedResourceProbe {
   description: string | null
   topics?: string[]
+  /**
+   * The id the host named for this resource, when it has named one. It is the part of
+   * the ownership check a name cannot supply on its own.
+   */
+  id?: number
 }
 
 /** Reads the marker off whatever the host reports about a resource it created. */
@@ -471,21 +565,23 @@ export async function recoverLiveResources(input: {
       absent.push(entry.handle)
       continue
     }
+    // The id and the marker are checked together, in that order, and a resource this
+    // receipt records without an id is judged on its marker alone. Neither half is
+    // redundant: the marker is a line of text anybody can copy, and the id is what
+    // says whether the repository standing at this name is the one this run asked for
+    // or a replacement that inherited its description.
     if (
-      entry.kind === 'repository' &&
-      typeof entry.remoteId === 'number' &&
-      repository.id !== entry.remoteId
+      !ownsCreatedResource(
+        repository,
+        input.receipt.marker,
+        entry.kind === 'repository' && typeof entry.remoteId === 'number'
+          ? entry.remoteId
+          : undefined,
+      )
     ) {
       refused.push({
         handle: entry.handle,
-        reason: `the host has id ${String(repository.id)} there; this run created id ${entry.remoteId}`,
-      })
-      continue
-    }
-    if (!ownsMarker(markerOnRepository(repository), input.receipt.marker)) {
-      refused.push({
-        handle: entry.handle,
-        reason: 'it no longer carries the ownership marker this receipt records',
+        reason: 'it no longer carries the ownership marker and id this receipt records',
       })
       continue
     }
@@ -513,8 +609,15 @@ export async function recoverLiveResources(input: {
   }
 }
 
-/** The repository a handle belongs to, which every handle in a receipt is prefixed by. */
-function repositoryOf(entry: LiveResource): string | null {
+/**
+ * The repository a handle belongs to, which every handle in a receipt is prefixed by.
+ *
+ * This is what makes "inside the repository this run deleted" a statement about a
+ * receipt rather than about a guess. Deleting a repository removes everything in it,
+ * and only what is in it: settling a sibling repository's entries because the
+ * primary's deletion succeeded would mark somebody else's repository as removed.
+ */
+export function repositoryOf(entry: LiveResource): string | null {
   if (entry.kind === 'repository') {
     const at = entry.handle.indexOf('/')
     return at > 0 ? entry.handle : null

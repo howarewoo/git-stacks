@@ -698,6 +698,53 @@ const realPromisifiedExecFile = realExecFile[promisify.custom]
 const realExecFileSync = childProcess.execFileSync
 let active: ActiveHarness | null = null
 
+/**
+ * The live run that owns this process's real `git` and `gh`, if one does.
+ *
+ * The interception below is installed by importing this module, which every test in
+ * this repository does — including the one that runs against an authorized disposable
+ * repository on a real host, which creates no harness. Left there, the boundary has
+ * nothing to answer the live run's Git with and refuses it, so the whole live target
+ * is unrunnable from its first probe: that is a source fact, not an observed failure.
+ *
+ * Installing the interception only while a harness exists was the other answer, and it
+ * is worse. The product captures `promisify(execFile)` when its own modules load, which
+ * the tests deliberately do after importing this fixture, so a patch applied at harness
+ * creation is applied too late to be seen by the very code it exists to answer.
+ *
+ * So the refusal stands and the way past it is explicit. A live run says out loud
+ * that it owns a real host and is asking for the real tool, and only for as long as it
+ * holds that claim. Nothing else reaches the real tools: a `git` with no harness and
+ * no live claim is still refused, which is what keeps a broken interception from
+ * leaving for github.com.
+ */
+let liveOwner: symbol | null = null
+
+/**
+ * Claims the real `git` and `gh` for one live run, and answers how to give the claim
+ * back.
+ *
+ * Refused while a harness is answering, because the two are opposites: one run cannot
+ * both own the real tools and expect every command in it to be answered by a fixture.
+ * Releasing the claim a second time is a no-op rather than an error, so a cleanup that
+ * runs twice cannot take it away from a run that still holds it.
+ */
+export function claimLiveTools(): { release: () => void } {
+  if (active !== null) {
+    throw new Error('a run cannot use the real git and gh while a GitHub harness is answering them')
+  }
+  if (liveOwner !== null) {
+    throw new Error('another live run already owns the real git and gh in this process')
+  }
+  const owner = Symbol('git-stacks live run')
+  liveOwner = owner
+  return {
+    release: () => {
+      if (liveOwner === owner) liveOwner = null
+    },
+  }
+}
+
 function commandError(file: string, args: readonly string[], code: number, stderr: string) {
   const cmd = [file, ...args].join(' ')
   const error = new Error(`Command failed: ${cmd}\n${stderr}`) as CommandError
@@ -831,8 +878,11 @@ function runFixtureCommand(
   if (command === 'git' || command === 'gh') {
     // A `git` or `gh` request that reaches this boundary without a harness to answer it
     // is a request for the real tools. Running it for real is how an interception failure
-    // reaches github.com instead of failing, so the fixture refuses it and says why.
+    // reaches github.com instead of failing, so the fixture refuses it and says why —
+    // unless a live run has claimed the real tools, which is the one request that is
+    // meant to reach them.
     if (!harness) {
+      if (liveOwner !== null) return realPromisifiedExecFile(file, args, options)
       return Promise.reject(
         commandError(file, args, 2, `the GitHub fixture has no harness to answer ${command}\n`),
       )
@@ -855,8 +905,10 @@ childProcess.execFile = Object.assign(
       const command = commandName(file)
       // A `gh` or `git` request that bypasses the promisified boundary would
       // reach the real tools, so it fails here instead of answering from the
-      // wrong process.
-      if (active && ['git', 'gh'].includes(command)) {
+      // wrong process. The same refusal applies with no harness at all, because
+      // that is the shape an interception failure takes, and it is the case this
+      // branch used to fall straight through to the real `execFile`.
+      if (['git', 'gh'].includes(command) && (active !== null || liveOwner === null)) {
         throw new Error(
           `The GitHub harness answers ${file} only through the promisified execFile boundary`,
         )
@@ -1001,12 +1053,26 @@ export interface GitHubHarnessOptions {
    * other test in this repository expects.
    */
   readonly barePath?: string
+  /**
+   * The directory this harness works in, when the caller has already made one.
+   *
+   * The harness creates its own by default, and that is right for a test that only
+   * needs somewhere to put a bare repository. It is not right for a run that has to
+   * establish a boundary *before* the first Git command: the harness runs real Git to
+   * create and seed that repository, and a caller that installs its Git isolation
+   * afterwards has nothing to point the isolation's home directory at, because the
+   * directory did not exist yet. Naming it here lets the caller own it, install on it,
+   * and remove it whatever happens to this harness.
+   *
+   * A caller-supplied root is still this harness's to fill in and to remove on close.
+   */
+  readonly root?: string
 }
 
 export async function createGitHubHarness(
   options: GitHubHarnessOptions = {},
 ): Promise<GitHubHarness> {
-  const root = await mkdtemp(join(tmpdir(), 'git-stacks-github-harness-'))
+  const root = options.root ?? (await mkdtemp(join(tmpdir(), 'git-stacks-github-harness-')))
   const repo = join(root, 'repo')
   const bare = join(root, options.barePath ?? 'remote.git')
   const statePath = join(root, 'github-state.json')
@@ -1138,6 +1204,12 @@ export async function createGitHubHarness(
           fullName,
           ...(request.kind === 'fork' ? { forkOf: primaryName(state) } : {}),
           description: request.marker,
+          // Private, always. A public repository answers for every account that asks,
+          // so a push to it would succeed whether or not the account pushing had been
+          // given anything — and a controlled run that reported "the reviewer can reach
+          // its own fork" on a public fork would be reporting that the host is permissive,
+          // not that the run proved anything about credentials.
+          private: true,
         })
         return {
           id: repositoryIdentity(served.fullName),

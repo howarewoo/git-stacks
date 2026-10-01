@@ -1,8 +1,8 @@
 import { execFileSync } from 'node:child_process'
 import { accessSync, constants, statSync } from 'node:fs'
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { delimiter, join, relative } from 'node:path'
 import { tmpdir } from 'node:os'
-import { delimiter, join } from 'node:path'
 import {
   DirectGitHubTransport,
   GitHubTransportError,
@@ -12,14 +12,23 @@ import {
 import { githubHostContext, type GitHubHostContext } from '../../src/main/github-host'
 import { detectNativeStacksCapability } from '../../src/main/native-stacks'
 import { startAsyncMerge } from '../../src/main/merge-async'
-import { createGitHubHarness, type GitHubHarness } from '../fixtures/github-harness'
+import {
+  claimLiveTools,
+  createGitHubHarness,
+  WRITING_ROLES,
+  type GitHubHarness,
+} from '../fixtures/github-harness'
 import { startControlledGitHubHost, type ControlledGitHubHost } from '../fixtures/live-github-tls'
 import { disposableRepositoryName, ownershipMarker, type LiveRunConfig } from './config'
+import { LiveRedactor } from './diagnostics'
 import { GitHubAdmin } from './github-admin'
 import { installIsolatedGitEnvironment, type IsolatedGitEnvironment } from './git-environment'
-import { markerOnRepository, ownsMarker, ResourceLedger } from './provisioning'
-import { FaultInjectingTransport } from './transport'
-import { LocalGitWorkspace } from './workspace'
+import {
+  markerOnRepository,
+  ownsCreatedResource,
+  repositoryOf,
+  ResourceLedger,
+} from './provisioning'
 import type {
   LiveActor,
   LiveAdmin,
@@ -33,6 +42,8 @@ import type {
   LiveTarget,
   LiveWorkspace,
 } from './contract'
+import { FaultInjectingTransport } from './transport'
+import { LocalGitWorkspace } from './workspace'
 
 /**
  * The two disposable targets, written once.
@@ -134,7 +145,7 @@ abstract class DisposableTarget implements LiveTarget {
   protected readonly fullName: string
   protected readonly ledger: ResourceLedger
   protected readonly root: string
-  protected readonly git: IsolatedGitEnvironment
+  protected git: IsolatedGitEnvironment
   protected readonly reviewerAdmin: LiveAdmin | null
   private readonly injected: FaultInjectingTransport
 
@@ -394,12 +405,32 @@ abstract class DisposableTarget implements LiveTarget {
   }
 
   private async runCleanup(): Promise<LiveCleanupReport> {
+    // Everything below reasons about a host, and a host can be slow, refuse, or drop a
+    // connection. None of that may keep this run's own local state alive: the process
+    // environment holds its credentials, the workspace holds a clone, and a controlled
+    // run holds a listening socket that nothing else closes. So the whole decision runs
+    // under one finally rather than being followed by a shutdown each branch remembers.
+    try {
+      return await this.settleCleanup()
+    } finally {
+      await this.shutdown()
+    }
+  }
+
+  /**
+   * What cleanup managed against the host, decided before any local state is let go.
+   *
+   * A failure in here is a failure of one step. The receipt is flushed, a resource is
+   * released or refused, and the next step still runs: a run that could not remove a
+   * rule set should still remove the repository holding it, and should still get its
+   * own process back.
+   */
+  private async settleCleanup(): Promise<LiveCleanupReport> {
     await this.ledger.flush()
     if (this.ledger.list().every((entry) => entry.kind !== 'repository')) {
       for (const entry of this.ledger.outstanding()) {
         this.ledger.refuse(entry.handle, 'the run recorded no repository to prove it owns this')
       }
-      await this.shutdown()
       return this.ledger.report()
     }
     // A repository whose creation was never confirmed is reconciled rather than assumed
@@ -416,21 +447,27 @@ abstract class DisposableTarget implements LiveTarget {
         )
         continue
       }
-      // A host that does not have it is an answer, and so is one that does: the entry
-      // either becomes a resource with an id the host named, or stops being outstanding.
-      // What it must never do is stay unresolved, because a report that lists a creation
-      // as neither made nor unmade leaves a person with nowhere to start. The read is
-      // made with the credential that owns the name, because another one may not be able
-      // to see it and would report an absent repository that is very much present.
-      const existing = await readRepositoryIdentity(admin, entry.handle)
+      // A host that does not have it is an answer, and so is one that does — but only
+      // when what it has is provably the thing that was asked for. A name that has since
+      // been taken by somebody else's repository is not this run's lost response, and
+      // confirming it would hand a repository nobody created to this run's own cleanup.
+      // The read is made with the credential that owns the name, because another one may
+      // not be able to see it and would report an absent repository that is very much
+      // present.
+      const existing = await readRepositoryIdentity(
+        admin,
+        entry.handle,
+        entry.marker ?? this.marker,
+      )
       if (existing === null) this.ledger.release(entry.handle)
       else this.ledger.confirm(entry.handle, existing.id)
     }
     let owned = false
     try {
-      owned = ownsMarker(
-        markerOnRepository(await this.admin.readRepository(this.fullName)),
+      owned = ownsCreatedResource(
+        await this.admin.readRepository(this.fullName),
         this.marker,
+        this.recordedId(this.fullName),
       )
     } catch (error) {
       this.ledger.refuse(
@@ -443,7 +480,6 @@ abstract class DisposableTarget implements LiveTarget {
     if (!owned) {
       const reason = `${this.fullName} no longer carries this run's ownership marker`
       for (const entry of this.ledger.outstanding()) this.ledger.refuse(entry.handle, reason)
-      await this.shutdown()
       return this.ledger.report()
     }
 
@@ -491,12 +527,18 @@ abstract class DisposableTarget implements LiveTarget {
     // run reported a complete cleanup.
     const removed = await this.attempt(() => this.removeRepository(this.fullName))
     if (removed) {
-      for (const entry of this.ledger.outstanding()) this.ledger.release(entry.handle)
+      // Only what the deleted repository contained. A separate repository this run also
+      // created, and refused or failed to remove a moment ago, is a different resource
+      // with its own marker and its own account: settling it because the primary went
+      // away marks a repository that is still standing as deleted, and a recovery run
+      // reads `deletedAt` as "already gone" and skips it for ever.
+      for (const entry of this.ledger.outstanding()) {
+        if (repositoryOf(entry) === this.fullName) this.ledger.release(entry.handle)
+      }
     } else {
       this.ledger.refuse(this.fullName, 'the host still has this repository')
     }
     await this.ledger.close()
-    await this.shutdown()
     return this.ledger.report()
   }
 
@@ -546,7 +588,10 @@ abstract class DisposableTarget implements LiveTarget {
     const admin = this.adminFor(entry.actor)
     if (admin === null) return false
     try {
-      if (!ownsMarker(markerOnRepository(await admin.readRepository(entry.handle)), this.marker)) {
+      // The same two things the primary is held to: this run's marker, matched whole,
+      // and the id the host named for this resource when it was created. A marker alone
+      // is a line of text that survives a deletion and a reuse of the same name.
+      if (!ownsCreatedResource(await admin.readRepository(entry.handle), this.marker, entry.remoteId)) {
         this.ledger.refuse(entry.handle, "it no longer carries this run's ownership marker")
         return false
       }
@@ -556,15 +601,33 @@ abstract class DisposableTarget implements LiveTarget {
     }
   }
 
+  /**
+   * The id the host named for a repository this run confirmed creating, if it did.
+   *
+   * The receipt holds it, so the cleanup path can require it rather than re-deriving
+   * one from a name that may since have been reused.
+   */
+  private recordedId(handle: string): number | undefined {
+    return this.ledger.list().find((entry) => entry.handle === handle)?.remoteId
+  }
+
   /** What the one cleanup this run did, so a second caller is told the same thing. */
   private cleaned: LiveCleanupReport | null = null
 
   /**
-   * Puts the process back the way the run found it, whatever cleanup managed.
+   * Puts this run's own state back, whatever the host did.
    *
-   * The Git environment is restored even when a remote deletion threw, because the
-   * process environment holds this run's credentials and a failed cleanup is exactly
-   * the moment a later command in the same process is least wanted.
+   * Three separate things are given back here, and none of them may depend on the
+   * others. The global transport goes first, because it is the one holding a
+   * credential in a place any later command in this process can reach. The process
+   * environment goes next, because it holds the run's Git credential headers. The
+   * local resources go last and unconditionally, because a repository whose deletion
+   * was refused or whose read threw still leaves a clone, a directory and — in a
+   * controlled run — a listening socket behind, and a socket nobody closes holds the
+   * event loop open so the process does not exit at all.
+   *
+   * A restore that cannot rewrite the process is worth nothing to throw over; the
+   * receipt is what still has to be right.
    */
   protected async shutdown(): Promise<void> {
     setGitHubTransport(null)
@@ -574,9 +637,34 @@ abstract class DisposableTarget implements LiveTarget {
       // A restore that cannot rewrite the process is worth nothing to throw over; the
       // receipt is what still has to be right.
     }
+    await this.releaseLocal()
   }
 
+  /** The files, listeners and helpers this run opened, and only those. */
+  protected abstract releaseLocal(): Promise<void>
+
   protected abstract removeRepository(fullName: string): Promise<boolean>
+
+  /**
+   * Teaches the process one more URL-scoped credential, for a repository this run
+   * created later.
+   *
+   * A run acts as more than one account, and each account's token belongs to exactly
+   * one remote. Git matches `http.<url>.extraheader` by URL prefix, so a header scoped
+   * to the primary's repository is simply not offered to the reviewer's fork — which
+   * is the whole reason the credential is a header and not a URL. Adding one is an
+   * extension of the environment already installed rather than a second install over
+   * it, so one restore still puts the process back exactly as it was found.
+   */
+  protected async extendGitCredentials(url: string, token: string): Promise<void> {
+    this.git = await installIsolatedGitEnvironment({
+      home: this.root,
+      author: AUTHOR,
+      extend: this.git,
+      credentials: [{ url, header: `AUTHORIZATION: basic ${basicAuth(token)}` }],
+    })
+    this.git.install()
+  }
 
   /** The receipt this run writes, so a failed run is auditable after the fact. */
   readonly receipt: string
@@ -621,30 +709,59 @@ export class ControlledLiveTarget extends DisposableTarget {
    * Nothing in the run can reach github.com, because nothing in the run names it.
    */
   static async start(options: { receiptPath?: string } = {}): Promise<ControlledLiveTarget> {
-    // The bare repository is created where a host serving `/<owner>/<name>.git` can
-    // reach it, so the clone and the API double are looking at one repository rather
-    // than at two that agree with each other.
-    const harness = await createGitHubHarness({ barePath: 'projects/acme/widgets.git' })
-    const server = await startControlledGitHubHost({
-      projectsRoot: harness.projectsRoot,
-      git: harness.env.GIT_STACKS_REAL_GIT as string,
-    })
-    // From this line the run owns two local resources — a listening socket and a
-    // directory — and nothing below has a cleanup path of its own. A listener nobody
-    // closes holds the event loop open for the rest of the process, so a run that
-    // fails anywhere below does not fail: it hangs until whatever is waiting on it
-    // gives up. That is why the whole body runs under one guard rather than only its
-    // last few lines; the first version of this had a guard that started after the
-    // owner was resolved, which is exactly the request a real host refuses.
-    const opened: { git?: IsolatedGitEnvironment; workspace?: LocalGitWorkspace } = {}
+    // From the very first statement this run owns something, and the guard below is
+    // open before it owns anything. That ordering is the whole point: the harness runs
+    // real Git to create and seed the repository this host serves, so a caller that
+    // installed its Git isolation afterwards would already have run Git against the
+    // ambient environment — an inherited `GIT_DIR`, a `credential.helper`, a
+    // `core.hooksPath`, a global signing key — before the boundary that exists to stop
+    // exactly that. So the directory is made first, the isolation is installed on it,
+    // and only then does anything else get created.
+    //
+    // A listener nobody closes holds the event loop open for the rest of the process,
+    // so a run that fails anywhere below does not fail: it hangs until whatever is
+    // waiting on it gives up. Each resource is recorded the moment it exists, because
+    // a throw means there is no end to collect at.
+    const opened: {
+      git?: IsolatedGitEnvironment
+      harness?: GitHubHarness
+      server?: ControlledGitHubHost
+      workspace?: LocalGitWorkspace
+      root?: string
+    } = {}
     try {
+      opened.root = await mkdtemp(join(tmpdir(), 'git-stacks-live-controlled-'))
+      const git = await installIsolatedGitEnvironment({
+        home: opened.root,
+        author: AUTHOR,
+      })
+      opened.git = git
+      // `install`, not `Object.assign`: merging adds and overwrites but never removes,
+      // so the retired variables would still be in the process while every Git the
+      // application's own services start inherits them.
+      git.install()
+      // The bare repository is created where a host serving `/<owner>/<name>.git` can
+      // reach it, so the clone and the API double are looking at one repository rather
+      // than at two that agree with each other.
+      const harness = await createGitHubHarness({
+        barePath: 'projects/acme/widgets.git',
+        root: opened.root,
+      })
+      opened.harness = harness
+      const server = await startControlledGitHubHost({
+        projectsRoot: harness.projectsRoot,
+        git: harness.env.GIT_STACKS_REAL_GIT as string,
+        authorizeGit: (fullName, authorization) => authorizeGitFor(harness, fullName, authorization),
+      })
+      opened.server = server
       return await ControlledLiveTarget.build({ harness, server, options, opened })
     } catch (error) {
       opened.workspace?.close()
       setGitHubTransport(null)
       opened.git?.restore()
-      await server.close().catch(() => undefined)
-      await harness.close().catch(() => undefined)
+      await opened.server?.close().catch(() => undefined)
+      await opened.harness?.close().catch(() => undefined)
+      if (opened.root !== undefined) await rm(opened.root, { recursive: true, force: true })
       throw error
     }
   }
@@ -658,7 +775,13 @@ export class ControlledLiveTarget extends DisposableTarget {
      * written as each thing is created rather than collected at the end, because a
      * throw means there is no end to collect at.
      */
-    opened: { git?: IsolatedGitEnvironment; workspace?: LocalGitWorkspace }
+    opened: {
+      git?: IsolatedGitEnvironment
+      harness?: GitHubHarness
+      server?: ControlledGitHubHost
+      workspace?: LocalGitWorkspace
+      root?: string
+    }
   }): Promise<ControlledLiveTarget> {
     const { harness, server, opened } = input
     const options = input.options
@@ -668,6 +791,10 @@ export class ControlledLiveTarget extends DisposableTarget {
     const fullName = `${state.repository.owner}/${state.repository.name}`
     state.repository.description = `Live suite target\n\n${marker}\n`
     state.repository.topics = ['git-stacks-live-e2e', `run-${runId}`]
+    // Private, so that "the reviewer can reach it" means a grant was enforced rather
+    // than that a public repository answered for everybody. Without this the second
+    // account's distinctness is proved by a host that was never asked the question.
+    state.repository.private = true
     // The account that owns a disposable repository administers it. Saying so through
     // the field the repository read exposes is what lets a merge capability be observed
     // rather than assumed, and it is the same answer a real owner gets.
@@ -677,19 +804,26 @@ export class ControlledLiveTarget extends DisposableTarget {
     }
     await harness.writeState(state)
 
-    // The run's Git isolation is installed into the process before any Git runs, so
-    // the commands the application's own services start later inherit it too. The
-    // controlled host needs no credential: its socket is this process, and the
-    // transport is pinned to it explicitly.
+    // The socket's certificate is the one thing that could not be known before the host
+    // existed, so this extends the environment already installed rather than replacing
+    // it: a second install would capture the first one's isolation as "the process as it
+    // was found", and restoring it would leave every retired variable retired for good.
+    // Each credential is scoped to the exact URL of the repository it is for, so the
+    // reviewer's token is never offered to the primary's remote and the primary's is
+    // never offered to the reviewer's fork.
     const git = await installIsolatedGitEnvironment({
       home: harness.root,
       author: AUTHOR,
+      extend: opened.git,
       gitTlsCaInfo: server.certificatePath,
+      credentials: [
+        {
+          url: server.cloneUrl(fullName),
+          header: `AUTHORIZATION: basic ${basicAuth(harness.primaryToken)}`,
+        },
+      ],
     })
     opened.git = git
-    // `install`, not `Object.assign`: merging adds and overwrites but never removes,
-    // so the retired variables would still be in the process while every Git the
-    // application's own services start inherits them.
     git.install()
     // The keys this host owns, not `harness.env`. That object is the whole process as
     // it was before isolation, so merging it here would put every variable the install
@@ -702,12 +836,14 @@ export class ControlledLiveTarget extends DisposableTarget {
     setGitHubTransport(null)
 
     const receiptPath = options.receiptPath ?? join(harness.root, 'live-github-e2e-receipt.json')
+    const redact = new LiveRedactor([harness.primaryToken, harness.reviewer.token]).text
     const ledger = new ResourceLedger({
       runId,
       marker,
       receiptPath,
       host: server.host,
       owner: state.currentUser,
+      redact,
     })
     const credential = (token: string): DirectGitHubTransport =>
       new DirectGitHubTransport({
@@ -736,7 +872,14 @@ export class ControlledLiveTarget extends DisposableTarget {
     })
     opened.workspace = workspace
     const admin = new GitHubAdmin(faults, fullName, marker)
+    // Both identities are settled before anything is recorded or any Git runs: a
+    // reviewer credential that turns out to be the primary account is a misconfigured
+    // run, and finding that out after the repository exists means cleanup depends on
+    // credentials this run has just proved it cannot trust.
     const primary = await admin.resolveOwner(state.currentUser)
+    const reviewerFaults = new FaultInjectingTransport(credential(harness.reviewer.token))
+    const reviewerAdmin = new GitHubAdmin(reviewerFaults, fullName, marker)
+    const reviewerLogin = await resolveReviewerIdentity(reviewerAdmin, primary.login)
     ledger.record({
       kind: 'repository',
       handle: fullName,
@@ -745,17 +888,15 @@ export class ControlledLiveTarget extends DisposableTarget {
       actor: primary.login,
     })
     await ledger.flush()
-    const reviewerFaults = new FaultInjectingTransport(credential(harness.reviewer.token))
-    const reviewer = await provisionReviewer({
+    // The grant, the acceptance and the read-back all need the repository to exist, so
+    // they are the part that has to wait. The identity they are granted to does not.
+    const reviewer = await grantReviewerAccess({
       admin,
-      reviewerAdmin: new GitHubAdmin(reviewerFaults, fullName, marker),
+      reviewerAdmin,
       reviewerTransport: reviewerFaults,
       fullName,
-      marker,
-      reviewerToken: harness.reviewer.token,
-      primaryLogin: primary.login,
+      reviewerLogin,
     })
-    const reviewerAdmin = new GitHubAdmin(reviewerFaults, fullName, marker)
 
     return new ControlledLiveTarget({
       runId,
@@ -836,6 +977,15 @@ export class ControlledLiveTarget extends DisposableTarget {
       actor: subject.owner,
     })
     const foreignPath = join(this.root, `foreign-${kind}`)
+    // The fork belongs to the reviewer's account, and this host now decides who may
+    // reach it, so the push has to carry that account's credential scoped to exactly
+    // this repository's URL. The primary's header does not match this remote and was
+    // never going to; installing the reviewer's is what turns "the reviewer can push to
+    // its own fork" from an assumption into something this host checked.
+    await this.extendGitCredentials(
+      this.server.cloneUrl(subject.fullName),
+      kind === 'fork' ? this.harness.reviewer.token : this.harness.primaryToken,
+    )
     await createForeignRepository({
       path: foreignPath,
       remote: this.server.cloneUrl(subject.fullName),
@@ -878,12 +1028,25 @@ export class ControlledLiveTarget extends DisposableTarget {
     return this.server.served
   }
 
-  /** The local clone and the bare repository, which are this run's alone to remove. */
+  /**
+   * There is no remote to clean up here: this run's host is this process.
+   *
+   * Everything the run opened is released by `releaseLocal` instead, which the guard
+   * runs whatever cleanup decided. Tying the socket to the repository step meant a
+   * refusal before that step — the marker could not be read, a branch would not delete
+   * — left a listener holding the event loop open and a run that hung instead of
+   * reporting.
+   */
   protected async removeRepository(): Promise<boolean> {
+    return true
+  }
+
+  /** The clone, the bare repository and the socket, which are this run's alone. */
+  protected async releaseLocal(): Promise<void> {
     this.workspaceInstance.close()
     await this.server.close()
     await this.harness.close()
-    return true
+    await rm(this.root, { recursive: true, force: true })
   }
 }
 
@@ -895,12 +1058,23 @@ export class GitHubLiveTarget extends DisposableTarget {
   private readonly workspaceInstance: LocalGitWorkspace
   private readonly foreign = new Map<LiveForeignKind, LiveForeignPullRequest>()
   private readonly reviewerToken: string | null
+  private readonly primaryToken: string
+  /** The claim on the real `git` and `gh`, held from startup until this run is done. */
+  private readonly liveTools: { release: () => void }
 
-  private constructor(setup: DisposableTargetSetup & { reviewerToken: string | null }) {
+  private constructor(
+    setup: DisposableTargetSetup & {
+      reviewerToken: string | null
+      primaryToken: string
+      liveTools: { release: () => void }
+    },
+  ) {
     super(setup)
     this.workspaceInstance = setup.workspace as LocalGitWorkspace
     this.reviewer = setup.reviewer
     this.reviewerToken = setup.reviewerToken
+    this.primaryToken = setup.primaryToken
+    this.liveTools = setup.liveTools
     this.admin = new GitHubAdmin(setup.faults, setup.fullName, setup.marker)
   }
 
@@ -925,12 +1099,18 @@ export class GitHubLiveTarget extends DisposableTarget {
     const fullName = `${config.owner}/${name}`
     const root = await mkdtemp(join(tmpdir(), `git-stacks-live-${name}-`))
     const receiptPath = config.receiptPath
+    const redact = new LiveRedactor(
+      [config.token, config.reviewerToken].filter(
+        (value): value is string => typeof value === 'string' && value.trim() !== '',
+      ),
+    ).text
     const ledger = new ResourceLedger({
       runId: config.runId,
       marker,
       receiptPath,
       host: config.host,
       owner: config.owner,
+      redact,
     })
     // Both credentials are pinned to this host's own endpoints and handed an
     // environment that cannot widen where they may be sent. The application's transport
@@ -965,6 +1145,12 @@ export class GitHubLiveTarget extends DisposableTarget {
     })
     git.install()
     setGitHubTransport(faults)
+    // This run is the one that owns a real host, so it is the one that may use the real
+    // `git` and `gh`. The fixture's interception refuses anything it has no harness to
+    // answer, which is what keeps a controlled run from ever leaving for github.com —
+    // and which would otherwise refuse this run's own first push. Saying so explicitly,
+    // for exactly as long as this target exists, is what separates the two.
+    const liveTools = claimLiveTools()
 
     // Everything past this point can create something. From here on, a failure is
     // reported with what it left behind rather than as a bare refusal.
@@ -975,6 +1161,32 @@ export class GitHubLiveTarget extends DisposableTarget {
       // the personal route, where it would create a repository under a different
       // account than the receipt would name.
       const primary = await admin.resolveOwner(config.owner)
+      // The creation is journalled, durably, before the request that creates it. A
+      // repository whose response is lost is then a receipt entry the recovery command
+      // can reconcile against the host, instead of a resource that exists on somebody's
+      // account and is described nowhere.
+      await ledger.intent({
+        kind: 'repository',
+        handle: fullName,
+        marker,
+        createdAt: new Date().toISOString(),
+        pending: true,
+        actor: primary.login,
+      })
+      // Both supplied credentials are identified, and proved to be two different
+      // accounts, before anything is created or pushed. A reviewer credential that is
+      // blank, that answers no identity, or that is the primary's own is a
+      // misconfigured run — and discovering that after the repository exists and the
+      // clone has been seeded means the cleanup that has to undo it is running on
+      // credentials the run has just proved it cannot trust.
+      const reviewerFaults =
+        config.reviewerToken === null
+          ? null
+          : new FaultInjectingTransport(pin(config.reviewerToken))
+      const reviewerAdmin =
+        reviewerFaults === null ? null : new GitHubAdmin(reviewerFaults, fullName, marker)
+      const reviewerLogin = await resolveReviewerIdentity(reviewerAdmin, primary.login)
+
       // The creation is journalled, durably, before the request that creates it. A
       // repository whose response is lost is then a receipt entry the recovery command
       // can reconcile against the host, instead of a resource that exists on somebody's
@@ -998,26 +1210,25 @@ export class GitHubLiveTarget extends DisposableTarget {
       } catch (error) {
         // The answer was lost, or the host refused. Either way the repository may or
         // may not exist, so the host is asked rather than the creation repeated: a
-        // second POST is how one lost response becomes two repositories.
+        // second POST is how one lost response becomes two repositories. What comes back
+        // has to be this run's own before anything is written to it — the read proves
+        // the exact name and the exact marker, because an unrelated repository that
+        // happens to occupy the name would otherwise receive this run's first commit.
         if (!(
           error instanceof GitHubTransportError &&
           (error.kind === 'network' || error.kind === 'timeout')
         )) {
           throw error
         }
-        const existing = await readRepositoryIdentity(admin, fullName)
+        const existing = await readRepositoryIdentity(admin, fullName, marker)
         if (existing === null) throw error
         identity = existing
       }
+      // One entry for this handle. `confirm` completes the journal that was already
+      // written before the request; recording the same repository again would leave a
+      // second entry that every later update misses, and that stays outstanding for
+      // ever while the repository it names is deleted.
       ledger.confirm(fullName, identity.id)
-      ledger.record({
-        kind: 'repository',
-        handle: fullName,
-        marker,
-        createdAt: new Date().toISOString(),
-        remoteId: identity.id,
-        actor: primary.login,
-      })
       await ledger.flush()
 
       const workspace = await seedRemoteClone({
@@ -1031,20 +1242,12 @@ export class GitHubLiveTarget extends DisposableTarget {
       // as itself. Both credentials are pinned to this run's own host and handed the
       // sanitized environment, so a reviewer credential cannot be redirected by
       // whatever the machine's environment happens to name.
-      const reviewerFaults =
-        config.reviewerToken === null
-          ? null
-          : new FaultInjectingTransport(pin(config.reviewerToken))
-      const reviewerAdmin =
-        reviewerFaults === null ? null : new GitHubAdmin(reviewerFaults, fullName, marker)
-      const reviewer = await provisionReviewer({
+      const reviewer = await grantReviewerAccess({
         admin,
         reviewerAdmin,
         reviewerTransport: reviewerFaults,
         fullName,
-        marker,
-        reviewerToken: config.reviewerToken,
-        primaryLogin: primary.login,
+        reviewerLogin,
       })
 
       return new GitHubLiveTarget({
@@ -1064,14 +1267,21 @@ export class GitHubLiveTarget extends DisposableTarget {
         root,
         reviewerAdmin,
         reviewerToken: config.reviewerToken,
+        primaryToken: config.token,
+        liveTools,
       })
     } catch (error) {
-      throw await reportSetupFailure(error, ledger, git, { root }, async () => {
+      throw await reportSetupFailure(error, ledger, git, { root }, liveTools, async () => {
         // The remote side is only touched if this run can still prove the repository is
         // its own; the local side and the process are restored regardless.
         const admin = new GitHubAdmin(faults, fullName, marker)
         try {
-          if (ownsMarker(markerOnRepository(await admin.readRepository(fullName)), marker)) {
+          // The repository is deleted only if a fresh read proves it is this run's: the
+          // exact name this run asked for, the exact marker, and the id the host named
+          // for it when the creation was confirmed. A repository that cannot be proven
+          // is left standing and named in the receipt, which is recoverable; one that
+          // was somebody else's is gone for ever.
+          if ((await readRepositoryIdentity(admin, fullName, marker)) !== null) {
             await admin.deleteRepository(fullName)
             ledger.release(fullName)
           } else {
@@ -1080,9 +1290,7 @@ export class GitHubLiveTarget extends DisposableTarget {
         } catch (cause) {
           ledger.refuse(
             fullName,
-            `the repository could not be removed: ${
-              cause instanceof Error ? cause.message : String(cause)
-            }`,
+            `the repository could not be removed: ${redact(cause instanceof Error ? cause.message : String(cause))}`,
           )
         }
         await ledger.close()
@@ -1143,15 +1351,11 @@ export class GitHubLiveTarget extends DisposableTarget {
             description: `Disposable foreign subject for the Git Stacks live suite, run ${this.runId}.`,
             marker: this.marker,
           })
+    // One entry for this handle. `confirm` completes the journal written before the
+    // request, records the id the host named, and takes the pending flag off — so
+    // recording the same repository again here would leave a duplicate that every
+    // later update misses and that stays outstanding for ever.
     this.ledger.confirm(identity.fullName, identity.id)
-    this.ledger.record({
-      kind: 'repository',
-      handle: identity.fullName,
-      marker: this.marker,
-      createdAt: new Date().toISOString(),
-      remoteId: identity.id,
-      actor: owner,
-    })
     const branch = 'git-stacks-live-e2e-foreign'
     const remote = `https://${this.host.host}/${identity.fullName}.git`
     await this.ledger.intent({
@@ -1163,6 +1367,15 @@ export class GitHubLiveTarget extends DisposableTarget {
       actor: owner,
     })
     const foreignPath = join(this.root, `foreign-${kind}`)
+    // The fork belongs to the reviewer's account, so the push has to carry that
+    // account's credential scoped to exactly this repository's URL. The primary's
+    // header does not match this remote and is never offered to it.
+    await this.extendGitCredentials(
+      remote,
+      kind === 'fork'
+        ? this.requireReviewerToken('A fork subject needs a second account, and this run was not given one')
+        : this.primaryToken,
+    )
     await createForeignRepository({ path: foreignPath, remote, branch, env: this.git.env })
     const clone = new LocalGitWorkspace({
       path: foreignPath,
@@ -1210,27 +1423,76 @@ export class GitHubLiveTarget extends DisposableTarget {
     return admin
   }
 
+  private requireReviewerToken(problem: string): string {
+    if (this.reviewerToken === null) throw new Error(problem)
+    return this.reviewerToken
+  }
+
+  /** The remote repository, which is deleted only by the run that can still prove it. */
   protected async removeRepository(fullName: string): Promise<boolean> {
-    const removed = await this.admin.deleteRepository(fullName)
+    return this.admin.deleteRepository(fullName)
+  }
+
+  /**
+   * The clone, the temporary directory, and the claim on the real `git` and `gh`.
+   *
+   * Released by the guard whatever the host did, rather than after a successful
+   * deletion. Tying the local teardown to the remote answer meant a run whose deletion
+   * was refused kept a clone, a token-bearing Git configuration, and the run's claim on
+   * the real tools for as long as the process lived.
+   */
+  protected async releaseLocal(): Promise<void> {
     this.workspaceInstance.close()
     await rm(this.root, { recursive: true, force: true })
-    return removed
+    this.liveTools.release()
   }
 }
 
 /**
- * The second account, granted access to the disposable repository and shown to hold it.
+ * Who the second credential actually is, proved before anything is created.
+ *
+ * The identity is read, never defaulted. A login that comes back empty has swallowed a
+ * failure, and treating that as a usable actor would hand a private repository to an
+ * unidentifiable credential. Neither is that login the primary's own: a run given one
+ * credential twice has two names for one account, and every later "the second account
+ * is not the first" claim in the suite would be true only because the run asserted it.
+ *
+ * This runs before the first mutation on purpose. After the repository exists and the
+ * clone has been seeded, a refusal here has to be cleaned up with the very credentials
+ * that were just found to be untrustworthy, and the rollback runs through a transport
+ * whose errors are part of what has to be read.
+ */
+async function resolveReviewerIdentity(
+  reviewerAdmin: LiveAdmin | null,
+  primaryLogin: string,
+): Promise<string | null> {
+  if (reviewerAdmin === null) return null
+  const login = await reviewerAdmin.viewer()
+  if (login === '' || login.toLowerCase() === 'undefined' || login.toLowerCase() === 'null') {
+    throw new Error(
+      'The reviewer credential did not identify an account; this run cannot use it as a reviewer',
+    )
+  }
+  if (login.toLowerCase() === primaryLogin.toLowerCase()) {
+    throw new Error(
+      `The reviewer credential authenticates as ${login}, the same account as the run's own; ` +
+        'a second reviewer has to be a different account',
+    )
+  }
+  return login
+}
+
+/**
+ * The second account, let into the disposable repository and shown to hold it.
  *
  * A token is not access. The repository was created moments ago and has exactly one
  * member, so a valid reviewer credential still cannot read a private pull request until
- * it has been let in. That is what happens here: the account is identified, proved to be
- * a different account from the primary, granted access, invited through if the host
- * requires an acceptance, and then read back. A second account that ends up the same
- * account, or one whose access cannot be read, is not a reviewer — and a run that was
- * explicitly given a reviewer credential has been misconfigured, which is a refusal
- * rather than a capability quietly reported as absent.
+ * it has been let in. That is what happens here: the account is granted access,
+ * invited through if the host requires an acceptance, and then read back. Access that
+ * cannot be read back is not access, and reporting a second reviewer from it would send
+ * every review scenario down a path that answers 404.
  */
-async function provisionReviewer(input: {
+async function grantReviewerAccess(input: {
   admin: LiveAdmin
   /**
    * The reviewer's admin surface and transport, built by the target that knows the
@@ -1241,29 +1503,13 @@ async function provisionReviewer(input: {
   readonly reviewerAdmin: LiveAdmin | null
   readonly reviewerTransport: GitHubTransport | null
   readonly fullName: string
-  readonly marker: string
-  readonly reviewerToken: string | null
-  readonly primaryLogin: string
+  /** The identity settled before this run created anything. */
+  readonly reviewerLogin: string | null
 }): Promise<LiveReviewer | null> {
-  if (input.reviewerToken === null || input.reviewerAdmin === null) return null
   const reviewerAdmin = input.reviewerAdmin
   const reviewerTransport = input.reviewerTransport
-  if (reviewerTransport === null) return null
-  // The identity is read, never defaulted. A login that comes back empty has swallowed a
-  // failure, and treating that as a usable actor would hand a private repository to an
-  // unidentifiable credential.
-  const login = await reviewerAdmin.viewer()
-  if (login === '' || login.toLowerCase() === 'undefined' || login.toLowerCase() === 'null') {
-    throw new Error(
-      'The reviewer credential did not identify an account; this run cannot use it as a reviewer',
-    )
-  }
-  if (login.toLowerCase() === input.primaryLogin.toLowerCase()) {
-    throw new Error(
-      `The reviewer credential authenticates as ${login}, the same account as the run's own; ` +
-        'a second reviewer has to be a different account',
-    )
-  }
+  const login = input.reviewerLogin
+  if (reviewerAdmin === null || reviewerTransport === null || login === null) return null
   const invitationId = await input.admin.inviteCollaborator(input.fullName, login, 'push')
   if (invitationId !== null) {
     // A 201 means the account has to accept before it holds anything, and only that
@@ -1306,21 +1552,49 @@ async function reportSetupFailure(
   ledger: ResourceLedger,
   git: IsolatedGitEnvironment,
   local: { readonly root: string },
+  liveTools: { release: () => void },
   removeRemote: () => Promise<void>,
 ): Promise<LiveProvisioningFailure> {
   // The remote side first, because that is the part somebody else can see. Whatever it
   // could not remove is already in the receipt, so the local side being cleaned up
   // afterwards cannot take the record of it with it.
   await removeRemote().catch(() => undefined)
-  await rm(local.root, { recursive: true, force: true }).catch(() => undefined)
-  git.restore()
+  // Every local claim this run made is given back, and none of them depends on another
+  // having worked. The process keeps the real `git`, the real API base and this run's
+  // credentials — and holds the only claim on the real tools — unless all three of these
+  // run, which is exactly the case a failure part-way through startup is in. A restore
+  // that throws would skip the ones after it, so each is put back under its own guard
+  // and the first failure is carried on.
+  const teardown: unknown[] = []
+  for (const give of [
+    () => rm(local.root, { recursive: true, force: true }),
+    () => liveTools.release(),
+    () => git.restore(),
+  ]) {
+    try {
+      await give()
+    } catch (cause) {
+      teardown.push(cause)
+    }
+  }
   const report = ledger.report()
-  const reason = error instanceof Error ? error.message : String(error)
   const standing = report.remaining
+  const reasons = [error, ...teardown]
+    .map((reason) => (reason instanceof Error ? reason.message : String(reason)))
+    // The refusal is written down and read by whoever has to clean up after this, so
+    // it goes through the same redactor as everything else in the receipt: a lost
+    // response is reported by the host as the body it sent back, and a token in a URL
+    // is a token in a stack trace.
+    .map((text) => ledger.redact(text))
   return new LiveProvisioningFailure(
-    standing.length === 0
-      ? reason
-      : `${reason}; ${standing.length} resource(s) are still on the host and are named in the receipt: ${standing.join(', ')}`,
+    [
+      ...reasons,
+      ...(standing.length === 0
+        ? []
+        : [
+            `${standing.length} resource(s) are still on the host and are named in the receipt: ${standing.join(', ')}`,
+          ]),
+    ].join('; '),
     report,
     ledger.receiptPath,
   )
@@ -1339,9 +1613,17 @@ async function reportSetupFailure(
 async function readRepositoryIdentity(
   admin: LiveAdmin,
   fullName: string,
+  marker: string,
 ): Promise<LiveRepositoryIdentity | null> {
   try {
     const repository = await admin.readRepository(fullName)
+    // A name is not a proof. This read is the answer to "did my lost POST create
+    // something", and the only thing that makes the answer yes is that what came back
+    // is this run's own: the host resolved this exact path, so the name is exact, and
+    // the marker is matched whole rather than as a substring — a description that
+    // mentions this run's marker while belonging to somebody else is still somebody
+    // else's repository, and seeding it is the one thing a run must never do.
+    if (!ownsCreatedResource(repository, marker)) return null
     return {
       id: typeof repository.id === 'number' ? repository.id : 0,
       fullName,
@@ -1480,6 +1762,73 @@ function basicAuth(token: string): string {
 /** A short suffix, so two runs on one machine never name a repository the same. */
 function newRunSuffix(): string {
   return `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`
+}
+
+/**
+ * Whether the credential in a Git request is allowed to write to the repository named.
+ *
+ * A host that serves everybody's pushes answers for a public repository whether or not
+ * anybody was let in, so a controlled run that proved "the reviewer can push to its own
+ * fork" against such a host proved that the host is permissive. This asks the same
+ * question GitHub asks — who is this credential, and what role does that account hold on
+ * this repository — using the same permission map the API surface enforces, so a push
+ * that succeeds is a grant the run made and the host checked.
+ *
+ * An unrecognised credential is refused rather than treated as the owner, because the
+ * whole point of the boundary is that a request with no identity behind it is a request
+ * that should not have been served.
+ */
+async function authorizeControlledGit(
+  harness: GitHubHarness,
+  fullName: string,
+  credential: string,
+): Promise<{ readonly login: string } | { readonly status: number; readonly message: string }> {
+  // The host has already taken the `Basic` header apart and handed back the secret, so
+  // decoding it a second time would match nothing and every request would be refused.
+  const token = credential
+  const state = await harness.readState()
+  const actor = (state.actors ?? []).find((entry) => entry.token === token)
+  if (!actor) return { status: 401, message: 'this credential is not an account here\n' }
+  // The primary repository is the one entry the registry never holds: it was created
+  // before this harness existed and is served from its own bare, so its name is read
+  // off that bare — the way the host itself resolves the path — rather than off the
+  // state, whose owner is whatever the API double answers with.
+  const primary = relative(harness.projectsRoot, harness.bare).replace(/\.git$/u, '')
+  if (fullName.toLowerCase() === primary.toLowerCase()) {
+    return { login: actor.login }
+  }
+  const registry = (state.repositories ?? []).find(
+    (entry) => entry.fullName.toLowerCase() === fullName.toLowerCase(),
+  )
+  if (!registry) return { status: 404, message: 'this host has no such repository\n' }
+  if (registry.private === false) return { login: actor.login }
+  const held = registry.permissions?.[actor.login]
+  if (held === undefined) {
+    return { status: 403, message: `${actor.login} has not been given access here\n` }
+  }
+  if (!WRITING_ROLES[held]) {
+    return { status: 403, message: `${actor.login} holds ${held} here, which cannot write\n` }
+  }
+  return { login: actor.login }
+}
+
+/**
+ * The authorization decision, for a request that arrived without a credential at all.
+ *
+ * A missing `Authorization` header is the ordinary case for a clone before the client
+ * has been asked for a credential, so it is answered as "no identity" rather than as a
+ * failure of this run's own configuration — the host is expected to say 401 and let
+ * Git answer with one.
+ */
+async function authorizeGitFor(
+  harness: GitHubHarness,
+  fullName: string,
+  authorization: string | undefined,
+): Promise<{ readonly login: string } | { readonly status: number; readonly message: string }> {
+  if (authorization === undefined || authorization.trim() === '') {
+    return { status: 401, message: 'this repository needs a credential\n' }
+  }
+  return authorizeControlledGit(harness, fullName, authorization)
 }
 
 /**

@@ -54,7 +54,46 @@ export interface ControlledGitHubHostOptions {
   readonly projectsRoot: string
   /** The one real `git` this run resolved, whose `git-http-backend` serves the protocol. */
   readonly git: string
+  /**
+   * Whether one Git request may proceed, and as whom.
+   *
+   * A Git request carries the same credential an API request does, and it has to be
+   * answered with the same care: `git-http-backend` will serve any repository the
+   * process can read to anybody who asks, and it names its own `REMOTE_USER` without
+   * consulting one. A controlled run that leaves that unanswered proves nothing about
+   * credentials — a fork the reviewer cannot read answers a push exactly like one it
+   * can, so the boundary is only worth having if something at it refuses.
+   *
+   * The answer is the login the credential belongs to, which becomes the `REMOTE_USER`
+   * the backend runs as, or a refusal. `null` means this host serves the repository
+   * without deciding, which is the pre-existing behaviour.
+   */
+  readonly authorizeGit?: (
+    fullName: string,
+    authorization: string | undefined,
+  ) => Promise<{ readonly login: string } | { readonly status: number; readonly message: string }>
 }
+
+/**
+ * The account a Git request's `Authorization` header belongs to, or null.
+ *
+ * GitHub's documented form for a token over HTTPS is the token as a password with
+ * `x-access-token` as the user, which is what a run installs, and that pair is what
+ * comes back base64-encoded in the header. A header in any other shape, or one this
+ * cannot decode, is not an identity this host is willing to reason about: it is
+ * answered as no credential at all rather than as somebody.
+ */
+function gitAuthorizationSecret(authorization: string | undefined): string | null {
+  if (authorization === undefined) return null
+  const match = /^basic\s+(\S+)$/iu.exec(authorization.trim())
+  if (match === null) return null
+  const decoded = Buffer.from(match[1], 'base64').toString('utf8')
+  const separator = decoded.indexOf(':')
+  if (separator < 1) return null
+  const user = decoded.slice(0, separator)
+  return user === 'x-access-token' ? decoded.slice(separator + 1) : null
+}
+
 export interface GeneratedCertificate {
   key: Buffer
   cert: Buffer
@@ -197,6 +236,28 @@ function isRepositoryRequest(pathname: string, projectsRoot: string): boolean {
 }
 
 /**
+ * Whether this host serves one Git request, and as whom.
+ *
+ * The answers are the three a real host gives and no others: 401 when the request
+ * named no credential this host recognises, 403 when it named one that has no access
+ * to this repository, and the account's login when it may proceed. A host that has
+ * been given no authorizer decides nothing, which is the behaviour every test that
+ * never asked about credentials keeps.
+ */
+async function decideGitRequest(
+  options: ControlledGitHubHostOptions,
+  fullName: string,
+  authorization: string | undefined,
+): Promise<{ login: string } | { status: number; message: string }> {
+  if (options.authorizeGit === undefined) return { login: 'git-stacks-live-e2e' }
+  const credential = gitAuthorizationSecret(authorization)
+  if (credential === null) {
+    return { status: 401, message: 'this repository needs a credential\n' }
+  }
+  return options.authorizeGit(fullName, credential)
+}
+
+/**
  * One Git request, handed to the same `git-http-backend` a real host runs.
  *
  * The protocol is Git's rather than a reimplementation of it: the backend resolves the
@@ -208,6 +269,7 @@ function serveGitRequest(
   backend: string,
   request: IncomingMessage,
   body: Buffer,
+  remoteUser: string,
   serve: (status: number, headers: Record<string, string>, payload: Buffer) => void,
 ): void {
   const url = new URL(request.url ?? '/', 'https://127.0.0.1')
@@ -222,7 +284,11 @@ function serveGitRequest(
       GIT_TERMINAL_PROMPT: '0',
       CONTENT_TYPE: String(request.headers['content-type'] ?? ''),
       CONTENT_LENGTH: String(body.length),
-      REMOTE_USER: 'git-stacks-live-e2e',
+      // The account the request authenticated as, decided before the backend was
+      // started rather than asserted for it. A constant here would have named one
+      // account to every repository this host serves, which is a host with no notion
+      // of who is asking.
+      REMOTE_USER: remoteUser,
       REMOTE_ADDR: request.socket.remoteAddress ?? '127.0.0.1',
       SERVER_PROTOCOL: 'HTTP/1.1',
       GATEWAY_INTERFACE: 'CGI/1.1',
@@ -281,15 +347,33 @@ export async function startControlledGitHubHost(
         const body = Buffer.concat(chunks)
         const url = new URL(request.url ?? '/', 'https://127.0.0.1')
         if (isRepositoryRequest(url.pathname, options.projectsRoot)) {
-          serveGitRequest(options, backend, request, body, (status, headers, payload) => {
-            served.push({
-              method: request.method ?? 'GET',
-              path: `${url.pathname}${url.search}`,
-              status,
-            })
-            response.writeHead(status, headers)
-            response.end(payload)
-          })
+          // The decision is made before a backend process is started, and a refusal is
+          // the host's own answer rather than an error: Git reads a 401 as "this
+          // repository needs a credential" and a 403 as "not this account's", which
+          // is what a real host says and what a run can therefore be expected to
+          // prove something about.
+          void (async () => {
+            const repository = decodeURIComponent(url.pathname.split('/').slice(1, 3).join('/'))
+            const answered = await decideGitRequest(
+              options,
+              repository,
+              request.headers.authorization,
+            )
+            const record = (status: number, headers: Record<string, string>, payload: Buffer) => {
+              served.push({
+                method: request.method ?? 'GET',
+                path: `${url.pathname}${url.search}`,
+                status,
+              })
+              response.writeHead(status, headers)
+              response.end(payload)
+            }
+            if ('status' in answered) {
+              record(answered.status, { 'content-type': 'text/plain' }, Buffer.from(answered.message))
+              return
+            }
+            serveGitRequest(options, backend, request, body, answered.login, record)
+          })()
           return
         }
         void (async () => {
@@ -326,24 +410,35 @@ export async function startControlledGitHubHost(
       })
     },
   )
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
-  const address = server.address()
-  if (address === null || typeof address === 'string')
-    throw new Error('the controlled host has no port')
-  const host = `127.0.0.1:${address.port}`
-  return {
-    url: `https://${host}`,
-    host,
-    certificatePath: certificate.certPath,
-    cloneUrl: (fullName) => `https://${host}/${fullName}.git`,
-    fetch: pinnedFetch(certificate.cert, served),
-    served,
-    async close() {
-      await new Promise<void>((resolve) => {
-        server.closeAllConnections()
-        server.close(() => resolve())
-      })
-      rmSync(certificate.directory, { recursive: true, force: true })
-    },
+  // From here the run owns a listening socket and a directory of key material, and
+  // both are gone if anything below throws. A socket nobody closes holds the event
+  // loop open for the rest of the process, so a host that started and then failed to
+  // find its own port does not report a failure — it hangs, and the caller's cleanup
+  // guard never runs because `start` never returned.
+  const stop = async (): Promise<void> => {
+    await new Promise<void>((resolve) => {
+      server.closeAllConnections()
+      server.close(() => resolve())
+    })
+    rmSync(certificate.directory, { recursive: true, force: true })
+  }
+  try {
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+    const address = server.address()
+    if (address === null || typeof address === 'string')
+      throw new Error('the controlled host has no port')
+    const host = `127.0.0.1:${address.port}`
+    return {
+      url: `https://${host}`,
+      host,
+      certificatePath: certificate.certPath,
+      cloneUrl: (fullName) => `https://${host}/${fullName}.git`,
+      fetch: pinnedFetch(certificate.cert, served),
+      served,
+      close: stop,
+    }
+  } catch (error) {
+    await stop().catch(() => undefined)
+    throw error
   }
 }

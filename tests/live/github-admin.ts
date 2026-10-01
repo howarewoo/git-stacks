@@ -12,7 +12,7 @@ import type {
   LiveRepositoryIdentity,
   LiveRuleSet,
 } from './contract'
-import { markedDescription, markerOnRepository, ownsMarker } from './provisioning'
+import { markedDescription, ownsCreatedResource } from './provisioning'
 
 /** The parts of a repository read the ownership check and capability probes need. */
 interface RepositoryProbe {
@@ -155,11 +155,19 @@ export class GitHubAdmin implements LiveAdmin {
    * to the personal route and then failing to read the configured name — leaves the
    * repository that really was created in nobody's receipt, which is exactly the
    * leftover this suite exists not to leave behind.
+   *
+   * The organization is the owner and never the actor. A repository created through
+   * an organization route is created *by* the user whose credential was spent, and
+   * that user is the only account whose credential can delete it again. Answering
+   * with the organization here would put a login in every receipt entry and in the
+   * recovery actor set that no credential in the run ever authenticates as, so the
+   * only command that can clean the run up refuses it — and would refuse the correct
+   * credential while accepting the wrong one.
    */
   async resolveOwner(owner: string): Promise<LiveActor> {
     const login = await this.viewer()
     if (login.toLowerCase() === owner.toLowerCase()) {
-      return { login, kind: 'user' }
+      return { login, kind: 'user', owner, ownerKind: 'user' }
     }
     const membership = await this.call<{ state?: string }>({
       method: 'GET',
@@ -181,7 +189,7 @@ export class GitHubAdmin implements LiveAdmin {
           'run is refused before anything is created.',
       )
     }
-    return { login: owner, kind: 'organization' }
+    return { login, kind: 'user', owner, ownerKind: 'organization' }
   }
 
   /** The commit a ref points at, which is what a check run and a merge both attach to. */
@@ -225,12 +233,16 @@ export class GitHubAdmin implements LiveAdmin {
     marker: string
     private?: boolean
   }): Promise<LiveRepositoryIdentity> {
-    const actor = await this.resolveOwner(input.owner)
+    const resolved = await this.resolveOwner(input.owner)
     const { data } = await this.call<CreatedRepositoryProbe>({
       method: 'POST',
+      // The route follows the owner, and the owner is not the account spending the
+      // credential. Sending an organization's name to the personal route does not
+      // fail — it creates the repository under the caller's own account instead,
+      // which is a repository this run will not find under the name it recorded.
       path:
-        actor.kind === 'organization'
-          ? `orgs/${encodeURIComponent(actor.login)}/repos`
+        resolved.ownerKind === 'organization'
+          ? `orgs/${encodeURIComponent(resolved.owner)}/repos`
           : 'user/repos',
       body: {
         name: input.name,
@@ -245,9 +257,9 @@ export class GitHubAdmin implements LiveAdmin {
         has_discussions: false,
       },
     })
-    const identity = this.identityFrom(data, `${actor.login}/${input.name}`)
+    const identity = this.identityFrom(data, `${resolved.owner}/${input.name}`)
     if (
-      !ownsMarker(markerOnRepository(await this.readRepository(identity.fullName)), input.marker)
+      !ownsCreatedResource(await this.readRepository(identity.fullName), input.marker, identity.id)
     ) {
       throw new Error(
         `${identity.fullName} does not carry this run's ownership marker, so this run will not delete it`,
@@ -284,7 +296,7 @@ export class GitHubAdmin implements LiveAdmin {
       },
     })
     if (
-      !ownsMarker(markerOnRepository(await this.readRepository(identity.fullName)), input.marker)
+      !ownsCreatedResource(await this.readRepository(identity.fullName), input.marker, identity.id)
     ) {
       throw new Error(
         `${identity.fullName} did not accept this run's ownership marker, so this run will not delete it`,
