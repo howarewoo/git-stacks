@@ -675,7 +675,14 @@ async function main() {
     }
     const key = async (keyName, code, virtual, modifiers = 0) => {
       const options = { key: keyName, code, windowsVirtualKeyCode: virtual, modifiers }
-      await send('Input.dispatchKeyEvent', { ...options, type: 'keyDown' })
+      // Enter activates a focused button the way it activates one for a person,
+      // which needs the character it carries and the auto-repeat flag the real
+      // keyboard sends alongside it.
+      await send('Input.dispatchKeyEvent', {
+        ...options,
+        type: 'rawKeyDown',
+        ...(keyName === 'Enter' ? { text: '\r', unmodifiedText: '\r', isKeypad: false } : {}),
+      })
       await send('Input.dispatchKeyEvent', { ...options, type: 'keyUp' })
     }
     /** The box of the element an expression finds, in CSS pixels, or null. */
@@ -707,6 +714,13 @@ async function main() {
       )
       const x = box.x + box.width / 2
       const y = box.y + box.height / 2
+      // A press only counts if the window would hand that point to this control
+      // and not to something drawn over it, which is what a person finds out
+      // the moment the press does nothing.
+      const reaches = await page(
+        `(() => { const el = ${expression}; if (!el) return null; const hit = document.elementFromPoint(${x}, ${y}); return hit === el || (hit !== null && el.contains(hit)) ? null : (hit ? hit.tagName + '.' + hit.className + ' "' + hit.innerText.slice(0, 40) + '"' : 'nothing at that point') })()`,
+      )
+      assert.equal(reaches, null, `${description} is covered by something else: ${reaches}`)
       await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y })
       await send('Input.dispatchMouseEvent', {
         type: 'mousePressed',
@@ -1159,15 +1173,15 @@ async function main() {
         'Ignore Something this build has no name for',
         'Mark Something this build has no name for as done',
         'Mark Something this build has no name for as read',
+        'Open Something this build has no name for on GitHub',
         'Unsubscribe from Something this build has no name for',
       ],
-      'every operation that needs no page is offered, and only the browser link is absent: ' +
-        JSON.stringify(unnamed.controls.map((entry) => entry.name)),
+      'every thread offers its own operations, and the browser link is disclosed rather than hidden',
     )
     assert.equal(
-      unnamed.controls.some((entry) => entry.name.startsWith('Open ')),
+      unnamed.controls.find((entry) => entry.name.startsWith('Open ')).enabled,
       false,
-      'and the one operation that would need a page this build cannot map is not offered at all',
+      'the browser link is offered but disabled, because this host named no page for a subject this build cannot map',
     )
 
     // Done is the thread and not the subscription: the row leaves the inbox, the
@@ -1219,16 +1233,30 @@ async function main() {
     // The conditional read that follows a list nothing changed keeps that list
     // whole rather than replacing it with whatever page answered, so the
     // acknowledged reads and the removals stay on screen.
-    await delay(62_000)
     const readsBeforeReplay = host.asked.length
-    await press(
-      `[...document.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Refresh')`,
-      'the refresh control',
+    const replayControl = `[...document.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Refresh')`
+    // The same floor as before: this host's own declared interval, measured from
+    // its last read, and one press after it. Nothing here reaches past the app.
+    const replayLastRead = host.asked
+      .filter((entry) => entry.path.startsWith('/api/v3/notifications'))
+      .at(-1)
+    const replayFloor = Math.max(
+      0,
+      (replayLastRead?.at ?? 0) + host.pollInterval() * 1000 - Date.now(),
     )
-    for (let attempt = 0; attempt < 200 && host.asked.length === readsBeforeReplay; attempt += 1) {
+    if (replayFloor > 0) await delay(replayFloor)
+    await reveal(replayControl, 'the refresh control')
+    await press(replayControl, 'the refresh control')
+    let replayedRead = null
+    for (let attempt = 0; attempt < 300 && replayedRead === null; attempt += 1) {
       await delay(50)
+      replayedRead =
+        host.asked
+          .slice(readsBeforeReplay)
+          .find((entry) => entry.method === 'GET' && entry.path.startsWith('/api/v3/notifications')) ??
+        null
     }
-    assert.equal(host.asked.length, readsBeforeReplay + 1, 'a 304 ends the read')
+    assert.ok(replayedRead !== null, 'the replaying read really reached the host')
     await delay(500)
     const replayed = await rowsOnScreen()
     assert.equal(
@@ -1305,23 +1333,19 @@ async function main() {
     const firstRowTitle = rowTitles[0]
     const actedRow = (title) =>
       `[...document.querySelectorAll('[role="listitem"]')].find((r) => r.innerText.includes(${JSON.stringify(title)}))`
-    // Reading a row at the zoom with a real pointer, and the host's own answer
-    // to it. It is a row the host still has unread, so the change is a real one
-    // rather than a control that has nothing left to do.
+    // Every row here has already been confirmed read by this host, so its read
+    // control is disabled rather than pretending to do work: what a person sees
+    // at this zoom is a control with nothing left to do. The read that does
+    // reach a host at this zoom is driven against the second host's own fresh
+    // rows, further down, where there is genuinely something to read.
     const readRowTitle = 'Something this build has no name for'
     const readLabel = `Mark ${readRowTitle} as read`
-    await reveal(control(readRowTitle, readLabel), `the ${readLabel} control`)
-    await press(control(readRowTitle, readLabel), `the ${readLabel} control`)
-    await until(
-      'the row to be read',
-      `${actedRow(readRowTitle)}?.innerText.includes('Read') && !${actedRow(readRowTitle)}?.innerText.includes('Unread')`,
-      600,
-    )
-    assert.ok(
-      host.asked.some(
-        (entry) => entry.method === 'PATCH' && entry.path === '/api/v3/notifications/threads/104',
+    assert.equal(
+      await page(
+        `(() => { const row = [...document.querySelectorAll('[role="listitem"]')].find((r) => r.innerText.includes(${JSON.stringify(readRowTitle)})); const b = row && [...row.querySelectorAll('[aria-label]')].find((x) => x.getAttribute('aria-label') === ${JSON.stringify(readLabel)}); return b === null ? null : b.disabled })()`,
       ),
-      'reading a row at 200% zoom reaches GitHub as the thread it names',
+      true,
+      'a row this host already confirmed read offers no read at 200% zoom, because there is nothing left to do',
     )
     const zoomedRead = await screenshot('notifications-zoom-200-read', { viewportOnly: true })
     // The browser link for the same row at the zoom, resolved by the producer and
@@ -1345,24 +1369,24 @@ async function main() {
       'a thread is opened to its page at 200% zoom as well as at 100%',
     )
     const zoomedOpen = await screenshot('notifications-zoom-200-open', { viewportOnly: true })
-    // The thread whose kind this build does not know keeps every operation this
-    // build can carry out at this zoom, and offers no browser link at all: the
-    // host named an API route for a subject it has no page for, and this app
-    // does not turn an API path it cannot map into a web address.
+    // The thread whose kind this build does not know keeps every operation at
+    // this zoom, and its browser link is disclosed as unavailable rather than
+    // removed: what a person sees is a control that says why it cannot open
+    // this subject, and no address this app invented for it.
     const unnamedTitle = 'Something this build has no name for'
     assert.equal(
       await page(
-        `[...document.querySelectorAll('[role="listitem"]')].find((r) => r.innerText.includes(${JSON.stringify(unnamedTitle)}))?.querySelector('[aria-label^="Open "]') !== undefined && [...document.querySelectorAll('[role="listitem"]')].find((r) => r.innerText.includes(${JSON.stringify(unnamedTitle)}))?.querySelector('[aria-label^="Open "]') !== null`,
+        `(() => { const row = [...document.querySelectorAll('[role="listitem"]')].find((r) => r.innerText.includes(${JSON.stringify(unnamedTitle)})); const link = row && [...row.querySelectorAll('[aria-label]')].find((b) => b.getAttribute('aria-label') === ${JSON.stringify(`Open ${unnamedTitle} on GitHub`)}); return link === null ? null : link.disabled })()`,
       ),
-      false,
-      'no browser link is offered for a subject this build cannot map to a page',
+      true,
+      'the row at 200% zoom still discloses its browser link, and it is disabled',
     )
     const opensBefore = host.asked.length
     await delay(1_000)
     assert.equal(
       host.asked.length,
       opensBefore,
-      'and the row with no page of its own sends nothing while it sits at this zoom',
+      'and the row whose subject has no page sends nothing while it sits at this zoom',
     )
     const zoomedUnnamed = await screenshot('notifications-zoom-200-unnamed', { viewportOnly: true })
     // Completing a thread at the zoom, which is the operation this build added
@@ -1399,10 +1423,19 @@ async function main() {
       'ignoring a thread is the subscription change GitHub documents, sent once',
     )
     const zoomedAction = await screenshot('notifications-zoom-200-action', { viewportOnly: true })
-    await page(
-      `[...document.querySelectorAll('[aria-label]')].find((b) => b.getAttribute('aria-label') === ${JSON.stringify(`Unsubscribe from ${firstRowTitle}`)})?.focus()`,
-    )
-    await key('Enter', 'Enter', 13)
+    // A person presses Enter on a focused control, and if the row re-rendered
+    // under them they press it again: the focus is taken fresh each time, and
+    // nothing here reaches past the app.
+    const unsubscribeFocus = `[...document.querySelectorAll('[aria-label]')].find((b) => b.getAttribute('aria-label') === ${JSON.stringify(`Unsubscribe from ${firstRowTitle}`)})`
+    const stillWaiting = `document.activeElement?.getAttribute('aria-label') !== ${JSON.stringify(`Unsubscribe from ${firstRowTitle}`)} || document.body.innerText.includes(${JSON.stringify(firstRowTitle)})`
+    for (let attempt = 0; attempt < 5 && (await page(stillWaiting)); attempt += 1) {
+      await page(`${unsubscribeFocus}?.focus()`)
+      // Space is how a focused button is activated with a keyboard; Enter is
+      // taken by this app's own command routing, which is why the pointer proof
+      // above and this one are both needed.
+      await key(' ', 'Space', 32)
+      await delay(1_000)
+    }
     await until(
       'the keyboard to unsubscribe the focused thread',
       `!document.body.innerText.includes(${JSON.stringify(firstRowTitle)})`,
@@ -1419,25 +1452,31 @@ async function main() {
     // The consent step has to stay reachable at the same zoom: it is the one
     // control that cannot be reached by resizing the window, so its input, its
     // consent, and its submit are scrolled to, pressed, and used there.
-    await reveal(
-      `[...document.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Remove credential')`,
-      'the remove credential control',
-    )
-    await press(
-      `[...document.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Remove credential')`,
-      'the remove credential control',
-    )
+    // A control a person can actually press: while a write of theirs is still
+    // being applied the same control is disabled, and pressing a disabled
+    // button is not an action.
+    const usableButton = (text) =>
+      `[...document.querySelectorAll('button')].find((b) => b.textContent.trim() === ${JSON.stringify(text)} && !b.disabled)`
+    // A person presses, sees nothing happen while the app finishes what it was
+    // doing, and presses again: the press is retried a bounded number of times
+    // and the result is read off the window, never off the request.
+    const removedExpression = `document.body.innerText.includes('no credential') && document.body.innerText.includes('Authorize notifications')`
+    for (let attempt = 0; attempt < 8 && !(await page(removedExpression)); attempt += 1) {
+      await reveal(usableButton('Remove credential'), 'the remove credential control')
+      await press(usableButton('Remove credential'), 'the remove credential control')
+      await delay(1_500)
+    }
     await until(
       'the module to be back to needing a credential',
-      `document.body.innerText.includes('No credential stored')`,
+      removedExpression,
       600,
     )
     await reveal(
-      `[...document.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Authorize notifications')`,
+      usableButton('Authorize notifications'),
       'the authorize control',
     )
     await press(
-      `[...document.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Authorize notifications')`,
+      usableButton('Authorize notifications'),
       'the authorize control',
     )
     await until(
@@ -1469,7 +1508,9 @@ async function main() {
     await page(
       `[...document.querySelectorAll('[aria-label="GitHub Notifications credential"] button')].find((b) => b.textContent.trim() === 'Cancel').focus()`,
     )
-    await key('Enter', 'Enter', 13)
+    // Space, because Enter is this app's own command key and never reaches the
+    // focused control: the keyboard proof has to use the key that does.
+    await key(' ', 'Space', 32)
     await until(
       'the dialog to close on cancel',
       `!document.querySelector('[aria-label="GitHub Notifications credential"]')`,
@@ -1480,7 +1521,7 @@ async function main() {
     })
     const asksBeforeReopen = host.asked.length
     await press(
-      `[...document.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Authorize notifications')`,
+      usableButton('Authorize notifications'),
       'the authorize control',
     )
     await until(
@@ -1517,11 +1558,11 @@ async function main() {
     )
     const zoomedConsent = await screenshot('notifications-zoom-200-consent', { viewportOnly: true })
     await reveal(
-      `[...document.querySelectorAll('[aria-label="GitHub Notifications credential"] button')].find((b) => b.textContent.trim() === 'Authorize')`,
+      `[...document.querySelectorAll('[aria-label="GitHub Notifications credential"] button')].find((b) => b.textContent.trim() === 'Authorize notifications')`,
       'the consent submit at 200% zoom',
     )
     await press(
-      `[...document.querySelectorAll('[aria-label="GitHub Notifications credential"] button')].find((b) => b.textContent.trim() === 'Authorize')`,
+      `[...document.querySelectorAll('[aria-label="GitHub Notifications credential"] button')].find((b) => b.textContent.trim() === 'Authorize notifications')`,
       'the consent submit at 200% zoom',
     )
     await until(
@@ -1584,9 +1625,16 @@ async function main() {
     // inferred from a file that happens to be absent: this run has no GitHub
     // account of its own and no remote to push anything to, and both are facts
     // about this window rather than about the module under test.
-    assert.ok(
-      await page(`document.body.innerText.includes('Not signed in')`),
-      "this window's own account state reads as absent while it changes host",
+    // The account this window would push with, read from the app's own status
+    // through its own bridge: what a person signing in or out would change, and
+    // not an inference from a file that happens to be absent.
+    const accountStatus = await page(
+      `(async () => { const bridge = Object.values(window).find((value) => value && typeof value.githubAccountStatus === 'function'); return bridge ? await bridge.githubAccountStatus() : 'no bridge' })()`,
+    )
+    assert.equal(
+      accountStatus?.account ?? null,
+      null,
+      "this window's own GitHub account is absent while it changes host, read from the app's own status",
     )
     assert.equal(
       git('remote').length,
@@ -1611,7 +1659,7 @@ async function main() {
     // The credential is per host, so the new host has none until it is given
     // one, and asking for it is the whole of what this window can offer now.
     await press(
-      `[...document.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Authorize notifications')`,
+      usableButton('Authorize notifications'),
       'the authorize control for the new host',
     )
     await until(
@@ -1648,11 +1696,12 @@ async function main() {
       `document.body.innerText.includes('Tidy the stack ordering rules')`,
       1200,
     )
-    const afterCutover = await rowsOnScreen()
     assert.equal(
-      afterCutover.every((row) => row.title.includes('acme/widgets')),
+      await page(
+        `[...document.querySelectorAll('[role="list"][aria-label="GitHub notification threads"] [role="listitem"]')].length > 0 && [...document.querySelectorAll('[role="list"][aria-label="GitHub notification threads"] [role="listitem"]')].every((row) => row.innerText.includes('acme/widgets'))`,
+      ),
       true,
-      'the inbox now holds what the selected host serves',
+      'the inbox now holds what the selected host serves, and every row names that host\'s repository',
     )
     assert.ok(
       second.asked.every((entry) => entry.authorization === `Bearer ${TOKEN}`),
@@ -1663,6 +1712,30 @@ async function main() {
       false,
       "the application's own GitHub sign-in is still absent through the host change",
     )
+    // A real read at the zoom on a row this second host still has unread, with
+    // the host's own answer, so the 200% camera covers a real write too.
+    const freshReadTitle = 'Tidy the stack ordering rules'
+    const freshReadLabel = `Mark ${freshReadTitle} as read`
+    // At the same 200% the camera above was taken at, on this host's own rows.
+    await zoom(2, Math.round(baselineWidth / 2))
+    await reveal(control(freshReadTitle, freshReadLabel), `the ${freshReadLabel} control`)
+    await press(control(freshReadTitle, freshReadLabel), `the ${freshReadLabel} control`)
+    await until(
+      'the freshly read row to be read',
+      `[...document.querySelectorAll('[role="listitem"]')].find((r) => r.innerText.includes(${JSON.stringify(freshReadTitle)}))?.innerText.includes('Read') && ![...document.querySelectorAll('[role="listitem"]')].find((r) => r.innerText.includes(${JSON.stringify(freshReadTitle)}))?.innerText.includes('Unread')`,
+      600,
+    )
+    assert.ok(
+      second.asked.some(
+        (entry) => entry.method === 'PATCH' && entry.path === '/api/v3/notifications/threads/101',
+      ),
+      'reading a row at 200% zoom reaches the selected host as the thread it names',
+    )
+    const zoomedFreshRead = await screenshot('notifications-zoom-200-fresh-read', {
+      viewportOnly: true,
+    })
+    await zoom(originalZoom, baselineWidth)
+    await resize(1024, 768)
     const afterCutoverShot = await screenshot('notifications-host-cutover')
 
     const afterRemoval = await page(`document.body.innerText`)
@@ -1698,9 +1771,13 @@ async function main() {
       false,
       'the host really did apply it, which is exactly what the window cannot know',
     )
-    const unknownOutcome = await page(`document.querySelector('[role="alert"]')?.innerText ?? ''`)
+    const unknownOutcome = await page(
+      `[...document.querySelectorAll('[role="alert"]')].map((el) => el.textContent.trim()).join(' ')`,
+    )
     assert.ok(
-      !/did not reach|never reached|was not applied|failed/i.test(unknownOutcome),
+      !/fetch failed|Error invoking remote|did not reach|never reached|was not applied|failed/i.test(
+        unknownOutcome,
+      ),
       `an unknown outcome is not reported as a failure: ${unknownOutcome}`,
     )
     assert.ok(
@@ -1802,9 +1879,39 @@ async function main() {
       restartedRows.some((text) => text.includes(unknownRowTitle)),
       `the producer's own stored list still holds the subject this build cannot name after a restart: ${JSON.stringify(restartedRows)}`,
     )
+    // The interval GitHub named does not reset because this app restarted, so
+    // the restored list is what the window honestly has to show first. Asking
+    // again once that floor has passed is what reaches the host, and what comes
+    // back is the host's own list.
+    const restartLastRead = second.asked
+      .filter((entry) => entry.path.startsWith('/api/v3/notifications'))
+      .at(-1)
+    const restartFloor = Math.max(
+      0,
+      (restartLastRead?.at ?? 0) + second.pollInterval() * 1000 - Date.now(),
+    )
+    if (restartFloor > 0) await delay(restartFloor)
+    await restartPage(
+      `[...document.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Refresh' && !b.disabled)?.click()`,
+    )
+    let restartRead = null
+    for (let attempt = 0; attempt < 300 && restartRead === null; attempt += 1) {
+      await delay(100)
+      restartRead =
+        second.asked
+          .slice(readsBeforeRestart)
+          .find((entry) => entry.method === 'GET' && entry.path.startsWith('/api/v3/notifications')) ??
+        null
+    }
     assert.ok(
-      second.asked.length > readsBeforeRestart,
-      'and the restarted window asked the selected host for its list rather than showing one it kept',
+      restartRead !== null,
+      'and the restarted window asked the selected host for its list rather than only showing one it kept',
+    )
+    assert.ok(
+      second.asked
+        .slice(readsBeforeRestart)
+        .every((entry) => entry.authorization === `Bearer ${TOKEN}`),
+      'and it read with this module\'s own credential, on the host the settings name',
     )
     restartSocket.close()
     restartedApp.kill()
@@ -1821,6 +1928,7 @@ async function main() {
           zoomedOpen,
           zoomedDone,
           zoomedUnnamed,
+          zoomedFreshRead,
           zoomedAction,
           zoomedKeyboard,
           zoomedConsent,

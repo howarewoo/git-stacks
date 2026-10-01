@@ -205,6 +205,20 @@ function readableError(value: unknown): string {
 }
 
 /**
+ * What a person is told when a change reached GitHub and the answer never came
+ * back. The transport's own words describe this app, not GitHub, and reading
+ * them says nothing about whether the change landed: what is true is that
+ * nobody can tell from here, so that is what the window says.
+ */
+function unknownOutcomeError(message: string): string {
+  return /fetch failed|ECONNRESET|EPIPE|socket hang up|network|timed? ?out|aborted/iu.test(
+    message,
+  )
+    ? 'GitHub never answered, so this app cannot tell whether the change was applied.'
+    : message
+}
+
+/**
  * Whether an inbox answer is about the host this window is pointed at.
  *
  * A notification inbox is one host's private list, read with that host's own
@@ -1153,7 +1167,8 @@ function App() {
         const next = await action()
         if (notificationClaim(request, host) && inboxForHost(next, host)) setNotificationInbox(next)
       } catch (value) {
-        if (notificationClaim(request, host)) setNotificationActionError(readableError(value))
+        if (notificationClaim(request, host))
+          setNotificationActionError(unknownOutcomeError(readableError(value)))
       } finally {
         if (notificationClaim(request, host)) setNotificationBusy(false)
       }

@@ -655,7 +655,10 @@ button:disabled {
 .list-toolbar {
   display: flex;
   min-height: 66px;
-  flex: 0 0 66px;
+  /* The toolbar keeps its height only as a minimum: at the zoom a person set,
+     or in a narrow window, its controls wrap onto more lines and a fixed basis
+     would let them overlap what sits below instead of pushing it down. */
+  flex: 0 0 auto;
   align-items: center;
   gap: 14px;
   border-bottom: 1px solid var(--line);
