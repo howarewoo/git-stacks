@@ -741,6 +741,22 @@ test('recovery acts with the credential of the account that owns each resource',
   await written.discard()
 })
 
+test('a controlled target that cannot finish starting leaves nothing listening', async () => {
+  // The failure reproduced here is an ordinary one: a controlled target is started
+  // with no reachable owner. What made it unordinary was what it left behind — a
+  // listening socket and a directory, neither of which anything closed. A listener
+  // nobody closes holds the event loop open, so a start that fails like this hangs
+  // instead of failing, and this test only ends if the guard released what it opened.
+  await assert.rejects(
+    ControlledLiveTarget.start(),
+    (error: unknown) => error instanceof Error,
+    'a controlled target that cannot resolve its owner did not refuse',
+  )
+  // And a second one right after, because what this guards against is a first target
+  // keeping the process alive past its own failure rather than any one refusal.
+  await assert.rejects(ControlledLiveTarget.start(), (error: unknown) => error instanceof Error)
+})
+
 test("a failure report cannot publish either form of the run's own credential", () => {
   // The two forms a real run actually emits: the token as the API transport sends it,
   // and the base64 `x-access-token:<token>` pair Git presents as an authorization

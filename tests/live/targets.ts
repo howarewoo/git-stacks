@@ -629,6 +629,39 @@ export class ControlledLiveTarget extends DisposableTarget {
       projectsRoot: join(harness.root, 'projects'),
       git: harness.env.GIT_STACKS_REAL_GIT as string,
     })
+    // From this line the run owns two local resources — a listening socket and a
+    // directory — and nothing below has a cleanup path of its own. A listener nobody
+    // closes holds the event loop open for the rest of the process, so a run that
+    // fails anywhere below does not fail: it hangs until whatever is waiting on it
+    // gives up. That is why the whole body runs under one guard rather than only its
+    // last few lines; the first version of this had a guard that started after the
+    // owner was resolved, which is exactly the request a real host refuses.
+    const opened: { git?: IsolatedGitEnvironment; workspace?: LocalGitWorkspace } = {}
+    try {
+      return await ControlledLiveTarget.build({ harness, server, options, opened })
+    } catch (error) {
+      opened.workspace?.close()
+      setGitHubTransport(null)
+      opened.git?.restore()
+      await server.close().catch(() => undefined)
+      await harness.close().catch(() => undefined)
+      throw error
+    }
+  }
+
+  private static async build(input: {
+    harness: GitHubHarness
+    server: ControlledGitHubHost
+    options: { receiptPath?: string }
+    /**
+     * What this run has opened so far, so the caller's guard can close it. It is
+     * written as each thing is created rather than collected at the end, because a
+     * throw means there is no end to collect at.
+     */
+    opened: { git?: IsolatedGitEnvironment; workspace?: LocalGitWorkspace }
+  }): Promise<ControlledLiveTarget> {
+    const { harness, server, opened } = input
+    const options = input.options
     const runId = `controlled-${newRunSuffix()}`
     const marker = ownershipMarker(runId)
     const state = await harness.readState()
@@ -653,6 +686,7 @@ export class ControlledLiveTarget extends DisposableTarget {
       author: AUTHOR,
       gitTlsCaInfo: server.certificatePath,
     })
+    opened.git = git
     Object.assign(process.env, git.env, {
       ...harness.env,
       GIT_STACKS_GITHUB_API_URL: server.url,
@@ -693,6 +727,7 @@ export class ControlledLiveTarget extends DisposableTarget {
       root: harness.root,
       env: git.env,
     })
+    opened.workspace = workspace
     const admin = new GitHubAdmin(faults, fullName, marker)
     const primary = await admin.resolveOwner(state.currentUser)
     ledger.record({
@@ -715,51 +750,28 @@ export class ControlledLiveTarget extends DisposableTarget {
     })
     const reviewerAdmin = new GitHubAdmin(reviewerFaults, fullName, marker)
 
-    // Everything from here is a local socket this process opened. A throw from here on
-    // used to leave the host listening and the harness's directory behind, which is
-    // what made a failed controlled run hold the event loop open until the test runner
-    // gave up: there is no signal handler for a process that has already stopped, so
-    // nothing would ever have closed them either.
-    try {
-      return await ControlledLiveTarget.build({
-        runId,
-        marker,
-        receiptPath,
-        fullName,
-        defaultBranch: state.repository.defaultBranch,
-        host: githubHostContext(server.host),
-        primary,
-        ledger,
-        transport: productionTransport,
-        faults,
-        reviewer,
-        workspace,
-        git,
-        root: harness.root,
-        reviewerAdmin,
-        harness,
-        server,
-        productionTransport,
-      })
-    } catch (error) {
-      workspace.close()
-      setGitHubTransport(null)
-      git.restore()
-      await server.close().catch(() => undefined)
-      await harness.close().catch(() => undefined)
-      throw error
-    }
+    return new ControlledLiveTarget({
+      runId,
+      marker,
+      receiptPath,
+      fullName,
+      defaultBranch: state.repository.defaultBranch,
+      host: githubHostContext(server.host),
+      primary,
+      ledger,
+      transport: productionTransport,
+      faults,
+      reviewer,
+      workspace,
+      git,
+      root: harness.root,
+      reviewerAdmin,
+      harness,
+      server,
+      productionTransport,
+    })
   }
 
-  private static async build(
-    setup: DisposableTargetSetup & {
-      harness: GitHubHarness
-      server: ControlledGitHubHost
-      productionTransport: GitHubTransport
-    },
-  ): Promise<ControlledLiveTarget> {
-    return new ControlledLiveTarget(setup)
-  }
   repository(): string {
     return this.fullName
   }
