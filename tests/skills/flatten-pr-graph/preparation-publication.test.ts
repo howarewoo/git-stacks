@@ -1419,3 +1419,43 @@ test('a mandatory control in the caller environment stops preparation before it 
     'no task workspace may be created under a control this run cannot honour',
   )
 })
+
+test('a filesystem monitor is refused before the fingerprint runs git status', async (t) => {
+  const world = await createWorld('prepare-fsmonitor')
+  t.after(() => world.cleanup())
+  const a = await seedBranch(world, BRANCHES[12], { 'a.txt': 'a\n' })
+  await advanceRoot(world, { 'root.txt': 'root moves on\n' })
+
+  // A recording monitor that exits 0: a run that executed it would report itself prepared
+  // and leave no trace that anything external ran, so only the marker's absence tells the
+  // two apart. The repository-local control is set on the SOURCE and on the USER checkout,
+  // because the fingerprint is computed in the user's own worktree.
+  const marker = join(world.root, 'fsmonitor-ran')
+  const monitor = join(world.root, 'monitor.sh')
+  mkdirSync(join(world.root, 'bin'), { recursive: true })
+  writeFileSync(monitor, `#!/bin/sh\nprintf ran > ${JSON.stringify(marker)}\nexit 0\n`)
+  chmodSync(monitor, 0o755)
+  world.gitIn(world.repo, 'config', 'core.fsmonitor', monitor)
+  world.gitIn(world.remote, 'config', 'core.fsmonitor', monitor)
+  writeFileSync(join(world.repo, 'untracked.txt'), 'the user has work in progress\n')
+
+  const blocked = await runPrepare(world, {
+    runDirectory: join(world.root, 'run'),
+    order: [12],
+    heads: { 12: `refs/heads/${BRANCHES[12]}` },
+    originalHeads: { 12: a },
+  })
+
+  assert.equal(blocked.status, 'blocked')
+  assert.equal(blocked.ok, false)
+  assert.ok(
+    blocked.errors.some((error) => error.code === 'conflicting-environment-control'),
+    `the filesystem monitor must be reported, got ${JSON.stringify(blocked.errors)}`,
+  )
+  assert.equal(existsSync(marker), false, 'the filesystem monitor must never have been executed')
+  assert.equal(
+    existsSync(join(world.root, 'run', 'storage.git')),
+    false,
+    'no task-owned storage is created under a control this run cannot honour',
+  )
+})

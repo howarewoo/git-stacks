@@ -44,7 +44,10 @@
 const DRIVER_FIELDS = {
   filter: ['clean', 'smudge', 'process'],
   merge: ['driver'],
-  diff: ['command'],
+  // `textconv` is here because an ordinary `git diff` runs it. A fingerprint computed from
+  // the user's own worktree is such a diff, so leaving `textconv` out would let the read
+  // itself execute a program the run never admitted.
+  diff: ['command', 'textconv'],
 }
 
 function driverKeys(kind, name) {
@@ -211,6 +214,11 @@ const EXECUTABLE_CONFIG = [
   },
   { match: /^gpg\.(format|program)$/i, why: 'signing or verification runs this program', when: 'always' },
   {
+    match: /^core\.fsmonitor$/i,
+    why: 'git status and git diff run the filesystem monitor this names, or spawn Git\'s own daemon for it',
+    when: 'always',
+  },
+  {
     match: /^protocol\..+\.allow$/i,
     why: 'this permits a custom transport helper, which is a program Git will execute',
     when: 'always',
@@ -289,8 +297,9 @@ export function executableControls(git, cwd, env = {}, transports = new Set()) {
       const value = entry.slice(newline + 1)
       const rule = EXECUTABLE_CONFIG.find((candidate) => candidate.match.test(key))
       if (!rule || !applies(rule, transports)) continue
-      // A protocol permission that refuses everything is not a permission.
-      if (/^protocol\./i.test(key) && !isEnabled(value)) continue
+      // A permission that refuses everything is not a permission, and an explicitly false
+      // filesystem monitor is the one way to name the monitor without enabling it.
+      if (/^(protocol\.|core\.fsmonitor$)/i.test(key) && !isEnabled(value)) continue
       controls.push({
         control: key,
         value,

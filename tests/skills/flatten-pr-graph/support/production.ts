@@ -181,6 +181,11 @@ export interface PinnedPullRequest {
 
 const unique = (values: string[]): string[] => [...new Set(values)].sort()
 
+/** A ref name the way the helpers require one: fully qualified. */
+export function qualify(ref: string): string {
+  return ref.startsWith('refs/') ? ref : `refs/heads/${ref}`
+}
+
 export function prepareCodes(result: PreparedRun): string[] {
   return unique(result.errors.map((error) => error.code))
 }
@@ -506,10 +511,13 @@ export class Production {
       root: { ref: ROOT_REF, oid: this.root() },
       selection: options.selection ?? options.order,
       order: options.order,
+      // `git check-ref-format` refuses a one-level name unless `--allow-onelevel` is
+      // passed, and the helper asks Git itself rather than inventing a looser rule. The
+      // plan therefore carries fully qualified refs, as the shipped example does.
       heads: Object.fromEntries(
         options.order.map((number) => [
           number,
-          options.heads?.[number] ?? branches[number],
+          qualify(options.heads?.[number] ?? branches[number]),
         ]),
       ),
       originalHeads: options.originalHeads,

@@ -113,6 +113,5 @@ export interface PreparedRunDocument {
  * and worktree digests, stash object ids, local configuration, identity, and any Git
  * operation already in progress. `null` when no workspace was named.
  */
-export declare function readUserFingerprint(userWorkspace: string | null): UserWorkspaceFingerprint | null
 
 export declare function prepareStack(input: Record<string, unknown>): PreparedRunDocument

@@ -387,7 +387,7 @@ function userWorktreeDigest(repo) {
  * the result carries, not something to normalize - and every Git call below runs in a
  * task-owned directory.
  */
-export function readUserFingerprint(userWorkspace) {
+function readUserFingerprint(userWorkspace) {
   if (!userWorkspace) return null
   const path = requireDirectory(userWorkspace, 'userWorkspace')
   const status = lines(
@@ -862,6 +862,34 @@ const controlProbe = (cwd, args) => runGit(cwd, args, { allowFailure: true })
 
 function treePaths(storage, oid) {
   return readTreePaths(controlProbe, storage, oid)
+}
+
+/**
+ * The executable controls the caller's own environment and configuration impose, read
+ * before anything is created and before the user's checkout is touched.
+ *
+ * Both repositories are read, because both are repositories whose commands this run
+ * starts. The source is copied from and the user workspace is fingerprinted, and a
+ * repository-local `core.fsmonitor`, a local `core.hooksPath`, or an attributed
+ * `diff.<name>.textconv` in either one is a program `git status` or `git diff` will
+ * execute. The caller's environment is passed through unchanged rather than narrowed
+ * first: narrowing would make this read a configuration the helper's own children never
+ * see, which is a clean report of a control it had already bypassed.
+ */
+function inheritedExecutableControls(callerEnv, input) {
+  const probe = (cwd, args, env) => runGit(cwd, args, { allowFailure: true, env: env ?? callerEnv })
+  const repositories = [input.repository, input.userWorkspace].filter(
+    (repository) => typeof repository === 'string' && repository !== '',
+  )
+  // Preparation copies pinned refs from a local source path and never opens a transport,
+  // so only the always-reachable controls apply here.
+  const controls = repositories.flatMap((repository) =>
+    readExecutableControls(probe, repository, callerEnv, new Set(['file'])),
+  )
+  return controls.map((control, index) => ({
+    ...control,
+    value: `${control.value} (${repositories[index] === input.repository ? 'source' : 'user workspace'})`,
+  }))
 }
 
 function writeJournal(path, journal) {
@@ -1819,6 +1847,33 @@ function prepareStackInner(raw) {
     }
   }
 
+  // Control admission comes first, in the caller's own environment, and against BOTH
+  // repositories this run touches. `readUserFingerprint` runs `git status` and `git diff`
+  // in the user's own checkout, and Git consults `core.fsmonitor`, an index extension, and
+  // any `diff.<name>.textconv` the attributes name while answering those. Fingerprinting
+  // first would execute the very controls this run is supposed to refuse, and then report
+  // the run as prepared after having done it. The user's repository is read only once the
+  // controls that govern reading it have been admitted.
+  const callerEnv = { ...process.env }
+  const inheritedControls = inheritedExecutableControls(callerEnv, input)
+  const blockingInherited = inheritedControls.filter((control) => control.blocking)
+  if (blockingInherited.length > 0) {
+    return {
+      contractVersion: CONTRACT_VERSION,
+      ok: false,
+      errors: blockingInherited.map((control) => ({
+        code: 'conflicting-environment-control',
+        detail: `the caller's environment or configuration imposes ${control.control}, which this run will not strip and will not run`,
+        evidence: `${control.control} = ${control.value}; ${control.effect}`,
+      })),
+      run: null,
+      preparation: null,
+      verification: [],
+      continuation: { prepared: [], remaining: input.order, resumeFrom: null },
+      conflicts: [],
+      controls: inheritedControls,
+    }
+  }
   const userBefore = readUserFingerprint(input.userWorkspace)
   const controls = inspectControls(input.repository)
   const blockingControls = controls.filter((c) => c.blocking)
@@ -1925,38 +1980,6 @@ function prepareStackInner(raw) {
   // while reporting nothing. So the caller's own environment is read *before* anything is
   // created, with the configuration Git would really use, and an incompatible control stops
   // the run instead of being silently bypassed. Only then is the environment narrowed.
-  const callerEnv = { ...process.env }
-  const inheritedControls = readExecutableControls(
-    (cwd, args, env) => runGit(cwd, args, { allowFailure: true, env: env ?? callerEnv }),
-    input.repository,
-    callerEnv,
-    // Preparation copies pinned refs from a local source path; no transport is opened.
-    new Set(['file']),
-  )
-  const blockingInherited = inheritedControls.filter((control) => control.blocking)
-  if (blockingInherited.length > 0) {
-    return {
-      contractVersion: CONTRACT_VERSION,
-      ok: false,
-      errors: blockingInherited.map((control) => ({
-        code: 'conflicting-environment-control',
-        detail: `the caller's environment or configuration imposes ${control.control}, which this run will not strip and will not run`,
-        evidence: `${control.control} = ${control.value}; ${control.effect}`,
-      })),
-      run: { runId, runDirectory: input.runDirectory, journalPath, workspaces: [], backupRefs: [] },
-      preparation: null,
-      verification: [],
-      continuation: existing?.continuation ?? {
-        prepared: [],
-        remaining: input.order,
-        resumeFrom: null,
-      },
-      conflicts: existing?.conflicts ?? [],
-      userWorkspace: userBefore,
-      controls: inheritedControls,
-    }
-  }
-
   // The journal-state gate runs once task-owned storage exists, so a completed run can be
   // verified against real refs instead of being refused on the strength of a file alone.
 

@@ -217,16 +217,28 @@ function requireExistingDirectory(value, where) {
  */
 function endpointTransports(...endpoints) {
   const transports = new Set()
-  for (const endpoint of endpoints) {
-    if (typeof endpoint !== 'string' || endpoint === '') continue
-    if (endpoint.includes('::')) {
-      transports.add('ext')
-      continue
-    }
-    const scheme = /^([A-Za-z][A-Za-z0-9+.-]*):\/\//.exec(endpoint)
-    transports.add(scheme ? scheme[1].toLowerCase() : 'file')
-  }
+  for (const endpoint of endpoints) transports.add(transportOf(endpoint))
   return transports
+}
+
+/**
+ * Which transport a URL will be reached over.
+ *
+ * Git accepts two shapes with no `://`: a path, and the scp-like `[user@]host:path`. They
+ * are not the same thing - the second opens an ssh connection, resolves a host name, and
+ * runs whatever `core.sshCommand` or `GIT_SSH_COMMAND` names - and reading the second as a
+ * local path is how an ssh checking wrapper gets to run while every control reads it as
+ * file transport. The two are told apart the way Git tells them apart: a colon before the
+ * first slash, and not a Windows drive letter.
+ */
+function transportOf(url) {
+  if (typeof url !== 'string' || url === '') return 'unknown'
+  if (url.includes('::')) return 'ext'
+  const scheme = /^([A-Za-z][A-Za-z0-9+.-]*):\/\//.exec(url)
+  if (scheme) return scheme[1].toLowerCase()
+  const scp = /^([^/]+):([^/].*)$/.exec(url)
+  if (scp && !/^[A-Za-z]:/.test(url)) return 'ssh'
+  return url.startsWith('/') || url.startsWith('.') || url === '' ? 'file' : 'file'
 }
 
 function requireRemote(value, where) {
@@ -247,11 +259,11 @@ function requireRemote(value, where) {
       value,
     )
   }
-  const scheme = /^([A-Za-z][A-Za-z0-9+.-]*):\/\//.exec(value)
-  if (scheme && !PERMITTED_PUSH_SCHEMES.has(scheme[1].toLowerCase())) {
+  const transport = transportOf(value)
+  if (transport === 'ext' || !PERMITTED_PUSH_SCHEMES.has(transport)) {
     throw new InputError(
       'conflicting-environment-control',
-      `${where} uses the unsupported transport ${scheme[1]}://`,
+      `${where} uses the unsupported transport ${transport}`,
       value,
     )
   }
@@ -271,7 +283,7 @@ function resolvePushEndpoint(repository, remote) {
   const configured = runGit(repository, ['remote', 'get-url', '--all', '--push', remote], {
     allowFailure: true,
   })
-  if (!configured.ok) return { endpoint: remote, evidence: `${remote} is addressed directly` }
+  if (!configured.ok) return { endpoint: effectiveUrl(repository, remote), evidence: `${remote} is addressed directly` }
   const urls = lines(configured.stdout)
   if (urls.length === 0) {
     throw new InputError(
@@ -295,21 +307,45 @@ function resolvePushEndpoint(repository, remote) {
       url,
     )
   }
-  const scheme = /^([A-Za-z][A-Za-z0-9+.-]*):\/\//.exec(url)
-  if (scheme && !PERMITTED_PUSH_SCHEMES.has(scheme[1].toLowerCase())) {
+  return { endpoint: effectiveUrl(repository, url), evidence: `one push destination: ${url}` }
+}
+
+/**
+ * The URL Git will actually use, which is not always the one that was written down.
+ *
+ * `url.<base>.insteadOf` and `url.<base>.pushInsteadOf` rewrite a remote before any
+ * connection is attempted, so a string that looks like a local path can become an ssh URL
+ * and a string that looks like ssh can become something else entirely. Classifying the
+ * transport of the written form would classify a URL that is never contacted.
+ * `git ls-remote --get-url` performs exactly the rewrite Git performs and opens no
+ * connection, so this is Git's own answer rather than a reimplementation of its rules.
+ */
+function effectiveUrl(repository, url) {
+  const resolved = runGit(repository, ['ls-remote', '--get-url', url], { allowFailure: true })
+  if (!resolved.ok) {
     throw new InputError(
       'conflicting-environment-control',
-      `remote ${remote} uses the unsupported transport ${scheme[1]}://`,
-      url,
+      `the effective destination for ${url} could not be resolved, so its transport is unknown`,
+      (resolved.stderr || resolved.stdout).trim().slice(0, 200) || `git ls-remote --get-url exited ${resolved.status}`,
     )
   }
-  return { endpoint: url, evidence: `one push destination: ${url}` }
+  return lines(resolved.stdout)[0] ?? url
 }
 
 function verifyInput(raw) {
   const repository = requireExistingDirectory(raw.repository, 'repository')
   const remote = requireRemote(raw.remote, 'remote')
   const pushEndpoint = resolvePushEndpoint(repository, remote)
+  // The transport that matters is the one of the URL Git will actually use, which a
+  // configured `insteadOf` rewrite can change after the written form was checked.
+  const resolvedTransport = transportOf(pushEndpoint.endpoint)
+  if (resolvedTransport === 'ext' || !PERMITTED_PUSH_SCHEMES.has(resolvedTransport)) {
+    throw new InputError(
+      'conflicting-environment-control',
+      `remote ${remote} resolves to the unsupported transport ${resolvedTransport}`,
+      pushEndpoint.endpoint,
+    )
+  }
   const runDirectory = resolve(
     typeof raw.runDirectory === 'string' && isAbsolute(raw.runDirectory)
       ? raw.runDirectory
