@@ -335,6 +335,15 @@ export interface GitHubFixtureState {
     allowSquashMerge: boolean
     allowRebaseMerge: boolean
     /**
+     * Whether the host answers for this repository to one account only.
+     *
+     * Absent means public, which is what every state written before a disposable
+     * run needed to be private describes. A run that has to prove a second account
+     * was really let in sets it, because a public repository answers for everybody
+     * and would report a grant as working when nothing was ever enforced.
+     */
+    private?: boolean
+    /**
      * What `GET /repos/{owner}/{name}` reports about the repository's own description and
      * topics. A disposable run stamps its ownership marker here, and cleanup reads it back
      * through the same endpoint before it deletes anything.
