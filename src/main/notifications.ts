@@ -351,6 +351,14 @@ function notificationThread(value: unknown, host: GitHubHostContext): Notificati
  * always one on the host the inbox was read for, and is accepted by the same
  * external-link gate as every other link in this app.
  *
+ * Only the API routes whose web page this build can actually name are rewritten.
+ * An API path is not a web route spelled the same way: GitHub's web URLs for
+ * anything else are the API route and the page at once only by coincidence, and
+ * where they differ the coincidental path is not a page at all — there is no
+ * `/acme/widgets/check-suites/104`. An unrecognised route is therefore no link,
+ * which costs a person one unopenable control rather than giving them a subject
+ * link that opens something this module invented.
+ *
  * The subject is trusted only when this host's own API named it. A URL from
  * another origin is not this host's to interpret — not the public API, not a
  * look-alike — and a subject that is not a repository has no page here: both get
@@ -377,18 +385,23 @@ export function notificationSubjectUrl(
       : subject.pathname
   const repository = /^\/repos\/([^/]+)\/([^/]+)(\/[^?#]*)?$/u.exec(path)
   if (!repository) return null
+  const repository$ = `${host.webOrigin}/${repository[1]}/${repository[2]}`
   const rest = repository[3] ?? ''
-  // GitHub pluralises in its API and does not in its web routes:
+  if (rest === '') return repository$
+  // An issue is the one route whose web path is its API path.
+  if (/^\/issues\/[^/?#]+$/u.test(rest)) return `${repository$}${rest}`
+  // GitHub pluralises the other two in its API and does not in its web routes:
   // `/repos/acme/widgets/pulls/7` is the page `/acme/widgets/pull/7`, and
   // `/repos/acme/widgets/commits/<sha>` is the page of that one commit and its
   // comments, `/acme/widgets/commit/<sha>` — not the commit history of the
   // repository, which is what leaving the plural in place would open.
-  const page = rest.startsWith('/pulls/')
-    ? `/pull${rest.slice('/pulls'.length)}`
-    : rest.startsWith('/commits/')
-      ? `/commit${rest.slice('/commits'.length)}`
-      : rest
-  return `${host.webOrigin}/${repository[1]}/${repository[2]}${page}`
+  if (/^\/pulls\/[^/?#]+$/u.test(rest)) {
+    return `${repository$}/pull${rest.slice('/pulls'.length)}`
+  }
+  if (/^\/commits\/[^/?#]+$/u.test(rest)) {
+    return `${repository$}/commit${rest.slice('/commits'.length)}`
+  }
+  return null
 }
 
 /**
@@ -784,7 +797,8 @@ export class NotificationCenter {
       pollIntervalSeconds: record.pollIntervalSeconds,
       lastModified: record.lastModified,
       consecutiveFailures: record.failures,
-      nextPollAt: floor !== null && floor > this.now() ? Math.max(confirmed ?? 0, floor) : confirmed,
+      nextPollAt:
+        floor !== null && floor > this.now() ? Math.max(confirmed ?? 0, floor) : confirmed,
     }
     this.pendingBulkRead = record.pendingRead ?? null
     // The stored validator is what makes this run's first read conditional

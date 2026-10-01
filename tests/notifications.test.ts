@@ -1372,6 +1372,27 @@ test('a notification subject becomes a page on the host that sent it, and only t
     null,
     'a subject that is not a repository gets no link rather than a broken one',
   )
+  assert.equal(
+    notificationSubjectUrl('https://github.example/api/v3/repos/acme/widgets', enterprise),
+    'https://github.example/acme/widgets',
+    "a repository's own page needs no route to guess at",
+  )
+  assert.equal(
+    notificationSubjectUrl(
+      'https://github.example/api/v3/repos/acme/widgets/commits/0f1e2d3',
+      enterprise,
+    ),
+    'https://github.example/acme/widgets/commit/0f1e2d3',
+    "one commit is the singular page, not the repository's commit history",
+  )
+  assert.equal(
+    notificationSubjectUrl(
+      'https://github.example/api/v3/repos/acme/widgets/check-suites/104',
+      enterprise,
+    ),
+    null,
+    'an API route with no known web page is no link at all: the subject keeps its kind, and no URL is invented',
+  )
 
   // The point of the rewrite is that what the inbox exposes is the page, on this
   // host, and that the gate the renderer opens links through accepts it.
@@ -1405,6 +1426,15 @@ test('a thread read from a host is published with a page on that host, not the A
             type: 'PullRequest',
           },
         }),
+        // A subject whose API route has no web page this build can name: the
+        // thread still arrives with its kind, and without a link to guess at.
+        thread(host, '103', {
+          subject: {
+            title: 'A check suite',
+            url: `${host.context.apiBase}/repos/acme/widgets/check-suites/103`,
+            type: 'CheckSuite',
+          },
+        }),
         thread(host, '102'),
       ],
       headers: { 'last-modified': LAST_MODIFIED, 'x-poll-interval': '60' },
@@ -1418,14 +1448,27 @@ test('a thread read from a host is published with a page on that host, not the A
       inbox.threads.map((entry) => entry.url),
       [
         `https://${host.host}/acme/widgets/pull/101`,
+        null,
         `https://${host.host}/acme/widgets/issues/102`,
       ],
       'each thread is published as the page a person opens on this host',
     )
     assert.deepEqual(
       inbox.threads.map((entry) => externalGitHubLink(entry.url, [host.context]).ok),
-      [true, true],
+      [true, false, true],
       'and every published link is one this installation is willing to open',
+    )
+    const checkSuite = inbox.threads[1]
+    assert.equal(checkSuite?.url, null, 'an unrecognised API route is published with no URL at all')
+    assert.equal(
+      checkSuite?.kind,
+      'unknown',
+      'while the thread itself keeps the kind it was read with',
+    )
+    assert.equal(
+      checkSuite?.title,
+      'A check suite',
+      'and it is still shown, because refusing to invent a link is not refusing the thread',
     )
   } finally {
     center.forget()
@@ -2014,8 +2057,15 @@ test('markDone removes thread via distinct thread DELETE and preserves other row
     assert.equal((await center.inbox()).threads.length, 2)
 
     const inbox = await center.markDone('1')
-    assert.deepEqual(inbox.threads.map((t) => t.id), ['2'])
-    assert.ok(host.wire.some((req) => req.method === 'DELETE' && req.path === '/api/v3/notifications/threads/1'))
+    assert.deepEqual(
+      inbox.threads.map((t) => t.id),
+      ['2'],
+    )
+    assert.ok(
+      host.wire.some(
+        (req) => req.method === 'DELETE' && req.path === '/api/v3/notifications/threads/1',
+      ),
+    )
   } finally {
     center.forget()
     await host.close()
@@ -2038,7 +2088,10 @@ test('bulk markRead with 202 marks pending and confirms on subsequent full poll'
       }
     }
     return {
-      body: [{ ...thread(host, '1'), unread: false }, { ...thread(host, '2'), unread: false }],
+      body: [
+        { ...thread(host, '1'), unread: false },
+        { ...thread(host, '2'), unread: false },
+      ],
       headers: { 'last-modified': '2026-09-22T10:05:00.000Z' },
     }
   })
