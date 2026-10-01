@@ -1,15 +1,20 @@
 import assert from 'node:assert/strict'
-import { execFileSync } from 'node:child_process'
-import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { execFile, execFileSync } from 'node:child_process'
+import { createServer } from 'node:https'
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
+
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
-import { GitHubTransportError } from '../src/main/github-transport'
+import { promisify } from 'node:util'
+import { DirectGitHubTransport, GitHubTransportError } from '../src/main/github-transport'
 import type { GitHubFixtureState } from './fixtures/github-harness'
+import { generateCertificate } from './fixtures/live-github-tls'
 import { parseCommand, runCli, EXIT_OK, EXIT_REFUSED } from './live/cli'
 import { LIVE_ENV, LiveConfigurationError, readLiveRunConfig } from './live/config'
 import { failureReport, LiveRedactor, sanitizeLog } from './live/diagnostics'
+import { installIsolatedGitEnvironment } from './live/git-environment'
 import {
   readLiveReceipt as readLiveReceiptSync,
   ResourceLedger,
@@ -20,7 +25,10 @@ import {
 } from './live/provisioning'
 import { breakingDrift, compareSchemas, SCHEMA_PROBES } from './live/observed-schema'
 import { readCommittedSchema } from './live/schema-fixture'
+import { pushCommit } from './live/layers'
 import { ControlledLiveTarget, resolveRealGit } from './live/targets'
+
+const execFileAsync = promisify(execFile)
 
 /**
  * What the live suite is allowed to be trusted about, outside a scenario run.
@@ -161,15 +169,25 @@ function branchRefs(run: ControlledRun): string {
   )
 }
 
-/** A disposable branch the run owns, so a pull request can be opened against the trunk. */
+/**
+ * A disposable branch the run owns, carrying a commit of its own.
+ *
+ * The commit is made in the real clone and pushed over the real remote, because a ref
+ * created through the API and pointed at the trunk has nothing to compare: GitHub
+ * answers that pull request with `No commits between`, so every refusal, fault and race
+ * below would be reading a request the host refuses before it applies anything. The
+ * head is what the remote holds afterwards, read back rather than assumed.
+ */
 async function openBranch(run: ControlledRun, branch: string): Promise<void> {
-  const fullName = run.target.repository()
   const trunk = hostState(run).repository.defaultBranch
-  // The commit is resolved through the host rather than read out of the clone:
-  // the head the host names is the one a pull request would really attach to.
-  const sha = await run.target.admin.headSha(fullName, trunk)
-  assert.notEqual(sha, '')
-  assert.notEqual(await run.target.admin.createBranch(fullName, branch, sha), '')
+  const head = await pushCommit(await run.target.workspace(), {
+    branch,
+    parent: `origin/${trunk}`,
+    file: `${branch}.txt`,
+    contents: `${branch}\n`,
+    message: `${branch}: a branch the run owns`,
+  })
+  assert.match(head, /^[0-9a-f]{40}$/u, 'the branch the run pushed has no remote head')
 }
 
 function openPullRequest(
@@ -567,13 +585,18 @@ test('a receipt left on disk stops listing a repository once it has been removed
   try {
     const marker = run.target.marker
     const fullName = run.target.repository()
-    assert.ok(!existsSync(receiptPath), 'the target wrote no receipt before it created anything')
-    // The creation intent has to be on the disk before anything is created, so a
-    // response that never comes back still leaves a handle somebody can go and look for.
+    // The receipt names the repository and the marker cleanup matches on, and it does so
+    // on disk before anything is deleted: a response that never comes back, or a process
+    // that is killed, still leaves a handle somebody can go and look for.
     const opened = JSON.parse(readFileSync(receiptPath, 'utf8')) as LiveReceipt
-    assert.ok(
-      opened.resources.some((entry) => entry.kind === 'repository' && entry.handle === fullName),
-      'the receipt does not name the repository this run created',
+    const journal = opened.resources.find((entry) => entry.handle === fullName)
+    assert.ok(journal, 'the receipt does not name the repository this run created')
+    assert.equal(journal.kind, 'repository')
+    assert.equal(journal.marker, run.target.marker, 'the receipt carries no ownership marker')
+    assert.equal(
+      journal.deletedAt,
+      undefined,
+      'the receipt claims a deletion that has not happened',
     )
 
     const report = await run.target.cleanup()
@@ -597,18 +620,30 @@ test('a receipt left on disk stops listing a repository once it has been removed
 })
 
 test('a cleanup failure still puts the process back the way the run found it', async () => {
+  // Taken before the run rather than during it: what has to be true after a cleanup
+  // that refused everything is that the process is the one the run was started in, not
+  // the one the run was in the middle of. A snapshot from mid-run compares the run's
+  // own isolation against its absence afterwards, which reads as a leak even when the
+  // process is exactly where it started.
+  const before = sortedEnv(process.env)
   const run = await startControlled()
-  const before = { ...process.env }
   try {
-    // A repository whose read cannot prove ownership makes every deletion a refusal,
-    // which is the worst cleanup has to survive without leaking anything it installed.
-    const ledger = run.target.resources
-    ledger.refuse(run.target.repository(), 'forced for the test')
+    // A repository that no longer carries the marker makes every deletion a refusal,
+    // which is the worst cleanup has to survive without leaking anything it installed
+    // into the process that runs everything else afterwards.
+    const edited = hostState(run)
+    edited.repository.description = 'edited by somebody else'
+    writeFileSync(run.statePath, JSON.stringify(edited), 'utf8')
+    assert.notDeepEqual(
+      sortedEnv(process.env),
+      before,
+      'the run changed nothing at all, so a process left unchanged would prove nothing',
+    )
     const report = await run.target.cleanup()
     assert.equal(report.complete, false, 'a repository that was refused should not report complete')
     assert.deepEqual(
-      Object.keys(process.env).filter((key) => before[key] !== process.env[key]),
-      [],
+      sortedEnv(process.env),
+      before,
       'the run left the process environment changed after its cleanup',
     )
   } finally {
@@ -839,20 +874,51 @@ test('recovery acts with the credential of the account that owns each resource',
   await written.discard()
 })
 
-test('a controlled target that cannot finish starting leaves nothing listening', async () => {
-  // The failure reproduced here is an ordinary one: a controlled target is started
-  // with no reachable owner. What made it unordinary was what it left behind — a
-  // listening socket and a directory, neither of which anything closed. A listener
-  // nobody closes holds the event loop open, so a start that fails like this hangs
-  // instead of failing, and this test only ends if the guard released what it opened.
+test('a controlled target that cannot finish starting leaves nothing listening', async (t) => {
+  // The failure reproduced here is an ordinary one, and it happens where it hurts: a
+  // receipt path whose parent is a file cannot be written, so the run fails after the
+  // socket is open and the workspace exists, with two local resources it now owns.
+  // What made that unordinary was what it left behind — a listening socket and a
+  // directory, neither of which anything closed. A listener nobody closes holds the
+  // event loop open, so a start that fails like this hangs instead of failing.
+  //
+  // The directory this run opened is counted inside a temporary directory of this test's
+  // own. Every test file in this suite runs in its own process and each one opens a
+  // harness, so counting them in the shared temporary directory would be counting other
+  // files' runs as well and would fail whenever one of them overlaps this one.
+  const directory = await mkdtemp(join(tmpdir(), 'git-stacks-live-start-failure-'))
+  const privateTmp = join(directory, 'tmp')
+  const previousTmpdir = process.env.TMPDIR
+  mkdirSync(privateTmp)
+  process.env.TMPDIR = privateTmp
+  t.after(() => {
+    if (previousTmpdir === undefined) delete process.env.TMPDIR
+    else process.env.TMPDIR = previousTmpdir
+  })
+  const blocker = join(directory, 'receipt-path-is-a-file')
+  writeFileSync(blocker, 'not a directory\n')
+  const harnessRoots = (): number =>
+    readdirSync(privateTmp).filter((name) => name.startsWith('git-stacks-github-harness-')).length
+  const before = harnessRoots()
+
   await assert.rejects(
-    ControlledLiveTarget.start(),
-    (error: unknown) => error instanceof Error,
-    'a controlled target that cannot resolve its owner did not refuse',
+    ControlledLiveTarget.start({ receiptPath: join(blocker, 'receipt.json') }),
+    /receipt-path-is-a-file/u,
+    'a controlled target that could not journal its repository did not refuse',
   )
-  // And a second one right after, because what this guards against is a first target
-  // keeping the process alive past its own failure rather than any one refusal.
-  await assert.rejects(ControlledLiveTarget.start(), (error: unknown) => error instanceof Error)
+  assert.equal(harnessRoots(), before, 'a failed start left the directory it opened behind')
+
+  // And a real run right after, because what this guards against is the process itself:
+  // a transport nobody reset would send this run's requests through the failed one, and a
+  // socket nobody closed would still be holding the event loop when this file ends.
+  const next = await ControlledLiveTarget.start()
+  try {
+    const head = await next.admin.headSha(next.repository(), 'main')
+    assert.notEqual(head, '', 'the run after a failed start could not reach its own host')
+  } finally {
+    await next.cleanup()
+  }
+  await rm(directory, { recursive: true, force: true })
 })
 
 test("a failure report cannot publish either form of the run's own credential", () => {
@@ -987,6 +1053,226 @@ test('the process boundary holds during the run and closes afterwards', async ()
     assert.equal(observed.after.credentialGone, true, "the run's credential outlived the run")
   } finally {
     await rm(directory, { recursive: true, force: true })
+  }
+})
+
+test("the run's Git children inherit no ambient TLS bypass, trace switch, counted configuration, or token", async (t) => {
+  // Four things a developer machine or a CI image can carry without anybody noticing,
+  // and what each of them would do to a run: accept a certificate nothing vouches for,
+  // narrate the authorization header this run installs to whatever captures a Git
+  // command's stderr, put a configuration value in front of every Git the run starts,
+  // and hand a run a credential that belongs to somebody else entirely. They are put
+  // in the environment before the run, because an environment that never had them
+  // proves nothing about the ones that do.
+  const ambient: Record<string, string> = {
+    GIT_SSL_NO_VERIFY: '1',
+    // Node's answer to the same question, which Git's switch cannot reach: this is what
+    // the production transport's own `fetch` reads when it opens a connection, and it is
+    // read in this process, for every request the run makes including the first
+    // authenticated one. A purge naming only the Git variables secures the Git children
+    // and leaves that request exactly as unverified as it was.
+    NODE_TLS_REJECT_UNAUTHORIZED: '0',
+    GIT_CURL_VERBOSE: '1',
+    GIT_CONFIG_KEY_999: 'http.extraheader',
+    GIT_CONFIG_VALUE_999: 'AUTHORIZATION: basic c2VjcmV0',
+    GITHUB_TOKEN: 'ambient-token',
+  }
+  Object.assign(process.env, ambient)
+  t.after(() => {
+    for (const key of Object.keys(ambient)) delete process.env[key]
+  })
+  const run = await startControlled()
+  t.after(() => finish(run))
+
+  for (const key of Object.keys(ambient)) {
+    assert.equal(process.env[key], undefined, `${key} reached the process a run's Git reads`)
+  }
+
+  const git = resolveRealGit()
+  const origin = (await run.target.workspace()).git(['remote', 'get-url', 'origin'])
+  /**
+   * This run's own environment with the run's counted configuration taken out, which
+   * is what the host looks like to a Git that has not been given the authority the run
+   * pins for it.
+   */
+  const withoutRunConfiguration = (extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv => {
+    const env: NodeJS.ProcessEnv = { ...process.env, ...extra }
+    for (const key of Object.keys(env)) {
+      if (key.startsWith('GIT_CONFIG_KEY_') || key.startsWith('GIT_CONFIG_VALUE_')) delete env[key]
+    }
+    delete env.GIT_CONFIG_COUNT
+    return env
+  }
+  // The host this run serves is a socket in this process, so a Git command that reaches
+  // it cannot be run synchronously here: it would wait for an answer this event loop
+  // cannot give until it returned. Each case therefore runs its Git in a child process
+  // of its own — the shape a command the application starts actually has — carrying
+  // exactly the environment that case is about, and reporting what Git printed.
+  const lsRemote = async (env: NodeJS.ProcessEnv): Promise<{ code: number; stderr: string }> => {
+    const child = await execFileAsync(
+      process.execPath,
+      [
+        '-e',
+        "const { spawnSync } = require('node:child_process');" +
+          "const run = spawnSync(process.argv[1], process.argv.slice(2), { env: process.env, encoding: 'utf8' });" +
+          'process.stdout.write(JSON.stringify({ code: run.status, stderr: String(run.stderr) }))',
+        git,
+        'ls-remote',
+        origin,
+      ],
+      { encoding: 'utf8', env },
+    )
+    return JSON.parse(String(child.stdout)) as { code: number; stderr: string }
+  }
+
+  // The host's certificate is one nothing outside this run vouches for, so reaching it
+  // is the run pinning an authority and asking for verification; refusing it without
+  // that pin is the refusal being verification rather than an unreachable host.
+  const pinned = await lsRemote(process.env)
+  assert.equal(pinned.code, 0, `the run's own Git could not reach its host: ${pinned.stderr}`)
+  const unpinned = await lsRemote(withoutRunConfiguration())
+  assert.notEqual(unpinned.code, 0, 'the host answered without the authority this run pinned')
+  // And the variable the purge removes is what turns that refusal into an acceptance,
+  // which is why leaving it inherited is a hole and not a tidiness question.
+  const bypassed = await lsRemote(withoutRunConfiguration({ GIT_SSL_NO_VERIFY: '1' }))
+  assert.equal(
+    bypassed.code,
+    0,
+    'this Git refused an untrusted certificate even with verification switched off',
+  )
+
+  // Git narrating its own transport, which is where an authorization header goes.
+  assert.equal(
+    /http\.c:|== Info:/u.test(pinned.stderr),
+    false,
+    "the run's Git narrated its own transport",
+  )
+  const narrated = await lsRemote({ ...process.env, GIT_CURL_VERBOSE: '1' })
+  assert.match(narrated.stderr, /http\.c:/u, 'the probe cannot see a trace at all')
+
+  // The header an inherited counted pair would put in front of every command this run
+  // starts, and the same header arriving from a pair Git does read, so the first answer
+  // is an absence rather than a Git that has none to show.
+  const headersIn = (env: NodeJS.ProcessEnv): string => {
+    try {
+      return execFileSync(git, ['config', '--get-all', 'http.extraheader'], {
+        encoding: 'utf8',
+        env,
+      }).trim()
+    } catch (error) {
+      // A key the environment does not set is answered with exit 1 and no output, and
+      // that absence is the answer this is looking for; any other failure is not.
+      const status =
+        typeof error === 'object' && error !== null && 'status' in error ? error.status : undefined
+      assert.equal(
+        status,
+        1,
+        `reading http.extraheader failed for another reason: ${String(error)}`,
+      )
+      return ''
+    }
+  }
+  assert.equal(headersIn(process.env), '', 'an inherited header survived into the run')
+  assert.match(
+    headersIn({
+      ...process.env,
+      GIT_CONFIG_COUNT: '1',
+      GIT_CONFIG_KEY_0: 'http.extraheader',
+      GIT_CONFIG_VALUE_0: 'AUTHORIZATION: basic c2VjcmV0',
+    }),
+    /c2VjcmV0/u,
+    'the probe cannot see a counted header at all',
+  )
+
+  // And the run puts the process back exactly as it found these, so the machine that
+  // ran the suite is the machine it had before.
+  await finish(run)
+  for (const [key, value] of Object.entries(ambient)) {
+    assert.equal(process.env[key], value, `${key} was not put back the way the run found it`)
+  }
+})
+
+test('the API transport reaches an unvouched-for certificate only when Node is told not to check', async (t) => {
+  // The API side of the same boundary the Git case above covers, against a socket this
+  // test owns and a certificate nothing vouches for. The production transport is used
+  // exactly as the live target uses it — with no `fetch` of its own, so Node's TLS
+  // settings decide — and the credential is a string this test made up, so nothing here
+  // can be mistaken for a real account.
+  const certificate = generateCertificate()
+  t.after(() => rm(certificate.directory, { recursive: true, force: true }))
+  const token = 'live-e2e-synthetic-token'
+  /**
+   * One socket of its own, answering with the login the credential authenticated as.
+   * Each case gets a separate one because a pooled connection that already completed a
+   * handshake is not asked the question again: reusing one socket would let the second
+   * case succeed without ever checking a certificate, which is the opposite of what is
+   * being observed here.
+   */
+  const startHost = async (): Promise<{
+    readonly apiUrl: string
+    readonly presented: Array<string | undefined>
+  }> => {
+    const presented: Array<string | undefined> = []
+    const server = createServer(
+      { key: certificate.key, cert: certificate.cert },
+      (request, reply) => {
+        presented.push(request.headers.authorization)
+        reply.writeHead(200, { 'content-type': 'application/json' })
+        reply.end(JSON.stringify({ login: 'live-e2e-synthetic' }))
+      },
+    )
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+    t.after(() => new Promise<void>((resolve) => server.close(() => resolve())))
+    const address = server.address()
+    if (address === null || typeof address === 'string') throw new Error('the socket has no port')
+    return { apiUrl: `https://127.0.0.1:${address.port}`, presented }
+  }
+  const transport = (apiUrl: string): DirectGitHubTransport =>
+    new DirectGitHubTransport({
+      token,
+      host: new URL(apiUrl).host,
+      apiUrl,
+      graphqlUrl: `${apiUrl}/graphql`,
+    })
+
+  // What an inherited switch does to a request that carries this run's credential: the
+  // handshake completes against a certificate no authority vouches for, and the bearer
+  // arrives at a host that should never have seen it. This is what makes the retirement
+  // load-bearing rather than tidiness — without this case, the refusal below would prove
+  // nothing about whether anything was ever at stake.
+  const unchecked = await startHost()
+  process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0'
+  try {
+    const accepted = await transport(unchecked.apiUrl).rest<{ login: string }>({
+      method: 'GET',
+      path: 'user',
+    })
+    assert.equal(accepted.status, 200)
+    assert.deepEqual(unchecked.presented, [`Bearer ${token}`])
+  } finally {
+    delete process.env.NODE_TLS_REJECT_UNAUTHORIZED
+  }
+
+  // And the same request once the run's isolation has retired it: a transport with no
+  // fetch of its own cannot complete a handshake, and the host is asked nothing at all.
+  const verified = await startHost()
+  const isolated = await installIsolatedGitEnvironment({
+    home: certificate.directory,
+    author: { name: 'Git Stacks Live', email: 'live-e2e@example.invalid' },
+  })
+  isolated.install()
+  try {
+    assert.equal(process.env.NODE_TLS_REJECT_UNAUTHORIZED, undefined)
+    await assert.rejects(
+      () => transport(verified.apiUrl).rest({ method: 'GET', path: 'user' }),
+      (error: unknown) =>
+        error instanceof GitHubTransportError &&
+        (error.kind === 'network' || error.kind === 'not-configured'),
+      'the transport connected to a certificate nothing vouches for with the switch retired',
+    )
+    assert.deepEqual(verified.presented, [], 'a refused handshake still reached the host')
+  } finally {
+    isolated.restore()
   }
 })
 
