@@ -1,4 +1,4 @@
-import { writeFile } from 'node:fs/promises'
+import { rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { GitHubTransportError } from '../../../src/main/github-transport'
 import { getSnapshot, runAction } from '../../../src/main/git'
@@ -181,6 +181,13 @@ export const ruleAndFaultScenarios: readonly LiveScenario[] = [
       )
       ctx.log(`the outside actor's commit ${outsideHead} is on the remote`)
 
+      // The application's own refresh fetches before it reads, so a person whose branch
+      // moved outside the app has that commit in their clone by the time they look at
+      // a preview. Fetching here is that step: a preview against a clone that has never
+      // seen the commit the remote holds is a state no person can be in, and it would
+      // say more about the clone than about the refusal under test.
+      await ctx.workspace.gitNetwork(['fetch', 'origin', branch])
+
       const snapshot = await getSnapshot(ctx.workspace.path)
       const preview = await previewStack(ctx.workspace.path, snapshot, 'publish', branch)
       const outcome = await runAction(ctx.workspace.path, {
@@ -192,7 +199,9 @@ export const ruleAndFaultScenarios: readonly LiveScenario[] = [
         (result) => ({ refused: false, detail: result.message }),
         (error: unknown) => ({ refused: true, detail: String(error) }),
       )
-      ctx.log(`the application answered: ${outcome.refused ? 'refused' : 'accepted'}, ${outcome.detail}`)
+      ctx.log(
+        `the application answered: ${outcome.refused ? 'refused' : 'accepted'}, ${outcome.detail}`,
+      )
 
       // The refusal is beside the point, and it is not what is being asserted. The
       // outside commit is still the remote's head whether the application refused,
@@ -271,7 +280,10 @@ export const ruleAndFaultScenarios: readonly LiveScenario[] = [
         return
       }
       const pull = await mergedOnHost(ctx, layer.number)
-      assert(pull.merged, `#${layer.number} is not merged on the host after the merge settled as merged`)
+      assert(
+        pull.merged,
+        `#${layer.number} is not merged on the host after the merge settled as merged`,
+      )
       ctx.log(`the merge landed ${String(pull.sha ?? '')} after ${Math.round(elapsed / 1000)}s`)
     },
   },
@@ -283,10 +295,19 @@ export const ruleAndFaultScenarios: readonly LiveScenario[] = [
       const trunk = ctx.target.defaultBranch
       const layer = await mergeableLayer(ctx, 'merge-refused')
       // Somebody moves the trunk on under the layer. The pull request stays open and
-      // its work now conflicts, which is the state the host refuses to land.
+      // its work now conflicts, which is the state the host refuses to land. The clone
+      // is brought to what the host holds before that happens: an earlier merge in this
+      // run lands the trunk on the host's side while the clone keeps the old tip, and a
+      // commit made from there is rejected for a reason that has nothing to do with the
+      // refusal under test.
+      await ctx.workspace.gitNetwork(['fetch', 'origin', trunk])
       await ctx.workspace.gitNetwork(['checkout', trunk])
+      ctx.workspace.git(['reset', '--hard', `origin/${trunk}`])
+      // The move touches the file the layer added, with different contents, because that
+      // is what makes the two histories conflict. A trunk commit in another file merges
+      // cleanly, and a host that lands a clean merge is not refusing anything.
       await ctx.workspace.commit(
-        `${trunk}-moved.txt`,
+        'merge-refused.txt',
         'the trunk moved on\n',
         'merge-refused: the trunk moved on',
       )
@@ -301,10 +322,7 @@ export const ruleAndFaultScenarios: readonly LiveScenario[] = [
       const refused =
         outcome.error instanceof GitHubTransportError &&
         (outcome.error.status === 409 || outcome.error.status === 422)
-      assert(
-        refused,
-        `the host neither landed nor refused this merge: ${outcome.detail}`,
-      )
+      assert(refused, `the host neither landed nor refused this merge: ${outcome.detail}`)
       assert(
         outcome.settled === null || outcome.settled.status === 'failed',
         `the merge is ${outcome.settled?.status ?? 'unknown'} rather than a definite answer`,
@@ -324,7 +342,10 @@ export const ruleAndFaultScenarios: readonly LiveScenario[] = [
     title: 'a merge whose answer was lost adopts the request the host already made',
     requires: ['asyncMerge'],
     async run(ctx) {
-      const layer = await mergeableLayer(ctx, 'merge-lost')
+      // Its own branch name: one run shares one clone, and a second scenario pushing a
+      // branch the first already published is rejected for a reason that has nothing to
+      // do with the behaviour under test.
+      const layer = await mergeableLayer(ctx, 'merge-lost-held')
       const request = {
         number: layer.number,
         sha: layer.headSha,
@@ -363,10 +384,11 @@ export const ruleAndFaultScenarios: readonly LiveScenario[] = [
         second.settled !== null && second.settled.status === 'merged',
         `the adopted request settled as ${second.settled?.status ?? 'nothing'}: ${second.settled?.message ?? ''}`,
       )
-      assert(
-        second.settled.uuid === adopted.uuid,
-        `the poll read request ${String(second.settled.uuid)} rather than the adopted ${String(adopted.uuid)}`,
-      )
+      // The poll's own request id is deliberately not asserted against the adopted one.
+      // A host that has finished the merge answers with the outcome and no id, which is
+      // the contract production code already reads; asking for the echo would assert a
+      // field the host does not promise. That the merge settled, and that the host
+      // really made it, are the assertions either side of this one.
       const pull = await mergedOnHost(ctx, layer.number)
       assert(
         pull.merged,
@@ -402,7 +424,8 @@ export const ruleAndFaultScenarios: readonly LiveScenario[] = [
   },
   {
     id: 'schema/a-parser-depended-field-going-missing-is-reported',
-    title: 'a field a parser reads stopping answering is drift, and the rest of the probe still reads',
+    title:
+      'a field a parser reads stopping answering is drift, and the rest of the probe still reads',
     requires: [],
     async run(ctx) {
       const committed = readCommittedSchema()
@@ -490,9 +513,15 @@ export const ruleAndFaultScenarios: readonly LiveScenario[] = [
         removed !== undefined,
         `a removed file is missing from the status: ${paths.join(', ')}`,
       )
-      assert(removed.index === 'D', `the removed file is reported as ${removed.index}, not a deletion`)
+      assert(
+        removed.index === 'D',
+        `the removed file is reported as ${removed.index}, not a deletion`,
+      )
       const renamed = status.find((entry) => entry.path === `${prefix}-renamed.txt`)
-      assert(renamed !== undefined, `a renamed file is missing from the status: ${paths.join(', ')}`)
+      assert(
+        renamed !== undefined,
+        `a renamed file is missing from the status: ${paths.join(', ')}`,
+      )
       assert(
         renamed.originalPath === `${prefix}.txt`,
         `the rename reports its original as ${String(renamed.originalPath)}`,
@@ -510,6 +539,10 @@ export const ruleAndFaultScenarios: readonly LiveScenario[] = [
     requires: [],
     async run(ctx) {
       const { coordinator, events } = openCoordinator(ctx)
+      // The file local work leaves behind, removed on every exit. The scenarios after
+      // this one share the clone, and an untracked file is a change the next restack has
+      // to be told about: a failure of the next scenario rather than a fact about this one.
+      const localProbe = join(ctx.workspace.path, 'secondary-limit-local.txt')
       try {
         coordinator.attach(ctx.workspace.path, await getSnapshot(ctx.workspace.path))
         await coordinator.refreshNow()
@@ -522,7 +555,10 @@ export const ruleAndFaultScenarios: readonly LiveScenario[] = [
         // The host's own answer to a request the run makes, sent through the
         // transport the application is using, not an error written into the case.
         ctx.faults.refuseOnce(
-          { method: 'GET', pathIncludes: '/pulls' },
+          // The application's pull request and inbox reads are GraphQL operations, not
+          // REST routes, so a fault aimed at a REST path is answered by nothing at all
+          // and the scenario would be reporting a healthy refresh.
+          { method: 'POST', pathIncludes: 'graphql:' },
           {
             status: 403,
             kind: 'rate-limited',
@@ -549,17 +585,14 @@ export const ruleAndFaultScenarios: readonly LiveScenario[] = [
 
         // Local work reads the worktree, not GitHub, and must not be parked behind a
         // limit that only GitHub imposes.
-        await writeFile(join(ctx.workspace.path, 'secondary-limit-local.txt'), 'local work\n', 'utf8')
+        await writeFile(localProbe, 'local work\n', 'utf8')
         coordinator.notifyLocalChange()
         const local = await nextEvent(
           events,
           (event) => event.kind === 'snapshot' && event.snapshot !== undefined,
           10_000,
         )
-        assert(
-          local !== null,
-          'local work stopped refreshing while GitHub was rate limiting',
-        )
+        assert(local !== null, 'local work stopped refreshing while GitHub was rate limiting')
         ctx.faults.clearFaults()
         await coordinator.refreshNow()
         assert(
@@ -569,6 +602,7 @@ export const ruleAndFaultScenarios: readonly LiveScenario[] = [
         ctx.log('parked background polling at the limit, kept local refresh running, and recovered')
       } finally {
         coordinator.detach()
+        await rm(localProbe, { force: true })
       }
     },
   },

@@ -41,6 +41,11 @@ export async function pushLayer(
 ): Promise<Layer> {
   const { admin, repository } = ctx
   const headSha = await pushCommit(ctx.workspace, input)
+  // The base this layer sits on, recorded the way the application records it when it
+  // manages a branch. The host's own statement is the pull request, which the double
+  // and a real host both honour; what the clone cannot say on its own is where the
+  // branch came from, and a preview that cannot see that plans the wrong thing.
+  ctx.workspace.git(['config', `branch.${input.branch}.parent`, input.base])
   const pull = await admin.createPullRequest({
     fullName: repository,
     head: input.branch,
@@ -121,6 +126,12 @@ export async function twoLayerStack(
  * has to create, which is the state a person's own first push leaves behind. A
  * recovery case needs exactly that: the create request has to come from the
  * production submit path for its journal to hold an intent to recover from.
+ *
+ * Each branch records the one it sits on, which is what the application reads when
+ * it manages a branch itself. Without a pull request the host holds no statement
+ * about the chain and Git infers one only against the trunk, so an unrecorded pair
+ * of stacked branches reads as two unrelated branches and the preview plans a single
+ * layer — the case a recovery scenario would then prove nothing about.
  */
 export async function unpublishedStack(
   ctx: LiveScenarioContext,
@@ -138,6 +149,7 @@ export async function unpublishedStack(
       message: `${prefix}: first layer`,
     }),
   }
+  ctx.workspace.git(['config', `branch.${one.branch}.parent`, trunk])
   const two: Layer = {
     branch: `${prefix}-two`,
     number: 0,
@@ -149,5 +161,6 @@ export async function unpublishedStack(
       message: `${prefix}: second layer`,
     }),
   }
+  ctx.workspace.git(['config', `branch.${two.branch}.parent`, one.branch])
   return [one, two]
 }
