@@ -70,6 +70,7 @@ import {
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import {
   attributedDriverControls as readAttributedDriverControls,
+  executableControls as readExecutableControls,
   treePaths as readTreePaths,
 } from './git-controls.mjs'
 
@@ -163,14 +164,14 @@ function sanitizedEnv() {
   return env
 }
 
-function runGit(cwd, args, { allowFailure = false } = {}) {
+function runGit(cwd, args, { allowFailure = false, env = sanitizedEnv() } = {}) {
   try {
     const stdout = execFileSync('git', args, {
       cwd,
       encoding: 'utf8',
       timeout: GIT_TIMEOUT_MS,
       maxBuffer: 32 * 1024 * 1024,
-      env: sanitizedEnv(),
+      env,
       // A probe that is allowed to fail must not print Git's complaint into the caller's
       // stream: the caller reads the structured result, not a guessed failure.
       ...(allowFailure ? { stdio: ['ignore', 'pipe', 'pipe'] } : {}),
@@ -1916,6 +1917,46 @@ function prepareStackInner(raw) {
       }
     }
   }
+  // Every Git child of this run is started with the routing variables removed, because a
+  // task-owned working directory is not isolation while any of them survives. But a removed
+  // variable is only free when it carried no policy: `GIT_CONFIG_COUNT=1
+  // GIT_CONFIG_KEY_0=commit.gpgsign GIT_CONFIG_VALUE_0=true` is a mandatory control, and
+  // dropping it would make this helper commit under weaker rules than the caller asked for
+  // while reporting nothing. So the caller's own environment is read *before* anything is
+  // created, with the configuration Git would really use, and an incompatible control stops
+  // the run instead of being silently bypassed. Only then is the environment narrowed.
+  const callerEnv = { ...process.env }
+  const inheritedControls = readExecutableControls(
+    (cwd, args, env) => runGit(cwd, args, { allowFailure: true, env: env ?? callerEnv }),
+    input.repository,
+    callerEnv,
+    // Preparation copies pinned refs from a local source path; no transport is opened.
+    new Set(['file']),
+  )
+  const blockingInherited = inheritedControls.filter((control) => control.blocking)
+  if (blockingInherited.length > 0) {
+    return {
+      contractVersion: CONTRACT_VERSION,
+      ok: false,
+      errors: blockingInherited.map((control) => ({
+        code: 'conflicting-environment-control',
+        detail: `the caller's environment or configuration imposes ${control.control}, which this run will not strip and will not run`,
+        evidence: `${control.control} = ${control.value}; ${control.effect}`,
+      })),
+      run: { runId, runDirectory: input.runDirectory, journalPath, workspaces: [], backupRefs: [] },
+      preparation: null,
+      verification: [],
+      continuation: existing?.continuation ?? {
+        prepared: [],
+        remaining: input.order,
+        resumeFrom: null,
+      },
+      conflicts: existing?.conflicts ?? [],
+      userWorkspace: userBefore,
+      controls: inheritedControls,
+    }
+  }
+
   // The journal-state gate runs once task-owned storage exists, so a completed run can be
   // verified against real refs instead of being refused on the strength of a file alone.
 

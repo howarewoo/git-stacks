@@ -181,3 +181,137 @@ export function attributedDriverControls(git, cwd, sources, paths) {
   return controls
 }
 
+/**
+ * Configuration keys that name a program Git runs as a side of talking to a remote, or
+ * of recording a commit. Each is matched by shape rather than by an exact list, because
+ * the list is not the point: the point is that a *configured value which is a command*
+ * is a control, and this helper has no way to prove what it does.
+ */
+const EXECUTABLE_CONFIG = [
+  {
+    match: /^core\.sshcommand$/i,
+    why: 'every ssh connection runs this command instead of ssh',
+    when: 'ssh',
+  },
+  { match: /^core\.askpass$/i, why: 'a credential prompt runs this program', when: 'network' },
+  {
+    match: /^(credential|core\.credential)\.helper$/i,
+    why: 'every credential lookup runs this helper',
+    when: 'network',
+  },
+  {
+    match: /^core\.hookspath$/i,
+    why: 'every Git operation in this repository runs hooks from this directory',
+    when: 'always',
+  },
+  {
+    match: /^commit\.gpgsign$/i,
+    why: 'every commit this repository makes is signed, and the signing program is not inherited',
+    when: 'always',
+  },
+  { match: /^gpg\.(format|program)$/i, why: 'signing or verification runs this program', when: 'always' },
+  {
+    match: /^protocol\..+\.allow$/i,
+    why: 'this permits a custom transport helper, which is a program Git will execute',
+    when: 'always',
+  },
+]
+
+/**
+ * Environment variables that name a program Git runs for the same reasons. `GIT_CONFIG_*`
+ * is not here: those are configuration, and they are read through `git config --list` in
+ * the caller's own environment rather than pattern-matched out of a variable list.
+ */
+const EXECUTABLE_ENV = [
+  ['GIT_SSH_COMMAND', 'every ssh connection runs this command instead of ssh', 'ssh'],
+  ['GIT_SSH', 'every ssh connection runs this program instead of ssh', 'ssh'],
+  ['GIT_ASKPASS', 'a credential prompt runs this program', 'network'],
+  ['SSH_ASKPASS', 'a credential prompt runs this program', 'network'],
+  ['GIT_PROXY_COMMAND', 'every connection to the remote runs this program', 'network'],
+]
+
+/**
+ * Whether a control can be reached at all. A credential helper or an ssh wrapper is a
+ * real control over `https://` and `ssh://` and is never consulted for a local path, so
+ * reporting it against a local disposable remote would be a false alarm wearing the
+ * costume of a safety property.
+ */
+function applies(rule, transports) {
+  if (rule.when === 'always') return true
+  if (rule.when === 'ssh') return transports.has('ssh')
+  return (
+    transports.has('ssh') ||
+    transports.has('https') ||
+    transports.has('http') ||
+    transports.has('git')
+  )
+}
+
+function isEnabled(value) {
+  const normalized = String(value ?? '').trim().toLowerCase()
+  return normalized !== '' && normalized !== 'false' && normalized !== '0' && normalized !== 'off'
+}
+
+/**
+ * Every configured program that Git would execute as a side of reaching a remote or
+ * recording a commit, read from the configuration and the environment the *caller*
+ * supplied rather than from one this helper has already narrowed.
+ *
+ * That distinction is the whole point. A helper that strips `GIT_CONFIG_*` and
+ * `GIT_SSH_COMMAND` before reading the configuration produces a clean report of a
+ * configuration its own children no longer see - it has bypassed the control it was
+ * supposed to be reporting, and it says so by omission. So the caller passes its real
+ * environment, this reads what Git would really use, and an incompatible control is a
+ * blocker the caller has to see. Nothing is unset and nothing is overridden here; the
+ * alternative would be a run that quietly did the thing the control exists to prevent.
+ *
+ * `git(cwd, args, env)` is called with the environment explicitly, so a caller that runs
+ * its children through a narrowed environment still gets a read of the wide one.
+ */
+export function executableControls(git, cwd, env = {}, transports = new Set()) {
+  const controls = []
+  const listed = git(cwd, ['config', '--list', '-z'], env)
+  if (!listed.ok) {
+    controls.push({
+      control: 'config.read',
+      value: (listed.stderr || listed.stdout).trim().slice(0, 200) || `git config --list exited ${listed.status}`,
+      inTaskStorage: 'inherited',
+      blocking: true,
+      effect:
+        'the effective configuration could not be read, so it cannot be claimed that no configured program would run',
+    })
+  } else {
+    for (const entry of listed.stdout.split('\0')) {
+      if (entry === '') continue
+      const newline = entry.indexOf('\n')
+      if (newline === -1) continue
+      const key = entry.slice(0, newline)
+      const value = entry.slice(newline + 1)
+      const rule = EXECUTABLE_CONFIG.find((candidate) => candidate.match.test(key))
+      if (!rule || !applies(rule, transports)) continue
+      // A protocol permission that refuses everything is not a permission.
+      if (/^protocol\./i.test(key) && !isEnabled(value)) continue
+      controls.push({
+        control: key,
+        value,
+        inTaskStorage: 'inherited',
+        blocking: true,
+        effect: `${rule.why}; this helper will not run it and will not override it, so it stops instead`,
+      })
+    }
+  }
+  for (const [name, why, when] of EXECUTABLE_ENV) {
+    const value = env[name]
+    if (value === undefined || value === '') continue
+    if (!applies({ when }, transports)) continue
+    controls.push({
+      control: name,
+      value: String(value).slice(0, 200),
+      inTaskStorage: 'inherited',
+      blocking: true,
+      effect: `${why}; this helper will not run it and will not unset it, so it stops instead`,
+    })
+  }
+  return controls
+}
+

@@ -102,6 +102,7 @@ import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { executableControls } from './git-controls.mjs'
 
 const CONTRACT_VERSION = 'flatten-pr-graph/1'
 const GIT_TIMEOUT_MS = 300_000
@@ -148,14 +149,14 @@ function sanitizedEnv() {
   return env
 }
 
-function runGit(cwd, args, { allowFailure = false } = {}) {
+function runGit(cwd, args, { allowFailure = false, env = sanitizedEnv() } = {}) {
   try {
     const stdout = execFileSync('git', args, {
       cwd,
       encoding: 'utf8',
       timeout: GIT_TIMEOUT_MS,
-      maxBuffer: 32 * 1024 * 1024,
-      env: sanitizedEnv(),
+      maxBuffer: 32 * 1024 * 1034,
+      env,
       ...(allowFailure ? { stdio: ['ignore', 'pipe', 'pipe'] } : {}),
     })
     return { ok: true, status: 0, stdout: String(stdout), stderr: '' }
@@ -207,6 +208,25 @@ function requireExistingDirectory(value, where) {
     )
   }
   return resolve(value)
+}
+
+/**
+ * Which transports this run will actually use, so a control that only one of them can
+ * reach is reported against the right one. A bare path and a `file://` URL are Git's own
+ * shorthand for local transport and never open an ssh connection or ask for a credential.
+ */
+function endpointTransports(...endpoints) {
+  const transports = new Set()
+  for (const endpoint of endpoints) {
+    if (typeof endpoint !== 'string' || endpoint === '') continue
+    if (endpoint.includes('::')) {
+      transports.add('ext')
+      continue
+    }
+    const scheme = /^([A-Za-z][A-Za-z0-9+.-]*):\/\//.exec(endpoint)
+    transports.add(scheme ? scheme[1].toLowerCase() : 'file')
+  }
+  return transports
 }
 
 function requireRemote(value, where) {
@@ -1113,7 +1133,21 @@ export async function publishStack(raw, conversations = {}) {
         observedRefs: input.observedRefs,
         secrets: 'none; this journal records commit ids, branches, and outcomes only',
       }
-  const controls = inspectControls(input.repository)
+  // Read the controls the CALLER's own configuration and environment impose, before the
+  // first remote conversation rather than after it. `ls-remote` and a push both resolve
+  // an ssh wrapper, a credential helper, a proxy command, or a permitted custom transport
+  // on their way to the remote, so a checking wrapper would already have run by the time a
+  // later step noticed. Nothing here is unset or overridden: a control that cannot be
+  // honoured is a blocker, because the alternative is a run that quietly did the thing the
+  // control exists to prevent.
+  const callerEnv = { ...process.env }
+  const inherited = executableControls(
+    (cwd, args, env) => runGit(cwd, args, { allowFailure: true, env: env ?? callerEnv }),
+    input.repository,
+    callerEnv,
+    endpointTransports(input.pushEndpoint, ...input.heads.map((head) => head.ref)),
+  )
+  const controls = [...inherited, ...inspectControls(input.repository)]
   const blockedControls = controls.filter((control) => control.blocking)
 
   const returnWithoutJournal = (extra) => {

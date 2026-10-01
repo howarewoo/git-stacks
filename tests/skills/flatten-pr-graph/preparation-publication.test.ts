@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { createWorld, type World } from './support/real-git'
 import { prepareStack } from '../../../.agents/skills/flatten-pr-graph/scripts/prepare-stack.mjs'
@@ -52,6 +52,7 @@ interface PreparedRun {
   continuation: { prepared: number[]; remaining: number[]; resumeFrom: number | null }
   journalPath: string
   repeated?: boolean
+  controls?: Array<{ control: string; value: string; blocking: boolean; effect: string }>
 }
 
 interface PublicationRun {
@@ -67,6 +68,12 @@ interface PublicationRun {
   capability: Record<string, unknown> & { blockedControls?: string[] }
   rootAdvance: null | { pinned: string; observed: string; integrated: boolean }
   recovery: null | { unconfirmedAttempts: string[] }
+  controls: Array<{
+    control: string
+    value: string
+    blocking: boolean
+    effect: string
+  }>
 }
 
 /** The publication document, with the fields a test narrows or overrides typed. */
@@ -1271,4 +1278,142 @@ test('a root that moves after the writes is reported against the pinned snapshot
     prepared.preparation?.branches[0].preparedHead,
   )
   assert.equal(world.remoteRefs()['refs/heads/main'], pinned)
+})
+
+/**
+ * A real program that records the fact that it ran, so "this control was reported instead
+ * of bypassed" is a fact about the filesystem and not a field the helper reported about
+ * itself. It is deliberately a recording wrapper and nothing else: it exits zero, so a run
+ * that executed it would look successful.
+ */
+function recordingWrapper(path: string, marker: string): void {
+  mkdirSync(join(path, '..'), { recursive: true })
+  writeFileSync(path, `#!/bin/sh\nprintf 'ran %s\\n' "$*" >> ${JSON.stringify(marker)}\nexit 0\n`)
+  chmodSync(path, 0o755)
+}
+
+test('an ssh wrapper is reported and never run, before the first remote conversation', async (t) => {
+  const world = await createWorld('publish-ssh-wrapper')
+  t.after(() => world.cleanup())
+  const a = await seedBranch(world, BRANCHES[12], { 'a.txt': 'a\n' })
+  const prepared = await runPrepare(world, {
+    runDirectory: join(world.root, 'run'),
+    order: [12],
+    heads: { 12: `refs/heads/${BRANCHES[12]}` },
+    originalHeads: { 12: a },
+  })
+
+  const marker = join(world.root, 'ssh-ran.txt')
+  const wrapper = join(world.root, 'wrapper', 'ssh-check')
+  recordingWrapper(wrapper, marker)
+  const previous = process.env.GIT_SSH_COMMAND
+  process.env.GIT_SSH_COMMAND = wrapper
+  t.after(() => {
+    if (previous === undefined) delete process.env.GIT_SSH_COMMAND
+    else process.env.GIT_SSH_COMMAND = previous
+  })
+
+  const blocked = await runPublish(
+    world,
+    publicationDocument(world, prepared, [12], { remote: 'ssh://example.invalid/stacks.git' }),
+  )
+
+  assert.equal(blocked.status, 'blocked')
+  const named = blocked.controls
+    .filter((control) => control.blocking)
+    .map((control) => `${control.control}=${control.value}`)
+  assert.ok(
+    named.some((entry) => entry.startsWith('GIT_SSH_COMMAND=') && entry.includes(wrapper)),
+    `the ssh wrapper must be named as a control, got ${JSON.stringify(named)}`,
+  )
+  assert.equal(existsSync(marker), false, 'the ssh wrapper must not have been executed')
+  assert.deepEqual(blocked.publication.attempts, [])
+})
+
+test('a custom transport helper is refused before discovery and never executed', async (t) => {
+  const world = await createWorld('publish-ext-helper')
+  t.after(() => world.cleanup())
+  const a = await seedBranch(world, BRANCHES[12], { 'a.txt': 'a\n' })
+  const prepared = await runPrepare(world, {
+    runDirectory: join(world.root, 'run'),
+    order: [12],
+    heads: { 12: `refs/heads/${BRANCHES[12]}` },
+    originalHeads: { 12: a },
+  })
+
+  // The helper is a real executable on PATH, and the repository genuinely permits the
+  // transport, so the only thing stopping it is this helper refusing the URL by name.
+  const marker = join(world.root, 'ext-ran.txt')
+  const helper = join(world.root, 'bin', 'git-remote-recording')
+  recordingWrapper(helper, marker)
+  world.gitIn(join(world.root, 'run', 'storage.git'), 'config', 'protocol.ext.allow', 'always')
+
+  const blocked = await runPublish(
+    world,
+    publicationDocument(world, prepared, [12], {
+      remote: `ext::recording ${world.remote}`,
+    }),
+  )
+
+  assert.equal(blocked.status, 'blocked')
+  assert.match(
+    blocked.errors.map((error) => error.detail).join('; '),
+    /remote-helper transport/,
+  )
+  assert.equal(existsSync(marker), false, 'the ext helper must not have been executed')
+  assert.deepEqual(blocked.publication.attempts, [])
+})
+
+test('a mandatory control in the caller environment stops preparation before it creates anything', async (t) => {
+  const world = await createWorld('prepare-inherited-control')
+  t.after(() => world.cleanup())
+  const a = await seedBranch(world, BRANCHES[12], { 'a.txt': 'a\n' })
+  const runDirectory = join(world.root, 'run')
+  await advanceRoot(world, { 'root.txt': 'root moves on\n' })
+
+  // Stripping routing variables is what makes a task directory a task directory, but
+  // `GIT_CONFIG_*` carries policy. Dropping a mandatory one would commit under weaker
+  // rules than the caller asked for and report nothing, so it has to stop the run instead.
+  const previous = {
+    count: process.env.GIT_CONFIG_COUNT,
+    key: process.env.GIT_CONFIG_KEY_0,
+    value: process.env.GIT_CONFIG_VALUE_0,
+  }
+  process.env.GIT_CONFIG_COUNT = '1'
+  process.env.GIT_CONFIG_KEY_0 = 'commit.gpgsign'
+  process.env.GIT_CONFIG_VALUE_0 = 'true'
+  t.after(() => {
+    for (const [name, value] of [
+      ['GIT_CONFIG_COUNT', previous.count],
+      ['GIT_CONFIG_KEY_0', previous.key],
+      ['GIT_CONFIG_VALUE_0', previous.value],
+    ] as const) {
+      if (value === undefined) delete process.env[name]
+      else process.env[name] = value
+    }
+  })
+
+  const result = await runPrepare(world, {
+    runDirectory,
+    order: [12],
+    heads: { 12: `refs/heads/${BRANCHES[12]}` },
+    originalHeads: { 12: a },
+  })
+
+  assert.equal(result.status, 'blocked')
+  assert.equal(result.preparation, null)
+  assert.ok(
+    result.errors.some((error) => error.code === 'conflicting-environment-control'),
+    `the inherited signing control must be reported, got ${JSON.stringify(result.errors)}`,
+  )
+  assert.equal(
+    existsSync(join(runDirectory, 'storage.git')),
+    false,
+    'task-owned storage must not be created under a control this run cannot honour',
+  )
+  assert.equal(
+    existsSync(join(runDirectory, 'workspaces')),
+    false,
+    'no task workspace may be created under a control this run cannot honour',
+  )
 })
