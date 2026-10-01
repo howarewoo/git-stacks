@@ -1792,6 +1792,159 @@ button:disabled {
   color: var(--gs-semantic-text-muted);
 }
 
+/* The PR Inbox is a group rail beside a compact row list. The rail is a
+   selection, not navigation between repositories, so it uses the selection
+   role rather than the checked-out role the destination rail uses. */
+.pr-inbox-view {
+  overflow: hidden;
+}
+
+.pr-inbox-body {
+  display: grid;
+  min-height: 0;
+  flex: 1;
+  grid-template-columns: minmax(180px, 224px) minmax(0, 1fr);
+}
+
+.pr-inbox-rail {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  gap: 2px;
+  overflow: auto;
+  border-inline-end: 1px solid var(--gs-semantic-border-decorative);
+  background: var(--gs-semantic-surface-inset);
+  padding: 12px 8px;
+}
+
+.pr-inbox-rail-section {
+  margin-block-start: 12px;
+}
+
+.inbox-group {
+  display: flex;
+  width: 100%;
+  min-height: 32px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  border: 1px solid transparent;
+  border-radius: var(--gs-semantic-radius-control);
+  padding: 4px 8px;
+  text-align: left;
+  color: var(--gs-semantic-text-secondary);
+  font-size: var(--gs-semantic-type-label-size);
+}
+
+.inbox-group:hover {
+  background: var(--gs-component-row-hover-background);
+  color: var(--gs-semantic-text-primary);
+}
+
+.inbox-group:focus-visible {
+  outline: 2px solid var(--gs-semantic-focus-ring);
+  outline-offset: -2px;
+}
+
+.inbox-group-active {
+  background: var(--gs-semantic-surface-selection);
+  color: var(--gs-semantic-text-primary);
+  font-weight: 600;
+}
+
+.inbox-group-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.inbox-saved {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.inbox-group-saved {
+  flex: 1;
+}
+
+.pr-inbox-content {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+}
+
+.pr-inbox-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 12px;
+  border-block-end: 1px solid var(--gs-semantic-border-decorative);
+  padding: 12px 16px;
+}
+
+.pr-inbox-search {
+  min-width: 220px;
+  flex: 1;
+}
+
+.pr-inbox-save {
+  display: flex;
+  gap: 6px;
+}
+
+.pr-inbox-rule {
+  margin: 0;
+  padding: 8px 16px 0;
+  color: var(--gs-semantic-text-secondary);
+  font-size: var(--gs-semantic-type-metadata-size);
+  line-height: 1.5;
+}
+
+/* Rows stay compact so a group of two hundred is still scannable; the rail
+   stays its own scroll region so a long group list never pushes the rows. */
+.pr-inbox-item {
+  margin: 0;
+}
+
+@media (max-width: 1040px) {
+  /* The rail stacks above the rows rather than squeezing both: at this width a
+     180px rail costs a third of the row's width for a two-word group name. */
+  .pr-inbox-body {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr);
+  }
+
+  .pr-inbox-rail {
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+    border-inline-end: 0;
+    border-block-end: 1px solid var(--gs-semantic-border-decorative);
+  }
+
+  .pr-inbox-rail .nav-label {
+    width: 100%;
+  }
+
+  .inbox-group {
+    width: auto;
+  }
+
+  .pr-inbox-filters {
+    padding: 10px 12px;
+  }
+
+  .pr-inbox-search {
+    min-width: 0;
+    flex-basis: 100%;
+  }
+}
+
 .diagnostics-view {
   display: flex;
   height: 100%;

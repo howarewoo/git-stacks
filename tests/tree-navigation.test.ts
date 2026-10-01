@@ -133,6 +133,7 @@ test('every workspace destination has a distinct keyboard route and a spoken lab
     'history',
     'changes',
     'pullRequests',
+    'prInbox',
     'stashes',
     'diagnostics',
     'review',

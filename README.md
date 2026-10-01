@@ -1727,3 +1727,43 @@ Run snapshot unit and integration tests with:
 npx tsx --test tests/review-snapshots.test.ts
 npx playwright test tests/renderer/review-snapshots.spec.ts
 ```
+## PR Inbox
+
+`Mod+9` opens the PR Inbox: a GitHub-derived triage queue over every registered repository. It answers "what pull request work is waiting on me?" — it is **not** GitHub's notification inbox. Nothing in it reads a notification, subscription, release, or discussion, and no classic notification scope is required: every fact comes from the pull request, review, and check data the app already reads through a host-aware transport. Opening a row lands in the Review workspace for that row's own repository without checking anything out or changing branches.
+
+### Group semantics
+
+Group membership is a pure function of GitHub-reported facts. The signed-in viewer is the login the host reported for the read; logins are compared case-insensitively. A read with no viewer cannot place a pull request in a viewer-relative group and says so rather than guessing an author.
+
+| Group | Rule |
+| --- | --- |
+| **Review requested** | Open, not a draft, directly review-requested from you, and not authored by you. A pull request you opened yourself is your work, not a review you owe, so asking yourself for review never lands here. |
+| **Needs my response** | Open, not a draft, authored by you, and either changes were requested or the last review or comment is somebody else's. A pull request nobody has spoken on is not waiting on you. |
+| **My PRs — waiting** | Open, authored by you, not a draft, not waiting on your reply, and not approved. |
+| **My PRs — approved** | Open, authored by you, not a draft, and GitHub's review decision is approved. |
+| **Drafts** | Open and a draft, whoever opened it. Drafts are never in a review group. |
+| **Recently merged** | Merged within the recent window (30 days by default), measured from the read's own clock. |
+
+Only one overlap is intentional: **My PRs — approved** and **Needs my response**. The two answer different questions — what the reviewers decided, and who owes the next turn — so a pull request that was approved and then commented on is genuinely both. Every other pair is disjoint; `inboxGroupOverlapsAllowed` names the one allowed pair and `tests/pr-inbox.test.ts` holds the rest closed across the full cross-product of state, draft, author, request, decision, last turn, and merge instant.
+
+### Rows, search, and saved filters
+
+Rows are compact and keyboard-navigable: the list is one composite widget with a single Tab stop, arrow keys, `Home`, and `End`, and `Enter` opens the row into Review. Search matches what a row already shows — title, `#number`, repository, head branch, base branch, and author — and every whitespace-separated term must match. The repository selector is exact. A named filter is a group, a search, and optionally one repository; filters are stored in `pull-request-inbox.json` beside the settings file, written atomically at owner-only permissions, and re-loaded on launch. One malformed draft refuses the whole write rather than silently losing a filter.
+
+### Refresh states
+
+Empty, filtered-empty, stale/offline, auth-required, and partial-permission are five different answers, and the queue never reports an unanswered read as an empty one:
+
+- **empty** — GitHub confirmed the read and the group genuinely holds nothing.
+- **filtered-empty** — GitHub confirmed the read; this group, search, and repository select none of the rows.
+- **unconfirmed** — the read did not answer. The last confirmed rows stay on screen behind the reason, and if there are none the queue says it is unconfirmed rather than showing an empty list.
+- **partial** — some repositories answered and some could not. The rows below are the ones GitHub confirmed, and the unread repositories are named individually (`not visible to this credential`, `sign-in rejected`, `GitHub unreachable`, `origin is not on a GitHub host`, …).
+- **skipped** — a repository outside the refresh's request budget is reported as *not attempted*, never as an empty repository.
+
+The refresh is budgeted twice: it refuses to start while GitHub's remaining budget is below the 250-request reserve the repository sync already keeps, and it stops mid-refresh once the 24-request per-refresh cap is spent, naming the repositories it did not attempt. It is cancellable throughout, and the queue reads on open and on a 60-second cadence only while its destination is visible.
+
+Run the Inbox tests with:
+
+```sh
+npx tsx --test tests/pr-inbox.test.ts
+```

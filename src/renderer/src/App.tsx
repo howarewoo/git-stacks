@@ -97,6 +97,7 @@ import {
   WORKSPACE_VIEW_HEADING_ID,
   WORKSPACE_VIEW_SHORTCUTS,
   WorkspaceNavigation,
+  workspaceNeedsNoRepository,
   workspaceViewLabel,
 } from './components/workspace-navigation'
 import { ReviewView, type ReviewCommands } from './components/review-view'
@@ -114,6 +115,17 @@ import {
   matchesPullRequest,
 } from './components/data-views'
 import { PullRequestChecksPanel } from './components/check-details'
+import { PullRequestInboxView } from './components/pr-inbox-view'
+import {
+  PULL_REQUEST_INBOX_MERGED_WINDOW_DAYS,
+  PULL_REQUEST_INBOX_REFRESH_MS,
+} from '../../shared/pr-inbox'
+import type {
+  PullRequestInboxFilterDraft,
+  PullRequestInboxItem,
+  PullRequestInboxReport,
+  PullRequestInboxSavedFilter,
+} from '../../shared/pr-inbox'
 import { checkLabel, checksVariant } from './lib/pull-request-state'
 import type {
   PullRequestCheckDetail,
@@ -140,6 +152,7 @@ type WorkspaceView =
   | 'history'
   | 'changes'
   | 'pullRequests'
+  | 'prInbox'
   | 'review'
   | 'stashes'
   | 'diagnostics'
@@ -475,6 +488,15 @@ function App() {
   // so no result computed for the previous repository is ever applied.
   const repositoryGate = React.useRef(createRequestGate()).current
   const [remoteStatus, setRemoteStatus] = React.useState<RemoteFreshness | null>(null)
+  // The PR Inbox is its own destination with its own read: it spans every
+  // registered repository rather than the one on screen, and it is the only
+  // surface that answers "what is waiting on me?" across all of them.
+  const [inboxReport, setInboxReport] = React.useState<PullRequestInboxReport | null>(null)
+  const [inboxSavedFilters, setInboxSavedFilters] = React.useState<PullRequestInboxSavedFilter[]>([])
+  const [inboxLoading, setInboxLoading] = React.useState(false)
+  const [inboxRefreshing, setInboxRefreshing] = React.useState(false)
+  const [inboxError, setInboxError] = React.useState<string | null>(null)
+  const inboxGate = React.useRef(createRequestGate()).current
   // A background snapshot only applies to the repository the window still shows.
   const snapshotPathRef = React.useRef<string | null>(null)
   const setSnapshotAndSelection = React.useCallback((next: RepositorySnapshot) => {
@@ -662,7 +684,11 @@ function App() {
    * recents list, the folder dialog, a dropped folder, or a finished clone.
    */
   const openRepository = React.useCallback(
-    async (path?: string, mode: 'recent' | 'add' = 'recent') => {
+    async (
+      path?: string,
+      mode: 'recent' | 'add' = 'recent',
+      landing?: { reviewNumber: number },
+    ) => {
       if (!desktop || openingRef.current || busyRef.current) return
       openingRef.current = true
       // Resetting the gate before awaiting retires every in-flight refresh, so
@@ -685,7 +711,11 @@ function App() {
           setInspectedPath(null)
           setCommitAmend(false)
           setCommitMessage('')
-          setWorkspaceView('branches')
+          // Opening a repository reads it; it never changes what is checked out.
+          // Landing straight in Review is how a queue row reaches the workspace
+          // for its own repository without a checkout or a branch switch.
+          if (landing) setReviewNumber(landing.reviewNumber)
+          setWorkspaceView(landing ? 'review' : 'branches')
         }
         const repositories = await desktop.recentRepositories().catch(() => null)
         if (repositories) setRecentRepositories(repositories)
@@ -698,6 +728,89 @@ function App() {
     },
     [desktop, repositoryGate, setSnapshotAndSelection],
   )
+
+  /**
+   * Reads the queue. The main process owns cancellation, so closing the Inbox
+   * or starting another refresh retires this one; the gate keeps a late answer
+   * for an abandoned read off the screen.
+   */
+  const loadInbox = React.useCallback(
+    async (request: { mergedWithinDays: number }) => {
+      if (!desktop) return
+      inboxGate.reset()
+      const claim = inboxGate.claim()
+      setInboxLoading(true)
+      setInboxRefreshing(true)
+      setInboxError(null)
+      try {
+        const report = await desktop.pullRequestInbox?.(request)
+        if (!report) return
+        if (!inboxGate.current(claim)) return
+        setInboxReport(report)
+      } catch (value) {
+        if (!inboxGate.current(claim)) return
+        // A read that could not answer is reported, never emptied: the last
+        // confirmed rows stay on screen behind the reason.
+        setInboxError(readableError(value))
+      } finally {
+        if (inboxGate.current(claim)) {
+          setInboxLoading(false)
+          setInboxRefreshing(false)
+        }
+      }
+    },
+    [desktop, inboxGate],
+  )
+
+  // The queue reads on open and on the stored cadence. It never reads while the
+  // window is hidden, so a background app is not spending rate budget.
+  React.useEffect(() => {
+    if (workspaceView !== 'prInbox' || !desktop) return
+    void loadInbox({ mergedWithinDays: PULL_REQUEST_INBOX_MERGED_WINDOW_DAYS })
+    const timer = window.setInterval(() => {
+      if (document.hidden) return
+      void loadInbox({ mergedWithinDays: PULL_REQUEST_INBOX_MERGED_WINDOW_DAYS })
+    }, PULL_REQUEST_INBOX_REFRESH_MS)
+    return () => {
+      window.clearInterval(timer)
+      // Leaving the destination cancels the read it started, so a queued read
+      // for twenty repositories is not answered for a window nobody sees.
+      inboxGate.reset()
+    }
+  }, [desktop, inboxGate, loadInbox, workspaceView])
+
+  const openInboxItem = React.useCallback(
+    (item: PullRequestInboxItem) => {
+      if (snapshot?.path === item.repositoryPath) {
+        setReviewNumber(item.number)
+        setWorkspaceView('review')
+        return
+      }
+      void openRepository(item.repositoryPath, 'recent', { reviewNumber: item.number })
+    },
+    [openRepository, snapshot?.path],
+  )
+
+  const saveInboxFilters = React.useCallback(
+    async (drafts: PullRequestInboxFilterDraft[]) => {
+      if (!desktop) return
+      try {
+        const saved = await desktop.savePullRequestInboxFilters?.(drafts)
+        if (saved) setInboxSavedFilters(saved)
+      } catch (value) {
+        setInboxError(readableError(value))
+      }
+    },
+    [desktop],
+  )
+
+  React.useEffect(() => {
+    if (!desktop) return
+    void desktop
+      .pullRequestInboxFilters?.()
+      .then((filters) => setInboxSavedFilters(filters ?? []))
+      .catch(() => [])
+  }, [desktop])
 
   const isBusy = Boolean(busyAction || opening || refreshing)
   const operationActive = Boolean(snapshot?.operation || snapshot?.stackOperation)
@@ -1713,6 +1826,7 @@ function App() {
             changeCount={snapshot?.files.length ?? 0}
             onSelect={setWorkspaceView}
             pullRequestCount={pullRequestCount}
+            inboxCount={inboxReport?.items.length ?? 0}
             stashCount={stashCount}
           />
         </div>
@@ -2320,6 +2434,20 @@ function App() {
     )
   }
 
+  const renderPrInbox = () => (
+    <PullRequestInboxView
+      error={inboxError}
+      loading={inboxLoading}
+      onDismissError={() => setInboxError(null)}
+      onOpen={openInboxItem}
+      onRefresh={() => void loadInbox({ mergedWithinDays: PULL_REQUEST_INBOX_MERGED_WINDOW_DAYS })}
+      onSaveFilters={(drafts) => void saveInboxFilters(drafts)}
+      refreshing={inboxRefreshing}
+      report={inboxReport}
+      savedFilters={inboxSavedFilters}
+    />
+  )
+
   const renderStashes = () => {
     if (!snapshot) return null
     return (
@@ -2336,6 +2464,9 @@ function App() {
   }
 
   const renderMainContent = () => {
+    // The queue is the one destination that is useful with no repository open:
+    // it reads every registered repository rather than the one on screen.
+    if (workspaceNeedsNoRepository(workspaceView)) return renderPrInbox()
     if (!snapshot) return null
     if (workspaceView === 'changes') return renderChanges()
     if (workspaceView === 'pullRequests') return renderPullRequests()
@@ -3111,7 +3242,11 @@ function App() {
       ) : null}
       <div className={cn('workspace', !detailsVisible && 'workspace-details-hidden')}>
         {renderSidebar()}
-        {snapshot ? <main className="main-pane">{renderMainContent()}</main> : renderOnboarding()}
+        {snapshot || workspaceNeedsNoRepository(workspaceView) ? (
+          <main className="main-pane">{renderMainContent()}</main>
+        ) : (
+          renderOnboarding()
+        )}
         {detailsVisible ? renderDetails() : null}
       </div>
       {workflow && snapshot && workflow.repoPath === snapshot.path ? (

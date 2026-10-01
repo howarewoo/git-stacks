@@ -6,6 +6,12 @@ import type { ReviewCommitSet, ReviewFileSet, ReviewHeadline, ReviewViewedRecord
 import type { ReviewHistory, ReviewHistoryDiff } from './review-snapshots'
 import type { PullRequestChecksReport } from './pull-request-checks'
 import type {
+  PullRequestInboxFilterDraft,
+  PullRequestInboxReport,
+  PullRequestInboxRequest,
+  PullRequestInboxSavedFilter,
+} from './pr-inbox'
+import type {
   ReviewDraft,
   ReviewDraftRecord,
   ReviewDraftResolution,
@@ -1371,6 +1377,23 @@ export interface DesktopAPI {
   cancelUpdate?(): Promise<UpdateStatus>
   /** Subscribes to status pushed as a download progresses. */
   onUpdateStatus?(listener: (status: UpdateStatus) => void): () => void
+
+  /**
+   * The GitHub-derived pull request queue across every registered repository.
+   * A read that could not answer keeps the last confirmed rows and reports why
+   * they are unconfirmed, so a refresh that failed is never an empty queue.
+   * Cancellable through `requestId`; a later read with the same id supersedes
+   * the one in flight rather than racing it.
+   */
+  pullRequestInbox?(request?: PullRequestInboxRequest): Promise<PullRequestInboxReport>
+  /** The last report GitHub confirmed, so the queue can render before its read lands. */
+  lastConfirmedPullRequestInbox?(): Promise<PullRequestInboxReport | null>
+  /** Saved Inbox filters. Main owns the file; the window never names a path. */
+  pullRequestInboxFilters?(): Promise<PullRequestInboxSavedFilter[]>
+  /** Replaces the saved filters with what the window sent, and returns what was stored. */
+  savePullRequestInboxFilters?(
+    filters: readonly PullRequestInboxFilterDraft[],
+  ): Promise<PullRequestInboxSavedFilter[]>
 }
 
 export type GitCapability = 'referenceTransactions' | 'rebaseUpdateRefs'

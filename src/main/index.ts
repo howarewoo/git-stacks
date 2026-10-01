@@ -138,9 +138,19 @@ import type {
 
 import type { GitEnvironmentStatus } from '../shared/types'
 import { UpdateService } from './update/service'
+import { PullRequestInboxService, type PullRequestInboxTarget } from './pr-inbox'
+import { PullRequestInboxFilters } from './pr-inbox-filters'
+import type { PullRequestInboxFilterDraft } from '../shared/pr-inbox'
 
 const readKeys = new RequestRegistry()
 const onboardingKeys = new RequestRegistry()
+const inboxKeys = new RequestRegistry()
+/**
+ * The PR Inbox reads every registered repository at once, so it lives under its
+ * own request root rather than any repository's: a repository switch must not
+ * end a queue read, and a queue read must not hold a repository's lane.
+ */
+const INBOX_ROOT = 'pr-inbox'
 /** Discovery and clone run before any repository exists, under their own root. */
 const ONBOARDING_ROOT = 'onboarding'
 
@@ -268,6 +278,25 @@ if (devUrl) {
 const trustedOrigin = devUrl ? new URL(devUrl).origin : productionOrigin
 const settingsPath = () => join(app.getPath('userData'), 'repositories.json')
 const settingsFile = () => join(app.getPath('userData'), 'settings.json')
+const inboxFiltersPath = () => join(app.getPath('userData'), 'pull-request-inbox.json')
+const inboxFilters = new PullRequestInboxFilters(inboxFiltersPath())
+const inboxService = new PullRequestInboxService()
+void inboxFilters.load().catch(() => [])
+
+/**
+ * The queue reads the registered repositories, resolved at refresh time rather
+ * than captured, so opening or removing a repository changes the next answer
+ * without restarting anything. One unreadable origin yields a repository with
+ * no GitHub remote rather than failing the whole queue.
+ */
+function inboxTargets(): Promise<PullRequestInboxTarget[]> {
+  return Promise.all(
+    recents.map(async (repository) => ({
+      path: repository.path,
+      originUrl: await getOriginUrl(repository.path).catch(() => null),
+    })),
+  )
+}
 
 // The stored choice is applied before any repository is attached, so the first
 // open already polls on the interval the person chose rather than on the default
@@ -1533,6 +1562,9 @@ function installHandlers() {
     validateSender(event)
     if (typeof requestId !== 'string' || !requestId) return
     onboardingKeys.cancel(ONBOARDING_ROOT, requestId)
+    // The queue runs across repositories, so it is cancelled whether or not one
+    // is open: a window with no repository still has a queue to stop.
+    inboxKeys.cancel(INBOX_ROOT, requestId)
     if (!activeRepository) return
     readKeys.cancel(activeRepository, requestId)
   })
@@ -1544,6 +1576,54 @@ function installHandlers() {
     const link = externalGitHubLink(value, await trustedExternalLinkHosts())
     if (!link.ok) throw new Error(link.message)
     await shell.openExternal(link.href)
+  })
+
+  // The PR Inbox is a GitHub-derived queue over every registered repository, so
+  // it runs before any repository is open and is not scoped to the one that is.
+  // Its reads claim their own request ids, which makes a refresh cancellable
+  // and makes a later refresh end the one still in flight.
+  ipcMain.handle('inbox:pull-requests', async (event, requested: unknown) => {
+    validateSender(event)
+    const asked = (requested ?? {}) as { requestId?: unknown; mergedWithinDays?: unknown }
+    const days = asked.mergedWithinDays
+    const mergedWithinDays =
+      typeof days === 'number' && Number.isFinite(days) && days > 0
+        ? Math.min(365, Math.round(days))
+        : undefined
+    return forSelectedHost((signal) =>
+      performBackgroundRead(
+        inboxKeys,
+        INBOX_ROOT,
+        signal,
+        async (combined) => {
+          // Origin remotes are read through the same local Git as every other
+          // repository read, so the queue sees exactly the origin the window
+          // would have opened.
+          const targets = await inboxTargets()
+          const runtime = await resolveGitRuntime()
+          return withGitRuntime(runtime, () =>
+            inboxService.refresh(targets, {
+              ...(mergedWithinDays ? { mergedWithinDays } : {}),
+              signal: combined,
+            }),
+          )
+        },
+        requestIdClaim(asked.requestId, 'inbox-refresh'),
+      ),
+    )
+  })
+  ipcMain.handle('inbox:last-confirmed', (event) => {
+    validateSender(event)
+    return inboxService.lastConfirmed
+  })
+  ipcMain.handle('inbox:filters', async (event) => {
+    validateSender(event)
+    return inboxFilters.list()
+  })
+  ipcMain.handle('inbox:filters-save', async (event, value: unknown) => {
+    validateSender(event)
+    if (!Array.isArray(value)) throw new Error('Saved filters must be a list.')
+    return inboxFilters.save(value as PullRequestInboxFilterDraft[])
   })
   // The capability matrix for the host this installation is pointed at. It is
   // produced by probing that host, so a host that has never answered reports

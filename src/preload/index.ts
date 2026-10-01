@@ -169,6 +169,10 @@ const desktop: DesktopAPI = {
       ipcRenderer.removeListener('update:status', handler)
     }
   },
+  pullRequestInbox: (request) => ipcRenderer.invoke('inbox:pull-requests', request),
+  lastConfirmedPullRequestInbox: () => ipcRenderer.invoke('inbox:last-confirmed'),
+  pullRequestInboxFilters: () => ipcRenderer.invoke('inbox:filters'),
+  savePullRequestInboxFilters: (filters) => ipcRenderer.invoke('inbox:filters-save', filters),
 }
 
 contextBridge.exposeInMainWorld('desktop', desktop)

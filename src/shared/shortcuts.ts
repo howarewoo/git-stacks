@@ -17,6 +17,7 @@ export type ShortcutId =
   | 'view.history'
   | 'view.review'
   | 'view.diagnostics'
+  | 'view.prInbox'
   | 'review.nextFile'
   | 'review.previousFile'
   | 'review.nextLayer'
@@ -186,6 +187,16 @@ export const SHORTCUT_DEFINITIONS: readonly ShortcutMetadata[] = [
     // `Mod+7` already opens Review, so the diagnostics report takes the next free view chord.
     defaultChord: 'Mod+8',
     description: 'Switch to the repository diagnostics and compatibility report.',
+  },
+  {
+    id: 'view.prInbox',
+    label: 'Go to PR Inbox',
+    group: 'Views',
+    // `Mod+8` is Diagnostics, so the cross-repository pull request queue takes
+    // the next free view chord.
+    defaultChord: 'Mod+9',
+    description:
+      'Switch to the GitHub-derived pull request queue across your registered repositories.',
   },
 ]
 
