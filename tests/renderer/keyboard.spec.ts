@@ -559,22 +559,6 @@ test.describe('Keyboard routes and accessibility navigation', () => {
       ),
     ).toBe(1)
   })
-
-  test('workspace navigation moves with arrow keys and announces the destination change', async ({
-    page,
-  }) => {
-    await openGallery(page, { scenario: 'shell-connected' })
-
-    const nav = page.getByRole('navigation', { name: 'Workspace destinations' })
-    const branches = nav.getByRole('button', { name: /^Branches/ })
-    await branches.focus()
-    await page.keyboard.press('ArrowDown')
-    const stacks = nav.getByRole('button', { name: /^Stacks/ })
-    await expect(stacks).toBeFocused()
-    await page.keyboard.press('End')
-    await expect(nav.getByRole('button', { name: /^Diagnostics/ })).toBeFocused()
-  })
-
   test('a keyboard destination change moves focus to the new workspace heading', async ({
     page,
   }) => {

@@ -1,5 +1,5 @@
 import { expect, type Page, test } from '@playwright/test'
-import { getDoubleCalls, openGallery, settle } from './helpers/gallery'
+import { getDoubleCalls, getOpenedExternalUrls, openGallery, settle } from './helpers/gallery'
 import { switchDestination } from './helpers/destinations'
 import type { ScenarioName } from './fixtures/manifest'
 
@@ -193,6 +193,45 @@ test.describe('Notification Center states and transitions', () => {
     await expect(token).toBeFocused()
   })
 
+  // The main process retires the old center the moment the selected host
+  // changes and publishes the new host's state. What the window is holding is
+  // its own copy, though: if the cutover only reached main, the previous host's
+  // private rows would stay on screen under the new host's name.
+  test('changing the selected host clears the previous host’s rows from the inbox', async ({
+    page,
+  }) => {
+    await openNotifications(page, 'notifications-ready')
+    const list = threadList(page)
+    await expect(list.getByRole('listitem')).toHaveCount(3)
+    await expect(page.getByText('octo', { exact: false })).toBeVisible()
+
+    await page.evaluate(() => window.fixture?.cutoverNotificationHost('notifications-other-host'))
+    await settle(page)
+
+    await expect(page.getByText('github.com', { exact: true })).toHaveCount(0)
+    await expect(page.getByText('ghe.acme.internal', { exact: true })).toBeVisible()
+    await expect(page.getByText('riley', { exact: false })).toBeVisible()
+    // Only the host just selected has anything to show.
+    await expect(list.getByRole('listitem')).toHaveCount(2)
+    await expect(
+      list.getByRole('listitem').filter({ hasText: 'Review the internal deploy queue' }),
+    ).toBeVisible()
+    const rendered = await inbox(page).innerText()
+    for (const previous of [
+      'Tidy the stack ordering rules',
+      'Mentioned in “Release checklist”',
+      'Checks failed on “Add checkout validation”',
+    ]) {
+      expect(rendered).not.toContain(previous)
+    }
+    // And the control that leaves this app still points at the host that is
+    // now selected, rather than at the one that was retired.
+    await list.getByRole('button', { name: 'Open Review the internal deploy queue' }).click()
+    expect(await getOpenedExternalUrls(page)).toEqual([
+      'https://ghe.acme.internal/ops/deploys/pull/201',
+    ])
+  })
+
   // A window zoomed to 200% gives the page half the CSS viewport, so this is
   // the layout that zoom produces — checked here against the same real
   // components, and against the window's own zoom factor in the desktop run.
@@ -215,7 +254,7 @@ test.describe('Notification Center states and transitions', () => {
           const box = button.getBoundingClientRect()
           return box.left >= -1 && box.right <= window.innerWidth + 1
             ? []
-            : [(button.getAttribute('aria-label') ?? button.textContent ?? ''), box.left, box.right]
+            : [button.getAttribute('aria-label') ?? button.textContent ?? '', box.left, box.right]
         }),
       ),
     )

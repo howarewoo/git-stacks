@@ -1337,6 +1337,14 @@ export function installFixtureControl(options: {
       released.clear()
       options.onScenarioChange(scenario.name)
     },
+    cutoverNotificationHost(name) {
+      // What a selected-host change does to this module: the previous host's
+      // inbox is retired and the newly selected host's is pushed to the window
+      // that is still holding the old one. Nothing else about the app moves,
+      // because nothing else about a host change moves in the real one either.
+      current = scenarioFor(name).notifications ?? null
+      notificationListener?.(currentNotifications())
+    },
     hold(call) {
       holds.add(call)
     },

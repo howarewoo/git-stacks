@@ -1091,7 +1091,8 @@ function App() {
         const next = await action()
         if (request === notificationRequest.current) setNotificationInbox(next)
       } catch (value) {
-        if (request === notificationRequest.current) setNotificationActionError(readableError(value))
+        if (request === notificationRequest.current)
+          setNotificationActionError(readableError(value))
       } finally {
         if (request === notificationRequest.current) setNotificationBusy(false)
       }
@@ -1118,7 +1119,8 @@ function App() {
         if (request === notificationRequest.current) setNotificationInbox(next)
         setNotificationDialogOpen(false)
       } catch (value) {
-        if (request === notificationRequest.current) setNotificationDialogError(readableError(value))
+        if (request === notificationRequest.current)
+          setNotificationDialogError(readableError(value))
       } finally {
         if (request === notificationRequest.current) setNotificationBusy(false)
       }

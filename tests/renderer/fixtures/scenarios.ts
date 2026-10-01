@@ -1907,4 +1907,42 @@ export const scenarios: Record<ScenarioName, FixtureScenario> = {
       message: 'Notifications are held off by policy on this computer.',
     }),
   },
+  'notifications-other-host': {
+    name: 'notifications-other-host',
+    summary:
+      'A different GitHub host after a settings change: its own account and its own threads.',
+    snapshot: connected,
+    recentRepositories,
+    notifications: {
+      ...notificationInbox({ stale: false }),
+      host: 'ghe.acme.internal',
+      login: 'riley',
+      reference: 'keychain://git-stacks/notifications/riley',
+      // These rows exist only on the host that was just selected. Nothing about
+      // them may survive into the view the previous host's inbox leaves behind.
+      threads: [
+        {
+          id: '201',
+          unread: true,
+          reason: 'review_requested',
+          title: 'Review the internal deploy queue',
+          url: 'https://ghe.acme.internal/ops/deploys/pull/201',
+          kind: 'pull_request',
+          repository: { owner: 'ops', name: 'deploys' },
+          updatedAt: UPDATED,
+        },
+        {
+          id: '202',
+          unread: true,
+          reason: 'mention',
+          title: 'Mentioned in “Nightly build rota”',
+          url: 'https://ghe.acme.internal/ops/builds/issues/202',
+          kind: 'issue',
+          repository: { owner: 'ops', name: 'builds' },
+          updatedAt: EARLIER,
+        },
+      ],
+      unreadCount: 2,
+    },
+  },
 }

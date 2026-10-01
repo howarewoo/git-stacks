@@ -246,15 +246,35 @@ more than one page of 50. A 304 replays the whole list rather than replacing it
 with the page that answered. That floor applies to a person pressing Refresh
 too: an early refresh returns what is already known and sends nothing.
 
-Marking a thread read and changing a subscription are sent once and never
-replayed, because a second attempt could repeat a change GitHub already applied.
-When the host cannot be reached, the last list GitHub confirmed stays on screen
-marked stale with the reason, rather than being shown as current or discarded.
+Marking one thread read is `PATCH /notifications/threads/{id}` and marking the
+whole inbox read is the `PUT /notifications` GitHub documents for it. Both are
+sent once and never replayed, because a second attempt could repeat a change
+GitHub already applied, and a change that did not reach GitHub is reported on the
+inbox rather than silently retried. When the host cannot be reached, the last
+list GitHub confirmed stays on screen marked stale with the reason, rather than
+being shown as current or discarded; an inbox nobody can confirm any more is
+stale for the same reason even when it is empty.
+
+A notification's `subject.url` is an API address, not a page. It is resolved onto
+the web origin of the host that sent it before Open is offered, so the link
+leaves for a page on that host; a subject from any other origin, or one that is
+not a repository, is offered no link at all rather than a guessed one.
 
 Each host keeps its own credential reference and cached list, and each credential
 belongs to one host and one account: a host change, an account change, or a
-replacement credential ends any read still in flight, so no list is ever
-published or written under another host's or account's name.
+replacement credential ends any read, write, or authorization still in flight, so
+no list is ever published or written under another host's or account's name.
+
+This module seals its token in a store of its own, separate from the one the
+sign-in uses, so the two can never erase each other: signing in, signing out, or
+clearing the application's credential leaves the notification token alone, and
+discarding the notification token leaves the sign-in alone. What it superseded is
+retired when the replacement commits, not left sealed behind it.
+
+Changing the selected GitHub host retires the previous host's center where the
+change happens, rather than at the next notification request: the window is
+handed the newly selected host's inbox, so the previous host's threads do not
+remain on screen under the new host's name.
 
 ### Verifying the notification center
 
@@ -278,9 +298,25 @@ otherwise. It is complementary to the [packaged desktop smoke](#packaged-desktop
 not a substitute for it.
 
 The renderer surface is also exercised in the [gallery](#renderer-verification):
-`notifications-awaiting-credential`, `notifications-ready`, and
-`notifications-stale` cover the states a person meets before, during, and after
-authorization.
+`notifications-awaiting-credential`, `notifications-ready`,
+`notifications-stale`, `notifications-rejected`,
+`notifications-policy-disabled`, and `notifications-other-host` cover the states a
+person meets before, during, and after authorization, and what a selected-host
+change does to an inbox the window is already showing.
+
+**What the zoomed screenshots are.** `webContents.setZoomFactor(2)` is the real
+zoom; more screenshot pixels would only be the same layout at a higher density.
+The run proves the factor took effect by the halved CSS viewport it produces, not
+by the size of the image. The zoomed shots capture the viewport rather than the
+whole document, because a capture grown past the viewport repaints a fixed dialog
+at the position it held in the shorter viewport it was opened in, which shows an
+overlaid surface as clipped when it is not.
+
+**What the baseline images are.** Regenerated here on macOS 27.0 (build 26A428).
+Every regenerated baseline was compared with the committed one before it was
+accepted: all changed pixels fall inside the 250px navigation rail, which is the
+row this feature adds, and no pixel outside that rail changed. The originals
+were captured on macOS 26.5.2 (25F84).
 
 ## GitHub hosts
 

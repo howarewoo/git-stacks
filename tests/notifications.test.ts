@@ -671,7 +671,6 @@ test("this module's credential and the application's own are sealed separately, 
       'gho_application_session',
       'the application credential is sealed in its own store, untouched by this module',
     )
-
     // What the account side does when no App identity is left: it empties the
     // whole store it owns. Nothing it does can reach a notification token, and
     // nothing this module does can have reached the sign-in in the first place.
@@ -686,6 +685,15 @@ test("this module's credential and the application's own are sealed separately, 
       'the inbox still reads with the credential this module sealed for itself',
     )
 
+    // And the other direction, against a sign-in that is sealed right now: the
+    // sign-out that follows has nothing of this module's to take, because
+    // discarding this module's credential is a change to this module's files
+    // alone.
+    const secondReference = await store.appVault.stage(
+      '127.0.0.1',
+      'gho_application_session_again',
+      clock,
+    )
     const afterRemoval = await center.removeCredential()
     assert.equal(afterRemoval.state, 'credential-missing')
     assert.equal(afterRemoval.reference, null)
@@ -693,6 +701,11 @@ test("this module's credential and the application's own are sealed separately, 
       await store.store.vault.references(),
       [],
       'only this module credential was removed, and nothing of the app was in this store',
+    )
+    assert.equal(
+      await store.appVault.open(secondReference, '127.0.0.1'),
+      'gho_application_session_again',
+      "the application's credential survives this module removing its own",
     )
     assert.deepEqual((await center.inbox()).threads, [], 'the list read with it is gone')
   } finally {

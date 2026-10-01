@@ -230,6 +230,13 @@ export interface FixtureControl {
   pushSnapshot(value: RepositorySnapshot): void
   /** Simulates dropping folders onto the window, dispatching to preload listeners. */
   dropRepository?(paths: string[]): void
+  /**
+   * Retires the mounted module's host and publishes the named scenario's
+   * notification state, exactly as a settings change does: the old host's
+   * inbox ends and the new host's is pushed to the mounted window, which is
+   * still showing the previous one.
+   */
+  cutoverNotificationHost(name: string): void
 }
 
 declare global {

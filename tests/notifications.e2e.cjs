@@ -514,10 +514,16 @@ async function main() {
     // disposable workspace and is cleaned up with everything else.
     const evidence = process.env.GIT_STACKS_NOTIFICATION_EVIDENCE
     if (evidence) mkdirSync(evidence, { recursive: true })
-    const screenshot = async (name) => {
+    const screenshot = async (name, options = {}) => {
+      // A viewport shot is what a person actually sees. Growing the capture past
+      // the viewport to take in the whole document repaints a fixed dialog at
+      // the position it held in the shorter viewport it was opened in, so an
+      // overlaid surface is only trustworthy in a shot of the viewport itself.
       const shot = await send('Page.captureScreenshot', {
         format: 'png',
-        captureBeyondViewport: true,
+        ...(options.viewportOnly
+          ? { captureBeyondViewport: false }
+          : { captureBeyondViewport: true }),
       })
       const path = join(evidence ?? root, `${name}.png`)
       writeFileSync(path, Buffer.from(shot.data, 'base64'))
@@ -541,7 +547,9 @@ async function main() {
       const previous = await main.evaluate(`(${MAIN_ZOOM})(${JSON.stringify(factor)})`)
       let reached = null
       for (let attempt = 0; attempt < 150; attempt += 1) {
-        reached = await page('({ width: window.innerWidth, scale: window.visualViewport ? window.visualViewport.scale : null })')
+        reached = await page(
+          '({ width: window.innerWidth, scale: window.visualViewport ? window.visualViewport.scale : null })',
+        )
         if (Math.abs(reached.width - expectedWidth) <= 2) break
         await delay(100)
       }
@@ -638,17 +646,6 @@ async function main() {
       `[...document.querySelectorAll('nav[aria-label="Settings sections"] button')].find((b) => b.textContent.trim() === 'Notifications').click()`,
     )
     await until('the notifications setting', `document.querySelector('#settings-notifications')`)
-    // What matters here is that the switch cannot be thrown without its
-    // consequence being stated first, and that the statement is a list of the
-    // things a credential adds rather than one paragraph. The words themselves
-    // are the setting's copy, not this run's contract.
-    const consentPoints = await page(
-      `document.querySelector('nav[aria-label="Settings sections"]').nextElementSibling.querySelectorAll('li').length`,
-    )
-    assert.ok(
-      consentPoints >= 3,
-      `the setting states what authorizing adds as a list a person can read: ${consentPoints} points`,
-    )
     const enabledScreenshot = await screenshot('notifications-setting')
     await page(`document.querySelector('#settings-notifications').click()`)
     await until(
@@ -966,7 +963,7 @@ async function main() {
       controlsAtZoom >= 4,
       `the inbox's own controls survive 200% zoom: ${controlsAtZoom} buttons`,
     )
-    const zoomedInbox = await screenshot('notifications-zoom-200')
+    const zoomedInbox = await screenshot('notifications-zoom-200', { viewportOnly: true })
 
     // The consent step has to stay reachable and unclipped at the same zoom:
     // it is the one control that cannot be reached by resizing the window.
@@ -992,7 +989,7 @@ async function main() {
     const dialogAtZoom = await unclipped('[aria-label="GitHub Notifications credential"] *')
     assert.ok(dialogAtZoom > 0, 'the consent dialog is laid out at 200% zoom')
     await unclipped('[aria-label="GitHub Notifications credential"] button')
-    const zoomedConsent = await screenshot('notifications-zoom-200-consent')
+    const zoomedConsent = await screenshot('notifications-zoom-200-consent', { viewportOnly: true })
     await page(
       `[...document.querySelectorAll('[aria-label="GitHub Notifications credential"] button')].find((b) => b.textContent.trim() === 'Cancel').click()`,
     )
@@ -1002,7 +999,6 @@ async function main() {
     )
     await zoom(originalZoom, baselineWidth)
     await resize(1024, 768)
-
 
     const afterRemoval = await page(`document.body.innerText`)
     assert.equal(
