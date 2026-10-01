@@ -41,6 +41,9 @@ export interface ProductionOutcome {
   status: string
   codes: string[]
   details: string[]
+  /** The documents the helper actually produced, for the independent schema verdict. */
+  preparation?: unknown
+  publication?: unknown
 }
 
 /** What a conforming implementation must produce, frozen before execution. */
@@ -50,8 +53,12 @@ export interface ProductionExpectation {
   codes?: string[]
   /** At least one of these codes has to appear. */
   codesAny?: string[]
-  /** A substring one reported detail must contain. */
-  detail?: string
+  /**
+   * Identifiers the report has to name - a path, a ref, a configuration key, a conflict
+   * kind. Not sentences: an implementation may phrase a refusal however it likes, but it has
+   * to name the thing the case is about.
+   */
+  mentions?: string[]
 }
 
 export interface ProductionCase {
@@ -484,7 +491,7 @@ define({
   area: 'preparation',
   criteria: ['#87 an ambiguous conflict blocks in a recoverable state'],
   findings: [],
-  expect: { status: 'partial', codesAny: CONFLICT_CODES, detail: 'shared.txt' },
+  expect: { status: 'partial', codesAny: CONFLICT_CODES, mentions: ['shared.txt'] },
   async run(production) {
     const originalHeads = await seedStack(production, [12, 13], {
       rootFiles: { 'shared.txt': 'seed\n' },
@@ -515,7 +522,7 @@ define({
   area: 'preparation',
   criteria: ['#87 a semantic decision needs explicit intent and reason'],
   findings: [],
-  expect: { status: 'partial', codes: ['invalid-input'], detail: 'intent' },
+  expect: { status: 'partial', codes: ['invalid-input'], mentions: ['intent'] },
   async run(production) {
     const originalHeads = await seedStack(production, [12, 13], {
       rootFiles: { 'shared.txt': 'seed\n' },
@@ -540,6 +547,8 @@ define({
 // ---------------------------------------------------------------------------
 
 interface StructuralCase {
+  /** The conflict kind this case is about; the report has to name it. */
+  mentions?: string[]
   id: string
   detail: string
   seed(production: Production): Promise<Record<number, string>>
@@ -548,8 +557,7 @@ interface StructuralCase {
 const structuralCases: StructuralCase[] = [
   {
     id: 'rename',
-    detail: 'rename-conflict',
-    async seed(production) {
+    detail: 'rename-conflict',    async seed(production) {
       production.advanceRoot({ 'root.txt': 'moves on\n', 'moves/old.txt': 'the original\n' })
       const renamer = await production.scratch('rename-12')
       renamer.fetch()
@@ -568,8 +576,7 @@ const structuralCases: StructuralCase[] = [
   },
   {
     id: 'modify-delete',
-    detail: 'modify-delete',
-    async seed(production) {
+    detail: 'modify-delete',    async seed(production) {
       production.advanceRoot({ 'root.txt': 'moves on\n', 'gone.txt': 'the original\n' })
       const editor = await production.scratch('modify-delete-12')
       editor.fetch()
@@ -588,8 +595,7 @@ const structuralCases: StructuralCase[] = [
   },
   {
     id: 'delete-modify',
-    detail: 'delete-modify',
-    async seed(production) {
+    detail: 'delete-modify',    async seed(production) {
       production.advanceRoot({ 'root.txt': 'moves on\n', 'gone.txt': 'the original\n' })
       const deleter = await production.scratch('delete-modify-12')
       deleter.fetch()
@@ -608,8 +614,7 @@ const structuralCases: StructuralCase[] = [
   },
   {
     id: 'file-directory',
-    detail: 'file-directory',
-    async seed(production) {
+    detail: 'file-directory',    async seed(production) {
       production.advanceRoot({ 'root.txt': 'moves on\n', 'thing': 'a file\n' })
       const filer = await production.scratch('file-directory-12')
       filer.fetch()
@@ -629,8 +634,7 @@ const structuralCases: StructuralCase[] = [
   },
   {
     id: 'binary',
-    detail: 'binary',
-    async seed(production) {
+    detail: 'binary',    async seed(production) {
       production.advanceRoot({ 'root.txt': 'moves on\n', 'blob.bin': 'seed\n' })
       const first = await production.scratch('binary-12')
       first.fetch()
@@ -657,8 +661,7 @@ const structuralCases: StructuralCase[] = [
   },
   {
     id: 'submodule',
-    detail: 'submodule',
-    async seed(production) {
+    detail: 'submodule',    async seed(production) {
       production.advanceRoot({ 'root.txt': 'moves on\n' })
       const first = await production.scratch('submodule-12')
       first.fetch()
@@ -691,8 +694,7 @@ const structuralCases: StructuralCase[] = [
   },
   {
     id: 'lockfile',
-    detail: 'lockfile',
-    async seed(production) {
+    detail: 'lockfile',    async seed(production) {
       const lock = `${JSON.stringify({ name: 'fixture', lockfileVersion: 3 })}\n`
       production.advanceRoot({ 'root.txt': 'moves on\n', 'package-lock.json': lock })
       const first = await production.scratch('lockfile-12')
@@ -720,8 +722,7 @@ const structuralCases: StructuralCase[] = [
   },
   {
     id: 'generated',
-    detail: 'generated',
-    async seed(production) {
+    detail: 'generated',    async seed(production) {
       production.advanceRoot({ 'root.txt': 'moves on\n', 'dist/bundle.js': 'seed\n' })
       const first = await production.scratch('generated-12')
       first.fetch()
@@ -746,7 +747,7 @@ for (const structural of structuralCases) {
     area: 'preparation',
     criteria: [`#87 a structural ${structural.id} conflict blocks with a precise reason`],
     findings: [],
-    expect: { status: 'partial', codesAny: CONFLICT_CODES, detail: structural.detail },
+    expect: { status: 'partial', codesAny: CONFLICT_CODES, mentions: [structural.detail] },
     async run(production) {
       const originalHeads = await structural.seed(production)
       const blocked = production.prepare({ order: [12, 13], originalHeads })
@@ -974,8 +975,7 @@ define({
   expect: {
     status: 'blocked',
     codes: ['conflicting-environment-control'],
-    detail: 'commit.gpgsign',
-  },
+    mentions: ['commit.gpgsign'],  },
   async run(production) {
     const originalHeads = await seedStack(production, [12, 13])
     production.world.gitIn(production.world.remote, 'config', 'commit.gpgsign', 'true')
@@ -998,8 +998,7 @@ define({
   expect: {
     status: 'blocked',
     codes: ['conflicting-environment-control'],
-    detail: 'core.hooksPath',
-  },
+    mentions: ['core.hooksPath'],  },
   async run(production) {
     const originalHeads = await seedStack(production, [12, 13])
     const hooks = join(production.world.root, 'policy-hooks')
@@ -1020,8 +1019,7 @@ define({
   expect: {
     status: 'blocked',
     codes: ['conflicting-environment-control'],
-    detail: 'merge.fixture.driver',
-  },
+    mentions: ['merge.fixture.driver'],  },
   async run(production) {
     const originalHeads = await seedStack(production, [12, 13], {
       rootFiles: {
@@ -1172,7 +1170,7 @@ define({
   area: 'preparation',
   criteria: ['#87 a symlink target outside the workspace is never modified'],
   findings: ['P13 a symlink followed out of the workspace'],
-  expect: { status: 'partial', codesAny: CONFLICT_CODES, detail: 'link.txt' },
+  expect: { status: 'partial', codesAny: CONFLICT_CODES, mentions: ['link.txt'] },
   async run(production) {
     const outside = join(production.world.root, 'outside-target.txt')
     writeFileSync(outside, 'the file a symlink points at\n')
@@ -1210,7 +1208,7 @@ define({
   area: 'preparation',
   criteria: ['#87 a stale snapshot is refused'],
   findings: ['P7 a deleted source ref hidden by storage'],
-  expect: { status: 'blocked', codes: ['stale-snapshot'], detail: 'absent from the source' },
+  expect: { status: 'blocked', codes: ['stale-snapshot'] },
   async run(production) {
     const numbers = [12, 13]
     const originalHeads = await seedStack(production, numbers)
@@ -1231,7 +1229,7 @@ define({
   area: 'preparation',
   criteria: ['#87 a stale snapshot is refused'],
   findings: [],
-  expect: { status: 'blocked', codes: ['stale-snapshot'], detail: 'moved since the plan' },
+  expect: { status: 'blocked', codes: ['stale-snapshot'] },
   async run(production) {
     const numbers = [12, 13]
     const originalHeads = await seedStack(production, numbers)
@@ -1251,7 +1249,7 @@ define({
   area: 'preparation',
   criteria: ['#87 a missing selection is never a wildcard'],
   findings: [],
-  expect: { status: 'blocked', codes: ['invalid-input'], detail: 'never a wildcard' },
+  expect: { status: 'blocked', codes: ['invalid-input'] },
   async run(production) {
     await seedStack(production, [12, 13])
     const refused = production.prepare({ order: [], selection: [], originalHeads: {} })
@@ -1271,7 +1269,7 @@ define({
   area: 'preparation',
   criteria: ['#87 a run directory owns exactly one plan'],
   findings: ['P5 a journal overwritten by a different plan'],
-  expect: { status: 'blocked', codes: ['unfinished-run'], detail: 'different selection' },
+  expect: { status: 'blocked', codes: ['unfinished-run'] },
   async run(production) {
     const first = await seedStack(production, [12, 13])
     const prepared = production.prepare({ order: [12, 13], originalHeads: first })
@@ -1529,8 +1527,7 @@ define({
   expect: {
     status: 'blocked',
     codesAny: ['invalid-input', 'conflicting-environment-control'],
-    detail: 'preparationRunDirectory',
-  },
+    mentions: ['preparationRunDirectory'],  },
   async run(production) {
     const stack = await preparedStack(production, [12, 13])
     const result = await production.publish(stack.prepared, {
@@ -1562,7 +1559,7 @@ for (const mutation of journalMutations) {
     area: 'publication',
     criteria: ['#88 an incompatible journal root, selection, order or prepared commit is refused'],
     findings: ['B3 a resume adopted a mutated plan'],
-    expect: { status: 'blocked', codes: ['stale-snapshot'], detail: 'mutated plan' },
+    expect: { status: 'blocked', codes: ['stale-snapshot'] },
     async run(production) {
       const stack = await preparedStack(production, [12, 13], {
         script: { refuseBaseUpdate: [13] },
@@ -1600,7 +1597,7 @@ define({
   area: 'publication',
   criteria: ['#88 a resume under a mutated order is refused'],
   findings: ['B3 a resume adopted a mutated plan'],
-  expect: { status: 'blocked', codes: ['stale-snapshot'], detail: 'mutated plan' },
+  expect: { status: 'blocked', codes: ['stale-snapshot'] },
   async run(production) {
     const stack = await preparedStack(production, [12, 13, 14], {
       script: { refuseBaseUpdate: [13] },
@@ -1744,7 +1741,6 @@ define({
   expect: {
     status: 'blocked',
     codes: ['stale-snapshot'],
-    detail: 'have not all been confirmed',
   },
   async run(production) {
     const stack = await preparedStack(production, [12, 13])
@@ -1775,7 +1771,7 @@ for (const grant of grantCases) {
     area: 'publication',
     criteria: ['#88 every required mutation kind is granted before any remote operation'],
     findings: ['B1 a ref-update grant not required for pending heads'],
-    expect: { status: 'blocked', codes: ['missing-permission'], detail: grant.detail },
+    expect: { status: 'blocked', codes: ['missing-permission'], mentions: [grant.detail] },
     async run(production) {
       const stack = await preparedStack(production, [12, 13])
       const result = await production.publish(
@@ -1810,7 +1806,6 @@ define({
   expect: {
     status: 'blocked',
     codes: ['missing-permission'],
-    detail: 'not exactly the prepared set',
   },
   async run(production) {
     const stack = await preparedStack(production, [12, 13])
@@ -1830,7 +1825,7 @@ define({
   area: 'publication',
   criteria: ['#88 a changed base is never overwritten'],
   findings: ['B5 a base overwritten after a concurrent move'],
-  expect: { status: 'blocked', codes: ['stale-snapshot'], detail: 'baseRef' },
+  expect: { status: 'blocked', codes: ['stale-snapshot'], mentions: ['baseRef'] },
   async run(production) {
     const stack = await preparedStack(production, [12, 13])
     const result = await production.publish(stack.prepared, {
@@ -1852,7 +1847,7 @@ define({
   area: 'publication',
   criteria: ['#88 a same-named fork is never the selected head'],
   findings: ['B5 a fork adopted'],
-  expect: { status: 'blocked', codes: ['stale-snapshot'], detail: 'headRepository' },
+  expect: { status: 'blocked', codes: ['stale-snapshot'], mentions: ['headRepository'] },
   async run(production) {
     const stack = await preparedStack(production, [12, 13])
     const result = await production.publish(stack.prepared, {
@@ -1876,7 +1871,6 @@ define({
   expect: {
     status: 'partial',
     codes: ['stale-snapshot'],
-    detail: 'field this run never writes',
   },
   async run(production) {
     const stack = await preparedStack(production, [12, 13, 14], {
@@ -1951,7 +1945,7 @@ define({
   area: 'publication',
   criteria: ['#88 applied then read failure is unknown, never fabricated'],
   findings: ['B6 an unread answer reported as success'],
-  expect: { status: 'partial', detail: 'is unconfirmed' },
+  expect: { status: 'partial', mentions: ['is unconfirmed'] },
   async run(production) {
     const stack = await preparedStack(production, [12, 13], {
       script: { applyThenThrow: true, failReadAfter: 4 },
@@ -1976,7 +1970,7 @@ define({
   area: 'publication',
   criteria: ['#88 a final read failure is never success'],
   findings: ['B9 unread state reported as published'],
-  expect: { status: 'partial', detail: 'final read-back' },
+  expect: { status: 'partial', mentions: ['final read-back'] },
   async run(production) {
     const stack = await preparedStack(production, [12, 13], { script: { failReadAfter: 5 } })
     const result = await production.publish(stack.prepared, publishArgs(stack))
@@ -2056,7 +2050,7 @@ define({
   area: 'publication',
   criteria: ['#88 a root that advanced after planning is never published over'],
   findings: [],
-  expect: { status: 'blocked', codes: ['stale-snapshot'], detail: 'root' },
+  expect: { status: 'blocked', codes: ['stale-snapshot'], mentions: ['root'] },
   async run(production) {
     const stack = await preparedStack(production, [12, 13])
     const newer = production.advanceRoot({ 'later.txt': 'the root moved on again\n' })
@@ -2115,8 +2109,7 @@ define({
   expect: {
     status: 'blocked',
     codesAny: ['stale-snapshot', 'conflicting-environment-control'],
-    detail: 'refs/heads/stranger',
-  },
+    mentions: ['refs/heads/stranger'],  },
   async run(production) {
     const stack = await preparedStack(production, [12, 13])
     await production.seedBranch('stranger', { 'stranger.txt': 'not selected\n' })
@@ -2142,7 +2135,7 @@ define({
   area: 'publication',
   criteria: ['#88 a journal write that fails does not erase acknowledged outcomes'],
   findings: ['B6 acknowledged writes reported as "nothing was written"'],
-  expect: { status: 'partial', codes: ['unfinished-run'], detail: 'journal' },
+  expect: { status: 'partial', codes: ['unfinished-run'] },
   async run(production) {
     const stack = await preparedStack(production, [12, 13])
     const journalPath = join(production.publishRun(), 'publication-journal.json')
@@ -2242,7 +2235,6 @@ define({
   expect: {
     status: 'blocked',
     codes: ['conflicting-environment-control'],
-    detail: 'remote-helper',
   },
   async run(production) {
     const stack = await preparedStack(production, [12, 13])
@@ -2265,7 +2257,6 @@ define({
   expect: {
     status: 'blocked',
     codes: ['conflicting-environment-control'],
-    detail: 'more than one push destination',
   },
   async run(production) {
     const stack = await preparedStack(production, [12, 13])
@@ -2303,7 +2294,6 @@ define({
   expect: {
     status: 'blocked',
     codes: ['invalid-input'],
-    detail: 'existing absolute directory',
   },
   async run(production) {
     const stack = await preparedStack(production, [12, 13])

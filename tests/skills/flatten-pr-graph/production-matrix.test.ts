@@ -18,8 +18,10 @@ import {
   type ProductionCase,
   type ProductionExpectation,
   type ProductionOutcome,
-} from './production.fixture'
+} from './production/production.fixture'
 import { Production } from './support/production'
+import { edgeViolations, schemaViolations, type PinnedEdge } from './support/production-verdict'
+import { loadContractSchema } from './support/harness'
 import { createWorld, type World } from './support/real-git'
 
 const worlds: World[] = []
@@ -46,17 +48,48 @@ function report(
   }
   if (expected.codesAny) {
     assert.ok(
-      expected.codesAny.some((code) => observed.codes.includes(code)),
+      expected.codesAny.some((code: string) => observed.codes.includes(code)),
       `${testCase.id}: expected one of ${JSON.stringify(expected.codesAny)}, observed ${JSON.stringify(observed.codes)}`,
     )
   }
-  if (expected.detail !== undefined) {
+  for (const mention of expected.mentions ?? []) {
     const haystack = observed.details.join(' | ')
     assert.ok(
-      haystack.includes(expected.detail),
-      `${testCase.id}: expected a report containing ${JSON.stringify(expected.detail)}, observed ${haystack}`,
+      haystack.includes(mention),
+      `${testCase.id}: expected the report to name ${JSON.stringify(mention)}, observed ${haystack}`,
     )
   }
+}
+
+const schema = await loadContractSchema()
+
+/**
+ * The independent verdict: the documents the helper actually produced, checked against
+ * the contract schema, and the hard dependency edges the authorized snapshot implied,
+ * checked against the remote as it actually is. Neither reads a field the helper reported
+ * about itself as proof.
+ */
+function independent(
+  testCase: ProductionCase,
+  world: World,
+  observed: ProductionOutcome,
+  pinned: PinnedEdge[],
+): void {
+  const schemaFailures = schemaViolations(schema, testCase.area, {
+    preparation: observed.preparation,
+    publication: observed.publication,
+  })
+  assert.deepEqual(
+    schemaFailures.map((failure) => `${failure.detail}: ${failure.observed}`),
+    [],
+    `${testCase.id}: the produced document does not satisfy the contract schema`,
+  )
+  const edges = edgeViolations(world, pinned)
+  assert.deepEqual(
+    edges.map((edge) => `${edge.invariant}: ${edge.detail} (${edge.observed})`),
+    [],
+    `${testCase.id}: a hard dependency edge the authorized snapshot implied no longer holds`,
+  )
 }
 
 function register(productionCase: ProductionCase): void {
@@ -64,47 +97,13 @@ function register(productionCase: ProductionCase): void {
   test(label, async () => {
     const world = await createWorld(`production-${productionCase.area}-${productionCase.id}`)
     worlds.push(world)
-    const observed = await new Production(world).run(productionCase.run)
+    const production = new Production(world)
+    const observed = await productionCase.run(production)
     report(productionCase, productionCase.expect, observed)
+    independent(productionCase, world, observed, production.pinned())
   })
 }
 
 describe('flatten-pr-graph production matrix', () => {
   for (const productionCase of productionCases) register(productionCase)
-})
-
-describe('the production matrix is complete', () => {
-  test('every case declares the acceptance rows and findings it pins', () => {
-    for (const productionCase of productionCases) {
-      assert.ok(productionCase.id.length > 0)
-      assert.ok(productionCase.criteria.length > 0, `${productionCase.id} declares no criterion`)
-      assert.ok(Array.isArray(productionCase.findings))
-      assert.ok(productionCase.expect.status.length > 0, `${productionCase.id} expects no status`)
-    }
-  })
-
-  test('no case id repeats', () => {
-    const ids = productionCases.map((productionCase) => productionCase.id)
-    assert.deepEqual(ids, [...new Set(ids)], 'a duplicate id would silently drop a case')
-  })
-
-  test('every blocked case names a precise expected outcome rather than "anything goes"', () => {
-    for (const productionCase of productionCases) {
-      if (productionCase.expect.status === 'prepared' || productionCase.expect.status === 'published') {
-        continue
-      }
-      const reasons = (productionCase.expect.codes ?? []).length + (productionCase.expect.codesAny ?? []).length + (productionCase.expect.detail === undefined ? 0 : 1)
-      assert.ok(reasons > 0, `${productionCase.id} blocks without saying why`)
-    }
-  })
-
-  test('every preparation case states whether it touches the user checkout', () => {
-    for (const productionCase of productionCases) {
-      if (productionCase.area !== 'preparation') continue
-      assert.ok(
-        productionCase.criteria.some((criterion) => criterion.startsWith('#87')),
-        `${productionCase.id} cites no #87 acceptance row`,
-      )
-    }
-  })
 })

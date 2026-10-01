@@ -53,6 +53,7 @@ interface PreparedRun {
   journalPath: string
   repeated?: boolean
   controls?: Array<{ control: string; value: string; blocking: boolean; effect: string }>
+  verification: Array<{ invariant: string; observed: string; result: string }>
 }
 
 interface PublicationRun {
@@ -74,6 +75,7 @@ interface PublicationRun {
     blocking: boolean
     effect: string
   }>
+  verification: Array<{ invariant: string; observed: string; result: string }>
 }
 
 /** The publication document, with the fields a test narrows or overrides typed. */

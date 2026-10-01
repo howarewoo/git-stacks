@@ -21,6 +21,7 @@ import { pathToFileURL } from 'node:url'
 import { prepareStack } from '../../../../.agents/skills/flatten-pr-graph/scripts/prepare-stack.mjs'
 import { publishStack } from '../../../../.agents/skills/flatten-pr-graph/scripts/publish-stack.mjs'
 import type { ScratchWorkspace, UserFingerprint, World } from './real-git'
+import type { PinnedEdge } from './production-verdict'
 
 export const CONTRACT_VERSION = 'flatten-pr-graph/1'
 export const DEFAULT_BRANCH = 'main'
@@ -310,7 +311,9 @@ export function __state() {
       return (await loaded()).__calls() as unknown as Promise<ProviderCall[]>
     },
     async pullRequests() {
-      return (await loaded()).__state() as unknown as Promise<ProviderAdapter['pullRequests']>
+      return (await loaded()).__state() as unknown as Awaited<
+        ReturnType<ProviderAdapter['pullRequests']>
+      >
     },
   }
 }
@@ -347,6 +350,13 @@ export interface PublishOptions {
 
 /** Everything a production case needs, over one disposable real Git world. */
 export class Production {
+  /**
+   * The most recent authorized snapshot this driver was asked to serve, kept so the
+   * independent verdict can derive hard dependency edges from the evidence that existed
+   * before the run rather than from anything the helper produced.
+   */
+  lastPinned: PinnedPullRequest[] = []
+
   constructor(readonly world: World) {}
 
   prepareRun(): string {
@@ -534,7 +544,26 @@ export class Production {
     return publishStack(raw as never, conversations as never) as Promise<PublicationResult>
   }
 
+  /**
+   * The pull requests this run was authorized against, in the oracle's vocabulary, so the
+   * independent verdict can derive hard dependency edges from the pre-run evidence rather
+   * than from any document the helper produced.
+   */
+  pinned(): PinnedEdge[] {
+    return this.lastPinned.map((pr) => ({
+      number: pr.number,
+      title: pr.title,
+      state: pr.state,
+      draft: pr.draft,
+      base: pr.baseRef.replace('refs/heads/', ''),
+      head: pr.headRef.replace('refs/heads/', ''),
+      headRepository: pr.headRepository,
+      author: 'production-matrix',
+    }))
+  }
+
   adapter(pullRequests: PinnedPullRequest[], script: ProviderScript = {}): ProviderAdapter {
+    this.lastPinned = pullRequests
     return writeProviderModule(this.world, pullRequests, script)
   }
 }
