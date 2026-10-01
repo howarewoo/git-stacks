@@ -341,6 +341,14 @@ export interface GitHubFixtureState {
      */
     description?: string | null
     topics?: string[]
+    /**
+     * The grants and invitations this repository holds, when a request has made any.
+     * A second account is let in by an invitation it accepts, so the host has to keep
+     * what the first request granted: the state that is saved is the only place a later
+     * request can read the grant from.
+     */
+    permissions?: Record<string, GitHubFixtureRole>
+    invitations?: GitHubFixtureInvitation[]
   }
   currentUser: string
   nextNumber: number
@@ -579,6 +587,15 @@ export interface GitHubHarness {
   statePath: string
   env: NodeJS.ProcessEnv
   /**
+   * Only the variables above that this harness sets, without the process it inherited.
+   *
+   * `env` is a full snapshot, because the commands it starts need the environment they
+   * would have had. Publishing it into a process that has just retired ambient
+   * verification switches would put every one of them back, so a caller that installs
+   * this host into the process environment takes these keys and no others.
+   */
+  readonly ownedEnvironment: Readonly<NodeJS.ProcessEnv>
+  /**
    * The directory whose `<owner>/<name>.git` subdirectories a host serving Git over HTTP
    * resolves a request path against. Every repository this harness creates is created
    * here, so one host serves the clone, a fork and a foreign repository.
@@ -808,12 +825,7 @@ function runFixtureCommand(
     // reaches github.com instead of failing, so the fixture refuses it and says why.
     if (!harness) {
       return Promise.reject(
-        commandError(
-          file,
-          args,
-          2,
-          `the GitHub fixture has no harness to answer ${command}\n`,
-        ),
+        commandError(file, args, 2, `the GitHub fixture has no harness to answer ${command}\n`),
       )
     }
     return command === 'git'
@@ -1046,8 +1058,7 @@ export async function createGitHubHarness(
     // The API double and the transport log read the fixture through the
     // environment, because they are loaded as plain modules the test process
     // imports rather than as the intercepted `gh` and `git` commands.
-    const env: NodeJS.ProcessEnv = {
-      ...process.env,
+    const ownedEnvironment: NodeJS.ProcessEnv = {
       GIT_STACKS_FIXTURE_ROOT: root,
       GIT_STACKS_FIXTURE_STATE: statePath,
       GIT_STACKS_FIXTURE_BARE: bare,
@@ -1057,10 +1068,14 @@ export async function createGitHubHarness(
       GH_TOKEN: 'fixture-token',
       GH_REPO: 'acme/widgets',
     }
-    // The directory a host serving `/<owner>/<name>.git` resolves against. The repository
-    // this harness created first already lives here, and every repository created after it
-    // is created beside it, so one socket serves all of them.
-    const projectsRoot = join(root, dirname(options.barePath ?? 'remote.git'))
+    const env: NodeJS.ProcessEnv = { ...process.env, ...ownedEnvironment }
+    // The directory a host serving `/<owner>/<name>.git` resolves against. It is two
+    // levels above the primary repository's bare, because the primary already sits
+    // inside an owner directory: taking only the parent would put every repository
+    // created afterwards one level too deep, where the host is not serving anything,
+    // and a Git request for one of them would be answered by the API instead of by a
+    // protocol. The double derives the same directory from the path it is given.
+    const projectsRoot = join(root, dirname(dirname(options.barePath ?? 'remote/acme/widgets.git')))
 
     const readFixtureState = async (): Promise<GitHubFixtureState> =>
       JSON.parse(await readFile(statePath, 'utf8')) as GitHubFixtureState
@@ -1091,6 +1106,7 @@ export async function createGitHubHarness(
       statePath,
       projectsRoot,
       env,
+      ownedEnvironment,
       overrideGit(override) {
         fixture.overrides.unshift(override)
       },
@@ -1155,10 +1171,14 @@ export async function createGitHubHarness(
         const isPrimary = input.fullName.toLowerCase() === primaryFullName.toLowerCase()
         const defaultBranch = input.defaultBranch ?? state.repository.defaultBranch
         const barePath = isPrimary ? bare : join(projectsRoot, `${input.fullName}.git`)
+        // The primary repository is the one entry that is never in the registry: it was
+        // created before this harness existed and is served from its own bare, which is
+        // the same resolution the API double makes when it is asked about it. Without
+        // that fallback a fork of the repository under test cannot be created at all.
         const forkOfBare = input.forkOf
-          ? registry.find(
-              (entry) => entry.fullName.toLowerCase() === input.forkOf?.toLowerCase(),
-            )?.bare
+          ? (registry.find((entry) => entry.fullName.toLowerCase() === input.forkOf?.toLowerCase())
+              ?.bare ??
+            (input.forkOf.toLowerCase() === primaryFullName.toLowerCase() ? bare : undefined))
           : undefined
         if (input.forkOf && !forkOfBare) {
           throw new Error(`a fork needs a served repository to fork: ${input.forkOf}`)
@@ -1214,7 +1234,6 @@ export async function createGitHubHarness(
       },
     }
     return harness
-
   } catch (error) {
     await rm(root, { recursive: true, force: true })
     throw error

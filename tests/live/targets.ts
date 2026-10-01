@@ -626,7 +626,7 @@ export class ControlledLiveTarget extends DisposableTarget {
     // than at two that agree with each other.
     const harness = await createGitHubHarness({ barePath: 'projects/acme/widgets.git' })
     const server = await startControlledGitHubHost({
-      projectsRoot: join(harness.root, 'projects'),
+      projectsRoot: harness.projectsRoot,
       git: harness.env.GIT_STACKS_REAL_GIT as string,
     })
     // From this line the run owns two local resources — a listening socket and a
@@ -691,7 +691,11 @@ export class ControlledLiveTarget extends DisposableTarget {
     // so the retired variables would still be in the process while every Git the
     // application's own services start inherits them.
     git.install()
-    Object.assign(process.env, harness.env, {
+    // The keys this host owns, not `harness.env`. That object is the whole process as
+    // it was before isolation, so merging it here would put every variable the install
+    // above just retired back into the process for the rest of the run — including, on
+    // this very path, a certificate check the run had already turned off for Git.
+    Object.assign(process.env, harness.ownedEnvironment, {
       GIT_STACKS_GITHUB_API_URL: server.url,
       GIT_STACKS_GITHUB_TRANSPORT: 'direct',
     })
@@ -831,8 +835,15 @@ export class ControlledLiveTarget extends DisposableTarget {
       pending: true,
       actor: subject.owner,
     })
+    const foreignPath = join(this.root, `foreign-${kind}`)
+    await createForeignRepository({
+      path: foreignPath,
+      remote: this.server.cloneUrl(subject.fullName),
+      branch,
+      env: this.git.env,
+    })
     const clone = new LocalGitWorkspace({
-      path: join(this.root, `foreign-${kind}`),
+      path: foreignPath,
       git: this.harness.env.GIT_STACKS_REAL_GIT as string,
       origin: this.server.cloneUrl(subject.fullName),
       cloneSource: this.server.cloneUrl(subject.fullName),
@@ -1151,8 +1162,10 @@ export class GitHubLiveTarget extends DisposableTarget {
       pending: true,
       actor: owner,
     })
+    const foreignPath = join(this.root, `foreign-${kind}`)
+    await createForeignRepository({ path: foreignPath, remote, branch, env: this.git.env })
     const clone = new LocalGitWorkspace({
-      path: join(this.root, `foreign-${kind}`),
+      path: foreignPath,
       git: resolveRealGit(),
       origin: remote,
       cloneSource: remote,
@@ -1348,6 +1361,32 @@ async function readRepositoryIdentity(
 }
 
 /**
+ * The repository a foreign branch is pushed from, created before anything points a
+ * remote at it.
+ *
+ * A workspace publishes its origin and the authority it trusts the moment it is
+ * constructed, so the clone has to exist first: there is no repository for it to
+ * name, and a command run against a directory that is not yet a repository fails on
+ * the very step that is supposed to make it one.
+ */
+async function createForeignRepository(input: {
+  path: string
+  remote: string
+  branch: string
+  env: NodeJS.ProcessEnv
+}): Promise<void> {
+  await mkdir(input.path, { recursive: true })
+  execFileSync(resolveRealGit(), ['init', '-b', input.branch, input.path], {
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: input.env,
+  })
+  execFileSync(resolveRealGit(), ['-C', input.path, 'remote', 'add', 'origin', input.remote], {
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: input.env,
+  })
+}
+
+/**
  * A clone of a real repository with one real commit pushed to a branch, the way a person
  * makes one: with Git, over the repository's own HTTPS remote.
  */
@@ -1357,12 +1396,6 @@ async function seedAndPush(
   branch: string,
   marker: string,
 ): Promise<void> {
-  const git = resolveRealGit()
-  await mkdir(workspace.path, { recursive: true })
-  execFileSync(git, ['init', '-b', branch, workspace.path], {
-    stdio: ['ignore', 'pipe', 'pipe'],
-    env: workspace.env,
-  })
   await writeFile(
     join(workspace.path, 'git-stacks-live-e2e-foreign.txt'),
     `Foreign subject for ${marker}\n`,
@@ -1370,7 +1403,6 @@ async function seedAndPush(
   )
   workspace.git(['add', '--', 'git-stacks-live-e2e-foreign.txt'])
   workspace.git(['commit', '-m', 'foreign subject for the live suite'])
-  workspace.git(['remote', 'add', 'origin', remote])
   workspace.git(['remote', 'set-url', 'origin', remote])
   workspace.git(['remote', 'set-url', '--push', 'origin', remote])
   await workspace.push(branch)
