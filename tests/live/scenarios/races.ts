@@ -23,7 +23,6 @@ async function publishPreview(ctx: LiveScenarioContext, branch: string): Promise
   return preview
 }
 
-
 /** How many pull requests the host currently has open for a head branch. */
 async function openPullRequestsFor(ctx: LiveScenarioContext, branch: string): Promise<number[]> {
   const listed = await ctx.transport.paginate<Record<string, unknown>>({

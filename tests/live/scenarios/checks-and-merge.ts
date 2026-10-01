@@ -344,7 +344,10 @@ export const mergeScenarios: readonly LiveScenario[] = [
         // rather than through a flag this scenario set.
         const snapshot = await getSnapshot(ctx.workspace.path)
         const preview = await previewStack(ctx.workspace.path, snapshot, 'merge', layer.branch)
-        assert(preview.merge !== null, `the second merge preview for ${layer.branch} carried no plan`)
+        assert(
+          preview.merge !== null,
+          `the second merge preview for ${layer.branch} carried no plan`,
+        )
         assert(
           preview.merge.actions.includes('merge_queue'),
           `the preview offers ${preview.merge.actions.join(', ')} now that ${trunk} has answered with an enqueue`,

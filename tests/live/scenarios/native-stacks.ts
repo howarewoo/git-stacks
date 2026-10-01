@@ -63,10 +63,7 @@ async function openPullRequestsFor(ctx: LiveScenarioContext, branch: string): Pr
  * has to go through it: a create sent from a scenario's own call carries no intent
  * for the journal to recover, so the production recovery is never exercised.
  */
-async function unpublishedPreview(
-  ctx: LiveScenarioContext,
-  branch: string,
-): Promise<StackPreview> {
+async function unpublishedPreview(ctx: LiveScenarioContext, branch: string): Promise<StackPreview> {
   const snapshot = await getSnapshot(ctx.workspace.path)
   const preview = await previewStack(ctx.workspace.path, snapshot, 'publish', branch)
   assert(preview.publish !== null, `the publish preview for ${branch} carried no plan`)
@@ -92,7 +89,10 @@ async function submitPreview(ctx: LiveScenarioContext, preview: StackPreview): P
 }
 
 /** The stacks that hold any of these pull requests, by number. */
-async function stacksHolding(ctx: LiveScenarioContext, numbers: readonly number[]): Promise<number[]> {
+async function stacksHolding(
+  ctx: LiveScenarioContext,
+  numbers: readonly number[],
+): Promise<number[]> {
   const { owner, repo } = ownerAndRepo(ctx.repository)
   const listed = await listPullRequestStacks(owner, repo, {
     host: ctx.host,
@@ -129,10 +129,7 @@ async function readForeignPullRequest(
     `the origin for ${subject.fullName} points at ${parsed.host}, not the host this run talks to`,
   )
   const data = await getGitHubData(ctx.workspace.path, remote)
-  assert(
-    data.available,
-    `the application could not read ${subject.fullName}: ${data.message}`,
-  )
+  assert(data.available, `the application could not read ${subject.fullName}: ${data.message}`)
   const found = data.pullRequests.find((entry) => entry.number === subject.number)
   assert(
     found !== undefined,

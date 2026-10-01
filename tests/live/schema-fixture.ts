@@ -47,13 +47,19 @@ function parseProvenance(value: unknown): Record<string, ObservedProvenance> {
   if (!isRecord(value)) return {}
   const provenance: Record<string, ObservedProvenance> = {}
   for (const [id, entry] of Object.entries(value)) {
-    if (!isRecord(entry) || typeof entry.source !== 'string' || typeof entry.observedAt !== 'string')
+    if (
+      !isRecord(entry) ||
+      typeof entry.source !== 'string' ||
+      typeof entry.observedAt !== 'string'
+    )
       continue
     provenance[id] = {
       source: entry.source,
       observedAt: entry.observedAt,
       ...(Array.isArray(entry.unobserved)
-        ? { unobserved: entry.unobserved.filter((item): item is string => typeof item === 'string') }
+        ? {
+            unobserved: entry.unobserved.filter((item): item is string => typeof item === 'string'),
+          }
         : {}),
     }
   }

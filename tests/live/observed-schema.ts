@@ -194,7 +194,8 @@ export const SCHEMA_PROBES: readonly SchemaProbe[] = [
     unpinned: [
       {
         path: '[].pull_requests[].merged_at',
-        reason: 'only closed stacks were observed, so an open member carrying the field is unproven',
+        reason:
+          'only closed stacks were observed, so an open member carrying the field is unproven',
       },
     ],
   },
@@ -289,9 +290,7 @@ export function mergeObservedFields(fields: readonly ObservedField[]): ObservedF
   }
   return [...byPath.entries()]
     .sort(([left], [right]) => left.localeCompare(right))
-    .flatMap(([path, types]) =>
-      [...types].sort().map((type): ObservedField => ({ path, type })),
-    )
+    .flatMap(([path, types]) => [...types].sort().map((type): ObservedField => ({ path, type })))
 }
 
 export interface SchemaDrift {
@@ -300,7 +299,6 @@ export interface SchemaDrift {
   readonly path: string
   readonly detail: string
 }
-
 
 /**
  * What a live host answered for each probe, in a form that can be committed.
