@@ -1,0 +1,84 @@
+{
+  "contractVersion": "flatten-pr-graph/1",
+  "intent": "execute",
+  "order": [
+    {
+      "position": 1,
+      "number": 12,
+      "fromBase": "main",
+      "toBase": "main",
+      "change": "none"
+    },
+    {
+      "position": 2,
+      "number": 13,
+      "fromBase": "main",
+      "toBase": "feat-a",
+      "change": "base-change"
+    }
+  ],
+  "hardDependencies": [
+    {
+      "before": 12,
+      "after": 13,
+      "source": "pr-base",
+      "evidence": "PR #13 head feat-b contains the prepared state of #12 (2a1b3c5)"
+    }
+  ],
+  "ambiguities": [],
+  "objective": {
+    "declared": [
+      "estimated-conflict-resolution-work",
+      "unnecessary-history-disruption",
+      "stable-tie-break"
+    ],
+    "estimates": [
+      {
+        "pair": [12, 13],
+        "kind": "measured-merge",
+        "value": 0,
+        "confidence": "high"
+      },
+      {
+        "pair": [12, 14],
+        "kind": "unknown",
+        "value": null,
+        "confidence": "unknown"
+      }
+    ],
+    "qualification": "best-found",
+    "budget": { "probes": 6, "exhausted": true },
+    "unknownTreatedAsZero": false
+  },
+  "proposedWrites": [
+    {
+      "kind": "ref-update",
+      "target": "refs/heads/feat-b",
+      "change": "head-update",
+      "reason": "integrate the prepared state of PR #12 into PR #13"
+    },
+    {
+      "kind": "pr-base-update",
+      "target": "13",
+      "change": "base-change",
+      "reason": "retarget PR #13 onto the head of PR #12"
+    }
+  ],
+  "prohibitedActivitiesNotPerformed": [
+    {
+      "activity": "run-or-await-checks",
+      "performed": false,
+      "evidence": "no check endpoint read; remote-triggered runs left alone"
+    },
+    {
+      "activity": "merge-close-or-reopen-pr",
+      "performed": false,
+      "evidence": "provider action log contains no merge, close, or reopen"
+    },
+    {
+      "activity": "disable-auto-merge",
+      "performed": false,
+      "evidence": "landing preflight read no enabled auto-merge; nothing was disabled"
+    }
+  ]
+}

@@ -1,0 +1,262 @@
+{
+  "contractVersion": "flatten-pr-graph/1",
+  "status": "published",
+  "intent": "execute",
+  "snapshot": {
+    "contractVersion": "flatten-pr-graph/1",
+    "capturedAt": "2026-10-01T09:00:00.000Z",
+    "intent": "execute",
+    "repository": {
+      "host": "github.com",
+      "owner": "acme",
+      "name": "widgets",
+      "defaultBranch": "main",
+      "verified": true
+    },
+    "root": {
+      "ref": "refs/heads/main",
+      "oid": "1f0c2a9b3d4e5f60718293a4b5c6d7e8f9012345",
+      "source": "repository-default"
+    },
+    "selection": {
+      "requested": ["12", "#13"],
+      "resolved": [
+        {
+          "number": 12,
+          "url": "https://github.com/acme/widgets/pull/12",
+          "state": "open",
+          "isDraft": false,
+          "headRef": "refs/heads/feat-a",
+          "headOid": "2a1b3c5d7e9f00112233445566778899aabbccdd",
+          "headRepository": "acme/widgets",
+          "baseRef": "refs/heads/main",
+          "baseOid": "1f0c2a9b3d4e5f60718293a4b5c6d7e8f9012345"
+        },
+        {
+          "number": 13,
+          "url": "https://github.com/acme/widgets/pull/13",
+          "state": "open",
+          "isDraft": true,
+          "headRef": "refs/heads/feat-b",
+          "headOid": "3b2c4d6e8f00112233445566778899aabbccddee",
+          "headRepository": "acme/widgets",
+          "baseRef": "refs/heads/main",
+          "baseOid": "1f0c2a9b3d4e5f60718293a4b5c6d7e8f9012345"
+        }
+      ],
+      "duplicatesCollapsed": []
+    },
+    "refs": [
+      { "ref": "refs/heads/main", "oid": "1f0c2a9b3d4e5f60718293a4b5c6d7e8f9012345" },
+      { "ref": "refs/heads/feat-a", "oid": "2a1b3c5d7e9f00112233445566778899aabbccdd" },
+      { "ref": "refs/heads/feat-b", "oid": "3b2c4d6e8f00112233445566778899aabbccddee" },
+      { "ref": "refs/heads/unrelated", "oid": "6e5f70912233445566778899aabbccddeeff0011" }
+    ],
+    "userWorkspace": {
+      "present": true,
+      "headRef": "refs/heads/wip",
+      "dirtyPaths": ["src/draft.ts"],
+      "stashCount": 1,
+      "configDigest": "sha256:0d1a2b3c"
+    },
+    "history": { "complete": true, "shallow": false, "grafted": 0 },
+    "landing": { "autoMergeEnabledOn": [], "queueBoundBases": [], "unreadableProtectionBases": [] }
+  },
+  "plan": {
+    "contractVersion": "flatten-pr-graph/1",
+    "intent": "execute",
+    "order": [
+      { "position": 1, "number": 12, "fromBase": "main", "toBase": "main", "change": "none" },
+      {
+        "position": 2,
+        "number": 13,
+        "fromBase": "main",
+        "toBase": "feat-a",
+        "change": "base-change"
+      }
+    ],
+    "hardDependencies": [
+      {
+        "before": 12,
+        "after": 13,
+        "source": "pr-base",
+        "evidence": "PR #13 head feat-b contains the prepared state of #12"
+      }
+    ],
+    "ambiguities": [],
+    "objective": {
+      "declared": [
+        "estimated-conflict-resolution-work",
+        "unnecessary-history-disruption",
+        "stable-tie-break"
+      ],
+      "estimates": [
+        { "pair": [12, 13], "kind": "measured-merge", "value": 0, "confidence": "high" }
+      ],
+      "qualification": "best-found",
+      "budget": { "probes": 6, "exhausted": true },
+      "unknownTreatedAsZero": false
+    },
+    "proposedWrites": [
+      {
+        "kind": "ref-update",
+        "target": "refs/heads/feat-b",
+        "change": "head-update",
+        "reason": "integrate the prepared state of PR #12 into PR #13"
+      },
+      {
+        "kind": "pr-base-update",
+        "target": "13",
+        "change": "base-change",
+        "reason": "retarget PR #13 onto the head of PR #12"
+      }
+    ],
+    "prohibitedActivitiesNotPerformed": [
+      {
+        "activity": "run-or-await-checks",
+        "performed": false,
+        "evidence": "no check endpoint read"
+      }
+    ]
+  },
+  "preparation": {
+    "contractVersion": "flatten-pr-graph/1",
+    "workspaceKind": "task-owned-isolated",
+    "branches": [
+      {
+        "number": 12,
+        "originalHead": "2a1b3c5d7e9f00112233445566778899aabbccdd",
+        "preparedHead": "2a1b3c5d7e9f00112233445566778899aabbccdd",
+        "basedOn": "1f0c2a9b3d4e5f60718293a4b5c6d7e8f9012345",
+        "retainedOriginalCommits": ["2a1b3c5d7e9f00112233445566778899aabbccdd"],
+        "historyPolicy": "preserve-original-commits"
+      },
+      {
+        "number": 13,
+        "originalHead": "3b2c4d6e8f00112233445566778899aabbccddee",
+        "preparedHead": "5d4e6f80112233445566778899aabbccddeeff00",
+        "basedOn": "2a1b3c5d7e9f00112233445566778899aabbccdd",
+        "retainedOriginalCommits": ["3b2c4d6e8f00112233445566778899aabbccddee"],
+        "historyPolicy": "preserve-original-commits"
+      }
+    ],
+    "lostOriginalCommits": [],
+    "cumulativeIntegration": [
+      {
+        "number": 13,
+        "integratedPreparedStateOf": 12,
+        "evidence": "prepared head of #12 is an ancestor of prepared head of #13"
+      }
+    ],
+    "conflicts": [
+      { "number": 13, "path": "src/parser.ts", "resolution": "both-sides-with-stated-intent" }
+    ],
+    "unresolved": [],
+    "indexState": {
+      "unmergedEntries": [],
+      "operationsInProgress": [],
+      "conflictMarkersInTree": []
+    }
+  },
+  "publication": {
+    "contractVersion": "flatten-pr-graph/1",
+    "attempts": [
+      {
+        "sequence": 1,
+        "kind": "ref-update",
+        "target": "refs/heads/feat-b",
+        "from": "3b2c4d6e8f00112233445566778899aabbccddee",
+        "to": "5d4e6f80112233445566778899aabbccddeeff00",
+        "acknowledged": true,
+        "lease": {
+          "expectedRemote": "3b2c4d6e8f00112233445566778899aabbccddee",
+          "usedForceWithLease": true
+        },
+        "outcome": "acknowledged"
+      },
+      {
+        "sequence": 2,
+        "kind": "pr-base-update",
+        "target": "13",
+        "from": "1f0c2a9b3d4e5f60718293a4b5c6d7e8f9012345",
+        "to": "2a1b3c5d7e9f00112233445566778899aabbccdd",
+        "acknowledged": true,
+        "outcome": "acknowledged"
+      }
+    ],
+    "confirmed": [
+      {
+        "kind": "ref-update",
+        "target": "refs/heads/feat-b",
+        "oid": "5d4e6f80112233445566778899aabbccddeeff00"
+      },
+      {
+        "kind": "pr-base-update",
+        "target": "13",
+        "oid": "2a1b3c5d7e9f00112233445566778899aabbccdd"
+      }
+    ],
+    "unconfirmed": [],
+    "denials": [],
+    "remoteClaims": [
+      {
+        "kind": "ref-oid",
+        "target": "refs/heads/feat-b",
+        "observed": "5d4e6f80112233445566778899aabbccddeeff00",
+        "observedAt": "2026-10-01T09:05:12.000Z"
+      },
+      {
+        "kind": "pr-base",
+        "target": "13",
+        "observed": "refs/heads/feat-a",
+        "observedAt": "2026-10-01T09:05:12.000Z"
+      }
+    ],
+    "interrupted": false,
+    "concurrency": { "leaseHeld": true, "conflictingRemoteMoveDetected": false }
+  },
+  "ignoredChecks": {
+    "policy": "never-run-poll-wait-rerun-repair-or-gate",
+    "executed": [],
+    "suppressedOrWeakened": [],
+    "remoteTriggeredLeftAlone": true
+  },
+  "prohibitedActivities": [
+    { "activity": "run-or-await-checks", "performed": false, "evidence": "no check endpoint read" },
+    {
+      "activity": "merge-close-or-reopen-pr",
+      "performed": false,
+      "evidence": "provider action log has no merge, close, or reopen"
+    }
+  ],
+  "uncertainty": [
+    {
+      "item": "resolution of src/parser.ts",
+      "why": "structurally clean; only the human rubric can say whether both intents survived"
+    }
+  ],
+  "nextSafeAction": {
+    "action": "re-read the two published PR bases and heads before any further change",
+    "requires": ["explicit follow-up request"]
+  },
+  "semanticReview": {
+    "automated": false,
+    "rubric": "references/contract.md#102-semantic-intent-rubric-human-review-not-automatable",
+    "humanReviewRequired": true,
+    "reviewerVerdict": "unreviewed"
+  },
+  "verification": [
+    {
+      "invariant": "topology.chain",
+      "method": "re-read PR base/head from the provider after the last write",
+      "observed": "main <- feat-a (#12) <- feat-b (#13)",
+      "result": "pass"
+    },
+    {
+      "invariant": "remote.claims-match",
+      "method": "provider read after publication",
+      "observed": "feat-b ref and PR #13 base match the claimed values",
+      "result": "pass"
+    }
+  ]
+}

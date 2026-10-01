@@ -1,0 +1,39 @@
+{
+  "contractVersion": "flatten-pr-graph/1",
+  "workspaceKind": "task-owned-isolated",
+  "branches": [
+    {
+      "number": 12,
+      "originalHead": "2a1b3c5d7e9f00112233445566778899aabbccdd",
+      "preparedHead": "2a1b3c5d7e9f00112233445566778899aabbccdd",
+      "basedOn": "1f0c2a9b3d4e5f60718293a4b5c6d7e8f9012345",
+      "retainedOriginalCommits": ["2a1b3c5d7e9f00112233445566778899aabbccdd"],
+      "historyPolicy": "preserve-original-commits"
+    },
+    {
+      "number": 13,
+      "originalHead": "3b2c4d6e8f00112233445566778899aabbccddee",
+      "preparedHead": "5d4e6f80112233445566778899aabbccddeeff00",
+      "basedOn": "2a1b3c5d7e9f00112233445566778899aabbccdd",
+      "retainedOriginalCommits": ["3b2c4d6e8f00112233445566778899aabbccddee"],
+      "historyPolicy": "preserve-original-commits"
+    }
+  ],
+  "lostOriginalCommits": [],
+  "cumulativeIntegration": [
+    {
+      "number": 13,
+      "integratedPreparedStateOf": 12,
+      "evidence": "prepared head 2a1b3c5 of #12 is an ancestor of prepared head 5d4e6f8 of #13"
+    }
+  ],
+  "conflicts": [
+    { "number": 13, "path": "src/parser.ts", "resolution": "both-sides-with-stated-intent" }
+  ],
+  "unresolved": [],
+  "indexState": {
+    "unmergedEntries": [],
+    "operationsInProgress": [],
+    "conflictMarkersInTree": []
+  }
+}

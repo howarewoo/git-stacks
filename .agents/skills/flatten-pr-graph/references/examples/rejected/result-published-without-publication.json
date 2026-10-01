@@ -1,0 +1,100 @@
+{
+  "contractVersion": "flatten-pr-graph/1",
+  "status": "published",
+  "intent": "execute",
+  "snapshot": {
+    "contractVersion": "flatten-pr-graph/1",
+    "capturedAt": "2026-10-01T09:00:00.000Z",
+    "intent": "execute",
+    "repository": {
+      "host": "github.com",
+      "owner": "acme",
+      "name": "widgets",
+      "defaultBranch": "main",
+      "verified": true
+    },
+    "root": {
+      "ref": "refs/heads/main",
+      "oid": "1f0c2a9b3d4e5f60718293a4b5c6d7e8f9012345",
+      "source": "repository-default"
+    },
+    "selection": {
+      "requested": ["12"],
+      "resolved": [
+        {
+          "number": 12,
+          "url": "https://github.com/acme/widgets/pull/12",
+          "state": "open",
+          "isDraft": false,
+          "headRef": "refs/heads/feat-a",
+          "headOid": "2a1b3c5d7e9f00112233445566778899aabbccdd",
+          "headRepository": "acme/widgets",
+          "baseRef": "refs/heads/main",
+          "baseOid": "1f0c2a9b3d4e5f60718293a4b5c6d7e8f9012345"
+        }
+      ],
+      "duplicatesCollapsed": []
+    },
+    "refs": [{ "ref": "refs/heads/main", "oid": "1f0c2a9b3d4e5f60718293a4b5c6d7e8f9012345" }],
+    "userWorkspace": {
+      "present": false,
+      "headRef": null,
+      "dirtyPaths": [],
+      "stashCount": 0,
+      "configDigest": "sha256:0d1a2b3c"
+    },
+    "history": { "complete": true, "shallow": false, "grafted": 0 },
+    "landing": { "autoMergeEnabledOn": [], "queueBoundBases": [], "unreadableProtectionBases": [] }
+  },
+  "plan": {
+    "contractVersion": "flatten-pr-graph/1",
+    "intent": "execute",
+    "order": [],
+    "hardDependencies": [],
+    "ambiguities": [],
+    "objective": {
+      "declared": [
+        "estimated-conflict-resolution-work",
+        "unnecessary-history-disruption",
+        "stable-tie-break"
+      ],
+      "estimates": [],
+      "qualification": "heuristic",
+      "budget": { "probes": 0, "exhausted": false },
+      "unknownTreatedAsZero": false
+    },
+    "proposedWrites": [],
+    "prohibitedActivitiesNotPerformed": [
+      {
+        "activity": "run-or-await-checks",
+        "performed": false,
+        "evidence": "no check endpoint read"
+      }
+    ]
+  },
+  "ignoredChecks": {
+    "policy": "never-run-poll-wait-rerun-repair-or-gate",
+    "executed": [],
+    "suppressedOrWeakened": [],
+    "remoteTriggeredLeftAlone": true
+  },
+  "prohibitedActivities": [
+    { "activity": "run-or-await-checks", "performed": false, "evidence": "no check endpoint read" }
+  ],
+  "uncertainty": [{ "item": "none recorded", "why": "invalid document under test" }],
+  "nextSafeAction": { "action": "stop", "requires": [] },
+  "semanticReview": {
+    "automated": false,
+    "rubric": "references/contract.md#102-semantic-intent-rubric-human-review-not-automatable",
+    "humanReviewRequired": true,
+    "reviewerVerdict": "unreviewed"
+  },
+  "verification": [
+    {
+      "invariant": "status.legality",
+      "method": "claim",
+      "observed": "published without a publication document",
+      "result": "pass"
+    }
+  ]
+}

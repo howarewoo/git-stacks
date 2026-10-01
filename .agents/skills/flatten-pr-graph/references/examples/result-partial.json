@@ -1,0 +1,253 @@
+{
+  "contractVersion": "flatten-pr-graph/1",
+  "status": "partial",
+  "intent": "execute",
+  "snapshot": {
+    "contractVersion": "flatten-pr-graph/1",
+    "capturedAt": "2026-10-01T09:00:00.000Z",
+    "intent": "execute",
+    "repository": {
+      "host": "github.com",
+      "owner": "acme",
+      "name": "widgets",
+      "defaultBranch": "main",
+      "verified": true
+    },
+    "root": {
+      "ref": "refs/heads/main",
+      "oid": "1f0c2a9b3d4e5f60718293a4b5c6d7e8f9012345",
+      "source": "repository-default"
+    },
+    "selection": {
+      "requested": ["12", "13", "14"],
+      "resolved": [
+        {
+          "number": 12,
+          "url": "https://github.com/acme/widgets/pull/12",
+          "state": "open",
+          "isDraft": false,
+          "headRef": "refs/heads/feat-a",
+          "headOid": "2a1b3c5d7e9f00112233445566778899aabbccdd",
+          "headRepository": "acme/widgets",
+          "baseRef": "refs/heads/main",
+          "baseOid": "1f0c2a9b3d4e5f60718293a4b5c6d7e8f9012345"
+        },
+        {
+          "number": 13,
+          "url": "https://github.com/acme/widgets/pull/13",
+          "state": "open",
+          "isDraft": false,
+          "headRef": "refs/heads/feat-b",
+          "headOid": "3b2c4d6e8f00112233445566778899aabbccddee",
+          "headRepository": "acme/widgets",
+          "baseRef": "refs/heads/main",
+          "baseOid": "1f0c2a9b3d4e5f60718293a4b5c6d7e8f9012345"
+        },
+        {
+          "number": 14,
+          "url": "https://github.com/acme/widgets/pull/14",
+          "state": "open",
+          "isDraft": false,
+          "headRef": "refs/heads/feat-c",
+          "headOid": "4c5d7e9f00112233445566778899aabbccddeeff",
+          "headRepository": "acme/widgets",
+          "baseRef": "refs/heads/main",
+          "baseOid": "1f0c2a9b3d4e5f60718293a4b5c6d7e8f9012345"
+        }
+      ],
+      "duplicatesCollapsed": []
+    },
+    "refs": [
+      { "ref": "refs/heads/main", "oid": "1f0c2a9b3d4e5f60718293a4b5c6d7e8f9012345" },
+      { "ref": "refs/heads/feat-a", "oid": "2a1b3c5d7e9f00112233445566778899aabbccdd" },
+      { "ref": "refs/heads/feat-b", "oid": "3b2c4d6e8f00112233445566778899aabbccddee" },
+      { "ref": "refs/heads/feat-c", "oid": "4c5d7e9f00112233445566778899aabbccddeeff" }
+    ],
+    "userWorkspace": {
+      "present": false,
+      "headRef": null,
+      "dirtyPaths": [],
+      "stashCount": 0,
+      "configDigest": "sha256:0d1a2b3c"
+    },
+    "history": { "complete": true, "shallow": false, "grafted": 0 },
+    "landing": { "autoMergeEnabledOn": [], "queueBoundBases": [], "unreadableProtectionBases": [] }
+  },
+  "plan": {
+    "contractVersion": "flatten-pr-graph/1",
+    "intent": "execute",
+    "order": [
+      { "position": 1, "number": 12, "fromBase": "main", "toBase": "main", "change": "none" },
+      {
+        "position": 2,
+        "number": 13,
+        "fromBase": "main",
+        "toBase": "feat-a",
+        "change": "base-change"
+      },
+      {
+        "position": 3,
+        "number": 14,
+        "fromBase": "main",
+        "toBase": "feat-b",
+        "change": "base-change"
+      }
+    ],
+    "hardDependencies": [],
+    "ambiguities": [],
+    "objective": {
+      "declared": [
+        "estimated-conflict-resolution-work",
+        "unnecessary-history-disruption",
+        "stable-tie-break"
+      ],
+      "estimates": [],
+      "qualification": "heuristic",
+      "budget": { "probes": 0, "exhausted": false },
+      "unknownTreatedAsZero": false
+    },
+    "proposedWrites": [
+      {
+        "kind": "pr-base-update",
+        "target": "13",
+        "change": "base-change",
+        "reason": "chain onto PR #12"
+      },
+      {
+        "kind": "pr-base-update",
+        "target": "14",
+        "change": "base-change",
+        "reason": "chain onto PR #13"
+      }
+    ],
+    "prohibitedActivitiesNotPerformed": [
+      {
+        "activity": "run-or-await-checks",
+        "performed": false,
+        "evidence": "no check endpoint read"
+      }
+    ]
+  },
+  "preparation": {
+    "contractVersion": "flatten-pr-graph/1",
+    "workspaceKind": "task-owned-isolated",
+    "branches": [
+      {
+        "number": 12,
+        "originalHead": "2a1b3c5d7e9f00112233445566778899aabbccdd",
+        "preparedHead": "2a1b3c5d7e9f00112233445566778899aabbccdd",
+        "basedOn": "1f0c2a9b3d4e5f60718293a4b5c6d7e8f9012345",
+        "retainedOriginalCommits": ["2a1b3c5d7e9f00112233445566778899aabbccdd"],
+        "historyPolicy": "preserve-original-commits"
+      }
+    ],
+    "lostOriginalCommits": [],
+    "cumulativeIntegration": [],
+    "conflicts": [],
+    "unresolved": [],
+    "indexState": {
+      "unmergedEntries": [],
+      "operationsInProgress": [],
+      "conflictMarkersInTree": []
+    }
+  },
+  "publication": {
+    "contractVersion": "flatten-pr-graph/1",
+    "attempts": [
+      {
+        "sequence": 1,
+        "kind": "pr-base-update",
+        "target": "13",
+        "from": "1f0c2a9b3d4e5f60718293a4b5c6d7e8f9012345",
+        "to": "2a1b3c5d7e9f00112233445566778899aabbccdd",
+        "acknowledged": true,
+        "outcome": "acknowledged"
+      },
+      {
+        "sequence": 2,
+        "kind": "pr-base-update",
+        "target": "14",
+        "from": "1f0c2a9b3d4e5f60718293a4b5c6d7e8f9012345",
+        "to": "3b2c4d6e8f00112233445566778899aabbccddee",
+        "acknowledged": false,
+        "outcome": "denied"
+      }
+    ],
+    "confirmed": [
+      {
+        "kind": "pr-base-update",
+        "target": "13",
+        "oid": "2a1b3c5d7e9f00112233445566778899aabbccdd"
+      }
+    ],
+    "unconfirmed": [
+      {
+        "kind": "pr-base-update",
+        "target": "14",
+        "why": "permission denied before the request left the client"
+      }
+    ],
+    "denials": [
+      {
+        "kind": "pr-base-update",
+        "target": "14",
+        "reason": "permission-denied",
+        "acknowledged": false
+      }
+    ],
+    "remoteClaims": [
+      {
+        "kind": "pr-base",
+        "target": "13",
+        "observed": "refs/heads/feat-a",
+        "observedAt": "2026-10-01T09:03:00.000Z"
+      },
+      {
+        "kind": "pr-base",
+        "target": "14",
+        "observed": "refs/heads/main",
+        "observedAt": "2026-10-01T09:03:00.000Z"
+      }
+    ],
+    "interrupted": false,
+    "concurrency": { "leaseHeld": true, "conflictingRemoteMoveDetected": false }
+  },
+  "recovery": {
+    "acknowledgedChanges": ["PR #13 base is now refs/heads/feat-a"],
+    "unconfirmedAttempts": ["PR #14 base update was denied and did not land"],
+    "recommended": "re-read PR #13 and PR #14 bases before retrying PR #14; do not retry blindly and do not close or recreate anything"
+  },
+  "ignoredChecks": {
+    "policy": "never-run-poll-wait-rerun-repair-or-gate",
+    "executed": [],
+    "suppressedOrWeakened": [],
+    "remoteTriggeredLeftAlone": true
+  },
+  "prohibitedActivities": [
+    { "activity": "run-or-await-checks", "performed": false, "evidence": "no check endpoint read" }
+  ],
+  "uncertainty": [
+    {
+      "item": "whether PR #13 now shows the intended diff against its new base",
+      "why": "structure is verified; application correctness still needs the human rubric"
+    }
+  ],
+  "nextSafeAction": {
+    "action": "re-read both PR bases, then ask for the missing write permission before retrying PR #14",
+    "requires": ["permission for pull request base updates on PR #14"]
+  },
+  "semanticReview": {
+    "automated": false,
+    "rubric": "references/contract.md#102-semantic-intent-rubric-human-review-not-automatable",
+    "humanReviewRequired": true,
+    "reviewerVerdict": "unreviewed"
+  },
+  "verification": [
+    {
+      "invariant": "remote.claims-match",
+      "method": "provider read after the second attempt",
+      "observed": "PR #13 base refs/heads/feat-a; PR #14 base still refs/heads/main",
+      "result": "pass"
+    }
+  ]
+}

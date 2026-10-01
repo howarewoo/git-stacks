@@ -1,0 +1,53 @@
+{
+  "contractVersion": "flatten-pr-graph/1",
+  "attempts": [
+    {
+      "sequence": 1,
+      "kind": "ref-update",
+      "target": "refs/heads/feat-b",
+      "from": "3b2c4d6e8f00112233445566778899aabbccddee",
+      "to": "5d4e6f80112233445566778899aabbccddeeff00",
+      "acknowledged": true,
+      "lease": {
+        "expectedRemote": "3b2c4d6e8f00112233445566778899aabbccddee",
+        "usedForceWithLease": true
+      },
+      "outcome": "acknowledged"
+    },
+    {
+      "sequence": 2,
+      "kind": "pr-base-update",
+      "target": "13",
+      "from": "1f0c2a9b3d4e5f60718293a4b5c6d7e8f9012345",
+      "to": "2a1b3c5d7e9f00112233445566778899aabbccdd",
+      "acknowledged": true,
+      "outcome": "acknowledged"
+    }
+  ],
+  "confirmed": [
+    {
+      "kind": "ref-update",
+      "target": "refs/heads/feat-b",
+      "oid": "5d4e6f80112233445566778899aabbccddeeff00"
+    },
+    { "kind": "pr-base-update", "target": "13", "oid": "2a1b3c5d7e9f00112233445566778899aabbccdd" }
+  ],
+  "unconfirmed": [],
+  "denials": [],
+  "remoteClaims": [
+    {
+      "kind": "ref-oid",
+      "target": "refs/heads/feat-b",
+      "observed": "5d4e6f80112233445566778899aabbccddeeff00",
+      "observedAt": "2026-10-01T09:05:12.000Z"
+    },
+    {
+      "kind": "pr-base",
+      "target": "13",
+      "observed": "refs/heads/feat-a",
+      "observedAt": "2026-10-01T09:05:12.000Z"
+    }
+  ],
+  "interrupted": false,
+  "concurrency": { "leaseHeld": true, "conflictingRemoteMoveDetected": false }
+}

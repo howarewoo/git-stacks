@@ -1,0 +1,35 @@
+{
+  "contractVersion": "flatten-pr-graph/1",
+  "id": "fan-out-two-branches",
+  "title": "Two independent PRs both based on the root become one chain",
+  "matrixEntry": "fan-out",
+  "kind": "matrix",
+  "selection": ["12", "13"],
+  "expect": {
+    "status": "published",
+    "intent": "execute",
+    "permittedActions": [
+      "read-pr-metadata",
+      "list-pull-requests",
+      "read-ref",
+      "read-ancestry",
+      "read-landing-arrangement",
+      "write-task-owned-scratch",
+      "update-pr-base",
+      "push-selected-head"
+    ],
+    "forbiddenActions": ["run-checks", "merge-pr", "close-pr", "delete-branch", "push-root"],
+    "chain": [12, 13],
+    "preserved": {
+      "root": true,
+      "unselectedRefs": ["refs/heads/unrelated"],
+      "userWorkspace": true
+    },
+    "mustDetectInvariant": "topology.chain",
+    "honestResult": true
+  },
+  "humanReview": {
+    "required": true,
+    "rubric": "references/contract.md#102-semantic-intent-rubric-human-review-not-automatable"
+  }
+}

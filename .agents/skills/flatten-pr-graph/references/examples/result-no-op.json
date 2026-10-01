@@ -1,0 +1,137 @@
+{
+  "contractVersion": "flatten-pr-graph/1",
+  "status": "no-op",
+  "intent": "execute",
+  "snapshot": {
+    "contractVersion": "flatten-pr-graph/1",
+    "capturedAt": "2026-10-01T09:00:00.000Z",
+    "intent": "execute",
+    "repository": {
+      "host": "github.com",
+      "owner": "acme",
+      "name": "widgets",
+      "defaultBranch": "main",
+      "verified": true
+    },
+    "root": {
+      "ref": "refs/heads/main",
+      "oid": "1f0c2a9b3d4e5f60718293a4b5c6d7e8f9012345",
+      "source": "repository-default"
+    },
+    "selection": {
+      "requested": ["12"],
+      "resolved": [
+        {
+          "number": 12,
+          "url": "https://github.com/acme/widgets/pull/12",
+          "state": "open",
+          "isDraft": false,
+          "headRef": "refs/heads/feat-a",
+          "headOid": "2a1b3c5d7e9f00112233445566778899aabbccdd",
+          "headRepository": "acme/widgets",
+          "baseRef": "refs/heads/main",
+          "baseOid": "1f0c2a9b3d4e5f60718293a4b5c6d7e8f9012345"
+        }
+      ],
+      "duplicatesCollapsed": []
+    },
+    "refs": [
+      { "ref": "refs/heads/main", "oid": "1f0c2a9b3d4e5f60718293a4b5c6d7e8f9012345" },
+      { "ref": "refs/heads/feat-a", "oid": "2a1b3c5d7e9f00112233445566778899aabbccdd" }
+    ],
+    "userWorkspace": {
+      "present": true,
+      "headRef": "refs/heads/feat-a",
+      "dirtyPaths": [],
+      "stashCount": 0,
+      "configDigest": "sha256:0d1a2b3c"
+    },
+    "history": { "complete": true, "shallow": false, "grafted": 0 },
+    "landing": { "autoMergeEnabledOn": [], "queueBoundBases": [], "unreadableProtectionBases": [] }
+  },
+  "plan": {
+    "contractVersion": "flatten-pr-graph/1",
+    "intent": "execute",
+    "order": [
+      { "position": 1, "number": 12, "fromBase": "main", "toBase": "main", "change": "none" }
+    ],
+    "hardDependencies": [],
+    "ambiguities": [],
+    "objective": {
+      "declared": [
+        "estimated-conflict-resolution-work",
+        "unnecessary-history-disruption",
+        "stable-tie-break"
+      ],
+      "estimates": [],
+      "qualification": "heuristic",
+      "budget": { "probes": 0, "exhausted": false },
+      "unknownTreatedAsZero": false
+    },
+    "proposedWrites": [
+      {
+        "kind": "ref-update",
+        "target": "refs/heads/feat-a",
+        "change": "none",
+        "reason": "PR #12 already sits directly on the root; no write is required"
+      }
+    ],
+    "prohibitedActivitiesNotPerformed": [
+      {
+        "activity": "run-or-await-checks",
+        "performed": false,
+        "evidence": "no check endpoint read"
+      }
+    ]
+  },
+  "publication": {
+    "contractVersion": "flatten-pr-graph/1",
+    "attempts": [],
+    "confirmed": [],
+    "unconfirmed": [],
+    "denials": [],
+    "remoteClaims": [
+      {
+        "kind": "pr-base",
+        "target": "12",
+        "observed": "refs/heads/main",
+        "observedAt": "2026-10-01T09:01:00.000Z"
+      }
+    ],
+    "interrupted": false,
+    "concurrency": { "leaseHeld": false, "conflictingRemoteMoveDetected": false }
+  },
+  "ignoredChecks": {
+    "policy": "never-run-poll-wait-rerun-repair-or-gate",
+    "executed": [],
+    "suppressedOrWeakened": [],
+    "remoteTriggeredLeftAlone": true
+  },
+  "prohibitedActivities": [
+    { "activity": "run-or-await-checks", "performed": false, "evidence": "no check endpoint read" }
+  ],
+  "uncertainty": [
+    {
+      "item": "whether PR #12's contribution is wanted at all",
+      "why": "a redundant contribution is reported, never dropped or closed by the run"
+    }
+  ],
+  "nextSafeAction": {
+    "action": "stop; report the verified chain and let a human decide about PR #12",
+    "requires": []
+  },
+  "semanticReview": {
+    "automated": false,
+    "rubric": "references/contract.md#102-semantic-intent-rubric-human-review-not-automatable",
+    "humanReviewRequired": true,
+    "reviewerVerdict": "unreviewed"
+  },
+  "verification": [
+    {
+      "invariant": "status.legality",
+      "method": "provider base read compared with the snapshot, zero write attempts recorded",
+      "observed": "PR #12 base is refs/heads/main and no write was attempted",
+      "result": "pass"
+    }
+  ]
+}

@@ -1416,6 +1416,42 @@ it and the original tips stay recoverable.
   head, base, or state, or whose native stack membership, differs from both the reviewed
   pre-state and the reviewed result stops the run instead of overwriting it.
 
+## Flatten PR graph contract authoring
+
+The `flatten-pr-graph` skill has no runtime yet. What exists today is its versioned
+contract and the disposable fixture/oracle foundation that later increments consume:
+
+- `.agents/skills/flatten-pr-graph/references/contract.md` - the versioned conditional
+  contract (`flatten-pr-graph/1`): inputs, support envelope, preview versus execution,
+  preservation invariants, statuses and blocked codes, the objective and its
+  qualification, the prohibited runtime activities, and the semantic rubric that only a
+  human reviewer can answer.
+- `.agents/skills/flatten-pr-graph/references/schemas/` - `contract.schema.json` for every
+  stage document and `fixture.schema.json` for a fixture declaration. The examples under
+  `references/examples/`, including `references/examples/rejected/`, are validated or
+  refused by the authoring run.
+- `tests/skills/flatten-pr-graph/` - the fake GitHub boundary (pagination, refs, heads,
+  bases, denials, action recording), disposable real Git workspaces, the independent
+  state oracle, the initial fixture matrix, and the mutated-oracle sensitivities.
+
+Run the authoring checks with:
+
+```sh
+npm run test:skills   # discovers and runs tests/skills/flatten-pr-graph/*.test.ts
+```
+
+`npm test` matches `tests/*.test.ts` only, so the nested fixture evaluations need this
+entry point. The runner discovers the nested test files itself, runs them with the
+installed `tsx`, and writes a JSON report of the environment, the discovered files, and
+the exit status to a temporary directory it prints.
+
+These fixtures are authoring-time machinery. They seed local repositories and a fake
+provider, execute nothing on GitHub, and are never invoked by a flattening run. The
+oracle derives the status the observed state supports from real refs, the fake provider's
+action log, and the user's checkout; it never trusts the status a result document claims.
+Semantic intent - whether a resolution keeps both sides' intent - is not automatable and
+stays with the human rubric in contract.md §10.2.
+
 ## Review workspace
 
 Open **Review** from the workspace navigation, the command palette, or the

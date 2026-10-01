@@ -1,0 +1,16 @@
+{
+  "contractVersion": "flatten-pr-graph/1",
+  "id": "hand-waved-case",
+  "title": "A fixture that declares no expectations proves nothing",
+  "matrixEntry": "unsupported fork",
+  "kind": "matrix",
+  "selection": ["12"],
+  "expect": {
+    "status": "published",
+    "permittedActions": ["read-pr-metadata", "update-pr-base"],
+    "chain": [12],
+    "preserved": { "root": true, "unselectedRefs": [], "userWorkspace": true },
+    "mustDetectInvariant": "topology.chain",
+    "honestResult": true
+  }
+}

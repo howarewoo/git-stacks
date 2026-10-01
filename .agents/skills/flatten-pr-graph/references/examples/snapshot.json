@@ -1,0 +1,69 @@
+{
+  "contractVersion": "flatten-pr-graph/1",
+  "capturedAt": "2026-10-01T09:00:00.000Z",
+  "intent": "execute",
+  "repository": {
+    "host": "github.com",
+    "owner": "acme",
+    "name": "widgets",
+    "defaultBranch": "main",
+    "verified": true
+  },
+  "root": {
+    "ref": "refs/heads/main",
+    "oid": "1f0c2a9b3d4e5f60718293a4b5c6d7e8f9012345",
+    "source": "repository-default"
+  },
+  "selection": {
+    "requested": ["12", "#13", "https://github.com/acme/widgets/pull/12"],
+    "resolved": [
+      {
+        "number": 12,
+        "url": "https://github.com/acme/widgets/pull/12",
+        "state": "open",
+        "isDraft": false,
+        "headRef": "refs/heads/feat-a",
+        "headOid": "2a1b3c5d7e9f00112233445566778899aabbccdd",
+        "headRepository": "acme/widgets",
+        "baseRef": "refs/heads/main",
+        "baseOid": "1f0c2a9b3d4e5f60718293a4b5c6d7e8f9012345"
+      },
+      {
+        "number": 13,
+        "url": "https://github.com/acme/widgets/pull/13",
+        "state": "open",
+        "isDraft": true,
+        "headRef": "refs/heads/feat-b",
+        "headOid": "3b2c4d6e8f00112233445566778899aabbccddee",
+        "headRepository": "acme/widgets",
+        "baseRef": "refs/heads/main",
+        "baseOid": "1f0c2a9b3d4e5f60718293a4b5c6d7e8f9012345"
+      }
+    ],
+    "duplicatesCollapsed": [
+      {
+        "canonical": 12,
+        "inputs": ["12", "https://github.com/acme/widgets/pull/12"]
+      }
+    ]
+  },
+  "refs": [
+    { "ref": "refs/heads/main", "oid": "1f0c2a9b3d4e5f60718293a4b5c6d7e8f9012345" },
+    { "ref": "refs/heads/feat-a", "oid": "2a1b3c5d7e9f00112233445566778899aabbccdd" },
+    { "ref": "refs/heads/feat-b", "oid": "3b2c4d6e8f00112233445566778899aabbccddee" },
+    { "ref": "refs/heads/unrelated", "oid": "6e5f70912233445566778899aabbccddeeff0011" }
+  ],
+  "userWorkspace": {
+    "present": true,
+    "headRef": "refs/heads/wip",
+    "dirtyPaths": ["src/draft.ts"],
+    "stashCount": 1,
+    "configDigest": "sha256:0d1a2b3c"
+  },
+  "history": { "complete": true, "shallow": false, "grafted": 0 },
+  "landing": {
+    "autoMergeEnabledOn": [],
+    "queueBoundBases": [],
+    "unreadableProtectionBases": []
+  }
+}

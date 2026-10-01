@@ -1,0 +1,724 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/howarewoo/git-stacks/flatten-pr-graph/contract.schema.json",
+  "title": "flatten-pr-graph/1 result and stage documents",
+  "description": "One versioned contract. `result` is a oneOf over the six legal statuses, so an incomplete success claim is structurally rejected.",
+  "$defs": {
+    "contractVersion": { "const": "flatten-pr-graph/1" },
+    "sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "prNumber": { "type": "integer", "minimum": 1 },
+    "isoTime": { "type": "string", "minLength": 20 },
+    "intent": { "enum": ["preview", "execute"] },
+    "status": {
+      "enum": ["planned", "prepared", "published", "no-op", "blocked", "partial"]
+    },
+    "qualification": {
+      "enum": ["exact-for-declared-objective", "best-found", "heuristic"]
+    },
+    "invariant": {
+      "enum": [
+        "selection.complete",
+        "selection.no-expansion",
+        "topology.chain",
+        "topology.dependencies",
+        "preservation.root",
+        "preservation.unselected-refs",
+        "preservation.original-commits",
+        "preservation.cumulative",
+        "preservation.user-worktree",
+        "integrity.clean",
+        "remote.claims-match",
+        "remote.actions-permitted",
+        "status.legality"
+      ]
+    },
+    "repository": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["host", "owner", "name", "defaultBranch", "verified"],
+      "properties": {
+        "host": { "type": "string", "minLength": 1 },
+        "owner": { "type": "string", "minLength": 1 },
+        "name": { "type": "string", "minLength": 1 },
+        "defaultBranch": { "type": "string", "minLength": 1 },
+        "verified": { "const": true }
+      }
+    },
+    "rootRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ref", "oid", "source"],
+      "properties": {
+        "ref": { "type": "string", "pattern": "^refs/heads/.+" },
+        "oid": { "$ref": "#/$defs/sha" },
+        "source": { "enum": ["explicit", "repository-default", "declared-prerequisite"] }
+      }
+    },
+    "prIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "number",
+        "url",
+        "state",
+        "isDraft",
+        "headRef",
+        "headOid",
+        "headRepository",
+        "baseRef",
+        "baseOid"
+      ],
+      "properties": {
+        "number": { "$ref": "#/$defs/prNumber" },
+        "url": { "type": "string", "minLength": 1 },
+        "state": { "enum": ["open", "closed", "merged"] },
+        "isDraft": { "type": "boolean" },
+        "headRef": { "type": "string", "pattern": "^refs/heads/.+" },
+        "headOid": { "$ref": "#/$defs/sha" },
+        "headRepository": { "type": "string", "minLength": 1 },
+        "baseRef": { "type": "string", "pattern": "^refs/heads/.+" },
+        "baseOid": { "$ref": "#/$defs/sha" }
+      }
+    },
+    "collapsedDuplicate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["canonical", "inputs"],
+      "properties": {
+        "canonical": { "$ref": "#/$defs/prNumber" },
+        "inputs": { "type": "array", "minItems": 2, "items": { "type": "string", "minLength": 1 } }
+      }
+    },
+    "refEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ref", "oid"],
+      "properties": {
+        "ref": { "type": "string", "pattern": "^refs/heads/.+" },
+        "oid": { "$ref": "#/$defs/sha" }
+      }
+    },
+    "userWorkspace": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["present", "headRef", "dirtyPaths", "stashCount", "configDigest"],
+      "properties": {
+        "present": { "type": "boolean" },
+        "headRef": { "type": ["string", "null"] },
+        "dirtyPaths": { "type": "array", "items": { "type": "string" } },
+        "stashCount": { "type": "integer", "minimum": 0 },
+        "configDigest": { "type": "string", "minLength": 1 }
+      }
+    },
+    "history": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["complete", "shallow", "grafted"],
+      "properties": {
+        "complete": { "type": "boolean" },
+        "shallow": { "type": "boolean" },
+        "grafted": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "landing": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["autoMergeEnabledOn", "queueBoundBases", "unreadableProtectionBases"],
+      "properties": {
+        "autoMergeEnabledOn": { "type": "array", "items": { "$ref": "#/$defs/prNumber" } },
+        "queueBoundBases": { "type": "array", "items": { "type": "string" } },
+        "unreadableProtectionBases": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "snapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contractVersion",
+        "capturedAt",
+        "intent",
+        "repository",
+        "root",
+        "selection",
+        "refs",
+        "userWorkspace",
+        "history",
+        "landing"
+      ],
+      "properties": {
+        "contractVersion": { "$ref": "#/$defs/contractVersion" },
+        "capturedAt": { "$ref": "#/$defs/isoTime" },
+        "intent": { "$ref": "#/$defs/intent" },
+        "repository": { "$ref": "#/$defs/repository" },
+        "root": { "$ref": "#/$defs/rootRef" },
+        "selection": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["requested", "resolved", "duplicatesCollapsed"],
+          "properties": {
+            "requested": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+            "resolved": { "type": "array", "items": { "$ref": "#/$defs/prIdentity" } },
+            "duplicatesCollapsed": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/collapsedDuplicate" }
+            }
+          }
+        },
+        "refs": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/refEntry" } },
+        "userWorkspace": { "$ref": "#/$defs/userWorkspace" },
+        "history": { "$ref": "#/$defs/history" },
+        "landing": { "$ref": "#/$defs/landing" }
+      }
+    },
+    "hardDependency": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["before", "after", "source", "evidence"],
+      "properties": {
+        "before": { "$ref": "#/$defs/prNumber" },
+        "after": { "$ref": "#/$defs/prNumber" },
+        "source": { "enum": ["ancestry", "pr-base", "verified-prerequisite"] },
+        "evidence": { "type": "string", "minLength": 1 }
+      }
+    },
+    "estimate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pair", "kind", "value", "confidence"],
+      "properties": {
+        "pair": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "items": { "$ref": "#/$defs/prNumber" }
+        },
+        "kind": { "enum": ["pairwise-probe", "measured-merge", "unknown"] },
+        "value": { "type": ["number", "null"] },
+        "confidence": { "enum": ["high", "medium", "low", "unknown"] }
+      }
+    },
+    "objective": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["declared", "estimates", "qualification", "budget", "unknownTreatedAsZero"],
+      "properties": {
+        "declared": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "enum": [
+              "estimated-conflict-resolution-work",
+              "unnecessary-history-disruption",
+              "stable-tie-break"
+            ]
+          }
+        },
+        "estimates": { "type": "array", "items": { "$ref": "#/$defs/estimate" } },
+        "qualification": { "$ref": "#/$defs/qualification" },
+        "budget": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["probes", "exhausted"],
+          "properties": {
+            "probes": { "type": "integer", "minimum": 0 },
+            "exhausted": { "type": "boolean" }
+          }
+        },
+        "unknownTreatedAsZero": { "const": false }
+      }
+    },
+    "proposedWrite": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "target", "change", "reason"],
+      "properties": {
+        "kind": { "enum": ["ref-update", "pr-base-update"] },
+        "target": { "type": "string", "minLength": 1 },
+        "change": { "enum": ["none", "base-change", "head-update"] },
+        "reason": { "type": "string", "minLength": 1 }
+      }
+    },
+    "plan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contractVersion",
+        "intent",
+        "order",
+        "hardDependencies",
+        "ambiguities",
+        "objective",
+        "proposedWrites",
+        "prohibitedActivitiesNotPerformed"
+      ],
+      "properties": {
+        "contractVersion": { "$ref": "#/$defs/contractVersion" },
+        "intent": { "$ref": "#/$defs/intent" },
+        "order": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["position", "number", "fromBase", "toBase", "change"],
+            "properties": {
+              "position": { "type": "integer", "minimum": 1 },
+              "number": { "$ref": "#/$defs/prNumber" },
+              "fromBase": { "type": "string", "minLength": 1 },
+              "toBase": { "type": "string", "minLength": 1 },
+              "change": { "enum": ["none", "base-change", "head-update"] }
+            }
+          }
+        },
+        "hardDependencies": { "type": "array", "items": { "$ref": "#/$defs/hardDependency" } },
+        "ambiguities": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["item", "why"],
+            "properties": {
+              "item": { "type": "string", "minLength": 1 },
+              "why": { "type": "string", "minLength": 1 }
+            }
+          }
+        },
+        "objective": { "$ref": "#/$defs/objective" },
+        "proposedWrites": { "type": "array", "items": { "$ref": "#/$defs/proposedWrite" } },
+        "prohibitedActivitiesNotPerformed": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/prohibitedActivity" }
+        }
+      }
+    },
+    "preparedBranch": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "number",
+        "originalHead",
+        "preparedHead",
+        "basedOn",
+        "retainedOriginalCommits",
+        "historyPolicy"
+      ],
+      "properties": {
+        "number": { "$ref": "#/$defs/prNumber" },
+        "originalHead": { "$ref": "#/$defs/sha" },
+        "preparedHead": { "$ref": "#/$defs/sha" },
+        "basedOn": { "$ref": "#/$defs/sha" },
+        "retainedOriginalCommits": { "type": "array", "items": { "$ref": "#/$defs/sha" } },
+        "historyPolicy": { "const": "preserve-original-commits" }
+      }
+    },
+    "preparation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contractVersion",
+        "workspaceKind",
+        "branches",
+        "lostOriginalCommits",
+        "cumulativeIntegration",
+        "conflicts",
+        "unresolved",
+        "indexState"
+      ],
+      "properties": {
+        "contractVersion": { "$ref": "#/$defs/contractVersion" },
+        "workspaceKind": { "const": "task-owned-isolated" },
+        "branches": { "type": "array", "items": { "$ref": "#/$defs/preparedBranch" } },
+        "lostOriginalCommits": { "type": "array", "items": { "$ref": "#/$defs/sha" } },
+        "cumulativeIntegration": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["number", "integratedPreparedStateOf", "evidence"],
+            "properties": {
+              "number": { "$ref": "#/$defs/prNumber" },
+              "integratedPreparedStateOf": { "$ref": "#/$defs/prNumber" },
+              "evidence": { "type": "string", "minLength": 1 }
+            }
+          }
+        },
+        "conflicts": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["number", "path", "resolution"],
+            "properties": {
+              "number": { "$ref": "#/$defs/prNumber" },
+              "path": { "type": "string", "minLength": 1 },
+              "resolution": { "enum": ["both-sides-with-stated-intent", "clean-merge"] }
+            }
+          }
+        },
+        "unresolved": { "type": "array", "items": { "type": "string" } },
+        "indexState": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["unmergedEntries", "operationsInProgress", "conflictMarkersInTree"],
+          "properties": {
+            "unmergedEntries": { "type": "array", "items": { "type": "string" } },
+            "operationsInProgress": { "type": "array", "items": { "type": "string" } },
+            "conflictMarkersInTree": { "type": "array", "items": { "type": "string" } }
+          }
+        }
+      }
+    },
+    "attempt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sequence", "kind", "target", "from", "to", "acknowledged", "outcome"],
+      "properties": {
+        "sequence": { "type": "integer", "minimum": 1 },
+        "kind": { "enum": ["ref-update", "pr-base-update"] },
+        "target": { "type": "string", "minLength": 1 },
+        "from": { "$ref": "#/$defs/sha" },
+        "to": { "$ref": "#/$defs/sha" },
+        "acknowledged": { "type": "boolean" },
+        "lease": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "required": ["expectedRemote", "usedForceWithLease"],
+          "properties": {
+            "expectedRemote": { "$ref": "#/$defs/sha" },
+            "usedForceWithLease": { "type": "boolean" }
+          }
+        },
+        "outcome": { "enum": ["acknowledged", "denied", "rejected", "unknown"] }
+      }
+    },
+    "publication": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contractVersion",
+        "attempts",
+        "confirmed",
+        "unconfirmed",
+        "denials",
+        "remoteClaims",
+        "interrupted",
+        "concurrency"
+      ],
+      "properties": {
+        "contractVersion": { "$ref": "#/$defs/contractVersion" },
+        "attempts": { "type": "array", "items": { "$ref": "#/$defs/attempt" } },
+        "confirmed": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["kind", "target", "oid"],
+            "properties": {
+              "kind": { "enum": ["ref-update", "pr-base-update"] },
+              "target": { "type": "string", "minLength": 1 },
+              "oid": { "$ref": "#/$defs/sha" }
+            }
+          }
+        },
+        "unconfirmed": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["kind", "target", "why"],
+            "properties": {
+              "kind": { "enum": ["ref-update", "pr-base-update"] },
+              "target": { "type": "string", "minLength": 1 },
+              "why": { "type": "string", "minLength": 1 }
+            }
+          }
+        },
+        "denials": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["kind", "target", "reason", "acknowledged"],
+            "properties": {
+              "kind": { "enum": ["ref-update", "pr-base-update"] },
+              "target": { "type": "string", "minLength": 1 },
+              "reason": { "type": "string", "minLength": 1 },
+              "acknowledged": { "type": "boolean" }
+            }
+          }
+        },
+        "remoteClaims": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["kind", "target", "observed", "observedAt"],
+            "properties": {
+              "kind": { "enum": ["pr-base", "ref-oid"] },
+              "target": { "type": "string", "minLength": 1 },
+              "observed": { "type": ["string", "boolean"] },
+              "observedAt": { "$ref": "#/$defs/isoTime" }
+            }
+          }
+        },
+        "interrupted": { "type": "boolean" },
+        "concurrency": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["leaseHeld", "conflictingRemoteMoveDetected"],
+          "properties": {
+            "leaseHeld": { "type": "boolean" },
+            "conflictingRemoteMoveDetected": { "type": "boolean" }
+          }
+        }
+      }
+    },
+    "prohibitedActivity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["activity", "performed", "evidence"],
+      "properties": {
+        "activity": {
+          "enum": [
+            "run-or-await-checks",
+            "weaken-checks-or-protections",
+            "merge-close-or-reopen-pr",
+            "delete-branch",
+            "push-root",
+            "bypass-protection",
+            "disable-auto-merge",
+            "join-or-leave-merge-queue",
+            "modify-workflow-or-repo-config",
+            "edit-user-checkout-index-stash-or-config",
+            "drop-clone-or-recreate-pr",
+            "expand-selection",
+            "disable-environment-control"
+          ]
+        },
+        "performed": { "type": "boolean" },
+        "evidence": { "type": "string", "minLength": 1 }
+      }
+    },
+    "verificationRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["invariant", "method", "observed", "result"],
+      "properties": {
+        "invariant": { "$ref": "#/$defs/invariant" },
+        "method": { "type": "string", "minLength": 1 },
+        "observed": { "type": "string", "minLength": 1 },
+        "result": { "enum": ["pass", "fail", "unautomated"] }
+      }
+    },
+    "recovery": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["acknowledgedChanges", "unconfirmedAttempts", "recommended"],
+      "properties": {
+        "acknowledgedChanges": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "unconfirmedAttempts": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "recommended": { "type": "string", "minLength": 1 }
+      }
+    },
+    "ignoredChecks": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["policy", "executed", "suppressedOrWeakened", "remoteTriggeredLeftAlone"],
+      "properties": {
+        "policy": { "const": "never-run-poll-wait-rerun-repair-or-gate" },
+        "executed": { "type": "array", "items": { "type": "string" } },
+        "suppressedOrWeakened": { "type": "array", "items": { "type": "string" } },
+        "remoteTriggeredLeftAlone": { "const": true }
+      }
+    },
+    "nextSafeAction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["action", "requires"],
+      "properties": {
+        "action": { "type": "string", "minLength": 1 },
+        "requires": { "type": "array", "items": { "type": "string", "minLength": 1 } }
+      }
+    },
+    "semanticReview": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["automated", "rubric", "humanReviewRequired", "reviewerVerdict"],
+      "properties": {
+        "automated": { "const": false },
+        "rubric": { "type": "string", "minLength": 1 },
+        "humanReviewRequired": { "const": true },
+        "reviewerVerdict": { "enum": ["unreviewed", "pass", "fail"] }
+      }
+    },
+    "uncertaintyItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["item", "why"],
+      "properties": {
+        "item": { "type": "string", "minLength": 1 },
+        "why": { "type": "string", "minLength": 1 }
+      }
+    },
+    "blockedReason": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "detail", "evidence"],
+      "properties": {
+        "code": {
+          "enum": [
+            "missing-selection",
+            "unsupported-input",
+            "missing-permission",
+            "missing-external-prerequisite",
+            "missing-history",
+            "contradictory-graph",
+            "ambiguous-ownership",
+            "stale-snapshot",
+            "active-landing-arrangement",
+            "unresolved-conflict",
+            "conflicting-environment-control",
+            "lost-original-commit"
+          ]
+        },
+        "detail": { "type": "string", "minLength": 1 },
+        "evidence": { "type": "string", "minLength": 1 }
+      }
+    },
+    "result": {
+      "type": "object",
+      "required": [
+        "contractVersion",
+        "status",
+        "intent",
+        "snapshot",
+        "plan",
+        "ignoredChecks",
+        "prohibitedActivities",
+        "uncertainty",
+        "nextSafeAction",
+        "semanticReview",
+        "verification"
+      ],
+      "properties": {
+        "contractVersion": { "$ref": "#/$defs/contractVersion" },
+        "status": { "$ref": "#/$defs/status" },
+        "intent": { "$ref": "#/$defs/intent" },
+        "snapshot": { "$ref": "#/$defs/snapshot" },
+        "plan": { "$ref": "#/$defs/plan" },
+        "preparation": { "$ref": "#/$defs/preparation" },
+        "publication": { "$ref": "#/$defs/publication" },
+        "blockedReasons": { "type": "array", "items": { "$ref": "#/$defs/blockedReason" } },
+        "recovery": { "$ref": "#/$defs/recovery" },
+        "ignoredChecks": { "$ref": "#/$defs/ignoredChecks" },
+        "prohibitedActivities": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/prohibitedActivity" }
+        },
+        "uncertainty": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/uncertaintyItem" }
+        },
+        "nextSafeAction": { "$ref": "#/$defs/nextSafeAction" },
+        "semanticReview": { "$ref": "#/$defs/semanticReview" },
+        "verification": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/verificationRecord" }
+        }
+      },
+      "oneOf": [
+        {
+          "title": "planned",
+          "properties": { "status": { "const": "planned" } },
+          "required": ["status"],
+          "not": { "required": ["preparation", "publication"] }
+        },
+        {
+          "title": "prepared",
+          "properties": { "status": { "const": "prepared" } },
+          "required": ["status", "preparation"],
+          "not": { "required": ["publication"] }
+        },
+        {
+          "title": "published",
+          "properties": {
+            "status": { "const": "published" },
+            "publication": {
+              "type": "object",
+              "required": ["attempts", "confirmed", "unconfirmed", "denials"],
+              "properties": {
+                "unconfirmed": { "type": "array", "maxItems": 0 },
+                "denials": { "type": "array", "maxItems": 0 },
+                "remoteClaims": { "type": "array", "minItems": 1 }
+              }
+            }
+          },
+          "required": ["status", "preparation", "publication"]
+        },
+        {
+          "title": "no-op",
+          "properties": {
+            "status": { "const": "no-op" },
+            "publication": {
+              "type": "object",
+              "required": ["attempts", "confirmed", "unconfirmed", "denials"],
+              "properties": {
+                "attempts": { "type": "array", "maxItems": 0 },
+                "confirmed": { "type": "array", "maxItems": 0 },
+                "unconfirmed": { "type": "array", "maxItems": 0 },
+                "denials": { "type": "array", "maxItems": 0 }
+              }
+            },
+            "plan": {
+              "type": "object",
+              "required": ["proposedWrites"],
+              "properties": {
+                "proposedWrites": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "required": ["change"],
+                    "properties": { "change": { "const": "none" } }
+                  }
+                }
+              }
+            }
+          },
+          "required": ["status", "publication"]
+        },
+        {
+          "title": "blocked",
+          "properties": {
+            "status": { "const": "blocked" },
+            "publication": {
+              "type": "object",
+              "required": ["confirmed"],
+              "properties": { "confirmed": { "type": "array", "maxItems": 0 } }
+            }
+          },
+          "required": ["status", "blockedReasons"],
+          "not": { "required": ["recovery"] }
+        },
+        {
+          "title": "partial",
+          "properties": {
+            "status": { "const": "partial" },
+            "publication": {
+              "type": "object",
+              "required": ["confirmed", "unconfirmed"],
+              "properties": {
+                "confirmed": { "type": "array", "minItems": 1 },
+                "unconfirmed": { "type": "array", "minItems": 1 }
+              }
+            }
+          },
+          "required": ["status", "publication", "recovery", "preparation"]
+        }
+      ]
+    }
+  },
+  "$ref": "#/$defs/result"
+}
