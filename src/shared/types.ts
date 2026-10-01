@@ -1352,12 +1352,28 @@ export interface DesktopAPI {
    * Seals a notification credential. The token is accepted once and never
    * returned, logged, or reported: the answer is a status object, like every
    * other credential boundary this app has.
+   *
+   * `host` is the GitHub host the person acknowledged the consent for. It is
+   * required rather than optional because a token cannot be sealed for a host
+   * other than the one the dialog named, and main refuses a request whose host
+   * is no longer the configured one instead of sending the token somewhere the
+   * person never agreed to.
    */
-  saveNotificationCredential?(token: string, consent: boolean): Promise<NotificationModuleStatus>
+  saveNotificationCredential?(
+    token: string,
+    consent: boolean,
+    host: string,
+  ): Promise<NotificationModuleStatus>
   /** Removes the notification credential, and only this module's. */
   removeNotificationCredential?(): Promise<NotificationModuleStatus>
   /** Marks one thread, or `'all'`, as read. Sent once, never replayed. */
   markNotificationRead?(threadId: string | 'all'): Promise<NotificationInbox>
+  /**
+   * Marks one thread done. This is GitHub's own thread delete and nothing else:
+   * it is not unsubscribing, which changes what arrives in future, and the two
+   * never share a request.
+   */
+  markNotificationDone?(threadId: string): Promise<NotificationInbox>
   /** The subscription controls GitHub offers for one thread. */
   setNotificationSubscription?(
     threadId: string,

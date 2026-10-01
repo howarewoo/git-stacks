@@ -550,27 +550,33 @@ function notificationCenter(): NotificationCenter {
   // the one that was built for it rather than being asked to serve another.
   if (notificationHost !== null && notificationHost !== context.host) retireNotificationCenter()
   const scope = notificationScope(context.host)
-  notifications ??= new NotificationCenter({
-    host: context,
-    // This module's own sealed file, never the application's: signing out, a
-    // host change, or a whole-store cleanup on the account side cannot reach a
-    // notification token, and a notification token can never be read as the
-    // credential pull requests, stacks, and reviews depend on. One store and one
-    // queue per host, kept across centers, so a change this host's files are
-    // still making cannot be lost to the one that comes after it.
-    store: notificationCredentialStore(
-      join(app.getPath('userData'), `github-notifications-vault.${scope}.json`),
-      safeStorageProtector,
-    ),
-    credentialFile: join(app.getPath('userData'), `github-notifications.${scope}.json`),
-    cacheFile: join(app.getPath('userData'), `github-notifications-cache.${scope}.json`),
-    consent: () => ({
-      enabled: currentSettings?.notifications.enabled === true,
-      policyDisabled: settingsLocks.some((lock) => lock.key === 'notifications.enabled'),
-    }),
-    onChange: (inbox) => window?.webContents.send('notifications', inbox),
-  })
-  notificationHost = context.host
+  if (notifications === null) {
+    let center: NotificationCenter
+    center = new NotificationCenter({
+      host: context,
+      // This module's own sealed file, never the application's: signing out, a
+      // host change, or a whole-store cleanup on the account side cannot reach a
+      // notification token, and a notification token can never be read as the
+      // credential pull requests, stacks, and reviews depend on. One store and one
+      // queue per host, kept across centers, so a change this host's files are
+      // still making cannot be lost to the one that comes after it.
+      store: notificationCredentialStore(
+        join(app.getPath('userData'), `github-notifications-vault.${scope}.json`),
+        safeStorageProtector,
+      ),
+      credentialFile: join(app.getPath('userData'), `github-notifications.${scope}.json`),
+      cacheFile: join(app.getPath('userData'), `github-notifications-cache.${scope}.json`),
+      consent: () => ({
+        enabled: currentSettings?.notifications.enabled === true,
+        policyDisabled: settingsLocks.some((lock) => lock.key === 'notifications.enabled'),
+      }),
+      onChange: (inbox) => {
+        if (notifications === center) window?.webContents.send('notifications', inbox)
+      },
+    })
+    notifications = center
+    notificationHost = context.host
+  }
   syncNotificationModule()
   return notifications
 }
@@ -2138,9 +2144,15 @@ function installHandlers() {
   // handler, log, failure record, or support bundle can carry it back out.
   ipcMain.handle(
     'notifications:save-credential',
-    async (event, token: unknown, consent: unknown) => {
+    async (event, token: unknown, consent: unknown, host: unknown) => {
       validateSender(event)
-      return notificationCenter().saveCredential(token, consent)
+      const currentHost = configuredHost().host
+      if (typeof host !== 'string' || host !== currentHost) {
+        throw new Error(
+          'This token was typed for a different GitHub host, so it was not stored and not sent anywhere.',
+        )
+      }
+      return notificationCenter().saveCredential(token, consent, host)
     },
   )
   ipcMain.handle('notifications:remove-credential', async (event) => {
@@ -2150,6 +2162,10 @@ function installHandlers() {
   ipcMain.handle('notifications:mark-read', async (event, threadId: unknown) => {
     validateSender(event)
     return notificationCenter().markRead(threadId)
+  })
+  ipcMain.handle('notifications:done', async (event, threadId: unknown) => {
+    validateSender(event)
+    return notificationCenter().markDone(threadId)
   })
   ipcMain.handle(
     'notifications:subscription',

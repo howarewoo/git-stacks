@@ -1987,3 +1987,111 @@ test('a host selected again finds the store and the queue its predecessor left',
     await elsewhere.close()
   }
 })
+
+test('markDone removes thread via distinct thread DELETE and preserves other rows', async () => {
+  const store = await installation()
+  const host = await startHost((wire) => {
+    if (wire.path === '/api/v3/user') return { body: { login: 'octo' } }
+    if (wire.method === 'DELETE' && wire.path === '/api/v3/notifications/threads/1') {
+      return { status: 204, body: null }
+    }
+    return {
+      body: [thread(host, '1'), thread(host, '2')],
+      headers: { 'last-modified': LAST_MODIFIED },
+    }
+  })
+  const center = new NotificationCenter({
+    host: host.context,
+    fetch: verifiedFetch,
+    store: store.store,
+    credentialFile: store.credentialFile,
+    cacheFile: store.cacheFile,
+    consent: () => ({ enabled: true, policyDisabled: false }),
+    now: () => Date.parse('2026-09-22T10:00:00.000Z'),
+  })
+  try {
+    await center.saveCredential('ghp_notifications_token', true)
+    assert.equal((await center.inbox()).threads.length, 2)
+
+    const inbox = await center.markDone('1')
+    assert.deepEqual(inbox.threads.map((t) => t.id), ['2'])
+    assert.ok(host.wire.some((req) => req.method === 'DELETE' && req.path === '/api/v3/notifications/threads/1'))
+  } finally {
+    center.forget()
+    await host.close()
+  }
+})
+
+test('bulk markRead with 202 marks pending and confirms on subsequent full poll', async () => {
+  const store = await installation()
+  let poll = 0
+  const host = await startHost((wire) => {
+    if (wire.path === '/api/v3/user') return { body: { login: 'octo' } }
+    if (wire.method === 'PUT' && wire.path === '/api/v3/notifications') {
+      return { status: 202, body: null }
+    }
+    poll += 1
+    if (poll === 1) {
+      return {
+        body: [thread(host, '1'), thread(host, '2')],
+        headers: { 'last-modified': LAST_MODIFIED },
+      }
+    }
+    return {
+      body: [{ ...thread(host, '1'), unread: false }, { ...thread(host, '2'), unread: false }],
+      headers: { 'last-modified': '2026-09-22T10:05:00.000Z' },
+    }
+  })
+  let clock = Date.parse('2026-09-22T10:00:00.000Z')
+  const center = new NotificationCenter({
+    host: host.context,
+    fetch: verifiedFetch,
+    store: store.store,
+    credentialFile: store.credentialFile,
+    cacheFile: store.cacheFile,
+    consent: () => ({ enabled: true, policyDisabled: false }),
+    now: () => clock,
+  })
+  try {
+    await center.saveCredential('ghp_notifications_token', true)
+    assert.equal((await center.inbox()).unreadCount, 2)
+
+    const accepted = await center.markRead('all')
+    assert.equal(accepted.markAllReadPending, true)
+    assert.equal(accepted.unreadCount, 2)
+
+    clock += 61_000
+    const confirmed = await center.refresh()
+    assert.equal(confirmed.markAllReadPending, false)
+    assert.equal(confirmed.unreadCount, 0)
+  } finally {
+    center.forget()
+    await host.close()
+  }
+})
+
+test('saveCredential validates consented host and refuses mismatched host before network', async () => {
+  const store = await installation()
+  const host = await startHost(() => {
+    throw new Error('network should not be contacted')
+  })
+  const center = new NotificationCenter({
+    host: host.context,
+    fetch: verifiedFetch,
+    store: store.store,
+    credentialFile: store.credentialFile,
+    cacheFile: store.cacheFile,
+    consent: () => ({ enabled: true, policyDisabled: false }),
+    now: () => Date.parse('2026-09-22T10:00:00.000Z'),
+  })
+  try {
+    await assert.rejects(
+      () => center.saveCredential('ghp_token', true, 'different-host.internal'),
+      /different GitHub host/u,
+    )
+    assert.equal(host.wire.length, 0)
+  } finally {
+    center.forget()
+    await host.close()
+  }
+})

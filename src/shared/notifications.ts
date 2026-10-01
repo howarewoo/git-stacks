@@ -28,7 +28,7 @@ export const NOTIFICATION_CONSENT_TITLE = 'GitHub Notifications needs its own cr
 
 export const NOTIFICATION_CONSENT_POINTS: readonly string[] = [
   'GitHub serves the notifications endpoints to a classic personal access token with the notifications scope. The GitHub App credential this app signs in with cannot read them, so the App’s own permissions are left exactly as they are.',
-  'The token is stored only in this computer’s operating-system key store, sealed. Only an opaque reference is written to application state, and the token never reaches the window, a log, a diagnostic report, or a support bundle.',
+  'The token crosses into this app once, when you submit it, and is never handed back to this window after that. It is sealed with a key your operating system protects and stored as ciphertext in this app’s own notification credential file; ordinary application state holds only an opaque reference to it, and the token never reaches a log, a diagnostic report, or a support bundle.',
   'The token is pinned to one GitHub host and one account. Removing it disables the Notification Center and nothing else — sign-in, pull requests, stacks, and reviews keep working on the credential they already use.',
 ]
 
@@ -150,6 +150,14 @@ export interface NotificationInbox extends NotificationModuleStatus {
   /** True when the threads on screen have not been confirmed within the poll interval. */
   stale: boolean
   staleReason: NotificationStaleReason | null
+  /**
+   * True while GitHub has accepted the inbox-wide mark-as-read but has not yet
+   * confirmed it. `202` is GitHub saying the work is still running, so the last
+   * confirmed read state is still what this module knows: it is reported as
+   * pending rather than committed, and a later poll the server's own floor
+   * allows is what settles it.
+   */
+  markAllReadPending: boolean
 }
 
 /** How a person reads each thread's GitHub reason. */

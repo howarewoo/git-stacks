@@ -1126,6 +1126,14 @@ export class DirectGitHubTransport implements GitHubTransport {
       request$,
     )
     if (status === 304) {
+      // A mutation is documented to answer 304 as "nothing changed": there is
+      // no display body to replay for it, and a caller waiting on one is asking
+      // for the conditional-read contract that a write never entered. A
+      // conditional GET keeps the requirement it always had, because its 304
+      // does mean a stored body it has to replay.
+      if (!cached && method !== 'GET') {
+        return { status, data: null as T, headers, rateLimit, notModified: true }
+      }
       if (!cached)
         throw this.failure({
           status,
@@ -1599,6 +1607,13 @@ export class GhGitHubTransport implements GitHubTransport {
         : { ...request, headers: { ...request.headers, ...conditionalHeaders(cached) } }
     const { status, data, headers, rateLimit, authority } = await this.request<T>(conditional)
     if (status === 304) {
+      // A mutation is documented to answer 304 as "nothing changed", and `gh`
+      // has no stored display body to replay for a write either. A conditional
+      // GET keeps the requirement it always had.
+      const method = request.method ?? 'GET'
+      if (!cached && method !== 'GET') {
+        return { status, data: null as T, headers, rateLimit, notModified: true }
+      }
       if (!cached)
         throw new GitHubTransportError({
           status,
