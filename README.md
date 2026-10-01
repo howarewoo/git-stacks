@@ -1,11 +1,13 @@
 # Git Stacks
 
-A local-first desktop workbench for Git branches and stacked pull requests.
+An open-source, local-first desktop alternative to Graphite's pull-request
+management, without requiring a new stack-management CLI.
 
-Design rules live in [DESIGN.md](DESIGN.md). This guide covers how to run the app,
-how the large-repository work is measured, how development and verification are
-performed, and how a release is published and updated; record run-specific
-evidence and outstanding acceptance checks in the associated pull request.
+Current product scope lives in [PRODUCT.md](PRODUCT.md); design rules live in
+[DESIGN.md](DESIGN.md). This guide covers how to run the app, how the
+large-repository work is measured, how development and verification are performed,
+and how a release is published and updated; record run-specific evidence and
+outstanding acceptance checks in the associated pull request.
 
 ## Commands
 
@@ -1136,9 +1138,11 @@ These are the extreme cases the app states rather than hanging or crashing on.
   navigable one page at a time without retaining previous pages.
 - **An individual history entry over 1 MiB.** The reader reports a preview
   limit error instead of presenting a partial entry as the end of history.
-- **Pull request enumeration follows `gh`.** The renderer reveals pull requests
-  incrementally; the main process still asks the `gh` CLI for the origin's open
-  and tracked pull requests in one paginated call.
+- **Pull request enumeration is collected before display.** The renderer reveals
+  pull requests incrementally; the main process collects the origin's open pull
+  requests through paginated GraphQL reads on the host's typed transport, then
+  reads any locally tracked pull requests missing from that listing individually.
+  `gh` is an optional transport path, not a required enumeration dependency.
 
 ## Renderer verification
 
