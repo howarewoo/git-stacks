@@ -19,15 +19,15 @@ resolves to a blocker, never to a permission.
 
 ## 1. Conditional routing
 
-| If the request or state contains                                        | Read              | Because                                                     |
-| ----------------------------------------------------------------------- | ----------------- | ----------------------------------------------------------- |
-| any selected pull request, any base/head discussion                     | this file in full | the whole contract is one conditional unit                  |
-| "preview", "plan", "dry run", "what would happen"                       | §3, §5, §6.2      | preview is a distinct intent, not different wording         |
-| "execute", "do it", "flatten", "linearize"                              | §3–§10            | execution adds §7–§9 obligations                            |
-| a fork, closed/merged PR, duplicate head branch, or permission question | §5                | unsupported and blocked inputs are decided before any write |
-| auto-merge, merge queue, "it merged while we worked"                    | §5.4              | an active landing arrangement is a preflight blocker        |
-| "make it green", "wait for CI", "rerun the checks"                      | §8                | check-independent execution is non-negotiable               |
-| any success claim                                                       | §10               | status claims require named evidence                        |
+| If the request or state contains                                         | Read              | Because                                                     |
+| ------------------------------------------------------------------------ | ----------------- | ----------------------------------------------------------- |
+| any selected pull request, any base/head discussion                      | this file in full | the whole contract is one conditional unit                  |
+| "preview", "plan", "dry run", "what would happen"                        | §3, §5, §6.2      | preview is a distinct intent, not different wording         |
+| "execute", "do it", "flatten", "linearize"                               | §3–§10            | execution adds §7–§9 obligations                            |
+| a fork, closed/merged PR, duplicate head branch, or permission question  | §5                | unsupported and blocked inputs are decided before any write |
+| auto-merge already enabled on a selected PR, "it merged while we worked" | §5.4              | that pull request carries its own active auto-merge request |
+| "make it green", "wait for CI", "rerun the checks"                       | §8                | check-independent execution is non-negotiable               |
+| any success claim                                                        | §10               | status claims require named evidence                        |
 
 - **Empty resolution.** `selection.requested` and `selection.resolved` may both be empty in a
   snapshot, but only when the result carries the `missing-selection` blocker. The oracle
@@ -101,8 +101,14 @@ absence of an error.
 
 - missing permissions for an intended write, or a write denied mid-run;
 - missing external prerequisite, missing history, shallow or incomplete ancestry;
-- contradictory graph evidence: a dependency cycle, two verified predecessors for one chain
-  position, or a declared prerequisite that contradicts observed ancestry;
+- contradictory graph evidence: a dependency cycle, or a declared prerequisite that
+  contradicts observed ancestry.
+
+Multiple incoming hard prerequisites are **not** a contradiction. Several selected pull
+requests may all feed one head; the contract linearizes them and every observed dependency
+edge survives into the plan and into the prepared states. Only evidence that cannot all be
+true at once - a cycle, or a prerequisite that disagrees with observed ancestry - blocks.
+
 - ambiguous ownership of a ref or of a conflicting change's intent;
 - stale snapshot: any observed ref, base, or head differing from the captured snapshot at the
   moment it would be used;
@@ -111,24 +117,27 @@ absence of an error.
 Unsupported input is never silently dropped, cloned into a replacement PR, or expanded. The
 selection is exactly what the user selected or the run is `blocked`.
 
-### 5.4 Preflight: active landing arrangements
+### 5.4 Preflight: an auto-merge request on a selected pull request
 
-A selected PR that already has an active landing arrangement is **blocked**, not merely
-risky. Read-only preflight:
+A selected pull request that carries **its own active auto-merge request** is **blocked**,
+not merely risky. The preflight reads that one fact per selected pull request.
 
-- auto-merge enabled on any selected head, by any mechanism (repository setting, GraphQL
-  merge queue participation, or a plugin);
-- a merge queue or required-merge-method arrangement bound to a selected head's base;
-- branch protection or a ruleset whose rules the run cannot read, which leaves the required
-  set unknown.
+Only that fact blocks. Specifically:
 
-Reason: after a head push the provider may merge and close a selected PR before its base is
-retargeted, which destroys the identity the run is manipulating and cannot be undone by a
-later write.
+- a repository that _offers_ auto-merge, or any plugin, extension, or GraphQL feature that
+  could enable it, is not a selected pull request's enabled request and does not block;
+- the run does not inspect merge queues, required merge methods, branch protection, rulesets,
+  or check eligibility, and an unreadable protection or required-check set is not a blocker;
+- this contract resolves integration conflicts and ignores checks (§8), so check state is
+  never an input.
 
-The run must **not** disable auto-merge, leave a queue, change protection or ruleset, await or
-poll a queue, or re-create the PR. It stops before the first push and reports the observed
-arrangement as the blocker, with `nextSafeAction` naming the human decision.
+Reason: once a head push lands, an already-armed auto-merge can merge and close that pull
+request before its base is retargeted, which destroys the identity the run is manipulating and
+cannot be undone by a later write.
+
+The run must **not** disable auto-merge, leave or join a queue, change protection or a
+ruleset, or re-create the pull request. It stops before the first push and reports the
+observed request as the blocker, with `nextSafeAction` naming the human decision.
 
 ## 6. Preservation
 

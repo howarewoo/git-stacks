@@ -16,6 +16,7 @@ import {
   integrateBranch,
   mergeLeavingConflict,
   planFrom,
+  prepareBranch,
   preparationFrom,
   publicationFrom,
   remoteOid,
@@ -450,7 +451,18 @@ const alreadyCorrectChain: FixtureModule = {
           },
           { kind: 'pr-base-update', target: '13', change: 'none', reason: 'already on feat-a' },
         ],
-        { prohibitedActivitiesNotPerformed: notPerformed() },
+        {
+          prohibitedActivitiesNotPerformed: notPerformed(),
+          // #13 already declares #12 as its base: an observed hard edge the plan records.
+          hardDependencies: [
+            {
+              before: 12,
+              after: 13,
+              source: 'pr-base',
+              evidence: '#13 is based on the head of #12',
+            },
+          ],
+        },
       ),
       publication: {
         contractVersion: CONTRACT_VERSION,
@@ -587,19 +599,18 @@ const diamondFanIn: FixtureModule = {
   spec: {
     contractVersion: CONTRACT_VERSION,
     id: 'diamond-fan-in',
-    title: 'A head that integrates two unrelated predecessors is ambiguous',
+    title: 'A head that integrates two predecessors becomes the last position and keeps both edges',
     matrixEntry: 'diamond/fan-in with shared commits',
     kind: 'matrix',
     selection: ['12', '13', '14'],
     expect: {
-      status: 'blocked',
-      permittedActions: READ_ONLY,
+      status: 'published',
+      permittedActions: WITH_BASES,
       forbiddenActions: ['expand-selection', 'drop-selection', 'run-checks'],
-      chain: [],
+      chain: [12, 13, 14],
       preserved: { root: true, unselectedRefs: [], userWorkspace: true },
-      mustDetectInvariant: 'status.legality',
+      mustDetectInvariant: 'topology.chain',
       honestResult: true,
-      blockedCode: 'ambiguous-ownership',
     },
     humanReview: { required: true, rubric: RUBRIC_PATH },
   },
@@ -626,31 +637,145 @@ const diamondFanIn: FixtureModule = {
   async run(context) {
     const selection = ['12', '13', '14']
     const snapshot = captureSnapshot(context, { intent: 'execute', capturedAt: AT, selection })
+    const originalB = snapshot.selection.resolved[1].headOid
+    const originalA = snapshot.selection.resolved[0].headOid
+    // #14 already integrates both predecessors, so it is linearized *after* them and both
+    // dependency edges survive into the published chain.
+    await integrateBranch(context, 'run', 'feat-b', 'feat-a')
+    context.provider.recordAction('push-selected-head', 'feat-b')
+    // #14 must carry #13's prepared state too, or the chain is not cumulative.
+    await integrateBranch(context, 'run-c', 'feat-c', 'feat-b')
+    context.provider.recordAction('push-selected-head', 'feat-c')
+    context.provider.updatePullRequestBase(13, 'feat-a')
+    context.provider.updatePullRequestBase(14, 'feat-b')
+    return assemble({
+      context,
+      status: 'published',
+      selection,
+      chain: [12, 13, 14],
+      snapshot,
+      writes: [
+        headWrite('feat-b'),
+        headWrite('feat-c'),
+        baseWrite(13, 'main', 'feat-a'),
+        baseWrite(14, 'main', 'feat-b'),
+      ],
+      preparation: preparationFrom([
+        {
+          number: 12,
+          originalHead: originalA,
+          preparedHead: originalA,
+          basedOn: remoteOid(context, 'main'),
+          retainedOriginalCommits: [originalA],
+        },
+        {
+          number: 13,
+          originalHead: originalB,
+          preparedHead: remoteOid(context, 'feat-b'),
+          basedOn: remoteOid(context, 'feat-a'),
+          retainedOriginalCommits: [originalB],
+        },
+        {
+          number: 14,
+          originalHead: snapshot.selection.resolved[2].headOid,
+          preparedHead: remoteOid(context, 'feat-c'),
+          basedOn: remoteOid(context, 'feat-b'),
+          retainedOriginalCommits: [snapshot.selection.resolved[2].headOid],
+        },
+      ]),
+      headsBefore: { 'feat-b': originalB },
+      dependencies: [
+        {
+          before: 12,
+          after: 14,
+          source: 'ancestry',
+          evidence: 'real ancestry: the head of #12 is an ancestor of the head of #14',
+        },
+        {
+          before: 13,
+          after: 14,
+          source: 'ancestry',
+          evidence: 'real ancestry: the head of #13 is an ancestor of the head of #14',
+        },
+      ],
+    })
+  },
+}
+
+const preparedWithoutPublication: FixtureModule = {
+  spec: {
+    contractVersion: CONTRACT_VERSION,
+    id: 'prepared-without-publication',
+    title: 'Preparation finished and stopped before any provider write',
+    matrixEntry: 'prepared, nothing published',
+    kind: 'matrix',
+    selection: ['12', '13'],
+    expect: {
+      status: 'prepared',
+      permittedActions: READ_ONLY,
+      forbiddenActions: ['run-checks', 'merge-pr', 'close-pr', 'push-root'],
+      chain: [],
+      preserved: { root: true, unselectedRefs: ['refs/heads/unrelated'], userWorkspace: true },
+      mustDetectInvariant: 'status.legality',
+      honestResult: true,
+    },
+    humanReview: { required: true, rubric: RUBRIC_PATH },
+  },
+  async setup(context) {
+    defineProvider(context, {
+      pullRequests: [
+        pullRequest(12, 'feat-a', 'main', 'alice'),
+        pullRequest(13, 'feat-b', 'main', 'bob'),
+        pullRequest(20, 'unrelated', 'main', 'carol'),
+      ],
+    })
+    await seedBranch(context, 'seed-a', 'feat-a', { 'a.txt': 'a\n' }, 'Add A')
+    await seedBranch(context, 'seed-b', 'feat-b', { 'b.txt': 'b\n' }, 'Add B')
+    await seedBranch(context, 'seed-u', 'unrelated', { 'u.txt': 'u\n' }, 'Unrelated work')
+  },
+  async run(context) {
+    const selection = ['12', '13']
+    const snapshot = captureSnapshot(context, { intent: 'execute', capturedAt: AT, selection })
+    const originalA = snapshot.selection.resolved[0].headOid
+    const originalB = snapshot.selection.resolved[1].headOid
+    // Real preparation in the task's own workspace, then a deliberate stop: the remote ref
+    // never moves, so the supported status is `prepared`, not `no-op`.
+    const prepared = await prepareBranch(context, 'run', 'feat-b', 'feat-a')
+    void prepared
     return resultDocument({
-      status: 'blocked',
+      status: 'prepared',
       intent: 'execute',
       snapshot,
-      plan: planFrom(snapshot, [], [], {
+      plan: planFrom(snapshot, [12, 13], [headWrite('feat-b'), baseWrite(13, 'main', 'feat-a')], {
         prohibitedActivitiesNotPerformed: notPerformed(),
-        ambiguities: [
+        hardDependencies: [
           {
-            item: 'chain position of #14',
-            why: '#14 integrates both #12 and #13, which are not related by ancestry',
+            before: 12,
+            after: 13,
+            source: 'pr-base',
+            evidence: '#13 is retargeted onto the head of #12',
           },
         ],
       }),
-      blockedReasons: [
+      preparation: preparationFrom([
         {
-          code: 'ambiguous-ownership',
-          detail:
-            '#14 integrates two predecessors that are not related by ancestry, so one chain position is undefined',
-          evidence:
-            'real ancestry: heads of #12 and #13 are both ancestors of #14 and neither contains the other',
+          number: 12,
+          originalHead: originalA,
+          preparedHead: originalA,
+          basedOn: remoteOid(context, 'main'),
+          retainedOriginalCommits: [originalA],
         },
-      ],
+        {
+          number: 13,
+          originalHead: originalB,
+          preparedHead: remoteOid(context, 'feat-b'),
+          basedOn: remoteOid(context, 'feat-a'),
+          retainedOriginalCommits: [originalB],
+        },
+      ]),
       nextSafeAction: {
-        action: 'ask which predecessor #14 belongs behind',
-        requires: ['a human decision'],
+        action: 'publish the two recorded writes when the operator approves',
+        requires: ['operator approval of the prepared chain'],
       },
     })
   },
@@ -995,7 +1120,18 @@ const emptyContribution: FixtureModule = {
           },
           { kind: 'pr-base-update', target: '13', change: 'none', reason: 'already on feat-a' },
         ],
-        { prohibitedActivitiesNotPerformed: notPerformed() },
+        {
+          prohibitedActivitiesNotPerformed: notPerformed(),
+          // #13 already declares #12 as its base: an observed hard edge the plan records.
+          hardDependencies: [
+            {
+              before: 12,
+              after: 13,
+              source: 'pr-base',
+              evidence: '#13 is based on the head of #12',
+            },
+          ],
+        },
       ),
       publication: {
         contractVersion: CONTRACT_VERSION,
@@ -1490,4 +1626,5 @@ export const fixtures: FixtureModule[] = [
   previewLeavesStateUntouched,
   unresolvedConflict,
   activeAutoMerge,
+  preparedWithoutPublication,
 ]

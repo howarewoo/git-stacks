@@ -35,10 +35,6 @@ export interface ProviderState {
   deniedWrites: string[]
   /** Pull requests carrying an enabled auto-merge arrangement. */
   autoMergeEnabledOn: number[]
-  /** Bases the provider reports as bound to a merge queue. */
-  queueBoundBases: string[]
-  /** Bases whose protection rules cannot be read, leaving the required set unknown. */
-  unreadableProtectionBases: string[]
 }
 
 export type ProviderOutcome = 'observed' | 'acknowledged' | 'denied'
@@ -68,8 +64,6 @@ export class FakeGitHub {
     this.state.perPage = state.perPage
     this.state.deniedWrites = [...state.deniedWrites]
     this.state.autoMergeEnabledOn = [...state.autoMergeEnabledOn]
-    this.state.queueBoundBases = [...state.queueBoundBases]
-    this.state.unreadableProtectionBases = [...state.unreadableProtectionBases]
   }
 
   get repository(): { owner: string; name: string; defaultBranch: string } {
@@ -107,21 +101,9 @@ export class FakeGitHub {
 
   readLandingArrangement(): {
     autoMergeEnabledOn: number[]
-    queueBoundBases: string[]
-    unreadableProtectionBases: string[]
   } {
     this.record('read-landing-arrangement', this.state.defaultBranch, 'observed')
-    return {
-      autoMergeEnabledOn: [...this.state.autoMergeEnabledOn],
-      queueBoundBases: [...this.state.queueBoundBases],
-      unreadableProtectionBases: [...this.state.unreadableProtectionBases],
-    }
-  }
-
-  readBranchProtection(base: string): { readable: boolean } {
-    const readable = !this.state.unreadableProtectionBases.includes(base)
-    this.record('read-branch-protection', base, readable ? 'observed' : 'denied')
-    return { readable }
+    return { autoMergeEnabledOn: [...this.state.autoMergeEnabledOn] }
   }
 
   writeTaskOwnedScratch(label: string): void {
@@ -176,16 +158,6 @@ export class FakeGitHub {
 
   allPullRequests(): FakePullRequest[] {
     return this.state.pullRequests.map((pr) => ({ ...pr }))
-  }
-
-  /** Bases bound to a merge queue, as the landing preflight reports them. */
-  get queueBoundBases(): string[] {
-    return [...this.state.queueBoundBases]
-  }
-
-  /** Bases whose protection rules cannot be read, leaving the required set unknown. */
-  get unreadableProtectionBases(): string[] {
-    return [...this.state.unreadableProtectionBases]
   }
 
   hasAutoMerge(number: number): boolean {

@@ -44,7 +44,7 @@
       "configDigest": "sha256:0d1a2b3c"
     },
     "history": { "complete": true, "shallow": false, "grafted": 0 },
-    "landing": { "autoMergeEnabledOn": [], "queueBoundBases": [], "unreadableProtectionBases": [] }
+    "landing": { "autoMergeEnabledOn": [] }
   },
   "plan": {
     "contractVersion": "flatten-pr-graph/1",

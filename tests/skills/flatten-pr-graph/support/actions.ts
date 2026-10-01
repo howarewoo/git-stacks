@@ -10,7 +10,6 @@ export const PERMITTED_ACTIONS = [
   'list-pull-requests',
   'read-ref',
   'read-ancestry',
-  'read-branch-protection',
   'read-landing-arrangement',
   'write-task-owned-scratch',
   'update-pr-base',

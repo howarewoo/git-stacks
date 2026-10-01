@@ -4,11 +4,24 @@
   "title": "flatten-pr-graph/1 result and stage documents",
   "description": "One versioned contract. `result` is a oneOf over the six legal statuses, so an incomplete success claim is structurally rejected.",
   "$defs": {
-    "contractVersion": { "const": "flatten-pr-graph/1" },
-    "sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
-    "prNumber": { "type": "integer", "minimum": 1 },
-    "isoTime": { "type": "string", "minLength": 20 },
-    "intent": { "enum": ["preview", "execute"] },
+    "contractVersion": {
+      "const": "flatten-pr-graph/1"
+    },
+    "sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "prNumber": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "isoTime": {
+      "type": "string",
+      "minLength": 20
+    },
+    "intent": {
+      "enum": ["preview", "execute"]
+    },
     "status": {
       "enum": ["planned", "prepared", "published", "no-op", "blocked", "partial"]
     },
@@ -37,11 +50,25 @@
       "additionalProperties": false,
       "required": ["host", "owner", "name", "defaultBranch", "verified"],
       "properties": {
-        "host": { "type": "string", "minLength": 1 },
-        "owner": { "type": "string", "minLength": 1 },
-        "name": { "type": "string", "minLength": 1 },
-        "defaultBranch": { "type": "string", "minLength": 1 },
-        "verified": { "const": true }
+        "host": {
+          "type": "string",
+          "minLength": 1
+        },
+        "owner": {
+          "type": "string",
+          "minLength": 1
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "defaultBranch": {
+          "type": "string",
+          "minLength": 1
+        },
+        "verified": {
+          "const": true
+        }
       }
     },
     "rootRef": {
@@ -49,9 +76,16 @@
       "additionalProperties": false,
       "required": ["ref", "oid", "source"],
       "properties": {
-        "ref": { "type": "string", "pattern": "^refs/heads/.+" },
-        "oid": { "$ref": "#/$defs/sha" },
-        "source": { "enum": ["explicit", "repository-default", "declared-prerequisite"] }
+        "ref": {
+          "type": "string",
+          "pattern": "^refs/heads/.+"
+        },
+        "oid": {
+          "$ref": "#/$defs/sha"
+        },
+        "source": {
+          "enum": ["explicit", "repository-default", "declared-prerequisite"]
+        }
       }
     },
     "prIdentity": {
@@ -69,15 +103,37 @@
         "baseOid"
       ],
       "properties": {
-        "number": { "$ref": "#/$defs/prNumber" },
-        "url": { "type": "string", "minLength": 1 },
-        "state": { "enum": ["open", "closed", "merged"] },
-        "isDraft": { "type": "boolean" },
-        "headRef": { "type": "string", "pattern": "^refs/heads/.+" },
-        "headOid": { "$ref": "#/$defs/sha" },
-        "headRepository": { "type": "string", "minLength": 1 },
-        "baseRef": { "type": "string", "pattern": "^refs/heads/.+" },
-        "baseOid": { "$ref": "#/$defs/sha" }
+        "number": {
+          "$ref": "#/$defs/prNumber"
+        },
+        "url": {
+          "type": "string",
+          "minLength": 1
+        },
+        "state": {
+          "enum": ["open", "closed", "merged"]
+        },
+        "isDraft": {
+          "type": "boolean"
+        },
+        "headRef": {
+          "type": "string",
+          "pattern": "^refs/heads/.+"
+        },
+        "headOid": {
+          "$ref": "#/$defs/sha"
+        },
+        "headRepository": {
+          "type": "string",
+          "minLength": 1
+        },
+        "baseRef": {
+          "type": "string",
+          "pattern": "^refs/heads/.+"
+        },
+        "baseOid": {
+          "$ref": "#/$defs/sha"
+        }
       }
     },
     "collapsedDuplicate": {
@@ -85,8 +141,17 @@
       "additionalProperties": false,
       "required": ["canonical", "inputs"],
       "properties": {
-        "canonical": { "$ref": "#/$defs/prNumber" },
-        "inputs": { "type": "array", "minItems": 2, "items": { "type": "string", "minLength": 1 } }
+        "canonical": {
+          "$ref": "#/$defs/prNumber"
+        },
+        "inputs": {
+          "type": "array",
+          "minItems": 2,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
       }
     },
     "refEntry": {
@@ -94,8 +159,13 @@
       "additionalProperties": false,
       "required": ["ref", "oid"],
       "properties": {
-        "ref": { "type": "string", "pattern": "^refs/heads/.+" },
-        "oid": { "$ref": "#/$defs/sha" }
+        "ref": {
+          "type": "string",
+          "pattern": "^refs/heads/.+"
+        },
+        "oid": {
+          "$ref": "#/$defs/sha"
+        }
       }
     },
     "userWorkspace": {
@@ -103,11 +173,26 @@
       "additionalProperties": false,
       "required": ["present", "headRef", "dirtyPaths", "stashCount", "configDigest"],
       "properties": {
-        "present": { "type": "boolean" },
-        "headRef": { "type": ["string", "null"] },
-        "dirtyPaths": { "type": "array", "items": { "type": "string" } },
-        "stashCount": { "type": "integer", "minimum": 0 },
-        "configDigest": { "type": "string", "minLength": 1 }
+        "present": {
+          "type": "boolean"
+        },
+        "headRef": {
+          "type": ["string", "null"]
+        },
+        "dirtyPaths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "stashCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "configDigest": {
+          "type": "string",
+          "minLength": 1
+        }
       }
     },
     "history": {
@@ -115,19 +200,29 @@
       "additionalProperties": false,
       "required": ["complete", "shallow", "grafted"],
       "properties": {
-        "complete": { "type": "boolean" },
-        "shallow": { "type": "boolean" },
-        "grafted": { "type": "integer", "minimum": 0 }
+        "complete": {
+          "type": "boolean"
+        },
+        "shallow": {
+          "type": "boolean"
+        },
+        "grafted": {
+          "type": "integer",
+          "minimum": 0
+        }
       }
     },
     "landing": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["autoMergeEnabledOn", "queueBoundBases", "unreadableProtectionBases"],
+      "required": ["autoMergeEnabledOn"],
       "properties": {
-        "autoMergeEnabledOn": { "type": "array", "items": { "$ref": "#/$defs/prNumber" } },
-        "queueBoundBases": { "type": "array", "items": { "type": "string" } },
-        "unreadableProtectionBases": { "type": "array", "items": { "type": "string" } }
+        "autoMergeEnabledOn": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/prNumber"
+          }
+        }
       }
     },
     "snapshot": {
@@ -146,28 +241,73 @@
         "landing"
       ],
       "properties": {
-        "contractVersion": { "$ref": "#/$defs/contractVersion" },
-        "capturedAt": { "$ref": "#/$defs/isoTime" },
-        "intent": { "$ref": "#/$defs/intent" },
-        "repository": { "$ref": "#/$defs/repository" },
-        "root": { "$ref": "#/$defs/rootRef" },
+        "contractVersion": {
+          "$ref": "#/$defs/contractVersion"
+        },
+        "capturedAt": {
+          "$ref": "#/$defs/isoTime"
+        },
+        "intent": {
+          "$ref": "#/$defs/intent"
+        },
+        "repository": {
+          "$ref": "#/$defs/repository"
+        },
+        "root": {
+          "$ref": "#/$defs/rootRef"
+        },
         "selection": {
           "type": "object",
           "additionalProperties": false,
           "required": ["requested", "resolved", "duplicatesCollapsed"],
           "properties": {
-            "requested": { "type": "array", "items": { "type": "string", "minLength": 1 } },
-            "resolved": { "type": "array", "items": { "$ref": "#/$defs/prIdentity" } },
+            "requested": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "resolved": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/prIdentity"
+              }
+            },
             "duplicatesCollapsed": {
               "type": "array",
-              "items": { "$ref": "#/$defs/collapsedDuplicate" }
+              "items": {
+                "$ref": "#/$defs/collapsedDuplicate"
+              }
             }
           }
         },
-        "refs": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/refEntry" } },
-        "userWorkspace": { "$ref": "#/$defs/userWorkspace" },
-        "history": { "$ref": "#/$defs/history" },
-        "landing": { "$ref": "#/$defs/landing" }
+        "refs": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/refEntry"
+          }
+        },
+        "userWorkspace": {
+          "$ref": "#/$defs/userWorkspace"
+        },
+        "history": {
+          "$ref": "#/$defs/history"
+        },
+        "landing": {
+          "$ref": "#/$defs/landing",
+          "required": ["autoMergeEnabledOn"],
+          "additionalProperties": false,
+          "properties": {
+            "autoMergeEnabledOn": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/prNumber"
+              }
+            }
+          }
+        }
       }
     },
     "hardDependency": {
@@ -175,10 +315,19 @@
       "additionalProperties": false,
       "required": ["before", "after", "source", "evidence"],
       "properties": {
-        "before": { "$ref": "#/$defs/prNumber" },
-        "after": { "$ref": "#/$defs/prNumber" },
-        "source": { "enum": ["ancestry", "pr-base", "verified-prerequisite"] },
-        "evidence": { "type": "string", "minLength": 1 }
+        "before": {
+          "$ref": "#/$defs/prNumber"
+        },
+        "after": {
+          "$ref": "#/$defs/prNumber"
+        },
+        "source": {
+          "enum": ["ancestry", "pr-base", "verified-prerequisite"]
+        },
+        "evidence": {
+          "type": "string",
+          "minLength": 1
+        }
       }
     },
     "estimate": {
@@ -190,11 +339,19 @@
           "type": "array",
           "minItems": 2,
           "maxItems": 2,
-          "items": { "$ref": "#/$defs/prNumber" }
+          "items": {
+            "$ref": "#/$defs/prNumber"
+          }
         },
-        "kind": { "enum": ["pairwise-probe", "measured-merge", "unknown"] },
-        "value": { "type": ["number", "null"] },
-        "confidence": { "enum": ["high", "medium", "low", "unknown"] }
+        "kind": {
+          "enum": ["pairwise-probe", "measured-merge", "unknown"]
+        },
+        "value": {
+          "type": ["number", "null"]
+        },
+        "confidence": {
+          "enum": ["high", "medium", "low", "unknown"]
+        }
       }
     },
     "objective": {
@@ -213,18 +370,32 @@
             ]
           }
         },
-        "estimates": { "type": "array", "items": { "$ref": "#/$defs/estimate" } },
-        "qualification": { "$ref": "#/$defs/qualification" },
+        "estimates": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/estimate"
+          }
+        },
+        "qualification": {
+          "$ref": "#/$defs/qualification"
+        },
         "budget": {
           "type": "object",
           "additionalProperties": false,
           "required": ["probes", "exhausted"],
           "properties": {
-            "probes": { "type": "integer", "minimum": 0 },
-            "exhausted": { "type": "boolean" }
+            "probes": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "exhausted": {
+              "type": "boolean"
+            }
           }
         },
-        "unknownTreatedAsZero": { "const": false }
+        "unknownTreatedAsZero": {
+          "const": false
+        }
       }
     },
     "proposedWrite": {
@@ -232,10 +403,20 @@
       "additionalProperties": false,
       "required": ["kind", "target", "change", "reason"],
       "properties": {
-        "kind": { "enum": ["ref-update", "pr-base-update"] },
-        "target": { "type": "string", "minLength": 1 },
-        "change": { "enum": ["none", "base-change", "head-update"] },
-        "reason": { "type": "string", "minLength": 1 }
+        "kind": {
+          "enum": ["ref-update", "pr-base-update"]
+        },
+        "target": {
+          "type": "string",
+          "minLength": 1
+        },
+        "change": {
+          "enum": ["none", "base-change", "head-update"]
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        }
       }
     },
     "plan": {
@@ -252,8 +433,12 @@
         "prohibitedActivitiesNotPerformed"
       ],
       "properties": {
-        "contractVersion": { "$ref": "#/$defs/contractVersion" },
-        "intent": { "$ref": "#/$defs/intent" },
+        "contractVersion": {
+          "$ref": "#/$defs/contractVersion"
+        },
+        "intent": {
+          "$ref": "#/$defs/intent"
+        },
         "order": {
           "type": "array",
           "items": {
@@ -261,15 +446,33 @@
             "additionalProperties": false,
             "required": ["position", "number", "fromBase", "toBase", "change"],
             "properties": {
-              "position": { "type": "integer", "minimum": 1 },
-              "number": { "$ref": "#/$defs/prNumber" },
-              "fromBase": { "type": "string", "minLength": 1 },
-              "toBase": { "type": "string", "minLength": 1 },
-              "change": { "enum": ["none", "base-change", "head-update"] }
+              "position": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "number": {
+                "$ref": "#/$defs/prNumber"
+              },
+              "fromBase": {
+                "type": "string",
+                "minLength": 1
+              },
+              "toBase": {
+                "type": "string",
+                "minLength": 1
+              },
+              "change": {
+                "enum": ["none", "base-change", "head-update"]
+              }
             }
           }
         },
-        "hardDependencies": { "type": "array", "items": { "$ref": "#/$defs/hardDependency" } },
+        "hardDependencies": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/hardDependency"
+          }
+        },
         "ambiguities": {
           "type": "array",
           "items": {
@@ -277,17 +480,32 @@
             "additionalProperties": false,
             "required": ["item", "why"],
             "properties": {
-              "item": { "type": "string", "minLength": 1 },
-              "why": { "type": "string", "minLength": 1 }
+              "item": {
+                "type": "string",
+                "minLength": 1
+              },
+              "why": {
+                "type": "string",
+                "minLength": 1
+              }
             }
           }
         },
-        "objective": { "$ref": "#/$defs/objective" },
-        "proposedWrites": { "type": "array", "items": { "$ref": "#/$defs/proposedWrite" } },
+        "objective": {
+          "$ref": "#/$defs/objective"
+        },
+        "proposedWrites": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/proposedWrite"
+          }
+        },
         "prohibitedActivitiesNotPerformed": {
           "type": "array",
           "minItems": 1,
-          "items": { "$ref": "#/$defs/prohibitedActivity" }
+          "items": {
+            "$ref": "#/$defs/prohibitedActivity"
+          }
         }
       }
     },
@@ -303,12 +521,27 @@
         "historyPolicy"
       ],
       "properties": {
-        "number": { "$ref": "#/$defs/prNumber" },
-        "originalHead": { "$ref": "#/$defs/sha" },
-        "preparedHead": { "$ref": "#/$defs/sha" },
-        "basedOn": { "$ref": "#/$defs/sha" },
-        "retainedOriginalCommits": { "type": "array", "items": { "$ref": "#/$defs/sha" } },
-        "historyPolicy": { "const": "preserve-original-commits" }
+        "number": {
+          "$ref": "#/$defs/prNumber"
+        },
+        "originalHead": {
+          "$ref": "#/$defs/sha"
+        },
+        "preparedHead": {
+          "$ref": "#/$defs/sha"
+        },
+        "basedOn": {
+          "$ref": "#/$defs/sha"
+        },
+        "retainedOriginalCommits": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/sha"
+          }
+        },
+        "historyPolicy": {
+          "const": "preserve-original-commits"
+        }
       }
     },
     "preparation": {
@@ -325,10 +558,24 @@
         "indexState"
       ],
       "properties": {
-        "contractVersion": { "$ref": "#/$defs/contractVersion" },
-        "workspaceKind": { "const": "task-owned-isolated" },
-        "branches": { "type": "array", "items": { "$ref": "#/$defs/preparedBranch" } },
-        "lostOriginalCommits": { "type": "array", "items": { "$ref": "#/$defs/sha" } },
+        "contractVersion": {
+          "$ref": "#/$defs/contractVersion"
+        },
+        "workspaceKind": {
+          "const": "task-owned-isolated"
+        },
+        "branches": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/preparedBranch"
+          }
+        },
+        "lostOriginalCommits": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/sha"
+          }
+        },
         "cumulativeIntegration": {
           "type": "array",
           "items": {
@@ -336,9 +583,16 @@
             "additionalProperties": false,
             "required": ["number", "integratedPreparedStateOf", "evidence"],
             "properties": {
-              "number": { "$ref": "#/$defs/prNumber" },
-              "integratedPreparedStateOf": { "$ref": "#/$defs/prNumber" },
-              "evidence": { "type": "string", "minLength": 1 }
+              "number": {
+                "$ref": "#/$defs/prNumber"
+              },
+              "integratedPreparedStateOf": {
+                "$ref": "#/$defs/prNumber"
+              },
+              "evidence": {
+                "type": "string",
+                "minLength": 1
+              }
             }
           }
         },
@@ -349,21 +603,48 @@
             "additionalProperties": false,
             "required": ["number", "path", "resolution"],
             "properties": {
-              "number": { "$ref": "#/$defs/prNumber" },
-              "path": { "type": "string", "minLength": 1 },
-              "resolution": { "enum": ["both-sides-with-stated-intent", "clean-merge"] }
+              "number": {
+                "$ref": "#/$defs/prNumber"
+              },
+              "path": {
+                "type": "string",
+                "minLength": 1
+              },
+              "resolution": {
+                "enum": ["both-sides-with-stated-intent", "clean-merge"]
+              }
             }
           }
         },
-        "unresolved": { "type": "array", "items": { "type": "string" } },
+        "unresolved": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
         "indexState": {
           "type": "object",
           "additionalProperties": false,
           "required": ["unmergedEntries", "operationsInProgress", "conflictMarkersInTree"],
           "properties": {
-            "unmergedEntries": { "type": "array", "items": { "type": "string" } },
-            "operationsInProgress": { "type": "array", "items": { "type": "string" } },
-            "conflictMarkersInTree": { "type": "array", "items": { "type": "string" } }
+            "unmergedEntries": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "operationsInProgress": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "conflictMarkersInTree": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
           }
         }
       }
@@ -373,22 +654,42 @@
       "additionalProperties": false,
       "required": ["sequence", "kind", "target", "from", "to", "acknowledged", "outcome"],
       "properties": {
-        "sequence": { "type": "integer", "minimum": 1 },
-        "kind": { "enum": ["ref-update", "pr-base-update"] },
-        "target": { "type": "string", "minLength": 1 },
-        "from": { "$ref": "#/$defs/sha" },
-        "to": { "$ref": "#/$defs/sha" },
-        "acknowledged": { "type": "boolean" },
+        "sequence": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "kind": {
+          "enum": ["ref-update", "pr-base-update"]
+        },
+        "target": {
+          "type": "string",
+          "minLength": 1
+        },
+        "from": {
+          "$ref": "#/$defs/sha"
+        },
+        "to": {
+          "$ref": "#/$defs/sha"
+        },
+        "acknowledged": {
+          "type": "boolean"
+        },
         "lease": {
           "type": ["object", "null"],
           "additionalProperties": false,
           "required": ["expectedRemote", "usedForceWithLease"],
           "properties": {
-            "expectedRemote": { "$ref": "#/$defs/sha" },
-            "usedForceWithLease": { "type": "boolean" }
+            "expectedRemote": {
+              "$ref": "#/$defs/sha"
+            },
+            "usedForceWithLease": {
+              "type": "boolean"
+            }
           }
         },
-        "outcome": { "enum": ["acknowledged", "denied", "rejected", "unknown"] }
+        "outcome": {
+          "enum": ["acknowledged", "denied", "rejected", "unknown"]
+        }
       }
     },
     "publication": {
@@ -405,8 +706,15 @@
         "concurrency"
       ],
       "properties": {
-        "contractVersion": { "$ref": "#/$defs/contractVersion" },
-        "attempts": { "type": "array", "items": { "$ref": "#/$defs/attempt" } },
+        "contractVersion": {
+          "$ref": "#/$defs/contractVersion"
+        },
+        "attempts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/attempt"
+          }
+        },
         "confirmed": {
           "type": "array",
           "items": {
@@ -414,9 +722,16 @@
             "additionalProperties": false,
             "required": ["kind", "target", "oid"],
             "properties": {
-              "kind": { "enum": ["ref-update", "pr-base-update"] },
-              "target": { "type": "string", "minLength": 1 },
-              "oid": { "$ref": "#/$defs/sha" }
+              "kind": {
+                "enum": ["ref-update", "pr-base-update"]
+              },
+              "target": {
+                "type": "string",
+                "minLength": 1
+              },
+              "oid": {
+                "$ref": "#/$defs/sha"
+              }
             }
           }
         },
@@ -427,9 +742,17 @@
             "additionalProperties": false,
             "required": ["kind", "target", "why"],
             "properties": {
-              "kind": { "enum": ["ref-update", "pr-base-update"] },
-              "target": { "type": "string", "minLength": 1 },
-              "why": { "type": "string", "minLength": 1 }
+              "kind": {
+                "enum": ["ref-update", "pr-base-update"]
+              },
+              "target": {
+                "type": "string",
+                "minLength": 1
+              },
+              "why": {
+                "type": "string",
+                "minLength": 1
+              }
             }
           }
         },
@@ -440,10 +763,20 @@
             "additionalProperties": false,
             "required": ["kind", "target", "reason", "acknowledged"],
             "properties": {
-              "kind": { "enum": ["ref-update", "pr-base-update"] },
-              "target": { "type": "string", "minLength": 1 },
-              "reason": { "type": "string", "minLength": 1 },
-              "acknowledged": { "type": "boolean" }
+              "kind": {
+                "enum": ["ref-update", "pr-base-update"]
+              },
+              "target": {
+                "type": "string",
+                "minLength": 1
+              },
+              "reason": {
+                "type": "string",
+                "minLength": 1
+              },
+              "acknowledged": {
+                "type": "boolean"
+              }
             }
           }
         },
@@ -454,21 +787,36 @@
             "additionalProperties": false,
             "required": ["kind", "target", "observed", "observedAt"],
             "properties": {
-              "kind": { "enum": ["pr-base", "ref-oid"] },
-              "target": { "type": "string", "minLength": 1 },
-              "observed": { "type": ["string", "boolean"] },
-              "observedAt": { "$ref": "#/$defs/isoTime" }
+              "kind": {
+                "enum": ["pr-base", "ref-oid"]
+              },
+              "target": {
+                "type": "string",
+                "minLength": 1
+              },
+              "observed": {
+                "type": ["string", "boolean"]
+              },
+              "observedAt": {
+                "$ref": "#/$defs/isoTime"
+              }
             }
           }
         },
-        "interrupted": { "type": "boolean" },
+        "interrupted": {
+          "type": "boolean"
+        },
         "concurrency": {
           "type": "object",
           "additionalProperties": false,
           "required": ["leaseHeld", "conflictingRemoteMoveDetected"],
           "properties": {
-            "leaseHeld": { "type": "boolean" },
-            "conflictingRemoteMoveDetected": { "type": "boolean" }
+            "leaseHeld": {
+              "type": "boolean"
+            },
+            "conflictingRemoteMoveDetected": {
+              "type": "boolean"
+            }
           }
         }
       }
@@ -495,8 +843,13 @@
             "disable-environment-control"
           ]
         },
-        "performed": { "type": "boolean" },
-        "evidence": { "type": "string", "minLength": 1 }
+        "performed": {
+          "type": "boolean"
+        },
+        "evidence": {
+          "type": "string",
+          "minLength": 1
+        }
       }
     },
     "verificationRecord": {
@@ -504,10 +857,20 @@
       "additionalProperties": false,
       "required": ["invariant", "method", "observed", "result"],
       "properties": {
-        "invariant": { "$ref": "#/$defs/invariant" },
-        "method": { "type": "string", "minLength": 1 },
-        "observed": { "type": "string", "minLength": 1 },
-        "result": { "enum": ["pass", "fail", "unautomated"] }
+        "invariant": {
+          "$ref": "#/$defs/invariant"
+        },
+        "method": {
+          "type": "string",
+          "minLength": 1
+        },
+        "observed": {
+          "type": "string",
+          "minLength": 1
+        },
+        "result": {
+          "enum": ["pass", "fail", "unautomated"]
+        }
       }
     },
     "recovery": {
@@ -515,9 +878,24 @@
       "additionalProperties": false,
       "required": ["acknowledgedChanges", "unconfirmedAttempts", "recommended"],
       "properties": {
-        "acknowledgedChanges": { "type": "array", "items": { "type": "string", "minLength": 1 } },
-        "unconfirmedAttempts": { "type": "array", "items": { "type": "string", "minLength": 1 } },
-        "recommended": { "type": "string", "minLength": 1 }
+        "acknowledgedChanges": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "unconfirmedAttempts": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "recommended": {
+          "type": "string",
+          "minLength": 1
+        }
       }
     },
     "ignoredChecks": {
@@ -525,10 +903,24 @@
       "additionalProperties": false,
       "required": ["policy", "executed", "suppressedOrWeakened", "remoteTriggeredLeftAlone"],
       "properties": {
-        "policy": { "const": "never-run-poll-wait-rerun-repair-or-gate" },
-        "executed": { "type": "array", "items": { "type": "string" } },
-        "suppressedOrWeakened": { "type": "array", "items": { "type": "string" } },
-        "remoteTriggeredLeftAlone": { "const": true }
+        "policy": {
+          "const": "never-run-poll-wait-rerun-repair-or-gate"
+        },
+        "executed": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "suppressedOrWeakened": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "remoteTriggeredLeftAlone": {
+          "const": true
+        }
       }
     },
     "nextSafeAction": {
@@ -536,8 +928,17 @@
       "additionalProperties": false,
       "required": ["action", "requires"],
       "properties": {
-        "action": { "type": "string", "minLength": 1 },
-        "requires": { "type": "array", "items": { "type": "string", "minLength": 1 } }
+        "action": {
+          "type": "string",
+          "minLength": 1
+        },
+        "requires": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
       }
     },
     "semanticReview": {
@@ -545,10 +946,19 @@
       "additionalProperties": false,
       "required": ["automated", "rubric", "humanReviewRequired", "reviewerVerdict"],
       "properties": {
-        "automated": { "const": false },
-        "rubric": { "type": "string", "minLength": 1 },
-        "humanReviewRequired": { "const": true },
-        "reviewerVerdict": { "enum": ["unreviewed", "pass", "fail"] }
+        "automated": {
+          "const": false
+        },
+        "rubric": {
+          "type": "string",
+          "minLength": 1
+        },
+        "humanReviewRequired": {
+          "const": true
+        },
+        "reviewerVerdict": {
+          "enum": ["unreviewed", "pass", "fail"]
+        }
       }
     },
     "uncertaintyItem": {
@@ -556,8 +966,14 @@
       "additionalProperties": false,
       "required": ["item", "why"],
       "properties": {
-        "item": { "type": "string", "minLength": 1 },
-        "why": { "type": "string", "minLength": 1 }
+        "item": {
+          "type": "string",
+          "minLength": 1
+        },
+        "why": {
+          "type": "string",
+          "minLength": 1
+        }
       }
     },
     "blockedReason": {
@@ -581,8 +997,14 @@
             "lost-original-commit"
           ]
         },
-        "detail": { "type": "string", "minLength": 1 },
-        "evidence": { "type": "string", "minLength": 1 }
+        "detail": {
+          "type": "string",
+          "minLength": 1
+        },
+        "evidence": {
+          "type": "string",
+          "minLength": 1
+        }
       }
     },
     "result": {
@@ -601,58 +1023,114 @@
         "verification"
       ],
       "properties": {
-        "contractVersion": { "$ref": "#/$defs/contractVersion" },
-        "status": { "$ref": "#/$defs/status" },
-        "intent": { "$ref": "#/$defs/intent" },
-        "snapshot": { "$ref": "#/$defs/snapshot" },
-        "plan": { "$ref": "#/$defs/plan" },
-        "preparation": { "$ref": "#/$defs/preparation" },
-        "publication": { "$ref": "#/$defs/publication" },
-        "blockedReasons": { "type": "array", "items": { "$ref": "#/$defs/blockedReason" } },
-        "recovery": { "$ref": "#/$defs/recovery" },
-        "ignoredChecks": { "$ref": "#/$defs/ignoredChecks" },
+        "contractVersion": {
+          "$ref": "#/$defs/contractVersion"
+        },
+        "status": {
+          "$ref": "#/$defs/status"
+        },
+        "intent": {
+          "$ref": "#/$defs/intent"
+        },
+        "snapshot": {
+          "$ref": "#/$defs/snapshot"
+        },
+        "plan": {
+          "$ref": "#/$defs/plan"
+        },
+        "preparation": {
+          "$ref": "#/$defs/preparation"
+        },
+        "publication": {
+          "$ref": "#/$defs/publication"
+        },
+        "blockedReasons": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/blockedReason"
+          }
+        },
+        "recovery": {
+          "$ref": "#/$defs/recovery"
+        },
+        "ignoredChecks": {
+          "$ref": "#/$defs/ignoredChecks"
+        },
         "prohibitedActivities": {
           "type": "array",
           "minItems": 1,
-          "items": { "$ref": "#/$defs/prohibitedActivity" }
+          "items": {
+            "$ref": "#/$defs/prohibitedActivity"
+          }
         },
         "uncertainty": {
           "type": "array",
           "minItems": 1,
-          "items": { "$ref": "#/$defs/uncertaintyItem" }
+          "items": {
+            "$ref": "#/$defs/uncertaintyItem"
+          }
         },
-        "nextSafeAction": { "$ref": "#/$defs/nextSafeAction" },
-        "semanticReview": { "$ref": "#/$defs/semanticReview" },
+        "nextSafeAction": {
+          "$ref": "#/$defs/nextSafeAction"
+        },
+        "semanticReview": {
+          "$ref": "#/$defs/semanticReview"
+        },
         "verification": {
           "type": "array",
           "minItems": 1,
-          "items": { "$ref": "#/$defs/verificationRecord" }
+          "items": {
+            "$ref": "#/$defs/verificationRecord"
+          }
         }
       },
       "oneOf": [
         {
           "title": "planned",
-          "properties": { "status": { "const": "planned" } },
+          "properties": {
+            "status": {
+              "const": "planned"
+            }
+          },
           "required": ["status"],
-          "not": { "required": ["preparation", "publication"] }
+          "not": {
+            "required": ["preparation", "publication"]
+          }
         },
         {
           "title": "prepared",
-          "properties": { "status": { "const": "prepared" } },
+          "properties": {
+            "status": {
+              "const": "prepared"
+            }
+          },
           "required": ["status", "preparation"],
-          "not": { "required": ["publication"] }
+          "not": {
+            "required": ["publication"]
+          }
         },
         {
           "title": "published",
           "properties": {
-            "status": { "const": "published" },
+            "status": {
+              "const": "published"
+            },
             "publication": {
               "type": "object",
               "required": ["attempts", "confirmed", "unconfirmed", "denials"],
               "properties": {
-                "unconfirmed": { "type": "array", "maxItems": 0 },
-                "denials": { "type": "array", "maxItems": 0 },
-                "remoteClaims": { "type": "array", "minItems": 1 }
+                "unconfirmed": {
+                  "type": "array",
+                  "maxItems": 0
+                },
+                "denials": {
+                  "type": "array",
+                  "maxItems": 0
+                },
+                "remoteClaims": {
+                  "type": "array",
+                  "minItems": 1
+                }
               }
             }
           },
@@ -661,15 +1139,29 @@
         {
           "title": "no-op",
           "properties": {
-            "status": { "const": "no-op" },
+            "status": {
+              "const": "no-op"
+            },
             "publication": {
               "type": "object",
               "required": ["attempts", "confirmed", "unconfirmed", "denials"],
               "properties": {
-                "attempts": { "type": "array", "maxItems": 0 },
-                "confirmed": { "type": "array", "maxItems": 0 },
-                "unconfirmed": { "type": "array", "maxItems": 0 },
-                "denials": { "type": "array", "maxItems": 0 }
+                "attempts": {
+                  "type": "array",
+                  "maxItems": 0
+                },
+                "confirmed": {
+                  "type": "array",
+                  "maxItems": 0
+                },
+                "unconfirmed": {
+                  "type": "array",
+                  "maxItems": 0
+                },
+                "denials": {
+                  "type": "array",
+                  "maxItems": 0
+                }
               }
             },
             "plan": {
@@ -681,7 +1173,11 @@
                   "items": {
                     "type": "object",
                     "required": ["change"],
-                    "properties": { "change": { "const": "none" } }
+                    "properties": {
+                      "change": {
+                        "const": "none"
+                      }
+                    }
                   }
                 }
               }
@@ -692,26 +1188,43 @@
         {
           "title": "blocked",
           "properties": {
-            "status": { "const": "blocked" },
+            "status": {
+              "const": "blocked"
+            },
             "publication": {
               "type": "object",
               "required": ["confirmed"],
-              "properties": { "confirmed": { "type": "array", "maxItems": 0 } }
+              "properties": {
+                "confirmed": {
+                  "type": "array",
+                  "maxItems": 0
+                }
+              }
             }
           },
           "required": ["status", "blockedReasons"],
-          "not": { "required": ["recovery"] }
+          "not": {
+            "required": ["recovery"]
+          }
         },
         {
           "title": "partial",
           "properties": {
-            "status": { "const": "partial" },
+            "status": {
+              "const": "partial"
+            },
             "publication": {
               "type": "object",
               "required": ["confirmed", "unconfirmed"],
               "properties": {
-                "confirmed": { "type": "array", "minItems": 1 },
-                "unconfirmed": { "type": "array", "minItems": 1 }
+                "confirmed": {
+                  "type": "array",
+                  "minItems": 1
+                },
+                "unconfirmed": {
+                  "type": "array",
+                  "minItems": 1
+                }
               }
             }
           },

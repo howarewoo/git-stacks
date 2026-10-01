@@ -26,8 +26,6 @@ export interface ProviderScript {
   perPage?: number
   deniedWrites?: string[]
   autoMergeEnabledOn?: number[]
-  queueBoundBases?: string[]
-  unreadableProtectionBases?: string[]
 }
 
 const DEFAULT_OWNER = 'acme'
@@ -42,8 +40,6 @@ export function defineProvider(context: FixtureContext, script: ProviderScript):
     perPage: script.perPage ?? 2,
     deniedWrites: script.deniedWrites ?? [],
     autoMergeEnabledOn: script.autoMergeEnabledOn ?? [],
-    queueBoundBases: script.queueBoundBases ?? [],
-    unreadableProtectionBases: script.unreadableProtectionBases ?? [],
     pullRequests: script.pullRequests,
   })
 }
@@ -91,6 +87,23 @@ export async function integrateBranch(
  * Merges `other` into `branch` and leaves the conflict in the index, which is what a
  * blocked run looks like from the outside.
  */
+/**
+ * Preparation without publication: merge in the task's own workspace and stop. The remote
+ * ref does not move, so nothing on the provider side has happened yet.
+ */
+export async function prepareBranch(
+  context: FixtureContext,
+  name: string,
+  branch: string,
+  integrates: string,
+): Promise<{ path: string; oid: string }> {
+  const scratch = await context.scratch(name)
+  scratch.checkout(branch)
+  scratch.fetch()
+  scratch.merge(integrates)
+  return { path: scratch.path, oid: scratch.headOid() }
+}
+
 export async function mergeLeavingConflict(
   context: FixtureContext,
   scratchName: string,

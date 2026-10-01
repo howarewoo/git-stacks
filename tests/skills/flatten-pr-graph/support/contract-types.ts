@@ -67,9 +67,8 @@ export interface Snapshot {
   }
   history: { complete: boolean; shallow: boolean; grafted: number }
   landing: {
+    /** Selected pull requests whose own auto-merge request is active, by number. */
     autoMergeEnabledOn: number[]
-    queueBoundBases: string[]
-    unreadableProtectionBases: string[]
   }
 }
 

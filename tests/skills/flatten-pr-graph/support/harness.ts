@@ -14,7 +14,7 @@ import { resolveSelection } from './documents'
 import { FakeGitHub, type ProviderState } from './fake-github'
 import type { FixtureContext, FixtureModule, ObservedBaseline } from './fixture'
 import { loadSchema, type LoadedSchema } from './json-schema'
-import { judge, type OracleVerdict } from './oracle'
+import { judge, observedHardEdges, type OracleVerdict } from './oracle'
 import { createWorld, type ScratchWorkspace, type World } from './real-git'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -61,8 +61,6 @@ const EMPTY_PROVIDER_STATE: ProviderState = {
   pullRequests: [],
   deniedWrites: [],
   autoMergeEnabledOn: [],
-  queueBoundBases: [],
-  unreadableProtectionBases: [],
 }
 
 /**
@@ -92,6 +90,15 @@ export async function executeFixture(module: FixtureModule): Promise<FixtureExec
   const baseline: ObservedBaseline = {
     refsBefore: world.remoteRefs(),
     userBefore: world.userFingerprint(),
+    hardEdges: observedHardEdges(context),
+    scratchStateBefore: Object.fromEntries(
+      world
+        .scratches()
+        .map((scratch) => [
+          scratch.path,
+          { branch: scratch.currentBranch(), oid: scratch.headOid() },
+        ]),
+    ),
   }
   const claim = await module.run(context)
   const { numbers } = resolveSelection(module.spec.selection)

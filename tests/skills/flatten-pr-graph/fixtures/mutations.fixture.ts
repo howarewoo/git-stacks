@@ -78,6 +78,8 @@ function publishedAssemble(options: {
   chain: number[]
   writes: PlanWrite[]
   headsBefore?: Record<string, string>
+  /** Reported hard dependencies. Omitted entirely models a plan that dropped an edge. */
+  dependencies?: NonNullable<Parameters<typeof planFrom>[3]>['hardDependencies']
 }): ResultDocument {
   const bases: Record<number, string> = {}
   for (const number of options.chain) {
@@ -90,6 +92,7 @@ function publishedAssemble(options: {
     snapshot: options.snapshot,
     plan: planFrom(options.snapshot, options.chain, options.writes, {
       prohibitedActivitiesNotPerformed: notPerformed(),
+      ...(options.dependencies ? { hardDependencies: options.dependencies } : {}),
     }),
     preparation: preparationFrom(
       options.chain.map((number) => {
@@ -445,6 +448,205 @@ const forbiddenCheckExecution: FixtureModule = {
   },
 }
 
+/** Two branches where #13 already contains #12, so #12 -> #13 is an observed hard edge. */
+async function seedIntegratedPair(context: FixtureContext): Promise<void> {
+  await seedTwoPrs(context)
+  await integrateBranch(context, 'seed-integrate', 'feat-b', 'feat-a')
+}
+
+const omittedEdge: FixtureModule = {
+  spec: {
+    contractVersion: CONTRACT_VERSION,
+    id: 'omitted-hard-edge',
+    title: 'A plan that never declares a hard dependency the pre-run evidence proves',
+    matrixEntry: 'mutated: omitted hard dependency edge',
+    kind: 'mutation',
+    selection: ['12', '13'],
+    expect: {
+      status: 'published',
+      permittedActions: WITH_BASES,
+      forbiddenActions: ['run-checks', 'merge-pr'],
+      chain: [12, 13],
+      preserved: { root: true, unselectedRefs: ['refs/heads/unrelated'], userWorkspace: true },
+      mustDetectInvariant: 'topology.dependencies',
+      honestResult: false,
+    },
+    humanReview: { required: false, rubric: RUBRIC_PATH },
+  },
+  async setup(context) {
+    await seedIntegratedPair(context)
+  },
+  async run(context) {
+    const selection = ['12', '13']
+    const snapshot = captureSnapshot(context, { intent: 'execute', capturedAt: AT, selection })
+    const originalB = snapshot.selection.resolved[1].headOid
+    context.provider.recordAction('push-selected-head', 'feat-b')
+    context.provider.updatePullRequestBase(13, 'feat-a')
+    return publishedAssemble({
+      context,
+      snapshot,
+      chain: [12, 13],
+      writes: [headWrite('feat-b'), baseWrite(13, 'main', 'feat-a')],
+      headsBefore: { 'feat-b': originalB },
+      // dependencies omitted on purpose: the edge exists whether or not it is declared.
+    })
+  },
+}
+
+const wrongOrder: FixtureModule = {
+  spec: {
+    contractVersion: CONTRACT_VERSION,
+    id: 'wrong-order',
+    title: 'A declared hard edge ordered after the pull request that depends on it',
+    matrixEntry: 'mutated: dependency ordered backwards',
+    kind: 'mutation',
+    selection: ['12', '13'],
+    expect: {
+      status: 'published',
+      permittedActions: WITH_BASES,
+      forbiddenActions: ['run-checks', 'merge-pr'],
+      chain: [12, 13],
+      preserved: { root: true, unselectedRefs: ['refs/heads/unrelated'], userWorkspace: true },
+      mustDetectInvariant: 'topology.dependencies',
+      honestResult: false,
+    },
+    humanReview: { required: false, rubric: RUBRIC_PATH },
+  },
+  async setup(context) {
+    await seedIntegratedPair(context)
+  },
+  async run(context) {
+    const selection = ['12', '13']
+    const snapshot = captureSnapshot(context, { intent: 'execute', capturedAt: AT, selection })
+    const originalB = snapshot.selection.resolved[1].headOid
+    context.provider.recordAction('push-selected-head', 'feat-b')
+    context.provider.updatePullRequestBase(13, 'feat-a')
+    return publishedAssemble({
+      context,
+      snapshot,
+      // The report puts the dependent first while declaring the edge.
+      chain: [13, 12],
+      writes: [headWrite('feat-b'), baseWrite(13, 'main', 'feat-a')],
+      headsBefore: { 'feat-b': originalB },
+      dependencies: [
+        {
+          before: 12,
+          after: 13,
+          source: 'pr-base',
+          evidence: '#13 is retargeted onto the head of #12',
+        },
+      ],
+    })
+  },
+}
+
+const oldPredecessor: FixtureModule = {
+  spec: {
+    contractVersion: CONTRACT_VERSION,
+    id: 'old-predecessor',
+    title: 'A successor pinned to a predecessor head that no longer carries the prepared state',
+    matrixEntry: 'mutated: stale predecessor state',
+    kind: 'mutation',
+    selection: ['12', '13'],
+    expect: {
+      status: 'published',
+      permittedActions: WITH_BASES,
+      forbiddenActions: ['run-checks', 'merge-pr'],
+      chain: [12, 13],
+      preserved: { root: true, unselectedRefs: ['refs/heads/unrelated'], userWorkspace: true },
+      mustDetectInvariant: 'preservation.cumulative',
+      honestResult: false,
+    },
+    humanReview: { required: true, rubric: RUBRIC_PATH },
+  },
+  async setup(context) {
+    await seedTwoPrs(context)
+    // #13 was prepared against the state #12 had at seed time.
+    await integrateBranch(context, 'seed-integrate', 'feat-b', 'feat-a')
+  },
+  async run(context) {
+    const selection = ['12', '13']
+    const snapshot = captureSnapshot(context, { intent: 'execute', capturedAt: AT, selection })
+    const originalB = snapshot.selection.resolved[1].headOid
+    // #12 moves on; #13 still carries the earlier state of #12.
+    const revised = await context.scratch('revise-a')
+    revised.checkout('feat-a')
+    await revised.write('a.txt', 'a revised\n')
+    revised.commit('Revise A')
+    revised.push('feat-a')
+    context.provider.recordAction('push-selected-head', 'feat-a')
+    context.provider.updatePullRequestBase(13, 'feat-a')
+    return publishedAssemble({
+      context,
+      snapshot,
+      chain: [12, 13],
+      writes: [headWrite('feat-a'), baseWrite(13, 'main', 'feat-a')],
+      headsBefore: { 'feat-a': snapshot.selection.resolved[0].headOid, 'feat-b': originalB },
+      dependencies: [
+        {
+          before: 12,
+          after: 13,
+          source: 'pr-base',
+          evidence: '#13 is retargeted onto the head of #12',
+        },
+      ],
+    })
+  },
+}
+
+const firstBaseWrong: FixtureModule = {
+  spec: {
+    contractVersion: CONTRACT_VERSION,
+    id: 'first-base-wrong',
+    title: 'The first chain position is not pinned to the root',
+    matrixEntry: 'mutated: first chain position off the root',
+    kind: 'mutation',
+    selection: ['12', '13'],
+    expect: {
+      status: 'published',
+      permittedActions: WITH_BASES,
+      forbiddenActions: ['run-checks', 'merge-pr'],
+      chain: [12, 13],
+      preserved: { root: true, unselectedRefs: ['refs/heads/unrelated'], userWorkspace: true },
+      mustDetectInvariant: 'topology.chain',
+      honestResult: false,
+    },
+    humanReview: { required: false, rubric: RUBRIC_PATH },
+  },
+  async setup(context) {
+    await seedTwoPrs(context)
+  },
+  async run(context) {
+    const selection = ['12', '13']
+    const snapshot = captureSnapshot(context, { intent: 'execute', capturedAt: AT, selection })
+    const originalB = snapshot.selection.resolved[1].headOid
+    await integrateBranch(context, 'run', 'feat-b', 'feat-a')
+    context.provider.recordAction('push-selected-head', 'feat-b')
+    // The chain claims to start at the root; the first PR is actually based elsewhere.
+    context.provider.updatePullRequestBase(12, 'unrelated')
+    context.provider.updatePullRequestBase(13, 'feat-a')
+    return publishedAssemble({
+      context,
+      snapshot,
+      chain: [12, 13],
+      writes: [
+        headWrite('feat-b'),
+        baseWrite(12, 'main', 'unrelated'),
+        baseWrite(13, 'main', 'feat-a'),
+      ],
+      headsBefore: { 'feat-b': originalB },
+      dependencies: [
+        {
+          before: 12,
+          after: 13,
+          source: 'pr-base',
+          evidence: '#13 is retargeted onto the head of #12',
+        },
+      ],
+    })
+  },
+}
+
 export const fixtures: FixtureModule[] = [
   wrongBase,
   lostOriginalCommit,
@@ -453,4 +655,8 @@ export const fixtures: FixtureModule[] = [
   falsePublicationClaim,
   unresolvedConflictMutation,
   forbiddenCheckExecution,
+  omittedEdge,
+  wrongOrder,
+  oldPredecessor,
+  firstBaseWrong,
 ]

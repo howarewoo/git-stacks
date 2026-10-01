@@ -4,16 +4,23 @@
   "title": "flatten-pr-graph/1 authoring fixture declaration",
   "description": "A fixture declares its scenario, the outcome a conforming run must produce, and the invariant the oracle must be able to detect when the observed state is wrong. The oracle reads real repository and fake-provider state; this declaration is the expectation it judges that state against.",
   "$defs": {
-    "contractVersion": { "const": "flatten-pr-graph/1" },
-    "prNumber": { "type": "integer", "minimum": 1 },
-    "refName": { "type": "string", "pattern": "^refs/heads/.+" },
+    "contractVersion": {
+      "const": "flatten-pr-graph/1"
+    },
+    "prNumber": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "refName": {
+      "type": "string",
+      "pattern": "^refs/heads/.+"
+    },
     "allowedAction": {
       "enum": [
         "read-pr-metadata",
         "list-pull-requests",
         "read-ref",
         "read-ancestry",
-        "read-branch-protection",
         "read-landing-arrangement",
         "write-task-owned-scratch",
         "update-pr-base",
@@ -65,14 +72,30 @@
   "additionalProperties": false,
   "required": ["contractVersion", "id", "title", "matrixEntry", "kind", "selection", "expect"],
   "properties": {
-    "contractVersion": { "$ref": "#/$defs/contractVersion" },
-    "id": { "type": "string", "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$" },
-    "title": { "type": "string", "minLength": 1 },
-    "matrixEntry": { "type": "string", "minLength": 1 },
-    "kind": { "enum": ["matrix", "mutation"] },
+    "contractVersion": {
+      "$ref": "#/$defs/contractVersion"
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$"
+    },
+    "title": {
+      "type": "string",
+      "minLength": 1
+    },
+    "matrixEntry": {
+      "type": "string",
+      "minLength": 1
+    },
+    "kind": {
+      "enum": ["matrix", "mutation"]
+    },
     "selection": {
       "type": "array",
-      "items": { "type": "string", "minLength": 1 }
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
     },
     "expect": {
       "type": "object",
@@ -90,34 +113,67 @@
         "status": {
           "enum": ["planned", "prepared", "published", "no-op", "blocked", "partial"]
         },
-        "intent": { "enum": ["preview", "execute"] },
-        "permittedActions": { "type": "array", "items": { "$ref": "#/$defs/allowedAction" } },
+        "intent": {
+          "enum": ["preview", "execute"]
+        },
+        "permittedActions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/allowedAction"
+          }
+        },
         "forbiddenActions": {
           "type": "array",
           "minItems": 1,
-          "items": { "$ref": "#/$defs/forbiddenAction" }
+          "items": {
+            "$ref": "#/$defs/forbiddenAction"
+          }
         },
         "chain": {
           "type": "array",
-          "items": { "$ref": "#/$defs/prNumber" }
+          "items": {
+            "$ref": "#/$defs/prNumber"
+          }
         },
         "preserved": {
           "type": "object",
           "additionalProperties": false,
           "required": ["root", "unselectedRefs", "userWorkspace"],
           "properties": {
-            "root": { "type": "boolean" },
-            "unselectedRefs": { "type": "array", "items": { "type": "string", "minLength": 1 } },
-            "userWorkspace": { "type": "boolean" }
+            "root": {
+              "type": "boolean"
+            },
+            "unselectedRefs": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "userWorkspace": {
+              "type": "boolean"
+            }
           }
         },
-        "mustDetectInvariant": { "$ref": "#/$defs/invariant" },
+        "mustDetectInvariant": {
+          "$ref": "#/$defs/invariant"
+        },
         "honestResult": {
           "description": "false when the result document under test lies about the seeded state, so the oracle must reject it.",
           "type": "boolean"
         },
-        "retainedOriginalCommits": { "type": "array", "items": { "type": "string" } },
-        "lostOriginalCommits": { "type": "array", "items": { "type": "string" } },
+        "retainedOriginalCommits": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "lostOriginalCommits": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
         "blockedCode": {
           "enum": [
             "missing-selection",
@@ -134,7 +190,9 @@
             "lost-original-commit"
           ]
         },
-        "notes": { "type": "string" }
+        "notes": {
+          "type": "string"
+        }
       }
     },
     "humanReview": {
@@ -142,8 +200,13 @@
       "additionalProperties": false,
       "required": ["required", "rubric"],
       "properties": {
-        "required": { "type": "boolean" },
-        "rubric": { "type": "string", "minLength": 1 }
+        "required": {
+          "type": "boolean"
+        },
+        "rubric": {
+          "type": "string",
+          "minLength": 1
+        }
       }
     }
   }

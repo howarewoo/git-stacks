@@ -24,8 +24,15 @@ export interface UserFingerprint {
   headRef: string
   headOid: string | null
   status: string
+  /** Staged content, so an edit that keeps the same status still shows up. */
+  indexDigest: string
+  /** Unstaged and untracked content, so a dirty file rewritten in place still shows up. */
+  worktreeDigest: string
+  /** Stash object ids, so a replaced stash of the same length still shows up. */
+  stashOids: string
   stashCount: number
   configDigest: string
+  identity: string
 }
 
 export interface ScratchWorkspace {
@@ -35,6 +42,8 @@ export interface ScratchWorkspace {
   checkoutNew(branch: string): void
   /** Stages everything in the workspace and returns the new commit id. */
   commit(message: string): string
+  /** The branch the workspace currently has checked out. */
+  currentBranch(): string
   fetch(): void
   merge(branch: string): void
   push(branch: string, options?: { leaseFrom?: string; force?: boolean }): void
@@ -98,7 +107,23 @@ export interface World {
   makeShallowUserCheckout(): Promise<string>
   historyFacts(): { shallow: boolean; grafted: number }
   userFingerprint(): UserFingerprint
+  /** Every scratch this world created, in creation order. */
+  scratches(): ScratchWorkspace[]
   cleanup(): Promise<void>
+}
+
+/**
+ * Content behind the user's dirty state: the unstaged diff plus every untracked file's
+ * bytes. A run that rewrites a dirty file without changing `git status` still differs.
+ */
+function userWorktreeDigest(repo: string, gitIn: (cwd: string, args: string[]) => string): string {
+  const parts = [gitIn(repo, ['diff', '--binary'])]
+  for (const relative of gitIn(repo, ['ls-files', '--others', '--exclude-standard'])
+    .split('\n')
+    .filter(Boolean)) {
+    parts.push(relative, readFileSync(join(repo, relative), 'utf8'))
+  }
+  return parts.join('\u0000')
 }
 
 function sanitizedEnvironment(root: string): NodeJS.ProcessEnv {
@@ -170,6 +195,7 @@ export async function createWorld(label: string): Promise<World> {
   gitIn(repo, ['commit', '--quiet', '-m', 'Root commit'])
   gitIn(repo, ['push', '--quiet', '--set-upstream', 'origin', 'main'])
 
+  const scratches: ScratchWorkspace[] = []
   const world: World = {
     root,
     remote,
@@ -242,7 +268,7 @@ export async function createWorld(label: string): Promise<World> {
         tryGitIn(path, 'rev-parse', '--verify', '--quiet', `${branch}^{commit}`)
           ? branch
           : `origin/${branch}`
-      return {
+      const scratch: ScratchWorkspace = {
         path,
         async write(relative, content) {
           const target = join(path, relative)
@@ -251,6 +277,9 @@ export async function createWorld(label: string): Promise<World> {
         },
         checkout(branch) {
           gitIn(path, ['checkout', '--quiet', branch])
+        },
+        currentBranch() {
+          return gitIn(path, ['rev-parse', '--abbrev-ref', 'HEAD']).trim()
         },
         commit(message: string) {
           gitIn(path, ['add', '-A'])
@@ -304,6 +333,11 @@ export async function createWorld(label: string): Promise<World> {
           return gitIn(path, ['rev-parse', 'HEAD']).trim()
         },
       }
+      scratches.push(scratch)
+      return scratch
+    },
+    scratches() {
+      return [...scratches]
     },
     userFingerprint(): UserFingerprint {
       return {
@@ -312,8 +346,14 @@ export async function createWorld(label: string): Promise<World> {
         status: lines(gitIn(repo, ['status', '--porcelain=v1', '--untracked-files=all'])).join(
           '\n',
         ),
+        indexDigest: digest(gitIn(repo, ['diff', '--cached', '--binary'])),
+        worktreeDigest: digest(userWorktreeDigest(repo, gitIn)),
+        stashOids: lines(gitIn(repo, ['stash', 'list', '--format=%H'])).join('\n'),
         stashCount: (tryGitIn(repo, 'stash', 'list') ?? '').split('\n').filter(Boolean).length,
         configDigest: digest(lines(gitIn(repo, ['config', '--local', '--list'])).join('\n')),
+        identity: `${tryGitIn(repo, 'config', '--local', 'user.name') ?? ''} <${
+          tryGitIn(repo, 'config', '--local', 'user.email') ?? ''
+        }>`,
       }
     },
     async cleanup() {

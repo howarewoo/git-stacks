@@ -57,12 +57,16 @@ test('the mutation set covers every sensitivity the contract claims', async () =
   const invariants = mutations.map((fixture) => fixture.spec.expect.mustDetectInvariant).sort()
   assert.deepEqual(invariants, [
     'integrity.clean',
+    'preservation.cumulative',
     'preservation.original-commits',
     'preservation.unselected-refs',
     'remote.actions-permitted',
     'remote.claims-match',
     'selection.complete',
     'topology.chain',
+    'topology.chain',
+    'topology.dependencies',
+    'topology.dependencies',
   ])
   assert.ok(
     mutations.every((fixture) => fixture.spec.expect.honestResult === false),

@@ -90,6 +90,34 @@ export interface OracleInput {
   schema: LoadedSchema
 }
 
+/**
+ * The hard dependency edges implied by the pre-run evidence: a declared base that is a
+ * selected head, or strict ancestry between two selected heads. Derived here, never read
+ * from the report under test.
+ */
+export function observedHardEdges(
+  context: FixtureContext,
+): Array<{ from: number; to: number; basis: 'declared-base' | 'strict-ancestry' }> {
+  const provider = context.provider
+  const refs = context.world.remoteRefs()
+  const edges: Array<{ from: number; to: number; basis: 'declared-base' | 'strict-ancestry' }> = []
+  for (const target of provider.allPullRequests()) {
+    for (const source of provider.allPullRequests()) {
+      if (source.number === target.number) continue
+      const sourceHead = refs[branchRef(source.head)]
+      const targetHead = refs[branchRef(target.head)]
+      if (target.base === source.head) {
+        edges.push({ from: source.number, to: target.number, basis: 'declared-base' })
+        continue
+      }
+      if (sourceHead && targetHead && context.world.isRemoteAncestor(sourceHead, targetHead)) {
+        edges.push({ from: source.number, to: target.number, basis: 'strict-ancestry' })
+      }
+    }
+  }
+  return edges
+}
+
 function unique(values: number[]): number[] {
   return [...new Set(values)]
 }
@@ -161,22 +189,8 @@ function detectBlockers(input: OracleInput, refs: Record<string, string>): Block
     if (provider.hasAutoMerge(number)) {
       blockers.push({
         code: 'active-landing-arrangement',
-        detail: `auto-merge is enabled on pull request #${number}`,
-        evidence: `provider landing preflight reports autoMergeEnabledOn: [${number}]`,
-      })
-    }
-    if (provider.queueBoundBases.includes(pr.base)) {
-      blockers.push({
-        code: 'active-landing-arrangement',
-        detail: `base ${pr.base} is bound to a merge queue`,
-        evidence: `provider landing preflight reports queueBoundBases: [${pr.base}]`,
-      })
-    }
-    if (provider.readBranchProtection(pr.base).readable === false) {
-      blockers.push({
-        code: 'active-landing-arrangement',
-        detail: `protection rules for base ${pr.base} cannot be read, so the required set is unknown`,
-        evidence: `provider refused the protection read for ${pr.base}`,
+        detail: `pull request #${number} carries its own active auto-merge request`,
+        evidence: `the provider reports an auto-merge request on #${number}`,
       })
     }
   }
@@ -208,35 +222,6 @@ function detectBlockers(input: OracleInput, refs: Record<string, string>): Block
           detail: `pull requests #${left.number} and #${right.number} are each other's base`,
           evidence: `#${left.number} base ${leftPr.base} is #${right.number} head ${rightPr.head}`,
         })
-      }
-    }
-  }
-
-  // A fan-in whose head contains two incomparable selected heads leaves the chain
-  // position of that head ambiguous, which is a blocker rather than a guess.
-  for (const target of heads) {
-    const ancestors = heads.filter(
-      (candidate) =>
-        candidate.number !== target.number &&
-        refs[branchRef(candidate.head)] &&
-        refs[branchRef(target.head)] &&
-        world.isRemoteAncestor(refs[branchRef(candidate.head)], refs[branchRef(target.head)]),
-    )
-    for (const first of ancestors) {
-      for (const second of ancestors) {
-        if (first.number >= second.number) continue
-        if (
-          !world.isRemoteAncestor(refs[branchRef(first.head)], refs[branchRef(second.head)]) &&
-          !world.isRemoteAncestor(refs[branchRef(second.head)], refs[branchRef(first.head)])
-        ) {
-          blockers.push({
-            code: 'ambiguous-ownership',
-            detail: `pull request #${target.number} integrates both #${first.number} and #${second.number}, which are not related by ancestry`,
-            evidence:
-              `heads ${refs[branchRef(first.head)]} and ${refs[branchRef(second.head)]} ` +
-              `are both ancestors of ${refs[branchRef(target.head)]}`,
-          })
-        }
       }
     }
   }
@@ -366,15 +351,25 @@ export function judge(input: OracleInput): OracleVerdict {
 
   const attemptedWrites = provider.actions.filter((action) => WRITE_ACTIONS.has(action.kind))
   const confirmedWrites = attemptedWrites.filter((action) => action.outcome === 'acknowledged')
+  // Real preparation, observed in the task's own workspaces: a scratch the run created or
+  // moved, sitting on a selected head. This is independent of anything the report says.
+  const preparedEvidence = scratches.filter((scratch) => {
+    const before = baseline.scratchStateBefore[scratch.path]
+    const branch = scratch.currentBranch()
+    if (!selectedHeads.has(branchRef(branch))) return false
+    return before === undefined || before.branch !== branch || before.oid !== scratch.headOid()
+  })
+  const preparedWithoutMetadata = preparedEvidence.length > 0 && !view.preparationPresent
   let witnessedStatus: Status
   if (blockers.length > 0) {
     witnessedStatus = confirmedWrites.length > 0 ? 'partial' : 'blocked'
   } else if (intent === 'preview') {
     witnessedStatus = 'planned'
   } else if (attemptedWrites.length === 0) {
-    witnessedStatus = 'no-op'
+    witnessedStatus =
+      preparedEvidence.length === 0 ? 'no-op' : preparedWithoutMetadata ? 'partial' : 'prepared'
   } else {
-    witnessedStatus = 'published'
+    witnessedStatus = preparedWithoutMetadata ? 'partial' : 'published'
   }
 
   if (view.status !== witnessedStatus) {
@@ -438,7 +433,9 @@ export function judge(input: OracleInput): OracleVerdict {
   const chainFromProvider = expectedChain.every((number, index) => {
     const pr = provider.pullRequest(number)
     if (!pr) return false
-    if (index === 0) return true
+    // The first position is pinned to the root; every later position names its
+    // predecessor's head. A first PR sitting on anything else is not a chain.
+    if (index === 0) return pr.base === provider.repository.defaultBranch
     const predecessor = provider.pullRequest(expectedChain[index - 1])
     return predecessor ? pr.base === predecessor.head : false
   })
@@ -459,6 +456,23 @@ export function judge(input: OracleInput): OracleVerdict {
   }
 
   const positions = new Map(view.order.map((number, index) => [number, index]))
+  // Only a result that claims to have published something owes a dependency declaration;
+  // a blocked or no-op result makes no chain claim to check.
+  const claimsPublication = view.status === 'published' || view.status === 'partial'
+  for (const edge of claimsPublication ? baseline.hardEdges : []) {
+    if (!selected.includes(edge.from) || !selected.includes(edge.to)) continue
+    const declared = view.dependencies.some(
+      ([before, after]) => before === edge.from && after === edge.to,
+    )
+    if (!declared) {
+      violations.push({
+        invariant: 'topology.dependencies',
+        detail: 'a hard dependency observed before the run is missing from the plan',
+        observed: `#${edge.from} -> #${edge.to} by ${edge.basis}`,
+        expected: 'every observed hard edge appears in plan.dependencies',
+      })
+    }
+  }
   for (const [before, after] of view.dependencies) {
     const beforePosition = positions.get(before)
     const afterPosition = positions.get(after)
@@ -491,15 +505,18 @@ export function judge(input: OracleInput): OracleVerdict {
     })
   }
 
-  for (const [ref, before] of Object.entries(baseline.refsBefore)) {
+  // Union of what existed and what exists now, so an unauthorized new ref is as visible
+  // as a moved one.
+  for (const ref of new Set([...Object.keys(baseline.refsBefore), ...Object.keys(refs)])) {
     if (selectedHeads.has(ref) || ref === rootRef) continue
+    const before = baseline.refsBefore[ref]
     const now = refs[ref]
     if (now !== before) {
       violations.push({
         invariant: 'preservation.unselected-refs',
-        detail: 'a ref outside the authorized write set moved',
-        observed: `${ref} ${shortOid(before)} -> ${shortOid(now ?? ZERO_OID)}`,
-        expected: `${shortOid(before)}`,
+        detail: 'a ref outside the authorized write set moved or appeared',
+        observed: `${ref} ${shortOid(before ?? ZERO_OID)} -> ${shortOid(now ?? ZERO_OID)}`,
+        expected: `${shortOid(before ?? ZERO_OID)}`,
       })
     }
   }
@@ -530,8 +547,12 @@ export function judge(input: OracleInput): OracleVerdict {
     const changed =
       userNow.headOid !== baseline.userBefore.headOid ||
       userNow.status !== baseline.userBefore.status ||
+      userNow.indexDigest !== baseline.userBefore.indexDigest ||
+      userNow.worktreeDigest !== baseline.userBefore.worktreeDigest ||
+      userNow.stashOids !== baseline.userBefore.stashOids ||
       userNow.stashCount !== baseline.userBefore.stashCount ||
-      userNow.configDigest !== baseline.userBefore.configDigest
+      userNow.configDigest !== baseline.userBefore.configDigest ||
+      userNow.identity !== baseline.userBefore.identity
     if (changed) {
       violations.push({
         invariant: 'preservation.user-worktree',

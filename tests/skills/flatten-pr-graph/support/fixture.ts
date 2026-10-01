@@ -57,9 +57,21 @@ export interface DiscoveredFixtures {
 }
 
 /** What the harness observed before the run started; never taken from the claim. */
+export interface BaselineScratchState {
+  branch: string
+  oid: string
+}
+
 export interface ObservedBaseline {
   refsBefore: Record<string, string>
   userBefore: UserFingerprint
+  /**
+   * Hard dependency edges derived from the provider and Git evidence *before* the run
+   * started, so a report cannot drop an edge simply by not declaring it.
+   */
+  hardEdges: Array<{ from: number; to: number; basis: 'declared-base' | 'strict-ancestry' }>
+  /** Scratch branches and commits as they stood before the run touched them. */
+  scratchStateBefore: Record<string, BaselineScratchState>
 }
 
 export interface FixtureRun {

@@ -60,9 +60,7 @@
     },
     "history": { "complete": true, "shallow": false, "grafted": 0 },
     "landing": {
-      "autoMergeEnabledOn": [13],
-      "queueBoundBases": [],
-      "unreadableProtectionBases": []
+      "autoMergeEnabledOn": [13]
     }
   },
   "plan": {
