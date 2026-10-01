@@ -1015,13 +1015,21 @@ function classifyConflict(workspace, entries, renamed) {
     const theirs = entry.stages[3]
     const mode = (stage) => stage?.mode ?? null
     let kind
-    if (!base && ours && theirs) kind = 'add-add'
-    else if (base && ours && !theirs) kind = 'delete-modify'
-    else if (base && !ours && theirs) kind = 'modify-delete'
-    else if (ours && theirs && (mode(ours) === '160000' || mode(theirs) === '160000'))
+    // The mode decides before the shape does. A path that is a gitlink on either side is
+    // a submodule reference, not two added files, whether or not a base version existed;
+    // and a path that is a tree on one side is a file/directory conflict, which Git leaves
+    // as a single unmerged entry under a `~`-suffixed name rather than as a pair. Both are
+    // checked first so that neither can be reported as the plain add/add or modify/delete
+    // it superficially resembles, and an agent is never invited to resolve them.
+    if (mode(base) === '040000' || mode(ours) === '040000' || mode(theirs) === '040000')
+      kind = 'file-directory'
+    else if (mode(base) === '160000' || mode(ours) === '160000' || mode(theirs) === '160000')
       kind = 'submodule'
     else if (mode(base) === '120000' || mode(ours) === '120000' || mode(theirs) === '120000')
       kind = 'symlink'
+    else if (!base && ours && theirs) kind = 'add-add'
+    else if (base && ours && !theirs) kind = 'delete-modify'
+    else if (base && !ours && theirs) kind = 'modify-delete'
     else kind = 'content'
     const derived = classifyPath(entry.path)
     const binary = Boolean(

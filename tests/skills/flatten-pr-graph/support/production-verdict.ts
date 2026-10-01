@@ -51,13 +51,16 @@ export function asEdges(pinned: PinnedEdge[]): PinnedEdge[] {
  * log. The bare repository carries every published object, so the question is answerable
  * without a working tree and without trusting any document the helper produced.
  */
+/**
+ * Ancestry over the bare remote - the repository the run actually wrote to.
+ *
+ * It must be that repository and not the world's temporary directory: the objects the run
+ * published live only there, and a `merge-base` run anywhere else finds no repository at
+ * all, so every edge reads as violated and the verdict reports the run as broken for the
+ * one thing it did correctly.
+ */
 function isAncestor(world: World, ancestor: string, descendant: string): boolean {
-  try {
-    world.gitIn(world.root, 'merge-base', '--is-ancestor', ancestor, descendant)
-    return true
-  } catch {
-    return false
-  }
+  return world.isRemoteAncestor(ancestor, descendant)
 }
 
 function providerFor(pinned: PinnedEdge[]): FakeGitHub {
@@ -105,6 +108,11 @@ export function edgeViolations(world: World, pinned: PinnedEdge[]): Violation[] 
     if (!target || !source) continue
     const ref = `refs/heads/${target.head}`.replace('refs/heads/refs/heads/', 'refs/heads/')
     const sourceRef = `refs/heads/${source.head}`.replace('refs/heads/refs/heads/', 'refs/heads/')
+    // Both ends are read from the remote as the run left it. The authorized snapshot says
+    // A is based on B; it does not say which object A's head will finally be. A flatten
+    // rewrites the very heads it publishes, so comparing against the pinned original ids
+    // would fail every correct run and pass a broken one - the original ids of every
+    // rewritten pull request are unreachable from its published head by construction.
     const targetOid = refs[ref]
     const sourceOid = refs[sourceRef]
     if (targetOid === undefined) continue
@@ -121,7 +129,7 @@ export function edgeViolations(world: World, pinned: PinnedEdge[]): Violation[] 
     if (ancestor) continue
     violations.push({
       invariant: 'topology.dependencies',
-      detail: `#${edge.to} no longer contains #${edge.from} after the run`,
+      detail: `#${edge.to} no longer contains #${edge.from} after the run (${edge.basis} edge)`,
       observed: `${sourceOid} is not an ancestor of ${targetOid} at ${ref}`,
       expected: `${edge.basis} edge #${edge.from} -> #${edge.to} keeps ${sourceRef} contained`,
     })
