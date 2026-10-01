@@ -638,10 +638,12 @@ export { renderRunSummary }
 // The module is a command, not a library, when it is run directly. Importing it — which
 // the behavioural tests do — has no side effects at all.
 if (process.argv[1] !== undefined && import.meta.url === `file://${process.argv[1]}`) {
-  process.exitCode = await runCli({
+  void runCli({
     argv: process.argv.slice(2),
     env: process.env,
     out: (line) => process.stdout.write(`${line}\n`),
     err: (line) => process.stderr.write(`${line}\n`),
+  }).then((code) => {
+    process.exitCode = code
   })
 }

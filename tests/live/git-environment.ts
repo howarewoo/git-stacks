@@ -291,25 +291,31 @@ export async function installIsolatedGitEnvironment(
   // the empty string rather than removed, because an empty value is how Git is told
   // to have no helper at all; removing it would let the system configuration supply
   // one.
-  const config: Array<[string, string]> = [
-    // Hooks, if any run at all, run out of a directory this run created and left
-    // empty. `core.hooksPath` is absolute, so a repository-local setting cannot
-    // override it and a relative one cannot escape it.
-    ['core.hooksPath', template],
-    ['commit.gpgsign', 'false'],
-    ['tag.gpgsign', 'false'],
-    ['credential.helper', ''],
-    ['core.askPass', ''],
-    ['gpg.format', 'openpgp'],
-  ]
+  const config = new Map<string, string>()
+  if (input.extend !== undefined) {
+    const priorCount = Number(input.extend.env.GIT_CONFIG_COUNT ?? '0')
+    for (let i = 0; i < priorCount; i++) {
+      const key = input.extend.env[`GIT_CONFIG_KEY_${i}`]
+      const value = input.extend.env[`GIT_CONFIG_VALUE_${i}`]
+      if (key !== undefined && value !== undefined) config.set(key, value)
+    }
+  }
+  config.set('core.hooksPath', template)
+  config.set('commit.gpgsign', 'false')
+  config.set('tag.gpgsign', 'false')
+  config.set('credential.helper', '')
+  config.set('core.askPass', '')
+  config.set('gpg.format', 'openpgp')
+
   if (input.gitTlsCaInfo !== undefined) {
-    config.push(['http.sslCAInfo', input.gitTlsCaInfo], ['http.sslVerify', 'true'])
+    config.set('http.sslCAInfo', input.gitTlsCaInfo)
+    config.set('http.sslVerify', 'true')
   }
   for (const credential of input.credentials ?? []) {
-    config.push([`http.${credential.url}.extraheader`, credential.header])
+    config.set(`http.${credential.url}.extraheader`, credential.header)
   }
-  for (const [key, value] of input.config ?? []) config.push([key, value])
-
+  for (const [key, value] of input.config ?? []) config.set(key, value)
+  const pairs = Array.from(config.entries())
   env.HOME = home
   env.XDG_CONFIG_HOME = home
   env.GIT_CONFIG_GLOBAL = join(home, '.gitconfig')
@@ -320,8 +326,8 @@ export async function installIsolatedGitEnvironment(
   env.GIT_AUTHOR_EMAIL = input.author.email
   env.GIT_COMMITTER_NAME = input.author.name
   env.GIT_COMMITTER_EMAIL = input.author.email
-  env.GIT_CONFIG_COUNT = String(config.length)
-  config.forEach(([key, value], index) => {
+  env.GIT_CONFIG_COUNT = String(pairs.length)
+  pairs.forEach(([key, value], index) => {
     env[`GIT_CONFIG_KEY_${index}`] = key
     env[`GIT_CONFIG_VALUE_${index}`] = value
   })

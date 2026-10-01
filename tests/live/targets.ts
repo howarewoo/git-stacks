@@ -497,11 +497,10 @@ abstract class DisposableTarget implements LiveTarget {
         }
       }
       if (entry.kind === 'branch') {
+        const repo = repositoryOf(entry) ?? this.fullName
         const branch = entry.handle.split('#')[1] ?? ''
-        if (
-          branch !== '' &&
-          (await this.attempt(() => this.admin.deleteBranch(this.fullName, branch)))
-        ) {
+        const admin = this.adminFor(entry.actor) ?? this.admin
+        if (branch !== '' && (await this.attempt(() => admin.deleteBranch(repo, branch)))) {
           this.ledger.release(entry.handle)
         } else {
           this.ledger.refuse(entry.handle, 'the host still has this branch')
@@ -514,8 +513,12 @@ abstract class DisposableTarget implements LiveTarget {
     // the primary would either fail or, worse, succeed against something else.
     for (const entry of this.ledger.outstanding()) {
       if (entry.kind !== 'repository' || entry.handle === this.fullName) continue
-      if (await this.removeForeignRepository(entry)) this.ledger.release(entry.handle)
-      else if (this.adminFor(entry.actor) === null)
+      if (await this.removeForeignRepository(entry)) {
+        this.ledger.release(entry.handle)
+        for (const child of this.ledger.outstanding()) {
+          if (repositoryOf(child) === entry.handle) this.ledger.release(child.handle)
+        }
+      } else if (this.adminFor(entry.actor) === null)
         this.ledger.refuse(
           entry.handle,
           `no credential in this run acts as ${entry.actor ?? 'the owning account'}`,
@@ -755,6 +758,7 @@ export class ControlledLiveTarget extends DisposableTarget {
         // configured for another name has to be able to say so, or a suite that reads
         // the branch back from the host would still never meet one that is not `main`.
         defaultBranch: options.defaultBranch,
+        preserveRoot: true,
       })
       opened.harness = harness
       const server = await startControlledGitHubHost({
@@ -805,6 +809,9 @@ export class ControlledLiveTarget extends DisposableTarget {
     // than that a public repository answered for everybody. Without this the second
     // account's distinctness is proved by a host that was never asked the question.
     state.repository.private = true
+    state.repository.permissions = {
+      [state.currentUser.toLowerCase()]: 'admin',
+    }
     // The account that owns a disposable repository administers it. Saying so through
     // the field the repository read exposes is what lets a merge capability be observed
     // rather than assumed, and it is the same answer a real owner gets.
@@ -1099,7 +1106,9 @@ export class ControlledLiveTarget extends DisposableTarget {
    * — left a listener holding the event loop open and a run that hung instead of
    * reporting.
    */
-  protected async removeRepository(): Promise<boolean> {
+  protected async removeRepository(fullName: string): Promise<boolean> {
+    const bare = join(this.root, 'projects', `${fullName}.git`)
+    await rm(bare, { recursive: true, force: true }).catch(() => undefined)
     return true
   }
 
@@ -1108,7 +1117,7 @@ export class ControlledLiveTarget extends DisposableTarget {
     this.workspaceInstance.close()
     await this.server.close()
     await this.harnessInstance.close()
-    await rm(this.root, { recursive: true, force: true })
+    await rm(this.workspaceInstance.path, { recursive: true, force: true }).catch(() => undefined)
   }
 }
 
@@ -1251,18 +1260,6 @@ export class GitHubLiveTarget extends DisposableTarget {
         reviewerFaults === null ? null : new GitHubAdmin(reviewerFaults, fullName, marker)
       const reviewerLogin = await resolveReviewerIdentity(reviewerAdmin, primary.login)
 
-      // The creation is journalled, durably, before the request that creates it. A
-      // repository whose response is lost is then a receipt entry the recovery command
-      // can reconcile against the host, instead of a resource that exists on somebody's
-      // account and is described nowhere.
-      await ledger.intent({
-        kind: 'repository',
-        handle: fullName,
-        marker,
-        createdAt: new Date().toISOString(),
-        pending: true,
-        actor: primary.login,
-      })
       // The branch this repository treats as its default is the host's own setting, read
       // out of the answer the host gave. The create endpoint takes no such parameter, so
       // there is nothing to ask for: every merge, ruleset and base-ref question below is

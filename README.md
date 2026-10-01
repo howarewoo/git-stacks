@@ -1372,15 +1372,31 @@ repository rather than in the remote URL. It also removes what a machine can
 carry that would widen where that credential goes: `GIT_DIR` and its relatives,
 the counted `GIT_CONFIG_*` pairs, an ambient token, and an ambient API base.
 
-`NODE_TLS_REJECT_UNAUTHORIZED` and `NODE_EXTRA_CA_CERTS` go with them, and the
-reason is specific. The application's API calls are `fetch` in this process, and
-Node reads those two variables when it opens the connection: with the first set
-to `0`, a request carrying this run's bearer completes its handshake against a
-certificate nothing vouches for. Retiring `GIT_SSL_NO_VERIFY` secures the Git
-children and changes nothing about that request, so the retirement happens in
-the same install, before the first authenticated request rather than with the
-Git commands later. When the run finishes — succeeded, failed, or refused — the
-process environment is restored exactly as it was found.
+`NODE_TLS_REJECT_UNAUTHORIZED` and `NODE_EXTRA_CA_CERTS` are retired with them,
+and the two are not the same kind of thing. The application's API calls are
+`fetch` in this process, and Node reads the first of them when it opens the
+connection: with it set to `0`, a request carrying this run's bearer completes
+its handshake against a certificate nothing vouches for. Retiring
+`GIT_SSL_NO_VERIFY` secures the Git children and changes nothing about that
+request, so the retirement happens in the same install, before the first
+authenticated request rather than with the Git commands later. The recovery
+command retires it too, and for the same reason: it deletes repositories, and a
+certificate bypass still in place when its first connection opens would be a
+credential sent to whatever answered.
+
+The second is read once, when the process starts. Deleting it stops this run's
+Git children from inheriting an extra authority; it does not unload authorities
+this process already loaded. Which authorities a Node process trusts from its
+first instruction is settled by how it was launched, and a run that starts
+already trusting a certificate is not made safe by any environment it installs
+afterwards — so the suite claims no certificate pinning it does not perform, and
+the boundary it does enforce is the one it can: no credential leaves on a
+connection whose certificate this process has not accepted.
+
+When the run finishes — succeeded, failed, or refused — the process environment
+is restored exactly as it was found, on the refusal path and the failure path as
+well as the successful one. A process left holding a bypass it did not start with
+is not a thing this suite produces.
 
 ### The authorized target
 
@@ -1409,6 +1425,40 @@ is answered by sending a write and seeing whether the host takes it. What could
 not be observed becomes a note in the report, and a scenario whose capability is
 missing is a **failure**, not a skip — a suite that quietly stops covering merge
 queues would report green while the thing it exists to catch goes uncaught.
+
+### Which branch a run works on
+
+The trunk is whatever the host says it is. The repository's default branch is
+read out of the answer to the create request — that endpoint takes no such
+parameter, so nothing is passed and nothing is assumed — and every layer base,
+pull request base, native-chain expectation, queue ref and schema-probe parent
+in the suite reads that value rather than the word `main`. A host that creates a
+repository without naming one is refused before anything is seeded: a guess at
+that point means committing to a branch the repository has no evidence of
+having, and then asking the host questions about it.
+
+The controlled target takes the name it is stood up with, so an account whose
+repositories default to `trunk` is something this suite can cover rather than
+something it quietly assumes away. No environment variable was added for it: the
+live run reads the branch from the host, and a host that will not name one is
+refused.
+
+### Who may push
+
+A host that served every push would prove nothing about authorization, because a
+public repository answers everybody. The controlled host answers the question
+GitHub answers: it identifies the credential behind the request, looks up the
+role that account holds on the repository that was named, and refuses a push
+whose principal it does not recognise or whose role does not permit writing. The
+same boundary covers the foreign repository a reviewer is given, whose access is
+granted and read back before it is used, and a credential authorized for the
+disposable repository authorizes nothing else on the same host: it rides in a
+header scoped to that one repository's URL.
+
+On the authorized target the run claims the real `git` over the directory it
+created, and releases that claim when it finishes. It never claims `gh`, never
+invokes it, and never reads a credential from it, so a suite that is supposed to
+spend a credential somebody handed it cannot spend an ambient session instead.
 
 ### What it covers
 
@@ -1441,14 +1491,41 @@ runs in a `finally` that covers workspace setup, the capability probe, the
 scenarios, and schema generation, so a startup failure and a scenario failure
 both clean up; a run that left anything behind exits non-zero.
 
-The receipt is written before each resource is created and updated after every
-change, so a run that dies between creating something and deleting it still
-leaves the list of what to clean up by hand. It holds handles, timestamps, and
-refusal reasons — never a request body, a diff, or a credential. Progress
-lines, failure messages, stack traces, and request summaries are all rendered
-through the redactor first: configured credential literals (longest first, so a
-secret containing another is removed whole), the credential shapes the
-application already knows, any `user:password@` in a URL, and local paths.
+The account that spends the credential and the account the repository belongs to
+are two different answers, and the receipt keeps them apart. A run pointed at an
+organization creates the repository as a user acting for it, so every entry names
+the login that actually authenticated, and recovery asks for the accounts the
+receipt names rather than for the owner alone — demanding the organization
+itself would refuse the exact run that most needs recovering. A reviewer
+credential that turns out to be the same account as the primary is refused before
+anything is deleted rather than after.
+
+The receipt is also written _before_ the request that creates the resource, and
+flushed to disk before that request is sent, which is what makes a lost answer
+recoverable: the exact owner, name and marker are on the disk before the host has
+been asked. When the host names the object it created, that same entry is
+completed with the host's own id rather than a second entry being appended —
+two entries for one repository would leave one of them unsettleable and
+outstanding for ever.
+
+Recovery removes a repository only after the host confirms the id the receipt
+records _and_ the marker it stamped, in that order, and settles nothing else: a
+resource inside a repository that was removed is reported as gone with it, a
+refusal stays outstanding with its reason, and a read that could not be answered
+at all is reported as unknown rather than as removed or absent, because
+reporting a dropped connection as a deleted repository is the one answer a person
+cannot act on. Recovery installs no global transport, so a credential it was
+given for one deletion is never reachable by the rest of the process, and the
+same is true of the certificate bypass it retires first.
+
+The receipt is updated after every change, so a run that dies between creating
+something and deleting it still leaves the list of what to clean up by hand. It
+holds handles, timestamps, and refusal reasons — never a request body, a diff,
+or a credential. Progress lines, failure messages, stack traces, and request
+summaries are all rendered through the redactor first: configured credential
+literals (longest first, so a secret containing another is removed whole), the
+credential shapes the application already knows, any `user:password@` in a URL,
+and local paths.
 
 Exit codes are `0` passed, `1` a scenario or cleanup failed, `2` the run was
 refused before it started.
@@ -1520,8 +1597,28 @@ The live target's coverage — real native stacks, a real merge queue, a real
 second account, a real token — is **unobserved**. It needs a disposable account
 this repository has not been given, so those scenarios are runnable and
 unexercised, and the evidence for this suite is the controlled run: the whole
-catalogue green against a real Git, a real TLS host, and the production
+catalogue green against a real `git`, a real TLS host, and the production
 services. Recording a live pass is a separate, explicitly authorized act.
+
+Recovery is proven the same way and no further. The mechanism is exercised
+against a host this repository generated a certificate for and receipts this
+repository marked, so what that proves is the part that can be: that a killed
+run's repository is removed only once the host confirms its id and its marker,
+that a look-alike repository is left alone, and that a credential is not put on
+a connection whose certificate this process does not trust — with the process
+switch that would have skipped that question retired before the first request
+and restored afterwards. No recovery has been run against github.com, so what a
+real host answers for a deleted repository, and what it answers for one that was
+never there, is unobserved.
+
+Three things this suite depends on are configuration outside the repository
+rather than code in it: the protected environment and its required reviewers,
+the environment secrets, and the self-hosted runner label. Until a repository
+owner sets them, the fail-closed gate is the only thing standing between a
+dispatch and a run, and the section above says so rather than implying the
+protection exists. The desktop application is a separate matter from all of
+this: a packaged, signed install is verified on its own terms and none of the
+evidence here says anything about it.
 
 ## Changes workspace
 

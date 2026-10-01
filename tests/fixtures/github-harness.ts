@@ -1131,6 +1131,8 @@ export interface GitHubHarnessOptions {
   readonly root?: string
   /** The branch this host treats as the repository's default, as a real host's setting. */
   readonly defaultBranch?: string
+  /** Whether to keep the root directory when closing the harness. */
+  readonly preserveRoot?: boolean
 }
 
 export async function createGitHubHarness(
@@ -1393,7 +1395,9 @@ export async function createGitHubHarness(
         // being removed is reported as ENOTEMPTY unless the removal is allowed to try
         // again, and a run that failed while deleting its own scratch space is not a run
         // whose cleanup result means anything.
-        await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })
+        if (options.preserveRoot !== true) {
+          await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })
+        }
       },
     }
     return harness

@@ -20,6 +20,7 @@ export class LiveRedactor {
     this.literals = [...new Set(secrets.filter((value) => value.length >= 4))].sort(
       (left, right) => right.length - left.length,
     )
+    this.text = this.text.bind(this)
   }
 
   /**

@@ -676,7 +676,10 @@ test('recovery refuses a name that now belongs to something else', async () => {
   assert.deepEqual(outcome.unknown, [])
   assert.deepEqual(outcome.absent, [])
   assert.deepEqual(outcome.refused, [
-    { handle: 'acme/widgets', reason: 'the host has id 4242 there; this run created id 7001' },
+    {
+      handle: 'acme/widgets',
+      reason: 'it no longer carries the ownership marker and id this receipt records',
+    },
   ])
   assert.equal(outcome.complete, false, 'a refused deletion cannot report a complete recovery')
   await written.discard()
@@ -1097,10 +1100,22 @@ test("the run's Git children inherit no ambient TLS bypass, trace switch, counte
    */
   const withoutRunConfiguration = (extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv => {
     const env: NodeJS.ProcessEnv = { ...process.env, ...extra }
-    for (const key of Object.keys(env)) {
-      if (key.startsWith('GIT_CONFIG_KEY_') || key.startsWith('GIT_CONFIG_VALUE_')) delete env[key]
+    const pairs: Array<[string, string]> = []
+    const count = Number(env.GIT_CONFIG_COUNT ?? '0')
+    for (let i = 0; i < count; i++) {
+      const key = env[`GIT_CONFIG_KEY_${i}`] ?? ''
+      const value = env[`GIT_CONFIG_VALUE_${i}`] ?? ''
+      delete env[`GIT_CONFIG_KEY_${i}`]
+      delete env[`GIT_CONFIG_VALUE_${i}`]
+      if (key !== 'http.sslCAInfo' && key !== 'http.sslVerify') {
+        pairs.push([key, value])
+      }
     }
-    delete env.GIT_CONFIG_COUNT
+    env.GIT_CONFIG_COUNT = String(pairs.length)
+    pairs.forEach(([key, value], i) => {
+      env[`GIT_CONFIG_KEY_${i}`] = key
+      env[`GIT_CONFIG_VALUE_${i}`] = value
+    })
     return env
   }
   // The host this run serves is a socket in this process, so a Git command that reaches
@@ -1138,7 +1153,7 @@ test("the run's Git children inherit no ambient TLS bypass, trace switch, counte
   assert.equal(
     bypassed.code,
     0,
-    'this Git refused an untrusted certificate even with verification switched off',
+    `this Git refused an untrusted certificate even with verification switched off: ${bypassed.stderr}`,
   )
 
   // Git narrating its own transport, which is where an authorization header goes.
