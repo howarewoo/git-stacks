@@ -192,7 +192,6 @@ export function retireNodeTransportBypass(): { restore: () => void } {
   }
 }
 
-
 export interface GitEnvironmentInput {
   /**
    * The environment this run already installed, to add to rather than start over.

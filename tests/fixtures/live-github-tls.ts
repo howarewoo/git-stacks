@@ -374,7 +374,11 @@ export async function startControlledGitHubHost(
               response.end(payload)
             }
             if ('status' in answered) {
-              record(answered.status, { 'content-type': 'text/plain' }, Buffer.from(answered.message))
+              record(
+                answered.status,
+                { 'content-type': 'text/plain' },
+                Buffer.from(answered.message),
+              )
               return
             }
             serveGitRequest(options, backend, request, body, answered.login, record)

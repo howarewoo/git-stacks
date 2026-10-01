@@ -592,7 +592,9 @@ abstract class DisposableTarget implements LiveTarget {
       // The same two things the primary is held to: this run's marker, matched whole,
       // and the id the host named for this resource when it was created. A marker alone
       // is a line of text that survives a deletion and a reuse of the same name.
-      if (!ownsCreatedResource(await admin.readRepository(entry.handle), this.marker, entry.remoteId)) {
+      if (
+        !ownsCreatedResource(await admin.readRepository(entry.handle), this.marker, entry.remoteId)
+      ) {
         this.ledger.refuse(entry.handle, "it no longer carries this run's ownership marker")
         return false
       }
@@ -752,7 +754,8 @@ export class ControlledLiveTarget extends DisposableTarget {
       const server = await startControlledGitHubHost({
         projectsRoot: harness.projectsRoot,
         git: harness.env.GIT_STACKS_REAL_GIT as string,
-        authorizeGit: (fullName, authorization) => authorizeGitFor(harness, fullName, authorization),
+        authorizeGit: (fullName, authorization) =>
+          authorizeGitFor(harness, fullName, authorization),
       })
       opened.server = server
       return await ControlledLiveTarget.build({ harness, server, options, opened })
@@ -1066,17 +1069,16 @@ export class ControlledLiveTarget extends DisposableTarget {
    * host would prove nothing about a boundary whose whole point is that checking.
    * Nothing here calls the authorizer — the answer comes from the request handler.
    */
-  async wireGitRequestForTest(
-    repository: string,
-    credential: string | undefined,
-  ): Promise<number> {
+  async wireGitRequestForTest(repository: string, credential: string | undefined): Promise<number> {
     const url = new URL(`${this.server.url}/${repository}.git/info/refs`)
     url.searchParams.set('service', 'git-upload-pack')
     const answer = await this.server.fetch(url, {
       headers:
         credential === undefined
           ? {}
-          : { authorization: `basic ${Buffer.from(`x-access-token:${credential}`).toString('base64')}` },
+          : {
+              authorization: `basic ${Buffer.from(`x-access-token:${credential}`).toString('base64')}`,
+            },
     })
     await answer.arrayBuffer()
     return answer.status
@@ -1435,7 +1437,9 @@ export class GitHubLiveTarget extends DisposableTarget {
     await this.extendGitCredentials(
       remote,
       kind === 'fork'
-        ? this.requireReviewerToken('A fork subject needs a second account, and this run was not given one')
+        ? this.requireReviewerToken(
+            'A fork subject needs a second account, and this run was not given one',
+          )
         : this.primaryToken,
     )
     await createForeignRepository({ path: foreignPath, remote, branch, env: this.git.env })
@@ -1703,7 +1707,6 @@ async function readRepositoryIdentity(
     throw error
   }
 }
-
 
 /**
  * The repository a foreign branch is pushed from, created before anything points a

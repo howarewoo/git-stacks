@@ -404,9 +404,9 @@ async function runRecovery(receiptPath: string, options: CliOptions): Promise<nu
     if (!actors.has(primaryLogin.toLowerCase())) {
       options.err(
         redactor.text(
-        `This receipt records ${[...actors].join(', ')} as the account${actors.size === 1 ? '' : 's'} ` +
-          `that created what it names, and the credential supplied belongs to ${primaryLogin}. ` +
-          'Nothing was removed.',
+          `This receipt records ${[...actors].join(', ')} as the account${actors.size === 1 ? '' : 's'} ` +
+            `that created what it names, and the credential supplied belongs to ${primaryLogin}. ` +
+            'Nothing was removed.',
         ),
       )
       return EXIT_REFUSED
