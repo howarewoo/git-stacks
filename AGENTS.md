@@ -1,7 +1,8 @@
 # Repository instructions
 
-This project follows woostack. At the start of work, use `using-woostack` to load the
-project rules and route `/woostack-*` requests to the matching woostack skill.
+This project follows woostack. If `using-woostack` is available, use it at the
+start of work to load the project rules. Route `/woostack-*` requests to the
+matching woostack skill when available.
 
 Follow this file first when it conflicts with generic agent defaults.
 
