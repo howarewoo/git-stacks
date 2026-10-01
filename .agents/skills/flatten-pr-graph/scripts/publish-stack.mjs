@@ -283,7 +283,21 @@ function resolvePushEndpoint(repository, remote) {
   const configured = runGit(repository, ['remote', 'get-url', '--all', '--push', remote], {
     allowFailure: true,
   })
-  if (!configured.ok) return { endpoint: effectiveUrl(repository, remote), evidence: `${remote} is addressed directly` }
+  if (!configured.ok) {
+    // No configured remote of that name, so the value is addressed directly. Git then
+    // treats it as a path or a URL, and a local path has to exist: accepting a name that
+    // names nothing defers the failure to the first push, by which point the run has
+    // already reported a snapshot mismatch instead of the destination it never had.
+    const endpoint = effectiveUrl(repository, remote)
+    if (transportOf(endpoint) === 'file' && !existsSync(endpoint)) {
+      throw new InputError(
+        'conflicting-environment-control',
+        `remote ${remote} is neither a configured remote nor a destination that exists`,
+        endpoint,
+      )
+    }
+    return { endpoint, evidence: `${remote} is addressed directly` }
+  }
   const urls = lines(configured.stdout)
   if (urls.length === 0) {
     throw new InputError(

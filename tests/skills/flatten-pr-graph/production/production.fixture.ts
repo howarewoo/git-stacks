@@ -2301,9 +2301,12 @@ define({
     const stack = await preparedStack(production, [12, 13])
     const second = join(production.world.root, 'second.git')
     production.world.gitIn(production.world.root, 'init', '--bare', '--quiet', second)
-    production.world.gitIn(production.storage(), 'remote', 'add', 'mirror', production.world.remote)
+    // The helper reads the destination from the repository it was pointed at, so the two
+    // push urls have to live there; a remote configured in some other repository would
+    // test nothing about the run.
+    production.world.gitIn(production.world.remote, 'remote', 'add', 'mirror', production.world.remote)
     production.world.gitIn(
-      production.storage(),
+      production.world.remote,
       'remote',
       'set-url',
       '--add',

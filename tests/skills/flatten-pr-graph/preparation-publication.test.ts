@@ -21,6 +21,7 @@ interface PrepareInput {
   originalHeads: Record<number, string>
   root?: { ref: string; oid: string }
   rootFiles?: Record<string, string>
+  userWorkspace?: string | null
   resolutions?: Array<{
     number: number
     path: string
@@ -54,6 +55,14 @@ interface PreparedRun {
   repeated?: boolean
   controls?: Array<{ control: string; value: string; blocking: boolean; effect: string }>
   verification: Array<{ invariant: string; observed: string; result: string }>
+  userWorkspace?: null | {
+    present: boolean
+    path: string
+    status: string
+    worktreeDigest: string
+    indexDigest: string
+    operationsInProgress: string[]
+  }
 }
 
 interface PublicationRun {
@@ -104,6 +113,7 @@ function planInput(world: World, input: PrepareInput): Record<string, unknown> {
     order: input.order,
     heads: input.heads,
     originalHeads: input.originalHeads,
+    userWorkspace: input.userWorkspace ?? null,
     resolutions: input.resolutions ?? [],
     resume: input.resume ?? false,
     now: '2026-10-01T09:00:00.000Z',
@@ -1456,5 +1466,88 @@ test('a filesystem monitor is refused before the fingerprint runs git status', a
     existsSync(join(world.root, 'run', 'storage.git')),
     false,
     'no task-owned storage is created under a control this run cannot honour',
+  )
+})
+
+test('an operation in progress in a linked worktree is reported', async (t) => {
+  const world = await createWorld('prepare-linked-worktree')
+  t.after(() => world.cleanup())
+  const a = await seedBranch(world, BRANCHES[12], { 'shared.txt': 'ours\n' })
+  const b = await seedBranch(world, BRANCHES[13], { 'shared.txt': 'theirs\n' })
+  world.gitIn(world.repo, 'fetch', '--quiet', 'origin')
+
+  // A linked worktree: `.git` is a FILE naming a directory under the common directory, so
+  // every Git state file lives somewhere `join(path, '.git', ...)` never looks. A real
+  // unfinished merge is started there and has to survive the run and be reported.
+  const linked = join(world.root, 'linked-worktree')
+  world.gitIn(world.repo, 'worktree', 'add', '--quiet', '--detach', linked, b)
+  // A genuine conflicting merge, so MERGE_HEAD really exists in the linked worktree.
+  // `git merge` exits non-zero on a conflict, which is the point here; the merge itself
+  // is real and leaves MERGE_HEAD behind.
+  world.tryGitIn(linked, 'merge', '--no-commit', a)
+  const mergeHead = world.tryGitIn(linked, 'rev-parse', '--verify', 'MERGE_HEAD')
+  assert.ok(mergeHead, 'the fixture must really leave a merge in progress')
+  const marker = join(world.root, 'user-touched')
+  const prepared = await runPrepare(world, {
+    userWorkspace: linked,
+    runDirectory: join(world.root, 'run'),
+    order: [12],
+    heads: { 12: `refs/heads/${BRANCHES[12]}` },
+    originalHeads: { 12: a },
+  })
+
+  assert.equal(prepared.status, 'prepared', JSON.stringify(prepared.errors))
+  assert.equal(
+    world.tryGitIn(linked, 'rev-parse', '--verify', 'MERGE_HEAD'),
+    mergeHead,
+    "the user's unfinished merge must survive the run untouched",
+  )
+  assert.equal(existsSync(marker), false)
+  assert.deepEqual(
+    prepared.userWorkspace?.operationsInProgress,
+    ['MERGE_HEAD'],
+    'an operation in progress in a linked worktree is a fact about the user, not an absence',
+  )
+})
+
+test('two different binary files are not read as the same untracked content', async (t) => {
+  const world = await createWorld('prepare-binary-untracked')
+  t.after(() => world.cleanup())
+  const a = await seedBranch(world, BRANCHES[12], { 'a.txt': 'a\n' })
+  const prepared = await runPrepare(world, {
+    userWorkspace: world.repo,
+    runDirectory: join(world.root, 'run'),
+    order: [12],
+    heads: { 12: `refs/heads/${BRANCHES[12]}` },
+    originalHeads: { 12: a },
+  })
+  const before = prepared.userWorkspace?.worktreeDigest
+  assert.ok(before, 'the worktree digest is part of the report')
+
+  // 0xFF and 0xFE are distinct bytes that both decode to the replacement character, so a
+  // digest taken over decoded text reports these two files as identical content.
+  writeFileSync(join(world.repo, 'blob.bin'), Buffer.from([0xff, 0xfe, 0x00, 0x80]))
+  const first = await runPrepare(world, {
+    userWorkspace: world.repo,
+    order: [12],
+    heads: { 12: `refs/heads/${BRANCHES[12]}` },
+    originalHeads: { 12: a },
+    runDirectory: join(world.root, 'run-2'),
+  })
+  const afterFirst = first.userWorkspace?.worktreeDigest
+  assert.notEqual(afterFirst, before, 'new binary content must change the digest')
+
+  writeFileSync(join(world.repo, 'blob.bin'), Buffer.from([0xfe, 0xff, 0x00, 0x80]))
+  const second = await runPrepare(world, {
+    userWorkspace: world.repo,
+    order: [12],
+    heads: { 12: `refs/heads/${BRANCHES[12]}` },
+    originalHeads: { 12: a },
+    runDirectory: join(world.root, 'run-3'),
+  })
+  assert.notEqual(
+    second.userWorkspace?.worktreeDigest,
+    afterFirst,
+    'two different byte sequences must not read as the same content',
   )
 })

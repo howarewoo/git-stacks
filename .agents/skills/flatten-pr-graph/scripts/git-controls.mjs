@@ -255,6 +255,36 @@ function applies(rule, transports) {
   )
 }
 
+/**
+ * The spelling a control is reported under.
+ *
+ * Git's configuration keys are case-insensitive and `git config --list` lower-cases the
+ * variable part, so reading the real configuration and reporting it verbatim turns
+ * `core.hooksPath` into `core.hookspath`. That is the same control under a name no
+ * documentation, error message, or `git config` command the reader would try uses, and a
+ * report that names a key nobody can look up is not usable. The canonical spelling is
+ * restored here, and only here: the comparison that decides whether a control is present
+ * stays case-insensitive, exactly as Git's own is.
+ */
+const CANONICAL_CONTROL_KEYS = new Map([
+  ['core.hookspath', 'core.hooksPath'],
+  ['core.fsmonitor', 'core.fsmonitor'],
+  ['core.gpgsign', 'commit.gpgsign'],
+  ['core.sshcommand', 'core.sshCommand'],
+  ['core.gitproxy', 'core.gitProxy'],
+  ['core.pager', 'core.pager'],
+  ['core.editor', 'core.editor'],
+  ['gpg.program', 'gpg.program'],
+  ['gpg.ssh.program', 'gpg.ssh.program'],
+  ['credential.helper', 'credential.helper'],
+  ['diff.external', 'diff.external'],
+])
+
+/** The spelling to report, which is the canonical one when the key is a known control. */
+export function canonicalControlKey(key) {
+  return CANONICAL_CONTROL_KEYS.get(String(key).toLowerCase()) ?? key
+}
+
 function isEnabled(value) {
   const normalized = String(value ?? '').trim().toLowerCase()
   return normalized !== '' && normalized !== 'false' && normalized !== '0' && normalized !== 'off'
@@ -304,7 +334,7 @@ export function executableControls(git, cwd, env = {}, transports = new Set()) {
       // repository that had deliberately turned the control off.
       if (!isEnabled(value)) continue
       controls.push({
-        control: key,
+        control: canonicalControlKey(key),
         value,
         inTaskStorage: 'inherited',
         blocking: true,

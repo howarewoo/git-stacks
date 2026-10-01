@@ -62,6 +62,7 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
+  readlinkSync,
   realpathSync,
   statSync,
   unlinkSync,
@@ -127,6 +128,24 @@ function lines(text) {
  * or hook requirement - instead of a redirect the caller chose. The removed names are
  * reported in `controls` so the removal is visible rather than silent.
  */
+/**
+ * The variables that choose which repository, index, or object store a Git child talks
+ * to. These are removed from every child this run starts, because a task-owned directory
+ * has to be real isolation rather than a command that writes the user's index.
+ *
+ * `GIT_CONFIG_GLOBAL` and `GIT_CONFIG_SYSTEM` are deliberately absent. They choose which
+ * *configuration* Git reads, not which repository, so they are the machine's policy and
+ * not this run's routing: a child that dropped them would sign, hook, merge, and filter
+ * under a policy the caller does not have. Removing them is also how a configured merge
+ * driver or filter silently stopped running while the report claimed nothing executable
+ * was in play. A control this run genuinely cannot honour is refused by the admission
+ * gate below, with the caller's own environment, rather than removed from under it.
+ *
+ * `GIT_CONFIG_KEY_<n>`/`GIT_CONFIG_VALUE_<n>` and `GIT_CONFIG_COUNT` do inject arbitrary
+ * configuration, so they are still removed - and the admission gate reads them first, so a
+ * run launched with one of them set is refused for the control it injects rather than
+ * quietly committed without it.
+ */
 const ROUTING_ENV_VARS = [
   'GIT_DIR',
   'GIT_WORK_TREE',
@@ -136,8 +155,6 @@ const ROUTING_ENV_VARS = [
   'GIT_GRAFT_FILE',
   'GIT_COMMON_DIR',
   'GIT_CEILING_DIRECTORIES',
-  'GIT_CONFIG_GLOBAL',
-  'GIT_CONFIG_SYSTEM',
   'GIT_CONFIG_COUNT',
   'GIT_TEMPLATE_DIR',
   'GIT_EXTERNAL_DIFF',
@@ -373,12 +390,47 @@ function userWorktreeDigest(repo) {
   for (const relativePath of untracked) {
     const full = join(repo, relativePath)
     try {
-      parts.push(relativePath, readFileSync(full, 'utf8'))
+      // The bytes, never a decoded string. Decoding replaces every byte that is not valid
+      // UTF-8 with U+FFFD, so two different binary files - or one file whose bytes were
+      // rewritten - decode to the same text and the digest reports the user's work as
+      // unchanged when it is not. A symlink is content too: its target is read with
+      // `readlink`, so retargeting one is drift rather than an empty path.
+      const stat = lstatSync(full)
+      parts.push(
+        relativePath,
+        stat.isSymbolicLink() ? `link:${readlinkSync(full)}` : `file:${hashBytes(readFileSync(full))}`,
+      )
     } catch {
-      // unreadable
+      parts.push(relativePath, 'unreadable')
     }
   }
   return parts.join('\u0000')
+}
+
+/**
+ * The digest of raw content, over the bytes and their length.
+ *
+ * A hash of the decoded text would not be a hash of the content; this one is over what is
+ * on disk, so two different byte sequences cannot collide by decoding to the same string.
+ */
+function hashBytes(bytes) {
+  return `${createHash('sha256').update(bytes).digest('hex')}:${bytes.length}`
+}
+
+/**
+ * The path Git itself would use for one of its own state files in this repository.
+ *
+ * `join(path, '.git', marker)` is right only for an ordinary checkout. In a linked
+ * worktree `.git` is a file naming a directory elsewhere - `worktrees/<name>` under the
+ * common directory - so an operation in progress there has a real `MERGE_HEAD` that this
+ * construction never finds, and the run reports a user's unfinished merge as no operation
+ * at all. `rev-parse --git-path` answers with the path Git would use, and it is asked of
+ * the repository rather than assembled.
+ */
+function gitStatePath(cwd, marker) {
+  const resolved = gitOut(cwd, ['rev-parse', '--git-path', marker])
+  if (!resolved) return null
+  return isAbsolute(resolved) ? resolved : resolve(cwd, resolved)
 }
 
 /**
@@ -401,7 +453,10 @@ function readUserFingerprint(userWorkspace) {
     'CHERRY_PICK_HEAD',
     'rebase-merge',
     'rebase-apply',
-  ].filter((marker) => existsSync(join(path, '.git', marker)))
+  ]
+    .map((marker) => ({ marker, state: gitStatePath(path, marker) }))
+    .filter((entry) => entry.state !== null && existsSync(entry.state))
+    .map((entry) => entry.marker)
   const stash = gitOut(path, ['stash', 'list', '--format=%H']) ?? ''
   const indexDigest = digest(gitOut(path, ['diff', '--cached', '--binary']) ?? '')
   const worktreeDigest = digest(userWorktreeDigest(path))
