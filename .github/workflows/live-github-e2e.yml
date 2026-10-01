@@ -133,22 +133,6 @@ jobs:
             echo "::error::refusing to run: dispatched from $DISPATCH_REF, and this workflow reaches the environment's credentials"
             exit 1
           fi
-        run: |
-          set -euo pipefail
-          missing=0
-          for name in \
-            GIT_STACKS_LIVE_GITHUB_OWNER \
-            GIT_STACKS_LIVE_GITHUB_TOKEN \
-            GIT_STACKS_LIVE_GITHUB_REVIEWER_TOKEN; do
-            if [ -z "${!name:-}" ]; then
-              echo "::error::$name is not configured on the live-github-e2e environment"
-              missing=$((missing + 1))
-            fi
-          done
-          if [ "$missing" -ne 0 ]; then
-            echo "::error::refusing to run: a live run creates and deletes a repository, and $missing required value(s) are unset"
-            exit 1
-          fi
       - run: npm ci
       - name: Run the live suite against the authorized disposable repository
         # The run id names every resource it creates and is stamped on each one,

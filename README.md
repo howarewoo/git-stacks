@@ -1359,6 +1359,29 @@ This is the target that needs no authorization, and it is the one CI runs. It is
 not a mock: the scenarios exercise the production services, the production
 transport, and real `git`, and the only thing stood in for GitHub is GitHub.
 
+### What the run takes away from the environment
+
+A live run is the one place in this repository where a real credential is in the
+environment, so it replaces that environment rather than inheriting it. Every
+Git the run starts — the ones it starts itself, the ones an external clone
+starts, and the ones the application's own services start — reads an empty home
+and template directory, no system or global configuration, hooks pointed at a
+directory the run created and left empty, signing off, helpers cleared, and
+tracing off; the run's own credential rides in a header scoped to the disposable
+repository rather than in the remote URL. It also removes what a machine can
+carry that would widen where that credential goes: `GIT_DIR` and its relatives,
+the counted `GIT_CONFIG_*` pairs, an ambient token, and an ambient API base.
+
+`NODE_TLS_REJECT_UNAUTHORIZED` and `NODE_EXTRA_CA_CERTS` go with them, and the
+reason is specific. The application's API calls are `fetch` in this process, and
+Node reads those two variables when it opens the connection: with the first set
+to `0`, a request carrying this run's bearer completes its handshake against a
+certificate nothing vouches for. Retiring `GIT_SSL_NO_VERIFY` secures the Git
+children and changes nothing about that request, so the retirement happens in
+the same install, before the first authenticated request rather than with the
+Git commands later. When the run finishes — succeeded, failed, or refused — the
+process environment is restored exactly as it was found.
+
 ### The authorized target
 
 `--github` runs the same scenarios against a repository it creates on a real
@@ -1430,6 +1453,12 @@ application already knows, any `user:password@` in a URL, and local paths.
 Exit codes are `0` passed, `1` a scenario or cleanup failed, `2` the run was
 refused before it started.
 
+`npx tsx tests/live/cli.ts --recover <receipt>` is what a run that was killed
+before its own cleanup needs. It reads that run's receipt, asks the host to
+confirm the id and the marker for everything the receipt names, and removes only
+those; a receipt naming something the host does not confirm is reported and left
+alone.
+
 ### The committed schema fixture
 
 `tests/fixtures/live-github-observed-schema.json` is the contract the mock
@@ -1474,10 +1503,16 @@ the runner is the receipt; the credential is passed to one command and never
 written, echoed, or uploaded.
 
 An ordinary failure or a failing scenario cleans up in process. A job killed at
-its `timeout-minutes` cannot, and that is a real limit: the run id in the run
-log identifies the repository left behind, since every resource carries the
-marker, and such a repository can be deleted by hand once it has been confirmed
-to be the one that run created.
+its `timeout-minutes` cannot, and no in-process handler can: there is nothing to
+run one once the process is gone. So recovery is a third job in the same
+workflow, which runs when the live job did not succeed. It takes the receipt that
+job published as an artifact — the artifact, because a self-hosted label matches
+every machine carrying it, so a path on one runner says nothing about the next one
+— and removes only what that receipt names, after the host confirms both the id
+the run created and the marker it stamped. With no receipt published it says so
+and fails rather than searching for repositories whose names merely resemble
+what the run would have used. The run id in the log identifies any repository a
+recovery could not remove, since every resource carries the marker.
 
 ### Acceptance boundary
 
