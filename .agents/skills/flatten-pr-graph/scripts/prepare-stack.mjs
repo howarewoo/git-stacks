@@ -492,6 +492,35 @@ function seedStorage(input) {
       storage,
     ])
   }
+  for (const [number, headRef] of Object.entries(input.heads)) {
+    const sourceOid = gitOut(input.repository, [
+      'rev-parse',
+      '--verify',
+      '--quiet',
+      `${headRef}^{commit}`,
+    ])
+    if (!sourceOid) {
+      throw new InputError(
+        'stale-snapshot',
+        `selected head ref ${headRef} of #${number} does not exist in the source repository`,
+        `source repository: ${input.repository}`,
+      )
+    }
+  }
+  const sourceRootOid = gitOut(input.repository, [
+    'rev-parse',
+    '--verify',
+    '--quiet',
+    `${input.root.ref}^{commit}`,
+  ])
+  if (!sourceRootOid) {
+    throw new InputError(
+      'stale-snapshot',
+      `root ref ${input.root.ref} does not exist in the source repository`,
+      `source repository: ${input.repository}`,
+    )
+  }
+
   // One read-only copy of every published head. Nothing is pushed into the user's
   // repository from here, and the root is captured at the pinned commit id.
   const refspecs = Array.from(new Set([input.root.ref, ...Object.values(input.heads)])).map(
@@ -1289,7 +1318,22 @@ function inspectControls(repository) {
       allowFailure: true,
     },
   )
-  for (const line of drivers.ok ? lines(drivers.stdout) : []) {
+  const globalDrivers = runGit(
+    repository,
+    [
+      'config',
+      '--get-regexp',
+      '^merge\\..*\\.driver$',
+    ],
+    {
+      allowFailure: true,
+    },
+  )
+  const driverLines = new Set([
+    ...(drivers.ok ? lines(drivers.stdout) : []),
+    ...(globalDrivers.ok ? lines(globalDrivers.stdout) : []),
+  ])
+  for (const line of driverLines) {
     const space = line.indexOf(' ')
     const key = line.slice(0, space)
     const value = line.slice(space + 1)
@@ -1302,7 +1346,14 @@ function inspectControls(repository) {
         'a custom clean/smudge filter or merge driver in the source repository cannot be executed safely: preparation stops before running untrusted or bypassed drivers',
     })
   }
-  const hooksDir = join(repository, '.git', 'hooks')
+  const hooksConfig = gitOut(repository, ['config', '--get', 'core.hooksPath'])
+  const hooksDir = hooksConfig
+    ? isAbsolute(hooksConfig)
+      ? hooksConfig
+      : resolve(repository, hooksConfig)
+    : existsSync(join(repository, '.git', 'hooks'))
+      ? join(repository, '.git', 'hooks')
+      : join(repository, 'hooks')
   const hooks = existsSync(hooksDir)
     ? readdirSync(hooksDir)
         .filter((name) => !name.endsWith('.sample'))
@@ -1756,7 +1807,13 @@ function prepareStackInner(raw) {
     }
   }
 
-  journal.state = errors.length > 0 ? 'blocked' : 'prepared'
+  const status =
+    errors.length === 0 && remaining.length === 0
+      ? 'prepared'
+      : preparedBranches.length > 0
+        ? 'partial'
+        : 'blocked'
+  journal.state = status
   journal.preparation = preparation
   journal.updatedAt = input.now
   writeJournal(journalPath, journal)
@@ -1764,6 +1821,7 @@ function prepareStackInner(raw) {
   return {
     contractVersion: CONTRACT_VERSION,
     ok: errors.length === 0 && remaining.length === 0,
+    status,
     errors,
     run: {
       runId,

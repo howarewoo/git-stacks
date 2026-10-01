@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { createWorld, type World } from './support/real-git'
 import { prepareStack } from '../../../.agents/skills/flatten-pr-graph/scripts/prepare-stack.mjs'
@@ -36,6 +36,7 @@ interface PreparedRun {
   status?: string
   errors: Array<{ code: string; detail: string; evidence: string }>
   conflicts: Array<{ number: number; path: string; kind: string; needsDecision: boolean }>
+  decisions: Array<{ number: number; path: string; intent?: string; reason?: string }>
   preparation: null | {
     branches: Array<{
       number: number
@@ -63,13 +64,18 @@ interface PublicationRun {
     unconfirmed: Array<{ kind: string; target: string }>
     interrupted: boolean
   }
-  capability: Record<string, unknown>
+  capability: Record<string, unknown> & { blockedControls?: string[] }
   rootAdvance: null | { pinned: string; observed: string; integrated: boolean }
   recovery: null | { unconfirmedAttempts: string[] }
 }
 
-const BRANCHES = { 12: 'feat-a', 13: 'feat-b', 14: 'feat-c', 15: 'feat-conflict', 16: 'feat-lock' }
-
+const BRANCHES: Record<number, string> = {
+  12: 'feat-a',
+  13: 'feat-b',
+  14: 'feat-c',
+  15: 'feat-conflict',
+  16: 'feat-lock',
+}
 function planInput(world: World, input: PrepareInput): Record<string, unknown> {
   return {
     contractVersion: 'flatten-pr-graph/1',
@@ -99,12 +105,12 @@ async function runPrepare(world: World, input: PrepareInput): Promise<PreparedRu
   return (await prepareStack(planInput(world, input))) as unknown as PreparedRun
 }
 
-function runPublish(
+async function runPublish(
   world: World,
   document: Record<string, unknown>,
   conversations?: Record<string, unknown>,
 ): Promise<PublicationRun> {
-  return publishStack(
+  const result = await publishStack(
     {
       contractVersion: 'flatten-pr-graph/1',
       repository: join(world.root, 'run', 'storage.git'),
@@ -113,7 +119,8 @@ function runPublish(
       ...document,
     },
     conversations as never,
-  ) as Promise<PublicationRun>
+  )
+  return result as unknown as PublicationRun
 }
 
 let scratchCounter = 0
@@ -373,7 +380,7 @@ test('a caller-supplied resolution produces a prepared state the next run verifi
 
   const resolved = await runPrepare(world, {
     ...request,
-    runDirectory: join(world.root, 'run-resolved'),
+    resume: true,
     resolutions: [
       {
         number: 15,
@@ -384,14 +391,13 @@ test('a caller-supplied resolution produces a prepared state the next run verifi
       },
     ],
   })
-
   assert.equal(resolved.ok, true, JSON.stringify(resolved.errors))
   assert.ok(resolved.conflicts.some((conflict) => conflict.number === 15))
   const branch = resolved.preparation?.branches.find((entry) => entry.number === 15)
   assert.ok(branch)
   assert.equal(
     world.isAncestor(
-      join(world.root, 'run-resolved', 'storage.git'),
+      join(runDirectory, 'storage.git'),
       conflicting,
       branch.preparedHead,
     ),
@@ -785,4 +791,150 @@ test('configuration that would push extra refs stops publication', async (t) => 
     JSON.stringify(blocked.capability),
   )
   assert.deepEqual(world.remoteRefs(), before)
+})
+
+test('an empty grant or base-only grant with pending heads blocks before push calls', async (t) => {
+  const world = await createWorld('publish-missing-grant')
+  t.after(() => world.cleanup())
+  const a = await seedBranch(world, BRANCHES[12], { 'a.txt': 'a\n' })
+  const prepared = await runPrepare(world, {
+    runDirectory: join(world.root, 'run'),
+    order: [12],
+    heads: { 12: `refs/heads/${BRANCHES[12]}` },
+    originalHeads: { 12: a },
+  })
+  const before = world.remoteRefs()
+
+  // 1. Empty grant
+  const emptyDoc = publicationDocument(world, prepared, [12])
+  emptyDoc.authority.granted = []
+  const blockedEmpty = await runPublish(world, emptyDoc)
+  assert.equal(blockedEmpty.status, 'blocked')
+  assert.ok(blockedEmpty.errors.some((e) => e.code === 'missing-permission'))
+  assert.deepEqual(world.remoteRefs(), before)
+
+  // 2. Base-only grant with pending head writes
+  const baseOnlyDoc = publicationDocument(world, prepared, [12])
+  baseOnlyDoc.authority.granted = ['pr-base-update']
+  const blockedBaseOnly = await runPublish(world, baseOnlyDoc)
+  assert.equal(blockedBaseOnly.status, 'blocked')
+  assert.ok(blockedBaseOnly.errors.some((e) => e.code === 'missing-permission'))
+  assert.deepEqual(world.remoteRefs(), before)
+})
+
+test('publication pushes write.to even if backup ref was changed to unrelated commit', async (t) => {
+  const world = await createWorld('publish-verified-sha')
+  t.after(() => world.cleanup())
+  const a = await seedBranch(world, BRANCHES[12], { 'a.txt': 'a\n' })
+  const prepared = await runPrepare(world, {
+    runDirectory: join(world.root, 'run'),
+    order: [12],
+    heads: { 12: `refs/heads/${BRANCHES[12]}` },
+    originalHeads: { 12: a },
+  })
+  const storage = join(world.root, 'run', 'storage.git')
+  world.gitIn(storage, 'update-ref', 'refs/heads/prepared/12', a)
+
+  const doc = publicationDocument(world, prepared, [12])
+  const result = await runPublish(world, doc)
+  assert.equal(result.status, 'published')
+  assert.equal(
+    world.remoteRefs()[`refs/heads/${BRANCHES[12]}`],
+    prepared.preparation.branches[0].preparedHead,
+  )
+})
+
+test('publication retargets non-contiguous PR numbers correctly by number', async (t) => {
+  const world = await createWorld('publish-non-contiguous')
+  t.after(() => world.cleanup())
+  const a = await seedBranch(world, BRANCHES[12], { 'a.txt': 'a\n' })
+  const b = await seedBranch(world, BRANCHES[15], { 'b.txt': 'b\n' })
+  const prepared = await runPrepare(world, {
+    runDirectory: join(world.root, 'run'),
+    order: [12, 15],
+    heads: { 12: `refs/heads/${BRANCHES[12]}`, 15: `refs/heads/${BRANCHES[15]}` },
+    originalHeads: { 12: a, 15: b },
+  })
+  const doc = publicationDocument(world, prepared, [12, 15])
+  doc.intendedBases = { 12: 'main', 15: BRANCHES[12] }
+  const result = await runPublish(world, doc)
+  assert.equal(result.status, 'published')
+  const calls = providerCalls(world)
+  // PR 12 was already on main, so it is skipped; PR 15 was retargeted to feat-a
+  assert.deepEqual(calls, [
+    { number: 15, base: BRANCHES[12] },
+  ])
+})
+
+test('missing base grant with successful head push reports partial with recovery', async (t) => {
+  const world = await createWorld('publish-ref-only-grant')
+  t.after(() => world.cleanup())
+  const a = await seedBranch(world, BRANCHES[12], { 'a.txt': 'a\n' })
+  const prepared = await runPrepare(world, {
+    runDirectory: join(world.root, 'run'),
+    order: [12],
+    heads: { 12: `refs/heads/${BRANCHES[12]}` },
+    originalHeads: { 12: a },
+  })
+  const doc = publicationDocument(world, prepared, [12])
+  doc.intendedBases = { 12: 'other-base' }
+  doc.authority.granted = ['ref-update']
+
+  const result = await runPublish(world, doc)
+  assert.equal(result.status, 'partial')
+  assert.equal(result.ok, false)
+  assert.ok(result.recovery)
+  assert.ok(result.publication.confirmed.some((c) => c.kind === 'ref-update'))
+  assert.ok(result.errors.some((e) => e.code === 'missing-permission'))
+})
+
+test('repeated PR numbers in order are rejected before remote conversations', async (t) => {
+  const world = await createWorld('publish-duplicate-order')
+  t.after(() => world.cleanup())
+  const a = await seedBranch(world, BRANCHES[12], { 'a.txt': 'a\n' })
+  const prepared = await runPrepare(world, {
+    runDirectory: join(world.root, 'run'),
+    order: [12],
+    heads: { 12: `refs/heads/${BRANCHES[12]}` },
+    originalHeads: { 12: a },
+  })
+  const doc = publicationDocument(world, prepared, [12])
+  doc.order = [12, 12]
+
+  const result = await runPublish(world, doc)
+  assert.equal(result.status, 'blocked')
+  assert.ok(result.errors.some((e) => e.code === 'invalid-input'))
+})
+
+test('unauthorized invocation leaves existing recovery journal intact', async (t) => {
+  const world = await createWorld('publish-preserve-journal')
+  t.after(() => world.cleanup())
+  const runDir = join(world.root, 'run')
+  mkdirSync(runDir, { recursive: true })
+  const journalPath = join(runDir, 'publication-journal.json')
+  const initialJournal = {
+    contractVersion: 'flatten-pr-graph/1',
+    state: 'partial',
+    attempts: [{ sequence: 1, kind: 'ref-update', target: 'refs/heads/feat-a', outcome: 'unknown' }],
+    confirmed: [],
+    unconfirmed: [{ kind: 'ref-update', target: 'refs/heads/feat-a', why: 'unknown' }],
+  }
+  writeFileSync(journalPath, JSON.stringify(initialJournal))
+
+  const a = await seedBranch(world, BRANCHES[12], { 'a.txt': 'a\n' })
+  const prepared = await runPrepare(world, {
+    runDirectory: runDir,
+    order: [12],
+    heads: { 12: `refs/heads/${BRANCHES[12]}` },
+    originalHeads: { 12: a },
+  })
+  const doc = publicationDocument(world, prepared, [12])
+  doc.authority.intent = 'preview'
+
+  const result = await runPublish(world, doc)
+  assert.equal(result.status, 'blocked')
+
+  const readBack = JSON.parse(readFileSync(journalPath, 'utf8'))
+  assert.equal(readBack.state, 'partial')
+  assert.equal(readBack.attempts[0].outcome, 'unknown')
 })

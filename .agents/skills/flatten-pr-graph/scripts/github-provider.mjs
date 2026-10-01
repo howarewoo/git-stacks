@@ -8,22 +8,20 @@
  *
  * It exposes exactly the surface the contract allows:
  *
- *   capabilities()          -> reads the server version, and reports
- *                              `compareAndSwap: true` only because PATCH /pulls/{n}
- *                              accepts an `expected_base` the server enforces
+ *   capabilities()          -> reports supported operations, and sets
+ *                              `compareAndSwap: false` because GitHub's REST API
+ *                              (`PATCH /repos/{owner}/{repo}/pulls/{n}`) does not offer
+ *                              a server-side precondition check for base updates
  *   readPullRequest(number) -> GET /repos/{owner}/{repo}/pulls/{n}
- *   updatePullRequestBase(number, base, expectedBase)
- *                           -> PATCH /repos/{owner}/{repo}/pulls/{n}
- *                              with `base` and, when the caller pinned one, `expected_base`
+ *   updatePullRequestBase(number, base)
+ *                           -> PATCH /repos/{owner}/{repo}/pulls/{n} with `base`
  *
  * There is no merge, no queue, no ruleset, no check, no label, no reviewer, and no
  * branch-protection read here, and no code path that could be extended into one by
  * configuration: the endpoint, the verb, and the field names are literals.
  *
- * `expected_base` is GitHub's own precondition on the base branch, so a base retarget
- * that races a concurrent change is refused by the server instead of silently winning.
- * That is a genuine compare-and-swap, and the caller is told so rather than told it has a
- * read-before-write guard.
+ * Base retargets are guarded by an immediate read-before-write check, and the publication
+ * result explicitly documents `residualMetadataRace: true`.
  *
  * Credentials: `gh` must already be authenticated. This module never reads, stores, logs,
  * or forwards a token, and never prints anything except the operation result.
@@ -39,8 +37,18 @@ function gh(args) {
   })
 }
 
-/** The repository `gh` is pointed at, read from gh itself so no name is hard-coded. */
+/**
+ * The repository `gh` is pointed at. Uses the pinned repository from environment if
+ * available, otherwise falls back to inspecting the configured repository.
+ */
 function repositoryCoordinates() {
+  const envRepo = process.env.FLATTEN_PR_REPOSITORY || process.env.GH_REPO
+  if (envRepo && envRepo.includes('/')) {
+    const parts = envRepo.trim().split('/')
+    if (parts.length === 2 && parts[0] && parts[1]) {
+      return { owner: parts[0], name: parts[1] }
+    }
+  }
   const parsed = JSON.parse(gh(['repo', 'view', '--json', 'owner,name']))
   return { owner: parsed.owner.login, name: parsed.name }
 }
@@ -52,7 +60,7 @@ function ghJson(args) {
 function toPullRequest(raw) {
   return {
     number: raw.number,
-    state: raw.state,
+    state: typeof raw.state === 'string' ? raw.state.toUpperCase() : null,
     draft: raw.draft ?? false,
     headRef: raw.head?.ref ?? null,
     headSha: raw.head?.sha ?? null,
@@ -70,12 +78,11 @@ function toPullRequest(raw) {
 }
 
 export function capabilities() {
-  // A token without pull-request write scope fails here rather than at the first write.
-  gh(['api', 'rate_limit', '--jq', '.resources.core.remaining'])
+  const { owner, name } = repositoryCoordinates()
   return {
     operations: ['update-pull-request-base'],
-    compareAndSwap: true,
-    provider: `github:${repositoryCoordinates().owner}/${repositoryCoordinates().name}`,
+    compareAndSwap: false,
+    provider: `github:${owner}/${name}`,
   }
 }
 
@@ -83,32 +90,33 @@ export function readPullRequest(number) {
   const { owner, name } = repositoryCoordinates()
   const raw = ghJson([
     'api',
+    '-R',
+    `${owner}/${name}`,
     '--method',
     'GET',
     `repos/${owner}/${name}/pulls/${number}`,
     '-f',
-    `per_page=1`,
+    'per_page=1',
   ])
   return { ok: true, pullRequest: toPullRequest(raw) }
 }
 
-export function updatePullRequestBase(number, base, expectedBase) {
+export function updatePullRequestBase(number, base) {
   const { owner, name } = repositoryCoordinates()
-  const fields = ['-f', `base=${base}`]
-  if (typeof expectedBase === 'string' && expectedBase.length > 0) {
-    fields.push('-f', `expected_base=${expectedBase}`)
-  }
   const raw = ghJson([
     'api',
+    '-R',
+    `${owner}/${name}`,
     '--method',
     'PATCH',
     `repos/${owner}/${name}/pulls/${number}`,
-    ...fields,
+    '-f',
+    `base=${base}`,
   ])
   return {
     ok: true,
     applied: raw?.base?.ref === base,
-    preconditionMet: typeof expectedBase === 'string' ? raw?.base?.ref === base : null,
+    preconditionMet: null,
     provider: 'github',
   }
 }

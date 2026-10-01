@@ -76,13 +76,13 @@ real root branch name:
    state, draft, head ref, head repository, title, body, labels, reviewers - must be
    unchanged; if one changed, that is reported as a failure, not repaired.
 
-`github-provider.mjs` is the shipped GitHub implementation of that interface. It uses
-GitHub's `expected_base` precondition, so its base writes are a genuine
-compare-and-swap and the result says so (`baseWritesGuardedBy: "compare-and-swap"`). Any
-provider without a server-side precondition - including the fake used by the fixtures -
-is recorded as `read-before-write` with `residualMetadataRace: true`. A read before a
-write is not atomic, and no document here may promise a guarantee the interface cannot
-enforce.
+`github-provider.mjs` is the shipped GitHub implementation of that interface. Because
+GitHub's REST API (`PATCH /repos/{owner}/{repo}/pulls/{n}`) does not offer a server-side
+precondition check for base updates, the provider reports `compareAndSwap: false`. Base
+updates are guarded by an immediate read-before-write check, and the publication result
+explicitly records `baseWritesGuardedBy: "read-before-write"` with `residualMetadataRace: true`.
+A read before a write is not atomic, and no document here may promise a guarantee the interface
+cannot enforce.
 
 No check run, queue membership, ruleset, or branch-protection state is read or gated on.
 The one preflight fact read is the selected pull request's own auto-merge request, because

@@ -115,6 +115,20 @@ function lines(text) {
     .map((line) => line.trim())
     .filter(Boolean)
 }
+const ROUTING_ENV_VARS = [
+  'GIT_DIR',
+  'GIT_WORK_TREE',
+  'GIT_INDEX_FILE',
+  'GIT_OBJECT_DIRECTORY',
+  'GIT_ALTERNATE_OBJECT_DIRECTORIES',
+  'GIT_GRAFT_FILE',
+]
+
+function sanitizedEnv() {
+  const env = { ...process.env }
+  for (const v of ROUTING_ENV_VARS) delete env[v]
+  return env
+}
 
 function runGit(cwd, args, { allowFailure = false } = {}) {
   try {
@@ -123,6 +137,7 @@ function runGit(cwd, args, { allowFailure = false } = {}) {
       encoding: 'utf8',
       timeout: GIT_TIMEOUT_MS,
       maxBuffer: 32 * 1024 * 1024,
+      env: sanitizedEnv(),
       ...(allowFailure ? { stdio: ['ignore', 'pipe', 'pipe'] } : {}),
     })
     return { ok: true, status: 0, stdout: String(stdout), stderr: '' }
@@ -182,6 +197,13 @@ function requireRemote(value, where) {
       'invalid-input',
       `${where} must be a remote name or path`,
       `received ${JSON.stringify(value)}`,
+    )
+  }
+  if (value.startsWith('ext::') || value.includes('::')) {
+    throw new InputError(
+      'conflicting-environment-control',
+      `${where} specifies an ext or custom remote transport, which is not permitted`,
+      value,
     )
   }
   return value
@@ -396,6 +418,7 @@ function inspectControls(repository) {
     'push.default',
     'push.gpgsign',
     'core.hookspath',
+    'core.sshcommand',
   ])
   for (const line of read()) {
     const space = line.indexOf(' ')
@@ -404,19 +427,24 @@ function inspectControls(repository) {
     const value = line.slice(space + 1)
     const blocking =
       (key === 'push.followtags' && !['false', '0', 'no'].includes(value.toLowerCase())) ||
-      (key === 'push.recursesubmodules' && !['no', 'false', '0'].includes(value.toLowerCase()))
+      (key === 'push.recursesubmodules' && !['no', 'false', '0'].includes(value.toLowerCase())) ||
+      (key === 'core.sshcommand' && value.trim().length > 0)
     controls.push({
       control: key,
       value,
       inTaskStorage: 'inherited',
       blocking,
       effect: blocking
-        ? 'this setting would push refs nobody authorised; the run stops instead of overriding it'
+        ? 'this setting would modify push behaviour or invoke an unverified command; the run stops instead of overriding it'
         : 'left exactly as configured',
     })
   }
   const hooksPath = gitOut(repository, ['config', '--get', 'core.hooksPath'])
-  const hooksDir = hooksPath ?? join(repository, 'hooks')
+  const hooksDir = hooksPath
+    ? isAbsolute(hooksPath)
+      ? hooksPath
+      : resolve(repository, hooksPath)
+    : join(repository, 'hooks')
   const prePush = join(hooksDir, 'pre-push')
   controls.push({
     control: 'hooks/pre-push',
@@ -510,6 +538,20 @@ function verifyPreparedSet(input, refs) {
       })
       continue
     }
+    // Check if the committed tree retains conflict markers (Finding 10)
+    const markerCheck = runGit(
+      input.repository,
+      ['grep', '-I', '-l', '-e', '<<<<<<<', branch.preparedHead, '--'],
+      { allowFailure: true },
+    )
+    if (markerCheck.ok && lines(markerCheck.stdout).length > 0) {
+      errors.push({
+        code: 'unresolved-conflict',
+        detail: `the prepared head of #${number} retains conflict markers in its committed tree`,
+        evidence: lines(markerCheck.stdout).join(', '),
+      })
+      continue
+    }
     const retained =
       gitOut(input.repository, [
         'merge-base',
@@ -564,9 +606,44 @@ function verifyPreparedSet(input, refs) {
     }
     checked.push({ number, branch, predecessor, index })
   }
+
+  // Check preparation index state and unresolved list (Finding 10)
+  if (input.preparation?.indexState) {
+    const unmerged = input.preparation.indexState.unmergedEntries ?? []
+    const ops = input.preparation.indexState.operationsInProgress ?? []
+    const mks = input.preparation.indexState.conflictMarkersInTree ?? []
+    if (unmerged.length > 0 || ops.length > 0 || mks.length > 0) {
+      errors.push({
+        code: 'unresolved-conflict',
+        detail: 'preparation handoff records unresolved conflicts, ongoing operations, or conflict markers',
+        evidence: `unmerged=${unmerged.join(',')} ops=${ops.join(',')} markers=${mks.join(',')}`,
+      })
+    }
+  }
+  if (Array.isArray(input.preparation?.unresolved) && input.preparation.unresolved.length > 0) {
+    errors.push({
+      code: 'unresolved-conflict',
+      detail: 'preparation handoff lists unresolved paths',
+      evidence: input.preparation.unresolved.join(', '),
+    })
+  }
+
+  // Snapshot reconciliation: admit journaled prepared heads for selected head refs (Finding 12)
+  const selectedHeadMap = new Map(input.order.map((n) => [input.heads[n], byNumber.get(n)]))
   for (const [ref, pinned] of Object.entries(input.observedRefs)) {
     if (ref === input.root.ref) continue
+    const branchForRef = selectedHeadMap.get(ref)
     const now = refs[ref]
+    if (branchForRef) {
+      if (now !== undefined && now !== pinned && now !== branchForRef.preparedHead) {
+        errors.push({
+          code: 'stale-snapshot',
+          detail: `selected ref ${ref} moved to an unexpected commit`,
+          evidence: `observed ${pinned}, prepared ${branchForRef.preparedHead}, remote now holds ${now}`,
+        })
+      }
+      continue
+    }
     if (now !== undefined && now !== pinned) {
       errors.push({
         code: 'stale-snapshot',
@@ -713,9 +790,7 @@ export async function publishStack(raw, conversations = {}) {
   const controls = inspectControls(input.repository)
   const blockedControls = controls.filter((control) => control.blocking)
 
-  const finish = (extra) => {
-    journal.updatedAt = input.now
-    writeJournal(journalFile, journal)
+  const returnWithoutJournal = (extra) => {
     return {
       ...base,
       ...extra,
@@ -735,6 +810,12 @@ export async function publishStack(raw, conversations = {}) {
       },
       journalPath: journalFile,
     }
+  }
+
+  const finish = (extra) => {
+    journal.updatedAt = input.now
+    writeJournal(journalFile, journal)
+    return returnWithoutJournal(extra)
   }
 
   // 1. Authority. Nothing below runs without it, and it is checked against the exact
@@ -758,17 +839,15 @@ export async function publishStack(raw, conversations = {}) {
       evidence: `granted ${JSON.stringify(selection)}, prepared ${JSON.stringify(prepared)}`,
     })
   }
-  if (granted.size > 0 && !granted.has('ref-update') && !granted.has('pr-base-update')) {
+  if (granted.size === 0 || (!granted.has('ref-update') && !granted.has('pr-base-update'))) {
     authorityErrors.push({
       code: 'missing-permission',
       detail: 'the grant names no recognised mutation kind',
-      evidence: `granted ${input.authority.granted.join(', ')}`,
+      evidence: `granted ${input.authority.granted.join(', ') || 'nothing'}`,
     })
   }
   if (authorityErrors.length > 0) {
-    journal.state = 'blocked'
-    journal.attempts = []
-    return finish({
+    return returnWithoutJournal({
       errors: authorityErrors,
       status: 'blocked',
       nextSafeAction: {
@@ -776,7 +855,7 @@ export async function publishStack(raw, conversations = {}) {
           'ask for an explicit execute grant naming this exact selection and the mutations it permits',
         requires:
           input.authority.granted.length > 0
-            ? []
+            ? [`a grant naming ${WRITE_KINDS.join(' or ')}`]
             : [
                 'execute intent',
                 `a grant naming ${WRITE_KINDS.join(' or ')}`,
@@ -786,9 +865,20 @@ export async function publishStack(raw, conversations = {}) {
     })
   }
 
+  const currentPlan = {
+    selection: input.numbers,
+    order: input.order,
+    rootOid: input.root.oid,
+    rootRef: input.root.ref,
+    heads: input.heads,
+    intendedBases: input.intendedBases,
+    preparedHeads: Object.fromEntries(input.branches.map((b) => [b.number, b.preparedHead])),
+    originalHeads: Object.fromEntries(input.branches.map((b) => [b.number, b.originalHead])),
+  }
+
   // 2. An unfinished publication owns this journal until it is resumed or replanned.
   if (existingJournal && existingJournal.state !== 'published' && !input.resume) {
-    return finish({
+    return returnWithoutJournal({
       errors: [
         {
           code: 'unfinished-run',
@@ -804,6 +894,35 @@ export async function publishStack(raw, conversations = {}) {
       },
     })
   }
+
+  if (existingJournal && input.resume && existingJournal.plan) {
+    const planMatches =
+      sameJson(existingJournal.plan.selection, currentPlan.selection) &&
+      sameJson(existingJournal.plan.order, currentPlan.order) &&
+      existingJournal.plan.rootOid === currentPlan.rootOid &&
+      sameJson(existingJournal.plan.heads, currentPlan.heads) &&
+      sameJson(existingJournal.plan.intendedBases, currentPlan.intendedBases) &&
+      sameJson(existingJournal.plan.originalHeads, currentPlan.originalHeads) &&
+      sameJson(existingJournal.plan.preparedHeads, currentPlan.preparedHeads)
+    if (!planMatches) {
+      return returnWithoutJournal({
+        errors: [
+          {
+            code: 'stale-snapshot',
+            detail: 'cannot resume publication under a mutated plan; selection, order, root, heads, or prepared state changed',
+            evidence: 'journal plan differs from input plan',
+          },
+        ],
+        status: 'blocked',
+        nextSafeAction: {
+          action: 'start a new publication run with a clean run directory, or restore the original plan',
+          requires: ['matching-plan'],
+        },
+      })
+    }
+  }
+
+  journal.plan = currentPlan
 
   // 3. Re-read the remote, verify the prepared set against it, and decide the write set.
   const observed = {
@@ -923,7 +1042,25 @@ export async function publishStack(raw, conversations = {}) {
     })
   }
 
-  const refspecs = refWrites.map((write) => `refs/heads/prepared/${write.number}:${write.ref}`)
+  if (refWrites.length > 0 && !granted.has('ref-update')) {
+    journal.state = 'blocked'
+    return finish({
+      errors: [
+        {
+          code: 'missing-permission',
+          detail: 'no grant permits pushing prepared heads to the remote',
+          evidence: `pending head writes: ${refWrites.map((w) => w.ref).join(', ')}; granted: ${input.authority.granted.join(', ') || 'nothing'}`,
+        },
+      ],
+      status: 'blocked',
+      nextSafeAction: {
+        action: 'ask for an explicit execute grant naming ref-update for the prepared heads',
+        requires: ['ref-update'],
+      },
+    })
+  }
+
+  const refspecs = refWrites.map((write) => `${write.to}:${write.ref}`)
   const leases = refWrites.map((write) => `--force-with-lease=${write.ref}:${write.from}`)
   let atomic = { supported: null, evidence: 'no ref write was needed' }
   if (refWrites.length > 0) {
@@ -1185,111 +1322,176 @@ export async function publishStack(raw, conversations = {}) {
   }
 
   // 7. Base retargeting in dependency order, each one re-read before and verified after.
-  const baseWrites = []
-  const baseFailures = []
-  for (const [index, number] of input.order.entries()) {
-    const before = prBefore.get(number)
-    if (!before) continue
-    const intended = input.intendedBases[number]
-    const alreadyCorrect = before.baseRef === intended
-    if (alreadyCorrect) {
-      baseWrites.push({ number, intended, skipped: true })
-      continue
+  const resolveBaseSha = (refName) => {
+    const rawName = String(refName ?? '')
+    const stripped = rawName.replace(/^refs\/heads\//, '')
+    if (stripped === input.root.ref.replace(/^refs\/heads\//, '') || rawName === input.root.ref) {
+      return input.root.oid
     }
-    if (!granted.has('pr-base-update')) {
-      baseFailures.push({
-        code: 'missing-permission',
-        detail: `no grant permits retargeting #${number}`,
-        evidence: `granted ${input.authority.granted.join(', ') || 'nothing'}`,
-      })
-      continue
-    }
-    sequence += 1
-    journal.attempts.push({
-      sequence,
-      kind: 'pr-base-update',
-      target: String(number),
-      detail: `${before.baseRef} -> ${intended}`,
-      at: input.now,
-      outcome: 'attempted',
-    })
-    writeJournal(journalFile, journal)
-    let response
-    let callError = null
-    try {
-      response = provider.updatePullRequestBase(
-        number,
-        intended,
-        compareAndSwap ? before.baseRef : null,
-      )
-    } catch (error) {
-      callError = String(error?.message ?? error)
-    }
-    const readBack = (() => {
-      try {
-        return provider.readPullRequest(number)?.pullRequest ?? null
-      } catch (error) {
-        return null
-      }
-    })()
-    const applied = readBack?.baseRef === intended
-    const drifted =
-      readBack !== null && !sameJson(preserved(before), preserved(readBack)) && !applied
-    const outcome = applied
-      ? 'acknowledged'
-      : callError || response?.ok === false
-        ? 'denied'
-        : 'unknown'
-    publication.attempts.push({
-      sequence: sequence++,
-      kind: 'pr-base-update',
-      target: String(number),
-      from: before.baseRef,
-      to: intended,
-      acknowledged: applied,
-      lease: compareAndSwap
-        ? {
-            expectedRemote: readBack?.headOid ?? before.headOid ?? '0'.repeat(40),
-            usedForceWithLease: false,
-          }
-        : null,
-      outcome,
-    })
-    if (applied) {
-      publication.confirmed.push({ kind: 'pr-base-update', target: String(number), oid: intended })
-    } else {
-      publication.unconfirmed.push({
-        kind: 'pr-base-update',
-        target: String(number),
-        why: callError
-          ? `the provider call failed and the base does not read back as intended: ${callError.slice(0, 200)}`
-          : 'the base does not read back as intended after the write',
-      })
-      if (outcome === 'denied') {
-        publication.denials.push({
-          kind: 'pr-base-update',
-          target: String(number),
-          reason: 'provider-refused',
-          acknowledged: false,
-        })
+    for (const b of input.branches) {
+      const bRef = input.heads[b.number]
+      if (bRef === rawName || bRef?.replace(/^refs\/heads\//, '') === stripped) {
+        return b.preparedHead
       }
     }
-    if (drifted) {
-      errors.push({
-        code: 'stale-snapshot',
-        detail: `#${number} changed in a field this run never writes`,
-        evidence: `before ${JSON.stringify(preserved(before))}; after ${JSON.stringify(preserved(readBack))}`,
-      })
-    }
-    baseWrites.push({ number, intended, skipped: false, applied })
-    publication.remoteClaims.push({
-      kind: 'pr-base',
-      target: String(number),
-      observed: readBack?.baseRef ?? before.baseRef,
-      observedAt: input.now,
-    })
+    if (observed.refs[rawName]) return observed.refs[rawName]
+    if (observed.refs[`refs/heads/${stripped}`]) return observed.refs[`refs/heads/${stripped}`]
+    const resolved =
+      gitOut(input.repository, ['rev-parse', '--verify', '--quiet', `${rawName}^{commit}`]) ??
+      gitOut(input.repository, ['rev-parse', '--verify', '--quiet', `refs/heads/${stripped}^{commit}`])
+    if (resolved) return resolved
+    return input.root.oid
   }
 
+  const baseWrites = []
+  const baseFailures = []
+  const headPushFailed =
+    refWrites.length > 0 &&
+    (publication.unconfirmed.some((u) => u.kind === 'ref-update') ||
+      publication.denials.some((d) => d.kind === 'ref-update') ||
+      (typeof stuck !== 'undefined' && stuck.length > 0))
+
+  if (!headPushFailed) {
+    for (const [index, number] of input.order.entries()) {
+      let currentPr = null
+      try {
+        currentPr = provider.readPullRequest(number)?.pullRequest ?? null
+      } catch {
+        currentPr = null
+      }
+      if (!currentPr) {
+        baseFailures.push({
+          code: 'stale-snapshot',
+          detail: `the provider could not be read for #${number} before base update`,
+          evidence: 'pull request read failed',
+        })
+        break
+      }
+      const before = prBefore.get(number) ?? currentPr
+      if (currentPr.headRef !== before.headRef || currentPr.state !== 'OPEN') {
+        baseFailures.push({
+          code: 'stale-snapshot',
+          detail: `PR #${number} state changed before base update`,
+          evidence: `headRef=${currentPr.headRef} state=${currentPr.state}`,
+        })
+        break
+      }
+      const intended = input.intendedBases[number]
+      const alreadyCorrect = currentPr.baseRef === intended
+      if (alreadyCorrect) {
+        baseWrites.push({ number, intended, skipped: true })
+        continue
+      }
+      if (!granted.has('pr-base-update')) {
+        baseFailures.push({
+          code: 'missing-permission',
+          detail: `no grant permits retargeting #${number}`,
+          evidence: `granted ${input.authority.granted.join(', ') || 'nothing'}`,
+        })
+        break
+      }
+      const fromSha = resolveBaseSha(currentPr.baseRef)
+      const toSha = resolveBaseSha(intended)
+
+      sequence += 1
+      journal.attempts.push({
+        sequence,
+        kind: 'pr-base-update',
+        target: String(number),
+        detail: `${currentPr.baseRef} -> ${intended}`,
+        at: input.now,
+        outcome: 'attempted',
+      })
+      writeJournal(journalFile, journal)
+      let response = null
+      let callError = null
+      try {
+        response = provider.updatePullRequestBase(
+          number,
+          intended,
+          compareAndSwap ? currentPr.baseRef : null,
+        )
+      } catch (error) {
+        callError = String(error?.message ?? error)
+      }
+      let readBack = null
+      try {
+        readBack = provider.readPullRequest(number)?.pullRequest ?? null
+      } catch {
+        readBack = null
+      }
+      const applied = readBack?.baseRef === intended
+      const drifted =
+        readBack !== null && !sameJson(preserved(currentPr), preserved(readBack))
+      const outcome = applied
+        ? 'acknowledged'
+        : readBack === null
+          ? 'unknown'
+          : callError || response?.ok === false
+            ? 'denied'
+            : 'unknown'
+      if (outcome === 'unknown') {
+        publication.interrupted = true
+      }
+      publication.attempts.push({
+        sequence: sequence++,
+        kind: 'pr-base-update',
+        target: String(number),
+        from: fromSha,
+        to: toSha,
+        acknowledged: applied,
+        lease: compareAndSwap
+          ? {
+              expectedRemote: readBack?.headOid ?? currentPr.headOid ?? '0'.repeat(40),
+              usedForceWithLease: false,
+            }
+          : null,
+        outcome,
+      })
+      if (applied) {
+        publication.confirmed.push({ kind: 'pr-base-update', target: String(number), oid: toSha })
+      } else {
+        publication.unconfirmed.push({
+          kind: 'pr-base-update',
+          target: String(number),
+          why: callError
+            ? `the provider call failed and the base does not read back as intended: ${callError.slice(0, 200)}`
+            : readBack === null
+              ? 'the provider call completed but re-reading the pull request failed; base state is unknown'
+              : 'the base does not read back as intended after the write',
+        })
+        if (outcome === 'denied') {
+          publication.denials.push({
+            kind: 'pr-base-update',
+            target: String(number),
+            reason: 'provider-refused',
+            acknowledged: false,
+          })
+        }
+      }
+      baseWrites.push({ number, intended, skipped: false, applied })
+      if (readBack !== null) {
+        const observedBase = readBack.baseRef
+        publication.remoteClaims.push({
+          kind: 'pr-base',
+          target: String(number),
+          observed: observedBase.startsWith('refs/heads/') ? observedBase : `refs/heads/${observedBase}`,
+          observedAt: input.now,
+        })
+      }
+      if (drifted) {
+        errors.push({
+          code: 'stale-snapshot',
+          detail: `#${number} changed in a field this run never writes`,
+          evidence: `before ${JSON.stringify(preserved(currentPr))}; after ${JSON.stringify(preserved(readBack))}`,
+        })
+        break
+      }
+      if (!applied) {
+        break
+      }
+    }
+  }
   verification.push({
     invariant: 'remote.claims-match',
     method: 'provider re-read immediately after each metadata write',
@@ -1339,7 +1541,7 @@ export async function publishStack(raw, conversations = {}) {
         return null
       }
     })()
-    if (pr && pr.baseRef !== input.intendedBases[number]) chainHolds = false
+    if (!pr || pr.baseRef !== input.intendedBases[number]) chainHolds = false
   }
   verification.push({
     invariant: 'topology.chain',
@@ -1367,7 +1569,7 @@ export async function publishStack(raw, conversations = {}) {
 
   const unconfirmedCount = publication.unconfirmed.length
   const status =
-    unconfirmedCount === 0 && errors.length === 0
+    unconfirmedCount === 0 && errors.length === 0 && baseFailures.length === 0 && chainHolds
       ? publication.attempts.length === 0
         ? 'no-op'
         : 'published'
@@ -1414,14 +1616,15 @@ export async function publishStack(raw, conversations = {}) {
     },
     verification,
     recovery:
-      unconfirmedCount > 0 || uncertain.length > 0
+      status === 'partial' || unconfirmedCount > 0 || uncertain.length > 0
         ? {
             acknowledgedChanges: publication.confirmed.map(
               (entry) => `${entry.kind} ${entry.target}`,
             ),
-            unconfirmedAttempts: publication.unconfirmed.map(
-              (entry) => `${entry.kind} ${entry.target}`,
-            ),
+            unconfirmedAttempts: [
+              ...publication.unconfirmed.map((entry) => `${entry.kind} ${entry.target}`),
+              ...baseFailures.map((f) => `pr-base-update ${f.detail}`),
+            ],
             recommended:
               're-read the affected refs and bases before retrying; an unknown acknowledgement may already have landed, and nothing is rolled back automatically',
           }
