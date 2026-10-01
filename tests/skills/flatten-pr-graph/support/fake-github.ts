@@ -22,6 +22,16 @@ export interface FakePullRequest {
   head: string
   headRepository: string
   author: string
+  /**
+   * The commit the remote actually holds for `head` and for `base`.
+   *
+   * Optional because most #84 fixtures only ever model names, and an omitted id means
+   * "this fixture does not claim one" rather than a fabricated blank: a caller serving these
+   * over a transport supplies the real `git ls-remote` values instead. A fixture that does
+   * know the ids supplies them, so a served head is never an invented string.
+   */
+  headRefOid?: string | null
+  baseRefOid?: string | null
 }
 
 export interface ProviderState {

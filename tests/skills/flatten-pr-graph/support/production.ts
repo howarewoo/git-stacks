@@ -25,7 +25,7 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { delimiter, dirname, join } from 'node:path'
-import { pathToFileURL } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { prepareStack } from '../../../../.agents/skills/flatten-pr-graph/scripts/prepare-stack.mjs'
 import { publishStack } from '../../../../.agents/skills/flatten-pr-graph/scripts/publish-stack.mjs'
 import type { ScratchWorkspace, UserFingerprint, World } from './real-git'
@@ -197,9 +197,10 @@ export interface ProviderCall {
 /**
  * The shim's log, read back into one record per invocation.
  *
- * `CWD` opens a record, `ARG` lines carry the arguments, `END` closes it. An argument that
- * contains a tab would break this, and no Git argument this driver produces does; a
- * separator that an argument can imitate would have been the worse choice.
+ * `CWD` opens a record, `ARG` lines carry the arguments, `EXIT` carries the status the
+ * process left with, and `END` closes it. An argument that contains a tab would break this,
+ * and no Git argument this driver produces does; a separator that an argument can imitate
+ * would have been the worse choice.
  */
 function parseNativeTrace(recorded: string): NativeCommand[] {
   const records: NativeCommand[] = []
@@ -214,17 +215,24 @@ function parseNativeTrace(recorded: string): NativeCommand[] {
     if (tab < 0) continue
     const tag = line.slice(0, tab)
     const value = line.slice(tab + 1)
-    if (tag === 'CWD') current = { cwd: value, args: [] }
+    if (tag === 'CWD') current = { cwd: value, args: [], exitCode: null }
     else if (tag === 'ARG' && current) current.args.push(value)
+    else if (tag === 'EXIT' && current) current.exitCode = Number(value)
   }
   if (current) records.push(current)
   return records
 }
 
-/** One native process the helper started, as the shim observed it. */
+/**
+ * One native process the helper started, as the shim observed it.
+ *
+ * `exitCode` is the status the real `git` left with, or `null` for a record the shim never
+ * finished - which is itself a fact worth having rather than treating as success.
+ */
 export interface NativeCommand {
   cwd: string
   args: string[]
+  exitCode: number | null
 }
 
 /** One provider-side action, in the vocabulary the #84 oracle judges writes by. */
@@ -312,7 +320,18 @@ let providerCounter = 0
 let seedCounter = 0
 
 /**
- * Writes a provider double with exactly the three operations the contract allows.
+ * Writes a provider double as a thin bridge over the `FakeGitHub` the rest of #84 already
+ * judges provider writes by.
+ *
+ * The bridge owns the transport and nothing else: it maps the three contract operations
+ * onto the existing double's methods, keeps the served head and base commit ids equal to
+ * what `git ls-remote` actually reports, and hands back the double's own action record.
+ * It deliberately does **not** re-implement the provider's semantics - the refusal rules,
+ * the outcome vocabulary, and the action kinds all come from `FakeGitHub`, so a case and
+ * an #84 oracle fixture are looking at one implementation rather than two that happen to
+ * agree. The fault-injection knobs a publication case needs (an unreadable read, a lost
+ * acknowledgement, a concurrent base drift) are properties of the *transport*, so they live
+ * here; the state they act on does not.
  *
  * The module is loaded by `publishStack` through `import`, so it is the same module
  * instance the test reads afterwards: the record the test inspects is the record the
@@ -325,15 +344,38 @@ function writeProviderModule(
 ): ProviderAdapter {
   providerCounter += 1
   const module = join(world.root, `provider-${providerCounter}.mjs`)
-  const seeded = Object.fromEntries(pinned.map((pr) => [pr.number, pr]))
   const remotePath = world.remote
+  const supportModule = fileURLToPath(new URL('./fake-github.ts', import.meta.url))
+  // Real commit ids, read from the bare remote this run writes to. Nothing here invents
+  // one: a head or base the remote does not hold is served as absent, which is a fact.
+  const seeded = Object.fromEntries(
+    pinned.map((pr) => [
+      pr.number,
+      {
+        number: pr.number,
+        title: pr.title,
+        state: pr.state,
+        draft: pr.draft,
+        base: pr.baseRef,
+        head: pr.headRef,
+        headRepository: pr.headRepository,
+        author: pr.headRepository.split('/')[0],
+        body: pr.body,
+        labels: pr.labels,
+        reviewers: pr.reviewers,
+        autoMergeRequest: pr.autoMergeRequest,
+      },
+    ]),
+  )
   writeFileSync(
     module,
     `import { execFileSync } from 'node:child_process'
+import { FakeGitHub } from ${JSON.stringify(supportModule)}
+
 const remotePath = ${JSON.stringify(remotePath)}
 const seeded = ${JSON.stringify(seeded)}
 const script = ${JSON.stringify(script)}
-const pullRequests = new Map(Object.entries(seeded).map(([number, pr]) => [Number(number), structuredClone(pr)]))
+
 /** The remote's own refs, so every served id is read state and never a remembered one. */
 function liveOids() {
   const stdout = execFileSync('git', ['ls-remote', '--heads', remotePath], {
@@ -342,29 +384,82 @@ function liveOids() {
   })
   const oids = {}
   for (const line of stdout.split('\\n')) {
-    const [oid, ref] = line.trim().split(/\s+/)
+    const [oid, ref] = line.trim().split(/\\s+/)
     if (oid && ref) oids[ref.replace('refs/heads/', '')] = oid
   }
   return oids
 }
+
+// The double's own state is seeded from the real remote: the names come from the pinned
+// snapshot, the commit ids from Git. There is no second model of a pull request here.
+const provider = new FakeGitHub({
+  owner: 'acme',
+  name: 'widgets',
+  defaultBranch: 'main',
+  perPage: 30,
+  pullRequests: Object.values(seeded),
+  deniedWrites: Object.keys(seeded).filter((number) =>
+    (script.refuseBaseUpdate ?? []).includes(Number(number)),
+  ).map((number) => \`update-pr-base:\${number}\`),
+  autoMergeEnabledOn: Object.values(seeded)
+    .filter((pr) => pr.autoMergeRequest?.enabled === true)
+    .map((pr) => pr.number),
+  checkStates: script.checkStates ?? {},
+})
+
 function refresh() {
   const oids = liveOids()
-  for (const pullRequest of pullRequests.values()) {
-    if (oids[pullRequest.headRef] !== undefined) pullRequest.headRefOid = oids[pullRequest.headRef]
-    if (oids[pullRequest.baseRef] !== undefined) pullRequest.baseRefOid = oids[pullRequest.baseRef]
+  // One array, mutated once: \`allPullRequests\` hands back copies, so refreshing from one
+  // set of copies and configuring from another would drop every id it just filled in.
+  const pullRequests = provider.allPullRequests().map((pr) => ({
+    ...pr,
+    headRefOid: oids[pr.head] ?? null,
+    baseRefOid: oids[pr.base] ?? null,
+  }))
+  provider.configure({ ...providerState(pullRequests), pullRequests })
+}
+function providerState(pullRequests = provider.allPullRequests()) {
+  return {
+    owner: 'acme',
+    name: 'widgets',
+    defaultBranch: 'main',
+    perPage: 30,
+    pullRequests,
+    deniedWrites: (script.refuseBaseUpdate ?? []).map((number) => \`update-pr-base:\${number}\`),
+    autoMergeEnabledOn: [],
+    checkStates: script.checkStates ?? {},
   }
 }
-refresh()
+
 const calls = []
-const actions = []
-const checkStates = new Map(
-  Object.entries(script.checkStates ?? {}).map(([number, state]) => [Number(number), state]),
-)
 let reads = 0
 let writes = 0
 function record(op, number, base, outcome) {
   calls.push({ sequence: calls.length + 1, op, number: number ?? null, base: base ?? null, outcome })
 }
+
+/** The contract's pull-request shape, with the ids Git reports for its head and base. */
+function contractShape(number) {
+  refresh()
+  const pr = provider.pullRequest(number)
+  if (!pr) return null
+  return {
+    number: pr.number,
+    state: pr.state,
+    draft: pr.draft,
+    headRef: pr.head,
+    headRepository: pr.headRepository,
+    baseRef: pr.base,
+    headRefOid: pr.headRefOid ?? null,
+    baseRefOid: pr.baseRefOid ?? null,
+    title: pr.title,
+    body: pr.body ?? '',
+    labels: pr.labels ?? [],
+    reviewers: pr.reviewers ?? [],
+    autoMergeRequest: pr.autoMergeRequest ?? { enabled: false, method: null },
+  }
+}
+
 export function capabilities() {
   record('capabilities', null, null, 'observed')
   return {
@@ -375,79 +470,84 @@ export function capabilities() {
     provider: 'production-double',
   }
 }
+
 /**
  * Not part of the shipped provider's surface, and deliberately not in capabilities().
  *
- * It exists so a run that reaches for a check state is caught: the call is answered with
- * whatever the server holds, and recorded as an action, so the boundary is tested by
- * whether it was consulted rather than by what it then decided.
+ * It exists so a run that reaches for a check state is caught: the call is answered by the
+ * double and recorded there as an action, so the boundary is tested by whether it was
+ * consulted rather than by what it then decided.
  */
 export function readCheckState(number) {
-  const state = checkStates.get(number) ?? null
-  actions.push({
-    kind: 'read-check-state',
-    target: String(number),
-    outcome: state ? 'observed' : 'denied',
-  })
+  const state = provider.readCheckState(number)
   record('readCheckState', number, null, state ?? 'unknown')
   return state
 }
+
 export function readPullRequest(number) {
   reads += 1
   if (script.failReadAfter !== undefined && reads > script.failReadAfter) {
     record('readPullRequest', number, null, 'unreadable')
     throw new Error('the provider could not be reached')
   }
-  refresh()
-  const pullRequest = pullRequests.get(number)
-  record('readPullRequest', number, pullRequest?.baseRef ?? null, pullRequest ? 'observed' : 'absent')
-  return { ok: true, pullRequest: pullRequest ? structuredClone(pullRequest) : null }
+  const pullRequest = contractShape(number)
+  record(
+    'readPullRequest',
+    number,
+    pullRequest?.baseRef ?? null,
+    pullRequest ? 'observed' : 'absent',
+  )
+  return { ok: true, pullRequest }
 }
+
 export function updatePullRequestBase(number, base) {
-  const pullRequest = pullRequests.get(number)
-  if (!pullRequest) {
-    record('updatePullRequestBase', number, base, 'missing')
-    actions.push({ kind: 'update-pr-base', target: String(number), outcome: 'denied' })
-    return { ok: false, applied: false, preconditionMet: null }
-  }
-  if ((script.refuseBaseUpdate ?? []).includes(number)) {
-    record('updatePullRequestBase', number, base, 'denied')
-    actions.push({ kind: 'update-pr-base', target: String(number), outcome: 'denied' })
-    return { ok: false, applied: false, preconditionMet: null }
-  }
   // A concurrent base change lands here, between the caller's read-before-write and this
-  // PATCH. There is nothing to reject: GitHub applies the retarget over it.
+  // PATCH. There is nothing to reject: GitHub applies the retarget over it, and the
+  // double's record of what it applied to is what makes the race observable.
   const concurrent = (script.driftBaseBeforeWrite ?? {})[number]
-  if (concurrent !== undefined && concurrent !== pullRequest.baseRef) {
-    pullRequest.baseRef = concurrent
+  if (concurrent !== undefined) {
+    const drifted = provider.allPullRequests().map((pr) =>
+      pr.number === number ? { ...pr, base: concurrent } : pr,
+    )
+    provider.configure({ ...providerState(), pullRequests: drifted })
     record('updatePullRequestBase', number, base, 'concurrent-base-drift')
   }
-  pullRequest.baseRef = base
-  refresh()
+  const applied = provider.updatePullRequestBase(number, base)
+  if (!applied) {
+    record('updatePullRequestBase', number, base, 'denied')
+    return { ok: false, applied: false, preconditionMet: null }
+  }
   writes += 1
   record('updatePullRequestBase', number, base, 'acknowledged')
-  actions.push({ kind: 'update-pr-base', target: String(number), outcome: 'acknowledged' })
   if (script.driftTitleAfterWrite !== undefined && writes === script.driftTitleAfterWrite) {
-    pullRequest.title = pullRequest.title + ' (edited by somebody else)'
+    const edited = provider.allPullRequests().map((pr) =>
+      pr.number === number ? { ...pr, title: pr.title + ' (edited by somebody else)' } : pr,
+    )
+    provider.configure({ ...providerState(), pullRequests: edited })
   }
   if (script.applyThenThrow === true) {
-    // The write happened; only its acknowledgement was lost. The action record above is
-    // the server's own, and it survives the exception.
-    actions.push({ kind: 'update-pr-base', target: String(number), outcome: 'denied' })
+    // The write happened; only its acknowledgement was lost. The double's own action
+    // record already says it applied, and it survives the exception - which is exactly the
+    // situation a lost acknowledgement leaves behind.
     throw new Error('the acknowledgement was lost in transit')
   }
   return { ok: true, applied: true, preconditionMet: null, provider: 'github' }
 }
+
 export function __calls() {
   return calls
 }
+/** The double's own record, not a copy this module kept beside it. */
 export function __actions() {
-  return actions
+  return provider.actions
 }
 export function __state() {
-  return Object.fromEntries(
-    [...pullRequests].map(([number, pullRequest]) => [String(number), structuredClone(pullRequest)]),
-  )
+  const state = {}
+  for (const number of Object.keys(seeded)) {
+    const pr = contractShape(Number(number))
+    if (pr) state[number] = pr
+  }
+  return state
 }
 `,
     'utf8',
@@ -698,15 +798,22 @@ export class Production {
     const realGit = execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim()
     const script = join(shim, 'git')
     // One tab-separated record per invocation, terminated by END, so an argument
-    // containing spaces or a quote cannot be mistaken for a record boundary.
+    // containing spaces or a quote cannot be mistaken for a record boundary. The exit
+    // status is logged between the arguments and END: a command that was *attempted* and a
+    // command that *succeeded* are different facts, and a push the remote rejected is not
+    // evidence that anything was written.
     writeFileSync(
       script,
       [
         '#!/bin/sh',
+        `real=${JSON.stringify(realGit)}`,
         '{ printf "CWD\\t%s\\n" "$PWD"',
         '  for a in "$@"; do printf "ARG\\t%s\\n" "$a"; done',
-        '  printf "END\\n"; } >> "$FLATTEN_NATIVE_TRACE"',
-        `exec ${JSON.stringify(realGit)} "$@"`,
+        '  printf "RUN\\n"; } >> "$FLATTEN_NATIVE_TRACE"',
+        '"$real" "$@"',
+        'status=$?',
+        'printf "EXIT\\t%s\\nEND\\n" "$status" >> "$FLATTEN_NATIVE_TRACE"',
+        'exit "$status"',
         '',
       ].join('\n'),
     )

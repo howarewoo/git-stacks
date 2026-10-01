@@ -899,8 +899,12 @@ function sameIdentity(journal, input) {
  * merge this run is about to finish. Anything else means a different plan is sitting in
  * this directory, and deleting it would destroy the only copy of a conflict decision.
  */
+function workspacePath(storage, number) {
+  return join(storage, '..', 'workspaces', `pr-${number}`)
+}
+
 function cloneWorkspace(storage, number, originalOid, resume = false) {
-  const workspace = join(storage, '..', 'workspaces', `pr-${number}`)
+  const workspace = workspacePath(storage, number)
   if (existsSync(workspace)) {
     if (!resume) {
       throw new InputError(
@@ -911,11 +915,30 @@ function cloneWorkspace(storage, number, originalOid, resume = false) {
     }
     const head = gitOut(workspace, ['rev-parse', '--verify', '--quiet', 'HEAD'])
     if (head !== originalOid) {
-      throw new InputError(
-        'stale-snapshot',
-        `the workspace for #${number} is not at the original head this run pinned`,
-        `${workspace} is at ${head ?? 'nothing'}, the plan pins ${originalOid}; it was not recreated and its conflict evidence was not discarded`,
-      )
+      // A resumed run owns the workspace it created. When the commit sitting there is the
+      // one this run's own storage recorded for this pull request, the workspace holds this
+      // run's previous attempt rather than somebody else's work, and returning to the
+      // pinned original is how the resolution the caller just supplied can take effect.
+      // Anything else describes a different integration and stays refused: resetting it
+      // would destroy the only copy of a conflict decision this run did not make.
+      const own = gitOut(storage, [
+        'rev-parse',
+        '--verify',
+        '--quiet',
+        `refs/heads/prepared/${number}`,
+      ])
+      if (own !== head) {
+        throw new InputError(
+          'stale-snapshot',
+          `the workspace for #${number} is not at the original head this run pinned`,
+          `${workspace} is at ${head ?? 'nothing'}, the plan pins ${originalOid}; it was not recreated and its conflict evidence was not discarded`,
+        )
+      }
+      // Untracked files are left alone: they are the evidence a human may have dropped in
+      // there, and nothing this run does requires the directory to be empty.
+      runGit(workspace, ['merge', '--abort'], { allowFailure: true })
+      runGit(workspace, ['reset', '--quiet', '--hard', originalOid])
+      return workspace
     }
     return workspace
   }
@@ -1266,14 +1289,29 @@ function identityOf(workspace, commit) {
  * a task-owned ref. The integration commit exists only in the workspace, so the objects
  * are copied in first; a ref that already holds the object is simply pointed at it. This
  * is a local copy into task-owned storage - no remote, no branch on the user's remote.
+ *
+ * A resumed run that redoes a position replaces this run's own earlier commit, which is
+ * not a fast-forward. The ref is task-owned and its current value is this run's own
+ * unfinished attempt, so it is moved deliberately, guarded by the value it is replacing:
+ * a ref that moved underneath this run is somebody else's write and is refused rather than
+ * overwritten.
  */
 function recordPreparedHead(storage, workspace, number, oid) {
   const ref = `refs/heads/prepared/${number}`
   const held = gitOut(storage, ['rev-parse', '--verify', '--quiet', `${oid}^{commit}`])
   if (held !== oid) {
-    const pushed = runGit(workspace, ['push', '--quiet', storage, `HEAD:${ref}`], {
-      allowFailure: true,
-    })
+    const previous = gitOut(storage, ['rev-parse', '--verify', '--quiet', ref])
+    const pushed = runGit(
+      workspace,
+      [
+        'push',
+        '--quiet',
+        ...(previous ? [`--force-with-lease=${ref}:${previous}`] : []),
+        storage,
+        `HEAD:${ref}`,
+      ],
+      { allowFailure: true },
+    )
     if (!pushed.ok) {
       throw new InputError(
         'invalid-input',
@@ -2309,8 +2347,19 @@ function prepareStackInner(raw) {
   if (existing && input.resume) {
     for (const [index, branch] of (existing.preparation?.branches ?? []).entries()) {
       const oid = storageOid(storage, `refs/heads/prepared/${branch.number}`)
-      const matches =
+      // A branch the journal recorded is not automatically a branch this run finished. One
+      // whose prepared head still carries conflict markers, or whose workspace is still
+      // mid-operation, is an attempt that failed its own checks - adopting it would report
+      // that failure as success and leave no way to finish it, because every later run would
+      // find the same unfinished branch and keep skipping the work. Those positions are
+      // redone from the pinned original with the resolutions this call supplies.
+      const workspace = workspacePath(storage, branch.number)
+      const finished =
         oid !== null &&
+        conflictMarkers(storage, oid).length === 0 &&
+        operationsInProgress(workspace).length === 0
+      const matches =
+        finished &&
         oid === branch.preparedHead &&
         branch.originalHead === input.originalHeads[branch.number] &&
         isAncestor(storage, branch.originalHead, oid) &&

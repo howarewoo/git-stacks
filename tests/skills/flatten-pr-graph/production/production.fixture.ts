@@ -45,26 +45,29 @@ import {
   type PublishOptions,
 } from '../support/production'
 import type { World } from '../support/real-git'
+import type { ConfirmedChange } from '../support/production-verdict'
 
 /** What a case observed from real state, after the shipped helper returned. */
 export interface ProductionOutcome {
   status: string
   codes: string[]
   details: string[]
-  /** The documents the helper actually produced, for the independent schema verdict. */
   preparation?: unknown
   publication?: unknown
   /**
-   * The writes the document says the server confirmed, and where each selected head was
-   * supposed to land. Both feed the action and status oracles; neither is a claim the
-   * driver accepts on trust.
+   * The contract's own `publication.confirmed` - the changes the document claims the
+   * server confirmed - and separately the attempts it recorded as acknowledged. These are
+   * different claims and the oracles treat them differently: a confirmed change is judged
+   * against what actually happened, while an acknowledged attempt is only the run's own
+   * record of asking. Neither is accepted on trust.
    */
-  confirmed?: Array<{ kind: string; target: string }>
+  confirmed?: ConfirmedChange[]
+  acknowledged?: Array<{ kind: string; target: string; to?: string }>
   preparedHeads?: Record<number, string>
   /** Every provider action the server recorded, read back out of the double. */
   providerActions?: Array<{ kind: string; target: string; outcome: string }>
   /** The helper's own native Git processes, read back from the PATH shim. */
-  nativeTrace?: Array<{ cwd: string; args: string[] }>
+  nativeTrace?: Array<{ cwd: string; args: string[]; exitCode: number | null }>
 }
 
 /** What a conforming implementation must produce, frozen before execution. */
@@ -128,10 +131,14 @@ function publicationOutcome(
     describeErrors(result.errors),
   )
   base.publication = result.publication
-  base.confirmed = attempts
+  // The claim under test is the contract's `confirmed` array, read verbatim. The attempt
+  // log is kept beside it rather than standing in for it: a document can acknowledge an
+  // attempt whose write never landed, and that gap is exactly what the action oracle is
+  // for.
+  base.confirmed = (result.publication?.confirmed ?? []) as ConfirmedChange[]
+  base.acknowledged = attempts
     .filter((attempt) => attempt.outcome === 'acknowledged')
     .map((attempt) => ({ kind: attempt.kind, target: attempt.target, to: attempt.to }))
-  base.preparedHeads = preparedHeads
   if (production) base.providerActions = production.observedActions()
   return base
 }
@@ -142,6 +149,7 @@ interface PublicationObservation {
   errors: Array<{ code: string; detail: string; evidence?: string }>
   publication?: {
     attempts?: Array<{ kind: string; target: string; outcome: string; to?: string }>
+    confirmed?: ConfirmedChange[]
   }
 }
 
@@ -3135,7 +3143,7 @@ define({
   area: 'preparation',
   criteria: ['#87 an interrupted run continues in the workspace it already made'],
   findings: ['P4 Resume the existing conflicted workspace instead of cloning again'],
-  expect: { status: 'partial', codesAny: ['unresolved-conflict'] },
+  expect: { status: 'prepared', codes: [] },
   async run(production) {
     const originalHeads = await seedStack(production, [12], {
       files: { 12: { 'shared.txt': 'the pull request side\n' } },
@@ -3183,14 +3191,15 @@ define({
         },
       ],
     })
-    // The workspace the first run left is the one the second run continues in, and the
-    // storage head moves because of that continuation. Whether the run can then *finish*
-    // depends on the rest of the stack; what this case is about is that the work already
-    // done is not thrown away and redone from a fresh clone.
+    // The resumed run continues in the workspace the first run left - the sentinel is
+    // untracked, so a fresh clone would have lost it - and the resolution it was just given
+    // is what ends up in the commit. "It reused the folder" is not the point; a resolution
+    // that cannot finish the branch is not a continuation, it is a loop.
+    assert.equal(resumed.status, 'prepared', JSON.stringify(resumed.errors))
     assert.equal(
-      existsSync(join(workspace, 'shared.txt')),
-      true,
-      'the workspace the first run left is still the one the second run is using',
+      readFileSync(join(workspace, '.probe-sentinel'), 'utf8'),
+      'left over from the first attempt\n',
+      'the resumed run continued in the existing workspace instead of cloning a fresh one',
     )
     assert.equal(
       readdirSync(join(runDirectory, 'workspaces')).filter((name: string) => name.includes('pr-'))
@@ -3198,10 +3207,39 @@ define({
       1,
       'a resumed run must not accumulate a second workspace per branch',
     )
+    const head = resumed.preparation?.branches?.[0]?.preparedHead
+    assert.ok(head, 'the resumed run produced no prepared head')
+    assert.notEqual(head, first.preparation?.branches?.[0]?.preparedHead, 'the same commit')
     assert.equal(
-      readFileSync(join(workspace, '.probe-sentinel'), 'utf8'),
-      'left over from the first attempt\n',
-      'the resumed run continued in the existing workspace instead of cloning a fresh one',
+      production.world.gitIn(production.storage(runDirectory), 'show', `${head}:shared.txt`),
+      'the pull request side\n',
+      "the resolved content is the one the second run supplied, not the first run's markers",
+    )
+    assert.equal(
+      production.world.tryGitIn(
+        production.storage(runDirectory),
+        'grep',
+        '-I',
+        '-l',
+        '-e',
+        '<<<<<<<',
+        head,
+        '--',
+      ),
+      null,
+      'no conflict marker may survive into the prepared head',
+    )
+    // The original contribution is still there: a resolution replaces the conflicted path,
+    // it does not rebuild the branch from the root and drop the pull request's commits.
+    assert.equal(
+      production.storageAncestor(originalHeads[12], head, runDirectory),
+      true,
+      'the prepared head must still contain the original head it was integrating',
+    )
+    assert.deepEqual(
+      resumed.preparation?.branches?.[0]?.retainedOriginalCommits,
+      [originalHeads[12]],
+      'the original commit retention record survives the resume',
     )
     return preparedOutcome(resumed)
   },

@@ -136,13 +136,54 @@ export function edgeViolations(world: World, baseline: EdgeBaseline): Violation[
  * check, and it does not borrow `judge`'s result-document conformance, which the raw
  * helpers never produce.
  */
+/** One entry of the contract's `publication.confirmed`, verbatim. */
+export interface ConfirmedChange {
+  kind: string
+  target: string
+  oid: string
+}
+
+/**
+ * The refspecs a `git push` actually asked for, and whether it was a dry run.
+ *
+ * Anything beginning with `-` is an option, not a refspec, and that distinction is the
+ * whole point: `--force-with-lease=refs/heads/feat-a:<sha>` names the ref and the value it
+ * must still hold, and a substring search over all arguments finds the branch there and
+ * credits a push that never mentioned it as a destination. A dry run is not an attempted
+ * write either, so it is reported rather than quietly dropped.
+ */
+export function attemptedRefspecs(command: { args: string[] }): {
+  refspecs: string[]
+  dryRun: boolean
+} {
+  const positional = command.args.filter((arg) => !arg.startsWith('-'))
+  const separator = positional.indexOf('--')
+  const head = separator === -1 ? positional : positional.slice(0, separator)
+  const rest = separator === -1 ? [] : positional.slice(separator + 1)
+  return {
+    // The first positional is the subcommand; the rest are the repository and the refspecs.
+    refspecs: [...head.slice(2), ...rest],
+    dryRun: command.args.includes('--dry-run') || command.args.includes('-n'),
+  }
+}
+
+/** The `refs/...` name a refspec targets and the value it asked that ref to reach. */
+function refspecTarget(refspec: string): { ref: string; oid: string } | null {
+  const colon = refspec.lastIndexOf(':')
+  if (colon <= 0) return null
+  const value = refspec.slice(0, colon)
+  const ref = refspec.slice(colon + 1)
+  if (!ref.startsWith('refs/')) return null
+  return { ref, oid: value }
+}
+
 export function actionViolations(
-  confirmed: Array<{ kind: string; target: string; to?: string }>,
+  confirmed: ConfirmedChange[],
   observed: {
     actions: ProviderAction[]
     refs: Record<string, string>
     /** Every native Git process the helper started, from the PATH shim. */
-    trace: Array<{ cwd: string; args: string[] }>
+    trace: Array<{ cwd: string; args: string[]; exitCode: number | null }>
   },
 ): Violation[] {
   const provider = new FakeGitHub({
@@ -160,15 +201,19 @@ export function actionViolations(
   }
   const violations: Violation[] = []
   for (const claim of confirmed) {
-    const branch = claim.target.replace(/^refs\/heads\//, '')
     if (claim.kind === 'pr-base-update') {
+      // A base write is a provider operation, not a Git one: what backs the claim is the
+      // server's own record saying it acknowledged exactly this write. A Git trace could
+      // not speak to it at all, and conflating the two would let a push stand in for a
+      // metadata write that never happened.
+      const target = claim.target.replace(/^#/, '')
       const base = provider.actions.find(
-        (action) => action.kind === 'update-pr-base' && action.target === branch,
+        (action) => action.kind === 'update-pr-base' && action.target === target,
       )
       if (base?.outcome === 'acknowledged') continue
       violations.push({
         invariant: 'remote.claims-match' as const,
-        detail: `the document confirms a base update of #${branch} that the server never acknowledged`,
+        detail: `the document confirms a base update of #${target} that the server never acknowledged`,
         observed: base
           ? `the provider recorded it as ${base.outcome}`
           : 'the provider recorded no such write',
@@ -176,30 +221,58 @@ export function actionViolations(
       })
       continue
     }
+
+    const branch = claim.target.replace(/^refs\/heads\//, '')
     const ref = `refs/heads/${branch}`
-    // Three independent things, and one of them is not enough. The remote carrying the ref
-    // proves only that somebody wrote it: the branch was there before the run. What backs
-    // a confirmed push is that the helper actually ran a push naming this ref *and* the
-    // intended commit *and* that the remote now carries exactly that commit. A ref that was
-    // moved by somebody else, or that the run never pushed, fails both remaining checks.
-    const pushed = observed.trace.some(
+    // Three independent facts, all required. The remote carrying the ref proves only that
+    // somebody wrote it - the branch was there before the run. What backs a confirmed push
+    // is that this run issued a *non-dry-run* push whose refspecs name this ref at exactly
+    // the confirmed commit, that the push exited 0, and that the remote now carries exactly
+    // that commit. An existing ref plus a dry-run lease satisfies none of those, which is
+    // the combination that used to pass here.
+    const pushes = observed.trace.filter((command) => command.args.includes('push'))
+    const attempted = pushes.filter(
       (command) =>
-        command.args.includes('push') &&
-        command.args.some((arg) => arg.includes(`${branch}:`) || arg === branch) &&
-        (claim.to === undefined || command.args.some((arg) => arg.startsWith(claim.to as string))),
+        !attemptedRefspecs(command).dryRun &&
+        attemptedRefspecs(command).refspecs.some((refspec) => {
+          const target = refspecTarget(refspec)
+          return target !== null && target.ref === ref && target.oid === claim.oid
+        }),
     )
-    const landed = observed.refs[ref]
     const problems: string[] = []
-    if (!pushed) problems.push('no native push names this ref')
+    if (!/^[0-9a-f]{40}$/.test(claim.oid)) {
+      problems.push(`the confirmed change carries no commit id: ${JSON.stringify(claim.oid)}`)
+    }
+    if (attempted.length === 0) {
+      const named = pushes
+        .flatMap((command) => attemptedRefspecs(command).refspecs)
+        .map((refspec) => refspecTarget(refspec))
+        .filter((target) => target?.ref === ref)
+        .map((target) => `${target?.oid}:${target?.ref}`)
+      problems.push(
+        named.length > 0
+          ? `no non-dry-run push carried ${claim.oid} to ${ref}; the run asked for ${named.join(', ')}`
+          : `no non-dry-run push named ${ref} at ${claim.oid}`,
+      )
+    } else {
+      const failed = attempted.filter((command) => command.exitCode !== 0)
+      if (failed.length > 0) {
+        problems.push(
+          `the push of ${claim.oid} to ${ref} exited ${failed.map((c) => c.exitCode).join(', ')}`,
+        )
+      }
+    }
+    const landed = observed.refs[ref]
     if (landed === undefined) problems.push(`${ref} is absent from the remote`)
-    else if (claim.to !== undefined && landed !== claim.to)
-      problems.push(`${ref} is at ${landed}, not the confirmed ${claim.to}`)
+    else if (landed !== claim.oid)
+      problems.push(`${ref} is at ${landed}, not the confirmed ${claim.oid}`)
     if (problems.length === 0) continue
     violations.push({
       invariant: 'remote.claims-match' as const,
       detail: `the document confirms a ref update of ${ref} that the run did not make`,
       observed: problems.join('; '),
-      expected: 'a confirmed ref update is a push this run performed and the remote confirms',
+      expected:
+        'a confirmed ref update is a successful non-dry-run push of that exact commit to that exact ref, and the remote confirms it',
     })
   }
   return violations

@@ -1530,6 +1530,22 @@ pull request with no unmerged entry, operation, or committed conflict marker. An
 mismatched run directory stops the publication before the remote is even listed; a
 manifest is never published on its own authority.
 
+Every selected pull request is re-read before each base write and compared field by field
+against the pinned snapshot. Three observations are this run's own writes rather than a
+concurrent edit, so they are admissible: the base it is about to retarget, the head it
+pushed for that pull request, and the commit a base branch names once this run has pushed
+that branch itself. Any other difference - a fork by the same name, a state change, an edit
+to any field a retarget must not disturb - is refused. The root is reported rather than
+refused: this run pushes nothing to it, so an advanced root is named in `rootAdvance` and
+fails the `preservation.root` check instead of blocking the base writes.
+
+A resumed preparation adopts a journalled branch only when that branch actually passed its
+own checks - no conflict markers in its prepared head, no operation left in flight in its
+workspace. A branch that failed is redone from the pinned original with the resolutions the
+new call supplies, in the same workspace, replacing the run's own earlier commit under a
+lease. Adopting an unfinished branch would report the failure as success and leave the run
+unable to ever finish it.
+
 Preparation additionally refuses, before writing anything, when the source repository
 enforces a policy the task workspaces cannot inherit: `commit.gpgsign`, a local
 `core.hooksPath`, a `core.fsmonitor` command (a filesystem monitor is a program, and this

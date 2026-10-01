@@ -1064,6 +1064,41 @@ async function readSelectedPullRequest(provider, number, errors) {
 }
 
 /**
+ * The observations this run is allowed to see for one pull request: its own writes.
+ *
+ * Two ids are admissible. The head it publishes for this pull request. And the commit the
+ * base names, once this run has pushed that base itself - which happens whenever the base
+ * is another selected pull request's branch, whether the plan retargets onto it or the
+ * pinned snapshot already sat there. Both are ids this run put there.
+ *
+ * The root is different: this run never writes it, so an advanced root cannot make a base
+ * write unsafe - it only means the result has to name the advance, which `rootAdvance` and
+ * the `preservation.root` check already do. Refusing the whole publication there would
+ * report a root somebody else's work as this run's failure to publish.
+ */
+function admissibleFor(input, number, pinned) {
+  const preparedHeadFor = (ref) => {
+    if (!ref) return null
+    const name = String(ref).startsWith('refs/heads/') ? String(ref) : `refs/heads/${ref}`
+    return (
+      input.branches.find((candidate) => input.heads[candidate.number] === name)?.preparedHead ??
+      null
+    )
+  }
+  const baseRefs = [input.intendedBases[number], pinned?.baseRef].filter(Boolean)
+  const bases = baseRefs.map((ref) =>
+    String(ref).startsWith('refs/heads/') ? String(ref) : `refs/heads/${ref}`,
+  )
+  return {
+    intendedBase: input.intendedBases[number],
+    writtenHead: preparedHeadFor(input.heads[number]),
+    writtenBase: bases.map(preparedHeadFor).find((head) => head !== null) ?? null,
+    // True only when the base branch is the root, which this run pushes nothing to.
+    baseIsRoot: bases.some((ref) => ref === input.root.ref),
+  }
+}
+
+/**
  * Every way an observed pull request differs from the pinned one, named field by field.
  *
  * Comparing all of them is the point: a read of only `headRef` and `state` would happily
@@ -1073,14 +1108,25 @@ async function readSelectedPullRequest(provider, number, errors) {
 function compareAdmissible(pinned, observed, options = {}) {
   const divergences = []
   const intendedBase = options.intendedBase ?? null
+  const writtenHead = options.writtenHead ?? null
+  const writtenBase = options.writtenBase ?? null
+  const baseIsRoot = options.baseIsRoot === true
   const compare = (field, read = (pr) => pr?.[field] ?? null) => {
     const pinnedValue = read(pinned)
     if (pinnedValue === null || pinnedValue === undefined) return
     const observedValue = read(observed)
-    // The one admissible difference is this run's own base write. A resumed run re-reads
-    // a pull request a previous attempt already retargeted, and treating that as somebody
-    // else's concurrent edit would refuse a publication that is actually reconciled.
+    // Differences this run itself made are not somebody else's concurrent edit. It wrote
+    // the selected head, it retargeted the base, and its own push moved the commit that
+    // base names - so all three can legitimately be observed at their new values. Any
+    // *other* value is still a divergence, and refusing that is the whole point: without
+    // these three exceptions no multi-pull-request publication could ever reach its base
+    // updates, and a resumed one could never be reconciled.
     if (field === 'baseRef' && intendedBase !== null && observedValue === intendedBase) return
+    if (field === 'headRefOid' && writtenHead !== null && observedValue === writtenHead) return
+    if (field === 'baseRefOid' && writtenBase !== null && observedValue === writtenBase) return
+    // The root advanced and this run pushes nothing to it, so the commit it names is
+    // reported through `rootAdvance` rather than refused here.
+    if (field === 'baseRefOid' && baseIsRoot) return
     if (!sameJson(pinnedValue, observedValue)) {
       divergences.push(
         `${field}: authorized ${JSON.stringify(pinnedValue)}, observed ${JSON.stringify(observedValue)}`,
@@ -1587,9 +1633,11 @@ export async function publishStack(raw, conversations = {}) {
         // run must not disturb. A same-named fork, a retarget somebody else already made,
         // or a state change is a changed plan, never something to adopt.
         const pinned = input.pullRequests[number]
-        const divergences = compareAdmissible(pinned, observed, {
-          intendedBase: input.intendedBases[number],
-        })
+        const divergences = compareAdmissible(
+          pinned,
+          observed,
+          admissibleFor(input, number, pinned),
+        )
         if (divergences.length > 0) {
           prErrors.push({
             code: 'stale-snapshot',
@@ -1911,9 +1959,11 @@ export async function publishStack(raw, conversations = {}) {
         }
         // The pinned snapshot, not the batch preflight, is what this write is authorised
         // against: the head push and every earlier metadata write happened in between.
-        const divergences = compareAdmissible(input.pullRequests[number], currentPr, {
-          intendedBase: input.intendedBases[number],
-        })
+        const divergences = compareAdmissible(
+          input.pullRequests[number],
+          currentPr,
+          admissibleFor(input, number, input.pullRequests[number]),
+        )
         if (divergences.length > 0) {
           baseFailures.push({
             code: 'stale-snapshot',
