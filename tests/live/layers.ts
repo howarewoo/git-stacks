@@ -61,10 +61,11 @@ export async function threeLayerStack(
   ctx: LiveScenarioContext,
   prefix: string,
 ): Promise<[Layer, Layer, Layer]> {
+  const trunk = ctx.target.defaultBranch
   const first = await pushLayer(ctx, {
     branch: `${prefix}-one`,
-    parent: 'origin/main',
-    base: 'main',
+    parent: `origin/${trunk}`,
+    base: trunk,
     file: `${prefix}-one.txt`,
     contents: `${prefix} one\n`,
     message: `${prefix}: first layer`,
@@ -93,10 +94,11 @@ export async function twoLayerStack(
   ctx: LiveScenarioContext,
   prefix: string,
 ): Promise<[Layer, Layer]> {
+  const trunk = ctx.target.defaultBranch
   const first = await pushLayer(ctx, {
     branch: `${prefix}-one`,
-    parent: 'origin/main',
-    base: 'main',
+    parent: `origin/${trunk}`,
+    base: trunk,
     file: `${prefix}-one.txt`,
     contents: `${prefix} one\n`,
     message: `${prefix}: first layer`,
@@ -110,4 +112,42 @@ export async function twoLayerStack(
     message: `${prefix}: second layer`,
   })
   return [first, second]
+}
+
+/**
+ * A two-layer chain whose branches are pushed but never opened as pull requests.
+ *
+ * The publish preview treats a branch with no pull request as work the submission
+ * has to create, which is the state a person's own first push leaves behind. A
+ * recovery case needs exactly that: the create request has to come from the
+ * production submit path for its journal to hold an intent to recover from.
+ */
+export async function unpublishedStack(
+  ctx: LiveScenarioContext,
+  prefix: string,
+): Promise<[Layer, Layer]> {
+  const trunk = ctx.target.defaultBranch
+  const one: Layer = {
+    branch: `${prefix}-one`,
+    number: 0,
+    headSha: await pushCommit(ctx.workspace, {
+      branch: `${prefix}-one`,
+      parent: `origin/${trunk}`,
+      file: `${prefix}-one.txt`,
+      contents: `${prefix} one\n`,
+      message: `${prefix}: first layer`,
+    }),
+  }
+  const two: Layer = {
+    branch: `${prefix}-two`,
+    number: 0,
+    headSha: await pushCommit(ctx.workspace, {
+      branch: `${prefix}-two`,
+      parent: one.branch,
+      file: `${prefix}-two.txt`,
+      contents: `${prefix} two\n`,
+      message: `${prefix}: second layer`,
+    }),
+  }
+  return [one, two]
 }

@@ -1,423 +1,575 @@
-import {
-  GitHubTransportError,
-  setGitHubTransport,
-  type GitHubErrorKind,
-} from '../../../src/main/github-transport'
-import { originRemote, readReviewFilesFrom } from '../../../src/main/review'
-import { submitReview } from '../../../src/main/review-threads'
-import { pollAsyncMerge, startAsyncMerge } from '../../../src/main/merge-async'
-import { classifyRemoteFailure } from '../../../src/main/sync-coordinator'
-import { RemoteMutationLedger, unknownRemoteOutcome } from '../../../src/main/remote-mutations'
+import { writeFile } from 'node:fs/promises'
+import { join } from 'node:path'
+import { GitHubTransportError } from '../../../src/main/github-transport'
+import { getSnapshot, runAction } from '../../../src/main/git'
+import { getOriginUrl } from '../../../src/main/git-core'
+import { getGitHubIssues } from '../../../src/main/github'
+import { getStatus } from '../../../src/main/git-core'
+import { previewStack } from '../../../src/main/stacks'
+import { RepositoryScheduler } from '../../../src/main/repository-scheduler'
+import { RepositorySyncCoordinator, type SyncEvent } from '../../../src/main/sync-coordinator'
 import { LiveRedactor } from '../diagnostics'
 import {
+  SCHEMA_PROBES,
   breakingDrift,
   compareSchemas,
   observeSchema,
   prepareSchemaSubject,
   renderDrift,
+  type ObservedField,
+  type ObservedSchema,
 } from '../observed-schema'
 import { readCommittedSchema } from '../schema-fixture'
 import { pushLayer } from '../layers'
-import { anchorsFrom, assert, type LiveScenario, type LiveScenarioContext } from '../scenario'
-
-const noSleep = async (): Promise<void> => {}
+import { mergeableLayer, requestMerge } from './merge-support'
+import { assert, type LiveScenario, type LiveScenarioContext } from '../scenario'
 
 /**
- * A merge, carried through to a terminal answer.
+ * The remote head, read from the remote.
  *
- * Reading only the start is not a verdict: GitHub answers `202 pending` and finishes the
- * work afterwards, so a scenario that stopped there would call every gated merge a
- * failure and every ungated one a no-op. The request is polled to the end, and the
- * refusal is reported with the kind GitHub classified it as, because "blocked" and
- * "could not ask" are different bugs.
+ * A local tracking ref is a note the workspace left for itself: it moves when a
+ * fetch runs, so it can agree with an overwrite that already happened or disagree
+ * with one that did not. `ls-remote` asks the remote itself, which is the only
+ * question worth asking when the claim is that a push changed nothing.
  */
-async function attemptMerge(
+async function remoteHeadOf(ctx: LiveScenarioContext, branch: string): Promise<string | null> {
+  const listed = await ctx.workspace.gitNetwork(['ls-remote', '--heads', 'origin', branch])
+  const line = listed
+    .split('\n')
+    .map((entry) => entry.trim())
+    .find((entry) => entry.length > 0)
+  if (line === undefined) return null
+  return line.split(/\s+/u)[0] ?? null
+}
+
+/** Wait for one event the coordinator publishes, or give up after a real wait. */
+function nextEvent(
+  events: SyncEvent[],
+  take: (event: SyncEvent) => boolean,
+  withinMs: number,
+): Promise<SyncEvent | null> {
+  const { promise, resolve } = Promise.withResolvers<SyncEvent | null>()
+  const started = Date.now()
+  const tick = (): void => {
+    const found = events.find(take)
+    if (found !== undefined || Date.now() - started >= withinMs) resolve(found ?? null)
+    else setTimeout(tick, 25)
+  }
+  tick()
+  return promise
+}
+
+/**
+ * A repository held open by the real background refresh, reading through the same
+ * production readers the window uses.
+ */
+function openCoordinator(ctx: LiveScenarioContext): {
+  coordinator: RepositorySyncCoordinator
+  events: SyncEvent[]
+} {
+  const events: SyncEvent[] = []
+  const coordinator = new RepositorySyncCoordinator(
+    {
+      readSnapshot: (_root, signal, request) =>
+        getSnapshot(ctx.workspace.path, signal, undefined, request.github.remote),
+      readIssues: async (_root, signal) => {
+        const issues = await getGitHubIssues(
+          ctx.workspace.path,
+          await getOriginUrl(ctx.workspace.path, signal),
+          signal,
+        )
+        if (issues.message) throw new Error(issues.message)
+        return issues.issues
+      },
+      scheduler: new RepositoryScheduler(),
+    },
+    // Long enough that only this scenario's own events move the coordinator: a
+    // background timer firing mid-case would be indistinguishable from the answer.
+    { visibleMs: 600_000, secondaryMs: 600_000 },
+  )
+  coordinator.onEvent((event) => events.push(event))
+  return { coordinator, events }
+}
+
+/**
+ * The recorded host answer with one parser-depended field altered, which is the
+ * only change to a remote this tool can see: a field a consumer reads stops
+ * answering, or answers with another type.
+ *
+ * The committed document is what the host answered, which the matching case above
+ * proves against a live read. Staging the alteration on it keeps these two cases
+ * about the drift consumer rather than about a second reading of the same host.
+ */
+function withAlteredField(
+  schema: ObservedSchema,
+  probeId: string,
+  alter: (field: ObservedField) => ObservedField | null,
+): ObservedSchema {
+  const declaration = SCHEMA_PROBES.find((entry) => entry.id === probeId)
+  assert(declaration !== undefined, `no probe is named ${probeId}`)
+  const dependency = declaration.dependsOn[0]
+  assert(
+    dependency !== undefined,
+    `the ${probeId} probe declares no field for a parser to depend on`,
+  )
+  const fields = schema.probes[probeId] ?? []
+  const index = fields.findIndex((field) => field.path === dependency)
+  assert(
+    index >= 0,
+    `the ${probeId} probe depends on ${dependency}, which its own observation does not carry`,
+  )
+  const altered = alter(fields[index] as ObservedField)
+  return {
+    ...schema,
+    probes: {
+      ...schema.probes,
+      [probeId]:
+        altered === null
+          ? fields.filter((_, at) => at !== index)
+          : fields.map((field, at) => (at === index ? altered : field)),
+    },
+  }
+}
+
+/** The other type a field could answer with, so the alteration is a real change. */
+const otherType = (type: string): string => (type === 'array' ? 'string' : 'array')
+
+const mergedOnHost = async (
   ctx: LiveScenarioContext,
   number: number,
-  headSha: string,
-): Promise<{ landed: boolean; kind: GitHubErrorKind | null; detail: string }> {
-  const started = await startAsyncMerge({
-    fullName: ctx.repository,
-    number,
-    sha: headSha,
-    mergeMethod: 'merge',
-    mergeAction: 'direct_merge',
-    host: ctx.host,
-  }).then(
-    (start) => ({ start, error: null }),
-    (error: unknown) => ({ start: null, error }),
-  )
-  if (started.error !== null) {
-    const kind = started.error instanceof GitHubTransportError ? started.error.kind : null
-    return { landed: false, kind, detail: String(started.error) }
-  }
-  const uuid = started.start?.result.uuid ?? null
-  if (uuid === null) {
-    const status = started.start?.result.status ?? 'unknown'
-    return {
-      landed: false,
-      kind: null,
-      detail: `the host accepted with no request to read: ${status}`,
-    }
-  }
-  const settled = await pollAsyncMerge(
-    { fullName: ctx.repository, number, uuid, host: ctx.host },
-    { maxAttempts: 8, intervalMs: 25, sleep: noSleep },
-  )
-  return {
-    landed: settled.status === 'merged',
-    kind: null,
-    detail: `${settled.status}: ${settled.message ?? 'no message'}`,
-  }
+): Promise<{ merged: boolean; sha: string | null }> => {
+  const read = await ctx.transport.rest<{ merged: boolean; merge_commit_sha: string | null }>({
+    method: 'GET',
+    path: `repos/${ctx.repository}/pulls/${number}`,
+  })
+  return { merged: read.data.merged === true, sha: read.data.merge_commit_sha ?? null }
 }
 
-const mergeableLayer = (ctx: LiveScenarioContext, prefix: string) =>
-  pushLayer(ctx, {
-    branch: `${prefix}-layer`,
-    parent: 'origin/main',
-    base: 'main',
-    file: `${prefix}.txt`,
-    contents: `${prefix}\n`,
-    message: `${prefix}: a layer to gate`,
-  })
-
-/** Records the rule set so cleanup removes it even if the scenario throws. */
-function trackRuleSet(ctx: LiveScenarioContext, id: number): { full: string; release: () => void } {
-  const full = `${ctx.repository}/rulesets/${id}`
-  ctx.target.resources.record({
-    kind: 'rule-set',
-    handle: full,
-    marker: ctx.marker,
-    createdAt: new Date().toISOString(),
-  })
-  return { full, release: () => ctx.target.resources.release(full) }
-}
-
-export const ruleScenarios: readonly LiveScenario[] = [
+export const ruleAndFaultScenarios: readonly LiveScenario[] = [
   {
-    id: 'rules/required-check-blocks-the-merge',
-    title: 'a required check gates the merge, and passing it opens the gate',
-    requires: ['ruleSets', 'checks', 'asyncMerge', 'canMerge'],
-    async run(ctx) {
-      const required = 'git-stacks-live-e2e/required'
-      const created = await ctx.admin.createRuleSet({
-        name: 'git-stacks-live-e2e required check',
-        enforcement: 'active',
-        requiredStatusCheck: required,
-      })
-      const tracked = trackRuleSet(ctx, created.id)
-      try {
-        const layer = await mergeableLayer(ctx, 'rules-check')
-        const blocked = await attemptMerge(ctx, layer.number, layer.headSha)
-        assert(!blocked.landed, `the merge landed with ${required} unsatisfied: ${blocked.detail}`)
-        ctx.log(`refused as expected: ${blocked.detail}`)
-
-        await ctx.admin.createCheckRun({
-          fullName: ctx.repository,
-          headSha: layer.headSha,
-          name: required,
-          status: 'completed',
-          conclusion: 'success',
-        })
-        const allowed = await attemptMerge(ctx, layer.number, layer.headSha)
-        assert(
-          allowed.landed,
-          `the merge was still refused after ${required} passed: ${allowed.detail}`,
-        )
-        ctx.log('landed once the required check was satisfied')
-      } finally {
-        await ctx.admin.deleteRuleSet(ctx.repository, created.id)
-        tracked.release()
-      }
-    },
-  },
-  {
-    id: 'rules/required-approval-blocks-the-author',
-    title: 'a required approval is refused for the author and allowed after a reviewer approves',
-    requires: ['ruleSets', 'reviewThreads', 'secondReviewer', 'asyncMerge', 'canMerge'],
-    async run(ctx) {
-      const created = await ctx.admin.createRuleSet({
-        name: 'git-stacks-live-e2e required approval',
-        enforcement: 'active',
-        requiredApprovals: 1,
-      })
-      const tracked = trackRuleSet(ctx, created.id)
-      try {
-        const layer = await mergeableLayer(ctx, 'rules-approval')
-        const blocked = await attemptMerge(ctx, layer.number, layer.headSha)
-        assert(
-          !blocked.landed,
-          `the author's own merge landed with one approval required: ${blocked.detail}`,
-        )
-        ctx.log(`refused without an approval: ${blocked.detail}`)
-
-        const reviewer = ctx.target.reviewer
-        assert(reviewer !== null, 'no second account was supplied for this run')
-        // The application holds one signed-in account at a time, so the run signs
-        // the reviewer in for the duration of their write and restores the author
-        // afterwards. The approval is then the reviewer's, not the author's.
-        const author = ctx.transport
-        setGitHubTransport(reviewer.transport())
-        let approval: unknown = null
-        try {
-          const files = await readReviewFilesFrom(
-            await originRemote(ctx.workspace.path),
-            layer.number,
-          )
-          const file = files.files[0]
-          assert(file !== undefined, 'the diff had no file to anchor an approval to')
-          await submitReview(ctx.workspace.path, layer.number, {
-            event: 'APPROVE',
-            body: 'Approved by the second account.',
-            drafts: anchorsFrom(files, file.path).slice(0, 1),
-            comparison: files.comparison,
-          })
-        } catch (error) {
-          approval = error
-        } finally {
-          setGitHubTransport(author)
-        }
-        assert(approval === null, `the second account could not approve: ${String(approval)}`)
-
-        const allowed = await attemptMerge(ctx, layer.number, layer.headSha)
-        assert(allowed.landed, `the merge was refused after an approval: ${allowed.detail}`)
-        ctx.log(`approved by ${reviewer.login} and landed`)
-      } finally {
-        await ctx.admin.deleteRuleSet(ctx.repository, created.id)
-        tracked.release()
-      }
-    },
-  },
-]
-
-export const faultScenarios: readonly LiveScenario[] = [
-  {
-    id: 'fault/dropped-connection-holds-the-merge-for-the-person',
-    title: 'a merge whose answer was lost is held for the person and never resent',
-    requires: ['asyncMerge', 'canMerge'],
-    async run(ctx) {
-      const layer = await mergeableLayer(ctx, 'fault-lost')
-      const mergeAction = {
-        type: 'merge' as const,
-        ref: `refs/heads/${layer.branch}`,
-        expectedHead: layer.headSha,
-        expectedHeadRef: `refs/heads/${layer.branch}`,
-      }
-
-      // The request really reaches the host and the host really applies it; only the
-      // answer is discarded. That is the state a person is in when a merge may or may
-      // not have been asked for, and it is the only way to reach it without a host that
-      // lies about having merged something.
-      ctx.faults.loseOnce({ method: 'PUT', pathIncludes: 'merge-async' })
-      const lost = await startAsyncMerge({
-        fullName: ctx.repository,
-        number: layer.number,
-        sha: layer.headSha,
-        mergeMethod: 'merge',
-        mergeAction: 'direct_merge',
-        host: ctx.host,
-      }).then(
-        () => null,
-        (error: unknown) => error,
-      )
-      assert(lost !== null, 'the lost merge reported success rather than an unknown outcome')
-
-      const ledger = new RemoteMutationLedger()
-      const entry = ledger.recordFailure(mergeAction, lost)
-      assert(entry !== null, 'a dropped connection left nothing for the person to resolve')
-      assert(
-        entry.kind === 'merge' && entry.label.includes(layer.branch),
-        `the ledger recorded ${JSON.stringify(entry)} instead of this layer's merge`,
-      )
-      assert(ledger.pending().length === 1, 'the pending mutation was not held')
-      assert(ledger.dismiss(entry.id), 'the person could not dismiss the entry themselves')
-      assert(ledger.pending().length === 0, 'dismissing left the entry behind')
-
-      // A refusal GitHub itself reported never reached the mutation, so it must not
-      // become something a person has to clear before working again.
-      const refused = new GitHubTransportError({
-        kind: 'unprocessable',
-        status: 422,
-        detail: 'Validation Failed',
-      })
-      assert(unknownRemoteOutcome(refused) === null, 'a 422 was treated as possibly applied')
-      assert(
-        ledger.recordFailure(mergeAction, refused) === null,
-        'a 422 was recorded as an unknown outcome',
-      )
-      ctx.log('only the unanswerable failure was held, and it named the layer it belongs to')
-    },
-  },
-  {
-    id: 'fault/rate-limited-write-never-reaches-the-host',
-    title: 'a write refused by a spent rate limit is not sent and not retried into a duplicate',
-    requires: ['asyncMerge', 'canMerge'],
-    async run(ctx) {
-      const layer = await mergeableLayer(ctx, 'fault-rate')
-      // Only the merge request itself is counted. Polling a merge answers over the same
-      // path, so a count that included those reads would compare two different things.
-      const mergeRequests = (): Array<{ method: string; path: string; status: number | string }> =>
-        ctx.faults
-          .recentExchanges(1_000)
-          .filter((entry) => entry.method === 'PUT' && entry.path.includes('merge-async'))
-      const before = mergeRequests().length
-
-      ctx.faults.refuseOnce(
-        { method: 'PUT', pathIncludes: 'merge-async' },
-        { status: 403, kind: 'rate-limited', message: 'API rate limit exceeded' },
-      )
-      const refused = await attemptMerge(ctx, layer.number, layer.headSha)
-      assert(!refused.landed, 'a rate-limited write reported a landed merge')
-      assert(
-        refused.kind === 'rate-limited',
-        `the refusal classified as ${String(refused.kind)} rather than rate-limited`,
-      )
-      ctx.faults.clearFaults()
-
-      // The host refused before the request was sent, so it holds nothing: the retry
-      // after the reset is the first request GitHub ever sees for this pull request.
-      const attempted = mergeRequests().slice(before)
-      assert(
-        attempted.length === 1 && attempted[0].status === 403,
-        `${attempted.length} merge requests were recorded before the retry, and the one that was ` +
-          `answered ${String(attempted[0]?.status)}: a spent limit has to be refused before it is sent`,
-      )
-      const landed = await attemptMerge(ctx, layer.number, layer.headSha)
-      assert(landed.landed, `the merge after the reset did not land: ${landed.detail}`)
-      assert(
-        mergeRequests().length === before + 2,
-        `the run recorded ${mergeRequests().length - before} merge requests, not the one refused and ` +
-          'the one sent after the reset',
-      )
-      ctx.log(`one merge request reached the host, and it landed: ${landed.detail}`)
-    },
-  },
-  {
-    id: 'fault/rejected-credential-is-reported-as-unauthorized',
-    title: 'a rejected credential surfaces as unauthorized and writes nothing',
+    id: 'faults/force-push-preserves-the-remote',
+    title: 'a force-push refusal still leaves the outside commit on the remote',
     requires: [],
+    async run(ctx) {
+      const trunk = ctx.target.defaultBranch
+      const branch = 'force-preserve-layer'
+      const layer = await pushLayer(ctx, {
+        branch,
+        parent: `origin/${trunk}`,
+        base: trunk,
+        file: 'force-preserve.txt',
+        contents: 'force-preserve\n',
+        message: 'force-preserve: a layer with a head of its own',
+      })
+
+      // Somebody outside the application, in their own clone, with their own
+      // credentials, moves the head the application thinks it published.
+      const outside = await ctx.workspace.externalClone()
+      outside.gitNetwork(['fetch', 'origin'])
+      outside.git(['checkout', '-B', branch, `origin/${trunk}`])
+
+      const outsideHead = await outside.commit(
+        'force-preserve.txt',
+        'the outside commit\n',
+        'force-preserve: an outside commit',
+      )
+      await outside.gitNetwork(['push', '--force', 'origin', branch])
+      const before = await remoteHeadOf(ctx, branch)
+      assert(
+        before === outsideHead,
+        `the outside push left the remote at ${String(before)} rather than ${outsideHead}`,
+      )
+      ctx.log(`the outside actor's commit ${outsideHead} is on the remote`)
+
+      const snapshot = await getSnapshot(ctx.workspace.path)
+      const preview = await previewStack(ctx.workspace.path, snapshot, 'publish', branch)
+      const outcome = await runAction(ctx.workspace.path, {
+        type: 'executeStack',
+        token: preview.token,
+        allowForce: false,
+        mergeMethod: 'merge',
+      }).then(
+        (result) => ({ refused: false, detail: result.message }),
+        (error: unknown) => ({ refused: true, detail: String(error) }),
+      )
+      ctx.log(`the application answered: ${outcome.refused ? 'refused' : 'accepted'}, ${outcome.detail}`)
+
+      // The refusal is beside the point, and it is not what is being asserted. The
+      // outside commit is still the remote's head whether the application refused,
+      // gave up, or reported success, and only the remote can say so.
+      const after = await remoteHeadOf(ctx, branch)
+      assert(
+        after === outsideHead,
+        `the remote head is ${String(after)}, not the outside commit ${outsideHead} the run started from`,
+      )
+      ctx.log(`the remote still holds ${outsideHead}`)
+    },
+  },
+  {
+    id: 'faults/rejected-credential-writes-nothing',
+    title: 'a rejected credential surfaces as unauthorized and writes nothing',
+    requires: ['asyncMerge'],
     async run(ctx) {
       const layer = await mergeableLayer(ctx, 'fault-token')
       ctx.faults.refuseOnce(
-        { method: 'PUT', pathIncludes: 'merge-async' },
+        {
+          method: 'PUT',
+          pathIncludes: `repos/${ctx.repository}/pulls/${layer.number}/merge-async`,
+        },
         { status: 401, kind: 'unauthorized', message: 'Bad credentials' },
       )
-      const attempt = await startAsyncMerge({
-        fullName: ctx.repository,
+      const outcome = await requestMerge(ctx, {
         number: layer.number,
         sha: layer.headSha,
         mergeMethod: 'merge',
         mergeAction: 'direct_merge',
-        host: ctx.host,
-      }).then(
-        () => null,
-        (error: unknown) => error,
-      )
-      ctx.faults.clearFaults()
-      assert(attempt !== null, 'a rejected credential still produced a merge answer')
+      })
       assert(
-        attempt instanceof GitHubTransportError && attempt.kind === 'unauthorized',
-        `a rejected credential surfaced as ${String(attempt)}`,
+        outcome.kind === 'unauthorized',
+        `the rejected credential surfaced as ${outcome.detail}, not as unauthorized`,
       )
-      assert(
-        unknownRemoteOutcome(attempt) === null,
-        'a rejected credential was treated as possibly applied, so it would be retried',
-      )
-      const pull = await ctx.admin.readPullRequest(ctx.repository, layer.number)
-      assert(
-        pull.merged !== true,
-        'the merge landed even though the credential was rejected before it was sent',
-      )
-      ctx.log('the refusal was classified, nothing was written, and nothing was retried')
+      assert(outcome.accepted === null, 'a refused credential still produced a merge request')
+      const pull = await mergedOnHost(ctx, layer.number)
+      assert(!pull.merged, `#${layer.number} is merged although the credential was rejected`)
+      ctx.log(`the rejected credential surfaced as ${outcome.detail} and wrote nothing`)
     },
   },
   {
-    id: 'fault/secondary-rate-limit-parks-secondary-polling',
-    title: 'a secondary limit parks the inbox refresh without stopping the visible one',
+    id: 'merge/async-merge-settles-with-a-terminal-answer',
+    title: 'an accepted asynchronous merge is read through to the answer the host gives',
+    requires: ['asyncMerge'],
+    async run(ctx) {
+      const layer = await mergeableLayer(ctx, 'async-settles')
+      const started = Date.now()
+      const outcome = await requestMerge(ctx, {
+        number: layer.number,
+        sha: layer.headSha,
+        mergeMethod: 'merge',
+        mergeAction: 'direct_merge',
+      })
+      assert(
+        outcome.settled !== null,
+        `the merge was refused rather than started: ${outcome.detail}`,
+      )
+      const settled = outcome.settled
+      const elapsed = Date.now() - started
+      assert(
+        settled.status === 'merged' || settled.status === 'failed',
+        `after ${Math.round(elapsed / 1000)}s of real polling the merge is still ${settled.status}: ${settled.message ?? 'no message'}`,
+      )
+      // A host that answered `pending` is doing work afterwards. Reading it back in
+      // the same breath is what turns a running merge into a reported pending one,
+      // so the wait has to have been a wait.
+      if (outcome.accepted?.result.status === 'pending') {
+        assert(
+          elapsed >= 1_000,
+          `the host answered ${settled.status} within ${elapsed}ms of accepting a pending merge`,
+        )
+      }
+      if (settled.status !== 'merged') {
+        ctx.log(`the host refused to land this merge: ${settled.message ?? settled.status}`)
+        return
+      }
+      const pull = await mergedOnHost(ctx, layer.number)
+      assert(pull.merged, `#${layer.number} is not merged on the host after the merge settled as merged`)
+      ctx.log(`the merge landed ${String(pull.sha ?? '')} after ${Math.round(elapsed / 1000)}s`)
+    },
+  },
+  {
+    id: 'merge/mergeable-pull-request-refused-by-the-host-is-not-a-pending-merge',
+    title: 'a pull request the host will not land ends in a definite answer, not a pending one',
+    requires: ['asyncMerge'],
+    async run(ctx) {
+      const trunk = ctx.target.defaultBranch
+      const layer = await mergeableLayer(ctx, 'merge-refused')
+      // Somebody moves the trunk on under the layer. The pull request stays open and
+      // its work now conflicts, which is the state the host refuses to land.
+      await ctx.workspace.gitNetwork(['checkout', trunk])
+      await ctx.workspace.commit(
+        `${trunk}-moved.txt`,
+        'the trunk moved on\n',
+        'merge-refused: the trunk moved on',
+      )
+      await ctx.workspace.gitNetwork(['push', 'origin', trunk])
+
+      const outcome = await requestMerge(ctx, {
+        number: layer.number,
+        sha: layer.headSha,
+        mergeMethod: 'merge',
+        mergeAction: 'direct_merge',
+      })
+      const refused =
+        outcome.error instanceof GitHubTransportError &&
+        (outcome.error.status === 409 || outcome.error.status === 422)
+      assert(
+        refused,
+        `the host neither landed nor refused this merge: ${outcome.detail}`,
+      )
+      assert(
+        outcome.settled === null || outcome.settled.status === 'failed',
+        `the merge is ${outcome.settled?.status ?? 'unknown'} rather than a definite answer`,
+      )
+      const pull = await mergedOnHost(ctx, layer.number)
+      assert(
+        !pull.merged,
+        `#${layer.number} is merged on the host although the request was refused`,
+      )
+      ctx.log(
+        `the host answered ${String((outcome.error as GitHubTransportError).status)} and left #${layer.number} unmerged`,
+      )
+    },
+  },
+  {
+    id: 'merge/lost-response-adopts-the-request-the-host-already-holds',
+    title: 'a merge whose answer was lost adopts the request the host already made',
+    requires: ['asyncMerge'],
+    async run(ctx) {
+      const layer = await mergeableLayer(ctx, 'merge-lost')
+      const request = {
+        number: layer.number,
+        sha: layer.headSha,
+        mergeMethod: 'merge',
+        mergeAction: 'direct_merge',
+      } as const
+      // The request really is sent and the host really does make it; only the answer
+      // is discarded, which is the state a person is in when a merge may or may not
+      // have been started.
+      ctx.faults.loseOnce({
+        method: 'PUT',
+        pathIncludes: `repos/${ctx.repository}/pulls/${layer.number}/merge-async`,
+      })
+      const lost = await requestMerge(ctx, request)
+      assert(
+        lost.accepted === null,
+        `the lost answer was reported as ${lost.detail} rather than an unknown outcome`,
+      )
+      ctx.log(`the first request's answer was lost: ${lost.detail}`)
+
+      const second = await requestMerge(ctx, request)
+      assert(
+        second.accepted !== null,
+        `the host took a second merge request for #${layer.number} rather than reporting the one it already held: ${second.detail}`,
+      )
+      assert(
+        second.accepted.kind === 'conflict',
+        `the host answered the second request as ${second.accepted.result.status} rather than adopting the request it already held`,
+      )
+      const adopted = second.accepted.result
+      assert(
+        adopted.expectedHeadSha === null || adopted.expectedHeadSha === layer.headSha,
+        `the adopted request is for ${String(adopted.expectedHeadSha)}, not the head this run reviewed`,
+      )
+      assert(
+        second.settled !== null && second.settled.status === 'merged',
+        `the adopted request settled as ${second.settled?.status ?? 'nothing'}: ${second.settled?.message ?? ''}`,
+      )
+      assert(
+        second.settled.uuid === adopted.uuid,
+        `the poll read request ${String(second.settled.uuid)} rather than the adopted ${String(adopted.uuid)}`,
+      )
+      const pull = await mergedOnHost(ctx, layer.number)
+      assert(
+        pull.merged,
+        `#${layer.number} is not merged on the host after the adopted request settled as merged`,
+      )
+      ctx.log(`adopted ${String(adopted.uuid)} instead of starting a second merge`)
+    },
+  },
+  {
+    id: 'schema/committed-matches',
+    title: 'the committed contract matches what the host answered',
     requires: [],
     async run(ctx) {
-      const secondary = classifyRemoteFailure('You have exceeded a secondary rate limit', {
-        kind: 'secondary-rate-limit',
-        remaining: 4_000,
-        reset: null,
+      const target = await ctx.target
+      const subject = await prepareSchemaSubject({
+        target,
+        workspace: ctx.workspace,
+        defaultBranch: ctx.target.defaultBranch,
       })
-      assert(
-        secondary.state === 'rate-limited' && secondary.secondaryOnly,
-        `a secondary limit was classified as ${secondary.state}/${String(secondary.secondaryOnly)}`,
-      )
-      assert(secondary.resumeAt === null, 'a secondary limit was given a reset time to wait for')
-
-      const primary = classifyRemoteFailure('API rate limit exceeded for user', {
-        kind: 'rate-limited',
-        remaining: 0,
-        reset: new Date(Date.now() + 60_000),
-      })
-      assert(
-        primary.state === 'rate-limited' && !primary.secondaryOnly && primary.resumeAt !== null,
-        'a spent primary limit did not park polling until its reset',
-      )
-
-      const credential = classifyRemoteFailure('Bad credentials', {
-        kind: 'unauthorized',
-        remaining: null,
-        reset: null,
-      })
-      assert(
-        credential.state !== 'rate-limited',
-        `an expired credential was treated as a rate limit (${credential.state})`,
-      )
-      ctx.log('a secondary limit and a spent limit park differently')
-    },
-  },
-  {
-    id: 'diagnostics/failure-reports-withhold-secrets-and-paths',
-    title: 'a failure report cannot carry the run’s own secret or a local path',
-    requires: [],
-    async run(ctx) {
-      const token = 'live-e2e-fine-grained-secret-value'
-      const redactor = new LiveRedactor([token])
-      const report = redactor.text(
-        `request failed with Authorization: Bearer ${token} from /Users/someone/secret-place and ` +
-          `remote.origin.url=https://x-access-token:${token}@github.example/acme/widgets.git`,
-      )
-      assert(!report.includes(token), 'the run’s own secret survived redaction')
-      assert(!report.includes('x-access-token'), 'a credential in a remote URL survived redaction')
-      assert(!report.includes('/Users/someone'), 'a local path survived redaction')
-      assert(
-        report.includes('[REDACTED_SECRET]') && report.includes('[withheld: path]'),
-        `the report says nothing about what was removed: ${report}`,
-      )
-
-      const published = redactor.text('ghp_abcdefghijklmnopqrstuvwxyz0123456789')
-      assert(!published.includes('ghp_'), 'a published GitHub token shape survived redaction')
-      ctx.log('secrets, credentials, and paths are all withheld')
-    },
-  },
-  {
-    id: 'schema/observed-responses-match-the-committed-fixture',
-    title: 'what the host answers still matches the committed mock contract',
-    requires: ['nativeStacks', 'reviewThreads'],
-    async run(ctx) {
-      const observed = await observeSchema(
-        ctx.transport,
-        await prepareSchemaSubject({
-          target: ctx.target,
-          workspace: ctx.workspace,
-          defaultBranch: 'main',
-        }),
-        `${ctx.target.kind} runtime`,
-      )
+      const observed = await observeSchema(ctx.transport, subject, `${target.kind} live host`)
       const drift = compareSchemas(readCommittedSchema(), observed)
       const breaking = breakingDrift(drift)
       assert(
         breaking.length === 0,
-        `the committed mock contract no longer matches what the host answers:\n${renderDrift(breaking, new LiveRedactor([]))}`,
+        `the committed contract no longer matches what the host answers:\n${renderDrift(breaking, new LiveRedactor([]))}`,
       )
       ctx.log(
         drift.length === 0
           ? 'the host answers exactly the committed shape'
-          : `${drift.length} additive field(s) appeared; regenerate the fixture to capture them`,
+          : `${drift.length} additions no parser reads`,
       )
+    },
+  },
+  {
+    id: 'schema/a-parser-depended-field-going-missing-is-reported',
+    title: 'a field a parser reads stopping answering is drift, and the rest of the probe still reads',
+    requires: [],
+    async run(ctx) {
+      const committed = readCommittedSchema()
+      const probe = SCHEMA_PROBES.find((entry) => entry.dependsOn.length > 0)
+      assert(probe !== undefined, 'no probe declares a field a parser depends on')
+      const answered = committed
+      const altered = withAlteredField(answered, probe.id, () => null)
+      const breaking = breakingDrift(compareSchemas(committed, altered))
+      const missing = breaking.filter((entry) => entry.kind === 'missing')
+      assert(
+        missing.length > 0,
+        `a missing field the ${probe.id} parser reads was not reported as drift:\n${renderDrift(breaking, new LiveRedactor([]))}`,
+      )
+      assert(
+        missing.every((entry) => entry.path.length > 0 && entry.detail.length > 0),
+        'the drift report does not say which field went missing',
+      )
+      const remaining = (altered.probes[probe.id] ?? []).length
+      const answeredWith = (answered.probes[probe.id] ?? []).length
+      assert(
+        remaining === answeredWith - 1,
+        `the ${probe.id} probe answered with ${remaining} fields after one disappeared`,
+      )
+      ctx.log(`a missing ${String(missing[0]?.path)} on ${probe.id} is reported as breaking drift`)
+    },
+  },
+  {
+    id: 'schema/a-parser-depended-field-changing-type-is-reported',
+    title: 'a field a parser reads answering with another type is drift',
+    requires: [],
+    async run(ctx) {
+      const committed = readCommittedSchema()
+      const probe = SCHEMA_PROBES.find((entry) => entry.dependsOn.length > 0)
+      assert(probe !== undefined, 'no probe declares a field a parser depends on')
+      const altered = withAlteredField(committed, probe.id, (field) => ({
+        ...field,
+        type: otherType(field.type),
+      }))
+      const breaking = breakingDrift(compareSchemas(committed, altered))
+      const changed = breaking.filter((entry) => entry.kind === 'type-changed')
+      assert(
+        changed.length > 0,
+        `a changed type on a field the ${probe.id} parser reads was not reported:\n${renderDrift(breaking, new LiveRedactor([]))}`,
+      )
+      assert(
+        changed.every((entry) => entry.path.length > 0),
+        'the drift report does not say which field changed type',
+      )
+      ctx.log(`${String(changed[0]?.path)} on ${probe.id} changed type and was reported`)
+    },
+  },
+  {
+    id: 'fields/added-removed-and-renamed-files-are-what-git-reports',
+    title: 'the status the window shows names the added, removed, and renamed files Git reports',
+    requires: [],
+    async run(ctx) {
+      const prefix = 'status-files'
+      const layer = await pushLayer(ctx, {
+        branch: `${prefix}-layer`,
+        parent: 'origin/main',
+        base: 'main',
+        file: `${prefix}.txt`,
+        contents: `${prefix}\n`,
+        message: `${prefix}: a layer whose status is read`,
+      })
+      await ctx.workspace.gitNetwork(['checkout', layer.branch])
+      await writeFile(join(ctx.workspace.path, `${prefix}-doomed.txt`), 'doomed\n', 'utf8')
+      ctx.workspace.git(['add', '-A'])
+      ctx.workspace.git(['commit', '-m', `${prefix}: a file to remove`])
+
+      // Staged and uncommitted, which is the state the window's status is about.
+      ctx.workspace.git(['rm', '-q', '--', `${prefix}-doomed.txt`])
+      await writeFile(join(ctx.workspace.path, `${prefix}-added.txt`), 'added\n', 'utf8')
+      ctx.workspace.git(['add', '--', `${prefix}-added.txt`])
+      ctx.workspace.git(['mv', '--', `${prefix}.txt`, `${prefix}-renamed.txt`])
+
+      const status = await getStatus(ctx.workspace.path)
+      const paths = status.map((entry) => entry.path)
+      const removed = status.find((entry) => entry.path === `${prefix}-doomed.txt`)
+      assert(
+        status.some((entry) => entry.path === `${prefix}-added.txt`),
+        `an added file is missing from the status: ${paths.join(', ')}`,
+      )
+      assert(
+        removed !== undefined,
+        `a removed file is missing from the status: ${paths.join(', ')}`,
+      )
+      assert(removed.index === 'D', `the removed file is reported as ${removed.index}, not a deletion`)
+      const renamed = status.find((entry) => entry.path === `${prefix}-renamed.txt`)
+      assert(renamed !== undefined, `a renamed file is missing from the status: ${paths.join(', ')}`)
+      assert(
+        renamed.originalPath === `${prefix}.txt`,
+        `the rename reports its original as ${String(renamed.originalPath)}`,
+      )
+      assert(
+        status.every((entry) => !entry.conflicted),
+        'a working tree with no merge in it was reported as conflicted',
+      )
+      ctx.log(`status names ${status.length} paths, including the deletion and the rename`)
+    },
+  },
+  {
+    id: 'sync/a-secondary-limit-parks-the-inbox-and-not-the-local-state',
+    title: 'a secondary rate limit parks background polling while local work keeps refreshing',
+    requires: [],
+    async run(ctx) {
+      const { coordinator, events } = openCoordinator(ctx)
+      try {
+        coordinator.attach(ctx.workspace.path, await getSnapshot(ctx.workspace.path))
+        await coordinator.refreshNow()
+        assert(
+          coordinator.freshness().state === 'fresh',
+          `the healthy refresh reported ${coordinator.freshness().state}: ${String(coordinator.freshness().detail)}`,
+        )
+        events.length = 0
+
+        // The host's own answer to a request the run makes, sent through the
+        // transport the application is using, not an error written into the case.
+        ctx.faults.refuseOnce(
+          { method: 'GET', pathIncludes: '/pulls' },
+          {
+            status: 403,
+            kind: 'rate-limited',
+            message: 'You have exceeded a secondary rate limit and have been temporarily blocked',
+          },
+        )
+        await coordinator.refreshNow().then(
+          () => null,
+          (error: unknown) => error,
+        )
+        const limited = coordinator.freshness()
+        assert(
+          limited.state === 'rate-limited',
+          `a secondary limit left the repository ${limited.state}: ${String(limited.detail)}`,
+        )
+        assert(
+          limited.detail !== null && /secondary rate limit/iu.test(limited.detail),
+          `the reported reason does not name the limit the host gave: ${String(limited.detail)}`,
+        )
+        const emptied = events.filter(
+          (event) => event.kind === 'issues' && (event.issues?.length ?? 0) === 0,
+        )
+        assert(emptied.length === 0, 'a rate-limited read published an empty inbox')
+
+        // Local work reads the worktree, not GitHub, and must not be parked behind a
+        // limit that only GitHub imposes.
+        await writeFile(join(ctx.workspace.path, 'secondary-limit-local.txt'), 'local work\n', 'utf8')
+        coordinator.notifyLocalChange()
+        const local = await nextEvent(
+          events,
+          (event) => event.kind === 'snapshot' && event.snapshot !== undefined,
+          10_000,
+        )
+        assert(
+          local !== null,
+          'local work stopped refreshing while GitHub was rate limiting',
+        )
+        ctx.faults.clearFaults()
+        await coordinator.refreshNow()
+        assert(
+          coordinator.freshness().state === 'fresh',
+          `the refresh after the limit lifted still reported ${coordinator.freshness().state}`,
+        )
+        ctx.log('parked background polling at the limit, kept local refresh running, and recovered')
+      } finally {
+        coordinator.detach()
+      }
     },
   },
 ]

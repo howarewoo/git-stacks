@@ -10,6 +10,7 @@ import type {
   LiveTarget,
   LiveWorkspace,
 } from './contract'
+import type { PublishLayerChoice, StackPreview } from '../../src/shared/types'
 
 /** Everything a scenario is given. Nothing here is constructed by the scenario itself. */
 export interface LiveScenarioContext {
@@ -53,6 +54,30 @@ export interface Layer {
   readonly branch: string
   readonly number: number
   readonly headSha: string
+}
+
+/**
+ * The choices a submit would publish, taken from the preview as the view would.
+ *
+ * `approved` is what the person changed on screen before dispatching. Approving a
+ * base change is the only way a preview that captured a stale base is ever sent,
+ * so a scenario that needs the submit to really attempt the move approves it here
+ * rather than relying on a refusal to stand in for the attempt.
+ */
+export function publishChoices(
+  preview: StackPreview,
+  approved: Record<string, { updateBase?: boolean }> = {},
+): Record<string, PublishLayerChoice> {
+  const choices: Record<string, PublishLayerChoice> = {}
+  for (const layer of preview.publish?.layers ?? []) {
+    choices[layer.branch] = {
+      title: layer.title,
+      body: layer.body,
+      draft: layer.draft,
+      updateBase: approved[layer.branch]?.updateBase ?? layer.updateBase,
+    }
+  }
+  return choices
 }
 
 /**

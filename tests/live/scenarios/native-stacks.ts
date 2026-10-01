@@ -1,3 +1,5 @@
+import { getSnapshot, runAction } from '../../../src/main/git'
+import { getGitHubData } from '../../../src/main/github'
 import {
   addPullRequestsToStack,
   createPullRequestStack,
@@ -8,9 +10,11 @@ import {
   unstackPullRequestStack,
   validateNativeStackChain,
 } from '../../../src/main/native-stacks'
-import type { PullRequest } from '../../../src/shared/types'
-import { threeLayerStack, twoLayerStack } from '../layers'
-import { assert, type LiveScenario, type LiveScenarioContext } from '../scenario'
+import { getSubmitStackProgress, previewStack } from '../../../src/main/stacks'
+import { isRecord } from '../../../src/shared/guards'
+import { threeLayerStack, twoLayerStack, unpublishedStack } from '../layers'
+import { assert, publishChoices, type LiveScenario, type LiveScenarioContext } from '../scenario'
+import type { PullRequest, StackPreview } from '../../../src/shared/types'
 
 const ownerAndRepo = (repository: string): { owner: string; repo: string } => {
   const [owner, repo] = repository.split('/')
@@ -29,6 +33,100 @@ async function stackMembers(ctx: LiveScenarioContext, stackNumber: number): Prom
     transport: ctx.transport,
   })
   return stack.pullRequests.map((member) => member.number).sort((left, right) => left - right)
+}
+
+/** How many pull requests the host currently has open for a head branch. */
+async function openPullRequestsFor(ctx: LiveScenarioContext, branch: string): Promise<number[]> {
+  const listed = await ctx.transport.paginate<Record<string, unknown>>({
+    method: 'GET',
+    path: `repos/${ctx.repository}/pulls`,
+  })
+  return listed
+    .filter((entry) => isRecord(entry.head) && entry.head.ref === branch)
+    .map((entry) => Number(entry.number))
+    .sort((left, right) => left - right)
+}
+
+/**
+ * The publish preview for branches that have no pull request yet.
+ *
+ * This is the state a person's own first push leaves behind, and the only one in
+ * which the production submit path creates pull requests at all. A recovery case
+ * has to go through it: a create sent from a scenario's own call carries no intent
+ * for the journal to recover, so the production recovery is never exercised.
+ */
+async function unpublishedPreview(
+  ctx: LiveScenarioContext,
+  branch: string,
+): Promise<StackPreview> {
+  const snapshot = await getSnapshot(ctx.workspace.path)
+  const preview = await previewStack(ctx.workspace.path, snapshot, 'publish', branch)
+  assert(preview.publish !== null, `the publish preview for ${branch} carried no plan`)
+  const creating = preview.publish.layers.filter((layer) => layer.create)
+  assert(
+    creating.length === preview.publish.layers.length,
+    `the preview planned to create ${creating.length} of ${preview.publish.layers.length} pull requests`,
+  )
+  return preview
+}
+
+/** Dispatch the captured preview, and the failure it raised if it raised one. */
+async function submitPreview(ctx: LiveScenarioContext, preview: StackPreview): Promise<unknown> {
+  return runAction(ctx.workspace.path, {
+    type: 'submitStack',
+    token: preview.token,
+    allowForce: false,
+    layers: publishChoices(preview),
+  }).then(
+    () => null,
+    (error: unknown) => error,
+  )
+}
+
+/** The stacks that hold any of these pull requests, by number. */
+async function stacksHolding(ctx: LiveScenarioContext, numbers: readonly number[]): Promise<number[]> {
+  const { owner, repo } = ownerAndRepo(ctx.repository)
+  const listed = await listPullRequestStacks(owner, repo, {
+    host: ctx.host,
+    transport: ctx.transport,
+  })
+  return listed
+    .filter((stack) => stack.pullRequests.some((member) => numbers.includes(member.number)))
+    .map((stack) => stack.number)
+    .sort((left, right) => left - right)
+}
+
+/**
+ * The real pull request of a subject this run does not own, read the way the
+ * application reads one.
+ *
+ * The metadata comes from the production reader and parser through the URL the
+ * host reports for the pull request, so the head repository in the result is the
+ * one the host really has rather than a name this scenario chose.
+ */
+async function readForeignPullRequest(
+  ctx: LiveScenarioContext,
+  subject: { fullName: string; number: number; url: string },
+): Promise<PullRequest> {
+  const data = await getGitHubData(ctx.workspace.path, subject.url)
+  assert(
+    data.available,
+    `the application could not read ${subject.fullName}#${subject.number}: ${data.message}`,
+  )
+  const found = data.pullRequests.find((entry) => entry.number === subject.number)
+  assert(
+    found !== undefined,
+    `the host does not report pull request #${subject.number} at ${subject.fullName}`,
+  )
+  assert(
+    (found.headRepository ?? '').toLowerCase() === subject.fullName.toLowerCase(),
+    `#${subject.number} was read with head repository ${String(found.headRepository)}, not ${subject.fullName}`,
+  )
+  assert(
+    (found.headRepository ?? '').toLowerCase() !== ctx.repository.toLowerCase(),
+    `#${subject.number} claims to live in ${ctx.repository}, so it is not a foreign subject at all`,
+  )
+  return found
 }
 
 export const nativeStackScenarios: readonly LiveScenario[] = [
@@ -59,7 +157,7 @@ export const nativeStackScenarios: readonly LiveScenario[] = [
       const created = await createPullRequestStack(owner, repo, [one.number, two.number], {
         host: ctx.host,
         transport: ctx.transport,
-        defaultBranch: 'main',
+        defaultBranch: ctx.target.defaultBranch,
       })
       assert(
         created.pullRequests.length === 2,
@@ -102,56 +200,113 @@ export const nativeStackScenarios: readonly LiveScenario[] = [
     },
   },
   {
-    id: 'stacks/retry-after-lost-response-creates-no-duplicate',
-    title: 'a stack create whose answer was lost is not created twice',
+    id: 'stacks/lost-pull-request-create-recovers-without-duplicate',
+    title: 'a publish whose pull-request answer was lost recovers the one the host created',
     requires: ['nativeStacks'],
     async run(ctx) {
-      const { owner, repo } = ownerAndRepo(ctx.repository)
-      const [one, two] = await twoLayerStack(ctx, 'lost-create')
+      const [one, two] = await unpublishedStack(ctx, 'lost-pr')
+      const preview = await unpublishedPreview(ctx, two.branch)
 
       // The request really is sent and the host really does apply it; only the
-      // answer is discarded, which is the state a person is in when a merge may
-      // or may not have been requested.
-      ctx.faults.loseOnce({ method: 'POST', pathIncludes: `repos/${ctx.repository}/stacks` })
-      const attempted = await createPullRequestStack(owner, repo, [one.number, two.number], {
-        host: ctx.host,
-        transport: ctx.transport,
-        defaultBranch: 'main',
-      }).then(
-        (stack) => ({ stack, failed: false }),
-        (error: unknown) => ({ stack: null, error, failed: true }),
-      )
-      assert(attempted.failed, 'a lost response should surface as a failure the caller can retry')
-      ctx.log('the first create failed with the answer lost after the host applied it')
+      // answer is discarded, which is the state a person is in when a pull request
+      // may or may not have been opened.
+      ctx.faults.loseOnce({ method: 'POST', pathIncludes: `repos/${ctx.repository}/pulls` })
+      const failure = await submitPreview(ctx, preview)
+      assert(failure !== null, 'the lost create reported success rather than an unknown outcome')
+      ctx.log(`the submit failed with the answer lost: ${String(failure)}`)
 
-      // A retry has to adopt what the host already holds rather than write a
-      // second chain over the same layers, which is the duplicate this covers.
-      const adopted = await listPullRequestStacks(owner, repo, {
-        host: ctx.host,
-        transport: ctx.transport,
-        pullRequest: two.number,
-      })
-      const target = adopted[0]
+      const progress = await getSubmitStackProgress(ctx.workspace.path)
       assert(
-        target !== undefined,
-        'no stack holds the second layer; the lost create did not land on the host',
+        progress !== null && progress.status !== 'completed',
+        'the publish journal was cleared after a create whose answer was lost',
       )
+
+      const first = await openPullRequestsFor(ctx, one.branch)
       assert(
-        target.pullRequests.length === 2,
-        `the landed stack holds ${target.pullRequests.length} layers, so a retry would duplicate the chain`,
+        first.length === 1,
+        `the host applied the lost create but holds ${first.length} pull requests for ${one.branch}, not 1`,
       )
-      const all = await listPullRequestStacks(owner, repo, {
-        host: ctx.host,
-        transport: ctx.transport,
-      })
-      const holding = all.filter((stack) =>
-        stack.pullRequests.some((member) => member.number === one.number),
+      const second = await openPullRequestsFor(ctx, two.branch)
+      assert(
+        second.length === 0,
+        `the submission stopped before ${two.branch} was ever sent, yet it has ${second.length} pull requests`,
       )
+
+      await runAction(ctx.workspace.path, { type: 'submitStackRetry' })
+
+      // Recovery adopts the identity the host already holds. Anything else here is
+      // the duplicate this scenario exists for: a second pull request for either
+      // layer, or a second chain over them.
+      const recovered = await openPullRequestsFor(ctx, one.branch)
+      assert(
+        recovered.length === 1 && recovered[0] === first[0],
+        `${one.branch} went from ${first.join(',')} to ${recovered.join(',')} across the recovery`,
+      )
+      const opened = await openPullRequestsFor(ctx, two.branch)
+      assert(
+        opened.length === 1,
+        `${two.branch} ended the recovery with ${opened.length} open pull requests, not 1`,
+      )
+      const holding = await stacksHolding(ctx, [first[0], opened[0]])
       assert(
         holding.length === 1,
-        `the bottom layer is in ${holding.length} stacks after the lost create, not 1`,
+        `${holding.length} stacks hold the recovered chain, not 1: ${holding.join(', ')}`,
       )
-      ctx.log(`exactly one stack (#${target.number}) holds the chain`)
+      const members = await stackMembers(ctx, holding[0])
+      assert(
+        members.join(',') === [first[0], opened[0]].sort((left, right) => left - right).join(','),
+        `stack #${holding[0]} holds ${members.join(',')} rather than the recovered pair`,
+      )
+      ctx.log(`recovered #${first[0]} instead of opening a second one, and registered it once`)
+    },
+  },
+  {
+    id: 'stacks/lost-stack-create-recovers-without-duplicate',
+    title: 'a publish whose stack answer was lost recovers the registration the host made',
+    requires: ['nativeStacks'],
+    async run(ctx) {
+      const [one, two] = await unpublishedStack(ctx, 'lost-stack')
+      const preview = await unpublishedPreview(ctx, two.branch)
+
+      ctx.faults.loseOnce({ method: 'POST', pathIncludes: `repos/${ctx.repository}/stacks` })
+      const failure = await submitPreview(ctx, preview)
+      assert(failure !== null, 'the lost stack create reported success')
+      ctx.log(`the submit failed with the registration answer lost: ${String(failure)}`)
+
+      const published = (
+        await Promise.all([one, two].map((layer) => openPullRequestsFor(ctx, layer.branch)))
+      ).flat()
+      assert(
+        published.length === 2,
+        `the publication opened ${published.length} pull requests before the lost registration, not 2`,
+      )
+
+      const landed = await stacksHolding(ctx, published)
+      assert(
+        landed.length === 1,
+        `the host applied the lost registration but ${landed.length} stacks hold the chain, not 1`,
+      )
+      const landedMembers = await stackMembers(ctx, landed[0])
+      assert(
+        landedMembers.join(',') === [...published].sort((left, right) => left - right).join(','),
+        `the landed stack holds ${landedMembers.join(',')} rather than the published pair`,
+      )
+
+      await runAction(ctx.workspace.path, { type: 'submitStackRetry' })
+
+      const after = (
+        await Promise.all([one, two].map((layer) => openPullRequestsFor(ctx, layer.branch)))
+      ).flat()
+      assert(
+        after.join(',') === [...published].sort((left, right) => left - right).join(','),
+        `the recovery changed the published pull requests from ${published.join(',')} to ${after.join(',')}`,
+      )
+      const recovered = await stacksHolding(ctx, published)
+      assert(
+        recovered.length === 1 && recovered[0] === landed[0],
+        `after the recovery, ${recovered.join(', ') || 'nothing'} holds the chain rather than the one registration the host already had`,
+      )
+      ctx.log(`adopted stack #${landed[0]} instead of registering a second one`)
     },
   },
   {
@@ -169,7 +324,7 @@ export const nativeStackScenarios: readonly LiveScenario[] = [
       const error = await createPullRequestStack(owner, repo, [one.number, three.number], {
         host: ctx.host,
         transport: ctx.transport,
-        defaultBranch: 'main',
+        defaultBranch: ctx.target.defaultBranch,
       }).then(
         () => null,
         (thrown: unknown) => thrown,
@@ -191,76 +346,63 @@ export const nativeStackScenarios: readonly LiveScenario[] = [
   },
   {
     id: 'stacks/fork-head-is-refused',
-    title: 'a layer whose head lives in a fork cannot join the chain',
-    requires: ['nativeStacks'],
-    async run(ctx) {
-      const [one, two] = await twoLayerStack(ctx, 'fork-head')
-      const forkRepository = `${ctx.repository.split('/')[0]}-fork/${ctx.repository.split('/')[1]}`
-      const chain: PullRequest[] = [
-        {
-          number: one.number,
-          title: one.branch,
-          url: '',
-          state: 'OPEN',
-          draft: false,
-          base: 'main',
-          head: one.branch,
-          checks: 'none',
-          headRepository: forkRepository,
-        },
-        {
-          number: two.number,
-          title: two.branch,
-          url: '',
-          state: 'OPEN',
-          draft: false,
-          base: one.branch,
-          head: two.branch,
-          checks: 'none',
-          headRepository: ctx.repository,
-        },
-      ]
-      const result = validateNativeStackChain(chain, {
-        targetRepository: ctx.repository,
-        defaultBranch: 'main',
-      })
-      assert(!result.valid, 'a chain with a foreign head repository was accepted')
-      assert(
-        result.status === 'cross-fork-head',
-        `a fork head was refused as ${result.status}, not cross-fork-head`,
-      )
-      ctx.log(`fork head refused: ${result.message ?? result.status}`)
-    },
-  },
-  {
-    id: 'stacks/pull-request-from-another-repository-is-refused',
-    title: 'a number that names no pull request here cannot be stacked',
+    title: 'a real pull request opened from a fork cannot join the chain',
     requires: ['nativeStacks'],
     async run(ctx) {
       const { owner, repo } = ownerAndRepo(ctx.repository)
-      const [one] = await twoLayerStack(ctx, 'cross-repo')
-      const error = await createPullRequestStack(owner, repo, [one.number, 999_999], {
+      const [one] = await twoLayerStack(ctx, 'fork-head')
+      const subject = await ctx.target.foreignPullRequest('fork')
+      ctx.log(`the run opened #${subject.number} from the fork ${subject.fullName}`)
+
+      // The fork's pull request lives on this repository, so the production stack
+      // entry point can be asked to register it beside a real layer. Everything it
+      // knows about that pull request is read from the host by the same parser the
+      // application uses; nothing about the fork is asserted by this scenario.
+      const before = await stacksHolding(ctx, [one.number])
+      const error = await createPullRequestStack(owner, repo, [one.number, subject.number], {
         host: ctx.host,
         transport: ctx.transport,
-        defaultBranch: 'main',
+        defaultBranch: ctx.target.defaultBranch,
       }).then(
         () => null,
         (thrown: unknown) => thrown,
       )
-      assert(error !== null, 'a pull request number that names nothing was accepted into a chain')
+      assert(error !== null, 'a chain holding a real fork head was accepted')
       assert(
-        isNativeStackError(error) && error.status === 'invalid-chain',
-        `the cross-repository refusal was ${String(error)}`,
+        isNativeStackError(error) && error.status === 'cross-fork-head',
+        `the refusal was ${String(error)}, not a cross-fork-head NativeStackError`,
       )
-      const listed = await listPullRequestStacks(owner, repo, {
-        host: ctx.host,
-        transport: ctx.transport,
-        pullRequest: one.number,
+      const after = await stacksHolding(ctx, [one.number])
+      assert(
+        after.join(',') === before.join(','),
+        `the refused fork registration left ${after.join(',')} holding the layer, not ${before.join(',') || 'nothing'}`,
+      )
+      ctx.log(`fork head refused: ${error instanceof Error ? error.message : String(error)}`)
+    },
+  },
+  {
+    id: 'stacks/pull-request-from-another-repository-is-refused',
+    title: 'a real pull request in another repository cannot join this repository’s chain',
+    requires: ['nativeStacks'],
+    async run(ctx) {
+      const subject = await ctx.target.foreignPullRequest('repository')
+      const foreign = await readForeignPullRequest(ctx, subject)
+      ctx.log(`read #${foreign.number} from ${subject.fullName} as a foreign subject`)
+
+      // This pull request belongs to another repository, so it cannot be named in
+      // this repository's stack request at all. What can be asked is whether the
+      // guard that stack entry point uses refuses a chain holding it, given the
+      // metadata the application's own reader produced from the host.
+      const result = validateNativeStackChain([foreign], {
+        targetRepository: ctx.repository,
+        defaultBranch: ctx.target.defaultBranch,
       })
+      assert(!result.valid, 'a chain holding a real cross-repository head was accepted')
       assert(
-        listed.length === 0,
-        `the refused create still put #${one.number} in ${listed.length} stacks`,
+        result.status === 'cross-fork-head',
+        `a head in ${subject.fullName} was refused as ${result.status}, not cross-fork-head`,
       )
+      ctx.log(`cross-repository head refused: ${result.message ?? result.status}`)
     },
   },
 ]

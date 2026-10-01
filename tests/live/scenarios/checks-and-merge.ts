@@ -1,31 +1,18 @@
+import { getSnapshot, runAction } from '../../../src/main/git'
 import {
   clearPullRequestChecksCache,
   getPullRequestChecks,
   rerunPullRequestCheck,
 } from '../../../src/main/pull-request-checks'
+import { previewStack } from '../../../src/main/stacks'
 import {
   pollAsyncMerge,
   queueConfiguredFor,
-  readAsyncMerge,
   readMergeObservations,
-  recordMergeObservation,
   startAsyncMerge,
 } from '../../../src/main/merge-async'
-import { pushLayer } from '../layers'
-import { assert, type LiveScenario } from '../scenario'
-
-/** One mergeable layer with its own head, which is what a check attaches to. */
-const mergeableLayer = (ctx: Parameters<LiveScenario['run']>[0], prefix: string) =>
-  pushLayer(ctx, {
-    branch: `${prefix}-layer`,
-    parent: 'origin/main',
-    base: 'main',
-    file: `${prefix}.txt`,
-    contents: `${prefix}\n`,
-    message: `${prefix}: a layer to check and merge`,
-  })
-
-const noSleep = async (): Promise<void> => {}
+import { mergeableLayer, requestMerge } from './merge-support'
+import { assert, type LiveScenario, type LiveScenarioContext } from '../scenario'
 
 export const checkScenarios: readonly LiveScenario[] = [
   {
@@ -33,6 +20,7 @@ export const checkScenarios: readonly LiveScenario[] = [
     title: 'check runs, statuses, and workflow runs are rolled up the way the host reports them',
     requires: ['checks'],
     async run(ctx) {
+      const trunk = ctx.target.defaultBranch
       const layer = await mergeableLayer(ctx, 'checks-rollup')
       await ctx.admin.createCheckRun({
         fullName: ctx.repository,
@@ -58,7 +46,7 @@ export const checkScenarios: readonly LiveScenario[] = [
 
       const report = await getPullRequestChecks(ctx.workspace.path, layer.number, {
         headSha: layer.headSha,
-        base: 'main',
+        base: trunk,
         force: true,
       })
       assert(report.available, `the checks read was unavailable: ${report.message}`)
@@ -100,6 +88,7 @@ export const checkScenarios: readonly LiveScenario[] = [
     title: 'a rerun is refused unless the run belongs to this pull request head',
     requires: ['checks'],
     async run(ctx) {
+      const trunk = ctx.target.defaultBranch
       const layer = await mergeableLayer(ctx, 'checks-rerun')
       await ctx.admin.createCheckRun({
         fullName: ctx.repository,
@@ -111,7 +100,7 @@ export const checkScenarios: readonly LiveScenario[] = [
       clearPullRequestChecksCache()
       const error = await rerunPullRequestCheck(ctx.workspace.path, layer.number, 999_999, {
         headSha: layer.headSha,
-        base: 'main',
+        base: trunk,
       }).then(
         () => null,
         (thrown: unknown) => thrown,
@@ -129,6 +118,7 @@ export const checkScenarios: readonly LiveScenario[] = [
     title: 'a rate-limited checks read backs off and says so rather than spinning',
     requires: ['checks'],
     async run(ctx) {
+      const trunk = ctx.target.defaultBranch
       const layer = await mergeableLayer(ctx, 'checks-backoff')
       clearPullRequestChecksCache()
       ctx.faults.refuseOnce(
@@ -137,7 +127,7 @@ export const checkScenarios: readonly LiveScenario[] = [
       )
       const first = await getPullRequestChecks(ctx.workspace.path, layer.number, {
         headSha: layer.headSha,
-        base: 'main',
+        base: trunk,
         force: true,
       })
       assert(!first.available, 'a rate-limited read reported a usable report')
@@ -148,7 +138,7 @@ export const checkScenarios: readonly LiveScenario[] = [
       const before = ctx.faults.recentExchanges(1_000).length
       const second = await getPullRequestChecks(ctx.workspace.path, layer.number, {
         headSha: layer.headSha,
-        base: 'main',
+        base: trunk,
       })
       const after = ctx.faults.recentExchanges(1_000).length
       assert(!second.available, 'the backoff served a report it does not have')
@@ -163,6 +153,35 @@ export const checkScenarios: readonly LiveScenario[] = [
   },
 ]
 
+/**
+ * The merge the production path would run, and the journal it wrote.
+ *
+ * A queue enqueue is only evidence that a base ref has a queue when GitHub reports
+ * the terminal `enqueued` result, and the journal entry that says so is written by
+ * the merge path itself. Driving the preview and the action the view drives is what
+ * makes the observation the application's rather than the scenario's.
+ */
+async function mergeThroughProduction(
+  ctx: LiveScenarioContext,
+  branch: string,
+  mergeAction: 'default' | 'direct_merge' | 'merge_queue',
+): Promise<{ message: string }> {
+  const snapshot = await getSnapshot(ctx.workspace.path)
+  const preview = await previewStack(ctx.workspace.path, snapshot, 'merge', branch)
+  assert(preview.merge !== null, `the merge preview for ${branch} carried no plan`)
+  assert(
+    preview.merge.actions.includes(mergeAction),
+    `the preview offers ${preview.merge.actions.join(', ')}, not ${mergeAction}`,
+  )
+  return runAction(ctx.workspace.path, {
+    type: 'executeStack',
+    token: preview.token,
+    allowForce: false,
+    mergeAction,
+    mergeMethod: 'merge',
+  })
+}
+
 export const mergeScenarios: readonly LiveScenario[] = [
   {
     id: 'merge/direct-async-merge-lands',
@@ -170,36 +189,28 @@ export const mergeScenarios: readonly LiveScenario[] = [
     requires: ['asyncMerge', 'canMerge'],
     async run(ctx) {
       const layer = await mergeableLayer(ctx, 'merge-direct')
-      const started = await startAsyncMerge({
-        fullName: ctx.repository,
+      const attempt = await requestMerge(ctx, {
         number: layer.number,
         sha: layer.headSha,
         mergeMethod: 'merge',
         mergeAction: 'direct_merge',
-        host: ctx.host,
       })
-      assert(started.kind === 'result', 'the merge request was not accepted')
-      const uuid = started.result.uuid
-      assert(uuid !== null, 'an accepted merge request came back without the UUID to poll')
-
-      const settled = await pollAsyncMerge(
-        { fullName: ctx.repository, number: layer.number, uuid, host: ctx.host },
-        { maxAttempts: 12, intervalMs: 50, sleep: noSleep },
+      assert(attempt.accepted !== null, `the merge request was refused: ${attempt.detail}`)
+      assert(attempt.settled !== null, `the accepted request carried no result: ${attempt.detail}`)
+      assert(
+        attempt.settled.status !== 'pending',
+        `the merge was still running when the bound was reached: ${attempt.settled.message ?? 'no message'}`,
       )
       assert(
-        settled.status !== 'pending',
-        `the merge never reported a terminal result: ${settled.message}`,
-      )
-      assert(
-        settled.status === 'merged',
-        `the merge reported ${settled.status}: ${settled.message ?? ''}`,
+        attempt.settled.status === 'merged',
+        `the merge reported ${attempt.settled.status}: ${attempt.settled.message ?? ''}`,
       )
       const after = await ctx.admin.readPullRequest(ctx.repository, layer.number)
       assert(
         after.merged === true || after.state === 'closed',
         `the host does not show #${layer.number} as landed: state ${String(after.state)}`,
       )
-      ctx.log(`#${layer.number} merged as ${String(settled.mergeOid)}`)
+      ctx.log(`#${layer.number} merged as ${String(attempt.settled.mergeOid)}`)
     },
   },
   {
@@ -217,14 +228,17 @@ export const mergeScenarios: readonly LiveScenario[] = [
         mergeAction: 'direct_merge',
         host: ctx.host,
       }).then(
-        (start) => ({ start, failed: false }),
-        (error: unknown) => ({ error, failed: true }),
+        () => null,
+        (error: unknown) => error,
       )
-      assert(first.failed, 'the lost merge should surface as a failure the caller must handle')
+      assert(first !== null, 'the lost merge reported success rather than an unknown outcome')
 
-      // The retry is the interesting part: the host already holds a request, so it
-      // answers 409 with that request's own identity. Adopting it is the only safe
-      // answer, and issuing a second request would race a merge nobody reviewed.
+      // The retry is the interesting part, and GitHub documents two answers to it.
+      // A host that is still holding the request answers `409` with that request's
+      // own identity, and adopting it is the only safe move. A host that finished
+      // before the retry arrived answers `200` with the completed result and no
+      // identity at all, which is a success and not a conflict to be recovered from.
+      // Either is correct; answering only one of them would be a bug.
       const second = await startAsyncMerge({
         fullName: ctx.repository,
         number: layer.number,
@@ -233,23 +247,44 @@ export const mergeScenarios: readonly LiveScenario[] = [
         mergeAction: 'direct_merge',
         host: ctx.host,
       })
+      if (second.kind === 'conflict') {
+        const adopted = second.result
+        assert(
+          adopted.expectedHeadSha === null || adopted.expectedHeadSha === layer.headSha,
+          `the host holds a request for head ${String(adopted.expectedHeadSha)} rather than the reviewed ${layer.headSha}`,
+        )
+        assert(
+          adopted.mergeAction === null || adopted.mergeAction === 'direct_merge',
+          `the host holds a ${String(adopted.mergeAction)} request rather than a direct merge`,
+        )
+        assert(
+          adopted.mergeMethod === null || adopted.mergeMethod === 'squash',
+          `the host holds a ${String(adopted.mergeMethod)} request rather than the reviewed squash`,
+        )
+        const uuid = adopted.uuid
+        assert(uuid !== null, 'the adopted conflict carried no UUID to read')
+        const settled = await pollAsyncMerge(
+          { fullName: ctx.repository, number: layer.number, uuid, host: ctx.host },
+          { maxAttempts: 30, intervalMs: 1_000 },
+        )
+        assert(
+          settled.status !== 'pending',
+          `the adopted request never reported a terminal result: ${settled.message ?? 'still running'}`,
+        )
+        ctx.log(`adopted the existing request ${uuid.slice(0, 8)} (${settled.status})`)
+      } else {
+        assert(
+          second.result.status === 'merged',
+          `the retry answered ${second.result.status} for a request the host had already completed: ${second.result.message ?? ''}`,
+        )
+        ctx.log(`the host had already completed the request: ${second.result.status}`)
+      }
+
+      const landed = await ctx.admin.readPullRequest(ctx.repository, layer.number)
       assert(
-        second.kind === 'conflict',
-        `the retry answered ${second.kind} instead of adopting the request the host already holds`,
+        landed.merged === true,
+        `the host does not report #${layer.number} as merged after the recovered merge`,
       )
-      const uuid = second.result.uuid
-      assert(uuid !== null, 'the adopted conflict carried no UUID to read')
-      const settled = await readAsyncMerge({
-        fullName: ctx.repository,
-        number: layer.number,
-        uuid,
-        host: ctx.host,
-      })
-      assert(
-        settled.status !== 'pending',
-        `the adopted request never reported a terminal result: ${settled.message}`,
-      )
-      ctx.log(`adopted the existing request ${String(uuid).slice(0, 8)} (${settled.status})`)
     },
   },
   {
@@ -257,47 +292,68 @@ export const mergeScenarios: readonly LiveScenario[] = [
     title: 'a merge queue is proven by the accept, not by configuration',
     requires: ['mergeQueue', 'canMerge'],
     async run(ctx) {
-      const layer = await mergeableLayer(ctx, 'merge-queue')
-      const started = await startAsyncMerge({
-        fullName: ctx.repository,
-        number: layer.number,
-        sha: layer.headSha,
-        mergeMethod: null,
-        mergeAction: 'merge_queue',
-        host: ctx.host,
+      const trunk = ctx.target.defaultBranch
+      const created = await ctx.admin.createRuleSet({
+        name: 'git-stacks-live-e2e merge queue',
+        enforcement: 'active',
+        baseRefs: [`refs/heads/${trunk}`],
+        mergeQueue: true,
       })
-      assert(started.kind === 'result', 'the queue refused the enqueue outright')
-      assert(
-        started.result.status === 'enqueued' || started.result.status === 'pending',
-        `the enqueue reported ${started.result.status}: ${started.result.message ?? ''}`,
-      )
-      const uuid = started.result.uuid
-      assert(uuid !== null, 'an accepted enqueue came back without a UUID')
+      ctx.target.resources.record({
+        kind: 'rule-set',
+        handle: `${ctx.repository}/rulesets/${created.id}`,
+        marker: ctx.marker,
+        createdAt: new Date().toISOString(),
+      })
+      try {
+        const layer = await mergeableLayer(ctx, 'merge-queue')
+        const observationsBefore = await readMergeObservations(ctx.workspace.path)
+        assert(
+          !queueConfiguredFor(observationsBefore, trunk),
+          `a queue was already recorded for ${trunk} before this scenario asked for one`,
+        )
 
-      await recordMergeObservation(ctx.workspace.path, {
-        pullRequest: layer.number,
-        branch: layer.branch,
-        base: 'main',
-        headOid: layer.headSha,
-        action: 'merge_queue',
-        method: null,
-        request: { pullRequest: layer.number, uuid },
-        enqueuedAt: Date.now(),
-        requestedAt: Date.now(),
-        outcome: started.result.status === 'enqueued' ? 'enqueued' : 'pending',
-        message: started.result.message,
-        confirmed: null,
-      })
-      const observations = await readMergeObservations(ctx.workspace.path)
-      assert(
-        queueConfiguredFor(observations, 'main'),
-        'an accepted enqueue did not register a queue for the base ref',
-      )
-      assert(
-        !queueConfiguredFor(observations, 'release/9.9'),
-        'a queue was reported for a base ref nothing was ever enqueued on',
-      )
-      ctx.log(`enqueued #${layer.number} on main`)
+        // The queue is configured on the host and the merge goes through the
+        // production path, which is the only thing that writes the journal entry
+        // `queueConfiguredFor` reads. Nothing here records an enqueue by hand: if
+        // the host answers anything but a terminal enqueue, this fails.
+        await mergeThroughProduction(ctx, layer.branch, 'default')
+
+        const observations = await readMergeObservations(ctx.workspace.path)
+        const recorded = observations.get(layer.number)
+        assert(
+          recorded !== undefined && recorded.outcome === 'enqueued',
+          `the production merge recorded ${String(recorded?.outcome)} for #${layer.number} rather than an accepted enqueue`,
+        )
+        assert(
+          queueConfiguredFor(observations, trunk),
+          `an accepted enqueue did not register a queue for ${trunk}`,
+        )
+        assert(
+          !queueConfiguredFor(observations, 'release/9.9'),
+          'a queue was reported for a base ref nothing was ever enqueued on',
+        )
+        const configured = await ctx.admin.mergeQueues(ctx.repository)
+        assert(
+          configured.includes(trunk),
+          `the host reports merge queues on ${configured.join(', ') || 'nothing'}, not on ${trunk}`,
+        )
+
+        // With its own enqueue recorded, the next preview offers the queue as a
+        // choice. That is the product discovering the queue through the journal
+        // rather than through a flag this scenario set.
+        const snapshot = await getSnapshot(ctx.workspace.path)
+        const preview = await previewStack(ctx.workspace.path, snapshot, 'merge', layer.branch)
+        assert(preview.merge !== null, `the second merge preview for ${layer.branch} carried no plan`)
+        assert(
+          preview.merge.actions.includes('merge_queue'),
+          `the preview offers ${preview.merge.actions.join(', ')} now that ${trunk} has answered with an enqueue`,
+        )
+        ctx.log(`enqueued #${layer.number} on ${trunk}; the journal and the host both know`)
+      } finally {
+        await ctx.admin.deleteRuleSet(ctx.repository, created.id)
+        ctx.target.resources.release(`${ctx.repository}/rulesets/${created.id}`)
+      }
     },
   },
 ]

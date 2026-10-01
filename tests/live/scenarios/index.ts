@@ -3,7 +3,7 @@ import { nativeStackScenarios } from './native-stacks'
 import { reviewScenarios } from './reviews'
 import { checkScenarios, mergeScenarios } from './checks-and-merge'
 import { raceScenarios } from './races'
-import { faultScenarios, ruleScenarios } from './rules-and-faults'
+import { ruleAndFaultScenarios } from './rules-and-faults'
 
 /**
  * Every scenario the suite knows about, in the order a run executes them.
@@ -18,10 +18,9 @@ export const LIVE_SCENARIOS: readonly LiveScenario[] = [
   ...nativeStackScenarios,
   ...reviewScenarios,
   ...checkScenarios,
-  ...ruleScenarios,
+  ...ruleAndFaultScenarios,
   ...mergeScenarios,
   ...raceScenarios,
-  ...faultScenarios,
 ]
 
 /** One scenario by id, which is what `--only` selects. */

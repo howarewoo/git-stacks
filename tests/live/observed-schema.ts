@@ -24,6 +24,17 @@ export interface SchemaProbe {
    * addition upstream is not a failure and a removal that a parser needs is.
    */
   readonly dependsOn: readonly string[]
+  /**
+   * A field a parser reads that the committed contract does not pin, and why.
+   *
+   * A path is unpinned when no authorized read ever saw the host answer it: an
+   * empty collection shows no rows, and a pull request with no rename shows no
+   * `previous_filename`. Reporting those as depended-on would make the fixture fail
+   * on every run for a shape nobody has observed, which is the same as pinning
+   * nothing at all. An authorized read that does see them moves them into
+   * `dependsOn`, and from then on a host that stops answering one is real drift.
+   */
+  readonly unpinned?: readonly { readonly path: string; readonly reason: string }[]
 }
 
 export const SCHEMA_PROBES: readonly SchemaProbe[] = [
@@ -36,7 +47,10 @@ export const SCHEMA_PROBES: readonly SchemaProbe[] = [
       'description',
       'permissions.admin',
       'permissions.push',
-      'topics.names',
+      // GitHub answers `topics` as an array of names. The ownership marker a run
+      // stamps and cleanup reads back is one entry in it, so an object here would
+      // be a contract no repository on the host can satisfy.
+      'topics',
     ],
   },
   {
@@ -59,7 +73,33 @@ export const SCHEMA_PROBES: readonly SchemaProbe[] = [
   {
     id: 'pull-request-comments',
     request: { method: 'GET', path: 'repos/{owner}/{repository}/pulls/{number}/comments' },
-    dependsOn: ['[].id', '[].body', '[].path', '[].commit_id', '[].user.login', '[].created_at'],
+    // `pull_request_review_id` is what a review comment is matched to after a lost
+    // response, and `line`/`side`/`start_line`/`start_side` are what the posted
+    // anchor is reconciled against. A comment whose identity or anchor the read
+    // cannot resolve is a write the product believes is still unconfirmed.
+    dependsOn: [
+      '[].id',
+      '[].body',
+      '[].path',
+      '[].commit_id',
+      '[].user.login',
+      '[].created_at',
+      '[].pull_request_review_id',
+      '[].line',
+      '[].side',
+      '[].start_line',
+      '[].start_side',
+    ],
+    unpinned: [
+      {
+        path: '[].start_line',
+        reason: 'the observed comments all sit on one line, so only the null form was ever seen',
+      },
+      {
+        path: '[].start_side',
+        reason: 'the observed comments all sit on one line, so only the null form was ever seen',
+      },
+    ],
   },
   {
     id: 'pull-request-reviews',
@@ -77,22 +117,54 @@ export const SCHEMA_PROBES: readonly SchemaProbe[] = [
       'check_runs[].conclusion',
       'check_runs[].app.id',
     ],
+    unpinned: [
+      {
+        path: 'check_runs[].conclusion',
+        reason: 'only completed runs were observed; an in-progress run answers null there',
+      },
+    ],
   },
   {
     id: 'combined-status',
     request: { method: 'GET', path: 'repos/{owner}/{repository}/commits/{sha}/status' },
-    dependsOn: [
-      'state',
-      'total_count',
-      'statuses[].context',
-      'statuses[].state',
-      'statuses[].target_url',
+    dependsOn: ['state', 'total_count'],
+    unpinned: [
+      {
+        path: 'statuses[]',
+        reason: 'every authorized read of a commit status found an empty array, so no row was seen',
+      },
+      {
+        path: 'statuses[].context',
+        reason: 'every authorized read of a commit status found an empty array, so no row was seen',
+      },
+      {
+        path: 'statuses[].state',
+        reason: 'every authorized read of a commit status found an empty array, so no row was seen',
+      },
+      {
+        path: 'statuses[].target_url',
+        reason: 'every authorized read of a commit status found an empty array, so no row was seen',
+      },
     ],
   },
   {
     id: 'pull-request-files',
     request: { method: 'GET', path: 'repos/{owner}/{repository}/pulls/{number}/files' },
-    dependsOn: ['[].filename', '[].status', '[].additions', '[].deletions', '[].patch', '[].sha'],
+    dependsOn: [
+      '[].filename',
+      '[].status',
+      '[].additions',
+      '[].deletions',
+      '[].changes',
+      '[].patch',
+      '[].sha',
+    ],
+    unpinned: [
+      {
+        path: '[].previous_filename',
+        reason: 'the observed pull request only adds files, so no rename or removal was seen',
+      },
+    ],
   },
   {
     id: 'native-stacks',
@@ -104,23 +176,58 @@ export const SCHEMA_PROBES: readonly SchemaProbe[] = [
         'X-GitHub-Api-Version': '2026-03-10',
       },
     },
-    dependsOn: ['[].number', '[].node_id', '[].base.ref', '[].open', '[].pull_requests[].number'],
+    // A stack's chain is rebuilt from each member's head ref and head commit, and
+    // a member that lost its state or draft flag is neither validated nor
+    // displayed correctly. `merged_at` is deliberately absent: only closed stacks
+    // were observed, so its presence on an open stack has never been established.
+    dependsOn: [
+      '[].number',
+      '[].node_id',
+      '[].base.ref',
+      '[].open',
+      '[].pull_requests[].number',
+      '[].pull_requests[].head.ref',
+      '[].pull_requests[].head.sha',
+      '[].pull_requests[].state',
+      '[].pull_requests[].draft',
+    ],
+    unpinned: [
+      {
+        path: '[].pull_requests[].merged_at',
+        reason: 'only closed stacks were observed, so an open member carrying the field is unproven',
+      },
+    ],
   },
 ]
 
-/** One observed path and the JSON type found there. */
+/** One observed path and one JSON type found there. A path may carry several. */
 export interface ObservedField {
   readonly path: string
   readonly type: string
 }
 
-export interface ObservedSchema {
-  readonly version: 1
-  /** Where the shape was read from: a live host, or the controlled runtime. */
+/**
+ * Where one probe's recorded shape came from, kept per probe.
+ *
+ * A blanket "observed on github.com" would be a lie for the probes whose inner rows
+ * no authorized read ever saw: those are recorded as unobserved rather than as
+ * proven, so a later reader can tell a pinned contract from an empty one.
+ */
+export interface ObservedProvenance {
+  /** The endpoint and host the shape was read from. */
   readonly source: string
   readonly observedAt: string
+  /** Paths inside this response the read could not show, and why. */
+  readonly unobserved?: readonly string[]
+}
+
+export interface ObservedSchema {
+  readonly version: 1
+  /** Where the whole document was written, kept for the reader of the file. */
+  readonly source: string
   /** Probe id to the fields its response carried. */
   readonly probes: Record<string, readonly ObservedField[]>
+  readonly provenance?: Record<string, ObservedProvenance>
 }
 
 function typeOf(value: unknown): string {
@@ -129,25 +236,62 @@ function typeOf(value: unknown): string {
   return typeof value
 }
 
+/** How many rows of one collection are read before the shape is considered complete. */
+const MAX_OBSERVED_ROWS = 25
+
 /**
  * The shape of one response, flattened to paths and types. Values are never kept:
  * a repository description, a token, or a diff line must not end up in a
  * committed fixture, and a type carries everything a parser can be broken by.
+ *
+ * Every row of a collection is read, not just the first: a host answers the same
+ * path with different types across rows (`line` is null for a comment that is no
+ * longer in the diff and a number for one that is), and a contract built from the
+ * first row alone would pin the wrong one of the two.
  */
 export function shapeOf(value: unknown, prefix = '', depth = 0): ObservedField[] {
+  return mergeObservedFields(collectShape(value, prefix, depth))
+}
+
+function collectShape(value: unknown, prefix: string, depth: number): ObservedField[] {
   if (depth > 6) return []
   if (Array.isArray(value)) {
-    if (value.length === 0) return [{ path: prefix, type: 'array' }]
-    return [{ path: prefix, type: 'array' }, ...shapeOf(value[0], `${prefix}[]`, depth + 1)]
+    const fields: ObservedField[] = [{ path: prefix, type: 'array' }]
+    for (const item of value.slice(0, MAX_OBSERVED_ROWS)) {
+      fields.push(...collectShape(item, `${prefix}[]`, depth + 1))
+    }
+    return fields
   }
   if (isRecord(value)) {
     const fields: ObservedField[] = [{ path: prefix, type: 'object' }]
     for (const key of Object.keys(value).sort()) {
-      fields.push(...shapeOf(value[key], prefix ? `${prefix}.${key}` : key, depth + 1))
+      fields.push(...collectShape(value[key], prefix ? `${prefix}.${key}` : key, depth + 1))
     }
     return fields
   }
   return [{ path: prefix, type: typeOf(value) }]
+}
+
+/**
+ * One entry per path and type, sorted, with the empty root path dropped.
+ *
+ * A read that arrives from outside this module is merged through the same
+ * function, so a captured contract and a freshly observed one are the same
+ * document rather than two formats that have to be reconciled by hand.
+ */
+export function mergeObservedFields(fields: readonly ObservedField[]): ObservedField[] {
+  const byPath = new Map<string, Set<string>>()
+  for (const field of fields) {
+    if (field.path === '') continue
+    const types = byPath.get(field.path) ?? new Set<string>()
+    types.add(field.type)
+    byPath.set(field.path, types)
+  }
+  return [...byPath.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .flatMap(([path, types]) =>
+      [...types].sort().map((type): ObservedField => ({ path, type })),
+    )
 }
 
 export interface SchemaDrift {
@@ -157,13 +301,22 @@ export interface SchemaDrift {
   readonly detail: string
 }
 
-/** What a live host answered for each probe, in a form that can be committed. */
+
+/**
+ * What a live host answered for each probe, in a form that can be committed.
+ *
+ * The unpinned paths are reported rather than recorded: a host that answers them
+ * is carrying information nobody has decided how to read, and hiding that would
+ * make the document look like it had been compared field by field.
+ */
 export async function observeSchema(
   transport: GitHubTransport,
   substitutions: { owner: string; repository: string; number: number; sha: string },
   source: string,
 ): Promise<ObservedSchema> {
-  const probes: Record<string, ObservedField[]> = {}
+  const observedAt = new Date().toISOString()
+  const probes: Record<string, readonly ObservedField[]> = {}
+  const provenance: Record<string, ObservedProvenance> = {}
   for (const probe of SCHEMA_PROBES) {
     const path = probe.request.path
       .replace('{owner}', substitutions.owner)
@@ -171,9 +324,10 @@ export async function observeSchema(
       .replace('{number}', String(substitutions.number))
       .replace('{sha}', substitutions.sha)
     const response = await transport.rest<unknown>({ ...probe.request, path })
-    probes[probe.id] = shapeOf(response.data).filter((field) => field.path !== '')
+    probes[probe.id] = shapeOf(response.data)
+    provenance[probe.id] = { source, observedAt }
   }
-  return { version: 1, source, observedAt: new Date().toISOString(), probes }
+  return { version: 1, source, probes, provenance }
 }
 
 /** The file the schema probe changes, and the branch it changes it on. */
@@ -280,23 +434,33 @@ export async function prepareSchemaSubject(input: {
   return { owner, repository, number: pull.number, sha }
 }
 
+/** The drift kinds a consumer can actually be broken by; the rest are reported only. */
+const BREAKING_KINDS: Record<SchemaDrift['kind'], boolean> = {
+  missing: true,
+  'type-changed': true,
+  added: false,
+}
+
 /**
  * What drifted between an observed host and the committed schema.
  *
  * An addition is reported, not failed: GitHub ships fields continuously, and a
  * suite that fails on every one of them trains people to ignore it. A field a
- * parser reads disappearing, or changing type, is a failure — that is the drift
- * that silently turns a merge button into a no-op.
+ * parser reads disappearing, or changing from a type the parser can use to one it
+ * cannot, is a failure — that is the drift that silently turns a merge button
+ * into a no-op.
+ *
+ * Direction matters. A host that narrows a nullable field to a value is not drift,
+ * and neither is one that answers null somewhere the committed contract saw a
+ * value: both are forms the parsers already handle, and failing on them would be
+ * the same noise as failing on an addition. What is drift is the other direction,
+ * a field that was there and is now something a parser cannot read.
  */
 export function compareSchemas(expected: ObservedSchema, observed: ObservedSchema): SchemaDrift[] {
   const drift: SchemaDrift[] = []
   for (const probe of SCHEMA_PROBES) {
-    const before = new Map(
-      (expected.probes[probe.id] ?? []).map((field) => [field.path, field.type] as const),
-    )
-    const after = new Map(
-      (observed.probes[probe.id] ?? []).map((field) => [field.path, field.type] as const),
-    )
+    const before = typesByPath(expected.probes[probe.id] ?? [])
+    const after = typesByPath(observed.probes[probe.id] ?? [])
     for (const path of probe.dependsOn) {
       const wanted = before.get(path)
       const found = after.get(path)
@@ -309,21 +473,33 @@ export function compareSchemas(expected: ObservedSchema, observed: ObservedSchem
           probe: probe.id,
           kind: 'added',
           path,
-          detail: 'a depended-on field is not in the committed schema; regenerate it',
+          detail: 'the committed schema does not record it; regenerate the fixture to pin it',
         })
         continue
       }
-      if (wanted !== found) {
+      const lost = [...wanted].filter((type) => type !== 'null' && !found.has(type))
+      if (lost.length > 0) {
         drift.push({
           probe: probe.id,
           kind: 'type-changed',
           path,
-          detail: `committed ${wanted}, host answered ${found}`,
+          detail: `committed ${[...wanted].sort().join('|')}, host answered ${[...found].sort().join('|')}`,
         })
       }
+      for (const type of found) {
+        if (!wanted.has(type)) {
+          drift.push({
+            probe: probe.id,
+            kind: 'added',
+            path,
+            detail: `host added the ${type} form of a field the committed schema pins as ${[...wanted].sort().join('|')}`,
+          })
+        }
+      }
     }
-    for (const [path, type] of after) {
-      if (!before.has(path)) {
+    for (const [path, types] of after) {
+      if (before.has(path)) continue
+      for (const type of types) {
         drift.push({ probe: probe.id, kind: 'added', path, detail: `host added a ${type} field` })
       }
     }
@@ -331,9 +507,19 @@ export function compareSchemas(expected: ObservedSchema, observed: ObservedSchem
   return drift
 }
 
+function typesByPath(fields: readonly ObservedField[]): Map<string, Set<string>> {
+  const byPath = new Map<string, Set<string>>()
+  for (const field of fields) {
+    const types = byPath.get(field.path) ?? new Set<string>()
+    types.add(field.type)
+    byPath.set(field.path, types)
+  }
+  return byPath
+}
+
 /** Only the drift that means the committed fixtures are no longer trustworthy. */
 export function breakingDrift(drift: readonly SchemaDrift[]): SchemaDrift[] {
-  return drift.filter((entry) => entry.kind !== 'added')
+  return drift.filter((entry) => BREAKING_KINDS[entry.kind])
 }
 
 /** Renders the committed document, stable so a regeneration produces a reviewable diff. */
@@ -341,15 +527,11 @@ export function renderSchema(schema: ObservedSchema): string {
   const body = {
     version: 1,
     source: schema.source,
+    provenance: schema.provenance ?? {},
     probes: Object.fromEntries(
       Object.entries(schema.probes)
         .sort(([left], [right]) => left.localeCompare(right))
-        .map(([id, fields]) => [
-          id,
-          fields
-            .map((field) => ({ path: field.path, type: field.type }))
-            .sort((left, right) => left.path.localeCompare(right.path)),
-        ]),
+        .map(([id, fields]) => [id, mergeObservedFields(fields)]),
     ),
   }
   return `${JSON.stringify(body, null, 2)}\n`
