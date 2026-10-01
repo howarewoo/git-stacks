@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { accessSync, constants as fsConstants, statSync } from 'node:fs'
 import { mkdtemp, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
-import { createRequire } from 'node:module'
+import { createRequire, syncBuiltinESMExports } from 'node:module'
 import { tmpdir } from 'node:os'
 import { basename, delimiter, dirname, join } from 'node:path'
 import { promisify } from 'node:util'
@@ -801,10 +801,25 @@ function runFixtureCommand(
   options: ExecFileOptions,
 ): Promise<{ stdout: string; stderr: string }> {
   const harness = active
-  if (!harness) return realPromisifiedExecFile(file, args, options)
   const command = commandName(file)
-  if (command === 'git') return runGitFixture(harness, file, args, options)
-  if (command === 'gh') return runGhFixture(harness, file, args, options)
+  if (command === 'git' || command === 'gh') {
+    // A `git` or `gh` request that reaches this boundary without a harness to answer it
+    // is a request for the real tools. Running it for real is how an interception failure
+    // reaches github.com instead of failing, so the fixture refuses it and says why.
+    if (!harness) {
+      return Promise.reject(
+        commandError(
+          file,
+          args,
+          2,
+          `the GitHub fixture has no harness to answer ${command}\n`,
+        ),
+      )
+    }
+    return command === 'git'
+      ? runGitFixture(harness, file, args, options)
+      : runGhFixture(harness, file, args, options)
+  }
   return realPromisifiedExecFile(file, args, options)
 }
 
@@ -831,6 +846,14 @@ childProcess.execFile = Object.assign(
   },
   { [promisify.custom]: runFixtureCommand },
 )
+
+// Node snapshots a builtin's named exports into its ESM facade the first time anything
+// imports it. A module that imported `execFile` before this patch therefore keeps the real
+// one, and every `git` it runs would leave the fixture for github.com. This call copies the
+// patched CommonJS exports back onto the facade, so an import that already happened still
+// sees the fixture's boundary. It is the supported way to do that, and it has to follow the
+// assignment above and precede any restoration.
+syncBuiltinESMExports()
 
 async function runRealGit(
   realGit: string,
