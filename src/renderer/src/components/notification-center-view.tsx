@@ -76,7 +76,7 @@ function NotificationRow({
 }) {
   const subscribable = thread.url !== null
   return (
-    <div className="capability-row" role="listitem">
+    <div className="capability-row notification-thread-row" role="listitem">
       <span className="capability-copy">
         <strong>
           {thread.unread ? '● ' : ''}
@@ -270,7 +270,9 @@ export function NotificationCredentialDialog({
  */
 export function NotificationCenterView({
   busy,
+  error,
   inbox,
+  onDismissError,
   onMarkAllRead,
   onMarkRead,
   onOpenCredential,
@@ -280,7 +282,10 @@ export function NotificationCenterView({
   onSubscribe,
 }: {
   busy: boolean
+  /** What a refused write left on the inbox itself, independent of the dialog. */
+  error: string | null
   inbox: NotificationInbox | null
+  onDismissError: () => void
   onMarkAllRead: () => void
   onMarkRead: (threadId: string) => void
   onOpenCredential: () => void
@@ -307,6 +312,14 @@ export function NotificationCenterView({
   const canAuthorize = needsCredential && status.store.available !== false
   const tone = STATE_TONES[state]
   const polls = status !== null && state === 'ready'
+  /**
+   * A credential this module sealed away is discardable whatever the module's
+   * own state is. A token GitHub refuses, or one kept while a policy holds the
+   * module off, is exactly the credential a person most needs to be able to
+   * remove, and removing it needs no GitHub to answer. So the control follows
+   * the stored reference rather than whether polling is currently allowed.
+   */
+  const hasStoredCredential = status !== null && typeof status.reference === 'string'
 
   return (
     <div className="diagnostics-view">
@@ -351,17 +364,19 @@ export function NotificationCenterView({
               >
                 Mark all read
               </Button>
-              <Button
-                disabled={busy}
-                onClick={onRemoveCredential}
-                size="sm"
-                tooltip="Remove this module's credential. Sign-in, pull requests, stacks, and reviews are untouched."
-                variant="secondary"
-              >
-                <Trash2 className="size-3.5" />
-                Remove credential
-              </Button>
             </>
+          ) : null}
+          {hasStoredCredential ? (
+            <Button
+              disabled={busy}
+              onClick={onRemoveCredential}
+              size="sm"
+              tooltip="Remove this module's credential. Sign-in, pull requests, stacks, and reviews are untouched."
+              variant="secondary"
+            >
+              <Trash2 className="size-3.5" />
+              Remove credential
+            </Button>
           ) : null}
         </div>
       </div>
@@ -369,7 +384,7 @@ export function NotificationCenterView({
         <div className="flex flex-wrap items-center gap-2">
           <Badge variant={BADGE_TONES[tone]}>{NOTIFICATION_STATE_LABELS[state]}</Badge>
           {status ? <Badge variant="outline">{status.host}</Badge> : null}
-          {polls ? (
+          {status && (hasStoredCredential || !off) ? (
             <Badge variant="outline">
               {status.login ?? 'unverified account'} ·{' '}
               {status.reference ? 'credential sealed' : 'no credential'}
@@ -378,6 +393,16 @@ export function NotificationCenterView({
           {status?.store.available === false ? <Badge variant="danger">No key store</Badge> : null}
         </div>
         {status?.message ? <InlineAlert tone={tone}>{status.message}</InlineAlert> : null}
+        {error ? (
+          <InlineAlert role="alert" title="That change did not reach GitHub" tone="error">
+            <p className="m-0">{error}</p>
+            <div className="mt-2">
+              <Button onClick={onDismissError} size="sm" variant="secondary">
+                Dismiss
+              </Button>
+            </div>
+          </InlineAlert>
+        ) : null}
         {held ? (
           <InlineAlert tone={tone} title="Held off by policy">
             A policy on this computer holds the Notification Center off. Every pull request, stack,

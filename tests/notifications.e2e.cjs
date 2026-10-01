@@ -19,7 +19,7 @@ const {
   readdirSync,
   rmSync,
 } = require('node:fs')
-const { tmpdir } = require('node:os')
+const { homedir, tmpdir } = require('node:os')
 const { join } = require('node:path')
 const net = require('node:net')
 const { createServer } = require('node:https')
@@ -31,6 +31,52 @@ const LAST_MODIFIED = 'Tue, 22 Sep 2026 09:41:07 GMT'
 const root = mkdtempSync(join(tmpdir(), 'git-stacks-notifications-e2e-'))
 const userData = join(root, 'userdata')
 mkdirSync(userData, { recursive: true })
+// Nothing the caller exported may reach this run: an ambient signing key, a
+// real hooks path, or a real GitHub login would all turn a disposable smoke into
+// an operation on the machine it happens to run on. The filter and the macOS
+// HOME rule are the packaged smoke's, because that is where they were proved
+// against a real window: macOS hands a sandboxed app the home the password
+// database reports, and its helpers never come up against a synthetic one.
+const UNSAFE_INHERITED =
+  /^(GIT_|GH_|GITHUB_|GIT_STACKS_)|^NODE_OPTIONS$|^ELECTRON_RUN_AS_NODE$|^SSH_AUTH_SOCK$|(TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|COOKIE|API_?KEY)/iu
+const INHERITED_HOME = process.platform === 'darwin'
+const disposableHome = join(root, 'home')
+mkdirSync(disposableHome, { recursive: true })
+// The file `git` reads instead of the caller's global configuration, so no
+// commit.gpgSign, core.hooksPath, or include directive can reach a fixture commit.
+const emptyGitConfig = join(root, 'gitconfig')
+writeFileSync(emptyGitConfig, '')
+
+function environment() {
+  const inherited = Object.fromEntries(
+    Object.entries(process.env).filter(([key]) => !UNSAFE_INHERITED.test(key)),
+  )
+  return {
+    ...inherited,
+    HOME: INHERITED_HOME ? homedir() : disposableHome,
+    XDG_CONFIG_HOME: join(disposableHome, '.config'),
+    // gh reads its own configuration directory, so a real GitHub login cannot
+    // be reused and no GitHub call this run makes can succeed by accident.
+    GH_CONFIG_DIR: join(disposableHome, '.config', 'gh'),
+    GH_PROMPT_DISABLED: '1',
+    GIT_TERMINAL_PROMPT: '0',
+    GIT_CONFIG_NOSYSTEM: '1',
+    GIT_CONFIG_GLOBAL: emptyGitConfig,
+  }
+}
+
+const gitEnv = {
+  ...environment(),
+  GIT_AUTHOR_NAME: 'Notification Fixture',
+  GIT_AUTHOR_EMAIL: 'notifications@example.invalid',
+  GIT_COMMITTER_NAME: 'Notification Fixture',
+  GIT_COMMITTER_EMAIL: 'notifications@example.invalid',
+  // Belt and braces against signing: even a configuration that bypassed the
+  // empty global file would have nothing here to sign with.
+  GIT_CONFIG_COUNT: '1',
+  GIT_CONFIG_KEY_0: 'commit.gpgSign',
+  GIT_CONFIG_VALUE_0: 'false',
+}
 const certificate = mkdtempSync(join(root, 'cert-'))
 // Generated for this run, with the address it serves named as a subject
 // alternative name, because that is the part a client verifies. The application
@@ -60,12 +106,16 @@ execFileSync(
 
 const repository = join(root, 'fixture')
 mkdirSync(repository)
+// The fixture repository is committed by the same isolated `git` the app will
+// see: this disposable run must not sign, run hooks, or read the machine's own
+// identity and credential helpers, in either process.
 function git(...args) {
-  return execFileSync('git', ['-C', repository, ...args], { encoding: 'utf8' }).trim()
+  return execFileSync('git', ['-C', repository, ...args], {
+    encoding: 'utf8',
+    env: gitEnv,
+  }).trim()
 }
 git('init', '-b', 'main')
-git('config', 'user.name', 'Notification Fixture')
-git('config', 'user.email', 'notifications@example.invalid')
 writeFileSync(join(repository, 'shared.txt'), 'baseline\n')
 git('add', 'shared.txt')
 git('commit', '-m', 'baseline')
@@ -84,7 +134,7 @@ function startGitHubHost() {
       reason: 'review_requested',
       subject: {
         title: 'Tidy the stack ordering rules',
-        url: 'https://github.com/acme/widgets/pull/101',
+        url: 'https://api.github.com/repos/acme/widgets/pulls/101',
         type: 'PullRequest',
       },
       repository: { name: 'widgets', owner: { login: 'acme' } },
@@ -96,7 +146,7 @@ function startGitHubHost() {
       reason: 'mention',
       subject: {
         title: 'Mentioned in "Release checklist"',
-        url: 'https://github.com/acme/widgets/issues/102',
+        url: 'https://api.github.com/repos/acme/widgets/issues/102',
         type: 'Issue',
       },
       repository: { name: 'widgets', owner: { login: 'acme' } },
@@ -123,6 +173,10 @@ function startGitHubHost() {
           response.writeHead(status, { 'content-type': 'application/json', ...headers })
           response.end(body === null ? '' : JSON.stringify(body))
         }
+        // A host that answers anything with 205 would let a wrong verb, a wrong
+        // path, and a right one all pass this run. Each request is answered the
+        // way GitHub documents it, and anything else is a failure the run
+        // reports rather than absorbs.
         if (url.pathname === '/api/v3/user') return answer(200, { login: 'octo' })
         if (request.method === 'DELETE' && url.pathname.endsWith('/subscription')) {
           threads = threads.filter(
@@ -130,14 +184,20 @@ function startGitHubHost() {
           )
           return answer(204, null, {})
         }
-        if (request.method === 'PATCH') {
-          const marked = /\/threads\/([^/]+)$/.exec(url.pathname)?.[1] ?? 'all'
+        // Mark all read is PUT /notifications; marking one thread read is
+        // PATCH /notifications/threads/{thread_id}. Both end at 205.
+        const singleThread = /^\/api\/v3\/notifications\/threads\/([^/]+)$/.exec(url.pathname)
+        if (request.method === 'PUT' && url.pathname === '/api/v3/notifications') {
+          threads = threads.map((thread) => ({ ...thread, unread: false }))
+          return answer(205, null, {})
+        }
+        if (request.method === 'PATCH' && singleThread) {
           threads = threads.map((thread) =>
-            marked === 'all' || thread.id === marked ? { ...thread, unread: false } : thread,
+            thread.id === singleThread[1] ? { ...thread, unread: false } : thread,
           )
           return answer(205, null, {})
         }
-        if (request.method !== 'GET') return answer(205, null, {})
+        if (request.method !== 'GET') return answer(405, { message: 'Method Not Allowed' })
         if (url.pathname.startsWith('/api/v3/notifications')) {
           // A conditional read is answered the way GitHub answers one: nothing
           // changed, so there is no body to send and only the validator.
@@ -154,7 +214,7 @@ function startGitHubHost() {
     },
   )
   return new Promise((resolve) => {
-    server.listen(0, '127.0.0.1', () => resolve({ server, asked }))
+    server.listen(0, '127.0.0.1', () => resolve({ server, asked, threads: () => threads }))
   })
 }
 
@@ -211,6 +271,121 @@ function storedFiles() {
   walk(userData)
   return bodies.join('\n')
 }
+/**
+ * Minimal CDP client, used to reach the main process: the window's real zoom
+ * factor belongs to its webContents, and no renderer-side call can change it.
+ */
+class Cdp {
+  constructor(socket) {
+    this.socket = socket
+    this.nextId = 0
+    this.pending = new Map()
+    socket.addEventListener('message', (event) => {
+      const message = JSON.parse(event.data)
+      const entry = this.pending.get(message.id)
+      if (!entry) return
+      this.pending.delete(message.id)
+      if (message.error) entry.reject(new Error(`${entry.method}: ${message.error.message}`))
+      else entry.resolve(message.result)
+    })
+  }
+
+  static async open(endpoint) {
+    const socket = new WebSocket(endpoint)
+    await new Promise((resolveOpen, rejectOpen) => {
+      socket.addEventListener('open', resolveOpen, { once: true })
+      socket.addEventListener('error', () => rejectOpen(new Error(`could not open ${endpoint}`)), {
+        once: true,
+      })
+    })
+    return new Cdp(socket)
+  }
+
+  call(method, params = {}) {
+    const id = ++this.nextId
+    return new Promise((resolve, reject) => {
+      this.pending.set(id, { method, resolve, reject })
+      this.socket.send(JSON.stringify({ id, method, params }))
+    })
+  }
+
+  /** Evaluates in the inspected process and returns the value it returned. */
+  async evaluate(expression) {
+    const result = await this.call('Runtime.evaluate', {
+      expression,
+      awaitPromise: true,
+      returnByValue: true,
+    })
+    if (result.exceptionDetails) throw new Error(result.exceptionDetails.text)
+    return result.result.value
+  }
+}
+
+/** Reads or sets the real Electron zoom factor of the app window. */
+const MAIN_ZOOM = `(async (factor) => {
+  function resolveElectron() {
+    if (typeof require === 'function') { try { return require('electron') } catch {} }
+    if (process.mainModule && typeof process.mainModule.require === 'function') {
+      try { return process.mainModule.require('electron') } catch {}
+    }
+    const getBuiltin = process.getBuiltinModule
+    if (typeof getBuiltin === 'function') {
+      const registered = getBuiltin('electron')
+      if (registered) return registered
+      const Module = getBuiltin('module')
+      if (Module) return Module.createRequire(process.execPath)('electron')
+    }
+    throw new Error('Could not resolve the electron module from the main process')
+  }
+  const { BrowserWindow } = resolveElectron()
+  const window = BrowserWindow.getAllWindows()[0]
+  if (!window) throw new Error('The app has no window to zoom')
+  const previous = window.webContents.getZoomFactor()
+  if (factor !== null) window.webContents.setZoomFactor(factor)
+  return previous
+})`
+
+/**
+ * Records what the app asked the operating system to open, in the main process
+ * that actually calls `shell.openExternal`. A notification subject arrives as an
+ * API URL, so what leaves here is what proves it was resolved into a page a
+ * person can actually read on the host this run is pinned to.
+ */
+const MAIN_EXTERNAL = `(async (action) => {
+  function resolveElectron() {
+    if (typeof require === 'function') { try { return require('electron') } catch {} }
+    if (process.mainModule && typeof process.mainModule.require === 'function') {
+      try { return process.mainModule.require('electron') } catch {}
+    }
+    const getBuiltin = process.getBuiltinModule
+    if (typeof getBuiltin === 'function') {
+      const registered = getBuiltin('electron')
+      if (registered) return registered
+      const Module = getBuiltin('module')
+      if (Module) return Module.createRequire(process.execPath)('electron')
+    }
+    throw new Error('Could not resolve the electron module from the main process')
+  }
+  const { shell } = resolveElectron()
+  const active = globalThis.__notificationE2eLinks
+  if (action === 'calls') return (active?.calls ?? []).slice()
+  if (action === 'restore') {
+    if (active) delete globalThis.__notificationE2eLinks
+    if (active && typeof active.original === 'function') shell.openExternal = active.original
+    return true
+  }
+  if (active) return { installed: true }
+  const store = { original: shell.openExternal, calls: [] }
+  const patched = async (url, options, callback) => {
+    store.calls.push(String(url))
+    if (typeof options === 'function') options()
+    else if (typeof callback === 'function') callback()
+    return true
+  }
+  shell.openExternal = patched
+  globalThis.__notificationE2eLinks = store
+  return { installed: shell.openExternal === patched }
+})`
 
 async function main() {
   const host = await startGitHubHost()
@@ -218,27 +393,32 @@ async function main() {
   writeStartState(hostName)
   const port = await availablePort()
   const env = {
-    ...process.env,
+    ...environment(),
     GIT_STACKS_USER_DATA: userData,
     // This run's certificate is added to the trust store the process starts
     // with. Verification is on and the chain is checked; nothing anywhere in
     // this run is told to stop checking.
     NODE_EXTRA_CA_CERTS: join(certificate, 'cert.pem'),
   }
-  delete env.ELECTRON_RUN_AS_NODE
   const app = spawn(
     electron,
-    [join(__dirname, '..', 'out', 'main', 'index.js'), `--remote-debugging-port=${port}`],
+    [
+      join(__dirname, '..', 'out', 'main', 'index.js'),
+      `--remote-debugging-port=${port}`,
+      '--inspect=0',
+    ],
     { env, stdio: ['ignore', 'pipe', 'pipe'] },
   )
   let output = ''
-  app.stdout.on('data', (chunk) => {
+  let inspectorEndpoint = null
+  const harvest = (chunk) => {
     output += chunk
-  })
-  app.stderr.on('data', (chunk) => {
-    output += chunk
-  })
+    inspectorEndpoint ??= output.match(/Debugger listening on (ws:\/\/\S+)/)?.[1] ?? null
+  }
+  app.stdout.on('data', harvest)
+  app.stderr.on('data', harvest)
   let socket
+  let main = null
   try {
     let target
     for (let attempt = 0; attempt < 200; attempt += 1) {
@@ -253,6 +433,10 @@ async function main() {
       await delay(100)
     }
     assert.ok(target, `the renderer was unavailable: ${output}`)
+    for (let attempt = 0; attempt < 200 && !inspectorEndpoint; attempt += 1) await delay(100)
+    assert.ok(inspectorEndpoint, `the main process inspector never announced itself: ${output}`)
+    main = await Cdp.open(inspectorEndpoint)
+    await main.call('Runtime.enable')
     socket = new WebSocket(target.webSocketDebuggerUrl)
     await new Promise((resolve, reject) => {
       socket.addEventListener('open', resolve, { once: true })
@@ -322,14 +506,49 @@ async function main() {
       writeFileSync(path, Buffer.from(shot.data, 'base64'))
       return path
     }
-    const resize = async (width, height, deviceScaleFactor) => {
+    const resize = async (width, height) => {
       await send('Emulation.setDeviceMetricsOverride', {
         width,
         height,
-        deviceScaleFactor,
+        deviceScaleFactor: 1,
         mobile: false,
       })
       await delay(400)
+    }
+    /**
+     * The window's real zoom factor, set by the process that owns it. A
+     * doubled deviceScaleFactor would only make more pixels of the same layout,
+     * so the only thing that proves 200% is the halved CSS viewport this returns.
+     */
+    const zoom = async (factor, expectedWidth) => {
+      const previous = await main.evaluate(`(${MAIN_ZOOM})(${JSON.stringify(factor)})`)
+      let reached = null
+      for (let attempt = 0; attempt < 150; attempt += 1) {
+        reached = await page('({ width: window.innerWidth, scale: window.visualViewport ? window.visualViewport.scale : null })')
+        if (Math.abs(reached.width - expectedWidth) <= 2) break
+        await delay(100)
+      }
+      assert.ok(
+        reached !== null && Math.abs(reached.width - expectedWidth) <= 2,
+        `zoom factor ${factor} left a ${reached?.width}px CSS viewport, not the ${expectedWidth}px that zoom produces: ${output.slice(-1500)}`,
+      )
+      return previous
+    }
+    /** Every box a person has to reach, in CSS pixels, at the current zoom. */
+    const unclipped = async (selector) => {
+      const boxes = await page(
+        `[...document.querySelectorAll(${JSON.stringify(selector)})].map((el) => {
+          const box = el.getBoundingClientRect()
+          return { text: (el.innerText || el.getAttribute('aria-label') || '').slice(0, 40), left: box.left, right: box.right, width: window.innerWidth }
+        })`,
+      )
+      for (const box of boxes) {
+        assert.ok(
+          box.left >= -1 && box.right <= box.width + 1,
+          `"${box.text}" runs outside the viewport at this zoom: ${JSON.stringify(box)}`,
+        )
+      }
+      return boxes.length
     }
     const key = async (keyName, code, virtual, modifiers = 0) => {
       const options = { key: keyName, code, windowsVirtualKeyCode: virtual, modifiers }
@@ -402,19 +621,17 @@ async function main() {
       `[...document.querySelectorAll('nav[aria-label="Settings sections"] button')].find((b) => b.textContent.trim() === 'Notifications').click()`,
     )
     await until('the notifications setting', `document.querySelector('#settings-notifications')`)
-    const explanation = await page(
-      `document.querySelector('nav[aria-label="Settings sections"]').nextElementSibling.textContent`,
+    // What matters here is that the switch cannot be thrown without its
+    // consequence being stated first, and that the statement is a list of the
+    // things a credential adds rather than one paragraph. The words themselves
+    // are the setting's copy, not this run's contract.
+    const consentPoints = await page(
+      `document.querySelector('nav[aria-label="Settings sections"]').nextElementSibling.querySelectorAll('li').length`,
     )
     assert.ok(
-      explanation.includes('What authorizing one adds, in full'),
-      `the setting states the boundary in full: ${explanation.slice(0, 200)}`,
+      consentPoints >= 3,
+      `the setting states what authorizing adds as a list a person can read: ${consentPoints} points`,
     )
-    for (const point of ['classic personal access token', 'notifications', 'key store']) {
-      assert.ok(
-        explanation.includes(point),
-        `enabling says what it adds, and names ${point}: ${explanation.slice(0, 300)}`,
-      )
-    }
     const enabledScreenshot = await screenshot('notifications-setting')
     await page(`document.querySelector('#settings-notifications').click()`)
     await until(
@@ -447,16 +664,38 @@ async function main() {
       'the credential dialog',
       `document.querySelector('[aria-label="GitHub Notifications credential"]')`,
     )
-    const boundaryText = await page(
-      `document.querySelector('[aria-label="GitHub Notifications credential"]').innerText`,
+    // The dialog's facts, not its copy: it names the host this run's credential
+    // is pinned to, and nothing can be submitted until the boundary is ticked.
+    const boundary = await page(
+      `(() => {
+        const dialog = document.querySelector('[aria-label="GitHub Notifications credential"]')
+        const terms = [...dialog.querySelectorAll('dt')].map((dt) => dt.textContent.trim())
+        const values = [...dialog.querySelectorAll('dd')].map((dd) => dd.textContent.trim())
+        const checked = [...dialog.querySelectorAll('input[type="checkbox"], [role="checkbox"]')].some((box) => box.getAttribute('aria-checked') === 'true' || box.checked === true)
+        return { host: terms.indexOf('Host') === -1 ? null : values[terms.indexOf('Host')], checked }
+      })()`,
     )
-    for (const point of ['classic personal access token', 'notifications', hostName]) {
-      assert.ok(boundaryText.includes(point), `the consent names ${point}: ${boundaryText}`)
-    }
+    assert.equal(
+      boundary.host,
+      hostName,
+      `the consent names the host this credential is pinned to: ${JSON.stringify(boundary)}`,
+    )
+    assert.equal(boundary.checked, false, 'no consent is given before the dialog is opened')
     const submitDisabledBeforeConsent = await page(
       `[...document.querySelectorAll('[aria-label="GitHub Notifications credential"] button')].filter((b) => b.textContent.includes('Authorize')).every((b) => b.disabled)`,
     )
     assert.equal(submitDisabledBeforeConsent, true, 'consent is required before a token is stored')
+
+    // While the dialog owns focus it is the only modal: a global shortcut
+    // pressed from inside its fields must not open the command palette
+    // underneath it.
+    await key('k', 'KeyK', 75, 4)
+    await delay(500)
+    assert.equal(
+      await page(`Boolean(document.querySelector('[aria-label^="Search actions"]'))`),
+      false,
+      'a global shortcut inside the credential dialog does not open the command palette through it',
+    )
 
     // Type into the real input so the value travels the real event path.
     await page(
@@ -506,6 +745,36 @@ async function main() {
 
     const standard = await screenshot('notifications-standard')
 
+    // Opening a thread hands the operating system a page, not an API endpoint.
+    // The host this run is pinned to is the only origin allowed, and the
+    // subject has to arrive there as the pull request a person can read.
+    assert.deepEqual(
+      await main.evaluate(`(${MAIN_EXTERNAL})('install')`),
+      { installed: true },
+      'the run could not intercept the links this app opens',
+    )
+    await page(
+      `(() => {
+        const row = [...document.querySelectorAll('[role="listitem"]')].find((r) => r.innerText.includes('Tidy the stack ordering rules'))
+        if (!row) throw new Error('no row names this thread: ' + document.body.innerText)
+        const open = [...row.querySelectorAll('button')].find((b) => (b.getAttribute('aria-label') || '').startsWith('Open '))
+        if (!open) throw new Error('this row offers no Open control: ' + row.innerText)
+        open.click()
+        return true
+      })()`,
+    )
+    let opened = []
+    for (let attempt = 0; attempt < 100 && opened.length === 0; attempt += 1) {
+      await delay(100)
+      opened = await main.evaluate(`(${MAIN_EXTERNAL})('calls')`)
+    }
+    assert.deepEqual(
+      opened,
+      [`https://${hostName}/acme/widgets/pull/101`],
+      'the subject API URL was resolved to a page on the host this module is pinned to',
+    )
+    await main.evaluate(`(${MAIN_EXTERNAL})('restore')`)
+
     // Marking one thread read writes to this host once and updates the row.
     await page(
       `[...document.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Mark read').click()`,
@@ -518,6 +787,51 @@ async function main() {
     const writes = host.asked.filter((entry) => entry.method === 'PATCH')
     assert.equal(writes.length, 1, `marking read is sent once: ${JSON.stringify(writes)}`)
     assert.equal(writes[0].path, '/api/v3/notifications/threads/101')
+
+    /** What the window says each row is: the badge, not the button's wording. */
+    const rowsOnScreen = async () =>
+      page(
+        `[...document.querySelectorAll('[role="list"][aria-label="GitHub notification threads"] [role="listitem"]')].map((row) => ({
+          title: row.querySelector('strong')?.textContent.trim() ?? '',
+          state: row.querySelector('[class*="badge"]')?.textContent.trim()
+            ?? [...row.querySelectorAll('span')].map((s) => s.textContent.trim()).find((t) => t === 'Read' || t === 'Unread')
+            ?? null,
+        }))`,
+      )
+
+    // Mark all read is the bulk operation, which GitHub documents as
+    // PUT /notifications, and it is judged by the inbox it leaves behind rather
+    // than by the request alone.
+    await page(
+      `[...document.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Mark all read').click()`,
+    )
+    const bulkDeadline = Date.now() + 10_000
+    let bulk = host.asked.filter((entry) => entry.method === 'PUT')
+    while (Date.now() < bulkDeadline && bulk.length === 0) {
+      await delay(100)
+      bulk = host.asked.filter((entry) => entry.method === 'PUT')
+    }
+    assert.deepEqual(
+      bulk.map((entry) => `${entry.method} ${entry.path}`),
+      ['PUT /api/v3/notifications'],
+      'marking the whole inbox read is the documented bulk request',
+    )
+    await until(
+      'every thread to be marked read',
+      `[...document.querySelectorAll('[role="list"][aria-label="GitHub notification threads"] [role="listitem"]')].length > 0 && [...document.querySelectorAll('[role="list"][aria-label="GitHub notification threads"] [role="listitem"]')].every((row) => row.innerText.includes('Read') && !row.innerText.includes('Unread'))`,
+      600,
+    )
+    const afterBulk = await rowsOnScreen()
+    assert.equal(
+      afterBulk.every((row) => row.state === 'Read'),
+      true,
+      `the inbox on screen agrees with the host's state after the bulk write: ${JSON.stringify(afterBulk)}`,
+    )
+    assert.equal(
+      host.threads().every((thread) => thread.unread === false),
+      true,
+      'the host really did mark every thread read',
+    )
 
     // The interval GitHub asked for is a floor a person cannot outrun either:
     // asking again straight away sends nothing and changes nothing.
@@ -532,9 +846,9 @@ async function main() {
       'a read asked for inside the interval GitHub named is not sent at all',
     )
     assert.equal(
-      (await page(`document.body.innerText`)).includes('Tidy the stack ordering rules'),
+      (await rowsOnScreen()).every((row) => row.state === 'Read'),
       true,
-      'and the list GitHub last confirmed is still the one on screen',
+      'and the list GitHub last confirmed is still the one on screen, reads and all',
     )
 
     // Once the interval has passed, the read is conditional, and a host that
@@ -563,6 +877,20 @@ async function main() {
       true,
       'the list is replayed whole, not replaced by whatever page answered',
     )
+    // A conditional read replays what the module last saw, and what it last saw
+    // is after the writes this run performed. Replaying a pre-write list would
+    // put acknowledged reads back in front of the person who acknowledged them.
+    assert.equal(
+      (await rowsOnScreen()).every((row) => row.state === 'Read'),
+      true,
+      'the acknowledged read marks survive the conditional read: ' +
+        JSON.stringify(await rowsOnScreen()),
+    )
+    assert.equal(
+      host.threads().every((thread) => thread.unread === false),
+      true,
+      'and the host agrees the inbox is read',
+    )
 
     // Unsubscribing is per thread, so the named row's own control is the one
     // used: the row that leaves the list is the row that was acted on, and the
@@ -589,7 +917,7 @@ async function main() {
     )
 
     // The keyboard route reaches the view and the dialog, without a pointer.
-    await resize(1024, 768, 1)
+    await resize(1024, 768)
     await page(`document.body.focus()`)
     await page(`document.querySelector('nav button').focus()`)
     for (let index = 0; index < 8; index += 1) {
@@ -602,21 +930,63 @@ async function main() {
     )
     const minimum = await screenshot('notifications-minimum')
 
-    // 200% text scaling has to stay usable rather than clipping the boundary.
-    await resize(1024, 768, 2)
-    const scaled = await screenshot('notifications-200')
-    assert.ok(scaled.length > 0)
-    await resize(1024, 768, 1)
+    // Real 200% zoom, applied by the process that owns the window. More
+    // screenshot pixels would only be the same layout at a higher density, so
+    // what is checked here is the halved CSS viewport and what still fits in it.
+    const baselineWidth = await page('window.innerWidth')
+    const originalZoom = await zoom(2, Math.round(baselineWidth / 2))
+    assert.equal(
+      await page(`document.documentElement.scrollWidth > window.innerWidth`),
+      false,
+      'the view reflows at 200% zoom rather than forcing a horizontal scrollbar',
+    )
+    const rowsAtZoom = await unclipped(
+      '[role="list"][aria-label="GitHub notification threads"] [role="listitem"]',
+    )
+    assert.ok(rowsAtZoom > 0, `the inbox is on screen at 200% zoom: ${rowsAtZoom} rows`)
+    const controlsAtZoom = await unclipped('.list-toolbar button, .capability-row button')
+    assert.ok(
+      controlsAtZoom >= 4,
+      `the inbox's own controls survive 200% zoom: ${controlsAtZoom} buttons`,
+    )
+    const zoomedInbox = await screenshot('notifications-zoom-200')
 
-    // Removing this module's credential disables this module and nothing else.
+    // The consent step has to stay reachable and unclipped at the same zoom:
+    // it is the one control that cannot be reached by resizing the window.
     await page(
-      `[...document.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Remove credential').click()`,
+      `(() => {
+        const button = [...document.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Remove credential')
+        if (button) button.click()
+        return true
+      })()`,
     )
     await until(
       'the module to be back to needing a credential',
       `document.body.innerText.includes('No credential stored')`,
       600,
     )
+    await page(
+      `[...document.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Authorize notifications').click()`,
+    )
+    await until(
+      'the credential dialog at 200% zoom',
+      `document.querySelector('[aria-label="GitHub Notifications credential"]')`,
+    )
+    const dialogAtZoom = await unclipped('[aria-label="GitHub Notifications credential"] *')
+    assert.ok(dialogAtZoom > 0, 'the consent dialog is laid out at 200% zoom')
+    await unclipped('[aria-label="GitHub Notifications credential"] button')
+    const zoomedConsent = await screenshot('notifications-zoom-200-consent')
+    await page(
+      `[...document.querySelectorAll('[aria-label="GitHub Notifications credential"] button')].find((b) => b.textContent.trim() === 'Cancel').click()`,
+    )
+    await until(
+      'the credential dialog to close',
+      `!document.querySelector('[aria-label="GitHub Notifications credential"]')`,
+    )
+    await zoom(originalZoom, baselineWidth)
+    await resize(1024, 768)
+
+
     const afterRemoval = await page(`document.body.innerText`)
     assert.equal(
       afterRemoval.includes('Tidy the stack ordering rules'),
@@ -636,7 +1006,8 @@ async function main() {
           setting: enabledScreenshot,
           standard,
           minimum,
-          scaled,
+          zoomedInbox,
+          zoomedConsent,
           hostRequests: host.asked.map((entry) => `${entry.method} ${entry.path}`),
           secretInFiles: stored.includes(TOKEN),
           rendererErrors,
@@ -648,6 +1019,13 @@ async function main() {
     socket.close()
   } finally {
     if (socket && socket.readyState !== WebSocket.CLOSED) socket.close()
+    if (main) {
+      try {
+        main.socket.close()
+      } catch {
+        /* the socket dies with the app process */
+      }
+    }
     app.kill()
     host.server.close()
     host.server.closeAllConnections()

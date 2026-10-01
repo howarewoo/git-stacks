@@ -91,6 +91,8 @@ export const SCENARIO_NAMES = [
   'notifications-awaiting-credential',
   'notifications-ready',
   'notifications-stale',
+  'notifications-rejected',
+  'notifications-policy-disabled',
 ] as const
 
 export type ScenarioName = (typeof SCENARIO_NAMES)[number]
@@ -167,6 +169,8 @@ export const SCENARIO_GROUPS = {
     'notifications-awaiting-credential',
     'notifications-ready',
     'notifications-stale',
+    'notifications-rejected',
+    'notifications-policy-disabled',
   ],
 } as const satisfies Record<string, readonly ScenarioName[]>
 

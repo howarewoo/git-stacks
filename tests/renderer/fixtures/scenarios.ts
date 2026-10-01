@@ -1239,7 +1239,12 @@ const notificationThreads: NotificationInbox['threads'] = [
   },
 ]
 
-function notificationInbox(overrides: Partial<NotificationInbox> = {}): NotificationInbox {
+/**
+ * What GitHub serves this module once a credential exists: the live inbox the
+ * ready scenario renders. Authorizing a module that had none moves it onto this,
+ * because a stored credential is what turns the module into a live inbox at all.
+ */
+export function notificationInbox(overrides: Partial<NotificationInbox> = {}): NotificationInbox {
   return {
     ...notificationStatus,
     threads: notificationThreads,
@@ -1842,6 +1847,10 @@ export const scenarios: Record<ScenarioName, FixtureScenario> = {
       ...notificationStatus,
       state: 'credential-missing',
       enabled: true,
+      // No credential means no sealed reference to discard and no account it
+      // was sealed for; a module in this state holds nothing.
+      reference: null,
+      login: null,
       threads: [],
       unreadCount: 0,
       poll: {
@@ -1870,5 +1879,32 @@ export const scenarios: Record<ScenarioName, FixtureScenario> = {
     snapshot: connected,
     recentRepositories,
     notifications: notificationInbox({ stale: true, staleReason: 'offline' }),
+  },
+  'notifications-rejected': {
+    name: 'notifications-rejected',
+    summary:
+      'GitHub refused the stored token. It is still sealed here, so it has to stay discardable.',
+    snapshot: connected,
+    recentRepositories,
+    notifications: notificationInbox({
+      state: 'rejected',
+      threads: [],
+      unreadCount: 0,
+      message: 'GitHub refused the stored notification credential. Replace it to read this inbox.',
+    }),
+  },
+  'notifications-policy-disabled': {
+    name: 'notifications-policy-disabled',
+    summary:
+      'A policy holds the module off while a credential is still sealed here, so it stays discardable.',
+    snapshot: connected,
+    recentRepositories,
+    notifications: notificationInbox({
+      state: 'policy-disabled',
+      policyDisabled: true,
+      threads: [],
+      unreadCount: 0,
+      message: 'Notifications are held off by policy on this computer.',
+    }),
   },
 }

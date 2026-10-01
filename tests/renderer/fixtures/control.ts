@@ -65,7 +65,7 @@ import type {
   ReviewDraftResolution,
   ReviewEvent,
 } from '../../../src/shared/review-threads'
-import { checksReportFor, scenarios } from './scenarios'
+import { checksReportFor, notificationInbox, scenarios } from './scenarios'
 import { updateStatusFixture } from './update-status'
 import { DEFAULT_SCENARIO, type ScenarioName } from './manifest'
 import type { PullRequestChecksReport } from '../../../src/shared/pull-request-checks'
@@ -391,7 +391,7 @@ export function installFixtureControl(options: {
     // state: the fixture never borrows the pull request inbox for it.
     notifications: () => {
       record('notifications', [])
-      return answer('notifications', () => scenario.notifications ?? disabledNotifications())
+      return answer('notifications', () => currentNotifications())
     },
     notificationsStatus: () => {
       record('notifications', [])
@@ -403,7 +403,7 @@ export function installFixtureControl(options: {
           stale: _stale,
           staleReason: _reason,
           ...status
-        } = scenario.notifications ?? disabledNotifications()
+        } = currentNotifications()
         return status
       })
     },
@@ -422,26 +422,43 @@ export function installFixtureControl(options: {
       return Promise.resolve()
     },
     saveNotificationCredential: (token) => {
-      record('notifications', [token])
+      // The value crosses the bridge once and is never read back, so the log
+      // records that a credential arrived rather than keeping it in page memory.
+      record('notifications', [token.trim().length > 0])
       return answer('notifications', () => {
+        const served = notificationInbox()
         current = {
           ...(current ?? disabledNotifications()),
           state: 'ready',
           enabled: true,
           message: null,
+          reference: served.reference,
+          login: served.login,
+          threads: served.threads,
+          unreadCount: served.unreadCount,
+          poll: served.poll,
+          stale: false,
+          staleReason: null,
         }
+        notificationListener?.(current)
         return current
       })
     },
     removeNotificationCredential: () => {
       record('notifications', [])
       return answer('notifications', () => {
+        // Consent lives in settings, so removing the credential leaves the module
+        // enabled and without a credential — the same state the main process
+        // resolves to, where the list read with that credential is gone.
         current = {
           ...(current ?? disabledNotifications()),
-          state: 'disabled',
-          enabled: false,
+          state: 'credential-missing',
+          enabled: true,
           reference: null,
+          threads: [],
+          unreadCount: 0,
         }
+        notificationListener?.(current)
         return current
       })
     },
@@ -1316,6 +1333,7 @@ export function installFixtureControl(options: {
       // what it displays is deliberately not reset along with them.
       active = scenario.snapshot
       startsPending = new Set(scenario.pending ?? [])
+      current = scenario.notifications ?? null
       released.clear()
       options.onScenarioChange(scenario.name)
     },

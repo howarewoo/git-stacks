@@ -476,6 +476,11 @@ function App() {
     ref: string
     name: string
   } | null>(null)
+  // The Notification Center's consent dialog owns focus the way every other
+  // modal does, so global shortcuts and navigation focus stay out of it. It
+  // is declared here because the gate below is read on every render, before
+  // the notification state is reached.
+  const [notificationDialogOpen, setNotificationDialogOpen] = React.useState(false)
   const anyModalOpen =
     paletteOpen ||
     shortcutSettingsOpen ||
@@ -483,7 +488,8 @@ function App() {
     deleteTarget !== null ||
     newBranchOpen ||
     prOpen ||
-    workflow !== null
+    workflow !== null ||
+    notificationDialogOpen
   const [announcement, setAnnouncement] = React.useState('')
   const previousViewRef = React.useRef(workspaceView)
   const isMac = React.useMemo(() => isMacPlatform(), [])
@@ -1034,13 +1040,17 @@ function App() {
     desktop.openExternal(uri).catch((value) => setError(readableError(value)))
   }, [account, desktop])
 
-  // The optional Notification Center. Its own state, its own error, and its own
-  // request counter: a failed notification read must not report itself as a
-  // failed repository operation, and it must not borrow the sign-in's panel.
+  // The optional Notification Center. Its own state, its own request counter,
+  // and two separate errors: a failed read must not report itself as a failed
+  // repository operation, must not borrow the sign-in's panel, and a write that
+  // GitHub refused must stay on the inbox even while the credential dialog is
+  // closed over it.
   const [notificationInbox, setNotificationInbox] = React.useState<NotificationInbox | null>(null)
   const [notificationBusy, setNotificationBusy] = React.useState(false)
-  const [notificationDialogOpen, setNotificationDialogOpen] = React.useState(false)
-  const [notificationError, setNotificationError] = React.useState<string | null>(null)
+  /** Belongs to the consent dialog, and is dismissed with it. */
+  const [notificationDialogError, setNotificationDialogError] = React.useState<string | null>(null)
+  /** Belongs to the inbox, and is only cleared by answering it with a new action. */
+  const [notificationActionError, setNotificationActionError] = React.useState<string | null>(null)
   const notificationRequest = React.useRef(0)
 
   // The poll pushes the inbox; this only asks for what is already known, so
@@ -1076,11 +1086,12 @@ function App() {
       if (!desktop || notificationBusy) return
       const request = ++notificationRequest.current
       setNotificationBusy(true)
+      setNotificationActionError(null)
       try {
         const next = await action()
         if (request === notificationRequest.current) setNotificationInbox(next)
       } catch (value) {
-        if (request === notificationRequest.current) setNotificationError(readableError(value))
+        if (request === notificationRequest.current) setNotificationActionError(readableError(value))
       } finally {
         if (request === notificationRequest.current) setNotificationBusy(false)
       }
@@ -1099,7 +1110,7 @@ function App() {
       if (!desktop) return
       const request = ++notificationRequest.current
       setNotificationBusy(true)
-      setNotificationError(null)
+      setNotificationDialogError(null)
       try {
         await desktop.updateSettings?.({ notifications: { enabled: true } })
         await notificationCall('saveNotificationCredential', token, accepted)
@@ -1107,7 +1118,7 @@ function App() {
         if (request === notificationRequest.current) setNotificationInbox(next)
         setNotificationDialogOpen(false)
       } catch (value) {
-        if (request === notificationRequest.current) setNotificationError(readableError(value))
+        if (request === notificationRequest.current) setNotificationDialogError(readableError(value))
       } finally {
         if (request === notificationRequest.current) setNotificationBusy(false)
       }
@@ -2708,7 +2719,9 @@ function App() {
     return (
       <NotificationCenterView
         busy={notificationBusy}
+        error={notificationActionError}
         inbox={notificationInbox}
+        onDismissError={() => setNotificationActionError(null)}
         onMarkAllRead={() => {
           void runNotification(() =>
             notificationCall<NotificationInbox>('markNotificationRead', 'all'),
@@ -2720,7 +2733,7 @@ function App() {
           )
         }}
         onOpenCredential={() => {
-          setNotificationError(null)
+          setNotificationDialogError(null)
           setNotificationDialogOpen(true)
         }}
         onOpenThread={(thread) => {
@@ -3571,7 +3584,7 @@ function App() {
       />
       <NotificationCredentialDialog
         busy={notificationBusy}
-        error={notificationError}
+        error={notificationDialogError}
         host={notificationInbox?.host ?? 'github.com'}
         login={notificationInbox?.login ?? null}
         onOpenChange={setNotificationDialogOpen}
