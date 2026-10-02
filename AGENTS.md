@@ -33,10 +33,11 @@ Development, builds, and `npm test` compile the native clone-promotion helper;
 provide a C compiler or set `CC`. `npm test` also provisions the pinned Git runtime
 and may download it when absent.
 
-- For renderer changes, follow [Renderer verification](README.md#renderer-verification):
-  exercise the real components in the separate gallery and run the relevant
-  `npm run test:ui` checks. Visual baselines are macOS-specific; review differences
-  before updating them. Gallery dispatch proves renderer intent, not Git success.
+- Renderer verification is suggested, not mandatory. Consider exercising the real
+  components in the separate gallery and running relevant `npm run test:ui` checks
+  as described in [Renderer verification](README.md#renderer-verification).
+  Visual baselines are macOS-specific. Gallery dispatch proves renderer intent,
+  not Git success.
 - For preload, CSP, packaging, or local Git integration, use the
   [packaged desktop smoke](README.md#packaged-desktop-smoke); its Windows path is
   not supported. Keep manual assistive-technology evidence separate from automation.
