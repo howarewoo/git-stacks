@@ -1,5 +1,11 @@
 import { expect, type Locator, type Page } from '@playwright/test'
-import { DEFAULT_SCENARIO, type GalleryRouteId, type ScenarioName } from '../fixtures/manifest'
+import {
+  DEFAULT_SCENARIO,
+  GALLERY_ROUTES,
+  type GalleryRouteId,
+  type ScenarioName,
+} from '../fixtures/manifest'
+import { scenarios } from '../fixtures/scenarios'
 import type { FixtureCall, FixtureCallRecord } from '../fixtures/types'
 import { galleryUrl } from '../fixtures/urls'
 import type { GitAction } from '../../../src/shared/types'
@@ -58,6 +64,17 @@ export async function settle(page: Page): Promise<void> {
 }
 
 /**
+ * Scenarios the gallery mounts with nothing open. The queue is one destination
+ * among several that works without a repository — it spans every registered
+ * repository — so this is a property of those scenarios, not of the queue.
+ */
+const SCENARIOS_WITHOUT_A_REPOSITORY = new Set(
+  Object.entries(scenarios)
+    .filter(([, scenario]) => scenario.snapshot === null)
+    .map(([name]) => name),
+)
+
+/**
  * Navigates to a gallery scenario/route under pinned time and media settings.
  */
 export async function openGallery(page: Page, options: OpenGalleryOptions = {}): Promise<void> {
@@ -99,7 +116,7 @@ export async function openGallery(page: Page, options: OpenGalleryOptions = {}):
 
   // The fixture gallery automatically calls connect() on mount to open
   // the repository for active repository scenarios.
-  if (route === 'app' && scenario !== 'shell-no-repository' && scenario !== 'shell-loading') {
+  if (route === 'app' && !SCENARIOS_WITHOUT_A_REPOSITORY.has(scenario)) {
     await expect(page.getByRole('toolbar', { name: 'Repository actions' })).toBeVisible({
       timeout: 15_000,
     })
@@ -149,10 +166,17 @@ export async function holdDoubleCall(page: Page, call: FixtureCall): Promise<voi
 /**
  * Releases held calls of a given method (or all calls if omitted).
  */
-export async function releaseDoubleCalls(page: Page, call?: FixtureCall): Promise<number> {
-  return page.evaluate((targetCall) => {
-    return window.fixture.release(targetCall)
-  }, call)
+export async function releaseDoubleCalls(
+  page: Page,
+  call?: FixtureCall,
+  occurrence?: 'oldest' | 'newest',
+): Promise<number> {
+  return page.evaluate(
+    ({ targetCall, targetOccurrence }) => {
+      return window.fixture.release(targetCall, targetOccurrence)
+    },
+    { targetCall: call, targetOccurrence: occurrence },
+  )
 }
 
 /**
@@ -172,7 +196,52 @@ export async function failNextDoubleCall(
 }
 
 /**
- * Clears logs and holds on the active scenario double.
+ * Changes the gallery route the way a person using the gallery's own index
+ * does: same document, new hash, no reload.
+ *
+ * The fixture double is installed once and outlives every route, so a spec can
+ * hold a call while the component tree is unmounted and find that call pending
+ * the moment the tree mounts again. A read the App issues at mount — its stored
+ * filters, say — is only reachable that way, and a reload would throw away the
+ * very in-place transition the hold exists to stage.
+ */
+export async function switchGalleryRoute(page: Page, route: GalleryRouteId): Promise<void> {
+  await page.evaluate((hash) => {
+    window.location.hash = hash
+  }, GALLERY_ROUTES[route])
+  await expect(page.locator(`html[data-gallery-route="${route}"]`)).toBeAttached()
+}
+
+/**
+ * Installs another scenario's answers into the doubles the mounted page is
+ * already using. Nothing remounts: the window keeps its destination, its state
+ * and its in-flight reads, and the repository it is displaying stays on screen
+ * until the application opens or refreshes one itself.
+ */
+export async function changeScenario(page: Page, name: ScenarioName): Promise<void> {
+  await page.evaluate((scenarioName) => {
+    window.fixture.setScenario(scenarioName)
+  }, name)
+}
+
+/**
+ * Answers the next call of `call` with `value` once, as the producer itself
+ * would return it. It is consumed by the first call `release` settles.
+ */
+export async function answerNextDoubleCall(
+  page: Page,
+  call: FixtureCall,
+  value: unknown,
+): Promise<void> {
+  await page.evaluate(
+    ({ targetCall, answer }) => {
+      window.fixture.answerNext(targetCall, answer)
+    },
+    { targetCall: call, answer: value },
+  )
+}
+
+/**
  */
 export async function resetDouble(page: Page): Promise<void> {
   await page.evaluate(() => {

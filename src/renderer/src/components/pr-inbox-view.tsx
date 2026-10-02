@@ -6,6 +6,7 @@ import {
   filterPullRequestInbox,
   pullRequestInboxGroupLabel,
   pullRequestInboxPresentation,
+  pullRequestInboxQueueCount,
   type PullRequestInboxFilter,
   type PullRequestInboxFilterDraft,
   type PullRequestInboxGroupId,
@@ -63,13 +64,35 @@ function updatedLabel(item: PullRequestInboxItem, now: number): string {
   return `updated on ${new Date(updated).toLocaleDateString()}`
 }
 
-/** The whole row's meaning, spoken in full: states are named, never tinted. */
+/**
+ * Whether this row's check and review facts were read at all. A host that
+ * refused the fields behind them never reported a result, and a row that says
+ * "no checks" or "no review decision" for them states an absence the host
+ * never confirmed.
+ */
+function hasMetadata(item: PullRequestInboxItem): boolean {
+  return item.metadata !== 'degraded'
+}
+
+function inboxCheckLabel(item: PullRequestInboxItem): string {
+  return hasMetadata(item) ? checkLabel(item.checks) : 'unknown'
+}
+
+function inboxReviewLabel(item: PullRequestInboxItem): string {
+  if (hasMetadata(item)) return reviewLabel(asSharedPullRequest(item))
+  return 'review state unknown'
+}
+
+function inboxAuthorLabel(item: PullRequestInboxItem): string {
+  return item.author ? `opened by ${item.author}` : 'author not reported'
+}
+
 function rowLabel(item: PullRequestInboxItem, now: number): string {
   const pr = asSharedPullRequest(item)
   const layer = item.stack
     ? `, layer ${item.stack.position} of ${item.stack.size} in native stack #${item.stack.stackNumber}`
     : ''
-  return `Open pull request #${item.number} ${item.title} in ${item.repository}, ${lifecycleLabel(pr)}, checks ${checkLabel(item.checks)}, ${reviewLabel(pr)}${layer}, ${updatedLabel(item, now)}`
+  return `Open pull request #${item.number} ${item.title} in ${item.repository}, ${inboxAuthorLabel(item)}, ${lifecycleLabel(pr)}, checks ${inboxCheckLabel(item)}, ${inboxReviewLabel(item)}${layer}, ${updatedLabel(item, now)}`
 }
 
 function groupCounts(
@@ -98,23 +121,50 @@ export function PullRequestInboxView({
   report,
   loading,
   refreshing,
+  activating,
   error,
   savedFilters,
+  savingFilters,
+  filtersReady,
   onOpen,
   onRefresh,
   onSaveFilters,
   onDismissError,
+  searchInputRef,
 }: {
   report: PullRequestInboxReport | null
   loading: boolean
+  /** A repository is opening, so a row cannot start a second one. */
+  activating: boolean
   refreshing: boolean
   error: string | null
   savedFilters: readonly PullRequestInboxSavedFilter[]
+  /**
+   * A saved-filter write is in flight. Every one of these mutations replaces
+   * the whole list, so a second one started from the same list would drop the
+   * first; the controls wait for the stored answer instead of racing it.
+   */
+  savingFilters: boolean
+  /**
+   * Whether the stored filter list has been read. Every mutation replaces the
+   * whole list, so one taken before that read has landed would send back a list
+   * that does not yet exist and store it in its place.
+   */
+  filtersReady: boolean
   onOpen: (item: PullRequestInboxItem) => void
   onRefresh: () => void
   onSaveFilters: (drafts: PullRequestInboxFilterDraft[]) => void
   onDismissError: () => void
+  /**
+   * The queue's own search field. The advertised search shortcut is routed here
+   * while this destination is on screen, because the field that answers it is
+   * the one that filters these rows.
+   */
+  searchInputRef: React.RefObject<HTMLInputElement | null>
 }) {
+  // A whole-list write must not be started before the stored list has been
+  // read: the name field, Enter, Save and Remove all share this one wait.
+  const filtersSettling = savingFilters || !filtersReady
   const [filter, setFilter] = React.useState<PullRequestInboxFilter>(
     PULL_REQUEST_INBOX_DEFAULT_FILTER,
   )
@@ -124,6 +174,9 @@ export function PullRequestInboxView({
   const now = Date.now()
 
   const items = report?.items ?? []
+  // Only rows that belong to a group are in the queue; a pull request nobody
+  // asked this viewer about is fetched, but no group can ever show it.
+  const queued = React.useMemo(() => pullRequestInboxQueueCount(items), [items])
   const counts = React.useMemo(() => groupCounts(report), [report])
   const shown = React.useMemo(() => filterPullRequestInbox(items, filter), [items, filter])
   const window = useListWindow(shown)
@@ -143,9 +196,10 @@ export function PullRequestInboxView({
       truncated: [],
       detail: 'The queue has not been read from GitHub yet.',
     },
-    total: items.length,
+    total: queued,
     shown: shown.length,
     filtering,
+    loading,
   })
 
   React.useEffect(() => {
@@ -167,13 +221,11 @@ export function PullRequestInboxView({
 
   /** Every stored filter except `drop`, re-expressed as a draft for the main process. */
   const draftsWithout = (drop?: { id: string }): PullRequestInboxFilterDraft[] =>
-    savedFilters
-      .filter((entry) => entry.id !== drop?.id)
-      .map((entry) => ({ ...entry }))
+    savedFilters.filter((entry) => entry.id !== drop?.id).map((entry) => ({ ...entry }))
 
   const saveCurrentFilter = () => {
     const name = saveName.trim()
-    if (!name) return
+    if (!name || filtersSettling) return
     // Saving under a name that already exists replaces that filter rather than
     // leaving two identically named entries, and it keeps the identity the
     // person already had. A new filter sends no id: the main process assigns
@@ -193,6 +245,7 @@ export function PullRequestInboxView({
   }
 
   const removeSavedFilter = (id: string) => {
+    if (filtersSettling) return
     onSaveFilters(draftsWithout({ id }))
   }
 
@@ -261,6 +314,7 @@ export function PullRequestInboxView({
                   </button>
                   <Button
                     aria-label={`Remove saved filter ${saved.name}`}
+                    disabled={filtersSettling}
                     onClick={() => removeSavedFilter(saved.id)}
                     size="icon-sm"
                     variant="ghost"
@@ -278,6 +332,7 @@ export function PullRequestInboxView({
               <Input
                 onChange={(event) => setFilter({ ...filter, search: event.target.value })}
                 placeholder="Title, #number, repository, branch, or author"
+                ref={searchInputRef}
                 type="search"
                 value={filter.search}
               />
@@ -285,7 +340,9 @@ export function PullRequestInboxView({
             <Field id="pr-inbox-repository" label="Repository">
               <Select
                 controlSize="compact"
-                onChange={(event) => setFilter({ ...filter, repository: event.target.value || null })}
+                onChange={(event) =>
+                  setFilter({ ...filter, repository: event.target.value || null })
+                }
                 value={filter.repository ?? ''}
               >
                 <option value="">All registered repositories</option>
@@ -296,11 +353,12 @@ export function PullRequestInboxView({
                 ))}
               </Select>
             </Field>
-            <Field id="pr-inbox-save" label="Save this filter">
-              {/* The save row is an input and its button, so the pair is one
-                  field rather than two: one label, one tab stop into the name. */}
-              <div className="pr-inbox-save">
+            <div className="pr-inbox-save">
+              {/* The label names the input itself, so clicking it focuses the
+                  name field and assistive technology reads the two together. */}
+              <Field id="pr-inbox-save" label="Save this filter">
                 <Input
+                  disabled={filtersSettling}
                   onChange={(event) => setSaveName(event.target.value)}
                   onKeyDown={(event) => {
                     if (event.key === 'Enter') {
@@ -312,17 +370,17 @@ export function PullRequestInboxView({
                   type="text"
                   value={saveName}
                 />
-                <Button
-                  disabled={!saveName.trim()}
-                  onClick={saveCurrentFilter}
-                  size="sm"
-                  variant="secondary"
-                >
-                  <Filter className="size-3.5" />
-                  Save
-                </Button>
-              </div>
-            </Field>
+              </Field>
+              <Button
+                disabled={filtersSettling || !saveName.trim()}
+                onClick={saveCurrentFilter}
+                size="sm"
+                variant="secondary"
+              >
+                <Filter className="size-3.5" />
+                Save
+              </Button>
+            </div>
           </div>
           {activeGroup ? (
             <p className="pr-inbox-rule">
@@ -341,8 +399,8 @@ export function PullRequestInboxView({
           ) : null}
           {report?.refresh.truncated.length ? (
             <InlineAlert className="gh-banner" title="Merged history is bounded" tone="info">
-              Recently merged shows the newest pages only for{' '}
-              {report.refresh.truncated.join(', ')}. Older merged pull requests were not read.
+              Recently merged shows the newest pages only for {report.refresh.truncated.join(', ')}.
+              Older merged pull requests were not read.
             </InlineAlert>
           ) : null}
           {error ? (
@@ -361,10 +419,15 @@ export function PullRequestInboxView({
               {window.visible.map((item, index) => {
                 const pr = asSharedPullRequest(item)
                 return (
-                  <div className="pr-inbox-item" key={`${item.repository}#${item.number}`} role="listitem">
+                  <div
+                    className="pr-inbox-item"
+                    key={`${item.host}/${item.repository}#${item.number}`}
+                    role="listitem"
+                  >
                     <button
                       aria-label={rowLabel(item, now)}
                       className="pr-row"
+                      disabled={activating}
                       onClick={() => onOpen(item)}
                       onFocus={() => setActiveIndex(index)}
                       onKeyDown={(event) => {
@@ -383,8 +446,8 @@ export function PullRequestInboxView({
                       <span className="pr-copy">
                         <strong>{item.title}</strong>
                         <small>
-                          {item.repository} · {item.head} <span aria-hidden="true">→</span>{' '}
-                          {item.base} · {updatedLabel(item, now)}
+                          {item.repository} · {inboxAuthorLabel(item)} · {item.head}{' '}
+                          <span aria-hidden="true">→</span> {item.base} · {updatedLabel(item, now)}
                         </small>
                       </span>
                       <span className="pr-badges">
@@ -394,11 +457,20 @@ export function PullRequestInboxView({
                           </Badge>
                         ) : null}
                         <Badge variant={lifecycleVariant(pr)}>{lifecycleLabel(pr)}</Badge>
-                        <Badge variant={checksVariant(item.checks)}>
-                          <ShieldCheck className="size-3" />
-                          {checkLabel(item.checks)}
+                        {hasMetadata(item) ? (
+                          <Badge variant={checksVariant(item.checks)}>
+                            <ShieldCheck className="size-3" />
+                            {checkLabel(item.checks)}
+                          </Badge>
+                        ) : (
+                          <Badge variant="outline">
+                            <ShieldCheck className="size-3" />
+                            checks unknown
+                          </Badge>
+                        )}
+                        <Badge variant={hasMetadata(item) ? reviewVariant(pr) : 'outline'}>
+                          {inboxReviewLabel(item)}
                         </Badge>
-                        <Badge variant={reviewVariant(pr)}>{reviewLabel(pr)}</Badge>
                       </span>
                       <ChevronRight className="size-4" />
                     </button>
@@ -414,10 +486,19 @@ export function PullRequestInboxView({
                 remaining={window.remaining}
               />
             </div>
+          ) : presentation.list === 'loading' ? (
+            <p className="workflow-loading" role="status">
+              <Inbox className="size-4" />
+              Reading the pull request queue from GitHub…
+            </p>
           ) : presentation.list === 'unconfirmed' ? (
             <EmptyState className="compact-empty">
               <Search className="empty-icon" />
-              <h2>The queue is unconfirmed</h2>
+              {/* The notice's own heading, because every state that reaches
+                  here already says something more exact than "unconfirmed"
+                  would: which read ended, and why. The generic line stays for a
+                  report that carries no notice at all. */}
+              <h2>{presentation.notice?.title ?? 'The queue is unconfirmed'}</h2>
               <p>
                 {presentation.notice?.detail ??
                   'GitHub has not confirmed this queue yet, so the rows below are not known to be current.'}
@@ -431,8 +512,8 @@ export function PullRequestInboxView({
               <Search className="empty-icon" />
               <h2>No matching pull requests</h2>
               <p>
-                {items.length > 0
-                  ? `${items.length} pull request${items.length === 1 ? '' : 's'} are in the queue; this group, search, and repository show none of them.`
+                {queued > 0
+                  ? `${queued} pull request${queued === 1 ? '' : 's'} in the queue; this group, search, and repository show none of them.`
                   : 'Change or clear the search and the repository filter to see the other pull requests.'}
               </p>
               <Button
@@ -443,15 +524,12 @@ export function PullRequestInboxView({
                 Clear filters
               </Button>
             </EmptyState>
-          ) : loading ? (
-            <p className="workflow-loading" role="status">
-              <Inbox className="size-4" />
-              Reading the pull request queue from GitHub…
-            </p>
           ) : (
             <EmptyState className="compact-empty">
               <Inbox className="empty-icon" />
-              <h2>Nothing in {activeGroup ? pullRequestInboxGroupLabel(filter.group) : 'this group'}</h2>
+              <h2>
+                Nothing in {activeGroup ? pullRequestInboxGroupLabel(filter.group) : 'this group'}
+              </h2>
               <p>
                 {activeGroup?.rule ??
                   'GitHub confirmed the queue and this group is empty across your registered repositories.'}

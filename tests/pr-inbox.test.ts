@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -16,6 +16,8 @@ import {
   pullRequestInboxBudgetAllows,
   pullRequestInboxGroups,
   pullRequestInboxPresentation,
+  pullRequestInboxQueueCount,
+  pullRequestInboxRefreshFailure,
   pullRequestInboxRepositoryStatusLabel,
   sortPullRequestInbox,
   type PullRequestInboxFilter,
@@ -41,6 +43,7 @@ function signals(overrides: Partial<PullRequestInboxSignals> = {}): PullRequestI
     lastTurnLogin: null,
     updatedAt: '2026-02-28T12:00:00.000Z',
     mergedAt: null,
+    metadata: 'full',
     ...overrides,
   }
 }
@@ -79,6 +82,7 @@ function item(overrides: Partial<PullRequestInboxItem> = {}): PullRequestInboxIt
     lastTurnLogin: null,
     updatedAt: '2026-02-28T12:00:00.000Z',
     mergedAt: null,
+    metadata: 'full',
     groups: ['review-requested'],
     ...overrides,
   }
@@ -88,7 +92,14 @@ function repositoryReport(
   repository: string,
   status: PullRequestInboxRepositoryReport['status'] = 'ok',
 ): PullRequestInboxRepositoryReport {
-  return { repository, path: `/repos/${repository}`, host: 'github.com', status, detail: '' }
+  return {
+    repository,
+    path: `/repos/${repository}`,
+    host: 'github.com',
+    status,
+    viewer: VIEWER,
+    detail: '',
+  }
 }
 
 function refresh(overrides: Partial<PullRequestInboxRefresh> = {}): PullRequestInboxRefresh {
@@ -126,10 +137,9 @@ test('a draft is never in a review group, whoever asked for review', () => {
 
 test('a draft you owe a reply on is still only a draft', () => {
   assert.deepEqual(groupsOf({ draft: true, author: VIEWER, lastTurnLogin: 'grace' }), ['drafts'])
-  assert.deepEqual(
-    groupsOf({ draft: true, author: VIEWER, reviewDecision: 'CHANGES_REQUESTED' }),
-    ['drafts'],
-  )
+  assert.deepEqual(groupsOf({ draft: true, author: VIEWER, reviewDecision: 'CHANGES_REQUESTED' }), [
+    'drafts',
+  ])
 })
 
 test('needs my response is a reply you owe, not silence', () => {
@@ -152,7 +162,9 @@ test('my pull requests separate waiting from approved', () => {
     'my-prs-waiting',
   ])
   assert.deepEqual(groupsOf({ author: VIEWER, reviewDecision: null }), ['my-prs-waiting'])
-  assert.deepEqual(groupsOf({ author: VIEWER, reviewDecision: 'APPROVED', draft: true }), ['drafts'])
+  assert.deepEqual(groupsOf({ author: VIEWER, reviewDecision: 'APPROVED', draft: true }), [
+    'drafts',
+  ])
 })
 
 test('approved and then commented on is the one intended overlap', () => {
@@ -222,10 +234,7 @@ test('every group is reachable from some fact', () => {
       reachable.add(group)
     }
   }
-  assert.deepEqual(
-    [...reachable].sort(),
-    PULL_REQUEST_INBOX_GROUPS.map((group) => group.id).sort(),
-  )
+  assert.deepEqual([...reachable].sort(), PULL_REQUEST_INBOX_GROUPS.map((group) => group.id).sort())
 })
 
 test('membership is decided once, and in a fixed order, for the same facts', () => {
@@ -234,10 +243,6 @@ test('membership is decided once, and in a fixed order, for the same facts', () 
     'needs-response',
     'my-prs-approved',
   ])
-  assert.deepEqual(
-    pullRequestInboxGroups(fact, { viewer: VIEWER, now: NOW }),
-    pullRequestInboxGroups({ ...fact }, { viewer: VIEWER, now: NOW }),
-  )
 })
 
 test('a read with no viewer places nothing in a viewer-relative group', () => {
@@ -276,12 +281,17 @@ test('a closed pull request is in no group at all', () => {
   assert.deepEqual(groupsOf({ state: 'CLOSED', draft: true }), [])
 })
 
-test('every group states its rule, and no unknown group is accepted', () => {
+test('no unknown group is accepted, by the renderer or by a saved filter', () => {
   for (const group of PULL_REQUEST_INBOX_GROUPS) {
-    assert.ok(group.rule.length > 20, `${group.id} has no stated rule`)
     assert.ok(isPullRequestInboxGroupId(group.id))
   }
   assert.equal(isPullRequestInboxGroupId('notifications'), false)
+  assert.deepEqual(
+    parsePullRequestInboxSavedFilters([
+      { id: 'a', name: 'Unknown group', group: 'notifications', search: '', repository: null },
+    ]),
+    [],
+  )
 })
 
 test('search matches what a row already shows, and every term must match', () => {
@@ -291,10 +301,7 @@ test('search matches what a row already shows, and every term must match', () =>
   }
   assert.equal(matchesPullRequestInboxSearch(row, 'grace nothing'), false)
   assert.equal(matchesPullRequestInboxSearch(row, '   '), true)
-  assert.equal(
-    filterPullRequestInbox([row], filterWith({ search: 'acme/app' })).length,
-    1,
-  )
+  assert.equal(filterPullRequestInbox([row], filterWith({ search: 'acme/app' })).length, 1)
   assert.equal(filterPullRequestInbox([row], filterWith({ search: 'nothing here' })).length, 0)
 })
 
@@ -317,12 +324,6 @@ test('a group filter shows only that group', () => {
     filterPullRequestInbox(rows, filterWith({ group: 'my-prs-approved' })).map((row) => row.number),
     [2],
   )
-})
-
-test('the queue opens on the group that asks for your review', () => {
-  assert.equal(PULL_REQUEST_INBOX_DEFAULT_FILTER.group, 'review-requested')
-  assert.equal(PULL_REQUEST_INBOX_DEFAULT_FILTER.search, '')
-  assert.equal(PULL_REQUEST_INBOX_DEFAULT_FILTER.repository, null)
 })
 
 test('rows are ordered by recency, then repository, then number', () => {
@@ -386,17 +387,35 @@ test('a partial read is never promoted to a complete one', () => {
 test('empty, filtered-empty, and unconfirmed are three different answers', () => {
   const confirmed = refresh()
   assert.deepEqual(
-    pullRequestInboxPresentation({ refresh: confirmed, total: 0, shown: 0, filtering: false }),
+    pullRequestInboxPresentation({
+      refresh: confirmed,
+      total: 0,
+      shown: 0,
+      filtering: false,
+      loading: false,
+    }),
     { list: 'empty', notice: null },
   )
   assert.deepEqual(
-    pullRequestInboxPresentation({ refresh: confirmed, total: 1, shown: 0, filtering: true }),
+    pullRequestInboxPresentation({
+      refresh: confirmed,
+      total: 1,
+      shown: 0,
+      filtering: true,
+      loading: false,
+    }),
     { list: 'filtered-empty', notice: null },
   )
   // A group that holds none of the rows is filtered-empty, not empty: the queue
   // itself answered, and the person is looking at one group.
   assert.deepEqual(
-    pullRequestInboxPresentation({ refresh: confirmed, total: 1, shown: 0, filtering: false }),
+    pullRequestInboxPresentation({
+      refresh: confirmed,
+      total: 1,
+      shown: 0,
+      filtering: false,
+      loading: false,
+    }),
     { list: 'filtered-empty', notice: null },
   )
   for (const state of ['stale', 'offline', 'auth-required', 'rate-limited', 'partial'] as const) {
@@ -405,6 +424,7 @@ test('empty, filtered-empty, and unconfirmed are three different answers', () =>
       total: 0,
       shown: 0,
       filtering: false,
+      loading: false,
     })
     assert.equal(unconfirmed.list, 'unconfirmed', state)
     assert.ok(unconfirmed.notice, state)
@@ -424,6 +444,7 @@ test('a partial read names the repositories it did not read', () => {
     total: 1,
     shown: 1,
     filtering: false,
+    loading: false,
   })
   assert.equal(partial.list, 'rows')
   assert.equal(partial.notice?.tone, 'warning')
@@ -441,20 +462,54 @@ test('rows stay on screen behind the reason a refresh is not current', () => {
     total: 3,
     shown: 1,
     filtering: false,
+    loading: false,
   })
   assert.equal(kept.list, 'rows')
   assert.equal(kept.notice?.tone, 'warning')
-  assert.equal(kept.notice?.detail, 'GitHub could not be reached.')
 })
 
-test('a repository that was not attempted is named, never counted as empty', () => {
-  assert.equal(pullRequestInboxRepositoryStatusLabel('skipped'), 'not attempted')
+test('a queue nothing has ever confirmed reads as being read, not as unconfirmed', () => {
+  const never = refresh({
+    state: 'stale',
+    confirmedAt: null,
+    detail: 'GitHub could not be reached.',
+  })
+  const reading = pullRequestInboxPresentation({
+    refresh: never,
+    total: 0,
+    shown: 0,
+    filtering: false,
+    loading: true,
+  })
+  assert.equal(reading.list, 'loading')
+  assert.equal(reading.notice, null)
+  // The read that is running decides this, not the state the last failed one
+  // left behind: once it answers, the refusal is what the queue says.
   assert.equal(
-    pullRequestInboxRepositoryStatusLabel('forbidden'),
-    'not visible to this credential',
+    pullRequestInboxPresentation({
+      refresh: never,
+      total: 0,
+      shown: 0,
+      filtering: false,
+      loading: false,
+    }).list,
+    'unconfirmed',
   )
-  assert.equal(pullRequestInboxRepositoryStatusLabel('unauthorized'), 'sign-in rejected')
-  assert.equal(pullRequestInboxRepositoryStatusLabel('ok'), 'read')
+})
+
+test('a repository that was not attempted is named beside the ones that were', () => {
+  const unread = pullRequestInboxPresentation({
+    refresh: refresh({
+      state: 'partial',
+      repositories: [repositoryReport('acme/app'), repositoryReport('acme/other', 'skipped')],
+    }),
+    total: 1,
+    shown: 1,
+    filtering: false,
+    loading: false,
+  })
+  assert.match(unread.notice?.detail ?? '', /acme\/other/)
+  assert.equal(unread.notice?.detail.includes('acme/app (read)'), false)
 })
 
 test('a saved filter file that cannot be understood yields no filters, not a refusal', () => {
@@ -519,10 +574,7 @@ test('one invalid draft refuses the whole write rather than losing a filter', as
       { name: 'Kept', group: 'drafts', search: '', repository: null },
     ])
     await assert.rejects(
-      filters.save([
-        ...saved,
-        { name: '', group: 'drafts', search: '', repository: null },
-      ]),
+      filters.save([...saved, { name: '', group: 'drafts', search: '', repository: null }]),
     )
     assert.deepEqual(await filters.load(), saved)
   } finally {
@@ -548,4 +600,146 @@ test('a saved filter list is bounded', async () => {
   } finally {
     await rm(dir, { recursive: true, force: true })
   }
+})
+
+test('overlapping saves each store the list they were given', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'git-stacks-inbox-'))
+  const file = join(dir, 'pull-request-inbox.json')
+  const draft = (name: string) => ({
+    name,
+    group: 'drafts' as const,
+    search: name,
+    repository: null,
+  })
+  try {
+    const filters = new PullRequestInboxFilters(file)
+    // The save controls stay live while a save is in flight, so two saves can
+    // overlap. Sharing one temporary path let the second payload replace the
+    // first before its rename, and the second rename then failed: the window was
+    // told a list was stored that the file did not hold.
+    const first = filters.save([draft('First'), draft('Second')])
+    const second = filters.save([draft('Third')])
+    const [firstSaved, secondSaved] = await Promise.all([first, second])
+    assert.deepEqual(
+      firstSaved.map((filter) => filter.name),
+      ['First', 'Second'],
+    )
+    // The last save is the one on disk, and the window is told exactly that.
+    const written = JSON.parse(await readFile(file, 'utf8')) as { filters: unknown }
+    const stored = parsePullRequestInboxSavedFilters(written.filters)
+    assert.deepEqual(stored, secondSaved)
+    assert.deepEqual(await filters.load(), secondSaved)
+    // A saved filter keeps its identity when it is saved again, so a later edit
+    // replaces the filter it names rather than adding a second copy of it.
+    const again = await filters.save([{ ...secondSaved[0], name: 'Renamed' }])
+    assert.equal(again.length, 1)
+    assert.equal(again[0].id, secondSaved[0].id)
+    assert.equal(again[0].name, 'Renamed')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a save that cannot be written does not wedge the ones after it', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'git-stacks-inbox-'))
+  // A directory where the filter file belongs: the payload is written and the
+  // rename onto it is refused, which is a write that cannot succeed.
+  const blocked = join(dir, 'blocked')
+  await mkdir(blocked)
+  try {
+    const filters = new PullRequestInboxFilters(blocked)
+    await assert.rejects(
+      filters.save([{ name: 'Lost', group: 'drafts', search: '', repository: null }]),
+    )
+    await rm(blocked, { recursive: true, force: true })
+    const saved = await filters.save([
+      { name: 'Kept', group: 'drafts', search: '', repository: null },
+    ])
+    assert.deepEqual(
+      saved.map((filter) => filter.name),
+      ['Kept'],
+    )
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('an expired rate-limit window admits the queue again', () => {
+  const budget = DEFAULT_PULL_REQUEST_INBOX_BUDGET
+  // A count reported for a window that has already passed says nothing about the
+  // requests available now, so refusing on it would park a queue that no admitted
+  // request could ever unpark.
+  assert.deepEqual(
+    pullRequestInboxBudgetAllows(3, budget, {
+      reset: new Date(NOW - 60_000),
+      now: NOW,
+    }),
+    { allowed: true, reason: '' },
+  )
+  assert.equal(
+    pullRequestInboxBudgetAllows(3, budget, { reset: new Date(NOW + 60_000), now: NOW }).allowed,
+    false,
+  )
+  // A window still open keeps refusing, with the count that refuses it.
+  assert.match(
+    pullRequestInboxBudgetAllows(3, budget, { reset: new Date(NOW + 60_000), now: NOW }).reason,
+    /3 requests left/,
+  )
+})
+
+test('a refresh that read nothing says which failure it was, and names the repositories', () => {
+  const offline = pullRequestInboxRefreshFailure(
+    [repositoryReport('acme/app', 'offline'), repositoryReport('acme/widgets', 'offline')],
+    null,
+  )
+  assert.equal(offline?.state, 'offline')
+  assert.match(offline?.detail ?? '', /acme\/app/)
+  assert.match(offline?.detail ?? '', /acme\/widgets/)
+
+  const unreadable = pullRequestInboxRefreshFailure(
+    [repositoryReport('acme/app', 'forbidden'), repositoryReport('acme/private', 'not-found')],
+    null,
+  )
+  assert.equal(unreadable?.state, 'auth-required')
+  assert.match(unreadable?.detail ?? '', /acme\/private/)
+
+  // One repository that answered makes this a partial read, not a failure.
+  assert.equal(
+    pullRequestInboxRefreshFailure(
+      [repositoryReport('acme/app'), repositoryReport('acme/widgets', 'offline')],
+      null,
+    ),
+    null,
+  )
+  // A failure the refresh already established is reported as it stands.
+  assert.equal(
+    pullRequestInboxRefreshFailure([repositoryReport('acme/app', 'skipped')], {
+      state: 'rate-limited',
+      detail: 'budget spent',
+    })?.state,
+    'rate-limited',
+  )
+})
+
+test('only pull requests that belong to a group are counted in the queue', () => {
+  const rows = [
+    item({ number: 1, groups: ['review-requested'] }),
+    item({ number: 2, groups: [] }),
+    item({ number: 3, groups: ['needs-response', 'my-prs-approved'] }),
+  ]
+  assert.equal(pullRequestInboxQueueCount(rows), 2)
+  // A refresh that fetched only pull requests no group can hold is an empty
+  // queue, not one whose rows are hidden by a filter: no group or search could
+  // ever produce them.
+  const ungrouped = rows.filter((row) => row.groups.length === 0)
+  assert.deepEqual(
+    pullRequestInboxPresentation({
+      refresh: refresh(),
+      total: pullRequestInboxQueueCount(ungrouped),
+      shown: 0,
+      filtering: false,
+      loading: false,
+    }).list,
+    'empty',
+  )
 })

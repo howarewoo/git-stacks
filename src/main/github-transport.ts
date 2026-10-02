@@ -1,4 +1,5 @@
 import { execFile as execFileCallback } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { promisify } from 'node:util'
 import { canonicalHostName } from '../shared/host'
 import { commandCode, commandDetail, MAX_BUFFER } from './git-core'
@@ -58,6 +59,7 @@ export interface GitHubTransportFailure {
    * existing merge request apart from one this client would have made.
    */
   body?: unknown
+  authority?: string | null
 }
 
 /** Every transport failure carries a typed kind plus the rate-limit metadata GitHub returned. */
@@ -67,6 +69,7 @@ export class GitHubTransportError extends Error {
   readonly detail: string
   readonly rateLimit: GitHubRateLimit
   readonly body: unknown
+  readonly authority: string | null
 
   constructor(failure: GitHubTransportFailure) {
     const status = failure.status ?? null
@@ -80,16 +83,135 @@ export class GitHubTransportError extends Error {
     this.detail = detail
     this.rateLimit = failure.rateLimit ?? emptyRateLimit()
     this.body = failure.body
-    publishRateLimit(this.rateLimit, failure.kind)
+    this.authority = failure.authority ?? null
+    publishRateLimit(this.rateLimit, failure.kind, null, this.authority)
+  }
+}
+
+/**
+ * A call this build refused to make because the caller's own request budget was
+ * spent. It is raised rather than answered, and every consumer of a transport
+ * re-raises it instead of recording a host-unreachable answer: the host was
+ * never asked, so no host answered or failed to.
+ */
+export class GitHubBudgetExhaustedError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'GitHubBudgetExhaustedError'
   }
 }
 
 let latestRateLimit: GitHubRateLimitReport = { rateLimit: emptyRateLimit(), kind: null, at: 0 }
+/**
+ * What each host last reported, because two hosts do not share a window. A
+ * caller that budgets per host cannot read another host's remaining count as
+ * its own: it would turn away a queue GitHub is still answering.
+ */
+const rateLimitByHost = new Map<string, GitHubRateLimitReport>()
+const rateLimitByHostAuthority = new Map<string, GitHubRateLimitReport>()
 const rateLimitListeners = new Set<(report: GitHubRateLimitReport) => void>()
 
-function publishRateLimit(rateLimit: GitHubRateLimit, kind: GitHubErrorKind | null = null): void {
-  latestRateLimit = { rateLimit, kind, at: Date.now() }
+function rateLimitAuthorityKey(host: string, authority?: string | null): string {
+  return `${host.trim().toLowerCase()}\u0000${authority ?? ''}`
+}
+
+/**
+ * The clock every rate-limit observation is stamped with.
+ *
+ * It is this process's own clock, and a caller that runs a read on a clock of
+ * its own hands that clock over here as well: a wait is measured from the
+ * moment the refusal was seen, and the caller deciding whether that wait has
+ * passed reads the same clock, so one read's answer can never be dated in one
+ * time and admitted in another.
+ */
+let observationClock: () => number = Date.now
+
+export function setGitHubObservationClock(clock: (() => number) | null): void {
+  observationClock = clock ?? Date.now
+}
+
+function publishRateLimit(
+  rateLimit: GitHubRateLimit,
+  kind: GitHubErrorKind | null = null,
+  host: string | null = null,
+  authority?: string | null,
+  initiatedAt?: number,
+): void {
+  latestRateLimit = {
+    rateLimit,
+    kind,
+    at: observationClock(),
+    ...(authority !== undefined && authority !== null ? { authority } : {}),
+  }
+  if (host) {
+    const current = rateLimitByHost.get(host)
+    const isStale =
+      current !== undefined &&
+      initiatedAt !== undefined &&
+      current.at > initiatedAt &&
+      current.authority !== (authority ?? null)
+    if (!isStale) {
+      rateLimitByHost.set(host, latestRateLimit)
+    }
+    if (authority !== undefined && authority !== null) {
+      rateLimitByHostAuthority.set(rateLimitAuthorityKey(host, authority), latestRateLimit)
+    }
+    noteGitHubRetryDeadline(host, rateLimit, latestRateLimit.at, kind)
+  }
   for (const listener of rateLimitListeners) listener(latestRateLimit)
+}
+
+/**
+ * When each host asked to be left alone until.
+ *
+ * A wait belongs to the host that named it and to the answer that carried the
+ * name, so it is recorded where the refusal was observed — at the moment the
+ * response arrived, not the moment the request left — and read by whoever
+ * admits the next request. It outlives the allowance that came with it: what is
+ * left of a host's budget says when the window ends, not when the host is
+ * willing to answer again, so a later success publishes an allowance without
+ * ending a wait that is still in force.
+ */
+const retryDeadlineByHost = new Map<string, number>()
+
+export function noteGitHubRetryDeadline(
+  host: string,
+  rateLimit: GitHubRateLimit,
+  at: number,
+  kind: GitHubErrorKind | null,
+): void {
+  // Only a refusal that was actually about this host's rate limit. A repository
+  // the credential cannot see still carries that host's ordinary quota headers,
+  // and a reset an hour away is a statement about the window, not an
+  // instruction to stop asking the host for the hour.
+  if (kind !== 'rate-limited' && kind !== 'secondary-rate-limit') return
+  const retryAfter =
+    typeof rateLimit.retryAfterSeconds === 'number' ? rateLimit.retryAfterSeconds * 1000 : 0
+  // Primary reset windows belong to the authenticated principal, not the host.
+  if (kind !== 'secondary-rate-limit' && retryAfter <= 0) return
+  const reset = rateLimit.reset instanceof Date ? rateLimit.reset.getTime() : null
+  const wait = Math.max(
+    retryAfter,
+    kind === 'secondary-rate-limit' && reset !== null && Number.isFinite(reset) && reset > at
+      ? reset - at
+      : 0,
+  )
+  if (wait > 0)
+    retryDeadlineByHost.set(host, Math.max(retryDeadlineByHost.get(host) ?? 0, at + wait))
+}
+
+/**
+ * When `host` last asked to be left alone, as an absolute time, or null when it
+ * has not. This is the one wait a caller may refuse a host on: it was taken
+ * from that host's own refusal, at the moment that refusal was received.
+ */
+export function githubRetryDeadlineFor(host: string): number | null {
+  return retryDeadlineByHost.get(host) ?? null
+}
+
+/** Ends one host's wait, for the caller deciding that the wait is over. */
+export function clearGitHubRetryDeadline(host: string): void {
+  retryDeadlineByHost.delete(host)
 }
 
 /**
@@ -107,8 +229,32 @@ export function lastGitHubRateLimit(): GitHubRateLimitReport {
   return latestRateLimit
 }
 
+/**
+ * What `host` itself last reported, or an empty report for a host that has
+ * answered nothing. This is the only count a caller may budget a host with.
+ */
+export function lastGitHubRateLimitFor(
+  host: string,
+  authority?: string | null,
+): GitHubRateLimitReport {
+  if (authority !== undefined && authority !== null) {
+    return (
+      rateLimitByHostAuthority.get(rateLimitAuthorityKey(host, authority)) ?? {
+        rateLimit: emptyRateLimit(),
+        kind: null,
+        at: 0,
+        authority,
+      }
+    )
+  }
+  return rateLimitByHost.get(host) ?? { rateLimit: emptyRateLimit(), kind: null, at: 0 }
+}
+
 export function resetGitHubRateLimit(): void {
   latestRateLimit = { rateLimit: emptyRateLimit(), kind: null, at: 0 }
+  rateLimitByHost.clear()
+  rateLimitByHostAuthority.clear()
+  retryDeadlineByHost.clear()
 }
 
 export type GitHubRestMethod = 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE'
@@ -140,6 +286,8 @@ export interface GitHubRestResponse<T> {
   headers?: Headers
   /** True when a conditional request was answered 304 and `data` came from the cache. */
   notModified?: boolean
+  /** The credential authority this response was observed under, when authenticated. */
+  authority?: string
 }
 
 /** The most recent GitHub rate-limit metadata either transport observed. */
@@ -148,6 +296,11 @@ export interface GitHubRateLimitReport {
   /** The failure kind when this report came from an error, otherwise null. */
   kind: GitHubErrorKind | null
   at: number
+  /**
+   * The credential authority this rate limit was observed under, or null when
+   * observed without a credential.
+   */
+  authority?: string | null
 }
 
 export interface GitHubGraphqlOptions {
@@ -158,6 +311,16 @@ export interface GitHubGraphqlOptions {
 /** The only GitHub capability domain services may use; it never exposes a token or raw fetch. */
 export interface GitHubTransport {
   readonly kind: 'direct' | 'gh'
+  /**
+   * The host this transport's answers are evidence about, and the host whose
+   * allowance and wait it publishes: the one that will actually serve the
+   * requests. A configured API base can name that host rather than the host
+   * this transport was built for, so this is not the origin a repository's rows
+   * are filed under — it is the server those rows are metered on. Anything that
+   * budgets per host has to read admission here, or it consults an empty bucket
+   * for a server whose quota this process is already inside.
+   */
+  readonly destinationHost: string
   rest<T = unknown>(request: GitHubRestRequest): Promise<GitHubRestResponse<T>>
   /** Follows every page of a REST collection and returns the concatenated items. */
   paginate<T = unknown>(request: GitHubRestRequest): Promise<T[]>
@@ -166,6 +329,14 @@ export interface GitHubTransport {
     variables?: Record<string, unknown>,
     options?: GitHubGraphqlOptions,
   ): Promise<T>
+  /**
+   * An opaque identity for the credential this transport would authenticate
+   * with right now, asked of the transport itself because only the transport
+   * knows how it actually resolves one. It carries no secret and cannot
+   * authenticate anything: two answers that match are the same credential, and
+   * two that differ are a credential that was replaced.
+   */
+  credentialAuthority(): Promise<string>
 }
 
 export function emptyRateLimit(): GitHubRateLimit {
@@ -177,9 +348,64 @@ export function githubApiVersion(env: NodeJS.ProcessEnv = process.env): string {
   return typeof value === 'string' && value.trim() ? value.trim() : GITHUB_API_VERSION
 }
 
-export function githubApiUrl(env: NodeJS.ProcessEnv = process.env): string {
+/**
+ * The API base this environment names, when it names one. A base that was not
+ * named is not a base that was pointed at the public host: `gh` reads the same
+ * environment and picks a host of its own from `GH_HOST`, so a host decided
+ * from a base that was never configured would answer for the wrong credential.
+ */
+function configuredGitHubApiUrl(env: NodeJS.ProcessEnv = process.env): string | null {
   const value = env[GITHUB_API_URL_ENV]
-  return typeof value === 'string' && value.trim() ? value.replace(/\/+$/u, '') : GITHUB_API_URL
+  return typeof value === 'string' && value.trim() ? value.replace(/\/+$/u, '') : null
+}
+
+export function githubApiUrl(env: NodeJS.ProcessEnv = process.env): string {
+  return configuredGitHubApiUrl(env) ?? GITHUB_API_URL
+}
+
+/** The host name the public host's own API base answers on. */
+const GITHUB_API_HOSTNAME = new URL(GITHUB_API_URL).hostname
+
+/**
+ * The GitHub host an endpoint belongs to, by authority alone.
+ *
+ * The authority is the hostname and the port together, because an enterprise
+ * host may serve its API from a port of its own and a credential scoped to
+ * `ghe.example.com:8443` is not the credential for `ghe.example.com`: dropping
+ * the port would fence a request as one host while the CLI sends it to another.
+ * A port that is a scheme's own default is not part of a host's identity, so
+ * `https://ghe.example.com:443` and `https://ghe.example.com` are one host.
+ *
+ * The public host's API base is that host rather than a host of its own, so it
+ * answers as `github.com`; every other base names the authority that has to
+ * answer for it. An endpoint that is not a URL at all names no host, which is
+ * not the same as naming the public one.
+ */
+export function gitHubHostOfEndpoint(endpoint: string): string | null {
+  let authority: string
+  try {
+    authority = new URL(endpoint).host
+  } catch {
+    return null
+  }
+  const host = canonicalHostName(authority)
+  if (host === '') return null
+  return host === GITHUB_API_HOSTNAME ? GITHUB_HOST : host
+}
+
+/**
+ * The host an API base names, when the base says something the host's own
+ * routing would not.
+ *
+ * The public base is where a github.com request goes whether or not it was
+ * named, so it cannot outvote a host that was named for the transport: it
+ * resolves nothing a host name does not. Any other base was pointed at
+ * deliberately and is the host these requests are really for.
+ */
+function gitHubHostOfConfiguredBase(base: string | null): string | null {
+  if (base === null) return null
+  const canonical = base.replace(/\/+$/u, '')
+  return canonical === GITHUB_API_URL ? null : gitHubHostOfEndpoint(canonical)
 }
 
 /** The environment variable that holds one host's own token. */
@@ -269,6 +495,36 @@ let credentialSource: GitHubCredentialSource | null = null
  */
 let credentialGeneration = 0
 
+/** A one-way digest of a credential, used only to notice that it changed. */
+function credentialDigest(token: string | null): string {
+  return createHash('sha256')
+    .update(token ?? '')
+    .digest('hex')
+    .slice(0, 32)
+}
+
+/** Stable opaque identity for the actual credential material on one host. */
+function hostCredentialAuthority(host: string, material: string | null): string {
+  return `${host.trim().toLowerCase()}\u0000${credentialDigest(material)}`
+}
+
+/**
+ * The identity for the credential `host` would authenticate with from this
+ * process's own variables alone. A caller that has a transport for that host
+ * asks the transport instead, because only the transport knows which credential
+ * its requests would actually carry.
+ *
+ * This covers only what this module resolves. A host whose requests are made by
+ * the `gh` CLI is authenticated by whatever profile that CLI holds, and
+ * `GhGitHubTransport.credentialAuthority` is what sees that.
+ */
+export function githubHostCredentialIdentity(
+  host: string,
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  return hostCredentialAuthority(host, resolveGitHubToken(env, host.trim().toLowerCase()))
+}
+
 /** Installs the account credential for the process, or clears it on sign-out. */
 export function setGitHubCredentialSource(source: GitHubCredentialSource | null): void {
   credentialGeneration += 1
@@ -357,15 +613,33 @@ export function statusKind(
   return 'unknown'
 }
 
-function graphqlData<T>(body: unknown, status: number, rateLimit: GitHubRateLimit): T {
+/**
+ * The data of a GraphQL answer, or the refusal it reports.
+ *
+ * A GraphQL refusal arrives inside a successful HTTP response, so the envelope
+ * that carried it has already been published as an allowance by the time the
+ * body is read. `onRefusal` is how the classified refusal reaches the same
+ * record: a host that asked to be left alone must still be holding that answer
+ * when the next read is admitted, whether it said so in a status line or in the
+ * body it returned with 200.
+ */
+function graphqlData<T>(
+  body: unknown,
+  status: number,
+  rateLimit: GitHubRateLimit,
+  authority: string,
+  onRefusal?: (rateLimit: GitHubRateLimit, kind: GitHubErrorKind) => void,
+): T {
   const errors = graphqlMessages(body)
   if (errors) {
     const kind = statusKind(403, rateLimit, errors)
+    if (kind === 'rate-limited' || kind === 'secondary-rate-limit') onRefusal?.(rateLimit, kind)
     throw new GitHubTransportError({
       kind: kind === 'rate-limited' || kind === 'secondary-rate-limit' ? kind : 'invalid-response',
       status,
       detail: errors,
       rateLimit,
+      authority,
     })
   }
   if (!isRecord(body) || !isRecord(body.data)) {
@@ -374,6 +648,7 @@ function graphqlData<T>(body: unknown, status: number, rateLimit: GitHubRateLimi
       status,
       detail: 'GitHub returned a GraphQL response without data',
       rateLimit,
+      authority,
     })
   }
   return body.data as T
@@ -498,6 +773,23 @@ export class DirectGitHubTransport implements GitHubTransport {
   }
 
   /**
+   * The GitHub host whose allowance this transport's answers count for, and the
+   * host anything that admits work against this transport has to ask.
+   *
+   * A transport built without a host still serves one, and the base it was
+   * configured with names it. Publishing without that host would leave an
+   * ordinary answer with no provenance at all, so a consumer that budgets per
+   * host could never learn from a request made through the default transport.
+   *
+   * The base outranks the named host because the base is where the requests
+   * are sent: an answer published there has to be admitted on there. What a
+   * repository's rows are filed under is a separate fact and this is not it.
+   */
+  get destinationHost(): string {
+    return gitHubHostOfConfiguredBase(this.apiUrl) ?? this.host ?? GITHUB_HOST
+  }
+
+  /**
    * Whether requests go to the API origin the host this transport serves owns,
    * derived from that host's name alone. A transport built without a host keeps
    * the older rule: only `https://api.github.com` is an origin an owned
@@ -574,7 +866,7 @@ export class DirectGitHubTransport implements GitHubTransport {
   private async headers(
     hasBody: boolean,
     customHeaders?: Record<string, string>,
-  ): Promise<{ headers: Headers; origin: GitHubCredentialFailure }> {
+  ): Promise<{ headers: Headers; origin: GitHubCredentialFailure; token: string }> {
     const access = await this.accessCredential()
     if (!access) {
       throw new GitHubTransportError({
@@ -596,7 +888,7 @@ export class DirectGitHubTransport implements GitHubTransport {
         headers.set(key, value)
       }
     }
-    return { headers, origin: access.credential }
+    return { headers, origin: access.credential, token: access.token }
   }
 
   private async send(
@@ -604,7 +896,13 @@ export class DirectGitHubTransport implements GitHubTransport {
     method: GitHubRestMethod,
     payload: unknown,
     request: Pick<GitHubRestRequest, 'signal' | 'timeoutMs' | 'headers'>,
-  ): Promise<{ status: number; body: unknown; headers: Headers; rateLimit: GitHubRateLimit }> {
+  ): Promise<{
+    status: number
+    body: unknown
+    headers: Headers
+    rateLimit: GitHubRateLimit
+    authority: string
+  }> {
     const timeoutMs = request.timeoutMs ?? this.timeoutMs
     const controller = new AbortController()
     let timedOut = false
@@ -618,14 +916,17 @@ export class DirectGitHubTransport implements GitHubTransport {
       else request.signal.addEventListener('abort', forward, { once: true })
     }
     const request$ = (this.options.fetch ?? globalThis.fetch) as typeof globalThis.fetch
+    const initiatedAt = observationClock()
     // Which credential this request authenticates as, so a rejection is only ever
     // attributed to the credential that actually caused it.
     let credential: GitHubCredentialFailure = { origin: 'environment', session: null }
+    let requestAuthority: string | null = null
     try {
       // Resolving the credential can suspend; an abort in that window must not
       // be lost, because a fetch invoked with an already-aborted signal never settles.
       const access = await this.headers(payload !== undefined, request.headers)
       credential = access.origin
+      requestAuthority = hostCredentialAuthority(this.host ?? GITHUB_HOST, access.token)
       if (controller.signal.aborted) {
         throw new GitHubTransportError(
           timedOut
@@ -644,23 +945,47 @@ export class DirectGitHubTransport implements GitHubTransport {
         signal: controller.signal,
       })
       const rateLimit = parseRateLimit(response.headers)
-      publishRateLimit(rateLimit)
       // A 304 is the answer to a conditional request, not a failure: the stored
       // body stands, and `response.ok` would otherwise report it as unknown.
       if (response.status === 304) {
-        return { status: 304, body: null, headers: response.headers, rateLimit }
+        publishRateLimit(rateLimit, null, this.destinationHost, requestAuthority, initiatedAt)
+        return {
+          status: 304,
+          body: null,
+          headers: response.headers,
+          rateLimit,
+          authority: requestAuthority,
+        }
       }
       const body = parseJsonBody(await response.text())
       if (!response.ok) {
-        throw new GitHubTransportError({
+        const failure = new GitHubTransportError({
           kind: statusKind(response.status, rateLimit, apiMessage(body)),
           status: response.status,
           detail: apiMessage(body) ?? response.statusText ?? 'request failed',
           rateLimit,
           body,
+          authority: requestAuthority,
         })
+        // Recorded against this host as the refusal it is, so a consumer that
+        // budgets per host sees the wait this answer named.
+        publishRateLimit(
+          rateLimit,
+          failure.kind,
+          this.destinationHost,
+          requestAuthority,
+          initiatedAt,
+        )
+        throw failure
       }
-      return { status: response.status, body, headers: response.headers, rateLimit }
+      publishRateLimit(rateLimit, null, this.destinationHost, requestAuthority, initiatedAt)
+      return {
+        status: response.status,
+        body,
+        headers: response.headers,
+        rateLimit,
+        authority: requestAuthority,
+      }
     } catch (error) {
       if (error instanceof GitHubTransportError) {
         await reportFailure(error, credential)
@@ -692,8 +1017,13 @@ export class DirectGitHubTransport implements GitHubTransport {
     payload: unknown,
     request: Pick<GitHubRestRequest, 'signal' | 'timeoutMs' | 'headers'>,
   ): Promise<GitHubRestResponse<T>> {
-    const { status, body, headers, rateLimit } = await this.send(url, method, payload, request)
-    return { status, data: body as T, rateLimit, headers }
+    const { status, body, headers, rateLimit, authority } = await this.send(
+      url,
+      method,
+      payload,
+      request,
+    )
+    return { status, data: body as T, rateLimit, headers, authority }
   }
 
   /**
@@ -711,7 +1041,7 @@ export class DirectGitHubTransport implements GitHubTransport {
       key === null
         ? request
         : { ...request, headers: { ...request.headers, ...conditionalHeaders(cached) } }
-    const { status, body, headers, rateLimit } = await this.send(
+    const { status, body, headers, rateLimit, authority } = await this.send(
       `${this.apiUrl}/${path}`,
       method,
       request.body,
@@ -725,14 +1055,14 @@ export class DirectGitHubTransport implements GitHubTransport {
           detail: 'GitHub answered 304 without a stored response',
           rateLimit,
         })
-      return { status, data: cached.body as T, headers, rateLimit, notModified: true }
+      return { status, data: cached.body as T, headers, rateLimit, notModified: true, authority }
     }
     const etag = headers.get('etag')
     const lastModified = headers.get('last-modified')
     if (cache && key && method === 'GET' && (etag || lastModified)) {
       cache.set(key, { etag, lastModified, body, storedAt: new Date() })
     }
-    return { status, data: body as T, headers, rateLimit }
+    return { status, data: body as T, headers, rateLimit, authority }
   }
 
   async paginate<T = unknown>(request: GitHubRestRequest): Promise<T[]> {
@@ -779,13 +1109,29 @@ export class DirectGitHubTransport implements GitHubTransport {
     variables: Record<string, unknown> = {},
     options: GitHubGraphqlOptions = {},
   ): Promise<T> {
-    const { status, body, rateLimit } = await this.send(
+    const { status, body, rateLimit, authority } = await this.send(
       this.graphqlUrl,
       'POST',
       { query, variables },
       options,
     )
-    return graphqlData<T>(body, status, rateLimit)
+    return graphqlData<T>(body, status, rateLimit, authority, (limit, kind) =>
+      publishRateLimit(limit, kind, this.destinationHost, authority),
+    )
+  }
+
+  /**
+   * Every request this transport makes carries the credential
+   * `accessCredential` resolved for it, so that is what the identity fences on:
+   * a token handed straight to this transport, an ambient one it is allowed to
+   * use, or the signed-in account's own. Asking the environment instead would
+   * miss a supplied token and would miss an account credential that changed,
+   * which would leave work read under one credential sitting beside work read
+   * under the next one. The material is digested and never returned.
+   */
+  async credentialAuthority(): Promise<string> {
+    const access = await this.accessCredential()
+    return hostCredentialAuthority(this.host ?? GITHUB_HOST, access?.token ?? null)
   }
 }
 
@@ -907,15 +1253,76 @@ export class GhGitHubTransport implements GitHubTransport {
     return this.options.env ?? process.env
   }
 
+  /**
+   * The one GitHub host this transport authenticates as, sends every request
+   * to, and credits every answer it observes to.
+   *
+   * Endpoint construction, the credential the CLI is asked for, the environment
+   * its child process runs with and the allowance it publishes all resolve
+   * through this single host, so a request can never be made — or counted —
+   * against a host other than the one whose authority fences it. It is also
+   * what a consumer budgets and refuses against, which is why it is published:
+   * admitting work on the host a repository's origin named would consult a
+   * bucket this transport never writes to whenever the two differ.
+   *
+   * A configured API base decides the host, because `gh` is pointed at that URL
+   * and authenticates with the credential it holds for the host serving it. It
+   * decides it even when a host was named as well: an operator who points this
+   * build's base at another host is served by that host, and a host named for
+   * the requests' origin would describe a credential the requests never use,
+   * so a replacement of the credential that base does resolve to would go
+   * unnoticed. A host named with no base configured is the next authority, and
+   * `GH_HOST` the one after it, because that is the host `gh` itself resolves
+   * when nothing else was configured. A base nobody configured is the public
+   * one by fallback, not by anyone's decision, so it cannot outvote a host
+   * that was named.
+   */
+  get destinationHost(): string {
+    return (
+      gitHubHostOfConfiguredBase(this.configuredBase) ||
+      this.options.host?.trim().toLowerCase() ||
+      canonicalHostName(this.env.GH_HOST ?? '') ||
+      GITHUB_HOST
+    )
+  }
+  /**
+   * The API base this transport was pointed at, when it says something the
+   * host's own routing does not. The public base is where the CLI sends a
+   * github.com request anyway, so naming it resolves nothing a host name does
+   * not, and a transport pointed at it is left to name the host as before.
+   */
+  private get configuredBase(): string | null {
+    const base = this.options.apiUrl?.replace(/\/+$/u, '') ?? configuredGitHubApiUrl(this.env)
+    return base === null || base === GITHUB_API_URL ? null : base
+  }
   private get apiUrl(): string {
-    return this.options.apiUrl?.replace(/\/+$/u, '') ?? githubApiUrl(this.env)
+    return this.configuredBase ?? GITHUB_API_URL
+  }
+
+  /**
+   * The environment every `gh` child of this transport runs with.
+   *
+   * The authority, the request and the credential lookup all read this one
+   * environment rather than the partial one the options carry: the children
+   * inherit the process environment and are then scoped to the host these
+   * requests authenticate as, so a credential the caller did not supply can be
+   * the one the CLI actually uses. An authority derived from the partial
+   * environment would fence rows on a token the child never sees, and a
+   * credential replaced in the inherited one would not retire them.
+   */
+  private get childEnvironment(): Record<string, string> {
+    return {
+      GH_PROMPT_DISABLED: '1',
+      GIT_TERMINAL_PROMPT: '0',
+      ...hostScopedEnvironment({ ...process.env, ...this.options.env }, this.destinationHost),
+    }
   }
 
   private async api(
     args: string[],
     request: GitHubGraphqlOptions,
     input?: string,
-  ): Promise<{ status: number; headers: Headers; body: unknown }> {
+  ): Promise<{ status: number; headers: Headers; body: unknown; authority: string }> {
     if (request.signal?.aborted)
       throw new GitHubTransportError({ kind: 'cancelled', detail: 'the request was cancelled' })
     const controller = new AbortController()
@@ -928,40 +1335,42 @@ export class GhGitHubTransport implements GitHubTransport {
     const forward = () => controller.abort()
     request.signal?.addEventListener('abort', forward, { once: true })
     if (request.signal?.aborted) controller.abort()
-    const run =
-      this.options.run ??
-      (async (argv: string[], options: GitHubGraphqlOptions & { input?: string }) => {
-        const child = execFile('gh', argv, {
-          cwd: process.cwd(),
-          env: {
-            GH_PROMPT_DISABLED: '1',
-            GIT_TERMINAL_PROMPT: '0',
-            // `gh` is given this host's own credential and nothing else. Every
-            // unscoped variable is a credential for whichever host the person
-            // last signed in to, and `gh` would send it to whichever host it is
-            // asked about — so none of them reaches a child that may be pointed
-            // at a host they were never issued by.
-            // Merged first, then scrubbed: the child keeps what the machine
-            // needs to run at all, and loses every credential that belongs to no
-            // host in particular.
-            ...hostScopedEnvironment(
-              { ...process.env, ...this.options.env },
-              this.options.host ?? null,
-            ),
-          },
-          timeout: options.timeoutMs ?? GITHUB_TIMEOUT_MS,
-          signal: options.signal,
-          shell: false,
-          windowsHide: true,
-          maxBuffer: MAX_BUFFER,
-          encoding: 'utf8',
-        })
-        if (options.input !== undefined) child.child.stdin?.end(options.input)
-        const result = await child
-        return result.stdout
-      })
-    let output: string
+
     try {
+      const initiatedAt = observationClock()
+      const { authority, environment } = await this.credentialSnapshot({
+        signal: controller.signal,
+        timeoutMs,
+      })
+      if (request.signal?.aborted)
+        throw new GitHubTransportError({ kind: 'cancelled', detail: 'the request was cancelled' })
+      if (timedOut)
+        throw new GitHubTransportError({
+          kind: 'timeout',
+          detail: `request did not complete within ${timeoutMs}ms`,
+        })
+      if (controller.signal.aborted)
+        throw new GitHubTransportError({ kind: 'cancelled', detail: 'the request was cancelled' })
+      const run =
+        this.options.run ??
+        (async (argv: string[], options: GitHubGraphqlOptions & { input?: string }) => {
+          const child = execFile('gh', argv, {
+            cwd: process.cwd(),
+            // The same environment the credential lookup and the authority read,
+            // so what the CLI sends is what this transport fenced its rows on.
+            env: environment,
+            timeout: options.timeoutMs ?? GITHUB_TIMEOUT_MS,
+            signal: options.signal,
+            shell: false,
+            windowsHide: true,
+            maxBuffer: MAX_BUFFER,
+            encoding: 'utf8',
+          })
+          if (options.input !== undefined) child.child.stdin?.end(options.input)
+          const result = await child
+          return result.stdout
+        })
+      let output: string
       try {
         output = await run(args, { signal: controller.signal, timeoutMs, input })
       } catch (error) {
@@ -970,7 +1379,7 @@ export class GhGitHubTransport implements GitHubTransport {
             kind: 'timeout',
             detail: `request did not complete within ${timeoutMs}ms`,
           })
-        if (request.signal?.aborted)
+        if (request.signal?.aborted || controller.signal.aborted)
           throw new GitHubTransportError({ kind: 'cancelled', detail: 'the request was cancelled' })
         // gh exits nonzero for HTTP errors but preserves the API response in stdout.
         const stdout =
@@ -984,37 +1393,59 @@ export class GhGitHubTransport implements GitHubTransport {
           kind: 'timeout',
           detail: `request did not complete within ${timeoutMs}ms`,
         })
+      if (request.signal?.aborted || controller.signal.aborted)
+        throw new GitHubTransportError({ kind: 'cancelled', detail: 'the request was cancelled' })
+      const response = includedResponse(output)
+      const rateLimit = parseRateLimit(response.headers)
+      if (response.status === 304) {
+        publishRateLimit(rateLimit, null, this.destinationHost, authority, initiatedAt)
+        return { status: 304, headers: response.headers, body: null, authority }
+      }
+      if (response.status < 200 || response.status >= 300) {
+        const failure = new GitHubTransportError({
+          kind: statusKind(response.status, rateLimit, apiMessage(response.body)),
+          status: response.status,
+          detail: apiMessage(response.body) ?? 'request failed',
+          rateLimit,
+          body: response.body,
+          authority,
+        })
+        publishRateLimit(rateLimit, failure.kind, this.destinationHost, authority, initiatedAt)
+        await reportFailure(failure, { origin: 'gh', session: null })
+        throw failure
+      }
+      publishRateLimit(rateLimit, null, this.destinationHost, authority, initiatedAt)
+      return { ...response, authority }
+    } catch (error) {
       if (request.signal?.aborted)
         throw new GitHubTransportError({ kind: 'cancelled', detail: 'the request was cancelled' })
+      if (timedOut)
+        throw new GitHubTransportError({
+          kind: 'timeout',
+          detail: `request did not complete within ${timeoutMs}ms`,
+        })
+      if (error instanceof GitHubTransportError) {
+        throw error
+      }
+      if (controller.signal.aborted)
+        throw new GitHubTransportError({ kind: 'cancelled', detail: 'the request was cancelled' })
+      throw new GitHubTransportError({
+        kind: 'network',
+        detail: commandDetail(error),
+      })
     } finally {
       clearTimeout(timer)
       request.signal?.removeEventListener('abort', forward)
     }
-    const response = includedResponse(output)
-    const rateLimit = parseRateLimit(response.headers)
-    publishRateLimit(rateLimit)
-    // gh exits nonzero for HTTP errors but keeps a 304 conditional hit in the
-    // same place, and that answer is success rather than a failure.
-    if (response.status === 304) {
-      return { status: 304, headers: response.headers, body: null }
-    }
-    if (response.status < 200 || response.status >= 300) {
-      const failure = new GitHubTransportError({
-        kind: statusKind(response.status, rateLimit, apiMessage(response.body)),
-        status: response.status,
-        detail: apiMessage(response.body) ?? 'request failed',
-        rateLimit,
-        body: response.body,
-      })
-      await reportFailure(failure, { origin: 'gh', session: null })
-      throw failure
-    }
-    return response
   }
 
-  private async request<T>(
-    request: GitHubRestRequest,
-  ): Promise<{ status: number; data: T; headers: Headers; rateLimit: GitHubRateLimit }> {
+  private async request<T>(request: GitHubRestRequest): Promise<{
+    status: number
+    data: T
+    headers: Headers
+    rateLimit: GitHubRateLimit
+    authority: string
+  }> {
     const method = request.method ?? 'GET'
     let version = githubApiVersion(this.options.env)
     const extraHeaderEntries: [string, string][] = []
@@ -1031,25 +1462,45 @@ export class GhGitHubTransport implements GitHubTransport {
     for (const [key, value] of extraHeaderEntries) {
       args.push('--header', `${key}: ${value}`)
     }
-    const customApi = this.apiUrl !== GITHUB_API_URL
+    const configuredBase = this.configuredBase
     const isAbsolute = /^https?:\/\//u.test(request.path)
-    // `gh` is told which host it is talking to, so a session authenticated for
-    // github.com is never asked for a host this app is not serving.
-    const hostname = this.options.host?.trim().toLowerCase() || GITHUB_HOST
-    if (!customApi && !isAbsolute) {
-      args.splice(1, 0, '--hostname', hostname)
-    }
-    if (method !== 'GET') args.push('--method', method)
+    // The endpoint this request will actually reach, which is not always the
+    // path the caller wrote: a configured base is prepended to a relative one,
+    // and that base is what decides the host. Resolving the destination first
+    // and fencing that keeps the CLI, the credential scope and the allowance
+    // bucket on the host the request is really for, whichever form it took.
     const endpoint = isAbsolute
       ? request.path
-      : customApi
-        ? `${this.apiUrl}/${request.path.replace(/^\/+/u, '')}`
-        : request.path
+      : configuredBase === null
+        ? request.path
+        : `${configuredBase}/${request.path.replace(/^\/+/u, '')}`
+    // `gh` is told which host it is talking to, so a session authenticated for
+    // github.com is never asked for a host this app is not serving. It is told
+    // only when the endpoint is relative and the CLI has to resolve the host
+    // itself; an absolute endpoint addresses its host in place of that flag.
+    if (!isAbsolute && configuredBase === null) {
+      args.splice(1, 0, '--hostname', this.destinationHost)
+    }
+    // An absolute endpoint — and every endpoint under a configured base, which
+    // this one now is — sends this host's credential to the host that serves
+    // it. One outside the host this transport authenticates as would send that
+    // credential somewhere this read is not fenced to, so it is refused before
+    // anything is requested or attempted.
+    if (isAbsolute || configuredBase !== null) {
+      const destination = gitHubHostOfEndpoint(endpoint)
+      if (destination !== null && destination !== this.destinationHost) {
+        throw new GitHubTransportError({
+          kind: 'unsupported',
+          detail: `${destination} is not a host this transport authenticates as, so the request was not attempted`,
+        })
+      }
+    }
+    if (method !== 'GET') args.push('--method', method)
     args.push(endpoint)
     const input = request.body === undefined ? undefined : JSON.stringify(request.body)
     if (input !== undefined) args.push('--header', 'Content-Type: application/json', '--input', '-')
-    const { status, headers, body } = await this.api(args, request, input)
-    return { status, data: body as T, headers, rateLimit: parseRateLimit(headers) }
+    const { status, headers, body, authority } = await this.api(args, request, input)
+    return { status, data: body as T, headers, rateLimit: parseRateLimit(headers), authority }
   }
 
   async rest<T = unknown>(request: GitHubRestRequest): Promise<GitHubRestResponse<T>> {
@@ -1061,7 +1512,7 @@ export class GhGitHubTransport implements GitHubTransport {
       key === null
         ? request
         : { ...request, headers: { ...request.headers, ...conditionalHeaders(cached) } }
-    const { status, data, headers, rateLimit } = await this.request<T>(conditional)
+    const { status, data, headers, rateLimit, authority } = await this.request<T>(conditional)
     if (status === 304) {
       if (!cached)
         throw new GitHubTransportError({
@@ -1070,14 +1521,14 @@ export class GhGitHubTransport implements GitHubTransport {
           detail: 'GitHub answered 304 without a stored response',
           rateLimit,
         })
-      return { status, data: cached.body as T, headers, rateLimit, notModified: true }
+      return { status, data: cached.body as T, headers, rateLimit, notModified: true, authority }
     }
     const etag = headers.get('etag')
     const lastModified = headers.get('last-modified')
     if (cache && key && (request.method ?? 'GET') === 'GET' && (etag || lastModified)) {
       cache.set(key, { etag, lastModified, body: data, storedAt: new Date() })
     }
-    return { status, data, headers, rateLimit }
+    return { status, data, headers, rateLimit, authority }
   }
 
   async paginate<T = unknown>(request: GitHubRestRequest): Promise<T[]> {
@@ -1125,7 +1576,89 @@ export class GhGitHubTransport implements GitHubTransport {
       body: { query, variables },
       ...options,
     })
-    return graphqlData<T>(response.data, response.status, response.rateLimit)
+    return graphqlData<T>(
+      response.data,
+      response.status,
+      response.rateLimit,
+      response.authority,
+      (limit, kind) => publishRateLimit(limit, kind, this.destinationHost, response.authority),
+    )
+  }
+
+  /**
+   * The authority `gh` itself would authenticate with for this host.
+   *
+   * When this build hands `gh` a token, the credential is the one this process
+   * already resolved, and the environment identity is the whole of it. When it
+   * does not, every request is made by whatever credential the CLI holds for the
+   * host those requests name — and a credential replaced outside this app, which
+   * no account status and no environment variable can see, is exactly the
+   * replacement that must retire rows.
+   */
+  async credentialAuthority(options: GitHubGraphqlOptions = {}): Promise<string> {
+    return (await this.credentialSnapshot(options)).authority
+  }
+
+  /** Resolve once: the API child must use the material its observation names. */
+  private async credentialSnapshot(
+    options: GitHubGraphqlOptions,
+  ): Promise<{ authority: string; environment: Record<string, string> }> {
+    const host = this.destinationHost
+    const environment = this.childEnvironment
+    const own = githubHostCredentialIdentity(host, environment)
+    const ambient = resolveGitHubToken(environment, host)
+    if (ambient !== null) return { authority: own, environment }
+    const material = await this.cliCredentialMaterial(host, options)
+    if (material !== null) {
+      environment[canonicalHostName(host) === GITHUB_HOST ? 'GH_TOKEN' : 'GH_ENTERPRISE_TOKEN'] =
+        material
+    }
+    const digest =
+      material === null
+        ? credentialDigest(`gh-unavailable\u0000${host}`)
+        : credentialDigest(`gh\u0000${host}\u0000${material}`)
+    return { authority: `${own}\u0000${digest}`, environment }
+  }
+
+  /** The CLI's material remains private and is pinned only to its API child. */
+  private async cliCredentialMaterial(
+    host: string,
+    options: GitHubGraphqlOptions = {},
+  ): Promise<string | null> {
+    if (options.signal?.aborted) {
+      throw new GitHubTransportError({ kind: 'cancelled', detail: 'the request was cancelled' })
+    }
+    const args = ['auth', 'token', '--hostname', host]
+    const run = this.options.run
+    let output: string | undefined
+    try {
+      output = run === undefined ? await this.execGh(args, options) : await run(args, options)
+    } catch (error) {
+      if (options.signal?.aborted) {
+        throw new GitHubTransportError({ kind: 'cancelled', detail: 'the request was cancelled' })
+      }
+      return null
+    }
+    if (options.signal?.aborted) {
+      throw new GitHubTransportError({ kind: 'cancelled', detail: 'the request was cancelled' })
+    }
+    const material = typeof output === 'string' ? output.trim() : ''
+    return material === '' ? null : material
+  }
+
+  /** The same child-process shape `api` uses, without the response plumbing. */
+  private execGh(args: string[], options: GitHubGraphqlOptions = {}): Promise<string> {
+    const child = execFile('gh', args, {
+      cwd: process.cwd(),
+      env: this.childEnvironment,
+      timeout: options.timeoutMs ?? GITHUB_TIMEOUT_MS,
+      signal: options.signal,
+      shell: false,
+      windowsHide: true,
+      maxBuffer: MAX_BUFFER,
+      encoding: 'utf8',
+    })
+    return child.then((result) => result.stdout)
   }
 }
 

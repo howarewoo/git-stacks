@@ -38,6 +38,7 @@ import {
   type GitHubRestResponse,
   type GitHubTransport,
 } from '../src/main/github-transport'
+import { GITHUB_DEFAULT_HOST } from '../src/shared/host'
 import type { ReviewComparison, ReviewFile } from '../src/shared/review'
 import {
   observeReviewHead,
@@ -109,6 +110,12 @@ function mockTransport(handlers: {
   }
   return {
     kind: 'direct',
+    // Every workspace here has a github.com origin and this double is installed
+    // as that host's transport, so the host it answers for is the public one.
+    destinationHost: GITHUB_DEFAULT_HOST,
+    async credentialAuthority(): Promise<string> {
+      return 'review-snapshots-test-credential'
+    },
     async rest<T>(request: GitHubRestRequest): Promise<GitHubRestResponse<T>> {
       if (handlers.rest) {
         const result = handlers.rest(request)

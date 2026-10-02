@@ -17,6 +17,7 @@ import {
 } from './github-host'
 import {
   GITHUB_STACKS_API_VERSION,
+  GitHubBudgetExhaustedError,
   GitHubTransportError,
   type GitHubTransport,
 } from './github-transport'
@@ -933,6 +934,12 @@ export async function loadRepositoryNativeStacks(
   originUrl: string | null,
   pullRequests: PullRequest[],
   signal?: AbortSignal,
+  /**
+   * The transport the caller already resolved for this host. It is used for the
+   * probe and the listing so a caller that meters its own requests meters these
+   * too; without one the host's own transport answers.
+   */
+  transport?: GitHubTransport,
 ): Promise<{
   available: boolean
   nativeStacks: NativeStack[]
@@ -961,8 +968,9 @@ export async function loadRepositoryNativeStacks(
     // The read path reports an unconfirmed probe as an explicit unavailable state instead of
     // failing the whole repository snapshot; only mutations require a confirmed capability.
     // Display refreshes use validators; mutation preflights never do.
+    const calls = transport ?? hostTransport(host)
     const capability = await probeNativeStacksCapability(remote.owner, remote.name, {
-      transport: hostTransport(host),
+      transport: calls,
       conditional: true,
       ...(signal ? { signal } : {}),
     })
@@ -982,7 +990,11 @@ export async function loadRepositoryNativeStacks(
             : `${host.host} was not established either way: ${capability.message}`,
       }
     }
-    const stacks = await listPullRequestStacks(remote.owner, remote.name, { host, signal })
+    const stacks = await listPullRequestStacks(remote.owner, remote.name, {
+      host,
+      transport: calls,
+      ...(signal ? { signal } : {}),
+    })
     const byNumber = new Map(pullRequests.map((pr) => [pr.number, pr]))
     for (const stack of stacks) {
       for (const member of stack.pullRequests) {
@@ -1001,8 +1013,13 @@ export async function loadRepositoryNativeStacks(
     }
   } catch (error) {
     // A cancellation is this build stopping, not a fact about the host, and it
-    // is raised rather than recorded as a host that did not answer.
-    if (signal?.aborted || isCancelled(error)) throw error
+    // is raised rather than recorded as a host that did not answer. Neither is
+    // a call the caller's own request budget refused: the host was never asked,
+    // so recording it as unreachable would report a cut-off read as a host that
+    // cannot answer, and a caller metering its reads would spend nothing while
+    // believing the data is complete.
+    if (signal?.aborted || isCancelled(error) || error instanceof GitHubBudgetExhaustedError)
+      throw error
     return {
       available: false,
       nativeStacks: [],

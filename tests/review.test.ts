@@ -23,6 +23,7 @@ import {
   type GitHubRestResponse,
   type GitHubTransport,
 } from '../src/main/github-transport'
+import { GITHUB_DEFAULT_HOST } from '../src/shared/host'
 import {
   ReviewAnchorStaleError,
   ReviewComparisonMovedError,
@@ -605,6 +606,12 @@ function scriptedTransport(
     calls,
     transport: {
       kind: 'direct',
+      // The workspace origin is github.com and this double is installed as that
+      // host's transport, so it answers for the public host.
+      destinationHost: GITHUB_DEFAULT_HOST,
+      async credentialAuthority(): Promise<string> {
+        return 'review-test-credential'
+      },
       async rest<T>(request: GitHubRestRequest): Promise<GitHubRestResponse<T>> {
         const path = request.path ?? ''
         calls.push(path)
@@ -1446,6 +1453,10 @@ function threadDouble(options: DoubleOptions = {}): {
     },
     transport: {
       kind: 'direct',
+      destinationHost: GITHUB_DEFAULT_HOST,
+      async credentialAuthority(): Promise<string> {
+        return 'review-conversation-test-credential'
+      },
       async rest<T>(request: GitHubRestRequest): Promise<GitHubRestResponse<T>> {
         const path = request.path ?? ''
         if (request.method && request.method !== 'GET') {
@@ -2276,6 +2287,10 @@ test('a write whose outcome GitHub never confirms is not replayed into a duplica
   const attempts: string[] = []
   setGitHubTransport({
     kind: 'direct',
+    destinationHost: GITHUB_DEFAULT_HOST,
+    async credentialAuthority(): Promise<string> {
+      return 'review-apply-test-credential'
+    },
     async rest<T>(request: GitHubRestRequest): Promise<GitHubRestResponse<T>> {
       const path = request.path ?? ''
       if (request.method && request.method !== 'GET') {

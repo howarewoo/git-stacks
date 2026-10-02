@@ -51,7 +51,9 @@ export interface PullRequestInboxGroup {
  *    review requests. A team review request is not a direct request, so a team
  *    review never puts a pull request in a viewer's group on its own.
  * 5. *Last turn* is the author of the most recent review or issue comment, and
- *    null when the pull request has neither.
+ * 6. *Metadata* is which of those facts this read actually obtained. A host that
+ *    refuses the review, comment, and check fields answers a degraded read, and
+ *    a degraded read cannot decide the three groups those fields would decide.
  *
  * With those facts:
  *
@@ -174,6 +176,17 @@ function login(value: string | null | undefined): string | null {
 }
 
 /**
+ * Which of the recent facts a read actually obtained.
+ *
+ * `degraded` means the host answered without the review, comment, and check
+ * fields its schema does not carry. Every other field is real, and the ones it
+ * could not read are unknown rather than absent: a missing review decision is
+ * not "nobody reviewed it", and a row that says so may not be grouped as if it
+ * were.
+ */
+export type PullRequestInboxMetadata = 'full' | 'degraded'
+
+/**
  * The facts one pull request contributes to group membership. This is the whole
  * input to the rules: a field this interface does not carry cannot influence a
  * group, so membership cannot drift with a field the rules never read.
@@ -190,6 +203,8 @@ export interface PullRequestInboxSignals {
   lastTurnLogin: string | null
   updatedAt: string | null
   mergedAt: string | null
+  /** Which recent facts this read obtained; a degraded read decides fewer groups. */
+  metadata: PullRequestInboxMetadata
 }
 
 /**
@@ -209,6 +224,8 @@ export interface PullRequestInboxItem extends Omit<PullRequest, 'reviewDecision'
   lastTurnLogin: string | null
   updatedAt: string | null
   mergedAt: string | null
+  /** Which recent facts this read obtained; a degraded read shows unknown, not absence. */
+  metadata: PullRequestInboxMetadata
   groups: PullRequestInboxGroupId[]
 }
 
@@ -238,15 +255,27 @@ export function pullRequestInboxGroups(
   const answerOwed = lastTurn !== null && lastTurn !== viewer
   const approved = signals.reviewDecision === 'APPROVED'
   const needsResponse =
-    open && !signals.draft && authored && (signals.reviewDecision === 'CHANGES_REQUESTED' || answerOwed)
+    open &&
+    !signals.draft &&
+    authored &&
+    (signals.reviewDecision === 'CHANGES_REQUESTED' || answerOwed)
   const groups = new Set<PullRequestInboxGroupId>()
 
+  // Only the groups the read's own facts support. A degraded read never
+  // established a review decision or who spoke last, so it cannot say that
+  // nobody spoke and cannot say that nobody approved. Neither can a read that
+  // never established who the viewer is: with no account, authorship and a
+  // request to the viewer are both undecided rather than false, so every
+  // viewer-relative group is left empty instead of being decided against a
+  // person this read could not name.
   if (open && !signals.draft && requested && !authored) groups.add('review-requested')
-  if (needsResponse) groups.add('needs-response')
-  if (open && authored && !signals.draft && !needsResponse && !approved) {
-    groups.add('my-prs-waiting')
+  if (signals.metadata === 'full') {
+    if (needsResponse) groups.add('needs-response')
+    if (open && authored && !signals.draft && !needsResponse && !approved) {
+      groups.add('my-prs-waiting')
+    }
+    if (open && authored && !signals.draft && approved) groups.add('my-prs-approved')
   }
-  if (open && authored && !signals.draft && approved) groups.add('my-prs-approved')
   if (open && signals.draft) groups.add('drafts')
 
   const window = options.mergedWithinDays ?? PULL_REQUEST_INBOX_MERGED_WINDOW_DAYS
@@ -288,10 +317,7 @@ export const PULL_REQUEST_INBOX_DEFAULT_FILTER: PullRequestInboxFilter = {
  * everything rather than nothing, so clearing the box restores the group.
  * `#42`, `owner/name`, a branch name, a login, and a title word all match.
  */
-export function matchesPullRequestInboxSearch(
-  item: PullRequestInboxItem,
-  search: string,
-): boolean {
+export function matchesPullRequestInboxSearch(item: PullRequestInboxItem, search: string): boolean {
   const query = search.trim().toLowerCase()
   if (!query) return true
   const haystack = [
@@ -347,6 +373,21 @@ export function sortPullRequestInbox(
   })
 }
 
+/**
+ * How many rows the queue actually holds.
+ *
+ * A repository can hand back a pull request that belongs to no group at all:
+ * somebody else's open pull request nobody asked this viewer to review is not
+ * this person's work. Counting those rows would put a number on the navigation
+ * badge and in the empty-state copy that no group, search, or repository filter
+ * can ever produce, so the queue counts the rows a person could go and work.
+ */
+export function pullRequestInboxQueueCount(items: readonly PullRequestInboxItem[]): number {
+  let count = 0
+  for (const item of items) if (item.groups.length > 0) count += 1
+  return count
+}
+
 /** How one registered repository fared in a refresh. */
 export type PullRequestInboxRepositoryStatus =
   | 'ok'
@@ -358,6 +399,18 @@ export type PullRequestInboxRepositoryStatus =
   | 'not-found'
   | 'offline'
   | 'rate-limited'
+  /**
+   * Read, but not with the fields the queue asks for: the host's schema refused
+   * the review, comment, and check metadata, so what is missing is unknown rather
+   * than absent. A degraded repository is never counted as a complete read.
+   */
+  | 'degraded'
+  /**
+   * Read, and the host named no account for the rows: whose queue this is could
+   * not be established, so no group that depends on authorship or on a request
+   * to the viewer can be decided. The rows a group does not depend on stay.
+   */
+  | 'membership-unknown'
   /** The host's schema refused the review fields this read asks for. */
   | 'unsupported'
   /** The origin remote is not on a GitHub host, so it has no pull requests here. */
@@ -368,6 +421,13 @@ export type PullRequestInboxRepositoryStatus =
    * which. A skipped repository is never counted as an empty one.
    */
   | 'skipped'
+  /**
+   * Attempted, and the answer could not be classified: the host answered with
+   * something this build cannot read as a verdict. `detail` carries what it
+   * said. A read that was made and failed is never reported as one that was
+   * never attempted.
+   */
+  | 'failed'
 
 /** Static status to the phrase a person reads, so a reason is never improvised. */
 const REPOSITORY_STATUS_LABEL: Record<PullRequestInboxRepositoryStatus, string> = {
@@ -375,11 +435,14 @@ const REPOSITORY_STATUS_LABEL: Record<PullRequestInboxRepositoryStatus, string> 
   unauthorized: 'sign-in rejected',
   forbidden: 'not visible to this credential',
   'not-found': 'not found for this credential',
+  degraded: 'read without review or check metadata',
+  'membership-unknown': 'read without knowing whose queue this is',
   offline: 'GitHub unreachable',
   'rate-limited': 'rate limited',
   unsupported: 'this host does not report the review fields',
   'not-github': 'origin is not on a GitHub host',
   skipped: 'not attempted',
+  failed: 'could not be read',
 }
 
 export function pullRequestInboxRepositoryStatusLabel(
@@ -394,7 +457,30 @@ export interface PullRequestInboxRepositoryReport {
   path: string
   host: string | null
   status: PullRequestInboxRepositoryStatus
+  /**
+   * The login its rows were read and grouped as, or null when this repository
+   * reported none. Two hosts can serve two accounts, so this is the only place
+   * a row's viewer-relative groups can be traced back to.
+   */
+  viewer: string | null
   detail: string
+}
+
+/**
+ * How one repository that did not fully read is named in a notice.
+ *
+ * A read that reached a host and was refused is quoted in the host's own
+ * words, because those are the two statuses whose detail says something a
+ * static label cannot: an answer this build cannot classify, and a
+ * rate-limit refusal that names the moment the host asked to be left alone.
+ * "rate limited" in place of that is not a shorter reason, it is the loss of
+ * the only part of it that says when to try again. Every other status is
+ * decided here rather than by the host, so its label already says all of it.
+ */
+function unreadRepository(report: PullRequestInboxRepositoryReport): string {
+  const spoken = report.status === 'failed' || report.status === 'rate-limited'
+  const reason = spoken ? report.detail : pullRequestInboxRepositoryStatusLabel(report.status)
+  return `${report.repository} (${reason})`
 }
 
 /**
@@ -410,6 +496,14 @@ export type PullRequestInboxRefreshState =
   | 'partial'
   /** A read that could not answer, showing the last confirmed rows. */
   | 'stale'
+  /**
+   * The read ended before it confirmed anything, because the identity it was
+   * reading for was replaced while it was in flight. Nothing below belongs to
+   * whoever is signed in now, so the queue is empty rather than showing rows
+   * another credential read. It says nothing about signing in and nothing about
+   * the network: the read was ended, not refused and not unreachable.
+   */
+  | 'retired'
   | 'offline'
   | 'auth-required'
   | 'rate-limited'
@@ -439,7 +533,12 @@ export interface PullRequestInboxRefresh {
   confirmedAt: string | null
   /** When this refresh was attempted, successful or not. */
   checkedAt: string
-  /** The login the host reported for this read, or null when it reported none. */
+  /**
+   * The login this read was made as when every host that reported one reported
+   * the same login, and null otherwise. A queue assembled from two accounts has
+   * no single viewer, and naming one would label the other host's rows with it;
+   * each repository report carries its own.
+   */
   viewer: string | null
   /** GitHub round trips this refresh spent, and the cap it had. */
   requests: number
@@ -467,11 +566,26 @@ export interface PullRequestInboxRequest {
   mergedWithinDays?: number
 }
 
-/** Whether a refresh may start against the budget GitHub last reported. */
+/**
+ * Whether a refresh may start against the budget GitHub last reported.
+ *
+ * `reset` is the window the report was for, and a window that has already passed
+ * is no longer a limit: GitHub counts each window separately, so a count read
+ * before the reset says nothing about the requests available now. Refusing on
+ * an expired count would park a window that admits no request capable of
+ * updating the count, which is how a queue stays rate-limited until something
+ * unrelated calls the API.
+ */
 export function pullRequestInboxBudgetAllows(
   remaining: number | null,
   budget: PullRequestInboxBudget = DEFAULT_PULL_REQUEST_INBOX_BUDGET,
+  window: { reset?: Date | null; now?: number } = {},
 ): { allowed: boolean; reason: string } {
+  const reset = window.reset ?? null
+  const now = window.now ?? Date.now()
+  if (reset !== null && Number.isFinite(reset.getTime()) && now >= reset.getTime()) {
+    return { allowed: true, reason: '' }
+  }
   if (remaining === null || !Number.isFinite(remaining)) {
     return { allowed: true, reason: 'No rate limit has been reported yet.' }
   }
@@ -494,13 +608,100 @@ export function derivePullRequestInboxState(
   failed: { state: PullRequestInboxRefreshState; detail: string } | null,
 ): PullRequestInboxRefreshState {
   if (reports.length === 0) return failed?.state ?? 'stale'
-  const read = reports.filter((report) => report.status === 'ok').length
-  if (read === 0) return failed?.state ?? 'stale'
-  if (read < reports.length) return 'partial'
+  const complete = reports.filter((report) => report.status === 'ok').length
+  // A repository that answered with less than the queue asked for — without its
+  // review and check metadata, or without an account to read them as — is never
+  // promoted to a complete read, and is never counted as a failure either:
+  // GitHub did return pull requests for it.
+  const degraded = reports.filter(
+    (report) => report.status === 'degraded' || report.status === 'membership-unknown',
+  ).length
+  if (complete + degraded === 0) return failed?.state ?? 'stale'
+  if (complete < reports.length) return 'partial'
   return 'fresh'
 }
 
-export type PullRequestInboxListState = 'rows' | 'empty' | 'filtered-empty' | 'unconfirmed'
+/** Why a whole refresh could not answer, in the words the notice shows. */
+export interface PullRequestInboxFailure {
+  state: PullRequestInboxRefreshState
+  detail: string
+}
+
+/**
+ * The reason a refresh read nothing, taken from what the repositories reported.
+ *
+ * A refresh that read nothing has one honest answer, and which answer depends on
+ * why every repository failed: an unreachable host, a rejected sign-in, a
+ * credential that cannot see any registered repository, and an exhausted budget
+ * are four different problems with four different fixes. Reducing them all to
+ * "no repository could be read" would tell a person nothing they can act on, so
+ * the repository statuses decide and name themselves. A failure the refresh
+ * already established — the shared request cap, say — is reported as it stands.
+ */
+export function pullRequestInboxRefreshFailure(
+  reports: readonly PullRequestInboxRepositoryReport[],
+  failed: PullRequestInboxFailure | null,
+): PullRequestInboxFailure | null {
+  if (failed) return failed
+  if (
+    reports.some(
+      (report) =>
+        report.status === 'ok' ||
+        report.status === 'degraded' ||
+        report.status === 'membership-unknown',
+    )
+  )
+    return null
+  // An attempted read that failed for a reason this build cannot classify keeps
+  // the reason the host gave: naming the repositories without it would leave a
+  // person nothing they can act on, and calling it "not attempted" would
+  // misreport a request that was made.
+  const attempted = reports.filter((report) => report.status === 'failed')
+  if (attempted.length > 0) {
+    return {
+      state: 'stale',
+      detail: `No registered repository could be read: ${attempted
+        .map(unreadRepository)
+        .join(', ')}.`,
+    }
+  }
+  const names = (statuses: readonly PullRequestInboxRepositoryStatus[]): string =>
+    reports
+      .filter((report) => statuses.includes(report.status))
+      .map(unreadRepository)
+      .join(', ')
+  if (reports.some((report) => report.status === 'rate-limited')) {
+    return {
+      state: 'rate-limited',
+      detail: `GitHub refused every repository read: ${names(['rate-limited'])}.`,
+    }
+  }
+  if (reports.some((report) => report.status === 'unauthorized')) {
+    return {
+      state: 'auth-required',
+      detail: `GitHub rejected the signed-in account: ${names(['unauthorized'])}.`,
+    }
+  }
+  const unreachable = names(['offline'])
+  if (unreachable) {
+    return { state: 'offline', detail: `GitHub could not be reached: ${unreachable}.` }
+  }
+  const unreadable = names(['forbidden', 'not-found'])
+  if (unreadable) {
+    return {
+      state: 'auth-required',
+      detail: `No registered repository is visible to this credential: ${unreadable}.`,
+    }
+  }
+  const unusable = names(['not-github', 'unsupported'])
+  if (unusable) {
+    return { state: 'stale', detail: `No registered repository could be read: ${unusable}.` }
+  }
+  return null
+}
+
+export type PullRequestInboxListState =
+  'rows' | 'empty' | 'filtered-empty' | 'unconfirmed' | 'loading'
 
 export interface PullRequestInboxNotice {
   tone: 'info' | 'warning' | 'error'
@@ -522,34 +723,36 @@ export interface PullRequestInboxPresentation {
  * never produces `empty` or `filtered-empty`, because "we could not ask" is not
  * "there is nothing": it produces `unconfirmed` with the reason, which is the
  * only honest rendering of a queue whose last confirmed rows are gone.
+ *
+ * `loading` is the one answer that is not a claim about GitHub at all. It is
+ * rendered only while nothing has ever been confirmed and a read is in flight,
+ * so the first open of the destination reads as being read rather than as an
+ * empty or unrefused queue.
  */
 export function pullRequestInboxPresentation(input: {
   refresh: PullRequestInboxRefresh
   total: number
   shown: number
   filtering: boolean
+  loading: boolean
 }): PullRequestInboxPresentation {
-  const { refresh, total, shown, filtering } = input
+  const { refresh, total, shown, filtering, loading } = input
   const notice = pullRequestInboxNotice(refresh)
   if (shown > 0) return { list: 'rows', notice }
+  if (refresh.confirmedAt === null && loading) return { list: 'loading', notice: null }
   if (refresh.state !== 'fresh') return { list: 'unconfirmed', notice }
   if (filtering || total > shown) return { list: 'filtered-empty', notice }
   return { list: 'empty', notice: null }
 }
 
-function pullRequestInboxNotice(
-  refresh: PullRequestInboxRefresh,
-): PullRequestInboxNotice | null {
+function pullRequestInboxNotice(refresh: PullRequestInboxRefresh): PullRequestInboxNotice | null {
   switch (refresh.state) {
     case 'fresh':
       return null
     case 'partial': {
       const unread = refresh.repositories
         .filter((entry) => entry.status !== 'ok')
-        .map(
-          (entry) =>
-            `${entry.repository} (${pullRequestInboxRepositoryStatusLabel(entry.status)})`,
-        )
+        .map(unreadRepository)
       return {
         tone: 'warning',
         title: 'Some repositories could not be read',
@@ -559,7 +762,23 @@ function pullRequestInboxNotice(
     case 'stale':
       return {
         tone: 'warning',
-        title: 'Showing the last confirmed read',
+        // Only claim a confirmed read when there is one to show. The first read
+        // of a launch fails for plenty of reasons, and "showing the last
+        // confirmed read" over an empty list describes rows nobody can see.
+        title:
+          refresh.confirmedAt === null
+            ? 'The queue has never been read'
+            : 'Showing the last confirmed read',
+        detail: refresh.detail,
+      }
+    case 'retired':
+      return {
+        tone: 'warning',
+        // Says what happened to the read and nothing about the person: nobody
+        // signed out, nothing became unreachable, and the queue was not empty
+        // when it was last read. Only that this read cannot describe the queue,
+        // and that reading it again can.
+        title: 'Queue read retired',
         detail: refresh.detail,
       }
     case 'offline':

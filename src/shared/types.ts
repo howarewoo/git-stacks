@@ -1386,8 +1386,6 @@ export interface DesktopAPI {
    * the one in flight rather than racing it.
    */
   pullRequestInbox?(request?: PullRequestInboxRequest): Promise<PullRequestInboxReport>
-  /** The last report GitHub confirmed, so the queue can render before its read lands. */
-  lastConfirmedPullRequestInbox?(): Promise<PullRequestInboxReport | null>
   /** Saved Inbox filters. Main owns the file; the window never names a path. */
   pullRequestInboxFilters?(): Promise<PullRequestInboxSavedFilter[]>
   /** Replaces the saved filters with what the window sent, and returns what was stored. */

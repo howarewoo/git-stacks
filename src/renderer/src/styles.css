@@ -1891,8 +1891,11 @@ button:disabled {
   flex: 1;
 }
 
+/* The name field and its Save button are one flex row; the field keeps its own
+   label above the input, so the pair aligns with the other filter controls. */
 .pr-inbox-save {
   display: flex;
+  align-items: end;
   gap: 6px;
 }
 

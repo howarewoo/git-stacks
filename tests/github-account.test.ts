@@ -1015,8 +1015,9 @@ test('cancelling a first sign-in leaves no account metadata behind', async () =>
   await waitUntil(barrier.isHeld)
   await signingIn.cancelSignIn()
   barrier.release()
-  await waitUntil(async () => (await exists(stateFile)) === false)
-  await waitUntil(async () => (await exists(vaultFile)) === false)
+  // Metadata can be absent before the pending write and the vault disappears
+  // before its metadata rollback finishes. Observe both after that rollback.
+  await waitUntil(async () => !(await exists(vaultFile)) && !(await exists(stateFile)))
 
   assert.equal(signingIn.status().state, 'signed-out')
   assert.equal(signingIn.available(), false)

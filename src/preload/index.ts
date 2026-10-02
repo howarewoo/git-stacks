@@ -170,7 +170,6 @@ const desktop: DesktopAPI = {
     }
   },
   pullRequestInbox: (request) => ipcRenderer.invoke('inbox:pull-requests', request),
-  lastConfirmedPullRequestInbox: () => ipcRenderer.invoke('inbox:last-confirmed'),
   pullRequestInboxFilters: () => ipcRenderer.invoke('inbox:filters'),
   savePullRequestInboxFilters: (filters) => ipcRenderer.invoke('inbox:filters-save', filters),
 }
