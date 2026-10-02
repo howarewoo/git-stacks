@@ -1,7 +1,37 @@
-import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { readFileSync, renameSync, writeFileSync } from 'node:fs'
-import type { GitHubFixtureState } from './github-harness'
+import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import {
+  WRITING_ROLES,
+  createServedBareRepository,
+  type GitHubFixtureActor,
+  type GitHubFixtureRepository,
+  type GitHubFixtureRole,
+  type GitHubFixtureState,
+  type GitHubFixtureRepositoryState,
+} from './github-harness'
+import {
+  HttpError,
+  hostGit,
+  hostGitOrNull,
+  repositoryIdentity,
+  hostGitSucceeds,
+  hostRefSha,
+  paginate,
+  queryStringOf,
+  standingReviewDecisions,
+  validateRuleSetCreation,
+  withHostRepository,
+  type HostRepository,
+  type RestResult,
+} from './github-rest'
+import {
+  handleSurfaceGraphql,
+  handleSurfaceRest,
+  mergeQueueFor,
+  ruleSetBranchRules,
+  ruleSetRefusal,
+} from './github-review-surface'
 
 /**
  * Transport test double: serves the same fixture state the `gh` CLI fixture serves, but as
@@ -12,6 +42,19 @@ export interface GitHubApiDoubleRequest {
   path: string
   body: Record<string, unknown>
   headers: Record<string, string>
+  /**
+   * The account this request authenticated as. The live end-to-end suite signs a
+   * second account in to approve and reply, and GitHub decides `viewerDidAuthor`
+   * from exactly this, so it travels with the request rather than living in state.
+   */
+  viewer: string
+  /**
+   * Where this request was sent. A collection that has more to say names its next page
+   * in a `Link` header, and a real host writes that as an absolute URL on the host the
+   * caller is already talking to — so a client that follows it has to be handed the
+   * origin the request arrived on, not the one GitHub uses on the internet.
+   */
+  origin: string
 }
 
 const statePath = () => {
@@ -19,14 +62,6 @@ const statePath = () => {
   if (!value) throw new Error('GIT_STACKS_FIXTURE_STATE is required by the GitHub API double')
   return value
 }
-
-const barePath = () => {
-  const value = process.env.GIT_STACKS_FIXTURE_BARE
-  if (!value) throw new Error('GIT_STACKS_FIXTURE_BARE is required by the GitHub API double')
-  return value
-}
-
-const realGit = () => process.env.GIT_STACKS_REAL_GIT || '/usr/bin/git'
 
 function loadState(): GitHubFixtureState {
   return JSON.parse(readFileSync(statePath(), 'utf8')) as GitHubFixtureState
@@ -38,24 +73,257 @@ function saveState(state: GitHubFixtureState): void {
   renameSync(temporary, statePath())
 }
 
-function bareGit(args: string[], env?: NodeJS.ProcessEnv): string {
-  return execFileSync(realGit(), ['--git-dir', barePath(), ...args], {
-    encoding: 'utf8',
-    env: { ...process.env, ...env },
-  }).trim()
+const realGit = () => process.env.GIT_STACKS_REAL_GIT || '/usr/bin/git'
+
+const primaryFullName = (state: GitHubFixtureState) =>
+  `${state.repository.owner}/${state.repository.name}`
+
+function registryOf(state: GitHubFixtureState): GitHubFixtureRepository[] {
+  return state.repositories ?? []
 }
 
-function bareRef(ref: string): string | null {
-  try {
-    return bareGit(['rev-parse', '--verify', '--end-of-options', ref]) || null
-  } catch {
-    return null
+/**
+ * The repository a full name names on this host, or `null` when it names none.
+ *
+ * The repository the harness created first is described by the top-level state even when
+ * no registry entry exists for it, because that is how every state written before a second
+ * repository was possible still describes the one it serves. A registered entry for it
+ * wins, which is how a test gives that repository a visibility or a permission map.
+ */
+function repositoryEntry(
+  state: GitHubFixtureState,
+  fullName: string,
+): GitHubFixtureRepository | null {
+  const registered = registryOf(state).find(
+    (entry) => entry.fullName.toLowerCase() === fullName.toLowerCase(),
+  )
+  if (registered) return registered
+  if (fullName.toLowerCase() !== primaryFullName(state).toLowerCase()) return null
+  // The primary repository exists even where this process was not told which bare
+  // repository serves it: refusing it here would let a request for a repository this host
+  // does have fall through to the network.
+  const bare = process.env.GIT_STACKS_FIXTURE_BARE ?? ''
+  // The grants and the invitations this repository holds are the ones a request mutates,
+  // so they are read and written on the state that gets saved, the same way its pull
+  // requests are. A pair of copies taken per request would answer the second account's own
+  // read with the repository as it was before it was let in, which is a host that silently
+  // forgets every access it ever granted.
+  const primary = state.repository
+  primary.permissions ??= {}
+  primary.invitations ??= []
+  return {
+    fullName,
+    owner: primary.owner,
+    name: primary.name,
+    bare,
+    private: primary.private === true,
+    defaultBranch: primary.defaultBranch,
+    description: primary.description ?? null,
+    topics: primary.topics ?? [],
+    permissions: primary.permissions,
+    invitations: primary.invitations,
+    pulls: primaryPulls(state),
   }
 }
 
-function currentHead(pr: GitHubFixtureState['prs'][number]): string | null {
-  pr.headOid = bareRef(`refs/heads/${pr.head}`)
-  return pr.headOid
+/**
+ * The keys a repository answers for: its pull requests, its counters, and the switches
+ * that answer for them. They are the same names whether a repository is the top-level
+ * state or one entry of the registry.
+ */
+const REPOSITORY_SLICE_KEYS = [
+  'prs',
+  'comments',
+  'stacks',
+  'issues',
+  'reviews',
+  'reviewThreads',
+  'nextNumber',
+  'nextCommentId',
+  'nextStackNumber',
+  'nextReviewId',
+  'nextThreadId',
+  'ruleSets',
+  'nextRuleSetId',
+  'checks',
+  'mergeQueue',
+  'mergeQueueRefs',
+  'asyncMerge',
+  'asyncMergeResult',
+  'asyncMergeStaysPending',
+  'asyncMergeAlreadyQueued',
+] as const
+
+/**
+ * The primary repository's own slice, which is the top-level state itself.
+ *
+ * The slice reads and writes the state that is saved, rather than a copy of it taken when
+ * the request began: a pull request number this repository hands out has to be the number
+ * the next request already knows, and a copy would hand out the same one twice.
+ */
+function primaryPulls(state: GitHubFixtureState): GitHubFixtureRepositoryState {
+  const slice = {} as GitHubFixtureRepositoryState
+  const source = state as unknown as Record<string, unknown>
+  for (const key of REPOSITORY_SLICE_KEYS) {
+    Object.defineProperty(slice, key, {
+      enumerable: true,
+      configurable: true,
+      get: () => source[key],
+      set: (value: unknown) => {
+        source[key] = value
+      },
+    })
+  }
+  return slice
+}
+
+/**
+ * The real bare repository behind one of the repositories this host serves.
+ *
+ * Every repository is its own Git repository, so a fork's head, a foreign pull request and
+ * the base they are compared with are objects Git reads itself. A repository that names no
+ * bare repository of its own has no commits, and saying so keeps an unregistered
+ * repository from being answered out of somebody else's objects.
+ */
+function hostFor(repository: GitHubFixtureRepository, state: GitHubFixtureState): HostRepository {
+  if (repository.bare) {
+    const host: HostRepository = {
+      fullName: repository.fullName,
+      bare: repository.bare,
+    }
+    // A fork reads its parent's objects, the way GitHub's fork network does, so the
+    // comparison across the fork boundary is still Git's own.
+    const parent = repository.forkOf ? repositoryEntry(state, repository.forkOf) : null
+    if (parent?.bare) host.alternates = [parent.bare]
+    return host
+  }
+  const bare = process.env.GIT_STACKS_FIXTURE_BARE
+  if (!bare) throw new Error('GIT_STACKS_FIXTURE_BARE is required by the GitHub API double')
+  return { fullName: repository.fullName, bare }
+}
+
+/**
+ * The role an account holds on a repository: the owner administers it, a grant names the
+ * role, and anybody else has none of them at all.
+ */
+function roleOf(repository: GitHubFixtureRepository, login: string): GitHubFixtureRole | null {
+  if (repository.owner.toLowerCase() === login.toLowerCase()) return 'admin'
+  const granted = repository.permissions[login.toLowerCase()]
+  if (granted) return granted
+  // A repository whose grants the fixture does not model has granted nothing to anybody,
+  // and refusing every account that is not its owner would hide a repository that exists.
+  // As soon as one grant is registered, or the repository is private, the grants decide.
+  if (!repository.private && Object.keys(repository.permissions).length === 0) return 'admin'
+  return null
+}
+
+/**
+ * The state one repository's request is served from.
+ *
+ * Everything a repository answers for lives in its own slice, and the primary repository's
+ * slice is the top-level state. A pull request, a comment and a counter therefore come
+ * from the repository the request named, and a number it hands out is the number the next
+ * request already has.
+ */
+function scopeState(
+  state: GitHubFixtureState,
+  repository: GitHubFixtureRepository,
+): GitHubFixtureState {
+  const slice = repository.pulls as unknown as Record<string, unknown>
+  const scoped = {
+    ...state,
+    ...slice,
+    repository: {
+      ...state.repository,
+      owner: repository.owner,
+      name: repository.name,
+      defaultBranch: repository.defaultBranch,
+      description: repository.description ?? null,
+      topics: repository.topics ?? [],
+    },
+  } as GitHubFixtureState
+  for (const key of REPOSITORY_SLICE_KEYS) {
+    Object.defineProperty(scoped, key, {
+      enumerable: true,
+      configurable: true,
+      get: () => slice[key],
+      set: (value: unknown) => {
+        slice[key] = value
+      },
+    })
+  }
+  return scoped
+}
+
+/**
+ * Clearing one repository-scoped fact, the way every other mutation here reaches the
+ * state that gets saved.
+ *
+ * `delete` cannot do this job: these routes answer from a scoped view whose keys are
+ * accessors onto the repository's own slice, and deleting removes the accessor from the
+ * view rather than the value behind it. The request then answers from a merge that no
+ * longer exists while the state that is saved still holds one enqueued, which is the
+ * host disagreeing with itself a moment later. Assigning `undefined` writes through the
+ * accessor, and a key whose value is undefined is not serialized at all.
+ */
+function clearScopedFact(state: GitHubFixtureState, key: string): void {
+  ;(state as unknown as Record<string, unknown>)[key] = undefined
+}
+
+/**
+ * The scoped state one account's request is served from, with that account's real role.
+ *
+ * A repository the fixture manages permissions for reports the role the account actually
+ * holds, because a collaborator who was never granted anything and an administrator are
+ * not the same reader. A repository the fixture does not manage keeps whatever role its
+ * state names, so every test written before permissions existed keeps its meaning.
+ */
+function scopedStateFor(
+  state: GitHubFixtureState,
+  repository: GitHubFixtureRepository,
+  viewer: string,
+): GitHubFixtureState {
+  const scoped = scopeState(state, repository)
+  const managed = repository.private || Object.keys(repository.permissions).length > 0
+  if (!managed) return scoped
+  scoped.checks = { ...scoped.checks, viewerPermissions: roleFlags(roleOf(repository, viewer)) }
+  return scoped
+}
+
+function currentHead(
+  state: GitHubFixtureState,
+  pr: GitHubFixtureState['prs'][number],
+): string | null {
+  const head = repositoryEntry(state, pr.headRepository)
+  if (!head) {
+    pr.headOid = null
+    return null
+  }
+  const oid = withHostRepository(hostFor(head, state), () => hostRefSha(`refs/heads/${pr.head}`))
+  pr.headOid = oid
+  return oid
+}
+
+/**
+ * Whether Git can merge this pull request, asked of Git itself.
+ *
+ * `merge-tree` writes the merge it would perform and reports a conflict instead, so the
+ * answer comes from the same objects the branches are made of. A host that answered from
+ * the pull request's own flags would admit a merge Git cannot perform and refuse one it
+ * can.
+ */
+function mergeConflict(state: GitHubFixtureState, pr: GitHubFixtureState['prs'][number]): boolean {
+  const head = repositoryEntry(state, pr.headRepository)
+  const base = repositoryEntry(state, state.repository.owner + '/' + state.repository.name)
+  if (!head || !base) return false
+  const headOid = currentHead(state, pr)
+  const baseOid = withHostRepository(hostFor(base, state), () =>
+    hostRefSha(`refs/heads/${pr.base}`),
+  )
+  if (!headOid || !baseOid) return false
+  return !withHostRepository(hostFor(base, state), () =>
+    hostGitSucceeds(['merge-tree', '--write-tree', baseOid, headOid]),
+  )
 }
 
 function checkEntry(pr: GitHubFixtureState['prs'][number]) {
@@ -65,7 +333,11 @@ function checkEntry(pr: GitHubFixtureState['prs'][number]) {
   return null
 }
 
-function graphPullRequest(pr: GitHubFixtureState['prs'][number], withBody: boolean) {
+function graphPullRequest(
+  state: GitHubFixtureState,
+  pr: GitHubFixtureState['prs'][number],
+  withBody: boolean,
+) {
   const merged = pr.state === 'MERGED'
   const value: Record<string, unknown> = {
     id: `PR_${pr.number}`,
@@ -73,7 +345,7 @@ function graphPullRequest(pr: GitHubFixtureState['prs'][number], withBody: boole
     title: pr.title,
     url: pr.url,
     headRefName: pr.head,
-    headRefOid: currentHead(pr),
+    headRefOid: currentHead(state, pr),
     baseRefName: pr.base,
     isDraft: pr.draft === true,
     state: pr.state,
@@ -107,6 +379,10 @@ function restPullRequest(state: GitHubFixtureState, pr: GitHubFixtureState['prs'
       base: position === 1 ? stack.base.ref : stack.pull_requests[position - 2].head.ref,
     }
   }
+  // The fields a parser reads to decide whether a merge is even possible. `mergeable_state`
+  // is derived from the same rules the merge endpoint enforces, so the read and the write
+  // cannot disagree about a blocked pull request.
+  const blocked = !merged && ruleSetRefusal(state, pr, currentHead(state, pr) ?? '') !== null
   return {
     number: pr.number,
     title: pr.title,
@@ -114,8 +390,19 @@ function restPullRequest(state: GitHubFixtureState, pr: GitHubFixtureState['prs'
     body: pr.body || '',
     state: merged ? 'closed' : pr.state.toLowerCase(),
     draft: pr.draft === true,
-    head: { ref: pr.head, sha: currentHead(pr), repo: { full_name: pr.headRepository } },
-    base: { ref: pr.base },
+    user: actor(pr.author ?? state.currentUser),
+    created_at: '2026-01-01T00:00:00Z',
+    updated_at: '2026-01-01T00:00:00Z',
+    head: { ref: pr.head, sha: currentHead(state, pr), repo: { full_name: pr.headRepository } },
+    // Both ends carry a commit. The application pins a paginated read by comparing the
+    // comparison before and after it, and a base with no sha is unreadable rather than
+    // unchanged, so a double that omitted it would fail every diff read for the wrong
+    // reason.
+    base: { ref: pr.base, sha: hostRefSha(`refs/heads/${pr.base}`) },
+    merged,
+    merged_at: pr.mergedAt,
+    mergeable: !blocked,
+    mergeable_state: merged ? 'unknown' : blocked ? 'blocked' : 'clean',
     merge_commit_sha: pr.mergeOid || null,
     ...(stackObj ? { stack: stackObj } : {}),
   }
@@ -142,7 +429,7 @@ function formatStack(
         merged_at: p.merged_at,
         head: {
           ref: p.head.ref,
-          sha: (pr ? currentHead(pr) : null) ?? p.head.sha ?? '',
+          sha: (pr ? currentHead(state, pr) : null) ?? p.head.sha ?? '',
         },
       }
     }),
@@ -155,6 +442,94 @@ function actor(login: string) {
     5381,
   )
   return { id, login }
+}
+
+/** The stable id GitHub reports for an account, derived from the login it signs in with. */
+function accountId(login: string): number {
+  return actor(login).id
+}
+
+/** Whether an account is an organization or a person, which GitHub reports per account. */
+function actorType(state: GitHubFixtureState, login: string): 'User' | 'Organization' {
+  return (
+    (state.actors ?? []).find((entry) => entry.login.toLowerCase() === login.toLowerCase())?.type ??
+    'User'
+  )
+}
+
+/** Whether an account administers an organization, which is what creating for one needs. */
+function administersOrganization(state: GitHubFixtureState, login: string, org: string): boolean {
+  const entry = (state.actors ?? []).find(
+    (candidate) => candidate.login.toLowerCase() === login.toLowerCase(),
+  )
+  return (
+    (entry?.organizations ?? []).some(
+      (organization) => organization.toLowerCase() === org.toLowerCase(),
+    ) ||
+    (entry?.type === 'Organization' && entry.login.toLowerCase() === org.toLowerCase())
+  )
+}
+
+/** GitHub's own numeric id for a repository, stable for the name it is served under. */
+function repositoryId(fullName: string): number {
+  return repositoryIdentity(fullName)
+}
+
+/** The booleans GitHub reports for a repository role. */
+function roleFlags(role: GitHubFixtureRole | null): {
+  admin: boolean
+  maintain: boolean
+  push: boolean
+  triage: boolean
+  pull: boolean
+} | null {
+  if (role === null) return null
+  const rank: Record<GitHubFixtureRole, number> = {
+    admin: 4,
+    maintain: 3,
+    push: 2,
+    triage: 1,
+    pull: 0,
+  }
+  const held = rank[role]
+  return {
+    admin: held >= rank.admin,
+    maintain: held >= rank.maintain,
+    push: held >= rank.push,
+    triage: held >= rank.triage,
+    pull: true,
+  }
+}
+
+/** The GraphQL name GitHub reports for a repository role. */
+function viewerPermissionOf(
+  state: GitHubFixtureState,
+  repository: GitHubFixtureRepository | null,
+  login: string,
+): 'ADMIN' | 'MAINTAIN' | 'WRITE' | 'TRIAGE' | 'READ' {
+  if (state.checks?.viewerPermissions?.admin === true) return 'ADMIN'
+  const role = repository ? roleOf(repository, login) : 'pull'
+  if (role === 'admin') return 'ADMIN'
+  if (role === 'maintain') return 'MAINTAIN'
+  if (role === 'push') return 'WRITE'
+  if (role === 'triage') return 'TRIAGE'
+  return 'READ'
+}
+
+/** The repository as a nested object, the way a fork reports the one it came from. */
+function repositorySummary(repository: GitHubFixtureRepository) {
+  return {
+    id: repositoryId(repository.fullName),
+    node_id: `R_${repository.fullName}`,
+    name: repository.name,
+    full_name: repository.fullName,
+    owner: actor(repository.owner),
+    private: repository.private,
+    fork: Boolean(repository.forkOf),
+    default_branch: repository.defaultBranch,
+    url: `https://api.github.com/repos/${repository.fullName}`,
+    html_url: `https://github.com/${repository.fullName}`,
+  }
 }
 
 function findPr(state: GitHubFixtureState, number: number) {
@@ -183,19 +558,30 @@ function mergePullRequest(
   }
   if (!allowed[method])
     return { merged: false, message: `merge method ${method} is disabled`, sha: null }
-  const head = currentHead(pr)
-  if (!head || requestedSha !== head)
+  const head = currentHead(state, pr)
+  // GitHub's `sha` is the commit the head "must match" for the merge to be allowed, and
+  // it is optional: a request that names no sha merges the head the pull request has
+  // now. Requiring one would refuse a merge GitHub performs, which is how a scenario
+  // that merges outside the app comes to be impossible to stage.
+  if (!head || (requestedSha !== undefined && requestedSha !== head))
     return { merged: false, message: 'head SHA no longer matches', sha: null }
   if (pr.state !== 'OPEN') return { merged: false, message: 'pull request is not open', sha: null }
   // A stacked merge lands every pull request of the group on the branch the bottom one
   // targets, which is how GitHub merges a stack; no branch inside the stack moves.
   const baseName = typeof fields.base === 'string' ? fields.base : pr.base
   const baseRef = `refs/heads/${baseName}`
-  const base = bareRef(baseRef)
+  const base = hostRefSha(baseRef)
   if (!base) return { merged: false, message: `base branch ${baseName} is missing`, sha: null }
-  const tree = bareGit(['rev-parse', `${head}^{tree}`])
+  // The head tree lives in the repository the head branch lives in, which for a fork is
+  // not the repository the merge commit is created in.
+  const headRepository = repositoryEntry(state, pr.headRepository)
+  const tree = headRepository
+    ? withHostRepository(hostFor(headRepository, state), () =>
+        hostGit(['rev-parse', `${head}^{tree}`]),
+      )
+    : hostGit(['rev-parse', `${head}^{tree}`])
   const parents = method === 'merge' ? ['-p', base, '-p', head] : ['-p', base]
-  const mergedOid = bareGit(
+  const mergedOid = hostGit(
     ['commit-tree', tree, ...parents, '-m', `${pr.title} (#${pr.number})`],
     {
       GIT_AUTHOR_NAME: 'GitHub Fixture',
@@ -206,7 +592,7 @@ function mergePullRequest(
       GIT_COMMITTER_DATE: '2026-01-01T00:00:00Z',
     },
   )
-  bareGit(['update-ref', baseRef, mergedOid, base])
+  hostGit(['update-ref', baseRef, mergedOid, base])
   pr.state = 'MERGED'
   pr.mergedAt = new Date().toISOString()
   pr.mergeOid = mergedOid
@@ -246,7 +632,7 @@ function mergeStackedPullRequest(
       number === pr.number
         ? mergePullRequest(state, member, { sha, merge_method: method, base: stackBase })
         : mergePullRequest(state, member, {
-            sha: currentHead(member),
+            sha: currentHead(state, member),
             merge_method: method === 'rebase' ? 'squash' : method,
             base: stackBase,
           })
@@ -255,40 +641,8 @@ function mergeStackedPullRequest(
   return last
 }
 
-class HttpError extends Error {
-  constructor(
-    readonly status: number,
-    readonly reason: string,
-    message: string,
-    readonly headers: Record<string, string> = {},
-  ) {
-    super(message)
-  }
-}
-
-type RestResult = { status: number; body: unknown; headers?: Record<string, string> }
-
 function etagFor(body: unknown): string {
   return `"${createHash('sha1').update(JSON.stringify(body)).digest('hex')}"`
-}
-
-/** The query string of an API path, which is where `per_page` and `page` arrive. */
-function queryOf(path: string): string {
-  const index = path.indexOf('?')
-  return index === -1 ? '' : path.slice(index + 1)
-}
-
-/**
- * One page of a REST list, the way GitHub serves it. The double keeps the whole list and
- * answers `per_page`/`page`, so a reader that never follows pages really does lose
- * entries instead of silently receiving everything.
- */
-function page<T>(entries: T[], rawQuery: string | undefined): T[] {
-  const queryParams = new URLSearchParams(rawQuery ?? '')
-  const perPage = Number(queryParams.get('per_page')) || 30
-  const number = Number(queryParams.get('page')) || 1
-  const start = (number - 1) * perPage
-  return entries.slice(start, start + perPage)
 }
 
 function checkRunResponse(
@@ -299,7 +653,7 @@ function checkRunResponse(
   const runs = (state.checks?.checkRuns ?? []).filter((run) => run.headSha === headSha)
   const body = {
     total_count: runs.length,
-    check_runs: page(runs, queryOf(request.path)).map((run) => ({
+    check_runs: paginate(runs, queryStringOf(request.path)).map((run) => ({
       id: run.id,
       head_sha: run.headSha,
       node_id: `CR_${run.id}`,
@@ -339,7 +693,7 @@ function commitStatusResponse(
       : statuses.some((entry) => entry.state === 'pending')
         ? 'pending'
         : 'success',
-    statuses: page(statuses, queryOf(request.path)).map((entry) => ({
+    statuses: paginate(statuses, queryStringOf(request.path)).map((entry) => ({
       description: entry.description ?? null,
       id: 900_000,
       node_id: 'CS_1',
@@ -366,7 +720,7 @@ function workflowRunsResponse(
   )
   const body = {
     total_count: runs.length,
-    workflow_runs: page(runs, queryOf(request.path)).map((run) => ({
+    workflow_runs: paginate(runs, queryStringOf(request.path)).map((run) => ({
       id: run.id,
       name: run.name,
       node_id: `WR_${run.id}`,
@@ -424,14 +778,55 @@ function stacksFailure(state: GitHubFixtureState): HttpError | null {
   )
 }
 
-function createPullRequest(state: GitHubFixtureState, body: Record<string, unknown>) {
+function createPullRequest(
+  state: GitHubFixtureState,
+  body: Record<string, unknown>,
+  viewer: string,
+) {
   const head = String(body.head || '')
   const separator = head.indexOf(':')
   const owner = separator >= 0 ? head.slice(0, separator) : state.repository.owner
   const branch = separator >= 0 ? head.slice(separator + 1) : head
-  const headRepository = `${owner}/${state.repository.name}`
-  const headOid = bareRef(`refs/heads/${branch}`)
+  // `head` names the branch and the account it lives under, which for a fork is not the
+  // repository this pull request belongs to. Resolving that account to a repository this
+  // host actually serves is what keeps a forked or foreign head from being answered out of
+  // the base repository's refs.
+  const headRepository =
+    repositoryEntry(state, `${owner}/${state.repository.name}`) ??
+    registryOf(state).find((entry) => entry.owner.toLowerCase() === owner.toLowerCase())
+  if (!headRepository) {
+    throw new HttpError(422, 'Unprocessable Entity', `head repository ${owner} is unknown`)
+  }
+  const headHost = hostFor(headRepository, state)
+  const headOid = withHostRepository(headHost, () => hostRefSha(`refs/heads/${branch}`))
   if (!headOid) throw new HttpError(422, 'Unprocessable Entity', `head branch ${branch} is missing`)
+  const base = String(body.base || '')
+  const baseOid = hostRefSha(`refs/heads/${base}`)
+  if (!baseOid) throw new HttpError(422, 'Unprocessable Entity', `base branch ${base} is missing`)
+  // A pull request is the commits its head has that its base does not. Both refs existing
+  // says nothing about that: a branch cut from the base and left alone has both refs and
+  // no commits at all, which GitHub refuses with `No commits between base and head`. The
+  // count is Git's own, read across the two repositories when the head is a fork.
+  const mergeBase = withHostRepository(headHost, () =>
+    hostGitOrNull(['merge-base', baseOid, headOid]),
+  )
+  if (mergeBase === null) {
+    throw new HttpError(
+      422,
+      'Unprocessable Entity',
+      `base branch ${base} has no history in common with ${branch}`,
+    )
+  }
+  const comparison = withHostRepository(headHost, () =>
+    hostGit(['rev-list', '--count', `${baseOid}..${headOid}`]),
+  )
+  if (Number(comparison) === 0) {
+    throw new HttpError(
+      422,
+      'Unprocessable Entity',
+      `No commits between ${state.repository.owner}:${base} and ${headRepository.owner}:${branch}`,
+    )
+  }
   if (state.prs.some((pr) => pr.head === branch && pr.state === 'OPEN'))
     throw new HttpError(422, 'Unprocessable Entity', `a pull request for ${branch} already exists`)
   const number = nextNumber(state)
@@ -439,9 +834,9 @@ function createPullRequest(state: GitHubFixtureState, body: Record<string, unkno
     number,
     title: String(body.title || ''),
     body: String(body.body || ''),
-    base: String(body.base || ''),
+    base,
     head: branch,
-    headRepository,
+    headRepository: headRepository.fullName,
     draft: body.draft === true,
     state: 'OPEN' as const,
     checks: 'none' as const,
@@ -451,6 +846,7 @@ function createPullRequest(state: GitHubFixtureState, body: Record<string, unkno
     headOid,
     mergeOid: null as string | null,
     mergedAt: null as string | null,
+    author: viewer,
   }
   state.prs.push(pr)
   if (!state.comments) state.comments = {}
@@ -471,11 +867,439 @@ function commentResponse(
 function handleRest(state: GitHubFixtureState, request: GitHubApiDoubleRequest): RestResult {
   const { method, path } = request
   const body = request.body
-  const repository = `${state.repository.owner}/${state.repository.name}`
-  const prefix = `repos/${repository}`
-  if (path === 'user') return { status: 200, body: actor(state.currentUser) }
   const [rawPath, rawQuery] = path.split('?')
   const queryParams = new URLSearchParams(rawQuery ?? '')
+  const account = handleAccountRoutes(state, request, rawPath)
+  if (account) return account
+  // Every `repos/{owner}/{name}` request is served by that repository: its own refs, its
+  // own pull request numbers, its own reviews and its own rules. Serving it from the
+  // repository the fixture started with would make a fork, and a repository that belongs
+  // to somebody else, indistinguishable from the default one.
+  const routed = /^repos\/([^/]+)\/([^/]+)(\/|$)/u.exec(rawPath)
+  if (routed) {
+    const fullName = `${routed[1]}/${routed[2]}`
+    const served = repositoryEntry(state, fullName)
+    // A repository this host does not serve, and one this account may not see, are the
+    // same answer: GitHub does not confirm the existence of a private repository.
+    if (!served || roleOf(served, request.viewer) === null) {
+      throw new HttpError(404, 'Not Found', `Not Found: ${path}`)
+    }
+    const repository = fullName
+    const prefix = `repos/${repository}`
+    return withHostRepository(hostFor(served, state), () =>
+      serveRepositoryRoutes(
+        scopedStateFor(state, served, request.viewer),
+        request,
+        repository,
+        prefix,
+        rawPath,
+        rawQuery,
+        queryParams,
+      ),
+    )
+  }
+  // A path that names no repository is GitHub's 404 rather than a repository with no data.
+  throw new HttpError(404, 'Not Found', `Not Found: ${path}`)
+}
+
+/**
+ * The routes that belong to an account rather than to a repository: who is asking, which
+ * repositories it can see, which organizations it administers, and the invitations it has
+ * to accept. Creating a repository is here too, because GitHub creates it for the account
+ * the request authenticated as rather than for a repository.
+ */
+function handleAccountRoutes(
+  state: GitHubFixtureState,
+  request: GitHubApiDoubleRequest,
+  rawPath: string,
+): RestResult | null {
+  const { method, body } = request
+  const viewer = request.viewer
+  if (rawPath === 'user') {
+    return {
+      status: 200,
+      body: {
+        ...actor(viewer),
+        type: actorType(state, viewer),
+        url: `https://github.com/${viewer}`,
+      },
+    }
+  }
+  if (rawPath === 'user/repos') {
+    if (method === 'GET') {
+      const visible = [primaryFullName(state), ...registryOf(state).map((entry) => entry.fullName)]
+        .map((fullName) => repositoryEntry(state, fullName))
+        .filter((entry): entry is GitHubFixtureRepository => entry !== null)
+        .filter((entry) => roleOf(entry, viewer) !== null)
+        .map((entry) => repositorySummary(entry))
+      return { status: 200, body: paginate(visible, queryStringOf(request.path)) }
+    }
+    if (method !== 'POST')
+      throw new HttpError(405, 'Method Not Allowed', 'user repositories are read here')
+    return { status: 201, body: createRepositoryFor(state, body, viewer, viewer) }
+  }
+  const membership = new RegExp(`^user/memberships/orgs/([^/]+)$`, 'u').exec(rawPath)
+  if (membership) {
+    const org = decodeURIComponent(membership[1])
+    if (!administersOrganization(state, viewer, org)) {
+      throw new HttpError(404, 'Not Found', `Not Found: ${rawPath}`)
+    }
+    return {
+      status: 200,
+      body: { state: 'active', role: 'admin', organization: { login: org } },
+    }
+  }
+  const invitations = new RegExp(`^user/repository_invitations(?:/(\\d+))?$`, 'u').exec(rawPath)
+  if (invitations) {
+    const pending = allRepositories(state).flatMap((entry) =>
+      entry.invitations
+        .filter(
+          (invitation) =>
+            invitation.state === 'pending' &&
+            invitation.login.toLowerCase() === viewer.toLowerCase(),
+        )
+        .map((invitation) => ({
+          id: invitation.id,
+          repository: { full_name: invitation.repository },
+          invitee: actor(viewer),
+          permissions: invitation.permission,
+          created_at: '2026-01-01T00:00:00Z',
+        })),
+    )
+    if (method === 'GET') return { status: 200, body: pending }
+    if (!invitations[1] || method !== 'PATCH')
+      throw new HttpError(405, 'Method Not Allowed', 'an invitation is accepted with PATCH')
+    const id = Number(invitations[1])
+    const target = pending.find((entry) => entry.id === id)
+    if (!target) throw new HttpError(404, 'Not Found', `Invitation ${id} not found`)
+    const repository = repositoryEntry(
+      state,
+      String((target.repository as { full_name: string }).full_name),
+    )
+    const invitation = repository?.invitations.find((entry) => entry.id === id)
+    if (!repository || !invitation) {
+      throw new HttpError(404, 'Not Found', `Invitation ${id} not found`)
+    }
+    // Accepting grants the role the invitation named. Until it is accepted the account can
+    // still not read the repository, which is the whole point of an invitation.
+    const permission =
+      body.permissions === undefined ? invitation.permission : String(body.permissions)
+    repository.permissions[viewer] = permission as GitHubFixtureRole
+    invitation.state = 'accepted'
+    return { status: 204, body: null }
+  }
+  const organization = new RegExp(`^orgs/([^/]+)(/repos)?$`, 'u').exec(rawPath)
+  if (organization) {
+    const org = decodeURIComponent(organization[1])
+    if (actorType(state, org) !== 'Organization') {
+      throw new HttpError(404, 'Not Found', `Not Found: ${rawPath}`)
+    }
+    if (!organization[2]) {
+      return {
+        status: 200,
+        body: {
+          ...actor(org),
+          type: 'Organization',
+          url: `https://github.com/${org}`,
+          description: `${org} on the controlled host`,
+        },
+      }
+    }
+    if (method !== 'POST')
+      throw new HttpError(405, 'Method Not Allowed', 'organization repositories are read here')
+    if (!administersOrganization(state, viewer, org)) {
+      throw new HttpError(403, 'Forbidden', 'Must have admin rights to Repository.')
+    }
+    return { status: 201, body: createRepositoryFor(state, body, viewer, org) }
+  }
+  return null
+}
+
+/**
+ * The login a credential authenticates as, or `null` when it authenticates nobody.
+ *
+ * Every account is registered with the one credential that stands for it, so two accounts
+ * are two identities on the wire and a credential from anywhere else is not served at all.
+ * A state that registers no accounts is answered by the two accounts this fixture has
+ * always had, so every test that writes its own state keeps its meaning.
+ */
+function authenticate(state: GitHubFixtureState, token: string): string | null {
+  const registered = state.actors
+  if (registered) {
+    return registered.find((entry) => entry.token === token)?.login ?? null
+  }
+  if (token === 'fixture-token') return state.currentUser
+  if (token === 'fixture-reviewer-token') return 'reviewer'
+  return null
+}
+
+/** Every repository this host serves, the fixture's own first. */
+function allRepositories(state: GitHubFixtureState): GitHubFixtureRepository[] {
+  return [primaryFullName(state), ...registryOf(state).map((entry) => entry.fullName)]
+    .map((fullName) => repositoryEntry(state, fullName))
+    .filter((entry): entry is GitHubFixtureRepository => entry !== null)
+}
+
+/** The directory whose `<owner>/<name>.git` subdirectories this host serves Git from. */
+function servedProjectsRoot(): string {
+  const bare = process.env.GIT_STACKS_FIXTURE_BARE
+  if (!bare) throw new Error('GIT_STACKS_FIXTURE_BARE is required by the GitHub API double')
+  return dirname(dirname(bare))
+}
+
+/**
+ * Creates a repository with its own real bare repository, for `owner`.
+ *
+ * The caller has already decided who owns it: the account the request authenticated as, or
+ * the organization that account administers. Nothing else may create a repository for
+ * somebody, which is what keeps a repository's owner the account that can administer it.
+ */
+function createRepositoryFor(
+  state: GitHubFixtureState,
+  body: Record<string, unknown>,
+  viewer: string,
+  owner: string,
+): Record<string, unknown> {
+  const name = String(body.name ?? '')
+  if (name === '') throw new HttpError(422, 'Unprocessable Entity', 'name is required')
+  const fullName = `${owner}/${name}`
+  if (repositoryEntry(state, fullName)) {
+    throw new HttpError(422, 'Unprocessable Entity', `repository ${fullName} already exists`)
+  }
+  // The create endpoint documents no way to choose the branch a repository starts on:
+  // `default_branch` is a field of the answer, not of the request. So this host picks, and
+  // a `default_branch` sent in the body is not honoured and not stored — a caller that
+  // believed it chose would be answering from a branch that does not exist.
+  const defaultBranch = state.repository.defaultBranch
+  const bare = join(servedProjectsRoot(), `${fullName}.git`)
+  mkdirSync(dirname(bare), { recursive: true })
+  createServedBareRepository({ git: realGit(), bare, defaultBranch })
+  const repository: GitHubFixtureRepository = {
+    fullName,
+    owner,
+    name,
+    bare,
+    private: body.private === true,
+    defaultBranch,
+    description: typeof body.description === 'string' ? body.description : null,
+    topics: Array.isArray(body.topics) ? body.topics.map(String) : [],
+    permissions: { [owner]: 'admin' },
+    invitations: [],
+    pulls: {
+      prs: [],
+      comments: {},
+      stacks: [],
+      issues: [],
+      nextNumber: 1,
+      nextCommentId: 1,
+    },
+  }
+  // The account that created it holds its administration, which for an organization
+  // repository is the account that administers the organization rather than the
+  // organization itself.
+  if (viewer.toLowerCase() !== owner.toLowerCase()) repository.permissions[viewer] = 'admin'
+  registryOf(state).push(repository)
+  return {
+    ...repositorySummary(repository),
+    description: repository.description,
+    topics: repository.topics,
+    allow_merge_commit: state.repository.allowMergeCommit === true,
+    allow_squash_merge: state.repository.allowSquashMerge === true,
+    allow_rebase_merge: state.repository.allowRebaseMerge === true,
+    permissions: roleFlags(roleOf(repository, viewer)) ?? undefined,
+  }
+}
+/**
+ * The routes of one repository, served from that repository's own state and refs.
+ *
+ * Every `repos/{owner}/{name}` request arrives here with the repository already resolved,
+ * so a route never has to ask which repository it is answering for, and a number, a rule
+ * or a ref always belongs to the repository that owns it.
+ */
+function serveRepositoryRoutes(
+  state: GitHubFixtureState,
+  request: GitHubApiDoubleRequest,
+  repository: string,
+  prefix: string,
+  rawPath: string,
+  rawQuery: string | undefined,
+  queryParams: URLSearchParams,
+): RestResult {
+  // The review, thread, ruleset, and ref routes belong to the live suite's surface module.
+  // A route it does not recognise falls through to the handlers below, so the original
+  // double keeps every route it already owned.
+  const surface = handleSurfaceRest(state, request, request.viewer)
+  if (surface) return surface
+  const { method, path } = request
+  const body = request.body
+  const served = repositoryEntry(state, repository)
+  const role = served ? roleOf(served, request.viewer) : null
+  const collaborators = new RegExp(
+    `^${prefix}/collaborators(?:/([^/]+))?(?:/(permission))?$`,
+    'u',
+  ).exec(rawPath)
+  if (collaborators) {
+    // Reading who holds what needs access to the repository, and changing who holds what
+    // needs administration of it. GitHub answers the read for a collaborator who was let
+    // in with push and refuses the write, so a host that refused both would make a second
+    // reviewer unable to prove it can read a repository it has already been given.
+    if (!served) throw new HttpError(404, 'Not Found', `Not Found: ${rawPath}`)
+    if (method === 'GET' ? role === null : role !== 'admin') {
+      throw new HttpError(403, 'Forbidden', 'Must have admin rights to Repository.')
+    }
+    if (!collaborators[1]) {
+      if (method !== 'GET') throw new HttpError(405, 'Method Not Allowed', 'collaborators are read')
+      return {
+        status: 200,
+        body: Object.entries(served.permissions).map(([login, permission]) => ({
+          login,
+          role_name: permission,
+          permissions: roleFlags(permission),
+        })),
+      }
+    }
+    const login = decodeURIComponent(collaborators[1])
+    if (collaborators[2]) {
+      if (method !== 'GET')
+        throw new HttpError(405, 'Method Not Allowed', 'a permission is read with GET')
+      // A grant is looked up the way every other role on this host is looked up, so a
+      // login written in either case names the same account.
+      const held = served.permissions[login.toLowerCase()]
+      if (!held) throw new HttpError(404, 'Not Found', `Not Found: ${rawPath}`)
+      return { status: 200, body: { permission: held, role_name: held, user: actor(login) } }
+    }
+    if (method === 'PUT') {
+      const permission = String(body.permission ?? 'push') as GitHubFixtureRole
+      if (!(permission in WRITING_ROLES)) {
+        throw new HttpError(422, 'Unprocessable Entity', `unknown permission ${permission}`)
+      }
+      // The account this host answers as administers the repository. A repository whose
+      // access came only from the "no grants registered yet" shortcut would lose that
+      // administration the instant any grant is written down, which is how letting a
+      // second reviewer in silently locked the owner out of their own repository.
+      if (Object.keys(served.permissions).length === 0) {
+        served.permissions[state.currentUser.toLowerCase()] = 'admin'
+      }
+      if (served.permissions[login.toLowerCase()]) {
+        served.permissions[login.toLowerCase()] = permission
+        return { status: 204, body: null }
+      }
+      // An account that has not accepted holds nothing yet: the invitation exists, and the
+      // role is granted when it is accepted. Granting it now would make the acceptance
+      // meaningless and a private repository would read to an outsider.
+      const id = (state.nextInvitationId ?? 1000) + 1
+      state.nextInvitationId = id
+      served.invitations.push({ id, repository, login, permission, state: 'pending' })
+      return {
+        status: 201,
+        body: {
+          id,
+          repository: { full_name: repository },
+          invitee: actor(login),
+          permissions: permission,
+          created_at: '2026-01-01T00:00:00Z',
+        },
+      }
+    }
+    if (method === 'DELETE') {
+      delete served.permissions[login.toLowerCase()]
+      served.invitations = served.invitations.filter(
+        (entry) => entry.login.toLowerCase() !== login.toLowerCase(),
+      )
+      return { status: 204, body: null }
+    }
+    throw new HttpError(405, 'Method Not Allowed', 'unsupported collaborators method')
+  }
+  if (rawPath === `${prefix}/invitations`) {
+    if (!served || role !== 'admin')
+      throw new HttpError(403, 'Forbidden', 'Must have admin rights to Repository.')
+    if (method !== 'GET') throw new HttpError(405, 'Method Not Allowed', 'invitations are read')
+    return {
+      status: 200,
+      body: served.invitations
+        .filter((entry) => entry.state === 'pending')
+        .map((entry) => ({
+          id: entry.id,
+          repository: { full_name: entry.repository },
+          invitee: actor(entry.login),
+          permissions: entry.permission,
+          created_at: '2026-01-01T00:00:00Z',
+        })),
+    }
+  }
+  if (rawPath === `${prefix}/forks`) {
+    if (method !== 'POST') throw new HttpError(405, 'Method Not Allowed', 'forks are created')
+    if (!served || role === null) {
+      throw new HttpError(404, 'Not Found', `Not Found: ${path}`)
+    }
+    const owner = typeof body.organization === 'string' ? body.organization : request.viewer
+    if (
+      typeof body.organization === 'string' &&
+      !administersOrganization(state, request.viewer, owner)
+    ) {
+      throw new HttpError(403, 'Forbidden', 'Must have admin rights to Organization.')
+    }
+    const name = typeof body.name === 'string' && body.name !== '' ? body.name : served.name
+    const fullName = `${owner}/${name}`
+    if (owner.toLowerCase() === served.owner.toLowerCase()) {
+      throw new HttpError(
+        422,
+        'Unprocessable Entity',
+        `a fork cannot be owned by the account that owns ${repository}`,
+      )
+    }
+    if (repositoryEntry(state, fullName)) {
+      throw new HttpError(422, 'Unprocessable Entity', `repository ${fullName} already exists`)
+    }
+    const bare = join(servedProjectsRoot(), `${fullName}.git`)
+    mkdirSync(dirname(bare), { recursive: true })
+    // A fork carries the history it was made from: fetching the parent's refs is what makes
+    // a pull request from the fork a real comparison of two repositories.
+    createServedBareRepository({
+      git: realGit(),
+      bare,
+      defaultBranch: served.defaultBranch,
+      forkOf: served.bare,
+    })
+    const fork: GitHubFixtureRepository = {
+      fullName,
+      owner,
+      name,
+      bare,
+      private: served.private,
+      defaultBranch: served.defaultBranch,
+      forkOf: served.fullName,
+      description: served.description ?? null,
+      topics: [],
+      permissions: { [owner]: 'admin' },
+      invitations: [],
+      pulls: { prs: [], comments: {}, stacks: [], issues: [], nextNumber: 1, nextCommentId: 1 },
+    }
+    registryOf(state).push(fork)
+    return {
+      status: 202,
+      body: {
+        ...repositorySummary(fork),
+        parent: repositorySummary(served),
+        source: repositorySummary(served),
+      },
+    }
+  }
+  if (rawPath === prefix && method === 'DELETE') {
+    if (!served || role !== 'admin')
+      throw new HttpError(403, 'Forbidden', 'Must have admin rights to Repository.')
+    const registry = registryOf(state)
+    const index = registry.findIndex(
+      (entry) => entry.fullName.toLowerCase() === repository.toLowerCase(),
+    )
+    if (index !== -1) {
+      const [removed] = registry.splice(index, 1)
+      rmSync(removed.bare, { recursive: true, force: true })
+      return { status: 204, body: null }
+    }
+    throw new HttpError(403, 'Forbidden', 'the fixture repository cannot be deleted here')
+  }
+
   if (rawPath.startsWith(`${prefix}/stacks`)) {
     if (state.stacksPreviewDisabled) {
       throw new HttpError(404, 'Not Found', 'Not Found: stacks preview unavailable')
@@ -565,7 +1389,7 @@ function handleRest(state: GitHubFixtureState, request: GitHubApiDoubleRequest):
                 : ('open' as const),
             draft: pr.draft === true,
             merged_at: pr.mergedAt,
-            head: { ref: pr.head, sha: currentHead(pr) ?? '' },
+            head: { ref: pr.head, sha: currentHead(state, pr) ?? '' },
           })),
         }
         state.stacks = state.stacks ?? []
@@ -643,7 +1467,7 @@ function handleRest(state: GitHubFixtureState, request: GitHubApiDoubleRequest):
           state: pr.state === 'MERGED' || pr.state === 'CLOSED' ? 'closed' : 'open',
           draft: pr.draft === true,
           merged_at: pr.mergedAt,
-          head: { ref: pr.head, sha: currentHead(pr) ?? '' },
+          head: { ref: pr.head, sha: currentHead(state, pr) ?? '' },
         })
       }
       return { status: 200, body: formatStack(state, stack) }
@@ -671,12 +1495,37 @@ function handleRest(state: GitHubFixtureState, request: GitHubApiDoubleRequest):
   if (path !== prefix && !path.startsWith(`${prefix}/`))
     throw new HttpError(404, 'Not Found', `Not Found: ${path}`)
   if (rawPath === prefix && method === 'GET') {
-    const role = state.checks?.viewerPermissions
+    const served = repositoryEntry(state, repository)
+    const parent = served?.forkOf ? repositoryEntry(state, served.forkOf) : null
+    // A state that names the viewer's role reports that role; otherwise the role is
+    // decided from the repository's own permissions, which is what a private repository
+    // and an accepted invitation change.
+    const role =
+      state.checks?.viewerPermissions ?? roleFlags(served ? roleOf(served, request.viewer) : null)
     return {
       status: 200,
       body: {
         full_name: repository,
+        id: repositoryId(repository),
+        name: state.repository.name,
+        owner: {
+          login: state.repository.owner,
+          id: actor(state.repository.owner).id,
+          type: actorType(state, state.repository.owner),
+        },
+        private: served?.private === true,
+        visibility: served?.private === true ? 'private' : 'public',
+        // The ownership marker a disposable run stamps on the repository it created
+        // lives here, so cleanup reads it back through the endpoint GitHub exposes
+        // rather than through anything the run kept to itself.
+        description: state.repository.description ?? null,
+        // GitHub reports topics as an array of names. An object shaped like
+        // `{ names: [...] }` is a shape no repository response has ever had, and a
+        // consumer written against it would agree with this host and with nothing else.
+        topics: state.repository.topics ?? [],
         default_branch: state.repository.defaultBranch,
+        fork: parent !== null,
+        ...(parent ? { parent: repositorySummary(parent), source: repositorySummary(parent) } : {}),
         allow_merge_commit: state.repository.allowMergeCommit === true,
         allow_squash_merge: state.repository.allowSquashMerge === true,
         allow_rebase_merge: state.repository.allowRebaseMerge === true,
@@ -713,6 +1562,49 @@ function handleRest(state: GitHubFixtureState, request: GitHubApiDoubleRequest):
   if (checkRuns) {
     if (method !== 'GET') throw new HttpError(405, 'Method Not Allowed', 'check runs are read-only')
     return checkRunResponse(state, request, decodeURIComponent(checkRuns[1]))
+  }
+  const statusCreate = new RegExp(`^${prefix}/statuses/([^/]+)$`, 'u').exec(rawPath)
+  if (statusCreate) {
+    // The real endpoint a CI system writes to, kept here so the combined-status shape
+    // the product reads can be observed with a record in it rather than an empty list.
+    if (method !== 'POST')
+      throw new HttpError(405, 'Method Not Allowed', 'a commit status is created with POST')
+    const headSha = decodeURIComponent(statusCreate[1])
+    if (!hostRefSha(headSha))
+      throw new HttpError(422, 'Unprocessable Entity', `No commit found for SHA ${headSha}`)
+    const context = typeof body.context === 'string' ? body.context : 'default'
+    const status = typeof body.state === 'string' ? body.state : 'pending'
+    if (!['error', 'failure', 'pending', 'success'].includes(status))
+      throw new HttpError(422, 'Unprocessable Entity', `Invalid state ${status}`)
+    const kept = (state.checks?.commitStatuses ?? []).filter(
+      (entry) => !(entry.headSha === headSha && entry.context === context),
+    )
+    state.checks = {
+      ...state.checks,
+      commitStatuses: [
+        ...kept,
+        {
+          headSha,
+          context,
+          state: status,
+          description: typeof body.description === 'string' ? body.description : null,
+          targetUrl: typeof body.target_url === 'string' ? body.target_url : null,
+        },
+      ],
+    }
+    return {
+      status: 201,
+      body: {
+        id: 900_000,
+        node_id: 'CS_1',
+        state: status,
+        context,
+        target_url: typeof body.target_url === 'string' ? body.target_url : null,
+        url: `https://api.github.com/repos/acme/widgets/statuses/900000`,
+        created_at: '2026-01-01T00:00:00Z',
+        updated_at: '2026-01-01T00:00:00Z',
+      },
+    }
   }
   const commitStatus = new RegExp(`^${prefix}/commits/([^/]+)/status$`, 'u').exec(rawPath)
   if (commitStatus) {
@@ -754,35 +1646,36 @@ function handleRest(state: GitHubFixtureState, request: GitHubApiDoubleRequest):
     if (rules?.forbidden) {
       throw new HttpError(403, 'Forbidden', 'Resource not accessible by integration')
     }
-    if (!rules || rules.branch !== branch) return { status: 200, body: [] }
-    const entries = (rules.required ?? []).map((entry) => ({
-      context: entry.context,
-      integration_id: entry.integrationId ?? null,
-    }))
-    if (entries.length === 0 && !rules.workflows) return { status: 200, body: [] }
-    return {
-      status: 200,
-      body: page(
-        [
-          ...(rules.workflows
-            ? [
-                {
-                  type: 'workflows',
-                  parameters: { workflows: [{ path: '.github/workflows/required.yml' }] },
-                },
-              ]
-            : []),
-          {
-            type: 'required_status_checks',
-            ruleset_id: 9100,
-            ruleset_source: 'Repository',
-            ruleset_source_type: 'Repository',
-            parameters: { required_status_checks: entries },
+    // Rule sets created through the API apply to exactly the same read. Leaving them out
+    // would report that no context is required on a branch whose merge the gate refuses
+    // for that very context.
+    const configured = ruleSetBranchRules(state, branch)
+    const legacy: unknown[] = []
+    if (rules && rules.branch === branch) {
+      if (rules.workflows) {
+        legacy.push({
+          type: 'workflows',
+          parameters: { workflows: [{ path: '.github/workflows/required.yml' }] },
+        })
+      }
+      if ((rules.required ?? []).length > 0) {
+        legacy.push({
+          type: 'required_status_checks',
+          ruleset_id: 9100,
+          ruleset_source: 'Repository',
+          ruleset_source_type: 'Repository',
+          parameters: {
+            required_status_checks: (rules.required ?? []).map((entry) => ({
+              context: entry.context,
+              integration_id: entry.integrationId ?? null,
+            })),
           },
-        ],
-        rawQuery,
-      ),
+        })
+      }
     }
+    const combined = [...legacy, ...configured]
+    if (combined.length === 0) return { status: 200, body: [] }
+    return { status: 200, body: paginate(combined, rawQuery) }
   }
   const pull = new RegExp(`^${prefix}/pulls/(\\d+)$`, 'u').exec(path)
   if (pull) {
@@ -812,7 +1705,7 @@ function handleRest(state: GitHubFixtureState, request: GitHubApiDoubleRequest):
     throw new HttpError(405, 'Method Not Allowed', `unsupported pull request method ${method}`)
   }
   if (method === 'POST' && path === `${prefix}/pulls`) {
-    const pr = createPullRequest(state, body)
+    const pr = createPullRequest(state, body, request.viewer)
     return {
       status: 201,
       body: { ...restPullRequest(state, pr), number: pr.number, html_url: pr.url },
@@ -827,7 +1720,19 @@ function handleRest(state: GitHubFixtureState, request: GitHubApiDoubleRequest):
       )
     )
       throw new HttpError(405, 'Method Not Allowed', 'stacked pull requests require merge-async')
-    return { status: 200, body: mergePullRequest(state, findPr(state, Number(merge[1])), body) }
+    // A ruleset the fixture is enforcing is the only thing allowed to refuse a merge
+    // here. Without this the rule set scenarios would agree with the client instead of
+    // proving the rules were ever applied. The expected head is the head the pull request
+    // has now unless the request named one, because GitHub's `sha` is optional and a rule
+    // must not turn an omitted sha into a mismatch.
+    const merged = findPr(state, Number(merge[1]))
+    if (mergeConflict(state, merged))
+      throw new HttpError(405, 'Method Not Allowed', 'Pull Request is not mergeable')
+    const expectedHead = body.sha === undefined ? currentHead(state, merged) : String(body.sha)
+    const refusal = ruleSetRefusal(state, merged, expectedHead ?? '')
+    if (refusal !== null)
+      throw new HttpError(405, 'Method Not Allowed', `merge blocked by ruleset: ${refusal}`)
+    return { status: 200, body: mergePullRequest(state, merged, body) }
   }
   const asyncMerge = new RegExp(`^${prefix}/pulls/(\\d+)/merge-async(?:/([^/]+))?$`, 'u').exec(path)
   if (asyncMerge) {
@@ -837,11 +1742,35 @@ function handleRest(state: GitHubFixtureState, request: GitHubApiDoubleRequest):
       const action = String(body.merge_action || 'default')
       if (action !== 'default' && action !== 'direct_merge' && action !== 'merge_queue')
         throw new HttpError(422, 'Unprocessable Entity', 'merge_action must be a documented value')
+      // GitHub answers a retry for an already-merged pull request with the terminal `200`
+      // and the merge commit, and this is checked before the open-state admission rules:
+      // a merge that already landed is the completed result, not a pull request that is
+      // not ready, and refusing it with 400 makes a successful recovery look like a fault.
+      // The answer carries no request identity, because there is no request left to read.
+      if (pr.state === 'MERGED') {
+        return {
+          status: 200,
+          body: {
+            status: 'merged',
+            details: {
+              message: 'Pull Request successfully merged',
+              sha: pr.mergeOid,
+            },
+          },
+        }
+      }
       if (pr.state !== 'OPEN' || pr.draft)
         throw new HttpError(400, 'Bad Request', 'Pull request is not ready to be merged')
-      // A second request for a pull request that already has one is refused with that
-      // request's own identity, which is what a client has to adopt rather than duplicate.
-      if (state.asyncMerge?.number === number)
+      // Mergeability is Git's own answer, and GitHub refuses the request before it is ever
+      // accepted. A request the host will not run is not a pending merge.
+      if (mergeConflict(state, pr))
+        throw new HttpError(422, 'Unprocessable Entity', 'Pull Request is not mergeable')
+      // Branch protection and repository rules are not run here: GitHub performs only the
+      // basic pull request state checks at admission and evaluates the rules while the
+      // request runs. Refusing with 405 here would make a rule-blocked pull request look
+      // like one GitHub never accepted, and would suppress the 409 that a request already
+      // in flight has to answer with.
+      if (state.asyncMerge?.number === number) {
         return {
           status: 409,
           body: {
@@ -855,7 +1784,13 @@ function handleRest(state: GitHubFixtureState, request: GitHubApiDoubleRequest):
             },
           },
         }
-      const queued = action === 'merge_queue' || (action === 'default' && state.mergeQueue === true)
+      }
+      // A queue belongs to a base ref: a default merge enqueues only where an active rule
+      // set says this branch has one. An explicit request for a queue that does not exist
+      // is admitted and then fails, because that is what an accepted request GitHub cannot
+      // complete looks like; answering `enqueued` would be inventing the evidence.
+      const queued =
+        action === 'merge_queue' || (action === 'default' && mergeQueueFor(state, pr.base))
       // The documented `200`: this pull request is already in a merge queue, so the result
       // is terminal and GitHub hands back no request identity to read it through.
       if (queued && state.asyncMergeAlreadyQueued) {
@@ -870,7 +1805,10 @@ function handleRest(state: GitHubFixtureState, request: GitHubApiDoubleRequest):
       const uuid = `fixture-${number}`
       state.asyncMerge = {
         number,
-        sha: String(body.sha),
+        // GitHub's `sha` is optional: a request that names none merges the head the pull
+        // request has when the request is made, and is cancelled if the head moves before
+        // it runs. Recording an empty string instead would cancel every such request.
+        sha: body.sha === undefined ? (currentHead(state, pr) ?? '') : String(body.sha),
         method: queued ? '' : String(body.merge_method || ''),
         action: queued ? 'merge_queue' : 'direct_merge',
         uuid,
@@ -896,7 +1834,7 @@ function handleRest(state: GitHubFixtureState, request: GitHubApiDoubleRequest):
       const canned = state.asyncMergeResult
       const pr = findPr(state, number)
       if (canned?.status === 'enqueued') {
-        delete state.asyncMerge
+        clearScopedFact(state, 'asyncMerge')
         return {
           status: 200,
           body: {
@@ -906,16 +1844,51 @@ function handleRest(state: GitHubFixtureState, request: GitHubApiDoubleRequest):
         }
       }
       if (canned?.status === 'failed') {
-        delete state.asyncMerge
+        clearScopedFact(state, 'asyncMerge')
         return {
           status: 200,
           body: { status: 'failed', details: { message: canned.message ?? 'merge failed' } },
         }
       }
+      // The lease, checked before either outcome is resolved. GitHub's contract for this
+      // endpoint is that the supplied head must match and that the request is cancelled if
+      // the head moves before the request runs, so an accepted request whose head has
+      // since moved answers a terminal failure — never an enqueue, which is evidence that
+      // this exact head is on its way onto the base, and never a merge of whatever is there
+      // now.
+      const leasedHead = currentHead(state, pr)
+      if (leasedHead === null || leasedHead !== pending.sha) {
+        clearScopedFact(state, 'asyncMerge')
+        return {
+          status: 200,
+          body: {
+            status: 'failed',
+            details: {
+              message: `head SHA ${String(leasedHead)} no longer matches the ${pending.sha} this request was made for`,
+            },
+          },
+        }
+      }
+      // This is where the rules are evaluated. A request that was admitted and is then
+      // blocked produces a terminal failed result rather than a request that was never
+      // accepted, which is what GitHub does and what a client polling for the outcome has
+      // to be able to read.
       if (pending.action === 'merge_queue') {
-        // An enqueued result is terminal and means the pull request joined a queue, not that
-        // it merged; the queue itself is not simulated further.
-        delete state.asyncMerge
+        if (!mergeQueueFor(state, pr.base)) {
+          clearScopedFact(state, 'asyncMerge')
+          return {
+            status: 200,
+            body: {
+              status: 'failed',
+              details: {
+                message: `Merge queue is not enabled on ${state.repository.owner}:${pr.base}`,
+              },
+            },
+          }
+        }
+        // An enqueued result is terminal and means the pull request joined a queue, not
+        // that it merged; the queue itself is not simulated further.
+        clearScopedFact(state, 'asyncMerge')
         return {
           status: 200,
           body: {
@@ -924,8 +1897,16 @@ function handleRest(state: GitHubFixtureState, request: GitHubApiDoubleRequest):
           },
         }
       }
+      const refusal = ruleSetRefusal(state, pr, pending.sha)
+      if (refusal !== null) {
+        clearScopedFact(state, 'asyncMerge')
+        return {
+          status: 200,
+          body: { status: 'failed', details: { message: `merge blocked by ruleset: ${refusal}` } },
+        }
+      }
       const result = mergeStackedPullRequest(state, pr, pending.sha, pending.method)
-      delete state.asyncMerge
+      clearScopedFact(state, 'asyncMerge')
       return {
         status: 200,
         body: result.merged
@@ -964,9 +1945,80 @@ function handleRest(state: GitHubFixtureState, request: GitHubApiDoubleRequest):
   throw new HttpError(404, 'Not Found', `Not Found: ${path}`)
 }
 
-function handleGraphql(state: GitHubFixtureState, body: Record<string, unknown>): RestResult {
+function handleGraphql(
+  state: GitHubFixtureState,
+  body: Record<string, unknown>,
+  viewer: string,
+): RestResult {
   const query = String(body.query || '')
   const variables = (body.variables ?? {}) as Record<string, unknown>
+  // A document that names a repository is served by that repository: its own pull
+  // requests, its own threads, and the role this account actually holds there. Answering
+  // from the fixture's own repository would make a fork, or a repository this account
+  // cannot see, look like a repository it may write to.
+  // Only a document that names a repository in full is scoped by this host. A query that
+  // carries an owner for some other purpose is none of this route's business.
+  const names =
+    typeof variables.owner === 'string' && typeof variables.name === 'string'
+      ? `${variables.owner}/${variables.name}`
+      : null
+  const named = names === null ? null : repositoryEntry(state, names)
+  if (named !== null) {
+    // The same two answers for the primary repository as for any other, because it is a
+    // repository like any other. Exempting it left the private repository a controlled
+    // run relies on readable over GraphQL by an account with no grant on it — while the
+    // REST surface refused that same account — and left the invited reviewer reaching
+    // every operation with the owner's `admin` flags, reported as an administrator on an
+    // account this run invited with a push role and nothing more.
+    if (roleOf(named, viewer) === null) {
+      return {
+        status: 200,
+        body: {
+          data: { repository: null },
+          errors: [
+            {
+              type: 'NOT_FOUND',
+              message: `Could not resolve to a Repository with the name '${variables.owner}/${variables.name}'.`,
+            },
+          ],
+        },
+      }
+    }
+    if (named.fullName.toLowerCase() === primaryFullName(state).toLowerCase()) {
+      // The primary's slice is this state rather than a registry entry, so there is
+      // nothing to re-scope into — only the role projection differs per account, and it
+      // is applied here and the request continues, which is what keeps a repository the
+      // fixture models permissions for from answering for somebody who holds none.
+      const managed = named.private || Object.keys(named.permissions).length > 0
+      if (managed) {
+        state = {
+          ...state,
+          checks: { ...state.checks, viewerPermissions: roleFlags(roleOf(named, viewer)) },
+        }
+      }
+    } else {
+      return withHostRepository(hostFor(named, state), () =>
+        handleGraphql(scopedStateFor(state, named, viewer), body, viewer),
+      )
+    }
+  } else if (names !== null) {
+    return {
+      status: 200,
+      body: {
+        data: { repository: null },
+        errors: [
+          {
+            type: 'NOT_FOUND',
+            message: `Could not resolve to a Repository with the name '${names}'.`,
+          },
+        ],
+      },
+    }
+  }
+  // The review thread, reply, resolve, and permission operations belong to the live
+  // suite's surface module; anything it does not recognise falls through below.
+  const surface = handleSurfaceGraphql(state, body, viewer)
+  if (surface) return surface
   const field = query.includes('convertPullRequestToDraft')
     ? 'convertPullRequestToDraft'
     : query.includes('markPullRequestReadyForReview')
@@ -1076,14 +2128,14 @@ function handleGraphql(state: GitHubFixtureState, body: Record<string, unknown>)
     const pr = findPr(state, Number(variables.number))
     return {
       status: 200,
-      body: { data: { repository: { pullRequest: graphPullRequest(pr, true) } } },
+      body: { data: { repository: { pullRequest: graphPullRequest(state, pr, true) } } },
     }
   }
   const after = typeof variables.endCursor === 'string' ? variables.endCursor : null
   const open = state.prs.filter((pr) => pr.state === 'OPEN')
   // One PR per page so a second request with a cursor proves the loop advanced.
   const start = after ? Number(after.replace('cursor:', '')) : 0
-  const nodes = open.slice(start, start + 1).map((pr) => graphPullRequest(pr, false))
+  const nodes = open.slice(start, start + 1).map((pr) => graphPullRequest(state, pr, false))
   const next = start + 1
   return {
     status: 200,
@@ -1139,9 +2191,14 @@ export function createGitHubApiDouble(): typeof globalThis.fetch {
         return json(400, { message: 'Problems parsing JSON' })
       }
     }
-    if (headers.authorization !== 'Bearer fixture-token')
-      return json(401, { message: 'Bad credentials' })
     const state = loadState()
+    // The credential a request carried decides who is asking, so two accounts are two real
+    // identities rather than one login behind a flag, and GitHub decides `viewerDidAuthor`
+    // from exactly this. Only a credential this run minted resolves; anything else,
+    // including a real one, is refused.
+    const token = (headers.authorization ?? '').replace(/^Bearer /u, '')
+    const viewer = authenticate(state, token)
+    if (viewer === null) return json(401, { message: 'Bad credentials' })
     if (!Array.isArray(state.requests)) state.requests = []
     const path = (url.pathname + url.search).replace(/^\//u, '')
     state.requests.push({
@@ -1150,7 +2207,14 @@ export function createGitHubApiDouble(): typeof globalThis.fetch {
       at: new Date().toISOString(),
       ...(Object.keys(body).length > 0 ? { body } : {}),
     })
-    const request: GitHubApiDoubleRequest = { method, path, body, headers }
+    const request: GitHubApiDoubleRequest = {
+      method,
+      path,
+      body,
+      headers,
+      viewer,
+      origin: url.origin,
+    }
     const lost = (state.lostResponses ?? []).findIndex((rule) => {
       if (rule.method !== method || !request.path.includes(rule.pathIncludes)) return false
       if (rule.pathEndsWith !== undefined && !request.path.endsWith(rule.pathEndsWith)) return false
@@ -1168,7 +2232,9 @@ export function createGitHubApiDouble(): typeof globalThis.fetch {
     })
     try {
       const result =
-        request.path === 'graphql' ? handleGraphql(state, body) : handleRest(state, request)
+        request.path === 'graphql'
+          ? handleGraphql(state, body, request.viewer)
+          : handleRest(state, request)
       // Somebody else pushes and closes a pull request after the response above was built but
       // before the caller sees it. The listing the caller is holding is now a stale snapshot,
       // which is the window a single earlier read cannot cover.
@@ -1183,7 +2249,7 @@ export function createGitHubApiDouble(): typeof globalThis.fetch {
         const rule = (state.driftOnRequest ?? [])[drift]
         state.driftOnRequest = (state.driftOnRequest ?? []).filter((_, index) => index !== drift)
         saveState(state)
-        bareGit(['update-ref', rule.ref, rule.to])
+        hostGit(['update-ref', rule.ref, rule.to])
       }
       const closeIndex = (state.closeOnRequest ?? []).findIndex((rule) => {
         if (!request.path.includes(rule.pathIncludes)) return false

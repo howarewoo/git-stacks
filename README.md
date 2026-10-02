@@ -57,6 +57,7 @@ npm ci                 # install
 npm run dev            # run the app
 npm run build          # typecheck + production build
 npm test               # the test suite
+npm run test:live       # the disposable GitHub end-to-end suite (no credentials)
 npm run format:check   # formatting gate
 npm run bench:performance  # large-repository benchmarks
 npm run build:promotion-helper  # build the atomic no-replace rename helper
@@ -1289,6 +1290,25 @@ The smoke launches the real Electron main process and preload bridge — never a
 
 This is a dev-main smoke; the packaged executable, preload packaging, and CSP remain the packaged desktop smoke's proof, and a real OS key-store acceptance is a separate manual gate.
 
+### Isolated desktop fixture
+
+`tests/fixtures/isolated-desktop.cjs` launches the real production main, preload, and renderer (`out/main/index.js`), with the Electron main entry replaced by the fixture itself:
+
+```sh
+node_modules/electron/dist/Electron.app/Contents/MacOS/Electron \
+  tests/fixtures/isolated-desktop.cjs \
+  --use-mock-keychain --password-store=basic \
+  --user-data-dir=<owned-temp-root>/user-data \
+  --fixture-root <owned-temp-root> \
+  --main out/main/index.js
+```
+
+Keep the fixture file first and Chromium startup switches before any `--` separator. The fixture patches the shared native `safeStorage` object in place, preserving Electron's non-configurable export getter and existing import aliases; it never calls the original methods. Keep sandboxing enabled.
+
+Before the production main module is imported, the fixture replaces every `safeStorage` entry point the compiled product uses with a local AES-256-GCM implementation keyed by `<fixture-root>/synthetic-key.bin` (mode 0600), so sealed credentials never touch the operating system's store and a wrong key fails to open them. The key persists only inside the caller-owned fixture root across fixture restarts; it is never printed, and neither is any plaintext. Chromium's own key store is forced to `--use-mock-keychain` and `--password-store=basic` before the app is imported. If any of that cannot be proven, the fixture exits before the production main is loaded. A launch is under the fixture when `<fixture-root>/fixture.json` is present. Passive: it exists only because the fixture created it. The fixture changes no production source, adds no production env switch, and is never referenced by packaged code; accepting the real OS key store remains a separate, external gate, and packaged-desktop acceptance stays with `npm run test:desktop`.
+
+`scripts/packaged-desktop-smoke.mjs` exercises the same synthetic backend in the shipped (unsigned development) package: it pauses the main entry at `--inspect-brk`, installs the helper's fixture before the first production statement, then resumes. That run is synthetic-store evidence only; it never claims the real OS keychain or a signed install.
+
 ### Updating visual baselines
 
 Use the pinned Playwright Chromium, OS/architecture, viewport, locale, timezone, device scale, and system fonts recorded in the verification report. Baselines are platform-specific: a passing macOS image is not Linux or Windows evidence. Do not update images solely to silence failures.
@@ -1330,6 +1350,326 @@ Use the packaged build and only disposable fixture repositories. `npm run test:d
 10. Record findings and platform limits in the pull request. Sign off only after blocking keyboard, contrast, state-truthfulness, and safety-dispatch findings are resolved.
 
 Real GitHub mutations require a separately designated test repository and explicit authorization; none is included in routine fixtures or CI.
+
+## Disposable GitHub end-to-end suite
+
+`tests/live` is the suite that runs against a real GitHub instead of a double in
+process: real Git, a real HTTPS transport, and a repository that exists for the
+length of one run. It exists for the behaviour mocks cannot prove — a native
+stack created twice, a merge requested twice, a review written against a
+comparison that moved, a check the host reports differently than we expect.
+
+```sh
+npm run test:live                  # the controlled target: no credentials, no network
+npx tsx tests/live/cli.ts --list   # every scenario, its title, and what it needs
+```
+
+### The controlled target
+
+`--controlled` stands the API double and Git's smart HTTP protocol up on one
+real TLS socket with a certificate generated for the run, and points the
+production transport at it. The clone's `origin` is a real HTTPS URL the
+application resolves a host and a repository from, so its fetches, pushes, and
+API reads all cross the same boundary they cross against github.com. The
+certificate is verified rather than trusted blindly, and nothing in the run
+names `github.com`, so the run cannot reach the real service even by accident.
+
+The run's own host answers on a `127.0.0.1` authority, so the URLs a scenario
+asks for are that host's and not the apparent `github.com` spelling — and the
+transport rule is told which they are rather than left to guess from the shape
+of an address. Each repository this run creates is registered as it is created,
+and a remote is answered only on an exact match against one of those URLs. A
+sibling path on the same host, any other authority, and a URL registered by
+nobody are all refused, because a rule that let through anything matching
+`https` — or anything under the directory this host serves — would be a rule
+that answers a request for github.com itself.
+
+The Git boundary refuses the same way. Git applies successive `-C` options in
+order and a separate `--git-dir` names a repository outright, so a command
+carrying more than one directory selector is refused rather than resolved: the
+last selector is where the command actually runs, and measuring the claim
+against the first is how a command reaches a checkout this run never created.
+That holds for a command the fixture answers and for one it forwards to the
+real `git`, because both are checked before either runs.
+
+This is the target that needs no authorization, and it is the one CI runs. It is
+not a mock: the scenarios exercise the production services, the production
+transport, and real `git`, and the only thing stood in for GitHub is GitHub.
+
+### What the run takes away from the environment
+
+A live run is the one place in this repository where a real credential is in the
+environment, so it replaces that environment rather than inheriting it. Every
+Git the run starts — the ones it starts itself, the ones an external clone
+starts, and the ones the application's own services start — reads an empty home
+and template directory, no system or global configuration, hooks pointed at a
+directory the run created and left empty, signing off, helpers cleared, and
+tracing off; the run's own credential rides in a header scoped to the disposable
+repository rather than in the remote URL. It also removes what a machine can
+carry that would widen where that credential goes: `GIT_DIR` and its relatives,
+the counted `GIT_CONFIG_*` pairs, an ambient token, and an ambient API base.
+
+`NODE_TLS_REJECT_UNAUTHORIZED` and `NODE_EXTRA_CA_CERTS` are retired with them,
+and the two are not the same kind of thing. The application's API calls are
+`fetch` in this process, and Node reads the first of them when it opens the
+connection: with it set to `0`, a request carrying this run's bearer completes
+its handshake against a certificate nothing vouches for. Retiring
+`GIT_SSL_NO_VERIFY` secures the Git children and changes nothing about that
+request, so the retirement happens in the same install, before the first
+authenticated request rather than with the Git commands later. The recovery
+command retires it too, and for the same reason: it deletes repositories, and a
+certificate bypass still in place when its first connection opens would be a
+credential sent to whatever answered.
+
+The second is read once, when the process starts. Deleting it stops this run's
+Git children from inheriting an extra authority; it does not unload authorities
+this process already loaded. Which authorities a Node process trusts from its
+first instruction is settled by how it was launched, and a run that starts
+already trusting a certificate is not made safe by any environment it installs
+afterwards — so the suite claims no certificate pinning it does not perform, and
+the boundary it does enforce is the one it can: no credential leaves on a
+connection whose certificate this process has not accepted.
+
+When the run finishes — succeeded, failed, or refused — the process environment
+is restored exactly as it was found, on the refusal path and the failure path as
+well as the successful one. A process left holding a bypass it did not start with
+is not a thing this suite produces.
+
+### The authorized target
+
+`--github` runs the same scenarios against a repository it creates on a real
+host and deletes afterwards. There is no default: a run with no owner, no
+token, and no run id is refused, and the refusal names the variables to set. A
+credential is never inherited from an ambient `gh` session and never read from a
+variable the application itself uses — the suite spends a credential somebody
+gave it for a disposable repository, or it does not run.
+
+Authorized API calls serialize across both actors, with at least one second
+between mutations. The pagination scenario's 100 filler reviews therefore take
+at least 99 seconds; controlled runs do not wait. A real primary or secondary
+rate-limit refusal parks subsequent scenarios and cleanup for the host's
+`Retry-After` or exhausted-budget reset, with a one-minute fallback when no
+deadline is supplied. The refused request is reported, never automatically
+replayed, including when its mutation outcome is uncertain.
+
+| Variable                                   | Meaning                                                                                                                     |
+| ------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------- |
+| `GIT_STACKS_LIVE_GITHUB_OWNER`             | The account the disposable repository is created under. Required.                                                           |
+| `GIT_STACKS_LIVE_GITHUB_TOKEN`             | That account's token. Required; never defaulted.                                                                            |
+| `GIT_STACKS_LIVE_GITHUB_REVIEWER_TOKEN`    | A second account that can approve and reply. Optional; without it the scenarios that need a reviewer fail rather than skip. |
+| `GIT_STACKS_LIVE_GITHUB_REPOSITORY_PREFIX` | Prefix of the disposable repository. Defaults to `git-stacks-live-e2e`.                                                     |
+| `GIT_STACKS_LIVE_GITHUB_RUN_ID`            | Id stamped on everything the run creates. Defaults to a per-run digest.                                                     |
+| `GIT_STACKS_LIVE_GITHUB_RECEIPT`           | Where the cleanup receipt is written.                                                                                       |
+
+The account needs permission to create and delete a repository, to administer
+its rule sets, and to merge. Anything the host cannot do is discovered by
+probing, not assumed: the native stack surface is asked through the product's
+own detector, review threads are asked about a real pull request, a merge queue
+is configured and read back off the rule set that declares it, and a credential
+is answered by sending a write and seeing whether the host takes it. What could
+not be observed becomes a note in the report, and a scenario whose capability is
+missing is a **failure**, not a skip — a suite that quietly stops covering merge
+queues would report green while the thing it exists to catch goes uncaught.
+
+### Which branch a run works on
+
+The trunk is whatever the host says it is. The repository's default branch is
+read out of the answer to the create request — that endpoint takes no such
+parameter, so nothing is passed and nothing is assumed — and every layer base,
+pull request base, native-chain expectation, queue ref and schema-probe parent
+in the suite reads that value rather than the word `main`. A host that creates a
+repository without naming one is refused before anything is seeded: a guess at
+that point means committing to a branch the repository has no evidence of
+having, and then asking the host questions about it.
+
+The controlled target takes the name it is stood up with, so an account whose
+repositories default to `trunk` is something this suite can cover rather than
+something it quietly assumes away. No environment variable was added for it: the
+live run reads the branch from the host, and a host that will not name one is
+refused.
+
+### Who may push
+
+A host that served every push would prove nothing about authorization, because a
+public repository answers everybody. The controlled host answers the question
+GitHub answers: it identifies the credential behind the request, looks up the
+role that account holds on the repository that was named, and refuses a push
+whose principal it does not recognise or whose role does not permit writing. The
+same boundary covers the foreign repository a reviewer is given, whose access is
+granted and read back before it is used, and a credential authorized for the
+disposable repository authorizes nothing else on the same host: it rides in a
+header scoped to that one repository's URL.
+
+On the authorized target the run claims the real `git` over the directory it
+created, and releases that claim when it finishes. It never claims `gh`, never
+invokes it, and never reads a credential from it, so a suite that is supposed to
+spend a credential somebody handed it cannot spend an ambient session instead.
+
+### What it covers
+
+`--list` is the authoritative catalogue. In outline: native stack create, extend,
+unstack, invalid chains, fork heads, and cross-repository numbers; single-line,
+multi-line, and reply review threads, resolve and unresolve, a review against a
+moved comparison, and a second account approving what the author cannot; check
+and status rollup, rerun refusal, and a spent rate limit; required-check and
+required-approval rule sets; direct and queued asynchronous merges; external
+mutation between preview and submit (force-push, retarget, merge, branch deletion,
+stack membership); network, rate-limit, and credential faults at the adapter
+boundary; and a schema-drift check against the committed fixture.
+
+Faults are injected at the transport boundary rather than in a server, which is
+what makes them usable against a real host. A lost response is the one fault a
+fixture cannot stage honestly and a live host must not be asked to produce: the
+request really is sent, GitHub really does apply it, and only the answer is
+discarded — the exact state a person is in when a merge may or may not have been
+requested, and the only way to prove a retry does not create a second merge,
+stack, or pull request. A refused write is the opposite: the host never sees it.
+The fault decorator reads `destinationHost` and `credentialAuthority()` from the
+wrapped transport on demand, preserving host provenance and credential rotation.
+
+### Cleanup and receipts
+
+Every resource the run creates carries the marker `git-stacks-live-e2e:<run id>`
+in its own description. Cleanup reads the marker back off the repository before
+it deletes anything, and refuses every resource — reporting what is still
+standing — when the marker cannot be proven. A name collision, a hand-made
+repository, or a previous run's leftover is never removed on a guess. Cleanup
+runs in a `finally` that covers workspace setup, the capability probe, the
+scenarios, and schema generation, so a startup failure and a scenario failure
+both clean up; a run that left anything behind exits non-zero.
+
+The account that spends the credential and the account the repository belongs to
+are two different answers, and the receipt keeps them apart. A run pointed at an
+organization creates the repository as a user acting for it, so every entry names
+the login that actually authenticated, and recovery asks for the accounts the
+receipt names rather than for the owner alone — demanding the organization
+itself would refuse the exact run that most needs recovering. A reviewer
+credential that turns out to be the same account as the primary is refused before
+anything is deleted rather than after.
+
+The receipt is also written _before_ the request that creates the resource, and
+flushed to disk before that request is sent, which is what makes a lost answer
+recoverable: the exact owner, name and marker are on the disk before the host has
+been asked. When the host names the object it created, that same entry is
+completed with the host's own id rather than a second entry being appended —
+two entries for one repository would leave one of them unsettleable and
+outstanding for ever.
+
+Recovery removes a repository only after the host confirms the id the receipt
+records _and_ the marker it stamped, in that order, and settles nothing else: a
+resource inside a repository that was removed is reported as gone with it, a
+refusal stays outstanding with its reason, and a read that could not be answered
+at all is reported as unknown rather than as removed or absent, because
+reporting a dropped connection as a deleted repository is the one answer a person
+cannot act on. Recovery installs no global transport, so a credential it was
+given for one deletion is never reachable by the rest of the process, and the
+same is true of the certificate bypass it retires first.
+
+The receipt is updated after every change, so a run that dies between creating
+something and deleting it still leaves the list of what to clean up by hand. It
+holds handles, timestamps, and refusal reasons — never a request body, a diff,
+or a credential. Progress lines, failure messages, stack traces, and request
+summaries are all rendered through the redactor first: configured credential
+literals (longest first, so a secret containing another is removed whole), the
+credential shapes the application already knows, any `user:password@` in a URL,
+and local paths.
+
+Exit codes are `0` passed, `1` a scenario or cleanup failed, `2` the run was
+refused before it started.
+
+`npx tsx tests/live/cli.ts --recover <receipt>` is what a run that was killed
+before its own cleanup needs. It reads that run's receipt, asks the host to
+confirm the id and the marker for everything the receipt names, and removes only
+those; a receipt naming something the host does not confirm is reported and left
+alone.
+
+### The committed schema fixture
+
+`tests/fixtures/live-github-observed-schema.json` is the contract the mock
+fixtures are held to. It records the shape the host was observed to answer —
+paths and JSON types only, no values, no repository name, no identifier — and
+`schema/observed-responses-match-the-committed-fixture` fails when a field the
+parsers depend on is missing or has changed type. Regenerate it deliberately
+with `--write-schema`, which prepares a real subject (a diff, a submitted review
+with a comment, a two-layer stack, a check run, and a commit status) before
+observing, because a probe over an empty pull request observes no fields at all.
+
+**Controlled provenance is not github.com acceptance.** The fixture's `source`
+field identifies its generating target. A controlled fixture describes the API
+double, not the real host. Compare it against an authorized live run and record
+the resulting evidence outside this README before making real-host claims.
+
+### The workflow
+
+`.github/workflows/live-github-e2e.yml` runs both targets, and it can only be
+started by hand (`workflow_dispatch`) with no inputs. There is no
+`pull_request`, `pull_request_target`, `push`, or `schedule` trigger, because
+every automatic trigger is a way for a branch somebody else controls to spend
+the disposable account's credential. Both jobs check out
+`github.event.repository.default_branch` explicitly — not the ref the dispatch
+happened from — with `persist-credentials: false`, pinned action SHAs,
+`contents: read` and no write scope, and one run at a time on the account so two
+runs cannot clean up each other's repositories.
+
+The `live` job reads its owner from an environment variable and its two tokens
+from secrets on the `live-github-e2e` environment, and refuses to install or run
+anything when any of them is unset — a repository that has not been configured
+says so and exits non-zero rather than starting with a guess. **Naming the
+environment in the workflow does not configure its protection.** A repository
+owner has to create the environment and, separately, require reviewers, set a
+wait timer, restrict it to the default branch, and add the two tokens as
+environment secrets; until they do, no protection exists and only the
+fail-closed gate stands between a dispatch and a run. The only file taken off
+the runner is the receipt; the credential is passed to one command and never
+written, echoed, or uploaded.
+
+An ordinary failure or a failing scenario cleans up in process. A job killed at
+its `timeout-minutes` cannot, and no in-process handler can: there is nothing to
+run one once the process is gone. So recovery is a third job in the same
+workflow, which runs when the live job did not succeed. It takes the receipt that
+job published as an artifact — the artifact, because a self-hosted label matches
+every machine carrying it, so a path on one runner says nothing about the next one
+— and removes only what that receipt names, after the host confirms both the id
+the run created and the marker it stamped. With no receipt published it says so
+and fails rather than searching for repositories whose names merely resemble
+what the run would have used. The run id in the log identifies any repository a
+recovery could not remove, since every resource carries the marker.
+
+### Acceptance boundary
+
+The controlled target uses disposable repositories, a generated TLS authority, and
+the production services. Run it with the commands above and record measured results
+outside this README. It does not establish real github.com behavior, authentication,
+or desktop acceptance; those require separately authorized verification.
+
+Recovery is a narrower claim than that, and it is stated as the mechanism rather
+than as a result. The command opens its own connection: a private agent, no
+keep-alive, a fresh verified handshake for every request, destroyed when the
+command ends. It does not reuse this process's pooled `fetch`, so no socket opened
+earlier — under a bypass, or against a different authority — can carry a deletion
+credential on a trust decision this run did not make. A caller that stands a host
+up can supply the authority that host's certificate chains to, which widens what
+the connection will believe and does not narrow it, and the process's own
+certificate switches are retired before the first request and restored afterwards.
+
+Which handles it is willing to delete is decided by the id and the marker the
+receipt records, so a look-alike repository is left alone, and a resource whose
+repository is still standing is reported rather than counted as removed.
+
+`runRecoveryAgainstControlledHost` in `tests/live/cli.ts` creates a controlled TLS
+host, a marked repository, and a receipt naming its id, then invokes the actual
+`--recover` command. Its regression checks the command outcome and reads the
+repository back from the host. Run the recovery regression alongside the controlled
+suite; neither substitutes for authorized recovery verification against github.com.
+
+Three things this suite depends on are configuration outside the repository
+rather than code in it: the protected environment and its required reviewers,
+the environment secrets, and the self-hosted runner label. Until a repository
+owner sets them, the fail-closed gate is the only thing standing between a
+dispatch and a run, and the section above says so rather than implying the
+protection exists. The desktop application is a separate matter from all of
+this: a packaged, signed install is verified on its own terms and none of the
+evidence here says anything about it.
 
 ## Changes workspace
 

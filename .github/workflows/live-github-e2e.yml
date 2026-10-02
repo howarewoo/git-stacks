@@ -1,0 +1,231 @@
+name: Disposable GitHub end-to-end
+
+# Manual only, on the default branch's own code. There is no `pull_request`,
+# `pull_request_target`, `push` or `schedule` trigger and no workflow input,
+# because this workflow spends a credential that creates and deletes repositories:
+# every automatic trigger is a way for a branch somebody else controls to run it,
+# and an input is a way for a run's own code to be swapped for another ref.
+on:
+  workflow_dispatch:
+
+# Read-only is the whole permission set. Nothing here needs to write to the
+# repository, and the disposable repositories are created with the environment's
+# own token, not with the workflow's.
+permissions:
+  contents: read
+
+# One run at a time on one account. Two overlapping runs would create disposable
+# repositories under the same owner, and a run that cleans up by name could
+# remove the other's while it is still using it.
+concurrency:
+  group: live-github-e2e
+  cancel-in-progress: false
+
+env:
+  NODE_VERSION: '24'
+
+jobs:
+  # The controlled target stands the API double and Git's smart HTTP protocol up
+  # on one real TLS socket with a certificate generated for the run, and points
+  # the production transport at it. Nothing in it names github.com, so this job
+  # needs no credential, authorizes nothing, and creates nothing to clean up on a
+  # real account.
+  controlled:
+    runs-on: [self-hosted, linux, arm64]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          # The trusted tree, named rather than inherited: a dispatch can be made
+          # from any branch, and the code that runs must be the default branch's.
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+      - name: Prove the checkout is the tree that was fetched
+        # What this actually proves, stated plainly because the difference matters:
+        # HEAD is the commit the trusted ref resolved to and the working tree was not
+        # edited after the fetch. It says nothing about whether that commit is trusted.
+        # The workflow file itself came from the ref the run was dispatched on, and a
+        # `workflow_dispatch` event can be made from any branch — so the gate that
+        # establishes trust is the environment's branch restriction and its required
+        # reviewers, configured outside this file. Without those, this step is a
+        # statement about a tree, not an authorization to run it.
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$(git rev-parse FETCH_HEAD)" || {
+            echo '::error::the checkout is not the commit that was fetched'
+            exit 1
+          }
+          git diff --quiet HEAD -- || { echo '::error::the working tree was changed'; exit 1; }
+      - name: Run the live suite against a controlled GitHub over real Git and TLS
+        run: npx tsx tests/live/cli.ts --controlled
+
+  # The authorized target. It creates a repository under a named account, runs
+  # the same scenarios against real GitHub, and deletes what it created.
+  live:
+    # Secrets and the owner name come from a protected environment, which a
+    # repository owner configures separately: required reviewers, a wait timer,
+    # branch restrictions, and the two tokens as environment secrets. Naming the
+    # environment here does not create that protection, and the gate below cannot
+    # stand in for it: it proves the three values are non-empty, and a repository
+    # that has also set same-named repository secrets or variables passes it
+    # without any environment protection at all. What is protected, and what this
+    # file cannot enforce, is the branch restriction and the approval — which is
+    # why the dispatch guard below refuses a run that was not started from the
+    # default branch, and why a repository that wants the tokens to mean something
+    # must configure the environment's reviewers and restrictions itself.
+    environment: live-github-e2e
+    runs-on: [self-hosted, linux, arm64]
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - name: Refuse to run without an authorized disposable account
+        # Before anything is installed, let alone created. The suite itself also
+        # refuses an unset owner or token, but a repository with no
+        # configuration should say so here rather than after a checkout, a
+        # dependency install, and a run that stops for the same reason.
+        shell: bash
+        env:
+          GIT_STACKS_LIVE_GITHUB_OWNER: ${{ vars.GIT_STACKS_LIVE_GITHUB_OWNER }}
+          GIT_STACKS_LIVE_GITHUB_TOKEN: ${{ secrets.GIT_STACKS_LIVE_GITHUB_TOKEN }}
+          GIT_STACKS_LIVE_GITHUB_REVIEWER_TOKEN: ${{ secrets.GIT_STACKS_LIVE_GITHUB_REVIEWER_TOKEN }}
+        run: |
+          set -euo pipefail
+          missing=0
+          for name in \
+            GIT_STACKS_LIVE_GITHUB_OWNER \
+            GIT_STACKS_LIVE_GITHUB_TOKEN \
+            GIT_STACKS_LIVE_GITHUB_REVIEWER_TOKEN; do
+            if [ -z "${!name:-}" ]; then
+              echo "::error::$name is not configured on the live-github-e2e environment"
+              missing=$((missing + 1))
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            echo "::error::refusing to run: a live run creates and deletes a repository, and $missing required value(s) are unset"
+            exit 1
+          fi
+      - name: Refuse a run that was not dispatched from the default branch
+        # `workflow_dispatch` can be started from any branch, and the workflow that runs
+        # is the one on that branch. Without this, a branch could carry a modified copy
+        # of this file and have it run with the environment's credentials. This is the
+        # in-file half of that protection; the environment's own branch restriction,
+        # configured by an owner, is the other half.
+        shell: bash
+        env:
+          DISPATCH_REF: ${{ github.ref }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          if [ "$DISPATCH_REF" != "refs/heads/$DEFAULT_BRANCH" ]; then
+            echo "::error::refusing to run: dispatched from $DISPATCH_REF, and this workflow reaches the environment's credentials"
+            exit 1
+          fi
+      - run: npm ci
+      - name: Run the live suite against the authorized disposable repository
+        # The run id names every resource it creates and is stamped on each one,
+        # so a leftover from a killed run is attributable and deletable. The
+        # suite removes what it created in a finally that runs whatever happened,
+        # including a scenario failure and a startup failure, and exits non-zero
+        # if anything is still standing.
+        env:
+          GIT_STACKS_LIVE_GITHUB_OWNER: ${{ vars.GIT_STACKS_LIVE_GITHUB_OWNER }}
+          GIT_STACKS_LIVE_GITHUB_TOKEN: ${{ secrets.GIT_STACKS_LIVE_GITHUB_TOKEN }}
+          GIT_STACKS_LIVE_GITHUB_REVIEWER_TOKEN: ${{ secrets.GIT_STACKS_LIVE_GITHUB_REVIEWER_TOKEN }}
+          # Pinned here rather than left to the runner. The suite requires a host and
+          # refuses without one, so omitting it would make this job always refuse; and
+          # inheriting whatever the runner happened to export would decide, for a
+          # credential this job supplies, where that credential gets sent.
+          GIT_STACKS_LIVE_GITHUB_HOST: github.com
+          GIT_STACKS_LIVE_GITHUB_RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
+          # The receipt is written to a durable directory on the runner, not only to
+          # the workspace. A job that is killed never reaches its own cleanup step, and
+          # a workspace is wiped with the job — so a receipt that only exists there is
+          # a record of a leftover that nobody can act on. This directory outlives the
+          # job, and the recovery job below reads it.
+          GIT_STACKS_LIVE_GITHUB_RECEIPT: ${{ runner.temp }}/../git-stacks-live-receipts/${{ github.run_id }}-${{ github.run_attempt }}.json
+        run: npx tsx tests/live/cli.ts --github
+      - name: Publish the sanitized receipt
+        # The receipt is written before each resource is created and updated
+        # after every change, so it names what is still standing even when a run
+        # is killed. It holds handles, timestamps, and refusal reasons — never a
+        # request body, a diff, or a credential — and it is the only file taken
+        # off this runner.
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: live-github-e2e-receipt
+          path: ${{ runner.temp }}/../git-stacks-live-receipts/${{ github.run_id }}-${{ github.run_attempt }}.json
+          if-no-files-found: warn
+          retention-days: 7
+
+  # What runs when the run above could not finish its own cleanup.
+  #
+  # A job that is cancelled or times out never reaches the `finally` that removes what
+  # it created, and no signal handler inside it could: there is nothing to run one when
+  # the process is killed. So the recovery is a separate job, in this same workflow, that
+  # runs when the live job did not succeed — it takes the receipt the live job left on
+  # the runner and removes only what that receipt names, after the host has confirmed
+  # both the id the run created and the marker it stamped.
+  # The receipt comes from this run's own artifact rather than from a path on the
+  # runner the live job happened to use. Those are different promises: a self-hosted
+  # label matches every machine carrying it, so a path under `runner.temp` on one of
+  # them says nothing about the next one. The artifact is the one route that genuinely
+  # crosses a job boundary, and the live job already publishes it with `if: always()`.
+  # Where no receipt was published the job says so and fails.
+  #
+  # It needs no more than the live job needed, and no more than that is granted: the
+  # same two account credentials from the same protected environment, and the receipt
+  # itself, which carries handles and ids and never a credential.
+  recover:
+    needs: live
+    if: ${{ failure() || cancelled() }}
+    environment: live-github-e2e
+    runs-on: [self-hosted, linux, arm64]
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+      - name: Take the receipt this run published
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: live-github-e2e-receipt
+          path: ${{ runner.temp }}/receipt
+      - name: Remove what the killed run left behind
+        shell: bash
+        env:
+          GIT_STACKS_LIVE_GITHUB_OWNER: ${{ vars.GIT_STACKS_LIVE_GITHUB_OWNER }}
+          GIT_STACKS_LIVE_GITHUB_TOKEN: ${{ secrets.GIT_STACKS_LIVE_GITHUB_TOKEN }}
+          GIT_STACKS_LIVE_GITHUB_REVIEWER_TOKEN: ${{ secrets.GIT_STACKS_LIVE_GITHUB_REVIEWER_TOKEN }}
+          GIT_STACKS_LIVE_GITHUB_HOST: github.com
+        run: |
+          set -euo pipefail
+          # No receipt means this run never got as far as creating anything it could
+          # not describe. The answer is to say so, not to look for repositories whose
+          # names resemble what this run would have used: a prefix is not evidence of
+          # ownership, and acting on one is how somebody else's repository gets deleted.
+          receipt="$(find "${{ runner.temp }}/receipt" -name '*.json' -type f | head -n 1)"
+          if [ -z "$receipt" ]; then
+            echo '::error::this run published no receipt, so nothing can be recovered'
+            exit 1
+          fi
+          npx tsx tests/live/cli.ts --recover "$receipt"

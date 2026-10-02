@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import { readFileSync, writeFileSync } from 'node:fs'
-import { createServer } from 'node:http'
+import { createServer, request as httpRequest } from 'node:http'
 import { chmod, mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { delimiter, join } from 'node:path'
@@ -618,24 +618,56 @@ test('pagination handles prefixed API base without next link and with next link'
     assert.deepEqual(multiItems, [{ id: 1 }, { id: 2 }])
     assert.deepEqual(serverRequests, ['/api/v3/multi', '/api/v3/multi?page=2'])
 
+    // The native CLI is not this run's to depend on, so this path is driven
+    // through the adapter the transport takes instead: the request goes over a
+    // real loopback socket to the same server the direct transport just used,
+    // and the answer comes back in the shape `gh api --include` prints. The
+    // prefixed base, the link header, and the second page are therefore the
+    // transport's own work rather than a harness agreeing with it.
+    const run = async (args: string[]): Promise<string> => {
+      const target = new URL(args[args.length - 1] ?? '')
+      const method = args.includes('--method')
+        ? (args[args.indexOf('--method') + 1] ?? 'GET')
+        : 'GET'
+      const answer = await new Promise<{
+        status: number
+        headers: [string, string][]
+        body: string
+      }>((resolve, reject) => {
+        const call = httpRequest(
+          {
+            hostname: target.hostname,
+            port: target.port,
+            path: `${target.pathname}${target.search}`,
+            method,
+          },
+          (response) => {
+            const chunks: Buffer[] = []
+            response.on('data', (chunk: Buffer) => chunks.push(chunk))
+            response.on('end', () =>
+              resolve({
+                status: response.statusCode ?? 0,
+                headers: Object.entries(response.headers).map(
+                  ([name, value]) =>
+                    [name, Array.isArray(value) ? value.join(', ') : String(value ?? '')] as [
+                      string,
+                      string,
+                    ],
+                ),
+                body: Buffer.concat(chunks).toString('utf8'),
+              }),
+            )
+          },
+        )
+        call.on('error', reject)
+        call.end()
+      })
+      const head = [`HTTP/1.1 ${answer.status} ${answer.status === 200 ? 'OK' : 'Error'}`]
+      for (const [name, value] of answer.headers) head.push(`${name}: ${value}`)
+      return `${head.join('\r\n')}\r\n\r\n${answer.body}`
+    }
     serverRequests.length = 0
-    const gh = new GhGitHubTransport({
-      apiUrl,
-      env: { GH_TOKEN: 'local-test-token' },
-      run: async (args) => {
-        const targetUrl = args.find((arg) => /^https?:\/\//u.test(arg))
-        if (!targetUrl) throw new Error(`No target URL found in gh args: ${args.join(' ')}`)
-        const methodIndex = args.indexOf('--method')
-        const method = methodIndex !== -1 ? args[methodIndex + 1] : 'GET'
-        const response = await fetch(targetUrl, { method })
-        const headerLines: string[] = []
-        response.headers.forEach((value, key) => {
-          headerLines.push(`${key}: ${value}`)
-        })
-        const text = await response.text()
-        return `HTTP/1.1 ${response.status} ${response.statusText || 'OK'}\r\n${headerLines.join('\r\n')}\r\n\r\n${text}`
-      },
-    })
+    const gh = new GhGitHubTransport({ apiUrl, env: { GH_TOKEN: 'local-test-token' }, run })
     const ghSingle = await gh.paginate<{ id: number }>({ path: 'single' })
     assert.deepEqual(ghSingle, [{ id: 1 }])
     assert.deepEqual(serverRequests, ['/api/v3/single'])
