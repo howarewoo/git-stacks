@@ -23,6 +23,9 @@ repository when the user asks for all current PRs.
 
 Do not run, wait for, or fix CI, tests, lint, builds, or review checks.
 Preserve unrelated work and respect repository protections.
+Before each publication write, verify auto-merge is disabled for every
+selected PR; stop and report a blocker if enabled or unverifiable.
+Do not disable auto-merge yourself.
 Do not merge the PRs into the root branch or close them.
 Honor preview-only requests without publishing changes.
 Stop rather than guess when a conflict requires an unclear product decision.
