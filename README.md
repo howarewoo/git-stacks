@@ -9,7 +9,48 @@ large-repository work is measured, how development and verification are performe
 and how a release is published and updated; record run-specific evidence and
 outstanding acceptance checks in the associated pull request.
 
+## License and contributions
+
+Git Stacks project code is licensed under the [MIT License](LICENSE).
+Dependencies, bundled Git, and other third-party material retain their own
+licenses; the project license does not replace their attribution or
+redistribution requirements.
+
+Upstream pull requests are maintainer-only. This repository does not accept
+external pull requests; bug reports and feature requests can be filed in
+[GitHub issues](https://github.com/howarewoo/git-stacks/issues). The public source
+may still be cloned, forked, modified, and redistributed under its license.
+
+For security vulnerabilities, use **Report a vulnerability** on the repository's
+[security advisories page](https://github.com/howarewoo/git-stacks/security/advisories)
+when private vulnerability reporting is enabled. Do not put credentials,
+private repository data, or exploit details in public issues.
+
+### Repository administration
+
+Keep **Settings → General → Pull requests → Collaborators only** selected and
+the owner as the sole collaborator. Inviting another collaborator grants that
+account permission to create upstream pull requests. Review installed GitHub
+Apps separately: collaborator restrictions are not a substitute for limiting
+an app's write permissions or who can trigger its automations.
+
+Before changing visibility, review the hosted branches and tags, their history,
+issues and pull requests, releases, and Actions logs and artifacts for sensitive
+material. Ignore rules do not remove files already committed, and making the
+repository private again does not retract copies or forks. Land the preparation
+changes before making the repository public, then enable private vulnerability
+reporting under **Settings → Advanced Security**.
+
+All workflows use standard GitHub-hosted runners. Standard runner execution is
+free for public repositories; private-repository minutes, paid larger runners,
+storage, and model-provider usage have their own billing rules. After the hosted
+workflows pass, retire idle self-hosted runner registrations and stop their local
+services; do not interrupt jobs or delete retained runner data during the cutover.
+
 ## Commands
+
+Use Node 24, npm, and the committed `package-lock.json`. A local source build
+does not need GitHub credentials; GitHub sign-in is configured separately below.
 
 ```sh
 npm ci                 # install
@@ -39,6 +80,13 @@ typechecks these test consumers as well as the application.
 
 Stale-preview publishing tests assert rejection and unchanged local and remote
 refs. Diagnostic wording is not part of that behavioral contract.
+
+Watcher tests use real filesystem events. Advancing a fake clock starts a
+coordinator refresh but does not complete its filesystem reads; await the
+emitted snapshot before asserting it. Observe watch readiness through events,
+not a fixed sleep: a newly registered macOS watch can miss its first write.
+Debouncing coalesces delivered filesystem bursts, not entire Git commands;
+do not pin a terminal commit to an exact watcher event count.
 
 Destination-focus checks activate the named navigation control with Enter and
 verify heading focus and the live announcement, independently of shortcut bindings.
@@ -1001,11 +1049,12 @@ in the “Filter current view branches, files, and pull requests” field, not t
 command palette, and ends after the filtered branch result completes two
 animation frames. The separate `diff-render-ssr` measurement is server-side
 rendering cost for a 1,000-line diff preview; it is not an input-to-paint budget.
-CI installs `xvfb` and `xauth` on the self-hosted Linux ARM64 runner, builds the
-app, and runs Electron under Xvfb. The runner needs passwordless `sudo` and
-Debian-compatible `apt-get`. Local runs need a display server.
-Compare trend results on the same runner class and Git/Node versions, since
-filesystem and process startup costs vary by machine.
+CI installs `xvfb` and `xauth` on GitHub's standard `ubuntu-24.04-arm` hosted
+runner, builds the app, and runs Electron under Xvfb. Local runs need a display
+server. Compare trend results on the same runner class and Git/Node versions,
+since filesystem and process startup costs vary by machine. Hosted-runner
+measurements start a new comparison series; the old self-hosted timings are not
+a directly comparable baseline. The existing performance budgets still apply.
 
 It writes `benchmarks/latest.json` and appends one line per run to
 `benchmarks/trend.jsonl` (capped at the last 200 runs). The `Performance budgets`

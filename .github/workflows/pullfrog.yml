@@ -16,7 +16,8 @@ permissions:
 
 jobs:
   pullfrog:
-    runs-on: [self-hosted, linux, arm64]
+    if: github.repository_owner == 'howarewoo' && github.repository == 'howarewoo/git-stacks'
+    runs-on: ubuntu-24.04
     permissions:
       id-token: write
       contents: read
