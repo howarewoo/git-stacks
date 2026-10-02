@@ -1,3 +1,4 @@
+import { setTimeout } from 'node:timers/promises'
 import {
   GitHubTransportError,
   type GitHubErrorKind,
@@ -6,6 +7,52 @@ import {
   type GitHubRestResponse,
   type GitHubTransport,
 } from '../../src/main/github-transport'
+
+/** Shared by authorized actors so setup, product writes, and cleanup cannot burst. */
+export class LiveRequestPacing {
+  private tail: Promise<void> = Promise.resolve()
+  private nextMutationAt = 0
+
+  constructor(
+    private readonly now: () => number = Date.now,
+    private readonly wait: (milliseconds: number) => Promise<unknown> = setTimeout,
+  ) {}
+
+  async run<T>(mutation: boolean, send: () => Promise<T>): Promise<T> {
+    const previous = this.tail
+    let release!: () => void
+    this.tail = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    await previous
+    try {
+      if (mutation && this.nextMutationAt > this.now()) {
+        await this.wait(this.nextMutationAt - this.now())
+      }
+      try {
+        return await send()
+      } catch (error) {
+        if (
+          error instanceof GitHubTransportError &&
+          (error.kind === 'rate-limited' || error.kind === 'secondary-rate-limit')
+        ) {
+          const limit = error.rateLimit
+          const deadline = Math.max(
+            this.now() + (limit.retryAfterSeconds ?? 60) * 1_000,
+            limit.remaining === 0 ? (limit.reset?.getTime() ?? 0) : 0,
+          )
+          // Park subsequent scenarios and cleanup, but never replay this mutation.
+          await this.wait(Math.max(0, deadline - this.now()))
+        }
+        throw error
+      } finally {
+        if (mutation) this.nextMutationAt = this.now() + 1_000
+      }
+    } finally {
+      release()
+    }
+  }
+}
 
 /** One request the run made, reduced to what a failure report may publish. */
 export interface LiveExchange {
@@ -50,7 +97,10 @@ export class FaultInjectingTransport implements GitHubTransport {
   private readonly rules: RestRule[] = []
   private readonly seen: LiveExchange[] = []
 
-  constructor(inner: GitHubTransport) {
+  constructor(
+    inner: GitHubTransport,
+    private readonly pacing?: LiveRequestPacing,
+  ) {
     this.inner = inner
     this.kind = inner.kind
   }
@@ -138,7 +188,8 @@ export class FaultInjectingTransport implements GitHubTransport {
       })
     }
     try {
-      const response = await this.inner.rest<T>(request)
+      const send = (): Promise<GitHubRestResponse<T>> => this.inner.rest<T>(request)
+      const response = await (this.pacing ? this.pacing.run(method !== 'GET', send) : send())
       this.record(method, request.path, response.status)
       if (rule) {
         throw new GitHubTransportError({
@@ -158,7 +209,8 @@ export class FaultInjectingTransport implements GitHubTransport {
   async paginate<T = unknown>(request: GitHubRestRequest): Promise<T[]> {
     const method = request.method ?? 'GET'
     try {
-      const items = await this.inner.paginate<T>(request)
+      const send = (): Promise<T[]> => this.inner.paginate<T>(request)
+      const items = await (this.pacing ? this.pacing.run(method !== 'GET', send) : send())
       this.record(method, request.path, 200)
       return items
     } catch (error) {
@@ -190,7 +242,10 @@ export class FaultInjectingTransport implements GitHubTransport {
       })
     }
     try {
-      const data = await this.inner.graphql<T>(query, variables, options)
+      const send = (): Promise<T> => this.inner.graphql<T>(query, variables, options)
+      const data = await (this.pacing
+        ? this.pacing.run(/^\s*mutation\b/u.test(query), send)
+        : send())
       this.record('POST', operation, 200)
       if (rule) {
         throw new GitHubTransportError({

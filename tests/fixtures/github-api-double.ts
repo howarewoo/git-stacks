@@ -807,16 +807,19 @@ function createPullRequest(
   // says nothing about that: a branch cut from the base and left alone has both refs and
   // no commits at all, which GitHub refuses with `No commits between base and head`. The
   // count is Git's own, read across the two repositories when the head is a fork.
-  const comparison = withHostRepository(headHost, () =>
-    hostGitOrNull(['rev-list', '--count', `${baseOid}..${headOid}`]),
+  const mergeBase = withHostRepository(headHost, () =>
+    hostGitOrNull(['merge-base', baseOid, headOid]),
   )
-  if (comparison === null) {
+  if (mergeBase === null) {
     throw new HttpError(
       422,
       'Unprocessable Entity',
       `base branch ${base} has no history in common with ${branch}`,
     )
   }
+  const comparison = withHostRepository(headHost, () =>
+    hostGit(['rev-list', '--count', `${baseOid}..${headOid}`]),
+  )
   if (Number(comparison) === 0) {
     throw new HttpError(
       422,

@@ -39,7 +39,7 @@ import type {
   LiveTarget,
   LiveWorkspace,
 } from './contract'
-import { FaultInjectingTransport } from './transport'
+import { FaultInjectingTransport, LiveRequestPacing } from './transport'
 import { GIT_TIMEOUT_MS, LocalGitWorkspace } from './workspace'
 
 /**
@@ -1184,7 +1184,13 @@ export class ControlledLiveTarget extends DisposableTarget {
       root: this.root,
       env: this.git.env,
     })
-    await seedAndPush(clone, this.server.cloneUrl(subject.fullName), branch, this.marker)
+    await seedAndPush(
+      clone,
+      this.server.cloneUrl(subject.fullName),
+      branch,
+      this.marker,
+      subject.defaultBranch,
+    )
     this.ledger.confirm(`${subject.fullName}#${branch}`)
     const openOn = kind === 'fork' ? this.fullName : subject.fullName
     const head = kind === 'fork' ? `${subject.owner}:${branch}` : branch
@@ -1408,7 +1414,8 @@ export class GitHubLiveTarget extends DisposableTarget {
           env: pinnedEnv,
         })
       const productionTransport = pin(config.token)
-      const faults = new FaultInjectingTransport(productionTransport)
+      const pacing = new LiveRequestPacing()
+      const faults = new FaultInjectingTransport(productionTransport, pacing)
       const remote = `https://${config.host}/${fullName}.git`
       const git = await installIsolatedGitEnvironment({
         home: opened.root,
@@ -1453,7 +1460,7 @@ export class GitHubLiveTarget extends DisposableTarget {
       const reviewerFaults =
         config.reviewerToken === null
           ? null
-          : new FaultInjectingTransport(pin(config.reviewerToken))
+          : new FaultInjectingTransport(pin(config.reviewerToken), pacing)
       const reviewerAdmin =
         reviewerFaults === null ? null : new GitHubAdmin(reviewerFaults, fullName, marker)
       const reviewerLogin = await resolveReviewerIdentity(reviewerAdmin, primary.login)
@@ -1728,7 +1735,13 @@ export class GitHubLiveTarget extends DisposableTarget {
       root: this.root,
       env: this.git.env,
     })
-    await seedAndPush(clone, remote, branch, this.marker)
+    const defaultBranch = identity.defaultBranch ?? this.defaultBranch
+    if (kind === 'repository') {
+      // Unlike a fork, a repository created with auto_init disabled has no trunk yet.
+      await clone.commit('README.md', '# live e2e target\n', 'live e2e baseline')
+      await clone.gitNetwork(['push', 'origin', `HEAD:refs/heads/${defaultBranch}`])
+    }
+    await seedAndPush(clone, remote, branch, this.marker, defaultBranch)
     this.ledger.confirm(`${journalled}#${branch}`)
     const openOn = kind === 'fork' ? this.fullName : identity.fullName
     // Which repository the pull request lives in, as the receipt spells it. For a fork
@@ -2127,7 +2140,10 @@ async function seedAndPush(
   remote: string,
   branch: string,
   marker: string,
+  defaultBranch: string,
 ): Promise<void> {
+  await workspace.gitNetwork(['fetch', 'origin', `refs/heads/${defaultBranch}`])
+  workspace.git(['checkout', '-B', branch, 'FETCH_HEAD'])
   await writeFile(
     join(workspace.path, 'git-stacks-live-e2e-foreign.txt'),
     `Foreign subject for ${marker}\n`,

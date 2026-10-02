@@ -1444,6 +1444,14 @@ credential is never inherited from an ambient `gh` session and never read from a
 variable the application itself uses — the suite spends a credential somebody
 gave it for a disposable repository, or it does not run.
 
+Authorized API calls serialize across both actors, with at least one second
+between mutations. The pagination scenario's 100 filler reviews therefore take
+at least 99 seconds; controlled runs do not wait. A real primary or secondary
+rate-limit refusal parks subsequent scenarios and cleanup for the host's
+`Retry-After` or exhausted-budget reset, with a one-minute fallback when no
+deadline is supplied. The refused request is reported, never automatically
+replayed, including when its mutation outcome is uncertain.
+
 | Variable                                   | Meaning                                                                                                                     |
 | ------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------- |
 | `GIT_STACKS_LIVE_GITHUB_OWNER`             | The account the disposable repository is created under. Required.                                                           |
