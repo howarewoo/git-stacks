@@ -55,6 +55,14 @@ export class FaultInjectingTransport implements GitHubTransport {
     this.kind = inner.kind
   }
 
+  get destinationHost(): string {
+    return this.inner.destinationHost
+  }
+
+  credentialAuthority(): Promise<string> {
+    return this.inner.credentialAuthority()
+  }
+
   /**
    * Sends the next matching request and then reports that nothing came back.
    * The host has applied it; the caller cannot know that.

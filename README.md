@@ -1516,6 +1516,8 @@ request really is sent, GitHub really does apply it, and only the answer is
 discarded — the exact state a person is in when a merge may or may not have been
 requested, and the only way to prove a retry does not create a second merge,
 stack, or pull request. A refused write is the opposite: the host never sees it.
+The fault decorator reads `destinationHost` and `credentialAuthority()` from the
+wrapped transport on demand, preserving host provenance and credential rotation.
 
 ### Cleanup and receipts
 
