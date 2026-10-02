@@ -2,13 +2,13 @@
 name: flatten-pr-graph
 description: >
   Put GitHub PRs into a single stack in dependency-respecting merge
-  order, resolve merge conflicts, and ignore other checks.
+  order, resolve merge conflicts, and skip local tests and other checks.
 ---
 
 # Flatten PR graph
 
 Put the requested PRs into a single stack in optimal merge order.
-Resolve merge conflicts. Ignore other checks.
+Resolve merge conflicts.
 
 Use the supplied PR list, or discover all open PRs in the current
 repository when the user asks for all current PRs.
@@ -21,7 +21,8 @@ repository when the user asks for all current PRs.
 4. Verify the resulting chain and report the order, conflicts resolved,
    and anything that remains blocked or incomplete.
 
-Do not run, wait for, or fix CI, tests, lint, builds, or review checks.
+Rely on CI for validation. Do not run, wait for, or fix local tests, lint,
+builds, CI, or review checks, even after resolving conflicts.
 Preserve unrelated work and respect repository protections.
 Before each publication write, verify auto-merge is disabled for every
 selected PR; stop and report a blocker if enabled or unverifiable.
