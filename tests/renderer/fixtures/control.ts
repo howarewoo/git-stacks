@@ -71,11 +71,6 @@ import { updateStatusFixture } from './update-status'
 import { DEFAULT_SCENARIO, type ScenarioName } from './manifest'
 import type { PullRequestChecksReport } from '../../../src/shared/pull-request-checks'
 import type { FixtureCall, FixtureCallRecord, FixtureControl, FixtureScenario } from './types'
-import {
-  DEFAULT_SETTINGS,
-  type AppSettings,
-  type SettingsSnapshot,
-} from '../../../src/shared/settings'
 import { canonicalHostName, GITHUB_DEFAULT_HOST } from '../../../src/shared/host'
 import type { NotificationInbox, NotificationModuleState } from '../../../src/shared/notifications'
 
@@ -561,6 +556,13 @@ export function installFixtureControl(options: {
     // for the host selected afterwards, which would be an answer nobody asked
     // for.
     get githubAccountStatus(): (() => Promise<GitHubAccountStatus>) | undefined {
+      const identity = scenario.identity
+      if (identity) {
+        return () => {
+          record('githubAccountStatus', [])
+          return answer('githubAccountStatus', () => identity.account)
+        }
+      }
       if (!scenario.exposesGithubAccount) return undefined
       return () => {
         record('githubAccountStatus', [])
@@ -1536,12 +1538,6 @@ export function installFixtureControl(options: {
         }
         return settingsSnapshot()
       })
-    }
-    // Main always answers with a status: a host that has named none reports
-    // itself signed out, never nothing at all.
-    desktop.githubAccountStatus = () => {
-      record('githubAccountStatus', [])
-      return answer('githubAccountStatus', () => identity.account)
     }
   }
 

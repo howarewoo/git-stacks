@@ -1189,7 +1189,6 @@ const inboxMembershipUnknown = inboxReport(inboxMembershipUnknownRead, inboxMemb
   detail: 'Some repositories could not be read.',
 })
 
-
 /**
  * The module's own state, kept apart from the pull request inbox: a host, an
  * account, a sealed reference, and the threads GitHub sent with their own

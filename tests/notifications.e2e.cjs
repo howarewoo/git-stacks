@@ -1412,8 +1412,13 @@ async function main() {
     // The keyboard route reaches the view and the dialog, without a pointer.
     await resize(1024, 768)
     await page(`document.body.focus()`)
-    await page(`document.querySelector('nav button').focus()`)
-    for (let index = 0; index < 8; index += 1) {
+    const notificationOffset = await page(`
+      [...document.querySelectorAll('nav[aria-label="Workspace destinations"] button')]
+        .findIndex((button) => button.textContent?.includes('GitHub Notifications'))
+    `)
+    assert.ok(notificationOffset >= 0, 'the notification destination is listed in navigation')
+    await page(`document.querySelector('nav[aria-label="Workspace destinations"] button').focus()`)
+    for (let index = 0; index < notificationOffset; index += 1) {
       await key('ArrowDown', 'ArrowDown', 40)
     }
     const keyboardFocused = await page(`document.activeElement?.textContent ?? ''`)

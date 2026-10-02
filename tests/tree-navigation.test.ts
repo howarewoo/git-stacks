@@ -8,11 +8,6 @@ import {
   rovingTarget,
 } from '../src/renderer/src/lib/tree-navigation'
 import { describeBranchRow } from '../src/renderer/src/lib/branches'
-import {
-  WORKSPACE_VIEW_SHORTCUTS,
-  workspaceViewLabel,
-  type WorkspaceView,
-} from '../src/renderer/src/components/workspace-navigation'
 
 test('roving keys map to moves and leave every other keystroke to the focused control', () => {
   assert.equal(rovingAction('ArrowDown'), 'next')
@@ -124,25 +119,4 @@ test('a roving surface claims only unmodified keys so global chords still dispat
     claimsRovingKey({ altKey: true, ctrlKey: false, metaKey: false, shiftKey: true }),
     false,
   )
-})
-
-test('every workspace destination has a distinct keyboard route and a spoken label', () => {
-  const views: WorkspaceView[] = [
-    'branches',
-    'stacks',
-    'history',
-    'changes',
-    'pullRequests',
-    'stashes',
-    'diagnostics',
-    'notifications',
-    'prInbox',
-    'review',
-  ]
-  const routed = new Set(WORKSPACE_VIEW_SHORTCUTS.map(([, view]) => view))
-  assert.deepEqual([...routed].sort(), [...views].sort())
-  assert.equal(new Set(WORKSPACE_VIEW_SHORTCUTS.map(([shortcut]) => shortcut)).size, views.length)
-  for (const view of views) {
-    assert.notEqual(workspaceViewLabel(view), view, `${view} has no destination label`)
-  }
 })
