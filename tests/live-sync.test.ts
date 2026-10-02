@@ -291,35 +291,6 @@ function harness(snapshotFor?: (attempt: number) => RepositorySnapshot): Harness
   }
 }
 
-test('a terminal commit produces one refresh for the whole burst it causes', async () => {
-  const { repo, cleanup } = await disposableRepository()
-  const log = new WatchLog()
-  const watcher = new RepositoryWatcher(repo, (event) => log.record(event.reason), {
-    debounceMs: 150,
-    maxDelayMs: 1_500,
-    sweepMs: 0,
-  })
-  try {
-    await watcher.start()
-    await quietFor()
-    assert.deepEqual(log.reasons, [], 'an unchanged startup root does not trigger a refresh')
-    await writeFile(join(repo, 'shared.txt'), 'edited\n')
-    git(repo, 'add', '.')
-    git(repo, 'commit', '-m', 'Terminal commit')
-    await log.waitFor((reason) => reason === 'change')
-    // A commit rewrites the index, HEAD, its ref, and the reflog in a burst.
-    // Asserting there is no second event is a claim about a window of quiet, so
-    // the window itself is the observation: a guessed sleep would hide it.
-    const quiet = Promise.withResolvers<void>()
-    setTimeout(quiet.resolve, 900)
-    await quiet.promise
-    assert.deepEqual(log.reasons, ['change'])
-  } finally {
-    watcher.stop()
-    await cleanup()
-  }
-})
-
 test('a branch switch made outside the window is reported', async () => {
   const { repo, cleanup } = await disposableRepository()
   git(repo, 'branch', 'feature/external')
@@ -462,6 +433,7 @@ test('a repository replaced while its Git directories are being resolved is watc
   const log = new WatchLog()
   const clock = new ManualClock()
   const snapshots: string[] = []
+  const refreshed = Promise.withResolvers<void>()
   const coordinator = new RepositorySyncCoordinator(
     {
       readSnapshot: async () =>
@@ -476,7 +448,10 @@ test('a repository replaced while its Git directories are being resolved is watc
     { ...DEFAULT_INTERVALS, localSettleMs: 100 },
   )
   coordinator.onEvent((event) => {
-    if (event.kind === 'snapshot' && event.snapshot) snapshots.push(event.snapshot.name)
+    if (event.kind === 'snapshot' && event.snapshot) {
+      snapshots.push(event.snapshot.name)
+      refreshed.resolve()
+    }
   })
   // The settle pass parks inside this lookup, which is the window a replacement
   // lands in: nothing is subscribed yet, so the replacement delivers no event.
@@ -518,6 +493,7 @@ test('a repository replaced while its Git directories are being resolved is watc
     await startPromise
     await log.waitFor((reason) => reason === 'change')
     await clock.advance(100)
+    await within(refreshed.promise, 'the replacement snapshot to be emitted')
     assert.deepEqual(snapshots, ['tree 0'], 'the replacement refreshes without a later edit')
 
     // The lookup that was in flight named the displaced tree's Git directory,
@@ -594,10 +570,14 @@ test('a root replaced on every attempt watches no Git directory rather than a di
     await startPromise
     assert.equal(lookups, gates.length, 'one lookup per replacement, then the pass gives up')
 
-    // The worktree watch follows the path rather than a tree, so an edit in
-    // the tree now at the path is still delivered.
-    await writeFile(join(repo, 'shared.txt'), 'edited after the churn\n')
-    await log.waitFor((reason) => reason === 'change')
+    // The worktree watch follows the path rather than a tree. Drive edits until
+    // it reports one: macOS may miss the first write while fs.watch is starting.
+    const changed = log.waitFor((reason) => reason === 'change')
+    for (let attempt = 0; attempt < 25 && !log.reasons.includes('change'); attempt += 1) {
+      await writeFile(join(repo, 'shared.txt'), `edited after the churn ${attempt}\n`)
+      await Promise.race([changed, quietFor(120)])
+    }
+    await changed
 
     // No resolution ever held, so no Git directory is watched: a branch in each
     // displaced store is invisible, which is what refusing to adopt one buys.

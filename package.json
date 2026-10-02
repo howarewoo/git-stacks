@@ -2,6 +2,7 @@
   "name": "git-stacks",
   "version": "0.1.0",
   "private": true,
+  "license": "MIT",
   "description": "A local-first desktop workbench for Git branches and stacked pull requests",
   "main": "./out/main/index.js",
   "type": "module",

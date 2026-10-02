@@ -40,7 +40,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: '22'
+          node-version: '24'
           cache: npm
       - name: Check release identity and signing prerequisites
         shell: bash
@@ -237,10 +237,21 @@ jobs:
           echo "::add-mask::$keychain_password"
           signing_keychain="$RUNNER_TEMP/git-stacks-signing.keychain-db"
           certificate="$RUNNER_TEMP/git-stacks-certificate.p12"
-          previous_keychains="$(security list-keychains -d user | tr -d '"')"
+          previous_keychains_output="$(security list-keychains -d user)"
+          previous_keychains=()
+          while IFS= read -r keychain; do
+            test -n "$keychain" || continue
+            keychain="${keychain#*\"}"
+            keychain="${keychain%\"*}"
+            previous_keychains+=("$keychain")
+          done <<< "$previous_keychains_output"
           cleanup() {
             security delete-keychain "$signing_keychain" >/dev/null 2>&1 || true
-            security list-keychains -d user -s $previous_keychains
+            if [ -n "$previous_keychains_output" ]; then
+              security list-keychains -d user -s "${previous_keychains[@]}"
+            else
+              security list-keychains -d user -s
+            fi
             rm -f "$certificate"
           }
           trap cleanup EXIT
@@ -370,9 +381,9 @@ jobs:
           # The step is required to be handed a proof, not to print a word that
           # looks like one. Selecting a test by name out of a file and reading a
           # test report for the count was the earlier way to do this, and it is
-          # fragile in a way that fails open: on this job's Node 22, a name
-          # pattern that matches nothing exits 0 and reports one passing test,
-          # because the file that matched nothing is itself a passing test. The
+          # fragile in a way that fails open: on Node 22, a name pattern that
+          # matched nothing exited 0 and reported one passing test, because the
+          # file that matched nothing was itself a passing test. The
           # report is also worded differently between versions, and the report
           # line for the file and the line for the test inside it differ only by
           # a name. So the test records what it proved into the file this job
@@ -419,7 +430,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: '22'
+          node-version: '24'
       - name: Collect the verified artifacts
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
@@ -480,7 +491,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: '22'
+          node-version: '24'
           cache: npm
       - run: npm ci
       - name: Require the update signing key before anything is published
@@ -666,7 +677,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: '22'
+          node-version: '24'
           cache: npm
       - run: npm ci
       - name: Refuse a known-vulnerable dependency
