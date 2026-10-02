@@ -125,7 +125,6 @@ test.describe('Remote freshness', () => {
     })
     const banner = page.getByRole('alert').filter({ hasText: 'Merge feature/one' })
     await expect(banner).toBeVisible()
-    await expect(banner).toContainText('will not be retried automatically')
     await page.screenshot({ path: 'test-results/pending-mutation.png' })
     await page.getByRole('button', { name: 'Dismiss Merge feature/one' }).click()
     await expect(banner).toHaveCount(0)

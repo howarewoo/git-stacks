@@ -100,12 +100,31 @@ function parseFile(text: string, file: string): Map<string, SealedCredential> {
  */
 export class CredentialVault {
   private entries: Map<string, SealedCredential> | null = null
+  /**
+   * This file's own queue for read-modify-write changes.
+   *
+   * Every entry is rewritten wholesale, so two mutations that read the file at
+   * the same time would lose one of the two entries. Sealing and unsealing can
+   * block on the operating system's key store, so the queue belongs to the vault
+   * and not to a caller: a caller that awaited its own step here would keep
+   * everything else that has to change this file waiting on a key store call.
+   */
+  private tail: Promise<unknown> = Promise.resolve()
 
   constructor(
     private readonly file: string,
     private readonly protector: SecretProtector,
   ) {}
 
+  /** Runs one change to this file after every change already queued on it. */
+  private change<T>(apply: () => Promise<T>): Promise<T> {
+    const settled = this.tail.then(apply, apply)
+    this.tail = settled.then(
+      () => undefined,
+      () => undefined,
+    )
+    return settled
+  }
   /** The OS store that will hold secrets, or why none can be used. */
   store(): SecretStore {
     return this.protector.store()
@@ -171,26 +190,28 @@ export class CredentialVault {
    * replacement can remove what it staged and keep what was there before.
    */
   async stage(host: string, secret: string, now: number): Promise<string> {
-    this.requireStore()
-    const entries = new Map(await this.read())
-    const reference = randomUUID()
-    let sealed: Buffer
-    try {
-      sealed = this.protector.seal(secret)
-    } catch {
-      throw new CredentialStoreError(
-        'unavailable',
-        'The operating-system key store rejected the credential.',
-      )
-    }
-    entries.set(reference, {
-      reference,
-      host,
-      sealed: sealed.toString('base64'),
-      createdAt: now,
+    return this.change(async () => {
+      this.requireStore()
+      const entries = new Map(await this.read())
+      const reference = randomUUID()
+      let sealed: Buffer
+      try {
+        sealed = this.protector.seal(secret)
+      } catch {
+        throw new CredentialStoreError(
+          'unavailable',
+          'The operating-system key store rejected the credential.',
+        )
+      }
+      entries.set(reference, {
+        reference,
+        host,
+        sealed: sealed.toString('base64'),
+        createdAt: now,
+      })
+      await this.write(entries)
+      return reference
     })
-    await this.write(entries)
-    return reference
   }
 
   /**
@@ -221,9 +242,11 @@ export class CredentialVault {
   }
 
   async remove(reference: string): Promise<void> {
-    const entries = new Map(await this.read())
-    if (!entries.delete(reference)) return
-    await this.write(entries)
+    await this.change(async () => {
+      const entries = new Map(await this.read())
+      if (!entries.delete(reference)) return
+      await this.write(entries)
+    })
   }
 
   /** Removes every credential this application owns. */

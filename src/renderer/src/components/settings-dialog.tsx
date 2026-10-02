@@ -28,6 +28,11 @@ import type { GitHubAccountStatus } from '../../../shared/types'
 import { UPDATE_CHANNELS, type UpdateChannel, type UpdateStatus } from '../../../shared/update'
 import { UpdateFacts, UpdateNotice } from './update-summary'
 import { CAPABILITY_STATE_LABELS, type GitHubHostStatus } from '../../../shared/host'
+import {
+  NOTIFICATION_CONSENT_POINTS,
+  NOTIFICATION_CREDENTIAL_KIND,
+  NOTIFICATION_CREDENTIAL_SCOPE,
+} from '../../../shared/notifications'
 
 const MERGE_METHOD_LABELS: Record<MergeMethod, string> = {
   merge: 'Merge commit',
@@ -86,11 +91,20 @@ export interface SettingsDialogProps {
 }
 
 type Section =
-  'account' | 'github' | 'git' | 'appearance' | 'privacy' | 'shortcuts' | 'updates' | 'diagnostics'
+  | 'account'
+  | 'github'
+  | 'notifications'
+  | 'git'
+  | 'appearance'
+  | 'privacy'
+  | 'shortcuts'
+  | 'updates'
+  | 'diagnostics'
 
 const SECTIONS: { id: Section; label: string }[] = [
   { id: 'account', label: 'Account' },
   { id: 'github', label: 'GitHub' },
+  { id: 'notifications', label: 'Notifications' },
   { id: 'git', label: 'Git' },
   { id: 'appearance', label: 'Appearance' },
   { id: 'updates', label: 'Updates' },
@@ -441,6 +455,54 @@ export function SettingsDialog({
                     This host has not answered yet, so nothing is claimed about what it supports.
                   </p>
                 )}
+              </WorkflowSection>
+            ) : null}
+
+            {section === 'notifications' && settings ? (
+              <WorkflowSection label="GitHub Notifications">
+                <p className="text-[length:var(--gs-semantic-type-body-size)] text-[var(--gs-semantic-text-secondary)]">
+                  The GitHub Notifications inbox is a different thing from the pull request inbox in
+                  this app, and it is not read with the credential this app signs in with. It is off
+                  by default; turning it on here says what it adds before you turn it on, and only
+                  then can a token be authorized from the Notification Center.
+                </p>
+                <Field
+                  id="settings-notifications"
+                  label={<span className="sr-only">Read a GitHub Notifications inbox</span>}
+                  description={`Optional and separate from sign-in. Reading this inbox needs a ${NOTIFICATION_CREDENTIAL_KIND} with the ${NOTIFICATION_CREDENTIAL_SCOPE} scope. It is entered here, crosses the bridge to the main process once, and is kept sealed by the operating system's own protection in a vault file this module owns; ordinary application state holds only an opaque reference to it, and the stored credential is never sent back to this window. Turning it off stops the polling and hides the list; it does not remove that token, and it changes nothing about pull requests, stacks, or reviews.`}
+                  error={problemFor('notifications.enabled')}
+                >
+                  <Checkbox
+                    id="settings-notifications"
+                    label="Read a GitHub Notifications inbox"
+                    checked={settings.notifications.enabled}
+                    disabled={busy || locked('notifications.enabled')}
+                    onChange={(event) =>
+                      void save(
+                        { notifications: { enabled: event.target.checked } },
+                        event.target.checked
+                          ? 'GitHub Notifications enabled. Authorize it from the Notification Center.'
+                          : 'GitHub Notifications turned off. Its stored token is kept, and nothing else changed.',
+                      )
+                    }
+                  />
+                </Field>
+                {lockFor('notifications.enabled') ? (
+                  <InlineAlert tone="info">{lockFor('notifications.enabled')!.reason}</InlineAlert>
+                ) : null}
+                <p className="text-[length:var(--gs-semantic-type-label-size)]">
+                  What authorizing one adds, in full
+                </p>
+                <ul className="m-0 grid list-none gap-2 p-0">
+                  {NOTIFICATION_CONSENT_POINTS.map((point) => (
+                    <li
+                      className="text-[length:var(--gs-semantic-type-metadata-size)] text-[var(--gs-semantic-text-secondary)]"
+                      key={point}
+                    >
+                      {point}
+                    </li>
+                  ))}
+                </ul>
               </WorkflowSection>
             ) : null}
 

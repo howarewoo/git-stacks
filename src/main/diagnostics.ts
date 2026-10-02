@@ -5,6 +5,7 @@ import type { AppSettings } from '../shared/settings'
 import type { GitHubHostStatus } from '../shared/host'
 import type { DiagnosticEntry, DiagnosticReport } from '../shared/settings'
 import type { GitEnvironmentStatus, GitRuntimeStatus, GitHubAccountStatus } from '../shared/types'
+import { NOTIFICATION_STATE_LABELS, type NotificationModuleStatus } from '../shared/notifications'
 
 const exec = promisify(execFile)
 
@@ -99,6 +100,12 @@ export interface DiagnosticSources {
    * the state it was observed in rather than a guess.
    */
   githubHost?: GitHubHostStatus | null
+  /**
+   * What the optional Notification Center reports about itself. Only its state,
+   * its host, and whether a sealed credential exists: the token, the reference,
+   * and every thread title stay out of every report and bundle.
+   */
+  notifications?: NotificationModuleStatus | null
 }
 
 function runtimeEntries(runtime: GitRuntimeStatus): DiagnosticEntry[] {
@@ -215,6 +222,36 @@ function accountEntries(account: GitHubAccountStatus | null): DiagnosticEntry[] 
     })
   }
   return entries
+}
+
+/**
+ * Three lines about a module that is optional: whether it is on, which host it
+ * is pinned to, and whether a credential is sealed for it. Nothing here can
+ * name a token, a reference, or a single notification.
+ */
+function notificationEntries(notifications: NotificationModuleStatus | null): DiagnosticEntry[] {
+  if (!notifications) return []
+  return [
+    {
+      source: 'github',
+      label: 'GitHub Notifications',
+      value: NOTIFICATION_STATE_LABELS[notifications.state],
+      status: notifications.state === 'ready' ? 'confirmed' : 'not-applicable',
+      detail: 'Optional module; off leaves every pull request workflow unchanged.',
+    },
+    {
+      source: 'github',
+      label: 'Notifications host',
+      value: notifications.host,
+      status: 'confirmed',
+    },
+    {
+      source: 'credentials',
+      label: 'Notifications credential',
+      value: notifications.reference ? 'present in the system credential store' : 'none stored',
+      status: 'confirmed',
+    },
+  ]
 }
 
 function safeHelperIdentifier(helper: string): string {
@@ -356,6 +393,7 @@ export async function runDiagnostics(sources: DiagnosticSources): Promise<Diagno
     ...runtimeEntries(sources.runtime),
     ...accountEntries(sources.account),
     ...stackEntries(sources.environment),
+    ...notificationEntries(sources.notifications ?? null),
     ...githubHostEntries(sources.githubHost ?? null),
     ...filesystemEntries(sources.filesystem),
   ]

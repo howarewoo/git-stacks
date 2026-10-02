@@ -114,9 +114,14 @@ export async function openGallery(page: Page, options: OpenGalleryOptions = {}):
   await page.goto(targetUrl)
   await expect(page.locator('#root')).toBeVisible({ timeout: 15_000 })
 
-  // The fixture gallery automatically calls connect() on mount to open
-  // the repository for active repository scenarios.
-  if (route === 'app' && !SCENARIOS_WITHOUT_A_REPOSITORY.has(scenario)) {
+  // The fixture gallery performs the same first click a person makes, so every
+  // scenario that has a repository starts connected. A scenario without one has
+  // no repository toolbar to wait for, and is ready as soon as it is rendered.
+  if (
+    route === 'app' &&
+    !SCENARIOS_WITHOUT_A_REPOSITORY.has(scenario) &&
+    scenario !== 'shell-loading'
+  ) {
     await expect(page.getByRole('toolbar', { name: 'Repository actions' })).toBeVisible({
       timeout: 15_000,
     })
@@ -160,6 +165,15 @@ export async function getDoubleCalls(page: Page): Promise<FixtureCallRecord[]> {
 export async function holdDoubleCall(page: Page, call: FixtureCall): Promise<void> {
   await page.evaluate((targetCall) => {
     window.fixture.hold(targetCall)
+  }, call)
+}
+
+/**
+ * Stops holding future calls of a given double method without releasing existing ones.
+ */
+export async function unholdDoubleCall(page: Page, call: FixtureCall): Promise<void> {
+  await page.evaluate((targetCall) => {
+    window.fixture.unhold(targetCall)
   }, call)
 }
 

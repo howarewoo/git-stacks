@@ -4,6 +4,7 @@ import type {
   ConflictFile,
   DesktopAPI,
   GitAction,
+  GitHubAccountStatus,
   GitRuntimeInfo,
   GitRuntimeStatus,
   HistoryPage,
@@ -65,11 +66,13 @@ import type {
   ReviewDraftResolution,
   ReviewEvent,
 } from '../../../src/shared/review-threads'
-import { checksReportFor, scenarios } from './scenarios'
+import { checksReportFor, notificationInbox, scenarios } from './scenarios'
 import { updateStatusFixture } from './update-status'
 import { DEFAULT_SCENARIO, type ScenarioName } from './manifest'
 import type { PullRequestChecksReport } from '../../../src/shared/pull-request-checks'
 import type { FixtureCall, FixtureCallRecord, FixtureControl, FixtureScenario } from './types'
+import { canonicalHostName, GITHUB_DEFAULT_HOST } from '../../../src/shared/host'
+import type { NotificationInbox, NotificationModuleState } from '../../../src/shared/notifications'
 
 /** The review state GitHub reports back for each submitted event. */
 const REVIEW_SUBMIT_STATES: Record<ReviewEvent, string> = {
@@ -320,6 +323,47 @@ export function installFixtureControl(options: {
     })
   }
 
+  /**
+   * What a Notification Center call answers is what the center held when the
+   * call was admitted, not what the double holds when the answer is released.
+   * That is the boundary this double exists to exercise: a read of the host
+   * that was selected then can land after the window has moved to another one,
+   * and it still carries the rows that host read.
+   */
+  const admittedAnswer = <T>(call: FixtureCall, produce: () => T): Promise<T> => {
+    const admitted = produce()
+    return answer(call, () => admitted)
+  }
+
+  /**
+   * The settings this double is running with. The host in them is the
+   * authoritative one: the Notification Center is pinned to whatever host the
+   * installation selects, and the window is expected to notice that from these
+   * settings rather than from whatever a reply happens to name. Everything else
+   * here is the value the gallery has always behaved as, so adding this double
+   * changes which host the module is about and nothing else.
+   */
+  const notificationSettings: AppSettings = {
+    ...DEFAULT_SETTINGS,
+    github: { host: scenario.notifications?.host ?? GITHUB_DEFAULT_HOST },
+    git: { ...DEFAULT_SETTINGS.git, defaultPullStrategy: 'ff-only' },
+    migrated: { legacyShortcutStorage: true },
+  }
+  const policyLockedNotifications = scenario.notifications?.policyDisabled === true
+  const settingsSnapshot = (): SettingsSnapshot => ({
+    settings: structuredClone(notificationSettings),
+    locks: policyLockedNotifications
+      ? [
+          {
+            key: 'notifications.enabled',
+            reason: 'Notifications are held off by policy on this computer.',
+          },
+        ]
+      : [],
+    issues: [],
+    recovered: false,
+    file: '/fixture/settings.json',
+  })
   const updateListeners = new Set<(status: UpdateStatus) => void>()
   /**
    * The snapshot repository reads are answered from. Seeded from the scenario,
@@ -332,6 +376,101 @@ export function installFixtureControl(options: {
    * repository it already opened until it opens or refreshes one itself.
    */
   let active: RepositorySnapshot | null = scenario.snapshot
+
+  const disabledNotifications = (): NotificationInbox => ({
+    host: notificationSettings.github.host,
+    state: notificationSettings.notifications.enabled ? 'credential-missing' : 'disabled',
+    enabled: notificationSettings.notifications.enabled,
+    policyDisabled: false,
+    reference: null,
+    login: null,
+    store: { available: true, name: 'Keychain', reason: null },
+    message: null,
+    threads: [],
+    unreadCount: 0,
+    poll: {
+      fetchedAt: null,
+      checkedAt: null,
+      nextPollAt: null,
+      pollIntervalSeconds: 60,
+      lastModified: null,
+      unchanged: false,
+    },
+    stale: false,
+    staleReason: null,
+    markAllReadPending: false,
+  })
+  /**
+   * What each host this double knows about serves. The center main publishes is
+   * the one for the host the installation has selected, and its files belong to
+   * that host alone, so the state lives per host rather than in one slot the
+   * next host overwrites.
+   */
+  const hostInboxes = new Map<string, NotificationInbox>()
+  if (scenario.notifications) hostInboxes.set(scenario.notifications.host, scenario.notifications)
+  let notificationListener: ((inbox: NotificationInbox) => void) | null = null
+  const currentNotifications = (): NotificationInbox =>
+    hostInboxes.get(notificationSettings.github.host) ?? disabledNotifications()
+  const publish = (host: string, inbox: NotificationInbox): NotificationInbox => {
+    hostInboxes.set(host, inbox)
+    return inbox
+  }
+  /**
+   * A write is addressed to the host that was selected when it was admitted, so
+   * that is the inbox it changes and the inbox its answer carries — even when
+   * the answer is held until after the window has moved on. The change itself
+   * lands only if the call is not refused, because a refused write did not
+   * happen: that is what makes a refused write observable at all.
+   */
+  const mutate = (
+    call: FixtureCall,
+    change: (inbox: NotificationInbox) => NotificationInbox,
+  ): Promise<NotificationInbox> => {
+    const host = notificationSettings.github.host
+    const admitted = hostInboxes.get(host) ?? disabledNotifications()
+    return answer(call, () => {
+      const next = publish(host, change(admitted))
+      notificationListener?.(next)
+      return next
+    })
+  }
+  /**
+   * What the module's state settles to, using the precedence the main process
+   * resolves with: a policy that holds the module off outranks consent, consent
+   * outranks a stored credential, and a credential exists only once it has been
+   * sealed. Removing a credential therefore cannot hand a module this computer
+   * never agreed to — or one a policy holds off — the state where it offers to
+   * authorize one.
+   */
+  const settle = (
+    before: NotificationInbox,
+    after: Partial<NotificationInbox>,
+  ): NotificationInbox => {
+    const enabled = after.enabled ?? before.enabled
+    const policyDisabled = after.policyDisabled ?? before.policyDisabled
+    const reference = after.reference !== undefined ? after.reference : before.reference
+    const hasCredential = typeof reference === 'string'
+    const state: NotificationModuleState = policyDisabled
+      ? 'policy-disabled'
+      : !enabled
+        ? 'disabled'
+        : hasCredential
+          ? before.state === 'rejected'
+            ? 'rejected'
+            : 'ready'
+          : 'credential-missing'
+    const message =
+      state === 'policy-disabled'
+        ? 'GitHub Notifications is disabled by the settings policy on this computer. Pull requests, stacks, and reviews keep working.'
+        : state === 'disabled'
+          ? 'GitHub Notifications is off. It is optional and uses its own credential; nothing else in this app changes when it is off.'
+          : state === 'rejected'
+            ? 'GitHub rejected the stored notification token. Replace it to read this inbox; nothing else in this app changed.'
+            : hasCredential
+              ? null
+              : 'Store a GitHub notification token to read this inbox. Sign-in, pull requests, and reviews are unaffected.'
+    return { ...before, ...after, reference, state, message }
+  }
   const desktop: DesktopAPI = {
     recentRepositories: () => {
       record('recentRepositories', [])
@@ -358,6 +497,236 @@ export function installFixtureControl(options: {
       return answer('refresh', () => {
         if (!active) throw new Error('No repository is open in this fixture.')
         return active
+      })
+    },
+    // The settings the double is running with, including the host the
+    // Notification Center is pinned to. It answers with the stored value, not
+    // with the one that was asked for, exactly as the main process does.
+    settings: () => {
+      record('notificationSettings', [])
+      return admittedAnswer('notificationSettings', () => settingsSnapshot())
+    },
+    updateSettings: (patch) => {
+      // Each shape of settings write is a call of its own, because each one is
+      // a different step of a different transition: holding the write that
+      // turns this module on must not hold the host a Settings change makes,
+      // or the cutover that has to happen while that write is outstanding
+      // would itself be waiting behind it.
+      const call: FixtureCall =
+        patch.github?.host !== undefined
+          ? 'notificationSettingsHost'
+          : patch.notifications?.enabled !== undefined
+            ? 'notificationSettingsEnable'
+            : 'notificationSettings'
+      record(call, [])
+      // The write lands when it is made and only the answer is ever delayed.
+      // That is what keeps a held write honest: it is applied to the host that
+      // was selected when it was made, never to whichever host the window has
+      // been pointed at by the time it is released.
+      const host = notificationSettings.github.host
+      if (patch.github?.host !== undefined) {
+        // Selecting a host retires the center the window was holding and
+        // opens the new host's. Nothing is pushed for the window to adopt:
+        // arriving at the new host's inbox is the window's own work, and a
+        // push that happened to carry it would prove nothing.
+        notificationSettings.github = { host: patch.github.host }
+      }
+      if (patch.notifications?.enabled !== undefined) {
+        notificationSettings.notifications = { enabled: patch.notifications.enabled }
+        const settled = settle(hostInboxes.get(host) ?? { ...disabledNotifications(), host }, {
+          enabled: patch.notifications.enabled,
+        })
+        notificationListener?.(settled)
+        publish(host, settled)
+      }
+      // The stored value is the one main wrote when it was asked, so a release
+      // that lands after a host change still answers with the host this write
+      // was made for rather than with whatever is stored now.
+      const stored = settingsSnapshot()
+      return answer(call, () => stored)
+    },
+    // This installation's own GitHub sign-in, which the App reads for the
+    // account panel and to know which host it is signed in to. It is optional
+    // in the product, so the method is only there for a scenario that named
+    // it: every other scenario leaves it off, which is what a main process
+    // without this bridge looks like, and answering it unasked would move the
+    // account footer of scenarios that never staged a sign-in. The answer is
+    // taken when the read is admitted, so a read held across a host change
+    // delivers the account of the host it was asked about — never one rebuilt
+    // for the host selected afterwards, which would be an answer nobody asked
+    // for.
+    get githubAccountStatus(): (() => Promise<GitHubAccountStatus>) | undefined {
+      const identity = scenario.identity
+      if (identity) {
+        return () => {
+          record('githubAccountStatus', [])
+          return answer('githubAccountStatus', () => identity.account)
+        }
+      }
+      if (!scenario.exposesGithubAccount) return undefined
+      return () => {
+        record('githubAccountStatus', [])
+        return admittedAnswer('githubAccountStatus', (): GitHubAccountStatus => ({
+          state: 'signed-in',
+          reference: 'app-credential-reference',
+          host: notificationSettings.github.host,
+          login: scenario.githubAccount?.login ?? 'octo',
+          permissions: [],
+          expiresAt: null,
+          refreshExpiresAt: null,
+          store: { available: true, name: 'fixture key store', reason: null },
+          signingIn: false,
+          challenge: null,
+          message: null,
+          externalCredential: false,
+        }))
+      }
+    },
+    // The optional Notification Center answers on its own calls, with its own
+    // state: the fixture never borrows the pull request inbox for it.
+    notifications: () => {
+      record('notifications', [])
+      return admittedAnswer('notifications', () => currentNotifications())
+    },
+    notificationsStatus: () => {
+      record('notifications', [])
+      return admittedAnswer('notifications', () => {
+        const {
+          threads: _threads,
+          unreadCount: _count,
+          poll: _poll,
+          stale: _stale,
+          staleReason: _reason,
+          ...status
+        } = currentNotifications()
+        return status
+      })
+    },
+    onNotifications: (listener) => {
+      notificationListener = listener
+      return () => {
+        notificationListener = null
+      }
+    },
+    refreshNotifications: () => {
+      record('notificationRefresh', [])
+      // A read is where a bulk change GitHub accepted earlier is confirmed by
+      // what it actually did, so a pending one is resolved here rather than
+      // being invented as a completed change at the moment it was accepted.
+      return admittedAnswer('notificationRefresh', () => {
+        const inbox = currentNotifications()
+        if (!inbox.markAllReadPending) return inbox
+        return publish(notificationSettings.github.host, {
+          ...inbox,
+          threads: inbox.threads.map((thread) => ({ ...thread, unread: false })),
+          unreadCount: 0,
+          markAllReadPending: false,
+        })
+      })
+    },
+    cancelNotifications: () => {
+      record('notificationCancel', [])
+      return Promise.resolve()
+    },
+    saveNotificationCredential: (
+      token: string,
+      consent: boolean,
+      host: string,
+    ): Promise<NotificationInbox> => {
+      // Sealing a credential is a call of its own rather than one more inbox
+      // read, because it is the write the App is waiting on before it asks for
+      // the inbox again. A test that holds the read after a successful
+      // authorization has to hold exactly that read: holding one kind for both
+      // would stop the authorization at the save and prove nothing about the
+      // read that follows it.
+      // The value crosses the bridge once and is never read back, so the log
+      // records that a credential arrived rather than keeping it in page memory.
+      record('notificationSave', [token.trim().length > 0, consent, host])
+      return mutate('notificationSave', (before) => {
+        // The host the dialog named is the host the token is identified against,
+        // and a token typed for one host is refused for another exactly as the
+        // main process refuses it.
+        if (host !== notificationSettings.github.host) {
+          throw new Error(
+            'This token was typed for a different GitHub host, so it was not stored and not sent anywhere.',
+          )
+        }
+        const served =
+          (scenario.notificationsBoxes && scenario.notificationsBoxes[host]) ?? notificationInbox()
+        const canonicalHost = canonicalHostName(host)
+        const isDefault = canonicalHost === 'github.com'
+        const webOrigin = isDefault ? 'https://github.com' : `https://${canonicalHost}`
+        const login = isDefault
+          ? served.login
+          : (scenario.githubAccount?.login ?? served.login ?? 'enterprise-user')
+        const threads = served.threads.map((t) => ({
+          ...t,
+          url: isDefault ? t.url : t.url ? t.url.replace('https://github.com', webOrigin) : null,
+        }))
+        return settle(before, {
+          host: canonicalHost,
+          enabled: true,
+          reference: served.reference ?? `notification-ref-${canonicalHost}`,
+          login,
+          threads,
+          unreadCount: threads.filter((t) => t.unread).length,
+          poll: served.poll,
+          stale: false,
+          staleReason: null,
+          markAllReadPending: false,
+        })
+      })
+    },
+    removeNotificationCredential: () => {
+      record('notificationRemove', [])
+      return mutate('notificationRemove', (before) => {
+        // The credential and the list read with it are gone. Consent and policy
+        // are not: turning the module off keeps its token, and a policy that
+        // holds it off keeps holding it with no token to use.
+        return settle(before, {
+          reference: null,
+          login: null,
+          threads: [],
+          unreadCount: 0,
+          markAllReadPending: false,
+        })
+      })
+    },
+    markNotificationRead: (threadId: string | 'all') => {
+      record('notificationMarkRead', [threadId])
+      return mutate('notificationMarkRead', (inbox) => {
+        if (threadId === 'all') {
+          // The bulk change is one GitHub accepts and finishes on its own, so
+          // what comes back says it was accepted and not that it is done. The
+          // rows stay as GitHub last confirmed them until a later read says
+          // otherwise.
+          return { ...inbox, markAllReadPending: true }
+        }
+        const threads = inbox.threads.map((thread) =>
+          thread.id === threadId ? { ...thread, unread: false } : thread,
+        )
+        return { ...inbox, threads, unreadCount: threads.filter((t) => t.unread).length }
+      })
+    },
+    markNotificationDone: (threadId: string): Promise<NotificationInbox> => {
+      record('notificationDone', [threadId])
+      return mutate('notificationDone', (inbox) => {
+        // GitHub's Done is the thread itself, not its subscription: the
+        // conversation stays subscribed to and the thread leaves the inbox.
+        const threads = inbox.threads.filter((thread) => thread.id !== threadId)
+        return { ...inbox, threads, unreadCount: threads.filter((t) => t.unread).length }
+      })
+    },
+    setNotificationSubscription: (threadId: string, action: string) => {
+      record('notificationSubscription', [threadId, action])
+      return mutate('notificationSubscription', (inbox) => {
+        const threads =
+          action === 'ignore'
+            ? inbox.threads.map((thread) =>
+                thread.id === threadId ? { ...thread, unread: false } : thread,
+              )
+            : inbox.threads.filter((thread) => thread.id !== threadId)
+        return { ...inbox, threads, unreadCount: threads.filter((t) => t.unread).length }
       })
     },
     runAction: (action) => {
@@ -1170,12 +1539,6 @@ export function installFixtureControl(options: {
         return settingsSnapshot()
       })
     }
-    // Main always answers with a status: a host that has named none reports
-    // itself signed out, never nothing at all.
-    desktop.githubAccountStatus = () => {
-      record('githubAccountStatus', [])
-      return answer('githubAccountStatus', () => identity.account)
-    }
   }
 
   const control: FixtureControl = {
@@ -1204,11 +1567,35 @@ export function installFixtureControl(options: {
       // what it displays is deliberately not reset along with them.
       active = scenario.snapshot
       startsPending = new Set(scenario.pending ?? [])
+      hostInboxes.clear()
+      if (scenario.notifications)
+        hostInboxes.set(scenario.notifications.host, scenario.notifications)
+      notificationSettings.github = { host: scenario.notifications?.host ?? GITHUB_DEFAULT_HOST }
       released.clear()
       options.onScenarioChange(scenario.name)
     },
+    serveNotificationHost(host, name) {
+      // The stored files that belong to a host the installation has just been
+      // pointed at. Installing them publishes nothing: the window learns the
+      // host from the settings it wrote and has to ask for the inbox itself.
+      const served = scenarioFor(name).notifications
+      // It is this host's own inbox, not another host's rows filed under this
+      // one: a window that asked for this host and was handed another host's
+      // rows would be refused, which is the right outcome for the wrong reason.
+      if (served) hostInboxes.set(host, served.host === host ? served : { ...served, host })
+    },
+    publishRetiredHostInbox(name) {
+      // A publication that was already on its way when the host changed. The
+      // center it came from has been retired, and the window it reaches is
+      // holding another host's inbox, which is what has to stay on screen.
+      const retired = scenarioFor(name).notifications
+      if (retired) notificationListener?.(retired)
+    },
     hold(call) {
       holds.add(call)
+    },
+    unhold(call) {
+      holds.delete(call)
     },
     release(call, occurrence?: 'oldest' | 'newest') {
       // Retained waiters are release-all targets even when their kind is no

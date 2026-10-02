@@ -1955,6 +1955,15 @@ button:disabled {
   flex-direction: column;
 }
 
+/* The shared list toolbar is a fixed 66px strip. This one carries the host,
+   the poll cadence, and three controls, so at the zoom a person set, or in a
+   narrow window, its controls wrap onto more lines: it grows past the strip
+   instead of painting over the headline beneath it. The 66px minimum is the
+   shared one; only the growth is this toolbar's own, as it is for review. */
+.notification-toolbar {
+  flex: 0 0 auto;
+}
+
 .capability-scroll {
   min-height: 0;
   flex: 1;
@@ -2010,6 +2019,21 @@ button:disabled {
   gap: 12px;
   border-bottom: 1px solid var(--gs-semantic-border-decorative);
   padding: 10px 4px;
+}
+
+/*
+ * A notification row carries GitHub's own controls for one thread: reading it,
+ * opening it, and the subscription it offers. At a narrow width — a small
+ * window, or 200% zoom — those controls wrap onto their own line rather than
+ * running past the edge of a list that scrolls vertically only.
+ */
+.notification-thread-row {
+  flex-wrap: wrap;
+  row-gap: 8px;
+}
+
+.notification-thread-row .capability-copy {
+  flex: 1 1 240px;
 }
 
 .capability-copy {

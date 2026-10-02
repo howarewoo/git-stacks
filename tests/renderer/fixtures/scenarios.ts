@@ -29,7 +29,7 @@ import {
 } from '../../../src/renderer/src/design-system/data-fixtures'
 import { EMPTY_SNAPSHOT_LIMITS } from '../../../src/shared/performance'
 import { DEFAULT_SETTINGS } from '../../../src/shared/settings'
-
+import type { NotificationInbox } from '../../../src/shared/notifications'
 import {
   deriveCheckRollup,
   summariseChecks,
@@ -1189,6 +1189,110 @@ const inboxMembershipUnknown = inboxReport(inboxMembershipUnknownRead, inboxMemb
   detail: 'Some repositories could not be read.',
 })
 
+/**
+ * The module's own state, kept apart from the pull request inbox: a host, an
+ * account, a sealed reference, and the threads GitHub sent with their own
+ * reasons. The reference is opaque, because the real one is.
+ */
+const notificationStatus = {
+  host: 'github.com',
+  state: 'ready' as const,
+  enabled: true,
+  policyDisabled: false,
+  reference: 'keychain://git-stacks/notifications/octo',
+  login: 'octo',
+  store: { available: true, name: 'Keychain', reason: null },
+  message: null,
+  // A bulk change GitHub has accepted but not confirmed is the only thing that
+  // sets this, so every scenario that is not that state says so explicitly.
+  markAllReadPending: false,
+}
+
+const notificationThreads: NotificationInbox['threads'] = [
+  {
+    id: '101',
+    unread: true,
+    reason: 'review_requested',
+    title: 'Tidy the stack ordering rules',
+    url: 'https://github.com/acme/widgets/pull/101',
+    kind: 'pull_request',
+    repository: { owner: 'acme', name: 'widgets' },
+    updatedAt: UPDATED,
+  },
+  {
+    id: '102',
+    unread: true,
+    reason: 'mention',
+    title: 'Mentioned in “Release checklist”',
+    url: 'https://github.com/acme/widgets/issues/102',
+    kind: 'issue',
+    repository: { owner: 'acme', name: 'widgets' },
+    updatedAt: EARLIER,
+  },
+  {
+    id: '103',
+    unread: false,
+    reason: 'ci_activity',
+    title: 'Checks failed on “Add checkout validation”',
+    url: 'https://github.com/acme/widgets/pull/98',
+    kind: 'pull_request',
+    repository: { owner: 'acme', name: 'widgets' },
+    updatedAt: EARLIER,
+  },
+]
+
+/**
+ * A module that is on and has no credential: nothing sealed, nothing polled,
+ * and the authorization this window would offer. Scenarios that differ only in
+ * what else is outstanding share it rather than repeating the same inbox.
+ */
+const awaitingCredential = (host = 'github.com'): NotificationInbox => ({
+  ...notificationStatus,
+  host,
+  state: 'credential-missing',
+  enabled: true,
+  // No credential means no sealed reference to discard and no account it
+  // was sealed for; a module in this state holds nothing.
+  reference: null,
+  login: null,
+  threads: [],
+  unreadCount: 0,
+  poll: {
+    fetchedAt: null,
+    checkedAt: null,
+    nextPollAt: null,
+    pollIntervalSeconds: 60,
+    lastModified: null,
+    unchanged: false,
+  },
+  stale: false,
+  staleReason: null,
+})
+
+/**
+ * What GitHub serves this module once a credential exists: the live inbox the
+ * ready scenario renders. Authorizing a module that had none moves it onto this,
+ * because a stored credential is what turns the module into a live inbox at all.
+ */
+export function notificationInbox(overrides: Partial<NotificationInbox> = {}): NotificationInbox {
+  return {
+    ...notificationStatus,
+    threads: notificationThreads,
+    unreadCount: notificationThreads.filter((thread) => thread.unread).length,
+    poll: {
+      fetchedAt: UPDATED,
+      checkedAt: UPDATED,
+      nextPollAt: UPDATED,
+      pollIntervalSeconds: 60,
+      lastModified: 'Tue, 22 Sep 2026 09:41:07 GMT',
+      unchanged: false,
+    },
+    stale: false,
+    staleReason: null,
+    markAllReadPending: false,
+    ...overrides,
+  }
+}
 export const scenarios: Record<ScenarioName, FixtureScenario> = {
   'shell-no-repository': {
     name: 'shell-no-repository',
@@ -1764,5 +1868,201 @@ export const scenarios: Record<ScenarioName, FixtureScenario> = {
         externalCredential: false,
       },
     },
+  },
+  'notifications-awaiting-credential': {
+    name: 'notifications-awaiting-credential',
+    summary: 'The module is on and has no token: authorization is offered, polling has not begun.',
+    snapshot: connected,
+    recentRepositories,
+    notifications: awaitingCredential(),
+  },
+  'notifications-read-pending': {
+    name: 'notifications-read-pending',
+    summary:
+      "The inbox's own read is admitted and still outstanding, so this window is showing neither host's rows and has nothing left to release.",
+    snapshot: connected,
+    recentRepositories,
+    // The read the App makes on mount starts outstanding: the answer it will
+    // get was taken for the host this window was pointed at, which is exactly
+    // the answer a later host change has to refuse rather than adopt.
+    pending: ['notifications'],
+    notifications: awaitingCredential(),
+  },
+  'notifications-account-pending': {
+    name: 'notifications-account-pending',
+    summary:
+      "This installation's own GitHub account read is still outstanding, so the window has no account for any host while the Notification Center is otherwise ready to be pointed at another one.",
+    snapshot: connected,
+    recentRepositories,
+    // The account read the App makes on mount is admitted and then held: the
+    // window is holding no account at all, which is a different thing from a
+    // notification credential being missing. It is also the only reason this
+    // scenario answers the optional account bridge at all: a window whose
+    // build has no such bridge holds no account either, and every other
+    // scenario already renders that way.
+    exposesGithubAccount: true,
+    pending: ['githubAccountStatus'],
+    notifications: awaitingCredential(),
+  },
+  'notifications-other-host-awaiting-credential': {
+    name: 'notifications-other-host-awaiting-credential',
+    summary:
+      'The other GitHub host, after a settings change, with no token of its own: its own authorization is offered rather than the previous host’s.',
+    snapshot: connected,
+    recentRepositories,
+    // The inbox this host serves is genuinely its own: it names this host,
+    // so a window pointed here is answering for this host and not carrying
+    // the previous one's inbox under this key.
+    notifications: awaitingCredential('ghe.acme.internal'),
+  },
+  'notifications-ready': {
+    name: 'notifications-ready',
+    summary: 'A live GitHub inbox: threads with GitHub’s own reasons, one already read.',
+    snapshot: connected,
+    recentRepositories,
+    notifications: notificationInbox({ stale: false }),
+  },
+  'notifications-stale': {
+    name: 'notifications-stale',
+    summary:
+      'GitHub could not be reached; the last confirmed list stands, marked stale with the reason.',
+    snapshot: connected,
+    recentRepositories,
+    notifications: notificationInbox({ stale: true, staleReason: 'offline' }),
+  },
+  'notifications-rejected': {
+    name: 'notifications-rejected',
+    summary:
+      'GitHub refused the stored token. It is still sealed here, so it has to stay discardable.',
+    snapshot: connected,
+    recentRepositories,
+    notifications: notificationInbox({
+      state: 'rejected',
+      threads: [],
+      unreadCount: 0,
+      message: 'GitHub refused the stored notification credential. Replace it to read this inbox.',
+    }),
+  },
+  'notifications-policy-disabled': {
+    name: 'notifications-policy-disabled',
+    summary:
+      'A policy holds the module off while a credential is still sealed here, so it stays discardable.',
+    snapshot: connected,
+    recentRepositories,
+    notifications: notificationInbox({
+      state: 'policy-disabled',
+      policyDisabled: true,
+      threads: [],
+      unreadCount: 0,
+      message: 'Notifications are held off by policy on this computer.',
+    }),
+  },
+  'notifications-other-host': {
+    name: 'notifications-other-host',
+    summary:
+      'A different GitHub host after a settings change: its own account and its own threads.',
+    snapshot: connected,
+    recentRepositories,
+    notifications: {
+      ...notificationInbox({ stale: false }),
+      host: 'ghe.acme.internal',
+      login: 'riley',
+      reference: 'keychain://git-stacks/notifications/riley',
+      // These rows exist only on the host that was just selected. Nothing about
+      // them may survive into the view the previous host's inbox leaves behind.
+      threads: [
+        {
+          id: '201',
+          unread: true,
+          reason: 'review_requested',
+          title: 'Review the internal deploy queue',
+          url: 'https://ghe.acme.internal/ops/deploys/pull/201',
+          kind: 'pull_request',
+          repository: { owner: 'ops', name: 'deploys' },
+          updatedAt: UPDATED,
+        },
+        {
+          id: '202',
+          unread: true,
+          reason: 'mention',
+          title: 'Mentioned in “Nightly build rota”',
+          url: 'https://ghe.acme.internal/ops/builds/issues/202',
+          kind: 'issue',
+          repository: { owner: 'ops', name: 'builds' },
+          updatedAt: EARLIER,
+        },
+      ],
+      unreadCount: 2,
+    },
+  },
+  'notifications-no-repository': {
+    name: 'notifications-no-repository',
+    summary:
+      'The Notification Center with no repository open: the inbox belongs to a host, not to a checkout.',
+    snapshot: null,
+    recentRepositories,
+    notifications: notificationInbox({ stale: false }),
+  },
+  'notifications-mark-all-accepted': {
+    name: 'notifications-mark-all-accepted',
+    summary:
+      'GitHub accepted the whole-inbox change and has not confirmed it yet, so the rows are still the last ones it confirmed.',
+    snapshot: connected,
+    recentRepositories,
+    notifications: notificationInbox({ stale: false, markAllReadPending: true }),
+  },
+  'notifications-no-subject-link': {
+    name: 'notifications-no-subject-link',
+    summary:
+      'A subject kind and reason this build has no name for, and a commit, with the controls each of them still has.',
+    snapshot: connected,
+    recentRepositories,
+    notifications: {
+      ...notificationInbox({ stale: false }),
+      threads: [
+        {
+          id: '301',
+          unread: true,
+          // A host can name a reason or a subject this build has no label for.
+          // The row is still a thread with an id, so its own operations are
+          // still operations on it.
+          reason: 'unknown',
+          title: 'Something this build has no name for',
+          // No page this build will open for it. That is a fact about the
+          // subject, not about what may be done to the thread.
+          url: null,
+          kind: 'unknown',
+          repository: null,
+          updatedAt: UPDATED,
+        },
+        {
+          id: '302',
+          unread: true,
+          reason: 'subscribed',
+          title: 'Pushed “Record the stack ordering rules”',
+          // The one-commit page, which is the commit itself and its comments,
+          // rather than the history of the branch it landed on.
+          url: 'https://github.com/acme/widgets/commit/9f1c2b7d4e5a',
+          kind: 'commit',
+          repository: { owner: 'acme', name: 'widgets' },
+          updatedAt: UPDATED,
+        },
+      ],
+      unreadCount: 2,
+    },
+  },
+  'notifications-turned-off': {
+    name: 'notifications-turned-off',
+    summary:
+      'Consent was withdrawn while a credential is still sealed: the module is off, and the token is still there to discard.',
+    snapshot: connected,
+    recentRepositories,
+    notifications: notificationInbox({
+      state: 'disabled',
+      enabled: false,
+      threads: [],
+      unreadCount: 0,
+      message: 'GitHub Notifications is off.',
+    }),
   },
 }

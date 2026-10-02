@@ -22,6 +22,7 @@ import {
   type GitHubErrorKind,
 } from '../src/main/github-transport'
 import { readPullRequestInbox, resetInboxHostAllowances } from '../src/main/pr-inbox'
+import type { CachedGitHubResponse, GitHubResponseCache } from '../src/main/github-response-cache'
 import type { DesktopAPI } from '../src/shared/types'
 
 // The renderer bridge is the whole renderer capability surface; it must never gain one.
@@ -98,7 +99,10 @@ function recordingFetch(
     captured.push({ url: String(input), init })
     const next = responses[Math.min(index, responses.length - 1)]
     index += 1
-    return new Response(JSON.stringify(next.body ?? {}), {
+    // 204, 205, and 304 are answers with no body, and `Response` refuses to be
+    // constructed with one, so the double answers them the way the host did.
+    const bodyless = next.status === 204 || next.status === 205 || next.status === 304
+    return new Response(bodyless ? null : JSON.stringify(next.body ?? {}), {
       status: next.status ?? 200,
       headers: {
         'content-type': 'application/json',
@@ -1176,4 +1180,93 @@ if (argv[0] === 'auth' && argv[1] === 'token') {
       )
     await rm(directory, { recursive: true, force: true })
   }
+})
+
+test('a 304 is replayed for a conditional read and refused for a mutation that did not opt in', async () => {
+  const validator = 'Tue, 22 Sep 2026 09:41:07 GMT'
+  const { fetch: answered304, captured } = recordingFetch([
+    { status: 304, headers: { etag: '"test-etag"' } },
+  ])
+  const transport = new DirectGitHubTransport({
+    fetch: answered304,
+    host: 'github.com',
+    env: {},
+    token: 'ghp_test',
+  })
+
+  // A conditional read with nothing stored behind its validator cannot replay
+  // anything, so GitHub's answer is a response this build cannot use.
+  await assert.rejects(
+    transport.rest({
+      method: 'GET',
+      path: 'notifications',
+      headers: { 'If-Modified-Since': validator },
+    }),
+    (error: unknown) =>
+      error instanceof GitHubTransportError &&
+      error.kind === 'invalid-response' &&
+      error.detail === 'GitHub answered 304 without a stored response',
+  )
+
+  await assert.rejects(
+    transport.rest({ method: 'PATCH', path: 'notifications/threads/1', body: { read: true } }),
+    (error: unknown) =>
+      error instanceof GitHubTransportError &&
+      error.kind === 'invalid-response' &&
+      error.detail === 'GitHub answered 304 without a stored response',
+  )
+
+  // The notification module documents 304 on its own writes as "nothing
+  // changed", so it opts in and gets that answer rather than a failure.
+  const opted = await transport.rest({
+    method: 'PATCH',
+    path: 'notifications/threads/1',
+    body: { read: true },
+    acceptNoChange: true,
+  })
+  assert.equal(opted.status, 304)
+  assert.equal(opted.notModified, true)
+  assert.equal(opted.data, null)
+
+  // A read that already has a body keeps replaying it: the 304 is about the
+  // stored response, and a mutation that opted in to "no change" stored none.
+  const { fetch: answeredOnce, captured: readCaptured } = recordingFetch([
+    { status: 200, body: [{ id: '1' }], headers: { 'last-modified': validator } },
+    { status: 304, headers: { 'last-modified': validator } },
+  ])
+  const entries = new Map<string, CachedGitHubResponse>()
+  const stored: GitHubResponseCache = {
+    get: (key) => entries.get(key) ?? null,
+    set: (key, entry) => void entries.set(key, entry),
+    delete: (key) => void entries.delete(key),
+    clear: () => entries.clear(),
+    size: () => entries.size,
+  }
+  const replaying = new DirectGitHubTransport({
+    fetch: answeredOnce,
+    host: 'github.com',
+    env: {},
+    token: 'ghp_test',
+    cache: stored,
+  })
+  const first = await replaying.rest({ method: 'GET', path: 'notifications', cache: true })
+  const replayed = await replaying.rest({
+    method: 'GET',
+    path: 'notifications',
+    cache: true,
+    headers: { 'If-Modified-Since': validator },
+  })
+  assert.deepEqual(replayed.data, first.data)
+  assert.equal(replayed.notModified, true)
+  assert.equal(
+    new Headers(readCaptured[1]?.init?.headers).get('if-modified-since'),
+    validator,
+    'the stored validator is what the conditional read sent back',
+  )
+  assert.equal(
+    readCaptured.length,
+    2,
+    'the conditional read was answered from the stored body without a second download',
+  )
+  assert.equal(captured.length, 3, 'each of the three refused or accepted answers was one request')
 })

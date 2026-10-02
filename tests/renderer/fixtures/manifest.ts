@@ -87,6 +87,20 @@ export const SCENARIO_NAMES = [
   'workflow-conflict-recovery',
   'workflow-operation-recovery',
   'workflow-external-operation',
+  // Optional notification center
+  'notifications-read-pending',
+  'notifications-awaiting-credential',
+  'notifications-account-pending',
+  'notifications-ready',
+  'notifications-stale',
+  'notifications-rejected',
+  'notifications-policy-disabled',
+  'notifications-other-host',
+  'notifications-other-host-awaiting-credential',
+  'notifications-no-repository',
+  'notifications-mark-all-accepted',
+  'notifications-no-subject-link',
+  'notifications-turned-off',
 ] as const
 
 export type ScenarioName = (typeof SCENARIO_NAMES)[number]
@@ -158,6 +172,21 @@ export const SCENARIO_GROUPS = {
     'workflow-conflict-recovery',
     'workflow-operation-recovery',
     'workflow-external-operation',
+  ],
+  notifications: [
+    'notifications-awaiting-credential',
+    'notifications-read-pending',
+    'notifications-account-pending',
+    'notifications-ready',
+    'notifications-stale',
+    'notifications-rejected',
+    'notifications-policy-disabled',
+    'notifications-other-host',
+    'notifications-other-host-awaiting-credential',
+    'notifications-no-repository',
+    'notifications-mark-all-accepted',
+    'notifications-no-subject-link',
+    'notifications-turned-off',
   ],
 } as const satisfies Record<string, readonly ScenarioName[]>
 
