@@ -493,7 +493,14 @@ export interface LiveCleanupReport {
   refused: Array<{ handle: string; reason: string }>
   /** Resources that were still there afterwards. */
   remaining: string[]
-  /** True only when nothing this run created is left behind. */
+  /**
+   * State this run left on the machine it ran on — a directory, a socket, a claim —
+   * which no deletion against a host could settle. It is reported apart from
+   * `remaining` because it is not a resource: naming it there would send a recovery
+   * run looking for a repository that does not exist.
+   */
+  localFailures?: string[]
+  /** True only when nothing this run created is left behind, on the host or locally. */
   complete: boolean
 }
 

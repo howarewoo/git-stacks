@@ -14,7 +14,12 @@ import { submitReview } from '../../../src/main/review-threads'
 import type { ReviewFile } from '../../../src/shared/review'
 import { previewStack } from '../../../src/main/stacks'
 import { RepositoryScheduler } from '../../../src/main/repository-scheduler'
-import { RepositorySyncCoordinator, type SyncEvent } from '../../../src/main/sync-coordinator'
+import {
+  DEFAULT_INTERVALS,
+  failureDelay,
+  RepositorySyncCoordinator,
+  type SyncEvent,
+} from '../../../src/main/sync-coordinator'
 import { LiveRedactor } from '../diagnostics'
 import {
   SCHEMA_PROBES,
@@ -146,13 +151,13 @@ function withAlteredField(
   }
 }
 /**
- * A probe's observation with one declared nullable field answered only `null`, or with a
- * form added beside the ones it already answered.
+ * A probe's observation with one field's answers replaced: only the documented null form,
+ * or a form no parser reads beside the ones the host already answered.
  *
- * The field is named by the caller from what the probe itself declares nullable, so the
- * case is about the declared reader rather than about a path picked to make an assertion
- * hold. A collection can answer the same field on more than one row, so the alteration
- * replaces one row and leaves the rest of the probe exactly as it was.
+ * The field is named by the caller from what the probe itself declares, so each case is
+ * about a declared reader rather than about a path picked to make an assertion hold. A
+ * collection can answer the same field on more than one row, so the alteration replaces
+ * one row and leaves the rest of the probe exactly as it was.
  */
 function withNullableObservation(
   schema: ObservedSchema,
@@ -256,7 +261,7 @@ async function mergeAsDocumented(
   ctx: LiveScenarioContext,
   number: number,
   sha: string | null,
-): Promise<{ status: string; message: string }> {
+): Promise<{ status: string; message: string; mergeOid: string | null }> {
   const accepted = await ctx.transport.rest<{ details?: { uuid?: string } }>({
     method: 'PUT',
     path: `repos/${ctx.repository}/pulls/${number}/merge-async`,
@@ -264,13 +269,17 @@ async function mergeAsDocumented(
   })
   const uuid = accepted.data.details?.uuid
   if (accepted.status !== 202 || typeof uuid !== 'string') {
-    return { status: `http-${accepted.status}`, message: 'the host did not accept the request' }
+    return {
+      status: `http-${accepted.status}`,
+      message: 'the host did not accept the request',
+      mergeOid: null,
+    }
   }
   const settled = await pollAsyncMerge(
     { fullName: ctx.repository, number, uuid, host: ctx.host },
     { maxAttempts: 30, intervalMs: 1_000 },
   )
-  return { status: settled.status, message: settled.message ?? '' }
+  return { status: settled.status, message: settled.message ?? '', mergeOid: settled.mergeOid }
 }
 
 export const ruleAndFaultScenarios: readonly LiveScenario[] = [
@@ -338,7 +347,17 @@ export const ruleAndFaultScenarios: readonly LiveScenario[] = [
         // read is the host's answer for a pull request's own base: a ref nothing exists
         // under, or one with no commit to merge, is one no pull request can be opened
         // against and no condition can be told apart on.
-        const bases = ['qa/direct', 'qa/nested/deep', 'qa/7', 'qa/x', 'qa/z', 'qa/xy', 'qa/x+']
+        const bases = [
+          'qa/direct',
+          'qa/nested/deep',
+          'qa/7',
+          'qa/x',
+          'qa/z',
+          'qa/a',
+          'qa/-',
+          'qa/xy',
+          'qa/x+',
+        ]
         const seed = await pushCommit(ctx.workspace, {
           branch: 'fnmatch-seed',
           parent: `origin/${trunk}`,
@@ -381,10 +400,12 @@ export const ruleAndFaultScenarios: readonly LiveScenario[] = [
             exclude: [`refs/heads/${trunk}`],
             context: 'fnmatch/nowhere',
           },
-          // The documented globstar is a doubled star followed by a separator: it spans
-          // zero or more whole directories, so this names a direct child as well as a
-          // deep one. A doubled star anywhere else is only a star, which is what the next
-          // rule set is for: `qa/**` reaches one segment and no further.
+          // The documented globstar is a whole segment of the pathname followed by a
+          // separator: it spans zero or more whole directories, so this names a direct
+          // child as well as a deep one. Doubled stars anywhere else are only stars, and
+          // the two rule sets that follow are the two places that shows: `qa/**` reaches
+          // one segment and no further, and `qa**/` reaches one segment too, because those
+          // stars sit inside a segment instead of being one.
           {
             name: 'a doubled star with a separator',
             include: ['qa/**/*'],
@@ -394,6 +415,11 @@ export const ruleAndFaultScenarios: readonly LiveScenario[] = [
             name: 'a doubled star without one',
             include: ['refs/heads/qa/**'],
             context: 'fnmatch/segment',
+          },
+          {
+            name: 'a doubled star inside a segment',
+            include: ['refs/heads/qa**/*'],
+            context: 'fnmatch/mid-segment',
           },
           { name: 'one star', include: ['refs/heads/qa/*'], context: 'fnmatch/star' },
           {
@@ -410,6 +436,14 @@ export const ruleAndFaultScenarios: readonly LiveScenario[] = [
             name: 'anything but a digit',
             include: ['refs/heads/qa/[!0-9]'],
             context: 'fnmatch/letter',
+          },
+          // A hyphen with nothing after it inside a class is the last character of that
+          // class, because a closing bracket cannot end a range. This names `qa/a` and
+          // `qa/-`, and neither `qa/7` nor any branch whose segment holds a separator.
+          {
+            name: 'a class ending in a hyphen',
+            include: ['refs/heads/qa/[a-]'],
+            context: 'fnmatch/trailing-hyphen',
           },
           // `+` is a character and not a repetition of the one before it, so this names
           // the branch with a plus in it and nothing else.
@@ -428,23 +462,51 @@ export const ruleAndFaultScenarios: readonly LiveScenario[] = [
           'qa/direct': [
             'fnmatch/globstar',
             'fnmatch/segment',
+            'fnmatch/mid-segment',
             'fnmatch/star',
             'fnmatch/star-minus-x',
           ],
           // Nothing else reaches this one: a star stops at the separator, and a doubled
-          // star that is not a segment of its own does not cross one either.
+          // star that is not a segment of its own does not cross one either. That is the
+          // whole difference between the rule set that walks directories and the one whose
+          // stars sit inside a segment, and neither of them is a character class.
           'qa/nested/deep': ['fnmatch/globstar'],
           'qa/7': [
             'fnmatch/globstar',
             'fnmatch/segment',
+            'fnmatch/mid-segment',
             'fnmatch/star',
             'fnmatch/star-minus-x',
             'fnmatch/digit',
             'fnmatch/one-character',
           ],
+          // The two branches the trailing-hyphen class names, and nothing else: `7` is
+          // not in it, and a class is one character, so it cannot reach a segment that
+          // holds a separator either.
+          'qa/a': [
+            'fnmatch/globstar',
+            'fnmatch/segment',
+            'fnmatch/mid-segment',
+            'fnmatch/star',
+            'fnmatch/star-minus-x',
+            'fnmatch/one-character',
+            'fnmatch/letter',
+            'fnmatch/trailing-hyphen',
+          ],
+          'qa/-': [
+            'fnmatch/globstar',
+            'fnmatch/segment',
+            'fnmatch/mid-segment',
+            'fnmatch/star',
+            'fnmatch/star-minus-x',
+            'fnmatch/one-character',
+            'fnmatch/letter',
+            'fnmatch/trailing-hyphen',
+          ],
           'qa/x': [
             'fnmatch/globstar',
             'fnmatch/segment',
+            'fnmatch/mid-segment',
             'fnmatch/star',
             'fnmatch/one-character',
             'fnmatch/letter',
@@ -452,6 +514,7 @@ export const ruleAndFaultScenarios: readonly LiveScenario[] = [
           'qa/z': [
             'fnmatch/globstar',
             'fnmatch/segment',
+            'fnmatch/mid-segment',
             'fnmatch/star',
             'fnmatch/star-minus-x',
             'fnmatch/one-character',
@@ -460,10 +523,17 @@ export const ruleAndFaultScenarios: readonly LiveScenario[] = [
           // A class is one character, so it names the single-character branches and not
           // these two: `xy` is two characters, and `x+` has a second character after the
           // `x` whatever the class said about the first.
-          'qa/xy': ['fnmatch/globstar', 'fnmatch/segment', 'fnmatch/star', 'fnmatch/star-minus-x'],
+          'qa/xy': [
+            'fnmatch/globstar',
+            'fnmatch/segment',
+            'fnmatch/mid-segment',
+            'fnmatch/star',
+            'fnmatch/star-minus-x',
+          ],
           'qa/x+': [
             'fnmatch/globstar',
             'fnmatch/segment',
+            'fnmatch/mid-segment',
             'fnmatch/star',
             'fnmatch/star-minus-x',
             'fnmatch/plus',
@@ -669,6 +739,34 @@ export const ruleAndFaultScenarios: readonly LiveScenario[] = [
         assert(
           !(await mergedOnHost(ctx, layer.number)).merged,
           `#${layer.number} merged against a head that was never pushed`,
+        )
+
+        // The request that names no head at all, against a second pull request that has
+        // its own satisfied report of the same context. `sha` is optional, so a host
+        // that treated the omitted field as an empty head would refuse this merge — and
+        // the refusal would arrive with nothing to distinguish it from the one above, so
+        // this is the only request in the case that can tell the two rules apart.
+        const leased = await mergeableLayer(ctx, 'rules-check-lease')
+        await ctx.admin.createCheckRun({
+          fullName: ctx.repository,
+          headSha: leased.headSha,
+          name: required,
+          status: 'completed',
+          conclusion: 'success',
+        })
+        const headless = await mergeAsDocumented(ctx, leased.number, null)
+        assert(
+          headless.status === 'merged',
+          `a request naming no head under a satisfied rule ended as ${headless.status}: ${headless.message}`,
+        )
+        const leasedPull = await mergedOnHost(ctx, leased.number)
+        assert(
+          leasedPull.merged && headless.mergeOid !== null && leasedPull.sha === headless.mergeOid,
+          `#${leased.number} is merged at ${String(leasedPull.sha)} on the host while the request that named no head reported ${String(headless.mergeOid)}`,
+        )
+        assert(
+          !(await mergedOnHost(ctx, layer.number)).merged,
+          `#${layer.number} merged as a side effect of merging #${leased.number}`,
         )
 
         // And the production merge, which is what the person in the window actually runs.
@@ -1025,6 +1123,32 @@ export const ruleAndFaultScenarios: readonly LiveScenario[] = [
         pull.merged && recoveredOid !== null && pull.sha === recoveredOid,
         `#${layer.number} is merged at ${String(pull.sha)} on the host while the recovery reported ${String(recoveredOid)}`,
       )
+      // The other documented answer, reached by waiting rather than by racing. The host
+      // has now finished, so a further request finds no request left to adopt and answers
+      // the completed `200` with no identity at all. Reading that as a merge is the only
+      // safe reading, and a client that insisted on the conflict would report a completed
+      // merge as a failure the person then has to act on.
+      const afterCompletion = await requestMerge(ctx, request)
+      assert(
+        afterCompletion.accepted !== null,
+        `a request for a pull request the host had already merged was reported as ${afterCompletion.detail}`,
+      )
+      assert(
+        afterCompletion.accepted?.kind === 'result',
+        `a request for a completed merge was answered with a conflict to adopt: ${afterCompletion.detail}`,
+      )
+      const completed = afterCompletion.accepted?.result ?? null
+      assert(
+        completed !== null && completed.status === 'merged' && completed.uuid === null,
+        `the retry for a completed merge answered ${completed?.status ?? 'nothing'} with ${String(completed?.uuid ?? null)} as the request to read`,
+      )
+      assert(
+        completed?.mergeOid !== null && completed?.mergeOid === pull.sha,
+        `the completed answer reports ${String(completed?.mergeOid)} while the host holds ${String(pull.sha)}`,
+      )
+      ctx.log(
+        `a request made after the host finished was read as the merge at ${String(completed?.mergeOid ?? '')} with no request to poll`,
+      )
     },
   },
   {
@@ -1039,11 +1163,23 @@ export const ruleAndFaultScenarios: readonly LiveScenario[] = [
         defaultBranch: ctx.target.defaultBranch,
       })
       const observed = await observeSchema(ctx.transport, subject, `${target.kind} live host`)
-      const drift = compareSchemas(readCommittedSchema(), observed)
+      const committed = readCommittedSchema()
+      const drift = compareSchemas(committed, observed)
       const breaking = breakingDrift(drift)
       assert(
         breaking.length === 0,
         `the committed contract no longer matches what the host answers:\n${renderDrift(breaking, new LiveRedactor([]))}`,
+      )
+      // A recorded shape with nothing recorded about where it was read is a claim
+      // rather than a contract, and the comparison above would hold a host to it
+      // without ever asking where it came from. Every probe it checks has to name the
+      // endpoint its committed shape was observed on.
+      const unrecorded = SCHEMA_PROBES.filter(
+        (probe) => (committed.provenance?.[probe.id]?.source ?? '') === '',
+      )
+      assert(
+        unrecorded.length === 0,
+        `the committed contract compares ${unrecorded.map((probe) => probe.id).join(', ')} without recording where their shape was read`,
       )
       ctx.log(
         drift.length === 0
@@ -1114,22 +1250,25 @@ export const ruleAndFaultScenarios: readonly LiveScenario[] = [
     requires: [],
     async run(ctx) {
       const committed = readCommittedSchema()
-      // Every probe that declares a nullable field, in turn. Which fields those are is the
-      // declaration's business, not this case's: a review comment's line and a check run's
-      // conclusion are both nullable, and both are read by a parser that has a reader for
-      // the null and for the string or number beside it.
-      const declared = SCHEMA_PROBES.filter((probe) => probe.nullable !== undefined)
+      // Every probe that declares a documented null form for a field, in turn. Which
+      // fields those are is the declaration's business, not this case's: a review
+      // comment's line and a check run's conclusion are both nullable, and both are
+      // read by a parser that has a reader for the null and for the string or number
+      // beside it.
+      const declared = SCHEMA_PROBES.map((probe) => ({
+        probe,
+        nullable: Object.entries(probe.readable).filter(([, forms]) => forms.includes('null')),
+      })).filter((entry) => entry.nullable.length > 0)
       assert(
         declared.length > 1,
         `only ${declared.length} probe declares a nullable field, so there is no declared reader to compare`,
       )
-      for (const probe of declared) {
-        const nullable = probe.nullable ?? {}
+      for (const { probe, nullable } of declared) {
         // Every nullable field the probe declares, one at a time. Which fields those are
         // is the declaration's business: a review comment's line, its start line, its
         // start side, its review id, and a check run's conclusion are all nullable, and
         // each is read by a parser that has a reader for the null and for the value.
-        for (const [path, readable] of Object.entries(nullable)) {
+        for (const [path, readable] of nullable) {
           assert(
             readable.length > 0,
             `the ${probe.id} probe declares ${path} with no readable form`,
@@ -1139,7 +1278,11 @@ export const ruleAndFaultScenarios: readonly LiveScenario[] = [
             recorded.length > 0,
             `the committed schema records no answer at all for ${path} on ${probe.id}`,
           )
-          const value = readable[0] as string
+          const value = readable.find((form) => form !== 'null')
+          assert(
+            value !== undefined,
+            `${path} on ${probe.id} declares null as its only readable form, so there is no value form to answer an unreadable one beside`,
+          )
 
           // Every row of the field is null now: nothing is in progress and nothing is
           // outdated. The field still answers, in a form the declaration reads. Which is
@@ -1176,6 +1319,66 @@ export const ruleAndFaultScenarios: readonly LiveScenario[] = [
             `${path} on ${probe.id} narrows to null without drift and rejects an object beside ${readable.join('|')}`,
           )
         }
+      }
+    },
+  },
+  {
+    id: 'schema/an-unreadable-form-beside-an-identity-is-drift',
+    title:
+      'a field that carries an identity answering a form no parser reads is drift, on whichever probe answers it',
+    requires: [],
+    async run(ctx) {
+      const committed = readCommittedSchema()
+      // The fields that carry an identity rather than a description, spread across the
+      // probes that answer them. Each is read by a parser that substitutes something for
+      // a form it cannot use — a comment with no id to match, a stack member numbered
+      // zero, a member whose head is a blank string — so a union that still holds the
+      // recorded form is the answer that loses the identity while reporting nothing.
+      const identities: readonly { readonly probe: string; readonly path: string }[] = [
+        { probe: 'repository', path: 'full_name' },
+        { probe: 'pull-request', path: 'number' },
+        { probe: 'pull-request-comments', path: '[].id' },
+        { probe: 'native-stacks', path: '[].number' },
+        { probe: 'native-stacks', path: '[].pull_requests[].number' },
+        { probe: 'native-stacks', path: '[].pull_requests[].head.ref' },
+        { probe: 'native-stacks', path: '[].pull_requests[].head.sha' },
+      ]
+      for (const identity of identities) {
+        const declared = SCHEMA_PROBES.find((probe) => probe.id === identity.probe)
+        assert(declared !== undefined, `no probe is named ${identity.probe}`)
+        assert(
+          declared.dependsOn.includes(identity.path),
+          `${identity.probe} does not depend on ${identity.path}, so no parser reads it`,
+        )
+        // The recorded form keeps answering and a form no reader has answers beside it,
+        // which is what a host that widened the field would send. Nothing expected goes
+        // missing here, so a comparison that only counted losses would report no drift.
+        const recorded = (committed.probes[identity.probe] ?? []).filter(
+          (field) => field.path === identity.path,
+        )
+        assert(
+          recorded.length > 0,
+          `the committed schema records no answer at all for ${identity.path} on ${identity.probe}`,
+        )
+        const widened = withNullableObservation(
+          committed,
+          identity.probe,
+          identity.path,
+          (field) => [field, { path: identity.path, type: 'object' }],
+        )
+        const reported = breakingDrift(compareSchemas(committed, widened)).filter(
+          (entry) => entry.probe === identity.probe && entry.path === identity.path,
+        )
+        const forms = recorded.map((field) => field.type).join('|')
+        assert(
+          reported.some((entry) => entry.kind === 'type-changed'),
+          `${identity.path} on ${identity.probe} answered an object beside the ${forms} it always answered and no drift was reported:\n${renderDrift(reported, new LiveRedactor([]))}`,
+        )
+        assert(
+          reported.some((entry) => entry.detail.includes('object')),
+          `the report for ${identity.path} on ${identity.probe} does not name the form no parser reads: ${reported.map((entry) => entry.detail).join('; ')}`,
+        )
+        ctx.log(`${identity.probe} ${identity.path} rejected an object beside ${forms}`)
       }
     },
   },
@@ -1247,6 +1450,10 @@ export const ruleAndFaultScenarios: readonly LiveScenario[] = [
         renamed.previousPath === `${prefix}.txt`,
         `the rename reports its original as ${String(renamed.previousPath)}`,
       )
+      assert(
+        renamed.status === 'renamed',
+        `the file the pull request renames is reported as ${renamed.status} rather than renamed`,
+      )
       ctx.log(
         `the host named ${files.files.length} changed files, including the rename from ${String(renamed.previousPath)}`,
       )
@@ -1258,10 +1465,11 @@ export const ruleAndFaultScenarios: readonly LiveScenario[] = [
     requires: [],
     async run(ctx) {
       const { coordinator, events } = openCoordinator(ctx)
-      // The file local work leaves behind, removed on every exit. The scenarios after
+      // The files local work leaves behind, removed on every exit. The scenarios after
       // this one share the clone, and an untracked file is a change the next restack has
       // to be told about: a failure of the next scenario rather than a fact about this one.
       const localProbe = join(ctx.workspace.path, 'secondary-limit-local.txt')
+      const afterLimitProbe = join(ctx.workspace.path, 'secondary-limit-after-limit.txt')
       const requests = (): number => ctx.faults.recentExchanges(10_000).length
       /** A real wait, so "nothing was requested" is an observation rather than a race. */
       const settle = async (ms: number): Promise<void> => {
@@ -1269,6 +1477,12 @@ export const ruleAndFaultScenarios: readonly LiveScenario[] = [
         setTimeout(resolve, ms)
         await promise
       }
+      // How long the coordinator waits before it asks GitHub again after one failure, at
+      // the production value rather than a shorter one. How long the park holds is the
+      // fact under test: a wait that ended before this deadline would also have ended
+      // before the timer it is waiting for could come due, and would report the same
+      // empty answer for a coordinator that never parked at all.
+      const backoff = failureDelay(1, DEFAULT_INTERVALS)
       try {
         coordinator.attach(ctx.workspace.path, await getSnapshot(ctx.workspace.path))
         await coordinator.refreshNow()
@@ -1280,17 +1494,18 @@ export const ruleAndFaultScenarios: readonly LiveScenario[] = [
 
         // The background tier is the one a limit is allowed to park, so the coordinator
         // has to be in it, and its poll has to actually come due. Both are proved with the
-        // same configuration used later to show the parking, because "no requests" only
-        // means something next to a run in which the same timer does make them.
+        // same configuration used later to show the parking, over the same window, because
+        // "no requests" only means something next to a run in which the same timer does
+        // make them.
         coordinator.reportActivity({ focused: false, visible: false })
         coordinator.applyIntervals({ visibleMs: 100, secondaryMs: 100, localSettleMs: 50 })
         const healthyBefore = requests()
-        await settle(1_500)
+        await settle(backoff - 500)
+        const healthy = requests() - healthyBefore
         assert(
-          requests() > healthyBefore,
+          healthy > 0,
           'a due background poll made no request at all, so a parked poll would prove nothing',
         )
-        const healthy = requests() - healthyBefore
 
         // Nothing but a filesystem event may publish a snapshot from here, so the event
         // that answers the local write is one published after the file was written. The
@@ -1350,17 +1565,59 @@ export const ruleAndFaultScenarios: readonly LiveScenario[] = [
           `a rate-limited read published ${inbox.length} inboxes, one of them holding ${String((inbox[0]?.issues ?? []).length)} issues`,
         )
 
-        // The same due background poll, under the limit. The coordinator is left parked
-        // for the production backoff, so waiting long enough for several of these
-        // intervals to come and go is waiting long enough to see that none of them
-        // reached GitHub.
+        // A second filesystem change, made now that the limit is confirmed to be in
+        // force. The local tier reads local Git and spends no GitHub request, so this is
+        // the one thing that has to keep working while the budget is paused, and the only
+        // way to show that is to write a file nobody has written yet and wait for the
+        // snapshot that carries it. The events published before the notification are
+        // dropped, because the failed refresh above published a snapshot of its own and
+        // that one describes a repository without this file in it.
+        events.length = 0
+        const localRequestFree = requests()
+        await writeFile(afterLimitProbe, 'more local work\n', 'utf8')
+        coordinator.notifyLocalChange()
+        const afterLimit = await nextEvent(
+          events,
+          (event) =>
+            event.kind === 'snapshot' &&
+            event.snapshot?.files.some(
+              (file) => file.path === 'secondary-limit-after-limit.txt',
+            ) === true,
+          10_000,
+        )
+        assert(
+          afterLimit !== null,
+          'a filesystem change made while GitHub was rate limited never published a snapshot carrying it',
+        )
+        assert(
+          requests() === localRequestFree,
+          `${requests() - localRequestFree} requests reached GitHub to publish local work, which needs no GitHub answer`,
+        )
+        assert(
+          coordinator.freshness().state === 'rate-limited',
+          `local work lifted the rate limit by itself: ${coordinator.freshness().state}`,
+        )
+
+        // The same background poll, under the limit, for as long as the coordinator
+        // promised to wait. The deadline is measured from the moment the timer is armed
+        // and stopped just short of it, so the wait covers the production backoff without
+        // racing the attempt that ends it.
         coordinator.applyIntervals({ visibleMs: 100, secondaryMs: 100, localSettleMs: 50 })
         const limitedBefore = requests()
-        await settle(1_500)
+        await settle(backoff - 500)
         const parked = requests() - limitedBefore
         assert(
           parked === 0,
           `${parked} requests reached GitHub while the secondary limit was in force, against ${healthy} in the same window without it`,
+        )
+
+        // And the deadline is a real one: the parked tier asks again once it passes,
+        // because a timer that never fired would report the same empty answer above.
+        await settle(1_500)
+        const resumed = requests() - limitedBefore
+        assert(
+          resumed > 0,
+          'the background tier never reached GitHub again after the backoff it was given, so the wait above proves only that nothing was armed',
         )
 
         ctx.faults.clearFaults()
@@ -1370,11 +1627,12 @@ export const ruleAndFaultScenarios: readonly LiveScenario[] = [
           `the refresh after the limit lifted still reported ${coordinator.freshness().state}`,
         )
         ctx.log(
-          `parked ${healthy} background polls a window at the limit, kept local refresh running, and recovered`,
+          `parked ${healthy} background polls worth of traffic for ${backoff}ms, published local work through the limit, and recovered`,
         )
       } finally {
         coordinator.detach()
         await rm(localProbe, { force: true })
+        await rm(afterLimitProbe, { force: true })
       }
     },
   },

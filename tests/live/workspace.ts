@@ -93,12 +93,20 @@ const REMOTE_SUBCOMMANDS: Record<string, true> = {
  */
 export const GIT_TIMEOUT_MS = 120_000
 
-/** One Git command that may reach the remote, with the outcome raised rather than printed. */
+/**
+ * One Git command that may reach the remote, with the outcome raised rather than printed.
+ *
+ * `cwd` is where the child starts, and it is part of what this run is allowed to do:
+ * the boundary a live run installs measures the claim on the real `git` against the
+ * directory a command acts on, and for a command with no `-C` that is the working
+ * directory rather than this process's.
+ */
 function runGitRemote(
   git: string,
   args: readonly string[],
   env: NodeJS.ProcessEnv,
   signal?: AbortSignal,
+  cwd?: string,
 ): Promise<string> {
   // `promisify` is applied where the command runs rather than once at module load,
   // because what it wraps is `child_process.execFile` as it stands by then: the boundary
@@ -111,6 +119,7 @@ function runGitRemote(
     env,
     maxBuffer: 32 * 1024 * 1024,
     timeout: GIT_TIMEOUT_MS,
+    ...(cwd === undefined ? {} : { cwd }),
     ...(signal ? { signal } : {}),
   }).then(
     (result) => result.stdout.trim(),
@@ -341,6 +350,13 @@ export class LocalGitWorkspace implements LiveWorkspace {
       [...trust, 'clone', ...this.cloneArgs, this.cloneSource, directory],
       this.env,
       this.abort.signal,
+      // The working directory this clone is made from is inside the run's own root, not
+      // this process's. A live run claims the real `git` for the directory it created,
+      // and the claim is measured against the directory the command acts on — which for
+      // a `clone` with no selector is where the child starts. Inheriting the checkout
+      // running the command is outside that root by definition, so the clone was
+      // refused for acting in a directory the run does not own.
+      this.root,
     )
     // The actor runs the same Git the run does — same isolation, same credential
     // scope, same identity. An external clone that reached the remote by some other

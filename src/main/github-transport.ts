@@ -1703,9 +1703,36 @@ let cached: { key: string; transport: GitHubTransport } | null = null
 /**
  * Install a transport for the current process. Tests and integration diagnostics use
  * this; the renderer has no path to it, so no token or HTTP capability crosses the bridge.
+ *
+ * Whatever was installed before is returned rather than discarded. A caller that
+ * installed a transport of its own has to be able to put the previous one back, and
+ * `githubTransport()` cannot tell it: that function answers with a transport resolved
+ * from the environment when nothing is installed, so reading it after a teardown would
+ * hand back a different object and leave the process holding somebody else's.
  */
-export function setGitHubTransport(transport: GitHubTransport | null): void {
+export function setGitHubTransport(transport: GitHubTransport | null): GitHubTransport | null {
+  const previous = installed
   installed = transport
+  return previous
+}
+
+/**
+ * The transport installed in this process, or null when nothing is.
+ *
+ * `githubTransport()` cannot answer this: it resolves a transport from the environment
+ * when nothing is installed, so it never returns null and it returns a different object
+ * from the one that was installed. A caller that installed a transport of its own
+ * therefore has no way to ask "is mine still the one in place?" — and without that
+ * question its teardown is a blind overwrite: if something else installed a transport
+ * after it, putting its own previous value back silently removes that other owner's
+ * transport and reports a clean process.
+ *
+ * This returns the slot itself, so the answer can be compared by identity. It exists
+ * for that comparison and for nothing else; a caller that wants a usable transport asks
+ * `githubTransport()`.
+ */
+export function installedGitHubTransport(): GitHubTransport | null {
+  return installed
 }
 
 const responseCache = new GitHubResponseCacheStore()

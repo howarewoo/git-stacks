@@ -1,6 +1,12 @@
-import { writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { Agent as HttpsAgent, request as HttpsRequest } from 'node:https'
+import { isIP } from 'node:net'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { createGitHubHarness } from '../fixtures/github-harness'
+import { startControlledGitHubHost } from '../fixtures/live-github-tls'
 import { describeThrown, LiveRedactor, renderRunSummary } from './diagnostics'
-import { LIVE_ENV, LiveConfigurationError, readLiveRunConfig } from './config'
+import { LIVE_ENV, LiveConfigurationError, ownershipMarker, readLiveRunConfig } from './config'
 import { observeSchema, prepareSchemaSubject, renderSchema } from './observed-schema'
 import { runLiveSuite, type LiveRunReport } from './runner'
 import { findScenario, LIVE_SCENARIOS } from './scenarios'
@@ -15,10 +21,17 @@ import { NODE_TRANSPORT_VARIABLES, retireNodeTransportBypass } from './git-envir
 import { FaultInjectingTransport } from './transport'
 import {
   DirectGitHubTransport,
+  GitHubTransportError,
   setGitHubTransport,
   type GitHubTransport,
 } from '../../src/main/github-transport'
-import { ControlledLiveTarget, GitHubLiveTarget, LiveProvisioningFailure } from './targets'
+import {
+  authorizeGitFor,
+  ControlledLiveTarget,
+  GitHubLiveTarget,
+  LiveProvisioningFailure,
+  newRunSuffix,
+} from './targets'
 import type { LiveCleanupReport, LiveTarget, LiveWorkspace } from './contract'
 
 /**
@@ -42,6 +55,118 @@ export interface CliOptions {
   /** Injected so a test can run the command without standing a host up. */
   readonly startControlled?: () => Promise<LiveTarget>
   readonly startGitHub?: () => Promise<LiveTarget>
+  /**
+   * The explicit trust bundle a controlled recovery host uses.
+   *
+   * This is trust material, not a connection. It says which certificates are acceptable;
+   * it says nothing about how the request is made, who pools the socket, or whether an
+   * earlier one can be reused. The recovery path always opens its own connection and
+   * always closes it — see `createVerifiedRecoveryConnection`.
+   *
+   * A host whose certificate chains to a public root needs nothing here, which is the
+   * ordinary case for an operator recovering a real repository. A host serving a
+   * certificate this machine legitimately holds the authority for is the case this
+   * exists for, so such a recovery can be exercised against a real TLS host instead of
+   * only described.
+   */
+  readonly recoveryTrust?: { readonly ca?: string }
+}
+
+/** A connection a recovery run owns for the length of the recovery, and closes itself. */
+interface OwnedRecoveryConnection {
+  readonly fetch: typeof globalThis.fetch
+  readonly close: () => Promise<void>
+}
+
+/**
+ * A recovery run's own connection to its host, and the only kind it will use.
+ *
+ * The reason this exists rather than reusing `fetch` is precisely the reason the
+ * recovery path retires the process's certificate switches. `fetch` in this process is
+ * one global pool: sockets it opened earlier — while a bypass was in force, or against a
+ * different authority — stay in it, and a request that reuses one inherits that
+ * connection's trust decision. A recovery credential is the most dangerous thing this
+ * suite sends anywhere, so it is sent over a connection that shares nothing: its own
+ * agent, no keep-alive, and therefore a new TLS handshake for every request, verified
+ * each time.
+ *
+ * Verification is required. An explicit `ca` replaces Node's default trust
+ * bundle; without one, Node uses its normal roots. Closing destroys this run's
+ * own agent rather than sharing sockets with the process's global pool.
+ */
+function createVerifiedRecoveryConnection(trust: { ca?: string }): OwnedRecoveryConnection {
+  const agent = new HttpsAgent({
+    // No reuse. Every request negotiates its own certificate, so no socket opened before
+    // this recovery — or by anything else in this process — can carry a credential on a
+    // decision this run did not make.
+    keepAlive: false,
+    maxSockets: 1,
+    ...(trust.ca === undefined ? {} : { ca: trust.ca }),
+  })
+  return {
+    // Async because the body has to be in hand before a socket is opened: a streaming
+    // body cannot be handed to a Node request that expects bytes, and the only callers
+    // here send a JSON document, so buffering is exact rather than an approximation.
+    fetch: async (input, init) => {
+      const request = input instanceof Request ? input : new Request(input, init)
+      const url = new URL(request.url)
+      if (url.protocol !== 'https:') {
+        throw new Error(`a recovery run only speaks TLS, and this one is ${url.protocol}`)
+      }
+      const body = request.body === null ? null : Buffer.from(await request.arrayBuffer())
+      return new Promise<Response>((resolve, reject) => {
+        const outbound = HttpsRequest(
+          {
+            protocol: url.protocol,
+            hostname: url.hostname,
+            port: url.port === '' ? 443 : Number(url.port),
+            path: `${url.pathname}${url.search}`,
+            method: request.method,
+            agent,
+            headers: Object.fromEntries(request.headers.entries()),
+            rejectUnauthorized: true,
+            // SNI is the hostname, and only when it is a name: an address is verified
+            // against the certificate's own subject alternative names instead, and
+            // naming an address here is refused by the TLS layer rather than ignored.
+            ...(isIP(url.hostname) === 0 ? { servername: url.hostname } : {}),
+            ...(trust.ca === undefined ? {} : { ca: trust.ca }),
+          },
+          (response) => {
+            const chunks: Buffer[] = []
+            response.on('data', (chunk: Buffer) => chunks.push(chunk))
+            response.on('end', () => {
+              const status = response.statusCode ?? 502
+              const received = Buffer.concat(chunks)
+              // 204 and 304 are defined to carry no body, and `Response` refuses to be
+              // constructed with one rather than dropping it — so a deletion, which is
+              // the one request this connection exists to make, would fail in the
+              // transport that was built to carry it. Passed as `null`, never as an empty
+              // buffer, because an empty buffer is a body and these statuses allow none.
+              const nullBody = status === 204 || status === 205 || status === 304
+              resolve(
+                new Response(nullBody ? null : received, {
+                  status,
+                  statusText: response.statusMessage ?? '',
+                  headers: response.headers as Record<string, string>,
+                }),
+              )
+            })
+          },
+        )
+        outbound.on('error', reject)
+        request.signal.addEventListener('abort', () => outbound.destroy(request.signal.reason))
+        if (body !== null) outbound.write(body)
+        outbound.end()
+      })
+    },
+    // `destroy` takes no callback on this runtime; the promise is resolved by hand once
+    // the sockets are gone.
+    close: () =>
+      new Promise<void>((done) => {
+        agent.destroy()
+        done()
+      }),
+  }
 }
 
 /** Exit codes a workflow step can act on without parsing anything. */
@@ -387,6 +512,19 @@ async function runRecovery(receiptPath: string, options: CliOptions): Promise<nu
   // them, so an absent variable is restored as absent and a process that had `0` gets
   // `0` back.
   const nodeTransport = retireNodeTransportBypass()
+  // The connection this recovery makes every request over. It is opened here, before
+  // any transport exists, and closed in the `finally` below on every path — the
+  // refusal, the failure, and the one that reports a result.
+  //
+  // It is its own rather than this process's `fetch` because that is one global pool.
+  // A socket sitting in it was opened under whatever trust decision was in force then —
+  // possibly a bypass, possibly a different authority — and reusing one carries that
+  // decision into a request that now carries a deletion credential. A recovery has no
+  // pooled connection to inherit, so it makes none: its own agent, no keep-alive, a new
+  // handshake per request. The process's own switches are still retired above, because
+  // they are read from `process.env` when any connection opens and the agent alone is
+  // not what they govern.
+  const connection = createVerifiedRecoveryConnection(options.recoveryTrust ?? {})
   let outcome: RecoveryOutcome | undefined
   try {
     // No global transport, and none restored afterwards. Everything this command does
@@ -394,7 +532,7 @@ async function runRecovery(receiptPath: string, options: CliOptions): Promise<nu
     // live credential where the whole application can reach it — and taking it away
     // afterwards would remove whatever was installed before this command ran rather than
     // put that back. A credential that belongs to one deletion never has to be global.
-    const primary = pinnedTransport(host, primaryToken)
+    const primary = pinnedTransport(host, primaryToken, connection.fetch)
     transports.push(primary)
 
     const who = async (transport: GitHubTransport): Promise<string> => {
@@ -413,6 +551,11 @@ async function runRecovery(receiptPath: string, options: CliOptions): Promise<nu
     }
 
     const primaryLogin = await who(primary)
+    // The identity check above is on the folded login, so the key the surface is stored
+    // under is folded too. A receipt recording `Alice` and a host answering `alice` are
+    // one account, and storing the surface under the host's spelling while every entry is
+    // dispatched on the receipt's is how a run holding exactly the right credential
+    // refuses every resource that account owns.
     if (!actors.has(primaryLogin.toLowerCase())) {
       options.err(
         redactor.text(
@@ -423,7 +566,10 @@ async function runRecovery(receiptPath: string, options: CliOptions): Promise<nu
       )
       return EXIT_REFUSED
     }
-    surfaces.set(primaryLogin, new GitHubAdmin(primary, receipt.owner, receipt.marker))
+    surfaces.set(
+      primaryLogin.toLowerCase(),
+      new GitHubAdmin(primary, receipt.owner, receipt.marker),
+    )
 
     if (reviewerToken !== '') {
       const reviewer = new DirectGitHubTransport({
@@ -433,6 +579,10 @@ async function runRecovery(receiptPath: string, options: CliOptions): Promise<nu
         graphqlUrl:
           host === 'github.com' ? 'https://api.github.com/graphql' : `https://${host}/api/graphql`,
         env: sanitizedEnv(options.env),
+        // The same connection as the primary's, and for the same reason: a second one
+        // would be a second trust decision about the same host, made separately from
+        // the first, and the reviewer credential would be the one that proved nothing.
+        fetch: connection.fetch,
       })
       transports.push(reviewer)
       const login = await who(reviewer)
@@ -449,7 +599,7 @@ async function runRecovery(receiptPath: string, options: CliOptions): Promise<nu
         )
         return EXIT_REFUSED
       }
-      surfaces.set(login, new GitHubAdmin(reviewer, receipt.owner, receipt.marker))
+      surfaces.set(login.toLowerCase(), new GitHubAdmin(reviewer, receipt.owner, receipt.marker))
     }
 
     outcome = await recoverLiveResources({
@@ -464,6 +614,13 @@ async function runRecovery(receiptPath: string, options: CliOptions): Promise<nu
     }
     throw error
   } finally {
+    // The connection is destroyed before anything else, and on every path out of here:
+    // the refusal, the failure, and the one that reports what it removed. An agent with
+    // no keep-alive holds no idle socket, but destroying it is what releases anything a
+    // request in flight left behind, and doing it before the process switches are put
+    // back means no connection of this run's is still able to open while a bypass is
+    // being retired.
+    await connection.close().catch(() => undefined)
     // Restored on the refusal path, on the failure path, and on the path that reports a
     // result — not only where a request happened to succeed. A process left with a
     // certificate bypass it did not start with is a process that will authenticate to
@@ -539,8 +696,46 @@ function sanitizedEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   return clean
 }
 
-/** A credential pinned to the host the receipt names, never to anything in the environment. */
-function pinnedTransport(host: string, token: string): GitHubTransport {
+/**
+ * Installs named variables into the process environment, and answers how to put it back.
+ *
+ * The fixture's API double is a plain module loaded by the host, so it reads its state
+ * from `process.env` at request time rather than from anything a caller hands down. A key
+ * that was absent before is deleted again on restore rather than set to `undefined`, so a
+ * reader testing `'key' in process.env` gets the same answer it would have had.
+ */
+function installOwnedKeys(
+  target: NodeJS.ProcessEnv,
+  owned: Readonly<NodeJS.ProcessEnv>,
+): () => void {
+  const prior = new Map<string, string | undefined>()
+  for (const [key, value] of Object.entries(owned)) {
+    if (value === undefined) continue
+    prior.set(key, target[key])
+    target[key] = value
+  }
+  return () => {
+    for (const [key, value] of prior) {
+      if (value === undefined) delete target[key]
+      else target[key] = value
+    }
+  }
+}
+
+/**
+ * A credential pinned to the host the receipt names, never to anything in the environment.
+ *
+ * `connect` is the connection the request goes out over, and it is part of what this
+ * function decides rather than something the transport looks up: the recovery path hands
+ * its surface a verified boundary explicitly rather than sharing the process's, so a
+ * credential for this host cannot travel over a connection some other part of the
+ * process opened and left in a pool.
+ */
+function pinnedTransport(
+  host: string,
+  token: string,
+  connect: typeof globalThis.fetch,
+): GitHubTransport {
   if (token.trim() === '') {
     throw new Error(
       `A recovery run needs ${LIVE_ENV.token}. It cannot inherit a credential from gh or from the ` +
@@ -555,6 +750,7 @@ function pinnedTransport(host: string, token: string): GitHubTransport {
       graphqlUrl:
         host === 'github.com' ? 'https://api.github.com/graphql' : `https://${host}/api/graphql`,
       env: sanitizedEnv(process.env),
+      fetch: connect,
     }),
   )
 }
@@ -630,6 +826,238 @@ function readSecrets(env: NodeJS.ProcessEnv): string[] {
     .filter((value): value is string => typeof value === 'string' && value.trim() !== '')
     .map((value) => value.trim())
   return [...new Set(secrets)]
+}
+
+/**
+ * Whether the host still has a repository at this name, answered by the host or not at
+ * all.
+ *
+ * There are exactly two answers this can give, and the difference between them is the
+ * whole point of the check. A 404 from a request this connection authenticated is the
+ * host saying the name holds nothing. Anything else that rejects — a 500, a timeout, a
+ * certificate this connection will not accept, a credential the host refused — is the
+ * host not having answered, which is not the same statement and must not be reported as
+ * one.
+ *
+ * Collapsing them is how a broken recovery gets certified. The read is the only thing
+ * standing between "the command said it removed the repository" and "the repository is
+ * gone", and a read that fails for any reason whatsoever is precisely what a recovery
+ * that did not work looks like from the outside — so it throws, and the harness fails
+ * rather than passing.
+ */
+async function readWhetherRepositoryRemains(
+  admin: GitHubAdmin,
+  fullName: string,
+): Promise<boolean> {
+  try {
+    await admin.readRepository(fullName)
+    return true
+  } catch (error) {
+    if (
+      error instanceof GitHubTransportError &&
+      (error.status === 404 || error.kind === 'not-found')
+    ) {
+      return false
+    }
+    throw new Error(
+      `the host could not be asked whether it still holds ${fullName}, so whether the ` +
+        `recovery removed it is unknown rather than proven: ${describeThrown(error)}`,
+    )
+  }
+}
+
+/**
+ * A recovery run against a real TLS host, end to end, for whoever needs to see one work.
+ *
+ * This stands the controlled host, gives it a repository carrying this run's marker,
+ * writes the receipt a killed run would have left behind, and then runs the actual
+ * `--recover` command over it — the same parser, the same refusal paths, the same
+ * production transport — and hands it only the authority this host's certificate
+ * chains to.
+ *
+ * The connection is not handed over. The recovery opens its own, over its own agent,
+ * with a fresh verified handshake per request and a shutdown it owns, which is the same
+ * path an operator recovering a real repository takes. Only the authority is supplied,
+ * because only the authority is something a host can legitimately tell a caller it
+ * trusts — so what this exercises is the default mechanism rather than a route that
+ * exists only for this test. A request that went anywhere else, or over a connection
+ * that trusted anything, would fail rather than be believed.
+ *
+ * The result answers the two questions that matter separately: what the command
+ * returned, and whether the repository is still standing afterwards. The second is read
+ * back over its own verified connection before the host is closed, so "it reported
+ * success" and "it removed what it named" cannot be confused.
+ *
+ * The read only answers when the host answers. A 404 is the host saying the repository
+ * is gone; a read that fails for any other reason is this harness failing, and it throws
+ * rather than reporting the repository as removed — an unanswerable question is not an
+ * affirmative one, and a harness that cannot tell the difference certifies recoveries
+ * that did not work.
+ */
+export async function runRecoveryAgainstControlledHost(input: {
+  readonly receiptPath?: string
+  readonly out: (line: string) => void
+  readonly err: (line: string) => void
+}): Promise<{
+  readonly code: number
+  readonly repository: string
+  readonly stillPresent: boolean
+}> {
+  const runId = `controlled-recovery-${newRunSuffix()}`
+  const marker = ownershipMarker(runId)
+  const root = await mkdtemp(join(tmpdir(), 'git-stacks-live-recovery-'))
+  const failures: unknown[] = []
+  try {
+    const harness = await createGitHubHarness({
+      barePath: 'projects/acme/widgets.git',
+      root,
+      preserveRoot: true,
+    })
+    const server = await startControlledGitHubHost({
+      projectsRoot: harness.projectsRoot,
+      git: harness.env.GIT_STACKS_REAL_GIT as string,
+      authorizeGit: (fullName, authorization) => authorizeGitFor(harness, fullName, authorization),
+    })
+    // The controlled host's API is a plain module, so it reads this fixture through the
+    // *process* environment at request time rather than through anything handed down.
+    // Installed for every request this function makes — the read that builds the receipt,
+    // the recovery, and the read-back — rather than around the recovery alone, because the
+    // first of those three is the one that fails without it.
+    //
+    // Only the keys this harness owns are installed. Its `env` is a full snapshot of the
+    // process, and publishing that would put every ambient verification switch back for
+    // as long as the host is up. Prior values are captured and restored rather than
+    // deleted, so a process that already had one of these keys keeps it afterwards.
+    const restoreFixtureEnv = installOwnedKeys(process.env, harness.ownedEnvironment)
+    try {
+      const state = await harness.readState()
+      // The subject is a repository this host created and registered, not the harness's
+      // own primary. The primary is served from a bare the fixture predates and is never
+      // in the host's registry, so the host refuses to delete it — which would make this
+      // a test of a refusal, not of the recovery. A created repository is deletable
+      // through the same documented route a real one is, so what the recovery does to it
+      // is what a recovery does.
+      const fullName = `${state.repository.owner}/recovery-subject`
+      await harness.createRepository({
+        fullName,
+        description: `Live suite recovery subject\n\n${marker}\n`,
+        topics: ['git-stacks-live-e2e', `run-${runId}`],
+        // Granted to the login that will act, which is not the owner segment: a role is
+        // held by an account, and a grant recorded against a name that is not one leaves
+        // the repository invisible to the very credential meant to delete it — a 404,
+        // which is also what a host answers for a repository that does not exist.
+        permissions: { [state.currentUser]: 'admin' },
+      })
+      // The connection this function owns is closed on every path out of this block,
+      // including the one where the recovery itself throws, because an unclosed agent
+      // keeps its sockets and a leaked handle is invisible until the process is killed.
+      const certificate = await readFile(server.certificatePath, 'utf8')
+      const connection = createVerifiedRecoveryConnection({ ca: certificate })
+      try {
+        const admin = new GitHubAdmin(
+          new DirectGitHubTransport({
+            token: harness.primaryToken,
+            host: server.host,
+            apiUrl: server.url,
+            graphqlUrl: `${server.url}/graphql`,
+            env: sanitizedEnv(process.env),
+            fetch: connection.fetch,
+          }),
+          fullName,
+          marker,
+        )
+        // The identity the receipt records is the host's own. A killed run records what
+        // the host told it, and a field this suite invented for the fixture would prove
+        // nothing about the match a real receipt relies on.
+        const identity = await admin.readRepository(fullName)
+        if (typeof identity.id !== 'number') {
+          throw new Error(
+            `the controlled host did not name an id for ${fullName}, so no receipt can ` +
+              'be written that a recovery could check the repository against',
+          )
+        }
+        const receiptPath = input.receiptPath ?? join(root, 'live-github-e2e-receipt.json')
+        await writeFile(
+          receiptPath,
+          JSON.stringify(
+            {
+              // The version a recovery refuses to act without, and the moment the receipt
+              // was written. A receipt missing either is not one this suite's own reader
+              // would accept, so writing one here without them would exercise a refusal
+              // rather than the recovery.
+              version: 2,
+              runId,
+              marker,
+              host: server.host,
+              owner: state.currentUser,
+              writtenAt: new Date().toISOString(),
+              resources: [
+                {
+                  kind: 'repository',
+                  handle: fullName,
+                  marker,
+                  createdAt: new Date().toISOString(),
+                  actor: state.currentUser,
+                  remoteId: identity.id,
+                },
+              ],
+            },
+            null,
+            2,
+          ),
+          'utf8',
+        )
+        // The connection is not handed over: the recovery opens its own, exactly as it
+        // does against a public host, and the only thing this host contributes is the
+        // authority its certificate chains to. So what is exercised here is the real
+        // path — a fresh handshake per request, verified, closed by the run — rather than
+        // a route that exists only for this test.
+        const code = await runCli({
+          argv: ['--recover', receiptPath],
+          env: {
+            ...process.env,
+            [LIVE_ENV.host]: server.host,
+            [LIVE_ENV.token]: harness.primaryToken,
+          },
+          out: input.out,
+          err: input.err,
+          recoveryTrust: { ca: certificate },
+        })
+        // Read back over the same verified connection, so what this reports is the host's
+        // own answer rather than anything the receipt already claimed.
+        const stillPresent = await readWhetherRepositoryRemains(admin, fullName)
+        return { code, repository: fullName, stillPresent }
+      } finally {
+        await connection.close().catch((cause: unknown) => {
+          failures.push(cause)
+        })
+      }
+    } finally {
+      // Put back before the host is shut down rather than after, and independently of
+      // whether either close below throws: these keys describe a fixture that is going
+      // away, and a process still holding them would have every later request point at a
+      // directory that no longer answers. Synchronous, so it cannot be skipped by an
+      // earlier failure the way an awaited close can be.
+      restoreFixtureEnv()
+      await server.close().catch((cause: unknown) => {
+        failures.push(cause)
+      })
+      await harness.close().catch((cause: unknown) => {
+        failures.push(cause)
+      })
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true }).catch((cause: unknown) => {
+      failures.push(cause)
+    })
+    if (failures.length > 0) {
+      throw new Error(
+        `the controlled recovery host was not fully released: ${failures
+          .map((cause) => describeThrown(cause))
+          .join('; ')}`,
+      )
+    }
+  }
 }
 
 export type { LiveRunReport }

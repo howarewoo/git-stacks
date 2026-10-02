@@ -1290,6 +1290,25 @@ The smoke launches the real Electron main process and preload bridge — never a
 
 This is a dev-main smoke; the packaged executable, preload packaging, and CSP remain the packaged desktop smoke's proof, and a real OS key-store acceptance is a separate manual gate.
 
+### Isolated desktop fixture
+
+`tests/fixtures/isolated-desktop.cjs` launches the real production main, preload, and renderer (`out/main/index.js`), with the Electron main entry replaced by the fixture itself:
+
+```sh
+node_modules/electron/dist/Electron.app/Contents/MacOS/Electron \
+  tests/fixtures/isolated-desktop.cjs \
+  --use-mock-keychain --password-store=basic \
+  --user-data-dir=<owned-temp-root>/user-data \
+  --fixture-root <owned-temp-root> \
+  --main out/main/index.js
+```
+
+Keep the fixture file first and Chromium startup switches before any `--` separator. The fixture patches the shared native `safeStorage` object in place, preserving Electron's non-configurable export getter and existing import aliases; it never calls the original methods. Keep sandboxing enabled.
+
+Before the production main module is imported, the fixture replaces every `safeStorage` entry point the compiled product uses with a local AES-256-GCM implementation keyed by `<fixture-root>/synthetic-key.bin` (mode 0600), so sealed credentials never touch the operating system's store and a wrong key fails to open them. The key persists only inside the caller-owned fixture root across fixture restarts; it is never printed, and neither is any plaintext. Chromium's own key store is forced to `--use-mock-keychain` and `--password-store=basic` before the app is imported. If any of that cannot be proven, the fixture exits before the production main is loaded. A launch is under the fixture when `<fixture-root>/fixture.json` is present. Passive: it exists only because the fixture created it. The fixture changes no production source, adds no production env switch, and is never referenced by packaged code; accepting the real OS key store remains a separate, external gate, and packaged-desktop acceptance stays with `npm run test:desktop`.
+
+`scripts/packaged-desktop-smoke.mjs` exercises the same synthetic backend in the shipped (unsigned development) package: it pauses the main entry at `--inspect-brk`, installs the helper's fixture before the first production statement, then resumes. That run is synthetic-store evidence only; it never claims the real OS keychain or a signed install.
+
 ### Updating visual baselines
 
 Use the pinned Playwright Chromium, OS/architecture, viewport, locale, timezone, device scale, and system fonts recorded in the verification report. Baselines are platform-specific: a passing macOS image is not Linux or Windows evidence. Do not update images solely to silence failures.
@@ -1354,6 +1373,24 @@ application resolves a host and a repository from, so its fetches, pushes, and
 API reads all cross the same boundary they cross against github.com. The
 certificate is verified rather than trusted blindly, and nothing in the run
 names `github.com`, so the run cannot reach the real service even by accident.
+
+The run's own host answers on a `127.0.0.1` authority, so the URLs a scenario
+asks for are that host's and not the apparent `github.com` spelling — and the
+transport rule is told which they are rather than left to guess from the shape
+of an address. Each repository this run creates is registered as it is created,
+and a remote is answered only on an exact match against one of those URLs. A
+sibling path on the same host, any other authority, and a URL registered by
+nobody are all refused, because a rule that let through anything matching
+`https` — or anything under the directory this host serves — would be a rule
+that answers a request for github.com itself.
+
+The Git boundary refuses the same way. Git applies successive `-C` options in
+order and a separate `--git-dir` names a repository outright, so a command
+carrying more than one directory selector is refused rather than resolved: the
+last selector is where the command actually runs, and measuring the claim
+against the first is how a command reaches a checkout this run never created.
+That holds for a command the fixture answers and for one it forwards to the
+real `git`, because both are checked before either runs.
 
 This is the target that needs no authorization, and it is the one CI runs. It is
 not a mock: the scenarios exercise the production services, the production
@@ -1547,13 +1584,10 @@ with `--write-schema`, which prepares a real subject (a diff, a submitted review
 with a comment, a two-layer stack, a check run, and a commit status) before
 observing, because a probe over an empty pull request observes no fields at all.
 
-**Its provenance is controlled, not captured from github.com.** The committed
-document was written by `--controlled`, so it is a claim about the API shape the
-double serves, and its `source` field records which runtime produced it. Live
-acceptance — the same scenarios, and this fixture, observed against the real
-host — belongs to the authorized run and is recorded in that run's evidence. No
-live GitHub run has been performed for this suite, so nothing here claims that
-the real host answers exactly this.
+**Controlled provenance is not github.com acceptance.** The fixture's `source`
+field identifies its generating target. A controlled fixture describes the API
+double, not the real host. Compare it against an authorized live run and record
+the resulting evidence outside this README before making real-host claims.
 
 ### The workflow
 
@@ -1593,23 +1627,30 @@ recovery could not remove, since every resource carries the marker.
 
 ### Acceptance boundary
 
-The live target's coverage — real native stacks, a real merge queue, a real
-second account, a real token — is **unobserved**. It needs a disposable account
-this repository has not been given, so those scenarios are runnable and
-unexercised, and the evidence for this suite is the controlled run: the whole
-catalogue green against a real `git`, a real TLS host, and the production
-services. Recording a live pass is a separate, explicitly authorized act.
+The controlled target uses disposable repositories, a generated TLS authority, and
+the production services. Run it with the commands above and record measured results
+outside this README. It does not establish real github.com behavior, authentication,
+or desktop acceptance; those require separately authorized verification.
 
-Recovery is proven the same way and no further. The mechanism is exercised
-against a host this repository generated a certificate for and receipts this
-repository marked, so what that proves is the part that can be: that a killed
-run's repository is removed only once the host confirms its id and its marker,
-that a look-alike repository is left alone, and that a credential is not put on
-a connection whose certificate this process does not trust — with the process
-switch that would have skipped that question retired before the first request
-and restored afterwards. No recovery has been run against github.com, so what a
-real host answers for a deleted repository, and what it answers for one that was
-never there, is unobserved.
+Recovery is a narrower claim than that, and it is stated as the mechanism rather
+than as a result. The command opens its own connection: a private agent, no
+keep-alive, a fresh verified handshake for every request, destroyed when the
+command ends. It does not reuse this process's pooled `fetch`, so no socket opened
+earlier — under a bypass, or against a different authority — can carry a deletion
+credential on a trust decision this run did not make. A caller that stands a host
+up can supply the authority that host's certificate chains to, which widens what
+the connection will believe and does not narrow it, and the process's own
+certificate switches are retired before the first request and restored afterwards.
+
+Which handles it is willing to delete is decided by the id and the marker the
+receipt records, so a look-alike repository is left alone, and a resource whose
+repository is still standing is reported rather than counted as removed.
+
+`runRecoveryAgainstControlledHost` in `tests/live/cli.ts` creates a controlled TLS
+host, a marked repository, and a receipt naming its id, then invokes the actual
+`--recover` command. Its regression checks the command outcome and reads the
+repository back from the host. Run the recovery regression alongside the controlled
+suite; neither substitutes for authorized recovery verification against github.com.
 
 Three things this suite depends on are configuration outside the repository
 rather than code in it: the protected environment and its required reviewers,

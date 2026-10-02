@@ -98,6 +98,7 @@ export const checkScenarios: readonly LiveScenario[] = [
         conclusion: 'failure',
       })
       clearPullRequestChecksCache()
+      const before = ctx.faults.recentExchanges(2_000).length
       const error = await rerunPullRequestCheck(ctx.workspace.path, layer.number, 999_999, {
         headSha: layer.headSha,
         base: trunk,
@@ -106,10 +107,33 @@ export const checkScenarios: readonly LiveScenario[] = [
         (thrown: unknown) => thrown,
       )
       assert(error !== null, 'a workflow run that does not exist was rerun')
+      const exchanges = ctx.faults.recentExchanges(2_000).slice(before)
       assert(
-        error instanceof Error &&
-          /no longer belongs|re-read|permission|permitted/iu.test(error.message),
-        `the refusal did not name the reason: ${String(error)}`,
+        exchanges.some(
+          (entry) =>
+            entry.method === 'GET' &&
+            entry.path === `repos/${ctx.repository}/pulls/${layer.number}` &&
+            entry.status === 200,
+        ),
+        'the rerun did not read the pull request identity from the host',
+      )
+      assert(
+        exchanges.some(
+          (entry) =>
+            entry.method === 'GET' &&
+            entry.path.startsWith(
+              `repos/${ctx.repository}/actions/runs?head_sha=${layer.headSha}`,
+            ) &&
+            entry.status === 200,
+        ),
+        'the rerun did not re-read workflow runs for the pull request head',
+      )
+      assert(
+        !exchanges.some(
+          (entry) =>
+            entry.method === 'POST' && entry.path.startsWith(`repos/${ctx.repository}/actions/`),
+        ),
+        'the refused rerun issued a workflow mutation',
       )
     },
   },

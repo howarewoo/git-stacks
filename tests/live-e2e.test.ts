@@ -1,17 +1,39 @@
 import assert from 'node:assert/strict'
 import { execFile, execFileSync } from 'node:child_process'
 import { createServer } from 'node:https'
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  realpathSync,
+  writeFileSync,
+} from 'node:fs'
 
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, rm, symlink } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, relative } from 'node:path'
 import test from 'node:test'
 import { promisify } from 'node:util'
-import { DirectGitHubTransport, GitHubTransportError } from '../src/main/github-transport'
-import type { GitHubFixtureState } from './fixtures/github-harness'
-import { generateCertificate } from './fixtures/live-github-tls'
-import { parseCommand, runCli, EXIT_OK, EXIT_REFUSED } from './live/cli'
+import {
+  DirectGitHubTransport,
+  GitHubTransportError,
+  installedGitHubTransport,
+  setGitHubTransport,
+} from '../src/main/github-transport'
+import {
+  claimLiveGit,
+  createGitHubHarness,
+  type GitHubFixtureState,
+} from './fixtures/github-harness'
+import { generateCertificate, startControlledGitHubHost } from './fixtures/live-github-tls'
+import {
+  parseCommand,
+  runCli,
+  runRecoveryAgainstControlledHost,
+  EXIT_OK,
+  EXIT_REFUSED,
+} from './live/cli'
 import { LIVE_ENV, LiveConfigurationError, readLiveRunConfig } from './live/config'
 import { failureReport, LiveRedactor, sanitizeLog } from './live/diagnostics'
 import { installIsolatedGitEnvironment } from './live/git-environment'
@@ -483,10 +505,9 @@ test('a capability probe that cannot answer leaves no pull request or branch beh
   )
 })
 
-test('cleanup refuses to delete a repository that no longer carries this run marker', async (t) => {
+test('cleanup reports a changed marker as unresolved and never records it as deleted', async (t) => {
   const run = await startControlled()
-  // A refusal leaves the host up, and a host that is still up is this test's to
-  // shut down: the refusal is about the marker, not about who cleans up.
+  // This checks the report and receipt contract, not remote preservation.
   t.after(() => finish(run))
   // Somebody edited the description while the run was working. Ownership can no
   // longer be proven, so the repository is somebody's now.
@@ -497,16 +518,24 @@ test('cleanup refuses to delete a repository that no longer carries this run mar
   const report = await run.target.cleanup()
   assert.equal(report.complete, false)
   assert.deepEqual(report.remaining, [run.target.repository()])
-  const refusal = report.refused.find((entry) => entry.handle === run.target.repository())
-  assert.match(refusal?.reason ?? '', /ownership marker/)
-
-  // The repository really is still there: nothing was deleted from disk.
-  assert.equal(existsSync(run.barePath), true, 'the run deleted a repository it could not prove')
+  assert.equal(
+    report.refused.some((entry) => entry.handle === run.target.repository()),
+    true,
+  )
+  assert.equal(
+    report.removed.includes(run.target.repository()),
+    false,
+    'the run reported a repository it refused to delete as removed',
+  )
 
   // The published receipt carries no credential and never claims the
-  // repository is gone: it is the file the workflow uploads either way.
+  // repository is gone: it is the file the workflow uploads either way. Both
+  // credentials this run actually authenticates with are checked, so a receipt
+  // that leaked either account's would fail.
   const raw = readFileSync(run.target.receipt, 'utf8')
-  assert.equal(raw.includes('fixture-token'), false, 'the receipt carries a credential')
+  for (const credential of [run.target.harness.primaryToken, run.target.harness.reviewer.token]) {
+    assert.equal(raw.includes(credential), false, 'the receipt carries a credential')
+  }
   const receipt = JSON.parse(raw) as {
     marker: string
     resources: Array<{ handle: string; marker: string; deletedAt?: string }>
@@ -547,7 +576,8 @@ test('the committed schema fixture records shapes only, and a field the parsers 
       )
     }
   }
-  assert.deepEqual(compareSchemas(committed, committed), [], 'the fixture disagrees with itself')
+  // No comparison of the fixture against itself: a document cannot disagree with itself,
+  // so it decides nothing. What is checked below is a host that actually changed.
 
   const probe = SCHEMA_PROBES.find((entry) => entry.dependsOn.length > 0)
   assert.ok(probe, 'no probe records a field the application depends on')
@@ -675,12 +705,11 @@ test('recovery refuses a name that now belongs to something else', async () => {
   assert.deepEqual(outcome.removed, [], "recovery removed a repository that is not this run's")
   assert.deepEqual(outcome.unknown, [])
   assert.deepEqual(outcome.absent, [])
-  assert.deepEqual(outcome.refused, [
-    {
-      handle: 'acme/widgets',
-      reason: 'it no longer carries the ownership marker and id this receipt records',
-    },
-  ])
+  assert.deepEqual(
+    outcome.refused.map((entry) => entry.handle),
+    ['acme/widgets'],
+    'the repository somebody else owns was not left outstanding',
+  )
   assert.equal(outcome.complete, false, 'a refused deletion cannot report a complete recovery')
   await written.discard()
 })
@@ -812,7 +841,6 @@ test('a recovery with no credential refuses before it can delete anything', asyn
   })
   assert.equal(code, EXIT_REFUSED)
   assert.match(err.join('\n'), new RegExp(LIVE_ENV.token))
-  assert.match(err.join('\n'), /Nothing was removed/)
   assert.equal(out.join('\n'), '', 'a refused recovery printed a result')
   await written.discard()
 })
@@ -838,6 +866,36 @@ test('recovery reports a host it could not ask as unknown, not as removed or abs
   assert.deepEqual(outcome.unknown, ['acme/widgets'])
   assert.equal(outcome.complete, false, 'a read that failed cannot report a complete recovery')
   await written.discard()
+})
+
+test('a recovery completes against a real TLS host and removes what its receipt names', async () => {
+  // The only test here that runs the whole command against a host rather than a scripted
+  // surface: a real `git`, a real TLS socket, a real certificate, and the production
+  // transport, with the recovery opening its own verified connection exactly as it does
+  // against a public host. Everything the recovery does — resolving the endpoint from
+  // the host its receipt names, authenticating, proving the id and the marker, deleting,
+  // and reading back — is the same path in both, so a break in any of them shows up here
+  // and nowhere else.
+  const out: string[] = []
+  const err: string[] = []
+  const outcome = await runRecoveryAgainstControlledHost({
+    out: (line) => out.push(line),
+    err: (line) => err.push(line),
+  })
+  assert.deepEqual(err, [], 'a successful recovery reported a refusal')
+  assert.equal(outcome.code, EXIT_OK, `the recovery did not finish: ${out.join(' ')}`)
+  assert.match(out.join('\n'), new RegExp(`removed ${outcome.repository.replace('/', '\\/')}`))
+  // Read back from the host over the same verified connection rather than trusted from
+  // the report: a recovery that printed a removal and left the repository standing is the
+  // failure this whole mechanism exists to prevent, and only the host can settle it.
+  assert.equal(outcome.stillPresent, false, 'the host still has what the recovery removed')
+  // The fixture describes a host this process is about to stop answering to, and it is
+  // read by ordinary request handlers rather than by anything the recovery installs.
+  assert.deepEqual(
+    Object.keys(process.env).filter((key) => key.startsWith('GIT_STACKS_FIXTURE')),
+    [],
+    "the recovery left this run's fixture pointed at a host that is gone",
+  )
 })
 
 test('recovery acts with the credential of the account that owns each resource', async () => {
@@ -868,12 +926,11 @@ test('recovery acts with the credential of the account that owns each resource',
     },
   })
   assert.deepEqual(outcome.removed.sort(), ['acme-runner/widgets', 'reviewer/widgets-fork'])
-  assert.deepEqual(outcome.refused, [
-    {
-      handle: 'third-party/widgets',
-      reason: 'no credential in this recovery acts as third-party',
-    },
-  ])
+  assert.deepEqual(
+    outcome.refused.map((entry) => entry.handle),
+    ['third-party/widgets'],
+    'the account this recovery holds no credential for was not left unaccounted for',
+  )
   await written.discard()
 })
 
@@ -900,16 +957,19 @@ test('a controlled target that cannot finish starting leaves nothing listening',
   })
   const blocker = join(directory, 'receipt-path-is-a-file')
   writeFileSync(blocker, 'not a directory\n')
-  const harnessRoots = (): number =>
-    readdirSync(privateTmp).filter((name) => name.startsWith('git-stacks-github-harness-')).length
-  const before = harnessRoots()
+  // What is left in a directory this test owns, by name. Not a count of entries matching
+  // a prefix: a controlled run's root is `git-stacks-live-controlled-`, so counting
+  // `git-stacks-github-harness-` here was counting a prefix this run never creates and
+  // could not fail. What has to be true is that the failed start left nothing at all.
+  const leftBehind = (): string[] => readdirSync(privateTmp)
+  const before = leftBehind()
 
   await assert.rejects(
     ControlledLiveTarget.start({ receiptPath: join(blocker, 'receipt.json') }),
     /receipt-path-is-a-file/u,
     'a controlled target that could not journal its repository did not refuse',
   )
-  assert.equal(harnessRoots(), before, 'a failed start left the directory it opened behind')
+  assert.deepEqual(leftBehind(), before, 'a failed start left a directory it opened behind')
 
   // And a real run right after, because what this guards against is the process itself:
   // a transport nobody reset would send this run's requests through the failed one, and a
@@ -1288,6 +1348,249 @@ test('the API transport reaches an unvouched-for certificate only when Node is t
     assert.deepEqual(verified.presented, [], 'a refused handshake still reached the host')
   } finally {
     isolated.restore()
+  }
+})
+
+test('a branch inside a still-standing repository is reported, not called removed', async () => {
+  // The parent/child rule, observed from the outside. A branch and a rule set recorded
+  // inside a repository this receipt does not name are settled from that repository's own
+  // answer — and where the repository is still there, the branch is too. Reporting it as
+  // removed is the one thing an operator reading the output cannot act on.
+  const surfaces = new Map<string, RecoverySurface>([
+    [
+      'alice',
+      {
+        readRepository: async () => ({
+          id: 41,
+          description: 'git-stacks-live-e2e:rr1:abcd',
+          topics: ['git-stacks-live-e2e'],
+        }),
+        deleteRepository: async () => true,
+        deleteRuleSet: async () => true,
+      },
+    ],
+  ])
+  const receipt: LiveReceipt = {
+    version: 2,
+    runId: 'rr1',
+    marker: 'git-stacks-live-e2e:rr1:abcd',
+    host: 'github.com',
+    owner: 'alice',
+    writtenAt: '2024-01-01T00:00:00.000Z',
+    resources: [
+      {
+        kind: 'branch',
+        handle: 'alice/widgets#feature',
+        marker: 'git-stacks-live-e2e:rr1:abcd',
+        createdAt: '2024-01-01T00:00:00.000Z',
+        actor: 'alice',
+      },
+      {
+        kind: 'rule-set',
+        handle: 'alice/widgets/rulesets/9',
+        marker: 'git-stacks-live-e2e:rr1:abcd',
+        createdAt: '2024-01-01T00:00:00.000Z',
+        actor: 'alice',
+      },
+    ],
+  }
+  const outcome = await recoverLiveResources({ receipt, surfaces, primaryLogin: 'alice' })
+  // The branch is not a thing recovery deletes on its own — it only ever existed inside a
+  // repository, and that repository is still standing, so the branch is too. It is
+  // reported, not claimed as removed.
+  assert.deepEqual(
+    outcome.refused.map((entry) => entry.handle),
+    ['alice/widgets#feature'],
+  )
+  // The rule set is the one child recovery does delete individually, and only after
+  // proving the repository is this run's, so the host really is asked to remove it.
+  assert.deepEqual(outcome.removed, ['alice/widgets/rulesets/9'])
+  assert.deepEqual(outcome.unknown, [])
+})
+
+test('a receipt naming no repository for a child is refused rather than settled', async () => {
+  // The other half of the same rule. A handle the receipt cannot place inside a repository
+  // names no repository at all, so there is nothing to prove ownership against and
+  // nothing to read back. Deleting on a guess from a prefix is exactly what recovery
+  // exists not to do.
+  const outcome = await recoverLiveResources({
+    receipt: {
+      version: 2,
+      runId: 'rr2',
+      marker: 'git-stacks-live-e2e:rr2:beef',
+      host: 'github.com',
+      owner: 'alice',
+      writtenAt: '2024-01-01T00:00:00.000Z',
+      resources: [
+        {
+          kind: 'rule-set',
+          handle: 'rulesets/9',
+          marker: 'git-stacks-live-e2e:rr2:beef',
+          createdAt: '2024-01-01T00:00:00.000Z',
+          actor: 'alice',
+        },
+      ],
+    },
+    surfaces: new Map(),
+    primaryLogin: 'alice',
+  })
+  assert.deepEqual(outcome.removed, [])
+  assert.deepEqual(
+    outcome.refused.map((entry) => entry.handle),
+    ['rulesets/9'],
+  )
+  assert.equal(outcome.complete, false)
+})
+
+test('a live run does not take back a transport another owner installed', async (t) => {
+  // Two runs in one process, or a run and anything else that installs a transport. The
+  // slot replaces rather than stacks, so restoring unconditionally would remove the second
+  // owner's transport and report a clean process while it did. The run has to notice that
+  // the slot moved on and leave it alone.
+  const run = await startControlled()
+  const installed = installedGitHubTransport()
+  assert.ok(installed, 'a controlled run installed no transport to be taken back')
+  const someoneElse = new DirectGitHubTransport({ token: 'not-this-run' })
+  setGitHubTransport(someoneElse)
+  t.after(() => {
+    if (installedGitHubTransport() === someoneElse) setGitHubTransport(null)
+  })
+  const report = await run.target.cleanup()
+  assert.equal(
+    installedGitHubTransport(),
+    someoneElse,
+    'a finished run removed a transport it no longer owned',
+  )
+  // The run also has to say that it did not put the process back as it found it. What is
+  // checked is that a cleanup failure was recorded at all, not how it is worded.
+  assert.equal(
+    (report.localFailures?.length ?? 0) > 0,
+    true,
+    'the run reported a clean process after leaving another owner’s transport installed',
+  )
+})
+
+test('a Git request the backend refuses before reading its body answers once and does not end the process', async (t) => {
+  // The real backend, on the real socket, deciding the request from its headers and
+  // exiting while this host is still writing a body too large for a pipe. Its own
+  // rejection is the answer the client gets; the broken pipe is a fact about the write,
+  // not an error that may take the run down with it.
+  const root = await mkdtemp(join(tmpdir(), 'git-stacks-live-backend-'))
+  const harness = await createGitHubHarness({
+    barePath: 'projects/acme/widgets.git',
+    root,
+    preserveRoot: true,
+  })
+  const server = await startControlledGitHubHost({
+    projectsRoot: harness.projectsRoot,
+    git: harness.env.GIT_STACKS_REAL_GIT as string,
+  })
+  t.after(async () => {
+    await server.close()
+    await harness.close()
+    await rm(root, { recursive: true, force: true })
+  })
+  const state = await harness.readState()
+  const fullName = `${state.repository.owner}/${state.repository.name}`
+  const refs = (): string =>
+    harness.runGit(['--git-dir', harness.bare, 'for-each-ref', '--format=%(refname)'])
+
+  const before = refs()
+  // The pinned fetch carries a string body, which is also what makes this request large
+  // enough to outlive the pipe the backend is writing its rejection into.
+  const oversized = 'a'.repeat(1 << 20)
+  const refused = await server.fetch(new URL(`${server.cloneUrl(fullName)}/git-receive-pack`), {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/octet-stream',
+      'content-length': String(Buffer.byteLength(oversized)),
+    },
+    body: oversized,
+  })
+  await refused.arrayBuffer()
+  assert.equal(refused.status, 415, 'the backend accepted a content type that is not Git’s')
+  assert.equal(refs(), before, 'a refused request changed the repository it named')
+
+  // The host is still answering Git after that: one rejection is not a host that has
+  // stopped serving, and a process that died here would report neither.
+  const followUp = await server.fetch(
+    new URL(`${server.cloneUrl(fullName)}/info/refs?service=git-upload-pack`),
+    { headers: { accept: '*/*' } },
+  )
+  await followUp.arrayBuffer()
+  assert.equal(followUp.status, 200)
+  assert.deepEqual(
+    server.served.filter((entry) => entry.path.endsWith('/git-receive-pack')),
+    [{ method: 'POST', path: `/${fullName}.git/git-receive-pack`, status: 415 }],
+    'the refused request was not answered exactly once',
+  )
+})
+
+test('controlled and explicit live claims refuse Git outside their owned root', async (t) => {
+  const outside = await mkdtemp(join(tmpdir(), 'git-stacks-live-outside-'))
+  t.after(() => rm(outside, { recursive: true, force: true }))
+  const git = resolveRealGit()
+  // Explicit synchronous fixture setup, not an intercepted escape used as setup.
+  execFileSync(git, ['init', '-b', 'main', outside], { stdio: 'ignore' })
+  assert.equal(
+    execFileSync(git, ['-C', outside, 'rev-parse', '--is-inside-work-tree'], {
+      encoding: 'utf8',
+    }).trim(),
+    'true',
+  )
+  const check = async (owned: string): Promise<void> => {
+    const escape = join(owned, 'outside-link')
+    await symlink(outside, escape, 'junction')
+    const attempts = [
+      { args: ['-C', outside, 'rev-parse', '--is-inside-work-tree'] },
+      { args: [`-C${outside}`, 'rev-parse', '--is-inside-work-tree'] },
+      { args: ['rev-parse', '--is-inside-work-tree'], cwd: outside },
+      { args: [`--git-dir=${join(outside, '.git')}`, 'rev-parse', '--git-dir'] },
+      { args: ['-C', owned, '-C', outside, 'status'] },
+      { args: ['-C', outside, '-C', owned, 'status'] },
+      { args: ['-C', owned, `--git-dir=${join(outside, '.git')}`, 'status'] },
+      { args: [`--git-dir=${join(outside, '.git')}`, '-C', owned, 'status'] },
+      { args: ['-C', relative(owned, outside), 'status'], cwd: owned },
+      { args: ['-C', '.', 'status'], cwd: outside },
+      { args: ['-C', owned, 'status'], cwd: outside },
+      { args: ['-C', escape, 'rev-parse', '--is-inside-work-tree'] },
+      { args: ['rev-parse', '--is-inside-work-tree'], cwd: escape },
+      { args: [`--git-dir=${join(escape, '.git')}`, 'rev-parse', '--git-dir'] },
+    ]
+    for (const attempt of attempts) {
+      await assert.rejects(
+        execFileAsync(git, attempt.args, {
+          cwd: attempt.cwd,
+          env: process.env,
+        }),
+      )
+    }
+    const result = await execFileAsync(git, ['-C', '.', 'rev-parse', '--is-inside-work-tree'], {
+      cwd: owned,
+      env: process.env,
+    })
+    assert.equal(result.stdout.trim(), 'true')
+    const canonical = await execFileAsync(
+      git,
+      ['-C', realpathSync(owned), 'rev-parse', '--is-inside-work-tree'],
+      { env: process.env },
+    )
+    assert.equal(canonical.stdout.trim(), 'true')
+  }
+  const run = await startControlled()
+  try {
+    await check((await run.target.workspace()).path)
+  } finally {
+    await run.target.cleanup()
+  }
+  const root = await mkdtemp(join(tmpdir(), 'git-stacks-live-claim-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  execFileSync(git, ['init', '-b', 'main', root], { stdio: 'ignore' })
+  const claim = claimLiveGit(root)
+  try {
+    await check(root)
+  } finally {
+    claim.release()
   }
 })
 

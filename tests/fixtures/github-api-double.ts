@@ -1960,7 +1960,13 @@ function handleGraphql(
       ? `${variables.owner}/${variables.name}`
       : null
   const named = names === null ? null : repositoryEntry(state, names)
-  if (named && named.fullName.toLowerCase() !== primaryFullName(state).toLowerCase()) {
+  if (named !== null) {
+    // The same two answers for the primary repository as for any other, because it is a
+    // repository like any other. Exempting it left the private repository a controlled
+    // run relies on readable over GraphQL by an account with no grant on it — while the
+    // REST surface refused that same account — and left the invited reviewer reaching
+    // every operation with the owner's `admin` flags, reported as an administrator on an
+    // account this run invited with a push role and nothing more.
     if (roleOf(named, viewer) === null) {
       return {
         status: 200,
@@ -1975,11 +1981,24 @@ function handleGraphql(
         },
       }
     }
-    return withHostRepository(hostFor(named, state), () =>
-      handleGraphql(scopedStateFor(state, named, viewer), body, viewer),
-    )
-  }
-  if (names !== null && named === null) {
+    if (named.fullName.toLowerCase() === primaryFullName(state).toLowerCase()) {
+      // The primary's slice is this state rather than a registry entry, so there is
+      // nothing to re-scope into — only the role projection differs per account, and it
+      // is applied here and the request continues, which is what keeps a repository the
+      // fixture models permissions for from answering for somebody who holds none.
+      const managed = named.private || Object.keys(named.permissions).length > 0
+      if (managed) {
+        state = {
+          ...state,
+          checks: { ...state.checks, viewerPermissions: roleFlags(roleOf(named, viewer)) },
+        }
+      }
+    } else {
+      return withHostRepository(hostFor(named, state), () =>
+        handleGraphql(scopedStateFor(state, named, viewer), body, viewer),
+      )
+    }
+  } else if (names !== null) {
     return {
       status: 200,
       body: {

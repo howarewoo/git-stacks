@@ -1,6 +1,11 @@
-import { execFileSync, spawn } from 'node:child_process'
+import { execFileSync, spawn, type ChildProcess } from 'node:child_process'
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
-import { createServer as createTlsServer, request as httpsRequest, type Server } from 'node:https'
+import {
+  Agent as HttpsAgent,
+  createServer as createTlsServer,
+  request as httpsRequest,
+  type Server,
+} from 'node:https'
 import type { IncomingMessage } from 'node:http'
 import net from 'node:net'
 import { tmpdir } from 'node:os'
@@ -147,10 +152,7 @@ export function generateCertificate(): GeneratedCertificate {
  * checks would be unable to observe the failure it most needs to see: a credential
  * or a request leaving for a host the certificate does not cover.
  */
-function pinnedFetch(
-  certificate: Buffer,
-  served: ControlledGitHubHost['served'],
-): typeof globalThis.fetch {
+function pinnedFetch(certificate: Buffer, agent: HttpsAgent): typeof globalThis.fetch {
   return (async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
     if (init?.signal?.aborted) throw new DOMException('The operation was aborted.', 'AbortError')
     const url = new URL(typeof input === 'string' ? input : String(input))
@@ -174,6 +176,9 @@ function pinnedFetch(
           method,
           headers: { ...headers, ...(body ? { 'content-length': Buffer.byteLength(body) } : {}) },
           ca: certificate,
+          // This host's own pool, not the one every request in this process would
+          // otherwise share. A socket it opened is a socket it has to be able to close.
+          agent,
           // RFC 6066 forbids an address in the SNI extension, and Node warns when one
           // is sent. A certificate whose subject alternative name is the address is
           // verified against that name regardless, so nothing is lost by omitting it.
@@ -205,7 +210,10 @@ function pinnedFetch(
       client.end()
     })
 
-    served.push({ method, path: `${url.pathname}${url.search}`, status: response.status })
+    // What this host served is recorded by its own handler, once per request. A client
+    // that recorded its own answer as well would count every request it made twice, and
+    // that journal is what a run reads to know how many requests it actually made.
+    //
     // The production transport refuses redirects, so a 3xx here is a fault in the
     // host rather than a hop to follow.
     if (response.status >= 300 && response.status < 400) {
@@ -233,6 +241,32 @@ function isRepositoryRequest(pathname: string, projectsRoot: string): boolean {
   // answer where it expected a ref advertisement.
   const served = decodeURIComponent(pathname.split('/').slice(1, 3).join('/'))
   return existsSync(join(projectsRoot, served)) || existsSync(join(projectsRoot, `${served}.git`))
+}
+
+/**
+ * The path this host answers its API from, given where the caller asked.
+ *
+ * This host's authority is not `github.com`, so it is a GitHub Enterprise Server host
+ * and a client that resolves its endpoints the way the production code does asks for
+ * `/api/v3/user` and `/api/graphql`. That is a real host's shape, and a run that has to
+ * be pointed at this host by host name — which is exactly what a recovery is, since it
+ * derives every endpoint from the host its receipt names — would otherwise be refused
+ * for asking the documented question of a host that answers it.
+ *
+ * So the enterprise prefixes are recognised here, at the socket, rather than inside the
+ * API double: what the double models is which endpoint means what, not which path prefix
+ * a host hangs them under. Only the exact prefix is removed, and only once — a
+ * repository legitimately named `api` is served under `/<owner>/api`, which this never
+ * rewrites, and a path that merely starts with the same letters is left alone.
+ */
+function apiPath(requestUrl: string): string {
+  if (requestUrl === '/api/v3' || requestUrl.startsWith('/api/v3/')) {
+    return requestUrl.slice('/api/v3'.length) || '/'
+  }
+  if (requestUrl === '/api/graphql' || requestUrl.startsWith('/api/graphql?')) {
+    return requestUrl.replace('/api/graphql', '/graphql')
+  }
+  return requestUrl
 }
 
 /**
@@ -272,6 +306,7 @@ async function decideGitRequest(
 function serveGitRequest(
   options: ControlledGitHubHostOptions,
   backend: string,
+  live: Set<ChildProcess>,
   request: IncomingMessage,
   body: Buffer,
   remoteUser: string,
@@ -300,52 +335,171 @@ function serveGitRequest(
       HTTP_CONTENT_ENCODING: String(request.headers['content-encoding'] ?? ''),
     },
   })
+  // Registered before anything else can fail, and released on the two ways this child
+  // can end: its own exit, and the host shutting down under it. A child the host does
+  // not know about is a child nobody can kill, and a killed pipe is a socket Git is
+  // still waiting on — so a request abandoned mid-push must not leave a backend reading
+  // a body that will never arrive.
+  live.add(child)
   const chunks: Buffer[] = []
   let failure = ''
+  // One request, one answer. A backend that fails, that has already answered, and whose
+  // socket the client has since closed are three events that used to be able to reach
+  // the same socket twice, and only the first of them is the answer.
+  let settled = false
+  let abandoned = false
+  let pipeFailure = ''
+  function detach(): void {
+    request.off('aborted', abandon)
+    request.socket.off('close', abandon)
+  }
+  function answer(status: number, headers: Record<string, string>, payload: Buffer): void {
+    // A client that hung up while this host was still deciding, or that has already
+    // been answered, gets nothing: there is no socket to answer and no second answer.
+    if (settled || abandoned || request.socket.destroyed) return
+    settled = true
+    detach()
+    serve(status, headers, payload)
+  }
+  function abandon(): void {
+    // Git hanging up mid-request is the ordinary end of a failed push, and nothing this
+    // host would have answered can reach it now. The backend is killed rather than left
+    // holding its pipes open; it stays in the owned set until it is reaped, because a
+    // child that was released while still running is a child nobody can kill.
+    abandoned = true
+    detach()
+    child.kill('SIGKILL')
+  }
   child.stdout.on('data', (chunk: Buffer) => chunks.push(chunk))
   child.stderr.on('data', (chunk: Buffer) => {
     failure += String(chunk)
   })
+  // The request body was read in full before this handler ran, so this is a write into a
+  // child that may already have answered on the headers alone and gone: `git-http-backend`
+  // refuses a POST whose content type is not one of Git's own before it reads a byte of
+  // the body, and a body larger than a pipe buffer cannot fit while it is exiting. That
+  // write fails with EPIPE on the child's stdin, which reaches this process as an
+  // unhandled stream error and ends the run rather than the request. It is collected here
+  // and used only when the backend produced no answer of its own, because a rejection the
+  // backend really did write is still this host's answer to send.
+  child.stdin.on('error', (cause: Error) => {
+    pipeFailure = String(cause)
+  })
+  // A spawn failure is this host's own answer rather than a crash, and the child is
+  // released on its close event like any other backend's.
+  child.on('error', (cause) => {
+    answer(500, { 'content-type': 'text/plain' }, Buffer.from(String(cause)))
+  })
   child.on('close', () => {
+    live.delete(child)
     const raw = Buffer.concat(chunks)
     const split = raw.indexOf('\r\n\r\n')
     if (split === -1) {
-      serve(
+      answer(
         500,
         { 'content-type': 'text/plain' },
-        Buffer.from(failure || 'git-http-backend produced no response'),
+        Buffer.from(failure || pipeFailure || 'git-http-backend produced no response'),
       )
       return
     }
+    // CGI status: a numeric status token and an optional reason phrase, and nothing at
+    // all when the backend is satisfied — which is a 200, not a malformed answer. Git
+    // writes `Status: 415 Unsupported Media Type` when it refuses, and reading that whole
+    // value as a number is what produced a `NaN` this host then handed to its own
+    // response writer. A status that is present and is not one fails the request.
     const headers: Record<string, string> = {}
     let status = 200
+    let unusable = false
     for (const line of raw.subarray(0, split).toString('utf8').split('\r\n')) {
       const separator = line.indexOf(':')
       if (separator === -1) continue
       const name = line.slice(0, separator)
       const value = line.slice(separator + 1).trim()
-      if (name.toLowerCase() === 'status') status = Number(value)
-      else headers[name] = value
+      if (name.toLowerCase() === 'status') {
+        const code = /^(\d{3})(?:\s|$)/u.exec(value)
+        if (code === null) unusable = true
+        else status = Number(code[1])
+      } else headers[name] = value
     }
-    serve(status, headers, raw.subarray(split + 4))
+    if (unusable || status < 100 || status > 599) {
+      answer(
+        500,
+        { 'content-type': 'text/plain' },
+        Buffer.from(failure || pipeFailure || 'git-http-backend produced an unusable status'),
+      )
+      return
+    }
+    answer(status, headers, raw.subarray(split + 4))
   })
+  request.on('aborted', abandon)
+  request.socket.on('close', abandon)
   child.stdin.end(body)
 }
 
-/** Starts the controlled host, bound to a certificate generated for this run. */
+/**
+ * Starts the controlled host, bound to a certificate generated for this run.
+ *
+ * Four things are opened here, and each has a lifetime this function is responsible
+ * for: a temporary directory holding a private key, generated by shelling out to
+ * `openssl`; a listening TLS socket; a client connection pool, because this host makes
+ * requests to itself; and a child `git-http-backend` per Git request.
+ *
+ * They are owned together. Before the host is returned, `this` function is the only thing
+ * that can reach any of them, so its guard releases all of them when startup throws.
+ * After it is returned, the caller is, and `close` is the only thing that releases them.
+ * The handoff is a single flag rather than a per-resource null-out, because a partial one
+ * is worse than either: a guard that takes the certificate while the caller still names
+ * it as the authority to trust fails the first handshake as an unreadable CA file, and
+ * one that takes the pool leaves a host that answers the first request and not the next.
+ */
 export async function startControlledGitHubHost(
   options: ControlledGitHubHostOptions,
 ): Promise<ControlledGitHubHost> {
-  const certificate = generateCertificate()
+  let certificate: GeneratedCertificate | null = null
+  let server: Server | null = null
   const api = createGitHubApiDouble()
   const served: ControlledGitHubHost['served'] = []
-  const backend = join(
-    execFileSync(options.git, ['--exec-path'], { encoding: 'utf8' }).trim(),
-    'git-http-backend',
-  )
-  const server: Server = createTlsServer(
-    { key: certificate.key, cert: certificate.cert },
-    (request, response) => {
+  // The client side of every request this host answers. These sockets are the host's own
+  // from the first request until the run is over, and Node's shared agent pools them —
+  // so a host that closes its listener but leaves its own client sockets pooled keeps
+  // this process's event loop open. That is what a run which reported a complete cleanup
+  // and then had to be killed looks like from the outside.
+  const agent = new HttpsAgent({ keepAlive: true })
+  // Backends started to answer Git. Each is a child process holding pipes, and a child
+  // nobody reaped holds the loop open the same way a pooled socket does.
+  const backends = new Set<ChildProcess>()
+  // Whether the returned host has taken all four. They are released together or not at
+  // all: a guard that took the certificate but left the pool, or took the pool while the
+  // caller still had it, is a partial handoff, and each half of one fails as something
+  // unrelated — an unreadable CA file, or a host that answers the first request and
+  // never the second.
+  let handedOff = false
+  // Everything this function opened, released in the reverse of the order it was opened:
+  // the backends first, because one blocked on a request that can no longer be answered
+  // holds a pipe and a child for ever; then the client sockets, which are pooled and
+  // would otherwise keep this process's event loop open past the listener; then the
+  // listener, whose own connections are destroyed so nothing arrives afterwards; then
+  // the key material, which is the last thing anything could still be reading.
+  const releaseAll = async (listening: Server | null, directory: string | null): Promise<void> => {
+    for (const child of backends) child.kill('SIGKILL')
+    backends.clear()
+    agent.destroy()
+    if (listening !== null) {
+      await new Promise<void>((done) => {
+        listening.closeAllConnections()
+        listening.close(() => done())
+      })
+    }
+    if (directory !== null) rmSync(directory, { recursive: true, force: true })
+  }
+  try {
+    certificate = generateCertificate()
+    const backend = join(
+      execFileSync(options.git, ['--exec-path'], { encoding: 'utf8' }).trim(),
+      'git-http-backend',
+    )
+    const servedCert = certificate.cert
+    server = createTlsServer({ key: certificate.key, cert: servedCert }, (request, response) => {
       const chunks: Buffer[] = []
       request.on('data', (chunk: Buffer) => chunks.push(chunk))
       request.on('end', () => {
@@ -358,12 +512,6 @@ export async function startControlledGitHubHost(
           // is what a real host says and what a run can therefore be expected to
           // prove something about.
           void (async () => {
-            const repository = decodeURIComponent(url.pathname.split('/').slice(1, 3).join('/'))
-            const answered = await decideGitRequest(
-              options,
-              repository,
-              request.headers.authorization,
-            )
             const record = (status: number, headers: Record<string, string>, payload: Buffer) => {
               served.push({
                 method: request.method ?? 'GET',
@@ -373,15 +521,41 @@ export async function startControlledGitHubHost(
               response.writeHead(status, headers)
               response.end(payload)
             }
-            if ('status' in answered) {
-              record(
-                answered.status,
-                { 'content-type': 'text/plain' },
-                Buffer.from(answered.message),
+            try {
+              const repository = decodeURIComponent(url.pathname.split('/').slice(1, 3).join('/'))
+              const answered = await decideGitRequest(
+                options,
+                repository,
+                request.headers.authorization,
               )
-              return
+              if ('status' in answered) {
+                record(
+                  answered.status,
+                  { 'content-type': 'text/plain' },
+                  Buffer.from(answered.message),
+                )
+                return
+              }
+              serveGitRequest(options, backend, backends, request, body, answered.login, record)
+            } catch (error) {
+              // The authorizer reads this host's own state, so it can fail the way any
+              // other read can — an unreadable file, a half-written state. An exception
+              // escaping here is an unhandled rejection inside a socket handler, which
+              // ends the process rather than the request: the controlled CLI would die
+              // before its own guard could close this socket, restore the environment it
+              // installed, or settle the receipt. So a backend that cannot answer is a
+              // 500 through the same path the API double uses, and the Git command fails
+              // the way a failing host makes it fail.
+              record(
+                500,
+                { 'content-type': 'application/json' },
+                Buffer.from(
+                  JSON.stringify({
+                    message: error instanceof Error ? error.message : String(error),
+                  }),
+                ),
+              )
             }
-            serveGitRequest(options, backend, request, body, answered.login, record)
           })()
           return
         }
@@ -391,7 +565,7 @@ export async function startControlledGitHubHost(
             // has more to give names its next page by absolute URL, and a host naming a
             // different origin than the caller reached sends every client that follows
             // it somewhere else.
-            const reached = `https://127.0.0.1:${request.socket.localPort ?? 443}${request.url ?? '/'}`
+            const reached = `https://127.0.0.1:${request.socket.localPort ?? 443}${apiPath(request.url ?? '/')}`
             const answered = await api(reached, {
               method: request.method,
               headers: new Headers(
@@ -412,42 +586,53 @@ export async function startControlledGitHubHost(
             response.writeHead(answered.status, Object.fromEntries(answered.headers.entries()))
             response.end(await answered.text())
           } catch (error) {
+            served.push({
+              method: request.method ?? 'GET',
+              path: `${url.pathname}${url.search}`,
+              status: 500,
+            })
             response.writeHead(500, { 'content-type': 'application/json' })
             response.end(JSON.stringify({ message: String(error) }))
           }
         })()
       })
-    },
-  )
-  // From here the run owns a listening socket and a directory of key material, and
-  // both are gone if anything below throws. A socket nobody closes holds the event
-  // loop open for the rest of the process, so a host that started and then failed to
-  // find its own port does not report a failure — it hangs, and the caller's cleanup
-  // guard never runs because `start` never returned.
-  const stop = async (): Promise<void> => {
-    await new Promise<void>((resolve) => {
-      server.closeAllConnections()
-      server.close(() => resolve())
     })
-    rmSync(certificate.directory, { recursive: true, force: true })
-  }
-  try {
-    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
-    const address = server.address()
-    if (address === null || typeof address === 'string')
+    await new Promise<void>((resolve) => server?.listen(0, '127.0.0.1', resolve))
+    const address = server?.address()
+    if (address === null || address === undefined || typeof address === 'string')
       throw new Error('the controlled host has no port')
     const host = `127.0.0.1:${address.port}`
+    // The listener, the key material and the client pool are the caller's from here, and
+    // the flag is set before the return so the guard below does not also release them.
+    // The bug this replaces cleared only the listener, which left the guard deleting a
+    // certificate the returned host was still naming as the authority Git should trust:
+    // the first handshake then failed as an unreadable CA file, which says nothing about
+    // TLS and everything about a lifetime that ended too early.
+    const owned = certificate
+    const listening = server
+    const stop = async (): Promise<void> => {
+      await releaseAll(listening, owned.directory)
+    }
+    handedOff = true
+    certificate = null
+    server = null
     return {
       url: `https://${host}`,
       host,
-      certificatePath: certificate.certPath,
+      certificatePath: owned.certPath,
       cloneUrl: (fullName) => `https://${host}/${fullName}.git`,
-      fetch: pinnedFetch(certificate.cert, served),
+      fetch: pinnedFetch(owned.cert, agent),
       served,
       close: stop,
     }
-  } catch (error) {
-    await stop().catch(() => undefined)
-    throw error
+  } finally {
+    // Nothing is released once the host has been handed over: `close` is the only thing
+    // that may release it, and it does all of it. Before that, this host is the only
+    // thing that can reach the pool or the backends, so a startup that threw takes them
+    // with it rather than leaving a socket and a child holding the event loop open for a
+    // caller whose guard will never run, because `start` never returned.
+    if (!handedOff) {
+      await releaseAll(server, certificate?.directory ?? null).catch(() => undefined)
+    }
   }
 }

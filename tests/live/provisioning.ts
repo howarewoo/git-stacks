@@ -33,6 +33,8 @@ export class ResourceLedger implements LiveResources {
   private sequence = 0
   /** Set once the run is over, so a queued write cannot recreate a directory. */
   private closed = false
+  /** What this run left on this machine, which no host deletion can settle. */
+  private readonly localFailures: string[] = []
 
   /**
    * What this receipt is allowed to publish.
@@ -255,6 +257,11 @@ export class ResourceLedger implements LiveResources {
         resources: this.entries.map((entry) =>
           entry.refused === undefined ? entry : { ...entry, refused: this.scrub(entry.refused) },
         ),
+        // What this run could not remove from this machine. It is not a resource, so a
+        // recovery run acting on handles must not try to delete it, and it is not a
+        // host deletion either — which is why it is its own field rather than an entry
+        // among the resources.
+        localFailures: [...this.localFailures],
       }
       await mkdir(dirname(this.receiptLocation), { recursive: true })
       const temporary = `${this.receiptLocation}.${process.pid}.${this.sequence++}.tmp`
@@ -275,8 +282,24 @@ export class ResourceLedger implements LiveResources {
       removed: this.entries.filter((entry) => entry.deletedAt).map((entry) => entry.handle),
       refused,
       remaining,
-      complete: remaining.length === 0,
+      localFailures: [...this.localFailures],
+      complete: remaining.length === 0 && this.localFailures.length === 0,
     }
+  }
+
+  /**
+   * Records that this run left something of its own behind on this machine.
+   *
+   * A host resource and a local directory are different kinds of leftover, and the
+   * report says which is which: a repository is settled by a deletion against a host,
+   * and a directory is settled by the filesystem. Folding the second into the first
+   * would either report a run as complete with its root still on disk, or report a
+   * deleted repository as outstanding. So this is recorded beside them, written into
+   * the receipt so the published artifact carries it, and counted by `complete`.
+   */
+  noteLocalFailure(reason: string): void {
+    this.localFailures.push(this.scrub(reason))
+    this.scheduleFlush()
   }
 }
 
@@ -509,8 +532,10 @@ function isAbsent(error: unknown): boolean {
  * Branches and pull requests are deliberately not removed one at a time. They only ever
  * existed inside a repository this run created, they die with it, and deleting them
  * individually would mean extra deletions aimed at names whose repositories may not be
- * this run's. They are reported as gone when the repository is gone, and as unknown
- * when it could not be established.
+ * this run's. They are reported as gone when the repository is gone, and as refused or
+ * unknown when the repository's own outcome says nothing about them — because a parent
+ * whose deletion was refused or could not be attempted has left every child standing,
+ * and reporting those children as removed would claim a cleanup that did not happen.
  */
 export async function recoverLiveResources(input: {
   readonly receipt: LiveReceipt
@@ -527,16 +552,32 @@ export async function recoverLiveResources(input: {
   const absent: string[] = []
   const refused: Array<{ handle: string; reason: string }> = []
   const unknown: string[] = []
+  // Folded on both sides, because the receipt records whatever the host spelled when the
+  // run happened and the host is free to answer the same account differently now. An
+  // account is one account; a lookup that treats two spellings as two is how a run
+  // holding the right credential refuses every resource that account owns.
   const surfaceFor = (entry: LiveResource): RecoverySurface | undefined =>
-    input.surfaces.get(entry.actor ?? input.primaryLogin)
+    input.surfaces.get((entry.actor ?? input.primaryLogin).toLowerCase())
+
+  /**
+   * What this run established about each repository the receipt names, so the
+   * resources inside one are settled from its parent's answer rather than from a
+   * second, independent guess. A repository that answered `still here` when it was
+   * asked to delete has not been removed, and nothing inside it has been either.
+   */
+  const repositories = new Map<string, 'removed' | 'absent' | 'refused' | 'unknown'>()
+  const rest = input.receipt.resources.filter((entry) => entry.kind !== 'repository')
 
   for (const entry of input.receipt.resources) {
+    if (entry.kind !== 'repository') continue
     if (entry.deletedAt !== undefined) {
+      repositories.set(entry.handle, 'absent')
       absent.push(entry.handle)
       continue
     }
     const fullName = repositoryOf(entry)
     if (fullName === null) {
+      repositories.set(entry.handle, 'refused')
       refused.push({
         handle: entry.handle,
         reason: 'the receipt does not say which repository this is',
@@ -545,23 +586,21 @@ export async function recoverLiveResources(input: {
     }
     const surface = surfaceFor(entry)
     if (surface === undefined) {
+      repositories.set(entry.handle, 'refused')
       refused.push({
         handle: entry.handle,
         reason: `no credential in this recovery acts as ${entry.actor ?? input.primaryLogin}`,
       })
       continue
     }
-
-    // A repository, or any resource inside one, may only be touched once the repository
-    // itself has been proved to be the one the receipt is about. A rule set id is
-    // unique per repository, so an id read back against the wrong repository is either a
-    // different resource or nothing at all.
     const repository = await readOrAbsent(surface, fullName)
     if (repository === 'unknown') {
+      repositories.set(entry.handle, 'unknown')
       unknown.push(entry.handle)
       continue
     }
     if (repository === 'absent') {
+      repositories.set(entry.handle, 'absent')
       absent.push(entry.handle)
       continue
     }
@@ -574,11 +613,81 @@ export async function recoverLiveResources(input: {
       !ownsCreatedResource(
         repository,
         input.receipt.marker,
-        entry.kind === 'repository' && typeof entry.remoteId === 'number'
-          ? entry.remoteId
-          : undefined,
+        typeof entry.remoteId === 'number' ? entry.remoteId : undefined,
       )
     ) {
+      repositories.set(entry.handle, 'refused')
+      refused.push({
+        handle: entry.handle,
+        reason: 'it no longer carries the ownership marker and id this receipt records',
+      })
+      continue
+    }
+    try {
+      const removedNow = await surface.deleteRepository(fullName)
+      repositories.set(entry.handle, removedNow ? 'removed' : 'refused')
+      if (removedNow) removed.push(entry.handle)
+      else refused.push({ handle: entry.handle, reason: 'the host still has it' })
+    } catch {
+      repositories.set(entry.handle, 'unknown')
+      unknown.push(entry.handle)
+    }
+  }
+
+  for (const entry of rest) {
+    if (entry.deletedAt !== undefined) {
+      absent.push(entry.handle)
+      continue
+    }
+    const fullName = repositoryOf(entry)
+    if (fullName === null) {
+      refused.push({
+        handle: entry.handle,
+        reason: 'the receipt does not say which repository this is',
+      })
+      continue
+    }
+    // A repository this receipt also names, and whose own outcome is known, decides
+    // its children. Only a repository the receipt says nothing about has to be read
+    // here, because there is no parent outcome to read it from.
+    const established = repositories.get(fullName)
+    if (established === 'removed' || established === 'absent') {
+      absent.push(entry.handle)
+      continue
+    }
+    if (established === 'refused') {
+      refused.push({
+        handle: entry.handle,
+        reason: `the repository that holds it, ${fullName}, is still standing`,
+      })
+      continue
+    }
+    if (established === 'unknown') {
+      unknown.push(entry.handle)
+      continue
+    }
+    const surface = surfaceFor(entry)
+    if (surface === undefined) {
+      refused.push({
+        handle: entry.handle,
+        reason: `no credential in this recovery acts as ${entry.actor ?? input.primaryLogin}`,
+      })
+      continue
+    }
+    // A resource inside a repository may only be touched once the repository itself has
+    // been proved to be the one the receipt is about. A rule set id is unique per
+    // repository, so an id read back against the wrong repository is either a different
+    // resource or nothing at all.
+    const repository = await readOrAbsent(surface, fullName)
+    if (repository === 'unknown') {
+      unknown.push(entry.handle)
+      continue
+    }
+    if (repository === 'absent') {
+      absent.push(entry.handle)
+      continue
+    }
+    if (!ownsCreatedResource(repository, input.receipt.marker)) {
       refused.push({
         handle: entry.handle,
         reason: 'it no longer carries the ownership marker and id this receipt records',
@@ -586,16 +695,23 @@ export async function recoverLiveResources(input: {
       continue
     }
 
+    if (entry.kind !== 'rule-set') {
+      // A branch or a pull request is not removed one at a time, because it only ever
+      // existed inside a repository this run created. That is a reason to report what
+      // is true, not to claim a removal: the repository it was in is still standing, so
+      // so is the branch, and a report saying otherwise is the one thing an operator
+      // reading this would not be able to act on.
+      refused.push({
+        handle: entry.handle,
+        reason: `it only ever existed inside ${fullName}, which is still standing`,
+      })
+      continue
+    }
     try {
-      const removedNow =
-        entry.kind === 'rule-set'
-          ? await surface.deleteRuleSet(fullName, Number(entry.handle.split('/').pop() ?? ''))
-          : entry.kind === 'repository'
-            ? await surface.deleteRepository(fullName)
-            : true
-      if (removedNow) removed.push(entry.handle)
-      else refused.push({ handle: entry.handle, reason: 'the host still has it' })
-    } catch (error) {
+      if (await surface.deleteRuleSet(fullName, Number(entry.handle.split('/').pop() ?? ''))) {
+        removed.push(entry.handle)
+      } else refused.push({ handle: entry.handle, reason: 'the host still has it' })
+    } catch {
       unknown.push(entry.handle)
     }
   }
@@ -616,13 +732,24 @@ export async function recoverLiveResources(input: {
  * receipt rather than about a guess. Deleting a repository removes everything in it,
  * and only what is in it: settling a sibling repository's entries because the
  * primary's deletion succeeded would mark somebody else's repository as removed.
+ *
+ * Each kind's handle is parsed as its own shape, because the two separators mean
+ * different things. A branch or a pull request is `<owner>/<repo>#<something>`, and a
+ * repository name may itself contain neither character, so the `#` is the boundary. A
+ * rule set is `<owner>/<repo>/rulesets/<id>`, and splitting that on `#` alone would
+ * return the whole handle — a repository called `acme/widgets` whose "repository" was
+ * `acme/widgets/rulesets/7`, which no host has and no deletion could ever match. So
+ * the kind decides which suffix is taken off, and only then is the remainder split at
+ * its owner separator.
  */
 export function repositoryOf(entry: LiveResource): string | null {
   if (entry.kind === 'repository') {
     const at = entry.handle.indexOf('/')
     return at > 0 ? entry.handle : null
   }
-  const prefix = entry.handle.split('#')[0] ?? entry.handle.split('/rulesets/')[0] ?? ''
+  const at = entry.kind === 'rule-set' ? entry.handle.indexOf('/rulesets/') : -1
+  const prefix =
+    at === -1 ? (entry.handle.split('#')[0] ?? entry.handle) : entry.handle.slice(0, at)
   return prefix.includes('/') ? prefix : null
 }
 

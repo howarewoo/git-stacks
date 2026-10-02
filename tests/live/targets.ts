@@ -1,11 +1,12 @@
 import { execFileSync } from 'node:child_process'
 import { accessSync, constants, statSync } from 'node:fs'
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
-import { delimiter, join, relative } from 'node:path'
+import { mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises'
+import { delimiter, join, relative, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
 import {
   DirectGitHubTransport,
   GitHubTransportError,
+  installedGitHubTransport,
   setGitHubTransport,
   type GitHubTransport,
 } from '../../src/main/github-transport'
@@ -21,15 +22,10 @@ import {
 } from '../fixtures/github-harness'
 import { startControlledGitHubHost, type ControlledGitHubHost } from '../fixtures/live-github-tls'
 import { disposableRepositoryName, ownershipMarker, type LiveRunConfig } from './config'
-import { LiveRedactor } from './diagnostics'
+import { describeThrown, LiveRedactor } from './diagnostics'
 import { GitHubAdmin } from './github-admin'
 import { installIsolatedGitEnvironment, type IsolatedGitEnvironment } from './git-environment'
-import {
-  markerOnRepository,
-  ownsCreatedResource,
-  repositoryOf,
-  ResourceLedger,
-} from './provisioning'
+import { ownsCreatedResource, repositoryOf, ResourceLedger } from './provisioning'
 import type {
   LiveActor,
   LiveAdmin,
@@ -111,6 +107,20 @@ export interface DisposableTargetSetup {
   readonly git: IsolatedGitEnvironment
   /** Where this run's local files live, and which are removed with it. */
   readonly root: string
+  /**
+   * Whatever transport this process held before this run installed its own, which is
+   * what teardown puts back. `setGitHubTransport` replaces rather than stacks, so
+   * reading the installed one afterwards would answer with a transport resolved from the
+   * environment — a different object, which is how a run ends up restoring somebody
+   * else's transport and calling the process clean.
+   */
+  readonly previousTransport: GitHubTransport | null
+  /**
+   * The transport this run installed, kept so teardown can tell whether it is still the
+   * one in place. A restore that does not check would overwrite a transport another owner
+   * put there after this run started.
+   */
+  readonly installedTransport: GitHubTransport
   /** The admin surface bound to the reviewer credential, for reviewer-owned work. */
   readonly reviewerAdmin: LiveAdmin | null
 }
@@ -148,6 +158,8 @@ abstract class DisposableTarget implements LiveTarget {
   protected readonly root: string
   protected git: IsolatedGitEnvironment
   protected readonly reviewerAdmin: LiveAdmin | null
+  private readonly previousTransport: GitHubTransport | null
+  private readonly installedTransport: GitHubTransport
   private readonly injected: FaultInjectingTransport
 
   constructor(setup: DisposableTargetSetup) {
@@ -162,6 +174,8 @@ abstract class DisposableTarget implements LiveTarget {
     this.root = setup.root
     this.git = setup.git
     this.reviewerAdmin = setup.reviewerAdmin
+    this.previousTransport = setup.previousTransport
+    this.installedTransport = setup.installedTransport
     this.injected = setup.faults
   }
 
@@ -406,16 +420,27 @@ abstract class DisposableTarget implements LiveTarget {
   }
 
   private async runCleanup(): Promise<LiveCleanupReport> {
-    // Everything below reasons about a host, and a host can be slow, refuse, or drop a
-    // connection. None of that may keep this run's own local state alive: the process
-    // environment holds its credentials, the workspace holds a clone, and a controlled
-    // run holds a listening socket that nothing else closes. So the whole decision runs
-    // under one finally rather than being followed by a shutdown each branch remembers.
+    // The host side and the local side are settled independently, and both are awaited
+    // before the report is taken. A run that answers while its socket is still listening
+    // or while it still holds this process's real `git` reports a cleanup that has not
+    // happened, so the local side is released here rather than in a `finally` a throw
+    // could step over — and neither side is allowed to depend on the other having
+    // worked. A side that fails is reported: what is left behind is exactly the thing a
+    // person has to come back for.
+    const failures: string[] = []
     try {
-      return await this.settleCleanup()
-    } finally {
-      await this.shutdown()
+      await this.settleCleanup()
+    } catch (error) {
+      failures.push(`the host side could not be settled: ${describeThrown(error)}`)
     }
+    for (const failure of await this.releaseEverything()) failures.push(failure)
+    for (const failure of failures) this.ledger.noteLocalFailure(failure)
+    // The last update reaches the disk before the receipt stops accepting them, on every
+    // path. Closing first makes every later update memory-only, so the published
+    // artifact keeps listing a repository this run has already deleted.
+    await this.ledger.flush()
+    await this.ledger.close()
+    return this.ledger.report()
   }
 
   /**
@@ -424,20 +449,25 @@ abstract class DisposableTarget implements LiveTarget {
    * A failure in here is a failure of one step. The receipt is flushed, a resource is
    * released or refused, and the next step still runs: a run that could not remove a
    * rule set should still remove the repository holding it, and should still get its
-   * own process back.
+   * own process back. Every path out of here leaves the receipt flushed and open, so
+   * the caller closes it once the local side has been settled too.
    */
-  private async settleCleanup(): Promise<LiveCleanupReport> {
+  private async settleCleanup(): Promise<void> {
     await this.ledger.flush()
     if (this.ledger.list().every((entry) => entry.kind !== 'repository')) {
       for (const entry of this.ledger.outstanding()) {
         this.ledger.refuse(entry.handle, 'the run recorded no repository to prove it owns this')
       }
-      return this.ledger.report()
+      await this.ledger.flush()
+      return
     }
     // A repository whose creation was never confirmed is reconciled rather than assumed
     // either way: the receipt already says what was asked for, so a fresh read decides
     // whether the host holds it. Re-sending the creation would be the one response that
-    // can turn an unknown outcome into two repositories.
+    // can turn an unknown outcome into two repositories. The three answers stay three:
+    // a name the host does not have, a name it holds under somebody else's marker, and a
+    // read that failed are different events, and a repository that is still standing
+    // under a conflicting marker is not this run's to release.
     for (const entry of this.ledger.unresolved()) {
       if (entry.kind !== 'repository') continue
       const admin = this.adminFor(entry.actor)
@@ -455,13 +485,28 @@ abstract class DisposableTarget implements LiveTarget {
       // The read is made with the credential that owns the name, because another one may
       // not be able to see it and would report an absent repository that is very much
       // present.
-      const existing = await readRepositoryIdentity(
+      // Awaited into a local, never held as a promise across the branches below: the
+      // loop refines this same receipt's journal, and a half-read identity compared
+      // against a promise decides nothing.
+      const outcome = await readRepositoryIdentity(
         admin,
         entry.handle,
         entry.marker ?? this.marker,
+        typeof entry.remoteId === 'number' ? entry.remoteId : undefined,
       )
-      if (existing === null) this.ledger.release(entry.handle)
-      else this.ledger.confirm(entry.handle, existing.id)
+      if (outcome.outcome === 'present') this.ledger.confirm(entry.handle, outcome.identity.id)
+      else if (outcome.outcome === 'absent') this.ledger.release(entry.handle)
+      else if (outcome.outcome === 'conflict') {
+        this.ledger.refuse(
+          entry.handle,
+          `a repository of that name exists and does not carry this run's marker, so it is not this run's to remove`,
+        )
+      } else {
+        this.ledger.refuse(
+          entry.handle,
+          `the host could not be asked whether it still holds it: ${outcome.reason}`,
+        )
+      }
     }
     let owned = false
     try {
@@ -473,18 +518,23 @@ abstract class DisposableTarget implements LiveTarget {
     } catch (error) {
       this.ledger.refuse(
         this.fullName,
-        `the repository could not be read back to prove ownership: ${
-          error instanceof Error ? error.message : String(error)
-        }`,
+        `the repository could not be read back to prove ownership: ${describeThrown(error)}`,
       )
     }
     if (!owned) {
       const reason = `${this.fullName} no longer carries this run's ownership marker`
       for (const entry of this.ledger.outstanding()) this.ledger.refuse(entry.handle, reason)
-      return this.ledger.report()
+      await this.ledger.flush()
+      return
     }
 
+    // The contents of the primary repository, and only those. `repositoryOf` reads a
+    // handle as its own kind, so a branch recorded against a foreign repository is not
+    // mistaken for one of this repository's and deleted here against a name whose owner
+    // has not been checked — which is how a run ends up deleting a branch in a
+    // repository somebody else now owns.
     for (const entry of this.ledger.outstanding()) {
+      if (repositoryOf(entry) !== this.fullName) continue
       if (entry.kind === 'rule-set') {
         const id = Number(entry.handle.split('/').pop() ?? '')
         if (
@@ -497,10 +547,12 @@ abstract class DisposableTarget implements LiveTarget {
         }
       }
       if (entry.kind === 'branch') {
-        const repo = repositoryOf(entry) ?? this.fullName
         const branch = entry.handle.split('#')[1] ?? ''
         const admin = this.adminFor(entry.actor) ?? this.admin
-        if (branch !== '' && (await this.attempt(() => admin.deleteBranch(repo, branch)))) {
+        if (
+          branch !== '' &&
+          (await this.attempt(() => admin.deleteBranch(this.fullName, branch)))
+        ) {
           this.ledger.release(entry.handle)
         } else {
           this.ledger.refuse(entry.handle, 'the host still has this branch')
@@ -510,25 +562,41 @@ abstract class DisposableTarget implements LiveTarget {
     // A repository this run created under another account — the reviewer's fork, or a
     // second disposable repository of its own — is removed with that account's own
     // credential, and only after its own marker has been read back. Removing it through
-    // the primary would either fail or, worse, succeed against something else.
+    // the primary would either fail or, worse, succeed against something else. Its
+    // contents are settled from that repository's own answer: released when it is gone,
+    // and reported as still standing when it is not, because a repository this run
+    // refused to remove has left every ref inside it exactly where it was.
+    const settled = new Set<string>()
     for (const entry of this.ledger.outstanding()) {
       if (entry.kind !== 'repository' || entry.handle === this.fullName) continue
       if (await this.removeForeignRepository(entry)) {
+        settled.add(entry.handle)
         this.ledger.release(entry.handle)
         for (const child of this.ledger.outstanding()) {
           if (repositoryOf(child) === entry.handle) this.ledger.release(child.handle)
         }
-      } else if (this.adminFor(entry.actor) === null)
-        this.ledger.refuse(
-          entry.handle,
-          `no credential in this run acts as ${entry.actor ?? 'the owning account'}`,
-        )
-      else this.ledger.refuse(entry.handle, "the host still has it, or it is no longer this run's")
+      } else {
+        if (this.adminFor(entry.actor) === null) {
+          this.ledger.refuse(
+            entry.handle,
+            `no credential in this run acts as ${entry.actor ?? 'the owning account'}`,
+          )
+        } else if (entry.refused === undefined) {
+          this.ledger.refuse(entry.handle, "the host still has it, or it is no longer this run's")
+        }
+        for (const child of this.ledger.outstanding()) {
+          if (child.kind === 'repository' || repositoryOf(child) !== entry.handle) continue
+          this.ledger.refuse(
+            child.handle,
+            `the repository that holds it, ${entry.handle}, is still standing`,
+          )
+        }
+      }
     }
-    // The receipt stays writable until the repository itself has been removed or refused,
-    // and is closed only after that last update is on the disk. Closing it first is what
-    // produced a published artifact listing a deleted repository as outstanding while the
-    // run reported a complete cleanup.
+    // The receipt stays writable until the repository itself has been removed or refused.
+    // Closing it first is what produced a published artifact listing a deleted repository
+    // as outstanding while the run reported a complete cleanup; the close itself now
+    // belongs to the caller, which takes it once the local side has been settled too.
     const removed = await this.attempt(() => this.removeRepository(this.fullName))
     if (removed) {
       // Only what the deleted repository contained. A separate repository this run also
@@ -537,13 +605,28 @@ abstract class DisposableTarget implements LiveTarget {
       // away marks a repository that is still standing as deleted, and a recovery run
       // reads `deletedAt` as "already gone" and skips it for ever.
       for (const entry of this.ledger.outstanding()) {
-        if (repositoryOf(entry) === this.fullName) this.ledger.release(entry.handle)
+        // A handle the receipt cannot place inside a repository names none at all, and
+        // this loop has just established that the repository it might have belonged to is
+        // gone. Refusing it is the only answer that does not invent an owner.
+        const repository = repositoryOf(entry)
+        if (repository === null) {
+          this.ledger.refuse(
+            entry.handle,
+            'the receipt does not say which repository this belongs to, so it could not be settled',
+          )
+        } else if (repository === this.fullName) {
+          this.ledger.release(entry.handle)
+        } else if (entry.kind !== 'repository' && !settled.has(repository)) {
+          this.ledger.refuse(
+            entry.handle,
+            'the receipt does not say which repository this belongs to, so it could not be settled',
+          )
+        }
       }
     } else {
       this.ledger.refuse(this.fullName, 'the host still has this repository')
     }
-    await this.ledger.close()
-    return this.ledger.report()
+    await this.ledger.flush()
   }
 
   /**
@@ -571,11 +654,20 @@ abstract class DisposableTarget implements LiveTarget {
    * repository the run itself created, which is a refusal that says nothing true — so
    * the actor recorded with the resource decides whose credential is used, and an
    * account this run has no credential for is a refusal rather than a guess.
+   *
+   * The comparison is on the folded login rather than the string. A receipt records
+   * whatever the host spelled, and a host is free to answer `Alice` where an earlier
+   * read said `alice`; treating those as two accounts would make this run refuse its
+   * own resources for want of a credential it is holding, and would hide the reverse
+   * mistake — one account's resources reached with another's credential.
    */
   private adminFor(actor: string | undefined): LiveAdmin | null {
     if (actor === undefined || actor === '') return this.admin
-    if (actor === this.primary.login) return this.admin
-    if (this.reviewer !== null && actor === this.reviewer.login) return this.reviewerAdmin
+    const login = actor.toLowerCase()
+    if (login === this.primary.login.toLowerCase()) return this.admin
+    if (this.reviewer !== null && login === this.reviewer.login.toLowerCase()) {
+      return this.reviewerAdmin
+    }
     return null
   }
 
@@ -621,29 +713,42 @@ abstract class DisposableTarget implements LiveTarget {
   private cleaned: LiveCleanupReport | null = null
 
   /**
-   * Puts this run's own state back, whatever the host did.
+   * Puts this run's own state back, whatever the host did, and reports what could not be.
    *
    * Three separate things are given back here, and none of them may depend on the
-   * others. The global transport goes first, because it is the one holding a
-   * credential in a place any later command in this process can reach. The process
-   * environment goes next, because it holds the run's Git credential headers. The
-   * local resources go last and unconditionally, because a repository whose deletion
-   * was refused or whose read threw still leaves a clone, a directory and — in a
-   * controlled run — a listening socket behind, and a socket nobody closes holds the
-   * event loop open so the process does not exit at all.
+   * others. The global transport goes first, because it is the one holding a credential
+   * in a place any later command in this process can reach. The process environment goes
+   * next, because it holds the run's Git credential headers. The local resources go last
+   * and unconditionally, because a repository whose deletion was refused or whose read
+   * threw still leaves a clone, a directory and — in a controlled run — a listening
+   * socket behind, and a socket nobody closes holds the event loop open so the process
+   * does not exit at all.
    *
-   * A restore that cannot rewrite the process is worth nothing to throw over; the
-   * receipt is what still has to be right.
+   * The transport is restored only while it is still this run's. `setGitHubTransport`
+   * replaced rather than stacked, so putting the previous value back is only correct if
+   * the slot still holds what this run put there; if something else installed a
+   * transport in the meantime, that other owner would silently lose its own — so the
+   * restore is skipped and reported instead. A blind overwrite would report a clean
+   * process while having removed somebody else's credential from it.
+   *
+   * Nothing here is thrown over: a restore that cannot rewrite the process, or a
+   * directory that will not delete, is returned as a failure for the report so the
+   * receipt still says what a person has to come back for.
    */
-  protected async shutdown(): Promise<void> {
-    setGitHubTransport(null)
-    try {
-      this.git.restore()
-    } catch {
-      // A restore that cannot rewrite the process is worth nothing to throw over; the
-      // receipt is what still has to be right.
+  private async releaseEverything(): Promise<string[]> {
+    const failures: string[] = []
+    for (const give of [
+      () => releaseOwnedTransport(this.installedTransport, this.previousTransport),
+      () => this.git.restore(),
+      () => this.releaseLocal(),
+    ]) {
+      try {
+        await give()
+      } catch (error) {
+        failures.push(describeThrown(error))
+      }
     }
-    await this.releaseLocal()
+    return failures
   }
 
   /** The files, listeners and helpers this run opened, and only those. */
@@ -736,6 +841,8 @@ export class ControlledLiveTarget extends DisposableTarget {
       server?: ControlledGitHubHost
       workspace?: LocalGitWorkspace
       root?: string
+      previousTransport?: GitHubTransport | null
+      installedTransport?: GitHubTransport
     } = {}
     try {
       opened.root = await mkdtemp(join(tmpdir(), 'git-stacks-live-controlled-'))
@@ -754,6 +861,7 @@ export class ControlledLiveTarget extends DisposableTarget {
       const harness = await createGitHubHarness({
         barePath: 'projects/acme/widgets.git',
         root: opened.root,
+        confineGitToRoot: true,
         // The host's own default, not this run's assumption about it. A controlled host
         // configured for another name has to be able to say so, or a suite that reads
         // the branch back from the host would still never meet one that is not `main`.
@@ -768,14 +876,53 @@ export class ControlledLiveTarget extends DisposableTarget {
           authorizeGitFor(harness, fullName, authorization),
       })
       opened.server = server
+      // The host's clone URLs are registered as this run's own, and only now that the
+      // authority is known. Without this the transport rule has no way to tell this run's
+      // own `127.0.0.1` URL from an unowned one and refuses the scenarios' `ls-remote` —
+      // which is what keeps the rule safe rather than wrong: an address is answerable
+      // because the run registered that exact URL, never because of its shape. Every
+      // repository created from here on is registered as it is created, so a fork or a
+      // foreign subject made mid-scenario is answerable on the same host too.
+      harness.serveClonesFor(server.cloneUrl)
       return await ControlledLiveTarget.build({ harness, server, options, opened })
     } catch (error) {
-      opened.workspace?.close()
-      setGitHubTransport(null)
-      opened.git?.restore()
-      await opened.server?.close().catch(() => undefined)
-      await opened.harness?.close().catch(() => undefined)
-      if (opened.root !== undefined) await rm(opened.root, { recursive: true, force: true })
+      // Each of these was opened independently and none can be released twice, so each
+      // is given back on its own. A socket whose close threw must not be the reason the
+      // harness that answers for it and the temporary directory holding this run's
+      // isolated Git home are both kept: the first would keep every later request in
+      // this process hanging, the second would keep a directory with a credential header
+      // in it on disk.
+      // The process is put back first and on its own, because restoring the environment
+      // is synchronous: it is not a promise and it must not be skipped because an earlier
+      // release threw. Leaving a credential header's `HOME` installed would affect every
+      // Git this process starts after the run.
+      try {
+        opened.git?.restore()
+      } catch {
+        // Nothing here can be given back a second time, and the original failure is the
+        // one the caller needs.
+      }
+      // Each is awaited under its own guard rather than chained with `.catch`, because
+      // they are not all the same kind of thing: putting a transport back is
+      // synchronous, while closing a socket and deleting a directory are not. A chain
+      // that assumes a promise skips the synchronous one, which is the one that has to
+      // happen before anything else starts reading the process.
+      for (const release of [
+        () => releaseOwnedTransport(opened.installedTransport, opened.previousTransport ?? null),
+        () => opened.server?.close(),
+        () => opened.harness?.close(),
+        opened.root === undefined
+          ? null
+          : () => rm(opened.root as string, { recursive: true, force: true }),
+      ]) {
+        if (release === null) continue
+        try {
+          await release()
+        } catch {
+          // Nothing here can be given back a second time, and the failure that sent us
+          // down this path is the one the caller needs to see.
+        }
+      }
       throw error
     }
   }
@@ -795,6 +942,8 @@ export class ControlledLiveTarget extends DisposableTarget {
       server?: ControlledGitHubHost
       workspace?: LocalGitWorkspace
       root?: string
+      previousTransport?: GitHubTransport | null
+      installedTransport?: GitHubTransport
     }
   }): Promise<ControlledLiveTarget> {
     const { harness, server, opened } = input
@@ -850,7 +999,12 @@ export class ControlledLiveTarget extends DisposableTarget {
       GIT_STACKS_GITHUB_API_URL: server.url,
       GIT_STACKS_GITHUB_TRANSPORT: 'direct',
     })
-    setGitHubTransport(null)
+    // Installing replaces rather than stacks, so whatever was here is taken and kept for
+    // teardown to put back. Reading the installed transport afterwards would not do it:
+    // `githubTransport()` answers with one resolved from the environment when nothing is
+    // installed, which is a different object, and restoring that would leave the process
+    // holding a transport this run never owned.
+    opened.previousTransport = setGitHubTransport(null)
 
     const receiptPath = options.receiptPath ?? join(harness.root, 'live-github-e2e-receipt.json')
     const redact = new LiveRedactor([harness.primaryToken, harness.reviewer.token]).text
@@ -874,6 +1028,7 @@ export class ControlledLiveTarget extends DisposableTarget {
     const productionTransport = credential(harness.primaryToken)
     const faults = new FaultInjectingTransport(productionTransport)
     setGitHubTransport(faults)
+    opened.installedTransport = faults
 
     const workspace = new LocalGitWorkspace({
       path: harness.repo,
@@ -930,6 +1085,8 @@ export class ControlledLiveTarget extends DisposableTarget {
       workspace,
       git,
       root: harness.root,
+      previousTransport: opened.previousTransport ?? null,
+      installedTransport: faults,
       reviewerAdmin,
       harness,
       server,
@@ -1100,24 +1257,53 @@ export class ControlledLiveTarget extends DisposableTarget {
   /**
    * There is no remote to clean up here: this run's host is this process.
    *
-   * Everything the run opened is released by `releaseLocal` instead, which the guard
-   * runs whatever cleanup decided. Tying the socket to the repository step meant a
-   * refusal before that step — the marker could not be read, a branch would not delete
-   * — left a listener holding the event loop open and a run that hung instead of
+   * The bare repository under the projects root is this host's own directory for the
+   * repository, so removing it is the deletion rather than a stand-in for one — and a
+   * removal that fails is a deletion that did not happen. Swallowing the error and
+   * answering `true` is what let a run report a complete cleanup with the directory
+   * still on disk and nothing left to notice it except a person reading a temporary
+   * directory. It is raised instead, so the refusal path reports what is still standing.
+   *
+   * Everything else the run opened is released by `releaseLocal`, which runs whatever
+   * this decided. Tying the socket to the repository step meant a refusal before that
+   * step left a listener holding the event loop open and a run that hung instead of
    * reporting.
    */
   protected async removeRepository(fullName: string): Promise<boolean> {
-    const bare = join(this.root, 'projects', `${fullName}.git`)
-    await rm(bare, { recursive: true, force: true }).catch(() => undefined)
+    await rm(join(this.root, 'projects', `${fullName}.git`), { recursive: true, force: true })
     return true
   }
 
-  /** The clone, the bare repository and the socket, which are this run's alone. */
+  /**
+   * The socket, the harness and everything this run wrote under its own root.
+   *
+   * Each is released on its own. They were opened independently and none of them can be
+   * released twice, so a socket whose close threw must not be the reason the harness's
+   * own state and this run's directory are kept: a harness left answering requests, or a
+   * temporary directory holding an isolated Git home with a credential header in it, is
+   * worse than any one of them being reported.
+   *
+   * The root itself goes, and only the receipt stays. The receipt is the file a workflow
+   * publishes and the file a later recovery run is pointed at; everything else under
+   * this root is this run's and nobody else's.
+   */
   protected async releaseLocal(): Promise<void> {
     this.workspaceInstance.close()
-    await this.server.close()
-    await this.harnessInstance.close()
-    await rm(this.workspaceInstance.path, { recursive: true, force: true }).catch(() => undefined)
+    const failures: string[] = []
+    for (const release of [
+      () => this.server.close(),
+      () => this.harnessInstance.close(),
+      () => removeOwnedRoot(this.root, this.receipt),
+    ]) {
+      try {
+        await release()
+      } catch (error) {
+        failures.push(describeThrown(error))
+      }
+    }
+    if (failures.length > 0) {
+      throw new Error(`the controlled host was not fully released: ${failures.join('; ')}`)
+    }
   }
 }
 
@@ -1156,25 +1342,26 @@ export class GitHubLiveTarget extends DisposableTarget {
    * because a run pointed at a repository somebody else owns is not a test that
    * failed — it is a test that deleted something.
    *
-   * Every step is inside one guard, from the first temporary directory onward. A
-   * receipt write that fails, a Git seed that throws, a push that is refused: each of
-   * those can happen after the repository exists, and before the guard existed the
-   * command's startup handler reported a refusal with no target and no cleanup,
-   * leaving a private repository standing with this run's marker in its description and
-   * nobody holding a receipt that named it. A setup failure now removes what it can
-   * prove it owns, restores the process, and reports what is left.
+   * Every step is inside one guard, from the first temporary directory onward, and each
+   * resource is written down the moment it exists. A receipt write that fails, a Git seed
+   * that throws, a push that is refused, a claim on the real `git` that is refused
+   * because another run already holds one: each of those can happen, and before the guard
+   * existed the command's startup handler reported the last of them with no target and
+   * no cleanup at all — a temporary directory, an installed environment carrying a
+   * URL-scoped live credential, and a token-bearing transport left in the process.
    */
   static async start(config: LiveRunConfig): Promise<GitHubLiveTarget> {
     const marker = ownershipMarker(config.runId)
     const name = disposableRepositoryName(config.repositoryPrefix, config.runId)
     const fullName = `${config.owner}/${name}`
-    const root = await mkdtemp(join(tmpdir(), `git-stacks-live-${name}-`))
     const receiptPath = config.receiptPath
     const redact = new LiveRedactor(
       [config.token, config.reviewerToken].filter(
         (value): value is string => typeof value === 'string' && value.trim() !== '',
       ),
     ).text
+    // The ledger allocates nothing and installs nothing, so it is built before the guard
+    // opens: a failure report needs one to say what is still standing.
     const ledger = new ResourceLedger({
       runId: config.runId,
       marker,
@@ -1183,57 +1370,93 @@ export class GitHubLiveTarget extends DisposableTarget {
       owner: config.owner,
       redact,
     })
-    // Both credentials are pinned to this host's own endpoints and handed an
-    // environment that cannot widen where they may be sent. The application's transport
-    // reads its API base from the environment when it is not told one, and deliberately
-    // permits an environment-configured base to be the origin a supplied token goes to
-    // — which on a machine where that variable is set for development would send a real
-    // disposable-account credential to whatever host it names, on the first request.
-    const pinnedEnv = { ...process.env }
-    delete pinnedEnv.GIT_STACKS_GITHUB_API_URL
-    delete pinnedEnv.GH_TOKEN
-    delete pinnedEnv.GITHUB_TOKEN
-    delete pinnedEnv.GIT_STACKS_GITHUB_TOKEN
-    const pin = (token: string): DirectGitHubTransport =>
-      new DirectGitHubTransport({
-        token,
-        host: config.host,
-        apiUrl: config.apiUrl,
-        graphqlUrl: config.graphqlUrl,
-        env: pinnedEnv,
-      })
-    const productionTransport = pin(config.token)
-    const faults = new FaultInjectingTransport(productionTransport)
-    const remote = `https://${config.host}/${fullName}.git`
-    const git = await installIsolatedGitEnvironment({
-      home: root,
-      author: AUTHOR,
-      // The credential rides in a header supplied to every Git this process starts, and
-      // never in the remote URL. A URL is read back by `git remote -v`, written into
-      // `.git/config`, copied into a diagnostic, and quoted by a person; a header
-      // scoped to this repository's URL is in none of them.
-      credentials: [{ url: remote, header: `AUTHORIZATION: basic ${basicAuth(config.token)}` }],
-    })
-    git.install()
-    setGitHubTransport(faults)
-    // This run is the one that owns a real host, so it is the one that may use a real
-    // `git` — and only over the directory it just created. The fixture's interception
-    // refuses anything it has no harness to answer, which is what keeps a controlled run
-    // from ever leaving for github.com, and which would otherwise refuse this run's own
-    // first push. The claim is scoped rather than process-wide on purpose: the run needs
-    // its own workspace and its own foreign clone, and a claim over every git on the
-    // machine would be more than it asked for.
-    const liveTools = claimLiveGit(root)
-
-    // Everything past this point can create something. From here on, a failure is
-    // reported with what it left behind rather than as a bare refusal.
+    // What this run took, and what it found. `previousTransport` is absent until the
+    // transport is actually installed: an absent entry means this startup never got that
+    // far, and teardown must not put back something it never took.
+    const opened: {
+      root?: string
+      git?: IsolatedGitEnvironment
+      liveTools?: { release: () => void }
+      previousTransport?: GitHubTransport | null
+      installedTransport?: FaultInjectingTransport
+    } = {}
+    // Whether the request that can create something was actually sent. A refusal that
+    // happened before it — a reviewer credential that turned out to be the primary's own,
+    // an owner this token cannot create in — has nothing on the host to undo, and a
+    // rollback that reached for one would be asking a host about a repository nobody
+    // asked it to make.
+    let createAttempted = false
     try {
+      opened.root = await mkdtemp(join(tmpdir(), `git-stacks-live-${name}-`))
+      // Both credentials are pinned to this host's own endpoints and handed an
+      // environment that cannot widen where they may be sent. The application's transport
+      // reads its API base from the environment when it is not told one, and deliberately
+      // permits an environment-configured base to be the origin a supplied token goes to
+      // — which on a machine where that variable is set for development would send a real
+      // disposable-account credential to whatever host it names, on the first request.
+      const pinnedEnv = { ...process.env }
+      delete pinnedEnv.GIT_STACKS_GITHUB_API_URL
+      delete pinnedEnv.GH_TOKEN
+      delete pinnedEnv.GITHUB_TOKEN
+      delete pinnedEnv.GIT_STACKS_GITHUB_TOKEN
+      const pin = (token: string): DirectGitHubTransport =>
+        new DirectGitHubTransport({
+          token,
+          host: config.host,
+          apiUrl: config.apiUrl,
+          graphqlUrl: config.graphqlUrl,
+          env: pinnedEnv,
+        })
+      const productionTransport = pin(config.token)
+      const faults = new FaultInjectingTransport(productionTransport)
+      const remote = `https://${config.host}/${fullName}.git`
+      const git = await installIsolatedGitEnvironment({
+        home: opened.root,
+        author: AUTHOR,
+        // The credential rides in a header supplied to every Git this process starts, and
+        // never in the remote URL. A URL is read back by `git remote -v`, written into
+        // `.git/config`, copied into a diagnostic, and quoted by a person; a header
+        // scoped to this repository's URL is in none of them.
+        credentials: [{ url: remote, header: `AUTHORIZATION: basic ${basicAuth(config.token)}` }],
+      })
+      opened.git = git
+      git.install()
+      // Whatever this process was already using is taken rather than discarded: the
+      // run's own transport replaces it, and teardown puts the previous one back instead
+      // of clearing a slot this run never owned.
+      opened.previousTransport = setGitHubTransport(faults)
+      opened.installedTransport = faults
+      // This run is the one that owns a real host, so it is the one that may use a real
+      // `git` — and only over the directory it just created. The fixture's interception
+      // refuses anything it has no harness to answer, which is what keeps a controlled run
+      // from ever leaving for github.com, and which would otherwise refuse this run's own
+      // first push. The claim is scoped rather than process-wide on purpose: the run needs
+      // its own workspace and its own foreign clone, and a claim over every git on the
+      // machine would be more than it asked for. It can be refused — by a harness, or by
+      // another live run — and it is taken inside the guard for that reason: a refusal
+      // used to exit startup with the isolated environment and a live credential already
+      // installed and nothing left to put them back.
+      opened.liveTools = claimLiveGit(opened.root)
+
       const admin = new GitHubAdmin(faults, fullName, marker)
       // The owner is resolved against the credential before the first mutation, so an
       // owner the token cannot create in is refused rather than silently redirected to
       // the personal route, where it would create a repository under a different
       // account than the receipt would name.
       const primary = await admin.resolveOwner(config.owner)
+      // Both supplied credentials are identified, and proved to be two different
+      // accounts, before anything is recorded or any remote is changed. A reviewer
+      // credential that is blank, that answers no identity, or that is the primary's own
+      // is a misconfigured run — and finding that out after the receipt already names a
+      // repository means the cleanup that has to undo it is running through the very
+      // credentials the run has just refused to trust.
+      const reviewerFaults =
+        config.reviewerToken === null
+          ? null
+          : new FaultInjectingTransport(pin(config.reviewerToken))
+      const reviewerAdmin =
+        reviewerFaults === null ? null : new GitHubAdmin(reviewerFaults, fullName, marker)
+      const reviewerLogin = await resolveReviewerIdentity(reviewerAdmin, primary.login)
       // The creation is journalled, durably, before the request that creates it. A
       // repository whose response is lost is then a receipt entry the recovery command
       // can reconcile against the host, instead of a resource that exists on somebody's
@@ -1246,20 +1469,6 @@ export class GitHubLiveTarget extends DisposableTarget {
         pending: true,
         actor: primary.login,
       })
-      // Both supplied credentials are identified, and proved to be two different
-      // accounts, before anything is created or pushed. A reviewer credential that is
-      // blank, that answers no identity, or that is the primary's own is a
-      // misconfigured run — and discovering that after the repository exists and the
-      // clone has been seeded means the cleanup that has to undo it is running on
-      // credentials the run has just proved it cannot trust.
-      const reviewerFaults =
-        config.reviewerToken === null
-          ? null
-          : new FaultInjectingTransport(pin(config.reviewerToken))
-      const reviewerAdmin =
-        reviewerFaults === null ? null : new GitHubAdmin(reviewerFaults, fullName, marker)
-      const reviewerLogin = await resolveReviewerIdentity(reviewerAdmin, primary.login)
-
       // The branch this repository treats as its default is the host's own setting, read
       // out of the answer the host gave. The create endpoint takes no such parameter, so
       // there is nothing to ask for: every merge, ruleset and base-ref question below is
@@ -1268,6 +1477,7 @@ export class GitHubLiveTarget extends DisposableTarget {
       // repository has no evidence of having and then asking questions about it.
       let identity: LiveRepositoryIdentity
       let defaultBranch: string
+      createAttempted = true
       try {
         identity = await admin.createRepository({
           owner: config.owner,
@@ -1289,8 +1499,8 @@ export class GitHubLiveTarget extends DisposableTarget {
           throw error
         }
         const existing = await readRepositoryIdentity(admin, fullName, marker)
-        if (existing === null) throw error
-        identity = existing
+        if (existing.outcome !== 'present') throw error
+        identity = existing.identity
       }
       if (identity.defaultBranch === null) {
         throw new Error(
@@ -1300,15 +1510,18 @@ export class GitHubLiveTarget extends DisposableTarget {
       }
       defaultBranch = identity.defaultBranch
       // One entry for this handle. `confirm` completes the journal that was already
-      // written before the request; recording the same repository again would leave a
-      // second entry that every later update misses, and that stays outstanding for
-      // ever while the repository it names is deleted.
+      // written before the request and records the id the host named for it; recording
+      // the same repository again would leave a second entry that every later update
+      // misses, and that stays outstanding for ever while the repository it names is
+      // deleted. The id is the strongest thing the receipt holds about this repository,
+      // so it is written down here — before the seed, the push and the grant that can
+      // each fail afterwards — rather than left for a cleanup that may never arrive.
       ledger.confirm(fullName, identity.id)
       await ledger.flush()
 
       const workspace = await seedRemoteClone({
         fullName,
-        root,
+        root: opened.root,
         remote,
         defaultBranch,
         git: git.env,
@@ -1339,33 +1552,73 @@ export class GitHubLiveTarget extends DisposableTarget {
         reviewer,
         workspace,
         git,
-        root,
+        root: opened.root,
         reviewerAdmin,
         reviewerToken: config.reviewerToken,
         primaryToken: config.token,
-        liveTools,
+        liveTools: opened.liveTools,
+        previousTransport: opened.previousTransport ?? null,
+        installedTransport: faults,
       })
     } catch (error) {
-      throw await reportSetupFailure(error, ledger, git, { root }, liveTools, async () => {
-        // The remote side is only touched if this run can still prove the repository is
-        // its own; the local side and the process are restored regardless.
-        const admin = new GitHubAdmin(faults, fullName, marker)
+      throw await reportSetupFailure(error, ledger, opened, async () => {
+        // The remote side is only touched if this run actually sent the request that
+        // could have created something, and only if it can still prove the repository is
+        // its own. The local side and the process are restored either way.
+        if (!createAttempted) {
+          ledger.release(fullName)
+          await ledger.close()
+          return
+        }
+        // The credential this rollback would use is the one this run actually installed,
+        // read from the slot that records it rather than from a local that only exists on
+        // the path that got this far. A setup that failed before installing one has
+        // nothing to ask a host with, and says so rather than reaching for whatever
+        // happens to be in the process.
+        const installed = opened.installedTransport
+        if (installed === undefined) {
+          ledger.refuse(
+            fullName,
+            'this run installed no credential it could have asked about the repository with, so it is left standing',
+          )
+          await ledger.close()
+          return
+        }
+        const admin = new GitHubAdmin(installed, fullName, marker)
         try {
           // The repository is deleted only if a fresh read proves it is this run's: the
           // exact name this run asked for, the exact marker, and the id the host named
-          // for it when the creation was confirmed. A repository that cannot be proven
-          // is left standing and named in the receipt, which is recoverable; one that
-          // was somebody else's is gone for ever.
-          if ((await readRepositoryIdentity(admin, fullName, marker)) !== null) {
+          // for it when the creation was confirmed. The id is required rather than
+          // optional, because a name that has since been reused can carry a copied marker
+          // and a different id — and ordinary cleanup already refuses that repository,
+          // so a setup rollback that accepted it would delete exactly what cleanup
+          // exists to protect. A repository that cannot be proven is left standing and
+          // named in the receipt, which is recoverable; one that was somebody else's is
+          // gone for ever.
+          const recorded = ledger.list().find((entry) => entry.handle === fullName)?.remoteId
+          const outcome = await readRepositoryIdentity(
+            admin,
+            fullName,
+            marker,
+            typeof recorded === 'number' ? recorded : undefined,
+          )
+          if (outcome.outcome === 'present') {
             await admin.deleteRepository(fullName)
             ledger.release(fullName)
-          } else {
+          } else if (outcome.outcome === 'absent') {
+            ledger.release(fullName)
+          } else if (outcome.outcome === 'conflict') {
             ledger.refuse(fullName, "the repository could not be proven to be this run's")
+          } else {
+            ledger.refuse(
+              fullName,
+              `the host could not be asked whether it still holds it: ${outcome.reason}`,
+            )
           }
         } catch (cause) {
           ledger.refuse(
             fullName,
-            `the repository could not be removed: ${redact(cause instanceof Error ? cause.message : String(cause))}`,
+            `the repository could not be removed: ${redact(describeThrown(cause))}`,
           )
         }
         await ledger.close()
@@ -1409,9 +1662,18 @@ export class GitHubLiveTarget extends DisposableTarget {
     const admin = kind === 'fork' ? this.requireReviewerAdmin() : this.admin
     const suffix = kind === 'fork' ? '' : `-foreign-${this.runId}`
     const name = `${this.fullName.split('/')[1]}${suffix}`.slice(0, 100)
+    // One spelling for this subject in the receipt, and it is the one this run asked
+    // for rather than the one the host happened to answer with. A host may return a
+    // differently-cased name for the same repository, and a receipt that held both
+    // spellings would settle neither of them: `confirm` looks its handle up exactly, so
+    // confirming the returned spelling silently finds nothing and throws away the id the
+    // host just named, and the child handles prefixed with it would never match the
+    // repository they live in. Case-insensitivity belongs in the repository portion of a
+    // handle, never in a ref, which Git treats as case-sensitive.
+    const journalled = `${owner}/${name}`
     await this.ledger.intent({
       kind: 'repository',
-      handle: `${owner}/${name}`,
+      handle: journalled,
       marker: this.marker,
       createdAt: new Date().toISOString(),
       pending: true,
@@ -1429,15 +1691,16 @@ export class GitHubLiveTarget extends DisposableTarget {
             // back by the host; nothing here chooses one.
           })
     // One entry for this handle. `confirm` completes the journal written before the
-    // request, records the id the host named, and takes the pending flag off — so
-    // recording the same repository again here would leave a duplicate that every
-    // later update misses and that stays outstanding for ever.
-    this.ledger.confirm(identity.fullName, identity.id)
+    // request, records the id the host named, and takes the pending flag off — on the
+    // handle the journal already holds, not on the spelling the response came back in.
+    this.ledger.confirm(journalled, identity.id)
     const branch = 'git-stacks-live-e2e-foreign'
+    // The remote address is the host's own spelling, because that is the name Git and
+    // the host both resolve; the receipt keeps the one this run asked for.
     const remote = `https://${this.host.host}/${identity.fullName}.git`
     await this.ledger.intent({
       kind: 'branch',
-      handle: `${identity.fullName}#${branch}`,
+      handle: `${journalled}#${branch}`,
       marker: this.marker,
       createdAt: new Date().toISOString(),
       pending: true,
@@ -1466,8 +1729,12 @@ export class GitHubLiveTarget extends DisposableTarget {
       env: this.git.env,
     })
     await seedAndPush(clone, remote, branch, this.marker)
-    this.ledger.confirm(`${identity.fullName}#${branch}`)
+    this.ledger.confirm(`${journalled}#${branch}`)
     const openOn = kind === 'fork' ? this.fullName : identity.fullName
+    // Which repository the pull request lives in, as the receipt spells it. For a fork
+    // that is the repository it was forked from — this run's own — and for a second
+    // repository it is that subject, under the handle this run journalled.
+    const pullRequestRepository = kind === 'fork' ? this.fullName : journalled
     const head = kind === 'fork' ? `${identity.owner}:${branch}` : branch
     const pull = await this.admin.createPullRequest({
       fullName: openOn,
@@ -1485,7 +1752,7 @@ export class GitHubLiveTarget extends DisposableTarget {
     })
     this.ledger.record({
       kind: 'pull-request',
-      handle: `${openOn}#${pull.number}`,
+      handle: `${pullRequestRepository}#${pull.number}`,
       marker: this.marker,
       createdAt: new Date().toISOString(),
       actor: owner,
@@ -1520,17 +1787,35 @@ export class GitHubLiveTarget extends DisposableTarget {
   }
 
   /**
-   * The clone, the temporary directory, and the claim on the real `git` and `gh`.
+   * The clone, everything this run wrote under its own root, and the claim on the real
+   * `git` and `gh`.
    *
-   * Released by the guard whatever the host did, rather than after a successful
-   * deletion. Tying the local teardown to the remote answer meant a run whose deletion
-   * was refused kept a clone, a token-bearing Git configuration, and the run's claim on
-   * the real tools for as long as the process lived.
+   * Released whatever the host did, rather than after a successful deletion. Tying the
+   * local teardown to the remote answer meant a run whose deletion was refused kept a
+   * clone, a token-bearing Git configuration, and the run's claim on the real tools for
+   * as long as the process lived.
+   *
+   * Each is released on its own. A directory that will not delete is reported, and the
+   * claim is still given back: a claim this run holds after it has finished refuses
+   * every later run in this process, and keeps the real `git` authorised over a
+   * directory that belongs to no run at all.
    */
   protected async releaseLocal(): Promise<void> {
     this.workspaceInstance.close()
-    await rm(this.root, { recursive: true, force: true })
-    this.liveTools.release()
+    const failures: string[] = []
+    for (const release of [
+      () => removeOwnedRoot(this.root, this.receipt),
+      () => this.liveTools.release(),
+    ]) {
+      try {
+        await release()
+      } catch (error) {
+        failures.push(describeThrown(error))
+      }
+    }
+    if (failures.length > 0) {
+      throw new Error(`this run's local state was not fully released: ${failures.join('; ')}`)
+    }
   }
 }
 
@@ -1636,37 +1921,57 @@ async function grantReviewerAccess(input: {
 async function reportSetupFailure(
   error: unknown,
   ledger: ResourceLedger,
-  git: IsolatedGitEnvironment,
-  local: { readonly root: string },
-  liveTools: { release: () => void },
+  opened: {
+    readonly root?: string
+    readonly git?: IsolatedGitEnvironment
+    readonly liveTools?: { release: () => void }
+    readonly previousTransport?: GitHubTransport | null
+    readonly installedTransport?: GitHubTransport
+  },
   removeRemote: () => Promise<void>,
 ): Promise<LiveProvisioningFailure> {
-  // The remote side first, because that is the part somebody else can see. Whatever it
-  // could not remove is already in the receipt, so the local side being cleaned up
-  // afterwards cannot take the record of it with it.
-  await removeRemote().catch(() => undefined)
   // Every local claim this run made is given back, and none of them depends on another
   // having worked. The process keeps the real `git`, the real API base and this run's
-  // credentials — and holds the only claim on the real tools — unless all three of these
-  // run, which is exactly the case a failure part-way through startup is in. A restore
-  // that throws would skip the ones after it, so each is put back under its own guard
-  // and the first failure is carried on.
+  // credentials — and holds the only claim on the real tools — unless all of these run,
+  // which is exactly the case a failure part-way through startup is in. A restore that
+  // throws would skip the ones after it, so each is given back under its own guard and
+  // the first failure is carried on.
+  //
+  // Each step is taken only if this startup actually acquired it. A refusal before the
+  // claim was taken must not release a claim that belongs to the run that holds it, and
+  // a refusal before the transport was installed must not clear a transport this run
+  // never installed and could never put back.
   const teardown: unknown[] = []
   for (const give of [
-    () => rm(local.root, { recursive: true, force: true }),
-    () => liveTools.release(),
-    () => git.restore(),
+    () => releaseOwnedTransport(opened.installedTransport, opened.previousTransport ?? null),
+    opened.root === undefined
+      ? null
+      : () => rm(opened.root as string, { recursive: true, force: true }),
+    opened.liveTools === undefined ? null : () => opened.liveTools?.release(),
+    opened.git === undefined ? null : () => opened.git?.restore(),
   ]) {
+    if (give === null) continue
     try {
       await give()
     } catch (cause) {
       teardown.push(cause)
     }
   }
+  // The remote side goes last, because it is the part somebody else can see and the
+  // local releases above cannot take the record of it with it. What it could not remove
+  // is already written into the receipt.
+  try {
+    await removeRemote()
+  } catch (cause) {
+    teardown.push(cause)
+  }
+  for (const cause of teardown) {
+    ledger.noteLocalFailure(describeThrown(cause))
+  }
   const report = ledger.report()
   const standing = report.remaining
   const reasons = [error, ...teardown]
-    .map((reason) => (reason instanceof Error ? reason.message : String(reason)))
+    .map(describeThrown)
     // The refusal is written down and read by whoever has to clean up after this, so
     // it goes through the same redactor as everything else in the receipt: a lost
     // response is reported by the host as the body it sent back, and a token in a URL
@@ -1680,6 +1985,9 @@ async function reportSetupFailure(
         : [
             `${standing.length} resource(s) are still on the host and are named in the receipt: ${standing.join(', ')}`,
           ]),
+      ...(report.localFailures ?? []).map(
+        (failure) => `this run left local state behind: ${failure}`,
+      ),
     ].join('; '),
     report,
     ledger.receiptPath,
@@ -1687,20 +1995,73 @@ async function reportSetupFailure(
 }
 
 /**
- * A repository identity read back from the host, or null when it is not there.
+ * Puts the process-wide transport back, but only while this run is still the one holding it.
+ *
+ * The slot replaces rather than stacks, so there is exactly one value in it at a time and
+ * only its current holder may decide what it becomes next. Restoring unconditionally
+ * would mean a run that finished — or failed — after somebody else installed a transport
+ * of their own silently removed that transport, taking its credential with it and
+ * reporting a clean process while it did. So the restore is conditional on the slot still
+ * holding what this run installed, and a slot that has moved on is reported rather than
+ * overwritten.
+ *
+ * `installed` is absent when this run never installed one — it failed before reaching
+ * that step — and there is then nothing to restore and nothing to report.
+ */
+function releaseOwnedTransport(
+  installed: GitHubTransport | undefined,
+  previous: GitHubTransport | null,
+): void {
+  if (installed === undefined) return
+  if (installedGitHubTransport() !== installed) {
+    throw new Error(
+      'the installed transport was replaced by something else while this run held it, so it ' +
+        'was left alone rather than removed',
+    )
+  }
+  setGitHubTransport(previous)
+}
+
+/**
+ * What a read back from the host can establish about a repository this run asked for.
+ *
+ * The four answers are four different events and nothing about one of them implies
+ * another. `absent` is the host saying the name holds nothing. `conflict` is a
+ * repository standing at the name that does not carry this run's marker, or carries a
+ * different id than the one the host named when it was created — somebody else's, and
+ * still there. `unknown` is a read that could not be completed at all. Only `present`
+ * is this run's own.
+ *
+ * Collapsing the middle three into one "not found" is what let a pending creation whose
+ * answer was lost be released while a repository with a copied marker still stood: the
+ * receipt then said it was gone, the run reported a complete cleanup, and a later
+ * recovery skipped it for ever because `deletedAt` reads as "already removed".
+ */
+type RepositoryRead =
+  | { readonly outcome: 'present'; readonly identity: LiveRepositoryIdentity }
+  | { readonly outcome: 'absent' }
+  | { readonly outcome: 'conflict' }
+  | { readonly outcome: 'unknown'; readonly reason: string }
+
+/**
+ * A repository identity read back from the host, answered as one of four events.
  *
  * This is the reconciliation for a creation whose answer was lost, so it reads and
  * never re-sends the request that created it: "I did not hear back" is not evidence
  * that nothing happened, and creating a second repository is the one outcome that
- * deleting either of them cannot undo. A 404 is the host saying it does not have it,
- * which is an answer; any other failure is raised, because treating a refused read as
- * an absent repository would delete nothing while reporting that nothing was left.
+ * deleting either of them cannot undo.
+ *
+ * `recordedId` is what a confirmed creation is held to, and it is what turns a
+ * repository carrying a copied marker into a conflict rather than into this run's own.
+ * A creation that was never confirmed has no id, and is judged on its marker alone,
+ * which is the strongest thing the receipt can say about it.
  */
 async function readRepositoryIdentity(
   admin: LiveAdmin,
   fullName: string,
   marker: string,
-): Promise<LiveRepositoryIdentity | null> {
+  recordedId?: number,
+): Promise<RepositoryRead> {
   try {
     const repository = await admin.readRepository(fullName)
     // A name is not a proof. This read is the answer to "did my lost POST create
@@ -1709,22 +2070,25 @@ async function readRepositoryIdentity(
     // the marker is matched whole rather than as a substring — a description that
     // mentions this run's marker while belonging to somebody else is still somebody
     // else's repository, and seeding it is the one thing a run must never do.
-    if (!ownsCreatedResource(repository, marker)) return null
+    if (!ownsCreatedResource(repository, marker, recordedId)) return { outcome: 'conflict' }
     return {
-      id: typeof repository.id === 'number' ? repository.id : 0,
-      fullName,
-      defaultBranch: repository.default_branch ?? null,
-      owner: repository.owner?.login ?? fullName.split('/')[0] ?? '',
-      ownerKind: repository.owner?.type === 'Organization' ? 'organization' : 'user',
+      outcome: 'present',
+      identity: {
+        id: typeof repository.id === 'number' ? repository.id : 0,
+        fullName,
+        defaultBranch: repository.default_branch ?? null,
+        owner: repository.owner?.login ?? fullName.split('/')[0] ?? '',
+        ownerKind: repository.owner?.type === 'Organization' ? 'organization' : 'user',
+      },
     }
   } catch (error) {
     if (
       error instanceof GitHubTransportError &&
       (error.status === 404 || error.kind === 'not-found')
     ) {
-      return null
+      return { outcome: 'absent' }
     }
-    throw error
+    return { outcome: 'unknown', reason: describeThrown(error) }
   }
 }
 
@@ -1840,6 +2204,31 @@ async function seedRemoteClone(input: {
 }
 
 /**
+ * Removes everything this run put under its own root, except the receipt.
+ *
+ * The receipt is the one file that has to survive. It is what the workflow publishes as
+ * an artifact and what an operator is told to point a recovery run at, so removing the
+ * root wholesale would delete the record of what a failed run left behind at the exact
+ * moment it was needed.
+ *
+ * Everything else under it goes: the clone, the bare repository, both foreign bares, the
+ * isolated Git home and template, and the configuration those hold with an
+ * `AUTHORIZATION` header for a live account in it. A temporary directory left behind is
+ * readable by whatever runs on this machine next, so "the root is still there" is not a
+ * state a run that reports a complete cleanup may be in. Removal is per entry rather
+ * than one recursive delete so the receipt is never caught by it, and so the paths are
+ * compared as resolved paths rather than as strings.
+ */
+async function removeOwnedRoot(root: string, receipt: string): Promise<void> {
+  const keep = resolve(receipt)
+  for (const name of await readdir(root)) {
+    const candidate = join(root, name)
+    if (resolve(candidate) === keep) continue
+    await rm(candidate, { recursive: true, force: true })
+  }
+}
+
+/**
  * The header value that authorizes Git against the repository, as base64.
  *
  * GitHub's documented form for a personal access token over HTTPS is the token as a
@@ -1851,7 +2240,7 @@ function basicAuth(token: string): string {
 }
 
 /** A short suffix, so two runs on one machine never name a repository the same. */
-function newRunSuffix(): string {
+export function newRunSuffix(): string {
   return `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`
 }
 
@@ -1888,23 +2277,41 @@ async function authorizeControlledGit(
   // plain comparison and not a guess about suffixes.
   const primary = relative(harness.projectsRoot, harness.bare).replace(/\.git$/u, '')
   if (fullName.toLowerCase() === primary.toLowerCase()) {
-    // Written by the account this run itself created the repository as, which is not
-    // the repository's `owner` field: a disposable repository under an organization is
+    // The account that created it administers it, and that account is not the
+    // repository's `owner` field: a disposable repository under an organization is
     // owned by the organization and created by a user credential that administers it.
-    // Comparing against the owner refuses the one account that is meant to be able to
-    // push to it; comparing against a login would admit any credential minted for that
-    // name. The grant that matters here is the one this run made, so it is compared
-    // against the credential that made it.
-    return token === harness.primaryToken
-      ? { login: actor.login }
-      : { status: 403, message: `${actor.login} did not create ${fullName}\n` }
+    // So the grant that matters is the one this run actually made — the credential the
+    // run created the repository with, plus whatever this run has since granted an
+    // account on it.
+    if (token === harness.primaryToken) return { login: actor.login }
+    // Everything below is the same grant the API surface enforces for a repository the
+    // registry does hold, and it is asked the same way: who is this credential, and
+    // what role does that account hold here. Equating permission with having created
+    // the repository would answer 403 to the reviewer's own valid credential on a
+    // repository this run invited it into and verified a push role on — the run's own
+    // grant, enforced by a rule that had forgotten it made one.
+    const held = state.repository?.permissions?.[actor.login.toLowerCase()]
+    if (held === undefined) {
+      return { status: 403, message: `${actor.login} has not been given access here\n` }
+    }
+    if (!WRITING_ROLES[held]) {
+      return { status: 403, message: `${actor.login} holds ${held} here, which cannot write\n` }
+    }
+    return { login: actor.login }
   }
   const registry = (state.repositories ?? []).find(
     (entry) => entry.fullName.toLowerCase() === fullName.toLowerCase(),
   )
   if (!registry) return { status: 404, message: 'this host has no such repository\n' }
   if (registry.private === false) return { login: actor.login }
-  const held = registry.permissions?.[actor.login]
+  // The same map, looked up the same way, for a repository in the registry: keys are
+  // matched case-insensitively because an account's login is spelled the way its owner
+  // spelled it and a permission map is keyed the way the grant was recorded. Refusing a
+  // reviewer over the capitalisation of a login would make the answer a fact about the
+  // spelling rather than about the role.
+  const held = Object.entries(registry.permissions ?? {}).find(
+    ([login]) => login.toLowerCase() === actor.login.toLowerCase(),
+  )?.[1]
   if (held === undefined) {
     return { status: 403, message: `${actor.login} has not been given access here\n` }
   }
@@ -1922,7 +2329,7 @@ async function authorizeControlledGit(
  * failure of this run's own configuration — the host is expected to say 401 and let
  * Git answer with one.
  */
-async function authorizeGitFor(
+export async function authorizeGitFor(
   harness: GitHubHarness,
   fullName: string,
   authorization: string | undefined,

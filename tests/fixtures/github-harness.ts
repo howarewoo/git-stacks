@@ -1,9 +1,9 @@
 import { randomUUID } from 'node:crypto'
-import { accessSync, constants as fsConstants, statSync } from 'node:fs'
+import { accessSync, constants as fsConstants, realpathSync, statSync } from 'node:fs'
 import { mkdtemp, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { createRequire, syncBuiltinESMExports } from 'node:module'
 import { tmpdir } from 'node:os'
-import { basename, delimiter, dirname, join, resolve, sep } from 'node:path'
+import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { promisify } from 'node:util'
 import type {
   execFileSync as execFileSyncFunction,
@@ -132,10 +132,27 @@ const githubCliFixture = nodeRequire('./github-cli.cjs') as GitHubCliFixture
 interface ActiveHarness {
   realGit: string
   barePath: string
+  confinedRoot: string | null
   statePath: string
   transportLog: string
   overrides: GitOverride[]
   pushHooks: GitPushHook[]
+  /**
+   * Clone URLs this run's own host serves, registered once the host is up.
+   *
+   * A controlled run's scenarios ask for the URL its real TLS host answers on, not the
+   * apparent `github.com` spelling, so the transport rule has to be told which URLs are
+   * this run's rather than inferring it from the shape of the address.
+   */
+  ownedRemotes: Set<string>
+  /**
+   * How this run's host spells a repository's clone URL, once it is known.
+   *
+   * Set by the controlled target as soon as its host answers. The harness cannot derive
+   * it — the authority belongs to the host — but it knows which repositories it creates,
+   * so it registers each one here rather than leaving a fork's remote unanswerable.
+   */
+  cloneUrlFor: ((fullName: string) => string) | null
 }
 
 type ExecFileDone = (error: Error | null, stdout: string, stderr: string) => void
@@ -155,7 +172,7 @@ interface ExecFileBoundary {
   [promisify.custom]: (
     file: string,
     args: readonly string[],
-    options: ExecFileOptions,
+    options?: ExecFileOptions,
   ) => Promise<{ stdout: string; stderr: string }>
 }
 
@@ -182,6 +199,12 @@ interface GitTransportFixture {
     barePath: string
     logPath: string
     cwd: string
+    /**
+     * The clone URLs this run's own host serves. An exact match is answered by the host
+     * over its own verified connection; anything else is refused, so the rule cannot be
+     * widened into "any `https` address".
+     */
+    ownedRemotes?: readonly string[]
   }): { ok: true; args: string[] } | { ok: false; refused: string }
 }
 
@@ -611,6 +634,16 @@ export interface GitHubHarness {
    */
   readonly projectsRoot: string
   /**
+   * Teaches the harness how this run's host spells a clone URL, so every repository it
+   * creates from here on is registered as it is created.
+   *
+   * One call rather than a registration per repository: the host owns the spelling and
+   * the harness owns the names, and neither can derive the other's. Registering by hand
+   * would leave a fork made mid-scenario unregistered, which is how a scenario's own
+   * remote comes to be refused by the very rule that exists to protect it.
+   */
+  serveClonesFor(cloneUrl: (fullName: string) => string): void
+  /**
    * Adds an account and mints the only credential that authenticates it. The token is
    * generated for this run, is never a real credential, and is the only one that resolves
    * to this login.
@@ -726,31 +759,50 @@ let liveGit: { root: string } | null = null
 /**
  * Whether a repository path lies inside the root this live run created.
  *
- * A prefix comparison on the string would be wrong in the way these things always are:
- * a root ending in `run-1` would claim `run-12`. The resolved paths are compared as
- * paths, so only a real descendant counts.
+ * Canonical filesystem paths account for platform aliases and symlinks. Comparing
+ * descendants at a separator boundary excludes look-alike sibling names.
  */
 function insideRoot(root: string, candidate: string): boolean {
-  const from = resolve(root)
-  const to = resolve(candidate)
+  const from = realpathSync(root)
+  const to = realpathSync(candidate)
   return to === from || to.startsWith(from.endsWith(sep) ? from : `${from}${sep}`)
 }
 
-/**
- * The directory a `git` command would act on, as the caller named it.
- *
- * `-C <path>` is the form the run's own workspace uses, and it comes before anything
- * else on the command line, so it is read first. An explicit `cwd` in the options is
- * next, because that is where the child would start. With neither, the command acts on
- * this process's directory, which is what `process.cwd()` reports and what the claim
- * is then measured against.
- */
-function targetDirectory(args: readonly string[], options: ExecFileOptions): string {
-  const index = args.indexOf('-C')
-  if (index !== -1 && typeof args[index + 1] === 'string') return args[index + 1]
-  const fromArgs = args.indexOf('--git-dir')
-  if (fromArgs !== -1 && typeof args[fromArgs + 1] === 'string') return args[fromArgs + 1]
-  return typeof options.cwd === 'string' ? options.cwd : process.cwd()
+/** Resolves supported Git directory selectors against the child's starting directory. */
+function targetDirectories(args: readonly string[], options: ExecFileOptions): string[] {
+  if (options.cwd !== undefined && typeof options.cwd !== 'string') {
+    throw new Error('a non-string git working directory cannot be checked against a claimed root')
+  }
+  const cwd = realpathSync(options.cwd ?? process.cwd())
+  const directories: string[] = []
+  for (let index = 0; index < args.length; index += 1) {
+    const token = args[index]
+    if (!token.startsWith('-')) break
+    if (token === '-c' || token === '--config-env') {
+      if (args[++index] === undefined) throw new Error('a git configuration option needs a value')
+      continue
+    }
+    let directory: string | undefined
+    if (token === '-C' || token === '--git-dir') {
+      directory = args[++index]
+      if (directory === undefined) throw new Error('a git directory selector needs a value')
+    } else if (token.startsWith('--git-dir=')) {
+      directory = token.slice('--git-dir='.length)
+    } else if (token.startsWith('-C') && token.length > 2) {
+      directory = token.slice(2)
+    } else if (token === '--work-tree' || token.startsWith('--work-tree=') || token === '--bare') {
+      throw new Error(
+        'an unsupported git directory selector cannot be checked against a claimed root',
+      )
+    }
+    if (directory !== undefined) {
+      directories.push(realpathSync(isAbsolute(directory) ? directory : `${cwd}${sep}${directory}`))
+    }
+  }
+  if (directories.length > 1) {
+    throw new Error('a git command with multiple directory selectors is refused')
+  }
+  return [cwd, ...directories]
 }
 
 /**
@@ -833,7 +885,28 @@ async function runGitFixture(
   options: ExecFileOptions,
 ): Promise<{ stdout: string; stderr: string }> {
   const argv = [...args]
-  const { repository, args: rest } = withoutRepository(argv)
+  // A confined run supplies the child's default context, never the ambient checkout.
+  // Explicit cwd values remain authoritative and must pass confinement below.
+  if (harness.confinedRoot !== null && options.cwd === undefined) {
+    options = { ...options, cwd: harness.confinedRoot }
+  }
+  if (harness.confinedRoot !== null) {
+    try {
+      const root = harness.confinedRoot
+      const directories = targetDirectories(argv, options)
+      if (!directories.every((directory) => insideRoot(root, directory))) {
+        throw new Error('the git command acts outside the controlled run root')
+      }
+    } catch (error) {
+      throw commandError(
+        file,
+        argv,
+        2,
+        `${error instanceof Error ? error.message : String(error)}\n`,
+      )
+    }
+  }
+  const { args: rest } = withoutRepository(argv)
   const override = harness.overrides.find((entry) => entry.match(rest))
   if (override) return { stdout: override.run(rest), stderr: '' }
   const hook = claimedPushHook(harness, argv)
@@ -843,9 +916,10 @@ async function runGitFixture(
     barePath: harness.barePath,
     logPath: harness.transportLog,
     cwd: typeof options.cwd === 'string' ? options.cwd : process.cwd(),
+    ownedRemotes: [...harness.ownedRemotes],
   })
   if (!plan.ok) throw commandError(file, argv, 2, `${plan.refused}\n`)
-  const command = repository ? ['-C', repository, ...plan.args] : plan.args
+  const command = plan.args
   const result = await realPromisifiedExecFile(harness.realGit, command, options)
   runHookStep(hook, 'after', file, argv)
   return result
@@ -905,7 +979,7 @@ function runGhFixture(
 function runFixtureCommand(
   file: string,
   args: readonly string[],
-  options: ExecFileOptions,
+  options: ExecFileOptions = {},
 ): Promise<{ stdout: string; stderr: string }> {
   const harness = active
   const command = commandName(file)
@@ -920,8 +994,21 @@ function runFixtureCommand(
       // through an explicit transport, and a claim that let `gh` through would be a claim
       // on the installed credential tooling that no caller needs.
       if (command === 'git' && liveGit !== null) {
-        const directory = targetDirectory(args, options)
-        if (insideRoot(liveGit.root, directory)) {
+        if (options.cwd === undefined) options = { ...options, cwd: liveGit.root }
+        let directories: string[]
+        try {
+          directories = targetDirectories(args, options)
+        } catch (error) {
+          return Promise.reject(
+            commandError(
+              file,
+              args,
+              2,
+              `${error instanceof Error ? error.message : String(error)}\n`,
+            ),
+          )
+        }
+        if (directories.every((directory) => insideRoot(liveGit?.root ?? '', directory))) {
           return realPromisifiedExecFile(file, args, options)
         }
         return Promise.reject(
@@ -929,7 +1016,7 @@ function runFixtureCommand(
             file,
             args,
             2,
-            `a live run claimed a real git for ${liveGit.root}, and ${directory} is not inside it\n`,
+            `a live run claimed a real git for ${liveGit.root}, and ${directories.join(', ')} is not inside it\n`,
           ),
         )
       }
@@ -961,11 +1048,22 @@ childProcess.execFile = Object.assign(
       //
       // `gh` is refused outright: nothing in the live path reaches for it, so there is
       // no request on this boundary that ought to be let past. A `git` is let past only
-      // inside the directory a live run claimed.
-      const passes =
-        command === 'git' &&
-        liveGit !== null &&
-        insideRoot(liveGit.root, targetDirectory(args ?? [], options ?? {}))
+      // inside the directory a live run claimed — measured the same way the promisified
+      // boundary measures it, including refusing a command this cannot evaluate rather
+      // than guessing at it.
+      let passes = command === 'git' && liveGit !== null
+      if (passes && options?.cwd === undefined) {
+        options = { ...options, cwd: liveGit?.root }
+      }
+      if (passes) {
+        try {
+          passes = targetDirectories(args ?? [], options ?? {}).every((directory) =>
+            insideRoot(liveGit?.root ?? '', directory),
+          )
+        } catch {
+          passes = false
+        }
+      }
       if (!passes) {
         throw new Error(
           `The GitHub harness answers ${file} only through the promisified execFile boundary`,
@@ -1133,6 +1231,8 @@ export interface GitHubHarnessOptions {
   readonly defaultBranch?: string
   /** Whether to keep the root directory when closing the harness. */
   readonly preserveRoot?: boolean
+  /** Opts a controlled live run into Git directory confinement; ordinary fixtures remain unrestricted. */
+  readonly confineGitToRoot?: boolean
 }
 
 export async function createGitHubHarness(
@@ -1207,10 +1307,13 @@ export async function createGitHubHarness(
     const fixture: ActiveHarness = {
       realGit,
       barePath: bare,
+      confinedRoot: options.confineGitToRoot === true ? resolve(root) : null,
       statePath,
       transportLog,
       overrides: [],
       pushHooks: [],
+      ownedRemotes: new Set<string>(),
+      cloneUrlFor: null,
     }
     active = fixture
 
@@ -1266,6 +1369,15 @@ export async function createGitHubHarness(
       projectsRoot,
       env,
       ownedEnvironment,
+      serveClonesFor(cloneUrl) {
+        fixture.cloneUrlFor = cloneUrl
+        // The primary repository predates this harness and is never created through it, so
+        // `createRepository` does not register it. Its name is read off the bare the host
+        // serves it from — the way the host itself resolves the path — rather than off a
+        // configured spelling that could disagree with what is actually on disk.
+        const served = relative(projectsRoot, bare).replace(/\.git$/u, '')
+        fixture.ownedRemotes.add(cloneUrl(served))
+      },
       overrideGit(override) {
         fixture.overrides.unshift(override)
       },
@@ -1372,6 +1484,13 @@ export async function createGitHubHarness(
           pulls: { prs: [], comments: {}, stacks: [], issues: [], nextNumber: 1, nextCommentId: 1 },
         }
         registry.push(repository)
+        // A fork or a foreign subject is served from this run's own host, so its clone
+        // URL is this run's own too. Registered here, where the repository exists and
+        // its name is settled, and as that one exact URL — so nothing else on this host
+        // becomes answerable by association with a repository created here.
+        if (fixture.cloneUrlFor !== null) {
+          fixture.ownedRemotes.add(fixture.cloneUrlFor(input.fullName))
+        }
         await writeFixtureState(state)
         return repository
       },

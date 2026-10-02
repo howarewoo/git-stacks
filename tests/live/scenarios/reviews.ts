@@ -172,9 +172,18 @@ export const reviewScenarios: readonly LiveScenario[] = [
       // earlier reviews that the review this case loses is not on the first page it is sent
       // for: a reader that never follows the host's next link finds nothing and reports the
       // write as undelivered, leaving the comment to be sent a second time on the next
-      // attempt. These are real reviews on the host, written through the documented
-      // endpoint, and none of them carries a comment.
+      // attempt. The first review carries 100 comments so that the pull request's
+      // review comments endpoint (/pulls/${number}/comments) has an entire 100-entry
+      // page of comments before the review this case loses is sent. Reconciling the
+      // lost review therefore has to follow the next link to page 2 of comments as well
+      // as page 2 of reviews: a reader that paginated only reviews and read only page one
+      // of comments would find zero comments for this review and conclude it was never posted.
       const page = 100
+      const fillerComments = Array.from({ length: page }, (_, at) => ({
+        path: REVIEW_FILE,
+        line: 1,
+        body: `Filler review comment ${at} to fill page 1 of comments`,
+      }))
       for (let at = 0; at < page; at += 1) {
         const written = await ctx.transport.rest<{ id?: number }>({
           method: 'POST',
@@ -183,6 +192,7 @@ export const reviewScenarios: readonly LiveScenario[] = [
             body: `A review that only makes the history longer. ${at}`,
             event: 'COMMENT',
             commit_id: layer.headSha,
+            ...(at === 0 ? { comments: fillerComments } : {}),
           },
         })
         assert(
@@ -259,16 +269,19 @@ export const reviewScenarios: readonly LiveScenario[] = [
         `the reconciled review is attributed to ${String(recorded.user?.login)} rather than to this account`,
       )
 
+      // The comment of the reconciled review must be found on page 2 of the comments
+      // endpoint, proving that the reconciliation walked past the 100 filler comments on
+      // page one to find the comment that settled this review.
       const comments = await ctx.transport.rest<{ id?: unknown; body?: unknown }[]>({
         method: 'GET',
-        path: `repos/${ctx.repository}/pulls/${layer.number}/comments`,
+        path: `repos/${ctx.repository}/pulls/${layer.number}/comments?per_page=${page}&page=2`,
       })
       const carried = (Array.isArray(comments.data) ? comments.data : []).filter(
         (comment) => comment.body === drafts[0]?.body,
       )
       assert(
         carried.length === 1,
-        `the host holds ${carried.length} copies of the reconciled review's comment, not 1`,
+        `the host holds ${carried.length} copies of the reconciled review's comment on page 2, not 1`,
       )
       ctx.log(
         `review #${recorded.id} was reconciled from the page after ${page} earlier reviews, with one comment and no duplicate`,
@@ -461,6 +474,76 @@ export const reviewScenarios: readonly LiveScenario[] = [
         'the approving account does not read back as the author of its own approval',
       )
       ctx.log(`#${layer.number} approved by ${reviewer.login}`)
+    },
+  },
+  {
+    id: 'reviews/comment-on-renamed-file',
+    title: 'a review comment anchors on a file the pull request renamed',
+    requires: ['reviewThreads'],
+    async run(ctx) {
+      const prefix = 'review-renamed'
+      const originalFile = `${prefix}-original.txt`
+      const renamedFile = `${prefix}-renamed.txt`
+      await pushCommit(ctx.workspace, {
+        branch: `${prefix}-base`,
+        parent: `origin/${ctx.target.defaultBranch}`,
+        file: originalFile,
+        contents: 'line 1\nline 2\nline 3\n',
+        message: `${prefix}: create base file`,
+      })
+      await ctx.workspace.push(`${prefix}-base`)
+
+      ctx.workspace.git(['checkout', '-b', `${prefix}-layer`, `${prefix}-base`])
+      ctx.workspace.git(['mv', originalFile, renamedFile])
+      await ctx.workspace.commit(
+        renamedFile,
+        'line 1\nline 2 edited\nline 3\n',
+        `${prefix}: rename and edit`,
+      )
+      await ctx.workspace.push(`${prefix}-layer`)
+
+      const pull = await ctx.admin.createPullRequest({
+        fullName: ctx.repository,
+        head: `${prefix}-layer`,
+        base: `${prefix}-base`,
+        title: `${prefix}: renamed file review`,
+        body: 'A pull request with a renamed file.',
+      })
+
+      const remote = await originRemote(ctx.workspace.path)
+      const files = await readReviewFilesFrom(remote, pull.number)
+      const renamedEntry = files.files.find((f) => f.path === renamedFile)
+      assert(renamedEntry !== undefined, `renamed file ${renamedFile} not found in review files`)
+      assert(
+        renamedEntry.status === 'renamed',
+        `status is ${renamedEntry.status} rather than renamed`,
+      )
+      assert(
+        renamedEntry.previousPath === originalFile,
+        `previousPath is ${String(renamedEntry.previousPath)} rather than ${originalFile}`,
+      )
+
+      const draft = anchorsFrom(files, renamedFile)[0]
+      const result = await submitReview(ctx.workspace.path, pull.number, {
+        event: 'COMMENT',
+        body: 'Reviewing a renamed file.',
+        drafts: [draft],
+        comparison: files.comparison,
+      })
+      assert(
+        result.state === 'COMMENTED',
+        `the host recorded the review as ${result.state} rather than COMMENTED`,
+      )
+
+      const thread = await firstThread(ctx, pull.number)
+      assert(
+        thread.path === renamedFile,
+        `the thread is on ${thread.path}, not the renamed file ${renamedFile}`,
+      )
+      assert(thread.comments.length === 1, `the thread holds ${thread.comments.length} comments`)
+      ctx.log(
+        `comment on renamed file ${renamedFile} (previous ${originalFile}) submitted and verified on host`,
+      )
     },
   },
 ]

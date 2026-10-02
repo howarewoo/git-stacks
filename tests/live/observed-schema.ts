@@ -14,6 +14,14 @@ import { anchorsFrom } from './scenario'
  * These are the reads the product actually makes, not a survey of GitHub. A field
  * that no parser reads cannot break a merge, and pinning it would only make the
  * fixture churn on every unrelated addition upstream.
+ *
+ * Every probe here is a REST request, and the pull request list the window opens on
+ * is not one of them: the product reads pull requests through GraphQL, and no
+ * authorized read of that response has been recorded, so the contract below does not
+ * cover it. The REST pull request probes are not a substitute for it — they are the
+ * reads the native-stack reader and the checks reader make — and nothing here should
+ * be read as evidence about a GraphQL field. Recording that gap is the honest state
+ * of it: an unobserved shape is named, not pinned as though it had been seen.
  */
 export interface SchemaProbe {
   readonly id: string
@@ -36,21 +44,28 @@ export interface SchemaProbe {
    */
   readonly unpinned?: readonly { readonly path: string; readonly reason: string }[]
   /**
-   * The forms a parser reads for a field that may legitimately be absent, and the
-   * forms it reads when the field is there.
+   * The forms a consumer of this response can read, for every path in `dependsOn`.
    *
-   * `null` is the documented alternative for every path listed here, so the list
-   * holds the remaining forms the parser can use. Declaring it is what lets the
-   * comparison tell three things apart that look identical in a type list: a
-   * collection whose rows happened to hold the null form is a valid answer, a
-   * form the parser has no reader for is drift even when the union still contains
-   * a form it can read, and a field that answers `null` where the committed
-   * contract recorded a value is narrowing, not a field that stopped answering.
+   * A list of types is not a set of answers the product can choose from; it is a set
+   * it has to survive. A form outside this list is one no reader in the product has,
+   * so a host answering it beside a form the product does read is breaking drift even
+   * though every type the committed contract pinned is still present. That is as true
+   * of a field that is never null as of one that is, which is why the whole contract
+   * declares this rather than only the fields that may be absent: a stack member whose
+   * number or head cannot be read is a member the reader rebuilds with the wrong
+   * identity, not one it leaves out.
    *
-   * A path that is not listed is never null for its consumer, so nothing is
-   * inferred for it.
+   * `null` is one of the forms wherever GitHub documents an absence a parser already
+   * handles — rows that are all outdated, a run still in progress, a patch the host
+   * declined to return. A field that then answers only `null` has narrowed rather than
+   * stopped answering, and only there is losing its other forms a narrow answer
+   * instead of drift.
+   *
+   * A path no parser in the product reads is listed with the forms GitHub documents for
+   * it, so an answer nobody can consume is reported there rather than accepted because
+   * nothing happens to look at it.
    */
-  readonly nullable?: Readonly<Record<string, readonly string[]>>
+  readonly readable: Readonly<Record<string, readonly string[]>>
 }
 
 export const SCHEMA_PROBES: readonly SchemaProbe[] = [
@@ -68,6 +83,16 @@ export const SCHEMA_PROBES: readonly SchemaProbe[] = [
       // be a contract no repository on the host can satisfy.
       'topics',
     ],
+    readable: {
+      full_name: ['string'],
+      // A repository with no commits has no default branch at all, and the reader
+      // treats that as empty rather than as a branch called `main`.
+      default_branch: ['string', 'null'],
+      description: ['string', 'null'],
+      'permissions.admin': ['boolean'],
+      'permissions.push': ['boolean'],
+      topics: ['array'],
+    },
   },
   {
     id: 'pull-request',
@@ -85,6 +110,21 @@ export const SCHEMA_PROBES: readonly SchemaProbe[] = [
       'mergeable_state',
       'merged',
     ],
+    readable: {
+      number: ['number'],
+      state: ['string'],
+      title: ['string'],
+      draft: ['boolean'],
+      'base.ref': ['string'],
+      'base.sha': ['string'],
+      'head.ref': ['string'],
+      'head.sha': ['string'],
+      'head.repo.full_name': ['string'],
+      // GitHub answers `null` while it is still working out whether the pull request
+      // can merge, and no product parser reads either form of it.
+      mergeable_state: ['string', 'null'],
+      merged: ['boolean'],
+    },
   },
   {
     id: 'pull-request-comments',
@@ -122,18 +162,35 @@ export const SCHEMA_PROBES: readonly SchemaProbe[] = [
     // reconciliation skips it. `start_line` and `start_side` are null for a comment on a
     // single line and carry a number and a side for a range. All four are documented
     // absences the parsers already read, so a collection that holds only the null form of
-    // one of them is a valid answer rather than a lost field.
-    nullable: {
-      '[].line': ['number'],
-      '[].pull_request_review_id': ['number'],
-      '[].start_line': ['number'],
-      '[].start_side': ['string'],
+    // one of them is a valid answer rather than a lost field. The identity and the anchor
+    // fields beside them are read the same way on every comment, so a form no reader has
+    // is drift on those too.
+    readable: {
+      '[].id': ['number'],
+      '[].body': ['string'],
+      '[].path': ['string'],
+      '[].commit_id': ['string'],
+      '[].user.login': ['string'],
+      '[].created_at': ['string'],
+      '[].pull_request_review_id': ['number', 'null'],
+      '[].line': ['number', 'null'],
+      '[].side': ['string'],
+      '[].start_line': ['number', 'null'],
+      '[].start_side': ['string', 'null'],
     },
   },
   {
     id: 'pull-request-reviews',
     request: { method: 'GET', path: 'repos/{owner}/{repository}/pulls/{number}/reviews' },
     dependsOn: ['[].id', '[].state', '[].body', '[].commit_id', '[].user.login', '[].submitted_at'],
+    readable: {
+      '[].id': ['number'],
+      '[].state': ['string'],
+      '[].body': ['string'],
+      '[].commit_id': ['string'],
+      '[].user.login': ['string'],
+      '[].submitted_at': ['string'],
+    },
   },
   {
     id: 'check-runs',
@@ -154,12 +211,20 @@ export const SCHEMA_PROBES: readonly SchemaProbe[] = [
     ],
     // GitHub fills `conclusion` in only once a run is completed, so an in-progress run
     // answers `null` there and the rollup reads the run as still running.
-    nullable: { 'check_runs[].conclusion': ['string'] },
+    readable: {
+      total_count: ['number'],
+      'check_runs[].id': ['number'],
+      'check_runs[].name': ['string'],
+      'check_runs[].status': ['string'],
+      'check_runs[].conclusion': ['string', 'null'],
+      'check_runs[].app.id': ['number'],
+    },
   },
   {
     id: 'combined-status',
     request: { method: 'GET', path: 'repos/{owner}/{repository}/commits/{sha}/status' },
     dependsOn: ['state', 'total_count'],
+    readable: { state: ['string'], total_count: ['number'] },
     unpinned: [
       {
         path: 'statuses[]',
@@ -191,6 +256,17 @@ export const SCHEMA_PROBES: readonly SchemaProbe[] = [
       '[].patch',
       '[].sha',
     ],
+    readable: {
+      '[].filename': ['string'],
+      '[].status': ['string'],
+      '[].additions': ['number'],
+      '[].deletions': ['number'],
+      '[].changes': ['number'],
+      // A binary or too-large change is answered without a patch, and the reader
+      // reports that as unreadable rather than as an empty diff.
+      '[].patch': ['string', 'null'],
+      '[].sha': ['string'],
+    },
     unpinned: [
       {
         path: '[].previous_filename',
@@ -223,6 +299,20 @@ export const SCHEMA_PROBES: readonly SchemaProbe[] = [
       '[].pull_requests[].state',
       '[].pull_requests[].draft',
     ],
+    readable: {
+      '[].number': ['number'],
+      '[].node_id': ['string'],
+      '[].base.ref': ['string'],
+      '[].open': ['boolean'],
+      // A member's number is that pull request's own identity, and a member whose head
+      // cannot be read is a chain the reader cannot rebuild: both are values the parser
+      // substitutes rather than drops, so no other form of them is readable.
+      '[].pull_requests[].number': ['number'],
+      '[].pull_requests[].head.ref': ['string'],
+      '[].pull_requests[].head.sha': ['string'],
+      '[].pull_requests[].state': ['string'],
+      '[].pull_requests[].draft': ['boolean'],
+    },
     unpinned: [
       {
         path: '[].pull_requests[].merged_at',
@@ -487,7 +577,11 @@ const BREAKING_KINDS: Record<SchemaDrift['kind'], boolean> = {
  * direction, and the third thing a type list alone cannot show: a host that
  * answers a form the parser has no reader for is drift even when the same field
  * also answered a form it does, so a union that still holds the old type does not
- * excuse an added one.
+ * excuse an added one. That question is asked of every field a parser depends on,
+ * and not only of the ones that may be null: a pull request number or a stack
+ * member's head answered as something the reader cannot use is substituted with a
+ * default rather than dropped, so a union that still holds the number keeps the
+ * identity wrong without reporting anything at all.
  */
 export function compareSchemas(expected: ObservedSchema, observed: ObservedSchema): SchemaDrift[] {
   const drift: SchemaDrift[] = []
@@ -510,21 +604,25 @@ export function compareSchemas(expected: ObservedSchema, observed: ObservedSchem
         })
         continue
       }
-      const readable = probe.nullable?.[path]
+      // Every form this field answered has to be one a reader can use. Asking only of
+      // nullable fields would leave the fields that carry an identity unchecked, and
+      // those are exactly the ones whose unreadable form is absorbed by a default.
+      const readable = probe.readable[path]
       if (readable !== undefined) {
-        const unreadable = [...found].filter((type) => type !== 'null' && !readable.includes(type))
+        const unreadable = [...found].filter((type) => !readable.includes(type))
         if (unreadable.length > 0) {
           drift.push({
             probe: probe.id,
             kind: 'type-changed',
             path,
-            detail: `the host answered ${unreadable.sort().join('|')} and no parser reads that form of a field whose readable forms are ${readable.join('|')} or null`,
+            detail: `the host answered ${unreadable.sort().join('|')} and no parser reads that form of a field whose readable forms are ${[...readable].sort().join('|')}`,
           })
         }
       }
       // A field that answered only its documented null form narrowed; it did not stop
       // answering. Anything else that disappeared is a form the parser can no longer use.
-      const narrowedToNull = readable !== undefined && found.size === 1 && found.has('null')
+      const narrowedToNull =
+        readable?.includes('null') === true && found.size === 1 && found.has('null')
       const lost = [...wanted].filter((type) => type !== 'null' && !found.has(type))
       if (lost.length > 0 && !narrowedToNull) {
         drift.push({

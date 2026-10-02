@@ -219,7 +219,9 @@ type PatternPart =
  *
  * GitHub documents a class as one character listed in the brackets or included in its
  * ranges, with `!` at the front negating it. `^` is not documented as negating anything,
- * so it is a character like any other in here. Pathname semantics hold inside the class
+ * so it is a character like any other in here. A hyphen between two characters is a
+ * range; a hyphen with nothing after it before the closing bracket is the last character
+ * of the class, because `]` cannot end a range. Pathname semantics hold inside the class
  * too: no class matches the separator, whether or not it was negated.
  */
 function classPart(
@@ -232,7 +234,11 @@ function classPart(
   const members: { from: string; to: string }[] = []
   while (index < pattern.length && pattern[index] !== ']') {
     const from = pattern[index] as string
-    if (pattern[index + 1] === '-' && pattern[index + 2] !== undefined) {
+    if (
+      pattern[index + 1] === '-' &&
+      pattern[index + 2] !== undefined &&
+      pattern[index + 2] !== ']'
+    ) {
       members.push({ from, to: pattern[index + 2] as string })
       index += 3
       continue
@@ -259,13 +265,12 @@ function classPart(
 /**
  * A ref-name pattern read the way GitHub's documented fnmatch reads it.
  *
- * The documentation names Ruby's pathname `fnmatch`, so a star matches a run of characters
- * inside one segment and stops at the separator, `?` is exactly one of those characters,
- * `[a-z]` and `[!a-z]` are one character from a set or from everything outside it, and `+`
- * is an ordinary character. A doubled star is only more than that when it is a segment of
- * its own, a doubled star followed by a separator, which spans zero or more whole
- * directories; anywhere else, as in a trailing `qa/**`, it is a star where a star is.
- * Backslash quoting is not supported, so a backslash matches a backslash.
+ * A star matches a run of characters inside one segment and stops at the separator, `?` is
+ * exactly one of those characters, `[a-z]` and `[!a-z]` are one character from a set or
+ * from everything outside it, and `+` is an ordinary character. A doubled star is more
+ * than a star only when it is a whole segment of the pathname followed by a separator, at
+ * the start of the pattern or straight after another separator; anywhere else the stars
+ * sit inside a segment and cross nothing. Backslash quoting is not supported.
  */
 function patternParts(pattern: string): PatternPart[] {
   const parts: PatternPart[] = []
@@ -274,7 +279,13 @@ function patternParts(pattern: string): PatternPart[] {
     const char = pattern[index] as string
     if (char === '*') {
       const doubled = pattern[index + 1] === '*'
-      if (doubled && pattern[index + 2] === '/') {
+      // A globstar is a whole segment or it is not a globstar: the stars have to start
+      // one, and the separator has to end it. `qa**/` is a segment of its own, so the
+      // doubled star inside it stays inside it and the branch it names is one segment
+      // deep — reading it as a directory walk would enforce rules on branches GitHub
+      // does not protect.
+      const segmentStart = index === 0 || pattern[index - 1] === '/'
+      if (doubled && segmentStart && pattern[index + 2] === '/') {
         parts.push({ kind: 'directories' })
         index += 3
         continue
