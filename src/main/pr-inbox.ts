@@ -128,12 +128,15 @@ function rememberHostAllowance(
   kind: GitHubErrorKind | null = null,
 ): void {
   if (!authority) return
-  hostAllowances.set(`${host.trim().toLowerCase()}\u0000${authority}`, {
-    rateLimit,
-    kind,
-    at,
-    authority,
-  })
+  hostAllowances.set(
+    `${host.trim().toLowerCase()}\u0000${authority}\u0000${rateLimit.resource ?? ''}`,
+    {
+      rateLimit,
+      kind,
+      at,
+      authority,
+    },
+  )
 }
 
 /**
@@ -149,6 +152,7 @@ function hostAllowanceFor(
   host: string,
   at: number,
   authority?: string | null,
+  resource: string = 'graphql',
 ): GitHubRateLimit | null {
   if (!authority) return null
   const live = (report: GitHubRateLimitReport | undefined): GitHubRateLimitReport | null => {
@@ -163,9 +167,10 @@ function hostAllowanceFor(
   // Seeded from this host's own last response for this authority, never from
   // another authority or host: a count another principal reported is not evidence
   // about this one, and refusing on it would hide a queue GitHub is serving.
-  const own = lastGitHubRateLimitFor(host, authority)
+  const own = lastGitHubRateLimitFor(host, authority, resource)
   const theirs = own.at === 0 ? null : live(own)
-  const mine = live(hostAllowances.get(`${host.trim().toLowerCase()}\u0000${authority}`))
+  const key = `${host.trim().toLowerCase()}\u0000${authority}\u0000`
+  const mine = live(hostAllowances.get(`${key}${resource}`) ?? hostAllowances.get(key))
   if (theirs === null) return mine?.rateLimit ?? null
   if (mine === null) return theirs.rateLimit
   // Between the two of them only this host and authority reported, so the newer report is the
@@ -210,6 +215,7 @@ function chargedTransport(
   transport: GitHubTransport,
   charge: RefreshCharge,
   clock: () => number,
+  budget: PullRequestInboxBudget,
 ): GitHubTransport {
   const observed = async <T>(call: () => Promise<T>): Promise<T> => {
     try {
@@ -243,6 +249,19 @@ function chargedTransport(
     }
   }
   const rest = async <T>(request: GitHubRestRequest): Promise<GitHubRestResponse<T>> => {
+    const authority = await transport.credentialAuthority()
+    const reported = hostAllowanceFor(destination, clock(), authority, 'core')
+    const allow = pullRequestInboxBudgetAllows(reported?.remaining ?? null, budget, {
+      reset: reported?.reset ?? null,
+      now: clock(),
+    })
+    if (!allow.allowed)
+      throw new GitHubTransportError({
+        kind: 'rate-limited',
+        detail: allow.reason,
+        rateLimit: reported ?? undefined,
+        authority,
+      })
     charge.take()
     return observed(() => transport.rest<T>(request))
   }
@@ -828,7 +847,9 @@ export async function readPullRequestInbox(
     // to. A count another host reported, or one from a window that has since
     // reset, is not evidence about what this host will answer now.
     const authority = await serving.credentialAuthority().catch(() => null)
-    const principalKey = authority ? `${destination.trim().toLowerCase()}\u0000${authority}` : null
+    const principalKey = authority
+      ? `${destination.trim().toLowerCase()}\u0000${authority}\u0000graphql`
+      : null
     const principalRefused = principalKey ? refusedPrincipals.get(principalKey) : null
     if (principalRefused) {
       repositories.push({
@@ -866,7 +887,7 @@ export async function readPullRequestInbox(
     // still filed under the destination the transport publishes under.
     let transport = transports.get(host.host)
     if (!transport) {
-      transport = chargedTransport(destination, serving, charge, clock)
+      transport = chargedTransport(destination, serving, charge, clock, budget)
       transports.set(host.host, transport)
     }
     try {
@@ -949,7 +970,7 @@ export async function readPullRequestInbox(
           pausedServers.set(destination, message)
         } else if (error instanceof GitHubTransportError && error.authority) {
           refusedPrincipals.set(
-            `${destination.trim().toLowerCase()}\u0000${error.authority}`,
+            `${destination.trim().toLowerCase()}\u0000${error.authority}\u0000${error.rateLimit.resource ?? 'graphql'}`,
             message,
           )
         }

@@ -1823,6 +1823,148 @@ test('an unrelated account source cutover retains an unchanged environment crede
   }
 })
 
+test('native REST core allowance does not replace an explicit low GraphQL allowance', async () => {
+  const reset = String(Math.floor((NOW + 3_600_000) / 1000))
+  const api = installSynthetic({
+    'github.com': {
+      graphql: () => ({
+        ...answered(pullRequest()),
+        headers: {
+          'x-ratelimit-resource': 'graphql',
+          'x-ratelimit-remaining': '3',
+          'x-ratelimit-reset': reset,
+        },
+      }),
+      rest: (path) => ({
+        body: path.includes('/stacks') ? [] : { full_name: 'acme/app' },
+        headers: {
+          'x-ratelimit-resource': 'core',
+          'x-ratelimit-remaining': '4999',
+          'x-ratelimit-reset': reset,
+        },
+      }),
+    },
+  })
+  try {
+    await withOneClock(
+      () => NOW,
+      async () => {
+        const targets = [target('acme/app')]
+        const first = await readPullRequestInbox(targets, { now: NOW, clock: () => NOW })
+        assert.equal(first.refresh.state, 'fresh')
+        assert.equal(api.graphqlCalls['github.com'], 1)
+        assert.ok(
+          api.calls.some((call) => call.includes('/stacks?per_page=100')),
+          'the native listing reports its healthy core allowance after the GraphQL answer',
+        )
+        const before = api.calls.length
+        const second = await readPullRequestInbox(targets, { now: NOW, clock: () => NOW })
+        assert.equal(second.refresh.state, 'rate-limited')
+        assert.equal(second.refresh.repositories[0]?.status, 'rate-limited')
+        assert.equal(api.graphqlCalls['github.com'], 1, 'the GraphQL reserve still blocks refresh')
+        assert.equal(api.calls.length, before, 'the refused refresh sends no requests')
+      },
+    )
+  } finally {
+    api.restore()
+  }
+})
+
+test('a low REST core allowance does not prevent the next GraphQL query', async () => {
+  const reset = String(Math.floor((NOW + 3_600_000) / 1000))
+  const api = installSynthetic({
+    'github.com': {
+      graphql: () => ({
+        ...answered(pullRequest()),
+        headers: {
+          'x-ratelimit-resource': 'graphql',
+          'x-ratelimit-remaining': '4999',
+          'x-ratelimit-reset': reset,
+        },
+      }),
+      rest: (path) => ({
+        body: path.includes('/stacks') ? [] : { full_name: 'acme/app' },
+        headers: {
+          'x-ratelimit-resource': 'core',
+          'x-ratelimit-remaining': '3',
+          'x-ratelimit-reset': reset,
+        },
+      }),
+    },
+  })
+  try {
+    await withOneClock(
+      () => NOW,
+      async () => {
+        await api.transport('github.com').rest({ path: 'repos/acme/app' })
+        const before = api.calls.length
+        const report = await readPullRequestInbox([target('acme/app')], {
+          now: NOW,
+          clock: () => NOW,
+        })
+        assert.equal(api.graphqlCalls['github.com'], 1, 'core reserve does not refuse GraphQL')
+        assert.deepEqual(
+          report.items.map((item) => item.number),
+          [1],
+        )
+        assert.equal(report.refresh.state, 'fresh')
+        assert.equal(api.calls.length, before + 1, 'the core reserve still refuses native REST')
+      },
+    )
+  } finally {
+    api.restore()
+  }
+})
+
+test('a secondary GraphQL refusal without wait headers blocks refresh for exactly one minute', async () => {
+  const api = installSynthetic({
+    'github.com': {
+      graphql: (_variables, call) =>
+        call === 0
+          ? {
+              status: 200,
+              body: { errors: [{ message: 'You have exceeded a secondary rate limit' }] },
+              headers: {
+                'x-ratelimit-remaining': '4999',
+                'x-ratelimit-reset': null,
+                'retry-after': null,
+              },
+            }
+          : answered(pullRequest()),
+    },
+  })
+  try {
+    let moment = NOW
+    const clock = (): number => moment
+    await withOneClock(clock, async () => {
+      const targets = [target('acme/app')]
+      const first = await readPullRequestInbox(targets, { now: moment, clock })
+      assert.equal(first.refresh.state, 'rate-limited')
+      assert.equal(api.graphqlCalls['github.com'], 1)
+      const before = api.calls.length
+      const immediate = await readPullRequestInbox(targets, { now: moment, clock })
+      assert.equal(immediate.refresh.state, 'rate-limited')
+      assert.equal(api.calls.length, before, 'an immediate refresh respects the fallback wait')
+
+      moment = NOW + 59_999
+      const early = await readPullRequestInbox(targets, { now: moment, clock })
+      assert.equal(early.refresh.state, 'rate-limited')
+      assert.equal(api.calls.length, before, 'the fallback wait has not yet expired')
+
+      moment = NOW + 60_000
+      const released = await readPullRequestInbox(targets, { now: moment, clock })
+      assert.equal(released.refresh.state, 'fresh')
+      assert.equal(api.graphqlCalls['github.com'], 2, 'GraphQL is queried at the wait boundary')
+      assert.deepEqual(
+        released.items.map((item) => item.number),
+        [1],
+      )
+    })
+  } finally {
+    api.restore()
+  }
+})
+
 test('a host that names a wait is left alone until then, on every refresh', async () => {
   const api = installSynthetic({
     'github.com': {

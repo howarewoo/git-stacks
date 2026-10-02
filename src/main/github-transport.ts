@@ -111,8 +111,12 @@ const rateLimitByHost = new Map<string, GitHubRateLimitReport>()
 const rateLimitByHostAuthority = new Map<string, GitHubRateLimitReport>()
 const rateLimitListeners = new Set<(report: GitHubRateLimitReport) => void>()
 
-function rateLimitAuthorityKey(host: string, authority?: string | null): string {
-  return `${host.trim().toLowerCase()}\u0000${authority ?? ''}`
+function rateLimitAuthorityKey(
+  host: string,
+  authority?: string | null,
+  resource?: string | null,
+): string {
+  return `${host.trim().toLowerCase()}\u0000${authority ?? ''}\u0000${resource ?? ''}`
 }
 
 /**
@@ -153,8 +157,13 @@ function publishRateLimit(
     if (!isStale) {
       rateLimitByHost.set(host, latestRateLimit)
     }
+    rateLimitByHost.set(rateLimitAuthorityKey(host, null, rateLimit.resource), latestRateLimit)
     if (authority !== undefined && authority !== null) {
       rateLimitByHostAuthority.set(rateLimitAuthorityKey(host, authority), latestRateLimit)
+      rateLimitByHostAuthority.set(
+        rateLimitAuthorityKey(host, authority, rateLimit.resource),
+        latestRateLimit,
+      )
     }
     noteGitHubRetryDeadline(host, rateLimit, latestRateLimit.at, kind)
   }
@@ -192,7 +201,12 @@ export function noteGitHubRetryDeadline(
   const reset = rateLimit.reset instanceof Date ? rateLimit.reset.getTime() : null
   const wait = Math.max(
     retryAfter,
-    kind === 'secondary-rate-limit' && reset !== null && Number.isFinite(reset) && reset > at
+    kind === 'secondary-rate-limit' && retryAfter <= 0 ? 60_000 : 0,
+    kind === 'secondary-rate-limit' &&
+      rateLimit.remaining === 0 &&
+      reset !== null &&
+      Number.isFinite(reset) &&
+      reset > at
       ? reset - at
       : 0,
   )
@@ -236,10 +250,13 @@ export function lastGitHubRateLimit(): GitHubRateLimitReport {
 export function lastGitHubRateLimitFor(
   host: string,
   authority?: string | null,
+  resource?: string,
 ): GitHubRateLimitReport {
   if (authority !== undefined && authority !== null) {
+    const latest = rateLimitByHostAuthority.get(rateLimitAuthorityKey(host, authority))
     return (
-      rateLimitByHostAuthority.get(rateLimitAuthorityKey(host, authority)) ?? {
+      rateLimitByHostAuthority.get(rateLimitAuthorityKey(host, authority, resource)) ??
+      (latest?.rateLimit.resource === null ? latest : undefined) ?? {
         rateLimit: emptyRateLimit(),
         kind: null,
         at: 0,
@@ -247,7 +264,15 @@ export function lastGitHubRateLimitFor(
       }
     )
   }
-  return rateLimitByHost.get(host) ?? { rateLimit: emptyRateLimit(), kind: null, at: 0 }
+  return (
+    rateLimitByHost.get(
+      resource === undefined ? host : rateLimitAuthorityKey(host, null, resource),
+    ) ?? {
+      rateLimit: emptyRateLimit(),
+      kind: null,
+      at: 0,
+    }
+  )
 }
 
 export function resetGitHubRateLimit(): void {
