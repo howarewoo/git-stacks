@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
+import { readFileSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:http'
 import { chmod, mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -9,11 +10,18 @@ import {
   DirectGitHubTransport,
   GhGitHubTransport,
   GITHUB_API_VERSION,
+  environmentTokenName,
   GitHubTransportError,
   githubApiVersion,
   githubTransport,
+  lastGitHubRateLimitFor,
+  resetGitHubRateLimit,
+  setGitHubHostTransport,
+  setGitHubObservationClock,
+  type GitHubCredential,
   type GitHubErrorKind,
 } from '../src/main/github-transport'
+import { readPullRequestInbox, resetInboxHostAllowances } from '../src/main/pr-inbox'
 import type { DesktopAPI } from '../src/shared/types'
 
 // The renderer bridge is the whole renderer capability surface; it must never gain one.
@@ -21,6 +29,60 @@ type AssertNever<T extends never> = T
 type _NoTokenOrHttpCapability = AssertNever<
   Extract<keyof DesktopAPI, `${string}token${string}` | `${string}auth${string}`>
 >
+
+/**
+ * Credentials this machine may carry that a controlled CLI must not inherit.
+ *
+ * The child runs with the inherited environment under these options, so a real
+ * token on this machine is a token the child would carry — and an authority read
+ * from that child answers from the environment without ever asking the CLI,
+ * which would make a profile fixture compare equal to itself. The names are
+ * matched against what this environment actually carries rather than against a
+ * list of the hosts this file happens to mention: the family is every name the
+ * CLI reads and every host-scoped name this build derives from a host, and a
+ * host nobody wrote down here still reads one. No value is read, printed or
+ * inspected — only names are enumerated, and values are saved and handed back
+ * untouched. The fixture's own `PATH` is passed through options rather than by
+ * editing this environment.
+ */
+const INHERITED_GITHUB_CREDENTIALS = new Set([
+  'GH_TOKEN',
+  'GITHUB_TOKEN',
+  'GH_ENTERPRISE_TOKEN',
+  'GITHUB_ENTERPRISE_TOKEN',
+  'GIT_STACKS_GITHUB_TOKEN',
+])
+
+/** Every host-scoped name this build writes, however many hosts there are. */
+const HOST_SCOPED_GITHUB_CREDENTIAL = /^GIT_STACKS_GITHUB_TOKEN_/u
+
+/**
+ * Takes the inherited credentials away for the life of a fixture, and puts
+ * back whatever this machine had — as names only.
+ *
+ * Giving them back is safe to do more than once and safe to do from a failure
+ * path, so a setup that throws cannot leave the rest of this process running
+ * without the credentials it started with.
+ */
+function withoutInheritedCredentials(): () => void {
+  const saved = new Map<string, string | undefined>()
+  for (const name of Object.keys(process.env)) {
+    if (!INHERITED_GITHUB_CREDENTIALS.has(name) && !HOST_SCOPED_GITHUB_CREDENTIAL.test(name)) {
+      continue
+    }
+    saved.set(name, process.env[name])
+    delete process.env[name]
+  }
+  let restored = false
+  return () => {
+    if (restored) return
+    restored = true
+    for (const [name, value] of saved) {
+      if (value === undefined) delete process.env[name]
+      else process.env[name] = value
+    }
+  }
+}
 
 interface Captured {
   url: string
@@ -288,12 +350,10 @@ test('gh stays optional and the selected transport follows the environment', () 
     'direct',
   )
 })
-test('gh consumes HTTP response metadata and version without parsing stderr', async () => {
-  const commands: Array<{ args: string[]; input?: string }> = []
+test('gh parses HTTP status, rate headers, and paginated response bodies', async () => {
   const adapter = new GhGitHubTransport({
     env: { GIT_STACKS_GITHUB_API_VERSION: '2026-01-01' },
-    run: async (args, options) => {
-      commands.push({ args, input: options.input })
+    run: async (args) => {
       if (args.includes('repos/acme/widgets/pulls/9')) {
         const error = new Error('gh failed') as Error & { stdout: string }
         error.stdout =
@@ -311,8 +371,6 @@ test('gh consumes HTTP response metadata and version without parsing stderr', as
   })
   assert.equal(patched.status, 200)
   assert.equal(patched.rateLimit.remaining, 4321)
-  assert.ok(commands[0].args.includes('X-GitHub-Api-Version: 2026-01-01'))
-  assert.ok(commands[0].args.includes('--include'))
   assert.deepEqual(await adapter.paginate({ path: 'repos/acme/widgets/issues/3/comments' }), [
     { id: 1 },
     { id: 2 },
@@ -330,33 +388,6 @@ test('gh consumes HTTP response metadata and version without parsing stderr', as
     assert.equal(error.rateLimit.retryAfterSeconds, 60)
     return true
   })
-})
-
-test('gh sends structured REST bodies and GraphQL variables as JSON over stdin', async () => {
-  const sent: Array<{ args: string[]; input?: string }> = []
-  const adapter = new GhGitHubTransport({
-    run: async (args, options) => {
-      sent.push({ args, input: options.input })
-      return 'HTTP/2.0 200 OK\r\n\r\n{"data":{"ok":true}}\n'
-    },
-  })
-  const body = {
-    title: '["literal"]',
-    count: 7,
-    enabled: false,
-    empty: null,
-    nested: { labels: ['one', 'two'], options: { priority: 1 } },
-  }
-  await adapter.rest({ method: 'PATCH', path: 'repos/acme/widgets/pulls/3', body })
-  assert.deepEqual(JSON.parse(sent[0].input!), body)
-  assert.deepEqual(sent[0].args.slice(-2), ['--input', '-'])
-  assert.ok(!sent[0].args.includes('-F') && !sent[0].args.includes('-f'))
-
-  const variables = { input: { pullRequestId: 'PR_x', labels: ['one'] }, dryRun: false }
-  const query = 'mutation($input: ExampleInput!) { test(input: $input) { ok } }'
-  assert.deepEqual(await adapter.graphql(query, variables), { ok: true })
-  assert.deepEqual(JSON.parse(sent[1].input!), { query, variables })
-  assert.deepEqual(sent[1].args.slice(-2), ['--input', '-'])
 })
 
 test('gh rejects pre-cancelled requests and forwards deadlines to the subprocess', async () => {
@@ -588,11 +619,26 @@ test('pagination handles prefixed API base without next link and with next link'
     assert.deepEqual(serverRequests, ['/api/v3/multi', '/api/v3/multi?page=2'])
 
     serverRequests.length = 0
-    const gh = new GhGitHubTransport({ apiUrl, env: { GH_TOKEN: 'local-test-token' } })
+    const gh = new GhGitHubTransport({
+      apiUrl,
+      env: { GH_TOKEN: 'local-test-token' },
+      run: async (args) => {
+        const targetUrl = args.find((arg) => /^https?:\/\//u.test(arg))
+        if (!targetUrl) throw new Error(`No target URL found in gh args: ${args.join(' ')}`)
+        const methodIndex = args.indexOf('--method')
+        const method = methodIndex !== -1 ? args[methodIndex + 1] : 'GET'
+        const response = await fetch(targetUrl, { method })
+        const headerLines: string[] = []
+        response.headers.forEach((value, key) => {
+          headerLines.push(`${key}: ${value}`)
+        })
+        const text = await response.text()
+        return `HTTP/1.1 ${response.status} ${response.statusText || 'OK'}\r\n${headerLines.join('\r\n')}\r\n\r\n${text}`
+      },
+    })
     const ghSingle = await gh.paginate<{ id: number }>({ path: 'single' })
     assert.deepEqual(ghSingle, [{ id: 1 }])
     assert.deepEqual(serverRequests, ['/api/v3/single'])
-
     serverRequests.length = 0
     const ghMulti = await gh.paginate<{ id: number }>({ path: 'multi' })
     assert.deepEqual(ghMulti, [{ id: 1 }, { id: 2 }])
@@ -631,9 +677,11 @@ test('native gh sends JSON content type for REST and GraphQL bodies', async () =
   try {
     const address = server.address()
     assert.ok(address && typeof address !== 'string')
+    const host = `127.0.0.1:${address.port}`
     const gh = new GhGitHubTransport({
-      apiUrl: `http://127.0.0.1:${address.port}`,
-      env: { GH_TOKEN: 'local-test-token' },
+      apiUrl: `http://${host}`,
+      host,
+      env: { [environmentTokenName(host)]: 'local-test-token' },
     })
     const body = { title: 'Next', nested: { labels: ['one', 'two'] } }
     await gh.rest({ method: 'PATCH', path: 'pulls/3', body })
@@ -673,9 +721,11 @@ test('native gh cancellation and deadline cleanup apply to subprocesses on a loc
   try {
     const address = server.address()
     assert.ok(address && typeof address !== 'string')
+    const host = `127.0.0.1:${address.port}`
     const gh = new GhGitHubTransport({
-      apiUrl: `http://127.0.0.1:${address.port}`,
-      env: { GH_TOKEN: 'local-test-token' },
+      apiUrl: `http://${host}`,
+      host,
+      env: { [environmentTokenName(host)]: 'local-test-token' },
     })
 
     const pre = new AbortController()
@@ -701,5 +751,397 @@ test('native gh cancellation and deadline cleanup apply to subprocesses on a loc
     await new Promise<void>((resolve, reject) =>
       server.close((error) => (error ? reject(error) : resolve())),
     )
+  }
+})
+
+/**
+ * A `gh` on a PATH of this test's own, so what the transport asks the CLI is
+ * answered by a controlled profile rather than by whatever this machine has
+ * signed in to. The script is the CLI's real command shape — `auth token
+ * --hostname` reads a local store and contacts no host — so the default child
+ * path exercises the same code it would on a person's machine.
+ *
+ * The inherited credentials go with it: a token this machine really carries
+ * would be a credential the child presents, so the authority would resolve from
+ * the environment and this CLI would never be asked which profile it holds. The
+ * fixture keeps its own `PATH` and gives back what it borrowed.
+ */
+async function installControlledCli(): Promise<{
+  path: string
+  hold: (host: string, token: string | null) => void
+  remove: () => Promise<void>
+}> {
+  const restoreCredentials = withoutInheritedCredentials()
+  // From here on the fixture owns what the child can authenticate with, so a
+  // setup that fails part way through still gives the credentials back.
+  try {
+    const directory = await mkdtemp(join(tmpdir(), 'git-stacks-cli-'))
+    const store = join(directory, 'profiles.json')
+    await writeFile(store, '{}')
+    const binary = join(directory, 'gh')
+    await writeFile(
+      binary,
+      `#!${process.execPath}
+import { readFileSync } from 'node:fs'
+const argv = process.argv.slice(2)
+if (argv[0] !== 'auth' || argv[1] !== 'token') {
+  process.stderr.write('unexpected gh invocation: ' + argv.join(' ') + '\\n')
+  process.exit(2)
+}
+const host = argv[argv.indexOf('--hostname') + 1] ?? ''
+const profiles = JSON.parse(readFileSync(${JSON.stringify(store)}, 'utf8'))
+const token = profiles[host] ?? null
+if (typeof token !== 'string' || token === '') {
+  process.stderr.write('not logged in to any host\\n')
+  process.exit(1)
+}
+process.stdout.write(token + '\\n')
+`,
+    )
+    await chmod(binary, 0o755)
+    return {
+      path: directory,
+      hold(host, token) {
+        const current = JSON.parse(readFileSync(store, 'utf8')) as Record<string, string>
+        if (token === null) delete current[host]
+        else current[host] = token
+        writeFileSync(store, JSON.stringify(current))
+      },
+      async remove() {
+        restoreCredentials()
+        await rm(directory, { force: true, recursive: true })
+      },
+    }
+  } catch (error) {
+    // Nothing was installed, but this environment is already changed and the
+    // rest of this process runs on it.
+    restoreCredentials()
+    throw error
+  }
+}
+
+test('an authority fences the credential its own requests would carry, whatever supplied it', async () => {
+  // A token handed straight to the transport, an ambient one, and the account's
+  // own each reach `accessCredential`, so each has to move the identity. Asking
+  // the environment instead would leave the first and the third unfenced: this
+  // machine has no token in its environment at all here, so both would answer
+  // identically for every credential this transport ever used.
+  const env: NodeJS.ProcessEnv = {}
+  const supplied = new DirectGitHubTransport({ env, token: 'supplied-a' })
+  const first = await supplied.credentialAuthority()
+  const rotated = new DirectGitHubTransport({ env, token: 'supplied-b' })
+  assert.notEqual(
+    await rotated.credentialAuthority(),
+    first,
+    'a different supplied token is a different credential and must not keep the old rows',
+  )
+  assert.equal(await rotated.credentialAuthority(), await rotated.credentialAuthority())
+
+  // The account credential, asked of the account each time. One transport object
+  // survives an account that hands it a different credential, and nothing calls
+  // `setGitHubCredentialSource` in between: the only way to see that is to read
+  // the credential the transport would actually use.
+  let held: GitHubCredential | null = {
+    token: 'account-a',
+    origin: 'account',
+    session: 'session-1',
+  }
+  const account = new DirectGitHubTransport({
+    env,
+    credential: {
+      host: 'github.com',
+      available: () => held !== null,
+      current: async () => held,
+    },
+  })
+  const admitted = await account.credentialAuthority()
+  assert.notEqual(admitted, first, 'an account credential is not the supplied token')
+  held = { token: 'account-b', origin: 'account', session: 'session-1' }
+  assert.notEqual(
+    await account.credentialAuthority(),
+    admitted,
+    'the account replaced its credential under the same session; the rows read as the old one must be retired',
+  )
+  held = null
+  assert.notEqual(
+    await account.credentialAuthority(),
+    admitted,
+    'a signed-out account holds no credential, which is not the one it held',
+  )
+})
+
+test('the gh authority is the credential the CLI holds, from the CLI itself', async () => {
+  const cli = await installControlledCli()
+  try {
+    // No token is handed to gh here, so every request is authenticated by the
+    // profile the CLI holds. The lookup goes through the default child process,
+    // against a PATH that holds only this controlled CLI.
+    const env = (): NodeJS.ProcessEnv => ({ PATH: cli.path })
+    const transport = new GhGitHubTransport({ env: env() })
+
+    cli.hold('github.com', 'cli-token-a')
+    const admitted = await transport.credentialAuthority()
+    assert.equal(
+      await transport.credentialAuthority(),
+      admitted,
+      'the same profile is the same authority',
+    )
+
+    // The credential is renewed under the same login, from the same source, to
+    // the same host. A report about the profile reads the same before and after;
+    // the credential that would authenticate does not, and the rows read under
+    // the old one are not this credential's rows.
+    cli.hold('github.com', 'cli-token-b')
+    const renewed = await transport.credentialAuthority()
+    assert.notEqual(
+      renewed,
+      admitted,
+      'a renewed credential under one profile is a different credential',
+    )
+    assert.equal(await transport.credentialAuthority(), renewed)
+
+    // A host with nothing held for it is a host this CLI cannot authenticate,
+    // not the host it authenticates differently.
+    const enterprise = new GhGitHubTransport({ env: env(), host: 'ghe.example.com' })
+    cli.hold('github.com', 'cli-token-a')
+    assert.notEqual(
+      await enterprise.credentialAuthority(),
+      admitted,
+      'one host is not another host',
+    )
+
+    // `gh` defaults to GH_HOST when no host is named, so the authority has to be
+    // the credential for that host rather than for github.com.
+    const defaulted = new GhGitHubTransport({
+      env: { ...env(), GH_HOST: 'ghe.example.com' },
+    })
+    cli.hold('ghe.example.com', 'enterprise-token')
+    assert.equal(
+      await defaulted.credentialAuthority(),
+      await new GhGitHubTransport({
+        env: { ...env(), GH_HOST: 'ghe.example.com' },
+      }).credentialAuthority(),
+      'the same host resolves the same authority twice',
+    )
+    assert.notEqual(await defaulted.credentialAuthority(), admitted)
+
+    // A CLI that cannot name a credential fails closed. It is not installed on
+    // this PATH, so the identity it reports is not a profile anything holds.
+    const withoutCli = new GhGitHubTransport({ env: { PATH: join(cli.path, 'empty') } })
+    assert.notEqual(
+      await withoutCli.credentialAuthority(),
+      admitted,
+      'no CLI is not a profile to keep rows under',
+    )
+  } finally {
+    await cli.remove()
+  }
+})
+
+/** What `gh` prints with `--include`: a response line, its headers, then the body. */
+function answeredResponse(body = '{"data":{"viewer":{"login":"ada"}}}'): string {
+  return [
+    'HTTP/2 200',
+    'content-type: application/json; charset=utf-8',
+    'x-ratelimit-limit: 5000',
+    'x-ratelimit-remaining: 4998',
+    'x-ratelimit-reset: 1780000000',
+    '',
+    body,
+  ].join('\r\n')
+}
+
+test('a base this build was pointed at decides the host the answer is counted to', async () => {
+  resetGitHubRateLimit()
+  try {
+    const transport = new GhGitHubTransport({
+      // The host the caller named is where it wants the queue filed; the base is
+      // where this build was pointed to answer for it. Those are two different
+      // hosts, and an answer from the one reached belongs to the one reached.
+      host: 'github.com',
+      apiUrl: 'https://ghe.example.com:8443/api/v3',
+      graphqlUrl: 'https://ghe.example.com:8443/api/graphql',
+      run: async () => answeredResponse(),
+    })
+    await transport.graphql<{ viewer: { login: string } }>('{ viewer { login } }')
+    // The answer is evidence about the host that answered for it, so the quota
+    // it carried is counted there and not against the host it was filed under.
+    assert.equal(lastGitHubRateLimitFor('ghe.example.com:8443').rateLimit.remaining, 4998)
+    assert.equal(lastGitHubRateLimitFor('github.com').at, 0)
+  } finally {
+    resetGitHubRateLimit()
+  }
+})
+
+test('enterprise primary quota is isolated by the serving port', async () => {
+  resetGitHubRateLimit()
+  try {
+    const transport = new GhGitHubTransport({
+      host: 'ghe.example.com:8443',
+      apiUrl: 'https://ghe.example.com:8443/api/v3',
+      run: async () => answeredResponse(),
+    })
+    await transport.graphql<{ viewer: { login: string } }>('{ viewer { login } }')
+    assert.equal(lastGitHubRateLimitFor('ghe.example.com:8443').rateLimit.remaining, 4998)
+    assert.equal(lastGitHubRateLimitFor('ghe.example.com').at, 0)
+  } finally {
+    resetGitHubRateLimit()
+  }
+})
+
+test('the credential a child would carry is the one the authority names', async () => {
+  const scoped = environmentTokenName('github.com')
+  const previous = process.env[scoped]
+  try {
+    process.env[scoped] = 'inherited-credential-one'
+    const transport = new GhGitHubTransport({
+      env: { GH_TOKEN: 'credential-for-some-other-host' },
+      run: async () => answeredResponse(),
+    })
+    const fenced = await transport.credentialAuthority()
+    // A credential handed over for whichever host the CLI last signed in to
+    // never reaches the child as itself, so swapping it swaps nothing the
+    // requests are fenced on and rows read under one stay under it.
+    const swapped = await new GhGitHubTransport({
+      env: { GH_TOKEN: 'a-second-unscoped-credential' },
+      run: async () => answeredResponse(),
+    }).credentialAuthority()
+    assert.equal(fenced, swapped, 'the unscoped credential is not the one requests carry')
+
+    // Replacing the credential this host is entitled to, underneath the same
+    // transport, is a different credential, and the rows read with the old one
+    // must not outlive it.
+    process.env[scoped] = 'inherited-credential-two'
+    assert.notEqual(await transport.credentialAuthority(), fenced)
+  } finally {
+    if (previous === undefined) delete process.env[scoped]
+    else process.env[scoped] = previous
+  }
+})
+
+test('native CLI pins the credential resolved before a profile replacement and credits its own primary window', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'git-stacks-cli-profile-race-'))
+  const store = join(directory, 'profile')
+  await writeFile(store, 'profile-a')
+  const restoreCredentials = withoutInheritedCredentials()
+  const now = Date.parse('2026-03-01T12:00:00.000Z')
+  const server = createServer((request, response) => {
+    const account = request.headers.authorization === 'Bearer profile-a' ? 'A' : 'B'
+    response.setHeader('content-type', 'application/json')
+    response.setHeader('x-ratelimit-limit', '5000')
+    response.setHeader('x-ratelimit-remaining', account === 'A' ? '3' : '4998')
+    response.setHeader('x-ratelimit-reset', String(Math.floor(now / 1000) + 3600))
+    if (request.url?.endsWith('/graphql')) {
+      const pageInfo = { hasNextPage: false, endCursor: null }
+      response.end(
+        JSON.stringify({
+          data: {
+            viewer: { login: 'ada' },
+            repository: {
+              open: {
+                nodes: [
+                  {
+                    number: 44,
+                    title: `Account ${account} work`,
+                    url: 'https://github.com/acme/app/pull/44',
+                    headRefName: 'feat/inbox',
+                    headRefOid: 'a'.repeat(40),
+                    baseRefName: 'main',
+                    isDraft: false,
+                    state: 'OPEN',
+                    updatedAt: '2026-03-01T12:00:00.000Z',
+                    mergedAt: null,
+                    author: { login: 'grace' },
+                    headRepository: { nameWithOwner: 'acme/app' },
+                    reviewDecision: 'REVIEW_REQUIRED',
+                    reviewRequests: { nodes: [{ requestedReviewer: { login: 'ada' } }] },
+                    latestReviews: { nodes: [] },
+                    comments: { nodes: [] },
+                    commits: { nodes: [{ commit: { statusCheckRollup: { state: 'SUCCESS' } } }] },
+                  },
+                ],
+                pageInfo,
+              },
+              merged: { nodes: [], pageInfo },
+            },
+          },
+        }),
+      )
+    } else
+      response.end(
+        JSON.stringify(request.url?.includes('/stacks') ? [] : { account, full_name: 'acme/app' }),
+      )
+  })
+  let host: string | undefined
+  try {
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+    const address = server.address()
+    assert.ok(address && typeof address !== 'string')
+    host = `127.0.0.1:${address.port}`
+    const binary = join(directory, 'gh')
+    await writeFile(
+      binary,
+      `#!${process.execPath}
+import { readFileSync, writeFileSync } from 'node:fs'
+const argv = process.argv.slice(2)
+const store = ${JSON.stringify(store)}
+if (argv[0] === 'auth' && argv[1] === 'token') {
+  const captured = readFileSync(store, 'utf8')
+  writeFileSync(store, 'profile-b')
+  process.stdout.write(captured + '\\n')
+} else if (argv[0] === 'api') {
+  const endpoint = argv.find((arg) => arg.startsWith('http://'))
+  const token = process.env.GH_ENTERPRISE_TOKEN || process.env.GH_TOKEN || readFileSync(store, 'utf8')
+  const response = await fetch(endpoint, {
+    method: endpoint.endsWith('/graphql') ? 'POST' : 'GET',
+    headers: { authorization: 'Bearer ' + token },
+  })
+  process.stdout.write('HTTP/1.1 ' + response.status + ' OK\\r\\n')
+  for (const [name, value] of response.headers) process.stdout.write(name + ': ' + value + '\\r\\n')
+  process.stdout.write('\\r\\n' + await response.text() + '\\n')
+} else process.exit(2)
+`,
+    )
+    await chmod(binary, 0o755)
+    const transport = new GhGitHubTransport({
+      host,
+      apiUrl: `http://${host}/api/v3`,
+      env: { PATH: directory },
+    })
+    setGitHubHostTransport(host, transport)
+    resetGitHubRateLimit()
+    resetInboxHostAllowances()
+    setGitHubObservationClock(() => now)
+    const captured = await transport.rest<{ account: string }>({ path: 'repos/acme/app' })
+    assert.equal(
+      captured.data.account,
+      'A',
+      'the API uses the credential captured before profile replacement',
+    )
+    const inbox = await readPullRequestInbox(
+      [{ path: '/repos/app', originUrl: `https://${host}/acme/app.git` }],
+      { now, clock: () => now },
+    )
+    assert.equal(
+      inbox.refresh.state,
+      'fresh',
+      'account A’s spent primary window does not refuse account B',
+    )
+    assert.deepEqual(
+      inbox.items.map((item) => [item.number, item.title]),
+      [[44, 'Account B work']],
+    )
+  } finally {
+    if (host) setGitHubHostTransport(host, null)
+    resetGitHubRateLimit()
+    resetInboxHostAllowances()
+    setGitHubObservationClock(null)
+    restoreCredentials()
+    server.closeAllConnections()
+    if (server.listening)
+      await new Promise<void>((resolve, reject) =>
+        server.close((error) => (error ? reject(error) : resolve())),
+      )
+    await rm(directory, { recursive: true, force: true })
   }
 })

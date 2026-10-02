@@ -587,6 +587,7 @@ function runGitHubCli({ statePath, barePath, realGit, args, cwd, input }) {
     else if (args[0] === 'api') result = handleApi(state, args, fixture)
     else if (args[0] === 'auth' && args[1] === 'status')
       result = 'github.com\n  Logged in to github.com as fixture-user\n'
+    else if (args[0] === 'auth' && args[1] === 'token') result = 'fixture-token\n'
     else fail(`unknown gh request: ${args.join(' ')}`)
     saveState(state, statePath)
     return response(state, result, args)

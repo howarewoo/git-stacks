@@ -4,6 +4,7 @@ import { isRecord } from '../shared/guards'
 import {
   GITHUB_API_VERSION,
   GITHUB_STACKS_API_VERSION,
+  GitHubBudgetExhaustedError,
   GitHubTransportError,
   githubApiUrl,
   githubApiVersion,
@@ -393,8 +394,15 @@ export async function probeNativeStacksCapability(
       ...signal,
     })
   } catch (error) {
-    // A cancellation is this build stopping, not a fact about the host.
-    if (options.signal?.aborted || isCancelled(error)) throw error
+    // A cancellation is this build stopping, not a fact about the host. So is a
+    // call this build refused to make: the host was never asked, so it did not
+    // fail to answer, and reporting it as one would hide the caller's budget.
+    if (
+      options.signal?.aborted ||
+      isCancelled(error) ||
+      error instanceof GitHubBudgetExhaustedError
+    )
+      throw error
     if (
       error instanceof GitHubTransportError &&
       (error.status === 404 || error.kind === 'not-found')
@@ -441,8 +449,14 @@ export async function probeNativeStacksCapability(
     }
   } catch (error) {
     // A cancellation is this build stopping, not a fact about the host, and is
-    // raised here exactly as it is on the repository read above.
-    if (options.signal?.aborted || isCancelled(error)) throw error
+    // raised here exactly as it is on the repository read above. So is a call
+    // the caller's own budget refused.
+    if (
+      options.signal?.aborted ||
+      isCancelled(error) ||
+      error instanceof GitHubBudgetExhaustedError
+    )
+      throw error
     if (
       error instanceof GitHubTransportError &&
       (error.status === 404 || error.kind === 'not-found')

@@ -1497,6 +1497,10 @@ test('a failed issue read keeps the confirmed inbox and reports why it is unconf
   const state = { issuesFail: false }
   class PartialTransport implements GitHubTransport {
     readonly kind = 'direct' as const
+    readonly destinationHost = 'github.com'
+    async credentialAuthority(): Promise<string> {
+      return 'partial-test-credential'
+    }
     async rest<T = unknown>(): Promise<GitHubRestResponse<T>> {
       return {
         status: 404,
@@ -1590,6 +1594,10 @@ test('an older overlapping read never replaces the payload a newer read confirme
   const releaseOlder = Promise.withResolvers<void>()
   class OverlappingTransport implements GitHubTransport {
     readonly kind = 'direct' as const
+    readonly destinationHost = 'github.com'
+    async credentialAuthority(): Promise<string> {
+      return 'overlapping-test-credential'
+    }
     async rest<T = unknown>(): Promise<GitHubRestResponse<T>> {
       return {
         status: 404,
@@ -2360,6 +2368,10 @@ test('delayed network GitHub request is aborted by mutation; coordinator clears 
 
   class StalledTransport implements GitHubTransport {
     readonly kind = 'direct' as const
+    readonly destinationHost = 'github.com'
+    async credentialAuthority(): Promise<string> {
+      return 'stalled-test-credential'
+    }
     public aborted = 0
     public queryReceived = 0
 
@@ -2511,6 +2523,10 @@ test('tracked closed or merged PR detail stall is aborted by mutation and preser
 
   class TrackedPrStallTransport implements GitHubTransport {
     readonly kind = 'direct' as const
+    readonly destinationHost = 'github.com'
+    async credentialAuthority(): Promise<string> {
+      return 'tracked-stall-test-credential'
+    }
     public openPrQueryReceived = 0
     public trackedPrQueryReceived = 0
     public aborted = 0

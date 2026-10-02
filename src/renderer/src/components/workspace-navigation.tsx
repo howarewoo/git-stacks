@@ -5,6 +5,7 @@ import {
   GitBranch,
   GitPullRequest,
   History,
+  Inbox,
   Layers,
   MessageSquareDiff,
   SlidersHorizontal,
@@ -20,6 +21,7 @@ export type WorkspaceView =
   | 'history'
   | 'changes'
   | 'pullRequests'
+  | 'prInbox'
   | 'review'
   | 'stashes'
   | 'diagnostics'
@@ -30,6 +32,16 @@ export type WorkspaceView =
  * navigation control the user just pressed.
  */
 export const WORKSPACE_VIEW_HEADING_ID = 'workspace-view-heading'
+
+/**
+ * Destinations that read across every registered repository rather than the
+ * one that is open, so they stay useful with no repository open at all. The
+ * shell asks this instead of testing a destination name, so a cross-repository
+ * workspace cannot render as a repository that does not exist.
+ */
+export function workspaceNeedsNoRepository(view: WorkspaceView): boolean {
+  return view === 'prInbox'
+}
 
 type WorkspaceDestination = {
   id: WorkspaceView
@@ -43,6 +55,7 @@ const workspaceDestinations: readonly WorkspaceDestination[] = [
   { id: 'history', label: 'History', icon: History },
   { id: 'changes', label: 'Working changes', icon: Files },
   { id: 'pullRequests', label: 'Pull requests', icon: GitPullRequest },
+  { id: 'prInbox', label: 'PR Inbox', icon: Inbox },
   { id: 'review', label: 'Review', icon: MessageSquareDiff },
   { id: 'stashes', label: 'Stashes', icon: Archive },
   { id: 'diagnostics', label: 'Diagnostics', icon: SlidersHorizontal },
@@ -66,6 +79,7 @@ export const WORKSPACE_VIEW_SHORTCUTS: readonly (readonly [ShortcutId, Workspace
   ['view.stashes', 'stashes'],
   ['view.diagnostics', 'diagnostics'],
   ['view.review', 'review'],
+  ['view.prInbox', 'prInbox'],
 ]
 
 export function WorkspaceNavigation({
@@ -75,6 +89,7 @@ export function WorkspaceNavigation({
   pullRequestCount,
   stashCount,
   attentionCount,
+  inboxCount,
   onSelect,
 }: {
   activeView: WorkspaceView
@@ -83,6 +98,8 @@ export function WorkspaceNavigation({
   pullRequestCount: number
   stashCount: number
   attentionCount: number
+  /** Pull requests waiting on this person across every registered repository. */
+  inboxCount?: number
   onSelect: (view: WorkspaceView) => void
 }) {
   const countFor = (view: WorkspaceView) => {
@@ -91,6 +108,7 @@ export function WorkspaceNavigation({
     if (view === 'pullRequests') return pullRequestCount
     if (view === 'stashes') return stashCount
     if (view === 'diagnostics') return attentionCount || undefined
+    if (view === 'prInbox') return inboxCount || undefined
     return undefined
   }
 

@@ -28,6 +28,8 @@ import {
   unstagedOnlyChanges,
 } from '../../../src/renderer/src/design-system/data-fixtures'
 import { EMPTY_SNAPSHOT_LIMITS } from '../../../src/shared/performance'
+import { DEFAULT_SETTINGS } from '../../../src/shared/settings'
+
 import {
   deriveCheckRollup,
   summariseChecks,
@@ -35,6 +37,15 @@ import {
   type PullRequestCheckState,
   type PullRequestChecksReport,
 } from '../../../src/shared/pull-request-checks'
+import {
+  pullRequestInboxGroups,
+  type PullRequestInboxItem,
+  type PullRequestInboxRefresh,
+  type PullRequestInboxReport,
+  type PullRequestInboxRepositoryReport,
+  type PullRequestInboxSignals,
+} from '../../../src/shared/pr-inbox'
+import type { GitHubCapabilityState } from '../../../src/shared/host'
 import type { FixtureScenario } from './types'
 import type { ScenarioName } from './manifest'
 
@@ -138,9 +149,12 @@ const checkoutTestsBranch = local({
   pr: checkoutPr,
 })
 
+const INBOX_PATH = '/Users/ada/Code/git-stacks'
+const SPECIMENS_PATH = '/Users/ada/Code/design-system-specimens'
+
 const recentRepositories: RecentRepository[] = [
   { path: '/Users/ada/Code/git-stacks', name: 'git-stacks' },
-  { path: '/Users/ada/Code/design-system-specimens', name: 'design-system-specimens' },
+  { path: SPECIMENS_PATH, name: 'design-system-specimens' },
   {
     path: '/Users/ada/Code/work/git-stacks-workbench-fixture-with-a-long-directory-name',
     name: 'git-stacks-workbench-fixture-with-a-long-directory-name',
@@ -589,22 +603,32 @@ function checksReport(
 }
 
 /**
- * The report a scenario gives a pull request that names no checks of its own.
+ * The report a pull request that names no checks of its own answers with, taken
+ * from the snapshot that is on screen.
+ *
  * Every branch row and pull request list the app renders already declares the
  * state it is showing, so the read that follows has to answer with that same
  * state. Returning nothing instead makes a background refresh of every ordinary
  * scenario fail, which is a statement about the fixture and not about the code
  * under test.
+ *
+ * The snapshot is named by the caller rather than assumed: a pull request
+ * reached by opening another repository belongs to that repository, and reading
+ * its checks out of the repository the fixture started with would answer with
+ * another pull request's facts — or with none at all. A scenario's own
+ * `pullRequestChecks` still wins, so a scenario that states an override for a
+ * number keeps stating it.
  */
 export function checksReportFor(
   scenario: FixtureScenario,
   number: number,
+  snapshot: RepositorySnapshot | null,
 ): PullRequestChecksReport | null {
   const stated = scenario.pullRequestChecks?.[number]
   if (stated) return stated
   const pullRequest = [
-    ...(scenario.snapshot?.pullRequests ?? []),
-    ...(scenario.snapshot?.branches ?? []).flatMap((branch) => (branch.pr ? [branch.pr] : [])),
+    ...(snapshot?.pullRequests ?? []),
+    ...(snapshot?.branches ?? []).flatMap((branch) => (branch.pr ? [branch.pr] : [])),
   ].find((entry) => entry.number === number)
   if (!pullRequest) return null
   const state: PullRequestCheckState =
@@ -733,6 +757,438 @@ const deepChainSnapshot = repository({
   headOid: oid('local:feature/deep-0001'),
 })
 
+/**
+ * The PR Inbox queue fixtures. Group membership is decided by the production rules
+ * over fixed GitHub facts, so a scenario's group counts are the same numbers the
+ * main process would report for the same rows rather than a second opinion.
+ */
+const INBOX_NOW = Date.parse(UPDATED)
+const INBOX_VIEWER = 'ada'
+
+/**
+ * What this host answers about the review and check fields the queue reads.
+ *
+ * The queue reads them over GraphQL, so a host that does not serve GraphQL
+ * cannot return them at all. One declaration therefore produces both fixtures
+ * below — the complete rows and the narrowed ones — and the repository report
+ * that goes with each, so a scenario cannot show a complete read of one
+ * repository beside a degraded read of the same host.
+ */
+const INBOX_HOST_REVIEW_FIELDS: GitHubCapabilityState = 'supported'
+const INBOX_HOST_WITHOUT_REVIEW_FIELDS: GitHubCapabilityState = 'unsupported'
+const inboxMetadata = (graphql: GitHubCapabilityState): PullRequestInboxItem['metadata'] =>
+  graphql === 'supported' ? 'full' : 'degraded'
+
+function inboxRow(
+  overrides: Partial<PullRequestInboxSignals> & {
+    number: number
+    repository?: string
+    repositoryPath?: string
+    title: string
+    head?: string
+    checks?: PullRequest['checks']
+    /** The account this read was made as; null when the host named none. */
+    viewer?: string | null
+  },
+): PullRequestInboxItem {
+  const {
+    number,
+    repository = 'howarewoo/git-stacks',
+    repositoryPath = '/Users/ada/Code/git-stacks',
+    title,
+    head = `feature/inbox-${number}`,
+    viewer = INBOX_VIEWER,
+    checks = 'passing',
+    ...signals
+  } = overrides
+  const facts: PullRequestInboxSignals = {
+    state: 'OPEN',
+    draft: false,
+    author: 'grace',
+    reviewRequested: [],
+    reviewDecision: null,
+    lastTurnLogin: null,
+    updatedAt: UPDATED,
+    mergedAt: null,
+    metadata: inboxMetadata(INBOX_HOST_REVIEW_FIELDS),
+    ...signals,
+  }
+  return {
+    number,
+    title,
+    repository,
+    repositoryPath,
+    host: 'github.com',
+    url: `https://github.com/${repository}/pull/${number}`,
+    head,
+    base: 'main',
+    state: facts.state,
+    draft: facts.draft,
+    checks,
+    author: facts.author,
+    reviewRequested: facts.reviewRequested,
+    reviewDecision: facts.reviewDecision,
+    lastTurnLogin: facts.lastTurnLogin,
+    metadata: facts.metadata,
+    updatedAt: facts.updatedAt,
+    mergedAt: facts.mergedAt,
+    groups: pullRequestInboxGroups(facts, { viewer, now: INBOX_NOW }),
+  }
+}
+
+const inboxRows: PullRequestInboxItem[] = [
+  inboxRow({
+    number: 81,
+    title: 'Add a GitHub-derived PR Inbox across registered repositories',
+    head: 'feature/pr-inbox',
+    reviewRequested: [INBOX_VIEWER],
+    reviewDecision: 'REVIEW_REQUIRED',
+  }),
+  inboxRow({
+    number: 77,
+    title: 'Charge every native-stack page to the refresh budget',
+    head: 'feature/inbox-budget',
+    // The second registered repository, which really is one: opening this row
+    // opens that repository rather than the one already showing.
+    repository: 'howarewoo/design-system-specimens',
+    repositoryPath: SPECIMENS_PATH,
+    reviewRequested: [INBOX_VIEWER],
+    checks: 'failing',
+    // The same decision its Review snapshot states. One pull request has one
+    // review decision: a row that reported none while its Review reported one
+    // would change a fact about the pull request merely by opening it. The
+    // degraded scenario below is where an unavailable decision belongs, and it
+    // says so through its metadata instead.
+    reviewDecision: 'REVIEW_REQUIRED',
+  }),
+  inboxRow({
+    number: 64,
+    title: 'Keep the Inbox rows an earlier account read off the screen',
+    head: 'feature/inbox-identity',
+    author: INBOX_VIEWER,
+    reviewDecision: 'REVIEW_REQUIRED',
+    lastTurnLogin: 'grace',
+  }),
+  inboxRow({
+    number: 58,
+    title: 'Name the repositories a refresh did not attempt',
+    head: 'feature/inbox-partial',
+    author: INBOX_VIEWER,
+  }),
+  inboxRow({
+    number: 51,
+    title: 'Sketch the Inbox group rail',
+    head: 'feature/inbox-draft',
+    draft: true,
+    author: 'grace',
+  }),
+  inboxRow({
+    number: 44,
+    title: 'Land the first queue read',
+    head: 'feature/inbox-merged',
+    // A host that reports no author says that rather than naming one, so the
+    // row has to carry a real absence here: naming a login for this one would
+    // leave the fallback nothing to be exercised against.
+    author: null,
+    state: 'MERGED',
+    mergedAt: UPDATED,
+  }),
+]
+
+function inboxReport(
+  repositories: PullRequestInboxRepositoryReport[],
+  items: PullRequestInboxItem[],
+  overrides: Partial<PullRequestInboxRefresh> = {},
+): PullRequestInboxReport {
+  return {
+    refresh: {
+      state: 'fresh',
+      confirmedAt: UPDATED,
+      checkedAt: UPDATED,
+      viewer: INBOX_VIEWER,
+      requests: 4,
+      budget: { maxRequests: 24, reserve: 250 },
+      repositories,
+      truncated: [],
+      detail: '2 registered repositories read.',
+      ...overrides,
+    },
+    items,
+    mergedWithinDays: 30,
+  }
+}
+
+/**
+ * The Inbox's own primary workspace.
+ *
+ * The generic `connected` snapshot is left alone for everything that is not the
+ * queue: it is the fixture that selects pull request #41, and rewriting it to
+ * carry the Inbox's rows would move every other destination's review. A queue
+ * row is only real when opening it reaches a workspace that holds that pull
+ * request, so the Inbox gets its own primary snapshot with the same facts its
+ * rows are built from — same numbers, titles, refs, and check states.
+ *
+ * Its branches are the repository's own. Inheriting the generic set would leave
+ * the checkout branch's #41 associated with this repository: selecting that
+ * branch would then report a pull request the workspace does not hold, and the
+ * review, the external link and the Checks read would all act on it. The branch
+ * on screen is #81's own, with its head, because nothing here checked anything
+ * out.
+ */
+const inboxPr81: PullRequest = {
+  number: 81,
+  title: 'Add a GitHub-derived PR Inbox across registered repositories',
+  url: 'https://github.com/howarewoo/git-stacks/pull/81',
+  head: 'feature/pr-inbox',
+  base: 'main',
+  state: 'OPEN',
+  draft: false,
+  checks: 'passing',
+  headOid: '8181818181818181818181818181818181818181',
+  reviewDecision: 'REVIEW_REQUIRED',
+}
+
+const inboxPrimarySnapshot: RepositorySnapshot = {
+  ...repository({
+    path: INBOX_PATH,
+    name: 'git-stacks',
+    currentBranch: 'feature/pr-inbox',
+    branches: [
+      mainBranch,
+      local({
+        name: 'feature/pr-inbox',
+        current: true,
+        parent: 'main',
+        parentTip: oid('local:main'),
+        parentSource: 'recorded',
+        ahead: 2,
+        subject: 'Add a GitHub-derived PR Inbox across registered repositories',
+        updatedAt: UPDATED,
+        pr: inboxPr81,
+        oid: inboxPr81.headOid,
+      }),
+    ],
+    headOid: inboxPr81.headOid,
+  }),
+  pullRequests: [
+    inboxPr81,
+    {
+      number: 64,
+      title: 'Keep the Inbox rows an earlier account read off the screen',
+      url: 'https://github.com/howarewoo/git-stacks/pull/64',
+      head: 'feature/inbox-identity',
+      base: 'main',
+      state: 'OPEN',
+      draft: false,
+      checks: 'passing',
+      headOid: '6464646464646464646464646464646464646464',
+      reviewDecision: 'REVIEW_REQUIRED',
+    },
+    {
+      number: 58,
+      title: 'Name the repositories a refresh did not attempt',
+      url: 'https://github.com/howarewoo/git-stacks/pull/58',
+      head: 'feature/inbox-partial',
+      base: 'main',
+      state: 'OPEN',
+      draft: false,
+      checks: 'passing',
+      headOid: '5858585858585858585858585858585858585858',
+      reviewDecision: '',
+    },
+    {
+      number: 51,
+      title: 'Sketch the Inbox group rail',
+      url: 'https://github.com/howarewoo/git-stacks/pull/51',
+      head: 'feature/inbox-draft',
+      base: 'main',
+      state: 'OPEN',
+      draft: true,
+      checks: 'passing',
+      headOid: '5151515151515151515151515151515151515151',
+      reviewDecision: '',
+    },
+    {
+      number: 44,
+      title: 'Land the first queue read',
+      url: 'https://github.com/howarewoo/git-stacks/pull/44',
+      head: 'feature/inbox-merged',
+      base: 'main',
+      state: 'MERGED',
+      draft: false,
+      checks: 'passing',
+      headOid: '4444444444444444444444444444444444444444',
+      reviewDecision: '',
+    },
+  ],
+}
+
+/**
+ * The second registered repository's own workspace, with the pull request the
+ * Inbox row #77 names. Opening that row opens this repository and this pull
+ * request, so the destination is not a list of rows over one workspace. The
+ * origin is the canonical one for the repository its row, its repository report,
+ * and its Review facts all name.
+ *
+ * It carries no pull request but #77, on any branch: #41 belongs to the
+ * repository whose branches the generic fixture builds, and a workspace that
+ * listed it here would report another repository's review as this one's.
+ */
+const specimensPr77: PullRequest = {
+  number: 77,
+  title: 'Charge every native-stack page to the refresh budget',
+  url: 'https://github.com/howarewoo/design-system-specimens/pull/77',
+  head: 'feature/inbox-budget',
+  base: 'main',
+  state: 'OPEN',
+  draft: false,
+  checks: 'failing',
+  headOid: '7777777777777777777777777777777777777777',
+  reviewDecision: 'REVIEW_REQUIRED',
+}
+
+const specimensSnapshot: RepositorySnapshot = {
+  ...repository({
+    path: SPECIMENS_PATH,
+    name: 'design-system-specimens',
+    remoteUrl: 'git@github.com:howarewoo/design-system-specimens.git',
+    currentBranch: 'feature/inbox-budget',
+    branches: [
+      mainBranch,
+      local({
+        name: 'feature/inbox-budget',
+        current: true,
+        parent: 'main',
+        parentTip: oid('local:main'),
+        parentSource: 'recorded',
+        ahead: 1,
+        subject: 'Charge every native-stack page to the refresh budget',
+        updatedAt: UPDATED,
+        pr: specimensPr77,
+        oid: specimensPr77.headOid,
+      }),
+    ],
+    headOid: specimensPr77.headOid,
+  }),
+  pullRequests: [specimensPr77],
+}
+
+const inboxSnapshots: Record<string, RepositorySnapshot> = {
+  [INBOX_PATH]: inboxPrimarySnapshot,
+  [SPECIMENS_PATH]: specimensSnapshot,
+}
+
+/**
+ * The same rows as the full read, with the second repository's row carrying what
+ * a narrowed read actually produces: no review decision, no check result, and
+ * metadata marked unavailable. Its groups come from the same membership function
+ * as every other row, so this scenario exercises the real supported-set rule
+ * rather than a hand-written group list that could agree with the wrong one.
+ */
+const inboxDegradedRows: PullRequestInboxItem[] = inboxRows.map((row) =>
+  row.repositoryPath === SPECIMENS_PATH
+    ? inboxRow({
+        number: row.number,
+        title: row.title,
+        repository: row.repository,
+        repositoryPath: row.repositoryPath,
+        head: row.head,
+        reviewRequested: row.reviewRequested,
+        metadata: inboxMetadata(INBOX_HOST_WITHOUT_REVIEW_FIELDS),
+        checks: 'none',
+        reviewDecision: null,
+        lastTurnLogin: null,
+      })
+    : row,
+)
+
+const inboxRead: PullRequestInboxRepositoryReport[] = [
+  {
+    repository: 'howarewoo/git-stacks',
+    path: '/Users/ada/Code/git-stacks',
+    host: 'github.com',
+    status: 'ok',
+    viewer: INBOX_VIEWER,
+    detail: '4 pull requests',
+  },
+  {
+    repository: 'howarewoo/design-system-specimens',
+    path: SPECIMENS_PATH,
+    host: 'github.com',
+    status: 'ok',
+    viewer: INBOX_VIEWER,
+    detail: '2 pull requests',
+  },
+]
+
+const inboxNarrowedRead: PullRequestInboxRepositoryReport =
+  inboxMetadata(INBOX_HOST_WITHOUT_REVIEW_FIELDS) === 'degraded'
+    ? {
+        repository: 'howarewoo/design-system-specimens',
+        path: SPECIMENS_PATH,
+        host: 'github.com',
+        status: 'degraded',
+        viewer: INBOX_VIEWER,
+        detail: 'github.com does not report review decisions, the newest review, or check state.',
+      }
+    : (inboxRead[1] as PullRequestInboxRepositoryReport)
+
+const inboxQueue = inboxReport(inboxRead, inboxRows)
+const inboxEmpty = inboxReport(
+  [inboxRead[0]].filter((entry): entry is PullRequestInboxRepositoryReport => entry !== undefined),
+  [],
+  { requests: 2, detail: '1 registered repository read.' },
+)
+const inboxPartial = inboxReport(
+  [inboxRead[0] as PullRequestInboxRepositoryReport, inboxNarrowedRead],
+  inboxDegradedRows,
+  { state: 'partial', confirmedAt: UPDATED, detail: 'Some repositories could not be read.' },
+)
+
+/**
+ * The same read, the same rows, and no account behind them: the host named no
+ * viewer this time. Authorship and a request to the viewer are then undecided
+ * rather than false, so the membership function leaves every viewer-relative
+ * group empty and the rows that do not depend on one keep their places. The
+ * repository reports say why, which is the only thing that tells a person whose
+ * work stopped being listed.
+ */
+const inboxMembershipUnknownRows: PullRequestInboxItem[] = inboxRows.map((row) =>
+  inboxRow({
+    number: row.number,
+    title: row.title,
+    repository: row.repository,
+    repositoryPath: row.repositoryPath,
+    head: row.head,
+    state: row.state,
+    draft: row.draft,
+    checks: row.checks,
+    author: row.author,
+    reviewRequested: row.reviewRequested,
+    reviewDecision: row.reviewDecision,
+    lastTurnLogin: row.lastTurnLogin,
+    updatedAt: row.updatedAt,
+    mergedAt: row.mergedAt,
+    metadata: row.metadata,
+    viewer: null,
+  }),
+)
+
+const inboxMembershipUnknownRead: PullRequestInboxRepositoryReport[] = inboxRead.map((entry) => ({
+  ...entry,
+  status: 'membership-unknown',
+  viewer: null,
+  detail:
+    'github.com named no signed-in account for these rows, so the queue cannot say whose work they are.',
+}))
+
+const inboxMembershipUnknown = inboxReport(inboxMembershipUnknownRead, inboxMembershipUnknownRows, {
+  state: 'partial',
+  confirmedAt: UPDATED,
+  viewer: null,
+  detail: 'Some repositories could not be read.',
+})
+
 export const scenarios: Record<ScenarioName, FixtureScenario> = {
   'shell-no-repository': {
     name: 'shell-no-repository',
@@ -752,6 +1208,12 @@ export const scenarios: Record<ScenarioName, FixtureScenario> = {
     summary: 'Connected repository: stacked branches, one draft PR, clean tree.',
     snapshot: connected,
     recentRepositories,
+    // No queue here. This scenario's repository is the one every other
+    // destination is built around, and it holds pull request #41 — not the rows
+    // the Inbox shows. A queue read here would advertise rows that open a
+    // workspace which does not contain them, and every other destination's
+    // capture would inherit that fiction. The Inbox is captured from
+    // `pr-inbox-queue`, which owns the snapshots its rows open.
   },
   'shell-long-content': {
     name: 'shell-long-content',
@@ -1191,5 +1653,116 @@ export const scenarios: Record<ScenarioName, FixtureScenario> = {
       operation: 'other',
     },
     recentRepositories,
+  },
+  // PR Inbox
+  'pr-inbox-queue': {
+    name: 'pr-inbox-queue',
+    summary: 'Two registered repositories, six groups, one row per group.',
+    snapshot: inboxPrimarySnapshot,
+    recentRepositories,
+    snapshotsByPath: inboxSnapshots,
+    inbox: inboxQueue,
+  },
+  'pr-inbox-no-repository': {
+    name: 'pr-inbox-no-repository',
+    summary: 'The queue with no repository open: it spans every registered repository.',
+    snapshot: null,
+    recentRepositories,
+    snapshotsByPath: inboxSnapshots,
+    inbox: inboxQueue,
+  },
+  'pr-inbox-empty': {
+    name: 'pr-inbox-empty',
+    summary: 'GitHub confirmed a read that holds nothing: the queue is empty, not unconfirmed.',
+    snapshot: inboxPrimarySnapshot,
+    recentRepositories,
+    snapshotsByPath: inboxSnapshots,
+    inbox: inboxEmpty,
+  },
+  'pr-inbox-partial': {
+    name: 'pr-inbox-partial',
+    summary: 'One repository answered without review and check metadata; the other read fully.',
+    snapshot: inboxPrimarySnapshot,
+    recentRepositories,
+    snapshotsByPath: inboxSnapshots,
+    inbox: inboxPartial,
+  },
+  'pr-inbox-unavailable': {
+    name: 'pr-inbox-unavailable',
+    summary: 'GitHub is unreachable: the last confirmed rows stay behind the reason.',
+    snapshot: inboxPrimarySnapshot,
+    recentRepositories,
+    snapshotsByPath: inboxSnapshots,
+    inbox: inboxReport(inboxRead, inboxRows, {
+      state: 'offline',
+      confirmedAt: EARLIER,
+      checkedAt: UPDATED,
+      detail: 'GitHub could not be reached: howarewoo/git-stacks (GitHub unreachable).',
+    }),
+  },
+  'pr-inbox-retired': {
+    name: 'pr-inbox-retired',
+    summary:
+      'The read ended before it confirmed anything: the queue is empty and says so, without blaming the account or the network.',
+    snapshot: inboxPrimarySnapshot,
+    recentRepositories,
+    snapshotsByPath: inboxSnapshots,
+    // The same shape the main process returns for a read it ended: nothing at
+    // all, because the rows an earlier read confirmed were read by an identity
+    // that is no longer the one asking.
+    inbox: inboxReport([], [], {
+      state: 'retired',
+      confirmedAt: null,
+      checkedAt: UPDATED,
+      viewer: null,
+      requests: 0,
+      detail:
+        'This read ended before it confirmed anything, so it is not describing the current queue. Refresh to read the queue as it is now.',
+    }),
+  },
+  'pr-inbox-first-read': {
+    name: 'pr-inbox-first-read',
+    summary: 'Nothing has ever been read from GitHub: the queue is waiting on its first read.',
+    snapshot: connected,
+    recentRepositories,
+  },
+  'pr-inbox-membership-unknown': {
+    name: 'pr-inbox-membership-unknown',
+    summary:
+      'The host read the rows and named no account: no viewer-relative group can be decided, and the queue says why.',
+    snapshot: inboxPrimarySnapshot,
+    recentRepositories,
+    snapshotsByPath: inboxSnapshots,
+    inbox: inboxMembershipUnknown,
+  },
+  'pr-inbox-host-switch': {
+    name: 'pr-inbox-host-switch',
+    summary:
+      'A queue confirmed for one host, whose account status has not answered yet, when the person names a different host.',
+    snapshot: inboxPrimarySnapshot,
+    recentRepositories,
+    snapshotsByPath: inboxSnapshots,
+    inbox: inboxQueue,
+    // The account read is still outstanding, so the window opens holding a
+    // confirmed queue for github.com and nothing at all that says who behind it
+    // is. It answers with github.com's account, and it answers late.
+    pending: ['githubAccountStatus'],
+    identity: {
+      settings: { ...DEFAULT_SETTINGS },
+      account: {
+        state: 'signed-in',
+        reference: 'keychain://git-stacks/pr-inbox-host-switch',
+        host: 'github.com',
+        login: 'ada',
+        permissions: [{ permission: 'pull_requests', access: 'read', feature: 'inbox' }],
+        expiresAt: null,
+        refreshExpiresAt: null,
+        store: { available: true, name: null, reason: null },
+        signingIn: false,
+        challenge: null,
+        message: null,
+        externalCredential: false,
+      },
+    },
   },
 }

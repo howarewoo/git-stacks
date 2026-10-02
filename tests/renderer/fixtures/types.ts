@@ -16,6 +16,9 @@ import type { ReviewEvent } from '../../../src/shared/review-threads'
 import type { ReviewHistory, ReviewHistoryDiff } from '../../../src/shared/review-snapshots'
 
 import type { PullRequestChecksReport } from '../../../src/shared/pull-request-checks'
+import type { PullRequestInboxReport } from '../../../src/shared/pr-inbox'
+import type { AppSettings } from '../../../src/shared/settings'
+import type { GitHubAccountStatus } from '../../../src/shared/types'
 
 /** Every promise-returning `DesktopAPI` method the fixture double can intercept. */
 export type FixtureCall =
@@ -67,6 +70,12 @@ export type FixtureCall =
   | 'downloadUpdate'
   | 'installUpdate'
   | 'cancelUpdate'
+  | 'pullRequestInbox'
+  | 'pullRequestInboxFilters'
+  | 'savePullRequestInboxFilters'
+  | 'settings'
+  | 'updateSettings'
+  | 'githubAccountStatus'
 
 /** One entry of the ordered {@link FixtureControl.calls} log. */
 export interface FixtureCallRecord {
@@ -87,6 +96,26 @@ export interface FixtureScenario {
   /** `null` renders the production no-repository onboarding instead of a workspace. */
   readonly snapshot: RepositorySnapshot | null
   readonly recentRepositories: readonly RecentRepository[]
+  /**
+   * The snapshot each registered repository opens as, keyed by its path. A
+   * queue row names a repository path, and opening that row has to open that
+   * repository: answering every path with one snapshot would make a row for a
+   * second repository open the first one's workspace.
+   */
+  readonly snapshotsByPath?: Readonly<Record<string, RepositorySnapshot>>
+  /**
+   * The settings file this window reads and the account behind it.
+   *
+   * Both surfaces are installed only where a scenario declares them. A window
+   * with neither has no host to compare its queue against, so nothing retires
+   * that queue at mount — and giving every scenario both would retire it on
+   * mount for a reason those fixtures are not built to show.
+   */
+  readonly identity?: {
+    settings: AppSettings
+    /** Main always answers with a status; a host that has named none is signed out. */
+    account: GitHubAccountStatus
+  }
   /** Calls that start pending; `release()` settles them. */
   readonly pending?: readonly FixtureCall[]
   /** Calls that always reject. Per-action errors belong in `actionFailures`. */
@@ -127,6 +156,12 @@ export interface FixtureScenario {
    * describe would.
    */
   readonly pullRequestChecks?: Readonly<Record<number, PullRequestChecksReport>>
+  /**
+   * The queue the Inbox destination reads. A scenario without one has no
+   * integration behind the destination, so the read refuses the way an
+   * unconfigured GitHub does rather than answering an invented queue.
+   */
+  readonly inbox?: PullRequestInboxReport
 }
 
 /** Typed gallery control surface. Every field is plain serializable data. */
@@ -141,14 +176,34 @@ export interface FixtureControl {
   readonly calls: FixtureCallRecord[]
   /** Call kinds currently held pending by `hold`. */
   readonly pending: FixtureCall[]
-  /** Installs another scenario and remounts the mounted tree in place. */
+  /**
+   * Installs another scenario's answers into the doubles already installed, without
+   * remounting anything: the mounted tree keeps its state, its destination, and
+   * its in-flight reads; reads that follow answer from the newly selected
+   * scenario's own repository (or refuse when it has none), while the repository
+   * already displayed remains on screen until the application opens another one.
+   */
   setScenario(name: string): void
   /** Keeps every later call of `call` pending until it is released. */
   hold(call: FixtureCall): void
-  /** Settles pending calls and returns how many were settled; omit `call` to release all. */
-  release(call?: FixtureCall): number
+  /**
+   * Settles pending calls oldest first, which is the order they were started
+   * in, and returns how many were settled; omit `call` to release all. Pass
+   * `occurrence` ('oldest' or 'newest') to settle only one specific pending
+   * call. A one-shot `failNext` is consumed by the first call this settles, so
+   * this order decides which of several pending reads is the one that fails.
+   */
+  release(call?: FixtureCall, occurrence?: 'oldest' | 'newest'): number
   /** Rejects the next call of `call` once, then restores normal behavior. */
   failNext(call: FixtureCall, message?: string): void
+  /**
+   * Answers the next call of `call` with `value` once, then restores normal
+   * behavior. The value is the answer the producer itself would return, so a
+   * spec can put a read that ended, or one that was replaced, on the wire
+   * without inventing a different shape for it. It is consumed by the first
+   * call `release` settles, exactly as `failNext` is.
+   */
+  answerNext(call: FixtureCall, value: unknown): void
   /**
    * Clicks the production Open repository control once, the first action a user takes, so a
    * scenario that has a repository starts connected. No-op when it has none.

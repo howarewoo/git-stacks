@@ -91,7 +91,11 @@ function renderRoute(route: GalleryRouteId, remountKey: string) {
     case 'dialog':
       return <DialogSpecimen key={remountKey} />
     default:
-      return <App key={remountKey} />
+      // Not keyed by the scenario. Remounting would make an in-place answer
+      // change indistinguishable from a first load, and the in-place
+      // transitions — a read that ends, a read that is replaced, a read that
+      // names no account — would then only ever be provable by reloading.
+      return <App />
   }
 }
 
@@ -115,10 +119,19 @@ function Gallery() {
     document.documentElement.dataset.galleryRoute = route
   }, [route, scenario])
 
-  // The production App only opens a repository when the user asks for one. The gallery performs
-  // that same first click so every scenario that has a repository starts in its connected state.
+  // The production App opens a repository only when the user asks for one, so
+  // the gallery performs that first click itself. It is armed once per App
+  // mount: leaving the App route unmounts the App, and coming back is a fresh
+  // mount that needs the same click.
+  const connected = React.useRef(false)
   React.useEffect(() => {
-    if (route === 'app') control.connect()
+    if (route !== 'app') {
+      connected.current = false
+      return
+    }
+    if (connected.current) return
+    connected.current = true
+    control.connect()
   }, [route, scenario])
 
   // No StrictMode here: every fixture must mount exactly once so the call log stays deterministic.

@@ -18,11 +18,22 @@ import type {
   SurgeryPreview,
 } from '../../../src/shared/types'
 import {
+  DEFAULT_SETTINGS,
+  type AppSettings,
+  type SettingsSnapshot,
+} from '../../../src/shared/settings'
+import {
   conflictLabels,
   conflictRegions,
   parseConflictSegments,
 } from '../../../src/shared/conflict'
 import type { ReviewHistoryDiff } from '../../../src/shared/review-snapshots'
+import {
+  parsePullRequestInboxFilterDraft,
+  parsePullRequestInboxSavedFilters,
+  type PullRequestInboxFilterDraft,
+  type PullRequestInboxSavedFilter,
+} from '../../../src/shared/pr-inbox'
 import type { ReviewHeadline, ReviewViewedRecord } from '../../../src/shared/review'
 import {
   fileViewFixtures,
@@ -254,6 +265,7 @@ export function installFixtureControl(options: {
   const calls: FixtureCallRecord[] = []
   const holds = new Set<FixtureCall>()
   const oneShotFailures = new Map<FixtureCall, string>()
+  const oneShotAnswers = new Map<FixtureCall, unknown>()
   const dropListeners = new Set<(paths: string[]) => void>()
   const released = new Set<FixtureCall>()
   const waiting: WaitingCall[] = []
@@ -263,6 +275,8 @@ export function installFixtureControl(options: {
   const publishMergeProgress = (progress: MergeProgress | null): void => {
     for (const listener of mergeListeners) listener(progress)
   }
+  /** Saved filters, as the main process keeps them: whole-list writes, identities preserved. */
+  let inboxFilters: PullRequestInboxSavedFilter[] = []
 
   const scenarioFor = (name: string): FixtureScenario =>
     scenarios[name as ScenarioName] ?? scenarios[DEFAULT_SCENARIO]
@@ -278,6 +292,11 @@ export function installFixtureControl(options: {
     const permanent = extraFailure ?? scenario.failures?.[call]
     const held = holds.has(call) || (startsPending.has(call) && !released.has(call))
     const settle = (): Promise<T> => {
+      const scripted = oneShotAnswers.get(call)
+      if (scripted !== undefined) {
+        oneShotAnswers.delete(call)
+        return Promise.resolve(scripted as T)
+      }
       const queued = oneShotFailures.get(call)
       if (queued !== undefined) {
         oneShotFailures.delete(call)
@@ -302,6 +321,17 @@ export function installFixtureControl(options: {
   }
 
   const updateListeners = new Set<(status: UpdateStatus) => void>()
+  /**
+   * The snapshot repository reads are answered from. Seeded from the scenario,
+   * replaced by a successful open, and reset to the newly selected scenario's
+   * own snapshot when the scenario changes, because that is the world the
+   * double is answering for now.
+   *
+   * This is not what the window is displaying. `setScenario` installs another
+   * scenario's answers without remounting anything, so the App keeps the
+   * repository it already opened until it opens or refreshes one itself.
+   */
+  let active: RepositorySnapshot | null = scenario.snapshot
   const desktop: DesktopAPI = {
     recentRepositories: () => {
       record('recentRepositories', [])
@@ -309,13 +339,25 @@ export function installFixtureControl(options: {
     },
     openRepository: (path) => {
       record('openRepository', path === undefined ? [] : [path])
-      return answer('openRepository', () => scenario.snapshot)
+      return answer('openRepository', () => {
+        const requested = path === undefined ? undefined : scenario.snapshotsByPath?.[path]
+        const opened = requested ?? scenario.snapshot
+        if (!opened) throw new Error('No repository is open in this fixture.')
+        // Opened is the repository that is now on screen, so every read after it
+        // is answered from it. Returning the snapshot is not the same thing: the
+        // selected pull request's headline, files, and threads are looked up in
+        // whichever snapshot is active, and leaving the previous one active is
+        // how a row for a second repository reaches a Review workspace that says
+        // the pull request is not there.
+        active = opened
+        return opened
+      })
     },
     refresh: () => {
       record('refresh', [])
       return answer('refresh', () => {
-        if (!scenario.snapshot) throw new Error('No repository is open in this fixture.')
-        return scenario.snapshot
+        if (!active) throw new Error('No repository is open in this fixture.')
+        return active
       })
     },
     runAction: (action) => {
@@ -368,7 +410,7 @@ export function installFixtureControl(options: {
         if (
           path !== view.path ||
           view.content === null ||
-          !scenario.snapshot?.files.some((file) => file.path === path && file.conflicted)
+          !active?.files.some((file) => file.path === path && file.conflicted)
         ) {
           throw new Error(`No conflict fixture exists for ${path}.`)
         }
@@ -379,8 +421,8 @@ export function installFixtureControl(options: {
           stagePreviewTruncated: [],
           binary: false,
           labels: conflictLabels({
-            operation: scenario.snapshot.operation,
-            currentBranch: scenario.snapshot.currentBranch,
+            operation: active.operation,
+            currentBranch: active.currentBranch,
             incomingSubject: null,
             incomingRef: null,
             stash: null,
@@ -462,7 +504,7 @@ export function installFixtureControl(options: {
     pullRequest: (number) => {
       record('pullRequest', [number])
       return answer('pullRequest', () => {
-        const found = scenario.snapshot?.pullRequests.find((pr) => pr.number === number)
+        const found = active?.pullRequests.find((pr) => pr.number === number)
         if (!found) throw new Error(`Pull request #${number} is not in this fixture snapshot.`)
         return {
           ...found,
@@ -479,12 +521,12 @@ export function installFixtureControl(options: {
     reviewHeadline: (number) => {
       record('reviewHeadline', [number])
       return answer('reviewHeadline', () => {
-        const found = scenario.snapshot?.pullRequests.find((pr) => pr.number === number)
+        const found = active?.pullRequests.find((pr) => pr.number === number)
         if (!found) throw new Error(`Pull request #${number} is not in this fixture snapshot.`)
         // A pull request carries only its own position; the layer list comes
         // from every pull request in the snapshot that names the same stack.
         const membership = found.stack
-          ? (scenario.snapshot?.pullRequests
+          ? (active?.pullRequests
               .filter((pr) => pr.stack?.stackNumber === found.stack?.stackNumber)
               .map((pr) =>
                 stackMember(pr.stack?.position ?? 1, pr.number, found.stack?.size ?? 1),
@@ -503,7 +545,7 @@ export function installFixtureControl(options: {
     reviewFiles: (number) => {
       record('reviewFiles', [number])
       return answer('reviewFiles', () => {
-        const found = scenario.snapshot?.pullRequests.find((pr) => pr.number === number)
+        const found = active?.pullRequests.find((pr) => pr.number === number)
         if (!found) throw new Error(`Pull request #${number} is not in this fixture snapshot.`)
         return reviewFileSet(number, scenario.reviewHeadOid ?? found.headOid ?? `head-${number}`)
       })
@@ -523,7 +565,7 @@ export function installFixtureControl(options: {
     reviewThreads: (number) => {
       record('reviewThreads', [number])
       return answer('reviewThreads', () => {
-        const found = scenario.snapshot?.pullRequests.find((pr) => pr.number === number)
+        const found = active?.pullRequests.find((pr) => pr.number === number)
         const headOid = scenario.reviewHeadOid ?? found?.headOid ?? `head-${number}`
         return {
           threads: reviewThreadSet(number, headOid),
@@ -575,7 +617,7 @@ export function installFixtureControl(options: {
             ? scenario.reviewHistory(number)
             : scenario.reviewHistory
         }
-        const found = scenario.snapshot?.pullRequests.find((pr) => pr.number === number)
+        const found = active?.pullRequests.find((pr) => pr.number === number)
         const currentHead = scenario.reviewHeadOid ?? found?.headOid ?? `head-${number}`
         const historicalHead = '1111222233334444555566667777888899990000'
         return {
@@ -643,7 +685,7 @@ export function installFixtureControl(options: {
             ? scenario.reviewHistoryDiff(number, fromOid)
             : scenario.reviewHistoryDiff
         }
-        const found = scenario.snapshot?.pullRequests.find((pr) => pr.number === number)
+        const found = active?.pullRequests.find((pr) => pr.number === number)
         const currentHead = scenario.reviewHeadOid ?? found?.headOid ?? `head-${number}`
         const fromSnapshot = {
           headOid: fromOid,
@@ -694,7 +736,7 @@ export function installFixtureControl(options: {
     reviewClearHistory: (number) => {
       record('reviewClearHistory', [number])
       return answer('reviewClearHistory', () => {
-        const found = scenario.snapshot?.pullRequests.find((pr) => pr.number === number)
+        const found = active?.pullRequests.find((pr) => pr.number === number)
         const currentHead = scenario.reviewHeadOid ?? found?.headOid ?? `head-${number}`
         return {
           number,
@@ -731,7 +773,7 @@ export function installFixtureControl(options: {
     reviewResolveDrafts: (number, drafts) => {
       record('reviewResolveDrafts', [number, drafts])
       return answer('reviewResolveDrafts', () => {
-        const found = scenario.snapshot?.pullRequests.find((pr) => pr.number === number)
+        const found = active?.pullRequests.find((pr) => pr.number === number)
         const headOid = scenario.reviewHeadOid ?? found?.headOid ?? `head-${number}`
         const files = reviewFileSet(number, headOid)
         // The main process re-resolves each anchor against a freshly read file
@@ -783,7 +825,7 @@ export function installFixtureControl(options: {
     pullRequestChecks: (number, options) => {
       record('pullRequestChecks', [number, options])
       return answer<PullRequestChecksReport>('pullRequestChecks', () => {
-        const report = checksReportFor(scenario, number)
+        const report = checksReportFor(scenario, number, active)
         if (!report) throw new Error(`Pull request #${number} is not in this scenario.`)
         return report
       })
@@ -791,7 +833,7 @@ export function installFixtureControl(options: {
     rerunPullRequestCheck: (number, runId) => {
       record('rerunPullRequestCheck', [number, runId])
       return answer<PullRequestChecksReport>('rerunPullRequestCheck', () => {
-        const report = checksReportFor(scenario, number)
+        const report = checksReportFor(scenario, number, active)
         if (!report) throw new Error(`Pull request #${number} is not in this scenario.`)
         if (!report.checks.some((check) => check.workflowRunId === runId)) {
           throw new Error('That workflow run no longer belongs to this pull request head.')
@@ -821,7 +863,7 @@ export function installFixtureControl(options: {
       record('searchIssues', [query])
       return answer('searchIssues', () => {
         const terms = query.toLowerCase().replace(/^#+/u, '')
-        const issues = (scenario.snapshot?.issues ?? []).filter((iss) => {
+        const issues = (active?.issues ?? []).filter((iss) => {
           if (String(iss.number) === terms || `#${iss.number}` === terms) return true
           return iss.title.toLowerCase().includes(terms)
         })
@@ -838,7 +880,7 @@ export function installFixtureControl(options: {
     previewIssueLink: (prNumber, issueNumber, relation, action) => {
       record('previewIssueLink', [prNumber, issueNumber, relation, action])
       return answer('previewIssueLink', () => {
-        const found = scenario.snapshot?.pullRequests.find((pr) => pr.number === prNumber)
+        const found = active?.pullRequests.find((pr) => pr.number === prNumber)
         const closing = (scenario.issueLinks?.[prNumber] ?? []).find(
           (link) => link.relation === 'closing',
         )
@@ -1034,6 +1076,106 @@ export function installFixtureControl(options: {
       updateListeners.add(listener)
       return () => updateListeners.delete(listener)
     },
+    pullRequestInbox: (request) => {
+      record('pullRequestInbox', request ? [request] : [])
+      return answer('pullRequestInbox', () => {
+        if (!scenario.inbox) throw new Error('This fixture has no PR Inbox read behind it.')
+        return scenario.inbox
+      })
+    },
+    pullRequestInboxFilters: () => {
+      record('pullRequestInboxFilters', [])
+      return answer('pullRequestInboxFilters', () => [...inboxFilters])
+    },
+    savePullRequestInboxFilters: (drafts) => {
+      record('savePullRequestInboxFilters', [drafts])
+      return answer('savePullRequestInboxFilters', () => {
+        // The main process owns the file and the identities in it: a draft that
+        // names a filter it already stored keeps that filter's id, and every
+        // other one is minted here. The window only ever sees what came back.
+        //
+        // Every draft is validated before anything is replaced, and an invalid
+        // one refuses the whole write. Dropping just that draft would delete a
+        // filter the person believes is still there, because the view removes
+        // the old version from the submitted list before appending its
+        // replacement: the stored filter would vanish with no error at all.
+        const known = new Set(inboxFilters.map((filter) => filter.id))
+        const used = new Set<string>()
+        const next: PullRequestInboxSavedFilter[] = []
+        for (const draft of drafts) {
+          const parsed = parsePullRequestInboxFilterDraft(draft)
+          if (!parsed) throw new Error('A saved filter needs a name, a group, and a valid search.')
+          const id =
+            parsed.id && known.has(parsed.id) && !used.has(parsed.id)
+              ? parsed.id
+              : crypto.randomUUID()
+          if (used.has(id)) continue
+          used.add(id)
+          next.push({
+            id,
+            name: parsed.name,
+            group: parsed.group,
+            search: parsed.search,
+            repository: parsed.repository,
+          })
+        }
+        inboxFilters = parsePullRequestInboxSavedFilters(next)
+        return [...inboxFilters]
+      })
+    },
+  }
+
+  /**
+   * The settings file and the account behind it, for a scenario that declares
+   * them.
+   *
+   * Both surfaces are installed only where they were asked for. A window with
+   * no settings has no host to compare its queue against, so nothing retires
+   * that queue at mount — and giving every scenario both would retire it on
+   * mount for a reason those fixtures are not built to show, which would hide
+   * the difference instead of demonstrating it.
+   */
+  // Read only from inside the surfaces below, which exist only where a scenario
+  // declared an identity. The fallback stands in for a window that declared
+  // none, where nothing here is ever called.
+  let settings: AppSettings = scenario.identity?.settings ?? DEFAULT_SETTINGS
+  const identity = scenario.identity
+  if (identity) {
+    const settingsSnapshot = (): SettingsSnapshot => ({
+      settings: { ...settings },
+      locks: [],
+      issues: [],
+      recovered: false,
+      file: '/tmp/git-stacks-fixture-settings.json',
+    })
+    desktop.settings = () => {
+      record('settings', [])
+      return answer('settings', settingsSnapshot)
+    }
+    desktop.updateSettings = (patch) => {
+      record('updateSettings', [patch])
+      return answer('updateSettings', () => {
+        // Whole-file writes, exactly as Main keeps them: an omitted group keeps
+        // its stored value, and a group that was offered is folded into the one
+        // already stored, so the window only ever sees what came back.
+        settings = {
+          ...settings,
+          github: { ...settings.github, ...patch.github },
+          git: { ...settings.git, ...patch.git },
+          appearance: { ...settings.appearance, ...patch.appearance },
+          privacy: { ...settings.privacy, ...patch.privacy },
+          updates: { ...settings.updates, ...patch.updates },
+          shortcuts: { ...settings.shortcuts, ...patch.shortcuts },
+        }
+        return settingsSnapshot()
+      })
+    }
+    // Main always answers with a status: a host that has named none reports
+    // itself signed out, never nothing at all.
+    desktop.githubAccountStatus = () => {
+      record('githubAccountStatus', [])
+      return answer('githubAccountStatus', () => identity.account)
+    }
   }
 
   const control: FixtureControl = {
@@ -1048,35 +1190,61 @@ export function installFixtureControl(options: {
       for (const call of startsPending) {
         if (!released.has(call)) kinds.add(call)
       }
+      // A call the scenario being left started pending is still outstanding
+      // once that scenario's list is gone, so it stays visible here until it
+      // actually settles. Hiding it would report a busy window as idle.
+      for (const item of waiting) kinds.add(item.call)
       return [...kinds]
     },
     setScenario(name) {
       scenario = scenarioFor(name)
+      // This double is installed once and outlives any number of scenario
+      // changes. Only the answers change here: the mounted window keeps the
+      // repository it opened, its destination, and its reads in flight, so
+      // what it displays is deliberately not reset along with them.
+      active = scenario.snapshot
       startsPending = new Set(scenario.pending ?? [])
       released.clear()
-      waiting.length = 0
       options.onScenarioChange(scenario.name)
     },
     hold(call) {
       holds.add(call)
     },
-    release(call) {
-      const targets = call ? [call] : [...new Set([...holds, ...startsPending])]
+    release(call, occurrence?: 'oldest' | 'newest') {
+      // Retained waiters are release-all targets even when their kind is no
+      // longer in this scenario's pending list. Their promises are outstanding,
+      // so leaving them out would strand whatever the window is waiting on and
+      // make a held boot or open look like it can never finish.
+      const targets = call
+        ? [call]
+        : [...new Set([...holds, ...startsPending, ...waiting.map((item) => item.call)])]
       let settled = 0
       for (const target of targets) {
-        released.add(target)
-        holds.delete(target)
-        for (let index = waiting.length - 1; index >= 0; index -= 1) {
-          if (waiting[index].call !== target) continue
-          const [entry] = waiting.splice(index, 1)
+        // Oldest first, which is the order the calls were started in. A release
+        // has to be able to say which of several pending calls answers first:
+        // `failNext` is consumed by the first of them to settle, so settling
+        // newest-first would silently hand a one-shot failure to the read the
+        // test just started instead of the one it abandoned.
+        const due = waiting.filter((item) => item.call === target)
+        const chosen =
+          occurrence === 'newest' ? due.slice(-1) : occurrence === 'oldest' ? due.slice(0, 1) : due
+        waiting.splice(0, waiting.length, ...waiting.filter((item) => !chosen.includes(item)))
+        for (const entry of chosen) {
           entry.settle()
           settled += 1
+        }
+        if (occurrence === undefined || waiting.every((item) => item.call !== target)) {
+          released.add(target)
+          holds.delete(target)
         }
       }
       return settled
     },
     failNext(call, message) {
       oneShotFailures.set(call, message ?? `Git Stacks fixture: ${call} failed`)
+    },
+    answerNext(call, value) {
+      oneShotAnswers.set(call, value)
     },
     connect() {
       if (!scenario.snapshot) return
@@ -1091,6 +1259,7 @@ export function installFixtureControl(options: {
       calls.length = 0
       holds.clear()
       oneShotFailures.clear()
+      oneShotAnswers.clear()
       released.clear()
       waiting.length = 0
     },

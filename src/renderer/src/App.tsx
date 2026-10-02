@@ -97,6 +97,7 @@ import {
   WORKSPACE_VIEW_HEADING_ID,
   WORKSPACE_VIEW_SHORTCUTS,
   WorkspaceNavigation,
+  workspaceNeedsNoRepository,
   workspaceViewLabel,
 } from './components/workspace-navigation'
 import { ReviewView, type ReviewCommands } from './components/review-view'
@@ -114,6 +115,18 @@ import {
   matchesPullRequest,
 } from './components/data-views'
 import { PullRequestChecksPanel } from './components/check-details'
+import { PullRequestInboxView } from './components/pr-inbox-view'
+import {
+  PULL_REQUEST_INBOX_MERGED_WINDOW_DAYS,
+  PULL_REQUEST_INBOX_REFRESH_MS,
+  pullRequestInboxQueueCount,
+} from '../../shared/pr-inbox'
+import type {
+  PullRequestInboxFilterDraft,
+  PullRequestInboxItem,
+  PullRequestInboxReport,
+  PullRequestInboxSavedFilter,
+} from '../../shared/pr-inbox'
 import { checkLabel, checksVariant } from './lib/pull-request-state'
 import type {
   PullRequestCheckDetail,
@@ -140,10 +153,16 @@ type WorkspaceView =
   | 'history'
   | 'changes'
   | 'pullRequests'
+  | 'prInbox'
   | 'review'
   | 'stashes'
   | 'diagnostics'
 
+/**
+ * The one request id every queue read claims. A later refresh supersedes the
+ * read before it, and leaving the destination cancels the read that is running.
+ */
+const INBOX_REQUEST_ID = 'inbox-refresh'
 import { CommandPalette } from './components/command-palette'
 import { ShortcutSettings } from './components/shortcut-settings'
 import { DirtyCheckoutGuard } from './components/dirty-checkout-guard'
@@ -465,6 +484,8 @@ function App() {
   const busyRef = React.useRef<string | null>(null)
   const openingRef = React.useRef(false)
   const searchRef = React.useRef<HTMLInputElement>(null)
+  /** The queue's own filter field, which the search chord focuses while it is on screen. */
+  const inboxSearchRef = React.useRef<HTMLInputElement>(null)
   const reviewCommands = React.useRef<ReviewCommands | null>(null)
   const deleteCancelRef = React.useRef<HTMLButtonElement>(null)
   const paletteHandoffFocusRef = React.useRef<HTMLElement | null>(null)
@@ -475,6 +496,32 @@ function App() {
   // so no result computed for the previous repository is ever applied.
   const repositoryGate = React.useRef(createRequestGate()).current
   const [remoteStatus, setRemoteStatus] = React.useState<RemoteFreshness | null>(null)
+  // The PR Inbox is its own destination with its own read: it spans every
+  // registered repository rather than the one on screen, and it is the only
+  // surface that answers "what is waiting on me?" across all of them.
+  const [inboxReport, setInboxReport] = React.useState<PullRequestInboxReport | null>(null)
+  const [inboxSavedFilters, setInboxSavedFilters] = React.useState<PullRequestInboxSavedFilter[]>(
+    [],
+  )
+  const [inboxLoading, setInboxLoading] = React.useState(false)
+  const [inboxRefreshing, setInboxRefreshing] = React.useState(false)
+  const [inboxSavingFilters, setInboxSavingFilters] = React.useState(false)
+  // The lock is a ref so a second mutation in the same event is refused before
+  // the render that shows the controls as waiting has happened.
+  const savingInboxFiltersRef = React.useRef(false)
+  // Whether the stored list has been read. The save controls wait for it: each
+  // one replaces the whole list, so a save taken against the list as it has not
+  // been read yet would send back an empty list and store it.
+  const [inboxFiltersReady, setInboxFiltersReady] = React.useState(false)
+  // Advances with every read and every accepted write, so an initialization
+  // answer that arrives after a save cannot put the list it read back.
+  const inboxFiltersGeneration = React.useRef(0)
+  const [inboxError, setInboxError] = React.useState<string | null>(null)
+  // The account the rows on screen were read for. A ref, not a state: it is
+  // read and written in the same event that retires those rows, and dropping the
+  // rows is what renders, not the identity itself.
+  const inboxIdentityRef = React.useRef<string | null>(null)
+  const inboxGate = React.useRef(createRequestGate()).current
   // A background snapshot only applies to the repository the window still shows.
   const snapshotPathRef = React.useRef<string | null>(null)
   const setSnapshotAndSelection = React.useCallback((next: RepositorySnapshot) => {
@@ -662,7 +709,11 @@ function App() {
    * recents list, the folder dialog, a dropped folder, or a finished clone.
    */
   const openRepository = React.useCallback(
-    async (path?: string, mode: 'recent' | 'add' = 'recent') => {
+    async (
+      path?: string,
+      mode: 'recent' | 'add' = 'recent',
+      landing?: { reviewNumber: number },
+    ) => {
       if (!desktop || openingRef.current || busyRef.current) return
       openingRef.current = true
       // Resetting the gate before awaiting retires every in-flight refresh, so
@@ -685,7 +736,11 @@ function App() {
           setInspectedPath(null)
           setCommitAmend(false)
           setCommitMessage('')
-          setWorkspaceView('branches')
+          // Opening a repository reads it; it never changes what is checked out.
+          // Landing straight in Review is how a queue row reaches the workspace
+          // for its own repository without a checkout or a branch switch.
+          if (landing) setReviewNumber(landing.reviewNumber)
+          setWorkspaceView(landing ? 'review' : 'branches')
         }
         const repositories = await desktop.recentRepositories().catch(() => null)
         if (repositories) setRecentRepositories(repositories)
@@ -698,6 +753,133 @@ function App() {
     },
     [desktop, repositoryGate, setSnapshotAndSelection],
   )
+
+  /**
+   * Reads the queue. The main process owns cancellation, so closing the Inbox
+   * or starting another refresh retires this one; the gate keeps a late answer
+   * for an abandoned read off the screen.
+   */
+  const loadInbox = React.useCallback(
+    async (request: { mergedWithinDays: number; requestId: string }) => {
+      if (!desktop) return
+      inboxGate.reset()
+      const claim = inboxGate.claim()
+      setInboxLoading(true)
+      setInboxRefreshing(true)
+      setInboxError(null)
+      try {
+        const report = await desktop.pullRequestInbox?.(request)
+        if (!report) return
+        if (!inboxGate.current(claim)) return
+        setInboxReport(report)
+      } catch (value) {
+        if (!inboxGate.current(claim)) return
+        // A read that could not answer is reported, never emptied: the last
+        // confirmed rows stay on screen behind the reason.
+        setInboxError(readableError(value))
+      } finally {
+        if (inboxGate.current(claim)) {
+          setInboxLoading(false)
+          setInboxRefreshing(false)
+        }
+      }
+    },
+    [desktop, inboxGate],
+  )
+
+  // Leaves the Inbox: ends the read the destination started, so the main process
+  // stops spending its request budget on repositories nobody is looking at, and
+  // retires the answer so it cannot repaint the destination when it lands.
+  const leaveInbox = React.useCallback(() => {
+    inboxGate.reset()
+    // The flags belong to the read this destination started, so they end with
+    // it. Leaving mid-read and coming back would otherwise find Refresh
+    // disabled for a read that is no longer running.
+    setInboxLoading(false)
+    setInboxRefreshing(false)
+    void desktop?.cancel?.(INBOX_REQUEST_ID)?.catch(() => undefined)
+  }, [desktop, inboxGate])
+
+  // The queue reads on open and on the stored cadence. It never reads while the
+  // window is hidden, so a background app is not spending rate budget.
+  React.useEffect(() => {
+    if (workspaceView !== 'prInbox' || !desktop) return
+    const read = {
+      mergedWithinDays: PULL_REQUEST_INBOX_MERGED_WINDOW_DAYS,
+      requestId: INBOX_REQUEST_ID,
+    }
+    void loadInbox(read)
+    const timer = window.setInterval(() => {
+      if (document.hidden) return
+      void loadInbox(read)
+    }, PULL_REQUEST_INBOX_REFRESH_MS)
+    return () => {
+      window.clearInterval(timer)
+      leaveInbox()
+    }
+  }, [desktop, leaveInbox, loadInbox, workspaceView])
+
+  // Opening a row lands in that repository's Review. While another repository is
+  // still opening, both paths are refused: the pending open would otherwise land
+  // after this one and replace the selection the person just made.
+  const openInboxItem = React.useCallback(
+    (item: PullRequestInboxItem) => {
+      if (openingRef.current) return
+      if (snapshot?.path === item.repositoryPath) {
+        setReviewNumber(item.number)
+        setWorkspaceView('review')
+        return
+      }
+      void openRepository(item.repositoryPath, 'recent', { reviewNumber: item.number })
+    },
+    [openRepository, snapshot?.path],
+  )
+
+  const saveInboxFilters = React.useCallback(
+    async (drafts: PullRequestInboxFilterDraft[]) => {
+      if (!desktop) return
+      // Every one of these replaces the whole list, so two of them overlap only
+      // to drop one of the two changes. The lock is this window's answer to the
+      // stored list, not the main process's write queue.
+      if (savingInboxFiltersRef.current) return
+      savingInboxFiltersRef.current = true
+      setInboxSavingFilters(true)
+      try {
+        const saved = await desktop.savePullRequestInboxFilters?.(drafts)
+        // The stored list has moved past the read the initialization answer
+        // belongs to, so that answer must not be able to put this one back.
+        if (saved) inboxFiltersGeneration.current += 1
+        if (saved) setInboxSavedFilters(saved)
+      } catch (value) {
+        setInboxError(readableError(value))
+      } finally {
+        savingInboxFiltersRef.current = false
+        setInboxSavingFilters(false)
+      }
+    },
+    [desktop],
+  )
+
+  React.useEffect(() => {
+    if (!desktop) return
+    let live = true
+    const generation = ++inboxFiltersGeneration.current
+    const settle = (filters?: readonly PullRequestInboxSavedFilter[] | null) => {
+      if (live && generation === inboxFiltersGeneration.current) {
+        setInboxSavedFilters(filters ? [...filters] : [])
+      }
+    }
+    void desktop
+      .pullRequestInboxFilters?.()
+      .then((filters) => settle(filters))
+      .catch(() => settle([]))
+      .finally(() => {
+        if (live && generation === inboxFiltersGeneration.current) setInboxFiltersReady(true)
+      })
+    return () => {
+      live = false
+    }
+  }, [desktop])
 
   const isBusy = Boolean(busyAction || opening || refreshing)
   const operationActive = Boolean(snapshot?.operation || snapshot?.stackOperation)
@@ -750,16 +932,71 @@ function App() {
       .catch((value) => setError(readableError(value)))
   }, [desktop, isBusy, operationActive])
 
+  // The identity the rows on screen belong to: the host this window reads for
+  // AND the account behind it. The host is part of it because switching from
+  // github.com to an enterprise host changes whose pull requests these are
+  // even when the account status is byte-for-byte unchanged.
+  const inboxHostRef = React.useRef<string | null>(null)
+  const retireInboxIdentity = React.useCallback(
+    (status: GitHubAccountStatus | null, host: string) => {
+      // The host is the first half of the identity, so it retires the queue on
+      // its own and before any account field is folded in. Rows read for the
+      // previous host cannot stay on screen under new settings while the
+      // account status is still pending, has failed, or is byte-for-byte the
+      // same; and with no account status yet, leaving the previous rows keyed to
+      // the old host would let a later first adoption pass them through.
+      if (inboxHostRef.current !== host) {
+        leaveInbox()
+        setInboxReport(null)
+        setInboxError(null)
+        inboxIdentityRef.current = null
+      }
+      inboxHostRef.current = host
+      if (!status) return
+      const identity = [
+        host,
+        status.host,
+        status.state,
+        status.login ?? '',
+        status.reference ?? '',
+      ].join('|')
+      if (inboxIdentityRef.current !== null && inboxIdentityRef.current !== identity) {
+        leaveInbox()
+        setInboxReport(null)
+        setInboxError(null)
+      }
+      inboxIdentityRef.current = identity
+    },
+    [leaveInbox],
+  )
+
+  const applyAccount = React.useCallback(
+    (status: GitHubAccountStatus) => {
+      retireInboxIdentity(status, inboxHostRef.current ?? status.host)
+      setAccount(status)
+    },
+    [retireInboxIdentity],
+  )
+
+  // A host this window reads for is part of that identity, so changing it
+  // retires the read still running for the previous host even when no account
+  // event arrives to report the switch.
+  React.useEffect(() => {
+    const host = settings?.github.host ?? null
+    if (host === null) return
+    retireInboxIdentity(account, host)
+  }, [account, retireInboxIdentity, settings?.github.host])
+
   // A running sign-in pushes its own state, so the panel is never left waiting on a read.
   React.useEffect(() => {
     if (!desktop) return
-    const stop = desktop.onGitHubAccount?.(setAccount)
+    const stop = desktop.onGitHubAccount?.(applyAccount)
     desktop
       .githubAccountStatus?.()
-      .then((value) => value && setAccount(value))
+      .then((value) => value && applyAccount(value))
       .catch(() => undefined)
     return stop
-  }, [desktop])
+  }, [applyAccount, desktop])
 
   const runAccountAction = React.useCallback(
     async (action: () => Promise<GitHubAccountStatus>, interruptible = false) => {
@@ -771,15 +1008,17 @@ function App() {
       try {
         const next = await action()
         // A slow sign-in must not overwrite the state a later cancel already
-        // reached; only the newest action's result is applied.
-        if (request === accountRequest.current) setAccount(next)
+        // reached; only the newest action's result is applied. It still passes
+        // the identity boundary, because signing out is exactly the change that
+        // must not leave the previous account's queue on screen.
+        if (request === accountRequest.current) applyAccount(next)
       } catch (value) {
         if (request === accountRequest.current) setError(readableError(value))
       } finally {
         if (request === accountRequest.current) setAccountBusy(false)
       }
     },
-    [accountBusy, desktop],
+    [accountBusy, applyAccount, desktop],
   )
 
   const openDevicePage = React.useCallback(() => {
@@ -1547,6 +1786,16 @@ function App() {
       if (matchesChord(event, shortcutBindings['search.focus'], isMac)) {
         if (!isEditableTarget(event.target)) {
           event.preventDefault()
+          // The destination on screen owns the search this chord promises. The
+          // queue filters itself, so `/` there has to reach the queue's own
+          // field: focusing the toolbar's search would filter something else,
+          // and with no repository open that field does not exist at all.
+          const inboxSearch = inboxSearchRef.current
+          if (workspaceView === 'prInbox' && inboxSearch) {
+            inboxSearch.focus()
+            inboxSearch.select()
+            return
+          }
           searchRef.current?.focus()
           searchRef.current?.select()
           return
@@ -1713,6 +1962,7 @@ function App() {
             changeCount={snapshot?.files.length ?? 0}
             onSelect={setWorkspaceView}
             pullRequestCount={pullRequestCount}
+            inboxCount={pullRequestInboxQueueCount(inboxReport?.items ?? [])}
             stashCount={stashCount}
           />
         </div>
@@ -2320,6 +2570,29 @@ function App() {
     )
   }
 
+  const renderPrInbox = () => (
+    <PullRequestInboxView
+      filtersReady={inboxFiltersReady}
+      searchInputRef={inboxSearchRef}
+      activating={opening}
+      error={inboxError}
+      loading={inboxLoading}
+      onDismissError={() => setInboxError(null)}
+      onOpen={openInboxItem}
+      onRefresh={() =>
+        void loadInbox({
+          mergedWithinDays: PULL_REQUEST_INBOX_MERGED_WINDOW_DAYS,
+          requestId: INBOX_REQUEST_ID,
+        })
+      }
+      onSaveFilters={(drafts) => void saveInboxFilters(drafts)}
+      savingFilters={inboxSavingFilters}
+      refreshing={inboxRefreshing}
+      report={inboxReport}
+      savedFilters={inboxSavedFilters}
+    />
+  )
+
   const renderStashes = () => {
     if (!snapshot) return null
     return (
@@ -2336,6 +2609,9 @@ function App() {
   }
 
   const renderMainContent = () => {
+    // The queue is the one destination that is useful with no repository open:
+    // it reads every registered repository rather than the one on screen.
+    if (workspaceNeedsNoRepository(workspaceView)) return renderPrInbox()
     if (!snapshot) return null
     if (workspaceView === 'changes') return renderChanges()
     if (workspaceView === 'pullRequests') return renderPullRequests()
@@ -3111,7 +3387,11 @@ function App() {
       ) : null}
       <div className={cn('workspace', !detailsVisible && 'workspace-details-hidden')}>
         {renderSidebar()}
-        {snapshot ? <main className="main-pane">{renderMainContent()}</main> : renderOnboarding()}
+        {snapshot || workspaceNeedsNoRepository(workspaceView) ? (
+          <main className="main-pane">{renderMainContent()}</main>
+        ) : (
+          renderOnboarding()
+        )}
         {detailsVisible ? renderDetails() : null}
       </div>
       {workflow && snapshot && workflow.repoPath === snapshot.path ? (

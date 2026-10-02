@@ -9,9 +9,15 @@
  * creation, stage/commit, stash/pop, merge-conflict resolution, merge abort). Every Git assertion
  * is checked against the real `git` binary on the disposable repository, never the app snapshot.
  *
- * No production code changes and no production file edits: the only injection is a runtime patch
- * of `shell.openExternal` inside the already-running main process, and the single call that
- * could reach it is only issued after the patch is proven in place.
+ * No production code or bundle edits: the runtime injections are the pre-main synthetic
+ * credential fixture and a `shell.openExternal` patch. The external-link call is issued only
+ * after its patch is proven in place.
+ *
+ * Credential sealing is fixture-synthetic: before the first production statement runs (the main
+ * entry is held at `--inspect-brk`), the shared `tests/fixtures/isolated-desktop.cjs` installs its
+ * fixture-owned AES-256-GCM `safeStorage` backend in place. The shipped bundle and packages are
+ * byte-identical to the unsigned local development package; this is synthetic-store evidence only.
+ * It claims no real OS-keychain acceptance and no signed-install behavior.
  *
  *   node scripts/packaged-desktop-smoke.mjs [--app <path>] [--timeout <seconds>] [--keep]
  */
@@ -31,60 +37,6 @@ const FEATURE = 'packaged-smoke/feature'
 const CONFLICT = 'conflict.txt'
 const ORIGIN = 'app://git-stacks'
 const UI_TIMEOUT = 20_000
-const API = [
-  'cancel',
-  'cancelGitHubSignIn',
-  'commitDiff',
-  'conflictView',
-  'dismissPendingMutation',
-  'fileView',
-  'gitRuntimeStatus',
-  'githubAccountStatus',
-  'history',
-  'mergeStatus',
-  'onBackgroundIssues',
-  'onBackgroundSnapshot',
-  'onGitHubAccount',
-  'onMergeProgress',
-  'onRemoteStatus',
-  'onSubmitStackProgress',
-  'openExternal',
-  'openRepository',
-  'previewIssueLink',
-  'pullRequest',
-  'pullRequestChecks',
-  'pullRequestIssueLinks',
-  'pushPreview',
-  'recentRepositories',
-  'reconciliationPreview',
-  'refresh',
-  'remoteStatus',
-  'reportActivity',
-  'rerunPullRequestCheck',
-  'reviewClearHistory',
-  'reviewCommits',
-  'reviewDrafts',
-  'reviewFiles',
-  'reviewHeadline',
-  'reviewHistory',
-  'reviewHistoryDiff',
-  'reviewReply',
-  'reviewResolveDrafts',
-  'reviewSetDrafts',
-  'reviewSetResolved',
-  'reviewSetViewed',
-  'reviewSubmit',
-  'reviewThreads',
-  'reviewViewed',
-  'runAction',
-  'searchIssues',
-  'setSystemGit',
-  'signOutOfGitHub',
-  'stackPreview',
-  'startGitHubSignIn',
-  'submitStackProgress',
-  'surgeryPreview',
-]
 const results = []
 const limits = []
 const log = (line) => process.stdout.write(`${line}\n`)
@@ -221,7 +173,7 @@ async function createWorkspace() {
 // secret-shaped variable, the Node and Electron launch switches, and the SSH agent are dropped,
 // and only fixture values are added back.
 const UNSAFE_INHERITED =
-  /^(GIT_|GH_|GITHUB_|GIT_STACKS_)|^NODE_OPTIONS$|^ELECTRON_RUN_AS_NODE$|^SSH_AUTH_SOCK$|(TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|COOKIE|API_?KEY)/iu
+  /^(GIT_|GH_|GITHUB_|GIT_STACKS_)|^NODE_OPTIONS$|^NODE_TLS_REJECT_UNAUTHORIZED$|^ELECTRON_RUN_AS_NODE$|^ELECTRON_RENDERER_URL$|^SSH_AUTH_SOCK$|(TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|COOKIE|API_?KEY)/iu
 
 /**
  * macOS hands the packaged app the home directory the password database reports, and its sandboxed
@@ -361,7 +313,7 @@ class Cdp {
     })
   }
 
-  static async open(endpoint, timeoutMs) {
+  static async open(endpoint) {
     const socket = new WebSocket(endpoint)
     await new Promise((resolveOpen, rejectOpen) => {
       socket.addEventListener('open', resolveOpen, { once: true })
@@ -369,17 +321,28 @@ class Cdp {
         once: true,
       })
     })
-    const client = new Cdp(socket)
-    const deadline = Date.now() + timeoutMs
-    while (Date.now() < deadline) {
-      try {
-        await client.send('Runtime.evaluate', { expression: '1', returnByValue: true })
-        return client
-      } catch {
-        await new Promise((wait) => setTimeout(wait, 200))
+    return new Cdp(socket)
+  }
+
+  pauseAtEntry() {
+    return new Promise((resolvePause, rejectPause) => {
+      const finish = (error, paused) => {
+        clearTimeout(timer)
+        this.socket.removeEventListener('message', listener)
+        if (error) rejectPause(error)
+        else resolvePause(paused)
       }
-    }
-    throw new Error(`${endpoint} never answered a CDP command`)
+      const listener = (event) => {
+        const message = JSON.parse(event.data)
+        if (message.method === 'Debugger.paused') finish(null, message.params)
+      }
+      const timer = setTimeout(() => finish(new Error('The main entry did not pause')), 30_000)
+      timer.unref()
+      this.socket.addEventListener('message', listener)
+      this.send('Debugger.enable')
+        .then(() => this.send('Runtime.runIfWaitingForDebugger'))
+        .catch((error) => finish(error))
+    })
   }
 
   send(method, params = {}) {
@@ -421,6 +384,22 @@ class Cdp {
     return response.result.value
   }
 
+  /** A paused entry needs synchronous frame evaluation, not a promise-backed runtime call. */
+  async callPaused(callFrameId, source, ...args) {
+    const expression = `(${source})(${args.map((arg) => JSON.stringify(arg ?? null)).join(',')})`
+    const response = await this.send('Debugger.evaluateOnCallFrame', {
+      callFrameId,
+      expression,
+      returnByValue: true,
+    })
+    if (response.exceptionDetails) {
+      const description =
+        response.exceptionDetails.exception?.description ?? response.exceptionDetails.text
+      throw new Error(text(String(description).split('\n')[0]))
+    }
+    return response.result.value
+  }
+
   close() {
     try {
       this.socket.close()
@@ -440,7 +419,7 @@ const RESOLVER = `function resolveElectron() {
     const registered = getBuiltin('electron')
     if (registered) return registered
     const Module = getBuiltin('module')
-    if (Module) return Module.createRequire(process.argv[1] || process.execPath)('electron')
+    if (Module) return Module.createRequire(process.execPath)('electron')
   }
   throw new Error('Could not resolve the electron module from the packaged main process')
 }`
@@ -566,7 +545,16 @@ function launch(target, workspace) {
   const logStream = createWriteStream(join(workspace.evidence, 'packaged-app.log'))
   const child = spawn(
     target.executable,
-    ['--inspect=0', '--remote-debugging-port=0', `--user-data-dir=${workspace.userData}`],
+    [
+      '--inspect-brk=0',
+      '--remote-debugging-port=0',
+      // The mock Chromium key store and the plaintext password store are forced
+      // from startup, so the packaged app never touches the OS keychain while
+      // the inspector installs the synthetic sealing backend.
+      '--use-mock-keychain',
+      '--password-store=basic',
+      `--user-data-dir=${workspace.userData}`,
+    ],
     {
       env: environment(workspace),
       cwd: workspace.root,
@@ -859,8 +847,51 @@ async function run(options) {
     app = launch(target, workspace)
     inspector = await Cdp.open(
       await endpoint(app, 'inspector', deadline, 'a main-process inspector endpoint'),
-      Math.max(1000, Math.min(30_000, deadline - Date.now())),
     )
+    const paused = await inspector.pauseAtEntry()
+    log(`paused main entry  : ${paused.reason}`)
+    // The entry pause (--inspect-brk) means no production statement has run
+    // yet. Install the synthetic sealing backend through the same shared
+    // helper the dev-main fixture uses, then resume the app.
+    const fixtureRoot = join(workspace.root, 'credential-fixture')
+    const installed = await inspector.callPaused(
+      paused.callFrames[0].callFrameId,
+      (helperPath, root) =>
+        (() => {
+          const Module = process.getBuiltinModule ? process.getBuiltinModule('module') : null
+          const resolveElectronModule = () => {
+            if (typeof require === 'function') {
+              try {
+                return require('electron')
+              } catch {}
+            }
+            if (process.mainModule && typeof process.mainModule.require === 'function') {
+              try {
+                return process.mainModule.require('electron')
+              } catch {}
+            }
+            if (Module && Module.createRequire) {
+              return Module.createRequire(process.execPath)('electron')
+            }
+            throw new Error('electron unavailable')
+          }
+          const createRequireFn = Module?.createRequire?.bind(Module)
+          if (!createRequireFn) throw new Error('module.createRequire unavailable')
+          const requireFromMain = createRequireFn(process.execPath)
+          const helper = requireFromMain(helperPath)
+          const electron = resolveElectronModule()
+          helper.installIsolatedSafeStorage({
+            electron,
+            keyFile: `${root}/synthetic-key.bin`,
+            fixtureRoot: root,
+          })
+          return true
+        })(),
+      join(ROOT, 'tests', 'fixtures', 'isolated-desktop.cjs'),
+      fixtureRoot,
+    )
+    assert(installed === true, 'The synthetic credential fixture failed to install')
+    await inspector.send('Debugger.resume')
     page = await connectRenderer(
       await endpoint(app, 'devtools', deadline, 'a renderer DevTools endpoint'),
     )

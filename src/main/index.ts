@@ -60,6 +60,7 @@ import { REVIEW_EVENTS } from '../shared/review-threads'
 import type { ReviewComparison, ReviewLineRef, ReviewViewedRecord } from '../shared/review'
 import type {
   GitAction,
+  GitHubAccountStatus,
   MergeProgress,
   PublishProgress,
   RecentRepository,
@@ -115,13 +116,14 @@ import {
   forgetHost,
   GITHUB_DOTCOM_HOST,
   githubHostContext,
+  hostTransport,
   probeGitHubHost,
   remoteHostContext,
   type GitHubHostContext,
   validateGitHubHostInput,
 } from './github-host'
 import { getConfigValue, parseRemote } from './git-core'
-import { GitHubTransportError } from './github-transport'
+import { GitHubTransportError, githubHostCredentialIdentity } from './github-transport'
 import { GITHUB_DEFAULT_HOST } from '../shared/settings'
 import { detectRefFormat, runDiagnostics } from './diagnostics'
 import { buildBundle, renderBundle, writeOwnerOnlyBundle } from './support-bundle'
@@ -138,9 +140,26 @@ import type {
 
 import type { GitEnvironmentStatus } from '../shared/types'
 import { UpdateService } from './update/service'
+import {
+  PullRequestInboxService,
+  retiredPullRequestInboxReport,
+  type PullRequestInboxTarget,
+} from './pr-inbox'
+import { PullRequestInboxFilters } from './pr-inbox-filters'
+import {
+  PULL_REQUEST_INBOX_MERGED_WINDOW_DAYS,
+  type PullRequestInboxFilterDraft,
+} from '../shared/pr-inbox'
 
 const readKeys = new RequestRegistry()
 const onboardingKeys = new RequestRegistry()
+const inboxKeys = new RequestRegistry()
+/**
+ * The PR Inbox reads every registered repository at once, so it lives under its
+ * own request root rather than any repository's: a repository switch must not
+ * end a queue read, and a queue read must not hold a repository's lane.
+ */
+const INBOX_ROOT = 'pr-inbox'
 /** Discovery and clone run before any repository exists, under their own root. */
 const ONBOARDING_ROOT = 'onboarding'
 
@@ -168,6 +187,20 @@ if (!app.isPackaged && process.env.GIT_STACKS_USER_DATA) {
 let window: BrowserWindow | null = null
 let activeRepository: string | null = null
 let recents: RecentRepository[] = []
+/**
+ * Moves whenever the registered repository list changes, which a read cannot see
+ * for itself: `inboxTargets` maps the list before it awaits each origin, so a
+ * repository added or dropped while that lookup is in flight leaves the read's
+ * own final list looking unchanged. The queue's fence carries this, so the
+ * comparison is against the registration that is current rather than the one the
+ * read started from.
+ */
+let inboxRegistrationGeneration = 0
+
+function setRecents(next: RecentRepository[]): void {
+  recents = next
+  inboxRegistrationGeneration += 1
+}
 const operations = new RepositoryOperations()
 
 const scheduler = new RepositoryScheduler()
@@ -268,6 +301,140 @@ if (devUrl) {
 const trustedOrigin = devUrl ? new URL(devUrl).origin : productionOrigin
 const settingsPath = () => join(app.getPath('userData'), 'repositories.json')
 const settingsFile = () => join(app.getPath('userData'), 'settings.json')
+const inboxFiltersPath = () => join(app.getPath('userData'), 'pull-request-inbox.json')
+const inboxFilters = new PullRequestInboxFilters(inboxFiltersPath())
+/**
+ * The signed-in identity the queue's rows belong to. It names the account, the
+ * credential behind it, and the host, because any one of those changing means
+ * the rows on screen were read for somebody else: another account's private
+ * pull requests are not this account's queue.
+ */
+let inboxIdentity = 'unsigned'
+/**
+ * The identity a queue read belongs to, in the terms the service fences on.
+ *
+ * It is the account status this process last saw AND the credential identity of
+ * every host the registered repositories resolve to. The status alone is not an
+ * authority: a scoped GIT_STACKS_GITHUB_TOKEN_<HOST> written into the
+ * environment, or the unscoped variables github.com reads, replaces a host's
+ * credential without any account status changing at all, and rows read under the
+ * credential that was replaced belong to somebody else. The credential identity
+ * is opaque, holds no secret, and is never logged or persisted.
+ */
+function inboxIdentityNow(): Promise<string> {
+  return inboxCredentialHosts().then((hosts) =>
+    [inboxIdentity, String(inboxRegistrationGeneration), ...hosts].join('\u0000'),
+  )
+}
+
+/**
+ * Every host a registered repository resolves to, each with the credential it
+ * would authenticate with. Resolved from the registered repositories rather
+ * than remembered from a read, so a repository added on a host with different
+ * credentials is covered too.
+ */
+function inboxCredentialHosts(): Promise<string[]> {
+  return Promise.all(inboxHosts.map((host) => hostCredentialAuthority(host)))
+}
+
+/**
+ * The credential one host would authenticate with, asked of the transport that
+ * will actually make its requests. A host answered by the `gh` CLI is
+ * authenticated by whichever profile that CLI holds, and a profile replaced
+ * outside this app is visible to nothing else — so asking only the environment
+ * and the account would leave rows read for the previous account on screen after
+ * a refresh that the new one could not complete.
+ */
+async function hostCredentialAuthority(hostName: string): Promise<string> {
+  const host = configuredHostContext(hostName)
+  try {
+    return await hostTransport(host).credentialAuthority()
+  } catch {
+    // An authority that cannot be asked is still fenced rather than skipped: the
+    // environment and account identity is less than the transport would know,
+    // and less evidence is not none.
+    return githubHostCredentialIdentity(host.host)
+  }
+}
+
+/** Hosts the registered repositories resolve to, refreshed with every snapshot. */
+let inboxHosts: readonly string[] = []
+
+const inboxService = new PullRequestInboxService(
+  inboxIdentityNow,
+  // Resolved again when a read lands, so a repository registered or removed
+  // while it was in flight retires the answer instead of publishing a queue
+  // that describes a list of repositories that no longer exists.
+  inboxTargets,
+)
+/** Queue reads in flight, so a replaced identity can stop the ones still running. */
+const inboxWork = new Set<AbortController>()
+
+/**
+ * Drops everything the queue holds for the identity that is being replaced, and
+ * stops the reads still running for it. Clearing the retained rows is not enough
+ * on its own: a read already in flight resolves with rows read under the old
+ * credential, so those are cancelled and refused rather than published.
+ */
+function retireInboxIdentity(identity: string): void {
+  inboxIdentity = identity
+  for (const controller of inboxWork) controller.abort()
+  inboxWork.clear()
+  inboxService.invalidate()
+}
+
+/** The identity one account status establishes, in the terms the queue fences on. */
+function accountIdentity(status: GitHubAccountStatus): string {
+  return [status.host, status.state, status.login ?? '', status.reference ?? ''].join('|')
+}
+// The stored filter list is read once, on the same promise every list and save
+// waits for: an answer produced before that read finished is an empty list that
+// reads as "you have none", and a whole-list save taken against it would
+// replace the file with whatever the window believed at the time.
+const inboxFiltersReady = inboxFilters.settled().catch(() => [])
+
+/**
+ * The queue reads the registered repositories, resolved at refresh time rather
+ * than captured, so opening or removing a repository changes the next answer
+ * without restarting anything. One unreadable origin yields a repository with
+ * no GitHub remote rather than failing the whole queue.
+ */
+function inboxTargets(): Promise<PullRequestInboxTarget[]> {
+  // The registration these origins are being resolved for, taken before the
+  // first await. A repository added or removed while the lookups are in flight
+  // makes this resolution obsolete, and it has no way to see that itself.
+  const registration = inboxRegistrationGeneration
+  return Promise.all(
+    recents.map(async (repository) => ({
+      path: repository.path,
+      originUrl: await getOriginUrl(repository.path).catch(() => null),
+    })),
+  ).then((targets) => {
+    // An obsolete resolution records nothing. The hosts it resolved are the
+    // ones a registration that no longer exists named, and publishing them
+    // would fence the reads that followed it on hosts they are not going to
+    // ask — retiring a read whose own registrations and credentials never
+    // changed, because a slower read for a dropped repository landed after it.
+    // The targets are still returned: this read describes the list it was
+    // given, and the generation its identity carries is what retires it.
+    if (registration !== inboxRegistrationGeneration) return targets
+    // The hosts this read will use, recorded from the same resolution that
+    // produced the targets. The queue's credential fence is asked about these
+    // hosts, so recording them anywhere else could fence on a host this read is
+    // not going to ask.
+    inboxHosts = [
+      ...new Set(
+        targets
+          .map((target) => {
+            const remote = target.originUrl ? parseRemote(target.originUrl) : null
+            return remote ? remoteHostContext(remote)?.host : null
+          })
+          .filter((host): host is string => typeof host === 'string'),
+      ),
+    ].sort()
+    return targets
+  })
+}
 
 // The stored choice is applied before any repository is attached, so the first
 // open already polls on the interval the person chose rather than on the default
@@ -330,7 +497,13 @@ function githubAccount() {
     host: configuredHost().host,
     vault: credentialVault(),
     stateFile: join(app.getPath('userData'), 'github-account.json'),
-    onChange: (status) => window?.webContents.send('github-account', status),
+    onChange: (status) => {
+      // The queue's rows belong to the account that read them, so a new identity
+      // is established before the window hears about the status that carries it.
+      const identity = accountIdentity(status)
+      if (identity !== inboxIdentity) retireInboxIdentity(identity)
+      window?.webContents.send('github-account', status)
+    },
   })
   accountHost = account.host
   return account
@@ -362,6 +535,9 @@ function applySettings(settings: AppSettings): void {
   for (const controller of hostWork) controller.abort()
   hostWork.clear()
   hostGeneration += 1
+  // The selected host is part of the queue's identity, and a host change can
+  // arrive without an account status to announce it.
+  retireInboxIdentity(`host:${settings.github.host}`)
   forgetHost(previousHost ?? undefined)
   if (account !== null && accountHost !== settings.github.host) {
     // The sign-out is not awaited, and it does not need to be: the account
@@ -545,7 +721,7 @@ async function remember(path: string) {
   await mkdir(dirname(settingsPath()), { recursive: true })
   await writeFile(`${settingsPath()}.tmp`, JSON.stringify(next), { mode: 0o600 })
   await rename(`${settingsPath()}.tmp`, settingsPath())
-  recents = next
+  setRecents(next)
 }
 
 function requirePullRequestNumber(value: unknown): number {
@@ -1533,6 +1709,9 @@ function installHandlers() {
     validateSender(event)
     if (typeof requestId !== 'string' || !requestId) return
     onboardingKeys.cancel(ONBOARDING_ROOT, requestId)
+    // The queue runs across repositories, so it is cancelled whether or not one
+    // is open: a window with no repository still has a queue to stop.
+    inboxKeys.cancel(INBOX_ROOT, requestId)
     if (!activeRepository) return
     readKeys.cancel(activeRepository, requestId)
   })
@@ -1544,6 +1723,86 @@ function installHandlers() {
     const link = externalGitHubLink(value, await trustedExternalLinkHosts())
     if (!link.ok) throw new Error(link.message)
     await shell.openExternal(link.href)
+  })
+
+  // The PR Inbox is a GitHub-derived queue over every registered repository, so
+  // it runs before any repository is open and is not scoped to the one that is.
+  // Its reads claim their own request ids, which makes a refresh cancellable
+  // and makes a later refresh end the one still in flight.
+  ipcMain.handle('inbox:pull-requests', async (event, requested: unknown) => {
+    validateSender(event)
+    const asked = (requested ?? {}) as { requestId?: unknown; mergedWithinDays?: unknown }
+    const days = asked.mergedWithinDays
+    const mergedWithinDays =
+      typeof days === 'number' && Number.isFinite(days) && days > 0
+        ? Math.min(365, Math.round(days))
+        : undefined
+    try {
+      return await forSelectedHost((signal) => {
+        // The identity is captured with the work, and the read is aborted when
+        // it is replaced, so a late page read under the previous account's
+        // credential is stopped and refused rather than published.
+        const controller = new AbortController()
+        inboxWork.add(controller)
+        return performBackgroundRead(
+          inboxKeys,
+          INBOX_ROOT,
+          AbortSignal.any([signal, controller.signal]),
+          async (combined) => {
+            // Origin remotes are read through the same local Git as every other
+            // repository read, so the queue sees exactly the origin the window
+            // would have opened.
+            const targets = await inboxTargets()
+            // Fenced after the targets are resolved, so the hosts this read asks
+            // are the hosts whose credentials the identity names.
+            const identity = await inboxIdentityNow()
+            const runtime = await resolveGitRuntime()
+            const report = await withGitRuntime(runtime, () =>
+              inboxService.refresh(targets, {
+                ...(mergedWithinDays ? { mergedWithinDays } : {}),
+                signal: combined,
+              }),
+            )
+            // Asked after that last await rather than only before it. Reading
+            // the identity is asynchronous, so a refresh that was ended, or
+            // replaced, while it was being re-read reaches here with an answer
+            // that must not be published; and a `gh` profile or a repository
+            // registered since must retire it rather than publish it.
+            const finalIdentity = await inboxIdentityNow()
+            if (combined.aborted || finalIdentity !== identity) throw new CommandCancelled()
+            return report
+          },
+          requestIdClaim(asked.requestId, 'inbox-refresh'),
+        ).finally(() => {
+          inboxWork.delete(controller)
+        })
+      })
+    } catch (error) {
+      // Only a read that was ENDED becomes a retired queue. Every other
+      // failure still rejects: a read that could not answer is the window's
+      // business, and this must not claim a queue it never confirmed or quietly
+      // replace rows that are still the ones GitHub confirmed. The retired
+      // report is returned rather than thrown so that the read still passes
+      // through the window's own gate, which is what stops a superseded read
+      // from painting over a newer one.
+      if (!isCommandCancelled(error)) throw error
+      return retiredPullRequestInboxReport(
+        mergedWithinDays ?? PULL_REQUEST_INBOX_MERGED_WINDOW_DAYS,
+      )
+    }
+  })
+  ipcMain.handle('inbox:filters', async (event) => {
+    validateSender(event)
+    return inboxFiltersReady.then(() => inboxFilters.list())
+  })
+  ipcMain.handle('inbox:filters-save', async (event, value: unknown) => {
+    validateSender(event)
+    if (!Array.isArray(value)) throw new Error('Saved filters must be a list.')
+    // This write replaces the whole list, so it waits for the stored list to
+    // have been read: a save taken against an unread store would drop every
+    // saved filter that store holds.
+    await inboxFiltersReady
+    return inboxFilters.save(value as PullRequestInboxFilterDraft[])
   })
   // The capability matrix for the host this installation is pointed at. It is
   // produced by probing that host, so a host that has never answered reports
@@ -1867,12 +2126,14 @@ app
     try {
       const stored: unknown = JSON.parse(await readFile(settingsPath(), 'utf8'))
       if (Array.isArray(stored))
-        recents = stored
-          .filter(
-            (item): item is RecentRepository =>
-              item && typeof item.path === 'string' && typeof item.name === 'string',
-          )
-          .slice(0, 12)
+        setRecents(
+          stored
+            .filter(
+              (item): item is RecentRepository =>
+                item && typeof item.path === 'string' && typeof item.name === 'string',
+            )
+            .slice(0, 12),
+        )
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT')
         console.warn('Could not read recent repositories:', error)
@@ -1880,7 +2141,7 @@ app
     // Development/smoke runs can use a disposable repository without touching the user's preferences.
     if (!app.isPackaged && process.env.GIT_STACKS_REPO) {
       const path = await resolveRepository(process.env.GIT_STACKS_REPO)
-      recents = [{ path, name: basename(path) }, ...recents.filter((item) => item.path !== path)]
+      setRecents([{ path, name: basename(path) }, ...recents.filter((item) => item.path !== path)])
     }
     const resourcesRoot = app.isPackaged
       ? process.resourcesPath

@@ -61,6 +61,16 @@ export const SCENARIO_NAMES = [
   'stash-stable-oid',
   'stash-empty',
   'stash-index-shift',
+  // PR Inbox
+  'pr-inbox-queue',
+  'pr-inbox-no-repository',
+  'pr-inbox-empty',
+  'pr-inbox-partial',
+  'pr-inbox-unavailable',
+  'pr-inbox-retired',
+  'pr-inbox-first-read',
+  'pr-inbox-membership-unknown',
+  'pr-inbox-host-switch',
   // Review
   'review-force-pushed',
   'review-stacked',
@@ -126,6 +136,16 @@ export const SCENARIO_GROUPS = {
     'pull-requests-unavailable',
     'pull-requests-issue-links',
     'pull-requests-merge-refused',
+  ],
+  inbox: [
+    'pr-inbox-queue',
+    'pr-inbox-no-repository',
+    'pr-inbox-empty',
+    'pr-inbox-partial',
+    'pr-inbox-unavailable',
+    'pr-inbox-membership-unknown',
+    'pr-inbox-retired',
+    'pr-inbox-first-read',
   ],
   stashes: ['stash-stable-oid', 'stash-empty', 'stash-index-shift'],
   workflows: [

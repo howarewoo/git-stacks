@@ -386,6 +386,20 @@ List reads are complete within a bound, and each page carries its own validator.
 
 Every request a call makes is subject to the same rules, the read that proves which head the pull request has included: when GitHub refuses that read the call stops there instead of going on to ask for the commit's checks, keeps the last good report with the rerun held back, and records the same deadline it would for any other refusal. Rate limits are the server's to set. A refused or rate-limited read waits at least as long as GitHub's own `Retry-After` or primary-limit reset, never only for the local backoff, and that deadline is kept even when the read never produced a report to cache, so the next refresh and every watch tick after it respect it. A read the caller abandons stops instead of finishing work nobody is waiting for.
 
+### PR Inbox
+
+The PR Inbox is a work queue, not a notification inbox, and it is its own destination rather than another tab of the repository on screen: it spans every registered repository and answers "what pull request work is waiting on me?". Its rail carries the six groups in triage order — Review requested, Needs my response, My PRs — waiting, My PRs — approved, Drafts, Recently merged — and each group is stated in the words a person would use, as the rail's row help. The rail counts and the navigation badge count the rows that belong to a group. A pull request a repository returned that no group can hold is not queue work, so a queue whose groups are all empty reads as an empty work queue rather than as rows hidden behind a filter that no control can reveal.
+
+A row names everything it is: title, repository, `#number`, head and base branch, author, checks, and the review state that put it in this group. Checks use the shared state vocabulary, and a host that could not report check state at all leaves the badge explicitly unknown rather than reading as a repository with no checks; the refresh that produced those rows is reported as degraded, which is a read with less than the queue asked for and never a complete one. A degraded read is stated once, with the repositories it applies to, rather than repeated per row.
+
+Opening a row lands in that row's own repository's Review workspace for that pull request, without checking anything out or changing branches. While one repository is opening, no row is activatable, so a selection somebody just made is never replaced by an earlier asynchronous open landing after it.
+
+The rows are one composite widget with a single Tab stop, roving `tabindex`, arrows that stop at both ends, Home and End, and Enter to open. Search is a labelled text field where every whitespace-separated term must match text the row already shows, and the repository selector is exact. The save row's label names the name input itself, not the wrapper the input shares with the Save button, so clicking the label focuses the field and a reader hears the two together.
+
+The queue keeps "nothing to do" and "no answer" apart. Empty, filtered-empty, unconfirmed, retired, partial, degraded, membership-unknown, failed, skipped, auth-required, rate-limited, and offline are different states, each with its own notice, and the notice's own heading is what the destination shows so no two states read alike; a read that read nothing says which failure it was and names the repositories it applies to rather than collapsing every failure into one generic notice. A read that answered with less than it asked for is never counted as a complete one, whether what is missing is the review and check metadata or the account the rows belong to: a membership-unknown read places a pull request in no viewer-relative group, because authorship and a request to the viewer are undecided rather than false, and it says which repository it could not name an account for rather than quietly listing less work. A read that was attempted and answered with something no verdict can be read from is a failure with the host's own reason attached, never a repository that was not attempted. A notice never blames the person for a read that ended: it says what happened to the read, and never claims a sign-out, a lost connection, or a queue that was never read.
+
+Rows belong to one identity. The account, its credential, and the selected host decide whose queue is on screen, and a change at that boundary ends the read still running for the previous identity and drops its rows rather than showing them until a refresh can answer for the new one. Keeping the last confirmed rows is for a read that could not answer under the identity that confirmed them, so a read that was ended is not one of those: it carries no rows, no repositories, and no login at all, and it is reported as a queue rather than raised as a failure, because a failure the destination would answer by keeping its rows is exactly wrong here. An ended read cannot reach past its own identity: rows a newer read has already confirmed under the credential that replaced it stay on screen. Registered clones and worktrees of one remote are one repository in the queue: read once, counted once, and opened through one deterministic local path.
+
 ### Reconciliation
 
 GitHub owns submitted membership and order. `src/main/reconciliation.ts` derives one deterministic state per stack by comparing that authority with local parent hints, pull-request head/base refs and SHAs, origin tracking refs, and real Git ancestry. The states are `matching`, `local-only`, `remote-native`, `reordered`, `stale`, `diverged`, `missing-branch`, `retargeted`, `merged`, `externally-unstacked`, and `ambiguous`; `ambiguous` blocks instead of guessing and never offers a repair. Every other state lists explicit repairs with the evidence each one would act on. Reporting and refresh only read: they never rewrite a branch, a parent hint, or a pull-request base. Repairs execute from a captured preview whose plan is re-validated against the origin URL, submitted membership, pull-request head SHAs and bases, and every recorded parent immediately before the first mutation, so a concurrent change fails as a stale preview instead of being overwritten. Repairs that move a branch or retarget a pull request require explicit confirmation, back the branch up under `refs/git-stacks/reconciliation/`, and append their recovery evidence to the report.
@@ -824,3 +838,67 @@ Four boundaries keep that override from damaging the credential this application
 - **A rejection is attributed.** Each request records which credential authenticated it — the stored account, an environment override, or `gh` — and only a rejection of the stored credential can renew, revoke, or policy-block it. An invalid override leaves the account intact.
 
 Authentication also stays out of the repository mutation gate: a stalled GitHub endpoint cannot block local Git work, every authorization request carries its own deadline, and cancelling a sign-in stays reachable while GitHub is still answering.
+
+#### Inbox metadata and identity boundaries
+
+A read states which of its recent facts the host actually gave it. A host that
+refuses the review, comment, and check fields answers a _degraded_ read, and a
+degraded read may only place a pull request in the groups its own facts support:
+review-requested, drafts, and recently merged. It may not claim a row is waiting,
+approved, or needs a response, because those are decided from fields the host
+never sent. The row says what it does not know — the check badge reads "unknown",
+not "pending" and not "no checks" — rather than rendering an absence as a result.
+
+A read that names no account at all is the same boundary from the other side. A
+host can return pull requests without ever saying whose they are, and then
+authorship and a request to the viewer are undecided rather than false: the
+viewer-relative groups stay empty rather than being decided against a person the
+read could not name, drafts and recently merged keep their rows, and the
+repository is reported as read without knowing whose queue this is so the work
+that stopped being listed has a stated reason. The missing account is stated
+ahead of missing metadata, because it is the reason the rows are not being shown
+as work.
+
+Viewer-relative groups are decided against one viewer, and a read never mixes
+two. One host is one credential: if a host reports two different logins across
+its repositories, the read is retired rather than published. Two hosts are two
+accounts, so their repositories aggregate normally, each repository report names
+the login its rows were decided as, and the queue-level viewer is stated only
+when every host agrees on it.
+
+The rows on screen belong to one identity: the host this window reads for, the
+account behind it, and the credential that host would authenticate with. Any one
+of them changing retires the read in flight and drops the rows it was for, so a
+refresh that fails afterwards keeps nothing from the credential it replaced. The
+credential part is whatever the transport that will actually make the requests
+would authenticate with — the environment or account credential this app
+resolved, or, where the `gh` CLI speaks for the host, the profile that CLI
+reports — reduced to an opaque per-host fingerprint. It holds no secret, holds no
+credential even in the making, and is never logged or persisted. The host is part
+of that identity on its own, so switching it retires the queue whether or not an
+account status has arrived to say so.
+
+One host names the requests, the credential asked of the CLI, the environment
+the CLI's process runs with, and the allowance the answers are credited to, so
+none of those four can disagree about which host this is. A host read from the
+wrong place names the wrong credential, so that one host is decided once and the
+four are never resolved apart from each other.
+
+The registered repositories are part of it too. A repository added or removed
+while a read is resolving its origins retires that read rather than letting it
+answer against the list it started from.
+
+Each GitHub host meters and refuses on its own, so a host's queue is admitted
+against what that host's own responses last reported. One host's remaining
+allowance is never evidence about another, and a count is evidence only about
+the window it belongs to: a report whose reset has passed is set aside however
+recently it arrived and however much more it allows, and where another report
+for that host still describes an open window, that one is what admission reads.
+When two live reports describe the same instant, the one that admits less is
+honoured. A host that answers "not now" is left alone until the moment it named —
+a `Retry-After`, or the primary window's reset when the answer names no counter
+at all — measured from the answer that carried it rather than from the start of
+the read that met it, and kept even by a refresh that kept no rows. The wait
+belongs to the host, so a refusal an ordinary repository read met delays the
+next refresh exactly as a refusal the queue met does; another host's wait is
+never its own.

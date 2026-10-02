@@ -30,6 +30,7 @@ import {
   type GitHubTransport,
 } from '../src/main/github-transport'
 import type { GitHubCredentialSource } from '../src/main/github-transport'
+import { GITHUB_DEFAULT_HOST } from '../src/shared/host'
 
 /**
  * A real GitHub host on a real socket, not a stubbed fetch. The certificate is
@@ -485,8 +486,20 @@ test('every review read and write reaches the host the origin names, not the pub
     viewerDidAuthor: false,
     reviewThreads: { totalCount: 0, pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] },
   }
-  const record = (calls: string[], label: string): GitHubTransport => ({
+  const record = (
+    calls: string[],
+    label: string,
+    // The host this double actually answers for. It is named rather than left
+    // implicit because admission and allowance are keyed by it, and a double
+    // that answered for one host while claiming another would make a consumer's
+    // own bookkeeping untestable.
+    destinationHost: string,
+  ): GitHubTransport => ({
     kind: 'direct',
+    destinationHost,
+    async credentialAuthority(): Promise<string> {
+      return `-credential`
+    },
     async rest<T>(request: GitHubRestRequest): Promise<GitHubRestResponse<T>> {
       calls.push(`${label}:${request.path ?? ''}`)
       return {
@@ -512,8 +525,10 @@ test('every review read and write reaches the host the origin names, not the pub
     },
   })
   const context = githubHostContext('git.acme.example')
-  setGitHubHostTransport(context.host, record(hostCalls, 'host'))
-  setGitHubTransport(record(hostlessCalls, 'hostless'))
+  setGitHubHostTransport(context.host, record(hostCalls, 'host', context.host))
+  // The hostless default serves the public host, which is what the production
+  // default transport reports when it was named nothing.
+  setGitHubTransport(record(hostlessCalls, 'hostless', GITHUB_DEFAULT_HOST))
   try {
     const permissions = await readReviewPermissions(workspace.repo, 7)
     assert.equal(permissions.viewer, 'ada')
