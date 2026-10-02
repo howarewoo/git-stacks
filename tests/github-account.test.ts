@@ -1015,8 +1015,9 @@ test('cancelling a first sign-in leaves no account metadata behind', async () =>
   await waitUntil(barrier.isHeld)
   await signingIn.cancelSignIn()
   barrier.release()
-  await waitUntil(async () => (await exists(stateFile)) === false)
+  // Rollback removes the staged credential before unlinking its metadata.
   await waitUntil(async () => (await exists(vaultFile)) === false)
+  await waitUntil(async () => (await exists(stateFile)) === false)
 
   assert.equal(signingIn.status().state, 'signed-out')
   assert.equal(signingIn.available(), false)
