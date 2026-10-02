@@ -655,10 +655,7 @@ button:disabled {
 .list-toolbar {
   display: flex;
   min-height: 66px;
-  /* The toolbar keeps its height only as a minimum: at the zoom a person set,
-     or in a narrow window, its controls wrap onto more lines and a fixed basis
-     would let them overlap what sits below instead of pushing it down. */
-  flex: 0 0 auto;
+  flex: 0 0 66px;
   align-items: center;
   gap: 14px;
   border-bottom: 1px solid var(--line);
@@ -1956,6 +1953,15 @@ button:disabled {
   height: 100%;
   min-height: 0;
   flex-direction: column;
+}
+
+/* The shared list toolbar is a fixed 66px strip. This one carries the host,
+   the poll cadence, and three controls, so at the zoom a person set, or in a
+   narrow window, its controls wrap onto more lines: it grows past the strip
+   instead of painting over the headline beneath it. The 66px minimum is the
+   shared one; only the growth is this toolbar's own, as it is for review. */
+.notification-toolbar {
+  flex: 0 0 auto;
 }
 
 .capability-scroll {

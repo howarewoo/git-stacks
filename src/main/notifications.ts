@@ -186,6 +186,16 @@ interface StoredCache {
    */
   retryFloorAt: string | null
   /**
+   * The server-directed rate-limit or retry deadline for this host. Survives
+   * ordinary poll interval resets and applies to both reads and writes.
+   */
+  serverFloorAt: string | null
+  /**
+   * The non-secret classification of the last failed read, so staleness
+   * survives restart.
+   */
+  failureKind: 'offline' | 'failed' | null
+  /**
    * Thread IDs covered by an accepted bulk mark-as-read awaiting later poll
    * confirmation. Stored so a restart does not lose the pending state.
    */
@@ -632,6 +642,17 @@ export class NotificationCenter {
   private authorization: AbortController | null = null
   private timer: NodeJS.Timeout | undefined
   private stopped = true
+  /**
+   * The owner token of the active read. When a mutation succeeds or the center
+   * is fenced, this token is cleared so a pre-existing read cannot mutate state
+   * or discard the validator.
+   */
+  private readOwner: object | null = null
+  /**
+   * The server-directed rate-limit or retry deadline for this host. Survives
+   * ordinary poll interval resets and applies to both reads and writes.
+   */
+  private serverFloorAt: number | null = null
 
   /**
    * Counts the boundaries a pending read or write may not cross.
@@ -649,6 +670,7 @@ export class NotificationCenter {
    */
   private fence(): number {
     this.generation += 1
+    this.readOwner = null
     // Every kind of pending work ends here, not just the read: a write that is
     // still waiting for the key store must not leave after the credential it
     // was waiting under, and a credential still being identified must not
@@ -739,8 +761,13 @@ export class NotificationCenter {
     try {
       const parsed: unknown = JSON.parse(await readFile(this.options.cacheFile, 'utf8'))
       if (!isRecord(parsed) || parsed.version !== CACHE_VERSION) return null
+      if (!Array.isArray(parsed.threads)) return null
       const interval = parsed.pollIntervalSeconds
       const failures = parsed.failures
+      const failureKind =
+        parsed.failureKind === 'offline' || parsed.failureKind === 'failed'
+          ? parsed.failureKind
+          : null
       return {
         version: CACHE_VERSION,
         host: text(parsed.host) ?? '',
@@ -751,12 +778,14 @@ export class NotificationCenter {
         pollIntervalSeconds: pollIntervalSeconds(
           typeof interval === 'number' ? String(interval) : null,
         ),
-        threads: Array.isArray(parsed.threads) ? parsed.threads : [],
+        threads: parsed.threads,
         failures:
           typeof failures === 'number' && Number.isFinite(failures) && failures > 0
             ? Math.floor(failures)
             : 0,
         retryFloorAt: timestamp(parsed.retryFloorAt),
+        serverFloorAt: timestamp(parsed.serverFloorAt),
+        failureKind,
         pendingRead: Array.isArray(parsed.pendingRead)
           ? parsed.pendingRead.filter(
               (item): item is string => typeof item === 'string' && item.length > 0,
@@ -788,7 +817,13 @@ export class NotificationCenter {
     // deadline that has already passed is no longer an instruction, and a
     // restart must not turn a host's refusal to be asked sooner into an
     // immediate request.
-    const floor = record.retryFloorAt === null ? null : Date.parse(record.retryFloorAt)
+    const failureFloor = record.retryFloorAt === null ? null : Date.parse(record.retryFloorAt)
+    const serverFloor = record.serverFloorAt === null ? null : Date.parse(record.serverFloorAt)
+    if (serverFloor !== null && serverFloor > this.now()) {
+      this.serverFloorAt = serverFloor
+    }
+    const effectiveFloor = Math.max(failureFloor ?? 0, this.serverFloorAt ?? 0)
+    const activeFloor = effectiveFloor > this.now() ? effectiveFloor : null
     this.memory = {
       ...this.memory,
       fetchedAt: record.fetchedAt,
@@ -797,8 +832,17 @@ export class NotificationCenter {
       pollIntervalSeconds: record.pollIntervalSeconds,
       lastModified: record.lastModified,
       consecutiveFailures: record.failures,
-      nextPollAt:
-        floor !== null && floor > this.now() ? Math.max(confirmed ?? 0, floor) : confirmed,
+      nextPollAt: activeFloor !== null ? Math.max(confirmed ?? 0, activeFloor) : confirmed,
+    }
+    if (record.failureKind !== null) {
+      this.memory.lastFailure = new GitHubTransportError({
+        kind: record.failureKind === 'offline' ? 'network' : 'unknown',
+        detail:
+          record.failureKind === 'offline'
+            ? 'The last notification read could not reach GitHub.'
+            : 'The last notification read failed.',
+        publish: false,
+      })
     }
     this.pendingBulkRead = record.pendingRead ?? null
     // The stored validator is what makes this run's first read conditional
@@ -808,10 +852,10 @@ export class NotificationCenter {
     if (restored.length === record.threads.length) {
       this.validator.remember(this.memory.lastModified, this.threads)
     } else {
+      this.memory.lastModified = null
       this.validator.discard()
     }
   }
-
   /** Writes the record that names a sealed reference, atomically. */
   private async writeCredentialFile(value: StoredNotificationCredential): Promise<void> {
     await mkdir(dirname(this.options.credentialFile), { recursive: true })
@@ -874,6 +918,14 @@ export class NotificationCenter {
   private async saveCache(generation: number = this.generation): Promise<boolean> {
     const credential = this.credentialForThisHost()
     const floor = this.memory.nextPollAt
+    const failureFloor = this.memory.consecutiveFailures > 0 && floor !== null ? floor : null
+    let failureKind: 'offline' | 'failed' | null = null
+    if (this.memory.lastFailure) {
+      failureKind =
+        this.memory.lastFailure.kind === 'network' || this.memory.lastFailure.kind === 'timeout'
+          ? 'offline'
+          : 'failed'
+    }
     const record: StoredCache = {
       version: CACHE_VERSION,
       host: this.host.host,
@@ -884,24 +936,28 @@ export class NotificationCenter {
       pollIntervalSeconds: this.memory.pollIntervalSeconds,
       threads: this.threads,
       failures: this.memory.consecutiveFailures,
-      retryFloorAt:
-        this.memory.consecutiveFailures > 0 && floor !== null
-          ? new Date(floor).toISOString()
+      retryFloorAt: failureFloor !== null ? new Date(failureFloor).toISOString() : null,
+      serverFloorAt:
+        this.serverFloorAt !== null && this.serverFloorAt > this.now()
+          ? new Date(this.serverFloorAt).toISOString()
           : null,
+      failureKind,
       pendingRead: this.pendingBulkRead,
     }
     return this.commit(generation, () => this.writeCache(record))
   }
 
-  private async dropCache(generation: number = this.generation): Promise<void> {
-    this.threads = []
-    this.memory = emptyPollMemory()
-    this.validator.clear()
-    // The removal is queued like every other change to this file, so a list that
-    // was being written when the credential it belongs to went away cannot land
-    // afterwards and leave the next run reading it.
-    await this.commit(generation, async () => {
-      await rm(this.options.cacheFile, { force: true })
+  /**
+   * Removes the cache file on disk only if it still belongs to the previous
+   * account's login, leaving a successor's freshly written cache untouched.
+   */
+  private async deleteCacheIfOwned(previousLogin: string | null): Promise<void> {
+    await this.options.store.serialize(async () => {
+      const stored = await this.readCacheRecord()
+      if (stored === null) return
+      if (stored.login === previousLogin) {
+        await rm(this.options.cacheFile, { force: true })
+      }
     })
   }
 
@@ -1074,18 +1130,30 @@ export class NotificationCenter {
 
   private async restoreStored(): Promise<void> {
     const lifetime = this.lifetime
-    const record = await this.readCredentialRecord()
-    if (!this.holds(lifetime)) return
-    this.credential = record
-    this.credentialLoaded = true
+    // Restoration joins the same queue as the writes and the removals, because
+    // what it must not do is adopt a record a removal is still in the middle of
+    // deleting: a host selected again while the center before it is removing its
+    // credential would otherwise read the old metadata and cache, and then keep
+    // a reference that no longer opens and rows it can never reload. What is
+    // queued here is these two reads and nothing else: every write to these
+    // files is a rename, and sealing a token runs on the vault's own queue, so
+    // no key store call can hold this one up.
+    await this.options.store.serialize(async () => {
+      if (!this.holds(lifetime)) return
+      const record = await this.readCredentialRecord()
+      if (!this.holds(lifetime)) return
+      this.credential = record
+      this.credentialLoaded = true
 
-    if (this.cacheLoaded) return
-    const cached = await this.readCacheRecord()
+      if (this.cacheLoaded) return
+      const cached = await this.readCacheRecord()
+      if (!this.holds(lifetime)) return
+      this.cacheLoaded = true
+      if (cached !== null) {
+        this.loadCache(this.credentialForThisHost()?.login ?? null, cached)
+      }
+    })
     if (!this.holds(lifetime)) return
-    this.cacheLoaded = true
-    if (cached !== null) {
-      this.loadCache(this.credentialForThisHost()?.login ?? null, cached)
-    }
     this.settle()
     // A center that was started before its credential existed is armed for the
     // wait a missing credential means. Restoring is what makes it ready, so the
@@ -1125,6 +1193,7 @@ export class NotificationCenter {
     token: string,
     signal: AbortSignal,
     outcome: ReadOutcome,
+    readOwner: object,
   ): Promise<NotificationRead> {
     const transport = this.transport(token)
     const apiBase = new URL(this.host.apiBase)
@@ -1152,9 +1221,11 @@ export class NotificationCenter {
           // cannot un-teach this build the interval page one just asked for.
           outcome.pollIntervalSeconds = interval
           if (response.notModified === true) {
-            if (lastModified !== null) this.memory.lastModified = lastModified
+            const replayed = Array.isArray(response.data)
+              ? (response.data as NotificationThread[])
+              : this.validator.replay()
             return {
-              threads: this.validator.replay(),
+              threads: replayed,
               unchanged: true,
               lastModified,
               pollIntervalSeconds: interval,
@@ -1206,7 +1277,9 @@ export class NotificationCenter {
       // The transport recorded the page it did read. Without the rest of the
       // walk that page is not the list, and replaying it as one would be a
       // claim GitHub never made.
-      this.validator.discard()
+      if (this.readOwner === readOwner && !signal.aborted) {
+        this.validator.discard()
+      }
       throw error
     }
   }
@@ -1242,13 +1315,28 @@ export class NotificationCenter {
     // Recorded outside the read so a walk that fails after page one still leaves
     // behind what page one taught this build about the host's interval.
     const outcome: ReadOutcome = { pollIntervalSeconds: null }
+    const readOwner = {}
+    this.readOwner = readOwner
     try {
       const token = await this.token()
       // A credential replaced, removed, or forgotten while the key store was
       // answering leaves this read with nothing to say and nothing to write.
-      if (!token || this.stale(generation, controller)) return this.snapshot()
-      const read = await this.read(token, controller.signal, outcome)
-      if (this.stale(generation, controller)) return this.snapshot()
+      if (!token || this.readOwner !== readOwner || this.stale(generation, controller)) {
+        return this.snapshot()
+      }
+      // Opening the credential waits on the key store, and this host can name a
+      // deadline while it waits — from a read that came back rate limited, or
+      // from a change that GitHub parked. The floor is checked again here,
+      // where the request is admitted, so a read reserved before that deadline
+      // was learned is not sent during it. With no deadline in force this
+      // changes nothing: the read proceeds as it was reserved.
+      if (this.memory.nextPollAt !== null && this.now() < this.memory.nextPollAt) {
+        return this.snapshot()
+      }
+      const read = await this.read(token, controller.signal, outcome, readOwner)
+      if (this.readOwner !== readOwner || this.stale(generation, controller)) {
+        return this.snapshot()
+      }
       const answeredAt = this.now()
       this.threads = read.threads
       if (read.pollIntervalSeconds !== null) {
@@ -1263,7 +1351,10 @@ export class NotificationCenter {
       this.memory.unchanged = read.unchanged
       this.memory.consecutiveFailures = 0
       this.memory.lastFailure = null
-      this.memory.nextPollAt = answeredAt + this.memory.pollIntervalSeconds * 1000
+      this.memory.nextPollAt = Math.max(
+        answeredAt + this.memory.pollIntervalSeconds * 1000,
+        this.serverFloorAt ?? 0,
+      )
       // An accepted bulk mark-as-read is settled here, by a list GitHub has
       // confirmed rather than by the request that asked for it: each thread the
       // request covered is confirmed once it comes back read or gone. A 304 is
@@ -1283,7 +1374,9 @@ export class NotificationCenter {
       // that was armed for the old deadline is armed again for this one.
       this.armTimer()
     } catch (error) {
-      if (this.stale(generation, controller)) return this.snapshot()
+      if (this.readOwner !== readOwner || this.stale(generation, controller)) {
+        return this.snapshot()
+      }
       const failure =
         error instanceof GitHubTransportError
           ? error
@@ -1313,7 +1406,14 @@ export class NotificationCenter {
           outcome.pollIntervalSeconds,
         )
       }
-      this.memory.nextPollAt = this.failureFloor(failedAt, failure)
+      const serverFloor = this.serverFloor(failedAt, failure)
+      if (serverFloor !== null) {
+        this.serverFloorAt = Math.max(this.serverFloorAt ?? 0, serverFloor)
+      }
+      this.memory.nextPollAt = Math.max(
+        this.failureFloor(failedAt, failure),
+        this.serverFloorAt ?? 0,
+      )
       // What this failure was told survives it: the interval page one named
       // keeps holding this host off, and the deadline GitHub gave is written
       // beside the last confirmed list so a restart, or a return to this host,
@@ -1321,6 +1421,7 @@ export class NotificationCenter {
       await this.saveCache(generation)
       this.armTimer()
     } finally {
+      if (this.readOwner === readOwner) this.readOwner = null
       if (this.inFlight === controller) this.inFlight = null
       options.signal?.removeEventListener('abort', forward)
     }
@@ -1402,8 +1503,10 @@ export class NotificationCenter {
     consent: unknown,
     host: unknown = this.host.host,
   ): Promise<NotificationModuleStatus> {
+    const lifetime = this.lifetime
     if (this.retired) throw new Error(NOT_STORED_MESSAGE)
     await this.restore()
+    if (!this.holds(lifetime)) throw new Error(NOT_STORED_MESSAGE)
     const { enabled, policyDisabled } = this.options.consent()
     if (policyDisabled) throw new Error(POLICY_MESSAGE)
     if (!enabled) {
@@ -1450,14 +1553,16 @@ export class NotificationCenter {
       }
       if (this.stale(generation, controller)) throw new Error(NOT_STORED_MESSAGE)
       const previous = this.credentialForThisHost()
-      // Sealing and committing are one change to one file and take their turn on
-      // its queue, so a stage another center left running for this host either
-      // commits before this one or finds itself stale and retires itself.
-      const reference = await this.options.store.serialize(async () => {
-        if (this.stale(generation, controller)) return null
-        return this.options.store.vault.stage(this.host.host, token, this.now())
-      })
-      if (reference === null) throw new Error(NOT_STORED_MESSAGE)
+      // Sealing runs on the vault's own queue rather than on this module's file
+      // queue: the key store can block, and a blocked save must not keep a host
+      // that is selected again from reading what is left on these files. The
+      // vault serializes its own read-modify-write, so nothing is lost by not
+      // holding that queue across the seal.
+      const reference = await this.options.store.vault.stage(this.host.host, token, this.now())
+      if (this.stale(generation, controller)) {
+        await this.retire(reference)
+        throw new Error(NOT_STORED_MESSAGE)
+      }
       const stored: StoredNotificationCredential = {
         reference,
         host: this.host.host,
@@ -1466,20 +1571,28 @@ export class NotificationCenter {
       }
       // Recheck ownership after the durable write: if the boundary moved
       // during the write, abandon only our staged reference and roll back the
-      // file only if it still names our staged reference.
+      // file only if it still names our staged reference. The credential is
+      // adopted inside the same queue callback, immediately after that final
+      // check and with no intervening await, so a removal, a withdrawal, or a
+      // retirement that runs once the file is durable can no longer interleave
+      // between the check passing and the credential being taken up.
       let adopted: string | null = null
+      let accountChanged = false
       try {
         adopted = await this.options.store.serialize(async () => {
-          if (this.stale(generation, controller)) return null
+          if (!this.holds(lifetime) || this.stale(generation, controller)) return null
           await this.writeCredentialFile(stored)
-          if (!this.stale(generation, controller)) return reference
-          const named = await this.readCredentialRecord()
-          await this.options.store.vault.remove(reference)
-          if (named?.reference === reference) {
-            if (previous) await this.writeCredentialFile(previous)
-            else await rm(this.options.credentialFile, { force: true })
+          if (!this.holds(lifetime) || this.stale(generation, controller)) {
+            const named = await this.readCredentialRecord()
+            await this.options.store.vault.remove(reference)
+            if (named?.reference === reference) {
+              if (previous) await this.writeCredentialFile(previous)
+              else await rm(this.options.credentialFile, { force: true })
+            }
+            return null
           }
-          return null
+          accountChanged = this.adopt(stored, previous, login)
+          return reference
         })
       } finally {
         if (adopted === null) {
@@ -1488,32 +1601,13 @@ export class NotificationCenter {
       }
       if (adopted === null) throw new Error(NOT_STORED_MESSAGE)
 
-      // Credential adoption, generation advancement, and synchronous invalidation
-      // of the previous account's in-memory threads/validator happen in ONE step
-      // with no intervening await, so no mixed-account snapshot can ever be exposed.
-      this.authorization = null
-      this.credential = stored
-      this.credentialLoaded = true
-      this.fence()
-      const accountChanged = (previous?.login ?? null) !== login
-      if (accountChanged) {
-        this.threads = []
-        this.memory = emptyPollMemory()
-        this.validator.clear()
-        this.pendingBulkRead = null
-      } else {
-        this.validator.clear()
-      }
-      this.rejected = false
-      this.settle()
-
       // Retire ONLY the captured superseded reference, never all other references
       // in the vault (which could belong to concurrent staged or successor saves).
       if (previous && previous.reference !== reference) {
         await this.retire(previous.reference)
       }
       if (accountChanged) {
-        await this.dropCache()
+        await this.deleteCacheIfOwned(previous?.login ?? null)
       }
 
       // The first read of a newly stored credential runs at once: nothing has
@@ -1524,6 +1618,41 @@ export class NotificationCenter {
     } finally {
       if (this.authorization === controller) this.authorization = null
     }
+  }
+
+  /**
+   * Takes up a credential that has just become this module's own: assignment,
+   * generation advancement, and the synchronous invalidation of the account it
+   * replaces, in ONE step with no intervening await, so no mixed-account
+   * snapshot can ever be exposed. It answers whether the account changed, which
+   * is what decides what is retired and cleaned up afterwards.
+   *
+   * This runs inside the shared file transaction, not after it: adoption is the
+   * other half of the durable write, and a boundary that moves between the two
+   * would leave a removed or retired module holding the credential it was told
+   * it did not have.
+   */
+  private adopt(
+    stored: StoredNotificationCredential,
+    previous: StoredNotificationCredential | null,
+    login: string,
+  ): boolean {
+    this.authorization = null
+    this.credential = stored
+    this.credentialLoaded = true
+    this.fence()
+    const accountChanged = (previous?.login ?? null) !== login
+    if (accountChanged) {
+      this.threads = []
+      this.memory = emptyPollMemory()
+      this.validator.clear()
+      this.pendingBulkRead = null
+    } else {
+      this.validator.clear()
+    }
+    this.rejected = false
+    this.settle()
+    return accountChanged
   }
 
   /**
@@ -1598,6 +1727,10 @@ export class NotificationCenter {
       throw new Error('A notification thread id is required.')
     }
     if (this.state !== 'ready') return this.snapshot()
+    if (threadId === 'all' && this.pendingBulkRead !== null) {
+      return this.snapshot()
+    }
+    const targetBulkIds = threadId === 'all' ? this.threads.map((thread) => thread.id) : null
     const generation = this.generation
     const response = await this.writeOnce({
       // GitHub documents the inbox-wide operation as `PUT /notifications`; only
@@ -1616,7 +1749,7 @@ export class NotificationCenter {
     if (threadId === 'all' && response.status === 202) {
       // 202 is accepted rather than completed: keep the pending target identity
       // internally and confirm observable completion on a later allowed poll.
-      this.pendingBulkRead = this.threads.map((thread) => thread.id)
+      this.pendingBulkRead = targetBulkIds
       await this.saveCache().catch(() => null)
       return this.publish()
     }
@@ -1737,6 +1870,9 @@ export class NotificationCenter {
    */
   private async writeOnce(request: GitHubRestRequest): Promise<GitHubRestResponse<unknown>> {
     if (this.write !== null) throw new Error(SEND_IN_FLIGHT_MESSAGE)
+    if (this.serverFloorAt !== null && this.serverFloorAt > this.now()) {
+      throw new Error('GitHub asked to wait before sending more requests to this host.')
+    }
     const generation = this.generation
     const controller = new AbortController()
     this.write = controller
@@ -1745,11 +1881,20 @@ export class NotificationCenter {
       const token = await this.token()
       if (!token) throw new Error('This inbox has no credential to write with.')
       if (!holds()) throw new Error(NOT_SENT_MESSAGE)
+      // Opening the credential waits on the key store, and the host can name a
+      // deadline while it waits. The floor is checked again here, where the
+      // request is admitted for sending, so a change admitted before that
+      // deadline was learned is not sent during it. Outside a deadline learned
+      // from the host this changes nothing: the change is sent as admitted.
+      if (this.serverFloorAt !== null && this.serverFloorAt > this.now()) {
+        throw new Error('GitHub asked to wait before sending more requests to this host.')
+      }
       let response: GitHubRestResponse<unknown>
       try {
         response = await this.transport(token).rest({
           ...request,
           cache: false,
+          acceptNoChange: true,
           signal: controller.signal,
         })
       } catch (error) {
@@ -1769,7 +1914,9 @@ export class NotificationCenter {
         // Consume mutation Retry-After/reset metadata into local rate-limit deadline
         const floor = this.serverFloor(this.now(), failure)
         if (floor !== null) {
-          this.memory.nextPollAt = Math.max(this.memory.nextPollAt ?? 0, floor)
+          this.serverFloorAt = Math.max(this.serverFloorAt ?? 0, floor)
+          this.memory.nextPollAt = Math.max(this.memory.nextPollAt ?? 0, this.serverFloorAt)
+          await this.saveCache().catch(() => null)
           this.armTimer()
         }
         throw new Error(
@@ -1778,6 +1925,7 @@ export class NotificationCenter {
       }
       if (!holds()) throw new Error(BOUNDARY_LOST_MESSAGE)
       // Invalidate/cancel reads predating this acknowledged mutation
+      this.readOwner = null
       if (this.inFlight) {
         this.inFlight.abort()
         this.inFlight = null
@@ -1800,6 +1948,7 @@ export class NotificationCenter {
    * cannot publish a list, move the poll floor, or clear a failure.
    */
   cancel(): void {
+    this.readOwner = null
     this.inFlight?.abort()
   }
 

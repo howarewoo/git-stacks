@@ -225,20 +225,27 @@ pull request inbox. It is off by default and nothing about sign-in, pull
 requests, stacks, or reviews changes when it is off, held off by policy, or
 stripped of its credential.
 
-GitHub serves its notifications endpoints to a classic personal access token
-rather than to a GitHub App credential, so this module authorizes one of its
+GitHub serves its notifications endpoints to a token with the `notifications` scope
+rather than to a GitHub App user access credential, so this module authorizes one of its
 own. The order is deliberate and the UI follows it:
 
 1. **Settings › Notifications** explains what authorizing adds — the credential
-   kind, the `notifications` scope, the key store it is sealed in, and the fact
+   kind, the `notifications` scope, how it is protected, and the fact
    that removing it affects nothing else — before the switch is touched.
 2. **GitHub Notifications › Authorize notifications** opens a dialog that repeats
    the boundary, names the host and the account the token belongs to, and
-   requires the acknowledgement before anything is stored.
-3. The token is sealed in this computer's operating-system key store. Only an
-   opaque reference is written to application state; the value crosses the
-   preload bridge once, is never read back, and appears in no log, status object,
-   diagnostic report, support bundle, or screenshot.
+   requires the acknowledgement before anything is stored. The host shown is the
+   one the dialog acknowledged; if the selected host changes while the dialog is
+   open, the submission is refused rather than sealing a token for a host the
+   person is no longer pointed at.
+3. The token is entered as a masked password field, so it is on screen in this
+   window before it is submitted — that is unavoidable, and it is the only moment
+   it is here. It crosses the preload bridge once and is never handed back to the
+   window after that. At rest it is sealed with a key this computer's operating
+   system protects and stored as ciphertext in this app's own notification
+   credential file; ordinary application state holds only an opaque reference to
+   it, and the token itself never reaches a log, status object, diagnostic report,
+   support bundle, or screenshot.
 
 The module polls conditionally. It sends GitHub's own `Last-Modified` value back
 as `If-Modified-Since`, honours `X-Poll-Interval` as a floor, and never asks for
@@ -254,6 +261,32 @@ inbox rather than silently retried. When the host cannot be reached, the last
 list GitHub confirmed stays on screen marked stale with the reason, rather than
 being shown as current or discarded; an inbox nobody can confirm any more is
 stale for the same reason even when it is empty.
+
+`Done` is a separate control from Ignore and Unsubscribe because it is a
+separate change on GitHub: it is `DELETE /notifications/threads/{id}`, marking
+the thread itself done, not changing its subscription. The subscription controls
+stay available whatever the thread is, and only Open is withheld when a subject
+has no page this host is known to serve.
+
+Marking the whole inbox read is a bulk operation GitHub answers by accepting it
+rather than by confirming it. When that acceptance is not yet confirmed, the
+inbox says so plainly, keeps the last confirmed state of each thread, and will
+not send the bulk request again — the next read that GitHub permits is what
+settles it. A write whose answer never arrives is reported as unknown, not as
+failed and not as applied, and is not silently retried.
+
+Only the API routes whose web page is actually known are turned into links: a
+pull request, an issue, and a commit. A subject GitHub reports by some other
+route — a check suite, say — is shown as itself with Open withheld, rather than
+guessed at.
+
+Whether a thread can be opened is a question about its address, not about what
+this build calls it. A `reason` or subject `type` GitHub invents after this build
+was written is kept and shown as unknown, and on its own withholds nothing: a
+pull request, an issue, or a commit reached by an unfamiliar reason is still
+opened, and Mark read, Done, Ignore, and Unsubscribe stay available for it
+whatever its kind or reason. Open is withheld only when there is no address this
+build can validate into a page on the host that sent it.
 
 A notification's `subject.url` is an API address, not a page. It is resolved onto
 the web origin of the host that sent it before Open is offered, so the link
@@ -297,6 +330,51 @@ when that is set, and cleans up its own processes, profile, and repository
 otherwise. It is complementary to the [packaged desktop smoke](#packaged-desktop-smoke),
 not a substitute for it.
 
+Both launches — the initial one and the restarted process — start through the
+isolated desktop fixture, `tests/fixtures/isolated-desktop.cjs`, which runs as
+the Electron main entry instead of the production main file. The fixture
+replaces every `safeStorage` entry point the compiled product uses with a
+synthetic AES-256-GCM sealing key confined to the run's own fixture root, forces
+Chromium onto `--use-mock-keychain`/`--password-store=basic`, proves no native
+method is reachable, and only then imports the production main: if that proof
+fails it exits before the production module loads. The same fixture root is
+reused across the restart, so the synthetic key persists and the sealed
+credential file stays readable across it. This run therefore never reads or
+writes the operating system's real credential store, and it is not acceptance
+of that store: no run here claims the real OS keychain, and the real-OS-store
+acceptance remains a separate manual gate.
+
+Three things in that run are worth stating as mechanisms rather than as results,
+because each is a place where a weaker check would pass and a wrong claim would
+follow from it.
+
+**Waiting for the app, not for the socket.** An answer arriving at the
+controlled host says nothing about whether the app has finished acting on it,
+so both halves are waited for separately: the request as the host recorded it,
+and then the record the producer writes back for that host, which moves only
+when it has republished the confirmed list and the validator it belongs to. Each
+of those waits fails the run when it times out; none of them falls through to
+the next step having waited for nothing.
+
+**The poll floor is GitHub's, and the module keeps it.** After a host applies a
+write whose answer is lost, the window is showing a read state it could not
+learn. Reconciling that needs a read the host's own interval permits, and the
+run waits past that interval for the read to happen rather than pressing
+Refresh to force one: once the floor has passed the module reconciles on its own
+timer, so a press would be a person asking for something the floor may refuse.
+The count of what the host has been asked is taken before the write that changed
+its list, which is well before the wait, because a read the app sends by itself
+is exactly the one a baseline measured from too late would miss.
+
+**An isolated run has no GitHub App registration.** The environment this run
+starts from strips every `GITHUB_` variable, so no client id reaches the
+process and nothing in the run registers one. The account status the window
+reports through its own bridge is therefore `not-configured` — this build cannot
+sign in to this host at all — which is a different claim from `signed-out`,
+which is a build that could and has not, and the run asserts the state that is
+actually true rather than the one that would read better. It reads the
+credential reference and the login the same way, and both are absent.
+
 The renderer surface is also exercised in the [gallery](#renderer-verification):
 `notifications-awaiting-credential`, `notifications-ready`,
 `notifications-stale`, `notifications-rejected`,
@@ -304,19 +382,43 @@ The renderer surface is also exercised in the [gallery](#renderer-verification):
 person meets before, during, and after authorization, and what a selected-host
 change does to an inbox the window is already showing.
 
-**What the zoomed screenshots are.** `webContents.setZoomFactor(2)` is the real
-zoom; more screenshot pixels would only be the same layout at a higher density.
-The run proves the factor took effect by the halved CSS viewport it produces, not
-by the size of the image. The zoomed shots capture the viewport rather than the
-whole document, because a capture grown past the viewport repaints a fixed dialog
-at the position it held in the shorter viewport it was opened in, which shows an
-overlaid surface as clipped when it is not.
+**What the zoomed screenshots are, and what they are not.**
+`webContents.setZoomFactor(2)` is the real zoom; more screenshot pixels would only
+be the same layout at a higher density. The run proves the factor took effect by
+the halved CSS viewport it produces, not by the size of the image. The zoomed
+shots capture the viewport rather than the whole document, because a capture
+grown past the viewport repaints a fixed dialog at the position it held in the
+shorter viewport it was opened in, which shows an overlaid surface as clipped
+when it is not.
 
-**What the baseline images are.** Regenerated here on macOS 27.0 (build 26A428).
-Every regenerated baseline was compared with the committed one before it was
-accepted: all changed pixels fall inside the 250px navigation rail, which is the
-row this feature adds, and no pixel outside that rail changed. The originals
-were captured on macOS 26.5.2 (25F84).
+At 200% zoom a 1024px window leaves a 512px CSS viewport, in which the
+navigation rail and the workspace content stack and the inbox rows fall below the
+fold. A capture of that viewport is 1024 physical pixels wide, and it shows the
+toolbar and the rail rather than the notification rows — a cropped toolbar edge
+in one of these images is what the page is scrolled to at that moment, not a
+control that has been lost. Nothing here claims every control is visible at once
+at this zoom. What the run does instead is reveal each control in turn by
+scrolling it into view, confirm it is the thing actually under the pointer's
+point with a hit test, act on it there, and capture that. A claim about a row's
+position or reachability at this zoom rests on those measurements and on the
+gallery at a 512px viewport — not on an image that does not contain the rows.
+
+The one place a person has to type is the consent dialog, and it is reached
+without a pointer at this zoom: from the focus the dialog itself puts on
+opening, by `Tab` to the token field, `Tab` to the acknowledgement and `Space` to
+give it, then `Tab` to the submit and `Space` to send, with the focus checked at
+every step. Nothing in the run moves the caret into the field itself, because a
+field it had to aim at would prove nothing about the one a person finds. `Space`
+rather than `Enter` is the activating key throughout, since `Enter` is this app's
+own command key and never reaches the focused control. This is a claim about
+this window's own focus order and its own key handling; it is not a claim about
+what the operating system's keyboard navigation or any assistive technology
+does with this app, which the run neither drives nor measures.
+
+**Baseline images and visual diffs.** When baseline screenshots are updated,
+each image is compared with the previous baseline before it is accepted, and
+only images affected by intentional layout changes are updated. A visual change
+is bounded to the component that changed, leaving unchanged surfaces pixel-identical.
 
 ## GitHub hosts
 
@@ -1366,7 +1468,7 @@ Run `npx playwright test` locally for one combined visual/behavioral HTML report
 
 Baselines are committed images, and the pull request records the exact platform, architecture, and verification run evidence each image came from rather than maintaining transient author-only capture notes here.
 
-The visual suite covers the nine destinations and three dialog compositions at minimum/default/wide sizes, shared-control variants, and a small set of long/error/recovery layouts. Other fixture states remain available in the gallery without separate screenshots or label-only assertions. Behavioral tests focus on keyboard access, asynchronous transitions, contrast, zoom/reduced motion, and mutation guards.
+The visual suite covers the ten destinations and three dialog compositions at minimum/default/wide sizes, shared-control variants, and a small set of long/error/recovery layouts. Other fixture states remain available in the gallery without separate screenshots or label-only assertions. Behavioral tests focus on keyboard access, asynchronous transitions, contrast, zoom/reduced motion, and mutation guards.
 
 ### Packaged desktop smoke
 
@@ -1439,11 +1541,11 @@ Automated axe and contrast checks supplement, not replace, human keyboard and as
 Use the packaged build and only disposable fixture repositories. `npm run test:desktop -- --keep` retains its disposable workspace and prints the path for a reviewer. Open only that fixture repository in the packaged app; remove the retained workspace after review.
 
 1. Record reviewer, date, exact macOS/build, Electron/app revision, VoiceOver version/settings, display scaling, and keyboard navigation settings.
-2. **Destination navigation.** With no pointer, arrow through the Workspace destinations rail and activate each of the nine destinations. After each switch, confirm focus lands on the destination's heading and the change is spoken through the polite live region. Also verify the direct routes: `/` focuses the in-view filter, `Mod+K` opens the command palette with its own search focused, and the view shortcuts (`Mod+1`–`Mod+9`) reach every destination.
+2. **Destination navigation.** With no pointer, arrow through the Workspace destinations rail and activate each of the ten destinations. After each switch, confirm focus lands on the destination's heading and the change is spoken through the polite live region. Also verify the direct routes: `/` focuses the in-view filter, `Mod+K` opens the command palette with its own search focused, and the view shortcuts reach every destination: `Mod+1`–`Mod+8` for Branches through Diagnostics, `Mod+9` for PR Inbox, and `Mod+0` for GitHub Notifications.
 3. **Branch tree.** Tab once into the repository branch tree and confirm it is a single tab stop. With Up/Down move between rows and confirm level, sibling position, and set size are announced; Home/End jump to the first and last row of the whole filtered list, revealing the page that mounts it when the list is paged, and the tree keeps its single tab stop. Press Enter and confirm the details pane follows the selection and focus stays in the tree. Confirm every row states current, remote, parent cycle, parent missing, requires-restack, pull-request number, checks, and ahead/behind in words, and that a visible focus ring marks the row. Filter the list so a branch's parent is no longer shown, and confirm the remaining rows announce no parent above them and share one root set. Finally, slide the mounted window past the first page and repeat Up/Down: focus must move to the neighbouring mounted row, the rows already mounted must be the rows still mounted, and the window must not jump back to the top.
 4. **Stack rail and history.** On Stacks, Tab into the member list and repeat the same arrow/Home/End/Enter contract, including Up/Down and Home/End on a stack longer than one page. On History, do the same for the commit list and confirm the inspected commit is announced as current.
 5. **Text entry.** Type `7/k` into the in-view filter and confirm every character is inserted, no destination changes, and the palette does not open. Repeat inside the command palette search. Open a dialog and confirm Tab is trapped, Escape does not discard entered work, explicit Cancel returns focus to the control that opened the dialog, and a rejected operation keeps focus inside the modal with its error associated.
-6. **Zoom and motion.** Set the window to 200% zoom (or 720×470) and walk all nine destinations: no horizontal scrolling, no action pushed off-screen, and the tree, rail, and history still keyboard-reachable. Enable Reduce Motion and confirm transitions are suppressed while status text, focus rings, and busy locks remain.
+6. **Zoom and motion.** Set the window to 200% zoom (or 720×470) and walk all ten destinations: no horizontal scrolling, no action pushed off-screen, and the tree, rail, and history still keyboard-reachable. Enable Reduce Motion and confirm transitions are suppressed while status text, focus rings, and busy locks remain.
 7. **State without colour.** Repeat the branch, pull-request, and Diagnostics surfaces under a high-contrast or monochrome display setting and confirm lifecycle, checks, review, capability support, and unavailable/unknown data are all still readable as words.
 8. **Errors and recovery.** Trigger unavailable GitHub metadata, a history error, a stale preview reload, busy state, partial completion, and conflict Continue/Abort. Confirm focus moves to a newly raised error and that announcements are timely without duplicating or hiding important state. With an error still on screen, open and cancel a dialog and confirm focus returns to the control that opened it rather than back to that error.
 9. Verify the native close/minimize/full-screen controls, including returning from full screen.

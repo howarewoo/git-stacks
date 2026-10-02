@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import { mkdtempSync, readFileSync } from 'node:fs'
-import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { createServer as createTlsServer, request as httpsRequest, type Server } from 'node:https'
 import net from 'node:net'
 import { tmpdir } from 'node:os'
@@ -24,7 +24,7 @@ import {
   notificationCredentialStore,
   notificationSubjectUrl,
 } from '../src/main/notifications'
-import type { NotificationInbox } from '../src/shared/notifications'
+import type { NotificationInbox, NotificationModuleStatus } from '../src/shared/notifications'
 
 /**
  * A real GitHub host on a real TLS socket, not a stubbed fetch. Every fact this
@@ -1188,10 +1188,11 @@ function centerFor(
     enabled: true,
     policyDisabled: false,
   }),
+  fetchOverride: typeof globalThis.fetch = verifiedFetch,
 ): NotificationCenter {
   return new NotificationCenter({
     host: host.context,
-    fetch: verifiedFetch,
+    fetch: fetchOverride,
     store: store.store,
     credentialFile: store.credentialFile,
     cacheFile: store.cacheFile,
@@ -2144,6 +2145,920 @@ test('saveCredential validates consented host and refuses mismatched host before
     )
     assert.equal(host.wire.length, 0)
   } finally {
+    center.forget()
+    await host.close()
+  }
+})
+
+// Integration proof: exercises real unmocked setTimeout in NotificationCenter.schedule()
+// to observe that automatic timer expiry triggers an inbox refresh on the platform clock.
+test('automatic timer expiry triggers inbox refresh without manual call', async () => {
+  const store = await installation()
+  const published: NotificationInbox[] = []
+  const host = await startHost((wire) => {
+    if (wire.path === '/api/v3/user') return { body: { login: 'octo' } }
+    return {
+      body: [thread(host, '1')],
+      headers: { 'last-modified': LAST_MODIFIED, 'x-poll-interval': '60' },
+    }
+  })
+  const center = new NotificationCenter({
+    host: host.context,
+    fetch: verifiedFetch,
+    store: store.store,
+    credentialFile: store.credentialFile,
+    cacheFile: store.cacheFile,
+    consent: () => ({ enabled: true, policyDisabled: false }),
+    onChange: (inbox) => {
+      published.push(inbox)
+    },
+  })
+  try {
+    const reference = await store.store.vault.stage(host.host, 'ghp_token', Date.now())
+    await writeFile(
+      store.credentialFile,
+      JSON.stringify({
+        version: 1,
+        reference,
+        host: host.host,
+        login: 'octo',
+        createdAt: new Date().toISOString(),
+      }),
+    )
+    // A stored list whose own interval has already passed, so the timer this
+    // center arms on restore is armed for a read it is allowed to make.
+    const readLongAgo = new Date(Date.now() - 600_000).toISOString()
+    await writeFile(
+      store.cacheFile,
+      JSON.stringify({
+        version: 1,
+        host: host.host,
+        login: 'octo',
+        lastModified: LAST_MODIFIED,
+        fetchedAt: readLongAgo,
+        checkedAt: readLongAgo,
+        pollIntervalSeconds: 60,
+        threads: [thread(host, '0')],
+        failures: 0,
+        retryFloorAt: null,
+        serverFloorAt: null,
+        failureKind: null,
+        pendingRead: null,
+      }),
+    )
+    // Restoring is what makes the center ready, and a ready center arms its
+    // timer for the interval the restored list was read under.
+    assert.equal((await center.inbox()).staleReason, 'expired')
+    center.start()
+    for (let i = 0; i < 30; i++) {
+      if (host.wire.some((req) => req.path.includes('/notifications'))) break
+      const { promise, resolve } = Promise.withResolvers<void>()
+      setTimeout(resolve, 100)
+      await promise
+    }
+    assert.ok(
+      host.wire.some((req) => req.path.includes('/notifications')),
+      'an automatic timer expiry triggered the inbox refresh without a manual refresh call',
+    )
+    assert.equal(published.length > 0, true, 'the automatic refresh published the inbox')
+    assert.equal(published.at(-1)?.threads.length, 1)
+  } finally {
+    center.stop()
+    center.forget()
+    await host.close()
+  }
+})
+
+test('malformed threads in cache record is rejected and row loss discards persistable validator', async () => {
+  const store = await installation()
+  const host = await startHost((wire) => {
+    if (wire.path === '/api/v3/user') return { body: { login: 'octo' } }
+    if (wire.ifModifiedSince === LAST_MODIFIED) {
+      return { status: 304, headers: { 'last-modified': LAST_MODIFIED } }
+    }
+    return {
+      body: [thread(host, '1'), thread(host, '2')],
+      headers: { 'last-modified': LAST_MODIFIED, 'x-poll-interval': '60' },
+    }
+  })
+  await writeFile(
+    store.cacheFile,
+    JSON.stringify({
+      version: 1,
+      host: host.host,
+      login: 'octo',
+      lastModified: LAST_MODIFIED,
+      fetchedAt: new Date().toISOString(),
+      checkedAt: new Date().toISOString(),
+      pollIntervalSeconds: 60,
+      threads: { malformed: true },
+      failures: 0,
+      retryFloorAt: null,
+      serverFloorAt: null,
+      failureKind: null,
+      pendingRead: null,
+    }),
+  )
+  const center = centerFor(store, host, () => Date.now())
+  try {
+    await center.saveCredential('ghp_token', true)
+    const inbox = await center.inbox()
+    assert.equal(inbox.threads.length, 2)
+  } finally {
+    center.forget()
+    await host.close()
+  }
+})
+
+test('restored failure staleness survives restart and is not erased by longer poll interval', async () => {
+  const store = await installation()
+  await writeFile(
+    store.cacheFile,
+    JSON.stringify({
+      version: 1,
+      host: 'github.com',
+      login: 'octo',
+      lastModified: LAST_MODIFIED,
+      fetchedAt: new Date().toISOString(),
+      checkedAt: new Date().toISOString(),
+      pollIntervalSeconds: 3600,
+      threads: [],
+      failures: 1,
+      retryFloorAt: new Date(Date.now() + 600_000).toISOString(),
+      serverFloorAt: null,
+      failureKind: 'failed',
+      pendingRead: null,
+    }),
+  )
+  const reference = await store.store.vault.stage('github.com', 'ghp_token', Date.now())
+  await writeFile(
+    store.credentialFile,
+    JSON.stringify({
+      version: 1,
+      reference,
+      host: 'github.com',
+      login: 'octo',
+      createdAt: new Date().toISOString(),
+    }),
+  )
+  const hostContext = githubHostContext('github.com')
+  const center = new NotificationCenter({
+    host: hostContext,
+    fetch: verifiedFetch,
+    store: store.store,
+    credentialFile: store.credentialFile,
+    cacheFile: store.cacheFile,
+    consent: () => ({ enabled: true, policyDisabled: false }),
+    now: () => Date.now(),
+  })
+  try {
+    const status = await center.inbox()
+    assert.equal(status.stale, true)
+    assert.equal(status.staleReason, 'failed', 'failure staleness is restored on restart')
+  } finally {
+    center.forget()
+  }
+})
+
+test('server floor from rate-limit or Retry-After blocks reads and mutations and persists', async () => {
+  const store = await installation()
+  const clock = Date.parse('2026-09-22T10:00:00.000Z')
+  const host = await startHost((wire) => {
+    if (wire.path === '/api/v3/user') return { body: { login: 'octo' } }
+    if (wire.method === 'PATCH') {
+      return {
+        status: 429,
+        body: { message: 'rate limited' },
+        headers: { 'retry-after': '300' },
+      }
+    }
+    return {
+      body: [thread(host, '1')],
+      headers: { 'last-modified': LAST_MODIFIED, 'x-poll-interval': '60' },
+    }
+  })
+  const center = centerFor(store, host, () => clock)
+  try {
+    await center.saveCredential('ghp_token', true)
+    await assert.rejects(() => center.markRead('1'), /rate limited/)
+    await assert.rejects(() => center.markRead('1'), /wait before sending more requests/)
+    const callsBefore = host.wire.length
+    await center.refresh()
+    assert.equal(host.wire.length, callsBefore)
+  } finally {
+    center.forget()
+    await host.close()
+  }
+})
+
+test('bulk markRead rejects second bulk PUT while pending and captures target IDs beforehand', async () => {
+  const store = await installation()
+  let putCount = 0
+  const host = await startHost((wire) => {
+    if (wire.path === '/api/v3/user') return { body: { login: 'octo' } }
+    if (wire.method === 'PUT' && wire.path === '/api/v3/notifications') {
+      putCount += 1
+      return { status: 202, body: {} }
+    }
+    return {
+      body: [thread(host, '1'), thread(host, '2')],
+      headers: { 'last-modified': LAST_MODIFIED, 'x-poll-interval': '60' },
+    }
+  })
+  const center = centerFor(store, host, () => Date.now())
+  try {
+    await center.saveCredential('ghp_token', true)
+    const first = await center.markRead('all')
+    assert.equal(putCount, 1)
+    assert.equal(first.markAllReadPending, true)
+
+    const second = await center.markRead('all')
+    assert.equal(putCount, 1, 'no second PUT sent while bulk mark-as-read is pending')
+    assert.equal(second.markAllReadPending, true)
+  } finally {
+    center.forget()
+    await host.close()
+  }
+})
+
+test('replacing account cleans up previous account files without deleting new account cache', async () => {
+  const store = await installation()
+  const host = await startHost((wire) => {
+    if (wire.path === '/api/v3/user') {
+      return {
+        body: { login: wire.authorization?.includes('first_token') ? 'user1' : 'user2' },
+      }
+    }
+    return {
+      body: [thread(host, '1')],
+      headers: { 'last-modified': LAST_MODIFIED, 'x-poll-interval': '60' },
+    }
+  })
+  const center = centerFor(store, host, () => Date.now())
+  try {
+    await center.saveCredential('ghp_first_token', true)
+    const inbox1 = await center.inbox()
+    assert.equal(inbox1.login, 'user1')
+    assert.equal(inbox1.threads.length, 1)
+
+    await center.saveCredential('ghp_second_token', true)
+    const inbox2 = await center.inbox()
+    assert.equal(inbox2.login, 'user2')
+    assert.equal(inbox2.threads.length, 1)
+
+    const cache = JSON.parse(await readFile(store.cacheFile, 'utf8'))
+    assert.equal(cache.login, 'user2')
+    assert.equal(cache.threads.length, 1)
+  } finally {
+    center.forget()
+    await host.close()
+  }
+})
+
+test('a host selected again never adopts a credential a pending removal is deleting', async () => {
+  const store = await installation()
+  const host = await startHost((wire) => {
+    if (wire.path === '/api/v3/user') return { body: { login: 'octo' } }
+    return {
+      body: [thread(host, '1')],
+      headers: { 'last-modified': LAST_MODIFIED, 'x-poll-interval': '60' },
+    }
+  })
+  const first = centerFor(store, host, () => Date.now())
+  try {
+    await first.saveCredential('ghp_octo', true)
+    assert.equal((await first.inbox()).threads.length, 1)
+
+    // A removal that has taken its turn on the file queue and is part way
+    // through deleting: the credential file and this host's cached rows are
+    // still on disk, and the reference in the vault is about to stop opening.
+    const gate = deferred()
+    const inside = deferred()
+    const remove = store.store.vault.remove.bind(store.store.vault)
+    let deleting = false
+    store.store.vault.remove = async (reference: string) => {
+      if (deleting) {
+        inside.release()
+        await gate.settled
+      }
+      return remove(reference)
+    }
+    deleting = true
+    first.forget()
+    const removing = centerFor(store, host, () => Date.now())
+    const removal = removing.removeCredential()
+    await inside.settled
+
+    // The app comes back to this host while that removal is still running. What
+    // it finds has to be what is left afterwards, not the record being deleted.
+    const returned = centerFor(store, host, () => Date.now())
+    const read = returned.inbox()
+    deleting = false
+    gate.release()
+    await removal
+    const restored = await read
+    assert.equal(restored.state, 'credential-missing')
+    assert.equal(restored.reference, null)
+    assert.equal(
+      restored.threads.length,
+      0,
+      "the previous account's private rows are not handed to the host that came back",
+    )
+    returned.forget()
+    removing.forget()
+  } finally {
+    first.forget()
+    await host.close()
+  }
+})
+
+/** Whether a path this run owns is on disk, without a second stat call. */
+function onDisk(path: string): boolean {
+  try {
+    readFileSync(path)
+    return true
+  } catch {
+    return false
+  }
+}
+
+test('a removal asked for while the credential is durable still wins over the save finishing', async () => {
+  const store = await installation()
+  const host = await startHost((wire) => {
+    if (wire.path === '/api/v3/user') return { body: { login: 'octo' } }
+    return {
+      body: [thread(host, '1')],
+      headers: { 'last-modified': LAST_MODIFIED, 'x-poll-interval': '60' },
+    }
+  })
+  const center = centerFor(store, host, () => Date.now())
+  // The moment the credential is on disk, this installation asks for it to be
+  // removed. The request is raised from inside the same file transaction that
+  // made the credential durable, so it is already waiting before the save
+  // itself is allowed to carry on — the exact window in which a save that took
+  // the credential up afterwards would undo a removal nobody cancelled.
+  const serialize = store.store.serialize.bind(store.store)
+  let asked = false
+  let removal: Promise<unknown> | null = null
+  store.store.serialize = <T>(task: () => Promise<T>): Promise<T> =>
+    serialize(async () => {
+      const result = await task()
+      if (!asked && onDisk(store.credentialFile)) {
+        asked = true
+        removal = center.removeCredential()
+      }
+      return result
+    })
+  try {
+    assert.equal(asked, false, 'nothing is asked for before a credential exists')
+    await center.saveCredential('ghp_token', true).catch(() => null)
+    assert.equal(asked, true, 'the removal was asked for as soon as the file was durable')
+    await removal
+
+    // A save that carries on after this must not hand back the credential the
+    // person asked to be rid of, in memory or on disk.
+    const live = await center.inbox()
+    assert.equal(live.state, 'credential-missing')
+    assert.equal(live.reference, null)
+    assert.equal(live.threads.length, 0)
+    assert.equal(onDisk(store.credentialFile), false, 'the durable record went with it')
+
+    const returned = centerFor(store, host, () => Date.now())
+    const restored = await returned.inbox()
+    assert.equal(restored.state, 'credential-missing')
+    assert.equal(restored.reference, null)
+    returned.forget()
+  } finally {
+    center.forget()
+    await host.close()
+  }
+})
+
+test('a read answered after a change was acknowledged never becomes the list a later 304 replays', async () => {
+  const store = await installation()
+  let clock = Date.parse('2026-09-22T10:00:00.000Z')
+  const LATE = 'Wed, 23 Sep 2026 10:00:00 GMT'
+  const bodyBuffered = deferred()
+  const allowConsumption = deferred()
+  let gateConsumption = false
+  let serveLate = false
+
+  const gatingFetch: typeof globalThis.fetch = (async (input, init) => {
+    const response = await verifiedFetch(input, init)
+    const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+    if (gateConsumption && url.includes('/notifications')) {
+      gateConsumption = false
+      // Capture the real owned HTTP response body off the socket:
+      const text = await response.text()
+      bodyBuffered.release()
+      // Gate continuation while the mutation is acknowledged and retires the read:
+      await allowConsumption.settled
+      return new Response(text, {
+        status: response.status,
+        headers: response.headers,
+      })
+    }
+    return response
+  }) as typeof globalThis.fetch
+
+  const host = await startHost(async (wire) => {
+    if (wire.path === '/api/v3/user') return { body: { login: 'octo' } }
+    if (wire.method === 'PATCH') return { status: 304, body: null }
+    if (serveLate) {
+      serveLate = false
+      return {
+        body: [thread(host, 'late')],
+        headers: { 'last-modified': LATE, 'x-poll-interval': '60' },
+      }
+    }
+    if (wire.ifModifiedSince === LAST_MODIFIED) return { status: 304, body: null }
+    return {
+      body: [thread(host, '1'), thread(host, '2'), thread(host, '3')],
+      headers: { 'last-modified': LAST_MODIFIED, 'x-poll-interval': '60' },
+    }
+  })
+
+  const center = centerFor(store, host, () => clock, undefined, gatingFetch)
+  let stale: Promise<NotificationInbox> | null = null
+  try {
+    await center.saveCredential('ghp_token', true)
+    const first = await center.inbox()
+    assert.equal(first.threads.length, 3, 'the list this host confirmed first')
+
+    // Read #2 gets a real 200 response with LATE validator, but continuation is gated:
+    serveLate = true
+    gateConsumption = true
+    clock += 61_000
+    stale = center.refresh()
+    await bodyBuffered.settled
+
+    // The change is sent and acknowledged with 304 while the body is buffered,
+    // retiring the read owner and aborting inFlight before consumption/continuation:
+    await center.markRead('1')
+    allowConsumption.release()
+    await stale
+
+    // Successor conditional read gets 304: replays the confirmed list, not the buffered late body:
+    clock += 61_000
+    const after = await center.refresh()
+    assert.equal(
+      after.threads.length,
+      3,
+      'the list replayed from the validator is the one GitHub confirmed, not the discarded one',
+    )
+    assert.equal(
+      after.threads.some((held) => held.id === 'late'),
+      false,
+      'a read that was already abandoned contributes no thread',
+    )
+    assert.equal(
+      after.threads.find((held) => held.id === '1')?.unread,
+      false,
+      'the acknowledged mutation is reflected in the replayed list',
+    )
+  } finally {
+    bodyBuffered.release()
+    allowConsumption.release()
+    if (stale) await stale.catch(() => null)
+    center.forget()
+    await host.close()
+  }
+})
+
+test('a change admitted before a read learned a deadline is not sent during it', async () => {
+  const store = await installation()
+  let clock = Date.parse('2026-09-22T10:00:00.000Z')
+  const suspended = deferred()
+  const gate = deferred()
+  const host = await startHost((wire) => {
+    if (wire.path === '/api/v3/user') return { body: { login: 'octo' } }
+    if (wire.method === 'PATCH') return { body: {} }
+    if (wire.method === 'GET' && wire.ifModifiedSince) {
+      return {
+        status: 429,
+        body: { message: 'rate limited' },
+        headers: { 'retry-after': '300' },
+      }
+    }
+    return {
+      body: [thread(host, '1')],
+      headers: { 'last-modified': LAST_MODIFIED, 'x-poll-interval': '60' },
+    }
+  })
+  const center = centerFor(store, host, () => clock)
+  try {
+    await center.saveCredential('ghp_token', true)
+    // The credential open is where a request waits on the key store. Holding it
+    // is the pause in which this host gets to name a deadline.
+    const open = store.store.vault.open.bind(store.store.vault)
+    let holding = true
+    store.store.vault.open = async (reference: string, hostName: string) => {
+      if (holding) {
+        holding = false
+        suspended.release()
+        await gate.settled
+      }
+      return open(reference, hostName)
+    }
+    const changing = center.markRead('1')
+    await suspended.settled
+
+    clock += 61_000
+    await center.refresh()
+    assert.equal(
+      (await center.inbox()).poll.nextPollAt,
+      new Date(clock + 300_000).toISOString(),
+      'the host named a deadline this module now holds',
+    )
+
+    gate.release()
+    await assert.rejects(
+      () => changing,
+      /wait before sending more requests/u,
+      'the change is refused rather than sent during the deadline it never saw',
+    )
+    assert.equal(
+      host.wire.some((entry) => entry.method === 'PATCH'),
+      false,
+      'no change reached the host while it was parking this module',
+    )
+
+    // Once the deadline has passed the module is available again, through the
+    // same public call.
+    clock += 300_000
+    await center.markRead('1')
+    assert.equal(
+      host.wire.some((entry) => entry.method === 'PATCH'),
+      true,
+      'outside a deadline the change is sent as asked',
+    )
+  } finally {
+    gate.release()
+    center.forget()
+    await host.close()
+  }
+})
+
+test('a read admitted before a change was parked is not sent during it', async () => {
+  const store = await installation()
+  let clock = Date.parse('2026-09-22T10:00:00.000Z')
+  const suspended = deferred()
+  const gate = deferred()
+  const host = await startHost((wire) => {
+    if (wire.path === '/api/v3/user') return { body: { login: 'octo' } }
+    if (wire.method === 'PATCH') {
+      return {
+        status: 429,
+        body: { message: 'rate limited' },
+        headers: { 'retry-after': '300' },
+      }
+    }
+    return {
+      body: [thread(host, '1')],
+      headers: { 'last-modified': LAST_MODIFIED, 'x-poll-interval': '60' },
+    }
+  })
+  const center = centerFor(store, host, () => clock)
+  try {
+    await center.saveCredential('ghp_token', true)
+    const open = store.store.vault.open.bind(store.store.vault)
+    let holding = true
+    store.store.vault.open = async (reference: string, hostName: string) => {
+      if (holding) {
+        holding = false
+        suspended.release()
+        await gate.settled
+      }
+      return open(reference, hostName)
+    }
+    clock += 61_000
+    const reading = center.refresh()
+    await suspended.settled
+
+    // While that read waits, a change goes out and this host answers it by
+    // parking the whole module for five minutes.
+    await assert.rejects(() => center.markRead('1'), /rate limited/u)
+    const answered = (await center.inbox()).poll.fetchedAt
+    const readsBefore = host.wire.filter((entry) => entry.method === 'GET').length
+
+    gate.release()
+    await reading
+    assert.equal(
+      host.wire.filter((entry) => entry.method === 'GET').length,
+      readsBefore,
+      'the read that was waiting never reached the host during the park',
+    )
+    const parked = await center.inbox()
+    assert.equal(parked.poll.fetchedAt, answered, 'the parked read answered nothing of its own')
+    assert.equal(parked.threads.length, 1, 'the list still stands as the last host answer left it')
+
+    clock += 300_000
+    await center.refresh()
+    assert.equal(
+      host.wire.filter((entry) => entry.method === 'GET').length,
+      readsBefore + 1,
+      'once the park has passed the module reads again',
+    )
+  } finally {
+    gate.release()
+    center.forget()
+    await host.close()
+  }
+})
+
+test('a park learned from a refused change holds through a restart and a return to the host', async () => {
+  const store = await installation()
+  let clock = Date.parse('2026-09-22T10:00:00.000Z')
+  const first = await startHost((wire) => {
+    if (wire.path === '/api/v3/user') return { body: { login: 'octo' } }
+    if (wire.method === 'PATCH') {
+      return {
+        status: 429,
+        body: { message: 'rate limited' },
+        headers: { 'retry-after': '300' },
+      }
+    }
+    return {
+      body: [thread(first, '1')],
+      headers: { 'last-modified': LAST_MODIFIED, 'x-poll-interval': '60' },
+    }
+  })
+  const other = await startHost((wire) => {
+    if (wire.path === '/api/v3/user') return { body: { login: 'riley' } }
+    return {
+      body: [thread(other, '9')],
+      headers: { 'last-modified': LAST_MODIFIED, 'x-poll-interval': '60' },
+    }
+  })
+  try {
+    const center = centerFor(store, first, () => clock)
+    await center.saveCredential('ghp_token', true)
+    // A read that succeeded and a change the host refused: the deadline comes
+    // from the change alone, with no read failure anywhere behind it.
+    await assert.rejects(() => center.markRead('1'), /rate limited/u)
+    center.forget()
+
+    // The same files, read by a new build: the deadline is still in force.
+    const restarted = centerFor(store, first, () => clock)
+    const beforeRestart = first.wire.length
+    await restarted.refresh()
+    assert.equal(
+      first.wire.length,
+      beforeRestart,
+      'a restart does not turn a deadline the host named into permission to ask',
+    )
+    restarted.forget()
+
+    // The person points this installation at another host and back again. The
+    // park belongs to this module, not to the last host it happened to ask.
+    const away = centerFor(store, other, () => clock)
+    assert.equal((await away.inbox()).state, 'credential-missing')
+    away.forget()
+    const returned = centerFor(store, first, () => clock)
+    const beforeReturn = first.wire.length
+    await returned.refresh()
+    assert.equal(first.wire.length, beforeReturn, 'coming back to the host does not either')
+    assert.equal((await returned.inbox()).state, 'ready')
+    returned.forget()
+
+    // Once the deadline has passed the module asks again, through the same call.
+    clock += 300_000
+    const later = centerFor(store, first, () => clock)
+    await later.refresh()
+    assert.ok(first.wire.length > beforeReturn, 'the read is sent once the park is over')
+    later.forget()
+  } finally {
+    await first.close()
+    await other.close()
+  }
+})
+
+test('a module that has been stopped asks for nothing, however long the clock runs', async () => {
+  const store = await installation()
+  let clock = Date.parse('2026-09-22T10:00:00.000Z')
+  const host = await startHost((wire) => {
+    if (wire.path === '/api/v3/user') return { body: { login: 'octo' } }
+    return {
+      body: [thread(host, '1')],
+      headers: { 'last-modified': LAST_MODIFIED, 'x-poll-interval': '60' },
+    }
+  })
+  const center = centerFor(store, host, () => clock)
+  try {
+    await center.saveCredential('ghp_token', true)
+    // Advance clock to when the poll interval is due so delayMs() is at its 1000ms floor:
+    clock += 60_000
+    // Start polling: this arms an actual unmocked setTimeout timer on the platform clock:
+    center.start()
+    await eventually(
+      () => host.wire.filter((entry) => entry.path.includes('/notifications')).length >= 2,
+      'the automatic timer was admitted and triggered an automatic read',
+    )
+    const afterAdmitted = host.wire.length
+    const allowedDeadline = (await center.inbox()).poll.nextPollAt
+
+    // Stopping clears the timer and fences against in-flight work:
+    center.stop()
+    // Stop means no automatic requests, but does not erase the server budget/deadline:
+    assert.equal(
+      (await center.inbox()).poll.nextPollAt,
+      allowedDeadline,
+      'stop preserves the allowed deadline rather than erasing the budget',
+    )
+
+    // Integration proof: exercises real unmocked setTimeout cancellation on platform clock.
+    // Advance clock past the new due deadline and wait real time beyond the delay floor:
+    clock += 60_000
+    const { promise: timerElapsed, resolve: onElapsed } = Promise.withResolvers<void>()
+    setTimeout(onElapsed, 1500)
+    await timerElapsed
+    assert.equal(
+      host.wire.length,
+      afterAdmitted,
+      'no automatic network request is made beyond due once stopped',
+    )
+  } finally {
+    center.forget()
+    await host.close()
+  }
+})
+
+test('an accepted bulk change is settled by a confirmed list, not by an unchanged one, and survives a restart', async () => {
+  const store = await installation()
+  let clock = Date.parse('2026-09-22T10:00:00.000Z')
+  const NEXT_MODIFIED = 'Tue, 22 Sep 2026 10:15:00 GMT'
+  let fullList: unknown[] = []
+  let activeModified = LAST_MODIFIED
+
+  const host = await startHost((wire) => {
+    if (wire.path === '/api/v3/user') return { body: { login: 'octo' } }
+    if (wire.method === 'PUT') return { status: 202, body: {} }
+    if (wire.ifModifiedSince === activeModified) return { status: 304, body: null }
+    return {
+      body: fullList,
+      headers: { 'last-modified': activeModified, 'x-poll-interval': '60' },
+    }
+  })
+  fullList = [thread(host, '1'), thread(host, '2')]
+
+  try {
+    const center = centerFor(store, host, () => clock)
+    await center.saveCredential('ghp_token', true)
+    const accepted = await center.markRead('all')
+    assert.equal(
+      accepted.markAllReadPending,
+      true,
+      'GitHub accepted the change without confirming it',
+    )
+    center.forget()
+
+    // The application restarts and the host answers the next read with 304: a
+    // list that has not changed says nothing about what the bulk change did.
+    clock += 61_000
+    const restarted = centerFor(store, host, () => clock)
+    const unchanged = await restarted.refresh()
+    assert.equal(unchanged.markAllReadPending, true, 'an unchanged list does not confirm the work')
+    assert.equal(unchanged.threads.length, 2, 'the replayed list is the one the host confirmed')
+    assert.equal(
+      host.wire.filter((entry) => entry.method === 'PUT').length,
+      1,
+      'the change is not sent a second time after a restart',
+    )
+
+    // A full list confirms the threads the request actually covered and leaves
+    // a thread that arrived afterwards exactly as the host has it.
+    restarted.forget()
+    fullList = [thread(host, '1', { unread: false }), thread(host, '3')]
+    activeModified = NEXT_MODIFIED
+
+    clock += 61_000
+    const confirmed = centerFor(store, host, () => clock)
+    const inbox = await confirmed.refresh()
+    assert.equal(inbox.markAllReadPending, false, 'a confirmed list settles the operation')
+    assert.equal(
+      inbox.threads.filter((held) => held.unread).length,
+      1,
+      'only the thread that arrived after the change is still unread',
+    )
+    confirmed.forget()
+  } finally {
+    await host.close()
+  }
+})
+
+test('a cache this installation owns is not replayed when its list cannot be read back', async () => {
+  const store = await installation()
+  const host = await startHost((wire) => {
+    if (wire.path === '/api/v3/user') return { body: { login: 'octo' } }
+    return {
+      body: [thread(host, '1'), thread(host, '2')],
+      headers: { 'last-modified': LAST_MODIFIED, 'x-poll-interval': '60' },
+    }
+  })
+  try {
+    const center = centerFor(store, host, () => Date.now())
+    await center.saveCredential('ghp_token', true)
+    assert.equal((await center.inbox()).threads.length, 2, 'the list this run confirmed')
+    center.forget()
+
+    // A cache file that names this credential and this host, whose list is not
+    // a list: a partial write, or a file another build left behind.
+    const cached = JSON.parse(await readFile(store.cacheFile, 'utf8'))
+    cached.threads = { length: 2 }
+    await writeFile(store.cacheFile, JSON.stringify(cached))
+
+    const returned = centerFor(store, host, () => Date.now())
+    const before = host.wire.length
+    const inbox = await returned.refresh()
+    const read = host.wire.slice(before).find((entry) => entry.method === 'GET')
+    assert.ok(read, 'the host was asked for the list again')
+    assert.equal(
+      read?.ifModifiedSince,
+      null,
+      'nothing this file could not give back is used to ask conditionally',
+    )
+    assert.equal(inbox.threads.length, 2, 'the host, not the file, decides what is in the inbox')
+    assert.equal(inbox.poll.unchanged, false)
+    returned.forget()
+  } finally {
+    await host.close()
+  }
+})
+
+test('cleaning up the previous account cannot take a cache the new account is still writing', async () => {
+  const store = await installation()
+  let clock = Date.parse('2026-09-22T10:00:00.000Z')
+  const host = await startHost((wire) => {
+    if (wire.path === '/api/v3/user') {
+      return { body: { login: wire.authorization?.includes('first_token') ? 'user1' : 'user2' } }
+    }
+    return {
+      body: [thread(host, '1')],
+      headers: { 'last-modified': LAST_MODIFIED, 'x-poll-interval': '60' },
+    }
+  })
+  const gate = deferred()
+  const center = centerFor(store, host, () => clock)
+  let saving: Promise<NotificationModuleStatus> | null = null
+  let during: Promise<NotificationInbox> | null = null
+  try {
+    await center.saveCredential('ghp_first_token', true)
+    assert.equal((await center.inbox()).login, 'user1')
+
+    // The superseded credential is retired, and that retirement is held open so
+    // the new account's own read lands while the cleanup is still in progress.
+    const retiring = deferred()
+    const remove = store.store.vault.remove.bind(store.store.vault)
+    let holding = false
+    store.store.vault.remove = async (reference: string) => {
+      if (holding) {
+        retiring.release()
+        await gate.settled
+      }
+      return remove(reference)
+    }
+    holding = true
+    saving = center.saveCredential('ghp_second_token', true)
+    await retiring.settled
+
+    // The new account reads its own list while the previous one is being
+    // cleaned up: start the real new refresh and observe HTTP admission and
+    // own memory after adoption, without awaiting refresh resolution (which
+    // queues its cache write behind the held retirement on the shared file queue).
+    clock += 61_000
+    during = center.refresh()
+    await eventually(
+      () =>
+        host.wire.some(
+          (entry) =>
+            entry.method === 'GET' &&
+            entry.path.includes('/notifications') &&
+            entry.authorization?.includes('second_token'),
+        ),
+      'the new account refresh was admitted to the wire while retirement is held',
+    )
+    const inMemory = await center.inbox()
+    assert.equal(inMemory.login, 'user2')
+    assert.equal(inMemory.threads.length, 1)
+
+    // Release the held retirement, then await and persist both operations:
+    gate.release()
+    const duringResolved = await during
+    assert.equal(duringResolved.login, 'user2')
+    assert.equal(duringResolved.threads.length, 1)
+    const saved = await saving
+    assert.equal(saved.login, 'user2')
+
+    clock += 61_000
+    const after = await center.refresh()
+    assert.equal(after.login, 'user2', 'the account in place is the one just stored')
+    assert.equal(after.threads.length, 1, 'and its list is intact after the cleanup finished')
+    const cache = JSON.parse(await readFile(store.cacheFile, 'utf8'))
+    assert.equal(cache.login, 'user2', 'the cache on disk belongs to the account in place')
+  } finally {
+    gate.release()
+    if (saving) await saving.catch(() => null)
+    if (during) await during.catch(() => null)
     center.forget()
     await host.close()
   }

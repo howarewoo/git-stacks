@@ -356,7 +356,7 @@ export function NotificationCenterView({
 
   return (
     <div className="diagnostics-view">
-      <div className="list-toolbar">
+      <div className="list-toolbar notification-toolbar">
         <div className="list-title-group">
           <h1 id={WORKSPACE_VIEW_HEADING_ID} tabIndex={-1}>
             GitHub Notifications
@@ -485,9 +485,9 @@ export function NotificationCenterView({
             title="GitHub accepted this and is still finishing it"
             tone="info"
           >
-            GitHub takes the whole-inbox change asynchronously, so it has not confirmed it yet.
-            The rows below are still the last list GitHub confirmed, this request is not sent
-            again, and the next read shows what it actually did.
+            GitHub takes the whole-inbox change asynchronously, so it has not confirmed it yet. The
+            rows below are still the last list GitHub confirmed, this request is not sent again, and
+            the next read shows what it actually did.
           </InlineAlert>
         ) : null}
         {polls && status.threads.length > 0 ? (

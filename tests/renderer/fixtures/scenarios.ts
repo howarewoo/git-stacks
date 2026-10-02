@@ -1243,6 +1243,34 @@ const notificationThreads: NotificationInbox['threads'] = [
 ]
 
 /**
+ * A module that is on and has no credential: nothing sealed, nothing polled,
+ * and the authorization this window would offer. Scenarios that differ only in
+ * what else is outstanding share it rather than repeating the same inbox.
+ */
+const awaitingCredential = (host = 'github.com'): NotificationInbox => ({
+  ...notificationStatus,
+  host,
+  state: 'credential-missing',
+  enabled: true,
+  // No credential means no sealed reference to discard and no account it
+  // was sealed for; a module in this state holds nothing.
+  reference: null,
+  login: null,
+  threads: [],
+  unreadCount: 0,
+  poll: {
+    fetchedAt: null,
+    checkedAt: null,
+    nextPollAt: null,
+    pollIntervalSeconds: 60,
+    lastModified: null,
+    unchanged: false,
+  },
+  stale: false,
+  staleReason: null,
+})
+
+/**
  * What GitHub serves this module once a credential exists: the live inbox the
  * ready scenario renders. Authorizing a module that had none moves it onto this,
  * because a stored credential is what turns the module into a live inbox at all.
@@ -1847,27 +1875,46 @@ export const scenarios: Record<ScenarioName, FixtureScenario> = {
     summary: 'The module is on and has no token: authorization is offered, polling has not begun.',
     snapshot: connected,
     recentRepositories,
-    notifications: {
-      ...notificationStatus,
-      state: 'credential-missing',
-      enabled: true,
-      // No credential means no sealed reference to discard and no account it
-      // was sealed for; a module in this state holds nothing.
-      reference: null,
-      login: null,
-      threads: [],
-      unreadCount: 0,
-      poll: {
-        fetchedAt: null,
-        checkedAt: null,
-        nextPollAt: null,
-        pollIntervalSeconds: 60,
-        lastModified: null,
-        unchanged: false,
-      },
-      stale: false,
-      staleReason: null,
-    },
+    notifications: awaitingCredential(),
+  },
+  'notifications-read-pending': {
+    name: 'notifications-read-pending',
+    summary:
+      "The inbox's own read is admitted and still outstanding, so this window is showing neither host's rows and has nothing left to release.",
+    snapshot: connected,
+    recentRepositories,
+    // The read the App makes on mount starts outstanding: the answer it will
+    // get was taken for the host this window was pointed at, which is exactly
+    // the answer a later host change has to refuse rather than adopt.
+    pending: ['notifications'],
+    notifications: awaitingCredential(),
+  },
+  'notifications-account-pending': {
+    name: 'notifications-account-pending',
+    summary:
+      "This installation's own GitHub account read is still outstanding, so the window has no account for any host while the Notification Center is otherwise ready to be pointed at another one.",
+    snapshot: connected,
+    recentRepositories,
+    // The account read the App makes on mount is admitted and then held: the
+    // window is holding no account at all, which is a different thing from a
+    // notification credential being missing. It is also the only reason this
+    // scenario answers the optional account bridge at all: a window whose
+    // build has no such bridge holds no account either, and every other
+    // scenario already renders that way.
+    exposesGithubAccount: true,
+    pending: ['githubAccountStatus'],
+    notifications: awaitingCredential(),
+  },
+  'notifications-other-host-awaiting-credential': {
+    name: 'notifications-other-host-awaiting-credential',
+    summary:
+      'The other GitHub host, after a settings change, with no token of its own: its own authorization is offered rather than the previous host’s.',
+    snapshot: connected,
+    recentRepositories,
+    // The inbox this host serves is genuinely its own: it names this host,
+    // so a window pointed here is answering for this host and not carrying
+    // the previous one's inbox under this key.
+    notifications: awaitingCredential('ghe.acme.internal'),
   },
   'notifications-ready': {
     name: 'notifications-ready',

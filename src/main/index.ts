@@ -2139,9 +2139,9 @@ function installHandlers() {
     validateSender(event)
     notifications?.cancel()
   })
-  // The token arrives once, here, and leaves this process only as a sealed
-  // value in the operating system's store. The reply is a status object, so no
-  // handler, log, failure record, or support bundle can carry it back out.
+  // The token arrives once, here, and is sealed with a key protected by the
+  // operating system. The reply is a status object, so no handler, log,
+  // failure record, or support bundle can carry the secret back out.
   ipcMain.handle(
     'notifications:save-credential',
     async (event, token: unknown, consent: unknown, host: unknown) => {

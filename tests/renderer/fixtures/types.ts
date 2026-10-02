@@ -78,11 +78,17 @@ export type FixtureCall =
   | 'updateSettings'
   | 'githubAccountStatus'
   | 'notifications'
+  | 'notificationSave'
+  | 'notificationRemove'
+  | 'notificationCancel'
   | 'notificationMarkRead'
   | 'notificationSubscription'
   | 'notificationRefresh'
   | 'notificationDone'
+  | 'githubAccountStatus'
   | 'notificationSettings'
+  | 'notificationSettingsHost'
+  | 'notificationSettingsEnable'
 
 /** One entry of the ordered {@link FixtureControl.calls} log. */
 export interface FixtureCallRecord {
@@ -174,6 +180,29 @@ export interface FixtureScenario {
    * inbox, so a scenario states it on its own rather than deriving it.
    */
   readonly notifications?: NotificationInbox
+  /**
+   * Per-host inboxes, keyed by the canonical GitHub host name. An enterprise
+   * host's authorized inbox is its own, and a scenario that authorizes one must
+   * be able to say what that host serves rather than reusing the default inbox.
+   */
+  readonly notificationsBoxes?: Readonly<Record<string, NotificationInbox>>
+  /**
+   * Whether this scenario answers the optional `githubAccountStatus` bridge at
+   * all. It is optional in the product, so the answer to leaving it off is not
+   * a signed-out account but no method: a window talking to a main process
+   * without it holds no account, which is what every scenario that never
+   * asked about this window's own sign-in already behaved as. Only a scenario
+   * whose own state depends on that read opts in, because a fixture that
+   * answered a read nothing asked for would move the account footer of every
+   * other scenario to a sign-in no one staged.
+   */
+  readonly exposesGithubAccount?: boolean
+  /**
+   * The account this installation's own GitHub sign-in reports. Enterprise
+   * authorization keeps the admitted host, account, and URLs, so a scenario
+   * states the signed-in login alongside them.
+   */
+  readonly githubAccount?: { readonly login: string | null }
 }
 
 /** Typed gallery control surface. Every field is plain serializable data. */
@@ -198,6 +227,8 @@ export interface FixtureControl {
   setScenario(name: string): void
   /** Keeps every later call of `call` pending until it is released. */
   hold(call: FixtureCall): void
+  /** Stops holding future calls of `call` without releasing already-held ones. */
+  unhold(call: FixtureCall): void
   /**
    * Settles pending calls oldest first, which is the order they were started
    * in, and returns how many were settled; omit `call` to release all. Pass
@@ -235,8 +266,12 @@ export interface FixtureControl {
   /**
    * Installs the named scenario's inbox as what the named host serves, the way
    * the main process restores the files that belong to a host it has just been
-   * pointed at. It publishes nothing: the window reaches the new host's inbox
-   * by asking for it, and a push that happened to carry it would prove nothing.
+   * pointed at, and it is that host's own inbox rather than another host's
+   * filed under this one: a window that asked for this host and was handed
+   * another host's rows would be refused for the right reason and for the
+   * wrong one at once.
+   * It publishes nothing: the window reaches the new host's inbox by asking for
+   * it, and a push that happened to carry it would prove nothing.
    */
   serveNotificationHost(host: string, name: string): void
   /**

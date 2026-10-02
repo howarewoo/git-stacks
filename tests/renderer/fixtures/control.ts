@@ -4,6 +4,7 @@ import type {
   ConflictFile,
   DesktopAPI,
   GitAction,
+  GitHubAccountStatus,
   GitRuntimeInfo,
   GitRuntimeStatus,
   HistoryPage,
@@ -70,12 +71,13 @@ import { updateStatusFixture } from './update-status'
 import { DEFAULT_SCENARIO, type ScenarioName } from './manifest'
 import type { PullRequestChecksReport } from '../../../src/shared/pull-request-checks'
 import type { FixtureCall, FixtureCallRecord, FixtureControl, FixtureScenario } from './types'
-import { DEFAULT_SETTINGS, type AppSettings, type SettingsSnapshot } from '../../../src/shared/settings'
-import { GITHUB_DEFAULT_HOST } from '../../../src/shared/host'
-import type {
-  NotificationInbox,
-  NotificationModuleState,
-} from '../../../src/shared/notifications'
+import {
+  DEFAULT_SETTINGS,
+  type AppSettings,
+  type SettingsSnapshot,
+} from '../../../src/shared/settings'
+import { canonicalHostName, GITHUB_DEFAULT_HOST } from '../../../src/shared/host'
+import type { NotificationInbox, NotificationModuleState } from '../../../src/shared/notifications'
 
 /** The review state GitHub reports back for each submitted event. */
 const REVIEW_SUBMIT_STATES: Record<ReviewEvent, string> = {
@@ -333,11 +335,10 @@ export function installFixtureControl(options: {
    * that was selected then can land after the window has moved to another one,
    * and it still carries the rows that host read.
    */
-  const admittedAnswer = <T,>(call: FixtureCall, produce: () => T): Promise<T> => {
+  const admittedAnswer = <T>(call: FixtureCall, produce: () => T): Promise<T> => {
     const admitted = produce()
     return answer(call, () => admitted)
   }
-
 
   /**
    * The settings this double is running with. The host in them is the
@@ -452,7 +453,8 @@ export function installFixtureControl(options: {
   ): NotificationInbox => {
     const enabled = after.enabled ?? before.enabled
     const policyDisabled = after.policyDisabled ?? before.policyDisabled
-    const hasCredential = typeof after.reference === 'string'
+    const reference = after.reference !== undefined ? after.reference : before.reference
+    const hasCredential = typeof reference === 'string'
     const state: NotificationModuleState = policyDisabled
       ? 'policy-disabled'
       : !enabled
@@ -472,7 +474,7 @@ export function installFixtureControl(options: {
             : hasCredential
               ? null
               : 'Store a GitHub notification token to read this inbox. Sign-in, pull requests, and reviews are unaffected.'
-    return { ...before, ...after, state, message }
+    return { ...before, ...after, reference, state, message }
   }
   const desktop: DesktopAPI = {
     recentRepositories: () => {
@@ -510,23 +512,73 @@ export function installFixtureControl(options: {
       return admittedAnswer('notificationSettings', () => settingsSnapshot())
     },
     updateSettings: (patch) => {
-      record('notificationSettings', [])
-      return admittedAnswer('notificationSettings', () => {
-        if (patch.github?.host !== undefined) {
-          // Selecting a host retires the center the window was holding and
-          // opens the new host's. Nothing is pushed for the window to adopt:
-          // arriving at the new host's inbox is the window's own work, and a
-          // push that happened to carry it would prove nothing.
-          notificationSettings.github = { host: patch.github.host }
-        }
-        if (patch.notifications?.enabled !== undefined) {
-          notificationSettings.notifications = { enabled: patch.notifications.enabled }
-          const next = settle(currentNotifications(), { enabled: patch.notifications.enabled })
-          notificationListener?.(next)
-          publish(notificationSettings.github.host, next)
-        }
-        return settingsSnapshot()
-      })
+      // Each shape of settings write is a call of its own, because each one is
+      // a different step of a different transition: holding the write that
+      // turns this module on must not hold the host a Settings change makes,
+      // or the cutover that has to happen while that write is outstanding
+      // would itself be waiting behind it.
+      const call: FixtureCall =
+        patch.github?.host !== undefined
+          ? 'notificationSettingsHost'
+          : patch.notifications?.enabled !== undefined
+            ? 'notificationSettingsEnable'
+            : 'notificationSettings'
+      record(call, [])
+      // The write lands when it is made and only the answer is ever delayed.
+      // That is what keeps a held write honest: it is applied to the host that
+      // was selected when it was made, never to whichever host the window has
+      // been pointed at by the time it is released.
+      const host = notificationSettings.github.host
+      if (patch.github?.host !== undefined) {
+        // Selecting a host retires the center the window was holding and
+        // opens the new host's. Nothing is pushed for the window to adopt:
+        // arriving at the new host's inbox is the window's own work, and a
+        // push that happened to carry it would prove nothing.
+        notificationSettings.github = { host: patch.github.host }
+      }
+      if (patch.notifications?.enabled !== undefined) {
+        notificationSettings.notifications = { enabled: patch.notifications.enabled }
+        const settled = settle(hostInboxes.get(host) ?? { ...disabledNotifications(), host }, {
+          enabled: patch.notifications.enabled,
+        })
+        notificationListener?.(settled)
+        publish(host, settled)
+      }
+      // The stored value is the one main wrote when it was asked, so a release
+      // that lands after a host change still answers with the host this write
+      // was made for rather than with whatever is stored now.
+      const stored = settingsSnapshot()
+      return answer(call, () => stored)
+    },
+    // This installation's own GitHub sign-in, which the App reads for the
+    // account panel and to know which host it is signed in to. It is optional
+    // in the product, so the method is only there for a scenario that named
+    // it: every other scenario leaves it off, which is what a main process
+    // without this bridge looks like, and answering it unasked would move the
+    // account footer of scenarios that never staged a sign-in. The answer is
+    // taken when the read is admitted, so a read held across a host change
+    // delivers the account of the host it was asked about — never one rebuilt
+    // for the host selected afterwards, which would be an answer nobody asked
+    // for.
+    get githubAccountStatus(): (() => Promise<GitHubAccountStatus>) | undefined {
+      if (!scenario.exposesGithubAccount) return undefined
+      return () => {
+        record('githubAccountStatus', [])
+        return admittedAnswer('githubAccountStatus', (): GitHubAccountStatus => ({
+          state: 'signed-in',
+          reference: 'app-credential-reference',
+          host: notificationSettings.github.host,
+          login: scenario.githubAccount?.login ?? 'octo',
+          permissions: [],
+          expiresAt: null,
+          refreshExpiresAt: null,
+          store: { available: true, name: 'fixture key store', reason: null },
+          signingIn: false,
+          challenge: null,
+          message: null,
+          externalCredential: false,
+        }))
+      }
     },
     // The optional Notification Center answers on its own calls, with its own
     // state: the fixture never borrows the pull request inbox for it.
@@ -571,7 +623,7 @@ export function installFixtureControl(options: {
       })
     },
     cancelNotifications: () => {
-      record('notifications', [])
+      record('notificationCancel', [])
       return Promise.resolve()
     },
     saveNotificationCredential: (
@@ -579,10 +631,16 @@ export function installFixtureControl(options: {
       consent: boolean,
       host: string,
     ): Promise<NotificationInbox> => {
+      // Sealing a credential is a call of its own rather than one more inbox
+      // read, because it is the write the App is waiting on before it asks for
+      // the inbox again. A test that holds the read after a successful
+      // authorization has to hold exactly that read: holding one kind for both
+      // would stop the authorization at the save and prove nothing about the
+      // read that follows it.
       // The value crosses the bridge once and is never read back, so the log
       // records that a credential arrived rather than keeping it in page memory.
-      record('notifications', [token.trim().length > 0, consent, host])
-      return mutate('notifications', (before) => {
+      record('notificationSave', [token.trim().length > 0, consent, host])
+      return mutate('notificationSave', (before) => {
         // The host the dialog named is the host the token is identified against,
         // and a token typed for one host is refused for another exactly as the
         // main process refuses it.
@@ -591,14 +649,25 @@ export function installFixtureControl(options: {
             'This token was typed for a different GitHub host, so it was not stored and not sent anywhere.',
           )
         }
-        const served = notificationInbox()
+        const served =
+          (scenario.notificationsBoxes && scenario.notificationsBoxes[host]) ?? notificationInbox()
+        const canonicalHost = canonicalHostName(host)
+        const isDefault = canonicalHost === 'github.com'
+        const webOrigin = isDefault ? 'https://github.com' : `https://${canonicalHost}`
+        const login = isDefault
+          ? served.login
+          : (scenario.githubAccount?.login ?? served.login ?? 'enterprise-user')
+        const threads = served.threads.map((t) => ({
+          ...t,
+          url: isDefault ? t.url : t.url ? t.url.replace('https://github.com', webOrigin) : null,
+        }))
         return settle(before, {
-          host: served.host,
+          host: canonicalHost,
           enabled: true,
-          reference: served.reference,
-          login: served.login,
-          threads: served.threads,
-          unreadCount: served.unreadCount,
+          reference: served.reference ?? `notification-ref-${canonicalHost}`,
+          login,
+          threads,
+          unreadCount: threads.filter((t) => t.unread).length,
           poll: served.poll,
           stale: false,
           staleReason: null,
@@ -607,8 +676,8 @@ export function installFixtureControl(options: {
       })
     },
     removeNotificationCredential: () => {
-      record('notifications', [])
-      return mutate('notifications', (before) => {
+      record('notificationRemove', [])
+      return mutate('notificationRemove', (before) => {
         // The credential and the list read with it are gone. Consent and policy
         // are not: turning the module off keeps its token, and a policy that
         // holds it off keeps holding it with no token to use.
@@ -1503,7 +1572,8 @@ export function installFixtureControl(options: {
       active = scenario.snapshot
       startsPending = new Set(scenario.pending ?? [])
       hostInboxes.clear()
-      if (scenario.notifications) hostInboxes.set(scenario.notifications.host, scenario.notifications)
+      if (scenario.notifications)
+        hostInboxes.set(scenario.notifications.host, scenario.notifications)
       notificationSettings.github = { host: scenario.notifications?.host ?? GITHUB_DEFAULT_HOST }
       released.clear()
       options.onScenarioChange(scenario.name)
@@ -1513,7 +1583,10 @@ export function installFixtureControl(options: {
       // pointed at. Installing them publishes nothing: the window learns the
       // host from the settings it wrote and has to ask for the inbox itself.
       const served = scenarioFor(name).notifications
-      if (served) hostInboxes.set(host, served)
+      // It is this host's own inbox, not another host's rows filed under this
+      // one: a window that asked for this host and was handed another host's
+      // rows would be refused, which is the right outcome for the wrong reason.
+      if (served) hostInboxes.set(host, served.host === host ? served : { ...served, host })
     },
     publishRetiredHostInbox(name) {
       // A publication that was already on its way when the host changed. The
@@ -1524,6 +1597,9 @@ export function installFixtureControl(options: {
     },
     hold(call) {
       holds.add(call)
+    },
+    unhold(call) {
+      holds.delete(call)
     },
     release(call, occurrence?: 'oldest' | 'newest') {
       // Retained waiters are release-all targets even when their kind is no

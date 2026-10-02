@@ -1,4 +1,4 @@
-import { expect, type Page, test } from '@playwright/test'
+import { expect, type Locator, type Page, test } from '@playwright/test'
 import {
   getDoubleCalls,
   getOpenedExternalUrls,
@@ -6,10 +6,11 @@ import {
   openGallery,
   releaseDoubleCalls,
   settle,
+  unholdDoubleCall,
 } from './helpers/gallery'
 import { switchDestination } from './helpers/destinations'
 import type { ScenarioName } from './fixtures/manifest'
-
+import type { FixtureCall } from './fixtures/types'
 /**
  * The optional Notification Center, driven through the real App and the real
  * components. Every assertion here is about what a person can see and do, plus
@@ -38,6 +39,110 @@ function inbox(page: Page) {
 
 function row(page: Page, title: string) {
   return threadList(page).getByRole('listitem').filter({ hasText: title })
+}
+
+/**
+ * The inbox reads this window has been admitted: the calls that carry no
+ * arguments of their own. Sealing a credential, removing one, and cancelling
+ * are calls of their own in the fixture, so this is a count of reads and
+ * nothing else — a count that included a write would prove nothing about
+ * whether the read after it was ever asked for.
+ */
+async function inboxReads(page: Page): Promise<number> {
+  const calls = await getDoubleCalls(page)
+  return calls.filter((entry) => entry.call === 'notifications' && entry.args.length === 0).length
+}
+
+/**
+ * How many times the double was asked for one call kind, so a test can watch a
+ * single step of a sequence be admitted rather than watch a whole log grow.
+ */
+async function callCount(page: Page, call: FixtureCall): Promise<number> {
+  return (await getDoubleCalls(page)).filter((entry) => entry.call === call).length
+}
+
+/**
+ * Walks the page's own Tab order until the keyboard lands on `control`. Focus
+ * is never assigned to it: a control this walk does not reach is not one a
+ * person can reach from the keyboard either.
+ */
+async function tabToControl(page: Page, control: Locator, limit = 240): Promise<void> {
+  for (let presses = 0; presses < limit; presses += 1) {
+    await page.keyboard.press('Tab')
+    if (await control.evaluate((element) => element === document.activeElement)) return
+  }
+  const label = await control.getAttribute('aria-label')
+  throw new Error(`Tab never reached ${label ?? 'the control'} within ${limit} presses.`)
+}
+
+/**
+ * Opens the authorization this host would offer and fills in what its submit
+ * is gated on. Nothing is submitted: each case holds one different step of the
+ * authorization that follows.
+ */
+async function openAuthorizationDialog(page: Page): Promise<Locator> {
+  await inbox(page).getByRole('button', { name: 'Authorize notifications' }).click()
+  const dialog = page.getByRole('dialog')
+  await expect(dialog).toBeVisible()
+  await dialog.getByLabel('Personal access token').fill('ghp_testtokentesttokentesttoken')
+  await dialog.getByRole('checkbox', { name: /I understand the boundary/ }).check()
+  return dialog
+}
+
+/**
+ * What the person in front of this window must still find after a late answer
+ * from a host they have left: the dialog they opened is still theirs, still
+ * empty, and still asking about the host now selected; the window is not left
+ * busy waiting for a write it has retired; and nothing was reported about it.
+ * The new host behind that dialog is then read with the dialog closed, which is
+ * the only way it is in the accessibility tree at all.
+ */
+async function expectNewHostUntouched(page: Page, dialog: Locator, host: string): Promise<void> {
+  await expect(dialog).toBeVisible()
+  await expect(dialog.getByLabel('Personal access token')).toHaveValue('')
+  await expect(dialog.getByRole('checkbox')).not.toBeChecked()
+  await expect(dialog.getByText(host, { exact: true })).toBeVisible()
+  // The dialog's submit is gated by consent and by an empty token either way,
+  // so it is the Cancel — which is disabled for nothing but a busy window —
+  // that says this window is not still waiting for the write it retired.
+  await expect(dialog.getByRole('button', { name: 'Cancel', exact: true })).toBeEnabled()
+  await expect(dialog.getByRole('alert')).toHaveCount(0)
+  await expect(page.getByText(/never sent|not sent again|was not sent again/iu)).toHaveCount(0)
+
+  await dialog.getByRole('button', { name: 'Close dialog' }).click()
+  await expect(dialog).toBeHidden()
+  await settle(page)
+  // The host this window moved to is exactly as it was: on, with nothing
+  // sealed for it, still offering its own authorization, and showing none of
+  // the rows the host that was left behind read.
+  await expect(inbox(page).getByText(host, { exact: true })).toBeVisible()
+  await expect(inbox(page).getByRole('button', { name: 'Authorize notifications' })).toBeVisible()
+  await expect(inbox(page).getByText(/no credential/)).toBeVisible()
+  await expect(inbox(page).getByRole('button', { name: 'Remove credential' })).toHaveCount(0)
+  await expect(inbox(page).getByRole('alert')).toHaveCount(0)
+  await expect(threadList(page)).toHaveCount(0)
+}
+
+/**
+ * Points this window at the other GitHub host and leaves that host's own
+ * authorization open, for a late answer to arrive in front of. Nothing is
+ * pushed for the host left behind: the new host's inbox is reached only because
+ * the window asked for it, through the settings it wrote itself.
+ */
+async function cutOverWithDialogOpen(page: Page, host: string): Promise<Locator> {
+  await page.evaluate(
+    ({ servedHost, scenario }) => window.fixture.serveNotificationHost(servedHost, scenario),
+    { servedHost: host, scenario: 'notifications-other-host-awaiting-credential' },
+  )
+  await selectGitHubHost(page, host)
+  await settle(page)
+  await expect(inbox(page).getByText(host, { exact: true })).toBeVisible()
+  // The new host has no credential of its own, so the person is offered its own
+  // authorization, and its dialog is open when the late answer finally lands.
+  await inbox(page).getByRole('button', { name: 'Authorize notifications' }).click()
+  const forNewHost = page.getByRole('dialog')
+  await expect(forNewHost).toBeVisible()
+  return forNewHost
 }
 
 /**
@@ -120,7 +225,9 @@ test.describe('Notification Center states and transitions', () => {
     // Done is GitHub's own operation on the thread, and it is not unsubscribing:
     // the thread leaves the inbox and the conversation keeps its subscription.
     const third = row(page, 'Checks failed on')
-    await third.getByRole('button', { name: 'Mark Checks failed on “Add checkout validation” as done' }).click()
+    await third
+      .getByRole('button', { name: 'Mark Checks failed on “Add checkout validation” as done' })
+      .click()
     await expect(third).toHaveCount(0)
     await expect(threadList(page).getByRole('listitem')).toHaveCount(1)
 
@@ -183,7 +290,7 @@ test.describe('Notification Center states and transitions', () => {
     await dialog.getByLabel('Personal access token').fill('ghp_fixture_never_real')
     await dialog.getByRole('checkbox').check()
     await page.evaluate(() => {
-      window.fixture.failNext('notifications', 'The key store refused to seal that credential.')
+      window.fixture.failNext('notificationSave', 'The key store refused to seal that credential.')
     })
     await dialog.getByRole('button', { name: 'Authorize notifications' }).click()
 
@@ -334,7 +441,9 @@ test.describe('Notification Center states and transitions', () => {
     // The read is what confirms it, and only then are the rows read.
     await expect(inbox(page).getByRole('status')).toHaveCount(0)
     await expect(row(page, 'Tidy the stack ordering rules').getByText('Unread')).toHaveCount(0)
-    await expect(threadList(page).getByRole('listitem').filter({ hasText: 'Unread' })).toHaveCount(0)
+    await expect(threadList(page).getByRole('listitem').filter({ hasText: 'Unread' })).toHaveCount(
+      0,
+    )
   })
 
   // The Notification Center addresses a GitHub host, not a checkout. Reading it
@@ -366,15 +475,29 @@ test.describe('Notification Center states and transitions', () => {
     await expect(inbox(page).getByText('github.com', { exact: true })).toBeVisible()
 
     // A read of the host that is selected now is in flight when the host
-    // changes, and it answers with the rows that host read.
-    await holdDoubleCall(page, 'notifications')
+    // changes, and it answers with the rows that host read. The hold is armed
+    // first and the toolbar's own control is pressed, so this is a read the
+    // window is genuinely waiting on rather than a bridge call with no consumer.
+    await holdDoubleCall(page, 'notificationRefresh')
+    const before = await getDoubleCalls(page)
+    await page.getByRole('button', REFRESH).click()
+    await expect
+      .poll(
+        async () =>
+          (await getDoubleCalls(page)).filter((entry) => entry.call === 'notificationRefresh')
+            .length,
+      )
+      .toBeGreaterThan(before.filter((entry) => entry.call === 'notificationRefresh').length)
+    await unholdDoubleCall(page, 'notificationRefresh')
     await page.evaluate(() =>
       window.fixture.serveNotificationHost('ghe.acme.internal', 'notifications-other-host'),
     )
     await selectGitHubHost(page, 'ghe.acme.internal')
-    await releaseDoubleCalls(page, 'notifications')
     await settle(page)
-
+    await expect(inbox(page).getByText('ghe.acme.internal', { exact: true })).toBeVisible()
+    const released = await releaseDoubleCalls(page, 'notificationRefresh')
+    expect(released).toBeGreaterThanOrEqual(1)
+    await settle(page)
     // Only the host now selected has anything to show.
     await expect(inbox(page).getByText('github.com', { exact: true })).toHaveCount(0)
     await expect(inbox(page).getByText('ghe.acme.internal', { exact: true })).toBeVisible()
@@ -406,6 +529,218 @@ test.describe('Notification Center states and transitions', () => {
     ])
   })
 
+  test('held mutation on previous host does not mutate new host or report error', async ({
+    page,
+  }) => {
+    await openNotifications(page, 'notifications-ready')
+    await page.evaluate(() =>
+      window.fixture.serveNotificationHost('ghe.acme.internal', 'notifications-other-host'),
+    )
+    await holdDoubleCall(page, 'notificationMarkRead')
+    const markReadBtn = row(page, 'Tidy the stack ordering rules').getByRole('button', {
+      name: 'Mark Tidy the stack ordering rules as read',
+    })
+    await markReadBtn.click()
+    await selectGitHubHost(page, 'ghe.acme.internal')
+    await settle(page)
+    await expect(inbox(page).getByText('ghe.acme.internal', { exact: true })).toBeVisible()
+    await releaseDoubleCalls(page, 'notificationMarkRead')
+    await settle(page)
+    await expect(inbox(page).getByText('ghe.acme.internal', { exact: true })).toBeVisible()
+    await expect(row(page, 'Review the internal deploy queue')).toBeVisible()
+  })
+
+  // An authorization is three steps the window waits on in turn, and each one
+  // is its own boundary: turning the module on, sealing the credential, and
+  // reading the inbox the accepted credential unlocked. A host change made
+  // while any one of them is outstanding retires that step and everything
+  // behind it. Each case below holds exactly one of the three.
+
+  // The read an accepted credential asks for is the last of them, and it is
+  // asked for only once the credential has been sealed. Its answer is the
+  // inbox of the host that sealed it, which is not the host this window now
+  // works against.
+  test('the inbox read an accepted authorization asks for is dropped when the host changes', async ({
+    page,
+  }) => {
+    await openNotifications(page, 'notifications-awaiting-credential')
+    const dialog = await openAuthorizationDialog(page)
+
+    await holdDoubleCall(page, 'notifications')
+    const readsBefore = await inboxReads(page)
+    await dialog.getByRole('button', { name: 'Authorize notifications' }).click()
+
+    // The credential really was sealed, and the read it unlocked really was
+    // asked for: exactly one new read, carrying no arguments of its own, and it
+    // is the thing still outstanding — the window is waiting on it, which its
+    // own disabled submit says.
+    await expect.poll(() => callCount(page, 'notificationSave')).toBe(1)
+    await expect.poll(() => inboxReads(page)).toBe(readsBefore + 1)
+    await expect(dialog.getByRole('button', { name: 'Authorize notifications' })).toBeDisabled()
+
+    // Only this read is held, so the read the new host makes is not waiting
+    // behind a hold that was armed for the one this window left. The dialog
+    // still owns the window, so it is closed the way a person closes it — the
+    // dialog's own control, not a shortcut the modal correctly swallows — and
+    // the authorization behind it stays outstanding.
+    await unholdDoubleCall(page, 'notifications')
+    await dialog.getByRole('button', { name: 'Close dialog' }).click()
+    await expect(dialog).toBeHidden()
+    const forNewHost = await cutOverWithDialogOpen(page, 'ghe.acme.internal')
+
+    // One read was waiting, and one is released: the inbox the accepted
+    // credential asked for, with the rows that host served.
+    expect(await releaseDoubleCalls(page, 'notifications')).toBe(1)
+    await settle(page)
+
+    await expectNewHostUntouched(page, forNewHost, 'ghe.acme.internal')
+  })
+
+  // Turning the module on is the first of them, and it is a decision about this
+  // computer rather than about a host. Held past a host change it must decide
+  // nothing about the host this window moved to: the window drops it between
+  // the first and the second step, so no credential is sealed behind it and no
+  // read follows one.
+  test('the enable this window agreed to does not land on the host it left', async ({ page }) => {
+    await openNotifications(page, 'notifications-awaiting-credential')
+    const dialog = await openAuthorizationDialog(page)
+
+    // Only this step is held. The host change below is a different call, and a
+    // window whose host could not change could not be tested for anything here.
+    await holdDoubleCall(page, 'notificationSettingsEnable')
+    await dialog.getByRole('button', { name: 'Authorize notifications' }).click()
+
+    // The enable was admitted and is the whole of what is outstanding: nothing
+    // behind it has been asked for.
+    await expect.poll(() => callCount(page, 'notificationSettingsEnable')).toBe(1)
+    await settle(page)
+    expect(await callCount(page, 'notificationSave')).toBe(0)
+
+    await dialog.getByRole('button', { name: 'Close dialog' }).click()
+    await expect(dialog).toBeHidden()
+    const forNewHost = await cutOverWithDialogOpen(page, 'ghe.acme.internal')
+    const readsAtCutover = await inboxReads(page)
+
+    expect(await releaseDoubleCalls(page, 'notificationSettingsEnable')).toBe(1)
+    await settle(page)
+
+    // The late answer retires the step behind it as well: no credential is
+    // sealed on the strength of a decision this window made about a host it has
+    // left, and no read is asked for after one.
+    expect(await callCount(page, 'notificationSave')).toBe(0)
+    expect(await inboxReads(page)).toBe(readsAtCutover)
+    // The host this window moved to is left exactly as it was: still on, still
+    // with nothing sealed for it.
+    await expectNewHostUntouched(page, forNewHost, 'ghe.acme.internal')
+  })
+
+  // The credential is the second of them, and it is the one that is about a
+  // host: the token was typed for the host this window was pointed at. Held
+  // past a host change it must not seal anything for the host this window moved
+  // to, and the read it would have unlocked must never be asked for.
+  test('a credential sealed for the host this window left never reaches the new one', async ({
+    page,
+  }) => {
+    await openNotifications(page, 'notifications-awaiting-credential')
+    const dialog = await openAuthorizationDialog(page)
+
+    await holdDoubleCall(page, 'notificationSave')
+    await dialog.getByRole('button', { name: 'Authorize notifications' }).click()
+
+    // Consent was given and the module turned on, so the credential really was
+    // admitted; the read the window asks for after it is not admitted until it
+    // settles.
+    await expect.poll(() => callCount(page, 'notificationSave')).toBe(1)
+    const readsBefore = await inboxReads(page)
+    await settle(page)
+    expect(await inboxReads(page)).toBe(readsBefore)
+
+    await dialog.getByRole('button', { name: 'Close dialog' }).click()
+    await expect(dialog).toBeHidden()
+    const forNewHost = await cutOverWithDialogOpen(page, 'ghe.acme.internal')
+    const readsAtCutover = await inboxReads(page)
+
+    expect(await releaseDoubleCalls(page, 'notificationSave')).toBe(1)
+    await settle(page)
+
+    // The write was refused for the host it was not made for and stored
+    // nowhere: the host this window moved to still has no credential of its own
+    // to discard, and the read a sealed credential unlocks is never asked for.
+    expect(await callCount(page, 'notificationSave')).toBe(1)
+    expect(await inboxReads(page)).toBe(readsAtCutover)
+    await expectNewHostUntouched(page, forNewHost, 'ghe.acme.internal')
+  })
+
+  // The read a window makes on mount is the first answer it will get, and it
+  // is admitted before this window has been told which host it works against.
+  // Nothing is pushed for the host left behind, so a cutover made while that
+  // read is outstanding has to be settled by the new host's own read alone.
+  test('the inbox read admitted for the host this window left never lands', async ({ page }) => {
+    await openGallery(page, { scenario: 'notifications-read-pending' })
+    await switchDestination(page, 'notifications')
+
+    // Every read this window has been admitted is still outstanding, and each
+    // of them took its answer for the host selected now.
+    const readsBefore = await inboxReads(page)
+    expect(readsBefore).toBeGreaterThan(0)
+    await expect(threadList(page)).toHaveCount(0)
+
+    await page.evaluate(() =>
+      window.fixture.serveNotificationHost('ghe.acme.internal', 'notifications-other-host'),
+    )
+    await selectGitHubHost(page, 'ghe.acme.internal')
+
+    // The new host's read joins them and is released with them: what settles
+    // first is not a question, because each answer carries its own host.
+    expect(await releaseDoubleCalls(page, 'notifications')).toBeGreaterThanOrEqual(readsBefore)
+    await settle(page)
+
+    // Only the host now selected has anything to show, and the rows that host
+    // read are the rows on screen.
+    await expect(inbox(page).getByText('ghe.acme.internal', { exact: true })).toBeVisible()
+    await expect(threadList(page).getByRole('listitem')).toHaveCount(2)
+    await expect(row(page, 'Review the internal deploy queue')).toBeVisible()
+    expect(await inbox(page).innerText()).not.toContain('Tidy the stack ordering rules')
+    await expect(page.getByText('github.com', { exact: true })).toHaveCount(0)
+    await expect(page.getByRole('alert')).toHaveCount(0)
+  })
+
+  test('the account read held for the first host cannot repopulate the window after a host change', async ({
+    page,
+  }) => {
+    // This window's own GitHub account read was admitted and is still
+    // outstanding, so it holds no account at all — which is a different thing
+    // from the Notification Center having no credential, and the two must not
+    // be substituted for one another.
+    await openNotifications(page, 'notifications-account-pending')
+    await expect(inbox(page).getByRole('button', { name: 'Authorize notifications' })).toBeVisible()
+    await page.evaluate(() =>
+      window.fixture.serveNotificationHost('ghe.acme.internal', 'notifications-other-host'),
+    )
+
+    // The person points this window at another host while that account read is
+    // still outstanding. Nothing is pushed for the host left behind, so what
+    // this window shows next is only what it asked the new host for.
+    await selectGitHubHost(page, 'ghe.acme.internal')
+    await settle(page)
+    await expect(row(page, 'Review the internal deploy queue')).toBeVisible()
+
+    // The answer that was admitted for the host this window left now arrives.
+    await unholdDoubleCall(page, 'githubAccountStatus')
+    await releaseDoubleCalls(page, 'githubAccountStatus')
+    await settle(page)
+
+    // The host this window is pointed at, and the rows that host serves, are
+    // still what is on screen; the answer that arrived late puts nothing of the
+    // host left behind back in front of the person, and reports no write this
+    // window never made.
+    await expect(inbox(page).getByText('ghe.acme.internal', { exact: true })).toBeVisible()
+    await expect(row(page, 'Review the internal deploy queue')).toBeVisible()
+    await expect(page.getByText('github.com', { exact: true })).toHaveCount(0)
+    await expect(page.getByText(/never sent|not sent again|was not sent again/iu)).toHaveCount(0)
+    await expect(inbox(page).getByRole('button', { name: REFRESH.name, exact: true })).toBeEnabled()
+  })
+
   // A window zoomed to 200% gives the page half the CSS viewport, so this is
   // the layout that zoom produces — checked here against the same real
   // components, and against the window's own zoom factor in the desktop run.
@@ -434,21 +769,21 @@ test.describe('Notification Center states and transitions', () => {
     )
     expect(clipped).toEqual([])
 
-    // Reached rather than merely laid out: the row is scrolled into the
-    // viewport, its control takes focus, and the keyboard is what changes it.
+    // Reached rather than merely laid out: the keyboard walks this window's own
+    // tab order to the control — nothing is focused for it — the browser scrolls
+    // it into the viewport on the way, and Space there is what changes the row.
     const markRead = rows
       .first()
       .getByRole('button', { name: 'Mark Tidy the stack ordering rules as read' })
-    await markRead.scrollIntoViewIfNeeded()
+    await tabToControl(page, markRead)
+    await expect(markRead).toBeFocused()
     const reached = await markRead.boundingBox()
     expect(reached).not.toBeNull()
     if (reached) {
       expect(reached.y).toBeGreaterThanOrEqual(0)
       expect(reached.y + reached.height).toBeLessThanOrEqual(384)
     }
-    await markRead.focus()
-    await expect(markRead).toBeFocused()
-    await page.keyboard.press('Enter')
+    await page.keyboard.press('Space')
     await expect(rows.first().getByText('Read', { exact: true })).toBeVisible()
   })
 })

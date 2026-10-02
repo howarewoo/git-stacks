@@ -211,9 +211,7 @@ function readableError(value: unknown): string {
  * nobody can tell from here, so that is what the window says.
  */
 function unknownOutcomeError(message: string): string {
-  return /fetch failed|ECONNRESET|EPIPE|socket hang up|network|timed? ?out|aborted/iu.test(
-    message,
-  )
+  return /fetch failed|ECONNRESET|EPIPE|socket hang up|network|timed? ?out|aborted/iu.test(message)
     ? 'GitHub never answered, so this app cannot tell whether the change was applied.'
     : message
 }
@@ -1192,20 +1190,15 @@ function App() {
       // The token was typed against the host this dialog named and the
       // acknowledgement was given for it, so the host travels with it and every
       // step re-asks whether that is still the host this window is pointed at.
-      // A step already in flight cannot be called back, which is why the check
-      // sits between the steps and why main validates the same host again.
-      const stillTheHost = (): boolean => {
-        if (notificationClaim(request, host)) return true
-        setNotificationDialogError(
-          'The selected GitHub host changed while this was being entered, so it was not sent to any host. Enter the token again to authorize the host that is selected now.',
-        )
-        return false
-      }
+      // If the host or dialog changed during any step, this continuation drops
+      // silently without polluting the current dialog with stale errors: a step
+      // already in flight cannot be called back, which is why the check sits
+      // between the steps and why main validates the same host again.
       try {
         await desktop.updateSettings?.({ notifications: { enabled: true } })
-        if (!stillTheHost()) return
+        if (!notificationClaim(request, host)) return
         await notificationCall('saveNotificationCredential', token, accepted, consentedHost)
-        if (!stillTheHost()) return
+        if (!notificationClaim(request, host)) return
         const next = await notificationCall<NotificationInbox>('notifications')
         if (notificationClaim(request, host) && inboxForHost(next, host)) {
           setNotificationInbox(next)
@@ -3690,9 +3683,7 @@ function App() {
             : null
         }
         onOpenChange={setNotificationDialogOpen}
-        onSubmit={(token, accepted, host) =>
-          void saveNotificationCredential(token, accepted, host)
-        }
+        onSubmit={(token, accepted, host) => void saveNotificationCredential(token, accepted, host)}
         open={notificationDialogOpen}
       />
       <RepositoryDiscoveryDialog

@@ -306,6 +306,12 @@ export interface GitHubRestRequest {
    * asks GitHub directly.
    */
   cache?: boolean
+  /**
+   * Opt in to accepting a 304 without a cached response body for a mutation
+   * that documents 304 as "nothing changed". Off by default: an unexpected
+   * 304 on any other mutation is refused as an invalid response.
+   */
+  acceptNoChange?: boolean
 }
 export interface GitHubRestResponse<T> {
   status: number
@@ -1126,12 +1132,11 @@ export class DirectGitHubTransport implements GitHubTransport {
       request$,
     )
     if (status === 304) {
-      // A mutation is documented to answer 304 as "nothing changed": there is
-      // no display body to replay for it, and a caller waiting on one is asking
-      // for the conditional-read contract that a write never entered. A
-      // conditional GET keeps the requirement it always had, because its 304
-      // does mean a stored body it has to replay.
-      if (!cached && method !== 'GET') {
+      // A mutation opting in to 304 is documented to answer as "no change":
+      // there is no display body to replay for it, and callers that did not
+      // opt in treat an unexpected 304 as an error. A conditional GET keeps
+      // the requirement it always had, because its 304 does mean a stored body.
+      if (!cached && method !== 'GET' && request.acceptNoChange === true) {
         return { status, data: null as T, headers, rateLimit, notModified: true }
       }
       if (!cached)
@@ -1145,7 +1150,12 @@ export class DirectGitHubTransport implements GitHubTransport {
     }
     const etag = headers.get('etag')
     const lastModified = headers.get('last-modified')
-    if (cache && key && method === 'GET' && (etag || lastModified)) {
+    // A response the caller has already abandoned is not this caller's to
+    // record: pairing an old body with the validator in force after it would
+    // make the next legitimate 304 replay an incomplete list. The centre that
+    // owns this cache cancels the read that is no longer wanted, and a
+    // cancelled read writes nothing.
+    if (cache && key && method === 'GET' && (etag || lastModified) && !request.signal?.aborted) {
       cache.set(key, { etag, lastModified, body, storedAt: new Date() })
     }
     return { status, data: body as T, headers, rateLimit, authority }
@@ -1607,11 +1617,11 @@ export class GhGitHubTransport implements GitHubTransport {
         : { ...request, headers: { ...request.headers, ...conditionalHeaders(cached) } }
     const { status, data, headers, rateLimit, authority } = await this.request<T>(conditional)
     if (status === 304) {
-      // A mutation is documented to answer 304 as "nothing changed", and `gh`
-      // has no stored display body to replay for a write either. A conditional
-      // GET keeps the requirement it always had.
+      // A mutation opting in to 304 is documented to answer as "no change", and
+      // callers that did not opt in treat an unexpected 304 as an error. A
+      // conditional GET keeps the requirement it always had.
       const method = request.method ?? 'GET'
-      if (!cached && method !== 'GET') {
+      if (!cached && method !== 'GET' && request.acceptNoChange === true) {
         return { status, data: null as T, headers, rateLimit, notModified: true }
       }
       if (!cached)
@@ -1625,7 +1635,16 @@ export class GhGitHubTransport implements GitHubTransport {
     }
     const etag = headers.get('etag')
     const lastModified = headers.get('last-modified')
-    if (cache && key && (request.method ?? 'GET') === 'GET' && (etag || lastModified)) {
+    // A response the caller has already abandoned is not this caller's to
+    // record: pairing an old body with the validator in force after it would
+    // make the next legitimate 304 replay an incomplete list.
+    if (
+      cache &&
+      key &&
+      (request.method ?? 'GET') === 'GET' &&
+      (etag || lastModified) &&
+      !request.signal?.aborted
+    ) {
       cache.set(key, { etag, lastModified, body: data, storedAt: new Date() })
     }
     return { status, data, headers, rateLimit, authority }

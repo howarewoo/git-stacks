@@ -169,6 +169,15 @@ export async function holdDoubleCall(page: Page, call: FixtureCall): Promise<voi
 }
 
 /**
+ * Stops holding future calls of a given double method without releasing existing ones.
+ */
+export async function unholdDoubleCall(page: Page, call: FixtureCall): Promise<void> {
+  await page.evaluate((targetCall) => {
+    window.fixture.unhold(targetCall)
+  }, call)
+}
+
+/**
  * Releases held calls of a given method (or all calls if omitted).
  */
 export async function releaseDoubleCalls(
