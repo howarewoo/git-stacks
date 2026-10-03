@@ -31,7 +31,7 @@ jobs:
   # needs no credential, authorizes nothing, and creates nothing to clean up on a
   # real account.
   controlled:
-    runs-on: [self-hosted, linux, arm64]
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
@@ -80,7 +80,7 @@ jobs:
     # default branch, and why a repository that wants the tokens to mean something
     # must configure the environment's reviewers and restrictions itself.
     environment: live-github-e2e
-    runs-on: [self-hosted, linux, arm64]
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
@@ -180,9 +180,9 @@ jobs:
   # the runner and removes only what that receipt names, after the host has confirmed
   # both the id the run created and the marker it stamped.
   # The receipt comes from this run's own artifact rather than from a path on the
-  # runner the live job happened to use. Those are different promises: a self-hosted
-  # label matches every machine carrying it, so a path under `runner.temp` on one of
-  # them says nothing about the next one. The artifact is the one route that genuinely
+  # runner the live job happened to use. Those are different promises: each job
+  # gets its own fresh machine, so a path under `runner.temp` on one of them says
+  # nothing about the next one. The artifact is the one route that genuinely
   # crosses a job boundary, and the live job already publishes it with `if: always()`.
   # Where no receipt was published the job says so and fails.
   #
@@ -193,7 +193,7 @@ jobs:
     needs: live
     if: ${{ failure() || cancelled() }}
     environment: live-github-e2e
-    runs-on: [self-hosted, linux, arm64]
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
