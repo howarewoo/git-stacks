@@ -92,6 +92,36 @@ do not pin a terminal commit to an exact watcher event count.
 Destination-focus checks activate the named navigation control with Enter and
 verify heading focus and the live announcement, independently of shortcut bindings.
 
+## Agent skills
+
+Repository-owned agent skills live in `.agents/skills/`. They are optional agent
+workflows, not desktop features or a required stack-management CLI.
+
+Use [ready-stack](.agents/skills/ready-stack/SKILL.md) for an explicit request to
+prepare an existing PR stack bottom-to-top. Supply a canonical PR URL identifying
+the stack or an explicit PR list; invocation syntax depends on the agent host.
+For example:
+
+```text
+Prepare the stack containing <canonical PR URL> using ready-stack.
+Prepare these PRs using ready-stack: <bottom PR URL>, <top PR URL>.
+Prepare the stack containing <canonical PR URL> using ready-stack --preview.
+```
+
+Preparation includes scoped corrections, review-thread handling, verification,
+publication, restacking, and ready-for-review transitions. Missing human approval
+does not prevent preparing descendants once author-side work and required checks
+are complete; the report distinguishes author-ready from actually merge-ready.
+The skill never merges, enqueues, or changes auto-merge. Preview is read-only,
+and loading the skill alone grants no mutation authority.
+
+Unlike [flatten-pr-graph](.agents/skills/flatten-pr-graph/SKILL.md), which orders PRs
+and deliberately skips checks, ready-stack verifies each changed layer. See its
+[verification scenarios](.agents/skills/ready-stack/references/verification.md)
+for activation, safety, recovery, and behavioral evaluation. For Markdown-only
+skill changes, use `npm run format:check` and exercise the skill with disposable
+fixtures or read-only preview; application tests do not validate agent behavior.
+
 ## Live local and remote freshness
 
 The open repository updates itself. Local Git work done in a terminal — a
