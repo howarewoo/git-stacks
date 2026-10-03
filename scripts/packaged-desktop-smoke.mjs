@@ -689,19 +689,10 @@ const window = BrowserWindow.getAllWindows().find((entry) => entry.webContents.g
 if (!window) throw new Error('The packaged app window is not on ' + origin)
 const report = []
 for (const frame of window.webContents.mainFrame.frames) {
-  const inside = { href: 'unreadable', state: 'unreadable', desktop: 'unreadable', scripts: -1 }
-  try {
-    const held = await frame.executeJavaScript(
-      '({ href: location.href, state: document.readyState, desktop: typeof window.desktop, scripts: document.querySelectorAll("script").length })',
-    )
-    inside.href = held.href
-    inside.state = held.state
-    inside.desktop = held.desktop
-    inside.scripts = held.scripts
-  } catch (error) {
-    inside.href = 'error:' + String(error?.message ?? error)
-  }
-  report.push({ requested: frame.url, ...inside })
+  const inside = await frame.executeJavaScript(
+    '({ href: location.href, state: document.readyState, desktop: typeof window.desktop, scripts: document.querySelectorAll("script").length })',
+  )
+  report.push({ name: frame.name, requested: frame.url, ...inside })
 }
 return { frames: report }`,
 )
@@ -881,17 +872,25 @@ function assertRefused(report, refusal) {
  */
 async function startSubframes(page) {
   return page.evaluate(async () => {
-    const frames = ['index.html', 'about:blank', 'data:text/html,<p>subframe</p>'].map((src) => {
-      const frame = document.createElement('iframe')
-      frame.setAttribute('src', src)
-      frame.setAttribute('aria-hidden', 'true')
-      frame.dataset.packagedSmokeSubframe = 'true'
-      document.body.append(frame)
-      return frame
-    })
+    const frames = ['index.html', 'about:blank', 'data:text/html,<p>subframe</p>'].map(
+      (src, index) => {
+        const frame = document.createElement('iframe')
+        frame.name = `packaged-smoke-subframe-${index}`
+        frame.setAttribute('src', src)
+        frame.setAttribute('aria-hidden', 'true')
+        frame.dataset.packagedSmokeSubframe = 'true'
+        document.body.append(frame)
+        return frame
+      },
+    )
     await new Promise((settle) => setTimeout(settle, 1500))
     return frames.map((frame) => {
-      const entry = { src: frame.getAttribute('src'), bridge: 'unreadable', url: 'unreadable' }
+      const entry = {
+        name: frame.name,
+        src: frame.getAttribute('src'),
+        bridge: 'unreadable',
+        url: 'unreadable',
+      }
       try {
         // contextBridge publishes an object, so a frame holding it reports 'object' here, not
         // 'function'. Reading the URL is a second, separate step because it throws cross-origin.
@@ -1641,29 +1640,31 @@ async function run(options) {
         ...children.frames,
       ]
       const evidence = frames.map(describe).join('; ')
+      assertEqual(
+        children.frames.length,
+        parentView.length,
+        `The main-process inspection did not cover every frame attempt: ${evidence}`,
+      )
       for (const frame of parentView) {
+        assertEqual(
+          children.frames.filter((child) => child.name === frame.name).length,
+          1,
+          `The main-process inspection did not uniquely observe ${frame.name}: ${evidence}`,
+        )
         assert(
           !holdsBridge(frame.bridge),
           `The app document reached a preload bridge in its ${frame.src} frame: ${evidence}`,
         )
       }
       for (const frame of children.frames) {
-        assert(
-          !holdsBridge(frame.desktop),
-          `A child frame of the app window held the preload bridge: ${evidence}`,
+        assertEqual(
+          frame.desktop,
+          'undefined',
+          `A child frame did not prove preload bridge absence: ${evidence}`,
         )
         assert(
           !frame.href.startsWith(`${ORIGIN}/`),
           `A child frame of the app window loaded an app document: ${evidence}`,
-        )
-      }
-      const unreadable = frames.filter(
-        (frame) =>
-          String(frame.desktop).startsWith('error:') || String(frame.href).startsWith('error:'),
-      )
-      if (unreadable.length > 0) {
-        note(
-          `${unreadable.length} frame(s) could not be read at all; nothing is claimed about what they contain.`,
         )
       }
       // No child frame of the shipped window holds an ipcRenderer, so the guard's frame clause has
