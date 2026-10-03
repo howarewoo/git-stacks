@@ -3,6 +3,7 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 import type {
   MergeAction,
+  MergeQueueEntry,
   MergeMethod,
   MergeQueueOutcome,
   MergeQueueState,
@@ -17,6 +18,141 @@ import {
   type GitHubTransport,
 } from './github-transport'
 import { hostTransport, type GitHubHostContext } from './github-host'
+
+/**
+ * What GitHub reports about one pull request's own merge-queue membership, read from the
+ * GraphQL fields the schema documents: `isMergeQueueEnabled` for the base ref's capability and
+ * `isInMergeQueue` with the entry itself for the pull request. Nothing here is derived from an
+ * earlier enqueue, because an enqueue records acceptance and nothing about what the queue did
+ * with the request afterwards.
+ *
+ * Every field is nullable. A host whose schema does not carry them, a refused credential, and a
+ * malformed answer are all the same truthful answer here: unknown, never `not-queued`.
+ */
+export interface MergeQueueRead {
+  /** True only when GitHub reports a merge queue enabled for this pull request's base ref. */
+  enabled: boolean | null
+  /** GitHub's own membership answer, or null when this read could not establish one. */
+  membership: 'queued' | 'not-queued' | null
+  /** The entry GitHub reports with a membership, which names the place in the queue. */
+  entry: MergeQueueEntry | null
+  /** The head and base this read observed, which fence the membership to one reviewed request. */
+  headOid: string | null
+  base: string | null
+}
+
+const UNKNOWN_QUEUE_READ: MergeQueueRead = {
+  enabled: null,
+  membership: null,
+  entry: null,
+  headOid: null,
+  base: null,
+}
+
+const MERGE_QUEUE_FIELDS =
+  'isMergeQueueEnabled isInMergeQueue mergeQueueEntry { position state enqueuedAt }'
+
+/** The states GitHub's schema documents for a merge queue entry, and nothing else. */
+const MERGE_QUEUE_ENTRY_STATES: Record<string, true> = {
+  AWAITING_CHECKS: true,
+  LOCKED: true,
+  MERGEABLE: true,
+  QUEUED: true,
+  UNMERGEABLE: true,
+}
+
+/** The `DateTime` scalar as GitHub documents it: ISO-8601, with a UTC designator. */
+const ISO_UTC_DATE_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]00:00)$/u
+
+/**
+ * An entry a read reports, or null when what arrived is not one this build can stand behind.
+ *
+ * A position counts from one, a state is one of the enum's own values, and an enqueue time is
+ * the ISO-8601 UTC string GitHub's `DateTime` scalar documents — not any string JavaScript
+ * happens to read as a date. An entry that fails any of those is not a queue position to show,
+ * and the membership that came with it stands on its own: the pull request is in the queue
+ * either way, and the place in it is simply not known yet.
+ */
+function parseQueueEntry(value: unknown): MergeQueueEntry | null {
+  if (!isRecord(value)) return null
+  const { position, state, enqueuedAt } = value
+  if (
+    typeof position !== 'number' ||
+    !Number.isInteger(position) ||
+    position < 1 ||
+    typeof state !== 'string' ||
+    !Object.hasOwn(MERGE_QUEUE_ENTRY_STATES, state) ||
+    typeof enqueuedAt !== 'string' ||
+    !ISO_UTC_DATE_TIME.test(enqueuedAt) ||
+    Number.isNaN(Date.parse(enqueuedAt))
+  ) {
+    return null
+  }
+  return { position, state, enqueuedAt }
+}
+
+/**
+ * Read one pull request's merge-queue membership from the host that owns the repository. The
+ * read never fails the caller: a host that cannot answer leaves queue state unknown, which is
+ * reported as unconfirmed rather than as a queue that dropped the pull request.
+ */
+export async function readMergeQueueRead(input: {
+  fullName: string
+  number: number
+  host?: GitHubHostContext
+  signal?: AbortSignal
+}): Promise<MergeQueueRead> {
+  const [owner, name] = input.fullName.split('/')
+  if (!owner || !name || !Number.isInteger(input.number) || input.number <= 0) {
+    return UNKNOWN_QUEUE_READ
+  }
+  const query = `query($owner: String!, $name: String!, $number: Int!) {
+    repository(owner: $owner, name: $name) {
+      pullRequest(number: $number) {
+        headRefOid
+        number
+        baseRefName
+        ${MERGE_QUEUE_FIELDS}
+      }
+    }
+  }`
+  try {
+    const value = await mergeTransport(input.host).graphql(
+      query,
+      {
+        owner,
+        name,
+        number: input.number,
+      },
+      input.signal ? { signal: input.signal } : {},
+    )
+    const repository = isRecord(value) ? value.repository : null
+    const node = isRecord(repository) ? repository.pullRequest : null
+    if (!isRecord(node) || node.number !== input.number) return UNKNOWN_QUEUE_READ
+    const headOid = typeof node.headRefOid === 'string' ? node.headRefOid : null
+    const base = typeof node.baseRefName === 'string' ? node.baseRefName : null
+    const enabled = typeof node.isMergeQueueEnabled === 'boolean' ? node.isMergeQueueEnabled : null
+    const membership =
+      typeof node.isInMergeQueue === 'boolean'
+        ? node.isInMergeQueue
+          ? ('queued' as const)
+          : ('not-queued' as const)
+        : null
+    if (enabled === null && membership === null) return { ...UNKNOWN_QUEUE_READ, headOid, base }
+    return {
+      enabled,
+      membership,
+      entry: membership === 'queued' ? parseQueueEntry(node.mergeQueueEntry) : null,
+      headOid,
+      base,
+    }
+  } catch {
+    // A refused schema, a denied credential, or an answer this build cannot read leaves the
+    // membership unknown. Reporting it as a removal would invent a queue decision GitHub
+    // never published.
+    return UNKNOWN_QUEUE_READ
+  }
+}
 
 /**
  * The transport a merge request and its result reads travel on. A request is made
@@ -258,6 +394,13 @@ export interface MergeQueueObservation {
    * outcomes across failed reads instead of reverting to the earlier enqueue.
    */
   confirmed: 'merged' | 'dropped' | null
+  /**
+   * GitHub's last confirmed queue membership for this pull request, and the entry it
+   * reported with it. Retained so a read that cannot reach GitHub keeps what a read
+   * confirmed instead of turning an unknown into a removal.
+   */
+  membership: 'queued' | 'not-queued' | null
+  entry: MergeQueueEntry | null
 }
 
 async function observationPath(repoPath: string): Promise<string> {
@@ -310,6 +453,11 @@ export async function readMergeObservations(
         message: typeof value.message === 'string' && value.message ? value.message : null,
         confirmed:
           value.confirmed === 'merged' || value.confirmed === 'dropped' ? value.confirmed : null,
+        membership:
+          value.membership === 'queued' || value.membership === 'not-queued'
+            ? value.membership
+            : null,
+        entry: parseQueueEntry(value.entry),
       })
     }
   } catch {
@@ -342,14 +490,24 @@ export async function recordMergeObservation(
 /**
  * Read the merge-queue state of a pull request from what GitHub actually reported.
  *
- * The terminal enqueue result does not track subsequent queue membership. This reader
- * uses the pull request's lifecycle: merged confirms landing, closed confirms it did
- * not land, and open leaves membership unconfirmed because an ejected pull request
- * can remain open.
+ * GitHub's own membership read decides it: a pull request the queue holds is `queued`, and one
+ * it does not hold is `dropped`, whether it was ejected or closed. The terminal enqueue result
+ * only proves a queue accepted the request, so it supplies the requested time and never the
+ * membership. A read that could not answer leaves the last confirmed membership in place and
+ * marks it stale, because an unknown is not a removal.
+ *
+ * A merged or closed pull request outranks membership: it has left the queue whatever the
+ * entry says. Membership is only this observation's state while every identity a read reported
+ * still matches the reviewed request. A read that names a different head or base — including
+ * one that could not answer the queue fields — describes something else, so nothing is applied
+ * and nothing is carried forward; an identity no read could report leaves the last confirmed
+ * membership in place, because an unknown is not a removal.
  */
 export function mergeQueueState(
   observation: MergeQueueObservation | undefined,
   pullRequestState: string,
+  read: MergeQueueRead = UNKNOWN_QUEUE_READ,
+  current: { headOid: string | null; base: string | null } | null = null,
 ): MergeQueueState | null {
   if (!observation) return null
   const state = pullRequestState.toUpperCase()
@@ -357,17 +515,47 @@ export function mergeQueueState(
   // read could not reach GitHub at all: an unreadable pull request is not a queue that
   // somehow took the group back.
   const merged = state === 'MERGED' || observation.confirmed === 'merged'
+  // Both identities are checked, not just the one that came with the membership. A pull
+  // request whose head moved or whose base was retargeted has left the request this
+  // observation describes, so its membership is neither applied nor retained.
+  const mismatched =
+    (read.headOid !== null && read.headOid !== observation.headOid) ||
+    (read.base !== null && read.base !== observation.base) ||
+    (current !== null &&
+      ((current.headOid !== null && current.headOid !== observation.headOid) ||
+        (current.base !== null && current.base !== observation.base)))
+  // New membership is only evidence about this request when the membership read proved the
+  // captured head and base itself. Another read's identity is never borrowed to fill in the
+  // one this answer left out: a head read before a retarget says nothing about a base read
+  // afterwards. An answer that proves no pair is no evidence about this request at all, so
+  // it can neither replace the remembered membership nor remove it.
+  const applies =
+    read.membership !== null &&
+    read.headOid === observation.headOid &&
+    read.base === observation.base &&
+    !mismatched
+  const retained = !mismatched && !applies
+  const membership = applies ? read.membership : retained ? observation.membership : null
+  const entry = applies ? read.entry : retained ? observation.entry : null
+
   const outcome: MergeQueueOutcome = merged
     ? 'merged'
     : state === 'CLOSED' || observation.confirmed === 'dropped'
       ? 'dropped'
-      : observation.outcome === 'pending'
-        ? 'pending'
-        : 'unconfirmed'
+      : membership === 'queued'
+        ? 'queued'
+        : membership === 'not-queued'
+          ? 'dropped'
+          : observation.outcome === 'pending'
+            ? 'pending'
+            : 'unconfirmed'
   return {
-    configured: true,
+    configured: observation.enqueuedAt !== null || read.enabled === true,
     outcome,
     requestedAt: new Date(observation.requestedAt).toISOString(),
+    membership,
+    entry: membership === 'queued' ? entry : null,
+    stale: retained && observation.membership !== null,
   }
 }
 

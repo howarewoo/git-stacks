@@ -189,8 +189,10 @@ to a stack, and the operation is worth knowing about from the outside:
 
 - The dialog previews the contiguous unmerged run below the selected pull
   request, and asks how GitHub should land it: the repository default, a direct
-  merge, or the merge queue. A direct merge also asks for the method, because a
-  queued merge runs the repository's own settings instead.
+  merge, or the merge queue. The queue is offered when GitHub reports a queue for
+  that base ref, so it is available on the first merge rather than after this
+  repository has enqueued something. A direct merge also asks for the method,
+  because a queued merge runs the repository's own settings instead.
 - The submitted stack is re-checked at the moment of the request. If a pull
   request joined or left the stack, or a head moved, since the preview, nothing
   is sent and the dialog says what changed.
@@ -205,10 +207,16 @@ to a stack, and the operation is worth knowing about from the outside:
   or a refresh that cannot reach GitHub still reports what was confirmed — merged,
   enqueued, or failed with GitHub's reason.
 - The asynchronous merge API's terminal `enqueued` result does not track later
-  queue membership. Git Stacks reads the pull request's lifecycle: merged,
-  dropped when closed without merging, or unconfirmed while still open.
-  An ejected pull request can remain open, so open is not proof of membership.
-  Check the pull request timeline on GitHub for queue updates. An accepted
+  queue membership, so Git Stacks asks GitHub about the pull request's own
+  membership: a pull request the queue holds is reported as queued, with the
+  place GitHub names, and one it no longer holds — ejected, or closed without
+  merging — is reported as dropped. Merged and closed pull requests outrank the
+  entry, and a read whose answer is for a different head or base confirms
+  nothing about the reviewed request.
+- That read is host-bound and never inferred. A schema without the queue
+  fields, a refused credential, an answer this build cannot read, and a dropped
+  connection all leave membership unknown: the last membership a read confirmed
+  is kept and labelled as not re-read, never turned into a removal. An accepted
   enqueue is retained as evidence that its base ref has a queue. A failed
   refresh preserves the last confirmed outcome without claiming fresh data.
 - A terminal result is written down even when GitHub returns no request UUID,
@@ -581,12 +589,13 @@ is the local one, and the app says which of the two it is showing.
 
 ### Rulesets, merge queue, and version-dependent behaviour
 
-This build does not detect or claim ruleset or merge-queue support on any host,
-including `github.com`. GitHub Enterprise Server versions differ from one
-another and from github.com, so the app reports what a host answered and never
-maps a version number to a feature. Whether a given instance offers a feature
-depends on that instance's version and its configuration, not on anything this
-build knows in advance.
+This build does not infer ruleset or merge-queue support from a host name or a
+version number. GitHub Enterprise Server versions differ from one another and
+from github.com, so the app reports what a host answered and never maps a version
+to a feature. Merge-queue delivery is offered for a base ref only when GitHub
+reports a queue for it, or this repository has already had an enqueue accepted
+for it; whether a given instance offers a queue depends on that instance's
+version and its configuration, not on anything this build knows in advance.
 
 Per-host and per-repository capability state is visible in Settings and in
 Diagnostics.

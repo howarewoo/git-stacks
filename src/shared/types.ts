@@ -266,11 +266,11 @@ export type MergeMethod = 'merge' | 'squash' | 'rebase'
 
 /**
  * The last merge request and subsequent pull-request state observed by Git Stacks.
- * A terminal `enqueued` result does not track later queue membership. An open pull
- * request can still be queued or have been ejected, so membership is `unconfirmed`
- * unless a later read confirms that the pull request merged or closed.
+ * `queued` and `dropped` come from GitHub's own membership read, not from the terminal
+ * `enqueued` result, which records acceptance and nothing about what the queue did later.
+ * `unconfirmed` is a read that could not answer, not a queue that took the pull request back.
  */
-export type MergeQueueOutcome = 'pending' | 'unconfirmed' | 'merged' | 'dropped'
+export type MergeQueueOutcome = 'pending' | 'queued' | 'unconfirmed' | 'merged' | 'dropped'
 
 /**
  * What GitHub reported for one accepted asynchronous merge request. A request is not a
@@ -278,8 +278,18 @@ export type MergeQueueOutcome = 'pending' | 'unconfirmed' | 'merged' | 'dropped'
  */
 export type MergeRequestOutcome = 'pending' | 'merged' | 'enqueued' | 'failed'
 
+/** One entry as the queue itself reports it, for the pull request GitHub says holds it. */
+export interface MergeQueueEntry {
+  position: number
+  state: string
+  enqueuedAt: string
+}
+
 export interface MergeQueueState {
-  /** True once GitHub accepted an enqueue for this base ref, which is the only proof of a queue. */
+  /**
+   * True once GitHub reports a merge queue enabled for this base ref, or accepted an enqueue
+   * for it. A read that could not answer either question leaves this false.
+   */
   configured: boolean
   /**
    * `pending` means GitHub accepted the asynchronous request and has not reported a terminal
@@ -287,6 +297,15 @@ export interface MergeQueueState {
    */
   outcome: MergeQueueOutcome | null
   requestedAt: string | null
+  /**
+   * GitHub's own answer for the captured head: it holds this pull request, or it does not.
+   * Null when that read could not answer, which is never a removal.
+   */
+  membership: 'queued' | 'not-queued' | null
+  /** The entry GitHub reported with that membership, which is what names its place in the queue. */
+  entry: MergeQueueEntry | null
+  /** True when this state is an earlier confirmation this read could not refresh. */
+  stale: boolean
 }
 
 /** One pull request that a single merge action will land, bottom-to-top. */

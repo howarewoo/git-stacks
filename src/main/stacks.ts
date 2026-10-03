@@ -113,6 +113,8 @@ import {
   startAsyncMerge,
   mergeQueueState,
   queueConfiguredFor,
+  readMergeQueueRead,
+  type MergeQueueRead,
   type AsyncMergeResult,
   type MergeQueueObservation,
 } from './merge-async'
@@ -2195,11 +2197,15 @@ async function capturePlan(
         }
       }
       if (chain.layers.length > 0) {
-        // An accepted enqueue is evidence that this base ref has a merge queue.
-        queueConfigured = queueConfiguredFor(
-          await readMergeObservations(root),
-          selectedEntry.pr.base,
-        )
+        // Two independent answers say a base ref runs a queue: GitHub's own capability field
+        // for the reviewed pull request, which covers a first merge before this repository
+        // has ever enqueued anything, and an accepted enqueue this client already recorded.
+        // A read that cannot answer contributes neither, so an unreadable host never offers
+        // or withholds queue delivery on its say-so.
+        const queueRead = await readQueueCapability(root, originFullName, selectedEntry.pr.number)
+        queueConfigured =
+          queueRead?.enabled === true ||
+          queueConfiguredFor(await readMergeObservations(root), selectedEntry.pr.base)
         merge = mergePreviewFor(
           chain.layers,
           selectedEntry.pr,
@@ -4926,6 +4932,23 @@ async function repositoryHost(repoPath: string): Promise<GitHubHostContext> {
   return host
 }
 
+/**
+ * What GitHub reports about the merge queue for one pull request, read from the host that owns
+ * this repository's origin. Null when there is no GitHub origin to ask, so a repository this
+ * build cannot address is never offered queue delivery from another host's answer.
+ */
+async function readQueueCapability(
+  repoPath: string,
+  fullName: string | null,
+  number: number,
+): Promise<MergeQueueRead | null> {
+  if (!fullName) return null
+  const remote = parseRemote(await getOriginUrl(repoPath))
+  const host = remoteHostContext(remote)
+  if (!host) return null
+  return readMergeQueueRead({ fullName, number, host })
+}
+
 async function repositoryMergeMethods(
   fullName: string,
   host: GitHubHostContext,
@@ -5124,6 +5147,8 @@ async function recordMergeRequest(
       // A new request is new evidence: whatever a previous request's read confirmed does not
       // describe this one.
       confirmed: null,
+      membership: null,
+      entry: null,
     })
   }
 }
@@ -5148,7 +5173,7 @@ function mergePreviewFor(
     : ['default', 'direct_merge']
   if (!queueConfigured) {
     warnings.push(
-      `No merge queue has answered for ${selected.base} in this repository yet, so this preview offers a direct merge or the repository default. Choosing the merge queue still works: GitHub reports whether it accepted it.`,
+      `Neither GitHub's own merge-queue capability for ${selected.base} nor an accepted enqueue recorded here reports a queue, so this preview offers a direct merge or the repository default. Choosing the merge queue still works: GitHub reports whether it accepted it.`,
     )
   }
   const layerNumbers = layers.map((entry) => entry.pr?.number ?? 0)
@@ -6320,10 +6345,18 @@ export async function getMergeStatus(repoPath: string): Promise<MergeStatus | nu
       : null
     const result = key ? reported.get(key) : undefined
     const live = await getPullRequest(root, observation.pullRequest).catch(() => null)
+    // GitHub's own membership read is what says whether the queue still holds this pull
+    // request; the terminal enqueue result only says a queue accepted it once.
+    const queueRead = await readMergeQueueRead({
+      fullName,
+      number: observation.pullRequest,
+      host,
+    })
     // One effective observation: what the request now says, the enqueue evidence that
-    // carries, and the pull request's own state as this read observed it. It is both what is
-    // persisted and what is reported, so a result and the state derived from it cannot
-    // disagree, and a read that cannot reach GitHub keeps what an earlier read confirmed.
+    // carries, the pull request's own state as this read observed it, and the membership
+    // GitHub confirmed for the same head and base. It is both what is persisted and what is
+    // reported, so a result and the state derived from it cannot disagree, and a read that
+    // cannot reach GitHub keeps what an earlier read confirmed.
     const enqueuedAt =
       result?.status === 'enqueued' ? observation.requestedAt : observation.enqueuedAt
     const confirmed: MergeQueueObservation['confirmed'] =
@@ -6332,23 +6365,49 @@ export async function getMergeStatus(repoPath: string): Promise<MergeStatus | nu
         : live?.state === 'CLOSED'
           ? 'dropped'
           : observation.confirmed
+    // Membership belongs to the head and base the request was made against. The membership
+    // read has to establish that pair itself: the pull request's own read is a separate
+    // moment, and borrowing its identity for a field this answer left out would let a
+    // retarget between the two reads look like a confirmed removal.
+    const identityFenced =
+      (queueRead.headOid !== null && queueRead.headOid !== observation.headOid) ||
+      (queueRead.base !== null && queueRead.base !== observation.base) ||
+      (live !== null &&
+        ((live.headOid !== null && live.headOid !== observation.headOid) ||
+          (live.base !== null && live.base !== observation.base)))
+    const membership =
+      !identityFenced &&
+      queueRead.membership !== null &&
+      queueRead.headOid === observation.headOid &&
+      queueRead.base === observation.base
+        ? queueRead
+        : null
     const effective: MergeQueueObservation = {
       ...observation,
       outcome: result ? result.status : observation.outcome,
       enqueuedAt,
       confirmed,
+      // A read that applies to this head and base replaces what was remembered; one that does
+      // not leaves the journal alone, because it describes a different request.
+      ...(membership ? { membership: membership.membership, entry: membership.entry } : {}),
       message: result ? (result.message ?? observation.message) : observation.message,
     }
     if (
       (result && result.status !== 'pending') ||
       effective.enqueuedAt !== observation.enqueuedAt ||
-      effective.confirmed !== observation.confirmed
+      effective.confirmed !== observation.confirmed ||
+      effective.membership !== observation.membership ||
+      JSON.stringify(effective.entry) !== JSON.stringify(observation.entry)
     ) {
       await recordMergeObservation(root, effective)
     }
+    // Only an accepted enqueue is a queue this repository has to answer for; a request that
+    // never reached one has no queue state to report.
     const queue = mergeQueueState(
       effective.enqueuedAt === null ? undefined : effective,
       live?.state ?? '',
+      queueRead,
+      live === null ? null : { headOid: live.headOid ?? null, base: live.base ?? null },
     )
     layers.push({
       branch: observation.branch,
@@ -6360,7 +6419,7 @@ export async function getMergeStatus(repoPath: string): Promise<MergeStatus | nu
           ? 'merged'
           : queue?.outcome === 'dropped'
             ? 'not-merged'
-            : effective.outcome === 'enqueued'
+            : effective.outcome === 'enqueued' || queue?.outcome === 'queued'
               ? 'enqueued'
               : effective.outcome === 'failed'
                 ? 'failed'
@@ -6384,20 +6443,31 @@ function mergeStatusDetail(
   const merged = mergeOid ? `Merged on GitHub as ${mergeOid.slice(0, 10)}` : 'Merged on GitHub'
   let detail: string
   if (queue?.outcome === 'merged') detail = merged
-  else if (queue?.outcome === 'dropped') {
-    detail = 'The pull request was closed without merging, so the queue dropped it'
-  } else if (queue?.outcome === 'unconfirmed') {
+  else if (queue?.outcome === 'queued') {
+    detail = queue.entry
+      ? `GitHub reports this pull request in the merge queue at position ${queue.entry.position}, ${queue.entry.state.toLowerCase()}`
+      : 'GitHub reports this pull request is in a merge queue'
+  } else if (queue?.outcome === 'dropped') {
+    // A closed pull request and one the queue let go are both dropped, but only one of them
+    // is something to enqueue again, so the reason is named rather than guessed at.
     detail =
-      live === null
-        ? `GitHub accepted this enqueue at ${requested}; current queue membership is unconfirmed`
-        : `GitHub accepted this enqueue at ${requested}; this pull request is still open, which does not say whether the queue still holds it`
+      live?.state === 'CLOSED'
+        ? 'The pull request was closed without merging, so the queue dropped it'
+        : queue.membership === 'not-queued'
+          ? 'GitHub reports this pull request is no longer in a merge queue, and reports no reason for it'
+          : 'The merge queue did not land this pull request'
+  } else if (queue?.outcome === 'unconfirmed') {
+    detail = `GitHub accepted this enqueue at ${requested}; this read could not confirm whether the queue still holds this pull request`
   } else if (observation.outcome === 'failed') {
     detail = observation.message ?? 'GitHub reported that the merge request failed'
   } else if (observation.outcome === 'merged') detail = merged
   else detail = `The merge request GitHub accepted at ${requested} has not reported a result yet`
-  // This refresh could not reach the pull request. What is reported is the last state a read
-  // confirmed, labelled as not re-read, because a read that failed is not evidence that
-  // anything changed.
+  // This refresh could not reach the pull request or its queue entry. What is reported is the
+  // last state a read confirmed, labelled as not re-read, because a read that failed is not
+  // evidence that anything changed.
+  if (queue?.stale) {
+    return `GitHub could not be read just now, so this is the last state a read confirmed. ${detail}`
+  }
   return live === null ? `${detail} GitHub could not be read to confirm it just now.` : detail
 }
 
@@ -6410,16 +6480,56 @@ function mergeStatusMessage(layers: MergeLayerResult[]): string {
     )
   }
   const queued = layers.filter((entry) => entry.status === 'enqueued')
-  if (queued.length > 0) {
-    const numbers = queued.map((entry) => `#${entry.pullRequest}`).join(', ')
+  // A pull request the queue still holds and one this read could not place are different
+  // states, so the summary names them separately instead of calling both of them queued.
+  const held = queued.filter((entry) => entry.queue?.outcome === 'queued' && !entry.queue.stale)
+  if (held.length > 0) {
     parts.push(
-      `Pull request${queued.length === 1 ? '' : 's'} ${numbers} joined the merge queue; current queue membership is unconfirmed.`,
+      `GitHub reports pull request${held.length === 1 ? '' : 's'} ${held.map((entry) => `#${entry.pullRequest}`).join(', ')} in the merge queue.`,
+    )
+  }
+  const unplaced = queued.filter(
+    (entry) => entry.queue?.outcome !== 'queued' && !entry.queue?.stale,
+  )
+  if (unplaced.length > 0) {
+    const numbers = unplaced.map((entry) => `#${entry.pullRequest}`).join(', ')
+    parts.push(
+      `Pull request${unplaced.length === 1 ? '' : 's'} ${numbers} joined the merge queue; current queue membership is unconfirmed.`,
     )
   }
   const failed = layers.filter((entry) => entry.status === 'failed')
   if (failed.length > 0) {
     parts.push(
       `GitHub refused the merge request for pull request${failed.length === 1 ? '' : 's'} ${failed.map((entry) => `#${entry.pullRequest}`).join(', ')}.`,
+    )
+  }
+  // A pull request the queue no longer holds is a change GitHub published, even when it says
+  // nothing else about it; a summary that reported no change here would hide the ejection. A
+  // closed pull request is named as the closure it is, not as something the queue ejected.
+  const ejected = layers.filter(
+    (entry) => entry.queue?.membership === 'not-queued' && !entry.queue.stale,
+  )
+  if (ejected.length > 0) {
+    parts.push(
+      `GitHub reports pull request${ejected.length === 1 ? '' : 's'} ${ejected.map((entry) => `#${entry.pullRequest}`).join(', ')} no longer in the merge queue.`,
+    )
+  }
+  for (const membership of ['queued', 'not-queued'] as const) {
+    const retained = layers.filter(
+      (entry) => entry.queue?.stale && entry.queue.membership === membership,
+    )
+    if (retained.length > 0) {
+      parts.push(
+        `The last confirmed queue state placed pull request${retained.length === 1 ? '' : 's'} ${retained.map((entry) => `#${entry.pullRequest}`).join(', ')} ${membership === 'queued' ? 'in' : 'outside'} the merge queue; current queue membership could not be confirmed.`,
+      )
+    }
+  }
+  const closed = layers.filter(
+    (entry) => entry.queue?.outcome === 'dropped' && entry.queue.membership !== 'not-queued',
+  )
+  if (closed.length > 0) {
+    parts.push(
+      `Pull request${closed.length === 1 ? '' : 's'} ${closed.map((entry) => `#${entry.pullRequest}`).join(', ')} closed without merging.`,
     )
   }
   const merged = layers.filter((entry) => entry.status === 'merged')
@@ -6875,10 +6985,53 @@ async function mergeStack(
   for (const result of results) {
     const observation = observations.get(result.pullRequest)
     const live = await getPullRequest(repoPath, result.pullRequest).catch(() => null)
+    // The run reports what the queue holds now, not only what it accepted: an enqueue GitHub
+    // answered in this same run is already settled by its own membership read.
+    const queueRead = observation
+      ? await readMergeQueueRead({
+          fullName: plan.originFullName,
+          number: result.pullRequest,
+          host,
+        })
+      : null
+    // A membership read for this run's own head and base is evidence the next refresh needs,
+    // so it is written down here rather than only shown: a restart, or a read that cannot
+    // reach the queue fields afterwards, must still report what this run confirmed. The
+    // membership read establishes the captured pair itself: another read's identity is a
+    // different moment and never fills in a field this answer left out.
+    const identityProven =
+      observation !== undefined &&
+      queueRead !== null &&
+      queueRead.headOid === observation.headOid &&
+      queueRead.base === observation.base
+    const applies =
+      queueRead !== null &&
+      queueRead.membership !== null &&
+      identityProven &&
+      (live === null || live.headOid === observation?.headOid) &&
+      (live === null || live.base === observation?.base)
+    if (observation && applies) {
+      await recordMergeObservation(repoPath, {
+        ...observation,
+        membership: queueRead.membership,
+        entry: queueRead.entry,
+      })
+    }
     result.queue = mergeQueueState(
       observation && observation.enqueuedAt !== null ? observation : undefined,
       live?.state ?? '',
+      queueRead ?? undefined,
+      live === null ? null : { headOid: live.headOid ?? null, base: live.base ?? null },
     )
+    // What the queue says now outranks what this run was told a moment ago: a pull request it
+    // has already released is not something this run is still waiting on.
+    if (result.queue?.outcome === 'dropped' && result.status !== 'merged') {
+      result.status = 'not-merged'
+      result.detail =
+        result.queue.membership === 'not-queued'
+          ? 'GitHub reports this pull request is no longer in a merge queue, and reports no reason for it'
+          : 'The pull request was closed without merging, so the queue dropped it'
+    }
   }
   let fetchMessage = ''
   try {

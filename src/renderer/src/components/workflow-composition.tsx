@@ -432,14 +432,26 @@ const mergeLayerPresentation: Record<
   failed: { label: 'failed', tone: 'danger' },
 }
 
-/** A terminal enqueue result and an open pull request do not prove current membership. */
+/**
+ * What a queue state means for this pull request, said only where the layer's own detail
+ * cannot: the detail already names GitHub's entry and its reason, so this line adds what
+ * follows from it — an unconfirmed read, an earlier confirmation, or what was left alone.
+ */
 function queueDetail(queue: NonNullable<MergeLayerResult['queue']>): string {
   if (queue.outcome === 'merged') return 'The merge queue landed this pull request.'
-  if (queue.outcome === 'dropped')
-    return 'The merge queue did not land this pull request: it is closed without merging. Close it out locally and enqueue again once the failing rule is resolved.'
+  if (queue.stale)
+    return 'GitHub could not be read just now, so this is the last confirmed queue state. Refresh to read the queue again.'
+  if (queue.outcome === 'queued') {
+    return 'The queue holds this pull request; it has not merged yet, and no local branch changed.'
+  }
+  if (queue.outcome === 'dropped') {
+    // What dropped it is named in the layer's own detail, because a closed pull request and
+    // one the queue let go are both dropped and only one of them can be enqueued again.
+    return 'No local branch was changed for this pull request.'
+  }
   if (queue.outcome === 'pending')
     return 'GitHub accepted this merge request and has not reported a result for it. Refresh to read the request again.'
-  return 'GitHub accepted this enqueue, but current queue membership is unconfirmed. Check the pull request timeline on GitHub for queue updates.'
+  return 'GitHub accepted this enqueue, but this read could not confirm whether the queue still holds this pull request. Refresh to read the queue again.'
 }
 
 export function MergeOutcomePanel({
@@ -455,6 +467,7 @@ export function MergeOutcomePanel({
   if (!progress) return null
   const failed = progress.layers.find((layer) => layer.status === 'failed')
   const landed = progress.layers.filter((layer) => layer.status === 'merged').length
+  const notMerged = progress.layers.filter((layer) => layer.status === 'not-merged')
   return (
     <WorkflowSection
       className={className}
@@ -473,7 +486,11 @@ export function MergeOutcomePanel({
             ? `${landed} pull request${landed === 1 ? '' : 's'} of this operation merged before it stopped, and no local branch was changed.`
             : 'No local branch was changed.'}
         </InlineAlert>
-      ) : progress.status === 'succeeded' ? (
+      ) : notMerged.length > 0 ? (
+        // A pull request the queue let go, or one that never merged, is not a success. The
+        // aggregate status cannot tell those apart from a finished merge, so the layers do.
+        <InlineAlert tone="warning">{progress.message}</InlineAlert>
+      ) : progress.layers.every((layer) => layer.status === 'merged') ? (
         <InlineAlert tone="success">{progress.message}</InlineAlert>
       ) : (
         <InlineAlert tone="info">{progress.message}</InlineAlert>

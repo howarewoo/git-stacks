@@ -197,15 +197,10 @@ test(
           layer.queue?.outcome ?? null,
         ]),
         [
-          [prFor(accepted, 'parent').number, 'enqueued', 'unconfirmed'],
-          [prFor(accepted, 'child').number, 'enqueued', 'unconfirmed'],
+          [prFor(accepted, 'parent').number, 'enqueued', 'queued'],
+          [prFor(accepted, 'child').number, 'enqueued', 'queued'],
         ],
-        'the enqueue and the queue evidence it carries are reported on the first read',
-      )
-      assert.doesNotMatch(
-        first?.layers[0]?.detail ?? '',
-        /has not reported a result/u,
-        'an enqueued request is not described as one that is still running',
+        'the queue that accepted the group reports holding it, by GitHub membership',
       )
 
       // The enqueue is journalled, so it outlives the result endpoint.

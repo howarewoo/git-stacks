@@ -148,6 +148,9 @@ const REPOSITORY_SLICE_KEYS = [
   'checks',
   'mergeQueue',
   'mergeQueueRefs',
+  'mergeQueueMembers',
+  'mergeQueueFields',
+  'mergeQueueEjects',
   'asyncMerge',
   'asyncMergeResult',
   'asyncMergeStaysPending',
@@ -597,6 +600,188 @@ function mergePullRequest(
   pr.mergedAt = new Date().toISOString()
   pr.mergeOid = mergedOid
   return { merged: true, sha: mergedOid, message: 'Pull Request successfully merged' }
+}
+
+/**
+ * The entry a merge queue holds for this pull request, or null when it holds none.
+ *
+ * A merged or closed pull request is out of the queue whatever the host's own record says,
+ * because the queue hands back every pull request it still has work for. A pull request that
+ * is open and absent from the record is the shape an ejected or never-queued request has: the
+ * queue is not holding it, which is a removal, not an absence of evidence.
+ */
+function queueEntryFor(
+  state: GitHubFixtureState,
+  pr: GitHubFixtureState['prs'][number],
+): { position: number; state: string; enqueuedAt: string } | null {
+  if (pr.state !== 'OPEN') return null
+  const entry = state.mergeQueueMembers?.[String(pr.number)]
+  return entry && entry.position > 0 && entry.state ? entry : null
+}
+
+/**
+ * Put a pull request into the merge queue the way this host accepts one. A GitHub-native stack
+ * is merged by one request for its top pull request, so every pull request of that stack joins
+ * the queue with it; a pull request whose stack is merged one request at a time joins alone.
+ */
+function enqueueInMergeQueue(state: GitHubFixtureState, pr: GitHubFixtureState['prs'][number]) {
+  const members = { ...(state.mergeQueueMembers ?? {}) }
+  const stack = (state.stacks ?? []).find((entry) =>
+    entry.pull_requests.some((member) => member.number === pr.number),
+  )
+  const numbers = stack ? stack.pull_requests.map((member) => member.number) : [pr.number]
+  const enqueuedAt = new Date().toISOString()
+  numbers.forEach((number, index) => {
+    members[String(number)] = { position: index + 1, state: 'QUEUED', enqueuedAt }
+  })
+  // A queue that takes a group and then releases it before the run reads back: the enqueue
+  // answer stays terminal and the membership is gone, which is what an ejection looks like.
+  if (state.mergeQueueEjects === true) {
+    for (const number of numbers) delete members[String(number)]
+  }
+  state.mergeQueueMembers = members
+}
+
+/**
+ * The queue fields of one pull request, as this host's schema answers them.
+ *
+ * A host whose schema has no queue fields answers a refusal, and a payload that carries the
+ * wrong shapes for them is unreadable in the same way. Both leave a client without membership
+ * to report, which is what makes them useful to test against: a build that answered "not in
+ * the queue" from either of them would be inventing a decision this host never made.
+ */
+function handleMergeQueueGraphql(
+  state: GitHubFixtureState,
+  body: Record<string, unknown>,
+): RestResult {
+  const variables = (body.variables ?? {}) as Record<string, unknown>
+  const pr = findPr(state, Number(variables.number))
+  const identity = {
+    number: pr.number,
+    headRefOid: currentHead(state, pr),
+    baseRefName: pr.base,
+  }
+  const mode = state.mergeQueueFields
+  if (mode === 'refused') {
+    return {
+      status: 200,
+      body: {
+        errors: [
+          {
+            message: "Field 'isInMergeQueue' doesn't exist on type 'PullRequest'",
+            type: 'undefinedField',
+          },
+        ],
+      },
+    }
+  }
+  if (mode === 'absent') {
+    return { status: 200, body: { data: { repository: { pullRequest: identity } } } }
+  }
+  if (mode === 'malformed') {
+    return {
+      status: 200,
+      body: {
+        data: {
+          repository: {
+            pullRequest: {
+              ...identity,
+              isMergeQueueEnabled: 'yes',
+              isInMergeQueue: 'no',
+              mergeQueueEntry: { position: '2', state: 3, enqueuedAt: null },
+            },
+          },
+        },
+      },
+    }
+  }
+  if (mode === 'no-head' || mode === 'no-base') {
+    // The pull request is named and one half of the pair it was read against is missing, so
+    // the booleans answer for a request this read never fully identified.
+    return {
+      status: 200,
+      body: {
+        data: {
+          repository: {
+            pullRequest: {
+              number: pr.number,
+              headRefOid: mode === 'no-head' ? null : identity.headRefOid,
+              baseRefName: mode === 'no-base' ? null : identity.baseRefName,
+              isMergeQueueEnabled: true,
+              isInMergeQueue: false,
+              mergeQueueEntry: null,
+            },
+          },
+        },
+      },
+    }
+  }
+  if (mode === 'state' || mode === 'date') {
+    // One field of an otherwise valid answer is unusable: an enum value no queue has, or a
+    // time that is not the documented scalar. Everything else, including the identity, is
+    // what this host would really answer.
+    const entry =
+      mode === 'state'
+        ? { position: 2, state: 'constructor', enqueuedAt: '2026-09-29T10:00:00Z' }
+        : { position: 2, state: 'QUEUED', enqueuedAt: 'Fri Oct 02 2026 00:00:00 GMT+0000' }
+    return {
+      status: 200,
+      body: {
+        data: {
+          repository: {
+            pullRequest: {
+              ...identity,
+              isMergeQueueEnabled: true,
+              isInMergeQueue: true,
+              mergeQueueEntry: entry,
+            },
+          },
+        },
+      },
+    }
+  }
+  if (mode === 'entry') {
+    // The membership answers truthfully and the entry does not: values no queue can hold.
+    return {
+      status: 200,
+      body: {
+        data: {
+          repository: {
+            pullRequest: {
+              ...identity,
+              isMergeQueueEnabled: true,
+              isInMergeQueue: true,
+              mergeQueueEntry: { position: -1, state: 'garbage', enqueuedAt: 'not-a-date' },
+            },
+          },
+        },
+      },
+    }
+  }
+  const entry = queueEntryFor(state, pr)
+  return {
+    status: 200,
+    body: {
+      data: {
+        repository: {
+          pullRequest: {
+            ...identity,
+            isMergeQueueEnabled: mergeQueueFor(state, pr.base),
+            isInMergeQueue: entry !== null,
+            mergeQueueEntry: entry
+              ? {
+                  id: `MQ_${pr.number}`,
+                  position: entry.position,
+                  state: entry.state,
+                  enqueuedAt: entry.enqueuedAt,
+                  headCommit: { oid: identity.headRefOid },
+                }
+              : null,
+          },
+        },
+      },
+    },
+  }
 }
 
 /**
@@ -1794,6 +1979,7 @@ function serveRepositoryRoutes(
       // The documented `200`: this pull request is already in a merge queue, so the result
       // is terminal and GitHub hands back no request identity to read it through.
       if (queued && state.asyncMergeAlreadyQueued) {
+        enqueueInMergeQueue(state, pr)
         return {
           status: 200,
           body: {
@@ -1835,6 +2021,7 @@ function serveRepositoryRoutes(
       const pr = findPr(state, number)
       if (canned?.status === 'enqueued') {
         clearScopedFact(state, 'asyncMerge')
+        enqueueInMergeQueue(state, pr)
         return {
           status: 200,
           body: {
@@ -1889,6 +2076,7 @@ function serveRepositoryRoutes(
         // An enqueued result is terminal and means the pull request joined a queue, not
         // that it merged; the queue itself is not simulated further.
         clearScopedFact(state, 'asyncMerge')
+        enqueueInMergeQueue(state, pr)
         return {
           status: 200,
           body: {
@@ -2123,6 +2311,11 @@ function handleGraphql(
         },
       },
     }
+  }
+  // A document that asks only for the queue fields is answered by the queue reader, so the
+  // schema it answers with stays the host's own rather than a shape this build prefers.
+  if (query.includes('isInMergeQueue')) {
+    return handleMergeQueueGraphql(state, body)
   }
   if (query.includes('pullRequest(number:')) {
     const pr = findPr(state, Number(variables.number))

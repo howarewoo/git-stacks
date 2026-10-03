@@ -10,7 +10,11 @@ import { SegmentedControl } from '../src/renderer/src/components/ui/segmented-co
 import { Textarea } from '../src/renderer/src/components/ui/textarea'
 import { TooltipProvider } from '../src/renderer/src/components/ui/tooltip'
 import { ShellSpecimen } from '../src/renderer/src/design-system/ShellSpecimen'
-import { ImmutableApproval } from '../src/renderer/src/components/workflow-composition'
+import {
+  ImmutableApproval,
+  MergeOutcomePanel,
+} from '../src/renderer/src/components/workflow-composition'
+import type { MergeProgress } from '../src/shared/types'
 import {
   liveGuardBase,
   publishPreview as specimenPublishPreview,
@@ -253,4 +257,42 @@ test('the one-time code and its cancel control do not depend on the account stat
   assert.ok(waiting.includes('Cancel sign-in'))
   assert.equal(waiting.includes('Open device page'), false)
   assert.equal(waiting.includes('ABCD-1234'), false)
+})
+
+test('merge outcome text distinguishes retained queue membership from a fresh read', () => {
+  for (const membership of ['queued', 'not-queued'] as const) {
+    const progress: MergeProgress = {
+      action: 'merge_queue',
+      status: 'queued',
+      message: 'Queue membership read.',
+      layers: [
+        {
+          branch: 'feature/checkout',
+          pullRequest: 42,
+          status: membership === 'queued' ? 'enqueued' : 'not-merged',
+          detail: 'Queue membership detail.',
+          mergedOid: null,
+          requestUuid: null,
+          queue: {
+            configured: true,
+            outcome: membership === 'queued' ? 'queued' : 'dropped',
+            requestedAt: '2026-10-03T00:00:00Z',
+            membership,
+            entry: null,
+            stale: false,
+          },
+        },
+      ],
+    }
+    const fresh = renderToStaticMarkup(React.createElement(MergeOutcomePanel, { progress }))
+    assert.doesNotMatch(fresh, /last confirmed queue state/u)
+    if (membership === 'queued') assert.match(fresh, /The queue holds this pull request/u)
+    else assert.match(fresh, /No local branch was changed for this pull request/u)
+
+    progress.layers[0].queue!.stale = true
+    const stale = renderToStaticMarkup(React.createElement(MergeOutcomePanel, { progress }))
+    assert.match(stale, /GitHub could not be read just now.*last confirmed queue state/u)
+    assert.doesNotMatch(stale, /The queue holds this pull request/u)
+    assert.match(stale, /Refresh to read the queue again/u)
+  }
 })
