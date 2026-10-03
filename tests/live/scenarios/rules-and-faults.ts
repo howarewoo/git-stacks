@@ -233,7 +233,11 @@ async function createRefConditionRuleSet(
         {
           type: 'required_status_checks',
           parameters: {
-            required_status_checks: [{ context: input.context, integration_id: null }],
+            // `integration_id` is omitted rather than filled with null: the contract
+            // types it as the integer an originating integration must have, and what
+            // this suite requires is a context it writes itself, which is no
+            // integration. Sent as null the host refuses the whole rule set.
+            required_status_checks: [{ context: input.context }],
             strict_required_status_checks_policy: false,
           },
         },

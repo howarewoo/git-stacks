@@ -387,6 +387,18 @@ const MERGE_QUEUE_NUMBERS = [
 
 const MERGE_QUEUE_METHODS = ['MERGE', 'SQUASH', 'REBASE'] as const
 
+/**
+ * Merge queue parameters a client may send but this contract does not have. They are
+ * refusable rather than merely ignored on purpose: the real API rejects the whole
+ * creation with a 422 when it sees one, so a host that quietly stores the rule lets a
+ * caller prove a capability from a request the real host never accepts.
+ */
+const UNSUPPORTED_MERGE_QUEUE_PARAMETERS = [
+  'queue_type',
+  'merge_commit_message',
+  'merge_commit_title',
+] as const
+
 function invalid(message: string): never {
   throw new HttpError(422, 'Unprocessable Entity', message)
 }
@@ -450,6 +462,11 @@ export function validateRuleSetCreation(body: unknown): void {
     const parameters = record(rule.parameters) ? rule.parameters : {}
     if (rule.type === 'merge_queue') {
       for (const key of MERGE_QUEUE_NUMBERS) requireNumber(parameters, key, 'merge_queue')
+      for (const key of UNSUPPORTED_MERGE_QUEUE_PARAMETERS) {
+        if (parameters[key] !== undefined) {
+          invalid(`merge_queue has no ${key} parameter; the request is refused whole`)
+        }
+      }
       const method = parameters.merge_method
       if (!MERGE_QUEUE_METHODS.includes(method as (typeof MERGE_QUEUE_METHODS)[number])) {
         invalid('merge_queue requires merge_method MERGE, SQUASH or REBASE')
@@ -485,6 +502,16 @@ export function validateRuleSetCreation(body: unknown): void {
         checks.some((entry) => !record(entry) || typeof entry.context !== 'string')
       ) {
         invalid('required_status_checks requires at least one named context')
+      }
+      // `integration_id` is documented as the integer an originating integration must
+      // have, so it is either absent or an id. Accepting `null` here would let a
+      // request the real API answers 422 for become a rule that gates on a context
+      // nobody can satisfy, which reads as a check that never arrives.
+      for (const entry of checks as Array<Record<string, unknown>>) {
+        const integration = entry.integration_id
+        if (integration !== undefined && !Number.isInteger(integration)) {
+          invalid('required_status_checks takes an integer integration_id or none at all')
+        }
       }
       requireBoolean(parameters, 'strict_required_status_checks_policy', 'required_status_checks')
     }

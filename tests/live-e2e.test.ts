@@ -505,6 +505,105 @@ test('a capability probe that cannot answer leaves no pull request or branch beh
   )
 })
 
+test('the queue and required-check permutations configure rule sets a real host accepts', async () => {
+  // The two rule-set permutations, run whole, over the production transport, against a
+  // host that refuses a creation body its own contract does not describe. That refusal
+  // is the point: a harness that names a parameter GitHub does not document answers 422
+  // on a real repository too, and the two things this covers — a merge queue on a base
+  // ref, and a context a merge is refused without — are exactly the capabilities a
+  // harness that cannot send either would report as unproven rather than fail.
+  const out: string[] = []
+  const err: string[] = []
+  const code = await runCli({
+    argv: [
+      '--controlled',
+      '--only',
+      'merge/queue-enqueue-is-proven-by-the-accept,' +
+        'rules/an-active-required-check-refuses-until-it-passes',
+    ],
+    env: {},
+    out: (line) => out.push(line),
+    err: (line) => err.push(line),
+  })
+  assert.equal(code, EXIT_OK, `the rule-set permutations failed: ${[...out, ...err].join('\n')}`)
+})
+
+test('the controlled host refuses a rule set shaped the way the documented contract has no shape for', async (t) => {
+  const run = await startControlled()
+  t.after(() => finish(run))
+  // The two shapes that were once sent and are not accepted by the real endpoint: a
+  // merge queue naming a parameter the contract does not have, and a required check
+  // carrying `null` where the contract types an integer. A host that stored either would
+  // turn a request the real API refuses into a rule it reports back as configured, which
+  // is how a run concludes a capability it never had.
+  const trunk = run.target.defaultBranch
+  const ruleSet = (rules: unknown[]): Record<string, unknown> => ({
+    name: 'an undocumented shape',
+    target: 'branch',
+    enforcement: 'active',
+    conditions: { ref_name: { include: [`refs/heads/${trunk}`], exclude: [] } },
+    rules,
+  })
+  const queue = {
+    type: 'merge_queue',
+    parameters: {
+      merge_method: 'MERGE',
+      min_entries_to_merge: 0,
+      max_entries_to_merge: 5,
+      min_entries_to_merge_wait_minutes: 0,
+      max_entries_to_build: 5,
+      check_response_timeout_minutes: 5,
+      grouping_strategy: 'ALLGREEN',
+      queue_type: 'base',
+    },
+  }
+  const check = (integration: unknown): Record<string, unknown> => ({
+    type: 'required_status_checks',
+    parameters: {
+      required_status_checks: [
+        { context: 'git-stacks-live-e2e/required', integration_id: integration },
+      ],
+      strict_required_status_checks_policy: false,
+    },
+  })
+  const refused = async (body: Record<string, unknown>): Promise<number> => {
+    try {
+      await run.target
+        .transport()
+        .rest({ method: 'POST', path: `repos/${run.target.repository()}/rulesets`, body })
+    } catch (error) {
+      assert.ok(error instanceof GitHubTransportError, `the host answered ${String(error)}`)
+      return error.status ?? 0
+    }
+    assert.fail('the host stored a rule set it documents no shape for')
+  }
+  assert.equal(
+    await refused(ruleSet([queue])),
+    422,
+    'a merge queue naming an undocumented parameter was accepted',
+  )
+  assert.equal(
+    await refused(ruleSet([check(null)])),
+    422,
+    'a required check naming a null integration was accepted',
+  )
+  // The same queue without it, and the same check without it, are the shapes the
+  // documented contract does describe, so the refusal above is the shape and not the
+  // rule.
+  const created = await run.target.admin.createRuleSet({
+    name: 'the documented shape',
+    enforcement: 'active',
+    baseRefs: [`refs/heads/${trunk}`],
+    mergeQueue: true,
+    requiredStatusCheck: 'git-stacks-live-e2e/required',
+  })
+  assert.ok(created.id > 0, 'the documented shape created no rule set')
+  assert.ok(
+    (await run.target.admin.mergeQueues(run.target.repository())).includes(trunk),
+    'a rule set built from the documented shape configured no queue',
+  )
+})
+
 test('cleanup reports a changed marker as unresolved and never records it as deleted', async (t) => {
   const run = await startControlled()
   // This checks the report and receipt contract, not remote preservation.
