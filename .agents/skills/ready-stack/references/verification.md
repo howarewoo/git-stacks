@@ -57,8 +57,11 @@ command spelling or on auto-loading the metadata.
    readiness. A bounded wait that expires yields pending verification; a genuine
    attributable failure is diagnosed/fixed, not waived. Dependent PRs are not
    claimed prepared while their prerequisite is blocked/pending.
-5. **Draft-gated CI.** After local verification, a selected draft can become ready
-   for review, triggering its checks. Readiness still depends on those results;
+5. **Draft-gated CI and serial review submission.** Start with all three PRs in
+   draft state. After each layer's local verification, observe its individual
+   ready-for-review transition and independent non-draft read-back, bottom first.
+   Finish its required checks/review before submitting the next layer; no bulk
+   or concurrent transitions. Draft-gated checks must run for the current head;
    the transition itself is not author-ready/merge-ready evidence.
 6. **Host/stack landing gate.** An observed landing-only dependency can yield
    author-ready when author verification is complete. Unknown protections yield
@@ -66,9 +69,24 @@ command spelling or on auto-loading the metadata.
    necessary for merge-ready; no landing action is taken.
 7. **Already prepared stack.** Rerun after independent confirmation. No duplicate
    commits, replies, resolutions, review requests, rewrites, or metadata updates.
+   Also exercise a draft bottom, already-ready middle, and draft top: transition
+   only bottom then top, with a fresh non-draft read for middle and no readiness
+   write or conversion back to draft. Still verify every layer before advancing.
 8. **No approval requirement.** When policy and current provider evidence require
    no human approval, its absence alone does not withhold merge-ready. Verify all
    other gates, including draft and dependent landing state; never invent policy.
+9. **Unconfirmed review submission.** Fail a bottom-layer readiness write or lose
+   its response. Do not submit descendants. Rediscover the bottom's draft state:
+   confirmed non-draft means no duplicate transition; still-draft may be retried
+   only after fresh preflight. An unreadable state remains blocked, never assumed
+   ready from the write response alone.
+10. **Already approved PR.** With fresh provider evidence confirming a non-draft
+    PR's approval remains valid under current repository policy, perform no
+    readiness transition, review request, or review resubmission. Still verify
+    current-head checks and other gates. Contrast with approval dismissed by a
+    later push: do not count the historical approval as current; request fresh
+    review through the configured mechanism when needed, without duplicating an
+    outstanding request.
 
 ## Safety and recovery
 
