@@ -9,9 +9,15 @@
  * creation, stage/commit, stash/pop, merge-conflict resolution, merge abort). Every Git assertion
  * is checked against the real `git` binary on the disposable repository, never the app snapshot.
  *
+ * The IPC boundary is exercised the same way: a second window this smoke owns, and the shipped
+ * window's own main frame at a foreign origin, both send real requests through the shipped preload
+ * bridge into the real `ipcMain` handlers, and are refused there while the authorized main frame
+ * keeps answering.
+ *
  * No production code or bundle edits: the runtime injections are the pre-main synthetic
- * credential fixture and a `shell.openExternal` patch. The external-link call is issued only
- * after its patch is proven in place.
+ * credential fixture, a `shell.openExternal` patch, the hidden window the unauthorized-sender check
+ * owns, and one foreign-origin document loaded into the app window's own frame at the end of the
+ * run. The external-link call is issued only after its patch is proven in place.
  *
  * Credential sealing is fixture-synthetic: before the first production statement runs (the main
  * entry is held at `--inspect-brk`), the shared `tests/fixtures/isolated-desktop.cjs` installs its
@@ -541,6 +547,165 @@ return {
 }`,
 )
 
+/**
+ * Read-only bridge calls, run inside whichever renderer's own document is under test. Each call
+ * resolves with either its value or the refusal main answered with, so the caller sees the real
+ * boundary result and never has to infer it.
+ */
+const READ_ONLY_PROBE = `(async () => {
+  const report = async (label, call) => {
+    try {
+      return { label, resolved: true, value: (await call()) ?? null }
+    } catch (error) {
+      return { label, resolved: false, message: String(error?.message ?? error) }
+    }
+  }
+  return {
+    href: location.href,
+    bridge: typeof window.desktop?.recentRepositories,
+    calls: [
+      await report('recentRepositories', () => window.desktop.recentRepositories()),
+      await report('refresh', () => window.desktop.refresh()),
+    ],
+  }
+})()`
+
+/**
+ * A document with no path, no file and no privilege behind it, loaded into the app window's own
+ * main frame so the sender and its frame are genuinely the app's own and only the origin differs.
+ */
+const FOREIGN_DOCUMENT = `data:text/html,${encodeURIComponent(
+  '<!doctype html><meta charset="utf-8"><title>foreign origin</title><p>foreign origin</p>',
+)}`
+
+/**
+ * open | probe | close for the window this smoke owns.
+ *
+ * The window is created in the main process that shipped the app, with the shipped preload and the
+ * same webPreferences the shipped window uses, and it loads the same app:// document. Its requests
+ * therefore cross the real ipcMain boundary as a second webContents holding the trusted origin:
+ * nothing here patches, wraps or re-implements the sender guard under test, and the window is
+ * destroyed again before the check returns.
+ */
+const MAIN_UNTRUSTED = mainScript(
+  'action, origin',
+  `const { BrowserWindow, app } = resolveElectron()
+const fs = process.getBuiltinModule('node:fs')
+const nodePath = process.getBuiltinModule('node:path')
+const probeSource = ${JSON.stringify(READ_ONLY_PROBE)}
+const store = (globalThis.__packagedSmokeUntrusted ??= {})
+const open = () => (store.window && !store.window.isDestroyed() ? store.window : null)
+if (action === 'close') {
+  const window = open()
+  if (window) window.destroy()
+  delete globalThis.__packagedSmokeUntrusted
+  return true
+}
+if (action === 'probe') {
+  const window = open()
+  if (!window) throw new Error('The unauthorized window is not open')
+  const contents = window.webContents
+  const deadline = Date.now() + 15000
+  while (contents.isLoading() && Date.now() < deadline) {
+    await new Promise((wait) => setTimeout(wait, 100))
+  }
+  const report = await contents.executeJavaScript(probeSource)
+  return {
+    ...report,
+    loading: contents.isLoading(),
+    senderId: contents.id,
+    appId: store.appId ?? null,
+    appUrl: store.appUrl ?? null,
+    windows: BrowserWindow.getAllWindows().length,
+  }
+}
+if (action !== 'open') throw new Error('Unknown unauthorized-window action ' + action)
+const previous = open()
+if (previous) previous.destroy()
+// The shipped window is identified while it is the only one, so the probe never has to guess which
+// of the two windows a URL belongs to.
+const shipped = BrowserWindow.getAllWindows().find(
+  (entry) => entry.webContents.getURL().startsWith(origin),
+)
+if (!shipped) throw new Error('The packaged app window is not on ' + origin)
+store.appId = shipped.webContents.id
+store.appUrl = shipped.webContents.getURL()
+const preload = nodePath.join(app.getAppPath(), 'out', 'preload', 'index.cjs')
+if (!fs.existsSync(preload)) throw new Error('The shipped preload is missing at ' + preload)
+store.window = new BrowserWindow({
+  show: false,
+  title: 'Git Stacks untrusted sender',
+  webPreferences: {
+    preload,
+    contextIsolation: true,
+    nodeIntegration: false,
+    nodeIntegrationInWorker: false,
+    nodeIntegrationInSubFrames: false,
+    sandbox: true,
+    webSecurity: true,
+    webviewTag: false,
+  },
+})
+await store.window.webContents.loadURL(origin + '/index.html')
+return { preload, visible: store.window.isVisible(), url: store.window.webContents.getURL() }`,
+)
+
+/**
+ * Loads a foreign-origin document in the shipped window's own main frame.
+ *
+ * `webContents.loadURL` is a main-process capability that the renderer's navigation guards do not
+ * cover, so it is the only way to reach the app window at an origin the renderer itself can never
+ * obtain. The sender and its frame are then genuinely the app's own, which is what leaves the
+ * origin check as the only thing standing between that document and every handler.
+ */
+const MAIN_FOREIGN_ORIGIN = mainScript(
+  'origin, url',
+  `const { BrowserWindow } = resolveElectron()
+const window = BrowserWindow.getAllWindows().find((entry) => entry.webContents.getURL().startsWith(origin))
+if (!window) throw new Error('The packaged app window is not on ' + origin)
+const contents = window.webContents
+const contentsIdBefore = contents.id
+await contents.loadURL(url)
+return {
+  url: contents.getURL(),
+  contentsIdBefore,
+  contentsIdAfter: contents.id,
+  frames: contents.mainFrame.frames.length,
+}`,
+)
+
+/**
+ * Reads every child frame the shipped window actually has, from the main process that owns them.
+ *
+ * A renderer can only read a frame it is same-origin with, so the parent's own view of a child
+ * frame proves nothing; the main process has no such restriction. Each frame is asked what it
+ * actually holds rather than what was requested for it, because a frame whose navigation was
+ * refused still carries the requested URL.
+ */
+const MAIN_CHILD_FRAMES = mainScript(
+  'origin',
+  `const { BrowserWindow } = resolveElectron()
+const window = BrowserWindow.getAllWindows().find((entry) => entry.webContents.getURL().startsWith(origin))
+if (!window) throw new Error('The packaged app window is not on ' + origin)
+const report = []
+for (const frame of window.webContents.mainFrame.frames) {
+  const inside = { href: 'unreadable', state: 'unreadable', desktop: 'unreadable', scripts: -1 }
+  try {
+    const held = await frame.executeJavaScript(
+      '({ href: location.href, state: document.readyState, desktop: typeof window.desktop, scripts: document.querySelectorAll("script").length })',
+    )
+    inside.href = held.href
+    inside.state = held.state
+    inside.desktop = held.desktop
+    inside.scripts = held.scripts
+  } catch (error) {
+    inside.href = 'error:' + String(error?.message ?? error)
+  }
+  report.push({ requested: frame.url, ...inside })
+}
+return { frames: report }`,
+)
+
 function launch(target, workspace) {
   const logStream = createWriteStream(join(workspace.evidence, 'packaged-app.log'))
   const child = spawn(
@@ -653,6 +818,104 @@ async function connectRenderer(devtools) {
     await new Promise((wait) => setTimeout(wait, 250))
   }
   throw new Error('The packaged window never exposed an app:// page over the DevTools endpoint')
+}
+
+/**
+ * The app-owned files a refused request must leave exactly as they were, read as bytes so that any
+ * write at all is visible rather than only a value the app itself would notice.
+ */
+function protectedState(userData) {
+  return ['repositories.json', 'settings.json']
+    .map((name) => {
+      const path = join(userData, name)
+      return existsSync(path)
+        ? `${name}=${readFileSync(path).toString('base64')}`
+        : `${name}=absent`
+    })
+    .join('|')
+}
+
+/**
+ * What the app's own main frame has to see before any repository is open: the recents read answered
+ * by its handler, and a refresh refused by the handler's own precondition rather than by the guard.
+ */
+function assertAuthorized(report, context) {
+  assertEqual(report.bridge, 'function', `The shipped window lost its preload bridge (${context})`)
+  const read = report.calls.find((call) => call.label === 'recentRepositories')
+  assert(
+    read.resolved,
+    `${context}: the authorized frame could not read the recents: ${read.message}`,
+  )
+  assertEqual(read.value.length, 1, `${context}: the authorized recents were not the seeded one`)
+  const refresh = report.calls.find((call) => call.label === 'refresh')
+  assert(
+    !refresh.resolved && /Open a local Git repository/.test(refresh.message),
+    `${context}: an authorized request never reached a handler body: ${refresh.message}`,
+  )
+}
+
+/**
+ * What a document the guard refuses has to see for every call: no value, the guard's own refusal,
+ * and never a handler precondition, which would mean the request reached the body behind the guard.
+ */
+function assertRefused(report, refusal) {
+  for (const call of report.calls) {
+    assert(
+      !call.resolved,
+      `A refused document was answered by ${call.label}: ${JSON.stringify(call.value)}`,
+    )
+    assert(refusal.test(call.message), `${call.label} was refused with "${call.message}"`)
+    assert(
+      !/Open a local Git repository/.test(call.message),
+      `${call.label} reached its handler body: ${call.message}`,
+    )
+  }
+}
+
+/**
+ * Gives three child frames of the app document a chance to load a document and leaves them there,
+ * so the main process can inspect them from outside the page, then reports what the parent can read.
+ *
+ * The parent's view is only part of the evidence: a frame the document is not same-origin with
+ * throws on property access, and that frame is reported as unreadable rather than counted as safe.
+ */
+async function startSubframes(page) {
+  return page.evaluate(async () => {
+    const frames = ['index.html', 'about:blank', 'data:text/html,<p>subframe</p>'].map((src) => {
+      const frame = document.createElement('iframe')
+      frame.setAttribute('src', src)
+      frame.setAttribute('aria-hidden', 'true')
+      frame.dataset.packagedSmokeSubframe = 'true'
+      document.body.append(frame)
+      return frame
+    })
+    await new Promise((settle) => setTimeout(settle, 1500))
+    return frames.map((frame) => {
+      const entry = { src: frame.getAttribute('src'), bridge: 'unreadable', url: 'unreadable' }
+      try {
+        // contextBridge publishes an object, so a frame holding it reports 'object' here, not
+        // 'function'. Reading the URL is a second, separate step because it throws cross-origin.
+        entry.bridge = typeof frame.contentWindow?.desktop
+        try {
+          entry.url = frame.contentWindow?.location.href ?? null
+        } catch {
+          entry.url = 'cross-origin'
+        }
+      } catch (error) {
+        entry.bridge = `blocked:${error.name}`
+      }
+      return entry
+    })
+  })
+}
+
+/** Removes every frame the subframe probe added, so the renderer is left as it was found. */
+async function stopSubframes(page) {
+  await page.evaluate(() => {
+    for (const frame of document.querySelectorAll('iframe[data-packaged-smoke-subframe]')) {
+      frame.remove()
+    }
+  })
 }
 
 function escapeForRegExp(value) {
@@ -1304,6 +1567,113 @@ async function run(options) {
       return `sandbox with context isolation, ${renderer.api.length} bridged methods, no Node globals in the page world`
     })
 
+    // The authorized frame answers first, so a refusal below can only come from the sender guard:
+    // the same preload, in the same main process, is proved to reach the handler bodies.
+    await check('IPC from an unauthorized sender is refused at the real boundary', async () => {
+      const authorized = await page.evaluate(READ_ONLY_PROBE)
+      assertAuthorized(authorized, 'before the unauthorized sender')
+      const protectedBefore = protectedState(probe.userData)
+      const opened = await inspector.call(MAIN_UNTRUSTED, 'open', ORIGIN)
+      assertEqual(opened.visible, false, 'The unauthorized sender window was shown on screen')
+      let unauthorized
+      try {
+        unauthorized = await inspector.call(MAIN_UNTRUSTED, 'probe', ORIGIN)
+        assert(
+          typeof unauthorized.senderId === 'number' &&
+            unauthorized.appId !== null &&
+            unauthorized.senderId !== unauthorized.appId,
+          `The unauthorized window is the shipped window (webContents ${unauthorized.senderId} against ${unauthorized.appId})`,
+        )
+        assert(unauthorized.loading === false, 'The unauthorized document never finished loading')
+        assert(
+          unauthorized.windows >= 2,
+          `The main process held ${unauthorized.windows} window, so no second sender existed`,
+        )
+        assertEqual(
+          unauthorized.bridge,
+          'function',
+          'The unauthorized document ran without the shipped preload bridge',
+        )
+        assert(
+          unauthorized.href.startsWith(`${ORIGIN}/`),
+          `The unauthorized document is ${unauthorized.href}, not the app origin`,
+        )
+        assertEqual(
+          unauthorized.appUrl.startsWith(`${ORIGIN}/`),
+          true,
+          'The shipped window is no longer on the app origin',
+        )
+        assertRefused(unauthorized, /Untrusted application request\.?/u)
+      } finally {
+        await inspector.call(MAIN_UNTRUSTED, 'close', ORIGIN)
+      }
+      assertEqual(
+        protectedState(probe.userData),
+        protectedBefore,
+        'A refused request changed the app-owned files',
+      )
+      assertAuthorized(await page.evaluate(READ_ONLY_PROBE), 'after the refusal')
+      return `webContents ${unauthorized.senderId} on ${ORIGIN} was refused by the shipped main process (preload ${opened.preload}) while webContents ${unauthorized.appId} kept answering, and the app-owned files are unchanged`
+    })
+
+    await check('no subframe of the app window can reach the preload bridge', async () => {
+      const holdsBridge = (desktop) => desktop === 'object' || desktop === 'function'
+      const parentView = await startSubframes(page)
+      let children
+      try {
+        assertEqual(parentView.length, 3, 'The subframe probe did not run every attempt')
+        // The parent's view stops at its own origin, so every child frame is read again from the
+        // main process, which asks the frame itself what it holds rather than what was requested.
+        children = await inspector.call(MAIN_CHILD_FRAMES, ORIGIN)
+      } finally {
+        await stopSubframes(page)
+      }
+      const describe = (frame) =>
+        `requested ${frame.requested ?? frame.src}, holds ${frame.href ?? frame.url} (${frame.state ?? 'unknown'}, ${frame.scripts ?? '?'} scripts, desktop ${frame.desktop ?? frame.bridge})`
+      const frames = [
+        ...parentView.map((frame) => ({
+          src: frame.src,
+          href: frame.url,
+          state: 'unknown',
+          scripts: '?',
+          desktop: frame.bridge,
+        })),
+        ...children.frames,
+      ]
+      const evidence = frames.map(describe).join('; ')
+      for (const frame of parentView) {
+        assert(
+          !holdsBridge(frame.bridge),
+          `The app document reached a preload bridge in its ${frame.src} frame: ${evidence}`,
+        )
+      }
+      for (const frame of children.frames) {
+        assert(
+          !holdsBridge(frame.desktop),
+          `A child frame of the app window held the preload bridge: ${evidence}`,
+        )
+        assert(
+          !frame.href.startsWith(`${ORIGIN}/`),
+          `A child frame of the app window loaded an app document: ${evidence}`,
+        )
+      }
+      const unreadable = frames.filter(
+        (frame) =>
+          String(frame.desktop).startsWith('error:') || String(frame.href).startsWith('error:'),
+      )
+      if (unreadable.length > 0) {
+        note(
+          `${unreadable.length} frame(s) could not be read at all; nothing is claimed about what they contain.`,
+        )
+      }
+      // No child frame of the shipped window holds an ipcRenderer, so the guard's frame clause has
+      // nothing to reject: this run measures that unavailability, it does not refuse a frame.
+      note(
+        'Subframe sender rejection is measured as unreachable rather than as a refused call: CSP frame-src none, the will-frame-navigate and will-attach-webview guards, and nodeIntegrationInSubFrames=false mean no child frame of the shipped window ever holds ipcRenderer.',
+      )
+      return `${parentView.length} frame attempts produced ${children.frames.length} child frame(s) in the app window, none holding the preload bridge: ${evidence}`
+    })
+
     await check('external links are validated before the shell sees them', async () => {
       const interception = await inspector.call(MAIN_EXTERNAL, 'install')
       assertEqual(
@@ -1639,8 +2009,9 @@ async function run(options) {
       return 'origin still holds only the fixture main branch at the published commit'
     })
 
-    // Run last: the blocked navigation leaves a pending load in the renderer, so every UI
-    // interaction has to happen before it.
+    // Run the last two together: the blocked navigation leaves a pending load in the renderer, and
+    // the foreign-origin document replaces the window's own frame, so every UI interaction and
+    // every authorized bridge call has to happen before them.
     await check('navigation and popups stay inside the app', async () => {
       const pagesBefore = page.context().pages().length
       const denied = await page.evaluate(() => {
@@ -1663,6 +2034,42 @@ async function run(options) {
       assert(page.url().startsWith(`${ORIGIN}/`), `The window navigated to ${page.url()}`)
       assertEqual(page.context().pages().length, pagesBefore, 'A popup opened a new page')
       return 'window.open denied and the off-app navigation was prevented'
+    })
+
+    await check('main answers the app origin and refuses a foreign one', async () => {
+      // A repository is open by now, so both read-only calls are answered by their handlers: the
+      // refusal that follows is the origin check alone.
+      const authorized = await page.evaluate(READ_ONLY_PROBE)
+      for (const call of authorized.calls) {
+        assert(call.resolved, `The authorized frame could not call ${call.label}: ${call.message}`)
+      }
+      const protectedBefore = protectedState(probe.userData)
+      const navigated = await inspector.call(MAIN_FOREIGN_ORIGIN, ORIGIN, FOREIGN_DOCUMENT)
+      assertEqual(
+        navigated.contentsIdAfter,
+        navigated.contentsIdBefore,
+        'The foreign document did not load in the app webContents',
+      )
+      assertEqual(navigated.frames, 0, 'The foreign document created child frames')
+      const deadline = Date.now() + UI_TIMEOUT
+      while (!page.url().startsWith('data:') && Date.now() < deadline) {
+        await new Promise((wait) => setTimeout(wait, 100))
+      }
+      assert(page.url().startsWith('data:'), `The app window still shows ${page.url()}`)
+      const foreign = await page.evaluate(READ_ONLY_PROBE)
+      assertEqual(foreign.bridge, 'function', 'The foreign origin did not run the shipped preload')
+      assertRefused(foreign, /Untrusted application origin\.?/u)
+      assertEqual(
+        protectedState(probe.userData),
+        protectedBefore,
+        'A refused foreign-origin request changed the app-owned files',
+      )
+      // The renderer cannot reach this state: the check above proves window.open and off-app
+      // navigation are refused, and only the main process can load a document into its own frame.
+      note(
+        'The foreign-origin document was loaded with webContents.loadURL in the shipped main process, which no renderer can reach; the attempt a renderer can make to leave the app origin is the navigation check above.',
+      )
+      return `${foreign.calls.length} read-only calls from that same main frame at a data: origin were refused as untrusted, the authorized frame answered immediately before, and the app-owned files are unchanged`
     })
 
     await report(null)

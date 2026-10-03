@@ -1481,6 +1481,15 @@ The smoke launches `release/mac-arm64/Git Stacks.app` by default on macOS and `r
 
 The packaged executable, preload bridge, CSP, window lifecycle, real 200% page zoom, external-link policy, and local Git workflows are exercised rather than inferred from a dev server. No GitHub mutation or personal repository is used. Native window-state API checks are not physical title-bar-button or VoiceOver verification; record those manual boundaries separately. The shared isolated desktop fixture is installed before the production main loads (an early Node-inspector pause, `--use-mock-keychain` and `--password-store=basic` on the launch), so this proof covers the actual shipped bundle and CSP under synthetic credential sealing: it is not a proof of the native OS secret store, and it is not proof of a signed release.
 
+### IPC sender validation
+
+The same packaged smoke proves the `validateSender` boundary in `src/main/index.ts` through the real Electron IPC path, never a renderer double or an exported guard. The authorized main frame calls read-only bridge methods first and is expected to be answered, then:
+
+- a second hidden window the smoke itself creates, in the same shipped main process, with the shipped preload and the shipped `webPreferences`, loading the same `app://` document, sends the same calls and must be refused as an untrusted request while the authorized frame keeps answering and `repositories.json`/`settings.json` stay byte-identical;
+- a `data:` document loaded with `webContents.loadURL` into the shipped window's own main frame — a capability no renderer holds, since the smoke's navigation check proves the renderer's own attempts to leave the origin are refused — must be refused as an untrusted origin from the very sender and frame the app trusts.
+
+Both refusals are checked against the handler's own precondition (`repository:refresh` needs an open repository), so a guard that stopped answering would be caught rather than mistaken for a refusal. The frame clause of the guard has no live case to reject: `frame-src 'none'`, the `will-frame-navigate` and `will-attach-webview` guards, and `nodeIntegrationInSubFrames: false` mean no child frame of the shipped window ever holds an `ipcRenderer`. The smoke attempts three subframes and then reads each child frame from the main process — a renderer can only read a frame it is same-origin with — asking the frame itself what it holds. Every child frame reports `typeof window.desktop === 'undefined'`, and the two whose navigation the CSP refused hold a `chrome-error://` document with no script at all rather than the requested app document. This measures that the frame clause is unreachable; it is not a live rejection proof for it.
+
 ### PR Inbox desktop smoke
 
 ```sh
