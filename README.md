@@ -1802,6 +1802,25 @@ not be observed becomes a note in the report, and a scenario whose capability is
 missing is a **failure**, not a skip — a suite that quietly stops covering merge
 queues would report green while the thing it exists to catch goes uncaught.
 
+### The rule sets it configures
+
+A rule set is created through `POST /repos/{owner}/{repo}/rulesets`, and the body is
+the one the endpoint documents: the seven required `merge_queue` parameters
+(`merge_method`, `min_entries_to_merge`, `min_entries_to_merge_wait_minutes`,
+`max_entries_to_merge`, `max_entries_to_build`, `check_response_timeout_minutes`,
+`grouping_strategy`) and nothing else, a required check named by `context` with
+`integration_id` omitted rather than set to `null`, the refs it protects stated in
+full, and the review-thread-resolution policy stated as `false`. Both omissions are
+the point: the endpoint refuses a parameter its contract does not have, and refuses
+an `integration_id` that is not an integration's integer id, so a body carrying
+`queue_type`, `merge_commit_message`, `merge_commit_title` or `integration_id: null`
+is a 422 on a real repository — a capability probe that sends one learns nothing
+about the account it asked, and the scenario that needed the queue or the check
+fails rather than reporting what it could not have configured. The controlled host
+holds the same line: it refuses those bodies with the same 422 rather than storing
+them, so a harness that regresses fails there before anyone spends a credential on a
+request github.com would refuse.
+
 ### Which branch a run works on
 
 The trunk is whatever the host says it is. The repository's default branch is

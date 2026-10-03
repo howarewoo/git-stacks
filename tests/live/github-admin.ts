@@ -566,16 +566,24 @@ export class GitHubAdmin implements LiveAdmin {
   /**
    * Creates a branch rule set, in the shape GitHub's ruleset contract documents.
    *
-   * Three things here are not stylistic. The ref condition is required and fully
+   * Four things here are not stylistic. The ref condition is required and fully
    * qualified, because a rule set with no condition governs the whole repository —
    * which is how a required check ends up refusing the topic branch push that was
    * supposed to satisfy it, before the scenario has asserted anything. The merge
-   * queue's parameters are the documented required set with the documented enum,
+   * queue's parameters are the seven the contract requires, with the documented enums,
    * because an incomplete queue rule is rejected by the host for the account that is
-   * perfectly allowed to configure one. And the review-thread-resolution policy is
-   * stated explicitly as `false`, because the permutation under test is about
-   * approvals: leaving it unstated would either be an invalid request or, read the
-   * other way, quietly add a conversation-resolution requirement nobody asked for.
+   * perfectly allowed to configure one. Those seven are also the whole of it: a host
+   * that refuses a parameter its contract does not have refuses the entire request, so
+   * a queue rule carrying `queue_type`, `merge_commit_message` or
+   * `merge_commit_title` is a 422 rather than a queue, and a probe that sends one
+   * learns nothing about the account it was asking about. The same rule applies to the
+   * required check: `integration_id` is documented as the integer an originating
+   * integration must have, so `null` is not a value for it and the parameter is omitted
+   * rather than filled in — this run writes its check runs with the credential it was
+   * handed, which is no integration. And the review-thread-resolution policy is stated
+   * explicitly as `false`, because the permutation under test is about approvals:
+   * leaving it unstated would either be an invalid request or, read the other way,
+   * quietly add a conversation-resolution requirement nobody asked for.
    *
    * No bypass actor is invented. A run has no real app, team or organization admin
    * id to name, so it creates the rule fully enforced and says so.
@@ -618,16 +626,9 @@ export class GitHubAdmin implements LiveAdmin {
                 {
                   type: 'merge_queue',
                   parameters: {
-                    queue_type: 'base',
                     merge_method: 'MERGE',
-                    merge_commit_message: 'queued from the live GitHub suite',
-                    merge_commit_title: 'queued from the live GitHub suite',
                     min_entries_to_merge: 0,
                     max_entries_to_merge: 5,
-                    // The three fields GitHub's contract requires and this request
-                    // used to omit. Without them the rule is invalid for every
-                    // account, including one allowed to configure queues, so a probe
-                    // sending it learns nothing about the account.
                     min_entries_to_merge_wait_minutes: 0,
                     max_entries_to_build: 5,
                     check_response_timeout_minutes: 5,
@@ -641,9 +642,7 @@ export class GitHubAdmin implements LiveAdmin {
                 {
                   type: 'required_status_checks',
                   parameters: {
-                    required_status_checks: [
-                      { context: input.requiredStatusCheck, integration_id: null },
-                    ],
+                    required_status_checks: [{ context: input.requiredStatusCheck }],
                     strict_required_status_checks_policy: false,
                     // The check gates merges onto the refs this rule set names; it is
                     // not a reason to refuse creating the branch that will carry the
