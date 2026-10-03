@@ -372,6 +372,13 @@ when that is set, and cleans up its own processes, profile, and repository
 otherwise. It is complementary to the [packaged desktop smoke](#packaged-desktop-smoke),
 not a substitute for it.
 
+A control in that window is pressed at a real point, and the press counts only
+once the window reports that exact control receiving the click. A window that
+re-lays-out between measuring a control and pressing it has the press aimed
+again, up to four times, when the press reached nothing; a press that reached a
+different control, or that the window cannot account for at all, is reported
+rather than repeated.
+
 Both launches — the initial one and the restarted process — start through the
 isolated desktop fixture, `tests/fixtures/isolated-desktop.cjs`, which runs as
 the Electron main entry instead of the production main file. The fixture
