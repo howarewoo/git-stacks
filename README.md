@@ -109,9 +109,11 @@ Prepare the stack containing <canonical PR URL> using ready-stack --preview.
 ```
 
 Preparation includes scoped corrections, review-thread handling, verification,
-publication, restacking, and ready-for-review transitions. Missing human approval
-does not prevent preparing descendants once author-side work and required checks
-are complete; the report distinguishes author-ready from actually merge-ready.
+publication, and restacking. After each layer's corrections and local verification,
+it submits drafts for review one at a time, bottom-to-top, and leaves already-ready
+PRs unchanged. Valid existing approval means no review resubmission or new request.
+Missing human approval does not prevent preparing descendants once author work and
+required checks are complete; the report distinguishes author-ready from merge-ready.
 The skill never merges, enqueues, or changes auto-merge. Preview is read-only,
 and loading the skill alone grants no mutation authority.
 The report is also the recovery handoff: it records verified state and the first
