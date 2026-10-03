@@ -814,50 +814,151 @@ async function main() {
         return { x: box.x, y: box.y, width: box.width, height: box.height }
       })()`)
     /**
-     * A real pointer press at a real point. The press travels the same path a
-     * person's does, so a control that was scrolled out of the viewport or
-     * covered by something else is reported as unreachable rather than being
-     * pressed anyway by a click that never went through the window.
+     * What a press can land on that is not the control it was aimed at but is
+     * still a control of its own, so that reaching one is never mistaken for
+     * reaching the one this run meant to press.
+     */
+    const PRESS_INTERACTIVE =
+      'a[href],button,input,select,textarea,summary,[role="button"],[role="checkbox"],[role="combobox"],[role="link"],[role="menuitem"],[role="menuitemcheckbox"],[role="menuitemradio"],[role="option"],[role="radio"],[role="searchbox"],[role="slider"],[role="spinbutton"],[role="switch"],[role="tab"],[role="textbox"],[role="treeitem"],[contenteditable="true"]'
+    /**
+     * A press at a real point on a real control, settled only by what the
+     * window reports having received. The reach check is against the geometry
+     * of the moment it was taken, and the window can re-lay-out between that
+     * and the dispatch: the capability matrix that replaces the host field's
+     * "not answered yet" line grows this vertically centred dialog and carries
+     * its button up with it, so a press aimed a moment earlier lands beside the
+     * control instead of on it.
+     *
+     * The watcher is on the document in the capture phase and settles what it
+     * saw there and then, while the nodes are still the ones that were
+     * clicked, because a handler may remove or reparent them before anything
+     * gets to look. Only one answer is a press that happened: the control
+     * itself receiving the click.
+     *
+     * A press another control received is never repeated, because that control
+     * may already have acted. A press that reached neither the control nor any
+     * other control is aimed again, up to a fixed number of times. Anything the
+     * window cannot account for — the control leaving the screen without the
+     * press reaching it, or the report never coming back — is an error and
+     * never a press that worked.
      */
     const press = async (expression, description) => {
-      const box = await boxOf(expression)
-      if (!box) {
-        throw new Error(`no ${description} on screen: ${await page('document.body.innerText')}`)
+      // A press that reached nothing at all is aimed again a few times, which
+      // is a person pressing again while the window is still settling and not a
+      // way of waiting on a control that never stops moving.
+      const attempts = 4
+      for (let attempt = 1; ; attempt += 1) {
+        const box = await boxOf(expression)
+        if (!box) {
+          throw new Error(`no ${description} on screen: ${await page('document.body.innerText')}`)
+        }
+        const viewport = await page('({ width: window.innerWidth, height: window.innerHeight })')
+        assert.ok(
+          box.x >= 0 &&
+            box.y >= 0 &&
+            box.x + box.width <= viewport.width + 1 &&
+            box.y + box.height <= viewport.height + 1,
+          `${description} is not inside the viewport a person presses in: ${JSON.stringify({ box, viewport })}`,
+        )
+        const x = box.x + box.width / 2
+        const y = box.y + box.height / 2
+        // A press only counts if the window would hand that point to this
+        // control and not to something drawn over it, which is what a person
+        // finds out the moment the press does nothing.
+        const reaches = await page(
+          `(() => { const el = ${expression}; if (!el) return null; const hit = document.elementFromPoint(${x}, ${y}); return hit === el || (hit !== null && el.contains(hit)) ? null : (hit ? hit.tagName + '.' + hit.className + ' "' + hit.innerText.slice(0, 40) + '"' : 'nothing at that point') })()`,
+        )
+        assert.equal(reaches, null, `${description} is covered by something else: ${reaches}`)
+        const watched = await page(
+          `(() => {
+            const el = ${expression}
+            if (!el) return false
+            const watch = { el, delivered: false, foreign: null, onClick: null }
+            watch.onClick = (event) => {
+              const target = event.target
+              if (!(target instanceof Element)) return
+              if (target === el || el.contains(target)) { watch.delivered = true; return }
+              if (watch.foreign !== null) return
+              const control = target.closest('${PRESS_INTERACTIVE}')
+              if (control !== null) {
+                watch.foreign = control.tagName + ' "' + (control.innerText || control.getAttribute('aria-label') || '').trim().slice(0, 60) + '"'
+              }
+            }
+            document.addEventListener('click', watch.onClick, true)
+            window.__pressWatch = watch
+            return true
+          })()`,
+        )
+        assert.equal(
+          watched,
+          true,
+          `the window would not report what the ${description} received, so no press of it can be proved`,
+        )
+        let landed = null
+        try {
+          await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y })
+          await send('Input.dispatchMouseEvent', {
+            type: 'mousePressed',
+            x,
+            y,
+            button: 'left',
+            buttons: 1,
+            clickCount: 1,
+          })
+          await send('Input.dispatchMouseEvent', {
+            type: 'mouseReleased',
+            x,
+            y,
+            button: 'left',
+            buttons: 0,
+            clickCount: 1,
+          })
+          landed = await page(
+            `(() => {
+              const watch = window.__pressWatch
+              if (!watch) return { watched: false }
+              // Detached before the handle is dropped, so that a detach that
+              // throws still leaves the finally below something to clean up.
+              document.removeEventListener('click', watch.onClick, true)
+              delete window.__pressWatch
+              return {
+                watched: true,
+                delivered: watch.delivered,
+                foreign: watch.foreign,
+                connected: watch.el.isConnected,
+              }
+            })()`,
+          )
+        } finally {
+          // A dispatch that never came back leaves the watcher attached, and a
+          // watcher left attached would report the next press's click as this
+          // one's.
+          await page(
+            `(() => { const watch = window.__pressWatch; if (!watch) return true; document.removeEventListener('click', watch.onClick, true); delete window.__pressWatch; return true })()`,
+          ).catch(() => {})
+        }
+        if (!landed?.watched) {
+          throw new Error(
+            `the window never reported what the press aimed at ${JSON.stringify({ x, y })} received, so the ${description} is unaccounted for rather than pressed`,
+          )
+        }
+        if (landed.delivered) return
+        if (landed.foreign !== null) {
+          throw new Error(
+            `the press aimed at ${JSON.stringify({ x, y })} for the ${description} reached ${landed.foreign}, a control of its own that may already have acted, so it is not pressed again`,
+          )
+        }
+        if (!landed.connected) {
+          throw new Error(
+            `the ${description} left the screen without the press aimed at ${JSON.stringify({ x, y })} reaching it, so it is unaccounted for rather than pressed`,
+          )
+        }
+        if (attempt >= attempts) {
+          throw new Error(
+            `the ${description} moved out from under ${attempt} presses aimed at it and none of them reached anything the window reports as a control`,
+          )
+        }
       }
-      const viewport = await page('({ width: window.innerWidth, height: window.innerHeight })')
-      assert.ok(
-        box.x >= 0 &&
-          box.y >= 0 &&
-          box.x + box.width <= viewport.width + 1 &&
-          box.y + box.height <= viewport.height + 1,
-        `${description} is not inside the viewport a person presses in: ${JSON.stringify({ box, viewport })}`,
-      )
-      const x = box.x + box.width / 2
-      const y = box.y + box.height / 2
-      // A press only counts if the window would hand that point to this control
-      // and not to something drawn over it, which is what a person finds out
-      // the moment the press does nothing.
-      const reaches = await page(
-        `(() => { const el = ${expression}; if (!el) return null; const hit = document.elementFromPoint(${x}, ${y}); return hit === el || (hit !== null && el.contains(hit)) ? null : (hit ? hit.tagName + '.' + hit.className + ' "' + hit.innerText.slice(0, 40) + '"' : 'nothing at that point') })()`,
-      )
-      assert.equal(reaches, null, `${description} is covered by something else: ${reaches}`)
-      await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y })
-      await send('Input.dispatchMouseEvent', {
-        type: 'mousePressed',
-        x,
-        y,
-        button: 'left',
-        buttons: 1,
-        clickCount: 1,
-      })
-      await send('Input.dispatchMouseEvent', {
-        type: 'mouseReleased',
-        x,
-        y,
-        button: 'left',
-        buttons: 0,
-        clickCount: 1,
-      })
     }
     /** Scrolls a control into the viewport the way a person scrolls to it. */
     const reveal = async (expression, description) => {
