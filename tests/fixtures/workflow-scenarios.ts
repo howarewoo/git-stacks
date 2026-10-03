@@ -391,27 +391,28 @@ export const syncPreview: StackPreview = {
 }
 
 /**
- * The sentence a read contributes for a pull request GitHub accepted into a queue. It is
- * named because a later read swaps it for what the queue did, and a pull request that is
- * still open says nothing about membership either way.
+ * The sentence a read contributes for a pull request a merge queue still holds. It is named
+ * because a later read swaps it for what the queue did with it, and an accepted enqueue says
+ * nothing about membership on its own.
  */
-export const mergeStatusQueueSentence =
-  'Pull request #40 joined the merge queue; current queue membership is unconfirmed.'
+export const mergeStatusQueueSentence = 'GitHub reports pull request #40 in the merge queue.'
 
-/** What a read-only refresh reports: one pull request the queue took, one still running. */
+/** What a read-only refresh reports: one pull request the queue holds, one still running. */
 export const mergeStatus: MergeStatus = {
   layers: [
     {
       branch: 'feature/checkout',
       pullRequest: 40,
       status: 'enqueued',
-      detail:
-        'GitHub accepted this enqueue at 2026-09-29T10:00:00.000Z; this pull request is still open, which does not say whether the queue still holds it',
+      detail: 'GitHub reports this pull request in the merge queue at position 1, queued',
       mergedOid: null,
       queue: {
         configured: true,
-        outcome: 'unconfirmed',
+        outcome: 'queued',
         requestedAt: '2026-09-29T10:00:00.000Z',
+        membership: 'queued',
+        entry: { position: 1, state: 'QUEUED', enqueuedAt: '2026-09-29T10:00:00.000Z' },
+        stale: false,
       },
       requestUuid: 'fixture-queued-40',
     },
@@ -422,7 +423,14 @@ export const mergeStatus: MergeStatus = {
       detail:
         'The merge request GitHub accepted at 2026-09-29T10:05:00.000Z has not reported a result yet',
       mergedOid: null,
-      queue: { configured: true, outcome: 'pending', requestedAt: '2026-09-29T10:05:00.000Z' },
+      queue: {
+        configured: true,
+        outcome: 'pending',
+        requestedAt: '2026-09-29T10:05:00.000Z',
+        membership: null,
+        entry: null,
+        stale: false,
+      },
       requestUuid: 'fixture-pending-41',
     },
   ],

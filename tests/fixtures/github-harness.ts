@@ -82,6 +82,14 @@ export interface GitHubFixtureRepositoryState {
   /** The legacy queue switch: a merge queue this fixture is serving on its base branch. */
   mergeQueue?: boolean
   mergeQueueRefs?: string[]
+  mergeQueueMembers?: Record<string, { position: number; state: string; enqueuedAt: string }>
+  mergeQueueFields?:
+    'refused' | 'absent' | 'malformed' | 'entry' | 'state' | 'date' | 'no-head' | 'no-base'
+  /**
+   * Releases a group the queue has just accepted, so the enqueue answer stays terminal while
+   * the membership is gone by the time the run reads it back.
+   */
+  mergeQueueEjects?: boolean
   asyncMerge?: {
     number: number
     sha: string
@@ -469,6 +477,25 @@ export interface GitHubFixtureState {
   mergeQueue?: boolean
   /** Base refs a merge queue is configured on, which the live suite probes for. */
   mergeQueueRefs?: string[]
+  /**
+   * The pull requests a merge queue currently holds, keyed by number, with the entry the host
+   * reports for each. A pull request that is absent from this map but open on a queued base is
+   * a pull request the queue has let go, which is what an ejected request looks like.
+   */
+  mergeQueueMembers?: Record<string, { position: number; state: string; enqueuedAt: string }>
+  /**
+   * How this host's schema answers the queue fields: `refused` is a schema without them,
+   * `absent` is an answer whose payload omits them, and `malformed` is one that carries
+   * values of the wrong shape. All three are reads a client cannot answer membership from.
+   * `entry` answers membership truthfully and the entry with values no queue can hold.
+   */
+  mergeQueueFields?:
+    'refused' | 'absent' | 'malformed' | 'entry' | 'state' | 'date' | 'no-head' | 'no-base'
+  /**
+   * Releases a group the queue has just accepted, so the enqueue answer stays terminal while
+   * the membership is gone by the time the run reads it back.
+   */
+  mergeQueueEjects?: boolean
   /**
    * The terminal result a pending asynchronous merge reports when its poll is read, so a test
    * can stand in for a queue that accepted, or refused, the group.
