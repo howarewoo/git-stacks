@@ -1571,6 +1571,19 @@ The smoke launches the real Electron main process and preload bridge — never a
 
 This is a dev-main smoke; the packaged executable, preload packaging, and CSP remain the packaged desktop smoke's proof, and a real OS key-store acceptance is a separate manual gate.
 
+### Update flow smoke
+
+```sh
+npm run build
+npm run test:update-flow
+```
+
+`scripts/update-flow-smoke.mjs` launches the built app — real main process, real preload, real renderer — through the shared [isolated desktop fixture](#isolated-desktop-fixture), which is the Electron main entry rather than `out/main/index.js`: it installs a synthetic AES-256-GCM sealing backend, proves no native `safeStorage` method is still reachable, and only then imports the production main with `--use-mock-keychain` and `--password-store=basic`, so if that proof fails the production module is never loaded at all. One disposable temporary root holds the repository the app opens, the Chromium profile, the Git and gh configuration, the fixture's sealing key and this run's generated TLS material; it is removed on every way out of the run — success, failure or signal — and `--keep` retains it for inspection. Inherited git and gh state, GitHub credentials, secret-shaped variables, `SSH_AUTH_SOCK`, the `NODE_OPTIONS`, `NODE_TLS_*`, `NODE_EXTRA_*` and `ELECTRON_*` overrides are dropped before the app is launched; that repository is also initialised and committed under the same held environment, so no host git identity, template, `GIT_DIR` or signing key decides what the app is shown first.
+
+macOS has the app inherit the host home, as the other desktop runs do, because its sandboxed helper processes only come up against the home the password database reports — so `HOME` is the one path this run does not own, and the paths git and gh read are held to the run's own files instead. The app reports what its Git environment can already do by running `git config` from that home, which a home that is itself a Git repository would answer from its own local configuration. **That arrangement is unsupported and refused**: before the app starts, the run asks git only whether that directory is inside a work tree — a metadata question, with no configuration value read — and stops with a prerequisite error if it is. The run never reads that repository and never acts on it; on such a machine it does not run.
+
+The run then reads the launched process's own environment back out of the app's main process and asserts that none of those shapes arrived from outside, that the fixture marker and its 0600 sealing key are on disk before the app is driven, and that the commit carries this run's own identity. The window is driven over the DevTools protocol — real mouse events, real typing, screenshots — against a release server this script owns with a certificate generated for the run: the manifest is signed, offered, downloaded and proved against the recorded digest, and an installer changed on disk after the download is refused without anything being run. That is dev-main evidence; it is not acceptance of the real OS key store, a signed release, or the packaged app, and a real OS key-store acceptance remains a separate manual gate.
+
 ### Isolated desktop fixture
 
 `tests/fixtures/isolated-desktop.cjs` launches the real production main, preload, and renderer (`out/main/index.js`), with the Electron main entry replaced by the fixture itself:
