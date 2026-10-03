@@ -708,6 +708,33 @@ Recent failures is included only when something was recorded. It carries the
 main-process failure summaries described under **Handled failures** above, and
 they pass through the same secret and path redaction as every other field.
 
+### The optional GitHub CLI
+
+**Settings → Diagnostics** reports the adapter this build is configured to use.
+`GIT_STACKS_GITHUB_TRANSPORT` names the preference — `direct` for the GitHub
+API, `gh` for the GitHub CLI, and `auto` (the default, and what an unset or
+unrecognised value means) for whichever of the two can serve a request. The
+report names the mode as configured. Under `auto` it does **not** name the
+adapter in use, because that depends on whether this app holds a usable GitHub
+credential, and a diagnostics run does not read one; the line reads _not
+established_ instead.
+
+Detection is one bounded, fixed command: `gh --version`, run through the same
+allowlist as the Git probes, with a byte cap, a deadline, and an environment
+carrying no GitHub credential. There is no `gh auth status`, no `gh auth token`,
+no request to any host, and no path to the binary in the report or the bundle —
+the output is projected down to the semantic version the CLI named, and output
+this build does not recognise is reported as unrecognised rather than partially
+believed. A CLI that exits non-zero, times out, or is absent produces the same
+safe _unavailable_ answer, and none of the CLI's own account, host, or
+credential is ever asked for or shown.
+
+`gh` is optional. A machine without it is reported, never failed: nothing in
+this app and no sign-in depends on it, so a missing CLI is a fact about the
+computer with nothing to go and fix. A configuration that resolved to `direct`
+does not run the CLI at all — this build will not use it — and the report says
+the CLI was _not asked_, which is a different fact from the CLI being missing.
+
 ## Signed updates
 
 A release is a signed manifest plus the artifacts that manifest names. The app

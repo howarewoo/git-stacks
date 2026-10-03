@@ -68,6 +68,7 @@ import type {
 } from '../../../src/shared/review-threads'
 import { checksReportFor, notificationInbox, scenarios } from './scenarios'
 import { updateStatusFixture } from './update-status'
+import { diagnosticsReportFixture } from './diagnostics'
 import { DEFAULT_SCENARIO, type ScenarioName } from './manifest'
 import type { PullRequestChecksReport } from '../../../src/shared/pull-request-checks'
 import type { FixtureCall, FixtureCallRecord, FixtureControl, FixtureScenario } from './types'
@@ -1440,6 +1441,14 @@ export function installFixtureControl(options: {
     cancelUpdate: () => {
       record('cancelUpdate', [])
       return answer('cancelUpdate', () => updateStatusFixture.cancelled)
+    },
+    // The capability report main builds from its own fixed allowlist. The
+    // gallery answers with the same shape, including the adapter lines for the
+    // optional GitHub CLI, so the Diagnostics section renders what a real
+    // report carries rather than a shortened stand-in.
+    diagnostics: () => {
+      record('diagnostics', [])
+      return answer('diagnostics', () => structuredClone(diagnosticsReportFixture))
     },
     onUpdateStatus: (listener) => {
       updateListeners.add(listener)

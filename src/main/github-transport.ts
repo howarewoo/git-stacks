@@ -1849,9 +1849,7 @@ export function setGitHubHostTransport(host: string, transport: GitHubTransport 
 
 export function githubTransport(env: NodeJS.ProcessEnv = process.env): GitHubTransport {
   if (installed) return installed
-  const configured = env[GITHUB_TRANSPORT_ENV]
-  const choice: GitHubTransportChoice =
-    configured === 'direct' || configured === 'gh' ? configured : 'auto'
+  const choice = githubTransportChoice(env)
   const token = resolveGitHubToken(env)
   // A different token, API version, or signed-in identity changes what a stored
   // body means. Availability is part of the key, so a sign-in or a sign-out
@@ -1898,9 +1896,7 @@ export function githubTransportForHost(
   const hostTransport = installedByHost.get(key)
   if (hostTransport) return hostTransport
   if (installed) return installed
-  const configured = env[GITHUB_TRANSPORT_ENV]
-  const choice: GitHubTransportChoice =
-    configured === 'direct' || configured === 'gh' ? configured : 'auto'
+  const choice = githubTransportChoice(env)
   // A credential only counts for the host it was issued by. Signing in to one
   // host therefore neither enables nor disables another host's own transport.
   const token = resolveGitHubToken(env, key)
@@ -1927,4 +1923,18 @@ export function githubTransportForHost(
       })
   cached = { key: cacheKey, transport }
   return transport
+}
+
+/**
+ * The adapter preference this process was configured with, named by
+ * `GIT_STACKS_GITHUB_TRANSPORT`. Anything else — unset, empty, or a value this
+ * build does not know — is `auto`, because an unrecognised preference must not
+ * select an adapter nobody asked for.
+ *
+ * This is the one place that preference is read, so the resolver and the
+ * diagnostics report cannot disagree about which mode this process runs in.
+ */
+export function githubTransportChoice(env: NodeJS.ProcessEnv = process.env): GitHubTransportChoice {
+  const configured = env[GITHUB_TRANSPORT_ENV]
+  return configured === 'direct' || configured === 'gh' ? configured : 'auto'
 }
