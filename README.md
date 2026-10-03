@@ -1608,17 +1608,76 @@ When adding a variant or migrating a view:
 
 Automated axe and contrast checks supplement, not replace, human keyboard and assistive-technology review. Final migration sign-off requires an explicitly recorded manual pass; missing evidence is a blocker, not an implied pass. The `Accessibility checks` workflow automates what a machine can judge; the script below is the part it cannot.
 
-Use the packaged build and only disposable fixture repositories. `npm run test:desktop -- --keep` retains its disposable workspace and prints the path for a reviewer. Open only that fixture repository in the packaged app; remove the retained workspace after review.
+**Two platforms, two records.** The target readers are VoiceOver on macOS and Narrator or NVDA on Windows; the `Accessibility checks` workflow runs headless Chromium on Linux and is evidence for no reader. One record per platform, each naming the reviewer, the date, the OS version and build, the app revision under test (`git rev-parse HEAD`), the reader with its version and settings, display scaling, the keyboard input modes in force (Sticky, Filter, and Slow Keys on Windows; keyboard menu navigation on macOS), and whether the chords are the shipped defaults or the ones set in Settings → Keyboard shortcuts. A macOS record does not answer the Windows one, an unrun platform is recorded as not run, and the evidence belongs in the pull request.
 
-1. Record reviewer, date, exact macOS/build, Electron/app revision, VoiceOver version/settings, display scaling, and keyboard navigation settings.
+**What to launch.** `npm ci`, then `npm run package`, then the unpacked application from `release/`: macOS `release/mac-arm64/Git Stacks.app/Contents/MacOS/Git Stacks` (or `release/mac/Git Stacks.app/Contents/MacOS/Git Stacks`), Linux `release/linux-unpacked/git-stacks`, Windows `release/win-unpacked/Git Stacks.exe`. `npm run test:desktop` is the automated packaged smoke: it supports macOS and Linux and refuses Windows ("Packaged desktop smoke supports macOS and Linux only; Windows process-tree cleanup is not implemented"), so the Windows pass is manual, and on the platforms it supports `--keep` retains its disposable workspace and prints the path.
+
+**An owned, credential-free run.** Everything the pass touches lives in one directory this pass creates, and the app is launched from a shell that carries none of the machine's Git, GitHub, or credential state. A fresh `--user-data-dir` is part of that, not all of it: it holds `settings.json`, `repositories.json`, the stored GitHub account, and the notification state, but the app also reads `GIT_STACKS_GITHUB_TOKEN`, `GITHUB_TOKEN`, and `GH_TOKEN` from the environment and can fall back to the machine's `gh` login, so `--user-data-dir` alone does not make the run credential-free. On macOS leave `HOME` as it is: the app brings its sandboxed helpers up only against the home the password database reports.
+
+```sh
+# macOS: an empty environment plus this run's own variables
+root=$(mktemp -d -t git-stacks-a11y)
+cd "$root"
+: > gitconfig
+mkdir gh
+env -i \
+  PATH="$PATH" HOME="$HOME" TMPDIR="${TMPDIR:-/tmp}" LANG="${LANG:-en_US.UTF-8}" \
+  root="$root" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL="$root/gitconfig" \
+  GH_CONFIG_DIR="$root/gh" GIT_TERMINAL_PROMPT=0 \
+  sh
+```
+
+```powershell
+# Windows PowerShell: a GUID root, then strip the ambient variables in place
+$root = Join-Path ([System.IO.Path]::GetTempPath()) ("git-stacks-a11y-" + [guid]::NewGuid())
+New-Item -ItemType Directory $root | Out-Null
+New-Item -ItemType File (Join-Path $root 'gitconfig') | Out-Null
+New-Item -ItemType Directory (Join-Path $root 'gh') | Out-Null
+Set-Location $root
+Get-ChildItem Env: | Where-Object { $_.Name -match '^(GIT_|GH_|GITHUB_|GIT_STACKS_|SSH_AUTH_SOCK|NODE_OPTIONS|NODE_TLS|NODE_EXTRA|ELECTRON_)|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|COOKIE|API_?KEY' } | ForEach-Object { Remove-Item "Env:$($_.Name)" }
+Get-ChildItem Env: | Where-Object { $_.Name -match '^(GIT_|GH_|GITHUB_|GIT_STACKS_|SSH_AUTH_SOCK|NODE_OPTIONS|NODE_TLS|NODE_EXTRA|ELECTRON_)|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|COOKIE|API_?KEY' } | Select-Object -ExpandProperty Name
+$env:GIT_CONFIG_NOSYSTEM = '1'; $env:GIT_CONFIG_GLOBAL = Join-Path $root 'gitconfig'
+$env:GH_CONFIG_DIR = Join-Path $root 'gh'; $env:GIT_TERMINAL_PROMPT = '0'
+```
+
+The shell that block opens is where the rest of the run happens: the fixture block below, and the packaged app itself with `--user-data-dir="$root/user-data"`. `exit` leaves it. `env -i` is what makes the run credential-free — nothing from the outer shell survives, so no `GITHUB_TOKEN`, `GH_TOKEN`, or host-scoped token, no `GIT_DIR`, `GIT_WORK_TREE`, or counted `GIT_CONFIG_*` pair, no `SSH_AUTH_SOCK`, `NODE_OPTIONS`, or Electron override reaches it — and `root` is passed into it explicitly, because an empty environment has nothing else to expand. The PowerShell block is one session rather than a subshell: it sets `$root`, moves into it with `Set-Location`, strips the ambient variables, and then runs the same fixture block and the same app launch, where the argument is `--user-data-dir=$root\user-data`; its query must print nothing, and anything it lists is unset before continuing. `GIT_CONFIG_NOSYSTEM` with an empty `GIT_CONFIG_GLOBAL` means Git reads no system or global configuration at all — no credential helper, `include`, signing, or hook path — and the empty `gh` directory means no `gh` login. Every Git the app starts inherits the launching environment, so the app is launched from that same session.
+
+**The fixture.** Both setups have moved into the run root, so this block's relative paths land inside it. Every line is a `git` call or a directory step that both shells spell the same way, and the tree starts empty, so nothing depends on how a shell would encode a file it wrote:
+
+```sh
+mkdir a11y-fixture
+cd a11y-fixture
+git init --quiet --initial-branch=main .
+git config user.name "Accessibility Review"
+git config user.email "a11y@example.invalid"
+git config commit.gpgsign false
+git commit --quiet --allow-empty -m "Seed commit"
+git init --quiet --bare --initial-branch=main ../a11y-fixture-origin.git
+git remote add origin ../a11y-fixture-origin.git
+git push --quiet --set-upstream origin main
+git checkout --quiet -b feature/one
+git commit --quiet --allow-empty -m "Feature one"
+git config --local branch.feature/one.parent main
+git checkout --quiet -b feature/two
+git commit --quiet --allow-empty -m "Feature two"
+git config --local branch.feature/two.parent feature/one
+```
+
+Add a file of your own when a step needs a working change; what the app reads is Git, not how the file was written.
+
+A member is recorded as `branch.<name>.parent`; the app walks those links to the default branch and groups branches by the first ancestor below it, so each further branch needs a new name and the previous branch as its parent, and only such a chain reaches one stack — build it past 200 members (`LIST_PAGE_SIZE`) when you intend to exercise the paged-list parts of steps 3 and 4. Open the fixture with **Add local repository** on the no-repository pane or by dropping the folder on the window — adoption never writes to the repository — then delete the run root and nothing else.
+
+**Readers.** `Mod` is `Cmd` on macOS and `Ctrl` on Windows ([`src/shared/shortcuts.ts`](src/shared/shortcuts.ts)); press each `Mod` chord to confirm it reaches the app, because a reader can keep a chord for itself. The branch tree, the stack rail, History, and every dialog handle the keyboard in the app, and a reader's reading mode — NVDA browse mode, Narrator scan mode — spends arrows, Home, End, and Enter on its own cursor, so run those checks in the reader's interaction or focus mode and use the reading mode to read what the app announces. Record which mode each observation was made in; an announcement that differs between the two modes is recorded, not treated as a defect.
+
+1. Confirm the record above names this platform, this build, and this reader, and that the reader is in the configuration you recorded. Then Tab to **Add local repository**, confirm the reader announces its name and role, and record what the operating system's folder picker announces, where focus lands once the workbench opens, and whether the repository's name and path are spoken.
 2. **Destination navigation.** With no pointer, arrow through the Workspace destinations rail and activate each of the ten destinations. After each switch, confirm focus lands on the destination's heading and the change is spoken through the polite live region. Also verify the direct routes: `/` focuses the in-view filter, `Mod+K` opens the command palette with its own search focused, and the view shortcuts reach every destination: `Mod+1`–`Mod+8` for Branches through Diagnostics, `Mod+9` for PR Inbox, and `Mod+0` for GitHub Notifications.
 3. **Branch tree.** Tab once into the repository branch tree and confirm it is a single tab stop. With Up/Down move between rows and confirm level, sibling position, and set size are announced; Home/End jump to the first and last row of the whole filtered list, revealing the page that mounts it when the list is paged, and the tree keeps its single tab stop. Press Enter and confirm the details pane follows the selection and focus stays in the tree. Confirm every row states current, remote, parent cycle, parent missing, requires-restack, pull-request number, checks, and ahead/behind in words, and that a visible focus ring marks the row. Filter the list so a branch's parent is no longer shown, and confirm the remaining rows announce no parent above them and share one root set. Finally, slide the mounted window past the first page and repeat Up/Down: focus must move to the neighbouring mounted row, the rows already mounted must be the rows still mounted, and the window must not jump back to the top.
 4. **Stack rail and history.** On Stacks, Tab into the member list and repeat the same arrow/Home/End/Enter contract, including Up/Down and Home/End on a stack longer than one page. On History, do the same for the commit list and confirm the inspected commit is announced as current.
-5. **Text entry.** Type `7/k` into the in-view filter and confirm every character is inserted, no destination changes, and the palette does not open. Repeat inside the command palette search. Open a dialog and confirm Tab is trapped, Escape does not discard entered work, explicit Cancel returns focus to the control that opened the dialog, and a rejected operation keeps focus inside the modal with its error associated.
-6. **Zoom and motion.** Set the window to 200% zoom (or 720×470) and walk all ten destinations: no horizontal scrolling, no action pushed off-screen, and the tree, rail, and history still keyboard-reachable. Enable Reduce Motion and confirm transitions are suppressed while status text, focus rings, and busy locks remain.
-7. **State without colour.** Repeat the branch, pull-request, and Diagnostics surfaces under a high-contrast or monochrome display setting and confirm lifecycle, checks, review, capability support, and unavailable/unknown data are all still readable as words.
+5. **Text entry.** In the reader's focus or interaction mode, type `7/k` into the in-view filter and confirm every character is inserted, no destination changes, and the palette does not open. Repeat inside the command palette search. Open a dialog and confirm Tab is trapped, Escape does not discard entered work, explicit Cancel returns focus to the control that opened the dialog, and a rejected operation keeps focus inside the modal with its error associated. Record reader-owned letter navigation in browse or scan mode separately from app shortcut failures; Narrator automatically turns scan mode off in edit fields so text can be entered.
+6. **Zoom and motion.** Check both sizes separately. Zoom to 200% — the app installs a real application menu, so View's Zoom In and Reset Zoom are reachable from the keyboard — walk all ten destinations, then Reset Zoom, then resize the window to the app's own minimum, 1000×700, and walk them again: at each, no horizontal scrolling, no action pushed off-screen, and the tree, rail, and history still keyboard-reachable. Enable Reduce Motion on macOS, turn Animation effects off on Windows, and confirm transitions are suppressed while status text, focus rings, and busy locks remain.
+7. **State without colour.** Repeat the branch, pull-request, and Diagnostics surfaces under a high-contrast or monochrome display setting (Increase contrast or Grayscale on macOS, a built-in high-contrast theme on Windows) and confirm lifecycle, checks, review, capability support, and unavailable/unknown data are all still readable as words.
 8. **Errors and recovery.** Trigger unavailable GitHub metadata, a history error, a stale preview reload, busy state, partial completion, and conflict Continue/Abort. Confirm focus moves to a newly raised error and that announcements are timely without duplicating or hiding important state. With an error still on screen, open and cancel a dialog and confirm focus returns to the control that opened it rather than back to that error.
-9. Verify the native close/minimize/full-screen controls, including returning from full screen.
+9. **Native window controls.** With the reader and no pointer, reach the window's own controls and confirm each is announced by the name of its action — minimize, zoom, and close on macOS; minimize, maximize or restore, and close on Windows — that activating each does what its name says, and that returning from full screen leaves the same names in the same order. A control announced by its icon, its position, or an untranslated name is a finding.
 10. Record findings and platform limits in the pull request. Sign off only after blocking keyboard, contrast, state-truthfulness, and safety-dispatch findings are resolved.
 
 Real GitHub mutations require a separately designated test repository and explicit authorization; none is included in routine fixtures or CI.
