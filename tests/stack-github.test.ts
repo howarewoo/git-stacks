@@ -2749,6 +2749,37 @@ test(
           assert.equal(layer?.queue?.outcome, 'queued', `a ${mode} queue read is not a removal`)
           assert.equal(layer?.queue?.stale, true, `a ${mode} queue read is reported as stale`)
           assert.match(layer?.detail ?? '', /last state a read confirmed/u)
+          assert.match(unread?.message ?? '', /last confirmed queue state.*in the merge queue/u)
+          assert.match(unread?.message ?? '', /current queue membership could not be confirmed/u)
+          assert.doesNotMatch(unread?.message ?? '', /GitHub reports.*in the merge queue/u)
+
+          delete broken.mergeQueueFields
+          delete broken.mergeQueueMembers?.[String(childNumber)]
+          await harness.writeState(broken)
+          const removed = await getMergeStatus(harness.repo)
+          assert.equal(
+            removed?.layers.find((entry) => entry.pullRequest === childNumber)?.queue?.membership,
+            'not-queued',
+          )
+          broken.mergeQueueFields = mode
+          await harness.writeState(broken)
+          const retainedRemoval = await getMergeStatus(harness.repo)
+          const removedLayer = retainedRemoval?.layers.find(
+            (entry) => entry.pullRequest === childNumber,
+          )
+          assert.equal(removedLayer?.queue?.membership, 'not-queued')
+          assert.equal(removedLayer?.queue?.stale, true)
+          assert.match(removedLayer?.detail ?? '', /last state a read confirmed/u)
+          assert.match(
+            retainedRemoval?.message ?? '',
+            /last confirmed queue state.*outside the merge queue/u,
+          )
+          assert.match(
+            retainedRemoval?.message ?? '',
+            /current queue membership could not be confirmed/u,
+          )
+          assert.doesNotMatch(retainedRemoval?.message ?? '', /GitHub reports.*no longer/u)
+
           assert.equal(starts.length, 1, 'reading a queue state submits no merge')
         })
       })

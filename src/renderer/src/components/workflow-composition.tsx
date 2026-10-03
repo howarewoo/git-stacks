@@ -439,6 +439,8 @@ const mergeLayerPresentation: Record<
  */
 function queueDetail(queue: NonNullable<MergeLayerResult['queue']>): string {
   if (queue.outcome === 'merged') return 'The merge queue landed this pull request.'
+  if (queue.stale)
+    return 'GitHub could not be read just now, so this is the last confirmed queue state. Refresh to read the queue again.'
   if (queue.outcome === 'queued') {
     return 'The queue holds this pull request; it has not merged yet, and no local branch changed.'
   }
@@ -449,9 +451,7 @@ function queueDetail(queue: NonNullable<MergeLayerResult['queue']>): string {
   }
   if (queue.outcome === 'pending')
     return 'GitHub accepted this merge request and has not reported a result for it. Refresh to read the request again.'
-  return queue.stale
-    ? 'GitHub could not be read just now, so this is the last confirmed queue state. Refresh to read the queue again.'
-    : 'GitHub accepted this enqueue, but this read could not confirm whether the queue still holds this pull request. Refresh to read the queue again.'
+  return 'GitHub accepted this enqueue, but this read could not confirm whether the queue still holds this pull request. Refresh to read the queue again.'
 }
 
 export function MergeOutcomePanel({

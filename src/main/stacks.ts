@@ -6482,13 +6482,15 @@ function mergeStatusMessage(layers: MergeLayerResult[]): string {
   const queued = layers.filter((entry) => entry.status === 'enqueued')
   // A pull request the queue still holds and one this read could not place are different
   // states, so the summary names them separately instead of calling both of them queued.
-  const held = queued.filter((entry) => entry.queue?.outcome === 'queued')
+  const held = queued.filter((entry) => entry.queue?.outcome === 'queued' && !entry.queue.stale)
   if (held.length > 0) {
     parts.push(
       `GitHub reports pull request${held.length === 1 ? '' : 's'} ${held.map((entry) => `#${entry.pullRequest}`).join(', ')} in the merge queue.`,
     )
   }
-  const unplaced = queued.filter((entry) => entry.queue?.outcome !== 'queued')
+  const unplaced = queued.filter(
+    (entry) => entry.queue?.outcome !== 'queued' && !entry.queue?.stale,
+  )
   if (unplaced.length > 0) {
     const numbers = unplaced.map((entry) => `#${entry.pullRequest}`).join(', ')
     parts.push(
@@ -6504,11 +6506,23 @@ function mergeStatusMessage(layers: MergeLayerResult[]): string {
   // A pull request the queue no longer holds is a change GitHub published, even when it says
   // nothing else about it; a summary that reported no change here would hide the ejection. A
   // closed pull request is named as the closure it is, not as something the queue ejected.
-  const ejected = layers.filter((entry) => entry.queue?.membership === 'not-queued')
+  const ejected = layers.filter(
+    (entry) => entry.queue?.membership === 'not-queued' && !entry.queue.stale,
+  )
   if (ejected.length > 0) {
     parts.push(
       `GitHub reports pull request${ejected.length === 1 ? '' : 's'} ${ejected.map((entry) => `#${entry.pullRequest}`).join(', ')} no longer in the merge queue.`,
     )
+  }
+  for (const membership of ['queued', 'not-queued'] as const) {
+    const retained = layers.filter(
+      (entry) => entry.queue?.stale && entry.queue.membership === membership,
+    )
+    if (retained.length > 0) {
+      parts.push(
+        `The last confirmed queue state placed pull request${retained.length === 1 ? '' : 's'} ${retained.map((entry) => `#${entry.pullRequest}`).join(', ')} ${membership === 'queued' ? 'in' : 'outside'} the merge queue; current queue membership could not be confirmed.`,
+      )
+    }
   }
   const closed = layers.filter(
     (entry) => entry.queue?.outcome === 'dropped' && entry.queue.membership !== 'not-queued',
