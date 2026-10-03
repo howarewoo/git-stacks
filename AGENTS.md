@@ -38,9 +38,9 @@ and may download it when absent.
   as described in [Renderer verification](README.md#renderer-verification).
   Visual baselines are macOS-specific. Gallery dispatch proves renderer intent,
   not Git success.
-- For preload, CSP, packaging, or local Git integration, use the
-  [packaged desktop smoke](README.md#packaged-desktop-smoke); its Windows path is
-  not supported. Keep manual assistive-technology evidence separate from automation.
+- For preload, CSP, IPC sender validation, packaging, or local Git integration, use
+  the [packaged desktop smoke](README.md#packaged-desktop-smoke); its Windows path
+  is not supported. Keep manual assistive-technology evidence separate from automation.
 - For performance changes, use [Performance budgets](README.md#performance-budgets)
   and `npm run bench:performance` after a build. Budget values belong in
   `src/shared/performance.ts`, not duplicated constants.
