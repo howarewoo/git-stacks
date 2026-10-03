@@ -13,17 +13,14 @@ membership, draft/auto-merge state, review threads, and required checks. Include
 behavioral defect in the bottom layer, an actionable review thread, and a clear
 restack conflict in a descendant. The target repository supplies its own checks.
 
-Record the model/harness versions, source revision, skill revision, tool and
-permission set, scenario input, tool calls, external writes, and terminal report.
-Use fresh copies of the same fixture state for comparisons. Do not claim skill
-benefit from a single run: paired with/without-skill trials must keep these inputs
-fixed and use independent behavior/state oracles. Measure correct outcomes,
-regressions, retries, unsafe writes, and unnecessary changes before efficiency.
+Record model/harness and source/skill revisions, tools/permissions, scenario input,
+tool calls/writes, and observed results. Use independent behavior/state oracles.
+Claim benefit only after paired runs from identical fixture states with the same
+model, harness, permissions, and inputs; prioritize correctness and safety.
 
-A controlled GitHub fixture can exercise agent decisions and recovery, but does
-not prove GitHub integration or permissions. Keep that evidence separate from
-independent native read-back on an authorized disposable GitHub stack. Do not
-claim cross-harness portability until the same contracts are exercised there.
+Fixture decisions do not prove GitHub integration or permissions. Record native
+read-back on authorized disposable PRs separately, and claim cross-harness
+portability only after exercising the same contracts there.
 
 ## Activation and authority
 

@@ -114,6 +114,8 @@ does not prevent preparing descendants once author-side work and required checks
 are complete; the report distinguishes author-ready from actually merge-ready.
 The skill never merges, enqueues, or changes auto-merge. Preview is read-only,
 and loading the skill alone grants no mutation authority.
+The report is also the recovery handoff: it records verified state and the first
+unproved operation to resume.
 
 Unlike [flatten-pr-graph](.agents/skills/flatten-pr-graph/SKILL.md), which orders PRs
 and deliberately skips checks, ready-stack verifies each changed layer. See its

@@ -16,17 +16,15 @@ author readiness.
 
 ## Input and authority
 
-Accept one canonical PR URL identifying its containing stack, or an explicit PR
-list bounding the selected scope. Support `--preview` as read-only inspection:
-no edits, commits, branch changes, pushes, replies, resolutions, review requests,
-readiness changes, or CI dispatches. Invocation syntax belongs to the host.
+Accept a canonical PR URL identifying its containing stack, or an explicit PR list
+bounding the selection. Invocation syntax belongs to the host.
 
-An explicit preparation request authorizes in-scope fixes, commits/pushes,
+An explicit preparation request authorizes scoped fixes, commits/pushes,
 restacks, clear conflict resolution, base repairs, review-thread updates, and
-ready-for-review transitions for the selected PRs. Loading or matching the skill
-alone grants no mutation authority. Explain blockers without mutations for an
-explanation/audit request. Host permissions remain authoritative; this skill
-neither grants permissions nor configures a sandbox.
+ready-for-review transitions. Loading or matching the skill grants no authority.
+Explanation/audit requests and `--preview` are read-only: no file, Git, GitHub,
+or CI mutations. Host permissions and sandbox policy remain authoritative;
+this skill neither grants permissions nor configures a sandbox.
 
 Never merge, enqueue, enable/disable auto-merge, bypass protections, dismiss
 reviews, fabricate approval, close PRs, or change credentials or standing policy.
@@ -71,9 +69,8 @@ order, observed gates, and unknowns. Do not claim preparation was performed.
 
 ## Prepare bottom-to-top
 
-For each PR, bind the round to its canonical head/base, relevant ancestor heads,
-and complete review-thread snapshot. Re-read these before side effects. Track
-intentional own changes separately from external drift.
+Bind each round to the canonical head/base, relevant ancestor heads, and complete
+thread snapshot. Re-read before side effects; distinguish own changes from drift.
 
 1. **Reconcile the base.** Restack onto the verified intended predecessor/trunk
    when needed. Resolve only conflicts whose intended behavior is supported by
@@ -84,18 +81,17 @@ intentional own changes separately from external drift.
    within selected scope using supported operations; never guess an endpoint or
    apply whole-stack removal to unselected members.
 2. **Investigate and correct.** Read every unresolved thread's full conversation
-   and implicated source. Classify concerns as valid, invalid, obsolete,
-   out-of-scope, or requiring an unsafe decision. Reproduce behavioral defects
-   when feasible, or establish adequate evidence before editing. Batch compatible
-   valid fixes; provide concrete evidence for non-fixes. Investigate failing
-   checks and correct causes attributable to this PR. Unrelated infrastructure,
-   permission failures, and out-of-scope corrections remain explicit blockers.
-3. **Verify the combined change.** Use semantic/LSP tools for symbol-aware work
-   when available. Exercise changed behavior and run repository-required checks,
-   narrow-to-broad. Add a regression test when it covers a plausible behavioral
-   bug; never skip checks, weaken assertions, or claim unrun checks passed.
-   Inspect the final diff for scope creep, secret/generated files, and unrelated
-   dependency/lockfile churn. Any later change invalidates affected proof.
+   and implicated source. Classify it as valid, invalid, obsolete, out-of-scope, or
+   requiring an unsafe decision. Establish evidence, reproducing behavioral bugs
+   when feasible, before batching compatible valid fixes. Give concrete evidence
+   for non-fixes. Diagnose failing checks and correct causes attributable to this
+   PR; unrelated infrastructure, permission, and scope failures stay blocked.
+3. **Verify the combined change.** Prefer semantic/LSP tools for symbol-aware work.
+   Exercise changed behavior and run repository-required checks narrow-to-broad.
+   Add meaningful behavioral regression coverage when needed. Never skip checks,
+   weaken assertions, or claim unrun checks passed. Inspect the final diff for
+   scope creep, secrets/generated files, and unrelated dependency/lockfile churn.
+   Later changes invalidate affected verification.
 4. **Publish and read back.** Recheck round identity and auto-merge. Commit only
    scoped paths/hunks, use a non-force single-branch push for ordinary corrections,
    and exact leases for authorized rewrites. Independently read canonical heads,
@@ -108,39 +104,36 @@ intentional own changes separately from external drift.
    non-fix evidence; read resolution state back. Unsafe/unanswered concerns stay
    open with exact thread URLs/IDs and blockers.
 6. **Refresh review and CI.** After corrections and local verification, transition
-   selected drafts to ready for review and read back the state; this can trigger
-   draft-gated checks, not establish readiness. Request fresh review through the
-   repository-supported mechanism when configured; do not invent approval or a
-   reviewer. Read required checks for the current head and applicable stack state.
-   Use bounded provider waits, not busy polling. New failures return to diagnosis;
-   timeout or unavailable results remain pending/unverified. Automated review
-   checks required by policy must settle; missing required human approval is
-   reported but does not prevent advancing once author-side work and verification
-   are complete.
+   selected drafts to ready for review and read back; this may trigger checks but
+   does not prove readiness. Request fresh review through the configured repository
+   mechanism, without inventing a reviewer or approval. Read required checks for
+   the current head and stack state, using bounded provider waits, not busy polling.
+   New failures return to diagnosis; unavailable/unfinished results stay pending.
+   Required automated review must settle. Missing required human approval is
+   reported but allows advancement after author work and verification complete.
 7. **Reconcile descendants and advance.** A lower-layer change invalidates
    affected descendant heads/bases, CI, and review evidence. Reconcile selected
    descendants before evaluating them; do not claim old-head checks apply.
    Advance only after this PR's actionable work and required verification are
    complete. A blocked or pending lower PR leaves dependent PRs unprepared.
 
-Reuse installed `woostack-address-comments` for thread handling and
-`woostack-commit` for scoped publication/maintenance when available, honoring this
-skill's selected scope and readiness authority. Otherwise perform the equivalent
-contracts above using authorized capabilities. Do not invoke `flatten-pr-graph`:
-its deliberate skip-checks policy conflicts with this workflow.
+Installed `woostack-address-comments` and `woostack-commit` may perform the
+corresponding steps within this scope; neither is required. Do not invoke
+`flatten-pr-graph`: its skip-checks policy conflicts with this workflow.
 
 ## Completion, recovery, and return
 
-Re-read the selected stack at the end. Confirm order/membership, heads/bases,
-thread dispositions, draft states, and current verification. If external drift
-invalidates evidence, rediscover and reverify affected work; never carry readiness
-across an unverified head/base/ancestor change. If the state keeps changing or an
-operation cannot safely progress, report the exact blocked boundary rather than
-looping or guessing.
+Re-read the selected stack's order/membership, heads/bases, thread dispositions,
+draft states, and verification at the end. Rediscover and reverify affected work
+after drift; never carry readiness across an unverified head/base/ancestor change.
+If state keeps changing or an operation cannot safely progress, report the exact
+blocked boundary rather than looping or guessing.
 
-Report per PR: canonical URL, before/after head and base, scoped commits/restacks,
-thread dispositions, observed verification commands/results, CI/review gates,
-and one of:
+Return one report and retain it as the handoff: selected order and workspace;
+per PR, canonical URL, recoverable original heads, verified before/after heads/bases,
+scoped commits/restacks, commit/reply IDs, thread dispositions, reply/resolution
+read-backs, verification commands/results and provenance, outstanding gates, and
+one of:
 
 - **Merge-ready:** fresh evidence satisfies applicable GitHub merge gates. Passing
   checks or a non-draft flag alone is insufficient; dependent landing gates count.
@@ -152,13 +145,10 @@ and one of:
 - **Blocked:** an actionable failure, unsafe decision, scope/capability limit,
   incomplete discovery, or an unprepared prerequisite remains.
 
-Return the bottom-to-top order and any remaining decision/blocker. Retain a
-handoff with selected identities/order, recoverable original heads, workspace,
-last verified heads/bases, own commit/reply IDs and resolution read-backs,
-verification provenance, outstanding gates, and the first unproved operation.
-After interruption or an uncertain write, rediscover exact Git/GitHub state by
-stable identity before retrying; never duplicate a commit, push, reply, resolution,
-or metadata update because its response was lost. Reruns reuse confirmed results
-only while their source and relevant stack state remain unchanged.
+Include remaining decisions/blockers and the first unproved operation. After
+interruption or an uncertain write, rediscover exact Git/GitHub state by stable
+identity before retrying; never duplicate a commit, push, reply, resolution, or
+metadata update because its response was lost. Reuse confirmed results only while
+their source and relevant stack state remain unchanged.
 
 For skill evaluation, read [verification scenarios](references/verification.md).
