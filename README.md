@@ -1986,10 +1986,10 @@ An ordinary failure or a failing scenario cleans up in process. A job killed at
 its `timeout-minutes` cannot, and no in-process handler can: there is nothing to
 run one once the process is gone. So recovery is a third job in the same
 workflow, which runs when the live job did not succeed. It takes the receipt that
-job published as an artifact — the artifact, because a self-hosted label matches
-every machine carrying it, so a path on one runner says nothing about the next one
-— and removes only what that receipt names, after the host confirms both the id
-the run created and the marker it stamped. With no receipt published it says so
+job published as an artifact — the artifact, because each job runs on its own
+fresh machine, so a path on one runner says nothing about the next one — and
+removes only what that receipt names, after the host confirms both the id the
+run created and the marker it stamped. With no receipt published it says so
 and fails rather than searching for repositories whose names merely resemble
 what the run would have used. The run id in the log identifies any repository a
 recovery could not remove, since every resource carries the marker.
@@ -2021,12 +2021,12 @@ host, a marked repository, and a receipt naming its id, then invokes the actual
 repository back from the host. Run the recovery regression alongside the controlled
 suite; neither substitutes for authorized recovery verification against github.com.
 
-Three things this suite depends on are configuration outside the repository
+Two things this suite depends on are configuration outside the repository
 rather than code in it: the protected environment and its required reviewers,
-the environment secrets, and the self-hosted runner label. Until a repository
-owner sets them, the fail-closed gate is the only thing standing between a
-dispatch and a run, and the section above says so rather than implying the
-protection exists. The desktop application is a separate matter from all of
+and the environment secrets. Until a repository owner sets them, the
+fail-closed gate is the only thing standing between a dispatch and a run, and
+the section above says so rather than implying the protection exists. The
+desktop application is a separate matter from all of
 this: a packaged, signed install is verified on its own terms and none of the
 evidence here says anything about it.
 
