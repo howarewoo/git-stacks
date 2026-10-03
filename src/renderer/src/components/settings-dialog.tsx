@@ -852,7 +852,9 @@ export function SettingsDialog({
                 <p className="text-[length:var(--gs-semantic-type-body-size)] text-[var(--gs-semantic-text-secondary)]">
                   Every line below was measured on this computer by a fixed set of commands run in
                   the app process. A line marked unavailable is something this build could not
-                  establish, not an assumption.
+                  establish, not an assumption, and a line marked not applicable is one this build
+                  never asked about — including the optional GitHub CLI, which no part of this app
+                  requires.
                 </p>
                 <Button variant="secondary" disabled={busy} onClick={openDiagnostics}>
                   Run report

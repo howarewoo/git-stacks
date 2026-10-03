@@ -126,7 +126,7 @@ import {
 import { getConfigValue, parseRemote } from './git-core'
 import { GitHubTransportError, githubHostCredentialIdentity } from './github-transport'
 import { GITHUB_DEFAULT_HOST } from '../shared/settings'
-import { detectRefFormat, runDiagnostics } from './diagnostics'
+import { detectRefFormat, readGitHubAdapterSources, runDiagnostics } from './diagnostics'
 import { buildBundle, renderBundle, writeOwnerOnlyBundle } from './support-bundle'
 import { locateTool, openInEditor } from './editor'
 import { recordFailure, recordedFailures } from './failure-log'
@@ -1311,6 +1311,7 @@ async function currentDiagnostics(settings: AppSettings) {
     appVersion: app.getVersion(),
     settings,
     githubHost,
+    githubAdapter: await readGitHubAdapterSources(),
     notifications: notifications === null ? null : await notifications.status().catch(() => null),
   })
 }
