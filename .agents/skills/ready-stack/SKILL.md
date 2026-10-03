@@ -3,16 +3,17 @@ name: ready-stack
 description: >
   Prepare an existing GitHub pull-request stack bottom-to-top: address review
   concerns, fix failing checks, resolve conflicts, restack affected branches,
-  and verify current-head readiness. Use for explicit stack-preparation requests;
-  never merge, enqueue, or enable auto-merge.
+  submit drafts for review one at a time, and verify current-head readiness. Use
+  for explicit stack-preparation requests; never merge, enqueue, or enable auto-merge.
 ---
 
 # Ready stack
 
-Prepare the selected stack in dependency order. Finish author-side work on each
-PR before advancing; missing required human approval alone does not stop
-preparation of its descendants. Report actual merge readiness separately from
-author readiness.
+Prepare the selected stack in dependency order, submitting each PR for review
+one at a time from bottom to top unless it is already ready for review. Finish
+author-side work on each PR before advancing; missing required human approval
+alone does not stop preparation of its descendants. Report actual merge readiness
+separately from author readiness.
 
 ## Input and authority
 
@@ -103,14 +104,24 @@ thread snapshot. Re-read before side effects; distinguish own changes from drift
    after independently confirming the reply and the published fix or sufficient
    non-fix evidence; read resolution state back. Unsafe/unanswered concerns stay
    open with exact thread URLs/IDs and blockers.
-6. **Refresh review and CI.** After corrections and local verification, transition
-   selected drafts to ready for review and read back; this may trigger checks but
-   does not prove readiness. Request fresh review through the configured repository
-   mechanism, without inventing a reviewer or approval. Read required checks for
-   the current head and stack state, using bounded provider waits, not busy polling.
-   New failures return to diagnosis; unavailable/unfinished results stay pending.
-   Required automated review must settle. Missing required human approval is
-   reported but allows advancement after author work and verification complete.
+6. **Submit for review and refresh CI.** After this PR's corrections, publication
+   read-back, thread handling, and local verification:
+   - **Draft state:** freshly read it. Transition only drafts to ready for review
+     using the host's supported operation, then independently confirm non-draft
+     state. Leave already-ready PRs unchanged; never convert them back to draft.
+     Submit one PR at a time, bottom-to-top, never in bulk or ahead of its
+     preparation round. A failed or unconfirmed transition blocks advancement.
+   - **Review state:** freshly read the decision and approval validity for the
+     current head/stack under repository policy. Skip review requests/resubmission
+     when approval remains valid; historical or dismissed approval is insufficient.
+     Otherwise request fresh review through the configured mechanism only when
+     needed, without inventing a reviewer/approval or duplicating an outstanding
+     request.
+   - **Verification:** submission may trigger checks but does not prove readiness.
+     Read required current-head/stack checks using bounded provider waits, not busy
+     polling. Diagnose new failures; unavailable/unfinished results stay pending.
+     Required automated review must settle. Missing required human approval alone
+     allows advancement after author work and required verification are complete.
 7. **Reconcile descendants and advance.** A lower-layer change invalidates
    affected descendant heads/bases, CI, and review evidence. Reconcile selected
    descendants before evaluating them; do not claim old-head checks apply.
@@ -132,7 +143,8 @@ blocked boundary rather than looping or guessing.
 Return one report and retain it as the handoff: selected order and workspace;
 per PR, canonical URL, recoverable original heads, verified before/after heads/bases,
 scoped commits/restacks, commit/reply IDs, thread dispositions, reply/resolution
-read-backs, verification commands/results and provenance, outstanding gates, and
+read-backs, review-submission outcome (transitioned or already ready) and draft-state
+read-back, verification commands/results and provenance, outstanding gates, and
 one of:
 
 - **Merge-ready:** fresh evidence satisfies applicable GitHub merge gates. Passing
