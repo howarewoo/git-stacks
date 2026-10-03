@@ -23,7 +23,7 @@
  *     module loaded; no ambient Git, GitHub, launch-switch or secret-shaped
  *     variable reached the process or the repository this run commits into,
  *     and the one directory macOS requires the app to keep — the host home —
- *     is refused outright when it is a Git work tree, so no personal
+ *     is refused outright when Git discovers a repository there, so no personal
  *     repository's configuration is read from it.
  *
  * Usage: node scripts/update-flow-smoke.mjs [--timeout <seconds>] [--keep]
@@ -181,6 +181,24 @@ const UNSAFE_INHERITED =
  * gh actually reads or writes is held to this run's disposable root instead.
  */
 const INHERITED_HOME = process.platform === 'darwin'
+
+export function assertHomeOutsideRepository(home, env) {
+  const repository = spawnSync('git', ['rev-parse', '--absolute-git-dir'], {
+    encoding: 'utf8',
+    cwd: home,
+    env: { ...env, LC_ALL: 'C' },
+  })
+  if (repository.status === 0) {
+    throw new Error(
+      `the home directory this run must inherit on macOS (${home}) is inside a Git repository, so the app's Git-environment probe would read a personal repository's local configuration. This smoke runs only where the home directory is not a Git repository: it does not read that repository, and it does not support one.`,
+    )
+  }
+  if (repository.status !== 128 || !repository.stderr?.startsWith('fatal: not a git repository')) {
+    throw new Error(
+      `could not establish that the inherited home is outside a Git repository: ${repository.error?.message ?? repository.stderr}`,
+    )
+  }
+}
 
 /**
  * The environment the app and this run's own git calls are started with. The
@@ -459,20 +477,9 @@ async function main() {
   // or a credential helper somebody keeps there. That configuration is not this
   // run's to read and not this run's to hold the app to, so the arrangement is
   // refused here, before the app is started, rather than tolerated and noted.
-  // The question asked is metadata only: whether git is inside a work tree at
-  // that directory. No configuration value is read from it.
-  if (INHERITED_HOME) {
-    const insideHome = spawnSync('git', ['rev-parse', '--is-inside-work-tree'], {
-      encoding: 'utf8',
-      cwd: homedir(),
-      env: gitEnvironment,
-    })
-    if (insideHome.stdout.trim() === 'true') {
-      throw new Error(
-        `the home directory this run must inherit on macOS (${homedir()}) is inside a Git work tree, so the app's Git-environment probe would read a personal repository's local configuration. This smoke runs only where the home directory is not a Git repository: it does not read that repository, and it does not support one.`,
-      )
-    }
-  }
+  // Detect repository metadata, including bare repositories and Git directories,
+  // without querying any configuration value.
+  if (INHERITED_HOME) assertHomeOutsideRepository(homedir(), gitEnvironment)
 
   // The app is launched as a process through the shared isolated desktop
   // fixture, the way the other desktop runs launch it: the fixture is the
@@ -590,7 +597,7 @@ async function main() {
   )
   assert(
     inherited.home === (INHERITED_HOME ? homedir() : home),
-    `the home directory is the one the platform requires${INHERITED_HOME ? ', and is not a Git work tree' : ''}`,
+    `the home directory is the one the platform requires${INHERITED_HOME ? ', and is outside any Git repository' : ''}`,
   )
 
   // The app's own Chromium endpoint is spoken to directly: the browser
@@ -1130,13 +1137,14 @@ async function main() {
   log('\nevery update check passed against the running app')
 }
 
-main()
-  .catch((error) => {
-    log(`the run failed: ${error?.stack ?? error}`)
-    process.exitCode = 1
-  })
-  .finally(() => {
-    // The fixture server and the app both hold the loop open; this run is over
-    // either way, and the port must be released before the next one starts.
-    process.exit(process.exitCode ?? 0)
-  })
+if (import.meta.main)
+  main()
+    .catch((error) => {
+      log(`the run failed: ${error?.stack ?? error}`)
+      process.exitCode = 1
+    })
+    .finally(() => {
+      // The fixture server and the app both hold the loop open; this run is over
+      // either way, and the port must be released before the next one starts.
+      process.exit(process.exitCode ?? 0)
+    })
