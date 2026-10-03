@@ -17,7 +17,14 @@
  *     the manifest recorded;
  *   - an installer that changed on disk after the download is refused, and
  *     nothing was run;
- *   - changing the channel in real settings reaches the running updater.
+ *   - changing the channel in real settings reaches the running updater;
+ *   - the app was launched through the shared isolated desktop fixture, so its
+ *     credential sealing was fixture-synthetic before the production main
+ *     module loaded; no ambient Git, GitHub, launch-switch or secret-shaped
+ *     variable reached the process or the repository this run commits into,
+ *     and the one directory macOS requires the app to keep — the host home —
+ *     is refused outright when Git discovers a repository there, so no personal
+ *     repository's configuration is read from it.
  *
  * Usage: node scripts/update-flow-smoke.mjs [--timeout <seconds>] [--keep]
  */
@@ -31,10 +38,12 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  rmSync,
+  statSync,
   writeFileSync,
 } from 'node:fs'
-import { mkdir, rm, writeFile } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
+import { writeFile } from 'node:fs/promises'
+import { homedir, tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { spawn } from 'node:child_process'
@@ -54,7 +63,12 @@ class Cdp {
     })
   }
 
-  static async open(endpoint, timeoutMs) {
+  /**
+   * `probe` is the command that proves this endpoint is answering: the browser
+   * endpoint answers `Browser.getVersion`, the Node inspector that serves the
+   * app's main process answers `Runtime.enable`.
+   */
+  static async open(endpoint, timeoutMs, probe = 'Browser.getVersion') {
     const socket = new WebSocket(endpoint)
     await new Promise((resolveOpen, rejectOpen) => {
       socket.addEventListener('open', resolveOpen, { once: true })
@@ -66,7 +80,7 @@ class Cdp {
     const deadline = Date.now() + timeoutMs
     while (Date.now() < deadline) {
       try {
-        await client.send('Browser.getVersion')
+        await client.send(probe)
         return client
       } catch {
         await new Promise((wait) => setTimeout(wait, 200))
@@ -147,9 +161,81 @@ const TIMEOUT_MS = (timeoutIndex >= 0 ? Number(args[timeoutIndex + 1]) : 120) * 
 const ARTIFACT = Buffer.from('a signed installer, as far as this fixture is concerned')
 const CHANNEL = 'stable'
 
+// Nothing the host shell exported may reach this run: git and gh state, GitHub
+// credentials, every secret-shaped variable, the Node and Electron overrides and
+// the SSH agent are dropped, and only this run's own values are added back. The
+// shapes are the ones the other desktop runs and the live suite already retire —
+// `NODE_TLS_*` and `NODE_EXTRA_CA_CERTS` among them, so no extra certificate
+// authority and no TLS bypass rides in on the environment. What the launched
+// process ended up with is read back out of that process below, so a variable
+// that matched none of these shapes and should not have been there is still
+// visible rather than assumed absent.
+const UNSAFE_INHERITED =
+  /^(GIT_|GH_|GITHUB_|GIT_STACKS_|SSH_AUTH_SOCK|NODE_OPTIONS|NODE_TLS|NODE_EXTRA|ELECTRON_)|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|COOKIE|API_?KEY/iu
+
+/**
+ * macOS spawns an app's sandboxed helper processes against the home directory
+ * the password database reports, so a synthetic `HOME` leaves the browser
+ * process unable to bring them up and it never answers on its own endpoint.
+ * The app therefore inherits the host home on macOS, and every path it, git or
+ * gh actually reads or writes is held to this run's disposable root instead.
+ */
+const INHERITED_HOME = process.platform === 'darwin'
+
+export function assertHomeOutsideRepository(home, env) {
+  const repository = spawnSync('git', ['rev-parse', '--absolute-git-dir'], {
+    encoding: 'utf8',
+    cwd: home,
+    env: { ...env, LC_ALL: 'C' },
+  })
+  if (repository.status === 0) {
+    throw new Error(
+      `the home directory this run must inherit on macOS (${home}) is inside a Git repository, so the app's Git-environment probe would read a personal repository's local configuration. This smoke runs only where the home directory is not a Git repository: it does not read that repository, and it does not support one.`,
+    )
+  }
+  if (repository.status !== 128 || !repository.stderr?.startsWith('fatal: not a git repository')) {
+    throw new Error(
+      `could not establish that the inherited home is outside a Git repository: ${repository.error?.message ?? repository.stderr}`,
+    )
+  }
+}
+
+/**
+ * The environment the app and this run's own git calls are started with. The
+ * key it is given is the fixture root the isolated desktop fixture seals with,
+ * which is created and proved below.
+ */
+function environment({ home, userData, workspace, ghConfig, gitconfig, release }) {
+  const inherited = Object.fromEntries(
+    Object.entries(process.env).filter(([key]) => !UNSAFE_INHERITED.test(key)),
+  )
+  return {
+    ...inherited,
+    HOME: INHERITED_HOME ? homedir() : home,
+    // gh reads its own configuration directory, so no real GitHub login can be
+    // reused and no GitHub call this run makes can succeed by accident.
+    XDG_CONFIG_HOME: join(home, '.config'),
+    GH_CONFIG_DIR: ghConfig,
+    GH_PROMPT_DISABLED: '1',
+    GIT_TERMINAL_PROMPT: '0',
+    // git reads only this run's own configuration file and no system file, so
+    // no identity, credential helper or include directive of the host's can
+    // reach the repository this run opens.
+    GIT_CONFIG_NOSYSTEM: '1',
+    GIT_CONFIG_GLOBAL: gitconfig,
+    GIT_STACKS_USER_DATA: userData,
+    GIT_STACKS_REPO: workspace,
+    GIT_STACKS_UPDATE_KEY_ID: release.keyId,
+    GIT_STACKS_UPDATE_PUBLIC_KEY: release.publicKey,
+    GIT_STACKS_UPDATE_FEED_BASE: release.base,
+    GIT_STACKS_UPDATE_CA_FILE: release.caFile,
+  }
+}
+
 /** A certificate for this run; the app is told to trust it, not to trust all. */
-function certificate() {
-  const dir = mkdtempSync(join(tmpdir(), 'git-stacks-update-tls-'))
+function certificate(root) {
+  const dir = join(root, 'tls')
+  mkdirSync(dir, { recursive: true })
   const key = join(dir, 'key.pem')
   const cert = join(dir, 'cert.pem')
   const made = spawnSync(
@@ -193,8 +279,8 @@ const OFFERED_VERSION = '999.0.0'
 const HOSTILE_TEXT =
   '<img src=x onerror="window.__gitStacksXss = true"> <script>window.__gitStacksXss = true</script> <b>bold</b>'
 
-async function startRelease() {
-  const tls = certificate()
+async function startRelease(root) {
+  const tls = certificate(root)
   const key = generateKeyPairSync('ed25519')
   const keyId = 'release-smoke'
   const publicKey = key.publicKey.export({ format: 'der', type: 'spki' }).toString('base64')
@@ -288,54 +374,139 @@ async function main() {
   if (!existsSync(join(ROOT, 'out', 'main', 'index.js'))) {
     throw new Error('The app is not built. Run `npm run build` first.')
   }
-  const release = await startRelease()
-  const home = mkdtempSync(join(tmpdir(), 'git-stacks-update-home-'))
-  const userData = join(home, 'user data')
-  const workspace = join(home, 'workspace')
-  mkdirSync(workspace, { recursive: true })
+  // One disposable root holds everything this run creates: the repository the
+  // app opens, the Chromium profile, the Git and gh configuration, the sealing
+  // key the isolated desktop fixture owns, and this run's TLS material. The
+  // whole run is removed by removing this one directory.
+  const runRoot = mkdtempSync(join(tmpdir(), 'git-stacks-update-'))
+  // Everything this run owns — the app process, and the root holding its
+  // sealing key, its generated TLS private key and its Chromium profile — is
+  // released on every way out of the run: success, a failure, or a signal.
+  // Removal is synchronous because a signal or an exit path cannot await, and
+  // both calls are guarded, so the ordinary ending and the handler cannot race
+  // each other into removing a directory twice.
+  let child = null
+  let discarded = false
+  const abandon = () => {
+    if (child && child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
+  }
+  const discard = () => {
+    if (discarded || keep) return
+    discarded = true
+    try {
+      rmSync(runRoot, { recursive: true, force: true })
+    } catch (error) {
+      log(`  note  the run root ${runRoot} could not be removed: ${error.message}`)
+    }
+  }
+  for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
+    process.on(signal, () => {
+      abandon()
+      discard()
+      process.exit(1)
+    })
+  }
+  process.on('exit', () => {
+    abandon()
+    discard()
+  })
+  const release = await startRelease(runRoot)
+  const home = join(runRoot, 'home')
+  const userData = join(runRoot, 'user data')
+  const workspace = join(runRoot, 'workspace')
+  const fixtureRoot = join(runRoot, 'isolated-desktop')
+  const ghConfig = join(home, '.config', 'gh')
+  const gitconfig = join(runRoot, 'gitconfig')
+  for (const directory of [home, userData, workspace, fixtureRoot, ghConfig]) {
+    mkdirSync(directory, { recursive: true })
+  }
+  // The identity this run commits with, in a configuration file it owns: git
+  // is never left to find an identity, a credential helper or an include
+  // directive in the host user's own configuration.
+  writeFileSync(gitconfig, '[user]\n\tname = Smoke\n\temail = smoke@example.invalid\n')
+  const launchEnvironment = environment({
+    home,
+    userData,
+    workspace,
+    ghConfig,
+    gitconfig,
+    release,
+  })
+  // The same held environment runs this run's own git calls. Signing is turned
+  // off explicitly rather than left to whatever the machine configures, so the
+  // commit below cannot stall on a key it is not allowed to have.
+  const gitEnvironment = {
+    ...launchEnvironment,
+    GIT_CONFIG_COUNT: '1',
+    GIT_CONFIG_KEY_0: 'commit.gpgSign',
+    GIT_CONFIG_VALUE_0: 'false',
+  }
   // The app opens the repository named by GIT_STACKS_REPO at startup, so it has
   // to be a real repository rather than an empty directory.
-  const made = spawnSync('git', ['init', '--quiet', workspace], { encoding: 'utf8' })
+  const made = spawnSync('git', ['init', '--quiet', workspace], {
+    encoding: 'utf8',
+    env: gitEnvironment,
+  })
   if (made.status !== 0) throw new Error(`git init failed: ${made.stderr}`)
-  writeFileSync(
-    join(home, '.gitconfig'),
-    '[user]\n\tname = Smoke\n\temail = smoke@example.invalid\n',
-  )
   // A commit whose subject is hostile, written before the app opens the
   // repository, so the History view has it to render from the first frame.
   const commit = spawnSync('git', ['commit', '--quiet', '--allow-empty', '-m', HOSTILE_TEXT], {
     encoding: 'utf8',
     cwd: workspace,
+    env: gitEnvironment,
   })
   if (commit.status !== 0) throw new Error(`git commit failed: ${commit.stderr}`)
+  // Whose commit the app is shown, read back from the commit itself: an
+  // ambient GIT_DIR, GIT_TEMPLATE_DIR, git identity or signing key that reached
+  // this call would show up here rather than pass unnoticed.
+  const author = spawnSync('git', ['log', '-1', '--format=%an <%ae>'], {
+    encoding: 'utf8',
+    cwd: workspace,
+    env: gitEnvironment,
+  }).stdout.trim()
+  assert(
+    author === 'Smoke <smoke@example.invalid>',
+    `the commit the app opens was authored by this run alone, not by inherited git state (${author})`,
+  )
 
-  // The app is launched the way this repository launches it for a real run:
-  // as a process, with its own Chromium debugging endpoint, connected to over
-  // the DevTools protocol rather than through a test harness in the main
-  // process.
-  const child = spawn(
+  // macOS has the app inherit the host home, because its sandboxed helper
+  // processes only come up against the home the password database reports. The
+  // app reports what its Git environment can already do by running `git config`
+  // from that home, so a home which is itself a Git repository would answer
+  // that probe from a personal repository's local configuration — an identity,
+  // or a credential helper somebody keeps there. That configuration is not this
+  // run's to read and not this run's to hold the app to, so the arrangement is
+  // refused here, before the app is started, rather than tolerated and noted.
+  // Detect repository metadata, including bare repositories and Git directories,
+  // without querying any configuration value.
+  if (INHERITED_HOME) assertHomeOutsideRepository(homedir(), gitEnvironment)
+
+  // The app is launched as a process through the shared isolated desktop
+  // fixture, the way the other desktop runs launch it: the fixture is the
+  // Electron main entry, installs its synthetic sealing backend, proves no
+  // native safeStorage method is still reachable, and only then imports the
+  // real production main, preload and renderer — the app is unchanged. If that
+  // proof fails the production module is never loaded at all. Chromium's own
+  // key store is mocked and basic, because an automated session has no
+  // reachable macOS Keychain, and the window is addressed over the DevTools
+  // protocol rather than through a harness inside the main process.
+  child = spawn(
     join(ROOT, 'node_modules', 'electron', 'dist', 'Electron.app', 'Contents', 'MacOS', 'Electron'),
     [
-      join(ROOT, 'out', 'main', 'index.js'),
-      '--no-sandbox',
-      // An automated session has no reachable macOS Keychain, and the app asks
-      // it whether one is available while restoring a stored credential. The
-      // mock keychain answers without a person present; the app is unchanged.
+      join(ROOT, 'tests', 'fixtures', 'isolated-desktop.cjs'),
       '--use-mock-keychain',
-      '--remote-debugging-port=0',
+      '--password-store=basic',
       `--user-data-dir=${userData}`,
+      '--remote-debugging-port=0',
+      '--inspect=0',
+      '--fixture-root',
+      fixtureRoot,
+      '--main',
+      join(ROOT, 'out', 'main', 'index.js'),
     ],
     {
       cwd: ROOT,
-      env: {
-        ...process.env,
-        HOME: home,
-        GIT_STACKS_REPO: workspace,
-        GIT_STACKS_UPDATE_KEY_ID: release.keyId,
-        GIT_STACKS_UPDATE_PUBLIC_KEY: release.publicKey,
-        GIT_STACKS_UPDATE_FEED_BASE: release.base,
-        GIT_STACKS_UPDATE_CA_FILE: release.caFile,
-      },
+      env: launchEnvironment,
       stdio: ['ignore', 'pipe', 'pipe'],
     },
   )
@@ -347,6 +518,7 @@ async function main() {
   }
   child.stdout.on('data', harvest)
   child.stderr.on('data', harvest)
+
   const devtoolsDeadline = Date.now() + TIMEOUT_MS
   let devtools = null
   while (Date.now() < devtoolsDeadline) {
@@ -357,6 +529,76 @@ async function main() {
   }
   if (!devtools)
     throw new Error(`the app never reported a debugging endpoint. Output:\n${transcript}`)
+
+  // The launch is under the fixture, and the fixture's own key is a file this
+  // run owns that no one else can open: read back from disk, not assumed from
+  // the switches above.
+  const marker = join(fixtureRoot, 'fixture.json')
+  const seal = existsSync(marker) ? JSON.parse(readFileSync(marker, 'utf8')) : null
+  assert(
+    seal?.store === 'aes-256-gcm' && seal?.keyFile === 'synthetic-key.bin',
+    `the credential store was synthetic and fixture-owned before the app loaded (${seal?.store ?? 'no marker'})`,
+  )
+  const key = join(fixtureRoot, 'synthetic-key.bin')
+  assert(
+    existsSync(key) && (statSync(key).mode & 0o777) === 0o600,
+    `the sealing key is a private file inside this run's own root${
+      existsSync(key) ? '' : ' (no key file)'
+    }`,
+  )
+
+  // The launched process's own environment, read from inside the app's main
+  // process over its Node inspector rather than from what this script believes
+  // it passed, and named rather than printed: what is checked is that nothing
+  // of the shape that would carry a GitHub login, a git setting or a secret
+  // arrived from outside, except the values this run set itself.
+  const inspectorDeadline = Date.now() + TIMEOUT_MS
+  let inspector = null
+  while (Date.now() < inspectorDeadline && !inspector) {
+    inspector = /Debugger listening on (ws:\/\/[^\s]+)/u.exec(transcript)?.[1] ?? null
+    if (!inspector) await new Promise((wait) => setTimeout(wait, 100))
+  }
+  if (!inspector)
+    throw new Error(`the app never reported a main-process debugger. Output:\n${transcript}`)
+  const mainProcess = await Cdp.open(inspector, TIMEOUT_MS, 'Runtime.enable')
+  const read = await mainProcess.send('Runtime.evaluate', {
+    expression: `({
+      names: Object.keys(process.env),
+      home: process.env.HOME ?? null,
+      userData: process.env.GIT_STACKS_USER_DATA ?? null,
+      ghConfig: process.env.GH_CONFIG_DIR ?? null,
+      gitConfigGlobal: process.env.GIT_CONFIG_GLOBAL ?? null,
+    })`,
+    returnByValue: true,
+  })
+  if (read.exceptionDetails) {
+    throw new Error(
+      `the main process refused to report its environment: ${read.exceptionDetails.exception?.description ?? read.exceptionDetails.text}`,
+    )
+  }
+  mainProcess.close()
+  const inherited = read.result.value
+  const deliberate = Object.keys(launchEnvironment).filter((name) => UNSAFE_INHERITED.test(name))
+  const leaked = inherited.names
+    .filter((name) => UNSAFE_INHERITED.test(name) && !deliberate.includes(name))
+    .sort()
+  assert(
+    leaked.length === 0,
+    `no ambient git, GitHub, launch-switch or secret-shaped variable reached the app${leaked.length > 0 ? ` (${leaked.join(', ')})` : ''}`,
+  )
+  // Only the paths this run owns are claimed as its own. `HOME` is the one the
+  // platform requires the app to keep, and the run holds git and gh to the
+  // paths it created rather than to that home.
+  assert(
+    inherited.userData === userData &&
+      inherited.ghConfig === ghConfig &&
+      inherited.gitConfigGlobal === gitconfig,
+    "the profile, the gh configuration and the Git configuration are this run's own paths",
+  )
+  assert(
+    inherited.home === (INHERITED_HOME ? homedir() : home),
+    `the home directory is the one the platform requires${INHERITED_HOME ? ', and is outside any Git repository' : ''}`,
+  )
 
   // The app's own Chromium endpoint is spoken to directly: the browser
   // websocket, then the one window target, then the same bridge the person
@@ -581,21 +823,6 @@ async function main() {
     await new Promise((stopped) => setTimeout(stopped, 500))
     if (child.exitCode === null) child.kill('SIGKILL')
   }
-
-  // An interrupted run must not leave a real Electron process behind holding a
-  // user data directory and a debugging port. A signal or an early exit takes
-  // the child down immediately; SIGKILL is used because the app is being
-  // abandoned rather than asked, and nothing of this run's survives it.
-  const abandon = () => {
-    if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
-  }
-  for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
-    process.on(signal, () => {
-      abandon()
-      process.exit(1)
-    })
-  }
-  process.on('exit', abandon)
 
   // The window is still loading at this point; its bridge is not there yet.
   const bridgeDeadline = Date.now() + TIMEOUT_MS
@@ -899,7 +1126,7 @@ async function main() {
 
   await stop()
   await release.close()
-  if (!keep) await rm(home, { recursive: true, force: true })
+  discard()
 
   if (failures.length > 0) {
     log(`\n${failures.length} check(s) failed:`)
@@ -910,13 +1137,14 @@ async function main() {
   log('\nevery update check passed against the running app')
 }
 
-main()
-  .catch((error) => {
-    log(`the run failed: ${error?.stack ?? error}`)
-    process.exitCode = 1
-  })
-  .finally(() => {
-    // The fixture server and the app both hold the loop open; this run is over
-    // either way, and the port must be released before the next one starts.
-    process.exit(process.exitCode ?? 0)
-  })
+if (import.meta.main)
+  main()
+    .catch((error) => {
+      log(`the run failed: ${error?.stack ?? error}`)
+      process.exitCode = 1
+    })
+    .finally(() => {
+      // The fixture server and the app both hold the loop open; this run is over
+      // either way, and the port must be released before the next one starts.
+      process.exit(process.exitCode ?? 0)
+    })
