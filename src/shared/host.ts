@@ -34,8 +34,7 @@ export type GitHubCapabilityState =
   'supported' | 'unsupported' | 'unauthenticated' | 'unreachable' | 'not-configured' | 'unknown'
 
 export type GitHubCapabilityId =
-  'rest' | 'graphql' | 'native-stacks' | 'repository-discovery' | 'device-sign-in'
-
+  'rest' | 'graphql' | 'native-stacks' | 'repository-discovery' | 'cli-authentication'
 export interface GitHubCapability {
   id: GitHubCapabilityId
   label: string
@@ -50,7 +49,7 @@ export const CAPABILITY_IDS: readonly GitHubCapabilityId[] = [
   'graphql',
   'native-stacks',
   'repository-discovery',
-  'device-sign-in',
+  'cli-authentication',
 ]
 
 export const CAPABILITY_LABELS: Record<GitHubCapabilityId, string> = {
@@ -58,7 +57,7 @@ export const CAPABILITY_LABELS: Record<GitHubCapabilityId, string> = {
   graphql: 'GraphQL API',
   'native-stacks': 'Native stacked pull requests',
   'repository-discovery': 'Repository discovery',
-  'device-sign-in': 'GitHub App sign-in',
+  'cli-authentication': 'GitHub CLI authentication',
 }
 
 /**

@@ -1,7 +1,7 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import type {
   DesktopAPI,
-  GitHubAccountStatus,
+  GitHubCliStatus,
   MergeProgress,
   PublishProgress,
   RemoteFreshness,
@@ -138,15 +138,16 @@ const desktop: DesktopAPI = {
     }
   },
   dismissPendingMutation: (id) => ipcRenderer.invoke('repository:dismiss-pending-mutation', id),
-  githubAccountStatus: () => ipcRenderer.invoke('github-account'),
-  startGitHubSignIn: () => ipcRenderer.invoke('github-account:sign-in'),
-  cancelGitHubSignIn: () => ipcRenderer.invoke('github-account:cancel'),
-  signOutOfGitHub: () => ipcRenderer.invoke('github-account:sign-out'),
-  onGitHubAccount: (listener: (status: GitHubAccountStatus) => void) => {
-    const handler = (_event: unknown, status: GitHubAccountStatus): void => listener(status)
-    ipcRenderer.on('github-account', handler)
+  // A real read of the installed GitHub CLI and the account it holds. Status
+  // only: no credential, no CLI output, and no path to either crosses here, and
+  // there is no channel for signing in, switching account, or signing out —
+  // those belong to the GitHub CLI itself.
+  githubCliStatus: () => ipcRenderer.invoke('github-cli:status'),
+  onGitHubCliStatus: (listener: (status: GitHubCliStatus) => void) => {
+    const handler = (_event: unknown, status: GitHubCliStatus): void => listener(status)
+    ipcRenderer.on('github-cli:status', handler)
     return () => {
-      ipcRenderer.removeListener('github-account', handler)
+      ipcRenderer.removeListener('github-cli:status', handler)
     }
   },
   notificationsStatus: () => ipcRenderer.invoke('notifications:status'),

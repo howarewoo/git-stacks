@@ -17,22 +17,13 @@ import {
   configuredHostContext,
 } from '../src/main/github-host'
 import {
-  GITHUB_DEVICE_VERIFICATION_URI,
-  githubAppClientId,
-  githubAppClientIdEnvName,
-  pollDeviceAuthorization,
-  requestDeviceCode,
-} from '../src/main/github-app'
-import {
   DirectGitHubTransport,
   GITHUB_STACKS_API_VERSION,
-  environmentTokenName,
   GitHubTransportError,
+  credentialEnvNames,
   githubTransportForHost,
   hostScopedEnvironment,
   resolveGitHubToken,
-  setGitHubCredentialSource,
-  type GitHubCredentialSource,
 } from '../src/main/github-transport'
 import {
   detectNativeStacksCapability,
@@ -155,11 +146,10 @@ test('an enterprise origin remote routes every request to that host, never to gi
   const probed = await withFetch(fetch, () =>
     withEnv(
       {
-        GIT_STACKS_GITHUB_TRANSPORT: 'direct',
-        // The token is set in the enterprise host's own variable. An ambient
-        // github.com token is never used for a host that did not issue it.
-        [environmentTokenName(ENTERPRISE)]: 'ghe-token',
-        GIT_STACKS_GITHUB_TOKEN: 'github-token',
+        // The credential is set in the enterprise host's own variable class. An
+        // ambient github.com token is never used for a host that did not issue it.
+        GH_ENTERPRISE_TOKEN: 'ghe-token',
+        GITHUB_ENTERPRISE_TOKEN: undefined,
         GITHUB_TOKEN: undefined,
         GH_TOKEN: undefined,
       },
@@ -410,15 +400,6 @@ test('a host that never answered is unreachable, never unsupported', async () =>
 
 test('a credential for one host never reaches another host, and the transport cache never crosses hosts', async () => {
   forgetHost()
-  const asked: string[] = []
-  const credential: GitHubCredentialSource = {
-    host: ENTERPRISE,
-    available: () => true,
-    current: async () => {
-      asked.push('current')
-      return { origin: 'account', session: 'session-1', token: 'ghe-secret' }
-    },
-  }
   const { fetch, recorded } = hostFetch([
     [`${ENTERPRISE_API}/repos/acme/widgets`, { body: { full_name: 'acme/widgets' } }],
     [
@@ -430,19 +411,20 @@ test('a credential for one host never reaches another host, and the transport ca
   const own = new DirectGitHubTransport({
     host: ENTERPRISE,
     apiUrl: ENTERPRISE_API,
-    credential,
+    token: 'ghe-secret',
     env: {},
     fetch,
   })
   await own.rest({ path: 'repos/acme/widgets' })
   assert.equal(recorded.length, 1)
   assert.equal(recorded[0].headers.get('authorization'), 'Bearer ghe-secret')
-  assert.deepEqual(asked, ['current'])
 
+  // The same credential handed to a transport for a different host is refused
+  // before anything leaves the process: this build's own transport authenticates
+  // with the one credential its caller owns, and never another host's.
   const foreign = new DirectGitHubTransport({
     host: 'other.example.com',
     apiUrl: 'https://other.example.com/api/v3',
-    credential,
     env: {},
     fetch,
   })
@@ -454,21 +436,12 @@ test('a credential for one host never reaches another host, and the transport ca
       return true
     },
   )
-  // Nothing left the process for the second host, and the secret was not even
-  // asked for: there is no header for it to have travelled in.
   assert.equal(recorded.length, 1)
-  assert.deepEqual(asked, ['current'])
 
-  // Each host is resolved through the cache with its own environment token, so a
-  // transport handed over from the other host would show up in the header.
-  const ownEnv = {
-    GIT_STACKS_GITHUB_TRANSPORT: 'direct',
-    [environmentTokenName(ENTERPRISE)]: 'ghe-cache-token',
-  }
-  const foreignEnv = {
-    GIT_STACKS_GITHUB_TRANSPORT: 'direct',
-    [environmentTokenName('other.example.com')]: 'other-cache-token',
-  }
+  // Each host is resolved through the cache with its own headless credential, so
+  // a transport handed over from the other host would show up in the header.
+  const ownEnv = { GH_ENTERPRISE_TOKEN: 'ghe-cache-token' }
+  const foreignEnv = { GH_ENTERPRISE_TOKEN: 'other-cache-token' }
   const cachedOwn = githubTransportForHost(ENTERPRISE, ENTERPRISE_API, ownEnv)
   const cachedForeign = githubTransportForHost(
     'other.example.com',
@@ -492,7 +465,7 @@ test('a credential for one host never reaches another host, and the transport ca
   )
 })
 
-test('github.com keeps its own API origin and its own device-flow paths', async () => {
+test('github.com keeps its own API origin and the credential class the CLI reads for it', () => {
   forgetHost()
   const context = githubHostContext('github.com')
   assert.equal(context.host, 'github.com')
@@ -502,47 +475,11 @@ test('github.com keeps its own API origin and its own device-flow paths', async 
   assert.equal(context.webOrigin, GITHUB_DOTCOM_WEB_ORIGIN)
   assert.equal(context.webOrigin, 'https://github.com')
   assert.equal(context.graphqlUrl, 'https://api.github.com/graphql')
-
-  const { fetch, recorded } = hostFetch([
-    [
-      'https://github.com/login/device/code',
-      {
-        body: {
-          device_code: 'device-1',
-          user_code: 'ABCD-1234',
-          verification_uri: GITHUB_DEVICE_VERIFICATION_URI,
-          expires_in: 900,
-          interval: 5,
-        },
-      },
-    ],
-    ['https://github.com/login/oauth/access_token', { body: { error: 'authorization_pending' } }],
-  ])
-  const env = { GIT_STACKS_GITHUB_APP_CLIENT_ID: 'Iv1.dotcom' }
-  assert.equal(githubAppClientId(env, 'github.com'), 'Iv1.dotcom')
-
-  const challenge = await requestDeviceCode({
-    clientId: githubAppClientId(env, 'github.com') as string,
-    host: 'github.com',
-    fetch,
-  })
-  const polled = await pollDeviceAuthorization({
-    clientId: githubAppClientId(env, 'github.com') as string,
-    deviceCode: challenge.deviceCode,
-    host: 'github.com',
-    fetch,
-  })
-
-  assert.equal(challenge.verificationUri, 'https://github.com/login/device')
-  assert.equal(polled.status, 'pending')
-  assert.deepEqual(
-    recorded.map((entry) => entry.url),
-    ['https://github.com/login/device/code', 'https://github.com/login/oauth/access_token'],
-  )
-  for (const entry of recorded) {
-    assert.equal(entry.method, 'POST')
-    assert.ok(entry.body?.includes('client_id=Iv1.dotcom'))
-  }
+  // github.com is read from the variable class the CLI itself reads it from,
+  // never the enterprise one.
+  assert.deepEqual([...credentialEnvNames('github.com')], ['GH_TOKEN', 'GITHUB_TOKEN'])
+  assert.equal(resolveGitHubToken({ GH_TOKEN: 'dotcom' }, 'github.com'), 'dotcom')
+  assert.equal(resolveGitHubToken({ GH_ENTERPRISE_TOKEN: 'server' }, 'github.com'), null)
 })
 
 test('the gh clone command names a host with a qualified URL, because gh has no host flag', () => {
@@ -626,131 +563,74 @@ test('a refusal that names a field this build does not query is not repeated any
   assert.doesNotMatch(graphql.detail, /doesn't exist/u)
 })
 
-test('two different hosts can never share one scoped token name', () => {
-  // Every pair here names two hosts a person could really configure, and each
-  // pair used to collapse to a single variable.
-  const pairs: Array<[string, string]> = [
-    ['ghe.internal.example.com', 'ghe.internal-example.com'],
-    ['ghe.internal.example.com', 'ghe-dot-internal.example.com'],
-    ['ghe.internal.example.com', 'ghe_port_internal.example.com'],
-    ['ghe.example.com', 'ghe-example.com'],
-  ]
-  for (const [one, other] of pairs) {
-    assert.notEqual(
-      environmentTokenName(one),
-      environmentTokenName(other),
-      `${one} and ${other} share one token name`,
-    )
-  }
-  // The variable name is written in the alphabet a shell accepts, and the
-  // canonical authority is what is encoded: a host on the default port and the
-  // same host without it are one host.
-  const scoped = environmentTokenName('github.com')
-  assert.match(scoped, /^GIT_STACKS_GITHUB_TOKEN_[A-Z0-9]+$/u)
-  assert.equal(scoped, environmentTokenName('github.com:443'))
-  assert.equal(scoped, environmentTokenName('github.com.'))
-  // A token in one host's scope is invisible to every other host, including the
-  // two names above that are one character away from it.
-  const env: NodeJS.ProcessEnv = {
-    [environmentTokenName('ghe.internal.example.com')]: 'dotted-secret',
-  }
-  assert.equal(resolveGitHubToken(env, 'ghe.internal.example.com'), 'dotted-secret')
-  for (const other of [
-    'ghe.internal-example.com',
-    'ghe-dot-internal.example.com',
-    'ghe_port_internal.example.com',
-    'ghe.example.com',
-  ]) {
-    assert.equal(resolveGitHubToken(env, other), null, `${other} can read another's token`)
-  }
-  // github.com keeps the unscoped names it has always had.
-  assert.equal(
-    resolveGitHubToken({ GIT_STACKS_GITHUB_TOKEN: 'dotcom-secret' }, 'github.com'),
-    'dotcom-secret',
+test('a credential is read from the variable class the CLI reads for that host, and never from the other one', () => {
+  // Every host here is one a person could really configure, and each is asked
+  // which class it belongs to. The rule is the CLI's own: github.com and the
+  // tenants under ghe.com are read from one pair, and every other GitHub host —
+  // which is what a GitHub Enterprise Server installation is — from the other.
+  assert.deepEqual(
+    [...credentialEnvNames('ghe.example.com')],
+    ['GH_ENTERPRISE_TOKEN', 'GITHUB_ENTERPRISE_TOKEN'],
   )
-  assert.equal(resolveGitHubToken({ GH_TOKEN: 'dotcom-secret' }, 'github.com'), 'dotcom-secret')
+  for (const tenant of ['acme.ghe.com', 'GHE.com']) {
+    assert.deepEqual([...credentialEnvNames(tenant)], ['GH_TOKEN', 'GITHUB_TOKEN'])
+  }
+  // A host on the default port is one host, so it is one class, and a trailing
+  // dot is not a different host.
+  assert.deepEqual(
+    [...credentialEnvNames('ghe.example.com:443')],
+    [...credentialEnvNames('ghe.example.com.')],
+  )
+  // A credential in one class is invisible to every host in the other, and the
+  // order the CLI resolves its own pair in is the order it is read in here.
+  const enterprise: NodeJS.ProcessEnv = {
+    GITHUB_ENTERPRISE_TOKEN: 'server-secret',
+    GH_ENTERPRISE_TOKEN: 'preferred-secret',
+  }
+  assert.equal(resolveGitHubToken(enterprise, 'ghe.internal.example.com'), 'preferred-secret')
+  assert.equal(resolveGitHubToken(enterprise, 'github.com'), null)
+  const dotcom: NodeJS.ProcessEnv = { GITHUB_TOKEN: 'dotcom-secret' }
+  assert.equal(resolveGitHubToken(dotcom, 'github.com'), 'dotcom-secret')
+  assert.equal(resolveGitHubToken(dotcom, 'ghe.internal.example.com'), null)
+  // A variable this build never wrote is not a credential for anything.
+  assert.equal(resolveGitHubToken({ GIT_STACKS_GITHUB_TOKEN: 'legacy' }, 'github.com'), null)
 })
 
-test('two different hosts can never share one client id, and a ported host has a name a shell accepts', () => {
-  // Every pair here names two hosts a person could really configure, and each
-  // pair used to collapse to a single variable: one host would then start a
-  // device sign-in with the other host's app registration.
-  const pairs: Array<[string, string]> = [
-    ['ghe.a-b.example', 'ghe.a.b.example'],
-    ['ghe.internal.example.com', 'ghe.internal-example.com'],
-    ['ghe.internal.example.com', 'ghe-dot-internal.example.com'],
-    ['ghe.example.com', 'ghe-example.com'],
-  ]
-  for (const [one, other] of pairs) {
-    assert.notEqual(
-      githubAppClientIdEnvName(one),
-      githubAppClientIdEnvName(other),
-      `${one} and ${other} share one client id name`,
-    )
-  }
-  // A host configured with a custom HTTPS port is named at all, and only with
-  // characters a shell accepts: the port cannot be spelled into a variable.
-  const ported = githubAppClientIdEnvName('ghe.example.com:8443')
-  assert.match(ported, /^GIT_STACKS_GITHUB_APP_CLIENT_ID_[A-Z0-9]+$/u)
-  assert.notEqual(ported, githubAppClientIdEnvName('ghe.example.com'))
-  // The default port is the same host, so it is the same name.
-  assert.equal(
-    githubAppClientIdEnvName('ghe.example.com:443'),
-    githubAppClientIdEnvName('ghe.example.com'),
-  )
-  // A registration set for one host is invisible to every other host, and the
-  // name that collapses two hosts together is not read as a fallback.
-  const env: NodeJS.ProcessEnv = {
-    [githubAppClientIdEnvName('ghe.a-b.example')]: 'Iv1.hyphenated',
-    GIT_STACKS_GITHUB_APP_CLIENT_ID_GHE_A_B_EXAMPLE: 'Iv1.legacy-alias',
-  }
-  assert.equal(githubAppClientId(env, 'ghe.a-b.example'), 'Iv1.hyphenated')
-  for (const other of ['ghe.a.b.example', 'ghe.example.com', 'ghe.a_b.example']) {
-    assert.equal(githubAppClientId(env, other), null, `${other} can read another's registration`)
-  }
-  // github.com keeps the unscoped name it has always had.
-  assert.equal(githubAppClientIdEnvName('github.com'), 'GIT_STACKS_GITHUB_APP_CLIENT_ID')
-  assert.equal(
-    githubAppClientId({ GIT_STACKS_GITHUB_APP_CLIENT_ID: 'Iv1.dotcom' }, 'github.com'),
-    'Iv1.dotcom',
-  )
-})
-test('a child process is given only the host its own credential came from', () => {
+test('a child process is given only the credential its own host is read from', () => {
   const scoped = hostScopedEnvironment(
     {
       PATH: '/usr/bin',
-      GH_TOKEN: 'ambient-secret',
-      GITHUB_TOKEN: 'ambient-secret-two',
+      GH_TOKEN: 'dotcom-secret',
+      GITHUB_TOKEN: 'dotcom-secret-two',
       GH_ENTERPRISE_TOKEN: 'enterprise-secret',
       GITHUB_ENTERPRISE_TOKEN: 'enterprise-secret-two',
       GIT_STACKS_GITHUB_TOKEN: 'this-build-secret',
-      [environmentTokenName('ghe.example.com')]: 'ghe-secret',
-      [environmentTokenName('ghe.other.example.com')]: 'other-secret',
     },
     'ghe.example.com',
   )
   assert.equal(scoped.PATH, '/usr/bin')
   assert.equal(
     scoped.GH_ENTERPRISE_TOKEN,
-    'ghe-secret',
-    'a custom host’s token is handed over under the name the CLI reads for it',
+    'enterprise-secret',
+    'the host’s own credential class is the one the CLI reads for it',
   )
   assert.equal(scoped.GH_TOKEN, undefined)
-  // github.com is read from the other name, and keeps its own.
+  // github.com is read from the other class, and keeps its own.
   const dotcom = hostScopedEnvironment(
-    { [environmentTokenName('github.com')]: 'dotcom-scoped', GH_TOKEN: 'ambient' },
+    { GH_TOKEN: 'dotcom-scoped', GITHUB_TOKEN: 'other-dotcom' },
     'github.com',
   )
   assert.equal(dotcom.GH_TOKEN, 'dotcom-scoped')
   assert.equal(dotcom.GH_ENTERPRISE_TOKEN, undefined)
-  for (const name of [
-    'GITHUB_TOKEN',
-    'GITHUB_ENTERPRISE_TOKEN',
-    'GIT_STACKS_GITHUB_TOKEN',
-    environmentTokenName('ghe.other.example.com'),
-  ]) {
-    assert.equal(scoped[name], undefined, `${name} must not reach a child`)
-  }
+  // A version query reaches no host at all, so it carries no credential of any
+  // class: a command that only prints a number gets no secret handed to it.
+  const version = hostScopedEnvironment(
+    { PATH: '/usr/bin', GH_TOKEN: 'dotcom-secret', GH_ENTERPRISE_TOKEN: 'server-secret' },
+    null,
+  )
+  assert.equal(version.GH_TOKEN, undefined)
+  assert.equal(version.GH_ENTERPRISE_TOKEN, undefined)
+  assert.equal(version.GIT_STACKS_GITHUB_TOKEN, undefined)
 })
 
 test('a host on the default HTTPS port is one host, not two', () => {
@@ -856,35 +736,37 @@ test('a repository on its own host is trusted only while that host is in the set
   assert.equal(externalGitHubLink('https://ghe.example.com:8443/x', []).ok, false)
 })
 
-test('a host that signs in again is not handed the transport of the sign-in it retired', () => {
+test('a credential replaced outside this app is never answered from a read made under the old one', async () => {
   forgetHost()
-  const first: GitHubCredentialSource = {
-    host: 'ghe.example.com',
-    available: () => true,
-    current: async () => ({ origin: 'account', session: 's1', token: 'first' }),
-  }
-  const second: GitHubCredentialSource = {
-    host: 'ghe.example.com',
-    available: () => true,
-    current: async () => ({ origin: 'account', session: 's2', token: 'second' }),
-  }
-  setGitHubCredentialSource(first)
-  const a = githubTransportForHost('ghe.example.com', 'https://ghe.example.com/api/v3', {})
-  setGitHubCredentialSource(null)
-  setGitHubCredentialSource(second)
-  const b = githubTransportForHost('ghe.example.com', 'https://ghe.example.com/api/v3', {})
-  assert.notEqual(
-    a,
-    b,
-    'the transport cached for a retired sign-in is handed out again for the next one',
+  const { fetch, recorded } = hostFetch([
+    [
+      `${ENTERPRISE_API}/repos/acme/widgets`,
+      { body: { full_name: 'acme/widgets' }, headers: { etag: 'W/"first"' } },
+    ],
+  ])
+  const env: NodeJS.ProcessEnv = { GH_ENTERPRISE_TOKEN: 'first-secret' }
+  const transport = githubTransportForHost(ENTERPRISE, ENTERPRISE_API, env)
+  await withFetch(fetch, () => transport.rest({ path: 'repos/acme/widgets', cache: true }))
+
+  // The account is switched in the CLI itself, between two reads. The transport
+  // is the same object, and it must still carry the credential the CLI now
+  // holds: a validator recorded for the previous credential is not an answer to
+  // the next request, so nothing the previous one was allowed to see is replayed.
+  env.GH_ENTERPRISE_TOKEN = 'second-secret'
+  await withFetch(fetch, () => transport.rest({ path: 'repos/acme/widgets', cache: true }))
+
+  assert.deepEqual(
+    recorded.map((entry) => entry.headers.get('authorization')),
+    ['Bearer first-secret', 'Bearer second-secret'],
   )
-  assert.equal(
-    githubTransportForHost('ghe.example.com', 'https://ghe.example.com/api/v3', {}),
-    b,
-    'a repeated call within one sign-in still reuses the transport',
-  )
-  setGitHubCredentialSource(null)
+  assert.equal(recorded[1].headers.get('if-none-match'), null)
+
+  // The same credential read again is a conditional read, and the body it
+  // already holds is what a 304 replays.
+  await withFetch(fetch, () => transport.rest({ path: 'repos/acme/widgets', cache: true }))
+  assert.equal(recorded[2].headers.get('if-none-match'), 'W/"first"')
 })
+
 
 test('a probe cancelled before it finishes records nothing about the host', async () => {
   forgetHost()

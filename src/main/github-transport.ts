@@ -17,7 +17,6 @@ export const GITHUB_API_VERSION = '2022-11-28'
 export const GITHUB_STACKS_API_VERSION = '2026-03-10'
 export const GITHUB_API_VERSION_ENV = 'GIT_STACKS_GITHUB_API_VERSION'
 export const GITHUB_API_URL_ENV = 'GIT_STACKS_GITHUB_API_URL'
-export const GITHUB_TRANSPORT_ENV = 'GIT_STACKS_GITHUB_TRANSPORT'
 export const GITHUB_API_URL = 'https://api.github.com'
 export const GITHUB_TIMEOUT_MS = 20_000
 const GITHUB_HOST = 'github.com'
@@ -447,92 +446,42 @@ function gitHubHostOfConfiguredBase(base: string | null): string | null {
   return canonical === GITHUB_API_URL ? null : gitHubHostOfEndpoint(canonical)
 }
 
-/** The environment variable that holds one host's own token. */
-export function environmentTokenName(host: string): string {
-  return `GIT_STACKS_GITHUB_TOKEN_${hostEnvSuffix(host)}`
+/**
+ * The credential variables the CLI reads for one host, most preferred first —
+ * the order the CLI itself resolves them in.
+ *
+ * The CLI reads `GH_TOKEN`/`GITHUB_TOKEN` for github.com and for `*.ghe.com`,
+ * and `GH_ENTERPRISE_TOKEN`/`GITHUB_ENTERPRISE_TOKEN` for every other GitHub
+ * host, which is what a GitHub Enterprise Server installation is. Handing a
+ * host the other pair is handing it a credential it will not read, so a host
+ * that is neither github.com nor under `ghe.com` is a server host.
+ */
+export function credentialEnvNames(host: string | null = null): readonly string[] {
+  const canonical = canonicalHostName(host ?? GITHUB_HOST)
+  const server = canonical !== GITHUB_HOST && !canonical.endsWith('.ghe.com')
+  return server
+    ? ['GH_ENTERPRISE_TOKEN', 'GITHUB_ENTERPRISE_TOKEN']
+    : ['GH_TOKEN', 'GITHUB_TOKEN']
 }
 
 /**
- * The host name as a suffix for an environment variable.
+ * The headless credential this process already holds for one host, or null.
  *
- * Collapsing separators to one underscore is not enough: `ghe.a.b.example` and
- * `ghe.a-b.example` would share a name, and a token set for one host would then
- * be sent to the other. Spelling a separator with a marker is not enough either,
- * because a host name may contain that marker's own characters: a literal
- * `ghe-dot-internal.example.com` would read the same as a dotted one. A custom
- * port adds a character no shell accepts in a variable name.
- *
- * So the name is not spelled at all. The canonical authority is written as
- * upper-case hexadecimal, which differs for every host by construction, uses
- * only characters a shell accepts in a variable name, and leaves nothing for a
- * host name to imitate. Every per-host variable in this build is named this
- * way, so one host's value can never be read as another's.
+ * These are the CLI's own variables and remain CLI-owned: this build supplies
+ * them to the `gh` children it starts and never stores, seals, or reports one.
+ * A host with no variable of its own class is a host this process holds nothing
+ * for, whatever the other class holds.
  */
-export function hostEnvSuffix(host: string): string {
-  return Buffer.from(canonicalHostName(host), 'utf8').toString('hex').toUpperCase()
-}
-
 export function resolveGitHubToken(
   env: NodeJS.ProcessEnv = process.env,
   host: string | null = null,
 ): string | null {
-  if (host) {
-    const scoped = env[environmentTokenName(host)]
-    if (typeof scoped === 'string' && scoped.trim()) return scoped.trim()
-    // Only the default host's unscoped variables belong to it; a host-specific
-    // sign-in for any other host is this build's own account, not the ambient one.
-    if (host.trim().toLowerCase() !== GITHUB_HOST) return null
-  }
-  for (const name of ['GIT_STACKS_GITHUB_TOKEN', 'GITHUB_TOKEN', 'GH_TOKEN']) {
+  for (const name of credentialEnvNames(host)) {
     const value = env[name]
     if (typeof value === 'string' && value.trim()) return value.trim()
   }
   return null
 }
-/**
- * Which credential authenticated a request. It carries no secret, only enough
- * provenance for a rejection to be attributed to the credential that caused it.
- */
-export type GitHubCredentialOrigin = 'account' | 'environment' | 'gh'
-
-/**
- * Which credential a request authenticated as, and which session of it. The
- * session is opaque and carries no secret; it exists so a response that arrives
- * after a renewal is recognised as belonging to a credential that is gone.
- */
-export interface GitHubCredentialFailure {
-  origin: GitHubCredentialOrigin
-  session: string | null
-}
-
-/** A credential the account handed to the transport for one request. */
-export interface GitHubCredential extends GitHubCredentialFailure {
-  origin: 'account'
-  token: string
-}
-
-/**
- * The signed-in account's credential. `current` refreshes it when it has
- * expired and returns null when sign-in is required; the credential itself
- * never leaves this call, so no caller and no renderer can observe it.
- */
-export interface GitHubCredentialSource {
-  current(): Promise<GitHubCredential | null>
-  /** Whether a usable credential is held right now, which drives transport choice. */
-  available(): boolean
-  /** The host the credential was issued for; it is never sent anywhere else. */
-  readonly host: string
-}
-
-let credentialSource: GitHubCredentialSource | null = null
-/**
- * Counts every credential this process has been given. A transport built for one
- * sign-in is not the transport for the next, and a host that signs in, signs
- * out, and signs in again must not be handed the transport that belonged to the
- * sign-in it retired. The count is part of the cache key, so a returning host is
- * given a new transport rather than the one it had before.
- */
-let credentialGeneration = 0
 
 /** A one-way digest of a credential, used only to notice that it changed. */
 function credentialDigest(token: string | null): string {
@@ -562,42 +511,6 @@ export function githubHostCredentialIdentity(
   env: NodeJS.ProcessEnv = process.env,
 ): string {
   return hostCredentialAuthority(host, resolveGitHubToken(env, host.trim().toLowerCase()))
-}
-
-/** Installs the account credential for the process, or clears it on sign-out. */
-export function setGitHubCredentialSource(source: GitHubCredentialSource | null): void {
-  credentialGeneration += 1
-  credentialSource = source
-}
-
-type GitHubFailureListener = (
-  error: GitHubTransportError,
-  credential: GitHubCredentialFailure,
-) => void | Promise<void>
-let failureListener: GitHubFailureListener | null = null
-
-/**
- * Reports a rejected credential to the account so it can refresh once and then
- * present a recoverable state instead of failing every call silently.
- */
-export function onGitHubFailure(listener: GitHubFailureListener | null): void {
-  failureListener = listener
-}
-
-/**
- * Awaited so a recovered credential is in place before the next request is made.
- * Only a rejection of the application-owned credential is reported, and only for
- * the session that was actually rejected: an invalid environment override or a
- * `gh` session says nothing about the stored account, and a response for a
- * superseded session says nothing about its replacement.
- */
-async function reportFailure(
-  error: GitHubTransportError,
-  credential: GitHubCredentialFailure,
-): Promise<void> {
-  if (error.kind !== 'unauthorized' && error.kind !== 'forbidden') return
-  if (credential.origin !== 'account') return
-  await failureListener?.(error, credential)
 }
 
 function numberHeader(value: string | null): number | null {
@@ -738,8 +651,12 @@ export function githubApiOriginForHost(host: string): string {
 }
 
 export interface DirectGitHubTransportOptions {
+  /**
+   * The one credential this transport authenticates with, supplied by the
+   * caller that owns it. There is no ambient fallback and no account to ask: a
+   * caller with no credential of its own has none to use here.
+   */
   token?: string | null
-  credential?: GitHubCredentialSource
   env?: NodeJS.ProcessEnv
   fetch?: typeof globalThis.fetch
   apiUrl?: string
@@ -761,23 +678,12 @@ export interface DirectGitHubTransportOptions {
   /** Validators for conditional reads; omitted means every GET is a full read. */
   cache?: GitHubResponseCache
   /**
-   * Whether a rejected request is reported to the process-wide account
-   * listener. On by default, because a stored App credential must learn that
-   * GitHub refused it. A transport that authenticates as a credential owned by
-   * one optional module turns it off: that credential's rejection is that
-   * module's own to report, and letting it reach the account would let a
-   * notifications token revoke or policy-block the sign-in that pull requests,
-   * stacks, and reviews depend on.
-   */
-  reportFailures?: boolean
-  /**
    * Whether this transport's rate-limit metadata becomes the process-wide
    * report the rest of the app budgets against. On by default. An optional
-   * module that authenticates as its own credential turns it off for the same
-   * reason it turns off `reportFailures`: one token's exhausted budget must
-   * not park pull requests, stacks, and reviews behind a wall this module hit
-   * alone. Its own deadlines are unaffected — every response still carries the
-   * metadata to whoever asked for it.
+   * module that authenticates as its own separately authorized credential turns
+   * it off: one token's exhausted budget must not park pull requests, stacks,
+   * and reviews behind a wall this module hit alone. Its own deadlines are
+   * unaffected — every response still carries the metadata to whoever asked.
    */
   reportRateLimit?: boolean
 }
@@ -820,18 +726,6 @@ export class DirectGitHubTransport implements GitHubTransport {
     return this.options.env ?? process.env
   }
 
-  /**
-   * Whether the ambient environment token was issued for the host this
-   * transport serves. `GIT_STACKS_GITHUB_TOKEN_<HOST>` is that host's own; the
-   * unscoped `GIT_STACKS_GITHUB_TOKEN`/`GITHUB_TOKEN`/`GH_TOKEN` are github.com's,
-   * which is the only host they are ever sent to.
-   */
-  private get environmentCredentialIsOurs(): boolean {
-    if (!this.host) return true
-    const scoped = this.env[environmentTokenName(this.host)]
-    if (typeof scoped === 'string' && scoped.trim()) return true
-    return this.host === GITHUB_HOST
-  }
 
   private get graphqlUrl(): string {
     return this.options.graphqlUrl?.replace(/\/+$/u, '') ?? `${this.apiUrl}/graphql`
@@ -903,56 +797,39 @@ export class DirectGitHubTransport implements GitHubTransport {
   }
 
   /**
-   * An explicit environment credential always wins; otherwise the signed-in
-   * account's credential is asked for, which refreshes it when it has expired.
-   * That credential is bound to one host, so another host's API — or any other
-   * origin — never receives it; such a host needs its own explicitly supplied
-   * credential.
+   * The credential this transport authenticates with, or null when its caller
+   * supplied none or the destination is not an origin that credential may be
+   * sent to. Nothing leaves this machine before the destination is known to be
+   * a host this transport is allowed to serve, and the credential is bound to
+   * one host, so another host's API — or any other origin — never receives it.
    */
-  private async accessCredential(): Promise<{
-    token: string
-    credential: GitHubCredentialFailure
-  } | null> {
-    // Nothing leaves this machine before the destination is known to be a host
-    // this transport is allowed to serve.
-    if (this.host && !this.servesSuppliedCredentialOrigin) return null
-    // A token handed to this transport directly is the caller's own assertion
-    // that it belongs to this host; an ambient one is not, and is treated as the
-    // host's issue rather than this machine's.
+  private accessCredential(): { token: string } | null {
     const supplied = this.options.token
-    if (supplied) {
-      return { token: supplied, credential: { origin: 'environment', session: null } }
-    }
-    const ambient = resolveGitHubToken(this.env, this.host ?? null)
-    if (ambient && this.environmentCredentialIsOurs) {
-      return { token: ambient, credential: { origin: 'environment', session: null } }
-    }
-    const credential = this.options.credential
-    if (!credential || !this.servesGitHubOrigin) return null
-    // The credential is the one this transport's own host issued, and this
-    // transport serves that host. A transport built for no host in particular
-    // serves the default one, so an enterprise application credential cannot
-    // pass the guard simply by arriving on a hostless transport and ride it to
-    // the public API.
-    const issuer = this.host ?? GITHUB_HOST
-    if (credential.host.trim().toLowerCase() !== issuer) return null
-    const held = await credential.current()
-    return held === null
-      ? null
-      : { token: held.token, credential: { origin: held.origin, session: held.session } }
+    if (!supplied) return null
+    if (this.host && !this.servesSuppliedCredentialOrigin) return null
+    return { token: supplied }
+  }
+
+  /**
+   * The identity every request and every cached body from this transport is
+   * fenced on: the credential its requests actually carry, digested. It is
+   * derived from the same resolution the request uses and changes with it, so a
+   * validator recorded for one credential can never be replayed against
+   * another.
+   */
+  private get requestAuthority(): string {
+    return hostCredentialAuthority(this.host ?? GITHUB_HOST, this.accessCredential()?.token ?? null)
   }
 
   private async headers(
     hasBody: boolean,
     customHeaders?: Record<string, string>,
-  ): Promise<{ headers: Headers; origin: GitHubCredentialFailure; token: string }> {
-    const access = await this.accessCredential()
+  ): Promise<{ headers: Headers; token: string }> {
+    const access = this.accessCredential()
     if (!access) {
       throw this.failure({
         kind: 'unauthorized',
-        detail: this.options.credential
-          ? 'sign in to GitHub from the account panel'
-          : `set ${GITHUB_TRANSPORT_ENV} with a token or provide GH_TOKEN`,
+        detail: 'no GitHub credential was supplied to this transport',
       })
     }
     const headers = new Headers({
@@ -967,7 +844,7 @@ export class DirectGitHubTransport implements GitHubTransport {
         headers.set(key, value)
       }
     }
-    return { headers, origin: access.credential, token: access.token }
+    return { headers, token: access.token }
   }
 
   private async send(
@@ -996,15 +873,11 @@ export class DirectGitHubTransport implements GitHubTransport {
     }
     const request$ = (this.options.fetch ?? globalThis.fetch) as typeof globalThis.fetch
     const initiatedAt = observationClock()
-    // Which credential this request authenticates as, so a rejection is only ever
+    // Which credential this request authenticates as, so a refusal is only ever
     // attributed to the credential that actually caused it.
-    let credential: GitHubCredentialFailure = { origin: 'environment', session: null }
     let requestAuthority: string | null = null
     try {
-      // Resolving the credential can suspend; an abort in that window must not
-      // be lost, because a fetch invoked with an already-aborted signal never settles.
       const access = await this.headers(payload !== undefined, request.headers)
-      credential = access.origin
       requestAuthority = hostCredentialAuthority(this.host ?? GITHUB_HOST, access.token)
       if (controller.signal.aborted) {
         throw this.failure(
@@ -1069,12 +942,7 @@ export class DirectGitHubTransport implements GitHubTransport {
         authority: requestAuthority,
       }
     } catch (error) {
-      if (error instanceof GitHubTransportError) {
-        if (this.options.reportFailures !== false) {
-          await reportFailure(error, credential)
-        }
-        throw error
-      }
+      if (error instanceof GitHubTransportError) throw error
       if (timedOut) {
         throw this.failure({
           kind: 'timeout',
@@ -1117,9 +985,14 @@ export class DirectGitHubTransport implements GitHubTransport {
   async rest<T = unknown>(request: GitHubRestRequest): Promise<GitHubRestResponse<T>> {
     const method = request.method ?? 'GET'
     const path = request.path.replace(/^\/+/u, '')
+    // The credential this request will carry is part of the cache identity: a
+    // body read as one account is not this account's answer to ask again, and a
+    // validator recorded for one credential must never be replayed against the
+    // next one.
+    const credential = this.requestAuthority
     // Only a caller that asked for display-grade freshness gets the cache.
     const cache = request.cache === true ? this.options.cache : undefined
-    const key = cache ? conditionalCacheKey(request) : null
+    const key = cache ? conditionalCacheKey(request, credential) : null
     const cached: CachedGitHubResponse | null = cache && key ? cache.get(key) : null
     const request$ =
       key === null
@@ -1225,16 +1098,13 @@ export class DirectGitHubTransport implements GitHubTransport {
 
   /**
    * Every request this transport makes carries the credential
-   * `accessCredential` resolved for it, so that is what the identity fences on:
-   * a token handed straight to this transport, an ambient one it is allowed to
-   * use, or the signed-in account's own. Asking the environment instead would
-   * miss a supplied token and would miss an account credential that changed,
+   * `accessCredential` resolved for it, so that is what the identity fences on.
+   * Asking the environment instead would miss a credential this caller owns,
    * which would leave work read under one credential sitting beside work read
    * under the next one. The material is digested and never returned.
    */
   async credentialAuthority(): Promise<string> {
-    const access = await this.accessCredential()
-    return hostCredentialAuthority(this.host ?? GITHUB_HOST, access?.token ?? null)
+    return this.requestAuthority
   }
 }
 
@@ -1302,47 +1172,38 @@ export interface GhGitHubTransportOptions {
   cache?: GitHubResponseCache
 }
 
-/** Optional fallback/diagnostic path: `gh api --include` supplies JSON and HTTP metadata. */
 /**
- * The environment a host-scoped child process runs with: every unscoped GitHub
- * credential removed, and only this host's own token put back under a name that
- * says which host issued it.
+ * The environment a host-scoped child process runs with.
+ *
+ * Only the credential variables the CLI reads for this host are forwarded, in
+ * the CLI's own order of preference, so `gh` resolves exactly the credential it
+ * would have resolved and a host is never handed another host's. Every other
+ * credential variable is removed rather than left to be inherited.
+ *
+ * A null host addresses no GitHub host at all — a version query reaches nothing —
+ * so no credential of any class is forwarded to it.
  */
 export function hostScopedEnvironment(
   env: NodeJS.ProcessEnv,
   host: string | null,
 ): Record<string, string> {
+  const allowed = host === null ? [] : credentialEnvNames(host)
   const scoped: Record<string, string> = {}
   for (const [name, value] of Object.entries(env)) {
     if (typeof value !== 'string') continue
-    if (/^GIT_STACKS_GITHUB_TOKEN_/u.test(name)) {
-      if (host && name === environmentTokenName(host)) scoped[name] = value
-      continue
-    }
-    if (UNSCOPED_CREDENTIAL_ENV.has(name)) continue
+    if (CREDENTIAL_ENV[name] === true && !allowed.includes(name)) continue
     scoped[name] = value
-  }
-  const token = host ? resolveGitHubToken(env, host) : null
-  // `gh` does not read one variable for every host: it reads `GH_TOKEN` for
-  // github.com and `GH_ENTERPRISE_TOKEN` for any other host. This build's own
-  // scoped token is therefore handed over under the name the CLI will actually
-  // read for that host — or the child is left with none rather than with
-  // someone else's.
-  if (token !== null) {
-    if (host && canonicalHostName(host) !== GITHUB_HOST) scoped.GH_ENTERPRISE_TOKEN = token
-    else scoped.GH_TOKEN = token
   }
   return scoped
 }
 
-/** Credential variables that belong to no particular host and are never forwarded. */
-const UNSCOPED_CREDENTIAL_ENV = new Set([
-  'GH_TOKEN',
-  'GITHUB_TOKEN',
-  'GH_ENTERPRISE_TOKEN',
-  'GITHUB_ENTERPRISE_TOKEN',
-  'GIT_STACKS_GITHUB_TOKEN',
-])
+/** Every credential variable a `gh` child may be given, in no host's favour. */
+const CREDENTIAL_ENV: Record<string, true> = {
+  GH_TOKEN: true,
+  GITHUB_TOKEN: true,
+  GH_ENTERPRISE_TOKEN: true,
+  GITHUB_ENTERPRISE_TOKEN: true,
+}
 
 export class GhGitHubTransport implements GitHubTransport {
   readonly kind = 'gh' as const
@@ -1425,6 +1286,8 @@ export class GhGitHubTransport implements GitHubTransport {
     args: string[],
     request: GitHubGraphqlOptions,
     input?: string,
+    /** A snapshot the caller already resolved, so one request resolves it once. */
+    pinned?: GitHubCliSnapshot,
   ): Promise<{ status: number; headers: Headers; body: unknown; authority: string }> {
     if (request.signal?.aborted)
       throw new GitHubTransportError({ kind: 'cancelled', detail: 'the request was cancelled' })
@@ -1441,10 +1304,8 @@ export class GhGitHubTransport implements GitHubTransport {
 
     try {
       const initiatedAt = observationClock()
-      const { authority, environment } = await this.credentialSnapshot({
-        signal: controller.signal,
-        timeoutMs,
-      })
+      const { authority, environment } =
+        pinned ?? (await this.credentialSnapshot({ signal: controller.signal, timeoutMs }))
       if (request.signal?.aborted)
         throw new GitHubTransportError({ kind: 'cancelled', detail: 'the request was cancelled' })
       if (timedOut)
@@ -1514,7 +1375,6 @@ export class GhGitHubTransport implements GitHubTransport {
           authority,
         })
         publishRateLimit(rateLimit, failure.kind, this.destinationHost, authority, initiatedAt)
-        await reportFailure(failure, { origin: 'gh', session: null })
         throw failure
       }
       publishRateLimit(rateLimit, null, this.destinationHost, authority, initiatedAt)
@@ -1542,7 +1402,10 @@ export class GhGitHubTransport implements GitHubTransport {
     }
   }
 
-  private async request<T>(request: GitHubRestRequest): Promise<{
+  private async request<T>(
+    request: GitHubRestRequest,
+    pinned?: GitHubCliSnapshot,
+  ): Promise<{
     status: number
     data: T
     headers: Headers
@@ -1602,20 +1465,36 @@ export class GhGitHubTransport implements GitHubTransport {
     args.push(endpoint)
     const input = request.body === undefined ? undefined : JSON.stringify(request.body)
     if (input !== undefined) args.push('--header', 'Content-Type: application/json', '--input', '-')
-    const { status, headers, body, authority } = await this.api(args, request, input)
+    const { status, headers, body, authority } = await this.api(args, request, input, pinned)
     return { status, data: body as T, headers, rateLimit: parseRateLimit(headers), authority }
   }
 
   async rest<T = unknown>(request: GitHubRestRequest): Promise<GitHubRestResponse<T>> {
-    // Only a caller that asked for display-grade freshness gets the cache.
+    // The credential this request will carry is part of the cache identity. A
+    // body read as one account is not this account's answer to ask again, and a
+    // validator recorded for one credential must never be replayed against the
+    // credential that replaced it — including a replacement made outside this
+    // app, in the CLI itself, between two refreshes. Resolved before the cache is
+    // consulted, and handed to the request that follows, so one read of the
+    // credential serves both.
     const cache = request.cache === true ? this.options.cache : undefined
-    const key = cache ? conditionalCacheKey(request) : null
-    const cached: CachedGitHubResponse | null = cache && key ? cache.get(key) : null
+    const snapshot: GitHubCliSnapshot | null =
+      cache === undefined
+        ? null
+        : await this.credentialSnapshot({
+            ...(request.signal ? { signal: request.signal } : {}),
+            ...(request.timeoutMs === undefined ? {} : { timeoutMs: request.timeoutMs }),
+          })
+    const key = snapshot ? conditionalCacheKey(request, snapshot.authority) : null
+    const cached: CachedGitHubResponse | null = key === null ? null : cache?.get(key) ?? null
     const conditional =
       key === null
         ? request
         : { ...request, headers: { ...request.headers, ...conditionalHeaders(cached) } }
-    const { status, data, headers, rateLimit, authority } = await this.request<T>(conditional)
+    const { status, data, headers, rateLimit, authority } = await this.request<T>(
+      conditional,
+      snapshot ?? undefined,
+    )
     if (status === 304) {
       // A mutation opting in to 304 is documented to answer as "no change", and
       // callers that did not opt in treat an unexpected 304 as an error. A
@@ -1721,17 +1600,14 @@ export class GhGitHubTransport implements GitHubTransport {
   /** Resolve once: the API child must use the material its observation names. */
   private async credentialSnapshot(
     options: GitHubGraphqlOptions,
-  ): Promise<{ authority: string; environment: Record<string, string> }> {
+  ): Promise<GitHubCliSnapshot> {
     const host = this.destinationHost
     const environment = this.childEnvironment
     const own = githubHostCredentialIdentity(host, environment)
     const ambient = resolveGitHubToken(environment, host)
     if (ambient !== null) return { authority: own, environment }
     const material = await this.cliCredentialMaterial(host, options)
-    if (material !== null) {
-      environment[canonicalHostName(host) === GITHUB_HOST ? 'GH_TOKEN' : 'GH_ENTERPRISE_TOKEN'] =
-        material
-    }
+    if (material !== null) environment[credentialEnvNames(host)[0]] = material
     const digest =
       material === null
         ? credentialDigest(`gh-unavailable\u0000${host}`)
@@ -1782,13 +1658,19 @@ export class GhGitHubTransport implements GitHubTransport {
 }
 
 /**
- * The only origin an application-owned GitHub App credential may be sent to.
- * A credential this application holds was issued by github.com; another host
- * needs its own explicitly supplied credential.
+ * The public API origin, which a transport built without a named host serves.
  */
 export const GITHUB_CREDENTIAL_ORIGIN = githubApiOriginForHost(GITHUB_HOST)
 
-export type GitHubTransportChoice = 'auto' | 'direct' | 'gh'
+/**
+ * One resolved look at the credential a `gh` child will authenticate with: the
+ * opaque identity that credential is fenced on, and the child environment that
+ * hands it to exactly one API process. The material itself never appears here.
+ */
+export interface GitHubCliSnapshot {
+  authority: string
+  environment: Record<string, string>
+}
 
 let installed: GitHubTransport | null = null
 const installedByHost = new Map<string, GitHubTransport>()
@@ -1847,35 +1729,23 @@ export function setGitHubHostTransport(host: string, transport: GitHubTransport 
   else installedByHost.delete(key)
 }
 
+/**
+ * The transport for the default host, always the GitHub CLI.
+ *
+ * There is no preference to read and no fallback to fall back to: GitHub
+ * collaboration requires an installed, authenticated `gh`, and a process with
+ * no authenticated CLI has no GitHub work to do rather than another way to do
+ * it.
+ */
 export function githubTransport(env: NodeJS.ProcessEnv = process.env): GitHubTransport {
   if (installed) return installed
-  const choice = githubTransportChoice(env)
-  const token = resolveGitHubToken(env)
-  // A different token, API version, or signed-in identity changes what a stored
-  // body means. Availability is part of the key, so a sign-in or a sign-out
-  // changes the choice on the next call without any explicit invalidation.
-  //
-  // This transport names no host, so it serves the default one. Only a
-  // credential the default host issued counts here: an enterprise sign-in
-  // neither selects the direct transport nor rides it to the public API.
-  const publicCredential =
-    credentialSource !== null && credentialSource.host.trim().toLowerCase() === GITHUB_HOST
-      ? credentialSource
-      : null
-  const available = publicCredential?.available() === true
-  const key = `${choice}:${githubApiUrl(env)}:${githubApiVersion(env)}:${token ?? ''}:${available}:${publicCredential?.host ?? ''}`
+  // The endpoints this process was configured for are part of the identity of
+  // the transport that serves them, so a changed base or API version builds a
+  // new one instead of reusing the transport another configuration made.
+  const key = `${githubApiUrl(env)}:${githubApiVersion(env)}`
   if (cached?.key === key) return cached.transport
   if (cached) responseCache.clear()
-  // Only a usable account credential selects the direct transport: an account
-  // service that is merely constructed must never disable an existing `gh`.
-  const direct = choice === 'direct' || (choice === 'auto' && (token !== null || available))
-  const transport: GitHubTransport = direct
-    ? new DirectGitHubTransport({
-        env,
-        cache: responseCache,
-        credential: publicCredential ?? undefined,
-      })
-    : new GhGitHubTransport({ env, cache: responseCache })
+  const transport: GitHubTransport = new GhGitHubTransport({ env, cache: responseCache })
   cached = { key, transport }
   return transport
 }
@@ -1896,45 +1766,16 @@ export function githubTransportForHost(
   const hostTransport = installedByHost.get(key)
   if (hostTransport) return hostTransport
   if (installed) return installed
-  const choice = githubTransportChoice(env)
-  // A credential only counts for the host it was issued by. Signing in to one
-  // host therefore neither enables nor disables another host's own transport.
-  const token = resolveGitHubToken(env, key)
-  const source = credentialSource ?? null
-  const available = source !== null && source.available() === true && source.host === key
-  const cacheKey = `${key}:${choice}:${apiBase}:${graphqlUrl ?? ''}:${githubApiVersion(env)}:${token ?? ''}:${source?.host ?? ''}:${available}:${credentialGeneration}`
+  const cacheKey = `${key}:${apiBase}:${graphqlUrl ?? ''}:${githubApiVersion(env)}`
   if (cached?.key === cacheKey) return cached.transport
-  const direct = choice === 'direct' || (choice === 'auto' && (token !== null || available))
-  const transport: GitHubTransport = direct
-    ? new DirectGitHubTransport({
-        env,
-        host: key,
-        apiUrl: apiBase,
-        ...(graphqlUrl ? { graphqlUrl } : {}),
-        // Only a credential issued by this host is attached; another host's is
-        // never carried into a transport that would refuse it anyway.
-        ...(available && source !== null ? { credential: source } : {}),
-      })
-    : new GhGitHubTransport({
-        env,
-        host: key,
-        apiUrl: apiBase,
-        ...(graphqlUrl ? { graphqlUrl } : {}),
-      })
+  const transport: GitHubTransport = new GhGitHubTransport({
+    env,
+    host: key,
+    apiUrl: apiBase,
+    cache: responseCache,
+    ...(graphqlUrl ? { graphqlUrl } : {}),
+  })
   cached = { key: cacheKey, transport }
   return transport
 }
 
-/**
- * The adapter preference this process was configured with, named by
- * `GIT_STACKS_GITHUB_TRANSPORT`. Anything else — unset, empty, or a value this
- * build does not know — is `auto`, because an unrecognised preference must not
- * select an adapter nobody asked for.
- *
- * This is the one place that preference is read, so the resolver and the
- * diagnostics report cannot disagree about which mode this process runs in.
- */
-export function githubTransportChoice(env: NodeJS.ProcessEnv = process.env): GitHubTransportChoice {
-  const configured = env[GITHUB_TRANSPORT_ENV]
-  return configured === 'direct' || configured === 'gh' ? configured : 'auto'
-}

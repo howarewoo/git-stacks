@@ -707,23 +707,16 @@ export class NotificationCenter {
     return new DirectGitHubTransport({
       apiUrl: this.host.apiBase,
       host: this.host.host,
-      env: {},
+      // This module's own sealed credential, and nothing else. It is authorized
+      // independently of the GitHub CLI, so it never resolves a token from the
+      // environment or asks the CLI who it is.
+      token,
       cache: this.validator,
-      reportFailures: false,
       // This module's budget is its own: an exhausted notification token must
       // not park the pull requests, stacks, and reviews that read through the
-      // application's own credential.
+      // GitHub CLI.
       reportRateLimit: false,
       ...(this.options.fetch ? { fetch: this.options.fetch } : {}),
-      credential: {
-        host: this.host.host,
-        available: () => true,
-        current: async () => ({
-          token,
-          session: this.credential?.reference ?? '',
-          origin: 'account' as const,
-        }),
-      },
     })
   }
 
@@ -1670,11 +1663,9 @@ export class NotificationCenter {
     const response = await new DirectGitHubTransport({
       apiUrl: this.host.apiBase,
       host: this.host.host,
-      env: {},
-      reportFailures: false,
+      token,
       reportRateLimit: false,
       ...(this.options.fetch ? { fetch: this.options.fetch } : {}),
-      token,
     }).rest<{ login?: unknown }>({ path: 'user', signal })
     const login = text(response.data?.login)
     if (!login) {
